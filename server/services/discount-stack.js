@@ -15,56 +15,97 @@
  * discounts rather than before. Callers pass the gate's value; nothing here
  * reads the environment.
  *
- * SLOT PRECEDENCE (the #4405 product rule: "a stored visit stamp rides the
- * invoice stack frozen and ahead of the rest" — a line-scoped term resolves
- * on its own line before a document-wide term ever sees the remainder).
- * This is a SEPARATE axis from the compounding order above, and it is NOT
- * "sort every percentage by rate regardless of where it lives" — slot beats
- * rate. Every entry point in this module resolves a mixed line/document
- * stack in exactly this order:
- *   1. Fixed dollar credits, any slot, first.
- *   2. Line-slot percentages (and a line-slot free_service), on their own
- *      line — rate descending among themselves, input index as the tiebreak.
- *   3. Document-slot percentages (and a document-slot free_service), on the
- *      remainder of their eligible pool — same rate-descending rule, applied
- *      only among terms that share that slot.
- * stackVisitDiscounts and stackDocumentDiscounts implement this natively —
- * their line/appointment and line/document-term splits ARE the two slots.
- * stackDiscounts has no lines of its own, so a discount MAY carry an
- * optional `slot: 'document'` to mark it document-scoped; every discount
- * without one defaults to `'line'`, which is why a caller who never sets
- * `slot` sees zero behavior change from before this rule existed — with
- * every item in the one slot, precedence never enters into it and rate
- * order alone still decides everything, exactly as documented above. Given
- * the SAME mixed-slot terms, all three exports land on the identical total
- * (Codex pre-push audit P1: $100 with a line 10% and a document 50%-capped-
- * $10 is $80 either way — the line's 10% must run before the document's
- * 50% sees the remainder, even though 50 > 10, because slot outranks rate).
+ * CANONICAL ORDER (the complete key — replaces the slot-only and cap-
+ * only notes from earlier rounds; this is the ONE place to read the rule,
+ * not the two together). Every discount, at any slot, sorts by ONE key,
+ * most significant first:
  *
- * CAP TIE-BREAK (same rate, different caps): within a slot's rate-
- * descending order above, two percentages sharing the SAME rate need a
- * further, deterministic tiebreak instead of falling through to input
- * index — reversing an otherwise identical stack must not change the
- * charge. The rule: the MORE restrictive cap resolves first — smaller
- * maxDiscountDollars before a larger one, any finite cap before no cap at
- * all (uncapped behaves like an infinitely large cap, so it always sorts
- * last among same-rate ties) — then input index as the final tiebreak.
- * This is the SAME "lesser of the two" principle as the dollar-credits-
- * first rule above, not a new one: whichever of the two possible orders
- * yields the SMALLER total discount is the one this module adopts,
- * deterministically, rather than let entry order hand the customer an
- * arbitrarily bigger or smaller price. Exhaustively verified (thousands of
- * rate/base/cap combinations): resolving the tighter cap first — while the
- * base is still large, since a tight cap can't use a bigger base anyway —
- * and leaving the looser cap (or no cap) for the smaller remaining base is
- * NEVER worse, and often strictly better, than the reverse; a naive
- * "larger cap first" guess is NOT safe — it produces the bigger (customer-
- * favorable but rule-violating) discount in a large fraction of cases,
- * which is why this module resolves the SMALLER cap first, not the larger
- * one. Example: $100 at 50% capped at $10, plus $100 at 50% uncapped —
- * $10 (the finite cap) resolves first, leaving $90 for the uncapped 50%
- * ($45), net $45 — never the reverse order's net $40 (Codex pre-push audit
- * P2, round 4).
+ *   1. SLOT — fixed dollar credits, any slot, first; then every LINE-slot
+ *      percentage/free_service; then every DOCUMENT-slot percentage/
+ *      free_service (Codex pre-push audit P1, round 3: a line-scoped term
+ *      resolves on its own line before a document-wide term ever sees the
+ *      remainder — the #4405 product rule, "a stored visit stamp rides
+ *      the invoice stack frozen and ahead of the rest"; $100 with a line
+ *      10% and a document 50%-capped-$10 is $80 either way, never $81 —
+ *      slot outranks rate). stackVisitDiscounts and stackDocumentDiscounts
+ *      implement this natively (their line/appointment and line/document-
+ *      term splits ARE the two slots); stackDiscounts has no lines of its
+ *      own, so a discount MAY carry `slot: 'document'` — everything else
+ *      defaults to 'line'.
+ *   2. KIND — within a slot, fixed before percentage before free_service.
+ *   3. VALUE — among terms of the same kind and slot, the larger `amount`
+ *      first: for percentages this is RATE (Codex pre-push audit P2,
+ *      round 3: rounding drift made $99 at 5%-then-10% total a cent
+ *      different from 10%-then-5%, even though the two orders are
+ *      mathematically identical — one canonical sequence removes the
+ *      drift); for fixed credits it's the dollar amount itself (Codex
+ *      pre-push audit round 6: two same-scope fixed credits with
+ *      different face values had NO tiebreak at all before this, so the
+ *      per-line pro-rata SPLIT between them could differ by a cent
+ *      depending on which one happened to be listed first, even though
+ *      the aggregate they produce together is provably the same either
+ *      way — verified against 20,000 randomized trials with zero
+ *      exceptions). One comparator (`resolveDiscountAmount` already reads
+ *      the same field regardless of kind), not two.
+ *   4. CAP — among percentages tied on rate, the MORE restrictive
+ *      maxDiscountDollars first; uncapped reads as an infinite cap, so it
+ *      always sorts last among rate ties (Codex pre-push audit P2, round
+ *      4: $100 at 50% capped $10 plus 50% uncapped is $45 net either way,
+ *      never the $40 that "uncapped first" gives).
+ *   5. SCOPE — among terms tied on everything above (this reaches FIXED
+ *      terms too, which have no cap concept — but DO reach this step
+ *      whenever two of them tie on value as well), the term reaching MORE
+ *      eligible lines resolves first: an unscoped term
+ *      (reaches every line) sorts before any scoped subset, and between
+ *      two scoped subsets the one with more line ids sorts first; an
+ *      exact tie (identical eligibleLines, same length and ids) falls
+ *      through to the next check. Direction verified by brute force, not
+ *      assumed (Codex pre-push audit P1+P2, round 5): for a FIXED term,
+ *      resolving the WIDER scope first is never worse and often strictly
+ *      better — 0 counterexamples across 20,000 randomized line-count /
+ *      amount / scope combinations ($80 scoped to one $50 line plus an
+ *      unscoped $80 across a $50+$100 pair nets $46.67 with the unscoped
+ *      credit running first, never the $20 that scoped-first gives — the
+ *      wide credit takes close to the same amount wherever it runs, so
+ *      long as its combined pool stays above its face value, while the
+ *      narrow credit's OWN achievable amount shrinks once the wide one
+ *      has already drawn on its one shared line; running the insensitive
+ *      one first and the sensitive one last against the now-smaller
+ *      remainder yields the smaller total). The mirror guess — narrower
+ *      scope first, echoing "tighter cap first" — is NOT the same
+ *      principle wearing a different hat and was rejected after the same
+ *      brute force showed it is never the smaller-discount order: for
+ *      caps the TIGHT constraint is insensitive to position and goes
+ *      first, but for scope the WIDE constraint is the insensitive one,
+ *      so it goes first instead — the common thread is "run whichever
+ *      term's own take barely depends on the current state first, save
+ *      the state-sensitive one for the shrunken remainder," which points
+ *      opposite ways for these two attributes, not the same way. For a
+ *      PERCENTAGE term sharing a rate and cap, no universal direction
+ *      exists at all — the same sweep found each order strictly smaller
+ *      about as often as the other (a near-even split, unlike the fixed
+ *      case's unanimous result) — so this module applies the SAME wider-
+ *      first convention there too, for one consistent rule across every
+ *      kind rather than a kind-dependent tie-break; it is not claimed to
+ *      always minimize a scoped-percentage tie, only to make it
+ *      deterministic, which is the property actually required.
+ *   6. INDEX — the caller's own input position, used ONLY when two terms
+ *      are byte-identical in slot, kind, rate, cap, AND scope (order
+ *      provably cannot matter between them).
+ *
+ * This key governs every place this module orders discounts: stackOrder
+ * (used directly by stackDiscounts, and internally by
+ * stackDocumentDiscounts for each line's own terms) AND
+ * stackDocumentDiscounts' two document-term passes, fixed and non-fixed
+ * alike (Codex pre-push audit P1, round 5: the fixed-document-term pass
+ * used to iterate in plain input order with NO canonicalization at all —
+ * a service-scoped $80 credit and an unscoped $80 credit on $50/$100
+ * lines left $20 net in one order and $46.67 in the other, because the
+ * unscoped credit spread across both lines FIRST whenever it happened to
+ * be listed first). Per-item `dollars` always maps back to the caller's
+ * OWN input position — only the SEQUENCE they compound in is
+ * canonicalized, never the reported identity of which discount produced
+ * which figure.
  *
  * Tier discounts (catalog stack_group 'tier', is_stackable=false) never
  * combine with each other: Silver + Gold, Bronze + Silver, ... are refused.
@@ -197,6 +238,57 @@ function resolveDiscountCap(discount) {
     : cap;
 }
 
+// More restrictive (smaller) cap sorts FIRST; two caps that are exactly
+// equal — including two uncapped terms, both +Infinity — are a genuine
+// tie and return 0, not NaN. Plain subtraction breaks here: Infinity -
+// Infinity is NaN, and a comparator that ever returns NaN stops being a
+// valid total order (Array.prototype.sort's behavior on a NaN result is
+// unspecified — it silently skipped the scope tiebreak below it, the bug
+// this comment is here to prevent regressing). Comparing for exact
+// equality first, before ever subtracting, is what keeps two uncapped
+// percentages falling through to the scope check instead.
+function compareDiscountCap(a, b) {
+  const capA = resolveDiscountCap(a);
+  const capB = resolveDiscountCap(b);
+  if (capA === capB) return 0;
+  if (capA === Infinity) return 1;
+  if (capB === Infinity) return -1;
+  return capA - capB;
+}
+
+// A discount's SCOPE for the final tie-break: how many lines it reaches,
+// and which ones. `eligibleLines` absent/null means "every line" — read
+// as +Infinity width so it sorts before any finite (narrower) scope; a
+// present array's width is its own length, and its `ids` are the line
+// indexes sorted ascending for a stable, order-independent identity (a
+// caller could hand the same set in any order without changing what this
+// module treats as "the same scope"). `ids` is null for an unscoped
+// discount — there's nothing to compare lexicographically, and the width
+// check alone already separates it from every scoped term.
+function resolveDiscountScope(discount) {
+  const eligibleLines = discount?.eligibleLines;
+  if (!Array.isArray(eligibleLines)) return { width: Infinity, ids: null };
+  return { width: eligibleLines.length, ids: [...eligibleLines].map(Number).sort((a, b) => a - b) };
+}
+
+// Wider scope (more eligible lines, unscoped widest of all) sorts FIRST;
+// see the module header's SCOPE step for the direction and why it's
+// opposite the cap rule's "tighter first." A tie on width falls through to
+// a lexicographic compare of the sorted line ids — deterministic, though
+// no minimizing direction was found (or needed) between two same-size
+// scopes — and a tie on BOTH (including two unscoped terms, where `ids`
+// is null for both) returns 0, leaving the decision to the index tiebreak.
+function compareDiscountScope(a, b) {
+  const scopeA = resolveDiscountScope(a);
+  const scopeB = resolveDiscountScope(b);
+  if (scopeA.width !== scopeB.width) return scopeB.width - scopeA.width;
+  if (!scopeA.ids || !scopeB.ids) return 0;
+  for (let i = 0; i < scopeA.ids.length; i++) {
+    if (scopeA.ids[i] !== scopeB.ids[i]) return scopeA.ids[i] - scopeB.ids[i];
+  }
+  return 0;
+}
+
 // Dollars ONE discount takes off `remaining`, clamped to [0, remaining].
 function discountStepDollars(discount, remaining) {
   if (!discount || !(remaining > 0)) return 0;
@@ -223,42 +315,16 @@ function discountStepDollars(discount, remaining) {
   return Math.min(remaining, Math.max(0, cents(dollars)));
 }
 
-// Fixed credits first (any slot, in the order given), then LINE-slot
-// percentages and free_service (rate descending), then DOCUMENT-slot
-// percentages and free_service (rate descending) — the module header's
-// slot precedence rule, encoded as five ranks: 0 fixed, 1 line-percent,
-// 2 line-free_service, 3 document-percent, 4 document-free_service. A
-// caller who never sets `slot` puts everything in rank pair (1,2) — slot
-// never distinguishes anything, and the ranking collapses to the original
-// fixed-then-percent-then-free_service order, unchanged.
-//
-// Percentages compound multiplicatively, so in EXACT math 5% then 10% and
-// 10% then 5% reach the identical final total — multiplication commutes.
-// But each step is rounded to the nearest cent as it's taken, and the SUM
-// of independently-rounded steps is not itself commutative: $99 at 5% then
-// 10% (in that input order) totaled a cent different from 10% then 5%
-// before this fix (Codex pre-push audit P2). Rather than carry exact
-// unrounded fractions through the whole stack (which would still need a
-// rule for how to divide the eventual rounding among the individual
-// items), percentages sharing a slot are sorted into ONE canonical order
-// regardless of how the caller listed them — largest rate first among that
-// slot's own percentages, then (same rate) the more restrictive cap first
-// per the module header's cap tie-break, ties broken by input index for
-// stability — so two calls stacking the SAME set land on the SAME total
-// no matter which order they were entered in. Neither rate nor cap breaks
-// a TIE ACROSS slots — slot rank already separated them before either is
-// ever consulted, which is the fix for Codex pre-push audit P1 (round 3):
-// a line 10% used to lose to a document 50% purely on rate, even though
-// the line term must resolve first regardless of either rate. Each item's
-// reported `dollars` still reflects its own place in that canonical
-// compounding (mapped back to its original input index for the caller),
-// which is what keeps per-term reporting exact: it sums to totalDollars
-// precisely because it IS the sequence that produced totalDollars, not a
-// separate estimate of it. Fixed credits are unaffected by rate, cap, or
-// slot ordering between themselves — a fixed dollar figure doesn't depend
-// on compounding order the way a percentage does — and there is normally
-// at most one free_service per slot (it takes whatever remains in that
-// slot, regardless of position within it).
+// Implements the module header's CANONICAL ORDER key: SLOT, then KIND,
+// then (percentages only) RATE and CAP, then SCOPE for everything, then
+// INDEX as the last resort. `rank` encodes SLOT+KIND as five buckets: 0
+// fixed (any slot), 1 line-percent, 2 line-free_service, 3 document-
+// percent, 4 document-free_service. A caller who never sets `slot` puts
+// every percentage/free_service in the line bucket — slot never
+// distinguishes anything, and the ranking collapses to a plain fixed-
+// then-percent-then-free_service order, unchanged from before slot
+// existed. See the header for why each step is in this order and how its
+// direction was verified.
 function stackOrder(discounts) {
   const rank = (d) => {
     if (isFixedDiscountType(d?.discountType)) return 0;
@@ -272,17 +338,33 @@ function stackOrder(discounts) {
       const rankA = rank(a.discount);
       const rankDiff = rankA - rank(b.discount);
       if (rankDiff !== 0) return rankDiff;
+      // VALUE: largest first — resolveDiscountAmount reads the same
+      // `amount` field for every kind, so this is "rate descending" for a
+      // percentage and "amount descending" for a fixed credit alike (one
+      // comparator, not two). A free_service's amount is always 0, so
+      // this is a no-op tie for it, falling straight through to scope.
+      // Two same-scope FIXED terms with different face values never had
+      // ANY tiebreak before this (round 5): the AGGREGATE they produce is
+      // provably the same regardless of which one runs first (each still
+      // takes its own full face value as long as neither gets clamped),
+      // verified by 20,000 randomized trials with zero exceptions — but
+      // the PER-LINE pro-rata split can differ by a cent depending on
+      // processing order when they share overlapping lines, so this still
+      // needs a deterministic direction even though no total is at stake;
+      // largest-first was picked for symmetry with the rate rule, not
+      // because either direction is "the lesser of the two" here.
+      const valueDiff = resolveDiscountAmount(b.discount) - resolveDiscountAmount(a.discount);
+      if (valueDiff !== 0) return valueDiff;
       if (isPercentRank(rankA)) {
-        const rateDiff = resolveDiscountAmount(b.discount) - resolveDiscountAmount(a.discount);
-        if (rateDiff !== 0) return rateDiff;
-        // Same rate: the more restrictive (smaller) cap resolves first —
-        // uncapped reads as +Infinity via resolveDiscountCap, so it always
-        // sorts last among same-rate ties. See the module header's CAP
-        // TIE-BREAK note for why smaller-first, not larger-first, is the
-        // "lesser of the two" (smaller total discount) choice.
-        const capDiff = resolveDiscountCap(a.discount) - resolveDiscountCap(b.discount);
+        const capDiff = compareDiscountCap(a.discount, b.discount);
         if (capDiff !== 0) return capDiff;
       }
+      // SCOPE applies at every rank, not just percentages — a fixed term
+      // has no cap to tie-break on, but it still needs a scope check
+      // (round-5 fix: two same-rank, same-value fixed terms used to fall
+      // straight through to index, the finding at :578).
+      const scopeDiff = compareDiscountScope(a.discount, b.discount);
+      if (scopeDiff !== 0) return scopeDiff;
       return a.index - b.index;
     });
 }
@@ -365,16 +447,33 @@ function stackDiscounts(base, discounts, { compound = true } = {}) {
   // sized against the FULL base — that's the defining legacy behavior,
   // kept as-is — but several full-base discounts can together add up to
   // more than the base holds ($80 + $50 fixed on a $100 base is $130).
-  // `budget` bounds what the AGGREGATE (and so each item, in the same
-  // fixed-then-percent-then-free-service order the loop already uses) is
-  // allowed to count toward the total, so totalDollars never exceeds
-  // `full` and the invariant totalDollars === full - net holds here too
-  // (Codex pre-push audit P2). compound:true doesn't need this — its own
-  // `remaining` already shrinks step to step, so discountStepDollars'
-  // own clamp keeps every step within what's left.
+  // `budget` bounds what the AGGREGATE (and so each item, in processing
+  // order) is allowed to count toward the total, so totalDollars never
+  // exceeds `full` and the invariant totalDollars === full - net holds
+  // here too (Codex pre-push audit P2). compound:true doesn't need this —
+  // its own `remaining` already shrinks step to step, so
+  // discountStepDollars' own clamp keeps every step within what's left.
+  //
+  // Processing order itself differs by mode, deliberately: compound:true
+  // uses the CANONICAL ORDER (stackOrder) because that's the whole point
+  // of the gate-on rule — the same set of discounts must compound the
+  // same way regardless of how a caller happened to list them. compound
+  // :false is a DIFFERENT contract: it exists to reproduce whatever each
+  // caller's own pre-lane math already did, callers that (before this
+  // module existed) each had their own ordering convention with no
+  // canonical-order concept at all — DiscountEngine's calculateDiscounts
+  // is the first live example, priority-ordered from the catalog, not
+  // sorted by kind/rate/cap/scope. Reordering that legacy path here would
+  // make the delegation something OTHER than a byte-identical parity
+  // shim, so compound:false walks the list in EXACTLY the order given —
+  // whichever order that is — and lets the clamp (not a canonicalizer)
+  // decide how a face-value overflow gets distributed.
   let budget = full;
   const dollarsByIndex = new Array(list.length).fill(0);
-  for (const { discount, index } of stackOrder(list)) {
+  const order = compound
+    ? stackOrder(list)
+    : list.map((discount, index) => ({ discount, index }));
+  for (const { discount, index } of order) {
     const raw = discountStepDollars(discount, compound ? remaining : full);
     const dollars = compound ? raw : Math.min(raw, Math.max(0, cents(budget)));
     dollarsByIndex[index] = dollars;
@@ -554,7 +653,15 @@ function stackDocumentDiscounts({ lines, documentTerms }) {
   }
 
   // 2. Fixed DOCUMENT terms, spread pro rata over lines that still carry a
-  // balance after step 1.
+  // balance after step 1, in CANONICAL order (Codex pre-push audit P1,
+  // round 5): this used to walk `docFixedIdx` in plain input order, so a
+  // service-scoped $80 credit and an unscoped $80 credit on $50/$100
+  // lines left $20 net in one order and $46.67 in the other — the
+  // unscoped credit spreads across BOTH lines and eats into the scoped
+  // credit's one shared line first whenever it happens to be listed
+  // first. stackOrder over just the fixed terms fixes it: wider scope
+  // (the module header's SCOPE step) resolves first among same-rank
+  // fixed terms, same as it does for percentages.
   const docDollars = new Array(docTerms.length).fill(0);
   const docFixedIdx = docTerms
     .map((t, i) => (isFixedDiscountType(t?.discountType) ? i : -1))
@@ -566,14 +673,15 @@ function stackDocumentDiscounts({ lines, documentTerms }) {
   // moves the base the OTHER lines' percentages compound on, so a $30
   // add-on-only credit on two $100 lines turned a 10% primary-line discount
   // from $10 into $8.50 (Codex #4405 r3 P1). Terms are resolved one at a
-  // time against their own pool: for unscoped terms that is exactly the
-  // compounding stackDiscounts gave (stackOrder keeps input order within a
-  // homogeneous fixed list), and a scoped term now only consumes the
-  // balance of the lines it actually reaches.
+  // time against their own pool, in canonical order — an unscoped term
+  // still reaches every line still carrying a balance, and a scoped term
+  // only ever consumes the balance of the lines it actually reaches.
   const termReachesLine = (term, lineIdx) => (
     !Array.isArray(term?.eligibleLines) || term.eligibleLines.includes(lineIdx)
   );
-  for (const termIdx of docFixedIdx) {
+  const docFixedOrder = stackOrder(docFixedIdx.map((i) => docTerms[i]));
+  for (const { index: subIdx } of docFixedOrder) {
+    const termIdx = docFixedIdx[subIdx];
     const term = docTerms[termIdx];
     const pool = state.filter((line, i) => line.remaining > 0 && termReachesLine(term, i));
     const poolTotal = cents(pool.reduce((sum, line) => sum + line.remaining, 0));
