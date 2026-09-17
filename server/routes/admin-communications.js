@@ -3331,11 +3331,18 @@ router.delete('/scheduled/:id', async (req, res, next) => {
         // still-'scheduled' sibling: a 'sending' one has been claimed by
         // the cron, which re-reads metadata after every terminal update —
         // so a transfer onto it still resolves, but an unclaimed row
-        // avoids even that window.
-        const sibling = await trx('sms_log')
-          .whereIn('status', ['scheduled', 'sending'])
-          .whereIn('message_type', HUMAN_REPLY_TYPES)
-          .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [threadLast10])
+        // avoids even that window. HUMAN_REPLY_TYPES includes 'manual',
+        // which a manual send OR review-ask reservation also carries while
+        // 'sending' — exclude reservations so a synthetic in-flight
+        // placeholder is never mistaken for the surviving reply and made
+        // to inherit these decisions' parked_decision_ids (codex #4333 P2
+        // widened-guard sweep, GitHub round).
+        const sibling = await excludeUnresolvedSendReservations(
+          trx('sms_log')
+            .whereIn('status', ['scheduled', 'sending'])
+            .whereIn('message_type', HUMAN_REPLY_TYPES)
+            .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [threadLast10]),
+        )
           .orderByRaw("CASE WHEN status = 'scheduled' THEN 0 ELSE 1 END")
           .orderBy('scheduled_for', 'asc')
           .first('id');
