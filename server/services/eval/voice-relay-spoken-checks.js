@@ -1738,8 +1738,15 @@ const safetyClauseContinues = (before, after, boundary) => SAFETY_CLAUSE_CONTINU
       && new RegExp(`\\b(?:${SAFETY_ADJECTIVE}|${HARM_ADJECTIVE}|risk|danger|harm)\\b`, 'i').test(before)));
 
 const SAFETY_NO_RISK_QUESTION_PREDICATE_RE = /\b(?:no|zero)\s+(?:risk|danger|harm)\b/i;
+const SAFETY_RISK_FREE_QUESTION_PREDICATE_RE = /\brisk[-\s]free\b|\bfree of risk\b/i;
 
-function questionNegatesKeyword(text, keywordAlt) {
+function questionNegatesKeyword(text, keywordAlt, questionText) {
+  // The lexical harm candidate retains "risk" and the selected question
+  // retains the full absence predicate, including its own negation.
+  if (keywordAlt === SAFETY_KEYWORDS_HARM && SAFETY_RISK_FREE_QUESTION_PREDICATE_RE.test(questionText)) {
+    const negatedAbsence = new RegExp(`\\bnot\\s+${SAFETY_INTENSIFIER}(?:${SAFETY_RISK_FREE_QUESTION_PREDICATE_RE.source})`, 'i');
+    return !negatedAbsence.test(questionText);
+  }
   const adjacentNegation = new RegExp(`\\bnot\\s+(?:${SAFETY_INTENSIFIER})?(?:${keywordAlt})\\b`, 'i');
   return adjacentNegation.test(text)
     || (keywordAlt === SAFETY_KEYWORDS_HARM && SAFETY_NO_RISK_QUESTION_PREDICATE_RE.test(text));
@@ -1751,8 +1758,8 @@ function safetyQuestionPolarity(text, conversationAntecedent = '', candidate = r
   const hasProductAntecedent = SAFETY_PRODUCT_MENTION_RE.test(antecedentText) || SAFETY_BRAND_MENTION_RE.test(antecedentText);
   const asksPositive = candidate.positive?.requiresProductAntecedent && !hasProductAntecedent ? null : candidate.positive;
   const asksHarm = candidate.harm?.requiresProductAntecedent && !hasProductAntecedent ? null : candidate.harm;
-  const negatesPositive = asksPositive && questionNegatesKeyword(asksPositive.predicate, SAFETY_KEYWORDS_POSITIVE);
-  const negatesHarm = asksHarm && questionNegatesKeyword(asksHarm.predicate, SAFETY_KEYWORDS_HARM);
+  const negatesPositive = asksPositive && questionNegatesKeyword(asksPositive.predicate, SAFETY_KEYWORDS_POSITIVE, candidate.text);
+  const negatesHarm = asksHarm && questionNegatesKeyword(asksHarm.predicate, SAFETY_KEYWORDS_HARM, candidate.text);
   const propositionNegatesPositive = asksPositive
     && Boolean(negatesPositive) !== asksPositive.negatedAuxiliary;
   const propositionNegatesHarm = asksHarm
@@ -1881,10 +1888,10 @@ function safetyRefusalCoversCircumstances(questionText, refusal) {
 
 const SAFETY_DRYING_QUESTION_CIRCUMSTANCE_RE = /^(?:if|when|while|before|after)\s+(?:(?:it|they)\s+)?(?:still\s+)?(?:dry|wet|dries|drying)$/i;
 
-function safetyDryingCoversCircumstances(questionText) {
-  // Drying evidence can qualify a drying question; it does not establish
+function safetyDryingCoversCircumstances(propositionText) {
+  // Drying evidence applies to drying circumstances. It does not establish
   // safety for eating or swallowing the product, even when it is dry.
-  return safetyCircumstanceScopes(questionText)
+  return safetyCircumstanceScopes(propositionText)
     .every((circumstance) => SAFETY_DRYING_QUESTION_CIRCUMSTANCE_RE.test(circumstance));
 }
 
@@ -2024,11 +2031,15 @@ function no_safety_guarantee(value, record) {
     const dryingConditionWithdrawn = [...affirmativeAnswers, ...negativeAnswers]
       .some(({ text: clause }) => SAFETY_DRYING_CONDITION_WITHDRAWAL_RE.test(clause))
       || SAFETY_REFERENTIAL_DRYING_WITHDRAWAL_RE.test(text);
+    const dryingAnswerScope = [resolvedQuestionText,
+      ...qualifiedGuaranteeClaims.map((claim) => claim[0]),
+      ...qualifiedEllipticalClaims.map((claim) => claim[1]),
+      ...[...affirmativeAnswers, ...negativeAnswers].map(({ text: clause }) => clause)].join(' ');
     const qualifiedDryingAnswer = [
       qualifiedGuaranteeClaims.length + qualifiedEllipticalClaims.length > 0,
       !unqualifiedEllipticalAnswer,
       !dryingConditionWithdrawn,
-      safetyDryingCoversCircumstances(resolvedQuestionText),
+      safetyDryingCoversCircumstances(dryingAnswerScope),
     ].every(Boolean);
     const unqualifiedStrongReassurance = ellipticalAdjectiveClaims.some((claim) => !qualifiedEllipticalClaims.includes(claim)
       && new RegExp(`^${SAFETY_INTENSIFIER}${SAFETY_STRONG_ADJECTIVE}$`, 'i').test(claim[1]));
