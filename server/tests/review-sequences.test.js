@@ -1827,6 +1827,57 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(row.status).toBe('suppressed');
     });
 
+    test('the retirement fallback (transaction unavailable) does not revive a row a concurrent cadence just suppressed (codex #4333 P1, GitHub round)', async () => {
+      // Same race as above, but this time the transaction ITSELF fails
+      // (a blip on its own write) after the concurrent enrollment's
+      // supersede already committed — exercising the catch(lockErr)
+      // fallback rather than the in-transaction alreadyHandled branch. The
+      // fallback's write must carry the SAME `status = 'pending'`
+      // condition as the locked path, or it blindly revives the row the
+      // race already suppressed.
+      mockGates.reviewSequences = true;
+      const due = new Date(Date.now() - 60000);
+      let updateAttempts = 0;
+      const mock = makeMock({
+        customers: [{ id: 'uq-fb', first_name: 'Ida', phone: '+19410000171', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-uq-fb', customer_id: 'uq-fb', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tuqfb', location_id: 'venice', created_at: new Date(), scheduled_for: due }],
+      }, {
+        onFirst: (table, _q, state) => {
+          if (table !== 'review_sequences') return;
+          // The concurrent enrollment's own supersede commits right as
+          // this transaction's activeSeq check runs (finds no active
+          // sequence — the enrollment's own INSERT hasn't landed either).
+          const row = state.rows.review_requests.find((r) => r.id === 'rr-uq-fb');
+          if (row) row.status = 'suppressed';
+        },
+        onUpdate: (table, patch) => {
+          if (table !== 'review_requests' || patch.status !== 'pending' || !patch.scheduled_for) return;
+          updateAttempts += 1;
+          // The FIRST such write is the transaction's own "requeued" write
+          // — it throws (the transaction itself is unavailable, per the
+          // audit). The SECOND is the fallback's write, which must succeed
+          // (and, by then, correctly match zero rows).
+          if (updateAttempts === 1) throw new Error('pg blip on retirement transaction');
+        },
+      });
+      db.mockImplementation(mock);
+      mockSendCustomerMessage.mockResolvedValueOnce({
+        sent: false, blocked: false, deliveryOutcome: 'not_sent', retryable: true,
+        nextAllowedAt: new Date(Date.now() + 5 * 60000).toISOString(), code: 'PROVIDER_FAILURE',
+      });
+
+      const out = await ReviewService.sendSMS('rr-uq-fb');
+
+      expect(updateAttempts).toBe(2);
+      expect(out).toEqual({ sent: false, failed: 'superseded_by_cadence' });
+      // The row stays exactly as the racing enrollment left it — the
+      // fallback's conditional write found status no longer 'pending' and
+      // left it alone, instead of blindly reviving it alongside the
+      // cadence's own touch.
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.status).toBe('suppressed');
+    });
+
     test('an accepted send whose post-stamp reservation release throws promotes the reservation instead of losing it (codex #4331 P1, structural pass, finding 5)', async () => {
       // The sent stamp on review_requests SUCCEEDS (a real, confirmed
       // delivery), but the reservation cleanup DELETE that follows it
@@ -6176,7 +6227,7 @@ describe('direct outreach serialization', () => {
   // would convert a truthful "try again later" hold into a generic 500 — and
   // on the satisfaction page, into the bare fallback link the hold exists to
   // suppress (Codex #4332 P2).
-  test('a failed cleanup delete keeps the email hold instead of raising', async () => {
+  test('a cleanup delete that fails twice falls back to suppressing the row instead of leaving it pending forever (codex #4332 P2, r2)', async () => {
     const customer = { id: 'direct-cleanup', first_name: 'Synthetic', phone: '+12025550101', email: 'synthetic@example.test' };
     const mock = makeMock({ customers: [customer], notification_prefs: [{ customer_id: customer.id, email_enabled: true, review_request: true }] },
       { throwSelectWhen: q => q.table === 'sms_log', throwDeleteFor: ['review_requests'] });
@@ -6184,10 +6235,56 @@ describe('direct outreach serialization', () => {
     const result = await ReviewService.sendOutreachTouch({ customer, channel: 'email' });
     expect(result).toMatchObject({ ok: false, blocked: true, code: 'REVIEW_HISTORY_UNAVAILABLE', httpStatus: 503, channel: 'email' });
     expect(mockEmailSendTemplate).not.toHaveBeenCalled();
-    // The undeletable row is harmless: no send is attached and the next
-    // attempt re-runs the same guard.
+    // Both delete attempts failed (throwDeleteFor) — the fallback plain
+    // UPDATE (not a delete, so it survives everything but the DB itself
+    // being unreachable) marks the row terminal instead of leaving it
+    // 'pending' with no retry owner, accumulating across every future
+    // retry that hits the same outage.
     expect(mock.__state.rows.review_requests).toHaveLength(1);
-    expect(mock.__state.rows.review_requests[0].status).toBe('pending');
+    expect(mock.__state.rows.review_requests[0].status).toBe('suppressed');
+  });
+
+
+  test('a cadence retry releases the PRIOR failed attempt\'s orphaned reservation for the same step (codex #4331 P2)', async () => {
+    // Seeds the exact state an earlier ambiguous-outcome pass on this same
+    // sequence step leaves behind: the request row marked 'failed' by
+    // _applyOutreachSendResult, its sms_log reservation deliberately left
+    // 'sending' as 72h ask-spacing evidence rather than released there.
+    const customer = { id: 'cadence-retry-1', first_name: 'Ida', last_name: 'V', phone: '+19410000188', nearest_location_id: 'venice' };
+    const staleAt = new Date(Date.now() - 3600000);
+    const mock = makeMock({
+      customers: [customer],
+      review_requests: [{
+        id: 'prior-failed-1', customer_id: customer.id, status: 'failed', channel: 'sms',
+        template_key: 'day0_ask', token: 'prior-tok', sequence_id: 'seq-retry-1', sequence_step: 1,
+        created_at: staleAt,
+      }],
+      sms_log: [{
+        id: 'res-prior-1', customer_id: customer.id, direction: 'outbound', status: 'sending',
+        message_body: 'Would you leave us a quick review?', to_phone: customer.phone,
+        metadata: { review_ask_reservation: true, review_request_id: 'prior-failed-1' },
+        created_at: staleAt, updated_at: staleAt,
+      }],
+    });
+    db.mockImplementation(mock);
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-retry-1' });
+
+    const out = await ReviewService.sendOutreachTouch({
+      customer, channel: 'sms', templateId: 'day0_ask',
+      sequenceId: 'seq-retry-1', sequenceStep: 1, manageRetryVia: 'sequence',
+    });
+
+    expect(out).toMatchObject({ ok: true, sent: true });
+    // A fresh row was minted for this retry — the prior one is untouched
+    // except for its now-released reservation.
+    expect(mock.__state.rows.review_requests).toHaveLength(2);
+    expect(mock.__state.rows.review_requests.find(r => r.id === 'prior-failed-1').status).toBe('failed');
+    // No orphaned reservation remains for EITHER request: the prior one was
+    // released by this retry, and the new one's own reservation was
+    // released on acceptance by the ordinary accepted-send bookkeeping.
+    const stillSending = mock.__state.rows.sms_log.filter(r => r.status === 'sending');
+    expect(stillSending).toHaveLength(0);
+    expect(mock.__state.rows.sms_log.some(r => r.id === 'res-prior-1')).toBe(false);
   });
 
   test('direct SMS holds the lock through provider acceptance and the durable stamp', async () => {

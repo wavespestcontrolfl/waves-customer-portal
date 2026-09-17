@@ -70,7 +70,7 @@ describe('reserveForRequest — age-bounded reuse', () => {
   test('(a) an unresolved reservation 1 minute old is reused unchanged', async () => {
     const createdAt = new Date(Date.now() - 60000);
     const rows = installSmsLog([
-      { id: 'res-fresh', status: 'sending', created_at: createdAt, updated_at: createdAt, metadata: { review_ask_reservation: true, review_request_id: 'rr-1' }, message_body: 'old body', to_phone: '+19410000000' },
+      { id: 'res-fresh', status: 'sending', customer_id: 'cust-1', direction: 'outbound', created_at: createdAt, updated_at: createdAt, metadata: { review_ask_reservation: true, review_request_id: 'rr-1' }, message_body: 'old body', to_phone: '+19410000000' },
     ]);
 
     const result = await reserveForRequest({ request, to: '+19410000009', body: 'new body', fromPhone: '+19415550000' });
@@ -89,7 +89,7 @@ describe('reserveForRequest — age-bounded reuse', () => {
     const staleAt = new Date(Date.now() - 73 * 3600000);
     expect(Date.now() - staleAt.getTime()).toBeGreaterThan(REVIEW_ASK_RESERVATION_HOLD_HOURS * 3600000);
     const rows = installSmsLog([
-      { id: 'res-stale', status: 'sending', created_at: staleAt, updated_at: staleAt, metadata: { review_ask_reservation: true, review_request_id: 'rr-1' }, message_body: 'old body', to_phone: '+19410000000' },
+      { id: 'res-stale', status: 'sending', customer_id: 'cust-1', direction: 'outbound', created_at: staleAt, updated_at: staleAt, metadata: { review_ask_reservation: true, review_request_id: 'rr-1' }, message_body: 'old body', to_phone: '+19410000000' },
     ]);
     // Note: general-reader visibility (isUnresolvedSendReservation) is
     // UNCONDITIONAL for a review-ask marker regardless of age (see
@@ -114,7 +114,7 @@ describe('reserveForRequest — age-bounded reuse', () => {
     // the ordinary (a) path.
     const staleAt = new Date(Date.now() - 73 * 3600000);
     const rows = installSmsLog([
-      { id: 'res-stale2', status: 'sending', created_at: staleAt, updated_at: staleAt, metadata: { review_ask_reservation: true, review_request_id: 'rr-1' }, message_body: 'old body', to_phone: '+19410000000' },
+      { id: 'res-stale2', status: 'sending', customer_id: 'cust-1', direction: 'outbound', created_at: staleAt, updated_at: staleAt, metadata: { review_ask_reservation: true, review_request_id: 'rr-1' }, message_body: 'old body', to_phone: '+19410000000' },
     ]);
     const first = await reserveForRequest({ request, to: '+19410000009', body: 'new body', fromPhone: '+19415550000' });
     expect(first.renewed).toBe(true);
@@ -127,6 +127,29 @@ describe('reserveForRequest — age-bounded reuse', () => {
     expect(rows[0].created_at).toEqual(renewedAt);
     expect(rows).toHaveLength(1);
   });
+
+  test('the lookup is scoped to the request customer_id, and to the promote() evidence check (codex #4333 P2, GitHub round)', async () => {
+    // sms_log has single-column indexes on customer_id/direction/message_type/
+    // created_at, none on status or the jsonb metadata this lookup matches
+    // on — adding customer_id (and direction) narrows via those indexes
+    // instead of a full-table scan on every send attempt. Proven here
+    // behaviorally: a review_request_id collision belonging to a DIFFERENT
+    // customer must never be treated as this request's own reservation.
+    const createdAt = new Date(Date.now() - 60000);
+    const rows = installSmsLog([
+      { id: 'res-other-customer', status: 'sending', customer_id: 'cust-OTHER', direction: 'outbound', created_at: createdAt, updated_at: createdAt, metadata: { review_ask_reservation: true, review_request_id: 'rr-1' }, message_body: 'old body', to_phone: '+19410000000' },
+    ]);
+
+    const result = await reserveForRequest({ request, to: '+19410000009', body: 'new body', fromPhone: '+19415550000' });
+
+    // Not reused — the other customer's row is invisible to this lookup, so
+    // a fresh reservation is inserted, correctly scoped to THIS request.
+    expect(result.reused).toBe(false);
+    expect(result.customerId).toBe('cust-1');
+    expect(rows).toHaveLength(2);
+    const inserted = rows.find((r) => r.id !== 'res-other-customer');
+    expect(inserted.customer_id).toBe('cust-1');
+  });
 });
 
 describe('countStaleUnresolved — operator-facing visibility (pre-push audit: "the smallest honest exposure")', () => {
@@ -135,11 +158,11 @@ describe('countStaleUnresolved — operator-facing visibility (pre-push audit: "
     const stale = new Date(Date.now() - 73 * 3600000);
     const fresh = new Date(Date.now() - 3600000);
     const rows = [
-      { id: 'stale-1', status: 'sending', created_at: stale, metadata: { review_ask_reservation: true, review_request_id: 'rr-a' } },
-      { id: 'stale-2', status: 'sending', created_at: stale, metadata: { review_ask_reservation: true, review_request_id: 'rr-b' } },
-      { id: 'fresh-1', status: 'sending', created_at: fresh, metadata: { review_ask_reservation: true, review_request_id: 'rr-c' } },
+      { id: 'stale-1', status: 'sending', direction: 'outbound', created_at: stale, metadata: { review_ask_reservation: true, review_request_id: 'rr-a' } },
+      { id: 'stale-2', status: 'sending', direction: 'outbound', created_at: stale, metadata: { review_ask_reservation: true, review_request_id: 'rr-b' } },
+      { id: 'fresh-1', status: 'sending', direction: 'outbound', created_at: fresh, metadata: { review_ask_reservation: true, review_request_id: 'rr-c' } },
       // Resolved — not counted regardless of age.
-      { id: 'resolved-1', status: 'sent', created_at: stale, metadata: { review_ask_reservation: true, review_request_id: 'rr-d' } },
+      { id: 'resolved-1', status: 'sent', direction: 'outbound', created_at: stale, metadata: { review_ask_reservation: true, review_request_id: 'rr-d' } },
     ];
     db.mockImplementation((table) => {
       if (table !== 'sms_log') throw new Error(`unexpected table ${table}`);
@@ -263,6 +286,26 @@ describe('promote — deduplicated against the real provider log (codex #4333 P1
 
     expect(result).toBe(true);
     expect(rows.find((r) => r.id === 'res-3').status).toBe('sent');
+    expect(rows).toHaveLength(2);
+  });
+
+  test('the real-evidence lookup is scoped to the reservation customer_id when known (codex #4333 P2, GitHub round)', async () => {
+    const { promote } = require('../services/messaging/review-ask-reservation');
+    const rows = installFullSmsLog([
+      { id: 'res-4', status: 'sending', direction: 'outbound', customer_id: 'cust-1', metadata: { review_ask_reservation: true, review_request_id: 'rr-4' } },
+      // Same review_request_id, contrived onto a DIFFERENT customer_id — a
+      // real match on review_request_id alone would wrongly find this as
+      // evidence; the customer_id predicate makes it invisible.
+      { id: 'real-wrong-customer', status: 'sent', direction: 'outbound', customer_id: 'cust-OTHER', metadata: { review_request_id: 'rr-4' } },
+    ]);
+
+    const result = await promote({ reservation: { id: 'res-4', requestId: 'rr-4', customerId: 'cust-1' } });
+
+    // The mismatched-customer row is invisible to the scoped lookup, so
+    // this promotes normally instead of wrongly treating it as real
+    // evidence and releasing the reservation.
+    expect(result).toBe(true);
+    expect(rows.find((r) => r.id === 'res-4').status).toBe('sent');
     expect(rows).toHaveLength(2);
   });
 });
