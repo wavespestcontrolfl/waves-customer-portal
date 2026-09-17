@@ -958,7 +958,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // alert's own dedupe advisory lock, so it can never commit between
     // the alert transaction's coverage scans and its instruction write,
     // and it retires the alert immediately after creation (Codex P0).
-    const stampedEstimateId = (String(notes || '').match(/accepted estimate #([0-9a-fA-F-]{8,})/) || [])[1] || null;
+    const stampedEstimateId = require('../services/setup-fee-alert-reconcile').acceptedEstimateIdFromNotes(notes);
     const createArgs = {
       customerId,
       serviceRecordId,

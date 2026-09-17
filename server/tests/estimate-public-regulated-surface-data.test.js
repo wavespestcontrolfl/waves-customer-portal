@@ -14,6 +14,7 @@ jest.mock('../models/db', () => {
   return mock;
 });
 jest.mock('../config/feature-gates', () => ({
+  ...jest.requireActual('../config/feature-gates'),
   isEnabled: jest.fn(() => false),
   gateEnvValue: jest.fn(() => false),
   gates: {},

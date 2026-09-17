@@ -11,6 +11,16 @@ const {
   commercialRiskTypeReviewNeeded,
 } = require('./estimate-delivery-options');
 
+// A grouped fixed bid's token may stay viewable past its own date (the
+// delivered entry link outlives the group's longest hold), so acceptance —
+// public and manual alike — enforces the property's OWN fixed deadline
+// independently of expires_at (pre-push codex P1 on #4309). SQL twin of
+// proposalExpiry: the full Eastern calendar day of validThrough.
+const { proposalExpiry, FIXED_BID_VALIDITY_ABSENT_SQL } = require('./proposal-bid');
+const FIXED_BID_STILL_VALID_SQL = `(${FIXED_BID_VALIDITY_ABSENT_SQL} OR (((estimate_data->'proposal'->>'validThrough')::date + 1)::timestamp AT TIME ZONE 'America/New_York') > NOW())`;
+const MANUAL_ACCEPT_ACTIVE_SQL = `(expires_at IS NULL OR expires_at >= NOW()) AND ${FIXED_BID_STILL_VALID_SQL}`;
+const fixedBidDeadlinePassed = (estimate, now = new Date()) => { const at = proposalExpiry(estimate); return Boolean(at && at < now); };
+
 const MANUAL_ACCEPTABLE_STATUSES = new Set(['sent', 'viewed']);
 
 function asMoneyOrNull(value) {
@@ -256,6 +266,7 @@ async function prepayBookingEligibility(estimate = {}) {
   // route attaches lead quotes to the customer on book, before accepting.
   if (!MANUAL_ACCEPTABLE_STATUSES.has(estimate.status)) return ineligible('status_not_acceptable');
   if (estimate.expires_at && new Date(estimate.expires_at) < new Date()) return ineligible('expired');
+  if (fixedBidDeadlinePassed(estimate)) return ineligible('expired');
   if (estimateDataHasUnresolvedManagerApproval(estimate.estimate_data || estimate.estimateData)) return ineligible('manager_approval_pending');
   if (commercialRiskTypeReviewNeeded(estimate.estimate_data || estimate.estimateData)) return ineligible('commercial_risk_review');
   if (!hasManualAnnualPrepayRecurringRows(estimate)) return ineligible('no_recurring_rows');
@@ -380,6 +391,9 @@ async function markEstimateManuallyAccepted({
 
     if (estimate.expires_at && new Date(estimate.expires_at) < new Date()) {
       throw httpError('Estimate is no longer active.', 409);
+    }
+    if (fixedBidDeadlinePassed(estimate)) {
+      throw httpError('The bid validity date has passed. Update Valid through in the proposal builder before marking it won.', 409);
     }
 
     if (estimateDataHasUnresolvedManagerApproval(estimate.estimate_data || estimate.estimateData)) {
@@ -547,7 +561,7 @@ async function markEstimateManuallyAccepted({
       // back to sent/viewed, a second accept must not rerun conversion and
       // invoicing.
       .whereNull('price_locked_at')
-      .whereRaw('(expires_at IS NULL OR expires_at >= NOW())')
+      .whereRaw(MANUAL_ACCEPT_ACTIVE_SQL)
       // Marker/archive predicates on the money write itself (pre-push P0,
       // PR #3304): the locked revalidation above serializes the engine-
       // drafted path, and these make the UPDATE refuse outright if any
@@ -986,7 +1000,7 @@ async function markEstimateManuallyAccepted({
   };
 }
 
-module.exports = {
+module.exports = { MANUAL_ACCEPT_ACTIVE_SQL,
   MANUAL_ACCEPTABLE_STATUSES,
   markEstimateManuallyAccepted,
   normalizeManualBillingTerm,

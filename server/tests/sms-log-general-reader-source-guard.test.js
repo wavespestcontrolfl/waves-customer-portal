@@ -46,471 +46,489 @@ const SERVER_ROOT = path.join(__dirname, '..');
 const SKIP_DIRS = new Set(['node_modules', 'tests', 'migrations', '__tests__', 'coverage', 'dist']);
 const WINDOW_SPAN = 15;
 
-// Explicit exemptions. Each entry names the exact file + line the scan
-// reports and why the exclusion genuinely does not apply. Default is ZERO —
-// every OTHER unwrapped site fails.
+// Explicit exemptions. Keyed on `file` + a stable `snippet` (the exact,
+// trimmed source line of the table-call statement — see findCandidates
+// below) instead of a line number: a line-number key churns on every
+// unrelated edit above it (every child branch merge-down, every future
+// PR touching the file, even a merge from main into this branch), forcing
+// a line-number chase on code this guard never actually cares about
+// (codex #4333 P2, GitHub round, "the guard's own line-number churn" —
+// confirmed on CI: main's independent edits since this branch's
+// merge-base shifted a dozen already-allowlisted lines and broke every
+// one of them under the old line key). `nth` disambiguates the rare case
+// where the exact same snippet text occurs more than once in one file
+// (1-based, in source order) — omit it when the snippet is unique in its
+// file. Each entry's reason says why the exclusion genuinely does not
+// apply. Default is ZERO — every OTHER unwrapped site fails.
 const ALLOWLIST = [
   {
     file: 'routes/twilio-webhook.js',
-    line: 1677,
+    snippet: 'const inbound = await trx(\'sms_log\')',
     reason: 'inbound-only (where from_phone = the opting-out customer\'s own number) — every send reservation (review-ask or reply) is Waves\' own outbound row, so its from_phone can never match a customer\'s number here.',
   },
   {
     file: 'scripts/backfill-comms-pr2.js',
-    line: 79,
+    snippet: 'const total = await db(\'sms_log\')',
     reason: 'one-off historical backfill script (ops tooling, run manually once, idempotent on re-run) — not a live reader feeding a human or a model.',
   },
   {
     file: 'scripts/backfill-comms-pr2.js',
-    line: 88,
-    reason: 'same one-off historical backfill script as line 79 (the paged batch read).',
+    snippet: 'const batch = await db(\'sms_log\')',
+    reason: 'same one-off historical backfill script as the total-count query above (the paged batch read).',
   },
   {
     file: 'services/completion-comms-guard.js',
-    line: 191,
+    snippet: 'const inboundRows = await knex(\'sms_log\')',
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
   },
   {
     file: 'services/completion-comms-guard.js',
-    line: 199,
+    snippet: 'const outboundRows = await knex(\'sms_log\')',
     reason: 'filtered to CONFIRMED_OUTBOUND_STATUS, which excludes \'sending\' — an unresolved reservation cannot match this status filter.',
   },
   {
     file: 'services/customer-intelligence/signal-detector.js',
-    line: 65,
+    snippet: 'const recentInbound = await db(\'sms_log\')',
     reason: 'inbound-only count (direction: \'inbound\') — a send reservation is always an outbound row; the outbound-count query a few lines below already uses the helper.',
   },
   {
     file: 'services/customer-intelligence/signal-detector.js',
-    line: 74,
+    snippet: 'const smsMessages = await db(\'sms_log\')',
     reason: 'inbound-only message read (direction: \'inbound\') feeding sentiment mining — a send reservation is always an outbound row.',
   },
   {
     file: 'services/recipient-optin.js',
-    line: 476,
+    snippet: 'const lastAsk = await db(\'sms_log\')',
     reason: 'single-row lookup (.first(\'status\')) — not a list read; the .limit( this scan\'s window sees belongs to the enclosing, unrelated recipient_optin sweep query above it.',
   },
   {
     file: 'services/messaging/deferred-replay-registry.js',
-    line: 1319,
+    snippet: 'rows = await db(\'sms_log\')',
     reason: 'whereIn(status, [blocked, failed, cancelled]) excludes \'sending\' — an unresolved reservation cannot match this status filter.',
   },
   {
     file: 'services/messaging/sync-optout.js',
-    line: 65,
+    snippet: 'const inbound = await trx(\'sms_log\')',
     reason: 'from_phone = the opting-out customer\'s own number — every send reservation is Waves\' own outbound row and can never match a customer\'s from_phone.',
   },
   {
     file: 'services/outbound-call-reason.js',
-    line: 146,
-    reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
-  },
-
-  // ─── Added by the widened-detection sweep (codex #4333 P2, GitHub round)
-  // that followed the sms-voice-corpus-miner.js gap. Every entry below was
-  // classified by hand against the reservation invariants enforced in
-  // review-ask-reservation.js: a send reservation is ALWAYS direction
-  // 'outbound', status 'sending' until resolved, message_type one of
-  // 'review' / 'manual' / 'ai_autosent', and never carries a twilio_sid
-  // until promoted (at which point it IS real delivery evidence, not a
-  // placeholder). A site that structurally cannot match any of those is
-  // listed here instead of wrapped; a site whose window intentionally
-  // needs to see reservations (ask-spacing, in-flight-reply evidence, the
-  // reservation sweep itself) says so explicitly.
-  {
-    file: 'routes/admin-communications.js',
-    line: 144,
+    snippet: 'db(\'sms_log\')',
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
   },
   {
     file: 'routes/admin-communications.js',
-    line: 3273,
+    snippet: 'const newerInbound = await db(\'sms_log\')',
+    reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
+  },
+  {
+    file: 'routes/admin-communications.js',
+    snippet: 'const scheduled = await db(\'sms_log\')',
     reason: 'status filtered to \'scheduled\', which excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
   },
   {
     file: 'routes/admin-communications.js',
-    line: 3365,
+    snippet: 'const sentSibling = await trx(\'sms_log\')',
     reason: 'status filtered to queued/sent/delivered, which excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
   },
   {
     file: 'routes/admin-communications.js',
-    line: 957,
+    snippet: 'const logged = outcome.providerMessageId && await db(\'sms_log\')',
     reason: 'keyed by twilio_sid — a send reservation never has one until it is promoted to a real send, at which point it is legitimate delivery evidence, not a placeholder.',
   },
   {
     file: 'routes/admin-import-sheets.js',
-    line: 58,
+    snippet: 'const existing = await db(\'sms_log\')',
     reason: 'from_phone matches the imported customer\'s own number (this route always inserts direction: \'inbound\' rows) — a send reservation\'s from_phone is always one of Waves\' own numbers, never a customer\'s.',
   },
   {
     file: 'routes/admin-projects.js',
-    line: 3726,
+    snippet: 'return db(\'sms_log\')',
     reason: 'status filtered to queued/sent/delivered, which excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
   },
   {
     file: 'routes/admin-projects.js',
-    line: 3739,
+    snippet: 'let claim = await db(\'sms_log\')',
     reason: 'metadata key (report_hold_release_key) is exclusive to this project\'s own report-hold-release claim rows — a review-ask/reply reservation never sets it, regardless of any status/direction overlap.',
   },
   {
     file: 'routes/admin-workflows.js',
-    line: 53,
+    snippet: 'const recentReactivations = await db(\'sms_log\')',
     reason: 'message_type restricted to \'reactivation\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
   },
   {
     file: 'routes/estimate-public.js',
-    line: 24926,
+    snippet: 'const recentPacketSend = async () => db(\'sms_log\')',
     reason: 'message_type restricted to \'estimate_service_details\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
   },
   {
     file: 'routes/stripe-webhook.js',
-    line: 5686,
+    snippet: 'const probeQueued = db(\'sms_log\')',
     reason: 'metadata key (stripe_payment_intent_id (+ stripe_event_id)) is exclusive to this ACH-failure-replay notice probe — a review-ask/reply reservation never sets it, regardless of any status/direction overlap.',
   },
   {
     file: 'routes/twilio-webhook.js',
-    line: 105,
+    snippet: 'const sent = await db(\'sms_log\')',
     reason: 'status filtered to queued/sent/delivered (see the window text), which excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
   },
   {
     file: 'routes/twilio-webhook.js',
-    line: 1203,
+    snippet: 'const prior = await db(\'sms_log\')',
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row. (also keyed by twilio_sid, which a reservation never has).',
   },
   {
     file: 'routes/twilio-webhook.js',
-    line: 1582,
+    snippet: 'let logRow = await trx(\'sms_log\').where({ twilio_sid: MessageSid }).first(\'customer_id\', \'created_at\', \'metadata\');',
     reason: 'keyed by twilio_sid — a send reservation never has one until it is promoted to a real send, at which point it is legitimate delivery evidence, not a placeholder.',
   },
   {
     file: 'routes/twilio-webhook.js',
-    line: 1590,
+    snippet: 'logRow = await trx(\'sms_log\').where({ twilio_sid: MessageSid }).first(\'customer_id\', \'created_at\', \'metadata\');',
     reason: 'keyed by twilio_sid — a send reservation never has one until it is promoted to a real send, at which point it is legitimate delivery evidence, not a placeholder.',
   },
   {
     file: 'routes/twilio-webhook.js',
-    line: 1826,
+    snippet: 'void db(\'sms_log\').where({ twilio_sid: MessageSid }).first()',
+    nth: 1,
     reason: 'keyed by twilio_sid — a send reservation never has one until it is promoted to a real send, at which point it is legitimate delivery evidence, not a placeholder.',
   },
   {
     file: 'routes/twilio-webhook.js',
-    line: 1868,
+    snippet: 'void db(\'sms_log\').where({ twilio_sid: MessageSid }).first()',
+    nth: 2,
     reason: 'keyed by twilio_sid — a send reservation never has one until it is promoted to a real send, at which point it is legitimate delivery evidence, not a placeholder.',
   },
   {
     file: 'routes/twilio-webhook.js',
-    line: 1997,
+    snippet: 'const last = await db(\'sms_log\')',
     reason: 'status filtered to a set that excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
   },
   {
     file: 'scripts/backfill-lead-activities-from-sms.js',
-    line: 76,
+    snippet: 'const rows = await db(\'sms_log\')',
     reason: 'keyed by twilio_sid — a send reservation never has one until it is promoted to a real send, at which point it is legitimate delivery evidence, not a placeholder.',
   },
   {
     file: 'scripts/replay-estimate-conversion-agent.js',
-    line: 70,
+    snippet: 'const q = db(\'sms_log as s\')',
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
   },
   {
     file: 'services/appointment-reminders.js',
-    line: 143,
+    snippet: 'const delivered = await db(\'sms_log\')',
     reason: 'status filtered to a set that excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
   },
   {
     file: 'services/appointment-reminders.js',
-    line: 3692,
+    snippet: 'const bounceLog = sid ? await trx(\'sms_log\').where({ twilio_sid: sid }).first(\'created_at\', \'metadata\') : null;',
     reason: 'keyed by twilio_sid — a send reservation never has one until it is promoted to a real send, at which point it is legitimate delivery evidence, not a placeholder.',
   },
   {
     file: 'services/call-commitments.js',
-    line: 1158,
+    snippet: 'const sms = await conn("sms_log")',
     reason: 'message_type restricted to \'confirmation\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
   },
   {
     file: 'services/call-commitments.js',
-    line: 1233,
+    snippet: 'const text = await conn("sms_log as os")',
     reason: 'status filtered to queued/sent/delivered, which excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
   },
   {
     file: 'services/call-recording-processor.js',
-    line: 14521,
+    snippet: 'confirmationDelivered = await db(\'sms_log\')',
     reason: 'keyed by twilio_sid — a send reservation never has one until it is promoted to a real send, at which point it is legitimate delivery evidence, not a placeholder.',
   },
   {
     file: 'services/call-recording-processor.js',
-    line: 15041,
+    snippet: 'const existing = await db(\'sms_log\')',
     reason: 'message_type restricted to \'confirmation\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
   },
   {
     file: 'services/call-recording-processor.js',
-    line: 15299,
+    snippet: 'const recentDup = await db(\'sms_log\')',
     reason: 'message_type restricted to \'confirmation\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
   },
   {
     file: 'services/campaign-drafts-gate.js',
-    line: 148,
+    snippet: 'const recentCampaignSms = await db(\'sms_log\')',
     reason: 'message_type restricted to CAMPAIGN_SMS_TYPES (upsell / renewal / reactivation / retention_outreach / retention), disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
   },
   {
     file: 'services/collections/consent-provenance.js',
-    line: 58,
+    snippet: 'return db(\'sms_log\')',
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
   },
   {
     file: 'services/contact-correction-queue.js',
-    line: 386,
+    snippet: '? await knex(\'sms_log\')',
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row. (also keyed by twilio_sid in the same window).',
   },
   {
     file: 'services/customer-intelligence/signal-detector.js',
-    line: 272,
+    snippet: 'const inbound = await db(\'sms_log\')',
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
   },
   {
     file: 'services/customer-intelligence/signal-detector.js',
-    line: 285,
+    snippet: 'const recentMessages = await db(\'sms_log\')',
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
   },
   {
     file: 'services/dropped-call-sms.js',
-    line: 312,
+    snippet: 'const prior = await db(\'sms_log\')',
     reason: 'message_type restricted to this file\'s own MESSAGE_TYPE constant, disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
   },
   {
     file: 'services/dropped-call-sms.js',
-    line: 644,
+    snippet: 'const row = await db(\'sms_log\')',
     reason: 'keyed by twilio_sid — a send reservation never has one until it is promoted to a real send, at which point it is legitimate delivery evidence, not a placeholder.',
   },
   {
     file: 'services/intelligence-bar/comms-tools.js',
-    line: 304,
+    snippet: 'const inbound = await db(\'sms_log\')',
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
   },
   {
     file: 'services/intelligence-bar/comms-tools.js',
-    line: 841,
+    snippet: 'const lastInbound = await db(\'sms_log\')',
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
   },
   {
     file: 'services/intelligence-bar/dashboard-tools.js',
-    line: 1181,
+    snippet: 'db(\'sms_log\').where({ direction: \'inbound\' }).where(function () {',
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row. (also status-scoped in the same window).',
   },
   {
     file: 'services/invoice.js',
-    line: 3039,
+    snippet: 'const existingQueued = await db("sms_log")',
     reason: 'metadata key (entry_point = \'invoice_send_deferred\') is exclusive to this deferred pay-link SMS claim — a review-ask/reply reservation never sets it, regardless of any status/direction overlap.',
   },
   {
     file: 'services/invoice.js',
-    line: 5198,
+    snippet: 'const deferredRows = await trx("sms_log")',
     reason: 'status filtered to a set that excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
   },
   {
     file: 'services/invoice.js',
-    line: 5256,
+    snippet: 'const dispatchingNow = await trx("sms_log")',
     reason: 'metadata key (entry_point IN (…deferred entry points…)) is exclusive to this deferred-dispatch SMS claim — a review-ask/reply reservation never sets it, regardless of any status/direction overlap.',
   },
   {
     file: 'services/lawn-intelligence.js',
-    line: 202,
+    snippet: 'const existing = await trx(\'sms_log\').where({ customer_id: customer.id })',
     reason: 'metadata key (entry_point = \'lawn_assessment_notification_deferred\') is exclusive to this deferred lawn-notification claim — a review-ask/reply reservation never sets it, regardless of any status/direction overlap.',
   },
   {
     file: 'services/lead-scorer.js',
-    line: 16,
+    snippet: 'const inboundSms = await db(\'sms_log\').where({ customer_id: customerId, direction: \'inbound\' }).count(\'* as count\').first();',
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
   },
   {
     file: 'services/messaging/landline-suppression.js',
-    line: 103,
+    snippet: 'const row = await trx(\'sms_log\').where({ twilio_sid: sid }).first(\'created_at\', \'metadata\');',
     reason: 'keyed by twilio_sid — a send reservation never has one until it is promoted to a real send, at which point it is legitimate delivery evidence, not a placeholder.',
   },
   {
     file: 'services/new-recurring-welcome-sms.js',
-    line: 596,
+    snippet: ': await db(\'sms_log\')',
     reason: 'status filtered to a set that excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
   },
   {
     file: 'services/outbound-call-reason.js',
-    line: 238,
+    snippet: 'const arrivalText = await db(\'sms_log\')',
     reason: 'message_type restricted to ARRIVAL_TEXT_TYPES (tech_en_route / tech_arrived), disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
   },
   {
     file: 'services/outbound-voicemail-sms.js',
-    line: 164,
+    snippet: 'const prior = await db(\'sms_log\')',
     reason: 'message_type restricted to this file\'s own MESSAGE_TYPE constant, disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
   },
   {
     file: 'services/recipient-optin.js',
-    line: 416,
+    snippet: 'const priorSendRow = await db(\'sms_log\')',
     reason: 'keyed by twilio_sid — a send reservation never has one until it is promoted to a real send, at which point it is legitimate delivery evidence, not a placeholder. (also message_type-scoped to a non-reservation type in the same window).',
   },
   {
     file: 'services/review-ask-history.js',
-    line: 100,
+    snippet: 'const rows = await db(\'sms_log\')',
     reason: 'deliberately includes in-flight review-ask/reply reservations as ask-spacing evidence (the REBUTTED FINDING note at the top of review-ask-reservation.js) — excluding them here would break the spacing guarantee this function exists to provide.',
   },
   {
     file: 'services/review-request.js',
-    line: 3058,
+    snippet: 'const stamped = await db("sms_log")',
     reason: 'status explicitly excludes \'sending\' in its own whereNotIn list (evidence of DELIVERY, not an in-flight attempt) — an unresolved reservation cannot match.',
   },
   {
     file: 'services/review-request.js',
-    line: 3087,
+    snippet: 'const evidence = await db("sms_log")',
     reason: 'status explicitly excludes \'sending\' in its own whereNotIn list, same as the stamped-evidence lookup just above it — an unresolved reservation cannot match.',
   },
   {
     file: 'services/review-request.js',
-    line: 825,
+    snippet: 'const rows = await db("sms_log")',
     reason: 'status filtered to a set that excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
   },
   {
     file: 'services/scheduler.js',
-    line: 4123,
+    snippet: 'const providerRow = await db(\'sms_log\')',
     reason: 'keyed by twilio_sid — a send reservation never has one until it is promoted to a real send, at which point it is legitimate delivery evidence, not a placeholder. (also status-scoped in the same window).',
   },
   {
     file: 'services/sms-additional-properties.js',
-    line: 116,
+    snippet: 'const message = await conn(\'sms_log\').where({ id: smsLogId }).first();',
     reason: 'single-row lookup by id — not a list read.',
   },
   {
     file: 'services/sms-additional-properties.js',
-    line: 126,
+    snippet: 'const live = await trx(\'sms_log\').where({ id: message.id }).forUpdate().first();',
     reason: 'single-row lookup by id — not a list read.',
   },
   {
     file: 'services/sms-auto-send.js',
-    line: 595,
+    snippet: 'reservationsCleared = await db(\'sms_log\')',
     reason: 'this IS the reply-reservation reconciliation sweep itself (settles manual_send_reservation / auto_send_reservation rows; review-ask reservations are explicitly excluded from it) — applying the exclusion helper here would hide the very rows this sweep exists to find and release.',
   },
   {
     file: 'services/sms-operational-actions.js',
-    line: 284,
+    snippet: 'const source = await trx(\'sms_log\').modify(withoutScheduledDeliveryTwins, \'sms_log\')',
     reason: 'single-row lookup by id — not a list read.',
   },
   {
     file: 'services/sms-operational-actions.js',
-    line: 381,
+    snippet: 'const candidates = await conn(\'sms_log as s\').modify(withoutScheduledDeliveryTwins, \'s\').where(\'s.created_at\', \'>=\', since).where(\'s.created_at\', \'<=\', now)',
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
   },
   {
     file: 'services/sms-operational-actions.js',
-    line: 483,
+    snippet: 'const source = await trx(\'sms_log\').where({ id: initial.sms_log_id }).forUpdate().first();',
     reason: 'single-row lookup by id — not a list read.',
   },
   {
     file: 'services/sms-operational-actions.js',
-    line: 538,
+    snippet: 'const source = await scheduledSourceMessage(trx, await trx(\'sms_log\').where({ id: message.id }).forUpdate().first());',
     reason: 'single-row lookup by id — not a list read.',
   },
   {
     file: 'services/sms-operational-actions.js',
-    line: 593,
-    reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
-  },
-  {
-    file: 'services/sms-shadow-backfill.js',
-    line: 172,
+    snippet: 'const message = await conn(\'sms_log as s\').where({ \'s.id\': smsLogId, \'s.direction\': \'inbound\' })',
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
   },
   {
     file: 'services/sms-shadow-backfill.js',
-    line: 240,
+    snippet: 'return db(\'sms_log as i\')',
+    nth: 1,
+    reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
+  },
+  {
+    file: 'services/sms-shadow-backfill.js',
+    snippet: 'return db(\'sms_log as i\')',
+    nth: 2,
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
   },
   {
     file: 'services/sms-shadow-judge.js',
-    line: 353,
+    snippet: 'const outbounds = await db(\'sms_log\')',
     reason: 'status filtered to a set that excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
   },
   {
     file: 'services/sms-shadow-judge.js',
-    line: 369,
+    snippet: 'const inboundBoundaries = await db(\'sms_log\')',
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
   },
   {
     file: 'services/sms-shadow-judge.js',
-    line: 401,
+    snippet: 'const correctedSends = await db(\'sms_log\')',
     reason: 'status filtered to SENT_STATUSES (queued/sent/delivered), which excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
   },
   {
     file: 'services/sms-suggest-mode.js',
-    line: 186,
+    snippet: 'const answered = await trx(\'sms_log\')',
     reason: 'status filtered to SENT_STATUSES (queued/sent/delivered), which excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
   },
   {
     file: 'services/sms-suggest-mode.js',
-    line: 195,
+    snippet: 'const replyInFlight = await trx(\'sms_log\')',
     reason: 'deliberately includes in-flight reservations — a manual/auto reply reservation IS a real send in progress, and hiding it would let a competing suggestion publish over an active send. A reservation stuck at \'sending\' is the stranded-send reconciliation\'s problem, not this check\'s.',
   },
   {
     file: 'services/sms-suggest-mode.js',
-    line: 204,
+    snippet: 'const newerInbound = await trx(\'sms_log\')',
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
   },
   {
     file: 'services/sms-suggest-mode.js',
-    line: 370,
+    snippet: 'const inbound = await trx(\'sms_log\').where({ id: smsLogId }).first(\'created_at\', \'from_phone\');',
     reason: 'single-row lookup by id — not a list read.',
   },
   {
     file: 'services/sms-voice-corpus-miner.js',
-    line: 307,
+    snippet: 'const inbounds = await db(\'sms_log\')',
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
   },
   {
     file: 'services/sms-voice-corpus-miner.js',
-    line: 321,
+    snippet: 'const followups = await db(\'sms_log\')',
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
   },
   {
     file: 'services/voicemail-lead-sms.js',
-    line: 176,
+    snippet: 'const prior = await db(\'sms_log\')',
     reason: 'message_type restricted to this file\'s own MESSAGE_TYPE constant, disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
   },
   {
     file: 'services/voicemail-lead-sms.js',
-    line: 445,
+    snippet: 'const row = await db(\'sms_log\')',
     reason: 'keyed by twilio_sid — a send reservation never has one until it is promoted to a real send, at which point it is legitimate delivery evidence, not a placeholder.',
   },
   {
     file: 'services/workflows/balance-reminder.js',
-    line: 136,
+    snippet: 'const prevReminders = await db("sms_log")',
     reason: 'message_type restricted to \'balance_reminder\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
   },
   {
     file: 'services/workflows/balance-reminder.js',
-    line: 519,
+    snippet: 'const prevCount = await db("sms_log")',
     reason: 'message_type restricted to \'late_payment\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
   },
   {
     file: 'services/workflows/balance-reminder.js',
-    line: 526,
+    snippet: 'const sentRecently = await db("sms_log")',
     reason: 'message_type restricted to \'late_payment\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
   },
   {
     file: 'services/workflows/balance-reminder.js',
-    line: 747,
+    snippet: 'const recentReminder = await db("sms_log")',
     reason: 'message_type restricted to this cooldown check\'s own message_type constant, disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
   },
   {
     file: 'services/workflows/payment-expiry.js',
-    line: 277,
+    snippet: 'const recentNotice = await db(\'sms_log\')',
     reason: 'message_type restricted to \'payment_expiry\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
   },
   {
     file: 'services/workflows/referral-nudge.js',
-    line: 20,
+    snippet: 'const recentNudge = await db(\'sms_log\')',
     reason: 'message_type restricted to \'referral_nudge\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
   },
   {
     file: 'services/workflows/renewal-reminder.js',
-    line: 83,
+    snippet: 'const recent = await db(\'sms_log\')',
     reason: 'message_type restricted to \'renewal\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
+  },
+  {
+    file: 'services/reschedule-link-promises.js',
+    snippet: 'const messages = await conn(\'sms_log\').where({ customer_id: context.customer.id, direction: \'outbound\' })',
+    reason: 'requires .whereNotNull(\'twilio_sid\') in the same statement — a send reservation never has one until it is promoted to a real send, at which point it is legitimate delivery evidence, not a placeholder (status overlaps \'sending\', but the twilio_sid requirement is the true disqualifier).',
+  },
+  {
+    file: 'services/reschedule-link-promises.js',
+    snippet: 'const sms = await conn(\'sms_log\').where({ twilio_sid: row.provider_message_id })',
+    reason: 'keyed by twilio_sid — a send reservation never has one until it is promoted to a real send, at which point it is legitimate delivery evidence, not a placeholder.',
+  },
+  {
+    file: 'services/reschedule-link-promises.js',
+    snippet: 'const sms = await conn(\'sms_log\').where({ twilio_sid: row.provider_message_id }).first(\'id\', \'status\');',
+    reason: 'keyed by twilio_sid — a send reservation never has one until it is promoted to a real send, at which point it is legitimate delivery evidence, not a placeholder.',
   },
 ];
 
@@ -614,8 +632,20 @@ function findCandidates() {
   return candidates;
 }
 
-function isAllowed(c) {
-  return ALLOWLIST.some((a) => a.file === c.file && a.line === c.line);
+// 1-based position of `target` among all candidates sharing its exact
+// file + snippet, ordered by line ascending — this is what `nth` addresses.
+function occurrenceIndex(allCandidates, target) {
+  const siblings = allCandidates
+    .filter((c) => c.file === target.file && c.snippet === target.snippet)
+    .sort((a, b) => a.line - b.line);
+  return siblings.findIndex((c) => c.line === target.line) + 1;
+}
+
+function isAllowed(c, allCandidates) {
+  return ALLOWLIST.some((a) => {
+    if (a.file !== c.file || a.snippet !== c.snippet) return false;
+    return occurrenceIndex(allCandidates, c) === (a.nth || 1);
+  });
 }
 
 describe('sms_log general-reader source guard (codex #4331)', () => {
@@ -682,7 +712,7 @@ describe('sms_log general-reader source guard (codex #4331)', () => {
 
   test('every "latest N messages" sms_log read either uses the shared helper or is explicitly allowlisted', () => {
     const candidates = findCandidates();
-    const violations = candidates.filter((c) => !c.compliant && !isAllowed(c));
+    const violations = candidates.filter((c) => !c.compliant && !isAllowed(c, candidates));
     const message = violations
       .map((v) => `  server/${v.file}:${v.line}  ${v.snippet}`)
       .join('\n');
@@ -692,10 +722,12 @@ describe('sms_log general-reader source guard (codex #4331)', () => {
         `('sending', a synthetic placeholder) can be presented as a delivered message.\n` +
         `Wrap the query in excludeUnresolvedSendReservations(...) from ` +
         `server/services/messaging/review-ask-reservation.js BEFORE .orderBy()/.limit(), ` +
-        `or add the site to ALLOWLIST in this test with a one-line reason the exclusion ` +
-        `genuinely does not apply (e.g. already direction/status-scoped so a reservation ` +
-        `structurally cannot match, or not a live reader).\n` +
-        `Offending site(s):\n${message}\n` +
+        `or add the site to ALLOWLIST in this test as { file, snippet, reason } — snippet is ` +
+        `the exact trimmed source line printed below (add nth if that same snippet occurs ` +
+        `more than once in the file) — with a one-line reason the exclusion genuinely does ` +
+        `not apply (e.g. already direction/status-scoped so a reservation structurally cannot ` +
+        `match, or not a live reader).\n` +
+        `Offending site(s) (file:line shown for reference; ALLOWLIST keys on file+snippet, not line):\n${message}\n` +
         `(Codex #4331 — this exact class of gap has recurred across six review rounds on this stack.)`,
       );
     }
@@ -704,15 +736,31 @@ describe('sms_log general-reader source guard (codex #4331)', () => {
 
   test('every ALLOWLIST entry still matches a real (still-unwrapped) candidate — no stale entries', () => {
     const candidates = findCandidates();
+    const seenKeys = new Set();
     for (const entry of ALLOWLIST) {
+      expect(typeof entry.file).toBe('string');
+      expect(typeof entry.snippet).toBe('string');
       expect(typeof entry.reason).toBe('string');
       expect(entry.reason.length).toBeGreaterThan(10);
-      const hit = candidates.find((c) => c.file === entry.file && c.line === entry.line);
+      const nth = entry.nth || 1;
+      const key = `${entry.file} ${entry.snippet} ${nth}`;
+      if (seenKeys.has(key)) {
+        throw new Error(`Duplicate ALLOWLIST entry for server/${entry.file} snippet "${entry.snippet}"${entry.nth ? ` (nth=${entry.nth})` : ''} — one of these two is masking a different, still-unwrapped site.`);
+      }
+      seenKeys.add(key);
+      const siblings = candidates
+        .filter((c) => c.file === entry.file && c.snippet === entry.snippet)
+        .sort((a, b) => a.line - b.line);
+      const hit = siblings[nth - 1];
       if (!hit) {
-        throw new Error(`ALLOWLIST entry server/${entry.file}:${entry.line} no longer matches any candidate site — remove it.`);
+        throw new Error(
+          `ALLOWLIST entry server/${entry.file} snippet "${entry.snippet}"${entry.nth ? ` (nth=${entry.nth})` : ''} ` +
+          `no longer matches any candidate site (found ${siblings.length} occurrence(s) of this ` +
+          `snippet in the file) — remove it or fix its nth.`,
+        );
       }
       if (hit.compliant) {
-        throw new Error(`ALLOWLIST entry server/${entry.file}:${entry.line} now uses the shared helper directly — remove the now-redundant entry.`);
+        throw new Error(`ALLOWLIST entry server/${entry.file}:${hit.line} "${entry.snippet}" now uses the shared helper directly — remove the now-redundant entry.`);
       }
     }
   });
