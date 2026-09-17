@@ -4327,6 +4327,33 @@ router.put('/:id/proposal', async (req, res, next) => {
   }
 });
 
+// Originals are processed in memory for this download and never retained.
+const bidFormUpload = require('multer')({
+  storage: require('multer').memoryStorage(),
+  limits: { fileSize: 12 * 1024 * 1024, files: 1, fields: 1, fieldSize: 64 * 1024 },
+}).single('sourcePdf');
+router.post('/:id/proposal/bid-form.pdf', (req, res, next) => {
+  if (!gateEnvValue('GATE_COMMERCIAL_BID_BUILDER')) return res.status(404).json({ error: 'Not found' });
+  bidFormUpload(req, res, (err) => err ? res.status(400).json({ error: 'Upload one original PDF up to 12 MB, with the form options.' }) : next());
+}, async (req, res, next) => {
+  try {
+    let options;
+    try { options = JSON.parse(req.body.options); } catch { return res.status(400).json({ error: 'Invalid bid-form options.' }); }
+    const estimate = await db('estimates').where({ id: req.params.id }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    if (!options?.expectedEditVersion || options.expectedEditVersion !== estimateEditVersion(estimate)) return res.status(409).json({ error: 'The saved proposal changed. Reload and review the prices before exporting.' });
+    const { buildProposalBidForm } = require('../services/pdf/proposal-bid-form');
+    const pdf = await buildProposalBidForm({ ...options, estimate, sourcePdf: req.file?.buffer });
+    const current = await db('estimates').where({ id: estimate.id }).first();
+    if (!current || estimateEditVersion(current) !== options.expectedEditVersion) return res.status(409).json({ error: 'The proposal changed while preparing the form. Review the latest prices and export again.' });
+    res.set({ 'Content-Type': 'application/pdf', 'Cache-Control': 'private, no-store', 'Content-Disposition': `attachment; filename="${options.template}-bid-form.pdf"` });
+    res.send(pdf);
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
+});
+
 // GET /api/admin/estimates/:id/proposal.pdf — branded commercial proposal
 // PDF (inline), using the same generator as its email attachment.
 router.get('/:id/proposal.pdf', async (req, res, next) => {

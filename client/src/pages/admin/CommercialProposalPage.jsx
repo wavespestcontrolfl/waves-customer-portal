@@ -7,6 +7,7 @@ import {
   ClipboardList, ChevronDown, ChevronUp, Wand2,
 } from 'lucide-react';
 import AdminCommandHeader from '../../components/admin/AdminCommandHeader';
+import ProposalBidForm from '../../components/estimates/ProposalBidForm';
 import { EstimateSendProvider, useEstimateSend } from '../../components/admin/EstimateSendDialog';
 import { PROPOSAL_UNITS, proposalLineAmount } from '@proposal-bid';
 
@@ -763,6 +764,26 @@ function CommercialProposalEditor() {
     },
   });
 
+  const downloadBidForm = async ({ file, ...options }) => {
+    const genAtClick = editGenRef.current;
+    if (!locked && !(await save())) throw new Error('Save the proposal successfully before exporting the form.');
+    if (editGenRef.current !== genAtClick) throw new Error('The proposal changed while the form was being prepared. Review the form row for each line and download again.');
+    const body = new FormData();
+    body.append('sourcePdf', file);
+    body.append('options', JSON.stringify({ ...options, expectedEditVersion: loadedVersionRef.current }));
+    const response = await fetch(`${API_BASE}/admin/estimates/${estimateId}/proposal/bid-form.pdf`, {
+      method: 'POST', headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` }, body,
+    });
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({}));
+      throw new Error(result.error || 'Could not prepare the bid form.');
+    }
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement('a');
+    link.href = url; link.download = `${options.template}-bid-form.pdf`; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  };
+
   // Returns true ONLY when the persisted proposal equals the on-screen
   // state — download/send/Mark-won gate on this, and a true returned while
   // newer keystrokes sit unsaved would let them act on a stale snapshot
@@ -1419,6 +1440,8 @@ function CommercialProposalEditor() {
               <Plus size={15} /> Add building
             </Button>
           )}
+
+          {bidToolsEnabled && !programsMode && <ProposalBidForm buildings={buildings} onDownload={downloadBidForm} disabled={saving || estimate?.status === 'sending'} />}
 
           <Card>
             <CardHeader>

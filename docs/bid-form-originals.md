@@ -17,5 +17,26 @@ scope PDFs. Filled fields, signed or flattened packets, annotations on the
 selected page, altered boxes and unreviewed actions are refused. The North Port
 original's unsigned signature fields and original JavaScript remain unchanged.
 
-The export consumer is a separate change. This foundation does not enable a
-route, submit a bid, send a document or change a rollout gate.
+The admin proposal editor exposes the download while the existing commercial
+bid-builder gate is enabled. Save an authored proposal with one-time building
+lines, an explicit validity date, and a form-row mapping for every priced line.
+The route compares the saved edit version before and after generation.
+
+North Port requires product quantities in lb or gal, application area in acres,
+consistent unit prices per row, no separate tax and a total at most $34,999.99.
+The September 8 Addendum No. 1 moves the due date to September 22; the RFQ's
+90-day hold requires Valid through December 21, 2026 or later. Recheck later
+addenda before submission. Cove needs reviewed SF quantities for apartments,
+clubhouse and garages; base-bid rows include tax. Enter the OCIP deduct alternate
+explicitly, including zero. Other units may contribute dollars but never SF.
+
+The editor refuses changes made during its pre-export save. The PDF is downloaded
+only to the requesting device; this neither submits the bid nor delivers it to
+a customer. Signatures, dates, discounts and legal attestations stay blank for
+manual completion. Save uses `updateFieldAppearances:false` so inspecting blank
+fields does not regenerate appearances on untouched packet pages. Uploaded
+originals are limited to 12 MB and 100 pages. The gate remains off by default.
+
+The upload and local download are reviewed portal-only exceptions in
+`docs/intelligence-bar-capabilities.json`: Intelligence Bar has no retained
+source-file contract for this browser-selected PDF.

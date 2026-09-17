@@ -79,6 +79,8 @@ jest.mock('../services/admin-estimate-persistence', () => ({
   staleCallLinkageReason: jest.fn(async () => null),
 }));
 
+jest.mock('../services/pdf/proposal-bid-form', () => ({ buildProposalBidForm: jest.fn(async () => Buffer.from('%PDF-synthetic')) }));
+const { buildProposalBidForm } = require('../services/pdf/proposal-bid-form');
 const db = require('../models/db');
 const router = require('../routes/admin-estimates');
 const persistence = require('../services/admin-estimate-persistence');
@@ -202,6 +204,33 @@ beforeEach(() => {
 });
 
 describe('commercial bid authoring', () => {
+  test('the disabled gate refuses uploaded forms before parsing or database access', async () => {
+    gateEnvValue.mockReturnValue(false);
+    const layer = router.stack.find((entry) => entry.route?.path === '/:id/proposal/bid-form.pdf');
+    const res = { status: jest.fn().mockReturnThis(), json: jest.fn() };
+    const next = jest.fn();
+    await layer.route.stack[0].handle({}, res, next);
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(next).not.toHaveBeenCalled();
+    expect(db).not.toHaveBeenCalled();
+  });
+  test('an export refuses a stale proposal before PDF generation', async () => {
+    const res = await invoke('/:id/proposal/bid-form.pdf', 'post', { options: JSON.stringify({ expectedEditVersion: 'stale' }) });
+    expect(res.statusCode).toBe(409);
+    expect(buildProposalBidForm).not.toHaveBeenCalled();
+    expect(mutations).toHaveLength(0);
+  });
+  test('an export refuses an edit made during PDF generation without writing data', async () => {
+    const version = persistence.estimateEditVersion(row);
+    buildProposalBidForm.mockImplementationOnce(async () => {
+      row.estimate_data = { ...dataOf(), syntheticConcurrentEdit: true };
+      return Buffer.from('%PDF-synthetic');
+    });
+    const res = await invoke('/:id/proposal/bid-form.pdf', 'post', { options: JSON.stringify({ expectedEditVersion: version }) });
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error).toMatch(/while preparing the form/);
+    expect(mutations).toHaveLength(0);
+  });
   beforeEach(() => gateEnvValue.mockImplementation((key) => key === 'GATE_COMMERCIAL_BID_BUILDER'));
   const proposal = () => ({ enabled: true, validThrough: '2099-12-21', buildings: [{ name: 'Synthetic field', lineItems: [{ id: 'application', description: 'Synthetic application', quantity: 25.8, unit: 'acre', unitPrice: 100, frequency: 'one_time' }] }] });
   test('PUT stores fractional quote totals and fixed expiry atomically', async () => {

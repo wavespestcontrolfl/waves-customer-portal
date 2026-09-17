@@ -3,6 +3,10 @@
 // Shared by the proposal editor, authoritative totals, and document renderers.
 // Quantities and unit rates retain four decimals; extended charges round once
 // to cents. No service rates or recommended pesticide application rates live here.
+const BID_FORM_PROFILES = {
+  north_port_pr27_02: { label: 'North Port PR27-02 · quote form', page: 15, minimumValidThrough: '2026-12-21', rows: { product: 'Product', application: 'Application', other: 'Additional item', freight: 'Freight' } },
+  cove_termite: { label: 'Cove + Willoughby · termite bid form', page: 3, rows: { apartments: 'Apartment buildings', clubhouse: 'Clubhouse', garages: 'Garages / maintenance' } },
+};
 const PROPOSAL_UNITS = {
   each: 'each', sqft: 'sq ft', lf: 'linear ft', acre: 'acres', lb: 'lb',
   gal: 'gal', hour: 'hours', day: 'days', trip: 'trips', lump_sum: 'lump sum',
@@ -44,4 +48,4 @@ const formatLineBasis = (line) => `${formatQuantity(line)} × ${formatUnitPrice(
 // otherwise). Shared by the public card, the browser document and SSR.
 const showsLineBasis = (line) => Boolean(line.unit) || Number(line.quantity) !== 1 || roundDecimal(line.unitPrice) !== roundCents(line.unitPrice);
 
-module.exports = { PROPOSAL_UNITS, PROPOSAL_COUNT_UNITS, proposalLineServiceCount, roundDecimal, roundCents, proposalLineAmount, formatQuantity, formatUnitPrice, formatLineBasis, showsLineBasis };
+module.exports = { BID_FORM_PROFILES, PROPOSAL_UNITS, PROPOSAL_COUNT_UNITS, proposalLineServiceCount, roundDecimal, roundCents, proposalLineAmount, formatQuantity, formatUnitPrice, formatLineBasis, showsLineBasis };
