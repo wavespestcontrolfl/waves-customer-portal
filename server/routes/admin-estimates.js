@@ -1,6 +1,7 @@
 const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 const express = require('express');
 const crypto = require('crypto');
+const { estimateOfferVersion } = require('../services/estimate-offer-version');
 const { gateEnvValue } = require('../config/feature-gates');
 const router = express.Router();
 const db = require('../models/db');
@@ -115,19 +116,6 @@ function parseEstimateData(estimateData) {
   return typeof estimateData === 'object' ? estimateData : null;
 }
 
-// Operational delivery stamps may change while the claim is taken. Contact,
-// property, scope, terms and dollars must still be the offer that was reviewed.
-function estimateOfferVersion(row) {
-  const data = { ...(parseEstimateData(row.estimate_data) || {}) };
-  for (const key of ['sendSnapshot', 'deliveryState', 'manualSendAttempts']) delete data[key];
-  if (data.estimatorEngine) {
-    data.estimatorEngine = { ...data.estimatorEngine };
-    delete data.estimatorEngine.delivering_at;
-    delete data.estimatorEngine.delivering_token;
-  }
-  const fields = ['customer_id', 'property_id', 'estimate_group_id', 'customer_name', 'customer_phone', 'customer_email', 'address', 'notes', 'monthly_total', 'annual_total', 'onetime_total', 'show_one_time_option', 'bill_by_invoice'];
-  return crypto.createHash('sha256').update(JSON.stringify([fields.map((key) => row[key]), data])).digest('hex');
-}
 
 // When an operator authors a commercial proposal, their line items ARE the
 // quote — so the auto-quote-required state a commercial estimate is created

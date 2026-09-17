@@ -64,7 +64,8 @@ const FAILED_STATUS = 'auto_send_failed';
 // claim still holds while recent, but past this window fails like any other
 // orphan — failClaim leaves the draft 'shadow', so it re-enters ordinary
 // drafting rather than staying invisibly stuck.
-const UNCERTAIN_CLAIM_HOLD_HOURS = 24;
+// One source of truth with the readers' hide window (review-ask-reservation).
+const { REPLY_RESERVATION_HOLD_HOURS: UNCERTAIN_CLAIM_HOLD_HOURS } = require('./messaging/review-ask-reservation');
 // message_drafts.status once the send is confirmed (out of the judge pool).
 const DRAFT_SENT_STATUS = 'auto_sent';
 
@@ -108,6 +109,20 @@ function isRealProviderSend(result) {
  * unresolved? Canonical outcomes are authoritative. The retryable/deferred
  * fallback remains only for callers that have not reached that contract yet.
  */
+/**
+ * sendCustomerMessage reports sent:true for upstream SUPPRESSION paths where
+ * no customer SMS actually left — the provider id is a sentinel (the
+ * admin-sms-templates kill switch returns sid 'template-disabled', a closed
+ * gate returns 'gate-blocked', and so on), not a provider sid. Returns that
+ * sentinel id, or null for a real send. Every owner that decides what a
+ * sent:true means has to make this distinction, so it lives here with
+ * SUPPRESSION_SENTINELS rather than being re-derived per caller.
+ */
+function suppressedSendSentinel(result) {
+  const id = result && result.providerMessageId;
+  return id && SUPPRESSION_SENTINELS.has(id) ? id : null;
+}
+
 function isAmbiguousProviderOutcome(result) {
   if (!result) return false;
   if (result.deliveryOutcome === 'uncertain') return true;
@@ -612,12 +627,23 @@ async function reconcileAutoSendClaims({ orphanMinutes = 30, uncertainReconcilia
   // either deletes it as a confirmed duplicate or promotes it to the durable
   // sent record when no separate provider log exists, so it must stay out of
   // this sweep regardless of age.
+  //
+  // scheduled_for IS NULL is the positive marker for "synthetic placeholder":
+  // review-request.js#reserveReviewSms never sets it. A real scheduled row
+  // (scheduled-sms-delivery.js stamps the same marker on it before its
+  // provider call) always carries a scheduled_for from its original queueing
+  // and keeps it for life — nothing ever nulls it. Age alone can't tell them
+  // apart: claimDueScheduledSms flips a due retry to 'sending' without
+  // touching created_at, so a freshly reclaimed real row can sit exactly at
+  // this cutoff and must never be eligible here (codex P1, review-ask-queued
+  // #4334) — losing it strands its retry and terminal-hook obligations.
   let reviewReservationsExpired = 0;
   try {
     const reviewCutoff = new Date(Date.now() - ASK_SPACING_MS);
     reviewReservationsExpired = await db('sms_log')
       .where({ direction: 'outbound', status: 'sending' })
       .whereRaw("metadata->>'review_ask_reservation' = 'true'")
+      .whereNull('scheduled_for')
       .where('created_at', '<', reviewCutoff)
       .del();
   } catch (err) {
@@ -644,6 +670,7 @@ module.exports = {
   SUPPRESSION_SENTINELS,
   isRealProviderSend,
   isAmbiguousProviderOutcome,
+  suppressedSendSentinel,
   autoSendActionsSafe,
   autoSendPreflight,
   hasActiveAutoSendClaim,

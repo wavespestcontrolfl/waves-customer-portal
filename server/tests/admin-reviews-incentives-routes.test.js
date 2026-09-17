@@ -1,3 +1,12 @@
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/google-business', () => ({}));
+jest.mock('../services/review-request', () => ({ sendGatedAsk: jest.fn() }));
+jest.mock('../services/review-incentives', () => ({}));
+jest.mock('../services/review-reply/publisher', () => ({}));
+jest.mock('../services/review-reply/drafter', () => ({}));
+jest.mock('../services/review-reply/grounding', () => ({}));
+jest.mock('../services/review-reply/runner', () => ({}));
+
 const fs = require('fs');
 const path = require('path');
 
@@ -75,5 +84,25 @@ describe('GET /api/admin/reviews/send-time-preview — staff-scoped', () => {
     expect(handler).toContain("const schedulerEnabled = isEnabled('cronJobs');");
     expect(handler).toContain('const reviewSequencesEnabled = reviewCadenceGate && schedulerEnabled;');
     expect(handler).toContain('schedulerEnabled,');
+  });
+});
+
+
+describe('POST /admin/reviews/send-request — review hold response', () => {
+  const router = require('../routes/admin-reviews');
+  const review = require('../services/review-request');
+  const handler = router.stack.find(layer => layer.route?.path === '/send-request').route.stack.at(-1).handle;
+
+  test.each([
+    [503, 'REVIEW_HISTORY_UNAVAILABLE', 'Could not verify recent review requests.'],
+    [409, 'REVIEW_ASK_SPACING', 'The next ask is still inside the 72-hour window.'],
+  ])('preserves HTTP %s and the review refusal reason', async (httpStatus, code, reason) => {
+    review.sendGatedAsk.mockResolvedValue({ outcome: 'blocked', code, reason, httpStatus });
+    const res = { status: jest.fn().mockReturnThis(), json: jest.fn() };
+    const next = jest.fn();
+    await handler({ body: { customerId: 'cust-1' } }, res, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(httpStatus);
+    expect(res.json).toHaveBeenCalledWith({ error: reason });
   });
 });
