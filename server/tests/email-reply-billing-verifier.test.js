@@ -119,7 +119,13 @@ describe('email reply amountless billing policy', () => {
   test.each([
     'Our technician will pay a visit tomorrow.',
     'Please pay a visit to our office.',
-  ])('preserves the bounded pay-a-visit idiom without a recipient: %s', (text) => {
+    'Our technician will pay you a courtesy visit tomorrow.',
+    'Please pay us a quick visit.',
+    'Our technician will pay a courtesy visit tomorrow.',
+    'Please pay a quick visit to our office.',
+    'Our technician will pay you a 30-minute courtesy visit tomorrow.',
+    'Please pay a 30 minute visit to our office.',
+  ])('preserves bounded pay-a-visit idioms with optional recipients and modifiers: %s', (text) => {
     expect(verdict(text)).toEqual({ ok: true, violations: [] });
   });
 
@@ -128,6 +134,11 @@ describe('email reply amountless billing policy', () => {
     'Our technician will pay you per visit.',
     'Please pay a visit to our office; payments are per visit.',
     'We pay a visit tomorrow, and each visit is paid separately.',
+    'Please pay us per courtesy visit.',
+    'Please pay for each 30-minute visit.',
+    'We bill you a courtesy visit.',
+    'We charge a 30 minute visit.',
+    'We pay you a courtesy visit tomorrow, and each visit is paid separately.',
   ])('keeps billing predicates blocked around pay-a-visit wording: %s', rejected);
 
   test.each([

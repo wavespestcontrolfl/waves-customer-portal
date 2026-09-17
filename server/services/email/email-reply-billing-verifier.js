@@ -42,7 +42,7 @@ function hasBillingUnit(tokens, at) {
     const afterRecipient = skipRecipient(tokens, next);
     if (isWord(tokens[at], 'pay')
       && isKind(tokens[afterRecipient], 'visit')
-      && tokens[afterRecipient].text === 'a visit') return false;
+      && tokens[afterRecipient].text.startsWith('a ')) return false;
     next = afterRecipient;
   }
   if (isWord(tokens[next], 'frequency')) next += 1;
