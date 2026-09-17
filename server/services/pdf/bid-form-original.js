@@ -2,7 +2,7 @@ const crypto = require('node:crypto');
 const { PDFArray, PDFDict, PDFName, PDFRef, PDFStream, PDFRawStream } = require('pdf-lib');
 
 const FORM_PAGE_FINGERPRINTS = {
-  north_port_pr27_02: { contents: '7605ce407e06a60e76aa10bf5909d73020dba95a01c3c88c35d8fd53bfa515a3', resources: '8f8dd15efaf336d0fed58631876ec381b2712cbb6d29b5f15841d413560043e9', packet: '65106f757cec51e1e1c70e0ed78f4c777a45b7a6c00d4752eb3f03319133c136' },
+  north_port_pr27_02: { contents: '7605ce407e06a60e76aa10bf5909d73020dba95a01c3c88c35d8fd53bfa515a3', resources: '8f8dd15efaf336d0fed58631876ec381b2712cbb6d29b5f15841d413560043e9', packet: 'ec00d6eb75b9c2b279d58f1fed33e81720a57cb4a1439b9d3413761ed54a94c8' },
   cove_termite: { contents: 'c2510d9ae0616ba91975260f799851e17f874769f2b2061c0db076c840f1ffa0', resources: 'da975e4497103e7eaed5ccb3fe24e99aef2d49814551b7caf04bcbd1fd3abe74', packet: 'dc2076d8cc4e1e9a8cf6297c90dfe8e3f34d2de4f4233df3fbc3bc4bb0923b73' },
 };
 const invalid = (message) => Object.assign(new Error(message), { statusCode: 400 });
@@ -13,7 +13,8 @@ function objectHasher(document, hash) {
     hash.update('<<');
     for (const [key, value] of sortedEntries(dict)) {
       const name = key.toString();
-      if (name === '/Parent' || name === '/P') continue;
+      if (name === '/P') continue;
+      if (name === '/Parent' && ['Page', 'Pages'].some((type) => dict.get(PDFName.of('Type')) === PDFName.of(type))) continue;
       hash.update(`${name}=`);
       visit(value);
     }
@@ -135,9 +136,9 @@ function assertBlankFormState(document, page) {
   if (!acroForm) return;
   const fields = document.getForm().getFields();
   const signed = (Number(acroForm.lookup(PDFName.of('SigFlags'))?.asNumber?.() || 0) & 2) !== 0
-    || fields.some((field) => field.acroField.dict.get(PDFName.of('FT')) === PDFName.of('Sig') && field.acroField.dict.get(PDFName.of('V')) != null);
+    || fields.some((field) => field.acroField.getInheritableAttribute(PDFName.of('FT')) === PDFName.of('Sig') && field.acroField.getInheritableAttribute(PDFName.of('V')) != null);
   if (signed) throw invalid('This PDF has been signed or prepared for signature. Upload the untouched original form.');
-  const filled = fields.some((field) => field.acroField.dict.get(PDFName.of('V')) != null);
+  const filled = fields.some((field) => field.acroField.getInheritableAttribute(PDFName.of('V')) != null);
   if (filled) throw invalid('This PDF has form fields already filled in. Upload the untouched original form.');
 }
 

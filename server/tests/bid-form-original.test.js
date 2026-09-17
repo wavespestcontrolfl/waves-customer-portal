@@ -79,6 +79,17 @@ describe('bid form original integrity beyond the content streams', () => {
     if (extraPage) pdf.addPage([612, 792]);
     mutateOther(other, field, pdf);
   });
+  test('field reparenting and inherited values are pinned', async () => {
+    const sourcePdf = await packet(null); await approve(sourcePdf);
+    const doc = await PDFDocument.load(sourcePdf);
+    const before = form.packetFingerprint(doc, 0);
+    const field = doc.getForm().getTextField('company');
+    const parent = doc.context.obj({ V: PDFString.of('Inherited bidder') });
+    field.acroField.dict.set(PDFName.of('Parent'), doc.context.register(parent));
+    expect(field.getText()).toBe('Inherited bidder');
+    expect(form.packetFingerprint(doc, 0)).not.toBe(before);
+    expect(() => form.assertOriginalBidForm(doc, 'north_port_pr27_02', 1)).toThrow(/already filled in/);
+  });
   test('blank fields elsewhere in the packet are allowed; filled ones are refused', async () => {
     await approve(await packet(null));
     await expect(build(await packet(null))).resolves.toBeInstanceOf(PDFPage);
