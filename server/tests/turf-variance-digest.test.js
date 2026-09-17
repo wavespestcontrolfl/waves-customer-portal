@@ -11,8 +11,10 @@ jest.mock('../models/db', () => {
   const qb = () => { throw new Error('db must not be touched when loadRows is injected'); };
   return qb;
 });
+jest.mock('../services/ops-digest-fall-off', () => ({ retireIfClean: jest.fn(async () => {}) }));
 
 const logger = require('../services/logger');
+const { retireIfClean } = require('../services/ops-digest-fall-off');
 const sendgrid = require('../services/sendgrid-mail');
 const {
   runTurfVarianceDigest,
@@ -105,11 +107,11 @@ describe('runTurfVarianceDigest', () => {
     expect(stampSendMarker).toHaveBeenCalledTimes(1);
   });
 
-  test('a recent durable send marker skips everything — deploy-overlap double-send guard (codex P1)', async () => {
-    const loadRows = jest.fn();
+  test('a recent durable send marker suppresses another alert after checking recovery', async () => {
+    const loadRows = jest.fn(async () => hotRows);
     const result = await runTurfVarianceDigest({ loadRows, sentRecently: async () => true });
     expect(result.skipped).toBe('recent_send');
-    expect(loadRows).not.toHaveBeenCalled();
+    expect(loadRows).toHaveBeenCalledTimes(1);
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 
@@ -123,8 +125,23 @@ describe('runTurfVarianceDigest', () => {
   });
 
   test('quiet window sends nothing', async () => {
-    const result = await runTurfVarianceDigest({ loadRows: async () => [row(2), row(-3), row(1)] });
+    const result = await runTurfVarianceDigest({ loadRows: async () => [row(2), row(-3), row(1)], sentRecently: async () => true });
     expect(result.skipped).toBe('within_threshold');
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(retireIfClean).toHaveBeenCalledWith('turf-variance');
+  });
+
+  test('an under-sampled window does not count as measured recovery', async () => {
+    const result = await runTurfVarianceDigest({ loadRows: async () => [row(80), row(90)] });
+    expect(result.skipped).toBe('insufficient_samples');
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(retireIfClean).not.toHaveBeenCalled();
+  });
+
+  test('missing measurements cannot pad the sample floor and falsely prove recovery', async () => {
+    const result = await runTurfVarianceDigest({ loadRows: async () => [row(0), row(null), row(''), row(' ')] });
+    expect(result.skipped).toBe('insufficient_samples');
+    expect(retireIfClean).not.toHaveBeenCalled();
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 

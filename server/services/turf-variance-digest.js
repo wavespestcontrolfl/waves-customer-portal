@@ -24,6 +24,7 @@
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { deliverOpsDigest } = require('./ops-digest');
+const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 
@@ -116,8 +117,13 @@ async function stampSendMarker() {
 }
 
 // Pure composition: null = nothing worth an email (the common, quiet case).
+function validSamples(rows) {
+  return (rows || []).filter((row) => row.turf_delta_pct != null
+    && String(row.turf_delta_pct).trim() !== '' && Number.isFinite(Number(row.turf_delta_pct)));
+}
+
 function composeTurfVarianceDigest(rows, { thresholdPct = alertPct(), samplesFloor = minSamples() } = {}) {
-  const samples = (rows || []).filter((row) => Number.isFinite(Number(row.turf_delta_pct)));
+  const samples = validSamples(rows);
   if (samples.length < samplesFloor) return null;
   const avg = samples.reduce((sum, row) => sum + Number(row.turf_delta_pct), 0) / samples.length;
   if (Math.abs(avg) < thresholdPct) return null;
@@ -158,8 +164,6 @@ function composeTurfVarianceDigest(rows, { thresholdPct = alertPct(), samplesFlo
 }
 
 async function runTurfVarianceDigest(opts = {}) {
-  if (await (opts.sentRecently || sentRecently)()) return { skipped: 'recent_send' };
-
   let rows;
   try {
     rows = await (opts.loadRows || loadTurfWindow)();
@@ -169,7 +173,14 @@ async function runTurfVarianceDigest(opts = {}) {
   }
 
   const composed = composeTurfVarianceDigest(rows, opts.thresholds || {});
-  if (!composed) return { skipped: 'within_threshold' };
+  if (!composed) {
+    const samplesFloor = opts.thresholds?.samplesFloor ?? minSamples();
+    if (validSamples(rows).length < samplesFloor) return { skipped: 'insufficient_samples' };
+    await retireIfClean('turf-variance'); // measured variance back inside threshold
+    return { skipped: 'within_threshold' };
+  }
+
+  if (await (opts.sentRecently || sentRecently)()) return { skipped: 'recent_send' };
 
   if (digestDisabled()) {
     logger.info(`[turf-variance] disabled — would send: avg ${composed.avgDeltaPct}% over ${composed.samples} services`);
@@ -192,6 +203,7 @@ async function runTurfVarianceDigest(opts = {}) {
 
   try {
     await deliverOpsDigest({
+      fallOff: true, // retired by retireIfClean on the clean run
       key: 'turf-variance',
       subject: composed.subject,
       html: composed.html,

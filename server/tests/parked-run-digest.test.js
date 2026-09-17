@@ -21,8 +21,10 @@ jest.mock('../models/db', () => {
   const qb = () => { throw new Error('db must not be touched when loaders are injected'); };
   return qb;
 });
+jest.mock('../services/ops-digest-fall-off', () => ({ retireIfClean: jest.fn(async () => {}) }));
 
 const email = require('../services/email');
+const { retireIfClean } = require('../services/ops-digest-fall-off');
 const { isEnabled } = require('../config/feature-gates');
 const {
   runParkedRunDigest,
@@ -235,6 +237,17 @@ describe('runParkedRunDigest cadence + watermark', () => {
     const result = await runParkedRunDigest(deps({ active: [], stale: [] }));
     expect(result).toEqual({ skipped: 'no_parked_runs' });
     expect(email.send).not.toHaveBeenCalled();
+    expect(retireIfClean).toHaveBeenCalledWith('parked-run-digest');
+  });
+
+  test('watermark-filtered stale parks still keep the finding open', async () => {
+    const d = deps({
+      stale: [item({ parked_at: '2026-07-01T10:00:00Z', opp_status: 'done' })],
+      watermark: '2026-08-01T00:00:00Z',
+    });
+    expect(await runParkedRunDigest(d)).toEqual({ skipped: 'no_new_parks' });
+    expect(email.send).not.toHaveBeenCalled();
+    expect(retireIfClean).not.toHaveBeenCalled();
   });
 
   test('new parks since the watermark → sends and advances the watermark to the tick time', async () => {
