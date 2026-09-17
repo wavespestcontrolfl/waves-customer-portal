@@ -2,8 +2,8 @@ const crypto = require('node:crypto');
 const { PDFArray, PDFDict, PDFName, PDFRef, PDFStream, PDFRawStream } = require('pdf-lib');
 
 const FORM_PAGE_FINGERPRINTS = {
-  north_port_pr27_02: { contents: '7605ce407e06a60e76aa10bf5909d73020dba95a01c3c88c35d8fd53bfa515a3', resources: '8f8dd15efaf336d0fed58631876ec381b2712cbb6d29b5f15841d413560043e9', packet: 'ec00d6eb75b9c2b279d58f1fed33e81720a57cb4a1439b9d3413761ed54a94c8' },
-  cove_termite: { contents: 'c2510d9ae0616ba91975260f799851e17f874769f2b2061c0db076c840f1ffa0', resources: 'da975e4497103e7eaed5ccb3fe24e99aef2d49814551b7caf04bcbd1fd3abe74', packet: 'dc2076d8cc4e1e9a8cf6297c90dfe8e3f34d2de4f4233df3fbc3bc4bb0923b73' },
+  north_port_pr27_02: { contents: '7605ce407e06a60e76aa10bf5909d73020dba95a01c3c88c35d8fd53bfa515a3', resources: '8f8dd15efaf336d0fed58631876ec381b2712cbb6d29b5f15841d413560043e9', packet: '9b49136bca2ccfad096f267cfc4e0b3c04d63c86879409c344eea145bf830eb4' },
+  cove_termite: { contents: 'c2510d9ae0616ba91975260f799851e17f874769f2b2061c0db076c840f1ffa0', resources: 'da975e4497103e7eaed5ccb3fe24e99aef2d49814551b7caf04bcbd1fd3abe74', packet: '42b353489dce4a43ce35dc198b964c65815a89ae88b683556c12a4dc6b7e5228' },
 };
 const invalid = (message) => Object.assign(new Error(message), { statusCode: 400 });
 const sortedEntries = (dict) => [...dict.entries()].sort((a, b) => (a[0].toString() < b[0].toString() ? -1 : 1));
@@ -13,7 +13,6 @@ function objectHasher(document, hash) {
     hash.update('<<');
     for (const [key, value] of sortedEntries(dict)) {
       const name = key.toString();
-      if (name === '/P') continue;
       if (name === '/Parent' && ['Page', 'Pages'].some((type) => dict.get(PDFName.of('Type')) === PDFName.of(type))) continue;
       hash.update(`${name}=`);
       visit(value);
@@ -102,7 +101,6 @@ function visitAcroFormSettings(document, value, hash, visit) {
   hash.update('<<');
   if (acroForm instanceof PDFDict) {
     for (const [key, entry] of sortedEntries(acroForm)) {
-      if (key.toString() === '/DR') continue;
       hash.update(`${key.toString()}=`); visit(entry);
     }
   }
@@ -134,6 +132,7 @@ function assertBlankFormState(document, page) {
   assertInertDocument(document);
   const acroForm = document.catalog.lookup(PDFName.of('AcroForm'));
   if (!acroForm) return;
+  if (acroForm.get(PDFName.of('XFA')) != null) throw invalid('This PDF contains XFA form content. Upload the untouched supported original form.');
   const fields = document.getForm().getFields();
   const signed = (Number(acroForm.lookup(PDFName.of('SigFlags'))?.asNumber?.() || 0) & 2) !== 0
     || fields.some((field) => field.acroField.getInheritableAttribute(PDFName.of('FT')) === PDFName.of('Sig') && field.acroField.getInheritableAttribute(PDFName.of('V')) != null);
@@ -158,10 +157,11 @@ function assertOriginalBidForm(document, template, pageNumber) {
   const expected = Object.hasOwn(FORM_PAGE_FINGERPRINTS, template) && FORM_PAGE_FINGERPRINTS[template];
   if (!expected) throw invalid('Choose a supported bid form.');
   const page = document.getPage(Number(pageNumber) - 1);
+  const originalPacket = packetFingerprint(document, Number(pageNumber) - 1);
   assertBlankFormState(document, page);
   const actual = pageFingerprint(document, page);
   if (actual.contents !== expected.contents || actual.resources !== expected.resources) throw invalid('This page does not match the supported blank bid form. Select the original form page; revised layouts need a reviewed template.');
-  if (packetFingerprint(document, Number(pageNumber) - 1) !== expected.packet) throw invalid('The other pages of this PDF differ from the reviewed original packet. Upload the untouched original form.');
+  if (originalPacket !== expected.packet) throw invalid('The other pages of this PDF differ from the reviewed original packet. Upload the untouched original form.');
   return page;
 }
 module.exports = { assertOriginalBidForm, pageContentHash, pageResourceHash, pageFingerprint, packetFingerprint, FORM_PAGE_FINGERPRINTS };

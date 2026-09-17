@@ -79,6 +79,29 @@ describe('bid form original integrity beyond the content streams', () => {
     if (extraPage) pdf.addPage([612, 792]);
     mutateOther(other, field, pdf);
   });
+  test('default form resources are pinned even for blank fields', async () => {
+    const sourcePdf = await packet(null); await approve(sourcePdf);
+    const doc = await PDFDocument.load(sourcePdf);
+    doc.catalog.lookup(PDFName.of('AcroForm')).set(PDFName.of('DR'), doc.context.obj({ Font: { Changed: { Type: 'Font', Subtype: 'Type1', BaseFont: 'Courier' } } }));
+    expect(() => form.assertOriginalBidForm(doc, 'north_port_pr27_02', 1)).toThrow(/other pages of this PDF differ/);
+  });
+  test('page-label prefixes are not confused with widget page references', async () => {
+    const sourcePdf = await blankPage(async (pdf) => {
+      pdf.catalog.set(PDFName.of('PageLabels'), pdf.context.obj({ Nums: [0, { P: PDFString.of('Original') }] }));
+    });
+    await approve(sourcePdf);
+    const doc = await PDFDocument.load(sourcePdf);
+    doc.catalog.lookup(PDFName.of('PageLabels')).lookup(PDFName.of('Nums')).lookup(1).set(PDFName.of('P'), PDFString.of('Changed'));
+    expect(() => form.assertOriginalBidForm(doc, 'north_port_pr27_02', 1)).toThrow(/other pages of this PDF differ/);
+  });
+  test('XFA content is refused before getForm can silently remove it', async () => {
+    const sourcePdf = await packet(null); await approve(sourcePdf);
+    const doc = await PDFDocument.load(sourcePdf);
+    const acroForm = doc.catalog.lookup(PDFName.of('AcroForm'));
+    acroForm.set(PDFName.of('XFA'), PDFString.of('<xfa>changed form</xfa>'));
+    expect(() => form.assertOriginalBidForm(doc, 'north_port_pr27_02', 1)).toThrow(/XFA/);
+    expect(acroForm.get(PDFName.of('XFA'))).toBeDefined();
+  });
   test('field reparenting and inherited values are pinned', async () => {
     const sourcePdf = await packet(null); await approve(sourcePdf);
     const doc = await PDFDocument.load(sourcePdf);
