@@ -1276,9 +1276,10 @@ const CONFIG_KEY_SUB_FEATURE_GATES = {
 
 // One shared call-time parser (feature-gates.gateEnvValue) so availability
 // and engine enforcement can never disagree on what counts as "on".
-const { gateEnvValue: gateEnvOn } = require('../config/feature-gates');
+const { gateEnvValue: gateEnvOn, termiteAnnualPlanSelectionEnabled } = require('../config/feature-gates');
 
 function configKeyFeatureAvailable(key) {
+  if (key === 'termite_annual_plan') return termiteAnnualPlanSelectionEnabled();
   const gate = CONFIG_KEY_FEATURE_GATES[key];
   if (!gate) return true;
   return gateEnvOn(gate);
