@@ -68,6 +68,16 @@ function hasBillingUnit(tokens, at) {
   return hasSeparator ? isKind(tokens[next], 'unit') : isUnit(tokens[next]);
 }
 
+function hasFrontedBillingPredicate(tokens, at, passive) {
+  let object = skipRecipient(tokens, at + 1);
+  const amount = isKind(tokens[object], 'money') || isKind(tokens[object], 'number');
+  if (isKind(tokens[object], 'application') || (amount && isKind(tokens[object + 1], 'application'))) return false;
+  if (passive || object > at + 1 || amount || isKind(tokens[object], 'unit')) return true;
+  if (isDeterminer(tokens[object])) object += 1;
+  if (isWord(tokens[object], 'separate', 'individual')) object += 1;
+  return isBillingNoun(tokens[object]) && !isKind(tokens[object + 1], 'application');
+}
+
 function hasInverseBillingUnit(tokens, at) {
   if (!isKind(tokens[at], 'unit')) return false;
   let next = skipSeparators(tokens, at + 1);
@@ -77,9 +87,10 @@ function hasInverseBillingUnit(tokens, at) {
     if (isWord(tokens[next], 'not', 'never')) next += 1;
     if (isWord(tokens[next], 'do', 'does', 'did', 'has')) next += 1;
     if (isWord(tokens[next], 'not', 'never')) next += 1;
-    if (isKind(tokens[next], 'be')) next += 1;
+    const passive = isKind(tokens[next], 'be');
+    if (passive) next += 1;
     if (isWord(tokens[next], 'not', 'never')) next += 1;
-    if (isWord(tokens[next], 'pay')) return true;
+    if (isBillingVerb(tokens[next])) return hasFrontedBillingPredicate(tokens, next, passive);
   }
   if (isDeterminer(tokens[next])) next += 1;
   if (isWord(tokens[next], 'separate', 'individual')) next += 1;

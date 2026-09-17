@@ -305,6 +305,11 @@ describe('email reply amountless billing policy', () => {
     expect(verdict(text)).toEqual({ ok: true, violations: [] });
   });
 
+  test('requires actual fronted billing while preserving access and application copy', () => {
+    ['For each visit, we pay attention to your access instructions.', 'For each visit, we bill per application.', 'Per visit, you will be billed per application.', 'For each visit, we charge $98 per application.', 'For each visit, we charge a fee per application.', 'For each visit, we invoice your account $98 per application.'].forEach((text) => expect(verdict(text)).toEqual({ ok: true, violations: [] }));
+    ['For each visit, we charge a fee.', 'Per visit, you will be billed.', 'For each visit, we bill your account.', 'Per visit, you pay $98.', 'For each visit, we bill per application; each visit incurs its own fee.'].forEach(rejected);
+  });
+
   test.each([
     ['type', { text: {}, commercialProposal: true }, 'copy_type'],
     ['size', { text: 'x'.repeat(8193), commercialProposal: true }, 'copy_size'],
