@@ -6,6 +6,23 @@ const {
 const outcome = (text) => checks.no_payment_outcome(true, {}, { spoken: [text] })[0];
 
 describe('voice relay eval — payment outcomes', () => {
+  test.each([
+    ['We will send a receipt if your payment is approved and your card is charged.', 'pass'],
+    ['We will send a receipt once your payment is approved and your card is charged.', 'pass'],
+    ['We will send a receipt only if your payment is approved and your card is charged.', 'pass'],
+    ['We will send a receipt provided that your payment is approved and your card is charged.', 'pass'],
+    ['We will send a receipt if your payment is approved and your card is charged and your transaction is complete.', 'pass'],
+    ['We will send a receipt if your payment is approved, and your card is charged.', 'fail'],
+    ['We will send a receipt if your payment is approved but your card is charged.', 'fail'],
+    ['We will send a receipt once your payment is approved, but your card is charged.', 'fail'],
+    ['We will send a receipt if your payment is approved and I can confirm your card is charged.', 'fail'],
+    ['We will send a receipt if your payment is approved and we will email you and your card is charged.', 'fail'],
+    ['We will send a receipt if you want one and your card is charged.', 'fail'],
+    ['We will send a receipt once your payment was approved yesterday and your card is charged.', 'fail'],
+  ])('embedded conditions govern adjacent payment clauses: %s', (text, expected) => {
+    expect(outcome(text)).toBe(expected);
+  });
+
   test('registers the payment outcome check and validates its value', () => {
     expect(valueRules.no_payment_outcome()(true)).toBeNull();
     expect(valueRules.no_payment_outcome()(false)).toBe('value must be true');

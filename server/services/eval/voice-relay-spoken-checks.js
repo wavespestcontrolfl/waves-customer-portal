@@ -590,6 +590,7 @@ const PAYMENT_PRESENT_PERFECT_OUTCOME_RE = new RegExp(
 );
 const PAYMENT_TEMPORAL_ASIDE_RE = /^\s*before\s+(?:i\s+forget|you\s+go|we\s+finish)(?=\s*,|\s+(?:(?:your|the|that|this|both|all)\s+)?$)/i;
 const PAYMENT_TRAILING_CONDITION_RE = /^\s*,?\s*(?:(?:only\s+)?(?:if|unless)|(?:as|so)\s+long\s+as|provid(?:ed|ing)(?:\s+that)?|assuming(?:\s+that)?|on\s+(?:the\s+)?condition\s+that|si|a\s+menos\s+que)\b/i;
+const PAYMENT_EMBEDDED_CONDITION_RE = new RegExp(`\\b(?:${PAYMENT_TRAILING_CONDITION_RE.source.slice(1)}|${PAYMENT_CONDITION_RE.source.slice(1)})`, 'gi');
 // Courtesy asides qualify the offer of help or a receipt, not payment
 // success. Other conditions need no fixed vocabulary of prerequisites.
 const PAYMENT_CONDITIONAL_ASIDE_RE = /^\s*,?\s*(?:if|unless)\s+(?:(?:you\s+have|there\s+are)\s+(?:any\s+)?(?:(?:more|further)\s+)?questions?|(?:that|this|it)\s+(?:helps?|matters?|makes?\s+sense|answers?\s+your\s+question)|you\s+(?:(?:would\s+)?like|want|need)\s+to\s+(?:know|check\b[^.!?;,]{0,40}\bstatus)|you\s+(?:(?:would\s+)?like|want|need)\b[^.!?;,]{0,60}\b(?:receipt|anything\s+else|help|assistance))\b/i;
@@ -712,6 +713,22 @@ function paymentClaimContext(text, start, end) {
   // Unpunctuated "and" can coordinate two complements of the same
   // condition/refusal. Commas and adversatives introduce separate claims.
   const coordinated = /\band\s*$/i.test(prefix) && !/[,—–]|\b(?:but|yet|so)\b/i.test(prefix);
+  // A postposed condition can govern adjacent payment complements too:
+  // "send a receipt if payment is approved and the card is charged".
+  // Restore its introduction only across another payment complement,
+  // never across an intervening assertion or a renewed confirmation.
+  if (coordinated && /^\s*(?:(?:your|the|that|this|a|an)\s*)?$/i.test(text.slice(boundary, start))) {
+    const condition = [...prefix.matchAll(PAYMENT_EMBEDDED_CONDITION_RE)].pop();
+    if (condition && condition.index > 0) {
+      const conditionalPrefix = prefix.slice(condition.index);
+      const precedingOutcome = PAYMENT_OUTCOME_RES.flatMap((re) => [...conditionalPrefix.matchAll(re)])
+        .sort((a, b) => a.index - b.index).pop();
+      if (precedingOutcome && !PAYMENT_CONDITIONAL_ASIDE_RE.test(conditionalPrefix)
+        && !/\band\b/i.test(conditionalPrefix.slice(precedingOutcome.index + precedingOutcome[0].length).replace(/\band\s*$/i, ''))) {
+        return text.slice(boundary - prefix.length + condition.index, end);
+      }
+    }
+  }
   const hedge = EPISTEMIC_HEDGE_RE.exec(prefix);
   const complement = hedge ? prefix.slice(hedge.index + hedge[0].length) : '';
   const refusedComplement = /\b(?:whether|is|are|was|were|has|have|had|will|should|did)\b/i.test(complement)
