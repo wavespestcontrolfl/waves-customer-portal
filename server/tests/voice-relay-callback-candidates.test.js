@@ -23,6 +23,8 @@ describe('callback commitment candidates', () => {
     ["We will call Ruth's mobile phone.", 'direct', 'We', 'Ruth'],
     ['She will hear from us.', 'recipient-first', 'us', 'She'],
     ['Your mother will receive a call from the office.', 'recipient-first', 'the office', 'Your mother'],
+    ['We will check, and the office will review, then will call her.', 'coordinated', 'the office', 'her'],
+    ['We will check, and we will review, then will call her.', 'coordinated', 'we', 'her'],
     ['We will check, and will call her.', 'coordinated', 'We', 'her'],
     ['We will check, and call her.', 'bare-coordinated', 'We', 'her'],
     ['Sure. We will check; the office will review, then will call her.', 'coordinated', 'the office', 'her'],
