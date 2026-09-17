@@ -20,6 +20,10 @@ describe('retireIfClean', () => {
     await retireIfClean('llm-dispatch-exceptions', { lockKey: 'ops-digest:llm-dispatch-exceptions' });
     expect(resolveOpsDigest).toHaveBeenLastCalledWith({ key: 'llm-dispatch-exceptions', source: null,
       resolvedBy: 'llm-dispatch-exceptions:clean-run', lockKey: 'ops-digest:llm-dispatch-exceptions' });
+    const observation = new Date().toISOString();
+    await retireIfClean('gbp-sync-health', { lockKey: 'ops-digest:gbp-sync-health', notAfter: observation });
+    expect(resolveOpsDigest).toHaveBeenLastCalledWith({ key: 'gbp-sync-health', source: null,
+      resolvedBy: 'gbp-sync-health:clean-run', lockKey: 'ops-digest:gbp-sync-health', notAfter: observation });
   });
 
   test('a stubbed digest module without resolveOpsDigest is a no-op', async () => {

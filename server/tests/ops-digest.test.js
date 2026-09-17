@@ -21,6 +21,13 @@ beforeEach(() => {
 });
 
 describe('deliverOpsDigest', () => {
+  it('passes a caller transaction through to the durable notification write', async () => {
+    withGate(true);
+    const trx = {};
+    mockNotifyAdmin.mockResolvedValue({ id: 'n_transaction' });
+    await deliverOpsDigest({ key: 'gbp-sync-health', subject: 'FIX: synthetic sync issue', text: 'Synthetic diagnostic', trx, sendEmail: jest.fn() });
+    expect(mockNotifyAdmin.mock.calls[0][3].trx).toBe(trx);
+  });
   it('gate on: dedupe options pass through to notifyAdmin only when given (2026-09-11 email shutoff)', async () => {
     withGate(true);
     mockNotifyAdmin.mockResolvedValue({ id: 'n9', deduped: true });

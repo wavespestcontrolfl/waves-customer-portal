@@ -13,7 +13,7 @@
  * reads as a no-op). Never throws, never blocks the sender: a failed retire
  * is logged inside resolveOpsDigest and retried on the next clean tick.
  */
-async function retireIfClean(key, { resolvedBy, alsoRetire, lockKey } = {}) {
+async function retireIfClean(key, { resolvedBy, alsoRetire, lockKey, notAfter } = {}) {
   try {
     const opsDigest = require('./ops-digest');
     if (typeof opsDigest.resolveOpsDigest !== 'function') return 0;
@@ -22,7 +22,7 @@ async function retireIfClean(key, { resolvedBy, alsoRetire, lockKey } = {}) {
     // retired by their own /resolve path, never from here. alsoRetire names
     // a companion bell category (+ metadata field holding this key) that
     // retires in the same call.
-    return await opsDigest.resolveOpsDigest({ key, source: null, resolvedBy: resolvedBy || `${key}:clean-run`, ...(alsoRetire ? { alsoRetire } : {}), ...(lockKey ? { lockKey } : {}) });
+    return await opsDigest.resolveOpsDigest({ key, source: null, resolvedBy: resolvedBy || `${key}:clean-run`, ...(alsoRetire ? { alsoRetire } : {}), ...(lockKey ? { lockKey } : {}), ...(notAfter ? { notAfter } : {}) });
   } catch {
     return 0;
   }

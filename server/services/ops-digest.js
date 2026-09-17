@@ -117,6 +117,7 @@ function inAppEnabled() {
  * @param {boolean} [p.refreshOnDedupe] rewrite the standing row (and re-bell it) when the content changed
  * @param {boolean} [p.fallOff]       the sender retires this key on its clean run (ops-digest-fall-off.js);
  *                                    stamps metadata.fallOff so the Activity feed pins the row until resolved
+ * @param {object} [p.trx]            caller transaction for atomic companion/digest persistence
  * @param {() => Promise<any>} p.sendEmail  the sender's existing mailer call
  * @returns {{ ok: boolean, channel: 'email'|'in_app', result?: any, error?: string, id?: string|null, fallback?: boolean }}
  *
@@ -124,7 +125,7 @@ function inAppEnabled() {
  * eval) still get an ops_digest row here: that row is what the Activity feed
  * lists, and it is created only on the email's cadence.
  */
-async function deliverOpsDigest({ key, subject, text, html, link = null, metadata = {}, dedupeKey, dedupeWindowMs, refreshOnDedupe, fallOff = false, sendEmail }) {
+async function deliverOpsDigest({ key, subject, text, html, link = null, metadata = {}, dedupeKey, dedupeWindowMs, refreshOnDedupe, fallOff = false, trx = null, sendEmail }) {
   if (typeof sendEmail !== 'function') throw new Error('deliverOpsDigest: sendEmail is required');
   if (!inAppEnabled()) {
     const result = await sendEmail();
@@ -140,6 +141,7 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
     row = await notificationService().notifyAdmin(CATEGORY, title, body, {
       link,
       bell: true,
+      ...(trx ? { trx } : {}),
       // Optional dedupe (2026-09-11 email shutoff): a daily digest that
       // reports the same standing list must hold ONE row, refreshed when
       // the list changes, not one unread row per morning.

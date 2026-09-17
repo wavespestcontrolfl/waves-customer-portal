@@ -12,12 +12,21 @@ const mockNotifyAdmin = jest.fn(async () => ({}));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotifyAdmin(...a) }));
 const mockEmailSend = jest.fn(async () => ({ ok: true }));
 jest.mock('../services/email', () => ({ send: (...a) => mockEmailSend(...a) }));
-jest.mock('../utils/cron-lock', () => ({ runExclusive: async (_k, fn) => fn() }));
+let mockNotificationLockHeld = false;
+let mockTransactionDepth = 0;
+jest.mock('../utils/cron-lock', () => ({ runExclusive: async (_k, fn) => {
+  mockNotificationLockHeld = true;
+  try { return await fn(); } finally { mockNotificationLockHeld = false; }
+} }));
 const mockRetireIfClean = jest.fn(async () => 1);
 jest.mock('../services/ops-digest-fall-off', () => ({ retireIfClean: (...args) => mockRetireIfClean(...args) }));
 
 const db = require('../models/db');
-db.raw = (sql) => sql;
+db.raw = (sql, bindings) => ({ sql, bindings });
+db.transaction = async (callback) => {
+  mockTransactionDepth += 1;
+  try { return await callback(db); } finally { mockTransactionDepth -= 1; }
+};
 const gbp = require('../services/google-business');
 
 const NOW = Date.parse('2026-08-08T12:00:00Z');
@@ -106,22 +115,42 @@ describe('_classifyLocationSyncHealth (pure classifier)', () => {
 });
 
 describe('_assessReviewSyncHealth (escalation)', () => {
-  function installDb({ aggregates = [], stats = [], recentNotification = null } = {}) {
+  function installDb({ aggregates = [], stats = [], recentNotification = null, cleanAt = null } = {}) {
+    const updates = [];
     db.mockImplementation((table) => {
       const q = {
         select: jest.fn(function () { return this; }),
         groupBy: jest.fn(async function () { return aggregates; }),
         where: jest.fn(function (a) {
-          this._statsQuery = a && a.reviewer_name === '_stats';
-          this._notifQuery = a && a.recipient_type === 'admin';
+          if (typeof a === 'function') a(this);
+          else if (a && typeof a === 'object') {
+            this._statsQuery = a.reviewer_name === '_stats';
+            this._notifQuery = a.recipient_type === 'admin';
+            this._id = a.id;
+          }
           return this;
         }),
-        whereRaw: jest.fn(function (sql) {
+        orWhere: jest.fn(function (callback) { callback(this); return this; }),
+        whereRaw: jest.fn(function (sql, bindings) {
           if (sql.includes("metadata->>'resolved'")) this._unresolvedOnly = true;
+          if (sql.includes('> ?::timestamptz')) this._newerThan = bindings[0];
           return this;
         }),
         first: jest.fn(async function () {
+          if (table === 'system_settings') return cleanAt ? { value: cleanAt } : null;
+          if (this._newerThan) {
+            const observation = recentNotification?.metadata?.observedAt || recentNotification?.created_at;
+            return Date.parse(observation) > Date.parse(this._newerThan) ? recentNotification : null;
+          }
           return this._unresolvedOnly && recentNotification?.metadata?.resolved === true ? null : recentNotification;
+        }),
+        update: jest.fn(async function (patch) {
+          updates.push(patch);
+          if (this._id === recentNotification?.id && recentNotification) {
+            recentNotification.metadata ||= {};
+            Object.assign(recentNotification.metadata, JSON.parse(patch.metadata.bindings[0]));
+          }
+          return 1;
         }),
       };
       // The _stats select resolves via .select() being awaited after .where()
@@ -131,6 +160,7 @@ describe('_assessReviewSyncHealth (escalation)', () => {
       });
       return q;
     });
+    return updates;
   }
 
   beforeEach(() => {
@@ -149,6 +179,7 @@ describe('_assessReviewSyncHealth (escalation)', () => {
   });
 
   test('healthy fleet sends NOTHING (exception-based)', async () => {
+    const cleanObservedAt = new Date(NOW - 2 * 3600000).toISOString();
     installDb({
       aggregates: [
         { location_id: 'bradenton', row_count: '109', newest_ingest_at: daysAgo(1), stats_updated_at: daysAgo(1) },
@@ -161,12 +192,15 @@ describe('_assessReviewSyncHealth (escalation)', () => {
     const out = await gbp._assessReviewSyncHealth(
       { bradenton: 'gbp', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' },
       { bradenton: 109, parrish: 33, sarasota: 47, venice: 12 },
+      {}, cleanObservedAt,
     );
     expect(out).toEqual({ healthy: true });
     expect(mockEmailSend).not.toHaveBeenCalled();
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
     expect(mockRetireIfClean).toHaveBeenCalledWith('gbp-sync-health', {
       alsoRetire: { category: 'review', field: 'opsKey', legacyTitlePrefix: 'Review sync health escalation [' },
+      lockKey: 'ops-digest:gbp-sync-health',
+      notAfter: cleanObservedAt,
     });
   });
 
@@ -204,6 +238,41 @@ describe('_assessReviewSyncHealth (escalation)', () => {
     const out = await gbp._assessReviewSyncHealth({ venice: 'gbp' });
     expect(out).toEqual({ deduped: true });
     expect(mockEmailSend).not.toHaveBeenCalled();
+  });
+
+  test('same-signature failures advance marker/digest observation and reject older failure repeats', async () => {
+    const t1 = new Date(NOW - 3 * 3600000).toISOString();
+    const t2 = new Date(NOW - 2 * 3600000).toISOString();
+    const t3 = new Date(NOW - 3600000).toISOString();
+    const marker = { id: 'n_same_signature', created_at: t1, metadata: { opsKey: 'gbp-sync-health', observedAt: t1 } };
+    const updates = installDb({ recentNotification: marker });
+    expect(await gbp._assessReviewSyncHealth({ venice: 'gbp' }, {}, {}, t3)).toEqual({ deduped: true });
+    expect(marker.metadata.observedAt).toBe(t3);
+    expect(updates).toHaveLength(2);
+    expect(JSON.parse(updates[1].metadata.bindings[0]).observedAt).toBe(t3);
+    expect(await gbp._assessReviewSyncHealth({ venice: 'gbp' }, {}, {}, t2)).toEqual({ stale: true });
+    expect(marker.metadata.observedAt).toBe(t3);
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    expect(mockEmailSend).not.toHaveBeenCalled();
+  });
+
+  test('a delayed older failure cannot resurrect after the durable newer clean watermark', async () => {
+    const t1 = new Date(NOW - 2 * 3600000).toISOString();
+    const t2 = new Date(NOW - 3600000).toISOString();
+    installDb({ cleanAt: t2 });
+    expect(await gbp._assessReviewSyncHealth({ venice: 'none' }, {}, {}, t1)).toEqual({ stale: true });
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    expect(mockEmailSend).not.toHaveBeenCalled();
+  });
+
+  test('SMTP runs after the durable marker transaction and notification lock release', async () => {
+    installDb();
+    mockEmailSend.mockImplementationOnce(async () => {
+      expect(mockNotificationLockHeld).toBe(false);
+      expect(mockTransactionDepth).toBe(0);
+      return { ok: true };
+    });
+    expect((await gbp._assessReviewSyncHealth({ venice: 'none' })).emailed).toBe(true);
   });
 
   test('a retired review marker permits the same finding to recur inside its former dedupe window', async () => {
