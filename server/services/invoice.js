@@ -3,6 +3,7 @@ const db = require("../models/db");
 const logger = require("./logger");
 const TaxCalculator = require("./tax-calculator");
 const DiscountEngine = require("./discount-engine");
+const { percentageDiscountDollars } = require("./discount-stack");
 const { etDateString, addETDays } = require("../utils/datetime-et");
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require("./short-url");
 const { publicPortalUrl } = require("../utils/portal-url");
@@ -1500,9 +1501,20 @@ const InvoiceService = {
         d.discount_type === "percentage" ||
         d.discount_type === "variable_percentage"
       ) {
-        dollars = Math.round(subtotal * (amt / 100) * 100) / 100;
-        if (d.max_discount_dollars)
-          dollars = Math.min(dollars, Number(d.max_discount_dollars));
+        // Cent-exact (Codex pre-push audit P1, round 6): the old
+        // `Math.round(subtotal * (amt / 100) * 100) / 100` float formula
+        // rounded 5% of $20.70 down to $1.03, never the correct half-up
+        // $1.04 — the SAME bug server/services/discount-stack.js's
+        // percentage math was fixed for, and the discount-engine.js
+        // preview delegates to. percentageDiscountDollars is that same
+        // fix, exported so this line uses the ONE place this rounding
+        // rule is written instead of a second, independently-buggy copy.
+        // Stacking wiring and the GATE_DISCOUNT_STACKING read are NOT
+        // part of this fix — slice 5 (invoice/document calculation) is
+        // where this whole block delegates to stackDocumentDiscounts;
+        // this is only the rounding correction on the existing additive
+        // math, touching nothing else here.
+        dollars = percentageDiscountDollars(subtotal, amt, d.max_discount_dollars);
       } else if (
         d.discount_type === "fixed_amount" ||
         d.discount_type === "variable_amount"

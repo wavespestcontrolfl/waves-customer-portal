@@ -553,6 +553,28 @@ const gates = {
   // when it flips.
   editApptPriceServiceScope: process.env.GATE_EDIT_APPT_PRICE_SERVICE_SCOPE === 'true',
 
+  // Multiple discounts on one service, and the one rule for how they combine
+  // (owner ruling 2026-09-11, "the lesser of the two"): dollar credits come
+  // off first, then percentages compound on what is left (10% then 5% off
+  // $111 is $16.10, never an additive $16.65), with one WaveGuard tier per
+  // document. The rule lives in server/services/discount-stack.js
+  // (stackDiscounts / stackVisitDiscounts / stackDocumentDiscounts) and
+  // GET /api/admin/discounts/stacking reports this value for pickers to
+  // read. discount-engine.js's /calculate preview and invoice.js's manual-
+  // discount save both already import discount-stack.js for its cent-exact
+  // percentage rounding (live regardless of this gate), but neither reads
+  // this gate to decide whether to COMPOUND — the preview always calls
+  // stackDiscounts with compound:false, and the save doesn't compound at
+  // all yet, so flipping this gate today changes nothing observable: off
+  // OR on, every existing total stays byte-identical (rounding-corrected)
+  // until slice 5 (invoice/document calculation) wires both the preview
+  // and invoice.js's line-item/manual-discount save to read the live gate
+  // TOGETHER. This map entry is for logGateStatus only — the canonical
+  // CALL-TIME reader is discountStackingLive() below (strict 'true');
+  // every caller, present and future, must use that, not this cached-at-
+  // load value, so a flip needs no redeploy.
+  discountStacking: process.env.GATE_DISCOUNT_STACKING === 'true',
+
   // Collective series moves on every staff surface (owner rulings 2026-07-30
   // + 2026-08-28): with the gate on, ANY date move of a cadence visit that
   // reaches SmartRebooker.reschedule — dispatch drag, the Edit appointment
@@ -2676,6 +2698,21 @@ function gateEnvValue(envName) {
   return ['1', 'true', 'on'].includes(String(process.env[envName] || '').toLowerCase());
 }
 
+// GATE_DISCOUNT_STACKING read at CALL time — strict `=== 'true'`, NOT
+// gateEnvValue's more permissive '1'/'true'/'on' case-insensitive rule,
+// because this gate's documented contract (and the endpoint test locking it
+// in) is that any other spelling or casing — 'TRUE', '1', unset — is off.
+// The `discountStacking` gates-map entry above is for logGateStatus only;
+// this is the one canonical reader every caller must use — today
+// server/routes/admin-discounts.js's GET /stacking, and later whichever
+// schedule/invoice slice wires an actual caller — so none of them can drift
+// from what the endpoint reports (Codex pre-push audit P1: the route used
+// to read the load-time gates-map value via isEnabled(), which never sees a
+// flip until the process restarts).
+function discountStackingLive() {
+  return process.env.GATE_DISCOUNT_STACKING === 'true';
+}
+
 // Fresh annual contracts require the term-aware cancellation path. Read both
 // switches at call time so pricing, availability and delivery agree.
 function termiteAnnualPlanSelectionEnabled() {
@@ -2723,5 +2760,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, termiteAnnualPlanSelectionEnabled };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, termiteAnnualPlanSelectionEnabled };
 // gates 1775330914
