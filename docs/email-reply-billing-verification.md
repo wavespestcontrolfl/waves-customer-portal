@@ -53,6 +53,17 @@ feedback about a technician or service remains valid after a fronted unit.
 After billing punctuation, a classified unit such as `for each visit` is
 required; a later bare visit subject does not attach to an earlier refunded
 charge. Independent visit-billing predicates still reject.
+Passive connectors, unmodified fee objects, negated separate billing, nominal
+auxiliaries, and bounded subject/existential fronted claims are screened.
+Reminder/status modifiers retain a following billing head. Feedback also
+permits experience, appointment, and pronoun objects; singular pay-a-visit
+idioms permit the scanner's determiner and modifier variants.
+
+Billing rejects complete Markdown inline links and HTML tags with `copy_markup`
+after bounded normalization, including entity-decoded markup, before the
+commercial exemption. This adapter does not render markup or erase scanner
+barriers; malformed delimiters and ordinary comparison symbols retain those
+barriers. The shared scanner and normalizer contracts remain unchanged.
 
 Monetary recognition belongs to the separately reviewed monetary sibling, but
 the lexical policies can overlap: `The $98 fee is per visit` contains the

@@ -285,6 +285,27 @@ describe('email reply amountless billing policy', () => {
   });
 
   test.each([
+    [['Fees are applied per visit.', 'Billing will be applied per visit.', 'Charges were applied for each visit.', 'Fees are not applied per visit.'], ['Fees are applied per application.', 'Billing is applied after the visit.']],
+    [['Each visit is charged a fee.', 'Every visit is billed an invoice.'], ['Each visit is charged a reminder.', 'Every visit is billed an individual report.']],
+    [['Each visit will not be charged individually.', 'Each visit is not billed separately.', 'Visits may never be separately invoiced.'], ['Each visit will not be scheduled individually.', 'Visits are not billed in full.']],
+    [['Each visit does incur a fee.', 'Every visit did have a separate charge.', 'Each visit has incurred a fee.', 'Visits have generated their own invoice.', 'Each visit has not incurred a fee.'], ['Each visit does incur a review step.', 'Visits have generated their own report.']],
+    [['For each visit, rate is per visit.'], ['For each visit, rate your experience.', 'Per visit, rate the appointment.', 'For each visit, rate it.']],
+    [['A per-visit payment reminder fee applies.', 'Per visit, payment reminder charges apply.', 'For each visit, the invoice status fee is due.'], ['A per-visit payment reminder applies.', 'For each visit, the invoice status is updated.']],
+    [['Please pay us per quick visit.', 'We pay you for each visit.'], ['Our technician will pay you another visit tomorrow.', 'Please pay us one quick visit.', 'We pay them another courtesy visit.']],
+    [['For each visit, we charge a fee.', 'Per visit, you will be billed.', 'For each visit, there is a separate fee.', 'Per visit, they do not charge a fee.', 'Per visit, you pay $98.'], ['For each visit, we send a reminder.', 'For each visit, there is a separate report.', 'Per visit, you will be reminded.']],
+  ])('covers reviewed finite grammar with safe controls: %j', (blocked, permitted) => {
+    blocked.forEach(rejected);
+    permitted.forEach((text) => expect(verdict(text)).toEqual({ ok: true, violations: [] }));
+  });
+
+  test.each(['Billing is [per visit](https://example.com)', 'Our **fee is [per visit](https://example.com)**', 'Billing is <strong>per visit</strong>', 'Billing is &lt;strong&gt;per visit&lt;/strong&gt;', 'Billing is [per application](https://example.com)', 'Billing is [per visit](https://example.com/(help))'])('fails closed on rendered markup before exemption: %s', (text) => {
+    for (const commercialProposal of [false, true]) expect(verifyEmailReplyBilling({ text, commercialProposal })).toEqual({ ok: false, violations: ['copy_markup'] });
+  });
+  test.each(['Billing is [ unmatched.', 'Your balance < the threshold.', 'Billing is <strong without a closing bracket.'])('preserves malformed delimiter barriers: %s', (text) => {
+    expect(verdict(text)).toEqual({ ok: true, violations: [] });
+  });
+
+  test.each([
     ['type', { text: {}, commercialProposal: true }, 'copy_type'],
     ['size', { text: 'x'.repeat(8193), commercialProposal: true }, 'copy_size'],
     ['tokens', { text: 'x '.repeat(513), commercialProposal: true }, 'copy_tokens'],

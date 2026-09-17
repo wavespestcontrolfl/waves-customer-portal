@@ -1,4 +1,5 @@
 const { recognizeEmailReplyPricingClauses } = require('./email-reply-pricing-clauses');
+const { normalizeEmailReplyCopy } = require('./email-reply-copy-normalizer');
 
 const BILLING_WORDS = new Set([
   'bill', 'charge', 'cost', 'fee', 'invoice', 'payment', 'pay', 'price', 'amount', 'rate',
@@ -38,7 +39,8 @@ function isFeedbackRate(tokens, at) {
   return isWord(tokens[at], 'rate')
     && (isWord(tokens[at - 1], 'please') || isKind(tokens[at - 1], 'modal')
       || isWord(tokens[at + 1], 'how')
-      || isWord(tokens[object], 'technician', 'technicians', 'service', 'services'));
+      || isWord(tokens[object], 'technician', 'technicians', 'service', 'services',
+        'experience', 'experiences', 'appointment', 'appointments', 'it', 'them'));
 }
 
 function hasBillingUnit(tokens, at) {
@@ -47,8 +49,7 @@ function hasBillingUnit(tokens, at) {
   if (isBillingVerb(tokens[at])) {
     const afterRecipient = skipRecipient(tokens, next);
     if (isWord(tokens[at], 'pay')
-      && isKind(tokens[afterRecipient], 'visit')
-      && tokens[afterRecipient].text.startsWith('a ')) return false;
+      && isKind(tokens[afterRecipient], 'visit')) return false;
     next = afterRecipient;
   }
   if (isWord(tokens[next], 'frequency')) next += 1;
@@ -56,7 +57,9 @@ function hasBillingUnit(tokens, at) {
   if (isWord(tokens[next], 'not', 'never')) next += 1;
   if (isWord(tokens[next], 'do', 'does', 'did', 'has')) next += 1;
   if (isWord(tokens[next], 'not', 'never')) next += 1;
-  if (isKind(tokens[next], 'be') || isWord(tokens[next], 'occur', 'apply')) next += 1;
+  if (isKind(tokens[next], 'be')) next += 1;
+  if (isWord(tokens[next], 'not', 'never')) next += 1;
+  if (isWord(tokens[next], 'occur', 'apply')) next += 1;
   const afterSeparators = skipSeparators(tokens, next);
   const hasSeparator = afterSeparators !== next;
   next = afterSeparators;
@@ -68,29 +71,48 @@ function hasBillingUnit(tokens, at) {
 function hasInverseBillingUnit(tokens, at) {
   if (!isKind(tokens[at], 'unit')) return false;
   let next = skipSeparators(tokens, at + 1);
+  if (isWord(tokens[next], 'we', 'you', 'they', 'he', 'she', 'it', 'there')) {
+    next += 1;
+    if (isKind(tokens[next], 'modal')) next += 1;
+    if (isWord(tokens[next], 'not', 'never')) next += 1;
+    if (isWord(tokens[next], 'do', 'does', 'did', 'has')) next += 1;
+    if (isWord(tokens[next], 'not', 'never')) next += 1;
+    if (isKind(tokens[next], 'be')) next += 1;
+    if (isWord(tokens[next], 'not', 'never')) next += 1;
+    if (isWord(tokens[next], 'pay')) return true;
+  }
   if (isDeterminer(tokens[next])) next += 1;
-  return isBillingNoun(tokens[next]) && !isFeedbackRate(tokens, next)
-    && !isWord(tokens[next + 1], 'reminder', 'reminders', 'status');
+  if (isWord(tokens[next], 'separate', 'individual')) next += 1;
+  if (!isBillingNoun(tokens[next]) || isFeedbackRate(tokens, next)) return false;
+  if (isWord(tokens[next + 1], 'reminder', 'reminders', 'status')) {
+    return isBillingNoun(tokens[next + 2]);
+  }
+  return true;
 }
 
 function hasSeparatePredicate(tokens, at) {
   if (!isVisit(tokens[at])) return false;
   let next = at + 1;
   if (isKind(tokens[next], 'modal')) next += 1;
+  if (isWord(tokens[next], 'not', 'never')) next += 1;
   const separateBeforeCopula = isSeparate(tokens[next]);
   if (separateBeforeCopula) next += 1;
   if (!isKind(tokens[next], 'be')) return false;
   next += 1;
+  if (isWord(tokens[next], 'not', 'never')) next += 1;
   if (separateBeforeCopula && isBillingVerb(tokens[next])) return true;
   if (isSeparate(tokens[next]) && isBillingVerb(tokens[next + 1])) return true;
   if (!isBillingVerb(tokens[next])) return false;
+  let object = next + 1;
+  if (isWord(tokens[object], 'a', 'an')) {
+    object += 1;
+    if (isWord(tokens[object], 'separate', 'individual')) object += 1;
+    return isChargeNoun(tokens[object]);
+  }
   return isSeparate(tokens[next + 1])
     || (isWord(tokens[next + 1], 'on')
       && isWord(tokens[next + 2], 'its', 'their')
-      && isWord(tokens[next + 3], 'own'))
-    || (isWord(tokens[next + 1], 'a', 'an')
-      && isWord(tokens[next + 2], 'separate', 'individual')
-      && isChargeNoun(tokens[next + 3]));
+      && isWord(tokens[next + 3], 'own'));
 }
 
 function hasActiveSeparateBilling(tokens, at) {
@@ -108,6 +130,10 @@ function hasNominalBillingPredicate(tokens, at) {
   if (!isVisit(tokens[at])) return false;
   let next = at + 1;
   if (isKind(tokens[next], 'modal')) next += 1;
+  if (isWord(tokens[next], 'not', 'never')) next += 1;
+  if (isWord(tokens[next], 'do', 'does', 'did')
+    || (isWord(tokens[next], 'has') && isWord(tokens[next + (isWord(tokens[next + 1], 'not', 'never') ? 2 : 1)], 'incur', 'generate', 'has'))) next += 1;
+  if (isWord(tokens[next], 'not', 'never')) next += 1;
   const action = tokens[next]?.text;
   if (!isWord(tokens[next], 'has', 'incur', 'generate')) return false;
   next += 1;
@@ -136,7 +162,12 @@ function hasBillingClaim(tokens) {
 // Inactive wording policy only. The caller supplies commercial context from
 // trusted data; the recognizer owns normalization and clause boundaries.
 function verifyEmailReplyBilling({ text = '', commercialProposal = false } = {}) {
-  const recognized = recognizeEmailReplyPricingClauses(text);
+  const normalized = normalizeEmailReplyCopy(text);
+  if (!normalized.ok) return { ok: false, violations: [normalized.reason] };
+  if (/\[[^\[\]]*\]\([^\[\])]*\)|<\/?[a-z][^<>]*>/i.test(normalized.text)) {
+    return { ok: false, violations: ['copy_markup'] };
+  }
+  const recognized = recognizeEmailReplyPricingClauses(normalized.text);
   if (!recognized.ok) return { ok: false, violations: [recognized.reason] };
 
   const blocked = commercialProposal !== true && recognized.clauses.some(hasBillingClaim);
