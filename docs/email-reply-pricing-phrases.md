@@ -29,6 +29,10 @@ The finite candidate families are:
   prefix. Fields `headStart` and `headEnd` identify the head tokens; `prefix`
   retains the preceding token spans/text, and `negated` records explicit
   `not`/`never` prefix evidence outside a recognized comparative qualifier.
+  `priceCue` identifies heads in the shared pricing-action vocabulary.
+  Generic `generate`, `apply`, `occur`, `has`, `due`, `required`, `payable`,
+  and `range` keep it false; they need separate currency or nominal evidence.
+  A true cue is lexical context, not a confirmed price or compliance verdict.
 
 Candidate families may overlap. Predicate candidates keep the longest
 supported prefix found for a given head, with at most 12 prefix tokens.

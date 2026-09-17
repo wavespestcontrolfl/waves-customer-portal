@@ -12,7 +12,7 @@ const noun = (start, text, roles = ['noun']) => ({
 });
 const predicate = (start, text) => ({
   type: 'predicate', ...span(start, start + 1, text), head: text,
-  headStart: start, headEnd: start + 1, negated: false, prefix: [],
+  headStart: start, headEnd: start + 1, negated: false, priceCue: true, prefix: [],
 });
 const candidate = (relation, start, end, anchor, connector = null, q = null) => ({
   relation, start, end, anchor, connector, qualifier: q,
@@ -98,7 +98,7 @@ describe('inactive bounded amount relation candidates', () => {
     expect(clause.amountRelations[1].candidates).toEqual([
       candidate('predicate_amount', 1, 4, {
         type: 'predicate', start: 1, end: 3, text: 'amount to', head: 'amount to',
-        headStart: 1, headEnd: 3, negated: false, prefix: [],
+        headStart: 1, headEnd: 3, negated: false, priceCue: true, prefix: [],
       }),
     ]);
     expect(clause.phrases.filter((p) => p.type === 'billing_head' && p.start === 1)).toHaveLength(2);
