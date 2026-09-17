@@ -12,6 +12,7 @@ const {
   SENTENCE_SPLIT_RE,
   QUESTION_LEAD_RE,
   QUESTION_AUX_RE_SOURCE,
+  QUESTION_AUX_WH_RE_SOURCE,
   CONVERSATIONAL_CONDITION_RE
 } = require('./voice-relay-spoken-language');
 
@@ -1723,7 +1724,10 @@ function safetyOnceDryQualifies(text, claim, questionText = null, antecedentText
   });
 }
 
-const SAFETY_NO_RISK_NEGATION_RE = /(?:\b(?:not|never)\s+|\b(?:do|does|did)(?:\s+not|n[\x27\u2019]t)\s+mean(?:\s+there\s+(?:is|was))?\s*)$/i;
+const SAFETY_NO_RISK_NEGATION_RE = new RegExp(
+  `(?:\\b(?:not|never)\\s+${SAFETY_INTENSIFIER}|\\b(?:do|does|did)(?:\\s+not|n[\\x27\\u2019]t)\\s+mean(?:\\s+there\\s+(?:is|was))?\\s*)$`,
+  'i',
+);
 
 const SAFETY_NO_RISK_ALLOWED_COMPLEMENT_RE = /^\s+of\s+(?:(?:losing|missing|rescheduling|moving|changing|cancel(?:l)?ing)\s+(?:your|the|an?)\s+(?:appointment|visit|booking)\b|(?:(?:incurring|paying|being charged)\s+)?(?:(?:an?|the|your)\s+)?(?:cancell?ation|late|service|booking)?\s*fees?\b|(?:rain|bad weather|a weather delay)\b)/i;
 const SAFETY_NO_RISK_COORDINATED_HARM_RE = /^\s*,?\s*(?:and|or)\s+(?:(?:an?|any|the|no)\s+)?(?:risk|harm|danger|hurt|poison|bother|affect)\b/i;
@@ -1953,8 +1957,23 @@ const latestQualifiedSafety = (previous, current) => previous || current;
 function safetyCallerContext(text, previousQuestion, previousProduct, antecedent) {
   const candidate = recognizeSafetyQuestion(text);
   const polarity = safetyQuestionPolarity(text, antecedent, candidate);
-  const safetyQuestion = polarity.positive || polarity.harm ? text : previousQuestion;
-  const resolvedQuestion = safetyQuestion && candidate.dryingFollowup ? safetyQuestion : text;
+  // Resolve an elliptical condition against the complete safety proposition.
+  // The same circumstance recognizer then retains ingestion/exposure scope;
+  // an independent question selected by recognition does not inherit it.
+  const followupText = candidate.text.replace(/^\s*(?:(?:what about|and)\s+)?(?:even\s+)?/i, '');
+  const independentQuestion = followupText.split(/[,;]/).slice(1)
+    .some((segment) => new RegExp(`^\\s*${QUESTION_AUX_WH_RE_SOURCE}\\b`, 'i').test(segment));
+  const conditionFollowup = !independentQuestion && safetyCircumstanceScopes(`safe ${candidate.text}`).some((scope) => {
+    const conditionLead = scope.slice(0, scope.indexOf(' ') + 1);
+    return followupText.toLowerCase().startsWith(conditionLead)
+      && !QUESTION_LEAD_RE.test(followupText.slice(conditionLead.length));
+  });
+  const inheritsSafety = previousQuestion && !polarity.positive && !polarity.harm
+    && (candidate.dryingFollowup || conditionFollowup);
+  const resolvedQuestion = inheritsSafety
+    ? `${previousQuestion.replace(/[.!?;]+\s*$/, '')} ${candidate.text.replace(/[.!?;]+\s*$/, '')}?` : text;
+  const safetyQuestion = polarity.positive || polarity.harm || inheritsSafety
+    ? resolvedQuestion : (latestInterrogativeSegment(text) ? '' : previousQuestion);
   return {
     safetyQuestion,
     resolvedQuestion,
