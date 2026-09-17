@@ -325,17 +325,40 @@ function compareDiscountScope(a, b) {
 // invisible to totals, but not to DiscountEngine's own bookkeeping, which
 // maps figures back to catalog rows and rolls per-discount usage totals
 // through recordInvoiceDiscounts (Codex pre-push audit P2, round 7).
-// `undefined` (neither field present) means there's no identity to sort
-// by at all, and the comparator falls straight through to index — exactly
-// the pre-this-round behavior for a term that never carried one.
+// `undefined` (neither field present) means there's no identity at all —
+// resolved deterministically below rather than left as a bare tie.
 function resolveDiscountId(discount) {
   return discount?.id ?? discount?.discount_key ?? undefined;
 }
 
+// IDENTIFIED terms sort before ANONYMOUS ones (the choice is arbitrary —
+// a catalog-backed discount taking precedence over a legacy/constructed
+// one with neither id nor discount_key — but it has to be SOME fixed
+// choice, stated once here, not "whichever one this pairwise comparison
+// happens to see first"). Two identified terms compare by identity
+// string; two anonymous terms tie here and fall through to index.
+//
+// Returning 0 for "either side lacks an identity" (the pre-round-8 rule)
+// is not a valid comparator: it makes anonymous-vs-identified pairs
+// intransitive. Three terms a/b/anonymous, tied on rate — a < b by
+// identity, but a-vs-anonymous and b-vs-anonymous BOTH returned 0 — gives
+// Array.prototype.sort no fixed point to anchor anonymous against, so
+// its position (and therefore whether it lands between a and b or
+// outside them) depended on which pairwise comparisons the sort
+// algorithm happened to run, which depended on the INPUT order (Codex
+// pre-push audit P2, round 8): the exact repro let identified b end up
+// crediting $10 or $9, and identified a $8.10 or $10, purely from
+// shuffling the SAME three terms. Anonymous terms are now a distinct,
+// deterministically-placed group instead of an ambiguous non-comparison,
+// so every identified pair keeps the SAME relative order regardless of
+// how many anonymous terms sit between them or where.
 function compareDiscountIdentity(a, b) {
   const idA = resolveDiscountId(a);
   const idB = resolveDiscountId(b);
-  if (idA === undefined || idB === undefined) return 0;
+  const hasA = idA !== undefined;
+  const hasB = idB !== undefined;
+  if (hasA !== hasB) return hasA ? -1 : 1;
+  if (!hasA) return 0;
   const strA = String(idA);
   const strB = String(idB);
   if (strA === strB) return 0;

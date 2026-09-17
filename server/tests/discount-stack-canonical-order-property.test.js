@@ -51,6 +51,27 @@
  * OWN random fixed/percent terms alongside document terms — round 3's
  * generator never mixed the two, which is exactly why P1 (:560) shipped
  * undetected for two more rounds after the class was first "closed."
+ *
+ * ROUND 8 — one more instance, found in the IDENTITY step itself rather
+ * than a missing attribute:
+ *
+ * P2 (:339): compareDiscountIdentity returned 0 (a tie) whenever EITHER
+ * side lacked an identity — not just when BOTH did. That is not a valid
+ * comparator: mixing a catalog-backed term with a legacy/constructed one
+ * carrying neither id nor discount_key made anonymous-vs-identified pairs
+ * intransitive, so a stack of three tied terms (identified b, anonymous,
+ * identified a) let b end up credited $10 or $9, and a $8.10 or $10,
+ * purely from shuffling the SAME three terms — index-based tiebreaking
+ * has no fixed point to anchor the anonymous term against when its
+ * comparisons against BOTH identified terms return 0. Fixed by giving
+ * missing identities a deterministic position: every identified term
+ * sorts before every anonymous term (arbitrary, but fixed and stated
+ * once), identified terms among themselves by identity string, anonymous
+ * terms among themselves left tied (falling through to index, same as
+ * before this round) since two anonymous terms have no comparator-visible
+ * way to distinguish them at all. The property test generator now makes
+ * 20% of terms anonymous (no id) specifically so the shuffle invariant
+ * exercises this mixed case at scale, not just the one hand-written repro.
  */
 const {
   stackDiscounts,
@@ -89,14 +110,18 @@ function randMoney(rand, lo, hi) {
 }
 
 let nextId = 0;
-// One random discount, any kind, ALWAYS carrying a unique id (round 7 —
-// see the top comment: this is what makes per-term dollar stability under
-// a shuffle a meaningful, always-checkable property instead of one that
-// ties make impossible to guarantee in general).
+// One random discount, any kind. 80% carry a unique id (round 7 — this is
+// what makes per-term dollar stability under a shuffle a meaningful,
+// always-checkable property instead of one that ties make impossible to
+// guarantee in general); 20% are ANONYMOUS — no id, no discount_key — a
+// legacy/constructed term the round-8 fix specifically targets: mixing
+// identified and anonymous terms in one tied stack used to make the
+// comparator non-transitive (see the top comment).
 function randomDiscount(rand, { allowScope, allowSlot, numLines }) {
   const kindRoll = rand();
   const discountType = kindRoll < 0.45 ? 'percentage' : kindRoll < 0.85 ? 'fixed_amount' : 'free_service';
-  const discount = { id: `term-${nextId++}`, discountType };
+  const discount = { discountType };
+  if (rand() < 0.8) discount.id = `term-${nextId++}`;
   if (discountType === 'percentage') {
     discount.amount = randInt(rand, 1, 60);
     if (rand() < 0.4) discount.maxDiscountDollars = randMoney(rand, 1, 80);
@@ -118,10 +143,21 @@ function randomDiscount(rand, { allowScope, allowSlot, numLines }) {
 // Maps a result's items/documentTerms array (parallel to the INPUT array
 // it came from) back to a Map keyed by each term's own id — the per-term
 // assertion tool every property test below uses instead of comparing by
-// array position, which a shuffle deliberately scrambles.
+// array position, which a shuffle deliberately scrambles. Anonymous terms
+// (no id) are deliberately left OUT of this map: two anonymous terms that
+// also tie on kind/value/cap/scope have no comparator-visible way to tell
+// them apart at all (identity is a tiebreak, not a magic distinguisher for
+// terms that never carried one), so which one a shuffle credits can
+// legitimately swap — the round-8 fix guarantees a DETERMINISTIC position
+// for the anonymous GROUP relative to identified terms, not a stable
+// identity for each anonymous term individually. Every IDENTIFIED term's
+// own dollars must still be stable regardless of how many anonymous terms
+// are mixed in, which is exactly what this filtered map checks.
 function byId(resultItems, inputTerms) {
   const map = new Map();
-  inputTerms.forEach((term, i) => map.set(term.id, resultItems[i].dollars));
+  inputTerms.forEach((term, i) => {
+    if (term.id !== undefined) map.set(term.id, resultItems[i].dollars);
+  });
   return map;
 }
 
@@ -341,6 +377,35 @@ describe('the exact reported repros, both orders and both slot assignments, thro
     const docReversed = stackDocumentDiscounts({ lines: [{ gross: 100, terms: [] }], documentTerms: [discountB, discountA] });
     expect(docForward.documentTerms[0].dollars).toBe(docReversed.documentTerms[1].dollars);
     expect(docForward.documentTerms[1].dollars).toBe(docReversed.documentTerms[0].dollars);
+  });
+
+  test('P2 (:339, round 8) — the exact reported mixed case: identified b, an ANONYMOUS term, and identified a, all tied at 10% on $100', () => {
+    // Before round 8, compareDiscountIdentity returned 0 whenever EITHER
+    // side lacked an identity, which is not a valid comparator: it made
+    // anonymous-vs-identified pairs intransitive, so shuffling the SAME
+    // three terms let identified b end up crediting $10 or $9, and
+    // identified a $8.10 or $10, purely from which pairwise comparisons
+    // the sort happened to run. The fix gives every identified term a
+    // fixed position ahead of every anonymous term, so both orders below
+    // — and every other permutation of the same three terms — land on
+    // the identical canonical sequence: a ($10, identified, alphabetically
+    // first) → b ($9, identified, second) → the anonymous term ($8.10,
+    // last, since it has no identity to place it ahead of either).
+    const identifiedA = { id: 'a', discountType: 'percentage', amount: 10 };
+    const identifiedB = { id: 'b', discountType: 'percentage', amount: 10 };
+    const anonymous = { discountType: 'percentage', amount: 10 };
+
+    const orderOne = stackDiscounts(100, [identifiedB, anonymous, identifiedA]);
+    const orderTwo = stackDiscounts(100, [anonymous, identifiedA, identifiedB]);
+
+    expect(orderOne.items.map((i) => i.dollars)).toEqual([9, 8.1, 10]); // [b, anonymous, a]
+    expect(orderTwo.items.map((i) => i.dollars)).toEqual([8.1, 10, 9]); // [anonymous, a, b]
+
+    // Same claim, read back per-identity rather than per-array-position:
+    // b is always $9 and a is always $10, regardless of where the
+    // anonymous term sits or which order the caller used.
+    expect(orderOne.items[0].dollars).toBe(orderTwo.items[2].dollars); // b
+    expect(orderOne.items[2].dollars).toBe(orderTwo.items[1].dollars); // a
   });
 
   test('the same P1 (:578) shape through stackDiscounts (flat, slot-tagged) agrees with stackDocumentDiscounts\' $46.67', () => {
