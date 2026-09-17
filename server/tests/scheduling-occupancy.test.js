@@ -409,13 +409,17 @@ describe('ORDERING CONTRACT — rung 1 is first at every writer', () => {
     const src = read('services/rebooker.js');
     // Single move: date lock, then the tech-scoped lock.
     const singleIdx = src.indexOf('await acquireOccupancyLock(trx, newDateStr);');
-    const singleTechIdx = src.indexOf("['slot-reserve', `${keptTechId || 'unassigned'}:${newDateStr}`],");
+    const singleTechIdx = src.indexOf('await lockTechDays(trx, [', singleIdx);
     expect(singleIdx).toBeGreaterThan(-1);
     expect(singleTechIdx).toBeGreaterThan(singleIdx);
+    const singleFence = src.slice(singleTechIdx, src.indexOf(']);', singleTechIdx));
+    expect(singleFence).toContain('{ techId: keptTechId, date: newDateStr }');
+    expect(singleFence).toContain('{ techId: null, date: newDateStr }');
     // Series: the multi-date acquisition is sorted-ascending (acquireOccupancyLocks)
     // and precedes every per-sibling tech lock in the loop below it.
     const seriesIdx = src.indexOf('await acquireOccupancyLocks(trx, [...projectedDates, ...followUpDays]);');
     expect(seriesIdx).toBeGreaterThan(-1);
+    expect(src.indexOf('await lockTechDays(trx, techDays);', seriesIdx)).toBeGreaterThan(seriesIdx);
     for (const techLock of [
       "['slot-reserve', `${options.technicianId}:${String(date).split('T')[0]}`],",
       "['slot-reserve', `${sib.technician_id}:${String(date).split('T')[0]}`],",

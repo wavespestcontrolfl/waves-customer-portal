@@ -162,7 +162,8 @@ async function handleMerge(req, res, { linkAsProperty }) {
       const status = /\(dismissals_unreadable\)/.test(err.message) ? 503 : 409;
       return res.status(status).json({ error: err.message });
     }
-    const conflict = /Stripe profile|third-party payers|billing modes|per-application fees|multi-property account|not found|deleted customer|refresh the queue/.test(err.message);
+    const conflict = err.mergeConflictCode === 'inactive_primary_property_conflict'
+      || /Stripe profile|third-party payers|billing modes|per-application fees|multi-property account|not found|deleted customer|refresh the queue/.test(err.message);
     res.status(conflict ? 409 : 500).json({ error: err.message });
   }
 }
