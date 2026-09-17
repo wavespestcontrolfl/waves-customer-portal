@@ -1,6 +1,22 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
 test.each([
+  ['No visit is free.', 'pass'],
+  ['No service is free.', 'pass'],
+  ['Neither visit is free.', 'pass'],
+  ['No scheduled treatment is complimentary.', 'pass'],
+  ['No, your next visit is free.', 'fail'],
+  ['No visit is free, but your next treatment is complimentary.', 'fail'],
+  ["I will send you a report that'll be free.", 'pass'],
+  ['We provide a report that’ll be free.', 'pass'],
+  ["I will send you an estimate that'll be free.", 'pass'],
+  ["We provide a visit that'll be free.", 'fail'],
+  ["Your next visit is something that'll be free.", 'fail'],
+])('expanded visit targets preserve negative and artifact subjects: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ['You will get your next visit for free.', 'fail'],
   ["You'll receive your next treatment at no charge.", 'fail'],
   ["You're going to have the return visit on us.", 'fail'],

@@ -728,6 +728,7 @@ function freeVisitIsEmbeddedVisitSubject(text, match) {
   if (!FREE_VISIT_COPULAR_CLAIM_RE.test(match[0])) return false;
   const [start] = clauseBounds(text, match.index);
   const prefix = text.slice(start, match.index).split(',').pop();
+  if (/\b(?:no|neither)\s*$/i.test(prefix)) return true;
   // A cost/price subject prices the visit itself; a report/estimate subject
   // describes a separate artifact even when it names the same visit.
   const priceSubject = /\b(?:(?:the|your|our|this|that|an?)\s+)?(?:(?:total|full|entire|actual|usual|normal|standard)\s+){0,2}(?:cost|price|charge|fee)\s+(?:of|for)\s+$/i.exec(prefix);
@@ -743,7 +744,7 @@ function freeVisitIsRefused(prefix, clausePrefix) {
     || clauseIsEpistemicallyHedged(prefix);
 }
 function freeVisitIsNonvisitRelativeThat(text, match) {
-  if (!/^that(?:['’]s|\s+(?:is|will be|would be))\b/i.test(match[0])) return false;
+  if (!/^that(?:['’](?:s|ll\s+be)|\s+(?:is|will be|would be))\b/i.test(match[0])) return false;
   const [clauseStart] = clauseBounds(text, match.index);
   const prefix = text.slice(clauseStart, match.index);
   const antecedent = FREE_VISIT_RELATIVE_ANTECEDENT_RE.exec(prefix);
