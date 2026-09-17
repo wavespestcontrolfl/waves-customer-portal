@@ -1336,3 +1336,48 @@ test.each([
 ])('payment and coverage targets exclude compound report artifacts: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+
+test.each([
+  ['We will waive the fee for this visit.', 'fail'],
+  ['We will waive the charge for that appointment.', 'fail'],
+  ['We waive the cost for the visit.', 'fail'],
+  ["I'll waive your fee for your upcoming treatment.", 'fail'],
+  ['We will waive the fee for this visit if the office approves.', 'pass'],
+  ['If the office approves, we will waive the fee for this visit.', 'pass'],
+  ['We will waive the fee for this visit and the report if the office approves.', 'pass'],
+  ['I cannot confirm that we will waive the fee for this visit.', 'pass'],
+  ['We will not waive the fee for this visit.', 'pass'],
+  ['We will waive the fee for this visit report.', 'pass'],
+  ['We will waive the fee for that appointment summary.', 'pass'],
+  ['We will waive the fee for your upcoming treatment estimate.', 'pass'],
+  ['We will waive the fee for the report during this visit.', 'pass'],
+  ['We will waive the fee for this visit only after Tuesday.', 'fail'],
+])('fee waivers reuse the shared visit target and its qualifier guards: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['Maybe your next visit is free.', 'pass'],
+  ['Maybe, your next visit is free.', 'pass'],
+  ['Perhaps your next visit is complimentary.', 'pass'],
+  ['Possibly your next visit is on us.', 'pass'],
+  ['It is possible that your next visit is free.', 'pass'],
+  ["It's possible that your next visit is free.", 'pass'],
+  ['It is a possibility that your next visit is free.', 'pass'],
+  ['Maybe we will give you a free visit.', 'pass'],
+  ["Perhaps you won't pay for your next visit.", 'pass'],
+  ['It is possible that we will waive the fee for this visit.', 'pass'],
+  ['It is possible that the cost of your next visit is free.', 'pass'],
+  ['Maybe the report is free, but your next visit is free.', 'fail'],
+  ['It is possible that the report is free, your next visit is free.', 'fail'],
+  ['Maybe your next visit is free, but the return visit is free.', 'fail'],
+  ['Maybe your next visit is free. The return visit is free.', 'fail'],
+  ['It is possible that your next visit is free; the return visit is free.', 'fail'],
+  ['Maybe the report is ready since your next visit is free.', 'fail'],
+  ['Maybe the report is ready because your next visit is free.', 'fail'],
+  ['It is possible that the report is ready, but we will waive the fee for this visit.', 'fail'],
+  ['Maybe the report is free and your next visit is free.', 'fail'],
+])('possibility qualifiers govern only their own free-visit proposition: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
