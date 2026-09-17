@@ -1609,6 +1609,12 @@ function reportHasAlternativeLocation(affirmed, locationAt, orTail) {
   return /\beither\b/i.test(affirmed) || !REPORT_UNRELATED_OR_CLAUSE_RE.test(alternativeTail);
 }
 
+function reportCoordinatedProductIsNominal(text) {
+  return (/^\s*(?:(?:the|a|an|your|our|their)\s+)?(?:(?:diluted|liquid|granular|(?:freshly\s+)?mixed)\s+){0,2}(?:bait|dust|liquid|spray|granules|gel|insecticide|pesticide)\s*$/i.test(text)
+    || /^\s*(?:(?:the|a|an|your|our|their)\s+)?[A-Z][A-Za-z0-9'’-]*(?:\s+[A-Z0-9][A-Za-z0-9'’-]*){0,2}\s*$/.test(text))
+    && !CLAUSE_FINITE_PREDICATE_RE.test(text) && !REPORT_FINDING_VERB_RE.test(text);
+}
+
 function reportCoordinatorSharesLocation(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb) {
   const gapStart = locationAt < subjectAt ? locationAt + locationLength : subjectAt + subjectLength;
   const findingGap = locationAt < subjectAt
@@ -1616,8 +1622,12 @@ function reportCoordinatorSharesLocation(affirmed, subjectAt, subjectLength, loc
   const coordinator = /\band\b/i.exec(findingGap);
   if (!coordinator) return true;
   if (locationAt < subjectAt) {
+    const productLink = /\b(?:with|using)\b/i.exec(findingGap);
+    if (!productLink) return false;
+    const productStart = productLink.index + productLink[0].length;
+    const productPrefix = findingGap.slice(productStart).split(/,\s*(?:and\s+)?|\band\b/i).filter((item) => item.trim());
     const frame = findingVerb.index < locationAt ? REPORT_LOCATION_LIST_PRODUCT_LINK_RE : REPORT_LOCATION_LIST_PASSIVE_TAIL_RE;
-    return frame.test(findingGap);
+    return frame.test(`${findingGap.slice(0, productStart)} `) && productPrefix.every(reportCoordinatedProductIsNominal);
   }
   const coordinatorAt = gapStart + coordinator.index;
   const verbBeforeCoordinator = affirmed.slice(
@@ -1628,11 +1638,7 @@ function reportCoordinatorSharesLocation(affirmed, subjectAt, subjectLength, loc
   const coordinatedObject = coordinatedTargetLink && afterCoordinator.slice(0, coordinatedTargetLink.index).replace(/\brespectively\b/gi, '');
   // Other coordinated objects are bounded formulation nouns or capitalized
   // product labels; arbitrary lowercase labels are conservatively unsupported.
-  const nominalObject = coordinatedObject
-    && (/^\s*(?:(?:the|a|an|your|our|their)\s+)?(?:(?:diluted|liquid|granular|(?:freshly\s+)?mixed)\s+){0,2}(?:bait|dust|liquid|spray|granules|gel|insecticide|pesticide)\s*$/i.test(coordinatedObject)
-      || /^\s*(?:(?:the|a|an|your|our|their)\s+)?[A-Z][A-Za-z0-9'’-]*(?:\s+[A-Z0-9][A-Za-z0-9'’-]*){0,2}\s*$/.test(coordinatedObject))
-    && !CLAUSE_FINITE_PREDICATE_RE.test(coordinatedObject)
-    && !REPORT_FINDING_VERB_RE.test(coordinatedObject);
+  const nominalObject = coordinatedObject && reportCoordinatedProductIsNominal(coordinatedObject);
   const sharedProductList = findingVerb.index > coordinatorAt && findingVerb.index < locationAt
     && !REPORT_FINDING_VERB_RE.test(affirmed.slice(subjectAt + subjectLength, coordinatorAt));
   const sharedLocationList = findingVerb.index < coordinatorAt
@@ -1660,7 +1666,8 @@ function reportLocationIsTreatmentTarget(
   )) return false;
   if (locationAt < subjectAt) {
     const beforeLocation = affirmed.slice(0, locationAt);
-    const betweenLocationAndProduct = affirmed.slice(locationAt + locationLength, subjectAt);
+    const betweenLocationAndProduct = affirmed.slice(locationAt + locationLength, subjectAt)
+      .replace(/\b(with|using)\b[\s\S]*$/i, '$1 ');
     // Active and passive treatment can name the treated area first and
     // introduce the product with "with": "treated the perimeter with P"
     // and "the perimeter was treated with P" assert the same pairing.
@@ -1669,7 +1676,7 @@ function reportLocationIsTreatmentTarget(
           && new RegExp(`\\b(?:treated|sprayed|applied|placed|used|treat|spray|apply|place|use)\\s+${REPORT_LOCATION_LIST_PREFIX}$`, 'i').test(beforeLocation))
         || (locationAt < findingVerb.index
           && new RegExp(`^\\s*${REPORT_LOCATION_LIST_PREFIX}$`, 'i').test(beforeLocation)
-          && REPORT_LOCATION_LIST_PASSIVE_TAIL_RE.test(betweenLocationAndProduct))) return true;
+          && REPORT_LOCATION_LIST_PASSIVE_TAIL_RE.test(betweenLocationAndProduct))) return reportRespectivelyPairsFinding(affirmed, subjectAt, locationAt, findingVerb);
     const treatmentTail = affirmed.slice(relationshipStart);
     const untimedTail = treatmentTail.replace(new RegExp(`(?:\\b(?:at|on)\\s+)?(?:${REPORT_COMPLETION_TIME})`, 'gi'), '');
     const adverbialTarget = /^\s*(?:(?:only|just|mostly|\w+ly)\s+)*(?:indoors|outdoors|inside|outside)\b/i.test(
@@ -1823,9 +1830,19 @@ function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb
 function reportRespectivelyPairsFinding(affirmed, subjectAt, locationAt, findingVerb) {
   const respectively = /\brespectively\b/i.exec(affirmed);
   if (!respectively || !findingVerb) return true;
+  const separator = /,\s*(?:(?:and|as\s+well\s+as|plus)\b)?|\b(?:and|as\s+well\s+as|plus)\b/gi;
   // A later list with its own predicate owns its "respectively" marker.
-  if (respectively.index > locationAt
-      && CLAUSE_FINITE_PREDICATE_RE.test(affirmed.slice(locationAt, respectively.index))) return true;
+  const evidenceEnd = Math.max(subjectAt, locationAt, findingVerb.index);
+  if (respectively.index > evidenceEnd
+      && CLAUSE_FINITE_PREDICATE_RE.test(affirmed.slice(evidenceEnd, respectively.index))) return true;
+  if (locationAt < subjectAt) {
+    const productLink = /\b(?:with|using)\b/i.exec(affirmed.slice(findingVerb.index + findingVerb[0].length, subjectAt));
+    if (!productLink) return false;
+    const locationListEnd = findingVerb.index > locationAt ? findingVerb.index
+      : findingVerb.index + findingVerb[0].length + productLink.index;
+    return [...affirmed.slice(subjectAt, respectively.index).replace(/,\s*$/, '').matchAll(separator)].length
+      === [...affirmed.slice(locationAt, locationListEnd).matchAll(separator)].length;
+  }
   const linkSearchStart = Math.min(respectively.index + respectively[0].length, findingVerb.index + findingVerb[0].length);
   const locationLink = REPORT_TREATMENT_LOCATION_LINK_RE.exec(affirmed.slice(linkSearchStart, locationAt));
   if (!locationLink) return false;
@@ -1837,7 +1854,6 @@ function reportRespectivelyPairsFinding(affirmed, subjectAt, locationAt, finding
   const locationTail = affirmed.slice(locationAt, locationListEnd)
     .split(new RegExp(`,\\s*(?=(?:according\\s+to|as(?!\\s+well\\s+as\\b)|which|${REPORT_COMPLETION_TIME})\\b)`, 'i'))[0]
     .replace(/,\s*$/, '');
-  const separator = /,\s*(?:(?:and|as\s+well\s+as|plus)\b)?|\b(?:and|as\s+well\s+as|plus)\b/gi;
   // Active treatment lists put the products after the verb, before the first
   // target link; passive lists put them before the verb.
   const productListEnd = subjectAt > findingVerb.index ? locationLinkAt : findingVerb.index;
@@ -1854,6 +1870,14 @@ function reportClauseBounds(text, at) {
   const nextStop = text.slice(at).search(/[.!?;]/);
   const sentenceEnd = nextStop < 0 ? text.length : at + nextStop;
   const sentence = text.slice(sentenceStart, sentenceEnd);
+  const firstLocation = new RegExp(`^\\s*${REPORT_LOCATION_LIST_ITEM}\\b`, 'i').exec(sentence);
+  const productLink = /\b(?:with|using)\b/i.exec(sentence);
+  if (firstLocation && productLink) {
+    const productStart = productLink.index + productLink[0].length;
+    const products = sentence.slice(productStart).split(/,\s*(?:and\s+)?|\band\b/i).filter((item) => item.trim());
+    if (products.length > 1 && REPORT_LOCATION_LIST_PASSIVE_TAIL_RE.test(`${sentence.slice(firstLocation[0].length, productStart)} `)
+        && products.every(reportCoordinatedProductIsNominal)) return [sentenceStart, sentenceEnd];
+  }
   // The general clause splitter may treat "and bait were applied" as a
   // second assertion. Shared comma lists and respectively lists need their
   // coordinated nouns and locations in one frame to preserve treatment scope.

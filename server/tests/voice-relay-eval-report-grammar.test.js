@@ -192,6 +192,21 @@ test.each(['exterior perimeter', 'garage'])('location-first coordination targets
     text.indexOf(location), location.length, /treated/.exec(text))).toBe(false);
 });
 
+test.each(['The exterior perimeter and garage were treated with', 'We treated the exterior perimeter and garage using'])('location-first respectively maps both lists: %s', (frame) => {
+  for (const [suffix, paired] of [['Talstar P and bait, respectively.', true], ['Talstar P and bait.', false], ['Talstar P and bait, and their amounts were 2 and 3 gallons, respectively.', false]]) {
+    const text = `${frame} ${suffix}`;
+    ['Talstar P', 'bait'].forEach((product, productIndex) => ['exterior perimeter', 'garage'].forEach((location, locationIndex) => {
+      expect(grammar.reportHasCompletedFinding(text, text.indexOf(product), product.length,
+        text.indexOf(location), location.length, /treated/.exec(text))).toBe(!paired || productIndex === locationIndex);
+    }));
+  }
+});
+
+test.each(['Talstar P', 'bait'])('location-first passive shared lists retain bounds for %s', (product) => {
+  const text = 'The exterior perimeter and garage were treated with Talstar P and bait.';
+  expect(grammar.reportClauseBounds(text, text.indexOf(product))).toEqual([0, text.length - 1]);
+});
+
 test.each(['spraying', 'treating', 'placing', 'using'])('completed %s retains governor and product scope', (action) => {
   for (const [prefix, completed] of [['We finished', true], ['We completed', true], ['We were supposed to have finished', false], ['We almost finished', false], ['We did not finish', false], ['We tried to have finished', false], ['We are', false]]) {
     const text = `${prefix} ${action} Talstar P to the exterior perimeter.`;
