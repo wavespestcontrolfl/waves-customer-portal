@@ -117,6 +117,20 @@ describe('email reply amountless billing policy', () => {
   });
 
   test.each([
+    'Our technician will pay a visit tomorrow.',
+    'Please pay a visit to our office.',
+  ])('preserves the bounded pay-a-visit idiom without a recipient: %s', (text) => {
+    expect(verdict(text)).toEqual({ ok: true, violations: [] });
+  });
+
+  test.each([
+    'Our technician will pay per visit.',
+    'Our technician will pay you per visit.',
+    'Please pay a visit to our office; payments are per visit.',
+    'We pay a visit tomorrow, and each visit is paid separately.',
+  ])('keeps billing predicates blocked around pay-a-visit wording: %s', rejected);
+
+  test.each([
     'You pay on each visit.', 'You pay on every scheduled visit.',
     'You pay on your visits.', 'Payments are on routine visits.',
     'Invoices are for your visits.', 'Billing is for every routine visit.',

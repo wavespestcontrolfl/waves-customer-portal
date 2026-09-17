@@ -40,7 +40,7 @@ function hasBillingUnit(tokens, at) {
   let next = at + 1;
   if (isBillingVerb(tokens[at])) {
     const afterRecipient = skipRecipient(tokens, next);
-    if (isWord(tokens[at], 'pay') && afterRecipient !== next
+    if (isWord(tokens[at], 'pay')
       && isKind(tokens[afterRecipient], 'visit')
       && tokens[afterRecipient].text === 'a visit') return false;
     next = afterRecipient;
