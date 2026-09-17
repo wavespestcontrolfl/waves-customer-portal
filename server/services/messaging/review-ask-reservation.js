@@ -366,6 +366,37 @@ async function countStaleUnresolved({ trx } = {}) {
   return parseInt(row?.c || 0, 10);
 }
 
+// Durable ownership for a release that could not be written (codex #4331
+// P2): a caller's release attempt gets ONE retry of its own (via
+// stampWithRetry at the call site) before it gives up — if the retried
+// delete ALSO throws, the caller marks the reservation `release_pending`
+// here rather than abandoning it after that single failure. This sweep is
+// the backstop: it retries the SAME delete on every marked row, so a
+// transient outage does not leave a reservation hidden from every general
+// reader (and permanently counted stale) with nothing left holding it
+// accountable. Called from reconcileStrandedSends alongside
+// countStaleUnresolved, so it runs on the existing cron cadence rather
+// than a new one.
+async function releasePending({ trx } = {}) {
+  const conn = trx || defaultDb();
+  const logger = require('../logger');
+  const marked = await conn('sms_log')
+    .where({ status: 'sending' })
+    .whereRaw(`metadata->>'${REVIEW_ASK_MARKER}' = 'true'`)
+    .whereRaw("metadata->>'release_pending' = 'true'")
+    .select('id');
+  let released = 0;
+  for (const row of marked) {
+    try {
+      const deleted = await conn('sms_log').where({ id: row.id }).del();
+      if (deleted) released += 1;
+    } catch (err) {
+      logger.warn(`[review] pending reservation release retry failed (id=${row.id}): ${err.message}`);
+    }
+  }
+  return released;
+}
+
 module.exports = {
   isUnresolvedReviewAskReservation,
   isUnresolvedSendReservation,
@@ -379,4 +410,5 @@ module.exports = {
   releaseById,
   promote,
   countStaleUnresolved,
+  releasePending,
 };
