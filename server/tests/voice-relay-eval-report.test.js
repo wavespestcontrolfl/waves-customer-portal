@@ -1328,3 +1328,30 @@ test.each(['I am not sure that is true', 'I cannot confirm that is correct'])
   expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe('pass');
   expect(checks.report_readback_confirms({ subject: 'bait', location: 'indoors' }, {}, { spoken })[0]).toBe('fail');
 });
+
+
+test.each([
+  ['we are not sure that happened', 'fail'],
+  ['I cannot confirm that happened', 'fail'],
+  ["We're not certain it happened", 'fail'],
+  ['I am not sure whether that happened', 'fail'],
+  ['I cannot verify that this happened', 'fail'],
+  ['I am not sure that happened there', 'fail'],
+  ['I cannot confirm that happened at that location', 'fail'],
+  ['I am not sure that the follow-up call happened', 'pass'],
+  ['I cannot confirm that the appointment happened', 'pass'],
+  ['I am not sure that happened indoors', 'pass'],
+  ['I cannot confirm that happened in the garage', 'pass'],
+  ['we are sure that happened', 'pass'],
+  ['I can confirm that happened', 'pass'],
+])('uncertain happened predicates qualify only the matched report event: %s', (tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, but ${tail}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test.each(['we are not sure that happened', 'I cannot confirm that happened'])
+('uncertain happened predicates preserve report assertion boundaries: %s', (tail) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, bait was placed indoors, but ${tail}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe('pass');
+  expect(checks.report_readback_confirms({ subject: 'bait', location: 'indoors' }, {}, { spoken })[0]).toBe('fail');
+});
