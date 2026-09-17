@@ -1774,8 +1774,9 @@ class GoogleBusinessService {
       if (verdict) findings.push({ loc, ...verdict });
     }
     if (!findings.length) {
-      // Use the escalation's existing lock so a clean cycle cannot race its
-      // marker write. The legacy title namespace belongs only to this alert.
+      // Serialize retirement with marker writes. Cycle observations precede
+      // this lock, so overlapping cycles can still arrive out of order.
+      // The legacy title namespace belongs only to this alert.
       await runExclusive('gbp-sync-health-notify', () => retireIfClean('gbp-sync-health', {
         alsoRetire: { category: 'review', field: 'opsKey', legacyTitlePrefix: 'Review sync health escalation [' },
       }), { recordHealth: false });
