@@ -75,6 +75,12 @@ test.each([
   ['We used Talstar P and went to the exterior perimeter.', 'Talstar P', false],
   ['We used Talstar P and returned to the exterior perimeter.', 'Talstar P', false],
   ['We used Talstar P and moved to the exterior perimeter.', 'Talstar P', false],
+  ['We used Talstar P and sat at the exterior perimeter.', 'Talstar P', false],
+  ['We used Talstar P and stood at the exterior perimeter.', 'Talstar P', false],
+  ['We used Talstar P and met the technician at the exterior perimeter.', 'Talstar P', false],
+  ['We used Talstar P and took equipment to the exterior perimeter.', 'Talstar P', false],
+  ['We used Talstar P and sent the technician to the exterior perimeter.', 'Talstar P', false],
+  ['We used Talstar P and then sat at the exterior perimeter.', 'Talstar P', false],
   ['We used Talstar P and sprayed the exterior perimeter.', 'Talstar P', false],
   ['We used Talstar P and applied bait to the exterior perimeter.', 'Talstar P', false],
   ['We used Talstar P and bait to the exterior perimeter.', 'Talstar P', true],
@@ -86,6 +92,9 @@ test.each([
   ['At the exterior perimeter, Talstar P was applied only indoors.', 'Talstar P', false],
   ['At the exterior perimeter, Talstar P was applied primarily indoors.', 'Talstar P', false],
   ['At the exterior perimeter, Talstar P was applied yesterday only indoors.', 'Talstar P', false],
+  ['At the exterior perimeter, Talstar P was applied at 9 AM indoors.', 'Talstar P', false],
+  ['At the exterior perimeter, Talstar P was applied at 9 AM only indoors.', 'Talstar P', false],
+  ['At the exterior perimeter, Talstar P was applied at 9 AM.', 'Talstar P', true],
   ['At the exterior perimeter, Talstar P was applied outdoors.', 'Talstar P', false],
   ['At the exterior perimeter, Talstar P was applied inside.', 'Talstar P', false],
   ['At the exterior perimeter, Talstar P was applied outside.', 'Talstar P', false],
@@ -95,6 +104,12 @@ test.each([
   ['At the exterior perimeter, the technician applied Talstar P with a backpack sprayer.', 'Talstar P', true],
   ['At the exterior perimeter, the technician applied Talstar P with a backpack sprayer stored indoors.', 'Talstar P', true],
   ['At the exterior perimeter, Talstar P was applied to the garage.', 'Talstar P', false],
+  ['We applied diluted Talstar P to the exterior perimeter.', 'Talstar P', true],
+  ['We applied liquid Talstar P to the exterior perimeter.', 'Talstar P', true],
+  ['We applied freshly mixed Talstar P to the exterior perimeter.', 'Talstar P', true],
+  ['We applied only the diluted Talstar P to the exterior perimeter.', 'Talstar P', true],
+  ['We applied bait while mixing Talstar P to the exterior perimeter.', 'Talstar P', false],
+  ['We applied a container of diluted Talstar P to the exterior perimeter.', 'Talstar P', false],
 ])('completed treatment and product ownership: %s / %s', (text, subject, completed) => {
   const verb = /\b(?:apply|applying|applied|placed|used|treated|sprayed|put|went|got|received)\b/i.exec(text);
   expect(grammar.reportHasCompletedFinding(text, text.indexOf(subject), subject.length,
@@ -113,6 +128,11 @@ test.each([
   ['Talstar P was not only applied to the exterior perimeter.', false],
   ['Talstar P was not applied to the exterior perimeter.', true],
   ['It is incorrect that Talstar P was applied to the exterior perimeter.', true],
+  ['Talstar P was applied without issue to the exterior perimeter.', false],
+  ['Talstar P was applied without delay to the exterior perimeter.', false],
+  ['Talstar P was applied without interruption to the exterior perimeter.', false],
+  ['Talstar P was not applied without issue to the exterior perimeter.', true],
+  ['We left without applying Talstar P to the exterior perimeter.', true],
 ])('affirmative focus differs from claim denial: %s', (text, denied) => {
   expect(grammar.reportClaimIsDenied(text, text, text.indexOf('Talstar P'),
     text.indexOf('exterior perimeter'), /applied/.exec(text), '')).toBe(denied);
@@ -127,6 +147,11 @@ test.each([
   ['  Confirm that Talstar P was applied to the exterior perimeter.', true],
   ['Check the invoice, Talstar P was applied to the exterior perimeter.', false],
   ['Okay, we confirm that Talstar P was applied to the exterior perimeter.', false],
+  ['Please confirm that bait, Talstar P, and dust were applied to the exterior perimeter.', true],
+  ['Confirm that bait, Talstar P were applied to the exterior perimeter.', true],
+  ['Please confirm that, Talstar P was applied to the exterior perimeter.', true],
+  ['We confirm that bait, Talstar P, and dust were applied to the exterior perimeter.', false],
+  ['Confirm that the invoice is paid, Talstar P was applied to the exterior perimeter.', false],
   ['We confirm that Talstar P was applied to the exterior perimeter.', false],
 ])('governing instruction detection: %s', (text, instruction) => {
   expect(grammar.reportFindingIsInstruction(text, text.indexOf('Talstar P'),
@@ -155,8 +180,23 @@ test.each([
   ['Talstar P was applied to the exterior perimeter or garage', '', true],
   ['Talstar P was applied to the exterior perimeter', 'and/or garage', true],
   ['Talstar P was applied to the exterior perimeter', 'or the technician can explain the report', false],
+  ['Talstar P was applied to the exterior perimeter before or after lunch', '', false],
+  ['Talstar P was applied to the exterior perimeter before', 'or after lunch', false],
+  ['Talstar P was applied to the exterior perimeter with either a backpack or a hand sprayer', '', false],
+  ['Talstar P was applied to the exterior perimeter at 9 AM or 10 AM', '', false],
+  ['Talstar P was applied to the exterior perimeter or the foundation before lunch', '', true],
 ])('location alternative detection: %s / %s', (text, tail, alternative) => {
   expect(grammar.reportHasAlternativeLocation(text, text.indexOf('exterior perimeter'), tail)).toBe(alternative);
+});
+
+test.each([
+  ['around', 'along', 'Talstar P', 'exterior perimeter', true], ['around', 'along', 'Talstar P', 'garage', false],
+  ['around', 'along', 'bait', 'garage', true], ['around', 'along', 'bait', 'exterior perimeter', false],
+  ['along', 'around', 'Talstar P', 'exterior perimeter', true], ['along', 'around', 'Talstar P', 'garage', false],
+])('respectively maps %s / %s: %s to %s', (first, second, subject, location, completed) => {
+  const text = `Talstar P and bait were applied ${first} the exterior perimeter and ${second} the garage, respectively.`;
+  expect(grammar.reportHasCompletedFinding(text, text.indexOf(subject), subject.length,
+    text.indexOf(location), location.length, /applied/.exec(text))).toBe(completed);
 });
 
 test.each(['as well as', 'plus'])('respectively pairing keeps list order with %s', (separator) => {

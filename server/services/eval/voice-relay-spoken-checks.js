@@ -1529,7 +1529,7 @@ const REPORT_PARTICIPLE_RE = /^(?:applied|placed|used|treated|sprayed|put|receiv
 const REPORT_LOCATION_RECIPIENT_VERB_RE = /^(?:got|received)$/i;
 const REPORT_NOUN_LED_PREFIX_RE = /^\s*(?:(?:the|a|an|your|our|their|his|her|my|its)\s*)?$/i;
 const REPORT_LOCATION_RECIPIENT_PREDICATE_RE = /^\s*(?:(?:itself|has|have|had|already|also|just|now|\w+ly)\s+)*$/i;
-const REPORT_DIRECT_OBJECT_GAP_RE = /^\s*(?:(?:only|just)\s+)?(?:(?:the|a|an|your|our|their|his|her|my|its)\s+)?$/i;
+const REPORT_DIRECT_OBJECT_GAP_RE = /^\s*(?:(?:only|just)\s+)?(?:(?:the|a|an|your|our|their|his|her|my|its)\s+)?(?:(?:diluted|liquid|granular|(?:freshly\s+)?mixed)\s+){0,2}$/i;
 const REPORT_COORDINATED_OBJECT_GAP_RE = /\b(?:around|along|throughout|across|on|to|at|in)\b[^.!?;]*\band\s+(?:[\w'\u2019-]+\s+){0,2}$/i;
 const REPORT_WENT_LOCATION_RE = /^\s*(?:around|along)\b/i;
 const REPORT_TREATMENT_LOCATION_LINK_RE = /\b(?:around|along|throughout|across|on|to|at|in)\b/i;
@@ -1556,6 +1556,7 @@ const REPORT_SHARED_LIST_CONDITION_RE = new RegExp(
 
 
 function reportFindingIsUncertain(text) {
+  // The runner supplies the bounded finding evidence, excluding unrelated tails.
   return /\b(?:tomorrow|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b/i.test(text)
     || REPORT_UNCERTAINTY_RE.test(text.replace(REPORT_COMPLETION_TIME_RE, ''));
 }
@@ -1564,7 +1565,16 @@ function reportFindingIsInstruction(affirmed, subjectAt, locationAt, findingVerb
   const firstFindingAt = Math.min(subjectAt, locationAt, findingVerb ? findingVerb.index : Infinity);
   // A comma before the finding can end an unrelated instruction; a later
   // instruction after the matched treatment is outside its evidence span.
-  const governingStart = affirmed.lastIndexOf(',', firstFindingAt - 1) + 1;
+  let governingStart = 0;
+  for (const comma of affirmed.slice(0, firstFindingAt).matchAll(/,/g)) {
+    const left = affirmed.slice(governingStart, comma.index);
+    const complement = /\b(?:that|whether)\b([^.!?;]*)$/i.exec(left);
+    if (REPORT_INSTRUCTION_RE.test(left) && complement
+        && !CLAUSE_FINITE_PREDICATE_RE.test(complement[1])) continue;
+    if (new RegExp(`^\\s*(?:[\\w'’-]+\\s+){1,6}${CLAUSE_FINITE_PREDICATE_RE.source}`, 'i').test(
+      affirmed.slice(comma.index + 1, findingEvidenceEnd),
+    )) governingStart = comma.index + 1;
+  }
   return REPORT_INSTRUCTION_RE.test(affirmed.slice(governingStart, findingEvidenceEnd));
 }
 
@@ -1576,6 +1586,9 @@ function reportFindingIsInstruction(affirmed, subjectAt, locationAt, findingVerb
 function reportHasAlternativeLocation(affirmed, locationAt, orTail) {
   if (locationAt < 0) return false;
   const retainedOr = /\bor\b/i.exec(affirmed.slice(locationAt));
+  const beforeOr = affirmed.slice(locationAt, retainedOr ? locationAt + retainedOr.index : affirmed.length);
+  if (beforeOr && (/\b(?:before|after|during|with|using|via)\b/i.test(beforeOr)
+      || new RegExp(REPORT_COMPLETION_TIME, 'i').test(beforeOr))) return false;
   const alternativeTail = /^(?:or|and\s*\/\s*or)\b/i.test(orTail)
     ? orTail.replace(/^and\s*\/\s*/i, '') : retainedOr && affirmed.slice(locationAt + retainedOr.index);
   if (!alternativeTail) return false;
@@ -1600,7 +1613,7 @@ function reportCoordinatorSharesLocation(affirmed, subjectAt, subjectLength, loc
     && /^\s*(?:(?:the|a|an|your|our|their)\s+)?[\w'’-]+(?:\s+[\w'’-]+){0,3}\s*$/i.test(coordinatedObject)
     && !CLAUSE_FINITE_PREDICATE_RE.test(coordinatedObject)
     && !REPORT_FINDING_VERB_RE.test(coordinatedObject)
-    && !/^\s*(?:\w+(?:ed|ing)|drove|ran|rode|flew|left)\b/i.test(
+    && !/^\s*(?:\w+(?:ed|ing)|drove|ran|rode|flew|left|sat|stood|met|took|sent)\b/i.test(
       coordinatedObject.replace(/^\s*(?:(?:then|also|just|now|\w+ly)\s+)*/i, ''),
     );
   const sharedProductList = findingVerb.index > coordinatorAt && findingVerb.index < locationAt
@@ -1621,12 +1634,11 @@ function reportLocationIsTreatmentTarget(
   affirmed, subjectAt, subjectLength, locationAt, locationLength, locationRecipient, findingVerb,
 ) {
   if (locationRecipient) return true;
-  if (subjectAt < findingVerb.index && findingVerb.index < locationAt
-      && /\b(?:applied|placed|used|treated|sprayed)\s+(?:respectively\s+)?(?:throughout|across|to|at|on|in)\b/i.test(
+  if (findingVerb.index < locationAt
+      && new RegExp(`\\b(?:applied|placed|used|treated|sprayed)\\s+(?:respectively\\s+)?${REPORT_TREATMENT_LOCATION_LINK_RE.source}`, 'i').test(
         affirmed.slice(findingVerb.index, locationAt),
       )
-      && /\brespectively\b/i.test(affirmed)
-      && reportRespectivelyPairsFinding(affirmed, subjectAt, locationAt, findingVerb)) return true;
+      && /\brespectively\b/i.test(affirmed)) return reportRespectivelyPairsFinding(affirmed, subjectAt, locationAt, findingVerb);
   // A product list may share the following predicate and location, while a
   // location list may share the preceding predicate. Other coordinators split
   // product-location pairs and cannot lend either side to the other.
@@ -1650,7 +1662,7 @@ function reportLocationIsTreatmentTarget(
           && /\b(?:was|were|has\s+been|had\s+been)\s+(?:treated|sprayed|applied|placed|used)\s+(?:with|using)\s+$/i.test(betweenLocationAndProduct))) return true;
     const treatmentTail = affirmed.slice(relationshipStart);
     const adverbialTarget = /^\s*(?:(?:only|just|mostly|\w+ly)\s+)*(?:indoors|outdoors|inside|outside)\b/i.test(
-      treatmentTail.replace(REPORT_COMPLETION_TIME_RE, ''),
+      treatmentTail.replace(REPORT_COMPLETION_TIME_RE, '').replace(/^\s*(?:at|on)\s+/i, ''),
     );
     const laterTargetLink = REPORT_TREATMENT_LOCATION_LINK_RE.exec(treatmentTail);
     const laterTarget = laterTargetLink
@@ -1786,14 +1798,16 @@ function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb
   if (subjectAt < 0 || locationAt < 0) return false;
   const firstAt = Math.min(subjectAt, locationAt, findingVerb ? findingVerb.index : affirmed.length);
   const lastAt = Math.max(subjectAt, locationAt, findingVerb ? findingVerb.index : 0) + 1;
-  return deniedSpans(affirmed).some(([start, end]) => firstAt < end && lastAt > start);
+  const denyingEvidence = affirmed.replace(/\bwithout\s+(?:any\s+)?(?:issues?|delays?|interruptions?)\b/gi,
+    (modifier) => ' '.repeat(modifier.length));
+  return deniedSpans(denyingEvidence).some(([start, end]) => firstAt < end && lastAt > start);
 }
 
 function reportRespectivelyPairsFinding(affirmed, subjectAt, locationAt, findingVerb) {
   const respectively = /\brespectively\b/i.exec(affirmed);
   if (!respectively || !findingVerb) return true;
   const linkSearchStart = Math.min(respectively.index + respectively[0].length, findingVerb.index + findingVerb[0].length);
-  const locationLink = /\b(?:throughout|across|to|at|on|in)\b/i.exec(affirmed.slice(linkSearchStart, locationAt));
+  const locationLink = REPORT_TREATMENT_LOCATION_LINK_RE.exec(affirmed.slice(linkSearchStart, locationAt));
   if (!locationLink) return false;
   const locationLinkAt = linkSearchStart + locationLink.index;
   const locationListStart = linkSearchStart + locationLink.index + locationLink[0].length;
@@ -1813,6 +1827,7 @@ function reportRespectivelyPairsFinding(affirmed, subjectAt, locationAt, finding
 }
 
 function reportClauseBounds(text, at) {
+  // Integration can extend two-item shared lists with reportSharedLocationContinuation.
   const ordinary = clauseBounds(text, at);
   const sentenceStart = Math.max(text.lastIndexOf('.', at - 1), text.lastIndexOf('!', at - 1),
     text.lastIndexOf('?', at - 1), text.lastIndexOf(';', at - 1)) + 1;
