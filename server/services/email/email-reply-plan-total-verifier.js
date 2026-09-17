@@ -8,7 +8,8 @@ const PRICE_WORDS = new Set([
 const PLAN_WORDS = new Set(['plan', 'program', 'package']);
 const PRICING_LABEL_WORDS = new Set([...PRICE_WORDS, ...PLAN_WORDS]);
 const PRICE_QUALIFIER = '(?:only|just|about|around|approximately|roughly|exactly|nearly|almost|up to|at least|as low as)';
-const PRICE_LABEL = new RegExp(`(?:^| )(?:${[...PRICE_WORDS].join('|')})(?: ${PRICE_QUALIFIER}){0,3}(?: <sep>)?$`);
+const PRICE_HEAD = `(?:${[...PRICE_WORDS].join('|')}|(?:${[...PRICING_LABEL_WORDS].join('|')}) <be>)`;
+const PRICE_LABEL = new RegExp(`(?:^| )${PRICE_HEAD}(?: ${PRICE_QUALIFIER}){0,3}(?: <sep>)?$`);
 const ACCOUNT_WORDS = new Set([
   'account', 'balance', 'payment', 'refund', 'credit', 'deposit', 'receipt',
   'received', 'pay', 'due',
@@ -90,16 +91,17 @@ function isPlanTotalPair(clause, amountAt, periodAt, context, legacyMonthlyPlan)
   const last = Math.max(amountAt, periodAt);
   const gap = clause.slice(first + 1, last);
   const accountEvent = context.some((token) => isWord(token, ACCOUNT_EVENTS));
+  const paymentCopulas = [...gap, ...context.slice(0, context.indexOf(amount))];
   const paymentPredicate = context.some((token) => token.kind === 'word' && token.text === 'payment')
-    && gap.some((token) => token.kind === 'be' && !/^(?:was|were|had been)$/.test(token.text));
+    && paymentCopulas.some((token) => token.kind === 'be' && !/^(?:was|were|had been)$/.test(token.text));
   const priceCue = paymentPredicate || context.some((token) => isWord(token, PRICE_WORDS));
   const planCue = context.some((token) => isWord(token, PLAN_WORDS));
   const direct = gap.every((token) => token.kind === 'sep');
   if (amount.kind === 'money' && direct && /^(?:\/|per\b|a\b|each\b|every\b)/.test(period.text)) return true;
   const assertionLabels = amountAt < periodAt ? [...gap, clause[periodAt + 1] || {}] : gap;
-  // A price word, three qualifiers of up to three words, and a separator fit
-  // within eleven canonical tokens. Unknown descriptions cannot join them.
-  const amountLabel = clause.slice(Math.max(0, amountAt - 11), amountAt)
+  // A price noun/predicate, copula, three three-word qualifiers and separator
+  // fit within twelve canonical tokens. Unknown descriptions cannot join them.
+  const amountLabel = clause.slice(Math.max(0, amountAt - 12), amountAt)
     .map((token) => (token.kind === 'word' ? token.text : `<${token.kind}>`)).join(' ');
   const assertedPrice = paymentPredicate || PRICE_LABEL.test(amountLabel)
     || (gap.some((token) => token.kind === 'be')

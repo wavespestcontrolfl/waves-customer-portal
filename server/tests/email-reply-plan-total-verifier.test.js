@@ -244,6 +244,33 @@ describe('inactive email reply plan-total policy', () => {
     rejected('The annual plan costs exactly $1176 after the credit posted.', { legacyMonthlyPlan: true });
   });
 
+  test.each([
+    'The plan is $98 monthly after your payment posted.',
+    'The plan is $1176 yearly after your payment posted.',
+    'Our program will be only $98 monthly after your payment posted.',
+    'The package was exactly $1176 annually after the credit posted.',
+    'The price is just about $98 monthly after your payment posted.',
+    'The fee is up to at least as low as: $1176 yearly after the credit posted.',
+    'The payment is $98 monthly after your payment posted.',
+    'The payment is 98 monthly after your payment posted.',
+    '$98 is the monthly payment after your payment posted.',
+    'The payment will be exactly $1176 yearly after your payment posted.',
+  ])('retains noun/copula assertions with a trailing period beside account events: %s', (text) => rejected(text));
+
+  test.each([
+    'Your payment was $98 monthly after the credit posted.',
+    'Your payment of $98 monthly is posted after the fee adjustment.',
+    'We received your payment of exactly $98 monthly for the plan.',
+    'Your payment of $98 monthly for the plan is now posted.',
+    'The price is only $98 per application after your payment posted.',
+    'Your payment posted. The price is $98 per application, visits are monthly.',
+  ])('keeps trailing-period account events and application prices distinct: %s', (text) => allowed(text));
+
+  test('keeps the trailing-period copula exemption monthly-only', () => {
+    allowed('The plan is only $98 monthly after your payment posted.', { legacyMonthlyPlan: true });
+    rejected('The plan is only $1176 yearly after your payment posted.', { legacyMonthlyPlan: true });
+  });
+
   test('applies legacy monthly exemptions to payment predicates without exempting yearly aggregates', () => {
     allowed('The monthly payment is $98 after your payment posted.', { legacyMonthlyPlan: true });
     rejected('The yearly payment is $1176 after your payment posted.', { legacyMonthlyPlan: true });

@@ -37,6 +37,10 @@ An asserted price label also permits up to three qualifiers from the monetary
 adapter's finite vocabulary (`only`, `exactly`, `at least`, `as low as`, and
 the other supported approximations); unknown descriptions do not join the
 label to an account-event amount.
+Price/plan nouns may precede the amount through a recognized copula and those
+qualifiers, including when the period follows (`The plan is only $98 monthly`).
+Explicit payment copulas also work in either period order; later copulas in
+posted-event descriptions do not turn the notice into a price.
 Singular/plural activity nouns allow up to four ordinary modifiers (`Monthly
 service reminders mention the $98 initial-service price`); an activity fee
 or cost predicate still counts as pricing.
