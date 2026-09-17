@@ -30,6 +30,9 @@ describe('callback commitment candidates', () => {
     ['We will check, or will call her.', 'coordinated', 'We', 'her'],
     ['We will check, or call her.', 'bare-coordinated', 'We', 'her'],
     ['We will check, or the office will review, then will call her.', 'coordinated', 'the office', 'her'],
+    ['We will check, and we’re going to review, then will call her.', 'coordinated', 'we', 'her'],
+    ["We will check, and someone's scheduled to review, then will call her.", 'coordinated', 'someone', 'her'],
+    ['We will check, and I’m going to review, then will call her.', 'coordinated', 'I', 'her'],
     ['We will check, and will call her.', 'coordinated', 'We', 'her'],
     ['We will check, and call her.', 'bare-coordinated', 'We', 'her'],
     ['Sure. We will check; the office will review, then will call her.', 'coordinated', 'the office', 'her'],
@@ -45,6 +48,23 @@ describe('callback commitment candidates', () => {
     }
     expect(candidate.recipient.start).toBeGreaterThanOrEqual(candidate.source.start);
     expect(candidate.recipient.end).toBeLessThanOrEqual(candidate.source.end);
+  });
+
+  test.each([
+    ['you’re going to', 'you'],
+    ["you're going to", 'you'],
+    ['he’s scheduled to', 'he'],
+    ["he's scheduled to", 'he'],
+    ['you’re scheduled to', 'you'],
+    ["you're scheduled to", 'you'],
+  ])('a contracted auxiliary resolves the actual non-Waves actor: %s', (subject, actor) => {
+    const text = `We will check, and ${subject} review, then will call her.`;
+    const [candidate] = recognizeCallbackCandidates(text, TARGETS);
+    expect(candidate.kind).toBe('coordinated');
+    expect(candidate.actor.text).toBe(actor);
+    expect(candidate.actor.waves).toBe(false);
+    expect(text.slice(candidate.actor.start, candidate.actor.end)).toBe(actor);
+    expect(text.slice(candidate.recipient.start, candidate.recipient.end)).toBe('her');
   });
 
   test.each(['and', 'or'])('a %s modal-only coordinated candidate retains its non-Waves governing actor', (link) => {
