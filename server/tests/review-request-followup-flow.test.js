@@ -805,7 +805,9 @@ describe('review request follow-up flow', () => {
   // local row proves nothing on its own.
   function wireStaleClaimNoLocalEvidence() {
     const rrQuery = chain();
-    const smsLogQuery = chain({ whereNotIn: jest.fn(function () { return this; }) });
+    // del: releaseUnsentReservation's own delete for a proven-unsent orphan
+    // reservation (codex #4333 P1) rides this same table's mock.
+    const smsLogQuery = chain({ whereNotIn: jest.fn(function () { return this; }), del: jest.fn().mockResolvedValue(1) });
     rrQuery.update.mockResolvedValueOnce(0); // pending claim misses
     rrQuery.first.mockResolvedValueOnce({
       id: 'rr-inline', token: 'tok-64chars', customer_id: 'cust-1', claimed_at: new Date('2026-06-03T13:00:00.000Z'),
@@ -818,7 +820,7 @@ describe('review request follow-up flow', () => {
       if (table === 'customers') return customersQuery;
       throw new Error(`Unexpected table query: ${table}`);
     });
-    return { rrQuery };
+    return { rrQuery, smsLogQuery };
   }
 
   test('stale claim, provider unreachable → stays blocked (unknown is not "not sent")', async () => {
@@ -842,19 +844,26 @@ describe('review request follow-up flow', () => {
     expect(rrQuery.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'sent' }));
   });
 
-  test('stale claim, provider confirms nothing left → pre-provider crash, claim released', async () => {
+  test('stale claim, provider confirms nothing left → pre-provider crash, claim released, and its orphaned reservation is released too (codex #4333 P1)', async () => {
     const { findOutboundMessageSince } = require('../services/twilio');
     // The numbers the customer holds now, then the recipient-less pass that
     // covers a number changed or merged since the claim — "nothing left"
     // means both came back empty.
     findOutboundMessageSince.mockResolvedValueOnce({ found: false });
     findOutboundMessageSince.mockResolvedValueOnce({ found: false });
-    const { rrQuery } = wireStaleClaimNoLocalEvidence();
+    const { rrQuery, smsLogQuery } = wireStaleClaimNoLocalEvidence();
     rrQuery.update.mockResolvedValueOnce(1); // the reclaim
 
     expect(await ReviewService.claimInlineForSend('rr-inline')).toBeInstanceOf(Date);
     expect(rrQuery.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'sent' }));
+    // The composer's lock-held reservation (correlated by review_request_id
+    // — codex #4333 P1) is what this releases: a crash between its commit
+    // and sendAndSettle otherwise leaves it stranded, blocking the
+    // recovered send this same call just proved should proceed for the
+    // full 72h spacing window, then aging into a hidden, uncounted orphan.
+    expect(smsLogQuery.del).toHaveBeenCalledTimes(1);
   });
+
 
   test('reviewSmsAllowedNow refuses deleted / already-reviewed customers, an exclusive email channel, and fails closed on a read failure', async () => {
     const prefsQuery = chain();
