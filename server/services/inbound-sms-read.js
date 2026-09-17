@@ -93,19 +93,19 @@ async function phonesWithLiveUnlinkedBell(candidateRows) {
   const phonesWithLiveBell = new Set();
   const candidatePhones = [...new Set(candidateRows.map((r) => r.contact_phone).filter(Boolean))];
   if (!candidatePhones.length) return phonesWithLiveBell;
-  const liveBellRows = await db('notifications')
-    .where({ recipient_type: 'admin', category: 'inbound_sms', link: '/admin/communications' })
-    .whereNull('read_at')
-    .select(db.raw("metadata->'payload'->>'twilioSid' as sid"));
-  const liveBellSids = liveBellRows.map((r) => r.sid).filter(Boolean);
-  if (!liveBellSids.length) return phonesWithLiveBell;
   const rows = await db('messages as m')
     .join('conversations as c', 'c.id', 'm.conversation_id')
     .leftJoin('sms_log as l', function join() {
       this.on('l.twilio_sid', '=', 'm.twilio_sid').andOnVal('l.direction', 'inbound');
     })
-    .whereIn('m.twilio_sid', liveBellSids)
-    .select(db.raw('COALESCE(l.from_phone, c.contact_phone) as contact_phone'));
+    .whereRaw('COALESCE(l.from_phone, c.contact_phone) = ANY(?)', [candidatePhones])
+    .whereExists(function liveBell() {
+      this.select(1).from('notifications as n')
+        .where({ 'n.recipient_type': 'admin', 'n.category': 'inbound_sms', 'n.link': '/admin/communications' })
+        .whereNull('n.read_at')
+        .whereRaw("n.metadata->'payload'->>'twilioSid' = m.twilio_sid");
+    })
+    .distinct(db.raw('COALESCE(l.from_phone, c.contact_phone) as contact_phone'));
   for (const row of rows) { if (row.contact_phone) phonesWithLiveBell.add(row.contact_phone); }
   return phonesWithLiveBell;
 }
@@ -114,7 +114,8 @@ async function phonesWithLiveUnlinkedBell(candidateRows) {
 async function resolveUnknownSenderPhoneMembership(scopedSids) {
   const unknownSenderSids = new Set();
   const phones = new Set();
-  if (!scopedSids.length) return { unknownSenderSids, phones };
+  const promotedSids = new Map();
+  if (!scopedSids.length) return { unknownSenderSids, phones, promotedSids };
   const candidateRows = await db('messages as m')
     .join('conversations as c', 'c.id', 'm.conversation_id')
     .leftJoin('sms_log as l', function join() {
@@ -131,9 +132,13 @@ async function resolveUnknownSenderPhoneMembership(scopedSids) {
     if (isUnknownSenderScoped) {
       unknownSenderSids.add(row.twilio_sid);
       if (row.contact_phone) phones.add(row.contact_phone);
+      if (row.customer_id) {
+        if (!promotedSids.has(row.customer_id)) promotedSids.set(row.customer_id, []);
+        promotedSids.get(row.customer_id).push(row.twilio_sid);
+      }
     }
   }
-  return { unknownSenderSids, phones };
+  return { unknownSenderSids, phones, promotedSids };
 }
 
 async function clearBacklogResetMarkers({ scope, ids, convs }) {
@@ -204,6 +209,11 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
     try {
       const membership = await resolveUnknownSenderPhoneMembership(scopedSids);
       for (const sid of membership.unknownSenderSids) unknownSenderSids.add(sid);
+      // Promoted SIDs can own both bell types. Clear only their customer
+      // link here; the generic bell remains protected by the phone lock.
+      for (const [customerId, twilioSids] of membership.promotedSids) {
+        notificationsCleared += await NotificationService.markInboundSmsReadAdmin({ customerId, twilioSids, before: now, role });
+      }
       for (const phone of membership.phones) {
         notificationsCleared += await retargetOrClearUnknownSenderBell(phone, now, role);
       }

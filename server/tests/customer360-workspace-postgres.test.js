@@ -27,7 +27,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/notification-service', () => ({
-  markInboundSmsReadAdmin: jest.fn().mockResolvedValue(0),
+  markInboundSmsReadAdmin: (...args) => jest.requireActual('../services/notification-service').markInboundSmsReadAdmin(...args),
   scopeAdminFeedToRole: (...args) => jest.requireActual('../services/notification-service').scopeAdminFeedToRole(...args),
 }));
 const { randomUUID, randomBytes } = require('node:crypto');
@@ -264,6 +264,22 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
       expect((await mockPg('messages').where({ id: messageIds[1] }).first()).is_read).toBe(false);
       await markInboundSmsRead({ messageIds: [messageIds[1]], role: 'admin' });
       expect((await readBell()).read_at).not.toBeNull();
+    });
+  }, 30000);
+
+  test('promoted reads clear their linked bell while preserving the generic unread sibling', async () => {
+    await withSender({ promoted: true }, async ({ messageIds, sids, readBell }) => {
+      const [linked] = await mockPg('notifications').insert({
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic linked bell',
+        link: `/admin/communications?thread=${ids[3]}`, metadata: JSON.stringify({ payload: { twilioSid: sids[0] } }),
+        created_at: new Date(Date.now() - 60000),
+      }).returning('id');
+      try {
+        await markInboundSmsRead({ messageIds: [messageIds[0]], role: 'admin' });
+        expect((await mockPg('notifications').where({ id: linked.id }).first()).read_at).not.toBeNull();
+        expect((await readBell()).read_at).toBeNull();
+        expect((await readBell()).metadata.payload.twilioSid).toBe(sids[1]);
+      } finally { await mockPg('notifications').where({ id: linked.id }).delete(); }
     });
   }, 30000);
 
