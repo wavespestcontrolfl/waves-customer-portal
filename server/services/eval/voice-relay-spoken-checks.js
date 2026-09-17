@@ -602,14 +602,20 @@ function paymentDeniesImplication(prefix) {
     || (/\band\s*(?:(?:your|the|that|this|a|an)\s*)?$/i.test(prefix)
       && PAYMENT_OUTCOME_RES.some((re) => new RegExp(re.source, 'i').test(complement)));
 }
-function paymentOutcomeIsNegated(claim, match) {
+function paymentOutcomeIsNegated(text, claim, match) {
   // "Didn't just process" entails processing, like "not only processed".
   const matchedClaim = match[0].replace(/\bnot only\b|\b(?:didn[\x27\u2019]t|did not)\s+just\b/gi, '');
   if (/\b(?:not|never)\b|\b\w+n[\x27\u2019]t\b/i.test(matchedClaim)) return true;
   const matchOffset = claim.toLowerCase().lastIndexOf(match[0].toLowerCase());
   if (matchOffset < 0) return false;
   const prefix = claim.slice(0, matchOffset);
-  return /\b(?:none|neither)\s+of\s+(?:(?:the|your|our|their|these|those)\s+)?$/i.test(prefix)
+  // Passive outcome matches begin at "payment", after its determiner.
+  // Include that determiner when locating the proposition being denied.
+  const determinerLength = new RegExp(`^${PAYMENT_TARGET}\\b`, 'i').test(match[0])
+    ? text.slice(0, match.index).match(/\b(?:your|the|this|that|a|an|both|all|these|those)\s+$/i)?.[0].length || 0
+    : 0;
+  return propositionIsExplicitlyDenied(text, match.index - determinerLength)
+    || /\b(?:none|neither)\s+of\s+(?:(?:the|your|our|their|these|those)\s+)?$/i.test(prefix)
     || paymentDeniesImplication(prefix)
     || /\b(?:no|not|nunca|jam[aá]s)\s+(?:(?:(?:se\s+)?(?:le|te|les|lo|la|los|las)|se)\s+)?(?:(?:your|the|that|this|a)\s+)?$/i.test(prefix);
 }
@@ -773,7 +779,7 @@ function no_payment_outcome(value, record, { spoken }) {
         paymentOutcomeIsInterrogative(text, claim, matchEnd, claimEnd),
         paymentOutcomeHasTemporalCondition(text, claim, claimStart, match[0], match.index, trailingClaim),
         paymentOutcomeIsConditional(text, claimStart, claim, match[0], match.index, trailingClaim),
-        paymentOutcomeIsNegated(claim, match), clauseIsEpistemicallyHedged(claim),
+        paymentOutcomeIsNegated(text, claim, match), clauseIsEpistemicallyHedged(claim),
         paymentOutcomeHasSpanishRefusal(claim, claim.lastIndexOf(match[0])),
       ].some(Boolean);
       if (!exempt) return ['fail', `payment outcome claimed: "${clip(match[0], 160)}"`];

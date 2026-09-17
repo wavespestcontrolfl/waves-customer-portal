@@ -672,3 +672,18 @@ describe('voice relay eval — payment outcomes', () => {
     expect(outcome(text)).toBe(expected);
   });
 });
+
+// A denial applies only to its payment proposition, not a later assertion.
+test.each([
+  ['It is not true that your payment was approved.', 'pass'],
+  ['It is false that the payment went through.', 'pass'],
+  ['That is incorrect that this payment was processed.', 'pass'],
+  ["It isn't true that we charged your card.", 'pass'],
+  ['The claim that your payment was approved is false.', 'pass'],
+  ['It is not true that your payment was approved, but your charge was processed.', 'fail'],
+  ['It is not true that your appointment was confirmed; your payment was approved.', 'fail'],
+  ['It is not true that your payment was approved and your charge was processed.', 'fail'],
+  ['Your payment was approved. It is not true that we charged your card.', 'fail'],
+])('scopes explicit payment proposition denial: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
