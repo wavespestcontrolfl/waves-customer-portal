@@ -704,3 +704,17 @@ test.each([
 ])('scopes explicit payment proposition denial: %s', (text, expected) => {
   expect(outcome(text)).toBe(expected);
 });
+
+test.each([
+  ['We received your payment instructions.', 'pass'],
+  ['We received your payment authorization form.', 'pass'],
+  ['We processed your card authorization document.', 'pass'],
+  ['We received your payment receipt.', 'pass'],
+  ['We received your payment instructions and processed them.', 'pass'],
+  ['We received your payment authorization form and approved it.', 'pass'],
+  ['We received your payment instructions and processed.', 'pass'],
+  ['We received your payment instructions, but your payment was approved.', 'fail'],
+  ['We processed your payment authorization form and charged your card.', 'fail'],
+])('payment paperwork is not a money outcome: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});

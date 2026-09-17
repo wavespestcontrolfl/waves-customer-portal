@@ -534,7 +534,7 @@ function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)
 // refusal before "but" or "so" cannot excuse a subsequent success claim.
 const PAYMENT_ACTOR = '(?:i|we|they|(?:the|our) (?:office|team|billing department)|billing|someone|stripe|waves pest control|(?:(?:a|the|our|your|their) )?(?:bank|(?:payment |billing )?(?:processor|system))|(?:a|the|our) (?:team member|billing team|manager))';
 const PAYMENT_SUCCESS_ADVERBS = '(?:(?:not\\s+only|already|just|now|then|(?!(?:probably|possibly|potentially|apparently|supposedly|seemingly|allegedly|presumably|unlikely|likely|conditionally|partially|nearly)\\b)[a-z]+ly)\\s+)*';
-const PAYMENT_NON_OUTCOME_SUFFIX = '(?!\\s+(?:(?:(?:update|change|replacement)\\s+)?requests?|info(?:rmation)?|details?|methods?|links?|numbers?|digits?|expir(?:ation|y)|cvv|cvc|security\\s+code)\\b)';
+const PAYMENT_NON_OUTCOME_SUFFIX = '(?!\\s+(?:(?:(?:update|change|replacement)\\s+)?requests?|instructions?|(?:authorization|consent)(?:\\s+(?:forms?|documents?))?|forms?|documents?|paperwork|receipts?|statements?|info(?:rmation)?|details?|methods?|links?|numbers?|digits?|expir(?:ation|y)|cvv|cvc|security\\s+code)\\b)';
 const PAYMENT_AMOUNT = `(?:\\$\\s*${DIGITS}|${DIGITS}\\s+(?:dollars?|bucks)|${NUMBER_RUN_EN_STRICT}(?:dollars?|bucks))`;
 const PAYMENT_TARGET = `(?:payments?|(?:(?:credit|debit|prepaid)\\s+)?cards?|charges?|transactions?)${PAYMENT_NON_OUTCOME_SUFFIX}(?:\\s+(?:of\\s+${PAYMENT_AMOUNT}|for\\s+${PAYMENT_AMOUNT}|from\\s+(?:yesterday|today|last\\s+\\w+)|that\\s+(?:you|we|they|i)\\s+(?:submitted|made|sent|authorized|approved|processed)|ending(?:\\s+in)?\\s+\\d{4}\\b))?`;
 const PAYMENT_OBJECT_PRONOUN = '(?:it|that(?!\\s+(?!(?:and|but|then|yet|so|if|unless|once|when|after|before|until|as|only|provided|providing|assuming|on|in|at|for|with|to|by|again|today|yesterday|tomorrow|last|just|now|already|successfully)\\b|[a-z]+ly\\b)[a-z]))';
@@ -743,7 +743,11 @@ function paymentClaimContext(text, start, end) {
     : text.slice(end - claimContext(scopeText, start, end).length, end);
 }
 function* inheritedPaymentOutcomeCandidates(text) {
-  for (const subject of text.matchAll(PAYMENT_INHERITED_SUBJECT_RE)) {
+  // A paperwork object can precede an action on a real payment, but cannot
+  // itself supply the payment referent for an omitted/pronominal object.
+  const nounHeads = new RegExp(PAYMENT_INHERITED_SUBJECT_RE.source.replace(PAYMENT_NON_OUTCOME_SUFFIX, ''), 'gi');
+  for (const subject of text.matchAll(nounHeads)) {
+    const artifactSubject = !new RegExp(`^(?:${PAYMENT_INHERITED_SUBJECT_RE.source})`, 'i').test(text.slice(subject.index));
     const subjectEnd = subject.index + subject[0].length;
     const subjectSuffix = text.slice(subjectEnd).split(/[.!?;—–]/)[0];
     for (const match of subjectSuffix.matchAll(PAYMENT_INHERITED_OUTCOME_RE)) {
@@ -761,6 +765,7 @@ function* inheritedPaymentOutcomeCandidates(text) {
       const objectTarget = new RegExp(`^(?:(?:your|the|an?|my|our|their|this|that)\\s+)?(?:${PAYMENT_TARGET}|${PAYMENT_OBJECT_PRONOUN})\\b`, 'i');
       const paymentObject = objectTarget.test(afterPredicate.trimStart())
         && !paymentOutcomePronounHasNonTargetAntecedent(text, { 0: afterPredicate.trim().split(/\s+/)[0], index: predicateStart });
+      if (artifactSubject && !(bareAction && paymentObject)) continue;
       // An intervening actor can still act on the same payment object.
       const interrupted = PAYMENT_INTERVENING_SUBJECT_RE.test(bridge);
       if (interrupted && !(bareAction && paymentObject)) continue;
