@@ -532,7 +532,7 @@ function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)
 
 // A denial of the proposition itself does not assert the proposition.
 // Scope it to the matched claim; denial of another claim cannot exempt it.
-const EXPLICIT_PROPOSITION_DENIAL_SOURCE = String.raw`\b(?:it|this|that)(?:(?:\s+(?:is|was)|['’]s)\s+(?:false|not\s+true|untrue|not\s+the\s+case)|\s+(?:isn['’]t|wasn['’]t)\s+(?:true|the\s+case))\s+that(?:\s+there\s+(?:is|are|was|were))?`;
+const EXPLICIT_PROPOSITION_DENIAL_SOURCE = String.raw`\b(?:it|this|that)(?:(?:\s+(?:is|was)|['’]s)\s+(?:false|not\s+(?:true|correct)|untrue|incorrect|not\s+the\s+case)|\s+(?:isn['’]t|wasn['’]t)\s+(?:true|correct|the\s+case))\s+that(?:\s+there\s+(?:is|are|was|were))?`;
 const EXPLICIT_PROPOSITION_DENIAL_RE = new RegExp(`${EXPLICIT_PROPOSITION_DENIAL_SOURCE}\\s*$`, 'i');
 const EXPLICIT_PROPOSITION_DENIAL_INTRO_RE = new RegExp(EXPLICIT_PROPOSITION_DENIAL_SOURCE, 'gi');
 const EXPLICIT_DENIAL_DISJUNCT_LEAD_RE = /\bor\s+(?:(?:i|we|you|he|she|they|it)\s+|(?:the|your|our|this|that|an?)\s+(?:[\w'’-]+\s+){0,3})?$/i;
@@ -565,7 +565,8 @@ function propositionIsExplicitlyDenied(text, at, findingVerb) {
 const FREE_VISIT_NONARTIFACT_TARGET_SUFFIX_SOURCE = `(?!\\s+(?:report|summary|estimate)\\b)`;
 const FREE_VISIT_PAYMENT_TARGET = `(?:(?:your|the|a|an|our|that|this)\\s+)?(?:(?:next|return|follow-up|follow up|upcoming|scheduled)\\s+)?(?:visit|one|service|treatment|appointment)\\b${FREE_VISIT_NONARTIFACT_TARGET_SUFFIX_SOURCE}`;
 const FREE_VISIT_PAYMENT_LINK = `(?:for|toward|on|about|regarding|to)\\s+(?:(?:(?:the|your)\\s+)?(?:cost|charge|fee)\\s+of\\s+)?${FREE_VISIT_PAYMENT_TARGET}`;
-const FREE_VISIT_FREE_PRICE_SOURCE = `(?:(?:(?:completely|totally|entirely|absolutely|fully)\\s+)?(?:free of charge|free)|on us|at no charge|no charge|at no cost|no cost|complimentary|on the house)`;
+const FREE_VISIT_ZERO_PRICE_SOURCE = `(?:zero(?:\\s+dollars?)?|\\$?0+(?:\\.0+)?(?:\\s+dollars?)?)(?!\\d|[.,]\\d)`;
+const FREE_VISIT_FREE_PRICE_SOURCE = `(?:(?:(?:completely|totally|entirely|absolutely|fully)\\s+)?(?:free of charge|free)|on us|at no charge|no charge|at no cost|no cost|complimentary|on the house|${FREE_VISIT_ZERO_PRICE_SOURCE})`;
 const FREE_VISIT_PRICE_MODIFIER_SOURCE = `(?:(?:already|actually|just|now|still|completely|totally|entirely|absolutely|fully|definitely|certainly|surely|undoubtedly|unquestionably|truly|really)\\s+){0,2}`;
 const FREE_VISIT_PRICE_COMPLEMENT_SOURCE = `(?:waived|${FREE_VISIT_FREE_PRICE_SOURCE})`;
 const FREE_VISIT_COMMITMENT_AUXILIARY_SOURCE = `(?:['’]ll|\\s+will|['’](?:re|m)\\s+going\\s+to|\\s+(?:are|am)\\s+going\\s+to)`;
@@ -581,6 +582,9 @@ const FREE_VISIT_PROMISE_RES = Object.freeze(
   `\\b(?:it|that|this)(?:['’](?:s|ll\\s+be)|\\s+(?:is|will be|would be))\\s+${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_FREE_PRICE_SOURCE}\\b`,
   `\\b(?:we|i)${FREE_VISIT_COMMITMENT_AUXILIARY_SOURCE}\\s+(?:do|perform|provide|give(?:\\s+you)?)\\s+${FREE_VISIT_PAYMENT_TARGET}\\s+(?:for\\s+)?${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_FREE_PRICE_SOURCE}\\b`,
   `\\b(?:we|i)${FREE_VISIT_COMMITMENT_AUXILIARY_SOURCE}\\s+(?:give|provide|do|perform)\\s+(?:you\\s+)?${FREE_VISIT_ADJECTIVAL_PRICE_TARGET_SOURCE}`,
+  `\\b(?:we|i)(?:['’](?:m|re)|\\s+(?:am|are))\\s+(?:doing|performing|providing|giving(?:\\s+you)?)\\s+${FREE_VISIT_PAYMENT_TARGET}\\s+(?:for\\s+)?${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_FREE_PRICE_SOURCE}\\b`,
+  `\\b(?:we|i)(?:['’](?:m|re)|\\s+(?:am|are))\\s+(?:giving|providing|doing|performing)\\s+(?:you\\s+)?${FREE_VISIT_ADJECTIVAL_PRICE_TARGET_SOURCE}`,
+  `\\b(?:i|we)\\s+(?:promise|guarantee)\\s+(?:you\\s+)?${FREE_VISIT_ADJECTIVAL_PRICE_TARGET_SOURCE}`,
   `\\byou${FREE_VISIT_COMMITMENT_AUXILIARY_SOURCE}\\s+(?:get|receive|have)\\s+${FREE_VISIT_ADJECTIVAL_PRICE_TARGET_SOURCE}`,
   `\\byou${FREE_VISIT_COMMITMENT_AUXILIARY_SOURCE}\\s+(?:get|receive|have)\\s+${FREE_VISIT_PAYMENT_TARGET}\\s+(?:for\\s+)?${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_FREE_PRICE_SOURCE}\\b`,
   `\\b${FREE_VISIT_NEGATED_PAYMENT_OBLIGATION_SOURCE}\\s+(?:(?:anything|a thing|a dime|a penny)\\s+)?(?:for|toward)\\s+${FREE_VISIT_PAYMENT_TARGET}`,
@@ -591,7 +595,7 @@ const FREE_VISIT_PROMISE_RES = Object.freeze(
   `\\b(?:we|i)${FREE_VISIT_COVER_PREDICATE_SOURCE}\\s+(?:the|your|our)\\s+(?:cost|charge|fee)\\s+of\\s+${FREE_VISIT_PAYMENT_TARGET}`,
   `\\b(?:we|i)(?:['’](?:ll|ve|re|m)|\\s+(?:will|would|have|had|are|am))?\\s+waiv(?:e|ed|ing)\\s+(?:the|your)\\s+(?:charge|fee|cost)\\s+for\\s+${FREE_VISIT_PAYMENT_TARGET}`,
   `\\b${FREE_VISIT_NEGATED_BILLING_SOURCE}(?: you)?\\b\\s+(?:(?:anything|a thing|a dime|a penny)\\s+)?(?:for|(?:the|a)\\s+(?:cost|charge|fee)\\s+(?:of|for))\\s+(?:(?:your|the|a|an|our)\\s+)?(?:(?:next|return|follow-up|follow up|that|this)\\s+)?(?:visit|one|service|treatment|appointment)\\b${FREE_VISIT_NONARTIFACT_TARGET_SUFFIX_SOURCE}`,
-  `\\b${FREE_VISIT_PAYMENT_TARGET}(?:['’]s\\s*${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_PRICE_COMPLEMENT_SOURCE}|\\s+${FREE_VISIT_PRICE_MODIFIER_SOURCE}(?:(?:costs?|will cost|is going to cost) (?:you )?nothing|(?:won['’]t|will not) cost (?:you )?(?:anything|a thing|a dime|a penny)|(?:is|will be|would be|has been)\\s+${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_PRICE_COMPLEMENT_SOURCE}))\\b`,
+  `\\b${FREE_VISIT_PAYMENT_TARGET}(?:['’]s\\s*${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_PRICE_COMPLEMENT_SOURCE}|\\s+${FREE_VISIT_PRICE_MODIFIER_SOURCE}(?:(?:costs?|will cost|is going to cost) (?:you )?(?:nothing|${FREE_VISIT_ZERO_PRICE_SOURCE})|(?:won['’]t|will not) cost (?:you )?(?:anything|a thing|a dime|a penny)|(?:is|will be|would be|has been)\\s+${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_PRICE_COMPLEMENT_SOURCE}))\\b`,
   `\\b(?:you )?(?:won['’]t|will not|don['’]t|do not) owe (?:us )?(?:anything|a thing|a dime|a penny)\\b(?:,?\\s+(?:not\\s+)?even)?(?:\\s+|,\\s*)${FREE_VISIT_PAYMENT_LINK}`,
   `\\bowe (?:us )?nothing\\b(?:,?\\s+(?:not\\s+)?even)?(?:\\s+|,\\s*)${FREE_VISIT_PAYMENT_LINK}`,
   `\\bno (?:bill|charge|cost|fee)\\b(?:\\s+applies?|\\s+at\\s+all)?(?:\\s+|,\\s*)${FREE_VISIT_PAYMENT_LINK}`

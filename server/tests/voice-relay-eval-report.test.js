@@ -2,6 +2,15 @@ const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-s
 const report = { subject: 'talstar p', location: 'exterior perimeter' };
 
 test.each([
+  ['It is incorrect that Talstar P was applied to the exterior perimeter.', 'fail'],
+  ["It isn't correct that the technician applied Talstar P to the exterior perimeter.", 'fail'],
+  ['It is incorrect that bait was applied indoors, but Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['It is correct that Talstar P was applied to the exterior perimeter.', 'pass'],
+])('direct correctness denials govern only their report proposition: %s', (text, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ['Actually, Talstar P was not applied to the exterior perimeter; it was applied indoors.', 'fail'],
   ['Actually, Talstar P was not applied to the exterior perimeter today.', 'fail'],
   ['Actually, Talstar P was not applied to the exterior perimeter yesterday.', 'pass'],
