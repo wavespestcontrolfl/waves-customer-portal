@@ -577,8 +577,8 @@ const FREE_VISIT_PASSIVE_PAYMENT_SOURCE = `(?:(?:(?:will\\s+(?:not|never)|won['�
 const FREE_VISIT_NEGATED_BILLING_SOURCE = `(?:won['’]t|will not|not going to|never|no need to|don['’]t|do not|doesn['’]t|does not)\\s+(?:bill|charge|invoice)`;
 const FREE_VISIT_PROMISE_RES = Object.freeze(
 [
-  `\\b(?:next|your next|the next|your|that|this|the|the return|the follow-up|the follow up)\\s+(?:visit|one|service|treatment|appointment)(?:['’]s(?: going to be)?|\\s+(?:is(?: going to be)?|will be|would be|comes))\\s+${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_FREE_PRICE_SOURCE}\\b`,
-  `\\b(?:it|that|this)(?:['’]s|\\s+(?:is|will be|would be))\\s+${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_FREE_PRICE_SOURCE}\\b`,
+  `\\b${FREE_VISIT_PAYMENT_TARGET}(?:['’](?:s(?: going to be)?|ll\\s+be)|\\s+(?:is(?: going to be)?|will be|would be|comes))\\s+${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_FREE_PRICE_SOURCE}\\b`,
+  `\\b(?:it|that|this)(?:['’](?:s|ll\\s+be)|\\s+(?:is|will be|would be))\\s+${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_FREE_PRICE_SOURCE}\\b`,
   `\\b(?:we|i)${FREE_VISIT_COMMITMENT_AUXILIARY_SOURCE}\\s+(?:do|perform|provide)\\s+${FREE_VISIT_PAYMENT_TARGET}\\s+(?:for\\s+)?${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_FREE_PRICE_SOURCE}\\b`,
   `\\b(?:we|i)${FREE_VISIT_COMMITMENT_AUXILIARY_SOURCE}\\s+(?:give|provide|do|perform)\\s+(?:you\\s+)?${FREE_VISIT_ADJECTIVAL_PRICE_TARGET_SOURCE}`,
   `\\byou${FREE_VISIT_COMMITMENT_AUXILIARY_SOURCE}\\s+(?:get|receive|have)\\s+${FREE_VISIT_ADJECTIVAL_PRICE_TARGET_SOURCE}`,
@@ -591,7 +591,7 @@ const FREE_VISIT_PROMISE_RES = Object.freeze(
   `\\b(?:we|i)${FREE_VISIT_COVER_PREDICATE_SOURCE}\\s+(?:the|your|our)\\s+(?:cost|charge|fee)\\s+of\\s+${FREE_VISIT_PAYMENT_TARGET}`,
   `\\b(?:we|i)(?:['’](?:ll|ve|re|m)|\\s+(?:will|would|have|had|are|am))?\\s+waiv(?:e|ed|ing)\\s+(?:the|your)\\s+(?:charge|fee|cost)\\s+for\\s+${FREE_VISIT_PAYMENT_TARGET}`,
   `\\b${FREE_VISIT_NEGATED_BILLING_SOURCE}(?: you)?\\b\\s+(?:(?:anything|a thing|a dime|a penny)\\s+)?(?:for|(?:the|a)\\s+(?:cost|charge|fee)\\s+(?:of|for))\\s+(?:(?:your|the|a|an|our)\\s+)?(?:(?:next|return|follow-up|follow up|that|this)\\s+)?(?:visit|one|service|treatment|appointment)\\b${FREE_VISIT_NONARTIFACT_TARGET_SUFFIX_SOURCE}`,
-  `\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b(?:['’]s\\s*${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_PRICE_COMPLEMENT_SOURCE}|\\s+${FREE_VISIT_PRICE_MODIFIER_SOURCE}(?:(?:costs?|will cost|is going to cost) (?:you )?nothing|(?:won['’]t|will not) cost (?:you )?(?:anything|a thing|a dime|a penny)|(?:is|will be|would be|has been)\\s+${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_PRICE_COMPLEMENT_SOURCE}))\\b`,
+  `\\b${FREE_VISIT_PAYMENT_TARGET}(?:['’]s\\s*${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_PRICE_COMPLEMENT_SOURCE}|\\s+${FREE_VISIT_PRICE_MODIFIER_SOURCE}(?:(?:costs?|will cost|is going to cost) (?:you )?nothing|(?:won['’]t|will not) cost (?:you )?(?:anything|a thing|a dime|a penny)|(?:is|will be|would be|has been)\\s+${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_PRICE_COMPLEMENT_SOURCE}))\\b`,
   `\\b(?:you )?(?:won['’]t|will not|don['’]t|do not) owe (?:us )?(?:anything|a thing|a dime|a penny)\\b(?:,?\\s+(?:not\\s+)?even)?(?:\\s+|,\\s*)${FREE_VISIT_PAYMENT_LINK}`,
   `\\bowe (?:us )?nothing\\b(?:,?\\s+(?:not\\s+)?even)?(?:\\s+|,\\s*)${FREE_VISIT_PAYMENT_LINK}`,
   `\\bno (?:bill|charge|cost|fee)\\b(?:\\s+applies?|\\s+at\\s+all)?(?:\\s+|,\\s*)${FREE_VISIT_PAYMENT_LINK}`
@@ -722,7 +722,7 @@ const FREE_VISIT_DEBTOR_CLAIM_RE = new RegExp(`^(?:${FREE_VISIT_DIRECT_PAY_SOURC
 const FREE_VISIT_BILLING_CLAIM_RE = new RegExp(`^${FREE_VISIT_NEGATED_BILLING_SOURCE}\\b`, 'i');
 const FREE_VISIT_DEBTOR_SUBJECT_RE = new RegExp(`\\b((?:i|we|you|he|she|they)(?:['’](?:ll|m|re|s))?|(?:(?:the|an?|our|your)\\s+(?:[\\w'’-]+\\s+){0,3}[\\w'’-]+))(?:\\s+${CLAIM_FUTURE_ACTOR_AUXILIARY_SOURCE})?\\s*$`, 'i');
 const FREE_VISIT_COMPANY_SUBJECT_RE = /^(?:(?:i|we)(?:['’](?:ll|m|re|ve|s))?|waves(?:\s+pest\s+control)?|billing|management|office|(?:(?:the|an?|our|your)\s+)?(?:[\w'’-]+\s+){0,3}(?:technician|tech|crew|team|office|billing|manager|company))$/i;
-const FREE_VISIT_COPULAR_CLAIM_RE = new RegExp(`^${FREE_VISIT_PAYMENT_TARGET}(?:['’]s|\\s+(?:is|will|would|has|comes|costs?))`, 'i');
+const FREE_VISIT_COPULAR_CLAIM_RE = new RegExp(`^${FREE_VISIT_PAYMENT_TARGET}(?:['’](?:s|ll\\s+be)|\\s+(?:is|will|would|has|comes|costs?))`, 'i');
 const FREE_VISIT_EMBEDDING_PREPOSITION_RE = /\b(?:for|of|from|with|about|regarding|on|at|to)\s+(?:(?:your|the|this|that)\s+)?$/i;
 function freeVisitIsEmbeddedVisitSubject(text, match) {
   if (!FREE_VISIT_COPULAR_CLAIM_RE.test(match[0])) return false;

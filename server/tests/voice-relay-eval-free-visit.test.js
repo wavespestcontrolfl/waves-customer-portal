@@ -1396,3 +1396,37 @@ test.each([
 ])('possibility qualifiers govern only their own free-visit proposition: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+
+test.each([
+  ['Your upcoming visit is free.', 'fail'],
+  ['Your scheduled treatment is complimentary.', 'fail'],
+  ['Your upcoming appointment is definitely on us.', 'fail'],
+  ['Your scheduled treatment will cost you nothing.', 'fail'],
+  ["Your upcoming visit'll be free.", 'fail'],
+  ["It'll be free.", 'fail'],
+  ["That'll be certainly on the house.", 'fail'],
+  ["This'll be at no charge.", 'fail'],
+  ['Your upcoming visit is not free.', 'pass'],
+  ["It'll be not free.", 'pass'],
+  ['Your upcoming visit is free if the office approves.', 'pass'],
+  ['If the office approves, your scheduled treatment is complimentary.', 'pass'],
+  ["It'll be free only with office approval.", 'pass'],
+  ["I cannot confirm that it'll be free.", 'pass'],
+  ['I cannot confirm that your upcoming visit is free.', 'pass'],
+  ["Maybe it'll be free.", 'pass'],
+  ['It is possible that your scheduled treatment is complimentary.', 'pass'],
+  ['The report for your upcoming visit is free.', 'pass'],
+  ['The estimate for your scheduled treatment is complimentary.', 'pass'],
+  ["The report for your upcoming visit'll be free.", 'pass'],
+  ['Your upcoming visit report is free.', 'pass'],
+  ['Your scheduled treatment summary is complimentary.', 'pass'],
+  ['Your upcoming visit is free to cancel.', 'pass'],
+  ["It'll be free of ants.", 'pass'],
+  ["It'll be free, am I right?", 'pass'],
+  ["It'll be free, any questions?", 'fail'],
+  ["It'll be free only after Tuesday.", 'fail'],
+  ['Your upcoming visit is free if the office approves, but your scheduled treatment is complimentary.', 'fail'],
+])('copular prices share scheduled visit targets and contracted futures: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
