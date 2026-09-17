@@ -58,7 +58,8 @@ function hasBillingUnit(tokens, at) {
 function hasInverseBillingUnit(tokens, at) {
   if (!isKind(tokens[at], 'unit')) return false;
   const next = skipSeparators(tokens, at + 1);
-  return isBillingNoun(tokens[next]) && !isFeedbackRate(tokens, next);
+  return isBillingNoun(tokens[next]) && !isFeedbackRate(tokens, next)
+    && !isWord(tokens[next + 1], 'reminder', 'reminders', 'status');
 }
 
 function hasSeparatePredicate(tokens, at) {

@@ -107,6 +107,22 @@ describe('email reply amountless billing policy', () => {
   });
 
   test.each([
+    'We send per-visit payment reminders.',
+    'Per visit, payment status is checked.',
+    'We send a per-visit billing reminder.',
+    'For each visit, invoice status is checked.',
+  ])('preserves inverse billing modifiers on reminders and status: %s', (text) => {
+    expect(verdict(text)).toEqual({ ok: true, violations: [] });
+  });
+
+  test.each([
+    'Per visit, payment is due.',
+    'A per-visit payment is required.',
+    'For each visit, a reminder is sent and payment is per visit.',
+    'We send per-visit payment reminders, and each visit has its own charge.',
+  ])('keeps actual billing assertions blocked around reminder and status wording: %s', rejected);
+
+  test.each([
     'Billing is' + String.fromCharCode(92, 10) + 'per visit',
     'Billing is per&#32;visit', '`Billing` is per visit',
     '**Our *fees* are per visit**', 'Billing: per visit',
