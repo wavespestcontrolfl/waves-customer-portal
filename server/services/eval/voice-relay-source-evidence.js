@@ -25,7 +25,7 @@ function maskTimeAbbreviations(source, ambiguities = []) {
     const question = QUESTION_LEAD_RE.test(remainder);
     const closesSentence = !remainder || (!continuation
       && (question || INSTRUCTION_LEAD_RE.test(remainder) || /^[A-Z]/.test(remainder)));
-    if (remainder && !continuation && !question) {
+    if (remainder && !continuation) {
       const dot = offset + value.length - 1;
       ambiguities.push({
         ...sourceSpan(source, dot, dot + 1),
@@ -43,7 +43,9 @@ function splitSourceSpans(source, separator, index = 0, end = source.length) {
   const spans = [];
   let start = index;
   const ambiguities = [];
-  const masked = maskTimeAbbreviations(source, ambiguities).slice(region.index, region.end);
+  const maskedSource = maskTimeAbbreviations(source, ambiguities);
+  const masked = maskedSource.slice(region.index, region.end);
+  const sentenceSeparators = [...maskedSource.matchAll(new RegExp(SENTENCE_SPLIT_RE.source, 'g'))];
   for (const match of masked.matchAll(pattern)) {
     if (!match[0].length) throw new RangeError('source separator must consume characters');
     const boundary = index + match.index;
@@ -51,12 +53,19 @@ function splitSourceSpans(source, separator, index = 0, end = source.length) {
     start = boundary + match[0].length;
   }
   spans.push({ ...sourceSpan(source, start, end), separator: sourceSpan(source, end, end) });
-  return spans.map((span) => ({
-    ...span,
-    ambiguousBoundaries: ambiguities
-      .filter((ambiguity) => (ambiguity.index >= span.index && ambiguity.index <= span.end)
-        || ambiguity.end === span.index),
-  }));
+  return spans.map((span) => {
+    // A trimmed or later clause still belongs to its selected source sentence.
+    // Inherit that parent's uncertainty, including its adjacent boundary.
+    const preceding = sentenceSeparators.filter((boundary) => boundary.index + boundary[0].length <= span.index).at(-1);
+    const contextStart = preceding ? preceding.index + preceding[0].length : 0;
+    const contextEnd = sentenceSeparators.find((boundary) => boundary.index >= span.end)?.index ?? source.length;
+    return {
+      ...span,
+      ambiguousBoundaries: ambiguities.filter((ambiguity) =>
+        (ambiguity.index >= contextStart && ambiguity.index <= contextEnd)
+        || ambiguity.end === contextStart),
+    };
+  });
 }
 
 function sentenceSourceSpans(source) {

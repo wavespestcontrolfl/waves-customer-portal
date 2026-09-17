@@ -197,3 +197,39 @@ test('a question subspan retains ambiguity from its abbreviation sentence bounda
   const subspan = splitSourceSpans(source, /;/, following.index, following.end)[0];
   expect(subspan.ambiguousBoundaries).toEqual(sentence.ambiguousBoundaries);
 });
+
+
+test.each(['After 9 p.m. is the bait safe?', 'Once dry at 9 p.m. is the bait safe?'])(
+  'an auxiliary after a fronted condition retains boundary uncertainty: %s', (source) => {
+    const question = latestInterrogativeSpan(source);
+    expect(question).toMatchObject({ text: ' is the bait safe', index: source.indexOf(' is the bait'), end: source.indexOf('?') });
+    expect(question.ambiguousBoundaries).toHaveLength(1);
+    expect(question.ambiguousBoundaries[0]).toMatchObject({ text: '.', selectedBoundary: true, reason: 'time_abbreviation' });
+    const safe = localCandidateEvidence(source, 'adjective', source.indexOf('safe'), source.indexOf('safe') + 4);
+    expect(safe.sentence.ambiguousBoundaries).toEqual(question.ambiguousBoundaries);
+    expectExact(source, question);
+    expectExact(source, question.ambiguousBoundaries[0]);
+  },
+);
+
+test.each(['If', 'call'])(
+  'a whitespace-trimmed %s subregion inherits its source-sentence ambiguity', (lead) => {
+    const source = 'The bait is safe at 9 p.m. If swallowed, call a veterinarian';
+    const parent = sentenceSourceSpans(source)[1];
+    const subspan = splitSourceSpans(source, /;/, source.indexOf(lead))[0];
+    expect(subspan.ambiguousBoundaries).toEqual(parent.ambiguousBoundaries);
+    expect(subspan.ambiguousBoundaries).toHaveLength(1);
+    expectExact(source, subspan);
+    expectExact(source, subspan.ambiguousBoundaries[0]);
+  },
+);
+
+test('both comma-separated subclauses inherit their selected parent sentence', () => {
+  const source = 'The bait is safe at 9 p.m. If swallowed, call a veterinarian. The office is closed.';
+  const parent = sentenceSourceSpans(source)[1];
+  const subclauses = splitSourceSpans(source, /,\s*/, source.indexOf('If'), parent.end);
+  expect(subclauses).toHaveLength(2);
+  for (const span of subclauses) expect(span.ambiguousBoundaries).toEqual(parent.ambiguousBoundaries);
+  const independent = splitSourceSpans(source, /;/, source.indexOf('The office'))[0];
+  expect(independent.ambiguousBoundaries).toEqual([]);
+});
