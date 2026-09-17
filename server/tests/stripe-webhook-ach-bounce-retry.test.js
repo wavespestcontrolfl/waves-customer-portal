@@ -55,6 +55,9 @@ jest.mock('../services/invoice-helpers', () => ({ INVOICE_UNCOLLECTIBLE_STATUSES
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https://portal.test') }));
 jest.mock('../services/payment-lifecycle-email', () => ({ sendPaymentFailed: jest.fn(async () => {}) }));
 jest.mock('../services/receipt-delivery-queue', () => ({}));
+jest.mock('../services/payment-failure-notifications', () => ({
+  enqueuePaymentFailureNotification: jest.fn(async () => ({ enqueued: true })),
+}));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn() }));
 jest.mock('../services/estimate-deposits', () => ({ handleDepositChargeReversed: jest.fn(async () => ({ handled: false })) }));
 jest.mock('../services/stripe', () => ({
@@ -74,8 +77,6 @@ function resetMockState() {
     processingRow: null,   // payments row matched by { pi, status: 'processing' }
     paymentRow: null,      // payments row matched by { pi } alone
     invoiceRow: null,      // invoices row matched by the PI
-    failCustomerLookup: false,
-    notificationClaims: new Set(),
     webhookEvent: null,
     failInvoiceLookup: false, // invoices .first() throws (fail-closed path)
     priorFailedCount: 0,   // payments count() result (prior attempts)
@@ -112,10 +113,7 @@ function mockMakeBuilder(table, sink) {
       if (mockState.failInvoiceLookup) throw new Error('invoice lookup failed');
       return mockState.invoiceRow;
     }
-    if (table === 'customers') {
-      if (mockState.failCustomerLookup) throw new Error('customer lookup failed');
-      return mockState.customer;
-    }
+    if (table === 'customers') return mockState.customer;
     if (table === 'ach_failure_log') {
       if (b._counted) return { cnt: mockState.recentFailures };
       return null;
@@ -146,14 +144,8 @@ jest.mock('../models/db', () => {
   db.raw = jest.fn(async () => ({ rowCount: 0 }));
   db.transaction = jest.fn(async (fn) => {
     const trx = jest.fn((table) => mockMakeBuilder(table, mockState.trxUpdates));
-    trx.raw = db.raw;
-    const claimsBefore = new Set(mockState.notificationClaims);
-    try {
-      return await fn(trx);
-    } catch (err) {
-      mockState.notificationClaims = claimsBefore;
-      throw err;
-    }
+    trx.raw = jest.fn(async () => {});
+    return fn(trx);
   });
   return db;
 });
@@ -318,81 +310,22 @@ describe('async monthly-autopay bounce arming', () => {
   });
 });
 
-describe('payment_failed admin bell payload', () => {
-  test('carries the resolved customerId so the internal-test-customer suppression can key on it (codex P2 on #4392)', async () => {
-    const db = require('../models/db');
-    const { triggerNotification } = require('../services/notification-triggers');
-    // Let the (PI, failed, attempt) claim win so notifyPaymentFailed reaches the trigger.
-    db.raw.mockImplementation(async (sql) => (String(sql).includes('stripe_payment_notification_log') ? { rowCount: 1 } : { rowCount: 0 }));
-    const row = processingRow();
-    mockState.processingRow = row;
-    mockState.paymentRow = row;
-    await handlePaymentIntentFailed(achBouncePI(), 'evt_pf_1');
-    const call = triggerNotification.mock.calls.find((c) => c[0] === 'payment_failed');
-    expect(call).toBeTruthy();
-    expect(call[1]).toMatchObject({ customerId: 'cust-1', amount: expect.any(Number), reason: expect.any(String), paymentIntentId: 'pi_ach_1', attemptId: 'ch_1' });
-  });
-
-  test('orphan intent (no invoice, no ledger row) falls back to the PI metadata waves_customer_id', async () => {
-    const db = require('../models/db');
-    const { triggerNotification } = require('../services/notification-triggers');
-    db.raw.mockImplementation(async (sql) => (String(sql).includes('stripe_payment_notification_log') ? { rowCount: 1 } : { rowCount: 0 }));
-    mockState.processingRow = null;
-    mockState.paymentRow = null;
-    mockState.invoiceRow = null;
-    mockState.customer = null;
-    await handlePaymentIntentFailed(achBouncePI({ metadata: { type: 'no_show_fee', waves_customer_id: 'cust-demo' }, last_payment_error: { message: 'declined', code: 'card_declined', payment_method: { type: 'card' } } }), 'evt_pf_2');
-    const call = triggerNotification.mock.calls.find((c) => c[0] === 'payment_failed');
-    expect(call).toBeTruthy();
-    expect(call[1].customerId).toBe('cust-demo');
-  });
-
-  test('a late payment_failed after the ledger row settled rings nothing', async () => {
-    const db = require('../models/db');
-    const { triggerNotification } = require('../services/notification-triggers');
-    db.raw.mockImplementation(async (sql) => (String(sql).includes('stripe_payment_notification_log') ? { rowCount: 1 } : { rowCount: 0 }));
-    mockState.processingRow = null;
-    mockState.paymentRow = processingRow({ status: 'paid' });
-    await handlePaymentIntentFailed(achBouncePI(), 'evt_pf_3');
-    expect(triggerNotification.mock.calls.find((c) => c[0] === 'payment_failed')).toBeUndefined();
-  });
-});
-
-describe('payment_failed notification replay', () => {
-  const db = require('../models/db');
+describe('payment_failed durable notification enqueue', () => {
+  const { enqueuePaymentFailureNotification } = require('../services/payment-failure-notifications');
   const { triggerNotification } = require('../services/notification-triggers');
   beforeEach(() => {
-    mockState.paymentRow = processingRow();
-    db.raw.mockImplementation(async (sql, bindings) => {
-      if (!String(sql).includes('stripe_payment_notification_log')) return { rowCount: 0 };
-      const key = JSON.stringify(bindings);
-      if (mockState.notificationClaims.has(key)) return { rowCount: 0 };
-      mockState.notificationClaims.add(key);
-      return { rowCount: 1 };
-    });
-    triggerNotification.mockReset().mockResolvedValue({ bellWritten: true });
+    enqueuePaymentFailureNotification.mockReset().mockResolvedValue({ enqueued: true });
   });
 
-  test.each([
-    ['preferences unavailable', { bellWritten: false, prefsUnavailable: true }],
-    ['admin lookup failed', { bellWritten: false, retryable: true }],
-    ['no recipients', { bellWritten: false, push: null }],
-    ['bell insert failed', { bellWritten: false, retryable: true, push: { sent: 0 } }],
-    ['push-only delivery failed', { bellWritten: false, push: { sent: 0, failed: 1 } }],
-  ])('%s fails the handler and lets the same Stripe event deliver once on replay', async (_label, outcome) => {
-    triggerNotification.mockResolvedValueOnce(outcome);
-    await expect(handlePaymentIntentFailed(achBouncePI(), 'evt_replay'))
-      .rejects.toThrow('Payment failure notification was not delivered');
-    expect(mockState.notificationClaims.size).toBe(0);
-    await handlePaymentIntentFailed(achBouncePI(), 'evt_replay');
-    await handlePaymentIntentFailed(achBouncePI(), 'evt_replay');
-    expect(triggerNotification).toHaveBeenCalledTimes(2);
-    expect(mockState.notificationClaims.size).toBe(1);
-    expect(triggerNotification).toHaveBeenLastCalledWith('payment_failed', expect.any(Object),
-      { dedupeKey: 'payment-failed:pi_ach_1:ch_1' });
+  test('acknowledges the event after enqueue without waiting for phone delivery', async () => {
+    triggerNotification.mockImplementation(() => new Promise(() => {}));
+    await handlePaymentIntentFailed(achBouncePI(), 'evt_queued');
+    expect(enqueuePaymentFailureNotification).toHaveBeenCalledWith(
+      achBouncePI(), 'Payment could not be completed.', 'evt_queued');
+    expect(triggerNotification).not.toHaveBeenCalled();
   });
 
-  test('the webhook returns 500 without marking processed, then acknowledges the replay after delivery', async () => {
+  test('the webhook returns 500 on enqueue failure, then acknowledges successful replay', async () => {
     const router = require('../routes/stripe-webhook');
     const route = router.stack.find((layer) => layer.route?.path === '/').route;
     const handler = route.stack[route.stack.length - 1].handle;
@@ -400,53 +333,28 @@ describe('payment_failed notification replay', () => {
     classifyExistingWebhookEvent.mockImplementation((row) => row.processed ? 'duplicate' : 'reclaim');
     mockConstructEvent.mockReturnValue({ id: 'evt_http_replay', type: 'payment_intent.payment_failed',
       data: { object: achBouncePI() } });
-    triggerNotification.mockResolvedValueOnce({ bellWritten: false, prefsUnavailable: true });
+    enqueuePaymentFailureNotification.mockRejectedValueOnce(new Error('Synthetic enqueue outage'));
     const post = async () => {
       const res = { status: jest.fn(() => res), json: jest.fn(() => res), send: jest.fn(() => res) };
       await handler({ headers: { 'stripe-signature': 'synthetic-signature' }, body: Buffer.from('{}') }, res);
       return res;
     };
-    const failed = await post();
-    expect(failed.status).toHaveBeenCalledWith(500);
+    expect((await post()).status).toHaveBeenCalledWith(500);
     expect(mockState.webhookEvent.processed).toBe(false);
-    expect(mockState.notificationClaims.size).toBe(0);
-    const delivered = await post();
-    expect(delivered.status).toHaveBeenCalledWith(200);
+    expect((await post()).status).toHaveBeenCalledWith(200);
     expect(mockState.webhookEvent.processed).toBe(true);
-    const duplicate = await post();
-    expect(duplicate.json).toHaveBeenCalledWith({ received: true, duplicate: true });
-    expect(triggerNotification).toHaveBeenCalledTimes(2);
+    expect((await post()).json).toHaveBeenCalledWith({ received: true, duplicate: true });
+    expect(enqueuePaymentFailureNotification).toHaveBeenCalledTimes(2);
+    expect(triggerNotification).not.toHaveBeenCalled();
   });
 
-  test('an admin delivery outage does not block the independent customer failure email', async () => {
+  test('an enqueue outage does not block the independent customer failure email', async () => {
     const lifecycleEmail = require('../services/payment-lifecycle-email');
-    triggerNotification.mockResolvedValueOnce({ bellWritten: false, prefsUnavailable: true });
+    enqueuePaymentFailureNotification.mockRejectedValueOnce(new Error('Synthetic enqueue outage'));
     const cardFailure = achBouncePI({ metadata: {}, last_payment_error: {
       message: 'declined', code: 'card_declined', payment_method: { type: 'card' },
     } });
-    await expect(handlePaymentIntentFailed(cardFailure, 'evt_card')).rejects.toThrow('not delivered');
+    await expect(handlePaymentIntentFailed(cardFailure, 'evt_card')).rejects.toThrow('enqueue outage');
     expect(lifecycleEmail.sendPaymentFailed).toHaveBeenCalledWith({ paymentIntentId: 'pi_ach_1', attemptId: 'ch_1' });
-  });
-
-  test('a lookup exception after taking the claim releases it for replay', async () => {
-    mockState.failCustomerLookup = true;
-    await expect(handlePaymentIntentFailed(achBouncePI(), 'evt_lookup')).rejects.toThrow('customer lookup failed');
-    expect(mockState.notificationClaims.size).toBe(0);
-    mockState.failCustomerLookup = false;
-    await handlePaymentIntentFailed(achBouncePI(), 'evt_lookup');
-    expect(triggerNotification).toHaveBeenCalledTimes(1);
-  });
-
-  test.each([
-    ['durable bell despite push failure', { bellWritten: true, retryable: true, error: 'push unavailable' }],
-    ['push-only success', { bellWritten: false, push: { sent: 1 } }],
-    ['intentional opt-out or test account', { bellWritten: false, suppressed: true }],
-    ['policy suppression', { bellWritten: false, policySilenced: true }],
-  ])('%s retains the claim and suppresses duplicate delivery', async (_label, outcome) => {
-    triggerNotification.mockResolvedValue(outcome);
-    await handlePaymentIntentFailed(achBouncePI(), 'evt_complete');
-    await handlePaymentIntentFailed(achBouncePI(), 'evt_complete');
-    expect(triggerNotification).toHaveBeenCalledTimes(1);
-    expect(mockState.notificationClaims.size).toBe(1);
   });
 });

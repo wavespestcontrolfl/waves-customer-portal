@@ -507,3 +507,36 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
     bellPolicy.clearOverrideCache();
   });
 });
+
+describe('payment failure settlement recheck', () => {
+  const PushService = require('../services/push-notifications');
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.mockImplementation((table) => table === 'technicians'
+      ? tableMock([{ id: 'admin-1', role: 'admin' }]) : tableMock([]));
+    NotificationService.notifyAdmin.mockImplementation(async (_category, _title, _body, opts) => (
+      await opts.shouldContinue() ? { id: 'synthetic-bell' } : { suppressed: true }
+    ));
+  });
+
+  test('a settlement discovered at the persistence boundary suppresses both channels', async () => {
+    const shouldContinue = jest.fn(async () => false);
+    const result = await triggerNotification('payment_failed', { paymentIntentId: 'pi_synthetic' }, {
+      dedupeKey: 'payment-failed:pi_synthetic:ch_synthetic', shouldContinue, beforePush: shouldContinue,
+    });
+    expect(shouldContinue).toHaveBeenCalled();
+    expect(result.bellWritten).toBe(false);
+    expect(result.suppressed).toBe(true);
+    expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
+  });
+
+  test('settlement after bell persistence prevents provider fan-out', async () => {
+    const shouldContinue = jest.fn().mockResolvedValueOnce(true).mockResolvedValue(false);
+    const result = await triggerNotification('payment_failed', { paymentIntentId: 'pi_synthetic' }, {
+      dedupeKey: 'payment-failed:pi_synthetic:ch_synthetic', shouldContinue, beforePush: shouldContinue,
+    });
+    expect(result.bellWritten).toBe(true);
+    expect(result.push.skipped).toBe('superseded_before_push');
+    expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
+  });
+});

@@ -877,7 +877,7 @@ function pushTagFor(triggerKey, payload = {}) {
  * @param {string} triggerKey — must match a key in TRIGGER_REGISTRY
  * @param {object} payload — trigger-specific data, see each build() for shape
  */
-async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null } = {}) {
+async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, shouldContinue = null } = {}) {
   try {
     const trigger = TRIGGER_REGISTRY[triggerKey];
     if (!trigger) {
@@ -980,6 +980,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
             built.body,
             { link: built.link, metadata: { triggerKey, priority: trigger.priority, payload: safePayload },
               ...(dedupeKey ? { dedupeKey } : {}),
+              ...(shouldContinue ? { shouldContinue } : {}),
               ...(relayFailureCall ? { relayFailureCall, dedupeKey: `relay-failure:${relayFailureCall.callSid}` } : {}) }
           );
           if (created && !created.suppressed) bellWritten = true;
@@ -993,6 +994,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     const stats = { bellWritten, push: null,
       ...(dedupeKey ? { retryable: anyBellEnabled && !bellWritten && !bellSuppressed } : {}),
     };
+    if (shouldContinue && bellSuppressed && !bellWritten) stats.suppressed = true;
     onBell?.(bellWritten); // durable bell result is available before badge lookup or push
     if (relayFailureCall && !bellWritten) return stats; // an unclaimed callback never dispatches a push
     // Every active admin turned BOTH channels off: that is deliberate
