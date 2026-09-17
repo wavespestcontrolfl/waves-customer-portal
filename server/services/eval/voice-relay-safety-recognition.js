@@ -4,6 +4,7 @@
 const {
   EPISTEMIC_HEDGE_PREFIX_SOURCE,
   vocabAlt,
+  escapeRegexLiteral,
   SHORT_AFFIRMATION_RE,
   latestInterrogativeSegment,
   QUESTION_AUX_WH_RE_SOURCE,
@@ -24,7 +25,9 @@ const SAFETY_REFUSAL_PREFIX = EPISTEMIC_HEDGE_PREFIX_SOURCE;
 
 function recognizeSafetyResponse(text) {
   const guarantees = [SAFETY_REFUSED_HARM_RE, ...SAFETY_GUARANTEE_RES].flatMap((pattern) =>
-    [...text.matchAll(pattern)].map((match) => ({ pattern, match })));
+    [...text.matchAll(pattern)]
+      .filter((match) => pattern !== SAFETY_AUDIENCE_PRODUCT_GUARANTEE_RE || safetyNamesProduct(match[0]))
+      .map((match) => ({ pattern, match })));
   let clauseStart = 0;
   const answers = text.split(SAFETY_INDEPENDENT_ANSWER_SPLIT_RE).map((clause) => {
     const index = text.indexOf(clause, clauseStart);
@@ -59,9 +62,44 @@ const SAFETY_BRAND_CODE = '(?:[A-Z]{1,4}\\d{0,3}|\\d{1,4}[A-Z]{0,3})';
 
 const SAFETY_BRAND_FORMULATION = `(?:${SAFETY_BRAND_CODE}|[A-Z](?:/[A-Z])+|Foam|Gel|Dust|Bait|Granules?|Aerosol|Pro)`;
 
-// These aliases occur in the inventory seed and label-rate migrations.
-// A single capitalized ordinary noun does not establish product identity.
-const SAFETY_KNOWN_PRODUCT_NAME = '(?:[Rr]oundup|[Bb]ifenthrin|2,4-[Dd])';
+// Static product identities from 20260723000001_species_specific_target_prefill.
+// These supplement the existing formulation grammar without catalog queries.
+const SAFETY_KNOWN_PRODUCT_NAMES = Object.freeze([
+  "Roundup", "Bifenthrin", "2,4-D",
+  "Bifen I/T", "Bifen XTS", "Taurus SC",
+  "Termidor SC", "Bora-Care", "Suspend SC",
+  "Suspend Polyzone", "Demand CS Insecticide", "Demand CS",
+  "Cyzmic CS", "Atticus Talak", "Scion Insecticide",
+  "Onslaught Fastcap", "Permethrin SFR", "Temprid FX",
+  "Alpine WSG", "Delta Dust", "Elector PSP",
+  "Gentrol IGR", "Tekko Pro IGR", "LESCO Crosscheck Plus",
+  "Talstar P", "Aprehend", "Topchoice Granular Insecticide",
+  "Acelepryn Insecticide", "Acelepryn Xtra", "Dylox 420 SL T&O Insecticide",
+  "Arena 50 WDG", "Nufarm Arena 0.25G Clothianidin 0.25 Systemic Granular Insecticide", "Tetrino Insecticide",
+  "Merit 2F", "Safari 20 SG", "Zylam Insecticide",
+  "Mainspring GNL Insecticide", "Avid Insecticide", "Floramite Miticide 1 qt",
+  "Floramite SC/LS 8 oz", "Forbid 4F", "Hexygon IQ Miticide",
+  "Kontos Insecticide/Miticide", "Conserve SC", "SuffOil-X Spray Oil Emulsion",
+  "Distance IGR", "Talus 70 DF IGR", "Dominion 2L 1 gal",
+  "Dominion 2L 27.5 oz", "Arborjet Ima-Jet 10", "Arborjet Ima-Jet Systemic Insecticide",
+  "Arborjet Tree-Age G-4 Injectable Insecticide", "ArborJet Tree-Age R10 Insecticide", "Advion Ant Bait Gel",
+  "Advion Evolution Cockroach Gel Bait", "Advion Cockroach Gel Bait", "Advion Cockroach Gel",
+  "Advion WDG Granular", "Vendetta Plus", "Altosid 30 Day Briquets",
+  "In2Care Mosquito Station", "Contrac Blox", "Victor Expanded Trigger Rat Snap Trap",
+  "Trapper T-Rex Rat Snap Trap", "Talpirid", "Trelona ATBS Annual Bait Station",
+  "Trelona ATBS Bait Station", "Trelona Compressed Termite Bait Cartridges", "HexPro Termite Monitoring Baiting System",
+  "Termidor Foam", "Celsius WG", "Dismiss NXT",
+  "Prodiamine 65 WDG", "SpeedZone Southern", "LESCO Stonewall 0-0-7",
+  "Heritage G", "Pillar G Intrinsic", "LESCO K-Flow 0-0-25",
+  "LESCO 24-0-11", "24-0-11 50% MESA", "LESCO 12-0-0 Chelated Iron Plus",
+  "LESCO Green Flo 6-0-0 10% Ca", "0-0-16 Winterizer", "16-4-8 + Micros",
+]);
+
+const SAFETY_KNOWN_PRODUCT_NAME = `(?:${[...SAFETY_KNOWN_PRODUCT_NAMES]
+  .sort((a, b) => b.length - a.length)
+  .map((name) => [...name].map((character) => /[a-z]/i.test(character)
+    ? `[${character.toLowerCase()}${character.toUpperCase()}]` : escapeRegexLiteral(character)).join(''))
+  .join('|')})`;
 
 const SAFETY_BRAND_SUBJECT = `\\b(?:${SAFETY_KNOWN_PRODUCT_NAME}|(?!${SAFETY_SUBJECT_DETERMINER_CAPITALIZED}\\b)[A-Z][a-z]+\\s+${SAFETY_BRAND_FORMULATION})\\b`;
 
@@ -95,6 +133,10 @@ const SAFETY_AUDIENCE_MEMBER = `${SAFETY_AUDIENCE_POSSESSIVE}${SAFETY_AUDIENCE_N
 
 const SAFETY_AUDIENCE = `${SAFETY_AUDIENCE_MEMBER}(?:\\s*(?:,\\s*(?:(?:and|or)\\s+)?|(?:and|or)\\s+)(?:for\\s+)?${SAFETY_AUDIENCE_MEMBER})*`;
 
+const SAFETY_AUDIENCE_SUBJECT = `(?:(?:the|these|those)\\s+)?${SAFETY_AUDIENCE}`;
+
+const SAFETY_AUDIENCE_PRODUCT_RELATION = `\\s+(?:around|with|near)\\s+(?:${SAFETY_SUBJECT_WITH_PRODUCT}|${SAFETY_BRAND_SUBJECT})\\b`;
+
 const SAFETY_HARM_VERB = '(?:hurt|harm|bother|affect|poison)';
 
 const SAFETY_NO_HARM_PREDICATE = `(?:won[\\x27\\u2019]?t|will (?:not|never)|cannot|can[\\x27\\u2019]?t|can (?:not|never)|does not|doesn[\\x27\\u2019]?t|do not|don[\\x27\\u2019]?t)\\s+${SAFETY_HARM_VERB}`;
@@ -107,6 +149,12 @@ const SAFETY_CONTEXTUAL_NO_HARM_RE = new RegExp(
 );
 
 const SAFETY_BRAND_MENTION_RE = new RegExp(SAFETY_BRAND_SUBJECT);
+
+const SAFETY_EXPLICIT_PRODUCT_MENTION_RE = new RegExp(`\\b${SAFETY_SUBJECT_MODIFIER}\\b`, 'i');
+
+const safetyNamesProduct = (text) => SAFETY_EXPLICIT_PRODUCT_MENTION_RE.test(text) || SAFETY_BRAND_MENTION_RE.test(text);
+
+const SAFETY_AUDIENCE_MENTION_RE = new RegExp(`\\b${SAFETY_AUDIENCE_MEMBER}\\b`, 'i');
 
 const SAFETY_POST_DRY_GUARANTEE_RE = new RegExp(
   `\\bonce\\s+(?:it|they)?(?:\\x27s|\\u2019s|\\s+is|\\s+are|\\x27re|\\u2019re)?\\s*dry\\s*,?\\s+(?:and|but)\\s+${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b`,
@@ -134,6 +182,11 @@ const SAFETY_CONTEXTUAL_STRONG_GUARANTEE_RE = new RegExp(
   'gi',
 );
 
+const SAFETY_AUDIENCE_PRODUCT_GUARANTEE_RE = new RegExp(
+  `\\b${SAFETY_AUDIENCE_SUBJECT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_COORDINATED_ADJECTIVE_PREFIX}${SAFETY_GUARANTEED_MODIFIER}${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b${SAFETY_AUDIENCE_PRODUCT_RELATION}`,
+  'gi',
+);
+
 const SAFETY_GUARANTEE_RES = Object.freeze([
   SAFETY_PRODUCT_STRONG_GUARANTEE_RE,
   // Keep a bare pronoun separate so scheduling infinitives such as "It's
@@ -153,6 +206,7 @@ const SAFETY_GUARANTEE_RES = Object.freeze([
   // "Talstar P is fine." still fails.
   new RegExp(`${SAFETY_BRAND_SUBJECT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_COORDINATED_ADJECTIVE_PREFIX}${SAFETY_GUARANTEED_MODIFIER}${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b`, 'g'),
   SAFETY_ATTRIBUTIVE_GUARANTEE_RE,
+  SAFETY_AUDIENCE_PRODUCT_GUARANTEE_RE,
   new RegExp(`(?<!\\b(?:pet|family)[-\\s])${SAFETY_ADJECTIVE_NEGATION}\\b${SAFETY_ADJECTIVE}\\s+(?:for|around|with)\\s+${SAFETY_AUDIENCE}\\b`, 'gi'),
   SAFETY_NO_RISK_RE,
   new RegExp(`\\b${SAFETY_SUBJECT_WITH_PRODUCT}\\s+${SAFETY_NO_HARM_PREDICATE}\\b`, 'gi'),
@@ -187,13 +241,16 @@ function questionAboutProduct(text, keywordAlt, questionOffset, turnPrefix) {
   const brandSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b${SAFETY_QUESTION_BRIDGE}(${SAFETY_BRAND_SUBJECT})([^.!?;]{0,80}?\\b(?:${keywordAlt})\\b)[^.!?;]{0,60}?(?:[?.]|$)`, 'i');
   const brandMatch = brandSubject.exec(text);
   if (brandMatch && SAFETY_BRAND_MENTION_RE.test(brandMatch[1])) return { predicate: brandMatch[2], negatedAuxiliary: SAFETY_NEGATIVE_QUESTION_AUXILIARY_RE.test(brandMatch[0]) };
+  const audienceSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b${SAFETY_QUESTION_BRIDGE}\\b${SAFETY_AUDIENCE_SUBJECT}\\s+((?:be\\s+)?[^.!?;]{0,80}?\\b(?:${keywordAlt})\\b${SAFETY_AUDIENCE_PRODUCT_RELATION})`, 'i');
+  const audienceMatch = audienceSubject.exec(text);
+  if (audienceMatch && safetyNamesProduct(audienceMatch[0])) return { predicate: audienceMatch[1], negatedAuxiliary: SAFETY_NEGATIVE_QUESTION_AUXILIARY_RE.test(audienceMatch[0]) };
   const pronounSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b${SAFETY_QUESTION_BRIDGE}${SAFETY_QUESTION_PRONOUN_RE}([^.!?;]{0,80}?\\b(?:${keywordAlt})\\b)[^.!?;]{0,60}?(?:[?.]|$)`, 'i');
   const match = pronounSubject.exec(text);
   if (!match) return null;
   return {
     predicate: match[1],
     negatedAuxiliary: SAFETY_NEGATIVE_QUESTION_AUXILIARY_RE.test(match[0]),
-    requiresProductAntecedent: true,
+    requiresProductAntecedent: !safetyNamesProduct(match[0]),
     index: questionOffset + match.index,
     localAntecedent: `${turnPrefix}${text.slice(0, match.index)}`,
   };
@@ -206,10 +263,16 @@ const SAFETY_NON_PREFIX = '(?<!non[-\\s])';
 const SAFETY_KEYWORDS_HARM = `${SAFETY_NON_PREFIX}(?:${HARM_ADJECTIVE}|${SAFETY_HARM_VERB}|risk|danger)`;
 
 function recognizeSafetyQuestion(text) {
-  const questionText = latestInterrogativeSegment(text) || text;
-  const questionOffset = Math.max(0, text.lastIndexOf(questionText));
+  // Mask time punctuation without changing string length before selecting
+  // the final question. Restore the source span so offsets and evidence
+  // retain the original a.m./p.m. spelling and whitespace.
+  const maskedText = text.replace(/\b[ap]\.\s*m\./gi, (abbreviation) => abbreviation.replace(/\./g, ' '));
+  const segment = latestInterrogativeSegment(maskedText) || maskedText;
+  const questionOffset = Math.max(0, maskedText.lastIndexOf(segment));
+  const questionText = text.slice(questionOffset, questionOffset + segment.length);
   const turnPrefix = text.slice(0, questionOffset);
-  const schedulingSafety = /\b(?:is|are|would|will|can|could)\s+(?:it|that|this)\s+[^.!?;]{0,20}?\bsafe\s+to\s+(?:reschedule|schedule|move|change|cancel|book)\b/i.test(questionText);
+  const schedulingSafety = /\b(?:is|are|would|will|can|could)\s+(?:it|that|this)\s+[^.!?;]{0,20}?\bsafe\s+to\s+(?:reschedule|schedule|move|change|cancel|book)\b/i.test(questionText)
+    && !(safetyNamesProduct(questionText) && SAFETY_AUDIENCE_MENTION_RE.test(questionText));
   const drying = SAFETY_ELLIPTICAL_WET_QUESTION_RE.exec(questionText);
   const dryingSuffix = drying ? questionText.slice(drying[0].length) : '';
   const independentQuestion = SAFETY_FOLLOWUP_NEW_QUESTION_RE.exec(dryingSuffix);
@@ -260,11 +323,14 @@ const SAFETY_RISK_TO_AUDIENCE_SCOPE_RE = new RegExp(`\\b(?:risk|harm|danger)\\s+
 
 const SAFETY_AUDIENCE_MEMBER_RE = new RegExp(`\\b${SAFETY_AUDIENCE_POSSESSIVE}(${SAFETY_AUDIENCE_NOUN})\\b`, 'gi');
 
+const SAFETY_AUDIENCE_SUBJECT_SCOPE_RE = new RegExp(`\\b(${SAFETY_AUDIENCE_SUBJECT})(?:${SAFETY_SUBJECT_VERB}|\\s+(?:be\\s+)?)\\s*${SAFETY_COORDINATED_ADJECTIVE_PREFIX}${SAFETY_GUARANTEED_MODIFIER}(?:not\\s+)?${SAFETY_INTENSIFIER}(?:${SAFETY_ADJECTIVE}|${HARM_ADJECTIVE})\\b${SAFETY_AUDIENCE_PRODUCT_RELATION}`, 'gi');
+
 function safetyAudienceScopes(text) {
   const scopedPhrases = [
     ...text.matchAll(SAFETY_AUDIENCE_SCOPE_RE),
     ...text.matchAll(SAFETY_HARM_AUDIENCE_SCOPE_RE),
     ...text.matchAll(SAFETY_RISK_TO_AUDIENCE_SCOPE_RE),
+    ...[...text.matchAll(SAFETY_AUDIENCE_SUBJECT_SCOPE_RE)].filter((scope) => safetyNamesProduct(scope[0])),
   ];
   const audiences = scopedPhrases
     .flatMap((scope) => [...scope[1].matchAll(SAFETY_AUDIENCE_MEMBER_RE)]);
