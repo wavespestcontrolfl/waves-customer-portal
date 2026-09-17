@@ -293,3 +293,77 @@ test.each(['The bait is safe while dry.', 'While dry, the bait is safe.'])(
     expectExact(source, evidence.adjacentConnectives[0]);
   },
 );
+
+test.each(['U.S.', 'U. S.', 'e.g.', 'Dr.'])(
+  'a lexical abbreviation retains governing negation or explicit uncertainty: %s', (abbreviation) => {
+    const source = `I cannot say the ${abbreviation} product is safe`;
+    const evidence = localCandidateEvidence(source, 'adjective', source.indexOf('safe'), source.indexOf('safe') + 4);
+    expect(evidence.negations.map((token) => token.text)).toContain('cannot');
+    expect(evidence.sentence.ambiguousBoundaries[0]).toMatchObject({ reason: 'lexical_abbreviation', selectedBoundary: false });
+    for (const span of [evidence, evidence.clause, ...evidence.negations, ...evidence.sentence.ambiguousBoundaries]) expectExact(source, span);
+  },
+);
+
+test('both sides of a potentially terminal lexical abbreviation retain its ambiguity', () => {
+  const source = 'I cannot say the bait is safe in the U.S. If swallowed, call a veterinarian';
+  const claim = localCandidateEvidence(source, 'adjective', source.indexOf('safe'), source.indexOf('safe') + 4);
+  const condition = localCandidateEvidence(source, 'condition', source.indexOf('If'), source.indexOf('If') + 2);
+  expect(claim.conditions).toEqual([]);
+  expect(claim.sentence.ambiguousBoundaries).toEqual(condition.sentence.ambiguousBoundaries);
+  expect(claim.sentence.ambiguousBoundaries[0]).toMatchObject({ reason: 'lexical_abbreviation', selectedBoundary: true });
+  expectExact(source, claim.sentence.ambiguousBoundaries[0]);
+});
+
+test.each(['call us', 'Call us', 'you should call us', 'the technician will call us'])(
+  'a comma-spliced independent clause keeps its own drying condition: %s', (instruction) => {
+    const source = `The bait is safe, ${instruction} once dry`;
+    const safe = localCandidateEvidence(source, 'adjective', source.indexOf('safe'), source.indexOf('safe') + 4);
+    expect(safe.clause.text).toBe('The bait is safe');
+    expect(safe.conditions).toEqual([]);
+    const call = localCandidateEvidence(source, 'instruction', source.indexOf('once'), source.indexOf('once') + 4);
+    expect(call.conditions[0].text).toBe('once dry');
+    for (const span of [safe, safe.clause, call.clause, call.conditions[0]]) expectExact(source, span);
+  },
+);
+
+test.each(['The bait is safe, once dry', 'Once it is dry, the bait is safe'])(
+  'a comma before a reduced drying qualifier stays within its proposition: %s', (source) => {
+    const safe = localCandidateEvidence(source, 'adjective', source.indexOf('safe'), source.indexOf('safe') + 4);
+    expect(safe.conditions[0].marker.text.toLowerCase()).toBe('once');
+    expect(safe.conditions[0].body.text.trim()).toMatch(/dry$/);
+    expectExact(source, safe.clause);
+  },
+);
+
+test.each(['Is the bait safe, or not?', 'Is the bait safe or not?', 'Is the bait safe, and harmless?'])(
+  'an elliptical alternative retains the complete source question: %s', (source) => {
+    const question = latestInterrogativeSpan(source);
+    expect(question.text).toBe(source.slice(0, -1));
+    expectExact(source, question);
+  },
+);
+
+test.each(['and is the spray safe', 'or will it hurt dogs', 'but what about the spray'])(
+  'a coordinated independent interrogative selects its exact last span: %s', (tail) => {
+    const source = `Is the bait safe, ${tail}?`;
+    const question = latestInterrogativeSpan(source);
+    const expected = tail.replace(/^(?:and|or|but) /, '');
+    expect(question.text).toBe(expected);
+    expect(question.index).toBe(source.indexOf(expected));
+    expectExact(source, question);
+  },
+);
+
+test('comma-separated finite assertions retain separate local negations', () => {
+  const source = 'The bait is not safe, the spray is safe once dry';
+  const first = source.indexOf('safe');
+  const second = source.lastIndexOf('safe');
+  const negative = localCandidateEvidence(source, 'adjective', first, first + 4);
+  const positive = localCandidateEvidence(source, 'adjective', second, second + 4);
+  expect(negative.negations.map((token) => token.text)).toEqual(['not']);
+  expect(negative.conditions).toEqual([]);
+  expect(positive.negations).toEqual([]);
+  expect(positive.conditions[0].text).toBe('once dry');
+  expectExact(source, negative.clause);
+  expectExact(source, positive.clause);
+});
