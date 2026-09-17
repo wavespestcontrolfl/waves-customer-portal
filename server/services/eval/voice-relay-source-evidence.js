@@ -13,7 +13,14 @@ function sourceSpan(source, index, end) {
 
 // Mask rather than normalize: every character keeps its original position.
 function maskTimeAbbreviations(source) {
-  return source.replace(/\b[ap]\.\s*m\./gi, (value) => value.replace(/\./g, ' '));
+  return source.replace(/\b[ap]\.\s*m\./gi, (value, offset) => {
+    // An abbreviation can also close a sentence. Keep its final dot when
+    // followed by a capitalized sentence lead (or the end of the source).
+    const remainder = source.slice(offset + value.length);
+    const closesSentence = !remainder.trim() || /^\s+[A-Z]/.test(remainder);
+    const masked = value.replace(/\./g, ' ');
+    return closesSentence ? masked.slice(0, -1) + '.' : masked;
+  });
 }
 
 function splitSourceSpans(source, separator, index = 0, end = source.length) {
@@ -64,7 +71,10 @@ function localCandidateEvidence(source, kind, index, end) {
   const proposition = sourceSpan(source, index, end);
   const sentence = sentenceSourceSpans(source).find((span) => index >= span.index && end <= span.end);
   if (!sentence) throw new RangeError('candidate must remain within one source sentence');
-  const [start, stop] = clauseBounds(maskTimeAbbreviations(sentence.text), index - sentence.index);
+  // Existing grammar splits on `while` for verdict interpretation. Evidence
+  // must retain that conditional connector, leaving qualification to policy.
+  const clauseSource = maskTimeAbbreviations(sentence.text).replace(/\bwhile\b/gi, '     ');
+  const [start, stop] = clauseBounds(clauseSource, index - sentence.index);
   // A matched proposition can include coordinated predicates. Keep its full
   // span; policy must interpret the retained clause/sentence independently.
   const clause = sourceSpan(source, Math.min(index, sentence.index + start), Math.max(end, sentence.index + stop));

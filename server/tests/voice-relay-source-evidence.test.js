@@ -11,9 +11,9 @@ function expectExact(source, span) {
 test.each(['a.m.', 'p.m.', 'A. M.', 'P.  M.'])('question offsets retain %s spelling and spacing', (time) => {
   const source = `The treatment is at 9 ${time} Is the bait safe for my dog? I need to know.`;
   const span = latestInterrogativeSpan(source);
-  expect(span.text).toBe(`The treatment is at 9 ${time} Is the bait safe for my dog`);
+  expect(span.text).toBe(' Is the bait safe for my dog');
   expectExact(source, span);
-  expect(sentenceSourceSpans(source)).toHaveLength(3);
+  expect(sentenceSourceSpans(source)).toHaveLength(4);
   expect(latestInterrogativeSegment(source)).toBe(`The treatment is at 9 ${time[0]}m Is the bait safe for my dog`);
 });
 
@@ -91,4 +91,25 @@ test('invalid and cross-sentence candidate intervals fail instead of silently at
   expect(() => sourceSpan('safe', 1, 6)).toThrow(RangeError);
   expect(() => localCandidateEvidence('safe. If dry.', 'adjective', 0, 12)).toThrow(RangeError);
   expect(() => splitSourceSpans('safe', /(?=safe)/)).toThrow(RangeError);
+});
+
+
+test.each(['The bait is safe while it is dry.', 'While it is dry, the bait is safe.'])(
+  'while conditions retain exact evidence: %s', (source) => {
+    const index = source.indexOf('safe');
+    const evidence = localCandidateEvidence(source, 'adjective', index, index + 4);
+    expect(evidence.conditions).toHaveLength(1);
+    expect(evidence.conditions[0].marker.text.toLowerCase()).toBe('while');
+    expect(evidence.conditions[0].body.text.trim()).toBe('it is dry');
+    expectExact(source, evidence.conditions[0]);
+  },
+);
+
+test('a time abbreviation may also end the candidate sentence', () => {
+  const source = 'The bait is safe at 9 p.m. If swallowed, call a veterinarian.';
+  const index = source.indexOf('safe');
+  const evidence = localCandidateEvidence(source, 'adjective', index, index + 4);
+  expect(evidence.conditions).toEqual([]);
+  expect(evidence.sentence.text).toBe('The bait is safe at 9 p.m');
+  expectExact(source, evidence.sentence);
 });
