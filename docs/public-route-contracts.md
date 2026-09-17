@@ -1034,7 +1034,7 @@ gate off, an unaccepted annual offer remains viewable and acceptable only
 when its server-owned `deliveryState` records a real provider handoff and a
 fingerprint matching the current customer, property, scope, terms and price,
 including the persisted tier, service interest, category and source.
-Pricing stamps, suppressed sends and earlier quarterly handoffs do not qualify.
+Pricing stamps, suppressed or deduplicated sends and earlier quarterly handoffs do not qualify.
 The legacy view and `/data` withhold ineligible offers; `/accept` returns its
 inactive 409. Document-render pins cannot bypass annual withholding. Decline and
 extension claims recheck the annual verdict under their existing locks before

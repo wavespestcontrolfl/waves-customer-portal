@@ -139,7 +139,7 @@ beforeEach(() => {
   db.transaction = jest.fn(async (fn) => fn(db));
   sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-synthetic-accepted' });
   smsTemplates.getTemplate.mockImplementation(async (_key, vars) => `SMS: ${vars.estimate_url}`);
-  EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'sg-1' } });
+  EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, providerAttempted: true, message: { provider_message_id: 'sg-1' } });
 });
 
 describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () => {

@@ -48,7 +48,7 @@ jest.mock('../services/email-template-library', () => {
     loadTemplateByKey: jest.fn(async (key) => ({ template: { ...template, template_key: key }, activeVersion: version })),
     renderTemplate,
     renderVersion: jest.fn(async (id, payload) => renderTemplate({ template, version: { id }, payload })),
-    sendTemplate: jest.fn(async () => ({ sent: true, message: { provider_message_id: 'synthetic-email-accepted' } })),
+    sendTemplate: jest.fn(async () => ({ sent: true, providerAttempted: true, message: { provider_message_id: 'synthetic-email-accepted' } })),
   };
 });
 jest.mock('../services/estimate-lead-linkage', () => ({ leadIdForEstimate: jest.fn(async () => null) }));
@@ -196,7 +196,7 @@ beforeEach(() => {
   sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-synthetic-reviewed' });
   email.sendTemplate.mockImplementation(async ({ onQueued }) => {
     await onQueued?.();
-    return { sent: true, message: { provider_message_id: 'synthetic-email-accepted' } };
+    return { sent: true, providerAttempted: true, message: { provider_message_id: 'synthetic-email-accepted' } };
   });
   email.loadTemplateByKey.mockImplementation(async (key) => ({ template: { template_key: key }, activeVersion: { id: 'synthetic-email-version' } }));
   buildPricingBundle.mockResolvedValue({ services: [] });
@@ -793,6 +793,96 @@ describe('group publication navigation', () => {
 });
 
 describe('reviewed send attempt receipts', () => {
+  test.each(['quarterly', 'annual_protection'])('historical %s email dedupe cannot mint a new annual delivery witness', async (firstPlan) => {
+    const { annualPlanHasDeliveredOffer } = require('../services/estimate-offer-version');
+    const priorAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const priorCancel = process.env.GATE_CANCEL_FLOW_V2;
+    process.env.GATE_TERMITE_ANNUAL_PLAN = process.env.GATE_CANCEL_FLOW_V2 = 'true';
+    row.status = 'draft';
+    row.estimate_data = { result: { results: { tmBait: { plan: firstPlan, annualFee: 299 } } } };
+    try {
+      expect((await invoke('/:id/send', 'post', { sendMethod: 'email' })).body.sent).toBe(true);
+      const priorDelivery = structuredClone(dataOf().deliveryState);
+      const revisedData = dataOf();
+      revisedData.result.results.tmBait = { plan: 'annual_protection', annualFee: 399 };
+      row.estimate_data = revisedData;
+      row.annual_total = '399';
+      row.status = 'draft';
+      // An old sent message is returned before this invocation reaches the
+      // provider; the legacy key survives an in-place offer revision.
+      email.sendTemplate.mockResolvedValueOnce({ sent: true, deduped: true,
+        message: { status: 'sent', provider_message_id: 'synthetic-prior-email' } });
+      const replay = await invoke('/:id/send', 'post', { sendMethod: 'email' });
+      expect(replay.statusCode).toBe(200);
+      expect(replay.body.channels.email).toMatchObject({ ok: true, providerAttempted: false });
+      expect(email.sendTemplate.mock.calls[1][0].idempotencyKey).toBe(email.sendTemplate.mock.calls[0][0].idempotencyKey);
+      expect(dataOf().deliveryState.firstDeliveredAt).toBe(priorDelivery.firstDeliveredAt);
+      expect(dataOf().deliveryState.lastDeliveredAt).toBe(priorDelivery.lastDeliveredAt);
+      expect(dataOf().deliveryState.deliveredAt).toEqual(priorDelivery.deliveredAt);
+      expect(dataOf().deliveryState.annualPlanOfferFingerprint).toBe(priorDelivery.annualPlanOfferFingerprint);
+      expect(annualPlanHasDeliveredOffer(row)).toBe(false);
+      process.env.GATE_TERMITE_ANNUAL_PLAN = process.env.GATE_CANCEL_FLOW_V2 = 'false';
+      const closed = await invoke('/:id/send', 'post', { sendMethod: 'email' });
+      expect(closed.statusCode).toBe(422);
+      expect(closed.body.code).toBe('TERMITE_ANNUAL_PLAN_DISABLED');
+      expect(email.sendTemplate).toHaveBeenCalledTimes(2);
+    } finally {
+      if (priorAnnual === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = priorAnnual;
+      if (priorCancel === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+      else process.env.GATE_CANCEL_FLOW_V2 = priorCancel;
+    }
+  });
+
+  test.each([undefined, false])('an exact issued annual email dedupe preserves its witness (providerAttempted=%s)', async (providerAttempted) => {
+    const { annualPlanOfferFingerprint, annualPlanHasDeliveredOffer } = require('../services/estimate-offer-version');
+    const priorAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const priorCancel = process.env.GATE_CANCEL_FLOW_V2;
+    process.env.GATE_TERMITE_ANNUAL_PLAN = process.env.GATE_CANCEL_FLOW_V2 = 'false';
+    row.status = 'sent';
+    row.estimate_data = { result: { results: { tmBait: { plan: 'annual_protection', annualFee: 299 } } } };
+    dataOf().deliveryState = { firstDeliveredAt: '2026-01-01T12:00:00Z', lastDeliveredAt: '2026-01-01T12:00:00Z',
+      deliveredAt: ['2026-01-01T12:00:00Z'], annualPlanOfferFingerprint: annualPlanOfferFingerprint(row) };
+    const priorDelivery = structuredClone(dataOf().deliveryState);
+    email.sendTemplate.mockResolvedValueOnce({ sent: true, deduped: true,
+      ...(providerAttempted === undefined ? {} : { providerAttempted }),
+      message: { status: 'sent', provider_message_id: 'synthetic-prior-email' } });
+    try {
+      const response = await invoke('/:id/send', 'post', { sendMethod: 'email' });
+      expect(response.statusCode).toBe(200);
+      expect(response.body.channels.email.providerAttempted).toBe(false);
+      expect(dataOf().deliveryState).toMatchObject(priorDelivery);
+      expect(annualPlanHasDeliveredOffer(row)).toBe(true);
+    } finally {
+      if (priorAnnual === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = priorAnnual;
+      if (priorCancel === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+      else process.env.GATE_CANCEL_FLOW_V2 = priorCancel;
+    }
+  });
+
+  test('a deduped result after an actual provider attempt still issues the annual offer', async () => {
+    const { annualPlanHasDeliveredOffer } = require('../services/estimate-offer-version');
+    const priorAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const priorCancel = process.env.GATE_CANCEL_FLOW_V2;
+    process.env.GATE_TERMITE_ANNUAL_PLAN = process.env.GATE_CANCEL_FLOW_V2 = 'true';
+    row.status = 'draft';
+    row.estimate_data = { result: { results: { tmBait: { plan: 'annual_protection', annualFee: 299 } } } };
+    email.sendTemplate.mockResolvedValueOnce({ sent: true, deduped: true, superseded: true, providerAttempted: true,
+      message: { status: 'sent', provider_message_id: 'synthetic-current-provider' } });
+    try {
+      const response = await invoke('/:id/send', 'post', { sendMethod: 'email' });
+      expect(response.statusCode).toBe(200);
+      expect(response.body.channels.email.providerAttempted).toBe(true);
+      expect(annualPlanHasDeliveredOffer(row)).toBe(true);
+    } finally {
+      if (priorAnnual === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = priorAnnual;
+      if (priorCancel === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+      else process.env.GATE_CANCEL_FLOW_V2 = priorCancel;
+    }
+  });
+
   test('an unchanged issued annual offer can still be resent after the gates close', async () => {
     const { annualPlanOfferFingerprint, annualPlanHasDeliveredOffer } = require('../services/estimate-offer-version');
     const priorAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
@@ -1469,6 +1559,25 @@ describe('grouped annual delivery gate races', () => {
     expect(row.status).toBe('draft');
     expect(sibling.status).toBe('scheduled');
     expect(dataOf(sibling).deliveryState?.annualPlanOfferFingerprint).toBeUndefined();
+  });
+
+  test.each([false, true])('historical email dedupe preserves annual sibling delivery authority (issued=%s)', async (issued) => {
+    const { annualPlanOfferFingerprint, annualPlanHasDeliveredOffer, annualPlanPublicReplayBlocked } = require('../services/estimate-offer-version');
+    if (issued) {
+      dataOf(sibling).deliveryState = { firstDeliveredAt: '2026-01-01T12:00:00Z', lastDeliveredAt: '2026-01-01T12:00:00Z',
+        deliveredAt: ['2026-01-01T12:00:00Z'], annualPlanOfferFingerprint: annualPlanOfferFingerprint(sibling) };
+      process.env.GATE_TERMITE_ANNUAL_PLAN = process.env.GATE_CANCEL_FLOW_V2 = 'false';
+    }
+    const priorDelivery = structuredClone(dataOf(sibling).deliveryState);
+    email.sendTemplate.mockResolvedValueOnce({ sent: true, deduped: true,
+      message: { status: 'sent', provider_message_id: 'synthetic-prior-quarterly-email' } });
+    const response = await invoke('/:id/send', 'post', { sendMethod: 'email' });
+    expect(response.statusCode).toBe(200);
+    expect(response.body.channels.email.providerAttempted).toBe(false);
+    expect(dataOf(sibling).deliveryState).toEqual(priorDelivery);
+    expect(annualPlanHasDeliveredOffer(sibling)).toBe(issued);
+    process.env.GATE_TERMITE_ANNUAL_PLAN = process.env.GATE_CANCEL_FLOW_V2 = 'false';
+    expect(annualPlanPublicReplayBlocked(sibling)).toBe(!issued);
   });
 
   test('an issued annual sibling remains authorized when gates close after group claims', async () => {

@@ -75,6 +75,7 @@ describe('admin estimate email delivery', () => {
     sendgrid.isConfigured.mockReturnValue(true);
     EmailTemplateLibrary.sendTemplate.mockResolvedValue({
       sent: true,
+      providerAttempted: true,
       message: { provider_message_id: 'sg-123' },
     });
   });
@@ -96,6 +97,7 @@ describe('admin estimate email delivery', () => {
 
     expect(result).toEqual({
       ok: true,
+      providerAttempted: true,
       messageId: 'sg-123',
       template: 'estimate.delivery',
     });

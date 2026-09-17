@@ -893,7 +893,8 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
       if (result.blocked) {
         return { ok: false, blocked: true, error: result.reason || 'Email suppressed', template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
       }
-      return { ok: !!result.sent, messageId: result.message?.provider_message_id || null, template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
+      return { ok: !!result.sent, providerAttempted: result.providerAttempted === true,
+        messageId: result.message?.provider_message_id || null, template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
     } catch (err) {
       if (versionId || !canFallbackFromTemplateEmailError(err)) {
         throw err;
@@ -948,7 +949,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
     const verdict = await withProviderHandoff(dispatch);
     if (verdict?.ok !== true) return { ok: false, error: 'Estimate delivery was blocked before the provider handoff' };
   } else await dispatch();
-  return { ok: true, provider: 'smtp_fallback' };
+  return { ok: true, providerAttempted: true, provider: 'smtp_fallback' };
 }
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -2847,13 +2848,13 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             withProviderHandoff,
           });
           channels.email = result.ok
-            ? { ok: true, provider: result.template || result.provider || 'email' }
+            ? { ok: true, providerAttempted: result.providerAttempted, provider: result.template || result.provider || 'email' }
             : { ok: false, uncertain: false, error: result.error || 'Email send failed' };
-          if (result.ok) {
+          if (result.ok && result.providerAttempted) {
             if (options.leadShapeRef) options.leadShapeRef.delivered = true;
             await stampLeadHandoffWitness(estimate, options);
           }
-          if (proposalMode && result.ok && proposalAttachments.length > 0) {
+          if (proposalMode && result.ok && result.providerAttempted && proposalAttachments.length > 0) {
             proposalPdfEmailed = true;
           }
         }
@@ -2869,10 +2870,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
 
   const sentChannels = requestedChannels.filter((ch) => channels[ch]?.ok);
   const failedChannels = requestedChannels.filter((ch) => !channels[ch]?.ok);
-  // Channels whose delivery counts as a first response: sms only when the
-  // provider send was REAL (not a suppression sentinel); email's ok already
-  // implies a real handoff.
-  const stampChannels = sentChannels.filter((ch) => (ch === 'sms' ? channels.sms?.real === true : true));
+  // Historical email idempotency hits report success without sending this
+  // offer. Only this invocation's real provider handoff advances a witness.
+  const stampChannels = sentChannels.filter((ch) => (ch === 'sms' ? channels.sms?.real === true : channels.email?.providerAttempted === true));
   // A REAL provider handoff succeeded: the customer holds the single-service
   // quote, so the send-time park must NEVER be reverted from here on — even
   // if the snapshot read or the status finalize below throws. A suppressed
