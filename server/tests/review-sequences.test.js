@@ -6093,7 +6093,7 @@ describe('direct outreach serialization', () => {
   // would convert a truthful "try again later" hold into a generic 500 — and
   // on the satisfaction page, into the bare fallback link the hold exists to
   // suppress (Codex #4332 P2).
-  test('a failed cleanup delete keeps the email hold instead of raising', async () => {
+  test('a cleanup delete that fails twice falls back to suppressing the row instead of leaving it pending forever (codex #4332 P2, r2)', async () => {
     const customer = { id: 'direct-cleanup', first_name: 'Synthetic', phone: '+12025550101', email: 'synthetic@example.test' };
     const mock = makeMock({ customers: [customer], notification_prefs: [{ customer_id: customer.id, email_enabled: true, review_request: true }] },
       { throwSelectWhen: q => q.table === 'sms_log', throwDeleteFor: ['review_requests'] });
@@ -6101,10 +6101,56 @@ describe('direct outreach serialization', () => {
     const result = await ReviewService.sendOutreachTouch({ customer, channel: 'email' });
     expect(result).toMatchObject({ ok: false, blocked: true, code: 'REVIEW_HISTORY_UNAVAILABLE', httpStatus: 503, channel: 'email' });
     expect(mockEmailSendTemplate).not.toHaveBeenCalled();
-    // The undeletable row is harmless: no send is attached and the next
-    // attempt re-runs the same guard.
+    // Both delete attempts failed (throwDeleteFor) — the fallback plain
+    // UPDATE (not a delete, so it survives everything but the DB itself
+    // being unreachable) marks the row terminal instead of leaving it
+    // 'pending' with no retry owner, accumulating across every future
+    // retry that hits the same outage.
     expect(mock.__state.rows.review_requests).toHaveLength(1);
-    expect(mock.__state.rows.review_requests[0].status).toBe('pending');
+    expect(mock.__state.rows.review_requests[0].status).toBe('suppressed');
+  });
+
+
+  test('a cadence retry releases the PRIOR failed attempt\'s orphaned reservation for the same step (codex #4331 P2)', async () => {
+    // Seeds the exact state an earlier ambiguous-outcome pass on this same
+    // sequence step leaves behind: the request row marked 'failed' by
+    // _applyOutreachSendResult, its sms_log reservation deliberately left
+    // 'sending' as 72h ask-spacing evidence rather than released there.
+    const customer = { id: 'cadence-retry-1', first_name: 'Ida', last_name: 'V', phone: '+19410000188', nearest_location_id: 'venice' };
+    const staleAt = new Date(Date.now() - 3600000);
+    const mock = makeMock({
+      customers: [customer],
+      review_requests: [{
+        id: 'prior-failed-1', customer_id: customer.id, status: 'failed', channel: 'sms',
+        template_key: 'day0_ask', token: 'prior-tok', sequence_id: 'seq-retry-1', sequence_step: 1,
+        created_at: staleAt,
+      }],
+      sms_log: [{
+        id: 'res-prior-1', customer_id: customer.id, direction: 'outbound', status: 'sending',
+        message_body: 'Would you leave us a quick review?', to_phone: customer.phone,
+        metadata: { review_ask_reservation: true, review_request_id: 'prior-failed-1' },
+        created_at: staleAt, updated_at: staleAt,
+      }],
+    });
+    db.mockImplementation(mock);
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-retry-1' });
+
+    const out = await ReviewService.sendOutreachTouch({
+      customer, channel: 'sms', templateId: 'day0_ask',
+      sequenceId: 'seq-retry-1', sequenceStep: 1, manageRetryVia: 'sequence',
+    });
+
+    expect(out).toMatchObject({ ok: true, sent: true });
+    // A fresh row was minted for this retry — the prior one is untouched
+    // except for its now-released reservation.
+    expect(mock.__state.rows.review_requests).toHaveLength(2);
+    expect(mock.__state.rows.review_requests.find(r => r.id === 'prior-failed-1').status).toBe('failed');
+    // No orphaned reservation remains for EITHER request: the prior one was
+    // released by this retry, and the new one's own reservation was
+    // released on acceptance by the ordinary accepted-send bookkeeping.
+    const stillSending = mock.__state.rows.sms_log.filter(r => r.status === 'sending');
+    expect(stillSending).toHaveLength(0);
+    expect(mock.__state.rows.sms_log.some(r => r.id === 'res-prior-1')).toBe(false);
   });
 
   test('direct SMS holds the lock through provider acceptance and the durable stamp', async () => {

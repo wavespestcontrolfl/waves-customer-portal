@@ -4661,6 +4661,36 @@ const ReviewService = {
       })
       .returning("*");
 
+    // codex #4331 P2: a prior attempt AT THIS EXACT sequence step that came
+    // back ambiguous (not accepted, not a definitive not_sent) is marked
+    // 'failed' by _applyOutreachSendResult, but its sms_log reservation is
+    // deliberately kept 'sending' as 72h ask-spacing evidence rather than
+    // released there. This fresh row is what the sequence runner minted to
+    // retry that same step — a NEW review_requests id, so the seam can never
+    // key a release/promote back to the old row again once this attempt
+    // takes over. Release it now, before this row's own reservation is
+    // taken, so it stops accumulating as a permanently orphaned reservation
+    // (invisible to reconcileStrandedSends, which only scans review_requests
+    // rows still 'sending' — this one is 'failed'). Best-effort: a failure
+    // here must not block the retry it is only cleaning up after.
+    if (sequenceId != null) {
+      try {
+        const priorAttempts = await db("review_requests")
+          .where({ sequence_id: sequenceId, sequence_step: sequenceStep })
+          .whereNot("id", request.id)
+          // A row still 'sending' is another attempt's live claim — its
+          // provider request may be in flight — never touched here; only
+          // the stranded-send reconciliation resolves that one.
+          .whereNot("status", "sending")
+          .select("id");
+        for (const prior of priorAttempts) {
+          await releaseUnsentReservation({ requestId: prior.id });
+        }
+      } catch (err) {
+        logger.warn(`[review] releasing a prior cadence step's reservation failed (sequenceId=${sequenceId} step=${sequenceStep} errType=${err?.name || "Error"})`);
+      }
+    }
+
     const reviewUrl = await buildReviewUrl(request, customer.id);
 
     // First name only (codex #3235 r2 P2): a full technician name blows the
@@ -4693,20 +4723,33 @@ const ReviewService = {
     const nextAllowedAt = result.nextAllowedAt || new Date(Date.now() + 15 * 60000).toISOString();
     if (actualChannel === "email") {
       // No provider was called and no worker owns an email retry. Remove the
-      // fresh attempt so it cannot inflate email-touch/sent reporting. The
-      // hold itself must survive a cleanup failure: a REVIEW_HISTORY_UNAVAILABLE
-      // caused by the database makes this delete fail for the same reason,
-      // and a throw here would turn the 503 into a generic 500 (or, for the
-      // satisfaction page, an ordinary error that exposes the bare fallback)
-      // (Codex #4332 P2). A leftover pending row is harmless: it carries no
-      // send and the next attempt re-runs the same guard.
-      try {
-        await db.transaction(async (trx) => {
+      // fresh attempt so it cannot inflate email-touch/sent reporting.
+      // Retried once (codex #4332 P2, r2): the delete is a fresh, healthy-DB
+      // write for REVIEW_ASK_SPACING/REVIEW_SEND_BUSY (both decided without
+      // ever touching a flaky resource), so a retry clears the transient
+      // blip that caused the first attempt to fail almost every time it can
+      // occur at all. Only a genuine REVIEW_HISTORY_UNAVAILABLE outage is
+      // likely to survive the retry too.
+      const cleaned = await stampWithRetry(
+        () => db.transaction(async (trx) => {
           const removed = await trx("review_requests").where({ id: request.id, status: "pending" }).del();
           if (removed) await trx("short_codes").where({ kind: "review", entity_type: "review_requests", entity_id: String(request.id) }).del();
-        });
-      } catch (cleanupErr) {
-        logger.warn(`[review] blocked email ask cleanup failed (requestId=${request.id} code=${result.code} errType=${cleanupErr?.name || "Error"})`);
+        }),
+        `blocked email ask cleanup (requestId=${request.id})`,
+      );
+      if (!cleaned) {
+        // Both delete attempts failed. A left-'pending' row has no retry
+        // owner and no scheduled_for — nothing will ever move it again, so
+        // it would sit forever reading as a live queued ask to the review
+        // queue and, worse, accumulate across every future retry that hits
+        // the same outage. Fall back to the same terminal status every
+        // other unsendable ask in this file resolves to (codex #4332 P2,
+        // r2) so it stops looking active. This is a plain single-row
+        // update, not the delete-plus-cascade above, so it survives
+        // everything but the DB itself being unreachable.
+        await db("review_requests").where({ id: request.id, status: "pending" })
+          .update({ status: "suppressed" })
+          .catch((markErr) => logger.error(`[review] blocked email ask fallback suppression failed (requestId=${request.id}): ${markErr.message}`));
       }
       return { ok: false, blocked: true, channel: "email",
         code: result.code, reason: result.reason, nextAllowedAt, httpStatus: result.httpStatus };
