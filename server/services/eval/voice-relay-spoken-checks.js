@@ -1527,7 +1527,7 @@ function no_third_party_disclosure(value, record, { spoken }) {
 // `location` (clauseOf), and that clause must not be negated
 // (clauseIsNegated) — the shared clause primitive doing directly what no
 // fixture lookbehind could.
-const REPORT_UNCERTAINTY_RE = /\b(?:can|must|may|might|could|would|should|will|shall|going to|i\s+(?:think|believe|guess|suppose)|my\s+(?:guess|belief|assumption)\s+is|(?:it|this|that)(?:['’]s|\s+is)\s+(?:possible|probable)\s+that|(?:it|this|that)\s+appears?\s+that|disput(?:e[sd]?|ing)\s+that|(?:incorrectly|falsely|mistakenly|erroneously)\s+(?:says?|said|states?|stated|reports?|reported)|plan(?:s|ned)? to|intend(?:s|ed|ing)?(?:\s+to)?|wish(?:es|ed|ing)?|maybe|perhaps|possibly|potentially|probably|allegedly|supposedly|reportedly|apparently)\b/i;
+const REPORT_UNCERTAINTY_RE = /\b(?:can|must|may|might|could|would|should|will|shall|going to|i\s+(?:think|believe|guess|suppose)|my\s+(?:guess|belief|assumption)\s+is|(?:it|this|that)(?:['’]s|\s+is)\s+(?:possible|probable)\s+that|(?:it|this|that)\s+appears?\s+that|(?:it|this|that)\s+(?:seems?\s+that|looks?\s+like|sounds?\s+like)|there(?:['’]s|\s+is)\s+a\s+chance(?:\s+that)?|pretend(?:s|ed|ing)?\s+that|disput(?:e[sd]?|ing)\s+that|(?:incorrectly|falsely|mistakenly|erroneously)\s+(?:says?|said|states?|stated|reports?|reported)|plan(?:s|ned)? to|intend(?:s|ed|ing)?(?:\s+to)?|wish(?:es|ed|ing)?|maybe|perhaps|possibly|potentially|probably|allegedly|supposedly|reportedly|apparently)\b/i;
 const REPORT_INSTRUCTION_RE = /(?:^|,\s*)(?:please\s+)?(?:apply|use|put|treat|spray|place|confirm|verify|check|tell\s+me)\b|\b(?:make sure|ensure|remember to|please\s+(?:confirm|verify|check|tell))\b/i;
 const REPORT_FINDING_VERB_RE = /\b(?:apply|applied|placed|used|treated|sprayed|put|went|got|received)\b/i;
 const REPORT_COMPLETION_TIME = `(?:(?:on\\s+)?(?:${VISIT_TIME_RE.source})|yesterday|earlier|recently|last\\s+(?:week|month|year)|(?:before|after)\\s+(?:breakfast|lunch|dinner))(?:\\s+(?:this\\s+)?(?:morning|afternoon|evening|night))?`;
@@ -1537,9 +1537,9 @@ const REPORT_LOCATION_RECIPIENT_VERB_RE = /^(?:got|received)$/i;
 const REPORT_NOUN_LED_PREFIX_RE = /^\s*(?:(?:the|a|an|your|our|their|his|her|my|its)\s*)?$/i;
 const REPORT_LOCATION_RECIPIENT_PREDICATE_RE = /^\s*(?:(?:itself|has|have|had|already|also|just|now|\w+ly)\s+)*$/i;
 const REPORT_DIRECT_OBJECT_GAP_RE = /^\s*(?:(?:only|just)\s+)?(?:(?:the|a|an|your|our|their|his|her|my|its)\s+)?$/i;
-const REPORT_COORDINATED_OBJECT_GAP_RE = /\b(?:around|along|on|to|at|in)\b[^.!?;]*\band\s+(?:[\w'\u2019-]+\s+){0,2}$/i;
+const REPORT_COORDINATED_OBJECT_GAP_RE = /\b(?:around|along|throughout|across|on|to|at|in)\b[^.!?;]*\band\s+(?:[\w'\u2019-]+\s+){0,2}$/i;
 const REPORT_WENT_LOCATION_RE = /^\s*(?:around|along)\b/i;
-const REPORT_TREATMENT_LOCATION_LINK_RE = /\b(?:around|along|on|to|at|in)\b/i;
+const REPORT_TREATMENT_LOCATION_LINK_RE = /\b(?:around|along|throughout|across|on|to|at|in)\b/i;
 const REPORT_ADVERBIAL_LOCATION_RE = /^(?:indoors|outdoors|inside|outside)$/i;
 const REPORT_ADVERBIAL_LOCATION_GAP_RE = new RegExp(`^\\s*(?:${REPORT_COMPLETION_TIME}\\s*)?$`, 'i');
 const REPORT_LOCATION_NOUN_PREFIX = `(?:(?:almost|nearly)\\s+)?(?:(?:the|a|an|your|our|their|his|her|my|its)\\s+)?(?:(?:full|entire|whole|outer|inner|front|rear|back|side|northern|southern|eastern|western|exterior|interior)\\s+){0,2}`;
@@ -1713,7 +1713,7 @@ function reportLocationIsTreatmentTarget(
 ) {
   if (locationRecipient) return true;
   if (subjectAt < findingVerb.index && findingVerb.index < locationAt
-      && /\b(?:applied|placed|used|treated|sprayed)\s+(?:respectively\s+)?(?:to|at|on|in)\b/i.test(
+      && /\b(?:applied|placed|used|treated|sprayed)\s+(?:respectively\s+)?(?:throughout|across|to|at|on|in)\b/i.test(
         affirmed.slice(findingVerb.index, locationAt),
       )
       && /\brespectively\b/i.test(affirmed)
@@ -1810,6 +1810,11 @@ function reportVerbGovernsProduct(affirmed, subjectAt, subjectLength, locationAt
 // location, including a verb shared across coordinated product-location pairs.
 function reportHasCompletedFinding(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb) {
   if (subjectAt < 0 || !findingVerb) return false;
+  if (/^\s+(?:[a-z0-9]\s+)?(?:containers?|bottles?|labels?|packages?|packaging|cans?|boxes?|bags?|jars?|jugs?|tanks?|packets?)\b/i.test(affirmed.slice(subjectAt + subjectLength))) return false;
+  const productFrame = findingVerb.index < subjectAt
+    ? affirmed.slice(findingVerb.index + findingVerb[0].length, locationAt)
+    : affirmed.slice(0, findingVerb.index);
+  if (/\bor\b/i.test(productFrame)) return false;
   if (/^apply$/i.test(findingVerb[0]) && !/\bdid\s+$/i.test(affirmed.slice(0, findingVerb.index))) return false;
   // "The perimeter received Talstar" describes treatment at the location;
   // "the technician received Talstar for the perimeter" describes custody.
@@ -1835,11 +1840,11 @@ function reportHasConciseFinding(affirmed, subjectAt, subjectLength, locationAt,
   const evidenceEnd = Math.max(subjectAt + subjectLength, locationAt + locationLength);
   // A scenario regex can match a brand stem before its one-character formulation suffix.
   const locationPrefix = affirmed.slice(subjectAt + subjectLength, locationAt)
-    .replace(/^\s*[a-z0-9]\b(?=\s+(?:(?:is|are|was|were|has|have|had)\b|(?:around|along|on|to|at|in)\b))/i, '')
+    .replace(/^\s*[a-z0-9]\b(?=\s+(?:(?:is|are|was|were|has|have|had)\b|(?:around|along|throughout|across|on|to|at|in)\b))/i, '')
     .replace(/^\s*(?:(?:is|are|was|were|has|have|had)\s+(?:been\s+)?)?/i, '');
   // Presentation punctuation does not change the trailing qualifier's scope.
   const qualifier = affirmed.slice(evidenceEnd)
-    .split(/,?\s+and\s+(?=(?:(?:the|a|an|your|our|their|his|her|my|its)\s+)?[\w'\u2019-]+(?:\s+[\w'\u2019-]+){0,2}\s+(?:is|are|was|were|has|have|around|along|on|to|at|in)\b)/i)[0]
+    .split(/,?\s+and\s+(?=(?:(?:the|a|an|your|our|their|his|her|my|its)\s+)?[\w'\u2019-]+(?:\s+[\w'\u2019-]+){0,2}\s+(?:is|are|was|were|has|have|around|along|throughout|across|on|to|at|in)\b)/i)[0]
     .replace(/^[\s,:—–-]+/, '')
     .replace(/^(?:perimeter|area|wall|walls|zone|edge)\b[\s,]*/i, '');
   return !findingVerb && /^(?:(?:the|a|an|your|our|their|his|her|my|its|granular)\s*)?$/i.test(affirmed.slice(0, firstAt).trim())
@@ -1852,7 +1857,8 @@ function reportHasConciseFinding(affirmed, subjectAt, subjectLength, locationAt,
 // governs it, so a later independent affirmative assertion remains usable.
 function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb, precedingText) {
   if (REPORT_SHARED_LIST_CONDITION_RE.test(precedingText)
-      || /\b(?:anything|all)\s+but\s*$/i.test(precedingText)) return true;
+      || /\b(?:anything|all)\s+but\s*$/i.test(precedingText)
+      || (!findingVerb && /\bor\s*$/i.test(precedingText))) return true;
   if (propositionIsExplicitlyDenied(affirmed, Math.min(subjectAt, locationAt), findingVerb)) return true;
   if (/\b(?:(?:only\s+)?if|unless|whether|until)\b/i.test(claim)
       || clauseIsEpistemicallyHedged(claim)) return true;
@@ -1872,7 +1878,7 @@ function reportRespectivelyPairsFinding(affirmed, subjectAt, locationAt, finding
   const respectively = /\brespectively\b/i.exec(affirmed);
   if (!respectively || !findingVerb) return true;
   const linkSearchStart = Math.min(respectively.index + respectively[0].length, findingVerb.index + findingVerb[0].length);
-  const locationLink = /\b(?:to|at|on|in)\b/i.exec(affirmed.slice(linkSearchStart, locationAt));
+  const locationLink = /\b(?:throughout|across|to|at|on|in)\b/i.exec(affirmed.slice(linkSearchStart, locationAt));
   if (!locationLink) return false;
   const locationLinkAt = linkSearchStart + locationLink.index;
   const locationListStart = linkSearchStart + locationLink.index + locationLink[0].length;
@@ -1880,9 +1886,9 @@ function reportRespectivelyPairsFinding(affirmed, subjectAt, locationAt, finding
   // can contain commas, and an Oxford comma plus "and" is one separator.
   const locationListEnd = respectively.index > locationListStart ? respectively.index : affirmed.length;
   const locationTail = affirmed.slice(locationAt, locationListEnd)
-    .split(new RegExp(`,\\s*(?=(?:according\\s+to|as|which|${REPORT_COMPLETION_TIME})\\b)`, 'i'))[0]
+    .split(new RegExp(`,\\s*(?=(?:according\\s+to|as(?!\\s+well\\s+as\\b)|which|${REPORT_COMPLETION_TIME})\\b)`, 'i'))[0]
     .replace(/,\s*$/, '');
-  const separator = /,\s*(?:and\b)?|\band\b/gi;
+  const separator = /,\s*(?:(?:and|as\s+well\s+as|plus)\b)?|\b(?:and|as\s+well\s+as|plus)\b/gi;
   // Active treatment lists put the products after the verb, before the first
   // target link; passive lists put them before the verb.
   const productListEnd = subjectAt > findingVerb.index ? locationLinkAt : findingVerb.index;
