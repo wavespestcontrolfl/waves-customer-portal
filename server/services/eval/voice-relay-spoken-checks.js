@@ -1685,6 +1685,7 @@ function safetyOnceDryQualifies(text, claim, questionText = null, antecedentText
   if (!SAFETY_ONCE_DRY_PREDICATE_RE.test(claim[0])
     || safetyGuaranteeIsInterrogative(text, claim)
     || SAFETY_DRYING_CONDITION_WITHDRAWAL_RE.test(fullClaimClause)
+    || !safetyDryingCoversCircumstances(fullClaimClause)
     || SAFETY_REFERENTIAL_DRYING_WITHDRAWAL_RE.test(text)
     || PET_SPECULATIVE_GUIDANCE_RE.test(claimClause)
     || clauseIsEpistemicallyHedged(claimClause)) return false;
