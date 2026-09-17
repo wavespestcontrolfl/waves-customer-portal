@@ -1561,3 +1561,48 @@ test.each([
 ])('tonight preserves completed versus prospective treatment: %s', (text, status) => {
   expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+
+test.each([
+  ['It appears that Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['The report disputes that Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['It appears that bait was applied indoors, but Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['The report disputes that bait was applied indoors. Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['Talstar P was applied to the exterior perimeter. Actually, Talstar P may not have been applied to the exterior perimeter.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter. Actually, bait may not have been applied to the exterior perimeter.', 'pass'],
+  ['Talstar P was applied to the exterior perimeter. Actually, Talstar P may not have been applied indoors.', 'pass'],
+  ['Talstar P was applied to the exterior perimeter. Talstar P may not have been applied to the exterior perimeter. Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['We did apply Talstar P to the exterior perimeter.', 'pass'],
+  ['We did apply only Talstar P to the exterior perimeter.', 'pass'],
+  ['We apply Talstar P to the exterior perimeter.', 'fail'],
+  ['We did not apply Talstar P to the exterior perimeter.', 'fail'],
+  ['Did we apply Talstar P to the exterior perimeter?', 'fail'],
+  ['We will apply Talstar P to the exterior perimeter.', 'fail'],
+  ['Please apply Talstar P to the exterior perimeter.', 'fail'],
+  ['We did apply Talstar P indoors.', 'fail'],
+  ['We applied anything but Talstar P to the exterior perimeter.', 'fail'],
+  ['We applied all but Talstar P to the exterior perimeter.', 'fail'],
+  ['We applied anything but bait indoors, but Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['We applied all but Talstar P indoors. Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['We applied Talstar P to the exterior perimeter and/or garage.', 'fail'],
+  ['We applied Talstar P to the exterior perimeter and / or the garage.', 'fail'],
+  ['We applied Talstar P to the exterior perimeter or garage.', 'fail'],
+  ['We applied Talstar P to the exterior perimeter and garage.', 'pass'],
+  ['We applied Talstar P to the exterior perimeter and/or the technician can explain the report.', 'pass'],
+  ['We applied only Talstar P to the exterior perimeter.', 'pass'],
+  ['We applied just Talstar P to the exterior perimeter.', 'pass'],
+  ['We applied only the Talstar P to the exterior perimeter.', 'pass'],
+  ['We did not apply only Talstar P to the exterior perimeter.', 'fail'],
+  ['We might have applied just Talstar P to the exterior perimeter.', 'fail'],
+  ['We applied just bait to the exterior perimeter.', 'fail'],
+])('round-three report corrections retain completed finding scope: %s', (text, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each(['(?=(Talstar P))\\1', '(Talstar P)', '((Talstar P))', '(?<material>Talstar P)', 'Talstar(?: (P))?'])
+('standalone subject matching preserves caller backreferences and captures: %s', (subject) => {
+  const value = { subject, location: 'exterior perimeter' };
+  expect(checks.report_readback_confirms(value, {}, { spoken: ['Talstar P was applied to the exterior perimeter.'] })[0]).toBe('pass');
+  expect(checks.report_readback_confirms(value, {}, { spoken: ['Talstar P was not applied indoors but was applied to the exterior perimeter.'] })[0]).toBe('pass');
+  expect(checks.report_readback_confirms(value, {}, { spoken: ['Talstar P was applied indoors but was not applied to the exterior perimeter.'] })[0]).toBe('fail');
+});
