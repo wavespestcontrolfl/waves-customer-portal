@@ -235,7 +235,7 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
       })));
       if (promoted) await mockPg('sms_log').insert(sids.map(twilio_sid => ({
         direction: 'inbound', from_phone: phone, to_phone: '+19415550290',
-        twilio_sid, body: 'Synthetic promoted twin', customer_id: ids[3], is_read: false,
+        twilio_sid, message_body: 'Synthetic promoted twin', customer_id: ids[3], is_read: false,
       })));
       [bell] = await mockPg('notifications').insert({
         recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic sender bell',
