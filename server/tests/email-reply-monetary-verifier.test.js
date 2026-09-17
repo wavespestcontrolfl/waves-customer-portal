@@ -88,6 +88,41 @@ describe('email reply monetary visit-pricing policy', () => {
   ])('rejects the carried-forward modal and fronted-subject cases: %s', rejected);
 
   test.each([
+    'Each visit incurs a $98 charge.',
+    'Each visit incurred USD 98.',
+    'Every visit incurs $98.',
+    'Visits incurred a ninety-eight-dollar fee.',
+    'Each visit will incur a $98 charge.',
+    'Each visit may incur a 98 dollar fee.',
+  ])('rejects recognized incur predicates with monetary evidence: %s', rejected);
+
+  test.each([
+    'Per visit: $98', 'For each visit: $98',
+    'Per scheduled visit - USD 98', 'For every visit, ninety-eight dollars',
+    'Per visit: only $98', 'For each visit: between $90 and $120',
+  ])('rejects fronted visit-unit monetary labels: %s', rejected);
+
+  test.each([
+    '$98 is the price per visit', '$98 is our charge for each visit',
+    'USD 98 will be the rate per visit', '$98 was a fee for every visit',
+    '$98 may be your cost per scheduled visit', '$98 is price per visit',
+  ])('rejects amount-first copular visit-price nouns: %s', rejected);
+
+  test.each([
+    'Each visit incurs 98 minutes of technician time.',
+    'Each visit will incur a 98 minute delay.',
+    'Each application incurs a $98 charge.',
+    'Each visit incurs a delay. The price is $98 per application.',
+    'Per visit: 98 minutes', 'For each visit: 98 photos',
+    'Per visit: 98', 'Per application: $98',
+    'For each application: $98', '$98 is the price per application',
+    '$98 is our charge for each application',
+    '$98 is the payment at your next visit',
+  ])('preserves measurements, application prices, and separate claims in new orders: %s', (text) => {
+    expect(verdict(text)).toEqual({ ok: true, violations: [] });
+  });
+
+  test.each([
     'Each visit costs 98 minutes of technician time',
     'Visits cost 2 hours each', 'Each visit is priced at 98 points',
   ])('preserves measured quantities after pricing-shaped predicates: %s', (text) => {
