@@ -9,7 +9,7 @@ const action = (text, head = 'charge') => clause(text).predicateFrames.find((fra
 beforeEach(() => upstream.mockClear());
 
 describe('inactive shared billing frames', () => {
-  test.each(['you', 'them', 'the customer', 'each client', 'our customers', 'your account'])(
+  test.each(['you', 'them', 'the customer', 'each client', 'our customers', 'your account', 'any customer'])(
     'retains a recognized recipient and original head: %s', (recipient) => {
       const result = clause(`We charge ${recipient} a fee.`);
       const frame = result.predicateFrames.find((entry) => entry.predicate.head === 'charge');
@@ -93,6 +93,17 @@ describe('inactive shared billing frames', () => {
       expect(frame.object.visit).not.toBeNull();
       expect(frame.object.nominal).not.toBeNull();
       expect(result.unitRelations.map((entry) => entry.unit)).toContain(frame.object.visit);
+    },
+  );
+
+  test.each(['a $98 fee', 'a separate $98 fee', '$98 individual fee'])(
+    'retains an amount and fee after a visit object: %s', (object) => {
+      const result = clause(`We bill every visit ${object} per application.`);
+      const frame = result.predicateFrames.find((entry) => entry.predicate.head === 'bill');
+      expect(frame.object.visit).not.toBeNull();
+      expect(frame.object.amount.text).toBe('$98');
+      expect(frame.object.nominal.head.head).toBe('fee');
+      expect(result.tokens[frame.end].kind).toBe('application');
     },
   );
 

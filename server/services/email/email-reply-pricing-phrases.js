@@ -8,7 +8,7 @@ const QUALIFIERS = [
 ].map((text) => text.split(' ')).sort((a, b) => b.length - a.length);
 const PRONOUNS = new Set(['i', 'we', 'you', 'he', 'she', 'it', 'they', 'me', 'us', 'him', 'her', 'them']);
 const DETERMINERS = new Set(['a', 'an', 'the', 'this', 'that', 'these', 'those', 'each', 'every',
-  'my', 'our', 'your', 'his', 'her', 'its', 'their']);
+  'my', 'our', 'your', 'his', 'her', 'its', 'their', 'any']);
 const PARTICIPANTS = new Set(['customer', 'customers', 'client', 'clients', 'account', 'accounts']);
 const NOUNS = new Set(['bill', 'charge', 'invoice', 'fee', 'rate', 'amount', 'balance', 'total',
   'cost', 'price', 'payment', 'dues', 'subscription', 'subscriptions', 'spread', 'surcharge', 'surcharges']);

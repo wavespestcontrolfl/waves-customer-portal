@@ -52,7 +52,8 @@ function objectAt(clause, start) {
   const modifiers = modifiersAt(tokens, start);
   let at = modifiers.end;
   const visit = unitRelations.find(({ unit }) => unit.start === at && VISITS.has(unit.kind))?.unit ?? null;
-  if (visit) at = visit.end;
+  const visitModifiers = visit ? modifiersAt(tokens, visit.end) : { end: at, separate: [] };
+  at = visitModifiers.end;
   let amount = amountRelations.find((record) => record.amount.start === at)?.amount ?? null;
   if (amount) at = amount.end;
   const inner = modifiersAt(tokens, at);
@@ -66,7 +67,7 @@ function objectAt(clause, start) {
   }
   if (!visit && !amount && !nominal) return null;
   return { start, end: at, visit, amount, nominal,
-    separate: [...modifiers.separate, ...(nominal ? inner.separate : [])] };
+    separate: [...modifiers.separate, ...visitModifiers.separate, ...(nominal ? inner.separate : [])] };
 }
 
 function recognizeClause(clause) {

@@ -18,7 +18,7 @@ Each clause adds `nominalFrames` and `predicateFrames`:
   The predicate and optional recipient reference original phrases. Separate
   adverbs may flank the recipient; `on its/their own` is retained too.
 - An object records `{start, end, visit, amount, nominal, separate}`. It supports
-  a bounded determiner/separation prefix, an optional visit, optional amount,
+  a bounded determiner/separation prefix, an optional visit and object prefix, optional amount,
   optional nominal, and an amount after the nominal (directly or via `of`/`at`).
   Visit and amount references are the original unit/amount records. This retains
   `pay a visit fee` distinctly from `pay a visit`, without judging either.
