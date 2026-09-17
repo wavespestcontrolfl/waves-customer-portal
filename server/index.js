@@ -1150,6 +1150,19 @@ primeCatalogNames.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV
       scheduledCron.scheduleInterval(runReceiptDeliveryQueue, 60 * 1000).unref();
     }
 
+    {
+      const runPaymentFailureNotifications = async () => {
+        try {
+          await require('./services/payment-failure-notifications')
+            .processPendingPaymentFailureNotifications({ limit: 10 });
+        } catch (err) {
+          logger.error(`[payment-failure-notifications] processor failed: ${err.message}`);
+        }
+      };
+      scheduledCron.scheduleTimeout(runPaymentFailureNotifications, 30 * 1000).unref();
+      scheduledCron.scheduleInterval(runPaymentFailureNotifications, 60 * 1000).unref();
+    }
+
     // Contact-correction jobs (codex #3413 r17): the durable queue behind
     // GATE_CONTACT_CORRECTION. The webhook enqueues before its ack and
     // kicks an immediate pass; this interval is the recovery guarantee —
