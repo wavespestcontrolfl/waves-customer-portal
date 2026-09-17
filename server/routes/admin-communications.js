@@ -3316,23 +3316,37 @@ router.delete('/scheduled/:id', async (req, res, next) => {
       // that marker is still an unresolved reservation to review-ask-history's
       // lastManualAskAt, which reads it regardless of status. Every other
       // scheduled row cancels the existing way: physically deleted.
-      const claimed = await trx('sms_log')
+      //
+      // Neither branch below reads the marker first and acts on that
+      // snapshot (codex P1, pre-push local audit on #4334): a plain SELECT
+      // here, followed by a separate DELETE/UPDATE, left a window where the
+      // dispatch cron's claim — itself a single conditional UPDATE,
+      // scheduler.js's claimDueScheduledSms, WHERE status = 'scheduled', on
+      // its own connection — could flip the row to 'sending', attempt
+      // delivery, and requeue it back to 'scheduled' with the marker now
+      // set, after this route had already decided to delete. Matching the
+      // cron's own shape instead closes it: the DELETE only fires when the
+      // marker is NOT present in the SAME statement that checks status, and
+      // the fallback UPDATE only matches a row the DELETE's own WHERE just
+      // excluded (still status = 'scheduled', so the marker must be why) —
+      // no instant where either statement acts on a snapshot the other could
+      // have invalidated.
+      let row = (await trx('sms_log')
         .where({ id: req.params.id, status: 'scheduled' })
-        .first('metadata');
-      const isReviewReservation = parseJson(claimed?.metadata, {}).review_ask_reservation === true;
-
-      // Atomic mutate-with-returning: if the dispatch cron claimed the row
-      // (status flipped to 'sending') between the peek and this point,
-      // zero rows return and we must NOT touch the decisions — the SMS is
-      // about to send and fire-time resolution owns them.
-      const mutated = isReviewReservation
-        ? await trx('sms_log')
+        .whereRaw("COALESCE(metadata->>'review_ask_reservation', '') <> 'true'")
+        .del(['id', 'metadata', 'created_at']))?.[0];
+      if (!row) {
+        // Either no matching row at all (claimed by the cron, or already
+        // resolved by another request), or one that matched status =
+        // 'scheduled' but carries the marker right now — the DELETE's own
+        // WHERE excluded it for that reason. Cancel it in place instead of
+        // deleting: a canceled row with the marker is still an unresolved
+        // reservation to review-ask-history's lastManualAskAt, which reads
+        // it regardless of status, so the 72-hour spacing hold survives.
+        row = (await trx('sms_log')
           .where({ id: req.params.id, status: 'scheduled' })
-          .update({ status: 'canceled', updated_at: new Date() }, ['id', 'metadata', 'created_at'])
-        : await trx('sms_log')
-          .where({ id: req.params.id, status: 'scheduled' })
-          .del(['id', 'metadata', 'created_at']);
-      const row = mutated?.[0];
+          .update({ status: 'canceled', updated_at: new Date() }, ['id', 'metadata', 'created_at']))?.[0];
+      }
       if (!row) return;
 
       const meta = parseJson(row.metadata, {});

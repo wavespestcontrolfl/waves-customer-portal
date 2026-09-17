@@ -15,22 +15,46 @@ jest.mock('../models/db', () => {
   const store = { sms_log: {} };
   const matches = (row, filter) => Object.entries(filter).every(([k, v]) => row[k] === v);
   const pick = (row, cols) => cols.reduce((out, c) => { out[c] = row[c]; return out; }, {});
+  const metadataOf = (row) => {
+    if (!row) return {};
+    return typeof row.metadata === 'string' ? (JSON.parse(row.metadata || '{}') || {}) : (row.metadata || {});
+  };
+  // Recognizes the one raw SQL fragment the route actually sends —
+  // `COALESCE(metadata->>'review_ask_reservation', '') <> 'true'` — the
+  // same substring-matching convention this codebase's other hand-rolled db
+  // mocks already use (e.g. scheduled-sms-review-dispatch.test.js).
+  const whereRawPredicates = {
+    review_ask_reservation: (row) => metadataOf(row).review_ask_reservation !== true,
+  };
   function builder(table) {
     let filter = {};
+    let rawPredicate = null;
     const qb = {
       where(cond) { filter = { ...filter, ...cond }; return qb; },
+      whereRaw(sql) {
+        const hit = Object.entries(whereRawPredicates).find(([needle]) => sql.includes(needle));
+        if (hit) rawPredicate = hit[1];
+        return qb;
+      },
       async first(...cols) {
-        const row = Object.values(store[table] || {}).find((r) => matches(r, filter));
+        const row = Object.values(store[table] || {}).find((r) => matches(r, filter) && (!rawPredicate || rawPredicate(r)));
         if (!row) return undefined;
         return cols.length ? pick(row, cols) : { ...row };
       },
       async update(patch, returning) {
-        const rows = Object.values(store[table] || {}).filter((r) => matches(r, filter));
+        // A concurrent writer's effects (e.g. the dispatch cron's own claim
+        // + requeue) become visible to this statement's WHERE evaluation at
+        // the instant it runs, exactly like a real atomic UPDATE — never
+        // against a snapshot read earlier. Tests hook this to simulate that
+        // race landing right before THIS statement executes.
+        if (db.__beforeMutate) db.__beforeMutate(table, 'update', filter);
+        const rows = Object.values(store[table] || {}).filter((r) => matches(r, filter) && (!rawPredicate || rawPredicate(r)));
         rows.forEach((r) => Object.assign(r, patch));
         return returning ? rows.map((r) => pick(r, returning)) : rows.length;
       },
       async del(returning) {
-        const rows = Object.values(store[table] || {}).filter((r) => matches(r, filter));
+        if (db.__beforeMutate) db.__beforeMutate(table, 'del', filter);
+        const rows = Object.values(store[table] || {}).filter((r) => matches(r, filter) && (!rawPredicate || rawPredicate(r)));
         rows.forEach((r) => { delete store[table][r.id]; });
         return returning ? rows.map((r) => pick(r, returning)) : rows.length;
       },
@@ -40,6 +64,7 @@ jest.mock('../models/db', () => {
   const db = (table) => builder(table);
   db.transaction = async (cb) => cb(db);
   db.__store = store;
+  db.__beforeMutate = null;
   return db;
 });
 jest.mock('../services/twilio', () => ({}));
@@ -175,6 +200,7 @@ describe('DELETE /admin/communications/scheduled/:id', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     db.__store.sms_log = {};
+    db.__beforeMutate = null;
   });
 
   test('a queued review-ask retry is canceled in place, keeping its reservation as spacing evidence', async () => {
@@ -229,6 +255,41 @@ describe('DELETE /admin/communications/scheduled/:id', () => {
     expect(row.status).toBe('sending');
     // Never matched 'scheduled', so the route never opens the thread lock.
     expect(suggest.lockSuggestThread).not.toHaveBeenCalled();
+  });
+
+  // codex P1 (pre-push local audit on #4334): the marker must not be read
+  // once and acted on later — a scheduled row that gains the marker between
+  // the route's decision and its write used to still get physically
+  // deleted, because the earlier read never saw it. The fix folds the
+  // marker check into the SAME statement that mutates the row, so there is
+  // no snapshot for a concurrent writer (the dispatch cron's own claim +
+  // requeue) to invalidate. Simulated here by mutating the store — from
+  // outside the route's own transaction — at the exact instant the route's
+  // first mutating statement (the conditional DELETE) runs, exactly where a
+  // real concurrent transaction's commit would become visible.
+  test('a marker that appears concurrently, right as the route mutates, still cancels in place instead of deleting', async () => {
+    seedScheduledRow('sms-race', { metadata: {} });
+    let fired = false;
+    db.__beforeMutate = (table, op, filter) => {
+      if (!fired && table === 'sms_log' && op === 'del' && filter.id === 'sms-race') {
+        fired = true;
+        // The dispatch cron claimed this row, attempted an uncertain send,
+        // and requeued it with the reservation marker — all landing in the
+        // instant between this request's transaction opening and its
+        // conditional DELETE actually running.
+        db.__store.sms_log['sms-race'].metadata = { review_ask_reservation: true };
+      }
+    };
+
+    const { status, body } = await withServer((baseUrl) => cancel(baseUrl, 'sms-race'));
+
+    expect(status).toBe(200);
+    expect(body).toEqual({ success: true });
+    expect(fired).toBe(true);
+    const row = db.__store.sms_log['sms-race'];
+    expect(row).toBeDefined();
+    expect(row.status).toBe('canceled');
+    expect(row.metadata).toMatchObject({ review_ask_reservation: true });
   });
 
   test('canceling an unknown id is a no-op success', async () => {
