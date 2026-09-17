@@ -27,6 +27,8 @@ const SAFETY_REFUSAL_PREFIX = EPISTEMIC_HEDGE_PREFIX_SOURCE;
 function recognizeSafetyResponse(text) {
   const guarantees = [SAFETY_REFUSED_HARM_RE, ...SAFETY_GUARANTEE_RES].flatMap((pattern) =>
     [...text.matchAll(pattern)]
+      .filter((match) => (pattern !== SAFETY_NAMED_PRODUCT_GUARANTEE_RE && pattern !== SAFETY_NAMED_PRODUCT_NO_HARM_RE)
+        || SAFETY_BRAND_IDENTITY_RE.test(match[1]))
       .filter((match) => pattern !== SAFETY_AUDIENCE_PRODUCT_GUARANTEE_RE || safetyNamesProduct(match[0]))
       .map((match) => ({ pattern, match })));
   let clauseStart = 0;
@@ -151,6 +153,8 @@ const SAFETY_CONTEXTUAL_NO_HARM_RE = new RegExp(
 
 const SAFETY_BRAND_MENTION_RE = new RegExp(SAFETY_BRAND_SUBJECT);
 
+const SAFETY_BRAND_IDENTITY_RE = new RegExp(`^(?:${SAFETY_BRAND_SUBJECT})$`);
+
 const SAFETY_EXPLICIT_PRODUCT_MENTION_RE = new RegExp(`\\b${SAFETY_SUBJECT_MODIFIER}\\b`, 'i');
 
 const safetyNamesProduct = (text) => SAFETY_EXPLICIT_PRODUCT_MENTION_RE.test(text) || SAFETY_BRAND_MENTION_RE.test(text);
@@ -188,6 +192,15 @@ const SAFETY_AUDIENCE_PRODUCT_GUARANTEE_RE = new RegExp(
   'gi',
 );
 
+// Predicate casing cannot establish a brand. Validate the captured product
+// prefix with the original case-sensitive identity grammar after matching.
+const SAFETY_NAMED_PRODUCT_GUARANTEE_RE = new RegExp(
+  `(${SAFETY_BRAND_SUBJECT})${SAFETY_SUBJECT_VERB}\\s+${SAFETY_COORDINATED_ADJECTIVE_PREFIX}${SAFETY_GUARANTEED_MODIFIER}${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b`,
+  'gi',
+);
+
+const SAFETY_NAMED_PRODUCT_NO_HARM_RE = new RegExp(`(${SAFETY_BRAND_SUBJECT})\\s+${SAFETY_NO_HARM_PREDICATE}\\b`, 'gi');
+
 const SAFETY_GUARANTEE_RES = Object.freeze([
   SAFETY_PRODUCT_STRONG_GUARANTEE_RE,
   // Keep a bare pronoun separate so scheduling infinitives such as "It's
@@ -200,12 +213,10 @@ const SAFETY_GUARANTEE_RES = Object.freeze([
   // (SAFETY_SUBJECT_WITH_PRODUCT: a determiner+noun or bare noun phrase,
   // never a bare pronoun/determiner alone).
   new RegExp(`\\b${SAFETY_SUBJECT_WITH_PRODUCT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_COORDINATED_ADJECTIVE_PREFIX}${SAFETY_GUARANTEED_MODIFIER}${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_FILLER_ADJECTIVE}\\b`, 'gi'),
-  // The brand/report-named subject (round-6 P1) — case-sensitive ('g' only,
-  // no 'i'), so "Talstar P is safe" fails the same as "the bait is safe".
   // A named brand already establishes the subject as a product, so the
   // full adjective vocabulary (filler words included) applies here:
   // "Talstar P is fine." still fails.
-  new RegExp(`${SAFETY_BRAND_SUBJECT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_COORDINATED_ADJECTIVE_PREFIX}${SAFETY_GUARANTEED_MODIFIER}${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b`, 'g'),
+  SAFETY_NAMED_PRODUCT_GUARANTEE_RE,
   SAFETY_ATTRIBUTIVE_GUARANTEE_RE,
   SAFETY_AUDIENCE_PRODUCT_GUARANTEE_RE,
   new RegExp(`(?<!\\b(?:pet|family)[-\\s])${SAFETY_ADJECTIVE_NEGATION}\\b${SAFETY_ADJECTIVE}\\s+(?:for|around|with)\\s+${SAFETY_AUDIENCE}\\b`, 'gi'),
@@ -213,7 +224,7 @@ const SAFETY_GUARANTEE_RES = Object.freeze([
   new RegExp(`\\b${SAFETY_SUBJECT_WITH_PRODUCT}\\s+${SAFETY_NO_HARM_PREDICATE}\\b`, 'gi'),
   new RegExp(`\\b(?:it|this|that|they|these|those)\\s+${SAFETY_NO_HARM_PREDICATE}\\s+${SAFETY_HARM_TARGET}\\b`, 'gi'),
   SAFETY_CONTEXTUAL_NO_HARM_RE,
-  new RegExp(`${SAFETY_BRAND_SUBJECT}\\s+${SAFETY_NO_HARM_PREDICATE}\\b`, 'g'),
+  SAFETY_NAMED_PRODUCT_NO_HARM_RE,
   SAFETY_POST_DRY_GUARANTEE_RE,
   // "not harmful (at all)", "never toxic", "no longer dangerous" — negating
   // the HARM word is itself the safety claim.
