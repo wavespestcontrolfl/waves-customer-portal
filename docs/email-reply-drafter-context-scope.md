@@ -65,14 +65,26 @@ placeholder only when the fact genuinely does not exist.
 
 Reused by both drafters. Given an `emails` row:
 
-1. Accept a server-resolved customer row only after validating the inbound
-   sender against that active customer. Otherwise require a unique exact
-   normalized email match. Shared addresses, deleted records, conflicting
+1. Before any customer-context read or model egress, require trusted Gmail
+   `authentication_results` to pass the existing `inbox-hygiene.hasAlignedAuth`
+   check against the inbound From domain. A normalized From match alone is
+   not authentication. Missing, failed, or unreadable evidence withholds
+   context and requires review; do not trust a message-supplied auth header.
+   Accept a server-resolved customer row only after validating the authenticated
+   inbound sender against that active customer. Otherwise require a unique
+   exact normalized email match. Shared addresses, deleted records, conflicting
    IDs, or ambiguous property ownership must withhold customer context.
    Never resolve from a name or a phone number supplied inside the message.
    `getContextForCustomer(customer)` accepts a row; it is not an identity
    resolver. Its phone lookup sibling uses `.first()` and is unsuitable
    for resolving ambiguous email senders.
+   Resolve the effective reply recipient (`reply_to` when present, otherwise
+   From) before assembling facts. The existing single-mailbox syntax check
+   does not prove recipient ownership: require that recipient to match the
+   same validated customer identity. A differing or unverified Reply-To,
+   including provider-relayed mail, requires review and no context/model
+   egress or Gmail draft in phase 1. Never silently fall back from an unsafe
+   Reply-To to From. Apply this boundary to manual and automatic entrypoints.
 2. Call `context-aggregator.getContextForCustomer(customer)` once and project
    an explicit allowlist into email facts. Preserve billing-lane authority,
    payer-billed exclusions, net collectible balances, completed-visit and
@@ -83,6 +95,15 @@ Reused by both drafters. Given an `emails` row:
    - latest 8 messages from the same mailbox/thread, both directions,
      chronologically ordered after selection; always include the triggering
      inbound, strip quoted history, exclude drafts and later messages in replay.
+     Validate every selected row, not just the triggering row or thread ID:
+     require a non-null `customer_id` equal to the validated customer, the
+     expected mailbox, and verified participants belonging only to that
+     mailbox's configured Waves identities and that customer. Inbound rows
+     also need aligned sender auth; validate From, To, Cc and effective
+     Reply-To ownership in both directions. Null/conflicting customer IDs,
+     foreign recipients, missing participant evidence, or an unverified row
+     make thread context unsafe and require review before model egress.
+     A Gmail thread ID alone is not an ownership boundary.
    - last 10 SMS from `smsHistory`, with timestamps.
    - last 3 call summaries from `recentCalls`, with dates and outcomes;
      omit raw transcripts and treat summaries as reported conversation,
@@ -152,6 +173,8 @@ labelled untrusted, exactly as the SMS drafter does.
 ### 4. Post-check (deterministic, reuse `sms-draft-verifier` patterns)
 
 - Word budget respected.
+- Complete request coverage proved, within the limited supported contract
+  below; a model's assertion that it answered everything is not proof.
 - No prices, dates, or amounts that do not appear in the facts block.
 - No exemplar fact leakage (same `few_shot_leak` check the SMS pathology
   ledger uses).
@@ -161,19 +184,51 @@ labelled untrusted, exactly as the SMS drafter does.
   Apply existing customer-copy compliance rules even if unsafe wording
   occurs in a call, SMS, or example.
 
+The implementation must define a versioned, conservative request inventory
+from the quote/signature-stripped triggering inbound, retaining source spans
+for every question and requested action. Supported forms need deterministic
+segmentation and intent rules; conjunctions, numbered items, and implicit
+requests must not disappear during splitting or truncation. If exhaustive
+inventory cannot be established, mark coverage `uncertain` and require
+operator review with no Gmail draft. Model-extracted items may suggest
+inventory entries but cannot certify that the inventory is complete.
+
+For supported items, bind each inventory ID to a visible answer span and its
+scoped fact references (or an explicit operator-needed answer for an absent
+fact). The verifier must validate each binding with tested deterministic
+intent-specific rules, reject missing/duplicate-only coverage and unsupported
+financial or booking meanings, and count words across the assembled visible
+draft. Model-provided IDs, token overlap, or factual membership alone cannot
+certify an answer. Any unsupported or semantically uncertain answer requires
+review; a complete verified answer that exceeds the budget also requires
+review. Do not shorten it by dropping an inventory item. Arbitrary multipart
+semantic coverage is unproven and is not promised by this scope.
+
 These checks catch known failures; token membership alone cannot establish
 semantic correctness. Allow at most one regeneration for a failed check;
 provider fallback is separately bounded by the dispatcher policy. If the
 second candidate fails or context is unsafe, expose a review reason in the
-existing operator workflow and create no Gmail draft. Automatic failures
-must follow existing claim/reconciliation semantics, not clear a claim and
-allow duplicate retries. Manual failures return a usable error to the UI.
+existing operator workflow and create no Gmail draft. Automatic terminal
+rejections (unsafe context, uncertain coverage, or exhausted deterministic
+checks) need a durable, idempotent rejected/review-needed outcome in the
+existing action-claim lifecycle, distinct from retryable `pending` and from
+a Gmail draft ID. Settle it with the existing claim ownership/CAS guards;
+never clear it to NULL or leave it pending for automatic redrafting. Fresh
+claims, stale takeover and `reconcilePendingDrafts` must exclude terminal
+outcomes until an explicit operator retry after evidence/input changes.
+This is a proposed extension: today's reconciler selects hour-old `pending`
+rows and can release them to NULL and redraft, so retaining `pending` alone
+would cause indefinite deterministic retries. Transient provider/thread
+failures and ambiguous Gmail creation retain the existing pending recovery
+contract; only reject terminally before any Gmail creation attempt. Manual
+failures return a usable error to the UI without creating a live auto claim.
 
 ### 5. Wire both drafters to the assembler
 
 - `draftReplyForEmail`: replace the existing system prompt and bare inbound
-  text with assembler output + exemplars + profile. Keep every existing
-  claim, dedupe, and Gmail-thread guard untouched. Bump the lane prompt
+  text with assembler output + exemplars + profile. Preserve the existing
+  atomic claim, dedupe, and Gmail-thread guards; extend terminal outcomes and
+  their reconciliation exclusions as specified above. Bump the lane prompt
   version.
 - `draftEmailReply` (IB and button): route through `dispatchWithFallback`
   on the `customerCopy` policy instead of a direct Anthropic call, and use
@@ -262,9 +317,9 @@ restores the legacy path without deleting existing operator drafts.
 
 | Slice | Deliverable | Required evidence before completion |
 | --- | --- | --- |
-| 1. Context contract | Shared assembler and fact projection, no live wiring | Fixtures for unique/shared/deleted sender matches; mailbox/thread isolation; absent vs unavailable; payer billing; archived estimates; cancelled visits; redacted access codes; bounded history and prompt injection. PostgreSQL verification of added/changed queries on a dedicated dev/preview database. |
+| 1. Context contract | Shared assembler and fact projection, no live wiring | Fixtures for aligned/failed/missing auth, spoofed matching From plus attacker Reply-To, unique/shared/deleted sender matches, and relayed mail review; every thread row checked for customer ID, mailbox and participants, including null IDs and foreign To/Cc; rejection before context reads/model egress; absent vs unavailable; payer billing; archived estimates; cancelled visits; redacted access codes; bounded history and prompt injection. PostgreSQL verification of added/changed queries on a dedicated dev/preview database. |
 | 2. Corpus source | Idempotent, gated human email pairs | Automated mail excluded; inbound pairing correct; redaction and injection rejection; replay holdouts excluded; repeated mining inserts no duplicates; SMS/profile readers unchanged unless explicitly scoped. |
-| 3. Shared drafting | Both entrypoints use the context, dispatcher, style and verifier | Gate-off parity; profile revoke/failure fallback; manual instructions remain untrusted data; no exemplar facts or forged signatures; bounded retry; dispatcher failure; invalid drafts withheld; existing claim, dedupe, live-thread and recipient guards pass. |
+| 3. Shared drafting | Both entrypoints use the context, dispatcher, style and verifier | Gate-off parity; profile revoke/failure fallback; manual instructions remain untrusted data; no exemplar facts or forged signatures; bounded retry; dispatcher failure; invalid drafts withheld; multipart fixtures with omitted first/middle/last items, conjunctions, implicit requests, false answer-ID mappings and budget pressure fail closed or require review, while supported complete answers pass; terminal rejection survives repeated classification and reconciler runs without redrafting, and explicit operator retry is guarded; transient/ambiguous recovery, existing claim, dedupe, live-thread and recipient guards pass. |
 | 4. Shadow and measurement | Internal comparison and correctly paired outcome metrics | Zero Gmail/send/claim side effects in shadow, including provider/storage failure; redacted evidence and retention contract; reply vs adoption distinction; reproducible cohort counts and reviewed promotion evidence. |
 
 Slice 1 is the next implementation step. Slices 1 and 2 can proceed
