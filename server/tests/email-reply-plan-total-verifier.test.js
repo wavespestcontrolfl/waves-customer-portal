@@ -77,6 +77,30 @@ describe('inactive email reply plan-total policy', () => {
     allowed('Price per visit: $98 monthly.');
   });
 
+  test.each([
+    'The monthly price is $98, applications are scheduled separately.',
+    'The yearly fee is $1176, visits are scheduled separately.',
+    'The monthly price is 98, applications are scheduled separately.',
+    'Monthly, we charge $98.',
+    'Yearly, we charge $1176.',
+    'Annually, we charge $1176.',
+  ])('keeps a plan price distinct from later units and fronted period punctuation: %s', (text) => {
+    rejected(text);
+  });
+
+  test.each([
+    'Your payment was $98, monthly prices remain unchanged.',
+    'Your refund was $1176, annual fees remain unchanged.',
+    'Your payment was 98, monthly prices remain unchanged.',
+    'Monthly updates were sent, the price is $98.',
+    'Annually, reminders are sent, the price is $1176.',
+    'The monthly price is $98 per application.',
+    'The monthly price is $98: per application.',
+    'The yearly fee is $1176 per visit.',
+  ])('respects independent comma claims and attached application or visit units: %s', (text) => {
+    allowed(text);
+  });
+
   test('uses only trusted literal true exemption flags', () => {
     allowed('$98/mo', { commercialProposal: true });
     allowed('$98/mo', { legacyMonthlyPlan: true });

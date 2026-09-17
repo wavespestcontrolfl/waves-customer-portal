@@ -20,7 +20,8 @@ const isAmount = (token) => token.kind === 'money' || token.kind === 'number';
 
 function tiedToVisitOrApplication(clause, at) {
   if (UNIT_KINDS.has(clause[at + 1]?.kind)) return true;
-  if (clause[at + 1]?.kind === 'sep' && UNIT_KINDS.has(clause[at + 2]?.kind)) return true;
+  if (clause[at + 1]?.kind === 'sep' && clause[at + 1].text !== ','
+    && UNIT_KINDS.has(clause[at + 2]?.kind)) return true;
   for (let index = Math.max(0, at - 4); index < at; index += 1) {
     if (!UNIT_KINDS.has(clause[index].kind)) continue;
     const between = clause.slice(index + 1, at);
@@ -55,7 +56,9 @@ function isPlanTotalPair(clause, amountAt, periodAt) {
   const first = Math.min(amountAt, periodAt);
   const last = Math.max(amountAt, periodAt);
   const gap = clause.slice(first + 1, last);
-  if (gap.some((token) => token.kind === 'barrier' || UNIT_KINDS.has(token.kind)
+  const frontedPeriod = periodAt < amountAt && /^(?:monthly|yearly|annually)$/.test(period.text);
+  if (gap.some((token, index) => token.kind === 'barrier' || UNIT_KINDS.has(token.kind)
+    || (token.kind === 'sep' && token.text === ',' && !(frontedPeriod && index === 0))
     || token.kind === 'period' || isAmount(token) || isWord(token, GAP_STOP_WORDS))) return false;
 
   const context = claimContext(clause, first, last);

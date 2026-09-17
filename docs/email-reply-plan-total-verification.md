@@ -25,6 +25,10 @@ are left alone. This is a finite policy, not a general English parser.
 A unit attached to one amount does not shield a later amount across a comma,
 and a later price statement after a conjunction or comma does not turn an
 earlier account payment into a plan-total claim.
+Commas also break the amount/period relationship and cannot attach a later
+visit/application noun to an earlier amount. One comma immediately after a
+fronted monthly/yearly/annually period is permitted (`Annually, we charge
+$1176`); a second comma still breaks the claim.
 
 Focused check from the repository root:
 `TZ=UTC node node_modules/jest/bin/jest.js --runInBand --no-coverage server/tests/email-reply-plan-total-verifier.test.js`.
