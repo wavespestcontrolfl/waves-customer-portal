@@ -11,13 +11,27 @@ function sourceSpan(source, index, end) {
   return { index, end, text: source.slice(index, end) };
 }
 
+const TIME_ZONE_CONTINUATION_RE = /^(?:(?:Eastern|Central|Mountain|Pacific|Alaska|Hawaii(?:-Aleutian)?)(?:\s+(?:standard|daylight))?\s+time\b|(?:[ECMP][DS]?T|UTC|GMT)\b)/i;
+const INSTRUCTION_LEAD_RE = /^(?:call|contact|ask|keep|leave|avoid|follow|wait)\b/i;
+
 // Mask rather than normalize: every character keeps its original position.
-function maskTimeAbbreviations(source) {
+// Casing is only a fallback choice, never proof of a sentence boundary.
+// Consumers must not use a condition across an ambiguous boundary as proof
+// that a proposition is qualified. Both adjacent selected spans carry it.
+function maskTimeAbbreviations(source, ambiguities = []) {
   return source.replace(/\b[ap]\.\s*m\./gi, (value, offset) => {
-    // An abbreviation can also close a sentence. Keep its final dot when
-    // followed by a capitalized sentence lead (or the end of the source).
-    const remainder = source.slice(offset + value.length);
-    const closesSentence = !remainder.trim() || /^\s+[A-Z]/.test(remainder);
+    const remainder = source.slice(offset + value.length).trimStart();
+    const continuation = TIME_ZONE_CONTINUATION_RE.test(remainder) || /^[,;:!?]/.test(remainder);
+    const question = QUESTION_LEAD_RE.test(remainder);
+    const closesSentence = !remainder || (!continuation
+      && (question || INSTRUCTION_LEAD_RE.test(remainder) || /^[A-Z]/.test(remainder)));
+    if (remainder && !continuation && !question) {
+      const dot = offset + value.length - 1;
+      ambiguities.push({
+        ...sourceSpan(source, dot, dot + 1),
+        reason: 'time_abbreviation', selectedBoundary: closesSentence,
+      });
+    }
     const masked = value.replace(/\./g, ' ');
     return closesSentence ? masked.slice(0, -1) + '.' : masked;
   });
@@ -28,14 +42,21 @@ function splitSourceSpans(source, separator, index = 0, end = source.length) {
   const pattern = new RegExp(separator.source, separator.flags.replace(/[gy]/g, '') + 'g');
   const spans = [];
   let start = index;
-  for (const match of maskTimeAbbreviations(region.text).matchAll(pattern)) {
+  const ambiguities = [];
+  const masked = maskTimeAbbreviations(source, ambiguities).slice(region.index, region.end);
+  for (const match of masked.matchAll(pattern)) {
     if (!match[0].length) throw new RangeError('source separator must consume characters');
     const boundary = index + match.index;
     spans.push({ ...sourceSpan(source, start, boundary), separator: sourceSpan(source, boundary, boundary + match[0].length) });
     start = boundary + match[0].length;
   }
   spans.push({ ...sourceSpan(source, start, end), separator: sourceSpan(source, end, end) });
-  return spans;
+  return spans.map((span) => ({
+    ...span,
+    ambiguousBoundaries: ambiguities
+      .filter((ambiguity) => (ambiguity.index >= span.index && ambiguity.index <= span.end)
+        || ambiguity.end === span.index),
+  }));
 }
 
 function sentenceSourceSpans(source) {
@@ -64,8 +85,8 @@ function lexicalSourceSpans(source, pattern, index = 0, end = source.length) {
   }));
 }
 
-const CONDITION_MARKER_RE = /\b(?:if|unless|when|while|before|after|once|provided(?:\s+that)?|as\s+long\s+as)\b/gi;
-const GRAMMATICAL_NEGATION_RE = /\b(?:not|never|cannot|no|nothing|nobody|\w+n[\x27\u2019]t)\b/gi;
+const CONDITION_MARKER_RE = /\b(?:if|unless|when|while|before|after|once|until|till|provided(?:\s+that)?|as\s+long\s+as)\b/gi;
+const GRAMMATICAL_NEGATION_RE = /\b(?:not|never|cannot|no|nothing|nobody|\w+n[\x27\u2019]t|(?:ca|wo|sha|do|does|did|is|are|was|were|has|have|had|could|would|should|must)n[\x27\u2019]?t)\b/gi;
 
 function localCandidateEvidence(source, kind, index, end) {
   const proposition = sourceSpan(source, index, end);
@@ -81,7 +102,7 @@ function localCandidateEvidence(source, kind, index, end) {
   const markers = lexicalSourceSpans(source, CONDITION_MARKER_RE, clause.index, clause.end);
   const conditions = markers.map((marker, offset) => {
     const next = markers[offset + 1]?.index ?? clause.end;
-    const punctuation = /[,;:—–]/.exec(source.slice(marker.end, next));
+    const punctuation = /[,;—–]|(?<!\d):|:(?!\d)/.exec(source.slice(marker.end, next));
     const bodyEnd = punctuation ? marker.end + punctuation.index : next;
     return {
       ...sourceSpan(source, marker.index, bodyEnd), marker,

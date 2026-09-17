@@ -113,3 +113,87 @@ test('a time abbreviation may also end the candidate sentence', () => {
   expect(evidence.sentence.text).toBe('The bait is safe at 9 p.m');
   expectExact(source, evidence.sentence);
 });
+
+
+test('clock minutes remain within a condition body', () => {
+  const source = 'The bait is safe after 9:00 tonight';
+  const evidence = localCandidateEvidence(source, 'adjective', source.indexOf('safe'), source.indexOf('safe') + 4);
+  expect(evidence.conditions[0].text).toBe('after 9:00 tonight');
+});
+
+test.each(['cant', 'wont', 'dont', 'isnt', 'couldnt'])('ASR negation %s retains its source spelling', (word) => {
+  const source = `I ${word} say the bait is safe`;
+  const evidence = localCandidateEvidence(source, 'adjective', source.indexOf('safe'), source.indexOf('safe') + 4);
+  expect(evidence.negations.map((span) => span.text)).toContain(word);
+});
+
+test.each(['until', 'till'])('inverse condition %s remains evidence for policy', (word) => {
+  const source = `The treatment is safe ${word} dry`;
+  const evidence = localCandidateEvidence(source, 'adjective', source.indexOf('safe'), source.indexOf('safe') + 4);
+  expect(evidence.conditions[0].text).toBe(`${word} dry`);
+});
+
+test.each(['Eastern time', 'eastern daylight time', 'EST', 'UTC'])(
+  'time-zone continuation %s retains the following condition', (zone) => {
+    const source = `The bait is safe at 9 p.m. ${zone} if swallowed`;
+    const index = source.indexOf('safe');
+    const evidence = localCandidateEvidence(source, 'adjective', index, index + 4);
+    expect(evidence.conditions.map((condition) => condition.text)).toEqual(['if swallowed']);
+    expect(evidence.sentence.ambiguousBoundaries).toEqual([]);
+    expectExact(source, evidence.sentence);
+    expectExact(source, evidence.conditions[0]);
+  },
+);
+
+test.each(['call', 'Call'])(
+  'an independent %s instruction stays outside the earlier proposition', (verb) => {
+    const source = `The bait is safe at 9 p.m. ${verb} a veterinarian if swallowed`;
+    const index = source.indexOf('safe');
+    const evidence = localCandidateEvidence(source, 'adjective', index, index + 4);
+    expect(evidence.conditions).toEqual([]);
+    expect(evidence.sentence.text).toBe('The bait is safe at 9 p.m');
+    const instruction = localCandidateEvidence(source, 'instruction', source.indexOf(verb), source.indexOf(verb) + verb.length);
+    expect(instruction.conditions.map((condition) => condition.text)).toEqual(['if swallowed']);
+    expect(evidence.sentence.ambiguousBoundaries).toEqual(instruction.sentence.ambiguousBoundaries);
+    expect(evidence.sentence.ambiguousBoundaries).toHaveLength(1);
+    expectExact(source, evidence.sentence.ambiguousBoundaries[0]);
+  },
+);
+
+test.each(['If swallowed', 'if swallowed'])(
+  'ambiguous conditional casing %s is explicit on both candidate sides', (condition) => {
+    const source = `The bait is safe at 9 p.m. ${condition}, call a veterinarian`;
+    const safeIndex = source.indexOf('safe');
+    const markerIndex = source.indexOf(condition);
+    const proposition = localCandidateEvidence(source, 'adjective', safeIndex, safeIndex + 4);
+    const conditional = localCandidateEvidence(source, 'condition', markerIndex, markerIndex + condition.length);
+    const boundary = proposition.sentence.ambiguousBoundaries[0];
+    expect(boundary).toMatchObject({
+      reason: 'time_abbreviation', selectedBoundary: condition.startsWith('I'),
+      index: source.indexOf('p.m.') + 3, end: source.indexOf('p.m.') + 4, text: '.',
+    });
+    expect(conditional.sentence.ambiguousBoundaries).toContainEqual(boundary);
+    expectExact(source, boundary);
+    if (boundary.selectedBoundary) expect(proposition.conditions).toEqual([]);
+    else expect(proposition.conditions[0].text).toBe(condition);
+  },
+);
+
+test('ambiguity offsets stay absolute when a consumer splits a subregion', () => {
+  const source = 'First. The bait is safe at 9 p.m. If swallowed, call a veterinarian';
+  const spans = splitSourceSpans(source, /[.!?;]+(?=\s|$)/, source.indexOf('The bait'));
+  expect(spans[0].ambiguousBoundaries[0]).toEqual(spans[1].ambiguousBoundaries[0]);
+  expectExact(source, spans[0].ambiguousBoundaries[0]);
+});
+
+
+test('a question subspan retains ambiguity from its abbreviation sentence boundary', () => {
+  const source = 'Is the bait safe at 9 p.m. If swallowed, call a veterinarian';
+  const sentence = sentenceSourceSpans(source)[0];
+  const question = latestInterrogativeSpan(source);
+  expect(question.ambiguousBoundaries).toEqual(sentence.ambiguousBoundaries);
+  expect(question.ambiguousBoundaries).toHaveLength(1);
+  const following = sentenceSourceSpans(source)[1];
+  const subspan = splitSourceSpans(source, /;/, following.index, following.end)[0];
+  expect(subspan.ambiguousBoundaries).toEqual(sentence.ambiguousBoundaries);
+});
