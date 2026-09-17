@@ -1484,3 +1484,17 @@ test.each([
   const spoken = [`Talstar P was applied to the exterior perimeter ${findingTime}, but it was not applied there ${denialTime}.`];
   expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
 });
+
+
+test.each(['(Talstar P)|bait', '((Talstar P))|bait', '(Talstar P)?bait', '(?<material>Talstar P)|bait'])
+('shared-subject contrasts preserve subject regex captures: %s', (subject) => {
+  const value = { subject, location: 'exterior perimeter' };
+  expect(checks.report_readback_confirms(value, {}, { spoken: ['bait was applied to the exterior perimeter but was not applied indoors.'] })[0]).toBe('pass');
+  expect(checks.report_readback_confirms(value, {}, { spoken: ['bait was applied indoors but was not applied to the exterior perimeter.'] })[0]).toBe('fail');
+});
+
+test.each(['I think', 'I believe', 'I guess', 'I suppose'])
+('location list stripping preserves full epistemic phrases: %s', (qualifier) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [`We applied Talstar P to the exterior perimeter, foundation, and garage ${qualifier}.`] })[0]).toBe('fail');
+  expect(checks.report_readback_confirms(report, {}, { spoken: [`We applied Talstar P to the exterior perimeter, foundation, and garage. ${qualifier} the office is closed.`] })[0]).toBe('pass');
+});

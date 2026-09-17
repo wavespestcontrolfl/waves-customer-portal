@@ -2052,8 +2052,13 @@ function report_readback_confirms(value, record, { spoken }) {
   // frame has one treatment predicate; a later named product owns its contrast.
   text = text.replace(new RegExp(
     `((?:${value.subject})(?:\\s+[a-z0-9]\\b)?)(\\s+(?:was|were|has\\s+been|had\\s+been)\\s+[^.!?;]*?\\bbut\\s+)(?=(?:was|were|has\\s+been|had\\s+been)\\s+(?:${REPORT_FINDING_VERB_RE.source}|not\\b))`, 'gi',
-  ), (match, product, predicate) => [...predicate.matchAll(new RegExp(REPORT_FINDING_VERB_RE.source, 'gi'))].length === 1
-    ? `${product}${predicate}${product} ` : match);
+  ), (match, product, ...captures) => {
+    // Subject patterns may add captures; the predicate is the final capture,
+    // before replace's offset, input text, and optional named-groups object.
+    const predicate = captures[captures.length - (typeof captures.at(-1) === 'object' ? 4 : 3)];
+    return [...predicate.matchAll(new RegExp(REPORT_FINDING_VERB_RE.source, 'gi'))].length === 1
+      ? `${product}${predicate}${product} ` : match;
+  });
   for (const m of reportContentMatches(text, subjectRe)) {
     // Preserve the sentence's question mark before clauseOf removes it.
     // A question about a finding does not confirm that finding.
@@ -2138,7 +2143,7 @@ function report_readback_confirms(value, record, { spoken }) {
         .replace(/^\s*(?:the report will show that|as you can see in the report,?)\s*/i, '');
       const trailingEvidence = affirmed.slice(findingEvidenceEnd)
         .replace(/^\s*(?:perimeter|area|wall|walls|zone|edge)\b/i, '')
-        .replace(/^\s*,\s*[^,;.!?]+(?:,\s*[^,;.!?]+)*?,?\s+and\s+(?:(?:the|a|an|your|our)\s+)?[\w'’-]+(?:\s+(?!(?:if|unless|maybe|perhaps|possibly|potentially|probably|allegedly|supposedly|reportedly|apparently|only|assuming|provided|according|as|which)\b)[\w'’-]+){0,3}\s*/i, '');
+        .replace(/^\s*,\s*[^,;.!?]+(?:,\s*[^,;.!?]+)*?,?\s+and\s+(?:(?:the|a|an|your|our)\s+)?[\w'’-]+(?:\s+(?!(?:if|unless|maybe|perhaps|possibly|potentially|probably|allegedly|supposedly|reportedly|apparently|i\s+(?:think|believe|guess|suppose)|only|assuming|provided|according|as|which)\b)[\w'’-]+){0,3}\s*/i, '');
       // A trailing "before" dates completed evidence. Remove only that
       // temporal marker, preserving any actual denial or condition later.
       const evidenceEnd = Math.max(subjectAt, locationAt, completedFinding ? findingVerb.index : -1);
