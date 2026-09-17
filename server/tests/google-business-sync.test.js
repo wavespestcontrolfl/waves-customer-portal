@@ -701,10 +701,34 @@ describe('Google Business review sync', () => {
     await service.syncAllReviews();
 
     expect(degraded).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), expect.stringMatching(/^stored-token lookup failed: Knex: Timeout/));
-    expect(health).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ bradenton: expect.stringMatching(/^stored-token lookup failed/) }));
+    expect(health).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ bradenton: expect.stringMatching(/^stored-token lookup failed/) }), expect.any(String));
     expect(service._classifyLocationSyncHealth({ hasResource: true, source: 'places_fallback', gbpFailure: 'stored-token lookup failed: Knex: Timeout' }).detail).not.toMatch(/credentials/);
     delete service._tokenLookupErrors.bradenton;
     degraded.mockRestore(); places.mockRestore(); health.mockRestore();
+  });
+
+  test('syncAllReviews carries the cycle observation from before provider fetches into health assessment', async () => {
+    const cycleStart = new Date().toISOString();
+    jest.useFakeTimers().setSystemTime(Date.parse(cycleStart));
+    jest.doMock('../services/review-incentives', () => ({ syncReviewIncentives: async () => {} }));
+    try {
+      service._getClient = jest.fn(async () => null);
+      jest.spyOn(service, '_syncPlacesStatsForLocation').mockImplementation(async () => {
+        jest.setSystemTime(Date.parse(cycleStart) + 60000);
+      });
+      jest.spyOn(service, '_syncPlacesReviewSampleForLocation').mockResolvedValue({ synced: 0, new: 0 });
+      jest.spyOn(service, '_describeCredentialGap').mockResolvedValue('Synthetic credentials missing');
+      jest.spyOn(service, '_notifyDegradedSync').mockResolvedValue();
+      jest.spyOn(service, '_retryUnlinkedReviewAutoLink').mockResolvedValue();
+      jest.spyOn(service, '_resolveGbpResourceNames').mockResolvedValue();
+      const health = jest.spyOn(service, '_assessReviewSyncHealth').mockResolvedValue({});
+      await service.syncAllReviews();
+      expect(health.mock.calls[0][3]).toBe(cycleStart);
+      expect(new Date().toISOString()).not.toBe(cycleStart);
+    } finally {
+      jest.useRealTimers();
+      jest.dontMock('../services/review-incentives');
+    }
   });
 
   test('upgrades a legacy Places row to the GBP review resource identity', async () => {

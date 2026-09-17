@@ -3,6 +3,7 @@ const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
 jest.mock('../models/db', () => {
   const db = (...args) => db.connection(...args);
+  db.transaction = (...args) => db.connection.transaction(...args);
   return db;
 });
 const { randomUUID } = require('node:crypto');
@@ -19,7 +20,7 @@ postgres('review ask history against migrated PostgreSQL', () => {
     const ownedQA = process.env.WAVES_LOCAL_DEV === '1'
       && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
     if (!local && !ownedQA) throw new Error('Use disposable CI or this worktree’s private QA database');
-    database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
+    database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 5 } });
   });
   beforeEach(async () => {
     trx = await database.transaction();
@@ -100,6 +101,63 @@ postgres('review ask history against migrated PostgreSQL', () => {
     expect(await history.lastDeliveredAskAt(customerId)).toEqual(at);
   });
 
+  test('only actual legacy follow-up delivery anchors history, not suppression', async () => {
+    const row = await request({ sms_sent_at: at, followup_sent: true, followup_sent_at: new Date(at.getTime() + 86400000) });
+    expect(await history.lastDeliveredAskAt(customerId)).toEqual(at);
+    const deliveredAt = new Date(at.getTime() + 72 * 3600000);
+    await trx('review_requests').where({ id: row.id }).update({ followup_delivered_at: deliveredAt });
+    expect(await history.lastDeliveredAskAt(customerId, { since: at })).toEqual(deliveredAt);
+    expect(await history.deliveredAskRows(customerId, { since: deliveredAt })).toEqual([]);
+  });
+
+  test.each(['bundled', 'declared'])('a delivered %s ask remains visible during finalize-only recovery', async kind => {
+    await trx('sms_log').insert({ customer_id: customerId, direction: 'outbound',
+      from_phone: '+12025550101', to_phone: '+12025550102', status: 'scheduled',
+      created_at: at, message_body: 'Thank you: https://portal.test/l/abc123',
+      metadata: { ...(kind === 'bundled' ? { bundled_review_request_id: randomUUID() } : { review_ask_delivered_at: at.toISOString() }), finalize_only: true } });
+    expect(await history.lastManualAskAt(customerId, { since: at })).toEqual(at);
+  });
+
+  test.each(['scheduled', 'failed', 'blocked', 'canceled', 'cancelled', 'undelivered'])('a %s recovery row retains review spacing until its reservation is cleared', async status => {
+    const [row] = await trx('sms_log').insert({ customer_id: customerId, direction: 'outbound',
+      from_phone: '+12025550101', to_phone: '+12025550102', status,
+      created_at: at, message_body: 'Please leave a Google review.',
+      metadata: { review_ask_reservation: true } }).returning('id');
+    expect(await history.lastManualAskAt(customerId, { since: at })).toEqual(at);
+    expect(await history.lastManualAskAt(customerId, { since: at, includeReservations: false })).toBeNull();
+    expect(await history.lastManualAskAt(customerId, { since: new Date(at.getTime() + 1) })).toBeNull();
+    await trx('sms_log').where({ id: row.id }).update({ metadata: {} });
+    expect(await history.lastManualAskAt(customerId, { since: at })).toBeNull();
+  });
+
+  test('an unresolved follow-up reservation holds spacing without claiming delivery', async () => {
+    const row = await request({ sms_sent_at: at });
+    const reservedAt = new Date(at.getTime() + 80 * 3600000);
+    await trx('review_requests').where({ id: row.id }).update({ followup_reserved_at: reservedAt });
+    expect(await history.lastDeliveredAskAt(customerId, { since: at })).toEqual(reservedAt);
+    expect(await history.lastDeliveredAskAt(customerId, { since: at, includeReservations: false })).toBeNull();
+    expect((await trx('review_requests').where({ id: row.id }).first()).followup_delivered_at).toBeNull();
+    await trx('review_requests').where({ id: row.id }).update({ followup_reserved_at: null });
+    expect(await history.lastDeliveredAskAt(customerId)).toEqual(at);
+  });
+
+  test('retry eligibility excludes held rows before the batch limit and admits expired holds', async () => {
+    const held = await request({ followup_sent: false, followup_next_attempt_at: new Date(at.getTime() + 60000) });
+    const due = await request({ followup_sent: false, followup_next_attempt_at: null });
+    const eligible = () => trx('review_requests').where({ customer_id: customerId, followup_sent: false })
+      .whereRaw('(followup_next_attempt_at IS NULL OR followup_next_attempt_at <= ?)', [at]).limit(20);
+    expect((await eligible()).map(row => row.id)).toEqual([due.id]);
+    await trx('review_requests').where({ id: held.id }).update({ followup_next_attempt_at: at });
+    expect((await eligible()).map(row => row.id).sort()).toEqual([held.id, due.id].sort());
+    const migration = require('../models/migrations/20260909000011_review_followup_retry_at');
+    await migration.down(trx);
+    await migration.down(trx);
+    await migration.up(trx);
+    await migration.up(trx);
+    expect(await trx.schema.hasColumn('review_requests', 'followup_next_attempt_at')).toBe(true);
+    expect(await trx.schema.hasColumn('review_requests', 'followup_delivered_at')).toBe(true);
+  });
+
   test('latest delivered manual ask excludes failed sends and acknowledgments', async () => {
     await request({ sms_sent_at: at });
     const manualAt = new Date(at.getTime() + 240000);
@@ -129,4 +187,103 @@ postgres('review ask history against migrated PostgreSQL', () => {
       to_phone: '+12025550102', status: 'sent', ...row })));
     expect(await history.lastManualAskAt(customerId, { since: at })).toEqual(confirmedAt);
   });
+
+  test('an enrollment supersedes a queued ask but never one already in flight', async () => {
+    // codex #4331 P1: sendSMS re-asserts 'pending' and opens its reservation
+    // before dialing the provider, but no row lock survives a network call.
+    // Suppressing an in-flight ask did not stop the text — it delivered, the
+    // row stamped back to 'sent', and the cadence that had just superseded it
+    // then read that delivery as an outside ask and stopped itself, costing
+    // the customer every follow-up touch. The unresolved reservation is the
+    // in-flight marker; the unit suite's query mock treats whereNotExists as
+    // a no-op, so this carve-out can only be proved here.
+    const ReviewService = require('../services/review-request');
+    const queued = await request({ status: 'pending', template_key: 'day0_ask', scheduled_for: at });
+    const inFlight = await request({ status: 'pending', template_key: 'day0_ask', scheduled_for: at });
+    await trx('sms_log').insert({
+      customer_id: customerId, direction: 'outbound', from_phone: '+12025550101', to_phone: '+12025550102',
+      status: 'sending', message_body: 'Would you leave us a quick review?',
+      metadata: JSON.stringify({ review_ask_reservation: true, review_request_id: inFlight.id }),
+    });
+
+    await ReviewService.supersedeQueuedAsks(customerId);
+
+    const rows = Object.fromEntries((await trx('review_requests').whereIn('id', [queued.id, inFlight.id])
+      .select('id', 'status')).map(row => [row.id, row.status]));
+    expect(rows[queued.id]).toBe('suppressed');
+    expect(rows[inFlight.id]).toBe('pending');
+  });
+
+  test('a SETTLED reservation stops protecting its row from the next enrollment', async () => {
+    // Only 'sending' is in flight. Once the reservation resolves (or the
+    // 72-hour sweep expires it), the row is superseded like any other queued
+    // ask — the carve-out cannot become a permanent shield.
+    const ReviewService = require('../services/review-request');
+    const settled = await request({ status: 'pending', template_key: 'day0_ask', scheduled_for: at });
+    await trx('sms_log').insert({
+      customer_id: customerId, direction: 'outbound', from_phone: '+12025550101', to_phone: '+12025550102',
+      status: 'sent', message_body: 'Would you leave us a quick review?',
+      metadata: JSON.stringify({ review_ask_reservation: true, review_request_id: settled.id }),
+    });
+
+    await ReviewService.supersedeQueuedAsks(customerId);
+
+    expect((await trx('review_requests').where({ id: settled.id }).first('status')).status).toBe('suppressed');
+  });
+
+  test('a concurrent enrollment cannot supersede between sendability check and reservation commit', async () => {
+    // This race needs separate PostgreSQL connections: the sender holds the
+    // review_requests row lock while its sms_log insert is stalled; the
+    // enrollment must wait and then see the committed reservation.
+    await trx.rollback();
+    trx = null;
+    const ReviewService = require('../services/review-request');
+    const db = require('../models/db');
+    db.connection = database;
+    const concurrentCustomerId = randomUUID();
+    let row;
+    let blocker;
+    let reservePromise;
+    let supersedePromise;
+    try {
+      await database('customers').insert({ id: concurrentCustomerId, first_name: 'Synthetic', last_name: 'Concurrent',
+        email: `${concurrentCustomerId}@example.invalid`, phone: 'fixture-concurrent',
+        address_line1: '100 Test Lane', city: 'Test City', zip: '00000', active: true, pipeline_stage: 'active_customer' });
+      [row] = await database('review_requests').insert({ customer_id: concurrentCustomerId, token: randomUUID(),
+        status: 'pending', template_key: 'day0_ask', channel: 'sms', location_id: 'venice', scheduled_for: at }).returning('*');
+      blocker = await database.transaction();
+      await blocker.raw('LOCK TABLE sms_log IN SHARE MODE');
+      reservePromise = ReviewService.reserveSendableReviewSms({ request: row, to: '+12025550102', body: 'Synthetic review ask' });
+
+      let waitingInsert;
+      const deadline = Date.now() + 2000;
+      do {
+        ({ rows: [waitingInsert] } = await database.raw("SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE '%insert into %sms_log%' LIMIT 1"));
+        if (!waitingInsert) await new Promise(resolve => setTimeout(resolve, 10));
+      } while (!waitingInsert && Date.now() < deadline);
+      expect(waitingInsert).toBeDefined();
+
+      supersedePromise = ReviewService.supersedeQueuedAsks(concurrentCustomerId);
+      let waitingSupersede;
+      do {
+        ({ rows: [waitingSupersede] } = await database.raw("SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE '%review_requests%' AND query ILIKE '%for update%' LIMIT 1"));
+        if (!waitingSupersede) await new Promise(resolve => setTimeout(resolve, 10));
+      } while (!waitingSupersede && Date.now() < deadline);
+      expect(waitingSupersede).toBeDefined();
+      await blocker.commit();
+      blocker = null;
+      expect(await reservePromise).toMatchObject({ requestId: row.id });
+      await supersedePromise;
+      expect((await database('review_requests').where({ id: row.id }).first('status')).status).toBe('pending');
+      expect(await database('sms_log').whereRaw("metadata->>'review_request_id' = ?", [row.id]).where({ status: 'sending' }).first()).toBeDefined();
+    } finally {
+      if (blocker) await blocker.rollback();
+      await Promise.allSettled([reservePromise, supersedePromise].filter(Boolean));
+      if (row) {
+        await database('sms_log').whereRaw("metadata->>'review_request_id' = ?", [row.id]).delete();
+        await database('review_requests').where({ id: row.id }).delete();
+      }
+      await database('customers').where({ id: concurrentCustomerId }).delete();
+    }
+  }, 30000);
 });

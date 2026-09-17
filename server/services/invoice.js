@@ -4,6 +4,7 @@ const db = require("../models/db");
 const logger = require("./logger");
 const TaxCalculator = require("./tax-calculator");
 const DiscountEngine = require("./discount-engine");
+const { percentageDiscountDollars } = require("./discount-stack");
 const { etDateString, addETDays } = require("../utils/datetime-et");
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require("./short-url");
 const { publicPortalUrl } = require("../utils/portal-url");
@@ -1123,10 +1124,13 @@ const InvoiceService = {
       throw new Error('Visit invoice creation requires its owning transaction');
     }
     let linkedScheduledServiceId = scheduledServiceId;
-    if (!linkedScheduledServiceId && serviceRecordId) {
+    let linkedRecordServiceDate = null;
+    if (serviceRecordId) {
       const linkedRecord = await database('service_records')
-        .where({ id: serviceRecordId, customer_id: customerId }).first('scheduled_service_id');
-      linkedScheduledServiceId = linkedRecord?.scheduled_service_id || null;
+        .where({ id: serviceRecordId, customer_id: customerId })
+        .first('scheduled_service_id', 'service_date');
+      if (!linkedScheduledServiceId) linkedScheduledServiceId = linkedRecord?.scheduled_service_id || null;
+      linkedRecordServiceDate = linkedRecord?.service_date || null;
     }
 
     // Phase 2 atomicity: a NET-terms accrual (statement get/create + invoice
@@ -1157,7 +1161,7 @@ const InvoiceService = {
     // (the best-effort tax/discount catches then abort with it — accepted
     // for linked money writes; plain unlinked creates keep the
     // untransacted path).
-    const stampedEstimateIdInNotes = (String(notes || "").match(/accepted estimate #([0-9a-fA-F-]{8,})/) || [])[1] || null;
+    const stampedEstimateIdInNotes = require('./setup-fee-alert-reconcile').acceptedEstimateIdFromNotes(notes);
     if (linkedScheduledServiceId || stampedEstimateIdInNotes) {
       if (database && database.isTransaction) {
         if (linkedScheduledServiceId) {
@@ -1179,6 +1183,83 @@ const InvoiceService = {
       await assertScheduledInvoiceNotPacketOwned(database, linkedScheduledServiceId, packetWrite?.packetId);
     } else if (packetWrite) {
       throw new Error('Visit invoice requires a billed member');
+    }
+    // A stamped writer may have waited behind packet adoption. Recheck its
+    // owner inside the mint transaction, before creating another charge.
+    if (stampedEstimateIdInNotes) {
+      const packetConflict = () => Object.assign(
+        new Error('This estimate is billed by its saved visit closeout. Resume that closeout.'),
+        { status: 409, statusCode: 409, isOperational: true, code: 'VISIT_PACKET_OWNS_BILLING' });
+      const contention = (error) => {
+        if (error?.code !== '55P03') throw error;
+        throw Object.assign(new Error('Estimate billing is being updated. Retry in a moment.'),
+          { status: 409, statusCode: 409, isOperational: true, code: 'VISIT_PACKET_OWNS_BILLING' });
+      };
+      // Match the date create() will persist: explicit input wins, then a
+      // service record's own completion date, then a scheduled-only visit.
+      // Pin a derived value so the later context read cannot validate one
+      // date here and insert another after a concurrent edit.
+      if (!serviceDate && serviceRecordId) serviceDate = linkedRecordServiceDate;
+      if (!serviceDate && !serviceRecordId && scheduledServiceId) {
+        const linkedScheduled = await database('scheduled_services')
+          .where({ id: scheduledServiceId, customer_id: customerId }).first('scheduled_date');
+        serviceDate = linkedScheduled?.scheduled_date || null;
+      }
+      let packetOwners;
+      try {
+        packetOwners = await database('invoices as i')
+          .join('visit_completion_packet_items as p', 'p.invoice_id', 'i.id')
+          .join('scheduled_services as s', 's.id', 'p.scheduled_service_id')
+          .where({ 'i.customer_id': customerId })
+          .whereRaw('s.source_estimate_id::text = ?', [stampedEstimateIdInNotes])
+          .whereNotNull('i.visit_completion_packet_id').orderBy('i.id')
+          .forUpdate('i').noWait().select('i.id', 'i.status', 'i.service_date', 'i.line_items', 'i.notes');
+      } catch (error) { contention(error); }
+      const { classifyAcceptedEstimateInvoiceCoverage,
+        sumPositiveSetupFeeCents } = require('./estimate-first-application-invoice');
+      // Compare the calculated invoice amounts, not caller-supplied amount.
+      const normalizedSetupLines = normalizeInvoiceLineItems(lineItems || []);
+      const incomingCoverage = classifyAcceptedEstimateInvoiceCoverage(
+        { line_items: normalizedSetupLines }, serviceDate,
+      );
+      const separateSetupFee = incomingCoverage.setupFeeOnly
+        && normalizedSetupLines.filter((line) => line.amount > 0)
+          .every((line) => /^WaveGuard Membership — one-time setup fee$/i.test(String(line.description || '').trim()))
+        && packetOwners.every((owner) => {
+          const lines = parseInvoiceLineItems(owner.line_items);
+          return lines.length > 0 && lines.every((line) => line && Number.isFinite(Number(line.amount)));
+        });
+      let separateSetupFeeAllowed = separateSetupFee;
+      if (packetOwners.length && separateSetupFee) {
+        // The estimate advisory lock serializes concurrent replacement writers.
+        // Lock their fee coverage too, failing operationally on a busy row.
+        let stampedCoverage;
+        try {
+          stampedCoverage = await database('invoices').where({ customer_id: customerId })
+            .where('notes', 'ilike', `%accepted estimate #${stampedEstimateIdInNotes}%`)
+            .orderBy('id').forUpdate().noWait().select('id');
+        } catch (error) { contention(error); }
+        const obligation = await require('./setup-fee-obligation').findUnmintedSetupFeeObligation({
+          sourceEstimateId: stampedEstimateIdInNotes, customerId,
+        }, database);
+        // The obligation reader counts stamped rows. Packet ownership also
+        // survives edited notes; count each unstamped owner once, and retain
+        // refunded cents as covered so deliberately refunded fees are not rebilled.
+        const stampedIds = new Set(stampedCoverage.map((row) => String(row.id)));
+        const unstampedOwners = [...new Map(packetOwners.map((row) => [String(row.id), row])).values()]
+          .filter((row) => !stampedIds.has(String(row.id)) && !['void', 'canceled', 'cancelled'].includes(row.status));
+        const packetFeeCents = unstampedOwners.reduce((sum, row) => sum + sumPositiveSetupFeeCents(row), 0);
+        separateSetupFeeAllowed = obligation.owed && Number.isSafeInteger(obligation.setupFeeRemainingCents)
+          && sumPositiveSetupFeeCents({ line_items: normalizedSetupLines }) <= obligation.setupFeeRemainingCents - packetFeeCents;
+      }
+      // Application ownership is visit-date scoped, matching the inverse
+      // packet guard: an explicit other date is a different application,
+      // while either side missing a date fails closed. Setup-fee coverage is
+      // estimate-wide and therefore deliberately uses every packet owner.
+      const matchingPacketOwners = packetOwners.filter((owner) =>
+        classifyAcceptedEstimateInvoiceCoverage(owner, serviceDate).matchesApplicationDate);
+      if ((incomingCoverage.hasSetupFee && packetOwners.length && (!separateSetupFee || !separateSetupFeeAllowed))
+        || (!incomingCoverage.hasSetupFee && matchingPacketOwners.length)) throw packetConflict();
     }
     const customer = await database("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");
@@ -1429,9 +1510,20 @@ const InvoiceService = {
         d.discount_type === "percentage" ||
         d.discount_type === "variable_percentage"
       ) {
-        dollars = Math.round(subtotal * (amt / 100) * 100) / 100;
-        if (d.max_discount_dollars)
-          dollars = Math.min(dollars, Number(d.max_discount_dollars));
+        // Cent-exact (Codex pre-push audit P1, round 6): the old
+        // `Math.round(subtotal * (amt / 100) * 100) / 100` float formula
+        // rounded 5% of $20.70 down to $1.03, never the correct half-up
+        // $1.04 — the SAME bug server/services/discount-stack.js's
+        // percentage math was fixed for, and the discount-engine.js
+        // preview delegates to. percentageDiscountDollars is that same
+        // fix, exported so this line uses the ONE place this rounding
+        // rule is written instead of a second, independently-buggy copy.
+        // Stacking wiring and the GATE_DISCOUNT_STACKING read are NOT
+        // part of this fix — slice 5 (invoice/document calculation) is
+        // where this whole block delegates to stackDocumentDiscounts;
+        // this is only the rounding correction on the existing additive
+        // math, touching nothing else here.
+        dollars = percentageDiscountDollars(subtotal, amt, d.max_discount_dollars);
       } else if (
         d.discount_type === "fixed_amount" ||
         d.discount_type === "variable_amount"

@@ -17,6 +17,7 @@ jest.mock('../models/db', () => new Proxy((...args) => mockPg(...args), {
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({
+  ...jest.requireActual('../config/feature-gates'),
   isEnabled: jest.fn(() => false),
   gateEnvValue: jest.fn(() => false),
   gates: {},

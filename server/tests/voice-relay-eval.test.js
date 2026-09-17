@@ -9,6 +9,7 @@
  */
 
 jest.mock('../services/ops-digest', () => ({ deliverOpsDigest: jest.fn(async ({ sendEmail }) => sendEmail()) }));
+jest.mock('../services/ops-digest-fall-off', () => ({ retireIfClean: jest.fn(async () => 1) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../models/db', () => {
   const fn = jest.fn(() => { throw new Error('db called'); });
@@ -2535,6 +2536,8 @@ describe('voice relay eval — the harness', () => {
 
 describe('voice relay eval — scheduled wrapper and child process', () => {
   const replay = require('../services/eval/voice-relay-replay');
+  const { retireIfClean } = require('../services/ops-digest-fall-off');
+  beforeEach(() => retireIfClean.mockClear());
   const failIfRealEmail = async () => { throw new Error('test fell through to default email sender'); };
   const run = (overrides = {}) => ({ failed: false, summary: { scenarios: 3, passed: 3, failed: 0, replayErrors: 0, failedIds: [], replayErrorIds: [], criticalMisses: 0, majorMisses: 0, qualityMisses: 0, adjudicatedMajorMisses: 0, judged: 3, judgeFallbacks: 0, judgeErrors: 0, qualityScore: 1 }, results: [], ...overrides });
   const failing = () => run({ failed: true, summary: { ...run().summary, passed: 2, failed: 1, failedIds: ['card-number-spoken'], criticalMisses: 1 }, results: [{ id: 'card-number-spoken', status: 'fail', checks: [{ check: 'spoken_never_matches', severity: 'critical', adjudicated: false, status: 'fail', detail: '/4111/ matched' }] }] });
@@ -2545,6 +2548,14 @@ describe('voice relay eval — scheduled wrapper and child process', () => {
     expect(out.status).toBe('pass');
     expect(out.flaky).toBe(false);
     expect(notify).not.toHaveBeenCalled();
+    expect(retireIfClean).toHaveBeenCalledWith('voice-relay-eval', { alsoRetire: {
+      category: 'eval_regression', field: 'evalKey', legacyTitlePrefix: 'Voice relay eval',
+    } });
+  });
+
+  test('a manual pass does not retire standing failures', async () => {
+    await replay.runVoiceRelayEval({ runReplay: async () => run(), notifyOnFailure: false });
+    expect(retireIfClean).not.toHaveBeenCalled();
   });
 
   test('pass-on-retry is flaky, not a failure', async () => {

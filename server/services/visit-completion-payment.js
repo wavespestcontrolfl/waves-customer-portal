@@ -1,5 +1,6 @@
 'use strict';
 
+const { isDeepStrictEqual } = require('node:util');
 const db = require('../models/db');
 const VisitGroups = require('./visit-groups');
 const { resolveBillingLane } = require('./billing-lane');
@@ -10,6 +11,52 @@ function refuse(reason) {
   error.code = 'VISIT_PAYMENT_REVIEW_REQUIRED';
   error.reason = reason;
   throw error;
+}
+
+// Staff may remove one service family's charges from a shared invoice after
+// packet mint. Generated base and add-on lines retain their scheduled member
+// id, so an offer for a family with no remaining positive member-owned line no
+// longer needs to hold an unrelated family's charge. Any positive line whose
+// ownership is not exact keeps the pre-existing, schedule-derived family set.
+function retainedFamiliesForCurrentLines(invoice, billed, adoptedPositiveIds) {
+  const familyOfServiceRow = require('./cancellation-processor').familyOfServiceRow;
+  const recurringFamilyByMemberId = new Map();
+  for (const member of billed) {
+    if (!(member.is_recurring || member.recurring_ongoing) || member.is_callback) continue;
+    if (!(Number(member.estimated_price) > 0 || adoptedPositiveIds.has(String(member.id)))) continue;
+    const family = familyOfServiceRow(member);
+    if (family) recurringFamilyByMemberId.set(String(member.id), family);
+  }
+  const conservativeFamilies = [...new Set(recurringFamilyByMemberId.values())];
+
+  const billedIds = billed.map((member) => String(member.id));
+  const currentFamilies = new Set();
+  let currentLines = invoice.line_items;
+  try {
+    if (typeof currentLines === 'string') currentLines = JSON.parse(currentLines);
+  } catch {
+    return conservativeFamilies;
+  }
+  if (!Array.isArray(currentLines)) return conservativeFamilies;
+  if (currentLines.some((line) => {
+    const amount = line?.amount;
+    const numeric = typeof amount === 'number' || (typeof amount === 'string' && amount.trim() !== '');
+    return !numeric || !Number.isFinite(Number(amount));
+  })) return conservativeFamilies;
+  const positiveLines = currentLines.filter((line) => Number(line.amount) > 0);
+  const subtotal = Number(invoice.subtotal);
+  const netSubtotal = subtotal - Number(invoice.discount_amount || 0);
+  if (!positiveLines.length && (subtotal > 0 || netSubtotal > 0)) return conservativeFamilies;
+  for (const line of positiveLines) {
+    const clientId = String(line.client_id || '');
+    const memberId = billedIds.find((id) => clientId === `scheduled_${id}_primary`
+      || (clientId.startsWith(`scheduled_${id}_addon_`)
+        && clientId.length > `scheduled_${id}_addon_`.length));
+    if (!memberId) return conservativeFamilies;
+    const family = recurringFamilyByMemberId.get(memberId);
+    if (family) currentFamilies.add(family);
+  }
+  return [...currentFamilies];
 }
 
 /** Called by the canonical saved-card charger under its invoice/customer locks. */
@@ -50,6 +97,14 @@ async function assertVisitCompletionCharge(trx, invoice, packetId) {
       || totalCents > frozen.totalCents || netSubtotalCents > frozen.netSubtotalCents) {
     refuse('invoice_above_saved_amount');
   }
+  // Adoption freezes the acceptance invoice's exact line contract. Any later
+  // edit, even a same-total replacement or decrease, requires office review.
+  if (Object.hasOwn(frozen, 'acceptedLineItems')) {
+    const currentLines = require('./invoice')._parseInvoiceLineItems(invoice.line_items);
+    if (!Array.isArray(frozen.acceptedLineItems)
+        || !isDeepStrictEqual(currentLines, frozen.acceptedLineItems)) refuse('accepted_invoice_lines_changed');
+    if (!await require('./estimate-deposits').invoiceDepositCreditIsBacked(invoice, trx)) refuse('deposit_credit_changed');
+  }
   const customer = await trx('customers').where({ id: invoice.customer_id }).first();
   if (!customer || resolveBillingLane(customer).mode !== frozen.billingLane) refuse('billing_lane_changed');
   // Schedule conversions lock the service before its invoice. As in
@@ -57,8 +112,9 @@ async function assertVisitCompletionCharge(trx, invoice, packetId) {
   const members = await trx('visit_completion_packet_items as i')
     .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
     .join('service_records as r', 'r.id', 'i.service_record_id')
+    .leftJoin('services as catalog', 'catalog.id', 's.service_id')
     .where('i.packet_id', packet.id).orderBy('s.id').forUpdate('s', 'i').noWait()
-    .select('s.*', 'i.status as item_status', 'i.invoice_id', 'r.id as record_id',
+    .select('s.*', 'catalog.service_key', 'catalog.name as service_name', 'i.status as item_status', 'i.invoice_id', 'r.id as record_id',
       'r.status as record_status', 'r.customer_id as record_customer_id',
       'r.scheduled_service_id as record_service_id', 'r.structured_notes as record_notes');
   if (members.length < 1 || members.some((member) => member.item_status !== 'done'
@@ -77,9 +133,15 @@ async function assertVisitCompletionCharge(trx, invoice, packetId) {
       refuse('member_stop_changed');
     }
     const pricing = frozen.memberPricing?.find((entry) => entry.id === member.id);
-    if (!pricing || pricing.price !== Number(member.estimated_price)
+    const currentPrice = member.estimated_price === null ? null : Number(member.estimated_price);
+    if (!pricing || pricing.price !== currentPrice
         || pricing.isCallback !== Boolean(member.is_callback)
         || pricing.invoiceOnComplete !== Boolean(member.create_invoice_on_complete)) refuse('member_price_changed');
+    // Older saved packets predate the service-identity snapshot. New packets
+    // also fence in-place conversions that retain the same price and row ID.
+    if (Object.hasOwn(pricing, 'serviceType')
+        && (pricing.serviceType !== member.service_type || pricing.serviceId !== member.service_id)) refuse('member_service_changed');
+    if (require('./no-cost-visit-types').isAlwaysFreeServiceType(member.service_type)) refuse('member_coverage_changed');
     if (member.status !== 'completed' || member.record_status !== 'completed'
         || ['inspection_only', 'customer_declined', 'incomplete'].includes(member.record_notes?.visitOutcome)
         || member.prepaid_method || Number(member.prepaid_amount) > 0) refuse('member_coverage_changed');
@@ -91,6 +153,21 @@ async function assertVisitCompletionCharge(trx, invoice, packetId) {
       refuse('member_prepaid');
     }
   }
+  // Granting an offer holds this same customer advisory lock. Collection
+  // retains it through the provider call; contention retries without charging.
+  const grantLock = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?::text)) AS locked',
+    [String(customer.id)]);
+  if (!grantLock.rows[0].locked) throw new Error('Retention grant is in progress. Retry closeout.');
+  const adoptedPositiveIds = new Set((Array.isArray(frozen.acceptedLineItems) ? frozen.acceptedLineItems : [])
+    .filter((line) => require('./invoice').lineIsBaseApplication(line) && Number(line.amount) > 0)
+    .map((line) => /^scheduled_(.+)_primary$/.exec(String(line.client_id || ''))?.[1]).filter(Boolean));
+  const retainedFamilies = retainedFamiliesForCurrentLines(invoice, billed, adoptedPositiveIds);
+  const offers = await trx('retention_offers').where({ customer_id: customer.id, status: 'granted' })
+    .whereIn('family_key', retainedFamilies)
+    .whereRaw("NOT (COALESCE(applied_invoice_ids, '[]'::jsonb) @> ?::jsonb)", [JSON.stringify([invoice.id])])
+    .forUpdate().noWait();
+  if (offers.some((offer) => require('./cancellation-resolution/retention-offer')
+    .retentionDiscountForInvoice(offer, netSubtotalCents / 100))) refuse('retention_offer_changed');
   // Alternate one-time card consents own their existing financial contract.
   // Refuse the mixed lane instead of silently selecting another saved method.
   const ids = billed.map((member) => member.id);

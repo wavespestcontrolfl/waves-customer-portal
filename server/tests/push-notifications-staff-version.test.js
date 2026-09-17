@@ -45,3 +45,22 @@ describe('staff push credential-version filtering', () => {
     expect(beforeDispatch).not.toHaveBeenCalled();
   });
 });
+
+test('queued retries send only to subscriptions that have not accepted delivery', async () => {
+  const apns = require('../services/apns');
+  const subs = [
+    { id: 'sub-accepted', platform: 'ios', device_token: 'token-accepted', admin_user_id: 'admin-1' },
+    { id: 'sub-retry', platform: 'ios', device_token: 'token-retry', admin_user_id: 'admin-1' },
+  ];
+  mockQuery.select.mockResolvedValue(subs);
+  apns.send.mockResolvedValueOnce({ ok: true }).mockResolvedValueOnce({ ok: false, reason: 'unavailable' });
+  const first = await pushService.sendToAdminUsers(['admin-1'], { title: 'Synthetic' }, { deliveredSubscriptionIds: [] });
+  expect(first).toMatchObject({ sent: 1, failed: 1, deliveredSubscriptionIds: ['sub-accepted'] });
+  apns.send.mockClear().mockResolvedValue({ ok: true });
+  const second = await pushService.sendToAdminUsers(['admin-1'], { title: 'Synthetic' }, {
+    deliveredSubscriptionIds: first.deliveredSubscriptionIds,
+  });
+  expect(apns.send).toHaveBeenCalledTimes(1);
+  expect(apns.send).toHaveBeenCalledWith('token-retry', expect.any(Object));
+  expect(second).toMatchObject({ sent: 2, failed: 0, deliveredSubscriptionIds: ['sub-accepted', 'sub-retry'] });
+});

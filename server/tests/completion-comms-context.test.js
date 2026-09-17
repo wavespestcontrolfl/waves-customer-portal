@@ -33,6 +33,7 @@ function stubKnex(rowsByTable = {}, whereArgs = {}) {
         }
         return q;
       },
+      whereRaw() { return q; },
       orderBy() { return q; },
       limit() { return q; },
       select() { return q; },

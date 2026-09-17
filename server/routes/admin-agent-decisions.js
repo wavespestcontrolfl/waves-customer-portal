@@ -4,6 +4,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { upsertReplyExampleFromAgentReview, NON_HUMAN_REPLY_MESSAGE_TYPES } = require('../services/reply-training-capture');
 const { SUGGEST_WORKFLOW } = require('../services/sms-suggest-mode');
+const { excludeUnresolvedSendReservations } = require('../services/messaging/review-ask-reservation');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -184,7 +185,10 @@ async function loadDecisionContext(decision) {
     decision.estimateId ? db('estimates').where({ id: decision.estimateId }).first() : null,
     (async () => {
       if (!(customerId || normalizePhoneLast10(phone))) return [];
-      const q = db('sms_log')
+      // codex #4331 P2 (structural pass): an unresolved review-ask
+      // reservation must not read as a message Waves definitely sent in
+      // this Agent Review decision's context payload.
+      const q = excludeUnresolvedSendReservations(db('sms_log'))
         .select('id', 'direction', 'from_phone', 'to_phone', 'message_body', 'message_type', 'status', 'admin_user_id', 'created_at')
         .orderBy('created_at', 'desc')
         .limit(18);

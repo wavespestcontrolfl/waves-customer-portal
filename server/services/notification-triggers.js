@@ -826,6 +826,12 @@ function pushTagFor(triggerKey, payload = {}) {
     // push-only attempt. Different caller windows still have distinct tags.
     return `waves-repeat_caller-${payload.repeatCallerDeliveryId || payload.callLogId || 'unknown-call'}`;
   }
+  if (triggerKey === 'payment_failed' && (payload.attemptId || payload.paymentIntentId)) {
+    // Per-attempt tag: the service worker replaces same-tag pushes with
+    // renotify:false, so two customers' failures before the first is
+    // dismissed must not collapse into one banner (codex P2 on #4392).
+    return `waves-payment_failed-${payload.attemptId || payload.paymentIntentId}`;
+  }
   if (triggerKey === 'customer_email_received') {
     // Per-email tag: same-tag pushes replace each other without renotifying,
     // so two customer emails must not collapse into one banner (hook P1).
@@ -871,7 +877,7 @@ function pushTagFor(triggerKey, payload = {}) {
  * @param {string} triggerKey — must match a key in TRIGGER_REGISTRY
  * @param {object} payload — trigger-specific data, see each build() for shape
  */
-async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null } = {}) {
+async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, shouldContinue = null, deliveredSubscriptionIds = null } = {}) {
   try {
     const trigger = TRIGGER_REGISTRY[triggerKey];
     if (!trigger) {
@@ -974,6 +980,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
             built.body,
             { link: built.link, metadata: { triggerKey, priority: trigger.priority, payload: safePayload },
               ...(dedupeKey ? { dedupeKey } : {}),
+              ...(shouldContinue ? { shouldContinue } : {}),
               ...(relayFailureCall ? { relayFailureCall, dedupeKey: `relay-failure:${relayFailureCall.callSid}` } : {}) }
           );
           if (created && !created.suppressed) bellWritten = true;
@@ -987,6 +994,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     const stats = { bellWritten, push: null,
       ...(dedupeKey ? { retryable: anyBellEnabled && !bellWritten && !bellSuppressed } : {}),
     };
+    if (shouldContinue && bellSuppressed && !bellWritten) stats.suppressed = true;
     onBell?.(bellWritten); // durable bell result is available before badge lookup or push
     if (relayFailureCall && !bellWritten) return stats; // an unclaimed callback never dispatches a push
     // Every active admin turned BOTH channels off: that is deliberate
@@ -1098,8 +1106,9 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
               ...(badgeInfo ? { badge: badgeInfo.count, badgeAt: badgeInfo.at } : {}),
             };
           },
-          { beforeDispatch },
+          { beforeDispatch, ...(deliveredSubscriptionIds ? { deliveredSubscriptionIds } : {}) },
         );
+        if (dedupeKey && stats.push?.failed > 0) stats.retryable = true;
         if (stats.push?.superseded) stats.push = { sent: 0, skipped: 'superseded_before_push' };
       }
     } catch (e) {
