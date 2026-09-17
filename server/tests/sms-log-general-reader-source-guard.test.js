@@ -62,6 +62,11 @@ const WINDOW_SPAN = 15;
 // apply. Default is ZERO — every OTHER unwrapped site fails.
 const ALLOWLIST = [
   {
+    file: 'services/review-request.js',
+    snippet: 'const reservationRow = await db("sms_log")',
+    reason: 'reservation-lifecycle bookkeeping, not a general reader: looks a review-ask reservation up BY its own marker to mark a stuck one release_pending for the stranded-send sweep; excluding reservations here would hide the very rows it exists to process (same class as the sms-auto-send sweep).',
+  },
+  {
     file: 'routes/twilio-webhook.js',
     snippet: 'const inbound = await trx(\'sms_log\')',
     reason: 'inbound-only (where from_phone = the opting-out customer\'s own number) — every send reservation (review-ask or reply) is Waves\' own outbound row, so its from_phone can never match a customer\'s number here.',
