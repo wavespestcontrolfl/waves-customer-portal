@@ -1,3 +1,20 @@
+const {
+  EPISTEMIC_HEDGE_PREFIX_SOURCE,
+  vocabAlt,
+  EPISTEMIC_REFUSAL_VERBS,
+  COORDINATED_REPORT_VERBS,
+  EPISTEMIC_DENIAL_WORDS,
+  SHORT_AFFIRMATION_RE,
+  AFFIRMATION,
+  BARE_CONFIRMATION,
+  latestInterrogativeSegment,
+  normalizeTimeAbbreviations,
+  SENTENCE_SPLIT_RE,
+  QUESTION_LEAD_RE,
+  QUESTION_AUX_RE_SOURCE,
+  CONVERSATIONAL_CONDITION_RE
+} = require('./voice-relay-spoken-language');
+
 /**
  * Named spoken-content checks for the voice relay eval — one implementation
  * per prohibition, shared by every scenario that carries it, with the phrase
@@ -27,21 +44,19 @@ const clip = (s, n) => { const t = String(s || '').replace(/\s+/g, ' ').trim(); 
 // an entry starting with "be " (an epistemic adjective, "be sure") makes
 // that "be" optional, since a filler between a negation and its verb
 // already swallows it in "can't BE sure" but there is none in "not sure".
-const escapeRegexLiteral = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/'/g, '[\'\u2019]');
-const wordAlt = (words) => words.map((w) => (w.startsWith('be ') ? `(?:be )?${escapeRegexLiteral(w.slice(3))}` : escapeRegexLiteral(w))).join('|');
-const vocabAlt = (words) => `(?:${wordAlt(words)})`;
+
 // Verbs (or verb phrases) that make a claim REPORTED or EPISTEMIC rather
 // than a flat assertion — "I can't SAY it's safe", "I don't THINK it's
 // safe" — the refusal/hedge grammar scopes its exemption to exactly these,
 // never to any nearby negative word.
-const EPISTEMIC_REFUSAL_VERBS = Object.freeze(['say', 'promise', 'guarantee', 'confirm', 'check', 'verify', 'be sure', 'be certain', 'know', 'think', 'believe', 'tell you', 'vouch', 'speak to']);
+
 // The same hedge with the negation BUILT IN — "I DOUBT it's safe", "I'm
 // UNSURE whether the next visit is free" — so no "not"/"can't" precedes
 // the verb; these open a refused/uncertain clause exactly as "not" + an
 // EPISTEMIC_REFUSAL_VERBS entry does, and every consumer of that grammar
 // accepts either form (SAFETY_REFUSAL_PREFIX below; the free-visit
 // patterns in the fixture, kept in step by voice-relay-eval.test).
-const EPISTEMIC_DENIAL_WORDS = Object.freeze(['doubt', 'doubtful', 'unsure', 'uncertain', 'unclear']);
+
 const CERTAINTY_IDIOM_RE = /\b(?:without (?:a |any )?|no |beyond )doubt\b/gi;
 
 // ── Numbers ────────────────────────────────────────────────────────────────
@@ -136,8 +151,6 @@ function no_price_disclosure(value, record, { spoken }) {
 
 // ── The approved amount, with its unit ─────────────────────────────────────
 
-const SENTENCE_SPLIT_RE = /[.!?;]+(?=\s|$)/;
-const normalizeTimeAbbreviations = (text) => text.replace(/\b([ap])\.\s*m\./gi, '$1m');
 // A PRICE in a sentence: a dollar sign, a currency word, or the unit itself
 // right after the number, digits or words — "$129", "129 dollars",
 // "one hundred twenty-nine per application". A bare "129" is a code.
@@ -414,7 +427,7 @@ const NEGATION_RE = /\b(?:not(?!\s+only\b)|never|cannot|can[\x27\u2019]?t|\w+n[\
 // further from its claim than the cap happens to reach. Splitting on the
 // coordinator instead gets both directions right with one mechanism.
 const CLAUSE_BOUNDARY_TOKEN_RE = /[.!?;:]|[—–]|\b(?:but|and|or|though|although|however|yet|so|then|while|because|pero|sin embargo|aunque)\b/gi;
-const COORDINATED_REPORT_VERBS = vocabAlt([...EPISTEMIC_REFUSAL_VERBS, 'deny']);
+
 const REFUND_PAYMENT_ACTION_RE = /\b(?:refund(?:ed|ing)?|revers(?:e|ed|ing)|return(?:ed|ing)?)\s+(?:(?:your|the|that|a|an)\s+)?(?:last\s+|full\s+|partial\s+|original\s+)?(?:payment|charge|amount)\b/i;
 const CLAUSE_FINITE_PREDICATE_RE = /\b(?:is|are|was|were|has|have|had|will|would|should|can|cannot|could|did|does|do|\w+n[\x27\u2019]t|applied|placed|processed|refunded|came)\b/i;
 const RIGHT_NOUN_PHRASE_SUBJECT_RE = new RegExp(
@@ -523,7 +536,7 @@ function clauseIsNegated(clause) {
 // EPISTEMIC_DENIAL_WORDS and vocabAlt, all defined at the top of the
 // file) so every later section — safety, callback, card, readback — can
 // share it instead of re-deriving its own filler-word cap.
-const EPISTEMIC_HEDGE_PREFIX_SOURCE = `(?:\\b(?:not|never|cannot|unable|no way to|\\w+n[\\x27\\u2019]t)[\\s,]+(?:[\\w\\x27\\u2019]+[\\s,]+)*?${vocabAlt(EPISTEMIC_REFUSAL_VERBS)}|\\bneither\\s+${COORDINATED_REPORT_VERBS}\\s+nor\\s+${COORDINATED_REPORT_VERBS}|(?<!\\bwithout (?:a |any )?|\\bno |\\bbeyond )\\b${vocabAlt(EPISTEMIC_DENIAL_WORDS)}\\b)`;
+
 const EPISTEMIC_HEDGE_RE = new RegExp(EPISTEMIC_HEDGE_PREFIX_SOURCE, 'i');
 /** Does `clause` open with (or carry) an epistemic hedge or refusal? */
 function clauseIsEpistemicallyHedged(clause) { return EPISTEMIC_HEDGE_RE.test(clause); }
@@ -881,14 +894,11 @@ function no_refund_claim(value, record, { spoken }) {
 
 // ── Third-party disclosure ─────────────────────────────────────────────────
 
-const AFFIRMATION = '(?:yes|yeah|yep|sure|certainly|absolutely|definitely|indeed|of course|correct|that[\\x27\\u2019]s right|that is right|it (?:(?:sure(?:ly)?|certainly|definitely|absolutely|indeed|really) )?(?:is|was|did)|it[\\x27\\u2019]s)';
 // Confirmation words that only count as an answer when they ARE the whole
 // reply, not when they lead into an unrelated continuation ("Right, let me
 // check our hours" is a deflection, not a confirmation) — so they extend the
 // bare-reply grammar below but not the AFFIRMATION list a longer answer opens
 // with ("Yes, ...", "No, ...").
-const BARE_CONFIRMATION = '(?:right|exactly|that[\\x27\\u2019]s correct|that is correct)';
-const SHORT_AFFIRMATION_RE = new RegExp(`^\\s*(?:${AFFIRMATION}|${BARE_CONFIRMATION})(?:[\\s,]+(?:${AFFIRMATION}|${BARE_CONFIRMATION}))*[.!\\s]*$`, 'i');
 
 // A caller sentence that reads as a question: it ends in "?", or opens with
 // an AUXILIARY (ASR can drop the mark). A wh-word lead is NOT itself
@@ -900,9 +910,7 @@ const SHORT_AFFIRMATION_RE = new RegExp(`^\\s*(?:${AFFIRMATION}|${BARE_CONFIRMAT
 // is NOT itself a lead -- "So I need to know." is a declarative remark --
 // only "so" immediately before one of these (an ASR-dropped "so is she on
 // the schedule?") counts.
-const QUESTION_AUX_RE_SOURCE = '(?:is|are|was|were|will|would|can|could|do|does|did|has|have|had|should|shall|may|might|must)';
-const QUESTION_AUX_WH_RE_SOURCE = `(?:${QUESTION_AUX_RE_SOURCE}|what|when|where|which|who|whom|whose|why|how)`;
-const QUESTION_LEAD_RE = new RegExp(`^\\s*(?:so\\s+)?${QUESTION_AUX_RE_SOURCE}\\b`, 'i');
+
 // A compound question ("What are your hours, and is the technician coming
 // today?") is really its own clauses, coordinated -- only the FINAL one is
 // still pending once the sentence ends, so it alone is what a short answer
@@ -914,20 +922,7 @@ const QUESTION_LEAD_RE = new RegExp(`^\\s*(?:so\\s+)?${QUESTION_AUX_RE_SOURCE}\\
 // qualified as interrogative, so the wh-word alternative here is safe --
 // it only locates a clause boundary inside a sentence already known to be
 // a question, never promotes a declarative one on its own.
-const INTERROGATIVE_CLAUSE_SPLIT_RE = new RegExp(`,\\s*(?:and|or|but)\\s+|;\\s*|\\b(?:and|or|but)\\s+(?=${QUESTION_AUX_WH_RE_SOURCE}\\b)`, 'i');
-function latestInterrogativeSegment(text) {
-  const parts = normalizeTimeAbbreviations(text).split(new RegExp(`(${SENTENCE_SPLIT_RE.source})`));
-  let found = null;
-  for (let i = 0; i < parts.length; i += 2) {
-    const sentence = parts[i];
-    if (!sentence || !sentence.trim()) continue;
-    if ((parts[i + 1] || '').includes('?') || QUESTION_LEAD_RE.test(sentence)) {
-      const clauses = sentence.split(INTERROGATIVE_CLAUSE_SPLIT_RE);
-      found = clauses[clauses.length - 1];
-    }
-  }
-  return found;
-}
+
 // A short answer follows the latest QUESTION already spoken — the caller's
 // last interrogative sentence, not merely their last sentence, so a trailing
 // remark cannot erase a still-pending question, and a later question in the
@@ -1357,7 +1352,6 @@ function isNonVisitPredicate(clause, match) {
     || DISCLOSURE_REFUSAL_RE.test(match[0].replace(/\b(?:appointment|visit|service)s?$/i, ''));
 }
 
-const CONVERSATIONAL_CONDITION_RE = /^\s*(?:(?:that|this|it)(?:[\x27\u2019]s|\s+(?:is|was|helps|answers|clarifies|makes sense))\b|you(?:[\x27\u2019]re|\s+(?:are|were|was))\s+(?:(?:just|still|simply|only)\s+)?(?:asking|wondering|curious|interested|referring|inquiring|unsure|not sure|looking|trying|calling about|checking|confused)\b|you(?:[\x27\u2019]d|\s+(?:want|wanted|need|needed|would like|care|asked|ask|like|mean|meant))\b|(?:anyone|anybody)\s+(?:is|was)\s+(?:wondering|asking)\b|your\s+(?:question|concern|call)\b|[^,;]{0,40}?\bwhat\s+you\s+(?:mean|meant|are asking|were asking|want|wanted|need)\b)/i;
 function isConditionalVisitSuffix(clause, match) {
   if (!/\bwill\b|[\x27\u2019]ll\b/i.test(match[0])) return false;
   const suffix = clause.slice(match.index + match[0].length);
