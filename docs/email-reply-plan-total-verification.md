@@ -41,6 +41,8 @@ Price/plan nouns may precede the amount through a recognized copula and those
 qualifiers, including when the period follows (`The plan is only $98 monthly`).
 Explicit payment copulas also work in either period order; later copulas in
 posted-event descriptions do not turn the notice into a price.
+Payment assertions use a bounded noun/copula/qualifier grammar. A copula
+describing `is posted` or `has been received` does not assert the amount.
 Singular/plural activity nouns allow up to four ordinary modifiers (`Monthly
 service reminders mention the $98 initial-service price`); an activity fee
 or cost predicate still counts as pricing.

@@ -266,6 +266,22 @@ describe('inactive email reply plan-total policy', () => {
     'Your payment posted. The price is $98 per application, visits are monthly.',
   ])('keeps trailing-period account events and application prices distinct: %s', (text) => allowed(text));
 
+  test.each([
+    'Your monthly payment is posted for $98',
+    'Your monthly payment has been received in the amount of $98',
+    'Your annual payment is posted for $1176',
+    'Your yearly payment has been received in the amount of $1176',
+    'Your monthly payment is posted for exactly $98 after the plan adjustment',
+    'Your monthly payment has been received in the amount of 98',
+  ])('does not confuse event copulas with an asserted payment amount: %s', (text) => allowed(text));
+
+  test.each([
+    'Your monthly payment is only about $98 after your credit posted',
+    'Your payment is monthly exactly $98 after your credit posted',
+    '$98 is the payment monthly after your credit posted',
+    'Your yearly payment will be at least $1176 after your credit posted',
+  ])('recognizes actual bounded payment copulas in both period orders: %s', (text) => rejected(text));
+
   test('keeps the trailing-period copula exemption monthly-only', () => {
     allowed('The plan is only $98 monthly after your payment posted.', { legacyMonthlyPlan: true });
     rejected('The plan is only $1176 yearly after your payment posted.', { legacyMonthlyPlan: true });

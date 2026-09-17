@@ -8,8 +8,13 @@ const PRICE_WORDS = new Set([
 const PLAN_WORDS = new Set(['plan', 'program', 'package']);
 const PRICING_LABEL_WORDS = new Set([...PRICE_WORDS, ...PLAN_WORDS]);
 const PRICE_QUALIFIER = '(?:only|just|about|around|approximately|roughly|exactly|nearly|almost|up to|at least|as low as)';
-const PRICE_HEAD = `(?:${[...PRICE_WORDS].join('|')}|(?:${[...PRICING_LABEL_WORDS].join('|')}) <be>)`;
-const PRICE_LABEL = new RegExp(`(?:^| )${PRICE_HEAD}(?: ${PRICE_QUALIFIER}){0,3}(?: <sep>)?$`);
+const PRICE_HEAD = `(?:${[...PRICE_WORDS].join('|')}|(?:${[...PRICING_LABEL_WORDS].join('|')}) <(?:be|pastBe)>)`;
+const QUALIFIED_END = `(?: ${PRICE_QUALIFIER}){0,3}(?: <sep>)?$`;
+const PRICE_LABEL = new RegExp(`(?:^| )${PRICE_HEAD}${QUALIFIED_END}`);
+const PAYMENT_LABEL = new RegExp(`(?:^| )payment <be>(?: <period>)?${QUALIFIED_END}`);
+const BE_AMOUNT = new RegExp(`(?:^| )<(?:be|pastBe)>${QUALIFIED_END}`);
+const PAYMENT_SUFFIX = /^<(?:money|number)> <be> (?:the |our |your |a )?(?:<period> payment|payment <period>)(?: |$)/;
+const PRICE_SUFFIX = new RegExp(`^<(?:money|number)> <(?:be|pastBe)> (?:the |our |your |a )?(?:<period> (?:${[...PRICING_LABEL_WORDS].join('|')})|(?:${[...PRICING_LABEL_WORDS].join('|')}) <period>)(?: |$)`);
 const ACCOUNT_WORDS = new Set([
   'account', 'balance', 'payment', 'refund', 'credit', 'deposit', 'receipt',
   'received', 'pay', 'due',
@@ -25,6 +30,12 @@ const PERIOD_DETERMINERS = new Set(['a', 'each', 'every']);
 const PERIOD_NOUNS = new Set(['month', 'mo', 'year', 'yr']);
 const isWord = (token, words) => token?.kind === 'word' && words.has(token.text);
 const isAmount = (token) => token.kind === 'money' || token.kind === 'number';
+
+function canonicalToken(token) {
+  if (token.kind === 'word') return token.text;
+  if (token.kind === 'be' && /^(?:was|were|had been)$/.test(token.text)) return '<pastBe>';
+  return `<${token.kind}>`;
+}
 
 function withDeterminedPeriods(clause) {
   const tokens = [];
@@ -91,20 +102,18 @@ function isPlanTotalPair(clause, amountAt, periodAt, context, legacyMonthlyPlan)
   const last = Math.max(amountAt, periodAt);
   const gap = clause.slice(first + 1, last);
   const accountEvent = context.some((token) => isWord(token, ACCOUNT_EVENTS));
-  const paymentCopulas = [...gap, ...context.slice(0, context.indexOf(amount))];
-  const paymentPredicate = context.some((token) => token.kind === 'word' && token.text === 'payment')
-    && paymentCopulas.some((token) => token.kind === 'be' && !/^(?:was|were|had been)$/.test(token.text));
-  const priceCue = paymentPredicate || context.some((token) => isWord(token, PRICE_WORDS));
+  // Payment copulas must join the amount through this finite grammar, rather
+  // than describe a posted/received event. Prefix and suffix scans are bounded.
+  const amountLabel = clause.slice(Math.max(0, amountAt - 13), amountAt).map(canonicalToken).join(' ');
+  const amountTail = clause.slice(amountAt, amountAt + 5).map(canonicalToken).join(' ');
+  if (PAYMENT_LABEL.test(amountLabel) || PAYMENT_SUFFIX.test(amountTail)) return true;
+  const priceCue = context.some((token) => isWord(token, PRICE_WORDS));
   const planCue = context.some((token) => isWord(token, PLAN_WORDS));
   const direct = gap.every((token) => token.kind === 'sep');
   if (amount.kind === 'money' && direct && /^(?:\/|per\b|a\b|each\b|every\b)/.test(period.text)) return true;
   const assertionLabels = amountAt < periodAt ? [...gap, clause[periodAt + 1] || {}] : gap;
-  // A price noun/predicate, copula, three three-word qualifiers and separator
-  // fit within twelve canonical tokens. Unknown descriptions cannot join them.
-  const amountLabel = clause.slice(Math.max(0, amountAt - 12), amountAt)
-    .map((token) => (token.kind === 'word' ? token.text : `<${token.kind}>`)).join(' ');
-  const assertedPrice = paymentPredicate || PRICE_LABEL.test(amountLabel)
-    || (gap.some((token) => token.kind === 'be')
+  const assertedPrice = PRICE_LABEL.test(amountLabel) || PRICE_SUFFIX.test(amountTail)
+    || (BE_AMOUNT.test(amountLabel)
       && assertionLabels.some((token) => isWord(token, PRICING_LABEL_WORDS)));
   if (accountEvent && !assertedPrice) return false;
   if (amount.kind === 'number') return priceCue;
