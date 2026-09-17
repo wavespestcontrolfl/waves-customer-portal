@@ -1362,7 +1362,7 @@ async function sendTemplate({
     // events that do not change queued status.
     const matchingProviderEvidence = matchingAttempt && await db('email_message_events')
       .where({ email_message_id: message.id, provider: 'sendgrid' })
-      .whereIn('event_type', ['processed', 'deferred', 'delivered', 'open', 'click', 'bounce', 'dropped', 'spamreport', 'unsubscribe', 'group_unsubscribe'])
+      .whereIn('event_type', ['processed', 'deferred', 'delivered', 'open', 'click', 'bounce', 'blocked', 'dropped', 'spamreport', 'unsubscribe', 'group_unsubscribe'])
       .whereRaw("raw_event->>'send_attempt_token' = ?", [sendAttemptToken])
       .first('event_type');
     if (matchingProviderEvidence && ['processed', 'deferred', 'open', 'click'].includes(matchingProviderEvidence.event_type)
@@ -1374,7 +1374,7 @@ async function sendTemplate({
       try {
         [recorded] = await db('email_messages').where({ id: message.id, send_attempt_token: sendAttemptToken })
           .where({ status: 'queued' })
-          .update({ status: 'sent', error_message: null, updated_at: new Date() }).returning('*');
+          .update({ status: 'sent', sent_at: new Date(), error_message: null, updated_at: new Date() }).returning('*');
       } catch (stampError) {
         bookkeepingFailed = true;
         logger.warn(`[email-template-library] webhook acceptance bookkeeping failed for ${templateKey}: ${stampError.message}`);

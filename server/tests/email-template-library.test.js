@@ -385,15 +385,16 @@ describe('email template library rendering', () => {
     expect(result).toMatchObject({ sent: true, superseded: true, providerAttempted: true, providerAccepted: false });
   });
 
-  test.each(['delivered', 'bounced', 'failed'])('a matching %s webhook proves acceptance after a lost SDK response', async (status) => {
+  test.each([['delivered', 'delivered'], ['bounced', 'bounce'], ['failed', 'bounce'], ['failed', 'blocked']])('a matching %s/%s webhook proves acceptance after a lost SDK response', async (status, eventType) => {
     const queuedMessage = { id: 'msg-webhook', status: 'queued', subject_snapshot: 'S' };
     const current = { ...queuedMessage, status };
+    const event = chain({ first: { event_type: eventType } });
     setDbQueues({
       email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
       email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
       email_suppressions: [chain({ result: [] })],
       email_messages: [chain({ returning: [queuedMessage] }), chain({ first: current }), chain()],
-      email_message_events: [chain({ first: { event_type: status === 'delivered' ? 'delivered' : 'bounce' } })],
+      email_message_events: [event],
     });
     sendgrid.sendOne.mockImplementationOnce(async ({ customArgs }) => {
       current.send_attempt_token = customArgs.send_attempt_token;
@@ -406,6 +407,7 @@ describe('email template library rendering', () => {
     expect(result).toMatchObject({ sent: true, providerAttempted: true, providerAccepted: true });
     // A provider-block bounce intentionally remains failed for its existing retry rail.
     expect(result.message.status).toBe(status);
+    expect(event.whereIn).toHaveBeenCalledWith('event_type', expect.arrayContaining([eventType]));
   });
 
   test.each([false, true])('SDK acceptance survives ledger failure (retry fails=%s)', async (retryFails) => {
@@ -452,7 +454,7 @@ describe('email template library rendering', () => {
       payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
     });
     expect(result).toMatchObject({ sent: true, providerAccepted: true });
-    expect(promote.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'sent' }));
+    expect(promote.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'sent', sent_at: expect.any(Date) }));
     expect(event.whereRaw).toHaveBeenCalledWith("raw_event->>'send_attempt_token' = ?", [current.send_attempt_token]);
   });
 
