@@ -31,7 +31,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { deliverOpsDigest } = require('./ops-digest');
-const { retireIfClean } = require('./ops-digest-fall-off');
 const sendgrid = require('./sendgrid-mail');
 const { isEnabled } = require('../config/feature-gates');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
@@ -325,7 +324,9 @@ async function runLeadToCashInvariantSweep({ now = new Date(), mailer = sendgrid
   const exceptions = results.filter((r) => !r.ok);
   if (!exceptions.length) {
     logger.info(`[l2c-invariants] clean: ${JSON.stringify(summary)}`);
-    await retireIfClean('lead-to-cash-invariants'); // fall-off: every invariant holds → standing FIX rows clear
+    // closeout_failed_facts checks yesterday only. A clean later window
+    // does not prove older failures (including license facts) were fixed,
+    // so this aggregate cannot automatically retire its prior alerts.
     return { skipped: 'clean', results: summary };
   }
   const report = composeReport(results, { now });
@@ -337,7 +338,6 @@ async function runLeadToCashInvariantSweep({ now = new Date(), mailer = sendgrid
   if (await sentRecently()) return { skipped: 'recent_send', results: summary };
   try {
     await deliverOpsDigest({
-      fallOff: true, // retired by retireIfClean on the clean run
       key: 'lead-to-cash-invariants',
       subject: report.subject,
       html: report.html,
