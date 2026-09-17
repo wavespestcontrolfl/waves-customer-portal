@@ -327,6 +327,19 @@ describe('inactive email reply plan-total policy', () => {
     blocked.forEach((text) => rejected(text));
     permitted.forEach((text) => allowed(text));
   });
+  test.each([
+    [['The plan costs $1,176 for the year', 'The plan costs $98 for the month', 'The price for the year is $1,176'], ['Your account balance is $98 for the month', 'We received $98 for the month after the plan adjustment']],
+    [['Your monthly payment totals $98', 'Your yearly payment equals $1,176', 'The monthly payment comes to $98', 'Your monthly payment will total 98 after your credit posted'], ['Your monthly payment of $98 posted after the total adjustment', 'Your yearly payment was $1,176 and it cleared']],
+    [['Each month, we charge $98', 'Per year, the plan costs $1,176', 'The plan is $98, billed monthly', 'The price is $1,176, charged yearly'], ['The initial price is $98, service occurs monthly', 'We received $98, billed monthly', 'Each month, we send reminders about your $98 balance', 'Per year, your payment posted for $1,176']],
+    [['Monthly service costs $98', 'Monthly treatment fee is $98', 'Monthly service weekly reminders cost $98'], ['The initial service costs $98 with monthly treatments afterward', 'The initial price is $98 followed by monthly service', 'The initial price is $98 followed by yearly treatments']],
+  ])('covers supported R4 pricing while preserving account and cadence facts: %j', (blocked, permitted) => {
+    blocked.forEach((text) => rejected(text));
+    permitted.forEach((text) => allowed(text));
+  });
+  test('keeps R4 legacy exceptions monthly-only', () => {
+    for (const text of ['The plan costs $98 for the month', 'Your monthly payment totals $98', 'Each month, we charge $98', 'The plan is $98, billed monthly']) allowed(text, { legacyMonthlyPlan: true });
+    for (const text of ['The plan costs $1,176 for the year', 'Your yearly payment equals $1,176', 'Per year, the plan costs $1,176', 'The price is $1,176, charged yearly']) rejected(text, { legacyMonthlyPlan: true });
+  });
   test('keeps R3 pricing exceptions unit-specific and trusted', () => {
     for (const text of ['Your monthly spread is $98', 'For the monthly plan, the price is $98', 'The plan is $98 and is billed monthly', '$98 is per month']) allowed(text, { legacyMonthlyPlan: true });
     for (const text of ['Your annualized plan total is $1176', '$1176 was per year', 'The plan is $1176 and is billed yearly']) rejected(text, { legacyMonthlyPlan: true });

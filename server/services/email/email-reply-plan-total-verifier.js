@@ -12,7 +12,7 @@ const PRICE_QUALIFIER = '(?:only|just|about|around|approximately|roughly|exactly
 const PRICE_HEAD = `(?:${[...PRICE_WORDS].join('|')}|(?:${[...PRICING_LABEL_WORDS].join('|')}) <(?:be|pastBe)>)`;
 const QUALIFIED_END = `(?: ${PRICE_QUALIFIER}){0,3}(?: <sep>)?$`;
 const PRICE_LABEL = new RegExp(`(?:^| )${PRICE_HEAD}${QUALIFIED_END}`);
-const PAYMENT_LABEL = new RegExp(`(?:^| )payment <be>(?: <period>)?${QUALIFIED_END}`);
+const PAYMENT_LABEL = new RegExp(`(?:^| )payment (?:<be>|(?:<modal> )?(?:totals?|equals?|comes? to))(?: <period>)?${QUALIFIED_END}`);
 const BE_AMOUNT = new RegExp(`(?:^| )<(?:be|pastBe)>${QUALIFIED_END}`);
 const PAYMENT_SUFFIX = /^<(?:money|number)> <be> (?:the |our |your |a )?(?:<period> payment|payment <period>)(?: |$)/;
 const PRICE_SUFFIX = new RegExp(`^<(?:money|number)> <(?:be|pastBe)> (?:the |our |your |a )?(?:<period> (?:${[...PRICING_LABEL_WORDS].join('|')})|(?:${[...PRICING_LABEL_WORDS].join('|')}) <period>)(?: |$)`);
@@ -25,6 +25,7 @@ const JOIN_WORDS = new Set(['the', 'a', 'an', 'our', 'your', 'my', 'their', 'his
 const ACCOUNT_EVENTS = new Set(['posted', 'cleared', 'received', 'refunded', 'credited', 'pay']);
 const PERIOD_ACTIVITY_WORDS = new Set([
   'reminder', 'reminders', 'update', 'updates', 'schedule', 'scheduling', 'appointment', 'appointments',
+  'service', 'services', 'treatment', 'treatments',
 ]);
 const CLAIM_BREAK_WORDS = new Set(['and', 'or', 'but']);
 const PERIOD_DETERMINERS = new Set(['a', 'each', 'every']);
@@ -51,7 +52,11 @@ function canonicalToken(token) {
 function withDeterminedPeriods(clause) {
   const tokens = [];
   for (let index = 0; index < clause.length; index += 1) {
-    if (isWord(clause[index], PERIOD_DETERMINERS)
+    if (clause[index].text === 'for' && clause[index + 1]?.text === 'the'
+      && isWord(clause[index + 2] || {}, PERIOD_NOUNS)) {
+      tokens.push({ kind: 'period', text: `for the ${clause[index + 2].text}` });
+      index += 2;
+    } else if (isWord(clause[index], PERIOD_DETERMINERS)
       && isWord(clause[index + 1] || {}, PERIOD_NOUNS)
       && !(clause[index].text === 'a' && clause[index + 2]?.kind === 'word'
         && clause[index + 2].text === 'ago')) {
@@ -85,38 +90,39 @@ function tiedToVisitOrApplication(clause, at) {
 
 function continuesPrice(clause, at, start) {
   const label = clause.slice(Math.max(start, at - 14), at - 1).map(canonicalToken).join(' ');
-  return clause[at].kind === 'word' && clause[at].text === 'and'
-    && clause[at - 1] && isAmount(clause[at - 1])
+  let next = at + 1;
+  if (clause[at].kind === 'word' && clause[at].text === 'and' && clause[next]?.kind === 'be') next += 1;
+  else if (clause[at].kind !== 'sep' || clause[at].text !== ',') return false;
+  return clause[at - 1] && isAmount(clause[at - 1])
     && (PRICE_LABEL.test(label) || PAYMENT_LABEL.test(label))
-    && clause[at + 1]?.kind === 'be' && isWord(clause[at + 2], BILLING_PREDICATES)
-    && clause[at + 3]?.kind === 'period';
+    && isWord(clause[next], BILLING_PREDICATES) && clause[next + 1]?.kind === 'period';
 }
 
 function breaksClaim(clause, at, start) {
   const token = clause[at];
-  const frontedPeriod = at - 1 === start && clause[at - 1]?.kind === 'period'
-    && /^(?:monthly|yearly|annually)$/.test(clause[at - 1].text);
+  const frontedPeriod = at - 1 === start && clause[at - 1]?.kind === 'period';
   const frontedPlan = at - start <= 4
     && FRONTED_PLAN.test(clause.slice(start, at).map(canonicalToken).join(' '))
     && PRICING_START.test(clause.slice(at + 1, at + 5).map(canonicalToken).join(' '));
   return token.kind === 'barrier' || UNIT_KINDS.has(token.kind)
-    || (token.kind === 'sep' && token.text === ',' && !frontedPeriod && !frontedPlan)
+    || (token.kind === 'sep' && token.text === ',' && !frontedPeriod && !frontedPlan
+      && !continuesPrice(clause, at, start))
     || (isWord(token, CLAIM_BREAK_WORDS) && !continuesPrice(clause, at, start));
 }
 
 function periodDescribesActivity(clause, at) {
   if (!/^(?:monthly|yearly|annual|annually|annualized)$/.test(clause[at].text)) return false;
   // At most four ordinary modifiers may precede a cadence/activity noun.
+  let activity = -1;
   for (let index = at + 1; index <= at + 5 && index < clause.length; index += 1) {
     const token = clause[index];
-    if (isWord(token, PERIOD_ACTIVITY_WORDS)) {
-      const predicate = clause[index + 1]?.kind === 'be' ? clause[index + 2] : clause[index + 1];
-      return !isWord(predicate || {}, PRICE_WORDS);
-    }
-    if (token.kind !== 'word' || isWord(token, PRICE_WORDS)
+    if (isWord(token, PERIOD_ACTIVITY_WORDS)) activity = index;
+    else if (token.kind !== 'word' || isWord(token, PRICE_WORDS)
       || isWord(token, PLAN_WORDS) || isWord(token, ACCOUNT_WORDS)) break;
   }
-  return false;
+  if (activity < 0) return false;
+  const predicate = clause[activity + 1]?.kind === 'be' ? clause[activity + 2] : clause[activity + 1];
+  return !isWord(predicate || {}, PRICE_WORDS);
 }
 
 function isPlanTotalPair(clause, amountAt, periodAt, context, legacyMonthlyPlan) {

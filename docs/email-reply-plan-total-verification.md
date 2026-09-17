@@ -26,7 +26,8 @@ cues; `annualized` is classified locally as a yearly period. Bare percentages
 and the finite distance units following a number are excluded; currency
 amounts remain prices. A single copula can directly join currency and period.
 The adapter joins canonical `a/each/every` and `month/mo/year/yr` word tokens
-locally; the prerequisite scanner is unchanged. `a month/year` (including
+locally, along with bounded `for the month/year`; the prerequisite scanner is
+unchanged. `a month/year` (including
 `mo/yr`) immediately followed by `ago` remains temporal wording rather than a
 recurring period. Only tokens in the same clause are considered. A barrier,
 conjunction, sentence boundary, or visit/application unit breaks the
@@ -46,22 +47,25 @@ Price/plan nouns may precede the amount through a recognized copula and those
 qualifiers, including when the period follows (`The plan is only $98 monthly`).
 Explicit payment copulas also work in either period order; later copulas in
 posted-event descriptions do not turn the notice into a price.
-Payment assertions use a bounded noun/copula/qualifier grammar. A copula
+Payment assertions use a bounded noun/copula/qualifier grammar, including
+`totals`, `equals`, and `comes to` predicates. A copula
 describing `is posted` or `has been received` does not assert the amount.
 Singular/plural activity nouns allow up to four ordinary modifiers (`Monthly
-service reminders mention the $98 initial-service price`); an activity fee
+service reminders mention the $98 initial-service price`), including service
+and treatment cadence; the final activity noun's fee
 or cost predicate still counts as pricing.
 A unit attached to one amount does not shield a later amount across a comma,
 and a later price statement after a conjunction or comma does not turn an
 earlier account payment into a plan-total claim.
 Commas also break the amount/period relationship and cannot attach a later
 visit/application noun to an earlier amount. One comma immediately after a
-fronted monthly/yearly/annually period at the beginning of its claim is
+fronted recognized period at the beginning of its claim is
 permitted (`Annually, we charge
 $1176`); a second comma still breaks the claim.
 `For the monthly plan, the price is $98` may retain its comma when a bounded
 fronted plan noun phrase continues into a pricing copula. An asserted price
-may retain `and` immediately before a copular billing predicate and period
+may retain `and` immediately before a copular billing predicate and period,
+or a comma before a billing predicate and period
 (`The plan is $98 and is billed monthly`); independent facts still break.
 Colons, dashes, and parentheses before unrelated application/visit nouns
 cannot exempt an amount; an actual attached unit such as `: per application`
