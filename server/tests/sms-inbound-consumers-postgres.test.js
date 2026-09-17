@@ -11,7 +11,7 @@ jest.mock('../services/messaging/validators/suppression', () => ({ recordSuppres
 jest.mock('../services/messaging/opt-out-detector', () => ({
   detectSmsOptCommand: jest.fn(() => ({ action: null })), detectHelp: jest.fn(() => ({ help: false })),
 }));
-jest.mock('../services/conversations', () => ({ recordTouchpoint: jest.fn(async () => ({})), updateByTwilioSid: jest.fn() }));
+jest.mock('../services/conversations', () => ({ recordTouchpoint: jest.fn(async () => ({ message: { id: 'saved-inbound-message' } })), updateByTwilioSid: jest.fn() }));
 jest.mock('../services/sms-media', () => ({ uploadTwilioMedia: jest.fn(async () => []) }));
 jest.mock('../services/twilio-failure-alerts', () => ({ alertTwilioFailure: jest.fn(async () => {}), isFailureStatus: jest.fn() }));
 jest.mock('../services/sms-intent', () => ({
