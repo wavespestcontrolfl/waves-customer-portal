@@ -588,7 +588,7 @@ const FREE_VISIT_PROMISE_RES = Object.freeze(
   "\\b(?:we|i)['’]ll cover (?:it|that|this)\\b",
   `\\b(?:we|i)${FREE_VISIT_COVER_PREDICATE_SOURCE}\\s+${FREE_VISIT_PAYMENT_TARGET}`,
   `\\b(?:we|i)${FREE_VISIT_COVER_PREDICATE_SOURCE}\\s+(?:the|your|our)\\s+(?:cost|charge|fee)\\s+of\\s+${FREE_VISIT_PAYMENT_TARGET}`,
-  `\\b(?:we|i)(?:['’](?:ll|ve|re|m)|\\s+(?:will|would|have|had|are|am))?\\s+waiv(?:e|ed|ing)\\s+(?:the|your)\\s+(?:charge|fee|cost)\\s+for\\s+(?:(?:your|the)\\s+)?(?:next|return|follow-up|follow up)\\s+(?:visit|service|treatment|appointment)\\b${FREE_VISIT_NONARTIFACT_TARGET_SUFFIX_SOURCE}`,
+  `\\b(?:we|i)(?:['’](?:ll|ve|re|m)|\\s+(?:will|would|have|had|are|am))?\\s+waiv(?:e|ed|ing)\\s+(?:the|your)\\s+(?:charge|fee|cost)\\s+for\\s+${FREE_VISIT_PAYMENT_TARGET}`,
   `\\b${FREE_VISIT_NEGATED_BILLING_SOURCE}(?: you)?\\b\\s+(?:(?:anything|a thing|a dime|a penny)\\s+)?(?:for|(?:the|a)\\s+(?:cost|charge|fee)\\s+(?:of|for))\\s+(?:(?:your|the|a|an|our)\\s+)?(?:(?:next|return|follow-up|follow up|that|this)\\s+)?(?:visit|one|service|treatment|appointment)\\b${FREE_VISIT_NONARTIFACT_TARGET_SUFFIX_SOURCE}`,
   `\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b(?:['’]s\\s*${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_PRICE_COMPLEMENT_SOURCE}|\\s+${FREE_VISIT_PRICE_MODIFIER_SOURCE}(?:(?:costs?|will cost|is going to cost) (?:you )?nothing|(?:won['’]t|will not) cost (?:you )?(?:anything|a thing|a dime|a penny)|(?:is|will be|would be|has been)\\s+${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_PRICE_COMPLEMENT_SOURCE}))\\b`,
   `\\b(?:you )?(?:won['’]t|will not|don['’]t|do not) owe (?:us )?(?:anything|a thing|a dime|a penny)\\b(?:,?\\s+(?:not\\s+)?even)?(?:\\s+|,\\s*)${FREE_VISIT_PAYMENT_LINK}`,
@@ -702,6 +702,8 @@ const FREE_VISIT_QUESTION_TERMINATOR_RE = /^(?:\?|or\s+(?:not|paid|billable|char
 const FREE_VISIT_ACKNOWLEDGMENT_RE = /^\s*,?\s*(?:ok(?:ay)?|all\s*right|alright|sounds?\s+good|got\s+it|you\s+(?:follow|understand|know)|understood|yeah|yes|good)(?:\s+then)?(?=\s*(?:$|[,;]))/i;
 const FREE_VISIT_TRUTH_QUESTION_RE = /^\s*,?\s*(?:(?:is|was)\s+(?:that|this|it)\s+(?:true|correct|right)|(?:isn['’]t|wasn['’]t|won['’]t|wouldn['’]t)\s+it|am\s+i\s+(?:right|correct)|right|correct)\s*$/i;
 const FREE_VISIT_TRAILING_RETRACTION_RE = /^\s*,?\s*(?:but|however)\s+(?:it|that|this)(?:\s+(?:(?:is|was)\s+(?:not\s+true|false|untrue|incorrect|wrong)|(?:isn['’]t|wasn['’]t)\s+true)|['’]s\s+(?:not\s+true|false|untrue|incorrect|wrong))(?=\s*(?:$|[,;.!?]|\b(?:because|since|as(?!\s+(?:long|soon)\s+as\b))\b))/i;
+const FREE_VISIT_POSSIBILITY_PREFIX_RE = /^\s*(?:maybe|perhaps|possibly|potentially|(?:it|this|that)(?:['’]s|\s+is)\s+(?:possible|a\s+possibility)\s+that)\s*,?\s*[^,;.!?]*$/i;
+const FREE_VISIT_POSSIBILITY_ASIDE_RE = /^\s*(?:maybe|perhaps|possibly|potentially)\s*,\s*$/i;
 const FREE_VISIT_NOUN_REFUSAL_RE = /\b(?:no|not\s+a)\s+(?:guarantees?|promises?)\s+(?:that\s+)?(?:(?:i|we|you|he|she|they|the\s+(?:office|team))\s+)?$/i;
 const FREE_VISIT_PERFECT_REFUSAL_RE = /\b(?:haven['’]t|hasn['’]t|hadn['’]t|(?:have|has|had)\s+not)\s+(?:actually\s+)?(?:verified|confirmed|said|told(?:\s+you)?|promised|guaranteed|checked|known|thought|believed)\s+(?:that\s+)?$/i;
 const FREE_VISIT_INFLECTED_REFUSAL_RE = /\b(?:not|never|cannot|can['’]t|\w+n['’]t)\s+(?:(?:actually|really|explicitly|personally|yet)\s+)?(?:promis(?:ed|ing)|guarantee(?:d|ing)|confirm(?:ed|ing)|check(?:ed|ing)|verif(?:ied|ying)|say(?:ing)?|said|tell(?:ing)?(?:\s+you)?|told(?:\s+you)?|think(?:ing)?|thought|believ(?:ed|ing)|mention(?:ed|ing)?)\s+(?:that\s+)?(?:(?:i|we|you|he|she|they|the\s+(?:office|team|technician))\s+)?$/i;
@@ -732,10 +734,11 @@ function freeVisitIsEmbeddedVisitSubject(text, match) {
     && !(priceSubject && !FREE_VISIT_EMBEDDING_PREPOSITION_RE.test(prefix.slice(0, priceSubject.index)));
 }
 const FREE_VISIT_CUSTOMER_SUBJECT_RE = /^(?:you|your\b|(?:the|an?)\s+(?:[\w'’-]+\s+){0,3}(?:customer|client|homeowner|resident))\b/i;
-function freeVisitIsRefused(prefix) {
+function freeVisitIsRefused(prefix, clausePrefix) {
   return FREE_VISIT_NOUN_REFUSAL_RE.test(prefix)
     || FREE_VISIT_PERFECT_REFUSAL_RE.test(prefix) || FREE_VISIT_INFLECTED_REFUSAL_RE.test(prefix)
     || FREE_VISIT_NEGATIVE_REPORTING_SUBJECT_RE.test(prefix)
+    || FREE_VISIT_POSSIBILITY_PREFIX_RE.test(prefix) || FREE_VISIT_POSSIBILITY_ASIDE_RE.test(clausePrefix)
     || clauseIsEpistemicallyHedged(prefix);
 }
 function freeVisitIsNonvisitRelativeThat(text, match) {
@@ -822,7 +825,7 @@ function no_free_visit_promise(value, record, { spoken }) {
         )
           || FREE_VISIT_PREPOSED_CONDITION_RE.test(freeVisitConditionPrefix(clausePrefix, sentencePrefix))
           || freeVisitHasPostclaimQualifier(text.slice(match.index + match[0].length), match[0]);
-        if (!governingCondition && !trailingRetraction && !freeVisitIsRefused(prefix)
+        if (!governingCondition && !trailingRetraction && !freeVisitIsRefused(prefix, clausePrefix)
             && !propositionIsExplicitlyDenied(text, match.index)) {
           return ['fail', `free visit promised: "${clip(match[0], 160)}"`];
         }
