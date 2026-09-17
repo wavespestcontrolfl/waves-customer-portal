@@ -1,4 +1,5 @@
 import FollowThroughCards from '../follow-through/FollowThroughCards';
+import RescheduleProposalCards from '../follow-through/RescheduleProposalCards';
 
 const D = { card: '#1e293b', border: '#334155', text: '#e2e8f0', muted: '#94a3b8', teal: '#0ea5e9', red: '#fca5a5' };
 const ui = {
@@ -26,5 +27,9 @@ const fieldUi = {
 const TECH_POLL_MS = 5 * 60 * 1000;
 
 export default function TechFollowThroughCards({ fieldWorkspace = false, ...props }) {
-  return <FollowThroughCards pollMs={TECH_POLL_MS} {...props} ui={fieldWorkspace ? fieldUi : ui} />;
+  const selectedUi = fieldWorkspace ? fieldUi : ui;
+  return <>
+    <RescheduleProposalCards pollMs={TECH_POLL_MS} ui={selectedUi} />
+    <FollowThroughCards pollMs={TECH_POLL_MS} {...props} ui={selectedUi} />
+  </>;
 }

@@ -1533,6 +1533,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // Keep the existing daily call watchdog independent of timer latency.
+  cron.schedule('0 */5 * * * *', async () => {
+    if (require('./reschedule-link-promises').mode() === 'off') return;
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const result = await runExclusive('reschedule-link-promises', () => require('./reschedule-link-promises').sweep());
+      if (result?.skipped && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`Promised-link tick skipped: ${result.reason || 'no_connection'}`);
+        await recordJobStart('reschedule-link-promises').catch(() => {});
+        await recordJobEnd('reschedule-link-promises', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch (err) {
+      logger.error(`[reschedule-link-promises] tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('0 20 7 * * *', async () => {
     try {
       const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
@@ -4396,7 +4414,7 @@ function initScheduledJobs() {
           // the attempts ran out; parked as send_failed with no due time it
           // is inert, as the sibling release leaves a held row (pre-push
           // codex P1 on #3750; codex r18 P2 on #3804).
-          const deterministicRefusal = !!(e && ['CLIENT_FALLBACK_PRICING', 'PRICING_AUTHORITY_NOT_SERVER', 'REPRICE_PENDING', 'ESTIMATE_REVIEW_STALE', 'SEND_OUTCOME_UNCERTAIN'].includes(e.code));
+          const deterministicRefusal = !!(e && ['CLIENT_FALLBACK_PRICING', 'PRICING_AUTHORITY_NOT_SERVER', 'REPRICE_PENDING', 'ESTIMATE_REVIEW_STALE', 'SEND_OUTCOME_UNCERTAIN', 'BID_VALIDITY_EXPIRED'].includes(e.code));
           // A reviewed attempt cannot be retimed: its receipt and pinned
           // offer belong to the original schedule. Even a bookkeeping throw
           // can follow provider acceptance, so stop for explicit staff review.

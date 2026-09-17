@@ -434,12 +434,12 @@ function pickNum(...vals) {
 
 // Live-basis annual program cost for a termite row that persisted only its
 // station count (see service-pricing termiteProgramAnnualCostForStations).
-function termiteAnnualCostFromStations(stations, system) {
+function termiteAnnualCostFromStations(stations, system, visitsPerYear) {
   const n = Number(stations);
   if (!(n > 0)) return NaN;
   try {
     const { termiteProgramAnnualCostForStations } = require('./pricing-engine/service-pricing');
-    const cost = termiteProgramAnnualCostForStations(n, String(system || 'trelona').toLowerCase());
+    const cost = termiteProgramAnnualCostForStations(n, String(system || 'trelona').toLowerCase(), { visitsPerYear });
     return Number.isFinite(cost) ? cost : NaN;
   } catch (_err) {
     return NaN;
@@ -507,7 +507,7 @@ function normalizeRecurringLines(result) {
     // (codex #4313 r8 P1); the usage registry cannot express it.
     if (serviceKey === 'termite_bait' && line.explicitCogsCost === undefined) {
       const tmBait = result?.results?.tmBait;
-      const derived = termiteAnnualCostFromStations(tmBait?.sta, tmBait?.selectedSystem || tmBait?.system);
+      const derived = termiteAnnualCostFromStations(tmBait?.sta, tmBait?.selectedSystem || tmBait?.system, svc.visitsPerYear ?? tmBait?.visitsPerYear);
       if (Number.isFinite(derived) && derived > 0) line.explicitCogsCost = money(derived);
     }
     lines.push(line);
@@ -890,7 +890,7 @@ function normalizeEngineLineItems(result, { emitInitialFee = true, initialFeeOve
     // its station count — the same per-station model on the live basis is
     // the honest COGS for it too (codex #4313 r8 P1).
     const termiteAnnualCost = serviceKey === 'termite_bait'
-      ? (num(item.costs?.annualTotal) > 0 ? num(item.costs.annualTotal) : termiteAnnualCostFromStations(item.stations, item.selectedSystem || item.system))
+      ? (num(item.costs?.annualTotal) > 0 ? num(item.costs.annualTotal) : termiteAnnualCostFromStations(item.stations, item.selectedSystem || item.system, item.visitsPerYear))
       : NaN;
     const explicitAnnualCost = Number.isFinite(termiteAnnualCost) && termiteAnnualCost > 0
       ? termiteAnnualCost
