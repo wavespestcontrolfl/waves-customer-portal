@@ -2,18 +2,27 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { isMembershipCustomerRow } = require('./waveguard-existing-services');
 const { stackDiscounts } = require('./discount-stack');
-const { discountStackingLive } = require('../config/feature-gates');
 
 // The /api/admin/discounts/calculate preview used to compute each
 // percentage independently against the untouched subtotal (additive) while
 // server/services/discount-stack.js compounds — two arithmetic engines for
 // the same "how do several discounts combine" question (CLAUDE.md rule 15
-// / AGENTS.md "extend the existing mechanism"). Delegating here means the
-// preview and a later save always agree: gate off, this reproduces the
-// pre-lane additive math exactly (compound:false); gate on, it compounds
-// the same way a save will (compound:true) — see discountStackingLive()
-// (server/config/feature-gates.js) for why that's the one canonical
-// call-time read, not a cached isEnabled().
+// / AGENTS.md "extend the existing mechanism"). Delegating here makes this
+// ONE engine instead of two, and fixes a real bug as a side effect (see
+// below) — but it does NOT yet make the preview compound. calculateDiscounts
+// below always calls this with compound:false, regardless of
+// GATE_DISCOUNT_STACKING: server/services/invoice.js's InvoiceService.create
+// (the thing this preview is a preview OF) still computes each manual
+// percentage against the untouched subtotal unconditionally — it doesn't
+// read the gate at all yet. Compounding the preview while the save stays
+// additive would make them disagree WORSE than before this consolidation,
+// not better (Codex pre-push audit P1: $111 at 10%+5% previewed $94.90
+// compounded against a $94.35 additive save). discountStackingLive()
+// (server/config/feature-gates.js) stays reserved for the stacking
+// endpoint alone until slice 5 (invoice/document calculation) changes
+// invoice.js and this call site TOGETHER, in the same PR, with its own
+// preview/save parity test — flipping one side alone is exactly the
+// half-migrated state that caused this finding.
 //
 // `applied` is already priority-ordered and already eligibility-filtered
 // by the caller; this only does the per-discount dollar math, mapping the
@@ -28,7 +37,9 @@ const { discountStackingLive } = require('../config/feature-gates');
 // fixed for elsewhere (Codex pre-push audit P1) — 5% of $20.70 rounded
 // down to $1.03 under the old formula, never the correct half-up $1.04.
 // That was always a bug, not a feature to preserve; the delegated preview
-// reports the same, now-correct, $1.04 a save would.
+// reports the same, now-correct, $1.04 a save would. compound is still a
+// parameter (not hardcoded inside the function) so the parity test can
+// exercise both paths directly and slice 5 has one line to change.
 function applyDiscountArithmetic(subtotal, applied, { compound }) {
   const terms = applied.map((disc) => ({
     discountType: disc.discount_type,
@@ -294,10 +305,12 @@ const DiscountEngine = {
     }
 
     // Calculate dollar amounts — delegated to discount-stack.js, the
-    // single arithmetic core (rule 15): compound follows the live gate, so
-    // this preview always agrees with what a save will compute, off or on.
+    // single arithmetic core (rule 15). compound:false, UNCONDITIONALLY —
+    // see this file's header for why the gate isn't read here yet
+    // (invoice.js's save path doesn't compound either, so previewing a
+    // compounded total would disagree with the save, not match it).
     const { discounts, totalDiscount, afterDiscount } = applyDiscountArithmetic(subtotal, applied, {
-      compound: discountStackingLive(),
+      compound: false,
     });
 
     return { discounts, totalDiscount, afterDiscount, subtotal };

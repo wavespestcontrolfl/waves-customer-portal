@@ -4,9 +4,21 @@
  * additively against the untouched subtotal while server/services/
  * discount-stack.js compounds: two arithmetic engines for the same
  * question. Consolidated so discount-engine.js delegates its per-
- * discount dollar math to stackDiscounts, with `compound:
- * discountStackingLive()` — gate off, the preview reproduces the old
- * additive math; gate on, it compounds the same way a save will.
+ * discount dollar math to stackDiscounts — one engine, not two.
+ *
+ * FOLLOW-UP (round 4 audit, P1): the first version of this delegation
+ * passed `compound: discountStackingLive()`, so flipping the gate on made
+ * the PREVIEW compound while server/services/invoice.js's
+ * InvoiceService.create (the save this previews) still computed each
+ * manual percentage against the untouched subtotal unconditionally — the
+ * gate made preview and save disagree WORSE, not better ($111 at 10%+5%
+ * previewed $94.90 against a $94.35 additive save). Fixed by passing
+ * `compound: false` UNCONDITIONALLY here instead: the preview is
+ * delegated (one engine, the rounding fix below still applies) but stays
+ * additive regardless of the gate, until slice 5 (invoice/document
+ * calculation) changes invoice.js and this call site TOGETHER, with its
+ * own preview/save parity test. discountStackingLive() is reserved for
+ * the /discounts/stacking endpoint alone until then.
  *
  * This file is the parity proof for the gate-off case. `oldAdditiveDollars`
  * below is a VERBATIM copy of the arithmetic this module used to run
@@ -219,7 +231,7 @@ describe('gate OFF (compound:false) — quantified parity against the deleted ad
   });
 });
 
-describe('gate ON (compound:true) — the preview compounds, matching what a save will compute', () => {
+describe('compound:true is available for slice 5 — not yet wired to the gate, but proven correct for when it is', () => {
   test('two percentages compound (10% then 5% is $16.10, not the additive $16.65)', () => {
     const applied = [
       discountRow({ discount_type: 'percentage', amount: 10 }),
@@ -242,7 +254,7 @@ describe('gate ON (compound:true) — the preview compounds, matching what a sav
   });
 });
 
-describe('DiscountEngine.calculateDiscounts (full function, DB mocked) reads the live gate', () => {
+describe('DiscountEngine.calculateDiscounts (full function, DB mocked) — additive regardless of the gate, in this slice', () => {
   const db = require('../models/db');
   function mockDiscounts(rows) {
     const query = { where: jest.fn(() => query), orderBy: jest.fn(async () => rows) };
@@ -275,10 +287,23 @@ describe('DiscountEngine.calculateDiscounts (full function, DB mocked) reads the
     expect(result.totalDiscount).toBe(16.65);
   });
 
-  test('gate on: compounds, matching a later save', async () => {
+  // Codex pre-push audit P1: with GATE_DISCOUNT_STACKING=true, the preview
+  // used to compound while InvoiceService.create (invoice.js:1503) still
+  // computed each manual percentage against the untouched subtotal
+  // unconditionally — $111 at 10%+5% previewed $94.90 while the save
+  // yielded $94.35. This slice does not fix that by flipping the save; it
+  // fixes it by NOT compounding the preview either, so both sides stay
+  // additive and agreeing until slice 5 changes them together. The gate is
+  // therefore inert here on purpose — this test is what pins that down and
+  // must keep failing (on purpose) once slice 5 flips the call site to
+  // discountStackingLive(), as a reminder to update this test alongside it.
+  test('the gate stays inert here: GATE_DISCOUNT_STACKING=true does NOT make the preview compound', async () => {
     process.env.GATE_DISCOUNT_STACKING = 'true';
     mockDiscounts([activeDiscount({ discount_type: 'percentage', amount: 10 }), activeDiscount({ id: 'd2', discount_type: 'percentage', amount: 5 })]);
     const result = await DiscountEngine.calculateDiscounts(null, { subtotal: 111 });
-    expect(result.totalDiscount).toBe(16.1);
+    // Still additive: 10% + 5% of the SAME $111 = $11.10 + $5.55 = $16.65,
+    // never the compounded $16.10 a stacking-aware save (slice 5) would
+    // produce.
+    expect(result.totalDiscount).toBe(16.65);
   });
 });
