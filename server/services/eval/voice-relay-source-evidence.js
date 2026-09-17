@@ -94,21 +94,24 @@ function lexicalSourceSpans(source, pattern, index = 0, end = source.length) {
   }));
 }
 
-const CONDITION_MARKER_RE = /\b(?:if|unless|when|while|before|after|once|until|till|provided(?:\s+that)?|as\s+long\s+as)\b/gi;
-const GRAMMATICAL_NEGATION_RE = /\b(?:not|never|cannot|no|nothing|nobody|\w+n[\x27\u2019]t|(?:ca|wo|sha|do|does|did|is|are|was|were|has|have|had|could|would|should|must)n[\x27\u2019]?t)\b/gi;
+const CONDITION_MARKER_RE = /\b(?:if|unless|when|while|before|after|once|until|till|provided(?:\s+that)?|(?:as\s+long|so\s+long)\s+as)\b/gi;
+const GRAMMATICAL_NEGATION_RE = /\b(?:not|never|cannot|no|nothing|nobody|neither|nor|\w+n[\x27\u2019]t|(?:ca|wo|sha|do|does|did|is|are|was|were|has|have|had|could|would|should|must)n[\x27\u2019]?t)\b/gi;
 
 function localCandidateEvidence(source, kind, index, end) {
   const proposition = sourceSpan(source, index, end);
   const sentence = sentenceSourceSpans(source).find((span) => index >= span.index && end <= span.end);
   if (!sentence) throw new RangeError('candidate must remain within one source sentence');
-  // Existing grammar splits on `while` for verdict interpretation. Evidence
-  // must retain that conditional connector, leaving qualification to policy.
-  const clauseSource = maskTimeAbbreviations(sentence.text).replace(/\bwhile\b/gi, '     ');
+  // Protect punctuation inside decimal tokens and the multiword marker
+  // without changing the shared clause grammar or any source offsets.
+  const clauseSource = maskTimeAbbreviations(sentence.text)
+    .replace(/(?<=\d)\.(?=\d)/g, ' ')
+    .replace(/\bso\s+long\s+as\b/gi, (marker) => ' '.repeat(marker.length));
   const [start, stop] = clauseBounds(clauseSource, index - sentence.index);
   // A matched proposition can include coordinated predicates. Keep its full
   // span; policy must interpret the retained clause/sentence independently.
   const clause = sourceSpan(source, Math.min(index, sentence.index + start), Math.max(end, sentence.index + stop));
-  const markers = lexicalSourceSpans(source, CONDITION_MARKER_RE, clause.index, clause.end);
+  const markers = lexicalSourceSpans(source, CONDITION_MARKER_RE, clause.index, clause.end)
+    .filter((marker) => !/^while$/i.test(marker.text));
   const conditions = markers.map((marker, offset) => {
     const next = markers[offset + 1]?.index ?? clause.end;
     const punctuation = /[,;—–]|(?<!\d):|:(?!\d)/.exec(source.slice(marker.end, next));
@@ -119,8 +122,24 @@ function localCandidateEvidence(source, kind, index, end) {
       position: bodyEnd <= index ? 'before' : marker.index >= end ? 'after' : 'overlapping',
     };
   });
+  // While may introduce a condition or contrast two assertions. Retain its
+  // adjacent lexical body separately; never merge the clauses or negations.
+  const adjacentConnectives = lexicalSourceSpans(source, /\bwhile\b/gi, sentence.index, sentence.end)
+    .filter((marker) => marker.end === clause.index || marker.index === clause.end
+      || (marker.index >= clause.index && marker.end <= clause.end))
+    .map((marker) => {
+      const [, bodyStop] = clauseBounds(clauseSource, marker.end - sentence.index);
+      const bodyLimit = sentence.index + bodyStop;
+      const punctuation = /[,;—–]|(?<!\d):|:(?!\d)/.exec(source.slice(marker.end, bodyLimit));
+      const bodyEnd = punctuation ? marker.end + punctuation.index : bodyLimit;
+      return {
+        ...sourceSpan(source, marker.index, bodyEnd), marker, relation: 'unresolved',
+        body: sourceSpan(source, marker.end, bodyEnd),
+        position: bodyEnd <= index ? 'before' : marker.index >= end ? 'after' : 'overlapping',
+      };
+    });
   return {
-    kind, ...proposition, sentence, clause, conditions,
+    kind, ...proposition, sentence, clause, conditions, adjacentConnectives,
     negations: lexicalSourceSpans(source, GRAMMATICAL_NEGATION_RE, clause.index, clause.end),
   };
 }

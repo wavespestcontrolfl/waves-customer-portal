@@ -264,6 +264,8 @@ test.each(['p.m.', 'p. m.', 'a.m.', 'A. M.'])(
     const text = `It is safe to schedule the treatment at 4 ${time} while your dog is home.`;
     const [answer] = recognizeSafetyResponse(text).answers;
     expect(answer.text).toBe(text.slice(0, -1));
-    expect(answer.evidence.conditions.map((condition) => condition.text)).toEqual(['while your dog is home']);
+    expect(answer.evidence.conditions).toEqual([]);
+    expect(answer.evidence.adjacentConnectives.map((connective) => connective.text)).toEqual(['while your dog is home']);
+    expect(answer.evidence.adjacentConnectives[0].relation).toBe('unresolved');
   },
 );
