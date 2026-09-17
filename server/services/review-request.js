@@ -23,6 +23,7 @@ const {
   releaseUnsent: releaseUnsentReservation,
   promote: promoteReviewSmsReservation,
   countStaleUnresolved: countStaleUnresolvedReservations,
+  releasePending: releasePendingReservations,
 } = require("./messaging/review-ask-reservation");
 
 // An explicit 'uncertain' deliveryOutcome (the provider handoff crossed the
@@ -783,18 +784,37 @@ function retryAtForDeferredSend(result) {
 const REVIEW_SEND_UNCERTAIN_REASON =
   "SMS delivery may have occurred, but no automatic retry was queued. Check the SMS delivery log before sending another review request.";
 
+// Distinguishes a genuinely UNAVAILABLE verification read (a transient DB
+// error — the scheduled_for WRITE may well have already succeeded; only
+// its confirmation failed) from a CONFIRMED absence (the row is not
+// pending, or carries no scheduled_for at all) by THROWING on the former
+// instead of swallowing both into the same `null` (codex #4331 P2).
+// Collapsing them used to let a caller with a THIRD, riskier "nothing is
+// queued at all" branch (sendGatedAsk, below) treat an unrelated read
+// blip exactly like a confirmed-missing schedule — reporting outcome:
+// 'error' when the row may in fact still be due, which let the
+// satisfaction route expose the bare Google review URL while
+// processScheduled still owned the pending row and would later text its
+// tokenized ask (an untracked click followed by a second solicitation).
+// Callers that already treat both cases the same way (the outreach retry
+// path a few hundred lines down) opt back into that with a bare
+// `.catch(() => null)` at the call site — unchanged behavior there.
 async function persistedReviewRetryAt(requestId) {
   if (!requestId) return null;
+  let row;
   try {
-    const row = await db("review_requests")
+    row = await db("review_requests")
       .where({ id: requestId, status: "pending" })
       .whereNotNull("scheduled_for")
       .first("scheduled_for");
-    if (!row?.scheduled_for || Number.isNaN(new Date(row.scheduled_for).getTime())) return null;
-    return row.scheduled_for;
-  } catch {
-    return null;
+  } catch (err) {
+    throw Object.assign(
+      new Error(`Retry verification unavailable (requestId=${requestId}): ${err.message}`),
+      { cause: err, code: "RETRY_VERIFICATION_UNAVAILABLE" },
+    );
   }
+  if (!row?.scheduled_for || Number.isNaN(new Date(row.scheduled_for).getTime())) return null;
+  return row.scheduled_for;
 }
 
 // Direct-outreach reservation insert (sendOutreachTouch -> _sendOutreachSms)
@@ -3599,8 +3619,17 @@ const ReviewService = {
       logger.warn(`[review] stale reservation count failed: ${err.message}`);
       return null;
     });
-    if (finished || released || staleReservations) {
-      logger.info(`[review] stranded sends reconciled (finished=${finished} released=${released}${staleReservations ? ` staleReservations=${staleReservations}` : ""})`);
+    // codex #4331 P2: a prior cadence-step reservation whose release attempt
+    // exhausted its own retry (sendOutreachTouch's prior-reservation cleanup)
+    // is marked release_pending instead of abandoned — retry the SAME delete
+    // here, on the sweep's existing cadence, rather than leaving it hidden
+    // and permanently counted stale with nothing left holding it accountable.
+    const pendingReleased = await releasePendingReservations().catch((err) => {
+      logger.warn(`[review] pending reservation release sweep failed: ${err.message}`);
+      return 0;
+    });
+    if (finished || released || staleReservations || pendingReleased) {
+      logger.info(`[review] stranded sends reconciled (finished=${finished} released=${released}${staleReservations ? ` staleReservations=${staleReservations}` : ""}${pendingReleased ? ` pendingReleased=${pendingReleased}` : ""})`);
     }
     return { finished, released };
   },
@@ -4709,7 +4738,41 @@ const ReviewService = {
           .whereNot("status", "sending")
           .select("id");
         for (const prior of priorAttempts) {
-          await releaseUnsentReservation({ requestId: prior.id });
+          // Retried once (codex #4331 P2, r2) — a transient blip on this
+          // delete must not silently abandon the reservation for good: this
+          // is the SAME DB the retry itself just sent successfully through,
+          // so a retry clears it almost every time it can occur at all.
+          const released = await stampWithRetry(
+            () => releaseUnsentReservation({ requestId: prior.id, customerId: request.customer_id }),
+            `prior cadence step reservation release (priorRequestId=${prior.id})`,
+          );
+          if (!released) {
+            // Both attempts failed. Leave durable ownership instead of
+            // abandoning it after one failure: mark the reservation
+            // release_pending so reconcileStrandedSends' own release-pending
+            // pass retries the SAME delete on its next tick — it stays
+            // accountable rather than hidden and permanently counted stale
+            // with nothing left responsible for it. Read-merge-write (this
+            // file's existing convention for a jsonb metadata column) rather
+            // than a raw concat, so the mock DB harnesses used across this
+            // file's own tests don't need a raw() implementation.
+            try {
+              const reservationRow = await db("sms_log")
+                .where({ status: "sending", customer_id: request.customer_id })
+                .whereRaw("metadata->>'review_request_id' = ?", [String(prior.id)])
+                .whereRaw("metadata->>'review_ask_reservation' = 'true'")
+                .first("id", "metadata");
+              if (reservationRow) {
+                const existingMeta = typeof reservationRow.metadata === "string"
+                  ? JSON.parse(reservationRow.metadata)
+                  : (reservationRow.metadata || {});
+                await db("sms_log").where({ id: reservationRow.id })
+                  .update({ metadata: JSON.stringify({ ...existingMeta, release_pending: true }) });
+              }
+            } catch (markErr) {
+              logger.error(`[review] marking a prior reservation release_pending failed (priorRequestId=${prior.id}): ${markErr.message}`);
+            }
+          }
         }
       } catch (err) {
         logger.warn(`[review] releasing a prior cadence step's reservation failed (sequenceId=${sequenceId} step=${sequenceStep} errType=${err?.name || "Error"})`);
@@ -5013,7 +5076,7 @@ const ReviewService = {
         // row. The reservation remains either way: the provider may have
         // accepted the SMS, so another ask must stay held for reconciliation.
         if (manageRetryVia === "cron") {
-          const persistedRetryAt = await persistedReviewRetryAt(request.id);
+          const persistedRetryAt = await persistedReviewRetryAt(request.id).catch(() => null);
           if (!persistedRetryAt) {
             return { ok: false, blocked: true, channel: "sms", requestId: request.id,
               code: "SMS_DELIVERY_UNCERTAIN", reason: REVIEW_SEND_UNCERTAIN_REASON, nextAllowedAt };
@@ -5562,9 +5625,23 @@ const ReviewService = {
         // different from an ordinary unqueued failure: its reservation stays
         // live, and the caller must be told to inspect delivery before retrying.
         if (manageRetryVia === "cron") {
-          const persistedRetryAt = await persistedReviewRetryAt(touch.requestId);
+          let persistedRetryAt = null;
+          let verificationUnavailable = false;
+          try {
+            persistedRetryAt = await persistedReviewRetryAt(touch.requestId);
+          } catch {
+            // The scheduled_for WRITE may well have succeeded — only its
+            // verification read failed (codex #4331 P2). Treated below
+            // exactly like provider uncertainty, never like a confirmed-
+            // missing schedule: reporting outcome 'error' here would tell
+            // the satisfaction route nothing is queued, and it would expose
+            // the bare Google review URL while processScheduled still owns
+            // the pending row and later texts its tokenized ask — an
+            // untracked click followed by a second solicitation.
+            verificationUnavailable = true;
+          }
           if (!persistedRetryAt) {
-            if (touch.reason === "provider_uncertain") {
+            if (verificationUnavailable || touch.reason === "provider_uncertain") {
               return { outcome: "blocked", code: "SMS_DELIVERY_UNCERTAIN", reason: REVIEW_SEND_UNCERTAIN_REASON,
                 nextAllowedAt: touch.nextAllowedAt || null, requestId: touch.requestId };
             }
@@ -7430,6 +7507,7 @@ ReviewService.__private = {
   nextTouchRunAt,
   shiftToWeekdayMorning,
   buildReviewUrl,
+  persistedReviewRetryAt,
 };
 
 // The tokenized review destination in its long form, honoring
