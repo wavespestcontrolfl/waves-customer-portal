@@ -348,6 +348,25 @@ describe('email reply amountless billing policy', () => {
     rejected('Each visit incurs a fee per application; every visit is billed separately.');
   });
 
+  test.each(['Each visit is billed separately', 'Each visit incurs a fee', 'We bill each visit', 'For each visit, the fee is', 'For each visit, we charge a fee', 'Per visit, you will be billed'])('requires affirmative application complements across billing paths: %s', (predicate) => {
+    for (const negation of ['not', 'never']) rejected(`${predicate}, ${negation} per application.`);
+    expect(verdict(`${predicate} per application.`)).toEqual({ ok: true, violations: [] });
+  });
+  test('keeps negated visit assertions blocked', () => {
+    ['Each visit is not billed separately.', 'Each visit will not incur a fee.', 'For each visit, the fee is not per application.'].forEach(rejected);
+  });
+
+  test('preserves complement polarity in each bounded connector position', () => {
+    ['not per application', 'may never apply per application', 'does not apply per application', 'is not per application', ': not per application'].forEach((complement) => rejected(`For each visit, the fee ${complement}.`));
+  });
+  test.each(['For each visit, the fee is $98', 'For each visit, we charge you $98', 'Each visit is separately billed a fee of $98', 'Each visit incurs a fee of $98', 'We bill each visit a fee of $98'])('supports punctuation after amounts without losing polarity: %s', (head) => {
+    for (const [open, close] of [[' ', ''], [' (', ')'], [': ', ''], [' — ', '']]) {
+      expect(verdict(`${head}${open}per application${close}.`)).toEqual({ ok: true, violations: [] });
+      rejected(`${head}${open}per visit${close}.`);
+      rejected(`${head}${open}not per application${close}.`);
+    }
+  });
+
   test.each([
     ['type', { text: {}, commercialProposal: true }, 'copy_type'],
     ['size', { text: 'x'.repeat(8193), commercialProposal: true }, 'copy_size'],

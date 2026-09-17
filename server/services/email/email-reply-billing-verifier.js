@@ -72,18 +72,20 @@ function hasBillingUnit(tokens, at) {
 function hasApplicationComplement(tokens, at) {
   let next = at + 1;
   if (isKind(tokens[next], 'modal')) next += 1;
-  if (isWord(tokens[next], 'not', 'never')) next += 1;
+  if (isWord(tokens[next], 'not', 'never')) return false;
   if (isWord(tokens[next], 'do', 'does', 'did', 'has')) next += 1;
-  if (isWord(tokens[next], 'not', 'never')) next += 1;
+  if (isWord(tokens[next], 'not', 'never')) return false;
   if (isKind(tokens[next], 'be')) next += 1;
-  if (isWord(tokens[next], 'not', 'never')) next += 1;
+  if (isWord(tokens[next], 'not', 'never')) return false;
   if (isSeparate(tokens[next])) next += 1;
   if (isWord(tokens[next], 'apply', 'occur')) next += 1;
   next = skipSeparators(tokens, next);
-  if (isWord(tokens[next], 'not', 'never')) next += 1;
+  if (isWord(tokens[next], 'not', 'never')) return false;
   if (isWord(tokens[next], 'of', 'at')
     && (isKind(tokens[next + 1], 'money') || isKind(tokens[next + 1], 'number'))) next += 1;
   if (isKind(tokens[next], 'money') || isKind(tokens[next], 'number')) next += 1;
+  next = skipSeparators(tokens, next);
+  if (isWord(tokens[next], 'not', 'never')) return false;
   return isKind(tokens[next], 'application') && /^(?:-?per\b|for\b|\/)/.test(tokens[next].text);
 }
 
@@ -91,6 +93,7 @@ function hasBillingObjectPredicate(tokens, at, passive) {
   if (hasApplicationComplement(tokens, at)) return false;
   let object = skipRecipient(tokens, at + 1);
   const recipient = object > at + 1;
+  object = skipSeparators(tokens, object);
   if (isSeparate(tokens[object])) object += 1;
   if (isWord(tokens[object], 'on') && isWord(tokens[object + 1], 'its', 'their')
     && isWord(tokens[object + 2], 'own')) object += 3;
@@ -99,6 +102,7 @@ function hasBillingObjectPredicate(tokens, at, passive) {
   if (isWord(tokens[object], 'separate', 'individual')) object += 1;
   const amount = isKind(tokens[object], 'money') || isKind(tokens[object], 'number');
   if (amount) object += 1;
+  object = skipSeparators(tokens, object);
   if (isDeterminer(tokens[object])) object += 1;
   if (isWord(tokens[object], 'separate', 'individual')) object += 1;
   const noun = isBillingNoun(tokens[object]);
