@@ -522,3 +522,19 @@ test.each([
 ])('round-four report uncertainty %s: %s', (_finding, text, uncertain) => {
   expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
 });
+
+test.each([
+  ['4043973800', 'It was unconfirmed that Talstar P was applied.', true],
+  ['4043973800', 'It is still unconfirmed that Talstar P was applied.', true],
+  ['4043973800', 'It is confirmed that Talstar P was applied.', false],
+  ['4043973804', "We couldn't rule out that Talstar P was applied.", true],
+  ['4043973804', 'We could not exclude that Talstar P was applied.', true],
+  ['4043973804', 'We can confirm that Talstar P was applied.', false],
+  ['4043973808', 'It might seem that Talstar P was applied.', true],
+  ['4043973808', 'It could appear Talstar P was applied.', true],
+  ['4043973808', 'Talstar P was applied.', false],
+  ['4043973812', 'Talstar P ought to have been applied.', true],
+  ['4043973812', 'Talstar P was applied.', false],
+])('round-five report uncertainty %s: %s', (_finding, text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
