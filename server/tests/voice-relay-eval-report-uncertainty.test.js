@@ -324,3 +324,75 @@ test.each([
 ])('had-put expansion requires explicit past evidence: %s', (text, uncertain) => {
   expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
 });
+
+test.each([
+  ["We'd put Talstar P around the perimeter tonight, as discussed yesterday.", true],
+  ["We'd put Talstar P around the perimeter yesterday.", false],
+  ["We'd put 0.5 ounces of Talstar P around the perimeter yesterday.", false],
+  ["We'd put 0.5 ounces of Talstar P around the perimeter tonight, as discussed yesterday.", true],
+])('4043636444 past disambiguation stays in the put clause: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['Talstar P was applied as if ants were present.', false],
+  ['It looks as if Talstar P was applied.', true],
+  ['It looked as if Talstar P was applied.', true],
+  ['It sounds as if Talstar P was applied.', true],
+  ['It is as if Talstar P was applied.', true],
+  ['Talstar P was applied, if ants were present.', true],
+  ['Talstar P was applied, unless ants were present.', true],
+])('4043636447 manner as-if differs from a treatment condition: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['We are hoping Talstar P was applied.', true],
+  ['I was hoping Talstar P was applied.', true],
+  ['Talstar P was applied.', false],
+])('4043636451 progressive hope governs completed-treatment evidence: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['The report might indicate that Talstar P was applied.', true],
+  ['The report might suggest that Talstar P was applied.', true],
+  ['The report indicated that Talstar P was applied.', false],
+])('4043636454 speculative report indication remains uncertain: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['It appears Talstar P was applied.', true],
+  ['That appears Talstar P was applied.', true],
+  ['It seems Talstar P was applied.', true],
+  ['We applied Talstar P at the rate that appears on the label.', false],
+  ['We applied Talstar P at the rate that appeared on the label.', false],
+  ['Talstar P was applied.', false],
+])('4043636460 epistemic appearance permits an omitted that: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['Talstar P was scheduled to be applied.', true],
+  ['Talstar P was applied as scheduled.', false],
+])('4043636466 scheduled treatment differs from completed-as-scheduled evidence: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['Talstar P was applied yesterday, not tomorrow.', false],
+  ['Talstar P was applied yesterday, rather than tomorrow.', false],
+  ['Talstar P was applied tomorrow.', true],
+])('4043636467 contrasted tomorrow does not make past treatment future: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['It was possible that Talstar P was applied.', true],
+  ['There was a chance that Talstar P was applied.', true],
+  ['It was confirmed that Talstar P was applied.', false],
+  ['There was confirmation that Talstar P was applied.', false],
+])('4043636473 past possibility remains uncertain: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
