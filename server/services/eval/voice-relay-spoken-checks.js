@@ -1743,7 +1743,7 @@ function reportFindingIsUncertain(text) {
         ? `${subject} had` : auxiliary;
     });
   const conditionalEvidence = text.replace(/\bas\s+if\b/gi, '');
-  const futureEvidence = text.replace(/\b(?:not|rather\s+than)\s+(?:tomorrow|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b/gi, '');
+  const futureEvidence = text.replace(/\b(?:not|rather\s+than|instead\s+of|as\s+opposed\s+to)\s+(?:tomorrow|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b/gi, '');
   const scopedEvidence = evidence.replace(REPORT_COMPLETION_TIME_RE, '')
     .replace(/\bas\s+(?:the\s+)?report\s+suggest(?:s|ed)?\b/gi, '')
     .replace(/\bas\s+(?:i|we|you|he|she|they|(?:the\s+)?(?:technician|tech|customer|client|homeowner|caller))\s+(?:expected|hoped)\b/gi,
@@ -1760,16 +1760,18 @@ function reportFindingIsUncertain(text) {
     || /\b(?:is|are|was|were|has|have|had)\s+not\s+necessarily\s+(?:been\s+)?(?:applied|used|treated|sprayed|placed|put)\b/i.test(scopedEvidence)
     || /\bought\s+to\s+(?:have\s+been|be)\s+(?:applied|used|treated|sprayed|placed|put)\b/i.test(scopedEvidence)
     || /\b(?:is|are|was|were|has\s+been|have\s+been|had\s+been)\s+(?:suspected|alleged|presumed)\s+to\s+(?:have|be)\b/i.test(scopedEvidence)
+    || /\blook(?:s|ed)?\s+(?:to\s+(?:have\s+been|be)|like\s+(?:it|this|that)(?:['’]s(?:\s+been)?|\s+(?:(?:is|was)|(?:has|had)\s+been)))\s+(?:applied|used|treated|sprayed|placed|put)\b/i.test(scopedEvidence)
     || /^\s*(?:well[,:]\s*)?(?:it|this|that)(?:['’]s|\s+(?:is|was))\s+not\s+clear\b/i.test(scopedEvidence)
     || /^\s*(?:well[,:]\s*)?(?:it|this|that)(?:['’]s|\s+(?:is|was))\s+(?:believed|thought|assumed|considered|reported|said|supposed|expected|suspected|alleged|presumed)\s+that\b/i.test(scopedEvidence)
     || /^\s*(?:well[,:]\s*)?(?:it|this|that)(?:(?:['’]s|\s+is)\s+yet|\s+has\s+yet|\s+remains)\s+to\s+be\s+(?:confirmed|verified)\s+(?:whether|if|that)\b/i.test(scopedEvidence)
     || /^\s*(?:well[,:]\s*)?there(?:['’]s|\s+(?:is|was))\s+no\s+(?:confirmation|evidence)\s+(?!(?:of|for|about)\b)(?=(?:(?:(?:the|a|an)\s+)?(?:[\w’'-]+\s+){1,4}(?:is|are|was|were|has|have|had)\s+(?:been\s+)?|(?:(?:i|we|you|he|she|they)|(?:the\s+)?(?:technician|tech|customer|client|homeowner|caller))\s+)(?:applied|used|treated|sprayed|placed|put)\b)/i.test(scopedEvidence)
     || /^\s*(?:well[,:]\s*)?(?:(?:it|this|that)\s+(?:is|was|remains|remained)\s+(?:(?:still|yet|currently)\s+)*(?:possible|probable|unlikely|improbable)\b|there(?:['’]s|\s+(?:is|was))\s+no\s+(?:confirmation|evidence)\s+(?:that|whether)\b|(?:the\s+)?report\s+(?:appears?|seems?)\s+to\s+(?:indicate|show|suggest|report|say|state|mention|document)\b|(?:it\s+remains\s+to\s+be\s+seen|(?:i|we)\s+wonder)\s+whether\b|(?:presumably|conceivably|in\s+all\s+likelihood)\b|(?:as\s+far\s+as\s+(?:i|we)\s+(?:know|can\s+tell)|to\s+the\s+best\s+of\s+(?:my|our)\s+knowledge)\b|(?:i|we)\s+(?:am|are)\s+(?:not\s+confident|(?:fairly|almost)\s+(?:sure|certain))\b)/i.test(scopedEvidence)
     || /\b(?:applied|used|treated|sprayed|placed|put)\b(?:[^.!?;]|(?<=\d)\.(?=\d))*,\s*(?:as\s+far\s+as\s+(?:i|we)\s+(?:know|can\s+tell)|to\s+the\s+best\s+of\s+(?:my|our)\s+knowledge)\s*[.!?]*$/i.test(scopedEvidence)
-    || clauseIsEpistemicallyHedged(scopedEvidence)
+    || clauseIsEpistemicallyHedged(scopedEvidence.replace(/\b(?:i|we)\s+(?:do|did)\s+not\s+doubt(?:\s+that)?\b/gi, ''))
     || REPORT_UNCERTAINTY_RE.test(scopedEvidence
       // Preserve named-technician past-tense put; base auxiliaries retain modal meaning.
-      .replace(/\b(?:[Tt]he|[Oo]ur|[Yy]our|[Tt]heir)\s+(?:technician|tech)\s+(?:Will|May)\b(?=\s+(?:(?:already|also|just|now|\w+ly)\s+)*put\b)/g, '')
+      .replace(/\b(the|our|your|their)\s+(technician|tech)\s+(will|may)\b(?=\s+(?:(?:already|also|just|now|\w+ly)\s+)*put\b)/gi,
+        (candidate, _article, _role, name) => /^(?:Will|May)$/.test(name) ? '' : candidate)
       .replace(/(^|,\s*|\b(?:based\s+on|after\s+(?:reviewing|checking|reading))\s+(?:the\s+)?report\s*,?\s*)(\s*(?:(?:yes|okay|certainly|absolutely)[,:]?\s+)?)(i|we)\s+can\s+(?:(?:definitely|certainly|confidently|clearly|conclusively|now|already|also|fully|absolutely)\s+)*(confirm|verify)\b(?![^.!?;]*\b(?:whether|if)\b)(?:\s+that\b)?/gi, '$1$2$3 $4'));
 }
 
