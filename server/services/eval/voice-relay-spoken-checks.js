@@ -1723,8 +1723,8 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
 // Classify one bounded treatment assertion. Product/location ownership,
 // clause selection, shared coordinator governors and final report check
 // registration are separate consumers.
-const REPORT_UNCERTAINTY_RE = /\b(?:(?:can|must|may|might|could|would|should|will|shall)\s+(?:(?:not|never|already|also|just|now|\w+ly)\s+)*(?:be|get|have|apply|use|treat|spray|place|put|receive|go|complete|finish|manage|show|say|state|report|confirm|verify|check|mention|document)\b|(?:would|could|should|might|must|may)['’]ve\b|going to|(?:i|we)\s+(?:think|thought|believ(?:e|ed)|guess(?:ed)?|suppos(?:e|ed)|assum(?:e|ed)|expect(?:ed)?)|my\s+(?:guess|belief|assumption)\s+is|(?:it|this|that)(?:['’]s|\s+is)\s+(?:possible|probable|unlikely|improbable)(?:\s+that)?|(?:it|this|that)\s+appear(?:s|ed)?\s+that|(?:appear(?:s|ed)?|seem(?:s|ed)?)\s+to\s+(?:have|be)|(?:is|are|was|were|has\s+been|have\s+been|had\s+been)\s+(?:believed|thought|assumed|considered|reported|said)\s+to\s+(?:have|be)|(?:it|this|that)\s+(?:seem(?:s|ed)?\s+that|looks?\s+like|sounds?\s+like)|there(?:['’]s|\s+is)\s+a\s+(?:chance|possibility)(?:\s+that)?|(?:pretend(?:s|ed|ing)?|imagin(?:e[sd]?|ing))\s+that|disput(?:e[sd]?|ing)\s+that|(?:incorrectly|falsely|mistakenly|erroneously)\s+(?:says?|said|states?|stated|reports?|reported)|plan(?:s|ned)? to|intend(?:s|ed|ing)?(?:\s+to)?|wish(?:es|ed|ing)?|maybe|perhaps|possibly|potentially|probably|likely|allegedly|supposedly|reportedly|apparently)\b/i;
-const REPORT_INSTRUCTION_RE = /(?:^\s*|,\s*)(?:please\s+)?(?:apply|use|put|treat|spray|place|confirm|verify|check|tell\s+me)\b|\b(?:(?:i|we)(?:\s+(?:need(?:ed)?|want(?:ed)?|ask(?:ed)?|request(?:ed)?)|['’]d\s+like|\s+would\s+like)\s+you\s+to\s+(?:confirm|verify|check|tell)|(?:i|we)\s+(?:need(?:ed)?|want(?:ed)?|request(?:ed)?)\s+(?:(?:a|your)\s+)?(?:confirmation|verification)\s+(?:that|whether|if)|please\s+let\s+me\s+know\s+(?:whether|if|that)|(?:ask(?:s|ed|ing)?|request(?:s|ed|ing)?)\s+that(?=\s+(?:[\w'’-]+\s+){1,6}(?:be|get|have|apply|use|treat|spray|place|put|receive)\b)|make sure|ensure|remember to|please\s+(?:confirm|verify|check|tell))\b/i;
+const REPORT_UNCERTAINTY_RE = /\b(?:(?:can|must|may|might|could|would|should|will|shall)\s+(?:(?:not|never|already|also|just|now|\w+ly)\s+)*(?:be|get|have|apply|use|treat|spray|place|put|receive|go|complete|finish|manage|succeed|show|say|state|report|confirm|verify|check|mention|document)\b|(?:would|could|should|might|must|may)['’]ve\b|going to|(?:i|we)\s+(?:think|thought|believ(?:e|ed)|guess(?:ed)?|suppos(?:e|ed)|assum(?:e|ed)|expect(?:ed)?)|my\s+(?:guess|belief|assumption)\s+is|(?:it|this|that)(?:['’]s|\s+is)\s+(?:possible|probable|unlikely|improbable)(?:\s+that)?|(?:it|this|that)\s+appear(?:s|ed)?\s+that|(?:appear(?:s|ed)?|seem(?:s|ed)?)\s+to\s+(?:have|be)|(?:is|are|was|were|has\s+been|have\s+been|had\s+been)\s+(?:believed|thought|assumed|considered|reported|said)\s+to\s+(?:have|be)|(?:it|this|that)\s+(?:seem(?:s|ed)?\s+that|looks?\s+like|sounds?\s+like)|there(?:['’]s|\s+is)\s+a\s+(?:chance|possibility)(?:\s+that)?|(?:pretend(?:s|ed|ing)?|imagin(?:e[sd]?|ing))\s+that|disput(?:e[sd]?|ing)\s+that|(?:incorrectly|falsely|mistakenly|erroneously)\s+(?:says?|said|states?|stated|reports?|reported)|plan(?:s|ned)? to|intend(?:s|ed|ing)?(?:\s+to)?|wish(?:es|ed|ing)?|maybe|perhaps|possibly|potentially|probably|likely|allegedly|supposedly|reportedly|apparently)\b/i;
+const REPORT_INSTRUCTION_RE = /(?:^\s*|,\s*)(?:please\s+)?(?:apply|use|put|treat|spray|place|have(?!\s+(?:(?:not\s+(?:only|just|merely|simply)|already|also|just|now|\w+ly)\s+)*(?:had|been|applied|used|sprayed|treated|placed|put|got|received|succeeded|finished|completed|managed)\b)|get|confirm|verify|check|tell\s+me)\b|\b(?:(?:i|we)(?:\s+(?:need(?:ed)?|want(?:ed)?|ask(?:ed)?|request(?:ed)?)|['’]d\s+like|\s+would\s+like)\s+you\s+to\s+(?:confirm|verify|check|tell)|(?:i|we)\s+(?:need(?:ed)?|want(?:ed)?|request(?:ed)?|ask(?:ed)?\s+for)\s+(?:(?:a|your)\s+)?(?:confirmation|verification)\s+(?:that|whether|if)|please\s+let\s+me\s+know\s+(?:whether|if|that)|(?:ask(?:s|ed|ing)?|request(?:s|ed|ing)?)\s+that(?=\s+(?:[\w'’-]+\s+){1,6}(?:be|get|have|apply|use|treat|spray|place|put|receive)\b)|make sure|ensure|remember to|please\s+(?:confirm|verify|check|tell))\b/i;
 const REPORT_FINDING_VERB_RE = /\b(?:apply|applying|applied|place|placed|placing|use|used|using|treat|treated|treating|spray|sprayed|spraying|put|went|got|received)\b/i;
 const REPORT_COMPLETION_TIME = `(?:(?:on\\s+)?(?:${VISIT_TIME_RE.source})|yesterday|earlier|recently|last\\s+(?:week|month|year)|(?:before|after)\\s+(?:breakfast|lunch|dinner))(?:\\s+(?:this\\s+)?(?:morning|afternoon|evening|night))?`;
 const REPORT_COMPLETION_TIME_RE = new RegExp(REPORT_COMPLETION_TIME, 'gi');
@@ -1738,7 +1738,11 @@ const REPORT_NONCOMPLETION_MODIFIER_RE = /\b(?:almost|nearly)(?:\s+(?:has|have|h
 function reportFindingIsUncertain(text) {
   // Consumers supply bounded finding evidence, excluding unrelated tails.
   return /\b(?:tomorrow|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b/i.test(text)
-    || REPORT_UNCERTAINTY_RE.test(text.replace(REPORT_COMPLETION_TIME_RE, ''));
+    || REPORT_UNCERTAINTY_RE.test(text.replace(REPORT_COMPLETION_TIME_RE, '')
+      // Capitalized Will/May after an explicit technician role are names;
+      // any following modal still qualifies the treatment independently.
+      .replace(/\b(?:[Tt]he|[Oo]ur|[Yy]our|[Tt]heir)\s+(?:technician|tech)\s+(?:Will|May)\b/g, '')
+      .replace(/^(\s*(?:(?:yes|okay|certainly|absolutely)[,:]?\s+)?)(i|we)\s+can\s+(confirm|verify)\s+that\b/i, '$1$2 $3 that'));
 }
 
 function reportFindingIsInstruction(affirmed, subjectAt, locationAt, findingVerb, findingEvidenceEnd) {
@@ -1777,7 +1781,7 @@ function reportHasCompletedPredicate(affirmed, findingVerb) {
   const prefix = reportWithoutNominalContrast(affirmed).slice(0, findingVerb.index)
     .replace(/\b(was|were|has|have|had|did)n['’]t\s+(?:only|just|merely|simply)\b/gi, '$1 ')
     .replace(/\bnot\s+(?:only|just|merely|simply)\b/gi, ' ');
-  const predicateIntroduction = prefix.replace(/\b(?:complet(?:e|ed)|finish(?:ed)?|manag(?:e|ed)\s+to)\s*$/i, '');
+  const predicateIntroduction = prefix.replace(/\b(?:complet(?:e|ed)|finish(?:ed)?|manag(?:e|ed)\s+to|succeed(?:ed)?\s+in)\s*$/i, '');
   if (REPORT_NONCOMPLETION_GOVERNOR_RE.test(predicateIntroduction)
       || REPORT_NONCOMPLETION_MODIFIER_RE.test(predicateIntroduction)
       || (/(?:\b(?:am|is|are|be|being|get|gets|getting)|['’](?:m|re))\s+(?:(?:\w+ly|already|also|just|now)\s+)*$/i.test(prefix)
@@ -1787,7 +1791,7 @@ function reportHasCompletedPredicate(affirmed, findingVerb) {
       && !clauseIsNegated(prefix);
   }
   if (REPORT_COMPLETED_GERUND_RE.test(findingVerb[0])) {
-    return /\b(?:completed|finished|did\s+(?:(?:already|also|just|now|\w+ly)\s+)*(?:complete|finish))\s+$/i.test(prefix)
+    return /\b(?:completed|finished|succeeded\s+in|did\s+(?:(?:already|also|just|now|\w+ly)\s+)*(?:complete|finish|succeed\s+in))\s+$/i.test(prefix)
       && !clauseIsNegated(prefix);
   }
   // 's can mean active perfect "has"; passive product ownership separately

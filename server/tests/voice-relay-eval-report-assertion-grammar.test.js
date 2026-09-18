@@ -555,3 +555,122 @@ test('active request-that subjunctive governs the invariant put verb', () => {
   expect(grammar.reportFindingIsInstruction(text, text.indexOf('Talstar P'),
     text.indexOf('exterior perimeter'), /put/.exec(text), text.length)).toBe(true);
 });
+
+test.each([
+  ['Please have Talstar P applied to the exterior perimeter.', 'I have had Talstar P applied to the exterior perimeter.'],
+  ['Get Talstar P applied to the exterior perimeter.', 'I got Talstar P applied to the exterior perimeter.'],
+])('causative imperative is an instruction while completed causative is evidence: %s', (imperative, completed) => {
+  expect(grammar.reportFindingIsInstruction(imperative, imperative.indexOf('Talstar P'),
+    imperative.indexOf('exterior perimeter'), /applied/.exec(imperative), imperative.length)).toBe(true);
+  expect(grammar.reportFindingIsInstruction(completed, completed.indexOf('Talstar P'),
+    completed.indexOf('exterior perimeter'), /applied/.exec(completed), completed.length)).toBe(false);
+  expect(grammar.reportHasCompletedPredicate(completed, /applied/.exec(completed))).toBe(true);
+});
+
+test('asked-for confirmation governs only its own finding', () => {
+  const requested = 'We asked for confirmation that Talstar P was applied to the exterior perimeter.';
+  expect(grammar.reportFindingIsInstruction(requested, requested.indexOf('Talstar P'),
+    requested.indexOf('exterior perimeter'), /applied/.exec(requested), requested.length)).toBe(true);
+
+  const received = 'We received confirmation that Talstar P was applied to the exterior perimeter.';
+  expect(grammar.reportFindingIsInstruction(received, received.indexOf('Talstar P'),
+    received.indexOf('exterior perimeter'), /applied/.exec(received), received.length)).toBe(false);
+
+  const unrelated = 'We asked for confirmation that the invoice was paid, Talstar P was applied to the exterior perimeter.';
+  expect(grammar.reportFindingIsInstruction(unrelated, unrelated.indexOf('Talstar P'),
+    unrelated.indexOf('exterior perimeter'), /applied/.exec(unrelated), unrelated.length)).toBe(false);
+});
+
+test.each([
+  ['We succeeded in applying Talstar P to the exterior perimeter.', true],
+  ['We did succeed in applying Talstar P to the exterior perimeter.', true],
+  ['We failed to succeed in applying Talstar P to the exterior perimeter.', false],
+  ['We expected to succeed in applying Talstar P to the exterior perimeter.', false],
+  ['We nearly succeeded in applying Talstar P to the exterior perimeter.', false],
+  ["We didn't succeed in applying Talstar P to the exterior perimeter.", false],
+])('successful gerund governor distinguishes completion: %s', (text, completed) => {
+  expect(grammar.reportHasCompletedPredicate(text, /applying/.exec(text))).toBe(completed);
+});
+
+test('future successful gerund is uncertain rather than completed evidence', () => {
+  const future = 'We will succeed in applying Talstar P to the exterior perimeter.';
+  expect(grammar.reportFindingIsUncertain(future)).toBe(true);
+
+  const completed = 'We succeeded in applying Talstar P to the exterior perimeter.';
+  expect(grammar.reportFindingIsUncertain(completed)).toBe(false);
+});
+
+test.each([
+  ['The technician Will put Talstar P around the exterior perimeter.', false],
+  ['The technician May put Talstar P around the exterior perimeter.', false],
+  ['The technician Will may put Talstar P around the exterior perimeter.', true],
+  ['The technician May will put Talstar P around the exterior perimeter.', true],
+  ['The technician will put Talstar P around the exterior perimeter.', true],
+  ['The technician may put Talstar P around the exterior perimeter.', true],
+  ['We will put Talstar P around the exterior perimeter.', true],
+  ['We may put Talstar P around the exterior perimeter.', true],
+])('modal put preserves technician-name tense: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['We can confirm that Talstar P was applied to the exterior perimeter.', false],
+  ['I can verify that Talstar P was applied to the exterior perimeter.', false],
+  ['We might confirm that Talstar P was applied to the exterior perimeter.', true],
+  ['I might verify that Talstar P was applied to the exterior perimeter.', true],
+  ['We can confirm that Talstar P might have been applied to the exterior perimeter.', true],
+])('affirmative can-confirm differs from speculative confirmation: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  "We can't confirm that Talstar P was applied to the exterior perimeter.",
+  'I cannot verify that Talstar P was applied to the exterior perimeter.',
+])('refused confirmation remains denied: %s', (text) => {
+  expect(grammar.reportClaimIsDenied(text, text, text.indexOf('Talstar P'),
+    text.indexOf('exterior perimeter'), /applied/.exec(text), '')).toBe(true);
+
+  const confirmed = 'We can confirm that Talstar P was applied to the exterior perimeter.';
+  expect(grammar.reportClaimIsDenied(confirmed, confirmed, confirmed.indexOf('Talstar P'),
+    confirmed.indexOf('exterior perimeter'), /applied/.exec(confirmed), '')).toBe(false);
+});
+
+// Direct "Can we confirm?" questions are selected by the question-aware runner,
+// outside these bounded assertion helpers.
+
+
+test.each([
+  'We hope we can confirm that Talstar P was applied to the exterior perimeter.',
+  'I hope I can verify that Talstar P was applied to the exterior perimeter.',
+  'We are hoping we can confirm that Talstar P was applied to the exterior perimeter.',
+])('tentative governors retain can-confirm uncertainty: %s', (text) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(true);
+});
+
+test.each(['Yes, ', 'Okay, ', 'Certainly, ', 'Absolutely, '])('affirmative discourse prefix %s retains explicit confirmation', (prefix) => {
+  expect(grammar.reportFindingIsUncertain(`${prefix}we can confirm that Talstar P was applied to the exterior perimeter.`)).toBe(false);
+});
+
+
+test.each([
+  'We, according to the report, have applied Talstar P to the exterior perimeter.',
+  'We, as documented, have had Talstar P applied to the exterior perimeter.',
+  'We, according to the report, have already applied Talstar P to the exterior perimeter.',
+])('perfect auxiliary after an aside is not an imperative: %s', (text) => {
+  expect(grammar.reportFindingIsInstruction(text, text.indexOf('Talstar P'),
+    text.indexOf('exterior perimeter'), /applied/.exec(text), text.length)).toBe(false);
+});
+
+
+test.each(['succeeded in applying', 'finished applying', 'completed applying', 'managed to apply'])('perfect completion governor %s after an aside is not an imperative', (completion) => {
+  const text = `We, as documented, have ${completion} Talstar P to the exterior perimeter.`;
+  expect(grammar.reportFindingIsInstruction(text, text.indexOf('Talstar P'),
+    text.indexOf('exterior perimeter'), /\b(?:apply|applying)\b/.exec(text), text.length)).toBe(false);
+});
+
+
+test.each(['only', 'just', 'merely', 'simply'])('perfect affirmative focus %s after an aside is not an imperative', (focus) => {
+  const text = `We, as documented, have not ${focus} applied Talstar P to the exterior perimeter.`;
+  expect(grammar.reportFindingIsInstruction(text, text.indexOf('Talstar P'),
+    text.indexOf('exterior perimeter'), /applied/.exec(text), text.length)).toBe(false);
+});
