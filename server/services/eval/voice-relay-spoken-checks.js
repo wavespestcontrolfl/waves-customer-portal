@@ -1776,12 +1776,13 @@ function reportFindingIsUncertain(text) {
       .replace(/(^|,\s*|\b(?:based\s+on|after\s+(?:reviewing|checking|reading))\s+(?:the\s+)?report\s*,?\s*)(\s*(?:(?:yes|okay|certainly|absolutely)[,:]?\s+)?)(i|we)\s+can\s+(?:(?:definitely|certainly|confidently|clearly|conclusively|now|already|also|fully|absolutely)\s+)*(confirm|verify)\b(?![^.!?;]*\b(?:whether|if)\b)(?:\s+that\b)?/gi, '$1$2$3 $4'));
 }
 
-const REPORT_INSTRUCTION_RE = /(?:^\s*|,\s*)(?:please\s+)?(?:apply|use|put|treat|spray|place|have(?!\s+(?:(?:not\s+(?:only|just|merely|simply)|already|also|just|now|\w+ly)\s+)*(?:had|been|applied|used|sprayed|treated|placed|put|got|received|succeeded|finished|completed|managed|confirmed|verified|checked)\b)|get|confirm|verify|check|tell\s+me)\b|\b(?:(?:i|we)(?:\s+(?:need(?:ed)?|want(?:ed)?|ask(?:ed)?|request(?:ed)?)|['’]d\s+like|\s+would\s+like)\s+(?:me|us|you|him|her|them|(?:(?:the|our|your|their)\s+)?(?:[\w'’-]+\s+){0,3}(?:technician|tech|crew|team)|[\w'’-]+(?:\s+[\w'’-]+){0,2})\s+to\s+(?:confirm|verify|check|tell)|(?:i|we)\s+(?:need(?:ed)?|want(?:ed)?|request(?:ed)?|ask(?:ed)?\s+for)\s+(?:(?:a|your)\s+)?(?:confirmation|verification)\s+(?:that|whether|if)|please\s+let\s+me\s+know\s+(?:whether|if|that)|(?:ask(?:s|ed|ing)?|request(?:s|ed|ing)?)\s+that(?=\s+(?:[\w'’-]+\s+){1,6}(?:be|get|have|apply|use|treat|spray|place|put|receive)\b)|make sure|ensure|remember to|please\s+(?:confirm|verify|check|tell))\b/i;
+const REPORT_INSTRUCTION_RE = /(?:^\s*|,\s*)(?:please\s+)?(?:apply|use|put|treat|spray|place|have(?!\s+(?:(?:not\s+(?:only|just|merely|simply)|already|also|just|now|\w+ly)\s+)*(?:had|been|applied|used|sprayed|treated|placed|put|got|received|succeeded|finished|completed|managed|confirmed|verified|checked)\b)|get|confirm|verify|check|tell\s+me)\b|\b(?:(?:i|we|he|she|they|(?:the\s+)?(?:customer|client|homeowner|caller|technician|tech))(?:\s+(?:need(?:s|ed)?|want(?:s|ed)?|ask(?:s|ed)?|request(?:s|ed)?)|['’]d\s+like|\s+would\s+like)\s+(?:me|us|you|him|her|them|(?:(?:the|our|your|their)\s+)?(?:[\w'’-]+\s+){0,3}(?:technician|tech|crew|team)|[\w'’-]+(?:\s+[\w'’-]+){0,2})\s+to\s+(?:confirm|verify|check|tell)|(?:i|we)\s+(?:need(?:ed)?|want(?:ed)?|request(?:ed)?|ask(?:ed)?\s+for)\s+(?:(?:a|your)\s+)?(?:confirmation|verification)\s+(?:that|whether|if)|please\s+let\s+me\s+know\s+(?:whether|if|that)|(?:ask(?:s|ed|ing)?|request(?:s|ed|ing)?)\s+that(?=\s+(?:[\w'’-]+\s+){1,6}(?:be|get|have|apply|use|treat|spray|place|put|receive)\b)|make sure|ensure|remember to|please\s+(?:confirm|verify|check|tell))\b/i;
 const REPORT_FINITE_PREDICATE_RE = new RegExp(`(?:${CLAUSE_FINITE_PREDICATE_RE.source}|\\b(?:treated|sprayed|used|put|went|got|received|completed|finished|managed|succeeded)\\b)`, 'i');
 
 function reportFindingIsInstruction(affirmed, subjectAt, locationAt, findingVerb, findingEvidenceEnd) {
   const firstFindingAt = Math.min(subjectAt, locationAt, findingVerb ? findingVerb.index : Infinity);
-  const subjectAside = /^(\s*(?:i|we|you|he|she|they|it)),\s*[^,]+,\s*/i;
+  const subjectAside = /^(\s*(?:i|we|you|he|she|they|it)(?:\s+(?:do|does|did|has|have|had|will|would|should|can|could|may|might|must|shall))?),\s*[^,]+,\s*/i;
+  const completedAssurance = /\b(?:i|we|you|he|she|they)\s+did\s+(?:(?:already|also|just|now|\w+ly)\s+)*(?:make\s+sure|ensure)\b/i;
   // A comma before the finding can end an unrelated instruction; a later
   // instruction after the matched treatment is outside its evidence span.
   let governingStart = 0;
@@ -1789,24 +1790,30 @@ function reportFindingIsInstruction(affirmed, subjectAt, locationAt, findingVerb
     const left = affirmed.slice(governingStart, comma.index);
     const right = affirmed.slice(comma.index + 1, findingEvidenceEnd);
     const clauseRight = right.replace(subjectAside, '$1 ');
+    const instructionLeft = left.replace(completedAssurance, '');
     const complement = /\b(that|whether)\b([^.!?;]*)$/i.exec(left);
+    const complementAdjunct = complement
+      && /^\s+(?:after|before|while|when|according\s+to|based\s+on|as)\b[^,]*$/i.test(complement[2]);
     const coordinatedFinding = /^(?!\s*(?:i|we|you|he|she|they|it)\b)\s*(?:[\w'’-]+\s+){1,6}(?:are|were|have)\b/i.test(right);
     const demonstrativeObject = complement && /^that$/i.test(complement[1])
-      && /^\s+(?:[\w'’-]+\s+){0,3}[\w'’-]+\s*$/.test(complement[2]) && !coordinatedFinding;
+      && /^\s+(?:[\w'’-]+\s+){0,3}[\w'’-]+\s*$/.test(complement[2])
+      && !complementAdjunct && !coordinatedFinding;
     const parentheticalAside = complement
       && /^,\s*as\s+(?:[\w'’-]+\s+){0,7}[\w'’-]+\s*$/i.test(complement[2]);
-    const interruptedComplement = REPORT_INSTRUCTION_RE.test(left)
+    const interruptedComplement = REPORT_INSTRUCTION_RE.test(instructionLeft)
       && /\b(?:confirm|verify|check|tell\s+me)\s*,\s*(?:after|before|while|when|according\s+to|based\s+on|as)\b[^,]*$/i.test(left)
       && /^\s*(?:that|whether|if)\b/i.test(right);
     if (interruptedComplement) continue;
-    if (REPORT_INSTRUCTION_RE.test(left) && complement && !demonstrativeObject
-        && (parentheticalAside || !REPORT_FINITE_PREDICATE_RE.test(complement[2]))) continue;
+    if (REPORT_INSTRUCTION_RE.test(instructionLeft) && complement && !demonstrativeObject
+        && (parentheticalAside || complementAdjunct
+          || !REPORT_FINITE_PREDICATE_RE.test(complement[2]))) continue;
     if (new RegExp(`^\\s*(?:[\\w'’-]+\\s+){1,6}${REPORT_FINITE_PREDICATE_RE.source}`, 'i').test(
       clauseRight,
     )) governingStart = comma.index + 1;
   }
   return REPORT_INSTRUCTION_RE.test(
-    affirmed.slice(governingStart, findingEvidenceEnd).replace(subjectAside, '$1 '),
+    affirmed.slice(governingStart, findingEvidenceEnd)
+      .replace(subjectAside, '$1 ').replace(completedAssurance, ''),
   );
 }
 
