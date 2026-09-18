@@ -544,6 +544,24 @@ test.each([
 test.each(["'", '’'])('affirmative contractions retain report scope with %s apostrophe', (apostrophe) => {
   expect(grammar.reportFindingIsUncertain(`We${apostrophe}re hoping Talstar P was applied.`)).toBe(true);
   expect(grammar.reportFindingIsUncertain(`It${apostrophe}s unconfirmed that Talstar P was applied.`)).toBe(true);
+  expect(grammar.reportFindingIsUncertain(`We${apostrophe}re not confident that Talstar P was applied.`)).toBe(true);
+  expect(grammar.reportFindingIsUncertain(`I${apostrophe}m fairly sure Talstar P was applied.`)).toBe(true);
+  expect(grammar.reportFindingIsUncertain(`I${apostrophe}m almost certain Talstar P was applied.`)).toBe(true);
+  expect(grammar.reportFindingIsUncertain(`It${apostrophe}s still possible Talstar P was applied.`)).toBe(true);
   expect(grammar.reportFindingIsUncertain(`We${apostrophe}re sure Talstar P was applied.`)).toBe(false);
+  expect(grammar.reportFindingIsUncertain(`I${apostrophe}m certain Talstar P was applied.`)).toBe(false);
   expect(grammar.reportFindingIsUncertain(`It${apostrophe}s confirmed that Talstar P was applied.`)).toBe(false);
+});
+
+test.each([
+  ['4044118309', ['Talstar P is suspected to have been applied.'], 'Talstar P is confirmed to have been applied.'],
+  ['4044118313', ['It remains possible that Talstar P was applied.', 'It is still possible that Talstar P was applied.'], 'It is confirmed that Talstar P was applied.'],
+  ['4044118319', ['The report appears to indicate that Talstar P was applied.', 'The report seems to show that Talstar P was applied.'], 'The report shows that Talstar P was applied.'],
+  ['4044118324', ['It remains to be seen whether Talstar P was applied.', 'We wonder whether Talstar P was applied.'], 'We know Talstar P was applied.'],
+  ['4044118330', ['Presumably, Talstar P was applied.', 'Conceivably, Talstar P was applied.', 'In all likelihood, Talstar P was applied.'], 'Talstar P was applied.'],
+  ['4044118333', ['As far as we know, Talstar P was applied.', 'As far as I can tell, Talstar P was applied.', 'To the best of my knowledge, Talstar P was applied.'], 'Talstar P was applied.'],
+  ['4044118337', ['We are not confident that Talstar P was applied.', 'I am fairly sure Talstar P was applied.', 'I am almost certain Talstar P was applied.'], 'We are confident that Talstar P was applied.'],
+])('round-six report uncertainty %s', (_finding, uncertainCases, definite) => {
+  uncertainCases.forEach((text) => expect(grammar.reportFindingIsUncertain(text)).toBe(true));
+  expect(grammar.reportFindingIsUncertain(definite)).toBe(false);
 });

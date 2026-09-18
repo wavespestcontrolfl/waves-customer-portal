@@ -1726,9 +1726,9 @@ const REPORT_COMPLETION_TIME_RE = new RegExp(REPORT_COMPLETION_TIME, 'gi');
 
 function reportFindingIsUncertain(text) {
   // Consumers supply bounded finding evidence, excluding unrelated tails.
-  const normalized = text.replace(/\bi['’]m(?=\s+hoping\b)/gi, 'i am')
-    .replace(/\bwe['’]re(?=\s+hoping\b)/gi, 'we are')
-    .replace(/\bit['’]s(?=\s+(?:(?:still|yet|currently)\s+)*(?:unconfirmed|unverified|unknown)\b)/gi, 'it is')
+  const normalized = text.replace(/\bi['’]m(?=\s+(?:hoping\b|not\s+confident\b|(?:fairly|almost)\s+(?:sure|certain)\b))/gi, 'i am')
+    .replace(/\bwe['’]re(?=\s+(?:hoping\b|not\s+confident\b|(?:fairly|almost)\s+(?:sure|certain)\b))/gi, 'we are')
+    .replace(/\bit['’]s(?=\s+(?:(?:still|yet|currently)\s+)*(?:unconfirmed|unverified|unknown|possible|probable|unlikely|improbable)\b)/gi, 'it is')
     .replace(/\bcannot\b/gi, 'can not')
     .replace(/\b(can)['’]t\b/gi, '$1 not')
     .replace(/\bwon['’]t\b/gi, 'will not')
@@ -1757,6 +1757,8 @@ function reportFindingIsUncertain(text) {
     || /\b(?:is|was|remains|remained)\s+(?:(?:still|yet|currently)\s+)*(?:unconfirmed|unverified|unknown)\b/i.test(scopedEvidence)
     || /\b(?:i|we)\s+(?:can|could)\s+not\s+(?:rule\s+out|exclude)\b/i.test(scopedEvidence)
     || /\bought\s+to\s+(?:have\s+been|be)\s+(?:applied|used|treated|sprayed|placed|put)\b/i.test(scopedEvidence)
+    || /\b(?:is|are|was|were|has\s+been|have\s+been|had\s+been)\s+suspected\s+to\s+(?:have|be)\b/i.test(scopedEvidence)
+    || /^\s*(?:(?:it|this|that)\s+(?:is|was|remains|remained)\s+(?:(?:still|yet|currently)\s+)*(?:possible|probable|unlikely|improbable)\b|(?:the\s+)?report\s+(?:appears?|seems?)\s+to\s+(?:indicate|show|suggest|report|say|state|mention|document)\b|(?:it\s+remains\s+to\s+be\s+seen|(?:i|we)\s+wonder)\s+whether\b|(?:presumably|conceivably|in\s+all\s+likelihood)\b|(?:as\s+far\s+as\s+(?:i|we)\s+(?:know|can\s+tell)|to\s+the\s+best\s+of\s+(?:my|our)\s+knowledge)\b|(?:i|we)\s+(?:am|are)\s+(?:not\s+confident|(?:fairly|almost)\s+(?:sure|certain))\b)/i.test(scopedEvidence)
     || clauseIsEpistemicallyHedged(scopedEvidence)
     || REPORT_UNCERTAINTY_RE.test(scopedEvidence
       // Preserve named-technician past-tense put; base auxiliaries retain modal meaning.
