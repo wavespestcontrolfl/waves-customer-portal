@@ -2847,9 +2847,27 @@ const InvoiceService = {
         scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(db),
         scheduled_request_review: false,
         scheduled_review_delay_minutes: null,
-        ...(allowClaimed ? {} : { send_claim_token: null }),
         updated_at: new Date(),
       });
+    // Keep a direct SMS's episode identity through post-delivery bookkeeping.
+    // A retry can finish that work when PostgreSQL committed the finalize but
+    // the acknowledgement was lost; a later explicit resend may supersede the
+    // token, in which case this episode's exact-token writes become no-ops.
+    // Nested SMS leaves release to the combined SMS+email finalizer.
+    const releaseDirectSmsClaim = async () => {
+      if (allowClaimed) return;
+      try {
+        await whereSendClaimOwned(
+          db("invoices").where({ id: invoiceId }),
+          invoice.send_claim_token,
+        ).update({ send_claim_token: null, updated_at: new Date() });
+      } catch (err) {
+        // The provider already accepted the SMS and terminal bookkeeping has
+        // run. A failed cleanup acknowledgement must not turn that delivery
+        // into a failed send or invite an automatic replay.
+        logger.error(`[invoice] SMS delivered for ${invoice.invoice_number} but send-claim cleanup failed: ${err.message}`);
+      }
+    };
     // Flips the moment the provider accepts the message. Everything after
     // that point is bookkeeping — its failure must never be reported as a
     // failed SEND (the UI reads a restored 'draft' as "provably unsent" and
@@ -3006,6 +3024,8 @@ const InvoiceService = {
         await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId });
       }
 
+      await releaseDirectSmsClaim();
+
       return { sent: true, payUrl };
     } catch (err) {
       if (smsDelivered) {
@@ -3066,6 +3086,7 @@ const InvoiceService = {
             logger.error(`[invoice] issued-invoice closeout failed (post-recovery) for ${invoice.invoice_number}: ${e.message}`);
           }
         }
+        await releaseDirectSmsClaim();
         return { sent: true, payUrl, finalizeError: err.message };
       }
       const restored = await restoreSendClaim(invoiceId, previousStatus, claimed, db, invoice.send_claim_token);

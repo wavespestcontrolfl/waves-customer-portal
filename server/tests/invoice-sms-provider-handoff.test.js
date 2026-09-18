@@ -39,6 +39,11 @@ jest.mock('../services/estimate-deposits', () => ({
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(),
 }));
+jest.mock('../services/customer-credit', () => ({
+  autoApplyAccountCreditIfEnabled: jest.fn(async () => null),
+}));
+jest.mock('../services/lead-estimate-link', () => ({ convertLeadFromEvent: jest.fn(async () => null) }));
+jest.mock('../services/invoice-issued-closeout', () => ({ closeOutVisitForIssuedInvoice: jest.fn(async () => null) }));
 
 const db = require('../models/db');
 const { withInvoiceDepositSettlement } = require('../services/estimate-deposits');
@@ -140,5 +145,60 @@ describe('invoice SMS provider handoff', () => {
     await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
       .rejects.toMatchObject({ code: 'INVOICE_BALANCE_CHANGED' });
     expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test('finishes direct-send bookkeeping when the finalize committed but its acknowledgement was lost', async () => {
+    const state = { ...invoice, status: 'draft', send_claim_token: null };
+    const ackLost = new Error('synthetic finalize acknowledgement lost');
+    let failFinalizeAck = true;
+    const invoiceQuery = () => {
+      const filters = [];
+      let count = 1;
+      let failure = null;
+      const q = {};
+      q.where = jest.fn((criteria) => { filters.push(criteria); return q; });
+      q.whereIn = jest.fn((key, values) => { filters.push({ [key]: values }); return q; });
+      const matches = () => filters.every((criteria) => Object.entries(criteria).every(([key, value]) => (
+        Array.isArray(value) ? value.includes(state[key]) : state[key] === value
+      )));
+      q.first = jest.fn(async () => (matches() ? { ...state } : undefined));
+      q.update = jest.fn((payload) => {
+        count = matches() ? 1 : 0;
+        if (count) {
+          for (const [key, value] of Object.entries(payload)) {
+            state[key] = key === 'status' && String(value).startsWith('CASE WHEN')
+              ? (['draft', 'scheduled', 'sending'].includes(state.status) ? 'sent' : state.status)
+              : value;
+          }
+          if (payload.sms_sent_at && failFinalizeAck) {
+            failFinalizeAck = false;
+            failure = ackLost;
+          }
+        }
+        return q;
+      });
+      q.returning = jest.fn(async () => (count ? [{ ...state }] : []));
+      q.then = (resolve, reject) => (failure ? Promise.reject(failure) : Promise.resolve(count)).then(resolve, reject);
+      return q;
+    };
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return invoiceQuery();
+      if (table === 'customers') return query({ first: { id: 'cust-1', first_name: 'Pat', phone: '+19415550101' } });
+      if (table === 'activity_log') return query();
+      throw new Error(`Unexpected table: ${table}`);
+    });
+    withInvoiceDepositSettlement.mockImplementation(async (_invoiceId, callback) => callback(db, { ...state }));
+    const dispatch = jest.fn(async () => ({ sent: true, deliveryOutcome: 'provider_accepted' }));
+    sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => withProviderHandoff(dispatch));
+
+    await expect(InvoiceService.sendViaSMS('inv-1')).resolves.toMatchObject({
+      sent: true,
+      finalizeError: ackLost.message,
+    });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(require('../services/invoice-followups').scheduleForInvoice).toHaveBeenCalledTimes(1);
+    expect(require('../services/lead-estimate-link').convertLeadFromEvent).toHaveBeenCalledTimes(1);
+    expect(require('../services/invoice-issued-closeout').closeOutVisitForIssuedInvoice).toHaveBeenCalledTimes(1);
+    expect(state).toMatchObject({ status: 'sent', send_claim_token: null });
   });
 });
