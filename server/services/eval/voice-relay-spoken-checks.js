@@ -1726,7 +1726,10 @@ const REPORT_COMPLETION_TIME_RE = new RegExp(REPORT_COMPLETION_TIME, 'gi');
 
 function reportFindingIsUncertain(text) {
   // Consumers supply bounded finding evidence, excluding unrelated tails.
-  const normalized = text.replace(/\bcannot\b/gi, 'can not')
+  const normalized = text.replace(/\bi['’]m(?=\s+hoping\b)/gi, 'i am')
+    .replace(/\bwe['’]re(?=\s+hoping\b)/gi, 'we are')
+    .replace(/\bit['’]s(?=\s+(?:(?:still|yet|currently)\s+)*(?:unconfirmed|unverified|unknown)\b)/gi, 'it is')
+    .replace(/\bcannot\b/gi, 'can not')
     .replace(/\b(can)['’]t\b/gi, '$1 not')
     .replace(/\bwon['’]t\b/gi, 'will not')
     .replace(/\bshan['’]t\b/gi, 'shall not')

@@ -538,3 +538,10 @@ test.each([
 ])('round-five report uncertainty %s: %s', (_finding, text, uncertain) => {
   expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
 });
+
+test.each(["'", '’'])('affirmative contractions retain report scope with %s apostrophe', (apostrophe) => {
+  expect(grammar.reportFindingIsUncertain(`We${apostrophe}re hoping Talstar P was applied.`)).toBe(true);
+  expect(grammar.reportFindingIsUncertain(`It${apostrophe}s unconfirmed that Talstar P was applied.`)).toBe(true);
+  expect(grammar.reportFindingIsUncertain(`We${apostrophe}re sure Talstar P was applied.`)).toBe(false);
+  expect(grammar.reportFindingIsUncertain(`It${apostrophe}s confirmed that Talstar P was applied.`)).toBe(false);
+});
