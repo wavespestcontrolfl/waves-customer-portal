@@ -26,6 +26,14 @@ const { publicPortalUrl } = require('../utils/portal-url');
 const { smtpFallbackAllowed } = require('./email-fallback-gate');
 const { isEnabled } = require('../config/feature-gates');
 
+// Keep aligned with invoice.js SEND_FINALIZABLE_STATUSES. Email preparation
+// can begin from any ordinary send/resend status, but the locked provider
+// boundary must refuse a cancellation/payment transition that landed while
+// the PDF or template was rendering.
+const INVOICE_EMAIL_FINALIZABLE_STATUSES = new Set([
+  'draft', 'scheduled', 'sent', 'viewed', 'overdue', 'sending',
+]);
+
 let cachedTransporter = null;
 function getTransporter() {
   if (cachedTransporter) return cachedTransporter;
@@ -351,6 +359,9 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
         async (trx, current) => {
           if ((current.send_claim_token || null) !== claimToken) {
             return { ok: false, reason: 'Invoice send claim changed; delivery not attempted', code: 'send_claim_lost' };
+          }
+          if (!INVOICE_EMAIL_FINALIZABLE_STATUSES.has(current.status)) {
+            return { ok: false, reason: `Invoice is no longer sendable (status: ${current.status || 'unknown'}); delivery not attempted`, code: 'invoice_not_sendable' };
           }
           // Reconciliation can finish while the PDF or template renders,
           // leaving no pending ledger balance. Compare the locked row after

@@ -118,6 +118,40 @@ describe('sendInvoiceEmail service summary', () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
+  test('rechecks sendable status at provider handoff after rendering', async () => {
+    mockDb(invoiceRow({ status: 'sending', send_claim_token: 'original' }));
+    const dispatch = jest.fn();
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      mockDb(invoiceRow({ status: 'void', send_claim_token: 'original' }));
+      const verdict = await withProviderHandoff(dispatch);
+      return { sent: verdict.ok, reason: verdict.reason };
+    });
+
+    await expect(sendInvoiceEmail('inv-1', { claimToken: 'original' }))
+      .resolves.toMatchObject({ ok: false, error: expect.stringMatching(/no longer sendable.*void/i) });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test.each(['draft', 'scheduled', 'sent', 'viewed', 'overdue', 'sending'])(
+    'allows %s at the locked provider boundary',
+    async (status) => {
+      const claimToken = status === 'sending' ? 'active-claim' : null;
+      mockDb(invoiceRow({ status, send_claim_token: claimToken }));
+      const dispatch = jest.fn();
+      EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+        const verdict = await withProviderHandoff(dispatch);
+        return { sent: verdict.ok, reason: verdict.reason };
+      });
+
+      const options = {
+        recipientOverride: { email: 'office@example.com' },
+        ...(claimToken ? { claimToken } : {}),
+      };
+      await expect(sendInvoiceEmail('inv-1', options)).resolves.toMatchObject({ ok: true });
+      expect(dispatch).toHaveBeenCalledTimes(1);
+    },
+  );
+
   test('accepted email cannot stamp or freeze payer data over a replacement claim', async () => {
     const invoice = invoiceRow({ status: 'sending', send_claim_token: 'original' });
     mockDb(invoice);

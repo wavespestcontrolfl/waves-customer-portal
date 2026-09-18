@@ -17,6 +17,26 @@
  *     review — the send is retried, never parked.
  */
 jest.mock('../models/db', () => {
+  const smsRestoreFailure = () => {
+    mockFault.smsRestoreOnce = false;
+    const failing = {};
+    for (const method of ['whereIn', 'where', 'whereRaw']) failing[method] = () => failing;
+    failing.update = () => Promise.reject(new Error('transient queued-SMS restore failure (injected)'));
+    return failing;
+  };
+  const wrapTransaction = (trx) => {
+    const wrapped = (table, ...args) => {
+      if (table === 'sms_log' && mockFault.smsRestoreOnce) return smsRestoreFailure();
+      return trx(table, ...args);
+    };
+    for (const name of ['raw', 'queryBuilder', 'ref']) wrapped[name] = (...args) => trx[name](...args);
+    wrapped.transaction = (callback, ...args) => trx.transaction(
+      (nested) => callback(wrapTransaction(nested)),
+      ...args,
+    );
+    for (const name of ['schema', 'fn']) Object.defineProperty(wrapped, name, { get: () => trx[name] });
+    return wrapped;
+  };
   const db = (table, ...args) => {
     if (table === 'invoices' && mockFault.invoiceClaimCheckOnce) {
       mockFault.invoiceClaimCheckOnce = false;
@@ -35,11 +55,7 @@ jest.mock('../models/db', () => {
       return failing;
     }
     if (table === 'sms_log' && mockFault.smsRestoreOnce) {
-      mockFault.smsRestoreOnce = false;
-      const failing = {};
-      for (const method of ['whereIn', 'where', 'whereRaw']) failing[method] = () => failing;
-      failing.update = () => Promise.reject(new Error('transient queued-SMS restore failure (injected)'));
-      return failing;
+      return smsRestoreFailure();
     }
     if (table === 'sms_log' && mockFault.smsLogOnce) {
       mockFault.smsLogOnce = false;
@@ -68,7 +84,11 @@ jest.mock('../models/db', () => {
     }
     return mockPg(table, ...args);
   };
-  for (const name of ['raw', 'transaction', 'queryBuilder', 'ref']) db[name] = (...args) => mockPg[name](...args);
+  for (const name of ['raw', 'queryBuilder', 'ref']) db[name] = (...args) => mockPg[name](...args);
+  db.transaction = (callback, ...args) => mockPg.transaction(
+    (trx) => callback(wrapTransaction(trx)),
+    ...args,
+  );
   for (const name of ['schema', 'fn']) Object.defineProperty(db, name, { get: () => mockPg[name] });
   return db;
 });
