@@ -12,8 +12,7 @@
  *     inside the same transaction
  *   - an allocation mismatch throws (the mint rolls back) and is retried
  *     against the fresh balance; a second failure raises the reconcile alert
- *     and falls back to an UNCREDITED mint — deposit machinery never blocks
- *     door collection
+ *     and holds the invoice mint until the ledger is reconciled
  *   - the in-lock replay check still short-circuits before any deposit work
  *   - a visit with no source estimate mints exactly as before
  *   - expectedDepositCredit (the credit a caller previewed to an operator):
@@ -66,7 +65,7 @@ const {
   mintOrReuseScheduledServiceInvoice,
 } = adminScheduleRouter._test;
 
-function makeTrx({ replayedInvoice = undefined, lockedSvcRow } = {}) {
+function makeTrx({ replayedInvoice = undefined, lockedSvcRow, sourceEstimateId = 'est-1' } = {}) {
   const trx = (table) => {
     const q = {};
     q.where = jest.fn(() => q);
@@ -79,9 +78,11 @@ function makeTrx({ replayedInvoice = undefined, lockedSvcRow } = {}) {
       if (table === 'scheduled_services') {
         // The mint's row lock re-read; undefined estimated_price on the
         // caller's svc keeps the stale-price guard out of legacy tests.
-        return lockedSvcRow !== undefined
-          ? lockedSvcRow
-          : { id: 'svc-1', estimated_price: null, primary_line_price: null };
+        return lockedSvcRow === null ? null : {
+          id: 'svc-1', customer_id: 'cust-1', source_estimate_id: sourceEstimateId,
+          estimated_price: null, primary_line_price: null,
+          ...(lockedSvcRow || {}),
+        };
       }
       return undefined;
     });
@@ -151,7 +152,7 @@ describe('mintScheduledServiceInvoiceWithDeposit', () => {
   });
 
   it('mints without deposit machinery when the visit has no source estimate', async () => {
-    programTransactions(makeTrx());
+    programTransactions(makeTrx({ sourceEstimateId: null }));
     mockCreate.mockResolvedValueOnce({ id: 'inv-1', applied_deposit_credit: 0 });
 
     await mintScheduledServiceInvoiceWithDeposit({ svc: { ...svc, source_estimate_id: null }, buildCreateParams });
@@ -186,21 +187,49 @@ describe('mintScheduledServiceInvoiceWithDeposit', () => {
     expect(callOrder).toEqual(['lock', 'read']);
   });
 
-  it('retries once on allocation mismatch, then alerts and falls back to an uncredited mint', async () => {
-    programTransactions(makeTrx(), makeTrx(), makeTrx());
-    // Two credited attempts both mismatch (ledger raced), third mints uncredited.
+  it('refuses a stale estimate source before reading or applying deposit credit', async () => {
+    programTransactions(makeTrx({ sourceEstimateId: 'est-other' }));
+    await expect(mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams }))
+      .rejects.toMatchObject({ code: 'SCHEDULED_BILLING_SOURCE_MOVED', status: 409 });
+    expect(mockPending).not.toHaveBeenCalled();
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  it('refuses a moved billing customer before adopting an existing invoice', async () => {
+    programTransactions(makeTrx({
+      lockedSvcRow: { customer_id: 'cust-other' },
+      replayedInvoice: { id: 'inv-other-customer' },
+    }));
+    await expect(mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams }))
+      .rejects.toMatchObject({ code: 'SCHEDULED_BILLING_SOURCE_MOVED', status: 409 });
+    expect(mockPending).not.toHaveBeenCalled();
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  it('refuses an estimate linked after a zero-deposit preview of an unlinked visit', async () => {
+    programTransactions(makeTrx());
+    await expect(mintScheduledServiceInvoiceWithDeposit({
+      svc: { ...svc, source_estimate_id: null },
+      buildCreateParams,
+      expectedDepositCredit: 0,
+    })).rejects.toMatchObject({ code: 'SCHEDULED_BILLING_SOURCE_MOVED', status: 409 });
+    expect(mockPending).not.toHaveBeenCalled();
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  it('retries once on allocation mismatch, then alerts and holds the invoice mint', async () => {
+    programTransactions(makeTrx(), makeTrx());
+    // Both credited attempts mismatch; neither can publish an uncredited bill.
     mockPending.mockResolvedValue({ amount: 49 });
     mockCreate
       .mockResolvedValueOnce({ id: 'inv-a', applied_deposit_credit: 49 })
-      .mockResolvedValueOnce({ id: 'inv-b', applied_deposit_credit: 49 })
-      .mockResolvedValueOnce({ id: 'inv-c', applied_deposit_credit: 0 });
+      .mockResolvedValueOnce({ id: 'inv-b', applied_deposit_credit: 49 });
     mockConsume.mockResolvedValue(20);
 
-    const result = await mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams });
+    await expect(mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams }))
+      .rejects.toMatchObject({ code: 'DEPOSIT_RECONCILIATION_REQUIRED', status: 409 });
 
-    expect(result.invoice.id).toBe('inv-c');
-    expect(mockCreate).toHaveBeenCalledTimes(3);
-    expect(mockCreate.mock.calls[2][0].depositCredit).toBeUndefined();
+    expect(mockCreate).toHaveBeenCalledTimes(2);
     expect(mockTrigger).toHaveBeenCalledTimes(1);
     expect(mockTrigger).toHaveBeenCalledWith('estimate_deposit_reconcile_needed', { estimateId: 'est-1' });
   });
@@ -386,7 +415,7 @@ describe('mintScheduledServiceInvoiceWithDeposit', () => {
   });
 
   it('bubbles an uncredited-mint failure instead of looping', async () => {
-    programTransactions(makeTrx());
+    programTransactions(makeTrx({ sourceEstimateId: null }));
     mockCreate.mockRejectedValueOnce(new Error('create exploded'));
 
     await expect(

@@ -1,6 +1,7 @@
 const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 const express = require('express');
 const crypto = require('crypto');
+const { estimateOfferVersion, annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
 const { gateEnvValue } = require('../config/feature-gates');
 const router = express.Router();
 const db = require('../models/db');
@@ -59,7 +60,9 @@ const {
   inferEstimateServiceLines,
 } = require('../services/estimate-service-lines');
 const { normalizeProposal, computeProposalTotals, isCommercialProposalData } = require('../services/estimate-proposal');
-const { validateBidFields } = require('../services/proposal-bid');
+const { programRevenueIssue } = require('../../shared/proposal-bid.cjs');
+const { proposalExpiry, groupLinkViewableThrough, hasFixedBidValidity, assertBidSendDate, assertBidScheduleDate, earliestScheduledDelivery, latestReachableSchedule, validateBidFields, normalizeProjectCosting, FIXED_BID_VALIDITY_ABSENT_SQL } = require('../services/proposal-bid');
+const { publishedGroupLinks, publishedOfferExpiry, extendPublishedGroupLinks } = require('../services/estimate-group-navigation');
 const { generateEstimateProposalPDF } = require('../services/pdf/estimate-pdf');
 const {
   acceptanceServiceLists,
@@ -114,18 +117,23 @@ function parseEstimateData(estimateData) {
   return typeof estimateData === 'object' ? estimateData : null;
 }
 
-// Operational delivery stamps may change while the claim is taken. Contact,
-// property, scope, terms and dollars must still be the offer that was reviewed.
-function estimateOfferVersion(row) {
-  const data = { ...(parseEstimateData(row.estimate_data) || {}) };
-  for (const key of ['sendSnapshot', 'deliveryState', 'manualSendAttempts']) delete data[key];
-  if (data.estimatorEngine) {
-    data.estimatorEngine = { ...data.estimatorEngine };
-    delete data.estimatorEngine.delivering_at;
-    delete data.estimatorEngine.delivering_token;
-  }
-  const fields = ['customer_id', 'property_id', 'estimate_group_id', 'customer_name', 'customer_phone', 'customer_email', 'address', 'notes', 'monthly_total', 'annual_total', 'onetime_total', 'show_one_time_option', 'bill_by_invoice'];
-  return crypto.createHash('sha256').update(JSON.stringify([fields.map((key) => row[key]), data])).digest('hex');
+
+// A group handoff delivers each published property's own offer and history.
+function publishedSiblingDeliveryPatch(sibling, anchorDeliveryState, deliveredAt) {
+  const prior = parseEstimateData(sibling.estimate_data);
+  const fingerprint = annualPlanOfferFingerprint(sibling);
+  const priorDeliveredAt = Array.isArray(prior?.deliveryState?.deliveredAt)
+    ? prior.deliveryState.deliveredAt.filter((time) => typeof time === 'string')
+    : [];
+  return {
+    deliveryState: {
+      ...anchorDeliveryState,
+      firstDeliveredAt: prior?.deliveryState?.firstDeliveredAt || deliveredAt,
+      lastDeliveredAt: deliveredAt,
+      deliveredAt: [...priorDeliveredAt, deliveredAt].slice(-DELIVERY_HISTORY_MAX),
+      annualPlanOfferFingerprint: fingerprint || null,
+    },
+  };
 }
 
 // When an operator authors a commercial proposal, their line items ARE the
@@ -398,7 +406,63 @@ function assertAutoSendPricingAuthority(row = {}) {
 // `forUpdate`: lock the sibling rows for the caller's transaction (the
 // schedule route), so a concurrent revision of a sibling serializes against
 // the scheduling write instead of slipping between this read and it.
-async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend = false, forUpdate = false } = {}) {
+const GROUP_FIXED_HOLD_STATUSES = ['draft', 'scheduled', 'sending', 'send_failed', 'sent', 'viewed', 'expired'];
+
+async function publishClaimedGroupSibling(estimate, sibling, siblingExpiry, snapshotPatch) {
+  return db.transaction(async (trx) => {
+    // Saves take this same group lock before locking member rows. Serialize
+    // publication with them before touching this sibling or entry tokens.
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['estimate-group-send', String(estimate.estimate_group_id)]);
+    const updated = await trx('estimates')
+      .where({ id: sibling.id, status: 'sending', estimate_group_id: estimate.estimate_group_id })
+      .whereNull('price_locked_at')
+      // A clarify hold arriving after the claim prevents publication.
+      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+      .update({
+        // A view during the handoff stamps viewed_at without leaving sending.
+        status: trx.raw("CASE WHEN viewed_at IS NOT NULL THEN 'viewed' ELSE 'sent' END"),
+        sent_at: trx.fn.now(),
+        expires_at: siblingExpiry,
+        scheduled_at: null,
+        send_method: null,
+        followup_unviewed_sent: true,
+        followup_viewed_sent: true,
+        followup_final_sent: true,
+        followup_expiring_sent: true,
+        estimate_data: trx.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(snapshotPatch)]),
+        updated_at: trx.fn.now(),
+      });
+    if (updated) await extendPublishedGroupLinks(trx, estimate);
+    return updated;
+  });
+}
+
+async function reconcilePublishedGroupSiblings(estimate, ordinaryGroupExpiry) {
+  await db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['estimate-group-send', String(estimate.estimate_group_id)]);
+    await trx('estimates')
+      .where({ estimate_group_id: estimate.estimate_group_id })
+      .whereNot({ id: estimate.id })
+      .whereIn('status', ['sent', 'viewed'])
+      .whereNull('archived_at')
+      .whereNull('price_locked_at')
+      .update({
+        // Forward-only own expiry, even when reminder flags also need a burn.
+        expires_at: trx.raw(`CASE WHEN ${FIXED_BID_VALIDITY_ABSENT_SQL} THEN GREATEST(COALESCE(expires_at, ?::timestamptz), ?::timestamptz) ELSE expires_at END`, [ordinaryGroupExpiry, ordinaryGroupExpiry]),
+        followup_unviewed_sent: true,
+        followup_viewed_sent: true,
+        followup_final_sent: true,
+        followup_expiring_sent: true,
+        estimate_data: trx.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ groupPublishedByEstimateId: estimate.id })]),
+        updated_at: trx.fn.now(),
+      });
+    await extendPublishedGroupLinks(trx, estimate);
+  });
+}
+
+async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend = false, forUpdate = false, sendAt = null } = {}) {
   if (!estimate?.estimate_group_id) return null;
   // Two sets are judged (never re-claimed): the PUBLISHABLE siblings this
   // send would publish (draft / scheduled / send_failed, unlocked) and every
@@ -406,16 +470,27 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
   // link-visible scope (sending / sent / viewed while unexpired, accepted /
   // declined always; GH codex P1 r6 + uncapped P1 r19), so a SERVER anchor
   // is never delivered beside an unverified price the link would show.
+  // Fixed holds remain blockers after expiry (including the sweep’s expired
+  // status) so the query cannot
+  // silently drop a promised property before the validity check runs.
   let query = database('estimates')
     .where({ estimate_group_id: estimate.estimate_group_id })
     .whereNot({ id: estimate.id })
     .whereNull('archived_at')
     .where((q) => q
       .where((publishable) => publishable.whereIn('status', ['draft', 'scheduled', 'send_failed']).whereNull('price_locked_at'))
-      .orWhere((visible) => applyLinkVisibleSiblingScope(visible)));
+      .orWhere((visible) => applyLinkVisibleSiblingScope(visible))
+      // 'sending' too: a fixed sibling whose delivery claim outlived its
+      // deadline (crashed or delayed) leaves the link-visible scope once
+      // expired, yet still decides whether a later group send can deliver
+      // (GH codex P2 r2 on #4309).
+      .orWhere((fixed) => fixed.whereIn('status', ['sending', 'sent', 'viewed', 'expired']).whereRaw(`NOT (${FIXED_BID_VALIDITY_ABSENT_SQL})`)));
   if (forUpdate) query = query.forUpdate();
   const siblings = await query.select('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data');
   for (const sibling of siblings) {
+    if (sendAt && ['draft', 'scheduled', 'sending', 'send_failed', 'sent', 'viewed', 'expired'].includes(sibling.status)) {
+      assertBidSendDate(sibling, sendAt);
+    }
     // A sibling under a clarify re-price hold blocks the group at REQUEST
     // time — schedule and immediate alike — so the operator hears it now,
     // not from the cron parking the anchor at publication (codex r16 P2 on
@@ -452,6 +527,7 @@ function blockingSiblingMessage(blockingSibling, beforeWhat) {
 }
 
 function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } = {}) {
+  assertBidSendDate(estimate);
   if (estimate.archived_at) {
     const err = new Error('Estimate is archived. Unarchive first.');
     err.statusCode = 400;
@@ -801,7 +877,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
       if (result.blocked) {
         return { ok: false, blocked: true, error: result.reason || 'Email suppressed', template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
       }
-      return { ok: !!result.sent, messageId: result.message?.provider_message_id || null, template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
+      return { ok: !!result.sent, providerAttempted: result.providerAttempted === true, providerAccepted: result.providerAccepted === true, messageId: result.message?.provider_message_id || null, template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
     } catch (err) {
       if (versionId || !canFallbackFromTemplateEmailError(err)) {
         throw err;
@@ -850,7 +926,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
     text,
     ...(smtpAttachments.length ? { attachments: smtpAttachments } : {}),
   });
-  return { ok: true, provider: 'smtp_fallback' };
+  return { ok: true, providerAttempted: true, providerAccepted: true, provider: 'smtp_fallback' };
 }
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -1244,10 +1320,13 @@ router.post('/:id/send', async (req, res, next) => {
             ['estimate-group-send', String(estimate.estimate_group_id)],
           );
         }
-        const blockingSibling = await findGroupSiblingBlockingSend(estimate, { database: trx, forUpdate: true });
+        // Fixed holds are judged at the first scheduler tick the job can
+        // reach, not the requested minute (GH codex P2 on #4309).
+        const blockingSibling = await findGroupSiblingBlockingSend(estimate, { database: trx, forUpdate: true, sendAt: earliestScheduledDelivery(scheduledTime) });
         if (blockingSibling) return { blockingSibling };
         await assertReviewedEstimateGroup(trx, estimate, req.body?.groupVersions);
         const lockedRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
+        assertBidScheduleDate(lockedRow, scheduledTime);
         if (req.body?.expectedEditVersion && estimateEditVersion(lockedRow) !== req.body.expectedEditVersion) {
           return { stale: true };
         }
@@ -1287,7 +1366,7 @@ router.post('/:id/send', async (req, res, next) => {
             status: 'scheduled',
             scheduled_at: scheduledTime,
             send_method: sendMethod,
-            expires_at: estimateExpiresAt(() => scheduledTime),
+            expires_at: estimateExpiresAt(() => scheduledTime, lockedRow),
             scheduled_send_attempts: 0,
             last_send_error: null,
             ...(receipt ? { estimate_data: JSON.stringify({ ...lockedData, manualSendAttempts: [...priorAttempts, receipt].slice(-DELIVERY_HISTORY_MAX) }) } : {}),
@@ -1806,11 +1885,15 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
       ['estimate-group-send', String(estimate.estimate_group_id)],
     );
     await assertReviewedEstimateGroup(trx, estimate, reviewedGroupVersions);
-    if (reviewedEditVersion) {
-      const anchor = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
-      if (estimateEditVersion(anchor) !== reviewedEditVersion) {
-        throw Object.assign(new Error('The saved estimate changed before its send claim. Review it again.'), { statusCode: 409, code: 'ESTIMATE_REVIEW_STALE' });
-      }
+    // The caller can have read the anchor before a proposal save committed.
+    // Even legacy sends without a reviewed edit version must use the offer
+    // that is current under this lock, before deriving the delivery deadline.
+    const anchor = await trx('estimates')
+      .where({ id: estimate.id, estimate_group_id: estimate.estimate_group_id })
+      .forUpdate().first();
+    if (!anchor || estimateOfferVersion(anchor) !== estimateOfferVersion(estimate)
+      || (reviewedEditVersion && estimateEditVersion(anchor) !== reviewedEditVersion)) {
+      throw Object.assign(new Error('The saved estimate changed before its send claim. Review it again.'), { statusCode: 409, code: 'ESTIMATE_REVIEW_STALE' });
     }
     // A sibling already mid-send is a concurrent publisher (another pod's
     // scheduled batch, or a parallel operator click): its send will publish
@@ -1830,7 +1913,7 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
     // gate before this send hands the customer the group link. Same verdict
     // the schedule route applied at request time; here it runs under the
     // group lock on the rows the claims below will actually publish beside.
-    const blockingSibling = await findGroupSiblingBlockingSend(estimate, { database: trx, autoSend });
+    const blockingSibling = await findGroupSiblingBlockingSend(estimate, { database: trx, autoSend, sendAt: new Date() });
     if (blockingSibling) {
       const err = new Error(blockingSiblingMessage(blockingSibling, 'sending this group (the group link shows every property together)'));
       err.statusCode = blockingSibling.statusCode;
@@ -1881,7 +1964,7 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
       // this lock (codex #3248 r6: a second compare-and-set here required
       // the stale pre-claim status and 409'd every grouped resend whose
       // siblings were already published/terminal).
-      return { claimed: [], anchorClaimedInLock };
+      return { claimed: [], anchorClaimedInLock, anchor };
     }
   for (const sibling of siblings) {
     try {
@@ -1943,7 +2026,7 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
       err.statusCode = 409;
       throw err;
     }
-    return { claimed, anchorClaimedInLock };
+    return { claimed, anchorClaimedInLock, anchor };
   });
 }
 
@@ -2041,8 +2124,8 @@ async function clearEstimateDeliveryClaim(estimateId, deliveryClaimToken) {
 // on the markers, so a message that still slips out carries a link that
 // serves nothing. DB failure fails CLOSED (the leg is retryable);
 // unparseable estimate_data proceeds, matching the verdict read.
-async function estimateInvalidatedJustBeforeHandoff(estimateId) {
-  const row = await db('estimates').where({ id: estimateId }).first('archived_at', 'estimate_data');
+async function estimateInvalidatedJustBeforeHandoff(estimateId, now = null) {
+  const row = await db('estimates').where({ id: estimateId }).first('id', 'estimate_group_id', 'archived_at', 'estimate_data');
   if (!row) return true;
   if (row.archived_at) return true;
   let data;
@@ -2055,7 +2138,27 @@ async function estimateInvalidatedJustBeforeHandoff(estimateId) {
   // A bedroom re-price in flight (estimate-clarify-asks): the draft's
   // dollars are about to be replaced — not sendable meanwhile.
   if (require('../services/estimate-clarify-asks').repricePendingActive(eng)) return true;
-  return !!(await staleCallLinkageReason(db, data));
+  if (await staleCallLinkageReason(db, data)) return true;
+  // Short-link, template and PDF preparation can carry an immediate send
+  // past midnight after the preflight deadline check (GH codex P2 r4 on
+  // #4309): re-read every property's fixed hold right before the provider
+  // handoff. A passed deadline THROWS the validity 409 so the leg records a
+  // definite failure with that message, never an uncertain handoff.
+  if (typeof now === 'function') {
+    const at = now();
+    if (row.estimate_group_id) {
+      const fixedSiblings = await db('estimates')
+        .where({ estimate_group_id: row.estimate_group_id })
+        .whereNot({ id: row.id })
+        .whereNull('archived_at')
+        .whereIn('status', GROUP_FIXED_HOLD_STATUSES)
+        .whereRaw(`NOT (${FIXED_BID_VALIDITY_ABSENT_SQL})`)
+        .select('estimate_data');
+      for (const sibling of Array.isArray(fixedSiblings) ? fixedSiblings : []) assertBidSendDate(sibling, at);
+    }
+    assertBidSendDate(row, at);
+  }
+  return false;
 }
 
 async function recordManualSendAttempt(estimateId, attempt, patch) {
@@ -2337,6 +2440,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       reviewedGroupVersions: options.reviewedGroupVersions,
     });
     claimedGroupSiblings = groupClaim.claimed;
+    estimate = groupClaim.anchor;
     // Signal claim ownership to the caller AFTER the claim transaction
     // committed. Ownership = this send claimed in-lock, or its CALLER
     // pre-claimed (scheduled cron / lead auto-send) — a bare 'sending'
@@ -2446,7 +2550,31 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   if (leadShape.parkedKey) await stampLeadHandoffAttempt(estimate, options);
 
   const now = typeof options.now === 'function' ? options.now : () => new Date();
-  const nextExpiresAt = estimateExpiresAt(now);
+  assertBidSendDate(estimate, now());
+  // This row's OWN offer deadline, never widened by a sibling (owner ruling
+  // 2026-09-11 on #4309 round 7). Group entry access is a separate concept
+  // and is recorded separately, below.
+  const nextExpiresAt = estimateExpiresAt(now, estimate);
+  // Group ENTRY access is independent of the anchor's own price eligibility:
+  // whether the anchor is ordinary or carries a shorter fixed hold, its token
+  // must outlive every published sibling's offer, whether a fixed date or
+  // an ordinary seven-day send window. That
+  // window is written to estimate_data.groupLinkViewableThrough instead of
+  // being folded into expires_at, so nothing that means "offer deadline" —
+  // acceptance, voice quoting, reminder eligibility and copy, the CTA — can
+  // read a navigation date by accident. Monotonic per delivered link: a link
+  // already promised a date is never shortened by a later send.
+  let nextGroupLinkViewableThrough = null;
+  if (estimate.estimate_group_id) {
+    const publishedSiblings = (await publishedGroupLinks(db, estimate))
+      .filter((sibling) => String(sibling.id) !== String(estimate.id));
+    const promised = groupLinkViewableThrough(estimate);
+    const widest = [nextExpiresAt, ...publishedSiblings.map(publishedOfferExpiry), promised].filter(Boolean)
+      .reduce((latest, at) => (!latest || at > latest ? at : latest), null);
+    // Record this delivered anchor's own hold too. A later edit may shorten
+    // it, while a best-effort sibling reconciliation may never have run.
+    if (widest) nextGroupLinkViewableThrough = widest;
+  }
   const requestedChannels = sendMethod === 'both' ? ['sms', 'email'] : [sendMethod];
   const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
   // One tracked short code PER CHANNEL LEG (same rule as estimate-follow-up
@@ -2519,7 +2647,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             ? options.reviewedMessages.sms?.split(stripSmsUrlScheme(longUrl)).join(stripSmsUrlScheme(smsViewUrl))
             : currentSmsBody;
           if (!smsBody) throw new Error('The reviewed text message is unavailable; nothing was sent');
-          if (await estimateInvalidatedJustBeforeHandoff(estimate.id)) {
+          if (await estimateInvalidatedJustBeforeHandoff(estimate.id, now)) {
             throw new Error('invalidated_before_delivery');
           }
           const result = await sendCustomerMessage({
@@ -2619,7 +2747,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // SendGrid price summary / details match the attached PDF if totals
           // changed mid-send. The PDF was built from freshEstimate above.
           const freshPriceLine = estimateEmailPriceLine(freshEstimate);
-          if (await estimateInvalidatedJustBeforeHandoff(estimate.id)) {
+          if (await estimateInvalidatedJustBeforeHandoff(estimate.id, now)) {
             throw new Error('invalidated_before_delivery');
           }
           if (options.reviewedMessages && !options.reviewedMessages.email) throw new Error('The reviewed email template was unavailable. Review a new message before sending.');
@@ -2637,13 +2765,13 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             onDispatch: () => { emailDispatchStarted = true; },
           });
           channels.email = result.ok
-            ? { ok: true, provider: result.template || result.provider || 'email' }
+            ? { ok: true, providerAttempted: result.providerAttempted, providerAccepted: result.providerAccepted, provider: result.template || result.provider || 'email' }
             : { ok: false, error: result.error || 'Email send failed' };
-          if (result.ok) {
+          if (result.ok && result.providerAccepted) {
             if (options.leadShapeRef) options.leadShapeRef.delivered = true;
             await stampLeadHandoffWitness(estimate, options);
           }
-          if (proposalMode && result.ok && proposalAttachments.length > 0) {
+          if (proposalMode && result.ok && result.providerAccepted && proposalAttachments.length > 0) {
             proposalPdfEmailed = true;
           }
         }
@@ -2659,10 +2787,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
 
   const sentChannels = requestedChannels.filter((ch) => channels[ch]?.ok);
   const failedChannels = requestedChannels.filter((ch) => !channels[ch]?.ok);
-  // Channels whose delivery counts as a first response: sms only when the
-  // provider send was REAL (not a suppression sentinel); email's ok already
-  // implies a real handoff.
-  const stampChannels = sentChannels.filter((ch) => (ch === 'sms' ? channels.sms?.real === true : true));
+  // Historical email idempotency hits report success without a handoff.
+  // Only this invocation's real provider delivery advances a witness.
+  const stampChannels = sentChannels.filter((ch) => (ch === 'sms' ? channels.sms?.real === true : channels.email?.providerAccepted === true));
   // A REAL provider handoff succeeded: the customer holds the single-service
   // quote, so the send-time park must NEVER be reverted from here on — even
   // if the snapshot read or the status finalize below throws. A suppressed
@@ -2743,6 +2870,13 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   const lastDeliveredAt = stampChannels.length
     ? now().toISOString()
     : (priorDeliveryState?.lastDeliveredAt || null);
+  // Use one handoff-anchored ordinary expiry for the navigation promise and
+  // every ordinary sibling publication/reconciliation below. Recomputing
+  // seven days later in the publication loop could leave the sibling's offer
+  // a few milliseconds longer than the delivered link that reaches it.
+  const ordinaryGroupExpiry = estimate.estimate_group_id
+    ? estimateExpiresAt(() => new Date(lastDeliveredAt || now()))
+    : null;
   // deliveredAt: EVERY real handoff, oldest first, capped — the durable
   // send history. first/last alone lose the middle: an estimate delivered
   // before a call, resent inside its fulfillment window and resent again
@@ -2751,6 +2885,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // forward untouched by suppressed attempts.
   const priorDeliveredAt = Array.isArray(priorDeliveryState?.deliveredAt) ? priorDeliveryState.deliveredAt.filter((t) => typeof t === 'string') : [];
   const deliveredAt = (stampChannels.length ? [...priorDeliveredAt, lastDeliveredAt] : priorDeliveredAt).slice(-DELIVERY_HISTORY_MAX);
+  const deliveredAnnualFingerprint = stampChannels.length
+    ? annualPlanOfferFingerprint(estimate)
+    : priorDeliveryState?.annualPlanOfferFingerprint;
   const deliveryStatePatch = {
     deliveryState: {
       attemptedAt: now().toISOString(),
@@ -2760,6 +2897,8 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       ...(firstDeliveredAt ? { firstDeliveredAt } : {}),
       ...(lastDeliveredAt ? { lastDeliveredAt } : {}),
       ...(deliveredAt.length ? { deliveredAt } : {}),
+      // Suppressed or historical deduped attempts retain the prior receipt.
+      ...(deliveredAnnualFingerprint ? { annualPlanOfferFingerprint: deliveredAnnualFingerprint } : {}),
     },
     // The per-park handoff witness rides the finalization write too, so a
     // transient failure of the in-branch stamp can never leave a delivered
@@ -2769,6 +2908,12 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
         leadServiceHandoffAt: (lastDeliveredAt || firstDeliveredAt || now().toISOString()),
         leadServiceHandoffParkId: String(options.leadShapeRef.parkId || ''),
       }
+      : {}),
+    // The delivered group link's viewability window rides the same
+    // finalization write as expires_at, so the token that just went out and
+    // the window it is promised are committed together (#4309 round 7).
+    ...(nextGroupLinkViewableThrough
+      ? { groupLinkViewableThrough: nextGroupLinkViewableThrough.toISOString() }
       : {}),
   };
   // Delivery outcomes must survive even if snapshot construction fails;
@@ -2788,7 +2933,11 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // into ITS audit snapshot too (GH codex P2 on #3628).
   let builtSendSnapshot = null;
   try {
-    const snapshot = await buildEstimateSendSnapshot({ ...freshForSnapshot, expires_at: nextExpiresAt }, now, { delivered: stampChannels.length > 0, deliveredAt: lastDeliveredAt });
+    // A historical success cannot replace the delivered billing terms with
+    // current configuration. Only a real handoff freezes a new quote.
+    const snapshot = stampChannels.length
+      ? await buildEstimateSendSnapshot({ ...freshForSnapshot, expires_at: nextExpiresAt }, now, { deliveredAt: lastDeliveredAt })
+      : (parseEstimateData(freshForSnapshot.estimate_data) || {});
     // Only a VALIDATED bundle feeds the audit — same rule as the sibling
     // and superseded branches (codex pre-push P1).
     builtSendSnapshot = snapshot.sendSnapshot && !snapshot.sendSnapshot.pricingBundleError
@@ -2799,10 +2948,12 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     // by a full estimate_data write. proposalDelivery is a sibling of proposal,
     // never a nested write, so the `||` merge can't drop the proposal itself.
     const mergePatch = {
-      sendSnapshot: snapshot.sendSnapshot || {},
+      ...(stampChannels.length ? { sendSnapshot: snapshot.sendSnapshot || {} } : {}),
       ...deliveryStatePatch,
     };
-    if (proposalEnabledForDelivery) {
+    // Proposal saves clear stale receipts; SMS alone preserves a surviving PDF receipt.
+    if (proposalEnabledForDelivery && stampChannels.length
+      && (channels.email?.providerAccepted || !parseEstimateData(freshForSnapshot.estimate_data)?.proposalDelivery)) {
       mergePatch.proposalDelivery = {
         stampedAt: now().toISOString(),
         pdfEmailed: proposalPdfEmailed,
@@ -2919,15 +3070,18 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       let preAcceptData = estimate.estimate_data;
       if (typeof preAcceptData === 'string') { try { preAcceptData = JSON.parse(preAcceptData); } catch { preAcceptData = {}; } }
       preAcceptData = preAcceptData || {};
-      // ONLY a bundle rebuilt from the PRE-DELIVERY claimed row is
-      // send-time truth — builtSendSnapshot came from freshForSnapshot,
+      // For a real delivery, ONLY a bundle rebuilt from the PRE-DELIVERY
+      // claimed row is send-time truth — builtSendSnapshot came from freshForSnapshot,
       // which post-dates delivery and can carry the acceptance rewrite,
       // and a prior send's stored sendSnapshot is equally stale. When the
       // rebuild fails, the audit goes out with NO bundle rather than a
-      // wrong one (codex pre-push P1).
+      // wrong one (codex pre-push P1). Historical success retains its prior
+      // snapshot because no new offer reached the provider.
       let raceBundle = null;
       try {
-        const rebuilt = await buildEstimateSendSnapshot({ ...estimate, expires_at: nextExpiresAt }, now);
+        const rebuilt = stampChannels.length
+          ? await buildEstimateSendSnapshot({ ...estimate, expires_at: nextExpiresAt }, now)
+          : preAcceptData;
         if (rebuilt?.sendSnapshot && !rebuilt.sendSnapshot.pricingBundleError) raceBundle = rebuilt.sendSnapshot;
       } catch { /* no validated pre-delivery bundle */ }
       const { sendSnapshot: stalePriorSnapshot, ...preAcceptSansSnapshot } = preAcceptData;
@@ -2990,38 +3144,19 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // final attempt the sibling is released for an operator re-send.
           // A sibling is delivered by the anchor's handoff — the same
           // real-channel test decides whether its scope stamp moves.
-          const snapshot = await buildEstimateSendSnapshot({ ...sibling, expires_at: nextExpiresAt }, now, { delivered: stampChannels.length > 0, deliveredAt: lastDeliveredAt });
-          if (!snapshot?.sendSnapshot || snapshot.sendSnapshot.pricingBundleError) {
+          const siblingExpiry = proposalExpiry(sibling) || ordinaryGroupExpiry;
+          const snapshot = stampChannels.length
+            ? await buildEstimateSendSnapshot({ ...sibling, expires_at: siblingExpiry }, now, { deliveredAt: lastDeliveredAt })
+            : (parseEstimateData(sibling.estimate_data) || {});
+          if (stampChannels.length && (!snapshot?.sendSnapshot || snapshot.sendSnapshot.pricingBundleError)) {
             throw new Error(`sibling send snapshot did not freeze pricing${snapshot?.sendSnapshot?.pricingBundleError ? `: ${snapshot.sendSnapshot.pricingBundleError}` : ''}`);
           }
-          siblingSnapshotPatch = { ...siblingSnapshotPatch, sendSnapshot: snapshot.sendSnapshot };
-          const updated = await db('estimates')
-            .where({ id: sibling.id, status: 'sending' })
-            .whereNull('price_locked_at')
-            // A hold stamped after the claim (a clarify reply lands on a
-            // 'sending' row by design) fails the publication; the sibling
-            // is released for the operator (codex r1 P1 on #3804).
-            .whereRaw(REPRICE_PENDING_ABSENT_SQL)
-            .update({
-              // A customer can open the anchor link instantly and view this
-              // sibling while it's still under the pre-delivery claim — the
-              // view stamps viewed_at without touching 'sending'. Same
-              // viewed-aware finalization as the anchor (codex #3244 r3).
-              status: db.raw("CASE WHEN viewed_at IS NOT NULL THEN 'viewed' ELSE 'sent' END"),
-              sent_at: db.fn.now(),
-              expires_at: nextExpiresAt,
-              scheduled_at: null,
-              send_method: null,
-              followup_unviewed_sent: true,
-              followup_viewed_sent: true,
-              followup_final_sent: true,
-              followup_expiring_sent: true,
-              estimate_data: db.raw(
-                "COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb",
-                [JSON.stringify(siblingSnapshotPatch)],
-              ),
-              updated_at: db.fn.now(),
-            });
+          const siblingDeliveryStatePatch = stampChannels.length > 0
+            ? publishedSiblingDeliveryPatch(sibling, deliveryStatePatch.deliveryState, lastDeliveredAt)
+            : {};
+          siblingSnapshotPatch = { ...siblingSnapshotPatch,
+            ...(stampChannels.length ? { sendSnapshot: snapshot.sendSnapshot } : {}), ...siblingDeliveryStatePatch };
+          const updated = await publishClaimedGroupSibling(estimate, sibling, siblingExpiry, siblingSnapshotPatch);
           if (!updated) {
             // Zero rows is EITHER a mid-publication acceptance (price-locked,
             // handled below) OR a clarify hold stamped after the claim — a
@@ -3043,7 +3178,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // the same (GH codex P2 r3).
           shadowLogFallbackDelivery(sibling, { handoff: stampChannels.length > 0 });
           if (!updated) {
-            await recordTerminalSiblingDelivery(sibling, snapshot, { delivered: stampChannels.length > 0, sendMethod, deliveryStatePatch });
+            await recordTerminalSiblingDelivery(sibling, snapshot, { delivered: stampChannels.length > 0, sendMethod, deliveryStatePatch: siblingDeliveryStatePatch });
           } else {
             await snapshotPublishedSibling(sibling, siblingSnapshotPatch, { now, nextExpiresAt, sendMethod });
           }
@@ -3075,22 +3210,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       .whereNull('archived_at')
       .whereNull('price_locked_at');
     try {
-      await liveSiblings()
-        .update({
-          // Forward-only expiry inside the SET (not the WHERE): a sibling
-          // already extended past this send still needs its reminder flags
-          // burned — the anchor owns all group comms (codex #3244 r5).
-          expires_at: db.raw('GREATEST(COALESCE(expires_at, ?::timestamptz), ?::timestamptz)', [nextExpiresAt, nextExpiresAt]),
-          followup_unviewed_sent: true,
-          followup_viewed_sent: true,
-          followup_final_sent: true,
-          followup_expiring_sent: true,
-          estimate_data: db.raw(
-            "COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb",
-            [JSON.stringify({ groupPublishedByEstimateId: estimate.id })],
-          ),
-          updated_at: db.fn.now(),
-        });
+      await reconcilePublishedGroupSiblings(estimate, ordinaryGroupExpiry);
     } catch (e) {
       logger.warn(`[admin-estimates] live-sibling group reconciliation failed for estimate ${estimate.id}: ${e.message}`);
     }
@@ -3675,6 +3795,8 @@ router.get('/:id/proposal', async (req, res, next) => {
       proposal,
       totals: computeProposalTotals(proposal),
       bidToolsEnabled: gateEnvValue('GATE_COMMERCIAL_BID_BUILDER'),
+      // Private operator inputs live beside the public proposal allowlist.
+      projectCosting: parseEstimateData(estimate.estimate_data)?.proposalCosting || null,
       // Engine-composed prospect research (commercial proposal lane) — the
       // builder page shows it read-only above the line items. Additive:
       // null for operator-originated proposals.
@@ -3706,6 +3828,7 @@ router.get('/:id/proposal', async (req, res, next) => {
         viewedAt: estimate.viewed_at,
         acceptedAt: estimate.accepted_at,
         expiresAt: estimate.expires_at,
+        fixedBidValidity: hasFixedBidValidity(estimate),
         archivedAt: estimate.archived_at,
         priceLockedAt: estimate.price_locked_at,
         billByInvoice: estimate.bill_by_invoice,
@@ -3757,7 +3880,7 @@ router.put('/:id/proposal', async (req, res, next) => {
     // the ordinary expired-row recovery: the re-save is allowed, leaves the
     // row expired, and the operator extends it afterwards.
     const { expiredRowRecoverableUnderGate } = require('../services/admin-estimate-persistence');
-    const expiredRecovery = estimate.status === 'expired' && expiredRowRecoverableUnderGate(estimate);
+    const expiredRecovery = estimate.status === 'expired' && (hasFixedBidValidity(estimate) || expiredRowRecoverableUnderGate(estimate));
     const closedStatuses = expiredRecovery
       ? ['accepted', 'declined', 'sending']
       : ['accepted', 'declined', 'expired', 'sending'];
@@ -3771,9 +3894,12 @@ router.put('/:id/proposal', async (req, res, next) => {
       });
     }
 
-    const incoming = req.body?.proposal || req.body || {};
+    const incoming = { ...(req.body?.proposal || req.body || {}) };
     const savedProposal = normalizeProposal(estimate);
-    const bidValidation = validateBidFields(incoming);
+    // Older proposal editors do not send the new date field. An omission
+    // preserves the authored hold; clearing it requires an explicit null.
+    if (!Object.hasOwn(incoming, 'validThrough')) incoming.validThrough = savedProposal.validThrough;
+    const bidValidation = validateBidFields(incoming, req.body?.projectCosting);
     if (bidValidation) return res.status(400).json({ error: bidValidation });
     // Programs-only callers may omit buildings entirely — normalize once
     // and use the array everywhere (pre-push codex P1: undefined.some threw).
@@ -3783,8 +3909,9 @@ router.put('/:id/proposal', async (req, res, next) => {
       const incomingLines = incomingBuildings.flatMap((building) => building.lineItems || building.line_items || []);
       const omittedIdentifiers = [...savedUnits.values()].some(Boolean) && incomingLines.some((line) => !line.id);
       const unitsChanged = omittedIdentifiers || incomingLines.some((line) => (line.unit || null) !== (savedUnits.get(line.id) || null));
-      if (unitsChanged) {
-        return res.status(409).json({ error: 'Bid authoring is currently disabled. Reload the proposal before editing; saved bid units remain in place.' });
+      if (Object.hasOwn(req.body || {}, 'projectCosting') || unitsChanged
+        || (incoming.validThrough || null) !== (savedProposal.validThrough || null)) {
+        return res.status(409).json({ error: 'Bid authoring is currently disabled. Reload the proposal before editing; saved bid units, costs and validity dates remain in place.' });
       }
     }
     const hasBuildings = incomingBuildings.length > 0;
@@ -3808,18 +3935,13 @@ router.put('/:id/proposal', async (req, res, next) => {
         return res.status(400).json({ error: 'Proposals are limited to 10 service programs.' });
       }
       for (const program of incomingPrograms) {
-        const freq = Number(program?.frequencyPerYear ?? program?.visitsPerYear);
-        if (!Number.isInteger(freq) || freq < 1 || freq > 52) {
-          return res.status(400).json({ error: 'Each program needs a whole-number service frequency between 1 and 52 visits per year.' });
-        }
-        // Finite, positive, cent-representable — 0.001 or Infinity would
-        // normalize to a dropped program and rewrite the authoritative
-        // totals to zero (pre-push codex P0).
-        const price = Number(program?.pricePerApplication ?? program?.perApplication);
-        if (!Number.isFinite(price) || price < 0.01
-          || Math.abs(price * 100 - Math.round(price * 100)) > 1e-6) {
-          return res.status(400).json({ error: 'Each program needs a per-application price of at least $0.01, in whole cents.' });
-        }
+        // Whole-number 1–52 frequency; finite, positive, cent-representable
+        // price — 0.001 or Infinity would normalize to a dropped program and
+        // rewrite the authoritative totals to zero (pre-push codex P0). The
+        // predicate is shared with the builder's costing card (GH codex P2
+        // r8 on #4270).
+        const programIssue = programRevenueIssue(program);
+        if (programIssue) return res.status(400).json({ error: programIssue });
         if (String(program?.label ?? program?.name ?? '').length > 120) {
           return res.status(400).json({ error: 'Program names are limited to 120 characters.' });
         }
@@ -4025,8 +4147,17 @@ router.put('/:id/proposal', async (req, res, next) => {
     }
 
     const existingData = parseEstimateData(estimate.estimate_data) || {};
+    const authoredExpiry = proposalExpiry({ estimate_data: { proposal: normalized } });
+    const hadFixedValidity = hasFixedBidValidity(estimate);
+    const standardStart = estimate.status === 'scheduled'
+      ? estimate.scheduled_at || estimate.sent_at
+      : estimate.sent_at || estimate.scheduled_at;
+    const expiryUpdate = authoredExpiry || (hadFixedValidity && standardStart
+      ? estimateExpiresAt(() => new Date(standardStart)) : null);
+    const revivingBid = expiredRecovery && (expiryUpdate > new Date() || (hadFixedValidity && !expiryUpdate));
     const nextData = {
       ...existingData,
+      ...(Object.hasOwn(req.body || {}, 'projectCosting') ? { proposalCosting: normalizeProjectCosting(req.body.projectCosting) } : {}),
       proposal: {
         ...normalized,
         updatedAt: new Date().toISOString(),
@@ -4041,7 +4172,22 @@ router.put('/:id/proposal', async (req, res, next) => {
     // drop it — the public copy falls back to "your account manager has the
     // proposal" until the next send re-stamps proposalDelivery against the new
     // PDF. Otherwise the link would keep saying the edited proposal was emailed.
-    clearStaleProposalDelivery(nextData);
+    // A private-cost-only save leaves the customer proposal and its PDF
+    // exactly as delivered, so the emailed marker stays true (GH codex P2 on
+    // #4270). Anything that changes the normalized proposal drops it.
+    // Customer-visible content only: line `id`s exist for the bid-form row
+    // mapping and are minted client-side for legacy lines on load, so they
+    // must not turn a cost-only save into a "changed proposal" (GH codex P2
+    // r12 on #4270).
+    const proposalContent = (value) => {
+      const { updatedAt, provenance, buildings, ...rest } = value || {};
+      const visibleLine = (line) => { const { id, ...visible } = line || {}; return visible; };
+      return JSON.stringify({ ...rest, buildings: (Array.isArray(buildings) ? buildings : []).map((b) => ({ ...b, lineItems: (Array.isArray(b?.lineItems) ? b.lineItems : []).map(visibleLine) })) });
+    };
+    const privateCostOnly = Object.hasOwn(req.body || {}, 'projectCosting') && proposalContent(normalized) === proposalContent({ ...savedProposal, enabled: true, synthesized: false });
+    if (!privateCostOnly) {
+      clearStaleProposalDelivery(nextData);
+    }
     // Make the authored proposal sendable: clear the auto-quote-required
     // booleans the commercial estimate was created with, and resolve any
     // blocking lead/draft automation status. proposal.enabled (set above) is
@@ -4088,6 +4234,22 @@ router.put('/:id/proposal', async (req, res, next) => {
       || (req.body?.expectedEditVersion && req.body.expectedEditVersion !== estimateEditVersion(locked))) {
       throw retry('The saved proposal changed while you were editing. Reload and review the current proposal before saving.');
     }
+    // These server-owned keys may be advanced by a group handoff or earlier
+    // save. The whole-blob proposal write must carry the LOCKED row's values
+    // even when this edit does not need to extend its own link again.
+    const lockedData = parseEstimateData(locked.estimate_data) || {};
+    for (const key of ['groupLinkViewableThrough', 'groupPublishedByEstimateId']) {
+      if (Object.hasOwn(lockedData, key)) nextData[key] = lockedData[key];
+      else delete nextData[key];
+    }
+    // A pending send is judged at the first scheduler tick it can reach,
+    // exactly as scheduling judged it (pre-push codex P1 on #4309): a 23:58
+    // ET send whose hold is shortened to that day would otherwise save, then
+    // fail at the midnight tick with nothing delivered.
+    if (locked.status === 'scheduled' && locked.scheduled_at && authoredExpiry
+      && authoredExpiry < earliestScheduledDelivery(locked.scheduled_at)) {
+      throw retry('Valid through must include the scheduled send date. Extend the validity date or reschedule before saving.');
+    }
     // The engine block is carried from the LOCKED row, never the pre-read:
     // a clarify re-price guard stamped between the two would otherwise be
     // dropped by this whole-blob write. And the guard this save OBSERVED on
@@ -4127,6 +4289,12 @@ router.put('/:id/proposal', async (req, res, next) => {
         .where((q) => q.where({ status: 'sending' }).orWhereRaw(`NOT (${DELIVERY_CLAIM_NOT_LIVE_SQL})`))
         .first('id');
       if (inFlightMember) throw retry('This multi-property group is being sent right now — wait a moment and retry.');
+      if (authoredExpiry) {
+        const laterSchedule = await trx('estimates').where({ estimate_group_id: groupId, status: 'scheduled' })
+          .whereNot({ id: estimate.id }).whereNull('archived_at').whereNull('price_locked_at')
+          .where('scheduled_at', '>', latestReachableSchedule(authoredExpiry)).first('id');
+        if (laterSchedule) throw retry('Valid through must include this group’s scheduled send date. Extend the validity date or reschedule before saving.');
+      }
     }
     const updateQuery = trx('estimates')
       .where({ id: estimate.id })
@@ -4154,6 +4322,14 @@ router.put('/:id/proposal', async (req, res, next) => {
     // and this UPDATE must not persist a term no billing path enforces
     // (codex #3297 r4c).
     if (savingPaymentTerm) updateQuery.where({ bill_by_invoice: true });
+    // Monotonic by design, including when a hold SHRINKS. A link already
+    // delivered promising reachability through a date keeps it; what changes
+    // is the offer, which lives in each row's own expires_at and closes on
+    // its own schedule. That is the whole point of the split: navigation can
+    // stay open over a group of expired cards (each renders expired and
+    // refuses acceptance), so there is nothing to reconstruct when a hold
+    // moves — which is why the old shrink-reconstruction pass and its
+    // groupWidenFloorExpiresAt floor are deleted rather than repaired.
     const count = await updateQuery.update({
       estimate_data: JSON.stringify(nextData),
       category: 'COMMERCIAL',
@@ -4166,14 +4342,59 @@ router.put('/:id/proposal', async (req, res, next) => {
       monthly_total: totals.monthlyEquivalent,
       annual_total: totals.annualRecurring,
       onetime_total: totals.oneTime,
+      ...(authoredExpiry || hadFixedValidity ? { expires_at: expiryUpdate } : {}),
+      ...(revivingBid ? { status: estimate.viewed_at ? 'viewed' : estimate.sent_at ? 'sent' : 'draft' } : {}),
+      ...(revivingBid && ['expired_unviewed', 'expired_viewed', 'expired_unsent'].includes(estimate.disposition)
+        ? { disposition: null, disposition_source: null, disposition_at: null, disposition_note: null } : {}),
       updated_at: db.fn.now(),
     });
     if (!count) return { updatedCount: 0 };
+    // Read the persisted post-save rows: this edit may clear a reprice hold
+    // or revive an expired member, making it newly eligible as a published
+    // source. All entry-link extensions commit with the guarded offer save.
+    if (groupId && (authoredExpiry || hadFixedValidity)) await extendPublishedGroupLinks(trx, locked);
+    // Each property's expires_at remains its own offer deadline. A sibling
+    // edit only extends navigation on eligible delivered links above.
     // The version THIS write committed, read under the same lock: the editor
     // keys its next save and its delivery review on it, so a save that lands
     // in the window before the editor's reload cannot be adopted as if it
     // were this one (pre-push codex P1 r3 on #4305).
-    const committed = await trx('estimates').where({ id: estimate.id }).first();
+    let committed = await trx('estimates').where({ id: estimate.id }).first();
+    // A private-cost-only save can change bookkeeping and DB representations
+    // without changing the offer staff scheduled. Preserve ONLY reviews that
+    // still matched the locked old offer; an already-stale review stays stale.
+    // Keep the persisted hash format unchanged for existing scheduled sends.
+    const reviewComparableData = { ...nextData, proposal: lockedData.proposal };
+    if (Object.hasOwn(lockedData, 'proposalCosting')) reviewComparableData.proposalCosting = lockedData.proposalCosting;
+    else delete reviewComparableData.proposalCosting;
+    const priorOfferVersion = estimateOfferVersion(locked);
+    if (privateCostOnly && savedProposal.enabled === true && savedProposal.synthesized !== true && committed
+      && estimateOfferVersion({ ...locked, estimate_data: reviewComparableData }) === priorOfferVersion
+      && Number(locked.monthly_total) === totals.monthlyEquivalent
+      && Number(locked.annual_total) === totals.annualRecurring
+      && Number(locked.onetime_total) === totals.oneTime) {
+      const committedOfferVersion = estimateOfferVersion(committed);
+      const scheduledRows = groupId
+        ? await trx('estimates').where({ estimate_group_id: groupId, status: 'scheduled' }).whereNull('archived_at').forUpdate().select()
+        : (committed.status === 'scheduled' ? [committed] : []);
+      for (const scheduledRow of scheduledRows) {
+        const scheduledData = parseEstimateData(scheduledRow.estimate_data) || {};
+        let reviewUpdated = false;
+        for (const attempt of scheduledData.manualSendAttempts || []) {
+          const review = attempt.scheduleReview;
+          if (!review || attempt.startedAt || attempt.result
+            || !scheduledRow.scheduled_at || review.scheduledAt !== new Date(scheduledRow.scheduled_at).toISOString()) continue;
+          if (scheduledRow.id === locked.id && review.reviewedOffer === priorOfferVersion) {
+            review.reviewedOffer = committedOfferVersion; reviewUpdated = true;
+          }
+          if (review.reviewedGroupVersions?.[locked.id] === priorOfferVersion) {
+            review.reviewedGroupVersions[locked.id] = committedOfferVersion; reviewUpdated = true;
+          }
+        }
+        if (reviewUpdated) await trx('estimates').where({ id: scheduledRow.id }).update({ estimate_data: JSON.stringify(scheduledData) });
+      }
+      committed = await trx('estimates').where({ id: estimate.id }).first();
+    }
     return { updatedCount: count, editVersion: committed ? estimateEditVersion(committed) : null };
     });
     if (!updatedCount) {
@@ -4193,8 +4414,7 @@ router.put('/:id/proposal', async (req, res, next) => {
 });
 
 // GET /api/admin/estimates/:id/proposal.pdf — branded commercial proposal
-// PDF (inline). Reuses the same generator that produces the email
-// attachment, so the download and the emailed copy are byte-identical.
+// PDF (inline), using the same generator as its email attachment.
 router.get('/:id/proposal.pdf', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();

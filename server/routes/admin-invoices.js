@@ -1328,7 +1328,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
     if (invalid) return res.status(400).json({ error: invalid });
     const { customerId, serviceRecordId, scheduledServiceId, expectedDepositCredit, expectedBalanceDue, title, lineItems, notes, emailMessage, dueDate, taxRate, discountIds, serviceDate } = req.body;
     // The exact linkage the setup-fee alert instructs — retired right after creation.
-    const stampedEstimateId = (String(notes || '').match(/accepted estimate #([0-9a-fA-F-]{8,})/) || [])[1] || null;
+    const stampedEstimateId = require('../services/setup-fee-alert-reconcile').acceptedEstimateIdFromNotes(notes);
     const createArgs = { customerId, serviceRecordId, title, lineItems, notes, emailMessage, dueDate, taxRate, discountIds, serviceDate };
 
     let outcome;

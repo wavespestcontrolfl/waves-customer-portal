@@ -32,6 +32,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { detectServiceLine } = require('./service-report/service-line-configs');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 const RECURRING_CAP_DAYS = 120;
 const ONE_TIME_CAP_DAYS = 180;
@@ -208,8 +209,10 @@ async function buildCompletionCommsContext({
         logger.warn(`[comms-context] call context unavailable: ${err.message}`);
         return [];
       }),
-    knex('sms_log')
-      .where({ customer_id: customerId })
+    // codex #4331 P2 (structural pass): an unresolved review-ask
+    // reservation must not read as a delivered message in this context.
+    excludeUnresolvedSendReservations(knex('sms_log')
+      .where({ customer_id: customerId }))
       .where('created_at', '>=', floor)
       .select('created_at', 'direction', 'message_body', 'message_type')
       .orderBy('created_at', 'desc')

@@ -24,16 +24,26 @@ const SETUP_FEE_WAIVED_RE = /setup fee waived|setup.*waiv/i;
 // the displayed schedule on it, and an unselected column reads as undefined,
 // silently falling back to term_start.
 let coverageColsCache = null;
-async function annualPrepayCoverageCols() {
-  if (coverageColsCache) return coverageColsCache;
+async function optionalRead(conn, read, fallback) {
   try {
-    const cols = await db('annual_prepay_terms').columnInfo();
+    return conn?.isTransaction && typeof conn.transaction === 'function'
+      ? await conn.transaction(read)
+      : await read(conn);
+  } catch {
+    return fallback;
+  }
+}
+
+async function annualPrepayCoverageCols(conn = db) {
+  if (coverageColsCache) return coverageColsCache;
+  const cols = await optionalRead(conn, (database) => database('annual_prepay_terms').columnInfo(), null);
+  if (!cols) {
+    coverageColsCache = [];
+  } else {
     coverageColsCache = [
       'coverage_service_type', 'coverage_visit_count', 'coverage_cadence',
       'first_visit_date', 'first_visit_window_start',
     ].filter((c) => cols[c]);
-  } catch {
-    coverageColsCache = [];
   }
   return coverageColsCache;
 }
@@ -238,13 +248,13 @@ const ANCHOR_MIN_PREPAY_FRACTION = 0.5;
 async function resolveInvoiceTermId(invoice, conn = db) {
   if (invoice?.annual_prepay_term_id) return invoice.annual_prepay_term_id;
   if (!invoice?.scheduled_service_id) return null;
-  try {
-    const visit = await conn('scheduled_services')
+  return optionalRead(conn, async (database) => {
+    const visit = await database('scheduled_services')
       .where({ id: invoice.scheduled_service_id })
       .first('annual_prepay_term_id');
     const termId = visit?.annual_prepay_term_id;
     if (!termId) return null;
-    const term = await conn('annual_prepay_terms')
+    const term = await database('annual_prepay_terms')
       .where({ id: termId })
       .first('id', 'prepay_invoice_id', 'prepay_amount');
     if (!term) return null;
@@ -267,28 +277,24 @@ async function resolveInvoiceTermId(invoice, conn = db) {
       return termId;
     }
     return null;
-  } catch {
-    return null;
-  }
+  }, null);
 }
 
 // Loads + normalizes the annual-prepay term for an invoice, or null when the
 // invoice isn't an annual prepayment. Shape matches the camelCase descriptor
 // returned by /api/auth/me so the client can treat them the same.
-async function loadInvoiceAnnualPrepay(invoice) {
-  const termId = await resolveInvoiceTermId(invoice);
+async function loadInvoiceAnnualPrepay(invoice, conn = db) {
+  const termId = await resolveInvoiceTermId(invoice, conn);
   if (!termId) return null;
-  const hasTable = await db.schema.hasTable('annual_prepay_terms').catch(() => false);
+  const hasTable = await optionalRead(conn, (database) => database.schema.hasTable('annual_prepay_terms'), false);
   if (!hasTable) return null;
-  const coverageCols = await annualPrepayCoverageCols();
-  const term = await db('annual_prepay_terms')
-    .where({ id: termId })
-    .first(
+  const coverageCols = await annualPrepayCoverageCols(conn);
+  const term = await optionalRead(conn, (database) => database('annual_prepay_terms')
+    .where({ id: termId }).first(
       'id', 'status', 'renewal_decision', 'plan_label', 'monthly_rate', 'prepay_amount',
       'term_start', 'term_end',
       ...coverageCols,
-    )
-    .catch(() => null);
+    ), null);
   if (!term) return null;
   const prepayAmount = term.prepay_amount != null ? Number(term.prepay_amount) : null;
   // A voided/refunded invoice flips its term to a terminal status but keeps the

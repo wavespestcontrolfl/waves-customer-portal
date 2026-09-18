@@ -431,6 +431,126 @@ postgres('deferred standalone lawn assessment notification (real PostgreSQL)', (
     }
   });
 
+  test('a failed proven-unsent release journals its exact attempt and recovery sends exactly once', async () => {
+    const seeded = await seed();
+    await fixture.knex('lawn_assessment_runs').where({ id: seeded.run.id }).update({
+      reconciliation: JSON.stringify({ published_observations: 'preserve-me' }),
+    });
+    const rejected = { sent: false, deliveryOutcome: 'not_sent', code: 'PROVIDER_RETRY', retryable: true };
+    mockNotify.mockRejectedValue(Object.assign(new Error('provider refused before handoff'), { providerOutcome: rejected }));
+    await fixture.knex.raw(`ALTER TABLE lawn_assessments
+      ADD CONSTRAINT fixture_notification_release_failure CHECK (notification_sent = true) NOT VALID`);
+    try {
+      await expect(LawnIntel.sendAssessmentNotification(seeded.assessment.id)).rejects.toMatchObject({
+        notificationResult: expect.objectContaining({
+          deliveryOutcome: 'not_sent', smsResult: expect.objectContaining({ retryable: true, code: 'PROVIDER_RETRY' }),
+        }),
+      });
+      const claimed = await fixture.knex('lawn_assessments').where({ id: seeded.assessment.id }).first();
+      const journaled = await runs.loadRun(seeded.assessment.id, fixture.knex);
+      expect(claimed).toMatchObject({ notification_sent: true, notification_sent_at: null });
+      expect(journaled.reconciliation).toMatchObject({
+        published_observations: 'preserve-me',
+        notification: { attempt_id: expect.any(String), outcome: 'not_sent' },
+      });
+    } finally {
+      await fixture.knex.raw('ALTER TABLE lawn_assessments DROP CONSTRAINT fixture_notification_release_failure');
+    }
+
+    const accepted = { sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'c'.repeat(32)}` };
+    mockNotify.mockResolvedValue(dispatcherResult(accepted));
+    await expect(LawnIntel.sendAssessmentNotification(seeded.assessment.id)).resolves.toMatchObject({
+      sent: true, deliveryOutcome: 'accepted', smsResult: accepted,
+    });
+    await expect(LawnIntel.sendAssessmentNotification(seeded.assessment.id)).resolves.toBeNull();
+    expect(mockNotify).toHaveBeenCalledTimes(2);
+    expect(await fixture.knex('lawn_assessments').where({ id: seeded.assessment.id }).first())
+      .toMatchObject({ notification_sent: true, notification_sent_at: expect.any(Date) });
+    expect((await runs.loadRun(seeded.assessment.id, fixture.knex)).reconciliation)
+      .toEqual({ published_observations: 'preserve-me' });
+  });
+
+  test('a legacy assessment still claims and settles while the optional run table is absent', async () => {
+    const seeded = await seed();
+    await fixture.knex('lawn_assessment_runs').where({ id: seeded.run.id }).del();
+    const accepted = { sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'e'.repeat(32)}` };
+    mockNotify.mockResolvedValue(dispatcherResult(accepted));
+    await fixture.knex.raw('ALTER TABLE ??.?? RENAME TO ??', [
+      fixture.schema, 'lawn_assessment_runs', 'lawn_assessment_runs_unavailable',
+    ]);
+    try {
+      await expect(LawnIntel.sendAssessmentNotification(seeded.assessment.id)).resolves.toMatchObject({
+        sent: true, deliveryOutcome: 'accepted', smsResult: accepted,
+      });
+      expect(await fixture.knex('lawn_assessments').where({ id: seeded.assessment.id }).first())
+        .toMatchObject({ notification_sent: true, notification_sent_at: expect.any(Date) });
+    } finally {
+      await fixture.knex.raw('ALTER TABLE ??.?? RENAME TO ??', [
+        fixture.schema, 'lawn_assessment_runs_unavailable', 'lawn_assessment_runs',
+      ]);
+    }
+  });
+
+  test('stale negative evidence cannot release a newer notification attempt', async () => {
+    const seeded = await seed();
+    const stale = await runs.claimNotificationAttempt(seeded.assessment.id, fixture.knex);
+    expect(await runs.releaseNotificationAttempt(seeded.assessment.id, stale.attemptId, fixture.knex)).toBe(true);
+    const current = await runs.claimNotificationAttempt(seeded.assessment.id, fixture.knex);
+
+    expect(await runs.recordNotificationNotSent(seeded.assessment.id, stale.attemptId, fixture.knex)).toBe(false);
+    expect(await runs.recoverNotificationNotSent(seeded.assessment.id, fixture.knex)).toBe(false);
+    expect(await fixture.knex('lawn_assessments').where({ id: seeded.assessment.id }).first())
+      .toMatchObject({ notification_sent: true, notification_sent_at: null });
+    expect((await runs.loadRun(seeded.assessment.id, fixture.knex)).reconciliation.notification)
+      .toEqual({ attempt_id: current.attemptId, outcome: 'pending' });
+  });
+
+  test('when release and evidence writes both fail, recovery stays incomplete and never re-sends', async () => {
+    const seeded = await seed();
+    const rejected = { sent: false, deliveryOutcome: 'not_sent', code: 'PROVIDER_RETRY', retryable: true };
+    mockNotify.mockResolvedValue(dispatcherResult(rejected));
+    await fixture.knex.raw(`ALTER TABLE lawn_assessments
+      ADD CONSTRAINT fixture_all_notification_writes_fail CHECK (notification_sent = true) NOT VALID`);
+    await fixture.knex.raw(`ALTER TABLE lawn_assessment_runs
+      ADD CONSTRAINT fixture_notification_evidence_failure
+      CHECK ((reconciliation #>> '{notification,outcome}') IS DISTINCT FROM 'not_sent')`);
+    try {
+      await expect(deliverConfirmedAssessment({ assessmentId: seeded.assessment.id }, replayDeps()))
+        .rejects.toMatchObject({ notificationResult: expect.objectContaining({ deliveryOutcome: 'not_sent' }) });
+    } finally {
+      await fixture.knex.raw('ALTER TABLE lawn_assessments DROP CONSTRAINT fixture_all_notification_writes_fail');
+      await fixture.knex.raw('ALTER TABLE lawn_assessment_runs DROP CONSTRAINT fixture_notification_evidence_failure');
+    }
+    const journal = (await runs.loadRun(seeded.assessment.id, fixture.knex)).reconciliation.notification;
+    expect(journal).toEqual({ attempt_id: expect.any(String), outcome: 'pending' });
+    await fixture.knex('lawn_assessment_runs').where({ id: seeded.run.id })
+      .update({ pipeline_claimed_at: fixture.knex.raw("clock_timestamp() - interval '16 minutes'") });
+    mockNotify.mockClear();
+
+    await expect(deliverConfirmedAssessment({ assessmentId: seeded.assessment.id }, replayDeps()))
+      .rejects.toMatchObject({ code: 'LAWN_DELIVERY_STEP_INCOMPLETE' });
+    expect(mockNotify).not.toHaveBeenCalled();
+    expect(await fixture.knex('lawn_assessments').where({ id: seeded.assessment.id }).first())
+      .toMatchObject({ notification_sent: true, notification_sent_at: null });
+    expect((await runs.loadRun(seeded.assessment.id, fixture.knex)).pipeline_completed_at).toBeNull();
+  });
+
+  test('replay consumes matching not-sent evidence before treating the assessment claim as terminal', async () => {
+    const seeded = await seed();
+    const { queued } = await queueHeld(seeded.assessment.id);
+    const attempt = await runs.claimNotificationAttempt(seeded.assessment.id, fixture.knex);
+    expect(await runs.recordNotificationNotSent(seeded.assessment.id, attempt.attemptId, fixture.knex)).toBe(true);
+    const accepted = { sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'d'.repeat(32)}` };
+    mockNotify.mockResolvedValue(dispatcherResult(accepted));
+    mockNotify.mockClear();
+
+    await expect(replayDeferredNotification(replayMeta(seeded, queued), replayDeps()))
+      .resolves.toMatchObject(accepted);
+    expect(mockNotify).toHaveBeenCalledTimes(1);
+    expect(await fixture.knex('lawn_assessments').where({ id: seeded.assessment.id }).first())
+      .toMatchObject({ notification_sent: true, notification_sent_at: expect.any(Date) });
+  });
+
   test('a queued dispatcher success keeps its claim when the sent-at settlement fails', async () => {
     const seeded = await seed();
     const held = holdSms();

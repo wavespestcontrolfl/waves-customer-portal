@@ -317,6 +317,22 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(tb.cogs.estimatedCost).toBeCloseTo(303.14, 1);
   });
 
+  test('a CLIENT_FALLBACK annual-plan termite row is costed at its stored ONE visit, not four', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-termite-plan-fallback', status: 'sent', monthly_total: '24.92', annual_total: '299.00', onetime_total: '450.00',
+      estimate_data: {
+        result: {
+          recurring: { services: [{ name: 'Termite Bait', service: 'termite_bait', mo: 24.92, perTreatment: 299, visitsPerYear: 1 }] },
+          results: { tmBait: { selectedSystem: 'trelona', sta: 15, plan: 'annual_protection', setupFee: 450, annualFee: 299, visitsPerYear: 1 } },
+        },
+      },
+    });
+    const tb = audit.lines.find((l) => l.serviceKey === 'termite_bait');
+    expect(tb.cogs.status).toBe('explicit');
+    // 1 × $55.42 labor + $67.62 cartridges + $13.85 reserve — no phantom visits.
+    expect(tb.cogs.estimatedCost).toBeCloseTo(136.89, 1);
+  });
+
   test('an enabled-but-empty proposal falls through to the engine lines', async () => {
     const audit = await buildEstimatePricingAudit({
       id: 'est-empty-prop', status: 'sent', monthly_total: '55.00', annual_total: '660.00', onetime_total: null,

@@ -30,6 +30,9 @@ jest.mock('../services/messaging/send-window', () => ({
 jest.mock('../services/invoice-email', () => ({
   sendInvoiceEmail: jest.fn(async () => ({ ok: true })),
 }));
+jest.mock('../services/estimate-deposits', () => ({
+  assertInvoiceDepositSettlementReady: jest.fn(async () => true),
+}));
 jest.mock('../config/twilio-numbers', () => ({
   getOutboundNumber: jest.fn(() => '+19413180000'),
 }));
@@ -452,6 +455,75 @@ describe('processScheduledSends send-window handling', () => {
     const updateArgs = failUpdate.update.mock.calls[0][0];
     expect(updateArgs.scheduled_send_attempts).toBe(3);
   });
+
+  test('an initial deposit readiness refusal keeps the scheduled retry slot instead of parking an ambiguous delivery', async () => {
+    isWithinSendWindowET.mockReturnValue(true);
+    const sendingInvoice = { ...dueRow, status: 'sending', total: 100 };
+    const claimToken = 'deposit-retry-claim';
+    const failUpdate = chain();
+    const refusal = new Error('A received deposit is awaiting invoice reconciliation');
+    refusal.code = 'DEPOSIT_RECONCILIATION_REQUIRED';
+    require('../services/estimate-deposits').assertInvoiceDepositSettlementReady
+      .mockRejectedValueOnce(refusal);
+    const smsSpy = jest.spyOn(InvoiceService, 'sendViaSMS');
+    try {
+      db
+        .mockReturnValueOnce(chain()) // stale recovery
+        .mockReturnValueOnce(chain({ rows: [dueRow] }))
+        .mockReturnValueOnce(chain({ returning: [{ ...sendingInvoice, send_claim_token: claimToken }] }))
+        .mockReturnValueOnce(chain({ first: sendingInvoice })) // wrapper precheck
+        .mockReturnValueOnce(chain({ first: sendingInvoice })) // initial claim readiness
+        .mockReturnValueOnce(failUpdate);
+
+      await expect(InvoiceService.processScheduledSends())
+        .resolves.toEqual({ sent: 0, failed: 1, deferred: 0 });
+
+      expect(smsSpy).not.toHaveBeenCalled();
+      expect(require('../services/invoice-email').sendInvoiceEmail).not.toHaveBeenCalled();
+      expect(failUpdate.where).toHaveBeenCalledWith({
+        id: 'inv-1', status: 'sending', send_claim_token: claimToken,
+      });
+      expect(failUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'scheduled', scheduled_send_attempts: 3, send_claim_token: null,
+      }));
+      const restored = failUpdate.update.mock.calls[0][0];
+      expect(restored.scheduled_send_at).toBeUndefined();
+      expect(restored.scheduled_send_error).toContain('awaiting invoice reconciliation');
+      expect(restored.scheduled_send_error).not.toMatch(/^Recovered from stale sending claim/);
+    } finally {
+      smsSpy.mockRestore();
+    }
+  });
+
+  test.each(['DEPOSIT_RECONCILIATION_REQUIRED', 'synthetic_deposit_lookup_failure'])(
+    'nested SMS claim readiness refusal %s suppresses the email leg too',
+    async (code) => {
+      const sendingInvoice = { ...dueRow, status: 'sending', total: 100 };
+      const refusal = new Error('Deposit readiness could not be confirmed');
+      refusal.code = code;
+      require('../services/estimate-deposits').assertInvoiceDepositSettlementReady
+        .mockResolvedValueOnce(true) // wrapper owns the send claim
+        .mockRejectedValueOnce(refusal); // deposit changes before nested SMS
+      db
+        .mockReturnValueOnce(chain({ first: sendingInvoice })) // wrapper precheck
+        .mockReturnValueOnce(chain({ first: sendingInvoice })) // outer claim read
+        .mockReturnValueOnce(chain({ first: undefined })) // queued-obligation precheck
+        .mockReturnValueOnce(chain({ returning: [] })) // no previous queued obligation
+        .mockReturnValueOnce(chain({ first: undefined })) // strict queue recheck
+        .mockReturnValueOnce(chain({ first: sendingInvoice })); // nested SMS claim read
+
+      const result = await InvoiceService.sendViaSMSAndEmail('inv-1', { allowClaimed: true });
+
+      expect(result.ok).toBe(false);
+      expect(result.sms.code).toBe(code);
+      expect(result.sms.invoiceWideRefusal).toBe(true);
+      expect(result.email.code).toBe(code);
+      expect(require('../services/invoice-email').sendInvoiceEmail).not.toHaveBeenCalled();
+      // Only the scheduled worker owns the token and may release its preclaim.
+      expect(db).toHaveBeenCalledTimes(6);
+      expect(refusal.deliveryNeverAttempted).toBe(true);
+    },
+  );
 
   // Codex round 14 P1 #4131: claimInvoiceForSend's allowClaimed branch now
   // runs the queued-obligation check too, which can THROW (a live queue

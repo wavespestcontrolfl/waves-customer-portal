@@ -8397,6 +8397,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // The terminal (refunded-invoice) alert lane owns this visit —
           // append the missing-fee instruction to ITS alert rather than
           // parking a second one (Codex P0, pre-push round 11).
+          // Retain the accepted fee for the terminal alert's locked coverage recheck.
+          unmintedSetupFeeObligation = obligation;
           terminalSetupFeeNote = ` ALSO: the one-time WaveGuard setup fee ($${Number(obligation.setupFee || 0).toFixed(2)}) for accepted estimate ${obligation.estimateSlug || obligation.estimateId} was never invoiced — bill it beside the visit charge above; verify it is not already on a live invoice before billing.`;
         } else if (obligation.owed && !obligation.firstVisitAlreadyCompleted) {
           // One parked visit per estimate (Codex P0, pre-push round 8):
@@ -8616,7 +8618,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // Both lookups are consulted (Codex P0, pre-push round 7): an
       // invoice minted between the two reads appears only in
       // preMintedInvoice, and the hold and beside-branch must agree.
-      unmintedSetupFeeHold: !!unmintedSetupFeeObligation && !existingCompletionInvoice && !preMintedInvoice,
+      unmintedSetupFeeHold: !!unmintedSetupFeeObligation && !terminalCompletionInvoice && !existingCompletionInvoice && !preMintedInvoice,
       createInvoiceOnComplete: svc.create_invoice_on_complete,
       waveguardTier: svc.cust_waveguard_tier,
       explicitMembership: explicitMembershipLane,
@@ -8797,7 +8799,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const stampedFeeRowsNow = unmintedSetupFeeObligation && svc.source_estimate_id
             ? await trx('invoices')
               .where({ customer_id: svc.customer_id })
-              .where('notes', 'like', `%accepted estimate #${svc.source_estimate_id}%`)
+              .where('notes', 'ilike', `%accepted estimate #${svc.source_estimate_id}%`)
               .forUpdate()
               .select('id', 'status', 'line_items', 'notes')
             : [];
@@ -9049,7 +9051,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           }
           const stampedNowRows = await trx('invoices')
             .where({ customer_id: svc.customer_id })
-            .where('notes', 'like', `%accepted estimate #${unmintedSetupFeeObligation.estimateId}%`)
+            .where('notes', 'ilike', `%accepted estimate #${unmintedSetupFeeObligation.estimateId}%`)
             .forUpdate()
             .orderBy('created_at', 'desc')
             .select('id', 'invoice_number', 'status', 'notes', 'line_items', 'scheduled_service_id', 'service_record_id');

@@ -38,6 +38,7 @@ jest.mock('../services/completion-invoice-candidate', () => ({
   completionTerminalInvoiceLookup: jest.fn(async () => null),
 }));
 jest.mock('../services/setup-fee-alert-reconcile', () => ({
+  ...jest.requireActual('../services/setup-fee-alert-reconcile'),
   reconcileSetupFeeAlert: jest.fn(async () => undefined),
   reconcileSetupFeeAlertForInvoice: jest.fn(async () => undefined),
 }));

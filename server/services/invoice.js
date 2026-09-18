@@ -1,8 +1,10 @@
 const crypto = require("crypto");
+const { isDeepStrictEqual } = require("node:util");
 const db = require("../models/db");
 const logger = require("./logger");
 const TaxCalculator = require("./tax-calculator");
 const DiscountEngine = require("./discount-engine");
+const { percentageDiscountDollars } = require("./discount-stack");
 const { etDateString, addETDays } = require("../utils/datetime-et");
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require("./short-url");
 const { publicPortalUrl } = require("../utils/portal-url");
@@ -1391,6 +1393,16 @@ async function claimInvoiceForSend(invoiceId, {
 } = {}) {
   const current = await database("invoices").where({ id: invoiceId }).first();
   if (!current) throw invoiceNotSendableError(current);
+  try {
+    await require("./estimate-deposits").assertInvoiceDepositSettlementReady(database, current, { lock: false });
+  } catch (err) {
+    // This read-only fence runs before any provider contact or queue adoption.
+    // The scheduled caller can safely retry its preclaim, and a nested SMS
+    // refusal must suppress email too: readiness applies to the whole invoice.
+    err.deliveryNeverAttempted = true;
+    err.invoiceWideRefusal = true;
+    throw err;
+  }
 
   if (allowClaimed) {
     if (!SEND_FINALIZABLE_STATUSES.includes(current.status)) {
@@ -1738,20 +1750,27 @@ async function convertLeadOnInvoiceSent({ invoiceId, customerId, priorStatus, pr
   }
 }
 
-async function annualPrepayInvoiceTableExists() {
-  if (!db.schema?.hasTable) return false;
-  return db.schema
-    .hasTable("annual_prepay_terms")
-    .catch(() => false);
+async function optionalInvoiceRead(database, read, fallback) {
+  try {
+    return database?.isTransaction && typeof database.transaction === "function"
+      ? await database.transaction(read)
+      : await read(database);
+  } catch {
+    return fallback;
+  }
 }
 
-async function loadAnnualPrepayTermForInvoice(invoiceId) {
+async function annualPrepayInvoiceTableExists(database = db) {
+  if (!database.schema?.hasTable) return false;
+  return optionalInvoiceRead(database, (conn) => conn.schema.hasTable("annual_prepay_terms"), false);
+}
+
+async function loadAnnualPrepayTermForInvoice(invoiceId, database = db) {
   if (!invoiceId) return null;
-  const exists = await annualPrepayInvoiceTableExists();
+  const exists = await annualPrepayInvoiceTableExists(database);
   if (!exists) return null;
-  const term = await db("annual_prepay_terms")
-    .where({ prepay_invoice_id: invoiceId })
-    .first();
+  const term = await optionalInvoiceRead(database, (conn) => conn("annual_prepay_terms")
+    .where({ prepay_invoice_id: invoiceId }).first(), null);
   if (!term) return null;
   return {
     id: term.id,
@@ -2002,10 +2021,13 @@ const InvoiceService = {
       throw new Error('Visit invoice creation requires its owning transaction');
     }
     let linkedScheduledServiceId = scheduledServiceId;
-    if (!linkedScheduledServiceId && serviceRecordId) {
+    let linkedRecordServiceDate = null;
+    if (serviceRecordId) {
       const linkedRecord = await database('service_records')
-        .where({ id: serviceRecordId, customer_id: customerId }).first('scheduled_service_id');
-      linkedScheduledServiceId = linkedRecord?.scheduled_service_id || null;
+        .where({ id: serviceRecordId, customer_id: customerId })
+        .first('scheduled_service_id', 'service_date');
+      if (!linkedScheduledServiceId) linkedScheduledServiceId = linkedRecord?.scheduled_service_id || null;
+      linkedRecordServiceDate = linkedRecord?.service_date || null;
     }
 
     // Phase 2 atomicity: a NET-terms accrual (statement get/create + invoice
@@ -2036,7 +2058,7 @@ const InvoiceService = {
     // (the best-effort tax/discount catches then abort with it — accepted
     // for linked money writes; plain unlinked creates keep the
     // untransacted path).
-    const stampedEstimateIdInNotes = (String(notes || "").match(/accepted estimate #([0-9a-fA-F-]{8,})/) || [])[1] || null;
+    const stampedEstimateIdInNotes = require('./setup-fee-alert-reconcile').acceptedEstimateIdFromNotes(notes);
     if (linkedScheduledServiceId || stampedEstimateIdInNotes) {
       if (database && database.isTransaction) {
         if (linkedScheduledServiceId) {
@@ -2058,6 +2080,83 @@ const InvoiceService = {
       await assertScheduledInvoiceNotPacketOwned(database, linkedScheduledServiceId, packetWrite?.packetId);
     } else if (packetWrite) {
       throw new Error('Visit invoice requires a billed member');
+    }
+    // A stamped writer may have waited behind packet adoption. Recheck its
+    // owner inside the mint transaction, before creating another charge.
+    if (stampedEstimateIdInNotes) {
+      const packetConflict = () => Object.assign(
+        new Error('This estimate is billed by its saved visit closeout. Resume that closeout.'),
+        { status: 409, statusCode: 409, isOperational: true, code: 'VISIT_PACKET_OWNS_BILLING' });
+      const contention = (error) => {
+        if (error?.code !== '55P03') throw error;
+        throw Object.assign(new Error('Estimate billing is being updated. Retry in a moment.'),
+          { status: 409, statusCode: 409, isOperational: true, code: 'VISIT_PACKET_OWNS_BILLING' });
+      };
+      // Match the date create() will persist: explicit input wins, then a
+      // service record's own completion date, then a scheduled-only visit.
+      // Pin a derived value so the later context read cannot validate one
+      // date here and insert another after a concurrent edit.
+      if (!serviceDate && serviceRecordId) serviceDate = linkedRecordServiceDate;
+      if (!serviceDate && !serviceRecordId && scheduledServiceId) {
+        const linkedScheduled = await database('scheduled_services')
+          .where({ id: scheduledServiceId, customer_id: customerId }).first('scheduled_date');
+        serviceDate = linkedScheduled?.scheduled_date || null;
+      }
+      let packetOwners;
+      try {
+        packetOwners = await database('invoices as i')
+          .join('visit_completion_packet_items as p', 'p.invoice_id', 'i.id')
+          .join('scheduled_services as s', 's.id', 'p.scheduled_service_id')
+          .where({ 'i.customer_id': customerId })
+          .whereRaw('s.source_estimate_id::text = ?', [stampedEstimateIdInNotes])
+          .whereNotNull('i.visit_completion_packet_id').orderBy('i.id')
+          .forUpdate('i').noWait().select('i.id', 'i.status', 'i.service_date', 'i.line_items', 'i.notes');
+      } catch (error) { contention(error); }
+      const { classifyAcceptedEstimateInvoiceCoverage,
+        sumPositiveSetupFeeCents } = require('./estimate-first-application-invoice');
+      // Compare the calculated invoice amounts, not caller-supplied amount.
+      const normalizedSetupLines = normalizeInvoiceLineItems(lineItems || []);
+      const incomingCoverage = classifyAcceptedEstimateInvoiceCoverage(
+        { line_items: normalizedSetupLines }, serviceDate,
+      );
+      const separateSetupFee = incomingCoverage.setupFeeOnly
+        && normalizedSetupLines.filter((line) => line.amount > 0)
+          .every((line) => /^WaveGuard Membership — one-time setup fee$/i.test(String(line.description || '').trim()))
+        && packetOwners.every((owner) => {
+          const lines = parseInvoiceLineItems(owner.line_items);
+          return lines.length > 0 && lines.every((line) => line && Number.isFinite(Number(line.amount)));
+        });
+      let separateSetupFeeAllowed = separateSetupFee;
+      if (packetOwners.length && separateSetupFee) {
+        // The estimate advisory lock serializes concurrent replacement writers.
+        // Lock their fee coverage too, failing operationally on a busy row.
+        let stampedCoverage;
+        try {
+          stampedCoverage = await database('invoices').where({ customer_id: customerId })
+            .where('notes', 'ilike', `%accepted estimate #${stampedEstimateIdInNotes}%`)
+            .orderBy('id').forUpdate().noWait().select('id');
+        } catch (error) { contention(error); }
+        const obligation = await require('./setup-fee-obligation').findUnmintedSetupFeeObligation({
+          sourceEstimateId: stampedEstimateIdInNotes, customerId,
+        }, database);
+        // The obligation reader counts stamped rows. Packet ownership also
+        // survives edited notes; count each unstamped owner once, and retain
+        // refunded cents as covered so deliberately refunded fees are not rebilled.
+        const stampedIds = new Set(stampedCoverage.map((row) => String(row.id)));
+        const unstampedOwners = [...new Map(packetOwners.map((row) => [String(row.id), row])).values()]
+          .filter((row) => !stampedIds.has(String(row.id)) && !['void', 'canceled', 'cancelled'].includes(row.status));
+        const packetFeeCents = unstampedOwners.reduce((sum, row) => sum + sumPositiveSetupFeeCents(row), 0);
+        separateSetupFeeAllowed = obligation.owed && Number.isSafeInteger(obligation.setupFeeRemainingCents)
+          && sumPositiveSetupFeeCents({ line_items: normalizedSetupLines }) <= obligation.setupFeeRemainingCents - packetFeeCents;
+      }
+      // Application ownership is visit-date scoped, matching the inverse
+      // packet guard: an explicit other date is a different application,
+      // while either side missing a date fails closed. Setup-fee coverage is
+      // estimate-wide and therefore deliberately uses every packet owner.
+      const matchingPacketOwners = packetOwners.filter((owner) =>
+        classifyAcceptedEstimateInvoiceCoverage(owner, serviceDate).matchesApplicationDate);
+      if ((incomingCoverage.hasSetupFee && packetOwners.length && (!separateSetupFee || !separateSetupFeeAllowed))
+        || (!incomingCoverage.hasSetupFee && matchingPacketOwners.length)) throw packetConflict();
     }
     const customer = await database("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");
@@ -2364,9 +2463,20 @@ const InvoiceService = {
         d.discount_type === "percentage" ||
         d.discount_type === "variable_percentage"
       ) {
-        dollars = Math.round(subtotal * (amt / 100) * 100) / 100;
-        if (d.max_discount_dollars)
-          dollars = Math.min(dollars, Number(d.max_discount_dollars));
+        // Cent-exact (Codex pre-push audit P1, round 6): the old
+        // `Math.round(subtotal * (amt / 100) * 100) / 100` float formula
+        // rounded 5% of $20.70 down to $1.03, never the correct half-up
+        // $1.04 — the SAME bug server/services/discount-stack.js's
+        // percentage math was fixed for, and the discount-engine.js
+        // preview delegates to. percentageDiscountDollars is that same
+        // fix, exported so this line uses the ONE place this rounding
+        // rule is written instead of a second, independently-buggy copy.
+        // Stacking wiring and the GATE_DISCOUNT_STACKING read are NOT
+        // part of this fix — slice 5 (invoice/document calculation) is
+        // where this whole block delegates to stackDocumentDiscounts;
+        // this is only the rounding correction on the existing additive
+        // math, touching nothing else here.
+        dollars = percentageDiscountDollars(subtotal, amt, d.max_discount_dollars);
       } else if (
         d.discount_type === "fixed_amount" ||
         d.discount_type === "variable_amount"
@@ -3164,8 +3274,8 @@ const InvoiceService = {
     // Same atomic discipline as the converter: credit line exists IFF the
     // ledger consumed exactly that amount in the same transaction; a
     // mismatch rolls back and one retry re-reads the fresh balance. Deposit
-    // machinery failures NEVER block visit invoicing — fall back to the
-    // plain create and alert for manual reconciliation.
+    // machinery failures leave invoicing on hold for manual reconciliation;
+    // an unknown deposit balance must never become a full-balance pay link.
     //
     // skipDepositCredit (Codex P1, PR #2897 fix round): callers whose
     // contract is an UNTOUCHED invoice for operator review — the backdated
@@ -3220,18 +3330,12 @@ const InvoiceService = {
     }
     if (sourceEstimateId) {
       const {
+        acquireEstimateDepositLedgerLock,
         pendingDepositCredit,
         consumeDepositCredit,
       } = require("./estimate-deposits");
+      let depositError;
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        let depositCredit = null;
-        try {
-          depositCredit = await pendingDepositCredit(sourceEstimateId);
-        } catch {
-          break; // ledger unreadable — invoice proceeds uncredited
-        }
-        const requested = depositCredit ? depositCredit.amount : 0;
-        if (!(requested > 0)) break;
         try {
           return await runMintTransaction(async (trx) => {
             // EVERY linked mint holds the shared advisory lock (Codex PR
@@ -3250,14 +3354,17 @@ const InvoiceService = {
             // that actually created the invoice.
             const adopted = await adoptUnderMintLock(trx);
             if (adopted) return adopted;
+            const createParams = await buildParams(trx);
+            await acquireEstimateDepositLedgerLock(trx, sourceEstimateId);
+            const depositCredit = await pendingDepositCredit(sourceEstimateId, trx);
             // Request the full unapplied balance; create() caps it against
             // its own post-discount, after-tax total (a pre-discount cap
             // here consumed ledger dollars the discounted invoice never
             // reflected) and reports the effective amount back.
             const created = await this.create({
-              ...(await buildParams(trx)),
+              ...createParams,
               database: trx,
-              depositCredit: { amount: requested, estimateId: sourceEstimateId },
+              depositCredit: depositCredit ? { amount: depositCredit.amount, estimateId: sourceEstimateId } : null,
             });
             await settleRetention(created, trx);
             const effective = Number(created?.applied_deposit_credit) || 0;
@@ -3277,6 +3384,7 @@ const InvoiceService = {
             return created;
           });
         } catch (err) {
+          depositError = err;
           // Stale-price/authorization refusals are terminal — retrying the
           // same stale params can't fix them (mirrors the shared mint
           // helper's contract).
@@ -3298,6 +3406,7 @@ const InvoiceService = {
           }
         }
       }
+      throw depositError;
     }
 
     if (replayFromScheduled) {
@@ -3337,24 +3446,32 @@ const InvoiceService = {
 
   /**
    * Get invoice by public token — for the /pay page.
-   * Also records view and updates status.
+   * Also records view and updates status unless this is a follow-up read.
    */
-  async getByToken(token) {
-    const invoice = await db("invoices").where({ token }).first();
+  async getByToken(token, { recordView = true, database = db } = {}) {
+    let invoice = await database("invoices").where({ token }).first();
     if (!invoice) return null;
     // NOTE: do NOT block payer_statement_id here — getByToken also backs the
     // PERMANENT receipt endpoints (receipt-v2), which must never 404 (AGENTS.md).
     // The accrued-invoice "statement-only" block lives in the PAY + invoice-PDF
     // routes instead (the collection surfaces), not this shared loader.
 
-    // Record view
-    const updates = { view_count: (invoice.view_count || 0) + 1 };
-    if (!invoice.viewed_at) updates.viewed_at = new Date();
-    if (invoice.status === "sent") updates.status = "viewed";
-    await db("invoices").where({ id: invoice.id }).update(updates);
+    // The pay page rereads after its deposit fence. That read must not count
+    // as another view. Keep the write conditional on the LIVE status: a
+    // settlement between the first SELECT and this UPDATE must stay prepaid.
+    const seenAt = new Date();
+    if (recordView) {
+      await database("invoices").where({ id: invoice.id }).update({
+        view_count: database.raw("COALESCE(view_count, 0) + 1"),
+        viewed_at: database.raw("COALESCE(viewed_at, ?)", [seenAt]),
+        status: database.raw("CASE WHEN status = 'sent' THEN 'viewed' ELSE status END"),
+      });
+      invoice = await database("invoices").where({ id: invoice.id }).first();
+      if (!invoice) return null;
+    }
 
     // Enrich with customer info
-    const customer = await db("customers")
+    const customer = await database("customers")
       .where({ id: invoice.customer_id })
       .select(
         "first_name",
@@ -3370,7 +3487,7 @@ const InvoiceService = {
         "property_type",
       )
       .first();
-    const annualPrepayTerm = await loadAnnualPrepayTermForInvoice(invoice.id);
+    const annualPrepayTerm = await loadAnnualPrepayTermForInvoice(invoice.id, database);
 
     const line_items =
       typeof invoice.line_items === "string"
@@ -3379,11 +3496,10 @@ const InvoiceService = {
 
     // Annual-prepay coverage callout (null for ordinary invoices). Built from
     // the parsed line items so setup-fee-waived detection sees the real text.
-    const annual_prepay = await loadInvoiceAnnualPrepay({ ...invoice, line_items });
+    const annual_prepay = await loadInvoiceAnnualPrepay({ ...invoice, line_items }, database);
 
     return {
       ...invoice,
-      ...updates,
       customer: require('./invoice-address').invoiceCustomerAddress(invoice, customer),
       annual_prepay,
       // Amount the customer actually pays = total − applied account credit. The
@@ -3762,6 +3878,8 @@ const InvoiceService = {
         const {
           sendCustomerMessage,
         } = require("./messaging/send-customer-message");
+        const sendInvoice = await db("invoices").where({ id: invoiceId }).first();
+        await require("./estimate-deposits").assertInvoiceDepositSettlementReady(db, sendInvoice, { lock: false });
         const sendResult = await sendCustomerMessage({
           to: customer.phone,
           body,
@@ -3780,6 +3898,51 @@ const InvoiceService = {
           // applies. If ops disables the invoice template to halt broken
           // billing texts, this flow needs to stop too.
           metadata: { original_message_type: "invoice" },
+          // The canonical sender owns push-first / push+SMS / Twilio routing.
+          // Wrap that ONE provider dispatcher so the invoice row and estimate
+          // deposit ledger stay stable through whichever delivery leg it picks.
+          // The canonical message audit runs after this callback commits.
+          withProviderHandoff: async (dispatch) => {
+            let dispatchedOutcome = null;
+            try {
+              const outcome = await require("./estimate-deposits").withInvoiceDepositSettlement(
+                invoiceId,
+                async (trx, current) => {
+                  const ownership = await require("./invoice-helpers").selfPayAtDispatch(invoiceId, trx)();
+                  if (ownership.ok !== true) {
+                    return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+                      code: ownership.code, error: ownership.reason, validator: "check_invoice_ownership_boundary" };
+                  }
+                  if (invoiceAmountDue(current) <= 0
+                    || invoiceAmountDue(current) !== invoiceAmountDue(sendInvoice)
+                    || !isDeepStrictEqual(parseInvoiceLineItems(current.line_items), parseInvoiceLineItems(sendInvoice.line_items))) {
+                    return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+                      code: "INVOICE_BALANCE_CHANGED", error: "Invoice balance changed while preparing delivery; retry send",
+                      validator: "check_invoice_deposit_settlement" };
+                  }
+                  dispatchedOutcome = await dispatch();
+                  return dispatchedOutcome;
+                },
+              );
+              return outcome || { sent: false, blocked: true, deliveryOutcome: "not_sent",
+                code: "INVOICE_UNREADABLE", error: "Invoice could not be re-read before delivery",
+                validator: "check_invoice_deposit_settlement" };
+            } catch (err) {
+              // A commit/connection error AFTER provider acceptance cannot be
+              // rewritten as a definite non-send: that would restore the send
+              // claim and offer an automatic retry of a message the customer
+              // already received. Preserve the provider's actual provenance;
+              // normal delivered bookkeeping below remains idempotent.
+              if (dispatchedOutcome
+                && (dispatchedOutcome.sent || dispatchedOutcome.deliveryOutcome !== "not_sent")) {
+                logger.error(`[invoice] Provider outcome known for ${invoiceId} but deposit-settlement handoff could not close: ${err.message}`);
+                return { ...dispatchedOutcome, settlementHandoffError: err.message };
+              }
+              return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+                code: err.code || "INVOICE_DEPOSIT_SETTLEMENT_FAILED", error: err.message,
+                retryable: err.retryable === true, validator: "check_invoice_deposit_settlement" };
+            }
+          },
         });
 
         if (!sendResult.sent) {
@@ -6489,13 +6652,19 @@ const InvoiceService = {
       if (totalCents !== creditCents) return skip("balance_due");
       await require("./stripe").assertNoInvoiceChargeReconciliationPending(id, trx);
       if ([invoice.payer_id, invoice.payer_statement_id, invoice.annual_prepay_term_id,
-        invoice.stripe_payment_intent_id, invoice.payment_recorded_at, invoice.status === "sending"].some(Boolean)) {
+        invoice.stripe_payment_intent_id, invoice.payment_recorded_at].some(Boolean)) {
         return skip("existing_payment_work");
       }
       const payment = await trx("payments").whereIn("status", ["paid", "processing"])
         .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [id]).first("id");
       const plan = await trx("payment_plans").where({ invoice_id: id, status: "active" }).first("id");
       if (payment || plan) return skip("existing_payment_work");
+      // Delivery owns the invoice row while its pay link is being handed to a
+      // provider. The deposit credit is already durable, so this is a retryable
+      // close gap after delivery resolves; it is not evidence of payment work.
+      if (invoice.status === "sending") {
+        return { ...skip("invoice_delivery_in_flight"), retryable: true };
+      }
       const sequence = await trx("invoice_followup_sequences").where({ invoice_id: id }).forUpdate()
         .first("id", "status", "touch_claimed_at");
       if (sequence?.status === "stopped") return skip("collection_stopped");

@@ -8,6 +8,7 @@
  * we can attach PDFs without modifying the thin one-off email wrapper.
  */
 
+const { isDeepStrictEqual } = require('node:util');
 const logger = require('./logger');
 const db = require('../models/db');
 const { invoiceAmountDue } = require('./invoice-helpers');
@@ -111,6 +112,11 @@ function invoiceRecipientFor(customer, prefs, recipientOverride) {
 async function sendInvoiceEmail(invoiceId, options = {}) {
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { ok: false, error: 'Invoice not found' };
+  try {
+    await require('./estimate-deposits').assertInvoiceDepositSettlementReady(db, invoice, { lock: false });
+  } catch (err) {
+    return { ok: false, error: err.message, code: err.code };
+  }
   // Phase 2: an accrued invoice (attached to a payer statement) is NEVER sent
   // individually — it is delivered as one line on the consolidated monthly
   // statement. This is the email chokepoint; fail closed.
@@ -330,6 +336,50 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     '— Waves Pest Control',
   ]);
 
+  const invoiceAtDispatch = async (dispatch) => {
+    let providerStarted = false;
+    let providerAccepted = false;
+    try {
+      const outcome = await require('./estimate-deposits').withInvoiceDepositSettlement(
+        invoice.id,
+        async (trx, current) => {
+          // Reconciliation can finish while the PDF or template renders,
+          // leaving no pending ledger balance. Compare the locked row after
+          // the ledger fence with the values used by BOTH the email and PDF.
+          if (invoiceAmountDue(current) <= 0
+            || invoiceAmountDue(current) !== amountDue
+            || !isDeepStrictEqual(current.line_items || [], invoice.line_items || [])) {
+            return { ok: false, reason: 'Invoice balance changed while preparing email; retry delivery' };
+          }
+          if (!effectiveOverride) {
+            const ownership = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, trx)();
+            if (ownership.ok !== true) return ownership;
+          }
+          providerStarted = true;
+          await dispatch();
+          providerAccepted = true;
+          return { ok: true };
+        },
+      );
+      return outcome || { ok: false, reason: 'Invoice could not be re-read before delivery' };
+    } catch (err) {
+      // The provider accepted the email before the read-only transaction's
+      // commit failed. Preserve the accepted outcome so no caller retries a
+      // message already delivered; the normal delivery stamp remains
+      // best-effort and idempotent.
+      if (providerAccepted) {
+        logger.error(`[invoice-email] Provider accepted invoice ${invoice.invoice_number} but deposit-settlement handoff could not close: ${err.message}`);
+        return { ok: true, settlementHandoffError: err.message };
+      }
+      // Once the request began, only the email library can classify the
+      // provider outcome (including a fast webhook proving delivery). Let its
+      // provider-error recovery run instead of reporting a pre-dispatch guard
+      // refusal and making the queued attempt immediately retryable.
+      if (providerStarted) throw err;
+      return { ok: false, reason: err.message, code: err.code };
+    }
+  };
+
   if (sendgrid.isConfigured()) {
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
@@ -368,12 +418,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
         // and an unconditional self-pay check would refuse every one of them.
         // What must not happen is the homeowner receiving a pay link for debt
         // that moved to AP while this send was being prepared.
-        withProviderHandoff: effectiveOverride ? undefined : async (dispatch) => {
-          const verdict = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, db)();
-          if (verdict.ok !== true) return verdict;
-          await dispatch();
-          return { ok: true };
-        },
+        withProviderHandoff: invoiceAtDispatch,
       });
       // A suppressed/blocked recipient (unsubscribed, on the suppression list)
       // resolves with sent:false — it was NOT delivered, so don't report ok:true.
@@ -405,7 +450,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   if (!transporter) return { ok: false, error: 'Email not configured', recipient: recipientPayload };
 
   try {
-    await transporter.sendMail({
+    const verdict = await invoiceAtDispatch(() => transporter.sendMail({
       from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
       to: recipient.email,
       subject: `Invoice ${invoice.invoice_number} — ${currency(amountDue)}`,
@@ -416,7 +461,8 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
         content: pdfBuffer,
         contentType: 'application/pdf',
       }],
-    });
+    }));
+    if (verdict.ok !== true) return { ok: false, error: verdict.reason, recipient: recipientPayload };
     await markEmailDelivered();
     logger.info(`[invoice-email] Invoice email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
     return { ok: true, recipient: recipientPayload, payUrl };

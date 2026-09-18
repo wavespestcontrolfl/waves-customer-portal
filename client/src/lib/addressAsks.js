@@ -17,6 +17,74 @@ export const ADDRESS_READBACK_REASONS = new Set([
   'address_readback',
 ]);
 
+const VALIDATION_NOTICE = {
+  rank: 0,
+  unitOnly: false,
+  readbackOnly: false,
+  reason: 'the address from the call did not validate',
+};
+const UNIT_NOTICE = {
+  rank: 2,
+  unitOnly: true,
+  readbackOnly: false,
+  reason: 'the caller gave the building but no unit number',
+};
+const NOTICE_BY_REASON = new Map([
+  ...[...ADDRESS_ASK_REASONS].map((reason) => [reason, VALIDATION_NOTICE]),
+  ['missing_unit_number', UNIT_NOTICE],
+  ['on_file_proof_customer_mismatch', {
+    rank: -1,
+    unitOnly: false,
+    readbackOnly: false,
+    reason: 'the saved address was validated for a different customer and this service address still needs confirmation',
+  }],
+  ['address_recovered', {
+    rank: 1,
+    unitOnly: false,
+    readbackOnly: true,
+    reason: 'the street was pieced back together from a garbled recording and has not been read back',
+  }],
+  ['address_readback', {
+    rank: 1,
+    unitOnly: false,
+    readbackOnly: true,
+    reason: 'the street validated, but it was heard with low confidence and has not been read back',
+  }],
+]);
+
+function evidenceFromCard(card, unitOnly) {
+  const payload = card.payload ?? {};
+  const candidates = Array.isArray(payload.address_candidates)
+    ? payload.address_candidates.filter(Boolean)
+    : [];
+  const unitBuilding = card.reason_code === 'missing_unit_number'
+    ? payload.unit_ask_building
+    : null;
+  const building = unitBuilding?.street_line_1
+    ? [unitBuilding.street_line_1, unitBuilding.city, unitBuilding.postal_code]
+      .filter(Boolean).join(', ')
+    : null;
+  const heardSnapshot = payload.heard_address;
+  const snapshotParts = heardSnapshot && typeof heardSnapshot === 'object'
+    ? [
+      heardSnapshot.street_line_1,
+      heardSnapshot.street_line_2,
+      heardSnapshot.city,
+      heardSnapshot.postal_code,
+    ].map((part) => String(part || '').trim()).filter(Boolean)
+    : [];
+  const heard = payload.address_as_heard
+    || (heardSnapshot?.street_line_1 ? snapshotParts.join(', ') : heardSnapshot?.raw_text)
+    || (snapshotParts.length > 0 ? snapshotParts.join(', ') : null)
+    || null;
+  return {
+    // A validated building is not transcription evidence.
+    heard: unitOnly ? null : heard,
+    building,
+    candidates: [...new Set(candidates)].slice(0, 5),
+  };
+}
+
 /** The validation-ask cards out of a /admin/triage response's items. */
 export function filterAddressAsks(items) {
   return (Array.isArray(items) ? items : []).filter(
@@ -35,87 +103,63 @@ export function filterAddressConfirmations(items) {
 export function addressAskNotice(asks) {
   const open = filterAddressConfirmations(asks);
   if (open.length === 0) return null;
-  // Mismatch > validation failure > read-back > missing unit.
-  const rank = (i) => {
-    if (i.reason_code === 'on_file_proof_customer_mismatch') return -1;
-    if (i.reason_code === 'missing_unit_number') return 2;
-    if (ADDRESS_READBACK_REASONS.has(i.reason_code)) return 1;
-    return 0;
-  };
-  // Recovery and low-confidence read-back describe different evidence.
-  const readbackReason = (i) => (i.reason_code === 'address_recovered'
-    ? 'the street was pieced back together from a garbled recording and has not been read back'
-    : 'the street validated, but it was heard with low confidence and has not been read back');
-  // A same-call address_unverified card is the hold behind a missing-unit ask.
-  // Classify that pair before ranking so another call's real failure can win.
-  const sameCall = (a, b) => (a.call_log_id ?? null) === (b.call_log_id ?? null);
-  // A live same-call recovery supersedes its stale generic hold. A stamped
-  // recovery does not; it yields to a current validation/unit ask.
-  const liveRecovery = (r, i) => r.reason_code === 'address_recovered'
-    && !r.payload?.recovery_superseded_at
-    && sameCall(r, i);
-  const retiredRecoveryWithCurrentAsk = (i) => i.reason_code === 'address_recovered'
-    && i.payload?.recovery_superseded_at
-    && open.some((r) => r !== i && ADDRESS_ASK_REASONS.has(r.reason_code) && sameCall(r, i));
-  const considered = open.filter((i) => !(i.reason_code === 'address_unverified'
-    && open.some((r) => liveRecovery(r, i)))
-    // Retired recovery remains owed only when no current same-call ask exists.
-    && !retiredRecoveryWithCurrentAsk(i));
-  const pool = considered.length > 0 ? considered : open;
-  const effectiveRank = (i) => {
-    const r = rank(i);
-    if (i.reason_code === 'address_unverified'
-      && pool.some((u) => u.reason_code === 'missing_unit_number' && sameCall(u, i))) return 2;
-    return r;
-  };
-  const sorted = [...pool].sort((a, b) => effectiveRank(a) - effectiveRank(b));
-  // Select the unit companion itself; otherwise prefer same-rank evidence.
-  const worst = effectiveRank(sorted[0]);
+  const entries = open.map((card) => {
+    const callId = card.call_log_id ?? null;
+    // Map uses SameValueZero, while the historical comparison used strict
+    // equality. Keep malformed NaN call ids isolated as strict equality did.
+    return { card, callKey: Number.isNaN(callId) ? Symbol() : callId };
+  });
+  const callState = new Map();
+  entries.forEach(({ card, callKey }) => {
+    const state = callState.get(callKey) || {
+      hasUnitAsk: false,
+      hasLiveRecovery: false,
+      hasCurrentAsk: false,
+    };
+    state.hasUnitAsk ||= card.reason_code === 'missing_unit_number';
+    state.hasLiveRecovery ||= card.reason_code === 'address_recovered'
+      && !card.payload?.recovery_superseded_at;
+    state.hasCurrentAsk ||= ADDRESS_ASK_REASONS.has(card.reason_code);
+    callState.set(callKey, state);
+  });
+
+  // Classify same-call companions once, before ranking. A generic hold paired
+  // with a unit ask belongs at unit priority, while a live recovery replaces
+  // that hold. A retired recovery yields to any current ask from its call.
+  const classified = entries.map(({ card, callKey }) => {
+    const state = callState.get(callKey);
+    const isGenericHold = card.reason_code === 'address_unverified';
+    const isRecovery = card.reason_code === 'address_recovered';
+    return {
+      card,
+      callKey,
+      notice: isGenericHold && state.hasUnitAsk ? UNIT_NOTICE : NOTICE_BY_REASON.get(card.reason_code),
+      suppressed: (isGenericHold && state.hasLiveRecovery)
+        || (isRecovery && card.payload?.recovery_superseded_at && state.hasCurrentAsk),
+    };
+  });
+  const considered = classified.filter(({ suppressed }) => !suppressed);
+  const pool = considered.length > 0 ? considered : classified;
+  const sorted = [...pool].sort((a, b) => a.notice.rank - b.notice.rank);
+
+  // Select the unit card itself; otherwise prefer evidence at the lead rank.
   const lead = sorted[0];
-  const card = worst === 2
-    ? (lead.reason_code === 'missing_unit_number'
-      ? lead
-      : sorted.find((i) => i.reason_code === 'missing_unit_number' && sameCall(i, lead)) || lead)
-    : sorted.find((i) => effectiveRank(i) === worst && i.payload?.address_as_heard) || lead;
-  const askKind = effectiveRank(card);
-  const candidates = Array.isArray(card.payload?.address_candidates)
-    ? card.payload.address_candidates.filter(Boolean)
-    : [];
-  const unitBuilding = card.reason_code === 'missing_unit_number'
-    ? card.payload?.unit_ask_building
-    : null;
-  const building = unitBuilding?.street_line_1
-    ? [unitBuilding.street_line_1, unitBuilding.city, unitBuilding.postal_code].filter(Boolean).join(', ')
-    : null;
-  const heardSnapshot = card.payload?.heard_address;
-  const snapshotParts = heardSnapshot && typeof heardSnapshot === 'object'
-    ? [
-      heardSnapshot.street_line_1,
-      heardSnapshot.street_line_2,
-      heardSnapshot.city,
-      heardSnapshot.postal_code,
-    ].map((part) => String(part || '').trim()).filter(Boolean)
-    : [];
-  const heard = card.payload?.address_as_heard
-    || (heardSnapshot?.street_line_1 ? snapshotParts.join(', ') : heardSnapshot?.raw_text)
-    || (snapshotParts.length > 0 ? snapshotParts.join(', ') : null)
-    || null;
+  let selected = lead;
+  if (lead.notice.unitOnly) {
+    selected = sorted.find(({ card, callKey }) => card.reason_code === 'missing_unit_number'
+      && callKey === lead.callKey) || lead;
+  } else {
+    selected = sorted.find(({ card, notice }) => notice.rank === lead.notice.rank
+      && card.payload?.address_as_heard) || lead;
+  }
+  const { card, notice } = selected;
   return {
     // Identity changes when an otherwise identical warning is replaced.
     cardId: card.id ?? null,
     callId: card.call_log_id ?? null,
-    unitOnly: askKind === 2,
-    readbackOnly: askKind === 1,
-    reason: askKind === 2
-      ? 'the caller gave the building but no unit number'
-      : askKind === 1
-        ? readbackReason(card)
-        : card.reason_code === 'on_file_proof_customer_mismatch'
-          ? 'the saved address was validated for a different customer and this service address still needs confirmation'
-          : 'the address from the call did not validate',
-    // A validated building is not transcription evidence.
-    heard: askKind === 2 ? null : heard,
-    building,
-    candidates: [...new Set(candidates)].slice(0, 5),
+    unitOnly: notice.unitOnly,
+    readbackOnly: notice.readbackOnly,
+    reason: notice.reason,
+    ...evidenceFromCard(card, notice.unitOnly),
   };
 }

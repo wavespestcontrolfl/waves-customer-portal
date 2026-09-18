@@ -9,6 +9,7 @@ jest.mock('../models/db', () => new Proxy((...args) => mockDb(...args), {
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const { mineVoiceCorpus, mineEmailPairs } = require('../services/sms-voice-corpus-miner');
+const { loadEmailReplyStyle } = require('../services/email/email-reply-style');
 const { distillVoiceProfile } = require('../services/voice-profile-distiller');
 const { fetchVoiceExemplars } = require('../services/sms-shadow-drafter');
 const mailboxAddress = 'contact@wavespestcontrol.com';
@@ -69,6 +70,16 @@ suite('reviewed email corpus PostgreSQL contract', () => {
     expect(rows[0].inbound_text).toContain('next service');
     expect(rows[0].reply_text).not.toContain('Corpus');
     expect(await mockDb('emails').whereIn('id', [inbound.id, reply.id]).orderBy('id')).toEqual(before);
+  });
+
+  test('the email reader finds examples produced by the real miner intent contract', async () => {
+    const rows = await collect();
+    expect(rows).toHaveLength(1);
+    await mockDb('voice_corpus_examples').insert(rows);
+    const context = { identity: { customerId: randomUUID() }, customer: { firstName: 'Reader' },
+      untrusted: { emailThread: { messages: [{ currentInbound: true, text: inbound.body_text }] } } };
+    const style = await loadEmailReplyStyle(context, { database: mockDb });
+    expect(style.exemplars).toEqual([{ inbound_text: rows[0].inbound_text, reply_text: rows[0].reply_text }]);
   });
 
   test('SENT alone is not human-authorship evidence', async () => {

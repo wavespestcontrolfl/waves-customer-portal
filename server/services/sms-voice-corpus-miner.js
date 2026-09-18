@@ -55,6 +55,7 @@ const { hasAlignedAuth } = require('./email/inbox-hygiene');
 const { gateEnvValue } = require('../config/feature-gates');
 const { savepointRead } = require('../utils/savepoint-read');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 const SCHEMA_VERSION = 'voice-corpus.v1';
 const PAIR_WINDOW_HOURS = 48; // max gap between inbound and the manual reply answering it
@@ -279,13 +280,23 @@ async function mineSmsPairs({ since, until, skipped }) {
   // `until` = now - OUTCOME_WINDOW_DAYS: a pair is only inserted once its
   // 7-day outcome window has CLOSED. Insert-ignore would otherwise freeze
   // immature outcomes forever (Codex P2).
-  const replies = await db('sms_log')
-    .where('direction', 'outbound')
-    .where('message_type', 'manual')
-    .where('created_at', '>=', since)
-    .where('created_at', '<', until)
-    .whereNotNull('customer_id')
-    .whereNotIn('status', ['failed', 'undelivered', 'scheduled'])
+  // codex #4333 P2 (GitHub round, "exclude reservations from the voice
+  // corpus"): a Communications review-ask reservation can sit at
+  // status='sending', message_type='manual' past this window's `until`
+  // cutoff after an uncertain outcome or a crash — the status/message_type
+  // filters above don't catch it, so without this it would be mined as a
+  // human-authored reply and fed into voice distillation.
+  // excludeUnresolvedSendReservations is applied BEFORE orderBy/select so
+  // it can never let a reservation displace a real reply.
+  const replies = await excludeUnresolvedSendReservations(
+    db('sms_log')
+      .where('direction', 'outbound')
+      .where('message_type', 'manual')
+      .where('created_at', '>=', since)
+      .where('created_at', '<', until)
+      .whereNotNull('customer_id')
+      .whereNotIn('status', ['failed', 'undelivered', 'scheduled']),
+  )
     .select('id', 'customer_id', 'admin_user_id', 'message_body', 'to_phone', 'created_at')
     .orderBy('created_at', 'asc');
 
@@ -652,6 +663,8 @@ async function mineVoiceCorpus({ sinceDays = 3 } = {}) {
 module.exports = {
   mineVoiceCorpus,
   mineEmailPairs,
+  parseEmailSelection,
+  emailTopText,
   eligibleCallTranscriptsQuery,
   SCHEMA_VERSION,
   // Production contract shared with the re-transcription backfill: a

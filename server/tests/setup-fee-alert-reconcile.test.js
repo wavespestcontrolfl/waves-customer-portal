@@ -8,6 +8,7 @@
 let mockTables = {};
 let mockUpdates = [];
 let mockCounters = {};
+let mockInvoiceNotePredicates = [];
 
 jest.mock('../models/db', () => {
   // ONE shared per-test counter map: the pre-read (direct db) and the
@@ -20,6 +21,7 @@ jest.mock('../models/db', () => {
     const self = () => chain;
     ['where', 'whereRaw', 'whereIn', 'whereNot', 'whereNull', 'orWhere', 'orWhereRaw', 'orWhereIn', 'orderBy', 'forUpdate', 'leftJoin', 'andWhere', 'orWhereNotNull', 'whereNotIn'].forEach((m) => {
       chain[m] = jest.fn((...args) => {
+        if (table === 'invoices' && m === 'where' && args[0] === 'notes') mockInvoiceNotePredicates.push(args);
         if (typeof args[0] === 'function') args[0].call(chain, chain);
         return chain;
       });
@@ -42,7 +44,7 @@ jest.mock('../models/db', () => {
   return mock;
 });
 
-const { reconcileSetupFeeAlert } = require('../services/setup-fee-alert-reconcile');
+const { acceptedEstimateIdFromNotes, reconcileSetupFeeAlert, reconcileSetupFeeAlertForInvoice } = require('../services/setup-fee-alert-reconcile');
 
 const CUST = 'c1000000-0000-0000-0000-000000000001';
 const EST = 'e1000000-0000-0000-0000-000000000001';
@@ -72,6 +74,49 @@ beforeEach(() => {
   mockUpdates = [];
   mockTables = {};
   mockCounters = {};
+  mockInvoiceNotePredicates = [];
+});
+
+test('accepted-estimate note linkage normalizes mixed case UUIDs and leaves freeform notes alone', async () => {
+  expect(acceptedEstimateIdFromNotes(`ACCEPTED ESTIMATE #${EST.toUpperCase()}.`)).toBe(EST);
+  expect(acceptedEstimateIdFromNotes('accepted estimate #freeform.')).toBeNull();
+  await reconcileSetupFeeAlertForInvoice({ id: 'inv-freeform', customer_id: CUST, notes: 'accepted estimate #freeform.' });
+  expect(mockCounters).toEqual({});
+});
+
+test('invoice transition reconciles an uppercase note stamp and scans coverage case-insensitively', async () => {
+  mockTables = {
+    notifications: notificationsInOrder(alertRow({ resolvedCovered: true })),
+    invoices: (n) => (n === 1 ? [
+      { id: 'inv-fee', status: 'paid', line_items: FEE_LINE, notes: `ACCEPTED ESTIMATE #${EST.toUpperCase()}.` },
+      { id: 'inv-app', status: 'paid', line_items: APP_LINE, notes: `accepted estimate #${EST}` },
+    ] : []),
+    scheduled_services: [],
+  };
+  await reconcileSetupFeeAlertForInvoice({ id: 'inv-fee', customer_id: CUST, notes: `ACCEPTED ESTIMATE #${EST.toUpperCase()}.` });
+  expect(mockCounters.notifications).toBeGreaterThan(0);
+  expect(mockInvoiceNotePredicates).toEqual([
+    ['notes', 'ilike', `%accepted estimate #${EST}%`],
+  ]);
+  expect(mockUpdates).toEqual([]);
+});
+
+test('terminal alert scan recognizes an uppercase note stamp', async () => {
+  const terminal = {
+    id: 'terminal-alert',
+    body: 'Bill the application ALSO: the one-time WaveGuard setup fee is owed.',
+    metadata: { setupFeeDedupeKey: `unminted_setup_fee_manual_billing:${EST}`,
+      customerId: CUST, setupFeeResolved: false, expectedSetupFeeCents: 9900 },
+  };
+  mockTables = {
+    notifications: (n) => (n === 1 || n === 2 || n === 4 ? [terminal] : []),
+    invoices: [{ id: 'inv-fee', status: 'paid', line_items: FEE_LINE,
+      notes: `ACCEPTED ESTIMATE #${EST.toUpperCase()}.` }],
+  };
+  await reconcileSetupFeeAlert({ customerId: CUST, sourceEstimateId: EST });
+  expect(mockInvoiceNotePredicates).toEqual([['notes', 'ilike', `%accepted estimate #${EST}%`]]);
+  expect(mockUpdates).toHaveLength(1);
+  expect(mockUpdates[0].payload.body).toContain('COVERED');
 });
 
 test('a RESOLVED alert whose fee invoice becomes REFUNDED stays settled — never rewritten to demand the fee again', async () => {

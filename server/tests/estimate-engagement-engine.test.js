@@ -854,6 +854,28 @@ describe('processDueJobs', () => {
     expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'link-expired' }));
   });
 
+  test('a row past its own offer deadline skips link-expired, and a far-future group-link viewability window does NOT rescue it (owner ruling on #4309 r7)', async () => {
+    enqueueProcessorHappyPath({
+      est: baseEstimate({
+        // expires_at IS this property's own offer deadline now — lapsed.
+        expires_at: new Date(NOW.getTime() - 2 * 86400000),
+        estimate_data: {
+          proposal: { enabled: true, validThrough: '2026-06-08' },
+          // Navigation state only: the delivered group link stays reachable
+          // for months. It must never make an expired offer sendable.
+          groupLinkViewableThrough: new Date(NOW.getTime() + 90 * 86400000).toISOString(),
+        },
+      }),
+    });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(0);
+    expect(followupShared.claimFollowupSend).not.toHaveBeenCalled();
+    const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'link-expired' }));
+  });
+
   test('a legacy-lane expiring claim suppresses the engine expiring email', async () => {
     const EXPIRING_RULE = { rule_key: 'expiring_engaged', enabled: true, trigger_type: 'time_sweep', priority: 30, template_key: 'estimate.engage_expiring', params: {} };
     enqueue('estimate_followup_jobs', { rows: [pendingJob({ rule_key: 'expiring_engaged' })] });

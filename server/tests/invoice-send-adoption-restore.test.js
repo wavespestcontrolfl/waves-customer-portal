@@ -49,6 +49,10 @@ jest.mock('../config/twilio-numbers', () => ({
 jest.mock('../services/invoice-email', () => ({
   sendInvoiceEmail: jest.fn(),
 }));
+jest.mock('../services/estimate-deposits', () => ({
+  assertInvoiceDepositSettlementReady: jest.fn(async () => true),
+  withInvoiceDepositSettlement: jest.fn(),
+}));
 
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -168,6 +172,7 @@ describe('claimInvoiceForSend adoption survives a failed replacement delivery', 
       .mockReturnValueOnce(chain({ returning: [] })) // adoption: nothing pre-existing to consume
       .mockReturnValueOnce(chain({ first: undefined })) // strict re-check after the consume (none live)
       .mockReturnValueOnce(chain({ first: { id: 'cust-1', phone: '+19415550123', first_name: 'Pat' } })) // customer lookup
+      .mockReturnValueOnce(chain({ first: { ...draftInvoice, status: 'sending' } })) // fresh deposit-settlement snapshot
       .mockReturnValueOnce(chain({ first: undefined })) // requeue idempotency check (no prior row)
       .mockReturnValueOnce(requeueInsertChain) // held-SMS scheduled-rail insert
       .mockReturnValueOnce(chain()); // restoreSendClaim
@@ -240,6 +245,7 @@ describe('claimInvoiceForSend adoption survives a failed replacement delivery', 
       .mockReturnValueOnce(chain({ returning: [{ id: 'sms-queued-1', scheduled_for: new Date('2026-09-11T09:00:00.000Z') }] })) // adoption consumes the pre-existing row
       .mockReturnValueOnce(chain({ first: undefined })) // strict re-check after the consume (none live)
       .mockReturnValueOnce(chain({ first: { id: 'cust-1', phone: '+19415550123', first_name: 'Pat' } })) // customer lookup
+      .mockReturnValueOnce(chain({ first: { ...draftInvoice, status: 'sending' } })) // fresh deposit-settlement snapshot
       .mockReturnValue(fallback); // finalize + every post-delivery best-effort step
 
     sendCustomerMessage.mockResolvedValueOnce({ sent: true });
@@ -265,6 +271,7 @@ describe('claimInvoiceForSend adoption survives a failed replacement delivery', 
       .mockReturnValueOnce(chain({ returning: [{ id: 'sms-queued-1', scheduled_for: new Date('2026-09-11T09:00:00.000Z') }] })) // adoption consumes the pre-existing row
       .mockReturnValueOnce(chain({ first: undefined })) // strict re-check after the consume (none live)
       .mockReturnValueOnce(chain({ first: { id: 'cust-1', phone: '+19415550123', first_name: 'Pat' } })) // customer lookup
+      .mockReturnValueOnce(chain({ first: { ...draftInvoice, status: 'sending' } })) // fresh deposit-settlement snapshot
       .mockReturnValue(fallback); // finalize retry + every post-delivery best-effort step
 
     // sendCustomerMessage attaches providerOutcome to the error it throws
@@ -315,6 +322,7 @@ describe('claimInvoiceForSend adoption survives a failed replacement delivery', 
       .mockReturnValueOnce(chain({ returning: [consumed] }))
       .mockReturnValueOnce(chain({ first: undefined }))
       .mockReturnValueOnce(chain({ first: { id: 'cust-1', phone: '+19415550123', first_name: 'Pat' } }))
+      .mockReturnValueOnce(chain({ first: { ...draftInvoice, status: 'sending' } })) // fresh deposit-settlement snapshot
       .mockReturnValueOnce(firstResolve)
       .mockReturnValueOnce(throwingChain(finalizeErr))
       .mockReturnValueOnce(secondResolve)
@@ -344,6 +352,7 @@ describe('claimInvoiceForSend adoption survives a failed replacement delivery', 
       .mockReturnValueOnce(chain({ returning: [consumed] }))
       .mockReturnValueOnce(chain({ first: undefined }))
       .mockReturnValueOnce(chain({ first: { id: 'cust-1', phone: '+19415550123', first_name: 'Pat' } }))
+      .mockReturnValueOnce(chain({ first: { ...draftInvoice, status: 'sending' } })) // fresh deposit-settlement snapshot
       .mockReturnValueOnce(requeueUpdate)
       .mockReturnValueOnce(restoreClaim);
     sendCustomerMessage.mockResolvedValueOnce({
@@ -367,7 +376,8 @@ describe('claimInvoiceForSend adoption survives a failed replacement delivery', 
     // The same row owns the replacement hold, so the finally block only
     // releases the invoice claim and cannot schedule a sibling obligation.
     expect(restoreClaim.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'draft' }));
-    expect(db).toHaveBeenCalledTimes(10);
+    // Includes the fresh invoice read required by the deposit handoff.
+    expect(db).toHaveBeenCalledTimes(11);
   });
 });
 
@@ -417,15 +427,31 @@ describe('sendViaSMS: every pre-delivery exit restores the consumed queue row (t
     },
     {
       name: 'provider blocks the send for a NON-hold reason (no deferred/nextAllowedAt)',
+      readsSettlementSnapshot: true,
       invoiceOverrides: {},
       customerOverride: { id: 'cust-1', phone: '+19415550123', first_name: 'Pat' },
       beforeRun: () => sendCustomerMessage.mockResolvedValueOnce({ sent: false, code: 'OPTED_OUT', reason: 'customer opted out' }),
       expectRejects: 'payment-link SMS blocked: OPTED_OUT',
       expectCreditReversalAttempted: true,
     },
+    {
+      name: 'a received estimate deposit becomes unreconciled after queue adoption',
+      readsSettlementSnapshot: true,
+      invoiceOverrides: {},
+      customerOverride: { id: 'cust-1', phone: '+19415550123', first_name: 'Pat' },
+      beforeRun: () => {
+        const err = new Error('A received deposit is awaiting invoice reconciliation');
+        err.code = 'DEPOSIT_RECONCILIATION_REQUIRED';
+        require('../services/estimate-deposits').assertInvoiceDepositSettlementReady
+          .mockResolvedValueOnce(true)
+          .mockRejectedValueOnce(err);
+      },
+      expectRejects: 'A received deposit is awaiting invoice reconciliation',
+      expectCreditReversalAttempted: true,
+    },
   ];
 
-  test.each(CASES)('$name', async ({ invoiceOverrides, customerOverride, beforeRun, expectRejects, expectResultCode, expectCreditReversalAttempted }) => {
+  test.each(CASES)('$name', async ({ invoiceOverrides, customerOverride, readsSettlementSnapshot, beforeRun, expectRejects, expectResultCode, expectCreditReversalAttempted }) => {
     jest.clearAllMocks();
     const { reverseAppliedCredit, autoApplyAccountCreditIfEnabled } = require('../services/customer-credit');
     // A partial (non-full) credit application so reverseCreditOnExit's
@@ -445,6 +471,7 @@ describe('sendViaSMS: every pre-delivery exit restores the consumed queue row (t
       chain({ first: undefined }),
     ];
     if (customerOverride) mocks.push(chain({ first: customerOverride }));
+    if (readsSettlementSnapshot) mocks.push(chain({ first: { ...invoiceRow, status: 'sending' } }));
     mocks.push(restoreQueueChain, restoreClaimChain);
     for (const m of mocks) db.mockReturnValueOnce(m);
     if (beforeRun) beforeRun();
@@ -626,6 +653,7 @@ describe('sendViaSMSAndEmail: the SMS queue restore decision is per-channel, not
       .mockReturnValueOnce(chain({ first: sendingInvoice })) // inner sendViaSMS's own claim read
       .mockReturnValueOnce(chain({ first: undefined })) // inner pre-check
       .mockReturnValueOnce(chain({ first: { id: 'cust-1', phone: '+19415550123', first_name: 'Pat' } })) // customer lookup — has a phone
+      .mockReturnValueOnce(chain({ first: sendingInvoice })) // fresh deposit-settlement snapshot
       .mockReturnValue(fallback); // provider-accepted send's own finalize, activity_log, follow-ups, the outer finalize, lead conversion — none of them matter here
 
     sendCustomerMessage.mockResolvedValueOnce({ sent: true });

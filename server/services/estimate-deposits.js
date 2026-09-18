@@ -14,6 +14,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const StripeService = require('./stripe');
+const { invoiceWithdrawnFromCustomer } = require('./invoice-helpers');
 const { DEPOSIT } = require('./pricing-engine/constants');
 // Surcharge revert (owner ruling 2026-07-13): a deposit PI can now capture
 // face value + card surcharge (credit funding, quoted at confirm). The
@@ -251,17 +252,8 @@ async function receivedDepositTotal(estimateId) {
   return totalCents / 100;
 }
 
-// Advisory-lock keyspace shared with scheduled-invoice-mint.js's
-// pendingDepositCredit read (Codex round 14 P1 #4131): pendingDepositCredit
-// is a plain SELECT and this function's insert/update are independent
-// writes, so without a shared lock a deposit can settle AFTER the mint's
-// zero-credit check but BEFORE the invoice commits — the check passes,
-// consumeAppliedDeposit skips (nothing to apply), and a full-balance
-// invoice goes out beside the newly received deposit. Keyed on the
-// estimate, same two-key scheme every other advisory lock in this codebase
-// uses (namespace + id-as-text) — whichever side gets here first (this
-// write, or the mint's read-through-commit) completes before the other
-// proceeds; import this helper, never re-declare the raw lock statement.
+// Receipt, mint, collection, void, and reconciliation share this estimate key.
+// Callers already holding an invoice row lock acquire this lock afterward.
 const ESTIMATE_DEPOSIT_LEDGER_LOCK = 'estimate.deposit.ledger';
 async function acquireEstimateDepositLedgerLock(trx, estimateId) {
   await trx.raw(
@@ -291,11 +283,6 @@ async function markDepositReceived({ paymentIntentId, estimateId, amountDollars,
   const receivedStamp = receivedAt instanceof Date && !Number.isNaN(receivedAt.getTime())
     ? receivedAt
     : db.fn.now();
-  // The insert/update run inside the SAME advisory-locked transaction the
-  // mint contends on (Codex round 14 P1 #4131) — the lock is acquired
-  // FIRST so a concurrent mint's pendingDepositCredit read either sees
-  // this row already committed, or waits behind this transaction and sees
-  // it on its own (equally locked) read.
   const { inserted, updated } = await db.transaction(async (trx) => {
     await acquireEstimateDepositLedgerLock(trx, estimateId);
     const insertedRows = await trx('estimate_deposits')
@@ -322,6 +309,17 @@ async function markDepositReceived({ paymentIntentId, estimateId, amountDollars,
     return { inserted: insertedRows, updated: updatedCount };
   });
 
+  // The ledger is durable before the invoice attempt. Receipt delivery
+  // follows it so a failed invoice rewrite still leaves a recorded payment.
+  let reconciliationError = null;
+  try {
+    await reconcileReceivedDepositSafely(estimateId, paymentIntentId);
+  } catch (err) {
+    // A retryable close must leave the webhook unprocessed, but the first
+    // received transition still owns this one-time receipt attempt.
+    reconciliationError = err;
+  }
+
   // Exactly one caller wins the not-yet-received → received transition
   // (webhook vs the accept flow's live verification) — that winner sends the
   // single receipt text. Best-effort: a receipt failure must never fail
@@ -331,6 +329,7 @@ async function markDepositReceived({ paymentIntentId, estimateId, amountDollars,
       logger.warn(`[estimate-deposits] deposit receipt failed for estimate ${estimateId}: ${err.message}`);
     });
   }
+  if (reconciliationError) throw reconciliationError;
 }
 
 // One receipt per received deposit — the deposit intent is customerless and
@@ -1172,6 +1171,235 @@ async function sweepTerminalEstimateDeposits() {
   return { estimatesSwept, refundedTotal };
 }
 
+// A late deposit may arrive after its first invoice was minted. Its ledger
+// receipt is already committed before this runs; any failure leaves the
+// dollars visible for manual reconciliation. Invoice row -> ledger lock is
+// the same order used by void and payment writers.
+function retryableDepositSettlementError(invoiceId, reason, cause = null) {
+  const err = new Error(`Invoice ${invoiceId} deposit settlement could not finish (${reason}); retry webhook`);
+  err.code = 'DEPOSIT_SETTLEMENT_RETRYABLE';
+  err.retryable = true;
+  err.invoiceId = invoiceId;
+  if (cause) err.cause = cause;
+  return err;
+}
+
+async function settleDepositCoveredInvoice(invoiceId) {
+  try {
+    const result = await require('./invoice').settleZeroBalance(invoiceId);
+    if (result.retryable) throw retryableDepositSettlementError(invoiceId, result.reason);
+    return result;
+  } catch (err) {
+    if (err.code === 'DEPOSIT_SETTLEMENT_RETRYABLE') throw err;
+    // An ambiguous or active Stripe charge is a manual ownership hold.
+    if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME'].includes(err.code)) {
+      return { settled: false, reason: err.code };
+    }
+    // Database/transport failures after the ledger and invoice commit must
+    // not acknowledge the only webhook event that can retry this close.
+    throw retryableDepositSettlementError(invoiceId, 'settlement_error', err);
+  }
+}
+
+async function reconcileReceivedDepositToInvoice(estimateId) {
+  const prefix = `Auto-generated from accepted estimate #${estimateId}`;
+  const candidates = await db('invoices as i')
+    .leftJoin('scheduled_services as direct', 'direct.id', 'i.scheduled_service_id')
+    .leftJoin('service_records as sr', 'sr.id', 'i.service_record_id')
+    .leftJoin('scheduled_services as recorded', 'recorded.id', 'sr.scheduled_service_id')
+    .where((q) => q.where('direct.source_estimate_id', estimateId)
+      .orWhere('recorded.source_estimate_id', estimateId)
+      .orWhere('i.notes', 'like', `${prefix}%`)
+      .orWhereRaw('i.line_items @> ?::jsonb', [JSON.stringify([{ category: 'deposit_credit', estimate_id: estimateId }])]))
+    .whereNotIn('i.status', ['void', 'refunded', 'canceled', 'cancelled'])
+    .orderBy('i.created_at', 'asc')
+    .select('i.id', 'i.customer_id');
+
+  let appliedTotal = 0;
+  let lastAppliedInvoiceId = null;
+  let payerInvoiceId = null;
+  let exhausted = false;
+  for (const candidate of candidates) {
+    const result = await db.transaction(async (trx) => {
+      // Bill-To edits use this customer gate before touching customer/visit
+      // rows. Taking it before the invoice lock makes the live payer recheck
+      // stable through this credit commit without inverting those writers.
+      await require('./pay-combined').lockCombinedCustomers(trx, [String(candidate.customer_id)]);
+      const invoice = await trx('invoices').where({ id: candidate.id }).forUpdate().first();
+      if (!invoice || ['void', 'refunded', 'canceled', 'cancelled'].includes(invoice.status)) return { state: 'skip' };
+      if (String(invoice.customer_id) !== String(candidate.customer_id)) {
+        throw new Error('Invoice owner moved while reconciling deposit');
+      }
+      const sourceId = await invoiceDepositEstimateId(invoice, trx);
+      if (String(sourceId) !== String(estimateId)) return { state: 'skip' };
+      if ([invoice.payer_id, invoiceWithdrawnFromCustomer(invoice)].some(Boolean)) {
+        return { state: 'payer', invoiceId: invoice.id };
+      }
+      const scheduledServiceId = invoice.scheduled_service_id
+        || (invoice.service_record_id
+          ? (await trx('service_records').where({ id: invoice.service_record_id }).first('scheduled_service_id'))?.scheduled_service_id
+          : null);
+      const livePayer = await require('./payer').resolveForInvoice({
+        database: trx, customerId: invoice.customer_id, scheduledServiceId, throwOnError: true,
+      });
+      if (livePayer.payerId) return { state: 'payer', invoiceId: invoice.id };
+      // Quiet backfill invoices leave deposit allocation to the reviewer.
+      // The completion record freezes that ownership beyond the mint call.
+      const reviewOnly = invoice.service_record_id && await trx('service_records')
+        .where({ id: invoice.service_record_id })
+        .whereRaw("structured_notes ->> 'backfill' = 'true'").first('id');
+      if (reviewOnly) return { state: 'park', invoiceId: invoice.id, reason: 'backfill_review' };
+      await acquireEstimateDepositLedgerLock(trx, estimateId);
+      const lines = invoice.line_items == null ? []
+        : typeof invoice.line_items === 'string' ? JSON.parse(invoice.line_items) : invoice.line_items;
+      if (!Array.isArray(lines)) return { state: 'park', invoiceId: invoice.id };
+      const cents = (value) => Math.round(Number(value || 0) * 100);
+      const priorCreditCents = lines.filter((line) => line?.category === 'deposit_credit')
+        .reduce((sum, line) => sum + Math.abs(cents(line.amount)), 0);
+      const dueCents = cents(invoice.subtotal) - cents(invoice.discount_amount)
+        + cents(invoice.tax_amount) - priorCreditCents;
+      if (dueCents !== cents(invoice.total) || dueCents < 0) return { state: 'park', invoiceId: invoice.id };
+      // A committed credit can leave a $0 invoice open when the separate
+      // zero-balance close is temporarily refused. Its stamped line is the
+      // durable retry marker even after the deposit ledger is exhausted.
+      if (!dueCents) {
+        const stamped = lines.some((line) => line?.category === 'deposit_credit'
+          && String(line.estimate_id) === String(estimateId) && cents(line.amount) < 0);
+        return stamped && ['draft', 'scheduled', 'sending', 'sent', 'viewed', 'overdue'].includes(invoice.status)
+          ? { state: 'settle', invoiceId: invoice.id } : { state: 'skip' };
+      }
+      const credit = await pendingDepositCredit(estimateId, trx);
+      if (!credit) return { state: 'exhausted' };
+
+      // Do not infer Stripe state from invoice.status alone. A durable
+      // saved-card claim or orphan can represent money in flight even with
+      // no invoice PI yet; any such row parks the credit for a human.
+      const activePayment = await trx('payments')
+        .whereIn('status', ['processing', 'paid'])
+        .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [String(invoice.id)])
+        .first('id');
+      const chargeAttempt = await trx('stripe_invoice_charge_attempts')
+        .where({ invoice_id: invoice.id }).whereIn('status', ['claimed', 'ambiguous'])
+        .whereNull('resolved_at').first('id');
+      const paymentPlan = await trx('payment_plans')
+        .where({ invoice_id: invoice.id, status: 'active' }).first('id');
+      const orphan = await trx('stripe_orphan_charges')
+        .where({ invoice_id: invoice.id, resolved: false }).first('id');
+      const ambiguous = await trx('payments')
+        .where({ status: 'failed' }).whereNull('stripe_payment_intent_id')
+        .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [String(invoice.id)])
+        .whereRaw("COALESCE((metadata::jsonb ->> 'ambiguous_outcome')::boolean, false) = true")
+        .where(function unresolved() { this.whereNull('superseded_by_payment_id').orWhereColumn('superseded_by_payment_id', 'payments.id'); })
+        .first('id');
+      const paymentWork = [
+        invoice.stripe_payment_intent_id, invoice.payment_recorded_at, invoice.paid_at,
+        Number(invoice.credit_applied || 0) > 0, invoice.payer_statement_id,
+        !['draft', 'scheduled', 'sending', 'sent', 'viewed', 'overdue'].includes(invoice.status),
+        activePayment, chargeAttempt, paymentPlan, orphan, ambiguous,
+      ].some(Boolean);
+      if (paymentWork) {
+        return { state: 'park', invoiceId: invoice.id };
+      }
+
+      // Delivery ownership is temporary, unlike a live payment. Keep the
+      // receipt webhook retryable until the sender finalizes/restores its
+      // claim (or the existing stale-send sweep parks it for review).
+      if (invoice.status === 'sending') {
+        throw retryableDepositSettlementError(invoice.id, 'invoice_delivery_in_flight');
+      }
+
+      const appliedCents = Math.min(dueCents, cents(credit.amount));
+      // This invoice activates an annual-prepay term only when its normal
+      // payment path settles. settleZeroBalance deliberately refuses that
+      // term anchor, so consuming its entire balance here would leave a $0
+      // invoice and a permanently pending term with no replayable credit.
+      const annualTermInvoice = appliedCents === dueCents && (invoice.annual_prepay_term_id
+        || (await trx('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('id'))?.id);
+      if (annualTermInvoice) {
+        return { state: 'park', invoiceId: invoice.id, reason: 'annual_prepay_full_coverage' };
+      }
+      const nextLines = [...lines, {
+        description: 'Deposit credit (paid at acceptance)',
+        quantity: 1,
+        unit_price: -appliedCents / 100,
+        amount: -appliedCents / 100,
+        category: 'deposit_credit',
+        estimate_id: estimateId,
+      }];
+      await trx('invoices').where({ id: invoice.id }).update({
+        line_items: JSON.stringify(nextLines),
+        total: (dueCents - appliedCents) / 100,
+        updated_at: trx.fn.now(),
+      });
+      const allocated = await consumeDepositCredit({
+        estimateId, amount: appliedCents / 100, invoiceId: invoice.id, trx,
+      });
+      if (cents(allocated) !== appliedCents) throw new Error('Late deposit allocation mismatch');
+      return { state: 'applied', invoiceId: invoice.id, amount: allocated, remainingCents: dueCents - appliedCents };
+    });
+    if (result.state === 'settle') {
+      const settled = await settleDepositCoveredInvoice(result.invoiceId);
+      if (!settled.settled && settled.reason !== 'already_settled') {
+        return { state: 'park', invoiceId: result.invoiceId, reason: settled.reason };
+      }
+      continue;
+    }
+    if (result.state === 'exhausted') {
+      exhausted = true;
+      continue;
+    }
+    if (result.state === 'applied') {
+      appliedTotal += result.amount;
+      lastAppliedInvoiceId = result.invoiceId;
+      if (!result.remainingCents) {
+        const settled = await settleDepositCoveredInvoice(result.invoiceId);
+        if (!settled.settled && settled.reason !== 'already_settled') {
+          return { state: 'park', invoiceId: result.invoiceId, reason: settled.reason };
+        }
+      }
+      // Another received row or unapplied remainder may cover the next
+      // existing invoice. The next iteration takes fresh invoice and ledger
+      // locks, never carrying a stale credit amount across transactions.
+      continue;
+    }
+    if (result.state === 'payer') {
+      payerInvoiceId = result.invoiceId;
+      continue;
+    }
+    if (result.state !== 'skip') return result;
+  }
+  return appliedTotal > 0
+    ? { state: 'applied', invoiceId: lastAppliedInvoiceId, amount: appliedTotal }
+    : (payerInvoiceId ? { state: 'park', invoiceId: payerInvoiceId, reason: 'payer_billed' }
+      : (exhausted ? { state: 'done' } : { state: 'no_invoice' }));
+}
+
+async function reconcileReceivedDepositSafely(estimateId, paymentIntentId = null) {
+  try {
+    const result = await reconcileReceivedDepositToInvoice(estimateId);
+    if (result.state !== 'park') return result;
+    logger.warn('[estimate-deposits] received deposit held for manual invoice reconciliation', {
+      estimateId, invoiceId: result.invoiceId,
+    });
+  } catch (err) {
+    logger.error('[estimate-deposits] late deposit reconciliation failed; received ledger retained', {
+      estimateId, error: err.message,
+    });
+    if (err.code === 'DEPOSIT_SETTLEMENT_RETRYABLE') throw err;
+  }
+  try {
+    const { triggerNotification } = require('./notification-triggers');
+    await triggerNotification('estimate_deposit_reconcile_needed', { estimateId }, {
+      dedupeKey: `estimate-deposit-reconcile:${paymentIntentId || estimateId}`,
+    });
+  } catch (notifyErr) {
+    logger.error('[estimate-deposits] failed to raise deposit reconcile alert', {
+      estimateId, error: notifyErr.message,
+    });
+  }
+  return { state: 'park' };
+}
+
 // Webhook entry: a succeeded PaymentIntent whose metadata marks it as an
 // estimate deposit. Routed from stripe-webhook.js BEFORE invoice handling.
 // Replay-safe: rows accept already consumed (received/credited) or already
@@ -1188,6 +1416,9 @@ async function handleDepositIntentSucceeded(paymentIntent, eventCreated = null) 
     .where({ stripe_payment_intent_id: paymentIntent.id })
     .first('status');
   if (existing && ['received', 'credited', 'refunded'].includes(existing.status)) {
+    if (['received', 'credited'].includes(existing.status)) {
+      await reconcileReceivedDepositSafely(estimateId, paymentIntent.id);
+    }
     return { handled: true, replay: true };
   }
 
@@ -1208,16 +1439,22 @@ async function handleDepositIntentSucceeded(paymentIntent, eventCreated = null) 
     return { handled: true, refunded: true };
   }
 
-  await markDepositReceived({
-    paymentIntentId: paymentIntent.id,
-    estimateId,
-    // Face value, not amount_received — see ensureDepositSatisfied.
-    amountDollars: depositFaceValueDollars(paymentIntent),
-    cardSurcharge: depositSurchargeDollars(paymentIntent),
-    // Stripe's succeeded-event timestamp (threaded from the webhook) — the
-    // settlement moment, not this handler's delivery time.
-    receivedAt: eventCreated ? new Date(eventCreated * 1000) : null,
-  });
+  let settlementRetryError = null;
+  try {
+    await markDepositReceived({
+      paymentIntentId: paymentIntent.id,
+      estimateId,
+      // Face value, not amount_received — see ensureDepositSatisfied.
+      amountDollars: depositFaceValueDollars(paymentIntent),
+      cardSurcharge: depositSurchargeDollars(paymentIntent),
+      // Stripe's succeeded-event timestamp (threaded from the webhook) — the
+      // settlement moment, not this handler's delivery time.
+      receivedAt: eventCreated ? new Date(eventCreated * 1000) : null,
+    });
+  } catch (err) {
+    if (err.code !== 'DEPOSIT_SETTLEMENT_RETRYABLE') throw err;
+    settlementRetryError = err;
+  }
   logger.info('[estimate-deposits] deposit received', { estimateId });
 
   await auditDepositSurchargeBypass(paymentIntent, estimateId);
@@ -1235,6 +1472,7 @@ async function handleDepositIntentSucceeded(paymentIntent, eventCreated = null) 
     logger.warn(`[estimate-deposits] lead conversion on deposit failed (${estimateId}): ${leadErr.message}`);
   }
 
+  if (settlementRetryError) throw settlementRetryError;
   return { handled: true };
 }
 
@@ -1461,6 +1699,84 @@ async function pendingDepositCredit(estimateId, trx = db) {
   };
 }
 
+// Resolve only durable invoice provenance. A stale/mismatched note or visit
+// link cannot direct one customer's deposit to another customer's invoice.
+async function invoiceDepositEstimateId(invoice, trx) {
+  const ids = [];
+  const scheduledServiceId = invoice.scheduled_service_id
+    || (invoice.service_record_id
+      ? (await trx('service_records').where({ id: invoice.service_record_id }).first('scheduled_service_id'))?.scheduled_service_id
+      : null);
+  if (scheduledServiceId) {
+    const service = await trx('scheduled_services').where({ id: scheduledServiceId }).first('source_estimate_id', 'customer_id');
+    if (!service || String(service.customer_id) !== String(invoice.customer_id)) {
+      throw new Error('Invoice visit provenance does not match its customer');
+    }
+    if (service.source_estimate_id) ids.push(String(service.source_estimate_id));
+  }
+  const stamp = /^Auto-generated from accepted estimate #([0-9a-fA-F-]{36})(?=\W|$)/.exec(String(invoice.notes || ''));
+  if (stamp) ids.push(stamp[1]);
+  const lines = invoice.line_items == null ? []
+    : typeof invoice.line_items === 'string' ? JSON.parse(invoice.line_items) : invoice.line_items;
+  if (!Array.isArray(lines)) throw new Error('Invoice line items are unreadable');
+  ids.push(...lines.filter((line) => line?.category === 'deposit_credit')
+    .map((line) => line.estimate_id).filter(Boolean).map(String));
+  const unique = [...new Set(ids)];
+  if (unique.length > 1) throw new Error('Invoice has conflicting estimate deposit provenance');
+  if (!unique.length) return null;
+  const estimate = await trx('estimates').where({ id: unique[0] }).first('customer_id');
+  if (!estimate || String(estimate.customer_id) !== String(invoice.customer_id)) {
+    throw new Error('Invoice deposit estimate does not match its customer');
+  }
+  return unique[0];
+}
+
+// Payment routes call this under their invoice-row lock, keeping the same
+// transaction open through their PI decision. A committed but unapplied
+// receipt must never leave the old full balance collectible.
+async function assertInvoiceDepositSettlementReady(trx, invoice, { lock = true } = {}) {
+  if (invoice.payer_id || invoiceWithdrawnFromCustomer(invoice)
+    || ['paid', 'prepaid'].includes(invoice.status)
+    || Number(invoice.total) <= 0) return;
+  const estimateId = await invoiceDepositEstimateId(invoice, trx);
+  if (!estimateId) return;
+  if (lock) await acquireEstimateDepositLedgerLock(trx, estimateId);
+  if (await pendingDepositCredit(estimateId, trx)) {
+    const err = new Error('A received deposit is awaiting invoice reconciliation');
+    err.code = 'DEPOSIT_RECONCILIATION_REQUIRED';
+    err.status = 409;
+    err.statusCode = 409;
+    throw err;
+  }
+}
+
+// Keep the invoice snapshot and the receipt ledger stable through a read or
+// provider handoff. Receipt recording commits before it requests an invoice
+// lock, so invoice -> ledger waits for uncommitted receipts without cycling.
+async function withInvoiceDepositSettlement(invoiceId, callback, database = db) {
+  return database.transaction(async (trx) => {
+    const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+    if (!invoice) return null;
+    await assertInvoiceDepositSettlementReady(trx, invoice);
+    // Provider logging uses a separate connection with a customer FK. Keep a
+    // customer merge from holding that row while waiting on our invoice. Do
+    // not wait here: an existing merge must finish after this rollback.
+    if (invoice.customer_id) {
+      try {
+        await trx('customers').where({ id: invoice.customer_id }).forKeyShare().noWait().first();
+      } catch (err) {
+        if (err.code !== '55P03') throw err;
+        const retry = new Error('This invoice is being updated. Please try again in a moment.');
+        retry.code = 'INVOICE_BUSY_RETRY';
+        retry.status = 409;
+        retry.statusCode = 409;
+        throw retry;
+      }
+    }
+    return callback(trx, invoice);
+  });
+}
+
 // Customer-scoped variant for flows that mint an invoice OFF the estimate
 // path (Customer 360 / AnnualPrepayLauncher manual annual-prepay invoice):
 // walk the customer's estimates with received deposit rows (oldest row
@@ -1517,14 +1833,6 @@ async function consumeDepositCredit({ estimateId, amount, invoiceId, trx = db })
   if (!(remainingCents > 0)) return 0;
   const requestedCents = remainingCents;
 
-  // Serialize against markDepositReceived / a concurrent mint's own read
-  // (Codex round 16 P1 #4131 — same chokepoint as pendingDepositCredit):
-  // the lock lives INSIDE this ledger writer so a caller can't forget it.
-  // Callers that already hold it (the mint's own transaction, which locks
-  // before its pendingDepositCredit read) just re-acquire — advisory xact
-  // locks are reentrant within the same transaction. trx must be a REAL
-  // transaction for the lock to actually serialize anything; every current
-  // caller already passes one.
   await acquireEstimateDepositLedgerLock(trx, estimateId);
 
   const rows = await trx('estimate_deposits')
@@ -1592,6 +1900,31 @@ async function handleDepositIntentCanceled(paymentIntent) {
   return { handled: true };
 }
 
+// Automatic collection needs invoice-specific backing. Partially consumed
+// historical pools without that attribution remain manual reconciliation.
+async function invoiceDepositCreditIsBacked(invoice, trx = db) {
+  const lines = require('./invoice')._parseInvoiceLineItems(invoice.line_items)
+    .filter((line) => line.category === 'deposit_credit');
+  const required = new Map();
+  for (const line of lines) {
+    const cents = -Math.round(Number(line.amount) * 100);
+    if (!line.estimate_id || !Number.isSafeInteger(cents) || cents <= 0) return false;
+    required.set(line.estimate_id, (required.get(line.estimate_id) || 0) + cents);
+  }
+  if (!required.size) return true;
+  const rows = await trx('estimate_deposits').where({ credited_invoice_id: invoice.id,
+    customer_id: invoice.customer_id }).whereIn('estimate_id', [...required.keys()])
+    .orderBy('id').forUpdate().noWait();
+  for (const row of rows) {
+    const credited = Math.round(Number(row.credited_amount) * 100);
+    const remaining = Math.round((Number(row.amount) - Number(row.refunded_amount || 0)) * 100);
+    if (!['received', 'credited'].includes(row.status) || !Number.isSafeInteger(credited)
+        || !Number.isSafeInteger(remaining) || credited <= 0 || credited > remaining) return false;
+    required.set(row.estimate_id, required.get(row.estimate_id) - credited);
+  }
+  return [...required.values()].every((cents) => cents === 0);
+}
+
 // Reverse a voided invoice's deposit consumption. The voided invoice's own
 // deposit_credit line items are the application record — each is stamped
 // with its estimate_id by InvoiceService.create(). Per-row attribution is
@@ -1622,12 +1955,6 @@ async function restoreDepositCreditForVoidedInvoice({ invoice, trx = db }) {
     totalRequestedCents += requestedCents;
     const estimateId = line.estimate_id || null;
     if (!estimateId) continue; // unstamped line — counted in the shortfall alert below
-    // Serialize against a concurrent mint's pendingDepositCredit read /
-    // consumeDepositCredit write, and against markDepositReceived (Codex
-    // round 16 P1 #4131): this restore makes credit available again, so it
-    // needs the SAME lock those take, acquired here inside the helper
-    // rather than left to each void path to remember. trx must be a real
-    // transaction (every current caller already supplies one).
     await acquireEstimateDepositLedgerLock(trx, estimateId);
     let remainingCents = requestedCents;
     const rows = await trx('estimate_deposits')
@@ -1749,11 +2076,14 @@ async function sendDepositReceiptEmailFallback(estimateId, { paymentIntentId = n
 }
 
 module.exports = {
+  acquireEstimateDepositLedgerLock,
   assessDepositFollowUpEligibility,
+  assertInvoiceDepositSettlementReady,
+  withInvoiceDepositSettlement,
   computeDepositAmount,
   DEPOSIT_FOLLOWUP_WINDOW,
   consumeDepositCredit,
-  acquireEstimateDepositLedgerLock,
+  invoiceDepositCreditIsBacked,
   handleDepositChargeReversed,
   handleDepositDisputeClosed,
   handleDepositIntentCanceled,
@@ -1764,6 +2094,7 @@ module.exports = {
   refundUnconsumedDeposits,
   resolveDepositPolicy,
   resolveDepositPolicyForEstimate,
+  reconcileReceivedDepositToInvoice,
   summarizeEstimateDeposit,
   sendDepositReceiptEmailFallback,
   linkedScheduledServiceId,

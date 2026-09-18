@@ -12,9 +12,10 @@ jest.mock('../models/db', () => {
   const mockRaws = [];
   const dbFn = jest.fn((table) => {
     const b = { _table: table, _whereIn: null, _whereRaw: [] };
-    for (const m of ['where', 'whereNull', 'whereNotNull']) b[m] = jest.fn(() => b);
+    for (const m of ['where', 'whereNull', 'whereNotNull', 'forUpdate']) b[m] = jest.fn(() => b);
     b.whereRaw = jest.fn((sql) => { b._whereRaw.push(sql); mockRaws.push({ table, sql }); return b; });
     b.whereIn = jest.fn((...args) => { b._whereIn = args; return b; });
+    b.first = jest.fn(async () => ({ estimate_data: {} }));
     b.update = jest.fn(() => Promise.resolve(1));
     b.del = jest.fn(() => {
       mockDeletes.push({ table: b._table, whereIn: b._whereIn });
@@ -22,6 +23,7 @@ jest.mock('../models/db', () => {
     });
     return b;
   });
+  dbFn.transaction = jest.fn(async (run) => run(dbFn));
   dbFn.fn = { now: jest.fn(() => 'NOW()') };
   dbFn._deletes = mockDeletes;
   dbFn._raws = mockRaws;
@@ -48,6 +50,7 @@ const {
   extensionStatusUpdate,
   EXTENDABLE_STATUSES,
   extensionDeliverableUnderGate,
+  fixedBidBlocksExtension,
 } = require('../services/estimate-extension');
 
 const DAY = 86400000;
@@ -105,6 +108,71 @@ describe('extensionStatusUpdate (view-blocking status revival)', () => {
 });
 
 describe('extendEstimate validation (pre-write throws)', () => {
+  it('allows an ordinary group and blocks an unreadable group before a public grant', async () => {
+    const query = { select: jest.fn(async () => [{ estimate_data: { proposal: {} } }]) };
+    for (const method of ['where', 'whereNot', 'whereNull', 'whereIn', 'whereRaw']) query[method] = jest.fn(() => query);
+    const database = jest.fn(() => query);
+    const anchor = { id: 'group-anchor', estimate_group_id: 'ordinary-group' };
+    expect(await fixedBidBlocksExtension(database, anchor)).toBe(false);
+    query.select.mockRejectedValueOnce(new Error('read failed'));
+    expect(await fixedBidBlocksExtension(database, anchor)).toBe(true);
+  });
+
+  it('reads every live sibling for the fixed-hold verdict, not only the revivable ones (GH codex P1 on #4309)', async () => {
+    const query = { select: jest.fn(async () => []) };
+    for (const method of ['where', 'whereNot', 'whereNull', 'whereIn', 'whereRaw']) query[method] = jest.fn(() => query);
+    const database = jest.fn(() => query);
+    expect(await fixedBidBlocksExtension(database, { id: 'group-anchor', estimate_group_id: 'ordinary-group' })).toBe(false);
+    expect(query.whereIn).toHaveBeenCalledWith('status', ['draft', 'scheduled', 'sending', 'send_failed', 'sent', 'viewed', 'expired']);
+    expect(query.whereNull).toHaveBeenCalledWith('archived_at');
+    expect(query.whereNull).not.toHaveBeenCalledWith('price_locked_at');
+    expect(query.whereRaw).toHaveBeenCalledWith(expect.stringMatching(/^NOT \(COALESCE\(estimate_data->'proposal'->>'validThrough'/));
+  });
+
+  it.each(['sending', 'scheduled', 'sent', 'expired'])('refuses the entire extension before writing when a %s sibling has fixed validity', async (status) => {
+    const update = jest.fn();
+    const query = { update, select: jest.fn(async () => [{ status, estimate_data: { proposal: { validThrough: '2020-01-01' } } }]) };
+    for (const method of ['where', 'whereNot', 'whereNull', 'whereIn', 'whereRaw']) query[method] = jest.fn(() => query);
+    db.mockImplementationOnce(() => query);
+    await expect(extendEstimate({
+      estimate: { id: 'group-anchor', estimate_group_id: 'fixed-group', status: 'viewed', sent_at: PAST, expires_at: PAST },
+      days: 7, silent: true, entryPoint: 'test', workflow: 'test',
+    })).rejects.toMatchObject({ statusCode: 400, message: expect.stringMatching(/fixed validity/) });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('rechecks a fixed sibling after acquiring the group lock without writing either row', async () => {
+    const anchor = { id: 'anchor', estimate_group_id: 'group', status: 'viewed', expires_at: PAST };
+    const update = jest.fn();
+    let locked = false;
+    const query = { update, select: jest.fn(async (...columns) => columns.includes('id')
+      ? [anchor]
+      : [{ estimate_data: { proposal: locked ? { validThrough: '2099-12-21' } : {} } }]) };
+    for (const method of ['where', 'whereNot', 'whereNull', 'whereIn', 'whereRaw', 'orderBy', 'forUpdate']) query[method] = jest.fn(() => query);
+    const trx = jest.fn(() => query);
+    trx.raw = jest.fn(async () => { locked = true; });
+    db.mockImplementationOnce(() => query);
+    db.transaction.mockImplementationOnce(async (run) => run(trx));
+    await expect(extendEstimate({ estimate: anchor, days: 7, silent: true }))
+      .rejects.toMatchObject({ code: 'FIXED_BID_VALIDITY' });
+    expect(locked).toBe(true);
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('classifies a fixed hold added to an ungrouped row after preflight before any extension write', async () => {
+    const estimate = { id: 'ordinary', status: 'viewed', sent_at: PAST, expires_at: PAST, estimate_data: {} };
+    const query = { update: jest.fn(), first: jest.fn(async () => ({
+      estimate_data: { proposal: { enabled: true, validThrough: '2099-12-21' } },
+    })) };
+    for (const method of ['where', 'whereNull', 'forUpdate']) query[method] = jest.fn(() => query);
+    const trx = jest.fn(() => query);
+    db.transaction.mockImplementationOnce(async (run) => run(trx));
+    await expect(extendEstimate({ estimate, days: 7, silent: true }))
+      .rejects.toMatchObject({ statusCode: 400, code: 'FIXED_BID_VALIDITY' });
+    expect(query.forUpdate).toHaveBeenCalledTimes(1);
+    expect(query.update).not.toHaveBeenCalled();
+  });
+
   it('refuses a LIVE sending claim — in-flight finalization owns status and expiry', async () => {
     // Thrown BEFORE any DB access: an extension mid-send would either be
     // overwritten by the send's final expires_at write or steal its claim.

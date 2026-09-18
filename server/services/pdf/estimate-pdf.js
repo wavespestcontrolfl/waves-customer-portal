@@ -146,7 +146,7 @@ function detailsBlock(doc, estimate, x, y) {
   const rows = [
     ['Proposal #', String(estimate.id || '').split('-')[0].toUpperCase() || '—'],
     ['Date', formatDisplayDate(estimate.created_at || new Date(), { fallback: '—' })],
-    ['Valid through', formatDisplayDate(estimate.expires_at, { fallback: '30 days from issue' })],
+    ['Valid through', formatDisplayDate(require('../proposal-bid').proposalExpiry(estimate) || estimate.expires_at, { fallback: '7 days after sending' })],
     ['Prepared by', 'Waves Pest Control, LLC'],
   ];
   doc.fontSize(10).font('Helvetica');

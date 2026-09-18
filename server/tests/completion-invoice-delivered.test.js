@@ -367,7 +367,7 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
     const { claimInvoiceForSend } = InvoiceService;
     const { ANNUAL_PREPAY_PREPAID_METHOD, annualPrepayCoversVisit } = require('../services/annual-prepay-renewals');
     const original = db.getMockImplementation();
-    const readRow = { id: 'inv-1', status: 'draft', total: 117, credit_applied: 0, scheduled_service_id: 'svc-1', service_record_id: null, payer_id: null };
+    const readRow = { id: 'inv-1', customer_id: 'cust-1', status: 'draft', total: 117, credit_applied: 0, scheduled_service_id: 'svc-1', service_record_id: null, payer_id: null };
     db.mockImplementation((table) => {
       const q = original(table);
       if (table === 'invoices') {

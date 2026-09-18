@@ -7,13 +7,7 @@ jest.mock('../models/db', () => {
   const mock = jest.fn((...args) => mockDbHandler(...args));
   mock.fn = { now: jest.fn(() => 'NOW') };
   mock.raw = jest.fn((sql) => ({ __raw: sql }));
-  // markDepositReceived runs its writes inside db.transaction so it can
-  // take the deposit-ledger advisory lock first (Codex round 14 P1
-  // #4131) — the trx passed to the callback IS this same mock, so
-  // trx('estimate_deposits')/trx.raw/trx.fn.now all route through the
-  // existing per-test mockDbHandler exactly like the untransacted calls
-  // did before.
-  mock.transaction = jest.fn((callback) => callback(mock));
+  mock.transaction = jest.fn(async (fn) => fn(mock));
   return mock;
 });
 jest.mock('../services/sms-template-renderer', () => ({
@@ -206,6 +200,10 @@ describe('webhook + invoice credit', () => {
       updates: [],
     };
     const handler = (table) => {
+      if (table === 'invoices as i') {
+        const q = { leftJoin: () => q, where: () => q, whereNotIn: () => q, orderBy: () => q, select: async () => [] };
+        return q;
+      }
       if (table === 'estimates') {
         return { where: () => ({ first: async () => { if (onEstimateRead) onEstimateRead(state); return estimateRow; } }) };
       }

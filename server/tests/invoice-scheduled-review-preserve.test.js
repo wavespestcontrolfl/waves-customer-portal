@@ -19,6 +19,9 @@ jest.mock('../services/logger', () => ({
 jest.mock('../services/invoice-email', () => ({
   sendInvoiceEmail: jest.fn(async () => ({ ok: true })),
 }));
+jest.mock('../services/estimate-deposits', () => ({
+  assertInvoiceDepositSettlementReady: jest.fn(async () => {}),
+}));
 jest.mock('../services/review-request', () => ({
   enrollPostService: jest.fn(async () => ({ id: 'rr-1' })),
 }));

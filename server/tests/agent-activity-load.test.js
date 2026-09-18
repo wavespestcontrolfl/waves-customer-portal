@@ -11,7 +11,7 @@ const mockTableErrors = {};
 function mockMakeBuilder(table) {
   const name = String(table).split(' ')[0];
   const builder = {};
-  for (const m of ['select', 'where', 'whereIn', 'leftJoin', 'orderBy', 'limit']) {
+  for (const m of ['select', 'where', 'whereIn', 'leftJoin', 'orderBy', 'orderByRaw', 'limit']) {
     builder[m] = () => builder;
   }
   builder.then = (resolve, reject) => {

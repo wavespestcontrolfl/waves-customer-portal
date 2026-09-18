@@ -8,8 +8,10 @@ jest.mock('../models/db', () => {
   qb.raw = () => { throw new Error('db.raw must not be touched when loadRows is injected'); };
   return qb;
 });
+jest.mock('../services/ops-digest-fall-off', () => ({ retireIfClean: jest.fn(async () => {}) }));
 
 const sendgrid = require('../services/sendgrid-mail');
+const { retireIfClean } = require('../services/ops-digest-fall-off');
 const {
   runRescheduleIntentWatcher,
   _private: { composeRescheduleIntentDigest },
@@ -74,14 +76,24 @@ describe('runRescheduleIntentWatcher', () => {
     expect(sendgrid.sendOne.mock.calls[0][0].subject).toMatch(/^ACT: 1 reschedule request/);
   });
 
-  test('quiet window sends nothing', async () => {
+  test('a clean scan retires the alert even during the send cooldown', async () => {
     const result = await runRescheduleIntentWatcher({
       loadRows: async () => [],
-      sentRecently: never,
+      sentRecently: async () => true,
       stampSendMarker: noop,
     });
     expect(result).toEqual({ skipped: 'nothing_found' });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(retireIfClean).toHaveBeenCalledWith('reschedule-intent');
+  });
+
+  test('an expired but still pending request does not clear the standing finding', async () => {
+    const loadRows = jest.fn(async ({ includeExpired } = {}) => includeExpired ? [flag()] : []);
+    const result = await runRescheduleIntentWatcher({ loadRows, sentRecently: never,
+      resolveActionedFlags: noop, replayPendingBells: noop });
+    expect(result).toEqual({ skipped: 'nothing_found' });
+    expect(loadRows).toHaveBeenCalledWith({ includeExpired: true });
+    expect(retireIfClean).not.toHaveBeenCalled();
   });
 
   test('kill switch suppresses send', async () => {
