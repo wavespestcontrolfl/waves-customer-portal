@@ -18,6 +18,13 @@
  */
 jest.mock('../models/db', () => {
   const db = (table, ...args) => {
+    if (table === 'invoices' && mockFault.invoiceClaimCheckOnce) {
+      mockFault.invoiceClaimCheckOnce = false;
+      const failing = {};
+      failing.where = () => failing;
+      failing.first = () => Promise.reject(new Error('invoice claim check failed (injected)'));
+      return failing;
+    }
     if (table === 'service_records' && mockFault.serviceRecordNotesUpdateFailures > 0) {
       const failing = {};
       failing.where = () => failing;
@@ -116,7 +123,7 @@ const CompletionAttempts = require('../services/completion-attempts');
 const { completeScheduledService } = require('../services/complete-scheduled-service');
 const connection = process.env.VISIT_PACKET_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
-const mockFault = { smsLogOnce: false, smsRestoreOnce: false, scheduledServicesLookupOnce: false, serviceRecordNotesUpdateFailures: 0 };
+const mockFault = { smsLogOnce: false, smsRestoreOnce: false, scheduledServicesLookupOnce: false, serviceRecordNotesUpdateFailures: 0, invoiceClaimCheckOnce: false };
 let database;
 let mockPg; // the per-test transaction while a test runs; the pool between tests
 jest.setTimeout(90000);
@@ -137,6 +144,7 @@ postgres('the shared send claim on a migrated database', () => {
     mockFault.smsRestoreOnce = false;
     mockFault.scheduledServicesLookupOnce = false;
     mockFault.serviceRecordNotesUpdateFailures = 0;
+    mockFault.invoiceClaimCheckOnce = false;
     mockRace.afterMint = null;
     sendCustomerMessage.mockImplementation(async () => ({ sent: true, channel: 'sms', providerMessageId: `SM${randomUUID().slice(0, 8)}` }));
     mockPg = await database.transaction();
@@ -207,6 +215,7 @@ postgres('the shared send claim on a migrated database', () => {
       expect(payLinkTexts()).toHaveLength(1);
       expect(invoice.status).toBe('sent');
       expect(invoice.sms_sent_at).not.toBeNull();
+      expect(invoice.send_claim_token).toBeNull();
     });
 
     test('an admin send that claims the fresh draft between the mint commit and the completion delivery owns it: the completion goes report-only, texts no second pay link, and leaves the admin claim untouched', async () => {
@@ -237,8 +246,66 @@ postgres('the shared send claim on a migrated database', () => {
       expect(invoice.sent_at).toBeNull();
       expect(invoice.sms_sent_at).toBeNull();
       // …and the admin send finishes its delivery exactly once.
-      await InvoiceService.markDeliverySent(adminClaim.invoice.id, { sms: true, source: 'admin_send_now' });
+      await InvoiceService.markDeliverySent(adminClaim.invoice.id, {
+        sms: true, source: 'admin_send_now', claimToken: adminClaim.invoice.send_claim_token,
+      });
       expect((await readInvoice(adminClaim.invoice.id)).status).toBe('sent');
+    });
+
+    test('a stale-parked completion cannot restore or finalize the replacement operator claim', async () => {
+      await visitFixture();
+      let originalToken;
+      let replacementClaim;
+      sendCustomerMessage.mockImplementationOnce(async (input) => {
+        const active = await mockPg('invoices').where({ customer_id: f.customerId }).first();
+        originalToken = active.send_claim_token;
+        expect(active).toMatchObject({ status: 'sending', send_claim_token: expect.any(String) });
+        await expect(input.preDispatchCheck()).resolves.toEqual({ ok: true });
+        await mockPg('invoices').where({ id: active.id }).update({
+          updated_at: new Date(Date.now() - 11 * 60 * 1000),
+        });
+        await InvoiceService.processScheduledSends({ limit: 1 });
+        expect(await readInvoice(active.id)).toMatchObject({ status: 'scheduled', send_claim_token: null });
+        replacementClaim = await InvoiceService.claimInvoiceForSend(active.id, { operatorInitiated: true });
+        expect(replacementClaim.invoice.send_claim_token).not.toBe(originalToken);
+        const lost = await input.preProviderCheck();
+        expect(lost).toMatchObject({ ok: false, code: 'send_claim_lost', retryable: true });
+        return { sent: false, blocked: true, ...lost };
+      });
+
+      expect((await complete()).status).toBe(503);
+      let after = await readInvoice(replacementClaim.invoice.id);
+      expect(after).toMatchObject({
+        status: 'sending', send_claim_token: replacementClaim.invoice.send_claim_token,
+        sent_at: null, sms_sent_at: null,
+      });
+      const record = await mockPg('service_records').where({ scheduled_service_id: f.serviceId }).first();
+      expect(record.structured_notes).toMatchObject({ completionSmsStatus: 'failed' });
+      await InvoiceService.markDeliverySent(after.id, {
+        sms: true, source: 'late_old_completion', claimToken: originalToken,
+      });
+      after = await readInvoice(after.id);
+      expect(after).toMatchObject({
+        status: 'sending', send_claim_token: replacementClaim.invoice.send_claim_token,
+        sent_at: null, sms_sent_at: null,
+      });
+    });
+
+    test('a completion claim-check read failure is retryable and releases its still-owned claim without provider contact', async () => {
+      await visitFixture();
+      sendCustomerMessage.mockImplementationOnce(async (input) => {
+        await expect(input.preDispatchCheck()).resolves.toEqual({ ok: true });
+        mockFault.invoiceClaimCheckOnce = true;
+        const failed = await input.preProviderCheck();
+        expect(failed).toMatchObject({ ok: false, retryable: true, code: 'send_claim_check_failed' });
+        return { sent: false, blocked: true, ...failed };
+      });
+
+      expect((await complete()).status).toBe(503);
+      const invoice = await mockPg('invoices').where({ customer_id: f.customerId }).first();
+      expect(invoice).toMatchObject({ status: 'draft', send_claim_token: null, sent_at: null, sms_sent_at: null });
+      const record = await mockPg('service_records').where({ scheduled_service_id: f.serviceId }).first();
+      expect(record.structured_notes).toMatchObject({ completionSmsStatus: 'failed' });
     });
 
     test.each(['returned', 'thrown'])('a %s uncertain completion pay-link handoff retains the claim without recording or retrying delivery', async (mode) => {
@@ -428,15 +495,18 @@ postgres('the shared send claim on a migrated database', () => {
 
     test('restoreSendClaim never writes the invoice row for a previousStatus of sending — the preclaimer owns that token', async () => {
       await scheduledInvoice();
-      const [claimed] = await mockPg('invoices').where({ id: f.invoiceId }).update({ status: 'sending', updated_at: new Date() }).returning(['id', 'updated_at']);
+      const claimToken = randomUUID();
+      const [claimed] = await mockPg('invoices').where({ id: f.invoiceId }).update({
+        status: 'sending', send_claim_token: claimToken, updated_at: new Date(),
+      }).returning(['id', 'updated_at']);
       await new Promise((resolve) => setTimeout(resolve, 5)); // a re-stamp must land on a later millisecond to be visible
-      await InvoiceService.restoreSendClaim(f.invoiceId, 'sending', true);
+      await InvoiceService.restoreSendClaim(f.invoiceId, 'sending', true, [], mockPg, claimToken);
       const after = await readInvoice(f.invoiceId);
       expect(after.status).toBe('sending');
       expect(new Date(after.updated_at).getTime()).toBe(new Date(claimed.updated_at).getTime());
       // A real previous status still restores exactly as before.
-      await InvoiceService.restoreSendClaim(f.invoiceId, 'scheduled', true);
-      expect((await readInvoice(f.invoiceId)).status).toBe('scheduled');
+      await InvoiceService.restoreSendClaim(f.invoiceId, 'scheduled', true, [], mockPg, claimToken);
+      expect(await readInvoice(f.invoiceId)).toMatchObject({ status: 'scheduled', send_claim_token: null });
     });
   });
 
@@ -539,7 +609,9 @@ postgres('the shared send claim on a migrated database', () => {
       expect(invoice.sent_at).toBeNull();
       expect(invoice.sms_sent_at).toBeNull();
       // …and the admin send finishes its delivery exactly once.
-      await InvoiceService.markDeliverySent(adminClaim.invoice.id, { sms: true, source: 'admin_send_now' });
+      await InvoiceService.markDeliverySent(adminClaim.invoice.id, {
+        sms: true, source: 'admin_send_now', claimToken: adminClaim.invoice.send_claim_token,
+      });
       expect((await readInvoice(adminClaim.invoice.id)).status).toBe('sent');
     });
 
@@ -889,6 +961,84 @@ postgres('the shared send claim on a migrated database', () => {
       expect(queued.scheduled_for).toEqual(originalSchedule);
       expect(queued.metadata.invoice_send_adoption_pending).toBeUndefined();
       expect((await readInvoice(f.invoiceId)).status).toBe('sent');
+    });
+
+    test.each(['accepted', 'held'])('a stale old sender cannot %s-mutate the queue after a replacement re-adopts it', async (mode) => {
+      await draftInvoiceFixture();
+      const queueId = randomUUID();
+      await mockPg('sms_log').insert({
+        id: queueId,
+        customer_id: f.customerId,
+        direction: 'outbound',
+        from_phone: '+19415550100',
+        to_phone: '+12025550123',
+        message_type: 'invoice',
+        message_body: 'Fixture deferred pay link',
+        status: 'scheduled',
+        scheduled_for: new Date('2026-09-12T12:00:00.000Z'),
+        metadata: { entry_point: 'invoice_send_deferred', invoice_id: f.invoiceId },
+      });
+      let originalToken;
+      let replacement;
+      sendCustomerMessage.mockImplementationOnce(async () => {
+        const active = await readInvoice(f.invoiceId);
+        originalToken = active.send_claim_token;
+        await mockPg('invoices').where({ id: f.invoiceId }).update({ updated_at: new Date(Date.now() - 11 * 60 * 1000) });
+        await InvoiceService.processScheduledSends({ limit: 1 });
+        replacement = await InvoiceService.claimInvoiceForSend(f.invoiceId, {
+          operatorInitiated: true,
+          adoptsQueuedInvoiceSend: true,
+        });
+        expect(replacement.invoice.send_claim_token).not.toBe(originalToken);
+        if (mode === 'accepted') return { sent: true, channel: 'sms', providerMessageId: `SM${randomUUID().slice(0, 8)}` };
+        return {
+          sent: false,
+          blocked: true,
+          deferred: true,
+          code: 'QUIET_HOURS_HOLD',
+          reason: 'held in fixture',
+          nextAllowedAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        };
+      });
+
+      if (mode === 'accepted') {
+        await expect(InvoiceService.sendViaSMS(f.invoiceId, { operatorInitiated: true }))
+          .resolves.toMatchObject({ sent: true, claimLost: true });
+      } else {
+        await expect(InvoiceService.sendViaSMS(f.invoiceId, { operatorInitiated: true }))
+          .rejects.toMatchObject({ code: 'QUIET_HOURS_HOLD' });
+      }
+      expect(await readInvoice(f.invoiceId)).toMatchObject({
+        status: 'sending', send_claim_token: replacement.invoice.send_claim_token,
+      });
+      const pending = await mockPg('sms_log').where({ id: queueId }).first();
+      expect(pending).toMatchObject({ status: 'cancelled' });
+      expect(pending.metadata.invoice_send_adoption_pending).toBe(true);
+
+      await InvoiceService.restoreSendClaim(
+        f.invoiceId,
+        replacement.previousStatus,
+        replacement.claimed,
+        replacement.consumedQueuedSendRows,
+        mockPg,
+        replacement.invoice.send_claim_token,
+      );
+      expect(await readInvoice(f.invoiceId)).toMatchObject({ status: 'scheduled', send_claim_token: null });
+      expect(await mockPg('sms_log').where({ id: queueId }).first()).toMatchObject({ status: 'scheduled' });
+    });
+
+    test('the nested SMS retains ownership through the email leg and the outer finalizer clears it', async () => {
+      await draftInvoiceFixture();
+      const { sendInvoiceEmail } = require('../services/invoice-email');
+      sendInvoiceEmail.mockImplementationOnce(async (invoiceId, options) => {
+        const betweenLegs = await readInvoice(invoiceId);
+        expect(betweenLegs).toMatchObject({ status: 'sent', send_claim_token: options.claimToken });
+        return { ok: true, messageId: 'email-fixture' };
+      });
+
+      const result = await InvoiceService.sendViaSMSAndEmail(f.invoiceId);
+      expect(result).toMatchObject({ ok: true, sms: { ok: true }, email: { ok: true } });
+      expect(await readInvoice(f.invoiceId)).toMatchObject({ status: 'sent', send_claim_token: null });
     });
   });
 

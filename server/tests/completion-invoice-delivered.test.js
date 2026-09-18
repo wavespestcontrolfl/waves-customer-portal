@@ -14,31 +14,40 @@ const { completionInvoiceAlreadyDelivered } = require('../services/invoice-helpe
 // flipped it to 'sending', and the loser is refused — so an admin "send
 // now" and the completion can never both text the pay link.
 jest.mock('../models/db', () => {
-  const state = { status: 'draft', sent_at: null, email_sent_at: null, queuedCompletionText: null };
+  const state = { id: 'inv-1', status: 'draft', send_claim_token: null, sent_at: null, email_sent_at: null, queuedCompletionText: null };
   const chain = (table) => {
     const q = {};
-    q.where = jest.fn(() => q);
+    const predicates = [];
+    let values = null;
+    let updated = false;
+    let count = 0;
+    const matches = () => predicates.every(([key, value]) => state[key] === value);
+    const execute = () => {
+      if (!updated && values) {
+        count = matches() ? 1 : 0;
+        if (count) Object.assign(state, values);
+        updated = true;
+      }
+      return count;
+    };
+    q.where = jest.fn((clause) => {
+      if (table === 'invoices' && clause && typeof clause === 'object') predicates.push(...Object.entries(clause));
+      return q;
+    });
     q.whereIn = jest.fn(() => q);
     q.whereRaw = jest.fn(() => q);
-    q.first = jest.fn(async () => (table === 'sms_log'
-      ? state.queuedCompletionText
-      : { id: 'inv-1', status: state.status, sent_at: state.sent_at, email_sent_at: state.email_sent_at }));
-    q.update = jest.fn((values) => ({
-      returning: jest.fn(async () => {
-        const expected = q.where.mock.calls[q.where.mock.calls.length - 1][0].status;
-        if (state.status !== expected) return [];
-        state.status = values.status;
-        return [{ id: 'inv-1', status: state.status }];
-      }),
-      catch: jest.fn(async () => { state.status = values.status; }),
-    }));
+    q.forUpdate = jest.fn(() => q);
+    q.first = jest.fn(async () => (table === 'sms_log' ? state.queuedCompletionText : (matches() ? { ...state } : undefined)));
+    q.update = jest.fn((next) => { values = next; return q; });
+    q.returning = jest.fn(async () => (execute() ? [{ ...state }] : []));
+    q.then = (resolve, reject) => Promise.resolve(execute()).then(resolve, reject);
     return q;
   };
   const db = jest.fn((table) => chain(table));
   db.__state = state;
   db.fn = { now: () => new Date() };
   db.raw = jest.fn();
-  db.transaction = jest.fn();
+  db.transaction = jest.fn(async (callback) => callback(db));
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -61,7 +70,7 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
     expect(first).toMatchObject({ previousStatus: 'draft', claimed: true });
     expect(db.__state.status).toBe('sending');
     await expect(claimInvoiceForSend('inv-1')).rejects.toThrow(/already in progress|not sendable/i);
-    await restoreSendClaim('inv-1', first.previousStatus, first.claimed);
+    await restoreSendClaim('inv-1', first.previousStatus, first.claimed, [], db, first.invoice.send_claim_token);
     expect(db.__state.status).toBe('draft');
   });
 
@@ -211,15 +220,14 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
     db.mockImplementation((table) => {
       const q = original(table);
       if (table === 'invoices') {
-        q.first = jest.fn(async () => ({ ...readRow, status: db.__state.status }));
-        q.update = jest.fn((values) => ({
-          returning: jest.fn(async () => {
-            if (db.__state.status !== q.where.mock.calls[q.where.mock.calls.length - 1][0].status) return [];
-            db.__state.status = values.status;
-            return [{ ...flippedRow, status: values.status }];
-          }),
-          catch: jest.fn(async () => { db.__state.status = values.status; }),
-        }));
+        q.first = jest.fn(async () => ({ ...readRow, status: db.__state.status, send_claim_token: db.__state.send_claim_token }));
+        const update = q.update;
+        q.update = jest.fn((values) => {
+          const result = update(values);
+          const returning = q.returning;
+          q.returning = jest.fn(async () => (await returning()).map((changed) => ({ ...flippedRow, ...changed })));
+          return result;
+        });
       }
       if (table === 'scheduled_services') q.first = jest.fn(async () => ({ id: 'svc-1', status: visitStatus }));
       return q;
@@ -266,15 +274,14 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
     db.mockImplementation((table) => {
       const q = original(table);
       if (table === 'invoices') {
-        q.first = jest.fn(async () => ({ ...readRow, status: db.__state.status }));
-        q.update = jest.fn((values) => ({
-          returning: jest.fn(async () => {
-            if (db.__state.status !== q.where.mock.calls[q.where.mock.calls.length - 1][0].status) return [];
-            db.__state.status = values.status;
-            return [{ ...readRow, status: values.status }];
-          }),
-          catch: jest.fn(async () => { db.__state.status = values.status; }),
-        }));
+        q.first = jest.fn(async () => ({ ...readRow, status: db.__state.status, send_claim_token: db.__state.send_claim_token }));
+        const update = q.update;
+        q.update = jest.fn((values) => {
+          const result = update(values);
+          const returning = q.returning;
+          q.returning = jest.fn(async () => (await returning()).map((changed) => ({ ...readRow, ...changed })));
+          return result;
+        });
       }
       if (table === 'scheduled_services') q.first = jest.fn(async () => ({ id: 'svc-1', status: 'confirmed', prepaid_amount: visitPrepaidAmount, prepaid_method: 'cash' }));
       if (table === 'payments') q.first = jest.fn(async () => (creditApplied ? { id: 'pmt-1' } : null));
@@ -337,15 +344,14 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
     db.mockImplementation((table) => {
       const q = original(table);
       if (table === 'invoices') {
-        q.first = jest.fn(async () => ({ ...readRow, status: db.__state.status }));
-        q.update = jest.fn((values) => ({
-          returning: jest.fn(async () => {
-            if (db.__state.status !== q.where.mock.calls[q.where.mock.calls.length - 1][0].status) return [];
-            db.__state.status = values.status;
-            return [{ ...readRow, status: values.status }];
-          }),
-          catch: jest.fn(async () => { db.__state.status = values.status; }),
-        }));
+        q.first = jest.fn(async () => ({ ...readRow, status: db.__state.status, send_claim_token: db.__state.send_claim_token }));
+        const update = q.update;
+        q.update = jest.fn((values) => {
+          const result = update(values);
+          const returning = q.returning;
+          q.returning = jest.fn(async () => (await returning()).map((changed) => ({ ...readRow, ...changed })));
+          return result;
+        });
       }
       if (table === 'scheduled_services') q.first = jest.fn(async () => ({ id: 'svc-1', status: 'confirmed', prepaid_amount: 117, prepaid_method: 'cash' }));
       if (table === 'payments') q.first = jest.fn(async () => null);
@@ -371,15 +377,14 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
     db.mockImplementation((table) => {
       const q = original(table);
       if (table === 'invoices') {
-        q.first = jest.fn(async () => ({ ...readRow, status: db.__state.status }));
-        q.update = jest.fn((values) => ({
-          returning: jest.fn(async () => {
-            if (db.__state.status !== q.where.mock.calls[q.where.mock.calls.length - 1][0].status) return [];
-            db.__state.status = values.status;
-            return [{ ...readRow, status: values.status }];
-          }),
-          catch: jest.fn(async () => { db.__state.status = values.status; }),
-        }));
+        q.first = jest.fn(async () => ({ ...readRow, status: db.__state.status, send_claim_token: db.__state.send_claim_token }));
+        const update = q.update;
+        q.update = jest.fn((values) => {
+          const result = update(values);
+          const returning = q.returning;
+          q.returning = jest.fn(async () => (await returning()).map((changed) => ({ ...readRow, ...changed })));
+          return result;
+        });
       }
       // A stamped visit — carries a positive prepaid_amount AND the annual
       // method, but no LIVE covering term (annualPrepayCoversVisit mocked
@@ -567,8 +572,8 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
       // sendViaSMS and sendViaSMSAndEmail thread operatorInitiated through to
       // the claim — the two callers an admin resend route actually uses.
       const invoiceSource = require('fs').readFileSync(require('path').join(__dirname, '../services/invoice.js'), 'utf8');
-      expect(invoiceSource).toMatch(/claimInvoiceForSend\(invoiceId, \{ allowClaimed, adoptsQueuedInvoiceSend, operatorInitiated \}\)/);
-      expect(invoiceSource).toMatch(/claimInvoiceForSend\(invoiceId, \{ allowClaimed, firstDeliveryOnly, adoptsQueuedInvoiceSend: true, operatorInitiated \}\)/);
+      expect(invoiceSource).toMatch(/claimInvoiceForSend\(invoiceId, \{ allowClaimed, claimToken, adoptsQueuedInvoiceSend, operatorInitiated \}\)/);
+      expect(invoiceSource).toMatch(/claimInvoiceForSend\(invoiceId, \{ allowClaimed, claimToken, firstDeliveryOnly, adoptsQueuedInvoiceSend: true, operatorInitiated \}\)/);
     } finally {
       db.mockImplementation(original);
     }
@@ -608,7 +613,7 @@ describe('completionInvoiceAlreadyDelivered', () => {
     // refuses BEFORE the flip on sent_at, email_sent_at, or a delivered
     // status — see the completion-invoice-delivered describe block below
     // for the mechanism-diff proof.
-    expect(completion).toMatch(/const claim = await InvoiceServiceForClaim\.claimInvoiceForSend\(invoice\.id, \{ firstDeliveryOnly: true \}\);\s*completionInvoiceSendClaim = \{ invoiceId: invoice\.id, previousStatus: claim\.previousStatus, claimed: claim\.claimed \};/);
+    expect(completion).toMatch(/const claim = await InvoiceServiceForClaim\.claimInvoiceForSend\(invoice\.id, \{ firstDeliveryOnly: true \}\);\s*completionInvoiceSendClaim = \{ invoiceId: invoice\.id, previousStatus: claim\.previousStatus, claimed: claim\.claimed, claimToken: claim\.invoice\.send_claim_token \};/);
     // The dead post-claim recheck itself (an actual call, not a comment
     // explaining why it's gone) no longer exists at this site.
     expect(completion).not.toMatch(/if \(require\('\.\.\/services\/invoice-helpers'\)\.completionInvoiceAlreadyDelivered\(claim\.invoice\)\)/);
@@ -638,7 +643,7 @@ describe('completionInvoiceAlreadyDelivered', () => {
     expect(completion).toMatch(/if \(invoice\?\.id && invoiceCreated && payUrl && snap\.invoiceLinkAllowed\) \{[\s\S]{0,300}?completionInvoiceLinkDelivered = true;\s*try \{\s*const InvoiceService = require\('\.\.\/services\/invoice'\);\s*invoice = await InvoiceService\.markDeliverySent/);
     expect(completion).not.toMatch(/markDeliverySent\([\s\S]{0,200}?\}\);\s*completionInvoiceLinkDelivered = true;/);
     // ONE release, in the outer finally — covers the normal end, the 503 resume returns and a throw.
-    expect(completion).toMatch(/throw err;\s*\} finally \{[\s\S]{0,1200}?if \(completionInvoiceSendClaim\?\.claimed && !completionInvoiceLinkDelivered && !completionInvoiceDeliveryUnverified\) \{\s*await require\('\.\.\/services\/invoice'\)\.restoreSendClaim\(completionInvoiceSendClaim\.invoiceId, completionInvoiceSendClaim\.previousStatus, true\);[\s\S]{0,120}?\}\s*\}\s*\}\s*\n\s*module\.exports = \{/);
+    expect(completion).toMatch(/throw err;\s*\} finally \{[\s\S]{0,1200}?if \(completionInvoiceSendClaim\?\.claimed && !completionInvoiceLinkDelivered && !completionInvoiceDeliveryUnverified\) \{\s*await require\('\.\.\/services\/invoice'\)\.restoreSendClaim\(completionInvoiceSendClaim\.invoiceId, completionInvoiceSendClaim\.previousStatus, true, \[\], db, completionInvoiceSendClaim\.claimToken\);[\s\S]{0,120}?\}\s*\}\s*\}\s*\n\s*module\.exports = \{/);
     expect(completion.match(/restoreSendClaim\(completionInvoiceSendClaim\.invoiceId/g)).toHaveLength(1);
     // Returned uncertainty is normalized before MMS fallback; thrown
     // uncertainty reaches the same catch. Neither is recorded delivered,

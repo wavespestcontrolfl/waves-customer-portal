@@ -13,6 +13,7 @@ jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.raw = jest.fn((sql) => sql);
   fn.fn = { now: jest.fn(() => 'now()') };
+  fn.transaction = jest.fn(async (callback) => callback(fn));
   return fn;
 });
 jest.mock('../services/logger', () => ({
@@ -61,6 +62,37 @@ function chain({ rows, returning, first, updateCount = 1 } = {}) {
   return q;
 }
 
+function deliveryDb(invoice, queueInsert = chain()) {
+  const current = { ...invoice };
+  db.mockImplementation((table) => {
+    if (table === 'sms_log') {
+      const q = chain({ returning: [], first: undefined });
+      q.insert = queueInsert.insert;
+      return q;
+    }
+    if (table !== 'invoices') return chain({ first: undefined });
+    const conditions = [];
+    const q = chain();
+    q.where = jest.fn((values) => {
+      if (values && typeof values === 'object') conditions.push(...Object.entries(values));
+      return q;
+    });
+    q.clone = jest.fn(() => q);
+    const matches = () => conditions.every(([key, value]) => current[key] === value);
+    let count = 0;
+    q.first = jest.fn(async () => matches() ? { ...current } : undefined);
+    q.update = jest.fn((values) => {
+      count = matches() ? 1 : 0;
+      if (count) Object.assign(current, values, typeof values.status === 'string' && values.status.startsWith('CASE') ? { status: 'sent' } : {});
+      return q;
+    });
+    q.returning = jest.fn(async () => count ? [{ ...current }] : []);
+    q.then = (resolve) => Promise.resolve(count).then(resolve);
+    return q;
+  });
+  return current;
+}
+
 const dueRow = {
   id: 'inv-1',
   invoice_number: 'WPC-2026-1042',
@@ -76,6 +108,7 @@ describe('processScheduledSends send-window handling', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    db.mockReset();
     isEnabled.mockImplementation((gate) => gate === 'smsSendWindow');
     nextSendWindowOpenET.mockReturnValue(WINDOW_OPEN);
     sendSpy = jest.spyOn(InvoiceService, 'sendViaSMSAndEmail');
@@ -307,17 +340,10 @@ describe('processScheduledSends send-window handling', () => {
         scheduled_request_review: false,
         scheduled_review_delay_minutes: null,
       };
-      db
-        .mockReturnValueOnce(chain({ first: { payer_statement_id: null } })) // accrual pre-check
-        .mockReturnValueOnce(chain({ first: sendingInvoice })) // claimInvoiceForSend read
-        // The preclaimed allowClaimed branch now reconciles the queue too
-        // (Codex round 14 P1 #4131): pre-check (none live), consume
-        // (nothing pre-existing to adopt), strict re-check (none live).
-        .mockReturnValueOnce(chain({ first: undefined }))
-        .mockReturnValueOnce(chain({ returning: [] }))
-        .mockReturnValueOnce(chain({ first: undefined }));
+      sendingInvoice.send_claim_token = 'scheduled-owner';
+      deliveryDb(sendingInvoice);
 
-      const result = await InvoiceService.sendViaSMSAndEmail('inv-1', { allowClaimed: true });
+      const result = await InvoiceService.sendViaSMSAndEmail('inv-1', { allowClaimed: true, claimToken: 'scheduled-owner' });
 
       expect(sendInvoiceEmail).not.toHaveBeenCalled();
       expect(result.ok).toBe(false);
@@ -351,19 +377,7 @@ describe('processScheduledSends send-window handling', () => {
         scheduled_review_delay_minutes: null,
       };
       const requeueInsert = chain();
-      db
-        .mockReturnValueOnce(chain({ first: { payer_statement_id: null } })) // accrual pre-check
-        .mockReturnValueOnce(chain({ first: draftInvoice })) // claim read
-        .mockReturnValueOnce(chain({ first: undefined })) // completion pay-link replay check (none queued)
-        .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending' }] })) // claim update
-        .mockReturnValueOnce(chain({ first: undefined })) // replay re-check under the claim (none)
-        .mockReturnValueOnce(chain({ returning: [] })) // adoption: consume the send's own scheduled held leg (none to cancel)
-        .mockReturnValueOnce(chain({ first: undefined })) // strict re-check after the consume (none live)
-        .mockReturnValueOnce(chain({ first: undefined })) // requeue idempotency check (no prior row)
-        .mockReturnValueOnce(requeueInsert) // held-SMS scheduled-rail insert
-        .mockReturnValueOnce(chain({ first: { ...draftInvoice, status: 'sending' } })) // second-channel collectibility recheck
-        .mockReturnValueOnce(chain()) // finalize update
-        .mockReturnValueOnce(chain({ first: null })); // lead-conversion read (permissive)
+      deliveryDb(draftInvoice, requeueInsert);
 
       const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {});
 
@@ -407,17 +421,7 @@ describe('processScheduledSends send-window handling', () => {
       failingInsert.insert = jest.fn(() => { throw new Error('sms_log insert failed'); });
       const restoreChain = chain();
       restoreChain.catch = jest.fn(() => Promise.resolve());
-      db
-        .mockReturnValueOnce(chain({ first: { payer_statement_id: null } })) // accrual pre-check
-        .mockReturnValueOnce(chain({ first: draftInvoice })) // claim read
-        .mockReturnValueOnce(chain({ first: undefined })) // completion pay-link replay check (none queued)
-        .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending' }] })) // claim update
-        .mockReturnValueOnce(chain({ first: undefined })) // replay re-check under the claim (none)
-        .mockReturnValueOnce(chain({ returning: [] })) // adoption: consume the send's own scheduled held leg (none to cancel)
-        .mockReturnValueOnce(chain({ first: undefined })) // strict re-check after the consume (none live)
-        .mockReturnValueOnce(chain({ first: undefined })) // requeue idempotency check (no prior row)
-        .mockReturnValueOnce(failingInsert) // held-SMS scheduled-rail insert THROWS
-        .mockReturnValue(restoreChain); // restoreSendClaim + anything after
+      deliveryDb(draftInvoice, failingInsert);
 
       const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {});
 
@@ -662,15 +666,10 @@ describe('processScheduledSends send-window handling', () => {
       require('../services/estimate-deposits').assertInvoiceDepositSettlementReady
         .mockResolvedValueOnce(true) // wrapper owns the send claim
         .mockRejectedValueOnce(refusal); // deposit changes before nested SMS
-      db
-        .mockReturnValueOnce(chain({ first: sendingInvoice })) // wrapper precheck
-        .mockReturnValueOnce(chain({ first: sendingInvoice })) // outer claim read
-        .mockReturnValueOnce(chain({ first: undefined })) // queued-obligation precheck
-        .mockReturnValueOnce(chain({ returning: [] })) // no previous queued obligation
-        .mockReturnValueOnce(chain({ first: undefined })) // strict queue recheck
-        .mockReturnValueOnce(chain({ first: sendingInvoice })); // nested SMS claim read
+      sendingInvoice.send_claim_token = 'scheduled-owner';
+      deliveryDb(sendingInvoice);
 
-      const result = await InvoiceService.sendViaSMSAndEmail('inv-1', { allowClaimed: true });
+      const result = await InvoiceService.sendViaSMSAndEmail('inv-1', { allowClaimed: true, claimToken: 'scheduled-owner' });
 
       expect(result.ok).toBe(false);
       expect(result.sms.code).toBe(code);
@@ -678,7 +677,7 @@ describe('processScheduledSends send-window handling', () => {
       expect(result.email.code).toBe(code);
       expect(require('../services/invoice-email').sendInvoiceEmail).not.toHaveBeenCalled();
       // Only the scheduled worker owns the token and may release its preclaim.
-      expect(db).toHaveBeenCalledTimes(6);
+      expect((await db('invoices').where({ id: 'inv-1' }).first()).send_claim_token).toBe('scheduled-owner');
       expect(refusal.deliveryNeverAttempted).toBe(true);
     },
   );
@@ -851,6 +850,8 @@ describe('processScheduledSends send-window handling', () => {
       q.orWhere = jest.fn(() => q);
       q.whereIn = jest.fn((field, values) => { predicates.push(() => values.includes(invoice[field])); return q; });
       q.whereRaw = jest.fn(() => q);
+      q.forUpdate = jest.fn(() => q);
+      q.clone = jest.fn(() => q);
       q.orderBy = jest.fn(() => q);
       q.limit = jest.fn(() => q);
       const matches = () => predicates.every((predicate) => predicate());
@@ -884,7 +885,9 @@ describe('processScheduledSends send-window handling', () => {
 
     const replacement = await InvoiceService.claimInvoiceForSend(invoice.id, { operatorInitiated: true });
     expect(replacement).toMatchObject({ claimed: true, previousStatus: 'scheduled' });
-    expect(invoice).toMatchObject({ status: 'sending', send_claim_token: null });
+    expect(invoice.status).toBe('sending');
+    expect(invoice.send_claim_token).toEqual(expect.any(String));
+    expect(invoice.send_claim_token).not.toBe(oldToken);
 
     finishOldSend({
       ok: false,
@@ -893,7 +896,9 @@ describe('processScheduledSends send-window handling', () => {
       creditApplied: 0,
     });
     await expect(oldWorker).resolves.toEqual({ sent: 0, failed: 1, deferred: 0 });
-    expect(invoice).toMatchObject({ status: 'sending', send_claim_token: null });
+    expect(invoice.status).toBe('sending');
+    expect(invoice.send_claim_token).toEqual(expect.any(String));
+    expect(invoice.send_claim_token).not.toBe(oldToken);
     expect(invoice.scheduled_send_error).toMatch(/^Recovered from stale sending claim/);
     expect(require('../services/logger').warn)
       .toHaveBeenCalledWith(expect.stringContaining('restore skipped'));
@@ -909,7 +914,9 @@ describe('processScheduledSends send-window handling', () => {
     });
     const legacyReplacement = await InvoiceService.claimInvoiceForSend(invoice.id, { operatorInitiated: true });
     expect(legacyReplacement).toMatchObject({ claimed: true, previousStatus: 'scheduled' });
-    expect(invoice).toMatchObject({ status: 'sending', send_claim_token: null });
+    expect(invoice.status).toBe('sending');
+    expect(invoice.send_claim_token).toEqual(expect.any(String));
+    expect(invoice.send_claim_token).not.toBe(oldToken);
     const lateOldRestore = await db('invoices')
       .where({ id: invoice.id, status: 'sending', send_claim_token: oldToken })
       .update({ status: 'scheduled', send_claim_token: null });

@@ -24,7 +24,7 @@ describe('complete-scheduled-service.js pay-link senders acquire the shared clai
     const block = source.slice(start, end);
     const claimAt = block.indexOf('paymentFailedDeclineClaim = await InvoiceServiceForDeclineClaim.claimInvoiceForSend(invoice.id, { firstDeliveryOnly: true });');
     const sendAt = block.indexOf('const failResult = throwIfDeliveryUnverified(await sendCustomerMessage({');
-    const restoreAt = block.indexOf('await InvoiceServiceForDeclineClaim.restoreSendClaim(invoice.id, paymentFailedDeclineClaim.previousStatus, paymentFailedDeclineClaim.claimed)');
+    const restoreAt = block.indexOf('await InvoiceServiceForDeclineClaim.restoreSendClaim(invoice.id, paymentFailedDeclineClaim.previousStatus, paymentFailedDeclineClaim.claimed, [], db, paymentFailedDeclineClaim.invoice.send_claim_token)');
     expect(claimAt).toBeGreaterThan(-1);
     expect(sendAt).toBeGreaterThan(claimAt);
     expect(restoreAt).toBeGreaterThan(sendAt);
@@ -54,8 +54,8 @@ describe('complete-scheduled-service.js pay-link senders acquire the shared clai
     const block = source.slice(start, start + 5500); // generous bound — this function is small
     const end = start + block.indexOf('\n    };\n'); // the function's own closing
     const claimAt = block.indexOf('payerApClaim = await InvoiceServiceForClaim.claimInvoiceForSend(invoice.id, { firstDeliveryOnly: true });');
-    const sendAt = block.indexOf('const payerSend = await InvoiceEmail.sendInvoiceEmail(invoice.id);');
-    const restoreAt = block.indexOf('await InvoiceServiceForClaim.restoreSendClaim(invoice.id, payerApClaim.previousStatus, payerApClaim.claimed)');
+    const sendAt = block.indexOf('const payerSend = await InvoiceEmail.sendInvoiceEmail(invoice.id, { claimToken: payerApClaim.invoice.send_claim_token });');
+    const restoreAt = block.indexOf('await InvoiceServiceForClaim.restoreSendClaim(invoice.id, payerApClaim.previousStatus, payerApClaim.claimed, [], db, payerApClaim.invoice.send_claim_token)');
     expect(claimAt).toBeGreaterThan(-1);
     expect(sendAt).toBeGreaterThan(claimAt);
     expect(restoreAt).toBeGreaterThan(sendAt);

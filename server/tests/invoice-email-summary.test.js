@@ -98,6 +98,64 @@ describe('sendInvoiceEmail service summary', () => {
     });
   });
 
+  test('refuses an email caller holding a replaced claim', async () => {
+    mockDb(invoiceRow({ status: 'sending', send_claim_token: 'replacement' }));
+    await expect(sendInvoiceEmail('inv-1', { claimToken: 'original' }))
+      .resolves.toMatchObject({ ok: false, code: 'send_claim_lost' });
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('rechecks captured ownership at provider handoff after rendering', async () => {
+    mockDb(invoiceRow({ status: 'sending', send_claim_token: 'original' }));
+    const dispatch = jest.fn();
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      mockDb(invoiceRow({ status: 'sending', send_claim_token: 'replacement' }));
+      const verdict = await withProviderHandoff(dispatch);
+      return { sent: verdict.ok, reason: verdict.reason };
+    });
+    await expect(sendInvoiceEmail('inv-1', { claimToken: 'original' }))
+      .resolves.toMatchObject({ ok: false, error: expect.stringMatching(/claim changed/) });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test('accepted email cannot stamp or freeze payer data over a replacement claim', async () => {
+    const invoice = invoiceRow({ status: 'sending', send_claim_token: 'original' });
+    mockDb(invoice);
+    const stamp = jest.fn();
+    EmailTemplates.sendTemplate.mockImplementationOnce(async () => {
+      invoice.send_claim_token = 'replacement';
+      const previousDb = db.getMockImplementation();
+      db.mockImplementation((table) => {
+        if (table !== 'invoices') return previousDb(table);
+        let expected;
+        const q = chain({ first: invoice });
+        q.where = jest.fn((values) => { expected = values; return q; });
+        q.update = jest.fn(async (values) => {
+          if (expected.send_claim_token !== invoice.send_claim_token) return 0;
+          stamp(values);
+          return 1;
+        });
+        return q;
+      });
+      return { sent: true, message: { provider_message_id: 'accepted-old' } };
+    });
+    await expect(sendInvoiceEmail('inv-1', { claimToken: 'original' })).resolves.toMatchObject({ ok: true });
+    expect(stamp).not.toHaveBeenCalled();
+    expect(require('../services/payer').freezeApEmail).not.toHaveBeenCalled();
+  });
+
+  test('does not freeze payer data when the ownership-guarded delivery stamp fails', async () => {
+    mockDb(invoiceRow({ status: 'sending', send_claim_token: 'original' }));
+    const previousDb = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const q = previousDb(table);
+      if (table === 'invoices') q.update = jest.fn().mockRejectedValue(new Error('stamp database unavailable'));
+      return q;
+    });
+    await expect(sendInvoiceEmail('inv-1', { claimToken: 'original' })).resolves.toMatchObject({ ok: true });
+    expect(require('../services/payer').freezeApEmail).not.toHaveBeenCalled();
+  });
+
   test('passes the invoice notes through as the invoice_summary template variable', async () => {
     const invoice = invoiceRow();
     mockDb(invoice);

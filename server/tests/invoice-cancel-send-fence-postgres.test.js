@@ -41,13 +41,13 @@ describe('cancellation/send fence — source contracts', () => {
     expect(finalizable).not.toMatch(/void/);
     // sendViaSMS, sendViaSMSAndEmail and markDeliverySent — three finalizes,
     // each guarded by the same whereIn.
-    expect(source.match(/\.whereIn\("status", SEND_FINALIZABLE_STATUSES\)\s*\n\s*\.update\(/g)).toHaveLength(3);
+    expect(source.match(/whereSendClaimOwned\(/g).length).toBeGreaterThanOrEqual(3);
     expect(source.match(/CASE WHEN status IN \('draft', 'scheduled', 'sending'\) THEN 'sent' ELSE status END/g)).toHaveLength(3);
     // The claim give-back and the 10-minute stale-claim recovery both key on
     // 'sending', so a voided claim is never re-armed or restored.
     const restoreStart = source.indexOf('async function restoreSendClaim(');
     const restoreClaim = source.slice(restoreStart, source.indexOf('\n}', restoreStart) + 2);
-    expect(restoreClaim).toMatch(/\.where\(\{ id: invoiceId, status: "sending" \}\)/);
+    expect(restoreClaim).toMatch(/\.where\(\{ id: invoiceId, status: "sending", send_claim_token: claimToken \}\)/);
     expect(source).toMatch(/await db\("invoices"\)\s*\n\s*\.where\(\{ status: "sending" \}\)\s*\n\s*\.where\("updated_at", "<", db\.raw\("NOW\(\) - INTERVAL '10 minutes'"\)\)/);
   });
 });

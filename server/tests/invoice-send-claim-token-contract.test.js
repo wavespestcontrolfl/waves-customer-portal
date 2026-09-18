@@ -24,8 +24,6 @@ const invoiceSource = fs.readFileSync(path.join(__dirname, '../services/invoice.
 // list (never widen the assertion below) as new intra-claim writers turn up.
 const OTHER_INTRA_CLAIM_WRITERS = [
   '../services/customer-credit.js', // applyAccountCreditToInvoice — round 18's finding
-  '../services/invoice-email.js', // markEmailDelivered's email_sent_at stamp
-  '../services/complete-scheduled-service.js',
   '../services/invoice-issued-closeout.js',
   '../services/invoice-followups.js',
 ];
@@ -53,20 +51,16 @@ describe('processScheduledSends send-claim token — source contract (round 18 #
     expect(helperBlock).toMatch(/\.update\(\{ \.\.\.payload, send_claim_token: null \}\)/);
   });
 
-  test('a new ordinary claim clears any inherited scheduled-worker token atomically', () => {
-    expect(invoiceSource).toMatch(/\.where\(\{ id: invoiceId, status: current\.status \}\)\s*\n\s*\/\/ A new ordinary claim[\s\S]{0,300}?\.update\(\{ status: "sending", updated_at: new Date\(\), send_claim_token: null \}\)/);
+  test('a new ordinary claim rotates the ownership token atomically', () => {
+    expect(invoiceSource).toMatch(/const freshClaimToken = crypto\.randomUUID\(\);[\s\S]{0,500}?\.update\(\{ status: "sending", updated_at: new Date\(\), send_claim_token: freshClaimToken \}\)/);
   });
 
-  test('send_claim_token is touched only by claim, token-matched restore, and claim-episode invalidation', () => {
-    const occurrences = invoiceSource.split('send_claim_token').length - 1;
-    // claim UPDATE, its returning() list, the restore WHERE, the restore
-    // UPDATE, stale recovery / ordinary-claim invalidation, plus explanatory
-    // prose in the comments directly above — any more means a new token
-    // consumer has crept in unreviewed.
-    expect(occurrences).toBeLessThanOrEqual(8);
+  test('stale recovery clears ownership while restores and finalizers compare the caller token', () => {
     const staleRecoveryAt = invoiceSource.indexOf('// Stale-claim recovery PARKS the row');
     const staleRecoveryBlock = invoiceSource.slice(staleRecoveryAt, staleRecoveryAt + 1800);
     expect(staleRecoveryBlock).toMatch(/status: "scheduled",[\s\S]{0,500}?send_claim_token: null,/);
+    expect(invoiceSource).toMatch(/whereSendClaimOwned\([\s\S]*?send_claim_token: claimToken/);
+    expect(invoiceSource).toMatch(/status: "sending", send_claim_token: claimToken/);
   });
 
   test.each(OTHER_INTRA_CLAIM_WRITERS)('%s never references send_claim_token — an intra-claim writer here cannot invalidate the scheduled-send restore', (relPath) => {

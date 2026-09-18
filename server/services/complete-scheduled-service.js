@@ -2372,10 +2372,19 @@ async function completeScheduledService(completionInput, packetContext = null) {
   let legacyVisitToDissolve = null;
   let markedSucceeded = false;
   // The completion's own delivery claim on a REUSED pre-minted invoice
-  // (Codex P1 #4131 r4): { invoiceId, previousStatus, claimed } while the
+  // (Codex P1 #4131 r4): { invoiceId, previousStatus, claimed, claimToken } while the
   // completion holds the 'sending' claim; released at the end unless a
   // pay-link text actually went out under it (completionInvoiceLinkDelivered).
   let completionInvoiceSendClaim = null;
+  const checkInvoiceSendClaim = async (invoiceId, claimToken) => {
+    try {
+      const owned = claimToken && await db('invoices')
+        .where({ id: invoiceId, status: 'sending', send_claim_token: claimToken }).first('id');
+      return owned ? { ok: true } : { ok: false, retryable: true, code: 'send_claim_lost', reason: 'Invoice send claim changed; delivery not attempted' };
+    } catch (err) {
+      return { ok: false, retryable: true, code: 'send_claim_check_failed', reason: err.message || 'Invoice send claim could not be verified' };
+    }
+  };
   let completionInvoiceLinkDelivered = false;
   let completionInvoiceDeliveryUnverified = false;
   let durableCompletionCommitted = false;
@@ -11427,6 +11436,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
               customerId: svc.customer_id,
               invoiceId: invoice.id,
               entryPoint: 'autopay_completion_decline',
+              preDispatchCheck: () => checkInvoiceSendClaim(invoice.id, paymentFailedDeclineClaim.invoice.send_claim_token),
+              preProviderCheck: () => checkInvoiceSendClaim(invoice.id, paymentFailedDeclineClaim.invoice.send_claim_token),
               identityTrustLevel: 'phone_matches_customer',
               // billing_mode_at_send: the owner autopay digest (#3607) classifies
               // the text against the lane that authorized it.
@@ -11504,6 +11515,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 invoice = await InvoiceService.markDeliverySent(invoice.id, {
                   sms: true,
                   source: 'payment_failed_notice',
+                  claimToken: paymentFailedDeclineClaim.invoice.send_claim_token,
                   payUrl,
                 });
               } catch (statusErr) {
@@ -11558,6 +11570,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 invoice = await InvoiceService.markDeliverySent(invoice.id, {
                   sms: true,
                   source: 'payment_failed_notice',
+                  claimToken: paymentFailedDeclineClaim.invoice.send_claim_token,
                   payUrl,
                 });
               } catch (statusErr) {
@@ -11572,7 +11585,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // releases the claim by flipping 'sending' → 'sent' (the same
             // mechanism every other pay-link sender uses).
             if (!paymentFailedNoticeDelivered && !paymentFailedNoticeDeliveryUnverified) {
-              await InvoiceServiceForDeclineClaim.restoreSendClaim(invoice.id, paymentFailedDeclineClaim.previousStatus, paymentFailedDeclineClaim.claimed)
+              await InvoiceServiceForDeclineClaim.restoreSendClaim(invoice.id, paymentFailedDeclineClaim.previousStatus, paymentFailedDeclineClaim.claimed, [], db, paymentFailedDeclineClaim.invoice.send_claim_token)
                 .catch((restoreErr) => logger.warn(`[dispatch] payment-failed notice claim restore failed for invoice ${invoice.id}: ${restoreErr.message}`));
             }
           }
@@ -11762,7 +11775,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           let payerApDelivered = false;
           try {
             const InvoiceEmail = require('../services/invoice-email');
-            const payerSend = await InvoiceEmail.sendInvoiceEmail(invoice.id);
+            const payerSend = await InvoiceEmail.sendInvoiceEmail(invoice.id, { claimToken: payerApClaim.invoice.send_claim_token });
             if (payerSend?.ok) {
               // DELIVERED the moment the provider accepted it (pre-push Codex
               // P1 #4131) — recorded BEFORE markDeliverySent below, so its
@@ -11776,6 +11789,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               invoice = await InvoiceServiceForClaim.markDeliverySent(invoice.id, {
                 email: true,
                 source: 'dispatch_completion_payer',
+                claimToken: payerApClaim.invoice.send_claim_token,
               });
             } else {
               logger.warn(`[dispatch] Payer invoice ${invoice.id} not delivered to AP (${payerSend?.error || 'unknown'}) — left unfinalized for operator correction`);
@@ -11784,7 +11798,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             logger.error(`[dispatch] Payer invoice AP send failed for ${invoice.id}: ${payerSendErr.message}`);
           } finally {
             if (!payerApDelivered) {
-              await InvoiceServiceForClaim.restoreSendClaim(invoice.id, payerApClaim.previousStatus, payerApClaim.claimed)
+              await InvoiceServiceForClaim.restoreSendClaim(invoice.id, payerApClaim.previousStatus, payerApClaim.claimed, [], db, payerApClaim.invoice.send_claim_token)
                 .catch((restoreErr) => logger.warn(`[dispatch] payer AP send claim restore failed for invoice ${invoice.id}: ${restoreErr.message}`));
             }
           }
@@ -11983,7 +11997,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // superset of what the removed check below ever covered, so
             // nothing here is a downgrade.
             const claim = await InvoiceServiceForClaim.claimInvoiceForSend(invoice.id, { firstDeliveryOnly: true });
-            completionInvoiceSendClaim = { invoiceId: invoice.id, previousStatus: claim.previousStatus, claimed: claim.claimed };
+            completionInvoiceSendClaim = { invoiceId: invoice.id, previousStatus: claim.previousStatus, claimed: claim.claimed, claimToken: claim.invoice.send_claim_token };
           } catch (claimErr) {
             // Classify the refusal (pre-push P1 r4): a row that is settled or
             // gone (paid / prepaid / voided / not found / a non-sendable status
@@ -12329,6 +12343,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
             ...(sentSmsType === 'service_complete_paid_receipt' && invoice?.id ? { invoiceId: invoice.id } : {}),
             identityTrustLevel: 'phone_matches_customer',
             metadata: smsMetadata,
+            ...(completionInvoiceSendClaim?.claimed && allowCompletionInvoiceLink
+              ? {
+                preDispatchCheck: () => checkInvoiceSendClaim(completionInvoiceSendClaim.invoiceId, completionInvoiceSendClaim.claimToken),
+                preProviderCheck: () => checkInvoiceSendClaim(completionInvoiceSendClaim.invoiceId, completionInvoiceSendClaim.claimToken),
+              }
+              : {}),
           };
           // Captured BEFORE the provider call: sendCustomerMessage throws
           // past acceptance when its audit insert fails (providerOutcome on
@@ -12491,7 +12511,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // (GitHub Codex r3 P1) — it is a delivery failure with the
             // enqueue error.
             const holdEnqueueFailed = !!completionHoldQueueError;
-            const policyBlocked = smsResult.blocked && !holdEnqueueFailed;
+            const claimCheckRefused = ['send_claim_lost', 'send_claim_check_failed'].includes(smsResult.code);
+            const policyBlocked = smsResult.blocked && !holdEnqueueFailed && !claimCheckRefused;
             completionSmsRejectedOutcome = policyBlocked ? null : {
               sent: false,
               terminal: !holdEnqueueFailed && smsResult.terminal === true,
@@ -12601,6 +12622,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 invoice = await InvoiceService.markDeliverySent(invoice.id, {
                   sms: true,
                   source: sentSmsType || 'completion_sms_with_invoice',
+                  claimToken: completionInvoiceSendClaim?.claimToken,
                   payUrl,
                 });
               } catch (statusErr) {
@@ -12686,6 +12708,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               invoice = await InvoiceService.markDeliverySent(invoice.id, {
                 sms: true,
                 source: snap.type || 'completion_sms_with_invoice',
+                claimToken: completionInvoiceSendClaim?.claimToken,
                 payUrl,
               });
             } catch (statusErr) {
@@ -13258,7 +13281,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // while that row is live (GitHub r5 P1 #4131), and its replay finalizes
     // through markDeliverySent at actual delivery.
     if (completionInvoiceSendClaim?.claimed && !completionInvoiceLinkDelivered && !completionInvoiceDeliveryUnverified) {
-      await require('../services/invoice').restoreSendClaim(completionInvoiceSendClaim.invoiceId, completionInvoiceSendClaim.previousStatus, true);
+      await require('../services/invoice').restoreSendClaim(completionInvoiceSendClaim.invoiceId, completionInvoiceSendClaim.previousStatus, true, [], db, completionInvoiceSendClaim.claimToken);
       completionInvoiceSendClaim = null;
     }
   }

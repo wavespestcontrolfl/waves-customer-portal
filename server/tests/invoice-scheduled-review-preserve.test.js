@@ -9,6 +9,7 @@ jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.raw = jest.fn((sql) => sql);
   fn.fn = { now: jest.fn(() => 'now()') };
+  fn.transaction = jest.fn(async (callback) => callback(fn));
   return fn;
 });
 jest.mock('../services/logger', () => ({
@@ -47,6 +48,9 @@ function chain({ first, returning } = {}) {
   const q = {};
   q.where = jest.fn(() => q);
   q.whereIn = jest.fn(() => q);
+  q.whereNull = jest.fn(() => q);
+  q.forUpdate = jest.fn(() => q);
+  q.clone = jest.fn(() => q);
   q.whereRaw = jest.fn(() => q);
   q.select = jest.fn(() => q);
   q.update = jest.fn(() => q);
@@ -79,28 +83,34 @@ function scheduledInvoice(overrides = {}) {
 //   post-delivery row the review block reads back; other tables get a
 //   permissive chain.
 function mockSendSequence(invoice, reviewRead = {}) {
-  db
-    .mockReturnValueOnce(chain({ first: invoice }))
-    .mockReturnValueOnce(chain({ first: invoice }))
-    .mockReturnValueOnce(chain({ first: undefined }))
-    .mockReturnValueOnce(chain({ returning: [{ ...invoice, status: 'sending' }] }))
-    .mockImplementation((table) => (table === 'invoices'
-      ? chain({
-        first: {
-          customer_id: invoice.customer_id,
-          service_record_id: invoice.service_record_id,
-          // What the review block reads back AFTER delivery: an unpaid
-          // completion invoice is 'sent' at this point.
-          status: 'sent',
-          ...reviewRead,
-        },
-      })
-      : chain()));
+  const current = { ...invoice };
+  let finalized = false;
+  db.mockImplementation((table) => {
+    if (table !== 'invoices') return chain();
+    const q = chain();
+    const predicates = [];
+    let count = 0;
+    q.where = jest.fn((values) => { if (values && typeof values === 'object') predicates.push(...Object.entries(values)); return q; });
+    const matches = () => predicates.every(([key, value]) => current[key] === value);
+    q.first = jest.fn(async () => matches() ? { ...current, ...(finalized ? reviewRead : {}) } : undefined);
+    q.update = jest.fn((values) => {
+      count = matches() ? 1 : 0;
+      if (count) {
+        Object.assign(current, values);
+        if (String(values.status).startsWith('CASE')) { current.status = 'sent'; finalized = true; }
+      }
+      return q;
+    });
+    q.returning = jest.fn(async () => count ? [{ ...current }] : []);
+    q.then = (resolve) => Promise.resolve(count).then(resolve);
+    return q;
+  });
 }
 
 describe('InvoiceService.sendViaSMSAndEmail scheduled-review fallback', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    db.mockReset();
     jest
       .spyOn(InvoiceService, 'sendViaSMS')
       .mockResolvedValue({ sent: true, payUrl: 'https://pay.example/x' });
@@ -249,6 +259,7 @@ function mockMarkDeliverySequence(invoice, { finalized = true, postCloseoutRead 
 describe('InvoiceService.markDeliverySent scheduled-review fallback', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    db.mockReset();
   });
 
   test('unpaid COMPLETION invoice → review ask deferred to the paid webhook (Codex P1, PR #3104 r1)', async () => {
@@ -372,6 +383,7 @@ describe('sendViaSMSAndEmail: nothing due on a pre-completion open-visit invoice
   let smsSpy;
   beforeEach(() => {
     jest.clearAllMocks();
+    db.mockReset();
     smsSpy = jest.spyOn(InvoiceService, 'sendViaSMS').mockResolvedValue({ sent: true, payUrl: 'https://pay.example/x' });
   });
   afterEach(() => jest.restoreAllMocks());
