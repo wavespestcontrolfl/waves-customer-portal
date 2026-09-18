@@ -1776,6 +1776,32 @@ function reportFindingIsUncertain(text) {
       .replace(/(^|,\s*|\b(?:based\s+on|after\s+(?:reviewing|checking|reading))\s+(?:the\s+)?report\s*,?\s*)(\s*(?:(?:yes|okay|certainly|absolutely)[,:]?\s+)?)(i|we)\s+can\s+(?:(?:definitely|certainly|confidently|clearly|conclusively|now|already|also|fully|absolutely)\s+)*(confirm|verify)\b(?![^.!?;]*\b(?:whether|if)\b)(?:\s+that\b)?/gi, '$1$2$3 $4'));
 }
 
+const REPORT_INSTRUCTION_RE = /(?:^\s*|,\s*)(?:please\s+)?(?:apply|use|put|treat|spray|place|have(?!\s+(?:(?:not\s+(?:only|just|merely|simply)|already|also|just|now|\w+ly)\s+)*(?:had|been|applied|used|sprayed|treated|placed|put|got|received|succeeded|finished|completed|managed)\b)|get|confirm|verify|check|tell\s+me)\b|\b(?:(?:i|we)(?:\s+(?:need(?:ed)?|want(?:ed)?|ask(?:ed)?|request(?:ed)?)|['’]d\s+like|\s+would\s+like)\s+(?:me|us|you|him|her|them|(?:(?:the|our|your|their)\s+)?(?:[\w'’-]+\s+){0,3}(?:technician|tech|crew|team)|[\w'’-]+(?:\s+[\w'’-]+){0,2})\s+to\s+(?:confirm|verify|check|tell)|(?:i|we)\s+(?:need(?:ed)?|want(?:ed)?|request(?:ed)?|ask(?:ed)?\s+for)\s+(?:(?:a|your)\s+)?(?:confirmation|verification)\s+(?:that|whether|if)|please\s+let\s+me\s+know\s+(?:whether|if|that)|(?:ask(?:s|ed|ing)?|request(?:s|ed|ing)?)\s+that(?=\s+(?:[\w'’-]+\s+){1,6}(?:be|get|have|apply|use|treat|spray|place|put|receive)\b)|make sure|ensure|remember to|please\s+(?:confirm|verify|check|tell))\b/i;
+const REPORT_FINITE_PREDICATE_RE = new RegExp(`(?:${CLAUSE_FINITE_PREDICATE_RE.source}|\\b(?:treated|sprayed|used|put|went|got|received|completed|finished|managed|succeeded)\\b)`, 'i');
+
+function reportFindingIsInstruction(affirmed, subjectAt, locationAt, findingVerb, findingEvidenceEnd) {
+  const firstFindingAt = Math.min(subjectAt, locationAt, findingVerb ? findingVerb.index : Infinity);
+  // A comma before the finding can end an unrelated instruction; a later
+  // instruction after the matched treatment is outside its evidence span.
+  let governingStart = 0;
+  for (const comma of affirmed.slice(0, firstFindingAt).matchAll(/,/g)) {
+    const left = affirmed.slice(governingStart, comma.index);
+    const right = affirmed.slice(comma.index + 1, findingEvidenceEnd);
+    const complement = /\b(that|whether)\b([^.!?;]*)$/i.exec(left);
+    const coordinatedFinding = /^(?!\s*(?:i|we|you|he|she|they|it)\b)\s*(?:[\w'’-]+\s+){1,6}(?:are|were|have)\b/i.test(right);
+    const demonstrativeObject = complement && /^that$/i.test(complement[1])
+      && /^\s+(?:[\w'’-]+\s+){0,3}[\w'’-]+\s*$/.test(complement[2]) && !coordinatedFinding;
+    const parentheticalAside = complement
+      && /^,\s*as\s+(?:[\w'’-]+\s+){0,7}[\w'’-]+\s*$/i.test(complement[2]);
+    if (REPORT_INSTRUCTION_RE.test(left) && complement && !demonstrativeObject
+        && (parentheticalAside || !REPORT_FINITE_PREDICATE_RE.test(complement[2]))) continue;
+    if (new RegExp(`^\\s*(?:[\\w'’-]+\\s+){1,6}${REPORT_FINITE_PREDICATE_RE.source}`, 'i').test(
+      right,
+    )) governingStart = comma.index + 1;
+  }
+  return REPORT_INSTRUCTION_RE.test(affirmed.slice(governingStart, findingEvidenceEnd));
+}
+
 const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_free_visit_promise, no_third_party_disclosure, only_language, capture_lead_input_asserts });
 
-module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, spokenDigits, assertedMatch, EPISTEMIC_REFUSAL_VERBS, EPISTEMIC_DENIAL_WORDS, clauseBounds, clauseOf, claimContext, clauseIsNegated, clauseIsEpistemicallyHedged, cueInSameClause, reportFindingIsUncertain } };
+module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, spokenDigits, assertedMatch, EPISTEMIC_REFUSAL_VERBS, EPISTEMIC_DENIAL_WORDS, clauseBounds, clauseOf, claimContext, clauseIsNegated, clauseIsEpistemicallyHedged, cueInSameClause, reportFindingIsUncertain, reportFindingIsInstruction } };
