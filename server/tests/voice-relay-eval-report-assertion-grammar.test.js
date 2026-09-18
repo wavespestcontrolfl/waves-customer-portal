@@ -674,3 +674,62 @@ test.each(['only', 'just', 'merely', 'simply'])('perfect affirmative focus %s af
   expect(grammar.reportFindingIsInstruction(text, text.indexOf('Talstar P'),
     text.indexOf('exterior perimeter'), /applied/.exec(text), text.length)).toBe(false);
 });
+
+test.each([
+  ['We asked the technician to confirm that', 'We asked the technician to confirm the invoice was paid,'],
+  ['We requested our crew to verify that', 'We requested our crew to verify the invoice was paid,'],
+  ['I asked Sam Jones to check whether', 'I asked Sam Jones to check the invoice,'],
+])('request to another recipient governs only its own finding: %s', (governor, unrelatedGovernor) => {
+  const requested = `${governor} Talstar P was applied to the exterior perimeter.`;
+  expect(grammar.reportFindingIsInstruction(requested, requested.indexOf('Talstar P'),
+    requested.indexOf('exterior perimeter'), /applied/.exec(requested), requested.length)).toBe(true);
+
+  const unrelated = `${unrelatedGovernor} Talstar P was applied to the exterior perimeter.`;
+  expect(grammar.reportFindingIsInstruction(unrelated, unrelated.indexOf('Talstar P'),
+    unrelated.indexOf('exterior perimeter'), /applied/.exec(unrelated), unrelated.length)).toBe(false);
+});
+
+test.each([
+  ['We can definitely confirm that Talstar P was applied to the exterior perimeter.', false],
+  ['We can now confirm that Talstar P was applied to the exterior perimeter.', false],
+  ['I can confidently verify that Talstar P was applied to the exterior perimeter.', false],
+  ['We can possibly confirm that Talstar P was applied to the exterior perimeter.', true],
+  ['I can probably confirm that Talstar P was applied to the exterior perimeter.', true],
+  ['We hope we can definitely confirm that Talstar P was applied to the exterior perimeter.', true],
+  ['We can definitely confirm that Talstar P might have been applied to the exterior perimeter.', true],
+])('adverbial can-confirm preserves certainty scope: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['We succeeded at applying Talstar P to the exterior perimeter.', true],
+  ['We did succeed at applying Talstar P to the exterior perimeter.', true],
+  ["We didn't succeed at applying Talstar P to the exterior perimeter.", false],
+  ['We nearly succeeded at applying Talstar P to the exterior perimeter.', false],
+  ['We expected to succeed at applying Talstar P to the exterior perimeter.', false],
+])('succeeded-at gerund governor distinguishes completion: %s', (text, completed) => {
+  expect(grammar.reportHasCompletedPredicate(text, /applying/.exec(text))).toBe(completed);
+});
+
+test.each([
+  ['We applied Talstar P to the exterior perimeter after checking if the gate was locked.', false],
+  ['If the gate was locked, we applied Talstar P to the exterior perimeter.', true],
+  ['We applied Talstar P to the exterior perimeter whether or not it rained.', false],
+  ['We checked whether Talstar P was applied to the exterior perimeter.', true],
+])('conditional marker is scoped to the treatment proposition: %s', (text, denied) => {
+  expect(grammar.reportClaimIsDenied(text, text, text.indexOf('Talstar P'),
+    text.indexOf('exterior perimeter'), /applied/.exec(text), '')).toBe(denied);
+});
+
+test.each([
+  ['falsely', 'shows'],
+  ['incorrectly', 'lists'],
+  ['mistakenly', 'documents'],
+  ['erroneously', 'records'],
+])('%s documented treatment differs from a positive %s record', (falsity, recordVerb) => {
+  const falseRecord = `The report ${falsity} ${recordVerb} Talstar P was applied to the exterior perimeter.`;
+  expect(grammar.reportFindingIsUncertain(falseRecord)).toBe(true);
+
+  const positiveRecord = `The report ${recordVerb} Talstar P was applied to the exterior perimeter.`;
+  expect(grammar.reportFindingIsUncertain(positiveRecord)).toBe(false);
+});
