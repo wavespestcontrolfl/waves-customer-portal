@@ -1,10 +1,10 @@
-// Scope/refusal/drying policy only. Conversation adjudication is intentionally
-// unregistered until the next split consumes these source-backed helpers.
+// Scope/refusal/drying policy consumes source evidence. Conversation state
+// and runner decisions live in voice-relay-safety-adjudicator.
 const {
-  EPISTEMIC_HEDGE_PREFIX_SOURCE, CONVERSATIONAL_CONDITION_RE, QUESTION_LEAD_RE,
+  EPISTEMIC_HEDGE_PREFIX_SOURCE, CONVERSATIONAL_CONDITION_RE, QUESTION_LEAD_RE, QUESTION_AUX_RE_SOURCE,
   clauseIsNegated, clauseIsEpistemicallyHedged,
 } = require('./voice-relay-spoken-language');
-const { localCandidateEvidence, sentenceSourceSpans } = require('./voice-relay-source-evidence');
+const { localCandidateEvidence, sentenceSourceSpans, INSTRUCTION_LEAD_RE } = require('./voice-relay-source-evidence');
 const {
   SAFETY_REFUSAL_PREFIX, SAFETY_SUBJECT_MODIFIER, SAFETY_INTENSIFIER, HARM_ADJECTIVE,
   SAFETY_ADDITIVE_ADJECTIVE_PREFIX, SAFETY_COORDINATED_ADJECTIVE_SEPARATOR,
@@ -224,6 +224,38 @@ function safetyTimingAudienceCovers(claimText, timingText) {
     || safetyAudienceCovers(positiveTimingText, claimText);
 }
 
+// A potentially terminal abbreviation does not erase a complete fronted
+// condition's following command. Interpret that bounded discourse form as
+// an independent instruction; keep every ambiguity flag on both source sides.
+// A bare condition, finite promise, or uncertainty within the command cannot
+// establish an unconditional technician timing witness.
+const INSTRUCTION_NOMINAL_PREDICATE_RE = new RegExp(`^\\s*${QUESTION_AUX_RE_SOURCE}\\b`, 'i');
+function timingAmbiguitySeparatesInstruction(source, evidence, witnessEnd) {
+  const sentences = sentenceSourceSpans(source);
+  return evidence.sentence.ambiguousBoundaries.every((boundary) => {
+    if (!/^(?:time_abbreviation|lexical_abbreviation)$/.test(boundary.reason) || boundary.index < witnessEnd) return false;
+    const containing = sentences.find((sentence) => boundary.end >= sentence.index && boundary.end < sentence.end);
+    if (!containing) return false;
+    const tail = source.slice(boundary.end, containing.end);
+    const head = boundary.end + tail.length - tail.trimStart().length;
+    const comma = source.indexOf(',', head);
+    const direct = INSTRUCTION_LEAD_RE.exec(source.slice(head, containing.end));
+    const commandAt = direct ? head : comma + 1;
+    if (!direct && (comma < head || comma >= containing.end)) return false;
+    const commandTail = source.slice(commandAt, containing.end);
+    const command = INSTRUCTION_LEAD_RE.exec(commandTail.trimStart());
+    if (!command || INSTRUCTION_NOMINAL_PREDICATE_RE.test(commandTail.trimStart().slice(command[0].length))) return false;
+    const index = commandAt + commandTail.length - commandTail.trimStart().length;
+    const instruction = localCandidateEvidence(source, 'instruction', index, index + command[0].length);
+    if (instruction.sentence.ambiguousBoundaries.some((item) => item.index >= head)) return false;
+    // Either selected sentence interpretation retains the same source marker
+    // and comma. Recognize its own following imperative without depending on
+    // selectedBoundary, which is a casing heuristic rather than certainty.
+    return Boolean(direct || [...evidence.conditions, ...instruction.conditions].some((condition) =>
+      condition.marker.index === head && condition.end === comma && condition.end < index));
+  });
+}
+
 function safetyOnceDryQualifies(text, claim, questionText = null, antecedentText = '') {
   const evidence = localCandidateEvidence(text, 'drying-claim', claim.index, claim.index + claim[0].length);
   const claimClause = text.slice(evidence.clause.index, claim.index + claim[0].length);
@@ -258,7 +290,8 @@ function safetyOnceDryQualifies(text, claim, questionText = null, antecedentText
     const suffix = text.slice(match.index + match[0].length);
     const productRestriction = /^\s*,?\s*(?:(?:but|and|however)\s+)?(?:not|only)\s+for\s+[^.!?;,]*/i.exec(suffix);
     const timingScope = text.slice(match.index, timingEvidence.sentence.end);
-    return !timingEvidence.sentence.ambiguousBoundaries.length && text[timingClaimEnd] !== '?' && !QUESTION_LEAD_RE.test(claim)
+    const ambiguityResolved = timingAmbiguitySeparatesInstruction(text, timingEvidence, match.index + match[0].length);
+    return ambiguityResolved && text[timingClaimEnd] !== '?' && !QUESTION_LEAD_RE.test(claim)
       && (TECHNICIAN_EXPLICIT_DRY_TIMING_RE.test(match[0])
         || !TECHNICIAN_VISIT_TIMING_RE.test(timingClaim)
         || (!TECHNICIAN_VISIT_TIMING_RE.test(match[0]) && TECHNICIAN_VISIT_TIMING_OBJECT_NEGATION_RE.test(suffix)))
@@ -429,6 +462,7 @@ module.exports = {
   safetyOnceDryQualifies, safetyAudienceCovers, safetyAudienceExcluded,
   safetyProductCovers, safetyProductDetailCovers, safetyProductExcludedFromRefusal,
   safetyRefusalCoversCircumstances, safetyDryingCoversCircumstances, refusesSafetyGuarantee,
+  TECHNICIAN_DRY_TIMING_ALTERNATIVE_RE,
   SAFETY_GENERIC_PRODUCT_RE, SAFETY_DRYING_CONDITION_WITHDRAWAL_RE,
   SAFETY_REFERENTIAL_DRYING_WITHDRAWAL_RE,
 };

@@ -16,8 +16,8 @@ test.each([
   expect(qualify(text)).toBe(expected);
 });
 
-test.each(['If swallowed', 'if swallowed'])('ambiguous abbreviation prevents timing qualification: %s', (condition) => {
-  expect(qualify(`The bait is safe once dry. The technician will confirm timing at 4 p.m. ${condition}, call poison control.`)).toBe(false);
+test.each(['If swallowed', 'if swallowed'])('a fronted condition with its own imperative preserves a timing witness: %s', (condition) => {
+  expect(qualify(`The bait is safe once dry. The technician will confirm timing at 4 p.m. ${condition}, call poison control.`)).toBe(true);
 });
 
 test.each([
@@ -80,4 +80,17 @@ test('scope evidence retains original source positions and separates connective 
   expect(evidence.adjacentConnectives[0]).toMatchObject({ relation: 'unresolved', marker: { index: text.indexOf('while') } });
   expect(text.slice(evidence.index, evidence.end)).toBe(evidence.text);
   expect(policy.safetyPropositionText('The spray is not safe, while the bait is safe.', 39)).toBe(' the bait is safe');
+});
+
+
+test.each([
+  'if swallowed.', 'If swallowed.', 'If asked, the technician will confirm timing.',
+  'If swallowed, they may call poison control.', 'If swallowed, call at 5 p.m. if requested.',
+  'If swallowed, call is optional.', 'If swallowed, contact will be made.',
+])('an unresolved timing qualification stays rejected: %s', (suffix) => {
+  expect(qualify(`The bait is safe once dry. The technician will confirm timing at 4 p.m. ${suffix}`)).toBe(false);
+});
+
+test('an independent instruction cannot remove an actual condition on timing', () => {
+  expect(qualify('The bait is safe once dry. The technician will confirm timing only if asked at 4 p.m. If swallowed, call poison control.')).toBe(false);
 });

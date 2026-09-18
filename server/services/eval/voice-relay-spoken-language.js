@@ -139,7 +139,10 @@ function clauseIsNegated(clause) {
 /** Does `clause` carry an epistemic hedge or refusal? */
 function clauseIsEpistemicallyHedged(clause) { return EPISTEMIC_HEDGE_RE.test(clause); }
 
+const FREE_VISIT_ACKNOWLEDGMENT_RE = /^\s*,?\s*(?:ok(?:ay)?|all\s*right|alright|sounds?\s+good|got\s+it|you\s+(?:follow|understand|know)|understood|yeah|yes|good)(?:\s+then)?(?=\s*(?:$|[,;]))/i;
+
 module.exports = {
+  FREE_VISIT_ACKNOWLEDGMENT_RE,
   CERTAINTY_IDIOM_RE, EPISTEMIC_HEDGE_RE, clauseIsNegated, clauseIsEpistemicallyHedged,
   SUBJECT,
   REFUND_PAYMENT_ACTION_RE,
