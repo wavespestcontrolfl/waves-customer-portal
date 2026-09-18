@@ -1720,18 +1720,22 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
 });
 
 // Classify bounded report evidence; runner registration is staged separately.
-const REPORT_UNCERTAINTY_RE = /\b(?:(?:can|must|may|might|could|would|should|will|shall)\s+(?:(?:not|never|already|also|just|now|still|well|yet|even|\w+ly)\s+)*(?:be|get|have|apply|use|treat|spray|place|put|receive|go|complete|finish|manage|succeed|show|say|state|report|confirm|verify|check|mention|document)\b|(?:would|could|should|might|must|may)['’]ve\b|going to|(?:i|we)\s+(?:think|thought|believ(?:e|ed)|guess(?:ed)?|suppos(?:e|ed)|assum(?:e|ed)|expect(?:ed)?|hop(?:e[sd]?|ing))|my\s+(?:guess|belief|assumption)\s+is|(?:it|this|that)(?:['’]s|\s+is)\s+(?:possible|probable|unlikely|improbable)(?:\s+that)?|(?:it|this|that)\s+appear(?:s|ed)?\s+that|(?:appear(?:s|ed)?|seem(?:s|ed)?)\s+to\s+(?:have|be)|(?:is|are|was|were|has\s+been|have\s+been|had\s+been)\s+(?:believed|thought|assumed|considered|reported|said)\s+to\s+(?:have|be)|(?:it|this|that)\s+(?:seem(?:s|ed)?\s+that|looks?\s+like|sounds?\s+like)|there(?:['’]s|\s+is)\s+a\s+(?:chance|possibility)(?:\s+that)?|(?:pretend(?:s|ed|ing)?|imagin(?:e[sd]?|ing))\s+that|disput(?:e[sd]?|ing)\s+that|(?:incorrectly|falsely|mistakenly|erroneously)\s+(?:says?|said|states?|stated|reports?|reported|shows?|showed|lists?|listed|documents?|documented|records?|recorded)|plan(?:s|ned)? to|intend(?:s|ed|ing)?\s+to|(?<!\bas\s(?:(?:i|we|you|he|she|they|it)\s)?(?:\w+ly\s)?)wish(?:es|ed|ing)?|hop(?:e[sd]?|ing)\s+that|hopefully|maybe|perhaps|possibly|potentially|probably|likely|allegedly|supposedly|reportedly|apparently)\b/i;
+const REPORT_UNCERTAINTY_RE = /\b(?:(?:can|must|may|might|could|would|should|will|shall)\s+(?:(?:not|never|already|also|just|now|still|well|yet|even|\w+ly)\s+)*(?:be|get|have|apply|use|treat|spray|place|put|receive|go|complete|finish|manage|succeed|show|say|state|report|confirm|verify|check|mention|document)\b|(?:would|could|should|might|must|may)['’]ve\b|\b(?:i|we|you|he|she|they|it)['’](?:ll\b|d\s+(?:(?:not|never|already|also|just|now|still|well|yet|even|\w+ly)\s+)*(?:have|be|get|apply|use|treat|spray|place|put|receive|go|complete|finish|manage|succeed)\b)|going to|(?:i|we)\s+(?:think|thought|believ(?:e|ed)|guess(?:ed)?|suppos(?:e|ed)|assum(?:e|ed)|expect(?:ed)?|hop(?:e[sd]?|ing))|my\s+(?:guess|belief|assumption)\s+is|(?:it|this|that)(?:['’]s|\s+is)\s+(?:possible|probable|unlikely|improbable)(?:\s+that)?|(?:it|this|that)\s+appear(?:s|ed)?\s+that|(?:appear(?:s|ed)?|seem(?:s|ed)?)\s+to\s+(?:have|be)|(?:is|are|was|were|has\s+been|have\s+been|had\s+been)\s+(?:believed|thought|assumed|considered|reported|said|supposed|expected)\s+to\s+(?:have|be)|(?:it|this|that)\s+(?:seem(?:s|ed)?\s+that|looks?\s+like|sounds?\s+like)|there(?:['’]s|\s+is)\s+a\s+(?:chance|possibility)(?:\s+that)?|(?:pretend(?:s|ed|ing)?|imagin(?:e[sd]?|ing))\s+that|disput(?:e[sd]?|ing)\s+that|(?:incorrectly|falsely|mistakenly|erroneously)\s+(?:says?|said|states?|stated|reports?|reported|shows?|showed|lists?|listed|documents?|documented|records?|recorded)|plan(?:s|ned)? to|intend(?:s|ed|ing)?\s+to|(?<!\bas\s+(?:(?:i|we|you|he|she|they|it)|(?:(?:the|our|your|their|a)\s+)[\w’'-]+(?:\s+[\w’'-]+)?|(?!(?:i|we|you|he|she|they|it)\b)[\w’'-]+)(?:\s+(?:had|have|has))?(?:\s+\w+ly)?\s)wish(?:es|ed|ing)?|hop(?:e[sd]?|ing)\s+that|hopefully|maybe|perhaps|possibly|potentially|probably|likely|allegedly|supposedly|reportedly|apparently)\b/i;
 const REPORT_COMPLETION_TIME = `(?:(?:on\\s+)?(?:${VISIT_TIME_RE.source})|yesterday|earlier|recently|last\\s+(?:week|month|year)|(?:before|after)\\s+(?:breakfast|lunch|dinner))(?:\\s+(?:this\\s+)?(?:morning|afternoon|evening|night))?`;
 const REPORT_COMPLETION_TIME_RE = new RegExp(REPORT_COMPLETION_TIME, 'gi');
 
 function reportFindingIsUncertain(text) {
   // Consumers supply bounded finding evidence, excluding unrelated tails.
-  return /\b(?:tomorrow|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b/i.test(text)
-    || REPORT_UNCERTAINTY_RE.test(text.replace(REPORT_COMPLETION_TIME_RE, '')
-      // Capitalized Will/May after an explicit technician role are names;
-      // any following modal still qualifies the treatment independently.
-      .replace(/\b(?:[Tt]he|[Oo]ur|[Yy]our|[Tt]heir)\s+(?:technician|tech)\s+(?:Will|May)\b/g, '')
-      .replace(/^(\s*(?:(?:yes|okay|certainly|absolutely)[,:]?\s+)?)(i|we)\s+can\s+(?:(?:definitely|certainly|confidently|now|already|also|fully|absolutely)\s+)*(confirm|verify)\b(?!\s+(?:whether|if)\b)(?:\s+that\b)?/i, '$1$2 $3'));
+  const evidence = text.replace(/\b(i|we|you|he|she|they|it)['’]d(?=\s+(?:(?:already|also|just|now|\w+ly)\s+)*put\b)/gi,
+    (auxiliary, subject, at) => (text.slice(at).search(REPORT_COMPLETION_TIME_RE) >= 0
+      || /\b(?:before|after)\s+(?:i|we|you|he|she|they|it)\s+(?:arrived|left|returned|called)\b/i.test(text.slice(at)))
+      ? `${subject} had` : auxiliary);
+  return /^\s*(?:(?:(?:only|even)\s+)?(?:if|unless)|assuming|provided\s+that)\b/i.test(text)
+    || /\b(?:tomorrow|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b/i.test(text)
+    || REPORT_UNCERTAINTY_RE.test(evidence.replace(REPORT_COMPLETION_TIME_RE, '')
+      // Preserve named-technician past-tense put; base auxiliaries retain modal meaning.
+      .replace(/\b(?:[Tt]he|[Oo]ur|[Yy]our|[Tt]heir)\s+(?:technician|tech)\s+(?:Will|May)\b(?=\s+(?:(?:already|also|just|now|\w+ly)\s+)*put\b)/g, '')
+      .replace(/(^|,\s*)(\s*(?:(?:yes|okay|certainly|absolutely)[,:]?\s+)?)(i|we)\s+can\s+(?:(?:definitely|certainly|confidently|now|already|also|fully|absolutely)\s+)*(confirm|verify)\b(?![^.!?;]*\b(?:whether|if)\b)(?:\s+that\b)?/gi, '$1$2$3 $4'));
 }
 
 const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_free_visit_promise, no_third_party_disclosure, only_language, capture_lead_input_asserts });

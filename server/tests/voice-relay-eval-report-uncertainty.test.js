@@ -220,3 +220,89 @@ test.each([
 ])('fulfilled wishes differ from wished-for treatment: %s', (text, uncertain) => {
   expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
 });
+
+test.each([
+  ['Based on the report, we can confirm that Talstar P was applied.', false],
+  ['Hopefully, based on the report, we can confirm that Talstar P was applied.', true],
+  ['If the report is accurate, we can confirm that Talstar P was applied.', true],
+])('evidence-prefixed can-confirm retains hopeful and conditional scope: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['The technician May have applied Talstar P.', true],
+  ['The technician May applied Talstar P.', false],
+  ['The technician Will apply Talstar P.', true],
+  ['The technician Will applied Talstar P.', false],
+])('technician May and Will distinguish modal syntax from names: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ["We'll apply Talstar P.", true],
+  ["I'll treat with Talstar P.", true],
+  ["We'd have applied Talstar P.", true],
+  ["We'd applied Talstar P.", false],
+  ['We’ll apply Talstar P.', true],
+  ['I’ll treat with Talstar P.', true],
+  ['We’d have applied Talstar P.', true],
+  ['We’d applied Talstar P.', false],
+])('contracted modal %s retains future and perfect scope', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['Talstar P was supposed to have been applied.', true],
+  ['Talstar P was expected to have been applied.', true],
+  ['Talstar P was applied.', false],
+])('passive expectation differs from completed treatment: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['We applied Talstar P as you had wished.', false],
+  ['We applied Talstar P as the customer wished.', false],
+  ['We wished that Talstar P was applied.', true],
+])('fulfilled past wishes differ from a wish complement: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['We can verify from the report if Talstar P was applied.', true],
+  ['We can verify from the report that Talstar P was applied.', false],
+  ['We can verify from the report Talstar P was applied.', false],
+])('report-grounded verification retains conditional scope: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['Only if the report is accurate, we can confirm that Talstar P was applied.', true],
+  ['Assuming the report is accurate, we can confirm that Talstar P was applied.', true],
+  ['Based on the report, we can confirm that Talstar P was applied.', false],
+])('conditional lead-ins differ from an evidentiary confirmation lead-in: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['The technician Will already put Talstar P around the exterior perimeter.', false],
+  ['The technician Will may already put Talstar P around the exterior perimeter.', true],
+])('technician Will with put distinguishes a name from a following modal: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ["We'd put Talstar P around the exterior perimeter yesterday.", false],
+  ["We'd have put Talstar P around the exterior perimeter yesterday.", true],
+  ["We'd already put Talstar P around the exterior perimeter before you arrived.", false],
+  ["We'd already have put Talstar P around the exterior perimeter before you arrived.", true],
+])('contracted would-have differs from contracted had completion: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['As you know we wish Talstar P had been applied.', true],
+  ['As technicians we wish Talstar P had been applied.', true],
+  ['Talstar P was applied as you had wished.', false],
+])('wish complements survive discourse prefixes without matching fulfilled wishes: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
