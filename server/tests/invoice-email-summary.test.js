@@ -143,8 +143,24 @@ describe('sendInvoiceEmail service summary', () => {
     });
 
     await expect(sendInvoiceEmail('inv-1', { claimToken: 'original' }))
-      .resolves.toMatchObject({ ok: false, error: expect.stringMatching(/linked visit is cancelled/i) });
+      .resolves.toMatchObject({ ok: false, code: 'INVOICE_VISIT_TERMINAL', deliveryOutcome: 'not_sent',
+        error: expect.stringMatching(/linked visit is cancelled/i) });
     expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test('preserves the legacy tokenless email boundary until that caller owns cleanup', async () => {
+    mockDb(invoiceRow({ scheduled_service_id: 'svc-cancelled' }));
+    const visitGuard = jest.spyOn(require('../services/invoice-helpers'), 'visitRefusesSettlement');
+    const dispatch = jest.fn();
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      const verdict = await withProviderHandoff(dispatch);
+      return { sent: verdict.ok, message: { provider_message_id: 'legacy-tokenless' } };
+    });
+
+    await expect(sendInvoiceEmail('inv-1', { recipientOverride: { email: 'office@example.com' } }))
+      .resolves.toMatchObject({ ok: true });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(visitGuard).not.toHaveBeenCalled();
   });
 
   test.each(['draft', 'scheduled', 'sent', 'viewed', 'overdue', 'sending'])(

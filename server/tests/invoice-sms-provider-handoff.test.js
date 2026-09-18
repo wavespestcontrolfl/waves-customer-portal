@@ -161,6 +161,17 @@ describe('invoice SMS provider handoff', () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
+  test('a throw after the provider boundary starts remains delivery-uncertain', async () => {
+    const dispatchError = new Error('provider socket closed');
+    sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => (
+      withProviderHandoff(async () => { throw dispatchError; })
+    ));
+    withInvoiceDepositSettlement.mockImplementation(async (_invoiceId, callback) => callback(db, invoice));
+
+    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
+      .rejects.toMatchObject({ deliveryOutcome: 'uncertain' });
+  });
+
   test('finishes direct-send bookkeeping when the finalize committed but its acknowledgement was lost', async () => {
     const state = { ...invoice, status: 'draft', send_claim_token: null };
     const ackLost = new Error('synthetic finalize acknowledgement lost');

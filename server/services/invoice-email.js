@@ -342,6 +342,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     '— Waves Pest Control',
   ]);
 
+  let boundaryRefusal = null;
   const invoiceAtDispatch = async (dispatch) => {
     let providerStarted = false;
     let providerAccepted = false;
@@ -355,17 +356,20 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
           if (!SEND_FINALIZABLE_STATUSES.includes(current.status)) {
             return { ok: false, reason: `Invoice is no longer sendable (status: ${current.status || 'unknown'}); delivery not attempted`, code: 'invoice_not_sendable' };
           }
-          let scheduledServiceId = current.scheduled_service_id || null;
-          if (!scheduledServiceId && current.service_record_id) {
-            const record = await trx('service_records')
-              .where({ id: current.service_record_id })
-              .first('scheduled_service_id');
-            scheduledServiceId = record?.scheduled_service_id || null;
-          }
-          const terminalVisit = await require('./invoice-helpers')
-            .visitRefusesSettlement(trx, scheduledServiceId);
-          if (terminalVisit) {
-            return { ok: false, reason: `Linked visit is ${terminalVisit}; delivery not attempted`, code: 'invoice_visit_terminal' };
+          if (claimToken) {
+            let scheduledServiceId = current.scheduled_service_id || null;
+            if (!scheduledServiceId && current.service_record_id) {
+              const record = await trx('service_records')
+                .where({ id: current.service_record_id })
+                .first('scheduled_service_id');
+              scheduledServiceId = record?.scheduled_service_id || null;
+            }
+            const terminalVisit = await require('./invoice-helpers')
+              .visitRefusesSettlement(trx, scheduledServiceId);
+            if (terminalVisit) {
+              boundaryRefusal = { code: 'INVOICE_VISIT_TERMINAL', reason: `Linked visit is ${terminalVisit}; delivery not attempted` };
+              return { ok: false, ...boundaryRefusal };
+            }
           }
           // Reconciliation can finish while the PDF or template renders,
           // leaving no pending ledger balance. Compare the locked row after
@@ -450,8 +454,11 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
       // payer-completion send, where the homeowner SMS path is suppressed) would
       // otherwise mark a never-delivered invoice as sent.
       if (result?.sent === false) {
-        logger.warn(`[invoice-email] Template invoice email NOT delivered for ${invoice.invoice_number} (${result.reason || 'blocked/suppressed'})`);
-        return { ok: false, blocked: !!result.blocked, error: result.reason || 'Email suppressed', recipient: recipientPayload };
+        const refusal = boundaryRefusal || result;
+        logger.warn(`[invoice-email] Template invoice email NOT delivered for ${invoice.invoice_number} (${refusal.reason || 'blocked/suppressed'})`);
+        return { ok: false, blocked: !!result.blocked, error: refusal.reason || 'Email suppressed',
+          code: refusal.code, deliveryOutcome: boundaryRefusal ? 'not_sent' : result.deliveryOutcome,
+          recipient: recipientPayload };
       }
       await markEmailDelivered();
       logger.info(`[invoice-email] Template invoice email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
@@ -486,7 +493,9 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
         contentType: 'application/pdf',
       }],
     }));
-    if (verdict.ok !== true) return { ok: false, error: verdict.reason, recipient: recipientPayload };
+    if (verdict.ok !== true) return { ok: false, error: verdict.reason, code: verdict.code,
+      deliveryOutcome: verdict.code === 'INVOICE_VISIT_TERMINAL' ? 'not_sent' : undefined,
+      recipient: recipientPayload };
     await markEmailDelivered();
     logger.info(`[invoice-email] Invoice email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
     return { ok: true, recipient: recipientPayload, payUrl };

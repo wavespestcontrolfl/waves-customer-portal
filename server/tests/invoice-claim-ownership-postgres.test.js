@@ -14,7 +14,7 @@ jest.mock('../routes/admin-sms-templates', () => ({ isTemplateActive: async () =
 jest.mock('../services/customer-credit', () => ({ autoApplyAccountCreditIfEnabled: async () => null, restoreAccountCreditForVoidedInvoice: async () => null }));
 jest.mock('../services/invoice-followups', () => ({ scheduleForInvoice: jest.fn(), stopForInvoice: jest.fn() }));
 jest.mock('../services/invoice-issued-closeout', () => ({ closeOutVisitForIssuedInvoice: jest.fn(async () => null), issuedCloseoutOwnsRecord: () => false }));
-jest.mock('../services/inspection-credit', () => ({ reverseInspectionCreditForBooking: async () => null }));
+jest.mock('../services/inspection-credit', () => ({ reverseInspectionCreditForBooking: jest.fn(async () => null) }));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: async () => null }));
 jest.mock('../services/lead-estimate-link', () => ({ convertLeadFromEvent: async () => null }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: () => false }));
@@ -90,16 +90,37 @@ postgres('invoice send episode ownership', () => {
     });
     await expect(Invoice.sendViaSMS(invoiceId)).rejects.toThrow();
     expect(dispatch).not.toHaveBeenCalled();
-    expect(await read()).toMatchObject({ status: 'draft', send_claim_token: null, sent_at: null });
+    expect(await read()).toMatchObject({ status: 'void', send_claim_token: null, sent_at: null });
     expect(original).toBeTruthy();
 
-    const staleToken = randomUUID();
-    await trx('invoices').where({ id: invoiceId }).update({ status: 'sent', send_claim_token: staleToken });
-    expect(Array.from(await Invoice.voidOpenInvoicesForCancelledService(visitId))).toEqual([invoiceId]);
-    expect(await read()).toMatchObject({ status: 'void', send_claim_token: null });
     await trx('scheduled_services').where({ id: visitId }).update({ status: 'confirmed' });
     await Invoice.unvoidInvoice(invoiceId);
     expect(await read()).toMatchObject({ status: 'draft', send_claim_token: null });
+  });
+
+  test.each([
+    ['a reactivated visit', 'confirmed', {}, null],
+    ['an attached PaymentIntent', 'cancelled', { stripe_payment_intent_id: 'pi_synthetic_claim' }, null],
+    ['a live queued pay-link', 'cancelled', {}, 'sending'],
+  ])('terminal-refusal cleanup preserves its claim for review with %s', async (_case, visitStatus, invoicePatch, queuedStatus) => {
+    const token = randomUUID();
+    await trx('scheduled_services').where({ id: visitId }).update({ status: visitStatus });
+    await trx('invoices').where({ id: invoiceId }).update({
+      status: 'sending', send_claim_token: token, ...invoicePatch,
+    });
+    if (queuedStatus) await trx('sms_log').insert({
+      customer_id: (await read()).customer_id, direction: 'outbound', from_phone: '+12025550101',
+      to_phone: '+12025550102', message_body: 'Pay link', status: queuedStatus,
+      metadata: { entry_point: 'invoice_send_deferred', invoice_id: invoiceId },
+    });
+
+    await expect(Invoice.voidOpenInvoicesForCancelledService(visitId, {
+      invoiceId, refusedClaimToken: token,
+    })).resolves.toEqual([]);
+    expect(await read()).toMatchObject({ status: 'sending', send_claim_token: token, ...invoicePatch });
+    expect(require('../services/inspection-credit').reverseInspectionCreditForBooking).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(require('../services/invoice-email').sendInvoiceEmail).not.toHaveBeenCalled();
   });
 
   test('successful direct send releases its token, and a resend mints a new one', async () => {
@@ -131,13 +152,32 @@ postgres('invoice send episode ownership', () => {
       expect(options.claimToken).toBe((await read()).send_claim_token);
       expect(options.claimToken).toBeTruthy();
       await trx('invoices').where({ id }).update({ send_claim_token: replacement });
-      return { ok: false, sms: { error: 'synthetic refusal' } };
+      return { ok: false, code: 'INVOICE_VISIT_TERMINAL',
+        sms: { error: 'terminal visit', code: 'INVOICE_VISIT_TERMINAL', deliveryOutcome: 'not_sent' },
+        email: { error: 'terminal visit', code: 'INVOICE_VISIT_TERMINAL', deliveryOutcome: 'not_sent' } };
     });
     try {
       await Invoice.processScheduledSends({ limit: 1 });
       expect(sender).toHaveBeenCalledTimes(1);
       expect(await read()).toMatchObject({ status: 'sending', send_claim_token: replacement, scheduled_send_attempts: 0 });
+      expect(require('../services/inspection-credit').reverseInspectionCreditForBooking).not.toHaveBeenCalled();
     } finally { sender.mockRestore(); }
+  });
+
+  test('scheduled combined terminal refusal atomically voids without spending an attempt', async () => {
+    await trx('scheduled_services').where({ id: visitId }).update({ status: 'cancelled' });
+    await trx('invoices').where({ id: invoiceId }).update({
+      status: 'scheduled', scheduled_send_at: new Date(Date.now() - 60000), scheduled_send_attempts: 0,
+    });
+    const dispatch = jest.fn(async () => ({ sent: true }));
+    sendCustomerMessage.mockImplementationOnce(({ withProviderHandoff }) => withProviderHandoff(dispatch));
+
+    await expect(Invoice.processScheduledSends({ limit: 1 }))
+      .resolves.toMatchObject({ sent: 0, failed: 0, deferred: 0 });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(require('../services/invoice-email').sendInvoiceEmail).not.toHaveBeenCalled();
+    expect(await read()).toMatchObject({ status: 'void', send_claim_token: null, scheduled_send_attempts: 0 });
+    expect(require('../services/inspection-credit').reverseInspectionCreditForBooking).toHaveBeenCalledTimes(1);
   });
 
   test('nested SMS retains ownership for email; the outer send clears it', async () => {

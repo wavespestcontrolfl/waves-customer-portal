@@ -846,6 +846,15 @@ function sendClaimLostError() {
   );
 }
 
+async function linkedScheduledServiceId(invoice, database = db) {
+  if (invoice?.scheduled_service_id) return invoice.scheduled_service_id;
+  if (!invoice?.service_record_id) return null;
+  const record = await database("service_records")
+    .where({ id: invoice.service_record_id })
+    .first("scheduled_service_id");
+  return record?.scheduled_service_id || null;
+}
+
 async function claimInvoiceForSend(invoiceId, {
   allowClaimed = false,
   claimToken = null,
@@ -2908,6 +2917,7 @@ const InvoiceService = {
         // The canonical message audit runs after this callback commits.
         withProviderHandoff: async (dispatch) => {
           let dispatchedOutcome = null;
+          let providerStarted = false;
           try {
             const outcome = await require("./estimate-deposits").withInvoiceDepositSettlement(
               invoiceId,
@@ -2918,13 +2928,7 @@ const InvoiceService = {
                     code: "send_claim_lost", error: "Invoice send claim changed; delivery not attempted",
                     validator: "check_invoice_send_claim" };
                 }
-                let scheduledServiceId = current.scheduled_service_id || null;
-                if (!scheduledServiceId && current.service_record_id) {
-                  const record = await trx("service_records")
-                    .where({ id: current.service_record_id })
-                    .first("scheduled_service_id");
-                  scheduledServiceId = record?.scheduled_service_id || null;
-                }
+                const scheduledServiceId = await linkedScheduledServiceId(current, trx);
                 const terminalVisit = await require("./invoice-helpers")
                   .visitRefusesSettlement(trx, scheduledServiceId);
                 if (terminalVisit) {
@@ -2944,6 +2948,7 @@ const InvoiceService = {
                     code: "INVOICE_BALANCE_CHANGED", error: "Invoice balance changed while preparing delivery; retry send",
                     validator: "check_invoice_deposit_settlement" };
                 }
+                providerStarted = true;
                 dispatchedOutcome = await dispatch();
                 return dispatchedOutcome;
               },
@@ -2962,6 +2967,11 @@ const InvoiceService = {
               logger.error(`[invoice] Provider outcome known for ${invoiceId} but deposit-settlement handoff could not close: ${err.message}`);
               return { ...dispatchedOutcome, settlementHandoffError: err.message };
             }
+            if (providerStarted) {
+              return { sent: false, blocked: true, deliveryOutcome: "uncertain",
+                code: err.code || "INVOICE_PROVIDER_OUTCOME_UNCERTAIN", error: err.message,
+                retryable: false, validator: "check_invoice_deposit_settlement" };
+            }
             return { sent: false, blocked: true, deliveryOutcome: "not_sent",
               code: err.code || "INVOICE_DEPOSIT_SETTLEMENT_FAILED", error: err.message,
               retryable: err.retryable === true, validator: "check_invoice_deposit_settlement" };
@@ -2979,6 +2989,7 @@ const InvoiceService = {
         const err = new Error(`payment-link SMS blocked: ${sendResult.code}`);
         err.code = sendResult.code;
         err.reason = sendResult.reason;
+        err.deliveryOutcome = sendResult.deliveryOutcome;
         // Send-window deferral contract: a QUIET_HOURS_HOLD is "try again at
         // 8 AM", not a delivery failure — carry the hold metadata so
         // sendViaSMSAndEmail / processScheduledSends can reschedule instead
@@ -3099,6 +3110,25 @@ const InvoiceService = {
         }
         await releaseDirectSmsClaim();
         return { sent: true, payUrl, finalizeError: err.message };
+      }
+      if (claimed && err.code === "INVOICE_VISIT_TERMINAL" && err.deliveryOutcome === "not_sent") {
+        const scheduledServiceId = await linkedScheduledServiceId(invoice);
+        const voided = scheduledServiceId
+          ? await InvoiceService.voidOpenInvoicesForCancelledService(scheduledServiceId, {
+              invoiceId,
+              refusedClaimToken: invoice.send_claim_token,
+            })
+          : [];
+        if (voided.includes(invoiceId)) {
+          logger.info(`[invoice] Voided ${invoice.invoice_number} after a definitive terminal-visit SMS refusal`);
+          throw err;
+        }
+        // Exact-token cleanup declined (replacement claim, money/PI fence,
+        // reactivated visit, or DB fault). Keep this episode parked for
+        // review; restoring it would make a definitely-refused cancelled-job
+        // send eligible for dunning or scheduler retries again.
+        logger.warn(`[invoice] Terminal-visit SMS refusal for ${invoice.invoice_number} could not be safely voided — claim retained for review`);
+        throw err;
       }
       const restored = await restoreSendClaim(invoiceId, previousStatus, claimed, db, invoice.send_claim_token);
       // Provider/Twilio error after we auto-applied credit above — the pay
@@ -3238,6 +3268,7 @@ const InvoiceService = {
       } catch (err) {
         sms.error = err.message;
         if (err.code) sms.code = err.code;
+        if (err.deliveryOutcome) sms.deliveryOutcome = err.deliveryOutcome;
         // Preserve the send-window hold so callers with a retry rail
         // (processScheduledSends) can move the due time to the window open
         // instead of treating the hold as a spent delivery attempt.
@@ -3331,7 +3362,16 @@ const InvoiceService = {
     const scheduledSmsHeld = allowClaimed
       && ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD", "APP_PROVIDER_RETRY"].includes(sms.code)
       && Boolean(sms.nextAllowedAt);
-    if (scheduledSmsHeld || sms.holdUnowned) {
+    const terminalSmsRefusal = sms.code === "INVOICE_VISIT_TERMINAL"
+      && sms.deliveryOutcome === "not_sent";
+    if (terminalSmsRefusal) {
+      // The locked SMS boundary proved the linked visit terminal before any
+      // provider request. Do not start a second channel for the same invalid
+      // invoice; the outer claim owner can now make one safe cleanup decision.
+      email.error = "Linked visit is terminal; email delivery not attempted";
+      email.code = "INVOICE_VISIT_TERMINAL";
+      email.deliveryOutcome = "not_sent";
+    } else if (scheduledSmsHeld || sms.holdUnowned) {
       email.error = sms.holdUnowned
         ? "Held SMS pay link could not be queued — whole send deferred so the claim stays retryable"
         : "Deferred with the held SMS leg — outside 8AM-8PM ET send window";
@@ -3345,6 +3385,8 @@ const InvoiceService = {
         });
         if (r?.ok) email.ok = true;
         else if (r?.error) email.error = r.error;
+        if (r?.code) email.code = r.code;
+        if (r?.deliveryOutcome) email.deliveryOutcome = r.deliveryOutcome;
         if (!payUrl && r?.payUrl) payUrl = r.payUrl;
         if (r?.recipient) email.recipient = r.recipient;
         if (r?.messageId) email.messageId = r.messageId;
@@ -3354,6 +3396,14 @@ const InvoiceService = {
     }
 
     const ok = sms.ok || email.ok;
+    const smsDefinitelyNotSent = (sms.deliveryOutcome === "not_sent" && sms.scheduled !== true)
+      || (claim.invoice?.payer_id && sms.code === "payer_billed");
+    const terminalVisitRefused = !ok
+      && smsDefinitelyNotSent
+      && email.code === "INVOICE_VISIT_TERMINAL"
+      && email.deliveryOutcome === "not_sent";
+    const terminalVisitObserved = !ok && (sms.code === "INVOICE_VISIT_TERMINAL"
+      || email.code === "INVOICE_VISIT_TERMINAL");
     let ownedDeliveryFinalized = false;
     if (ok) {
       const finalized = await whereSendClaimOwned(
@@ -3393,6 +3443,28 @@ const InvoiceService = {
           logger.error(`[invoice-followups] scheduleForInvoice failed (post-send finalize): ${e.message}`);
         }
       }
+    } else if (terminalVisitRefused) {
+      if (claimed) {
+        const scheduledServiceId = await linkedScheduledServiceId(claim.invoice);
+        const voided = scheduledServiceId
+          ? await InvoiceService.voidOpenInvoicesForCancelledService(scheduledServiceId, {
+              invoiceId,
+              refusedClaimToken: claim.invoice.send_claim_token,
+            })
+          : [];
+        if (!voided.includes(invoiceId)) {
+          logger.warn(`[invoice] Terminal-visit combined refusal for ${claim.invoice.invoice_number} could not be safely voided — claim retained for review`);
+        }
+      }
+      // A pre-claimed scheduled send is owned by processScheduledSends; it
+      // performs the same exact-token terminal cleanup. Neither owner may
+      // restore/reverse here and turn a cancelled-job send retryable again.
+    } else if (terminalVisitObserved) {
+      // One channel proved the visit terminal, but the other channel's
+      // provider outcome is not a definite non-send. Preserve the claim as
+      // delivery-unverified evidence; neither restore nor destructive void is
+      // licensed until an operator resolves the ambiguous channel.
+      logger.warn(`[invoice] Terminal visit detected for ${claim.invoice.invoice_number} with an unverified sibling-channel outcome — claim retained for review`);
     } else {
       const restored = await restoreSendClaim(
         invoiceId,
@@ -3480,7 +3552,10 @@ const InvoiceService = {
         );
       }
     }
-    return { ok, sms, email, payUrl, creditApplied: sendCreditResult?.applied || 0 };
+    return { ok, sms, email, payUrl, creditApplied: sendCreditResult?.applied || 0,
+      ...(terminalVisitRefused
+        ? { code: "INVOICE_VISIT_TERMINAL" }
+        : terminalVisitObserved ? { code: "INVOICE_VISIT_TERMINAL_OUTCOME_UNCERTAIN" } : {}) };
   },
 
   async markDeliverySent(
@@ -3676,6 +3751,8 @@ const InvoiceService = {
         // payer-billed invoice is delivered email-only by design.
         "payer_id",
         "customer_id",
+        "scheduled_service_id",
+        "service_record_id",
         // A combined-visit invoice re-resolves live Bill-To under held rows
         // before its queue claim.
         "visit_completion_packet_id",
@@ -3828,6 +3905,25 @@ const InvoiceService = {
       }
       if (result.code === "bill_to_fence_failed") {
         await restoreClaimedInvoice({ status: "scheduled", updated_at: new Date() });
+        continue;
+      }
+      if (result.code === "INVOICE_VISIT_TERMINAL") {
+        const scheduledServiceId = await linkedScheduledServiceId(inv);
+        const voided = scheduledServiceId
+          ? await InvoiceService.voidOpenInvoicesForCancelledService(scheduledServiceId, {
+              invoiceId: inv.id,
+              refusedClaimToken: claimed.send_claim_token,
+            })
+          : [];
+        held += 1;
+        if (!voided.includes(inv.id)) {
+          logger.warn(`[invoice] Scheduled send for ${inv.invoice_number} hit a terminal visit but could not be safely voided — claim retained for review`);
+        }
+        continue;
+      }
+      if (result.code === "INVOICE_VISIT_TERMINAL_OUTCOME_UNCERTAIN") {
+        held += 1;
+        logger.warn(`[invoice] Scheduled send for ${inv.invoice_number} found a terminal visit after an unverified channel outcome — claim retained for review`);
         continue;
       }
 
@@ -6851,13 +6947,22 @@ const InvoiceService = {
    *
    * Best-effort: logs and continues, never throws. Returns voided invoice ids.
    */
-  async voidOpenInvoicesForCancelledService(scheduledServiceId) {
+  async voidOpenInvoicesForCancelledService(
+    scheduledServiceId,
+    { invoiceId = null, refusedClaimToken = null } = {},
+  ) {
     const voided = [];
     if (!scheduledServiceId) return voided;
+    const refusedSendCleanup = Boolean(invoiceId && refusedClaimToken);
     try {
-      const candidates = await db("invoices")
-        .where({ scheduled_service_id: scheduledServiceId })
-        .whereIn("status", CANCELLED_SERVICE_VOIDABLE_STATUSES)
+      const candidateQuery = db("invoices");
+      if (refusedSendCleanup) {
+        candidateQuery.where({ id: invoiceId, status: "sending", send_claim_token: refusedClaimToken });
+      } else {
+        candidateQuery.where({ scheduled_service_id: scheduledServiceId })
+          .whereIn("status", CANCELLED_SERVICE_VOIDABLE_STATUSES);
+      }
+      const candidates = await candidateQuery
         .select("id", "invoice_number", "stripe_payment_intent_id", "payer_statement_id");
       if (candidates.length === 0) return voided;
       const StripeService = require("./stripe");
@@ -6865,6 +6970,18 @@ const InvoiceService = {
         try {
           // ── Stripe PI triage (pre-lock) ────────────────────────────────
           const triagedPiId = candidate.stripe_payment_intent_id || null;
+          // The refused-send cleanup runs after provider preparation. Never
+          // perform an external Stripe cancellation from that delayed path:
+          // a reactivated visit/replacement episode could have attached the
+          // PI after the refusal snapshot. Leave any PI-bearing row claimed
+          // for explicit money review. Normal cancellation keeps its existing
+          // triage below.
+          if (refusedSendCleanup && triagedPiId) {
+            logger.warn(
+              `[invoice] NOT auto-voiding ${candidate.invoice_number} after terminal delivery refusal — PaymentIntent ${triagedPiId} is attached; needs manual review`,
+            );
+            continue;
+          }
           if (triagedPiId) {
             let pi;
             try {
@@ -6930,7 +7047,32 @@ const InvoiceService = {
               .forUpdate()
               .first();
             if (!locked) return { skipped: "invoice no longer exists" };
-            if (!CANCELLED_SERVICE_VOIDABLE_STATUSES.includes(locked.status)) {
+            if (refusedSendCleanup) {
+              if (locked.status !== "sending" || locked.send_claim_token !== refusedClaimToken) {
+                return { skipped: "delivery claim changed; replacement episode retained", invoice: locked };
+              }
+              // A deferred invoice message may already own this delivery.
+              // Keep the invoice claimed while that message is queued,
+              // dispatching, or finalizing so terminal-refusal cleanup cannot
+              // erase its pay link or accepted-provider evidence.
+              const liveQueuedDelivery = await trx("sms_log")
+                .whereRaw("metadata->>'entry_point' IN ('invoice_send_deferred', 'invoice_followup_deferred', 'autopay_completion_decline_deferred', 'dispatch_completion_deferred')")
+                .whereRaw("metadata->>'invoice_id' = ?", [String(locked.id)])
+                .whereRaw("(status IN ('scheduled', 'sending') OR (status = 'sent' AND metadata->>'finalize_pending' = 'true'))")
+                .first("id");
+              if (liveQueuedDelivery) {
+                return { skipped: `queued delivery ${liveQueuedDelivery.id} is still live; needs delivery review`, invoice: locked };
+              }
+              const linkedVisitId = await linkedScheduledServiceId(locked, trx);
+              if (String(linkedVisitId || "") !== String(scheduledServiceId)) {
+                return { skipped: "linked visit changed after refusal", invoice: locked };
+              }
+              const terminalVisit = await require("./invoice-helpers")
+                .visitRefusesSettlement(trx, linkedVisitId);
+              if (!terminalVisit) {
+                return { skipped: "linked visit is no longer terminal", invoice: locked };
+              }
+            } else if (!CANCELLED_SERVICE_VOIDABLE_STATUSES.includes(locked.status)) {
               return { skipped: `status moved to ${locked.status}`, invoice: locked };
             }
             // A different/new PI attached after triage means a customer is
@@ -6954,8 +7096,10 @@ const InvoiceService = {
                 invoice: locked,
               };
             }
-            const [voidedInvoice] = await trx("invoices")
-              .where({ id: locked.id, status: locked.status })
+            const voidQuery = trx("invoices")
+              .where({ id: locked.id, status: locked.status });
+            if (refusedSendCleanup) voidQuery.where({ send_claim_token: refusedClaimToken });
+            const [voidedInvoice] = await voidQuery
               .update({ status: "void", send_claim_token: null, updated_at: new Date() })
               .returning("*");
             if (!voidedInvoice) return { skipped: "concurrent status change", invoice: locked };
@@ -7027,21 +7171,23 @@ const InvoiceService = {
       // spendable (Codex #3178 r7 P0). `finally` covers the no-invoice
       // early return too — a cancel with nothing to void still reverses.
       // Idempotent and never throws; the hourly sweep stays as recovery.
-      try {
-        const rev = await require('./inspection-credit').reverseInspectionCreditForBooking({
-          scheduledServiceId,
-          createdBy: 'system:inspection_credit_cancellation_void_hook',
-        });
-        // Surfaced for callers that COUNT reversals (the hourly sweep,
-        // which now routes through this seam — Codex #3178 r33 P2): a
-        // property on the returned array is additive and invisible to
-        // every array-consuming caller. Assigned in finally, so the
-        // no-invoice early return carries it too.
-        voided.inspectionCreditReversal = rev;
-      } catch (revErr) {
-        logger.error(
-          `[invoice] inspection credit reversal failed for cancelled service ${scheduledServiceId}: ${revErr.message}`,
-        );
+      if (!refusedSendCleanup || voided.includes(invoiceId)) {
+        try {
+          const rev = await require('./inspection-credit').reverseInspectionCreditForBooking({
+            scheduledServiceId,
+            createdBy: 'system:inspection_credit_cancellation_void_hook',
+          });
+          // Surfaced for callers that COUNT reversals (the hourly sweep,
+          // which now routes through this seam — Codex #3178 r33 P2): a
+          // property on the returned array is additive and invisible to
+          // every array-consuming caller. Assigned in finally, so the
+          // no-invoice early return carries it too.
+          voided.inspectionCreditReversal = rev;
+        } catch (revErr) {
+          logger.error(
+            `[invoice] inspection credit reversal failed for cancelled service ${scheduledServiceId}: ${revErr.message}`,
+          );
+        }
       }
     }
     return voided;

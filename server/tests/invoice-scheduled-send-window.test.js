@@ -302,6 +302,85 @@ describe('processScheduledSends send-window handling', () => {
     }
   });
 
+  test('combined terminal refusal skips email and delegates exact-token cleanup to its claim owner', async () => {
+    const { sendInvoiceEmail } = require('../services/invoice-email');
+    const terminal = Object.assign(new Error('linked visit cancelled'), {
+      code: 'INVOICE_VISIT_TERMINAL', deliveryOutcome: 'not_sent',
+    });
+    const smsSpy = jest.spyOn(InvoiceService, 'sendViaSMS').mockRejectedValue(terminal);
+    const voidSpy = jest.spyOn(InvoiceService, 'voidOpenInvoicesForCancelledService').mockResolvedValue(['inv-1']);
+    const draftInvoice = { ...dueRow, status: 'draft' };
+    db.mockReturnValueOnce(chain({ first: { payer_statement_id: null } }))
+      .mockReturnValueOnce(chain({ first: draftInvoice }))
+      .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending', scheduled_service_id: 'svc-1' }] }));
+    try {
+      const result = await InvoiceService.sendViaSMSAndEmail('inv-1');
+
+      expect(result).toMatchObject({ ok: false, code: 'INVOICE_VISIT_TERMINAL' });
+      expect(sendInvoiceEmail).not.toHaveBeenCalled();
+      expect(voidSpy).toHaveBeenCalledWith('svc-1', {
+        invoiceId: 'inv-1', refusedClaimToken: expect.any(String),
+      });
+    } finally {
+      smsSpy.mockRestore();
+      voidSpy.mockRestore();
+    }
+  });
+
+  test('terminal email refusal after an uncertain SMS keeps the claim for review', async () => {
+    const { sendInvoiceEmail } = require('../services/invoice-email');
+    const uncertain = Object.assign(new Error('provider outcome unknown'), {
+      code: 'INVOICE_PROVIDER_OUTCOME_UNCERTAIN', deliveryOutcome: 'uncertain',
+    });
+    const smsSpy = jest.spyOn(InvoiceService, 'sendViaSMS').mockRejectedValue(uncertain);
+    sendInvoiceEmail.mockResolvedValueOnce({ ok: false, error: 'visit cancelled',
+      code: 'INVOICE_VISIT_TERMINAL', deliveryOutcome: 'not_sent' });
+    const voidSpy = jest.spyOn(InvoiceService, 'voidOpenInvoicesForCancelledService');
+    const draftInvoice = { ...dueRow, status: 'draft' };
+    db.mockReturnValueOnce(chain({ first: { payer_statement_id: null } }))
+      .mockReturnValueOnce(chain({ first: draftInvoice }))
+      .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending', scheduled_service_id: 'svc-1' }] }));
+    try {
+      const result = await InvoiceService.sendViaSMSAndEmail('inv-1');
+
+      expect(result).toMatchObject({ ok: false, code: 'INVOICE_VISIT_TERMINAL_OUTCOME_UNCERTAIN' });
+      expect(voidSpy).not.toHaveBeenCalled();
+      expect(db).toHaveBeenCalledTimes(3);
+    } finally {
+      smsSpy.mockRestore();
+      voidSpy.mockRestore();
+    }
+  });
+
+  test('terminal email refusal keeps a claim when the held SMS adopted a live queued delivery', async () => {
+    const { sendInvoiceEmail } = require('../services/invoice-email');
+    const held = Object.assign(new Error('payment-link SMS held'), {
+      code: 'QUIET_HOURS_HOLD', deliveryOutcome: 'not_sent', deferred: true,
+      nextAllowedAt: WINDOW_OPEN.toISOString(), smsBody: 'Pay at https://pay.example/abc',
+      toPhone: '+19415550123',
+    });
+    const smsSpy = jest.spyOn(InvoiceService, 'sendViaSMS').mockRejectedValue(held);
+    sendInvoiceEmail.mockResolvedValueOnce({ ok: false, error: 'visit cancelled',
+      code: 'INVOICE_VISIT_TERMINAL', deliveryOutcome: 'not_sent' });
+    const voidSpy = jest.spyOn(InvoiceService, 'voidOpenInvoicesForCancelledService');
+    const draftInvoice = { ...dueRow, status: 'draft' };
+    db.mockReturnValueOnce(chain({ first: { payer_statement_id: null } }))
+      .mockReturnValueOnce(chain({ first: draftInvoice }))
+      .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending', scheduled_service_id: 'svc-1' }] }))
+      .mockReturnValueOnce(chain({ first: { id: 'queued-sms-1' } }));
+    try {
+      const result = await InvoiceService.sendViaSMSAndEmail('inv-1');
+
+      expect(result).toMatchObject({ ok: false, code: 'INVOICE_VISIT_TERMINAL_OUTCOME_UNCERTAIN',
+        sms: { scheduled: true } });
+      expect(voidSpy).not.toHaveBeenCalled();
+      expect(db).toHaveBeenCalledTimes(4);
+    } finally {
+      smsSpy.mockRestore();
+      voidSpy.mockRestore();
+    }
+  });
+
   test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'])('direct delivery held by %s is queued before the email sends', async (code) => {
     const { sendInvoiceEmail } = require('../services/invoice-email');
     const smsSpy = jest.spyOn(InvoiceService, 'sendViaSMS').mockImplementation(async () => {
@@ -417,5 +496,24 @@ describe('processScheduledSends send-window handling', () => {
     expect(result).toEqual({ sent: 0, failed: 1, deferred: 0 });
     const updateArgs = failUpdate.update.mock.calls[0][0];
     expect(updateArgs.scheduled_send_attempts).toBe(3);
+  });
+
+  test('scheduled terminal refusal neither restores the queue nor spends an attempt', async () => {
+    isWithinSendWindowET.mockReturnValue(true);
+    const terminalDue = { ...dueRow, scheduled_service_id: 'svc-1' };
+    db.mockReturnValueOnce(chain())
+      .mockReturnValueOnce(chain({ rows: [terminalDue] }))
+      .mockReturnValueOnce(chain({ returning: [claimedRow()] }));
+    sendSpy.mockResolvedValue({ ok: false, code: 'INVOICE_VISIT_TERMINAL',
+      sms: { code: 'INVOICE_VISIT_TERMINAL', deliveryOutcome: 'not_sent' },
+      email: { code: 'INVOICE_VISIT_TERMINAL', deliveryOutcome: 'not_sent' } });
+    const voidSpy = jest.spyOn(InvoiceService, 'voidOpenInvoicesForCancelledService').mockResolvedValue(['inv-1']);
+    try {
+      expect(await InvoiceService.processScheduledSends()).toEqual({ sent: 0, failed: 0, deferred: 0 });
+      expect(voidSpy).toHaveBeenCalledWith('svc-1', {
+        invoiceId: 'inv-1', refusedClaimToken: 'claim-1',
+      });
+      expect(db).toHaveBeenCalledTimes(3);
+    } finally { voidSpy.mockRestore(); }
   });
 });
