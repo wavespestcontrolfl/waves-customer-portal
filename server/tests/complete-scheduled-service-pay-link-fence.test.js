@@ -23,14 +23,14 @@ describe('complete-scheduled-service.js pay-link senders acquire the shared clai
     expect(end).toBeGreaterThan(start);
     const block = source.slice(start, end);
     const claimAt = block.indexOf('paymentFailedDeclineClaim = await InvoiceServiceForDeclineClaim.claimInvoiceForSend(invoice.id, { firstDeliveryOnly: true });');
-    const sendAt = block.indexOf('const failResult = await sendCustomerMessage({');
+    const sendAt = block.indexOf('const failResult = throwIfDeliveryUnverified(await sendCustomerMessage({');
     const restoreAt = block.indexOf('await InvoiceServiceForDeclineClaim.restoreSendClaim(invoice.id, paymentFailedDeclineClaim.previousStatus, paymentFailedDeclineClaim.claimed)');
     expect(claimAt).toBeGreaterThan(-1);
     expect(sendAt).toBeGreaterThan(claimAt);
     expect(restoreAt).toBeGreaterThan(sendAt);
     // The restore only fires on a non-delivered exit — a delivered notice
     // finalizes through markDeliverySent's own CAS instead.
-    expect(block).toMatch(/if \(!paymentFailedNoticeDelivered\) \{\s*\n\s*await InvoiceServiceForDeclineClaim\.restoreSendClaim\(/);
+    expect(block).toMatch(/if \(!paymentFailedNoticeDelivered && !paymentFailedNoticeDeliveryUnverified\) \{\s*\n\s*await InvoiceServiceForDeclineClaim\.restoreSendClaim\(/);
   });
 
   // Round-20 P1 (#4131, second claim-mode bug — same shape as the payer AP

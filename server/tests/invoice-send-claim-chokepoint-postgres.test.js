@@ -103,6 +103,7 @@ const { etDateString, addETDays } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { chargeInvoiceWithSavedCard } = require('../services/stripe');
 const InvoiceService = require('../services/invoice');
+const CompletionAttempts = require('../services/completion-attempts');
 const { completeScheduledService } = require('../services/complete-scheduled-service');
 const connection = process.env.VISIT_PACKET_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -169,17 +170,22 @@ postgres('the shared send claim on a migrated database', () => {
     return f;
   }
 
-  function complete() {
+  function complete(idempotencyKey = randomUUID()) {
     return completeScheduledService({
-      serviceId: f.serviceId,
-      idempotencyKey: randomUUID(),
+      serviceId: f.serviceId, idempotencyKey,
       body: { visitOutcome: 'completed', sendCompletionSms: true, requestReview: false, products: [], areasTreated: [],
-        customerRecap: 'The scheduled service was completed.', idempotencyKey: randomUUID() },
+        customerRecap: 'The scheduled service was completed.', idempotencyKey },
       actor: { techRole: 'technician', technicianId: f.techId, technician: { id: f.techId, name: 'Fixture Technician' } },
     });
   }
 
   const payLinkTexts = () => sendCustomerMessage.mock.calls.filter(([input]) => /\/pay\//.test(String(input?.body || input?.message || '')));
+
+  const uncertainSend = (mode) => {
+    const providerOutcome = { sent: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_UNKNOWN', error: 'provider response unavailable' };
+    if (mode === 'returned') return providerOutcome;
+    throw Object.assign(new Error('provider response unavailable'), { providerOutcome });
+  };
 
   describe('the completion claims the invoice it minted itself (round 16 P1)', () => {
     test('control: with nobody racing, the completion claims its own fresh draft, texts ONE pay link and finalizes it sent', async () => {
@@ -223,6 +229,57 @@ postgres('the shared send claim on a migrated database', () => {
       // …and the admin send finishes its delivery exactly once.
       await InvoiceService.markDeliverySent(adminClaim.invoice.id, { sms: true, source: 'admin_send_now' });
       expect((await readInvoice(adminClaim.invoice.id)).status).toBe('sent');
+    });
+
+    test.each(['returned', 'thrown'])('a %s uncertain completion pay-link handoff retains the claim without recording or retrying delivery', async (mode) => {
+      await visitFixture();
+      sendCustomerMessage.mockImplementation(async (input) => (/\/pay\//.test(String(input.body || ''))
+        ? uncertainSend(mode)
+        : { sent: true, channel: 'sms', providerMessageId: `SM${randomUUID().slice(0, 8)}` }));
+
+      const result = await complete();
+      expect(result.status).toBe(200);
+      const [invoice] = await mockPg('invoices').where({ customer_id: f.customerId });
+      expect(payLinkTexts()).toHaveLength(1);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(invoice).toMatchObject({ status: 'sending', sent_at: null, sms_sent_at: null });
+      const [record] = await mockPg('service_records').where({ scheduled_service_id: f.serviceId });
+      expect(record.structured_notes).toMatchObject({
+        completionSmsStatus: 'failed',
+        completionSmsDeliveryUnverifiedAt: expect.any(String),
+      });
+      expect(record.structured_notes.sentSmsAt).toBeUndefined();
+    });
+
+    test('an unrelated finalization failure resumes side effects without replaying an unverified completion text', async () => {
+      await visitFixture();
+      const idempotencyKey = randomUUID();
+      sendCustomerMessage.mockImplementation(async (input) => (/\/pay\//.test(String(input.body || ''))
+        ? uncertainSend('returned')
+        : { sent: true, channel: 'sms', providerMessageId: `SM${randomUUID().slice(0, 8)}` }));
+      const finalize = jest.spyOn(CompletionAttempts, 'markCompletionAttemptSucceeded')
+        .mockRejectedValueOnce(new Error('post-send finalization failure (injected)'));
+
+      try {
+        await expect(complete(idempotencyKey)).rejects.toThrow('post-send finalization failure (injected)');
+      } finally {
+        finalize.mockRestore();
+      }
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(await mockPg('service_completion_attempts').where({ service_id: f.serviceId }).first())
+        .toMatchObject({ status: 'side_effects_pending' });
+
+      const resumed = await complete(idempotencyKey);
+      expect(resumed.status).toBe(200);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      const [record] = await mockPg('service_records').where({ scheduled_service_id: f.serviceId });
+      expect(record.structured_notes).toMatchObject({
+        completionSmsStatus: 'failed',
+        completionSmsDeliveryUnverifiedAt: expect.any(String),
+      });
+      expect((await mockPg('invoices').where({ customer_id: f.customerId }).first())).toMatchObject({
+        status: 'sending', sent_at: null, sms_sent_at: null,
+      });
     });
   });
 
@@ -454,6 +511,30 @@ postgres('the shared send claim on a migrated database', () => {
       const [record] = await mockPg('service_records').where({ scheduled_service_id: f.serviceId });
       expect(record?.structured_notes?.paymentFailedNoticeStatus).toBe('sent');
       expect(record?.structured_notes?.paymentFailedNoticeAuditError).toMatch(/audit row insert failed/);
+    });
+
+    test.each(['returned', 'thrown'])('a %s uncertain decline notice retains its claim and suppresses the completion pay-link alternative', async (mode) => {
+      await autopayDeclineVisitFixture();
+      sendCustomerMessage.mockImplementation(async (input) => (input.purpose === 'payment_failure'
+        ? uncertainSend(mode)
+        : { sent: true, channel: 'sms', providerMessageId: `SM${randomUUID().slice(0, 8)}` }));
+
+      const result = await complete();
+      expect(result.status).toBe(200);
+      const [invoice] = await mockPg('invoices').where({ customer_id: f.customerId });
+      const payLinkCalls = payLinkTexts();
+      expect(payLinkCalls).toHaveLength(1);
+      expect(payLinkCalls[0][0].purpose).toBe('payment_failure');
+      const completionCalls = sendCustomerMessage.mock.calls.filter(([input]) => input.purpose === 'service_completion');
+      expect(completionCalls).toHaveLength(1);
+      expect(String(completionCalls[0][0].body)).not.toMatch(/\/pay\//);
+      expect(invoice).toMatchObject({ status: 'sending', sent_at: null, sms_sent_at: null });
+      const [record] = await mockPg('service_records').where({ scheduled_service_id: f.serviceId });
+      expect(record.structured_notes).toMatchObject({
+        paymentFailedNoticeStatus: 'failed',
+        paymentFailedNoticeDeliveryUnverifiedAt: expect.any(String),
+      });
+      expect(record.structured_notes.paymentFailedNoticeSentAt).toBeUndefined();
     });
   });
 

@@ -619,7 +619,7 @@ describe('completionInvoiceAlreadyDelivered', () => {
     // before the delivery lane, so an admin send can claim the fresh draft
     // in between). The earlier reused-only keys (preMintedInvoice /
     // adoptedConcurrentInvoice, r4 + r12) no longer gate it.
-    expect(completion).toMatch(/const linkOtherwiseEligible = !suppressCompletionInvoiceLink\s*&& includePayLink !== false[\s\S]{0,2200}?&& !invoice\?\.payer_id\s*(?:\/\/[^\n]*\n\s*)*&& !paymentFailedNoticeSent;[\s\S]{0,2200}?if \(linkOtherwiseEligible && invoice\?\.id\) \{/);
+    expect(completion).toMatch(/const linkOtherwiseEligible = !suppressCompletionInvoiceLink\s*&& includePayLink !== false[\s\S]{0,2200}?&& !invoice\?\.payer_id[\s\S]{0,900}?&& !paymentFailedNoticeSent\s*&& !paymentFailedNoticeDeliveryUnverified;[\s\S]{0,2200}?if \(linkOtherwiseEligible && invoice\?\.id\) \{/);
     expect(completion).not.toMatch(/if \(linkOtherwiseEligible && invoice\?\.id\s*&& \(\(preMintedInvoice/);
     expect(completion).toMatch(/const allowCompletionInvoiceLink = linkOtherwiseEligible && !reusedInvoiceClaimedElsewhere;/);
     expect(completion).not.toMatch(/allowCompletionInvoiceLinkBase/);
@@ -638,8 +638,18 @@ describe('completionInvoiceAlreadyDelivered', () => {
     expect(completion).toMatch(/if \(invoice\?\.id && invoiceCreated && payUrl && snap\.invoiceLinkAllowed\) \{[\s\S]{0,300}?completionInvoiceLinkDelivered = true;\s*try \{\s*const InvoiceService = require\('\.\.\/services\/invoice'\);\s*invoice = await InvoiceService\.markDeliverySent/);
     expect(completion).not.toMatch(/markDeliverySent\([\s\S]{0,200}?\}\);\s*completionInvoiceLinkDelivered = true;/);
     // ONE release, in the outer finally — covers the normal end, the 503 resume returns and a throw.
-    expect(completion).toMatch(/throw err;\s*\} finally \{[\s\S]{0,900}?if \(completionInvoiceSendClaim\?\.claimed && !completionInvoiceLinkDelivered\) \{\s*await require\('\.\.\/services\/invoice'\)\.restoreSendClaim\(completionInvoiceSendClaim\.invoiceId, completionInvoiceSendClaim\.previousStatus, true\);[\s\S]{0,120}?\}\s*\}\s*\}\s*\n\s*module\.exports = \{/);
+    expect(completion).toMatch(/throw err;\s*\} finally \{[\s\S]{0,1200}?if \(completionInvoiceSendClaim\?\.claimed && !completionInvoiceLinkDelivered && !completionInvoiceDeliveryUnverified\) \{\s*await require\('\.\.\/services\/invoice'\)\.restoreSendClaim\(completionInvoiceSendClaim\.invoiceId, completionInvoiceSendClaim\.previousStatus, true\);[\s\S]{0,120}?\}\s*\}\s*\}\s*\n\s*module\.exports = \{/);
     expect(completion.match(/restoreSendClaim\(completionInvoiceSendClaim\.invoiceId/g)).toHaveLength(1);
+    // Returned uncertainty is normalized before MMS fallback; thrown
+    // uncertainty reaches the same catch. Neither is recorded delivered,
+    // restored, or allowed to put the pay link on the alternate completion.
+    expect(completion.match(/throwIfDeliveryUnverified\(await sendCustomerMessage/g)).toHaveLength(3);
+    expect(completion).toMatch(/const unverifiedOutcome = deliveryUnverifiedProviderOutcome\(sendErr\);[\s\S]{0,300}?paymentFailedNoticeDeliveryUnverified = true;/);
+    expect(completion).toContain('if (!paymentFailedNoticeDelivered && !paymentFailedNoticeDeliveryUnverified)');
+    expect(completion).toMatch(/const unverifiedOutcome = deliveryUnverifiedProviderOutcome\(e\);[\s\S]{0,500}?completionInvoiceDeliveryUnverified = true;/);
+    expect(completion).toContain("completionSmsStatus: 'failed'");
+    expect(completion).toContain('completionSmsDeliveryUnverifiedAt: new Date().toISOString()');
+    expect(completion).not.toMatch(/completionInvoiceDeliveryUnverified = true;[\s\S]{0,400}?markDeliverySent/);
   });
 
   // Codex round 16 P1 #4131: the Dispatch feed's checkoutInvoice fetch used

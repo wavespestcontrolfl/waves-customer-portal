@@ -15,6 +15,24 @@ const CompletionAttempts = require('../services/completion-attempts');
 // attribution are derived from before the row lock; any of them moving under
 // the lock refuses the closeout (GitHub r11 P2 #4127).
 const ISSUED_CLOSEOUT_IDENTITY_FIELDS = ['service_type', 'service_catalog_id', 'service_id', 'technician_id'];
+
+// The messaging layer returns provider outcomes and also attaches the same
+// shape to thrown post-dispatch errors. Keep one classifier so every
+// completion pay-link sender treats an unknown outcome as "may have sent".
+function deliveryUnverifiedProviderOutcome(value) {
+  const outcome = value?.providerOutcome || value;
+  return outcome?.deliveryOutcome === 'uncertain' ? outcome : null;
+}
+
+function throwIfDeliveryUnverified(result) {
+  const providerOutcome = deliveryUnverifiedProviderOutcome(result);
+  if (!providerOutcome) return result;
+  const err = new Error(providerOutcome.reason || providerOutcome.error || providerOutcome.code || 'Provider delivery outcome is unknown');
+  err.code = providerOutcome.code;
+  err.providerOutcome = providerOutcome;
+  throw err;
+}
+
 const PropertyZones = require('../services/property-zones');
 const TermiteStations = require('../services/termite-stations');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -2346,6 +2364,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
   // pay-link text actually went out under it (completionInvoiceLinkDelivered).
   let completionInvoiceSendClaim = null;
   let completionInvoiceLinkDelivered = false;
+  let completionInvoiceDeliveryUnverified = false;
   let durableCompletionCommitted = false;
   try {
     const {
@@ -11079,6 +11098,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // scheduled-SMS rail; that queued row owns the obligation, so a
       // re-completion must not send a second copy.
       || recordStructuredNotes.completionSmsStatus === 'deferred'
+      // An uncertain provider handoff may have delivered. Its existing
+      // 'failed' closeout status surfaces office review; this durable marker
+      // distinguishes it from a definite failure and prevents a released
+      // side-effects resume from replaying the text.
+      || !!recordStructuredNotes.completionSmsDeliveryUnverifiedAt
       || completionSmsSendingFresh;
     // The pest-recap path (services/pest-recap.js) writes its own
     // service_records row and claims recap_sms_sent_at when it texts the
@@ -11266,6 +11290,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // through the GATE_AUTOPAY_CUSTOMER_SMS rollout gate like every other
     // automated-charge customer text.
     let paymentFailedNoticeSent = false;
+    let paymentFailedNoticeDeliveryUnverified = false;
     // Resume dedupe: the side-effects resume path reruns the auto-charge, so
     // a crash after this notice delivered but before the completion attempt
     // was marked succeeded would text the same decline twice. 'sending' also
@@ -11278,6 +11303,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const priorPaymentFailedNoticeStatus = String(recordStructuredNotes.paymentFailedNoticeStatus || '');
     if (priorPaymentFailedNoticeStatus === 'sent') {
       paymentFailedNoticeSent = true;
+    } else if (recordStructuredNotes.paymentFailedNoticeDeliveryUnverifiedAt) {
+      paymentFailedNoticeDeliveryUnverified = true;
     } else if (paymentFailedSmsContext && !['sending', 'deferred'].includes(priorPaymentFailedNoticeStatus)
       && svc.cust_phone && invoice?.id && invoiceCreated && payUrl
       && require('../services/invoice-helpers').isInvoiceCollectibleStatus(invoice.status)
@@ -11356,7 +11383,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               paymentFailedNoticeStatus: recordStructuredNotes.paymentFailedNoticeStatus,
               paymentFailedNoticeAttemptedAt: recordStructuredNotes.paymentFailedNoticeAttemptedAt,
             });
-            const failResult = await sendCustomerMessage({
+            const failResult = throwIfDeliveryUnverified(await sendCustomerMessage({
               to: svc.cust_phone,
               body: paymentFailedBody,
               channel: 'sms',
@@ -11369,7 +11396,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               // billing_mode_at_send: the owner autopay digest (#3607) classifies
               // the text against the lane that authorized it.
               metadata: { original_message_type: 'payment_failed', notificationEventKey: `payment-problem:service:${record.id}`, service_record_id: record.id, invoice_id: invoice.id, billing_mode_at_send: resolveBillingLane({ billing_mode: svc.cust_billing_mode, waveguard_tier: svc.cust_waveguard_tier, monthly_rate: svc.cust_monthly_rate }).mode },
-            });
+            }));
             paymentFailedNoticeSent = !!failResult.sent;
             // Send-window hold: the decline is deliberately independent of
             // completion messaging — when the operator skipped the separate
@@ -11462,38 +11489,54 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // which would erase the fact, restore the claim to draft, and
             // let the completion SMS below (paymentFailedNoticeSent still
             // false) duplicate the SAME pay link on a fresh claim.
-            const providerAccepted = sendErr?.providerOutcome?.sent === true;
-            if (!providerAccepted) throw sendErr;
-            paymentFailedNoticeDelivered = true;
-            paymentFailedNoticeSent = true;
-            recordStructuredNotes.paymentFailedNoticeStatus = 'sent';
-            recordStructuredNotes.paymentFailedNoticeSentAt = new Date().toISOString();
-            recordStructuredNotes.paymentFailedNoticeAuditError = sendErr.message || 'post-send write failed';
-            const acceptedNotes = { ...recordStructuredNotes };
-            await mergeRecordNotesKeys(record.id, {
-              paymentFailedNoticeStatus: recordStructuredNotes.paymentFailedNoticeStatus,
-              paymentFailedNoticeSentAt: recordStructuredNotes.paymentFailedNoticeSentAt,
-              paymentFailedNoticeAuditError: recordStructuredNotes.paymentFailedNoticeAuditError,
-            }).catch((updateErr) => logger.error(`[dispatch] payment-failed notice accepted-state update failed: ${updateErr.message}`));
-            record.structured_notes = acceptedNotes;
-            try {
-              const InvoiceService = require('../services/invoice');
-              invoice = await InvoiceService.markDeliverySent(invoice.id, {
-                sms: true,
-                source: 'payment_failed_notice',
-                payUrl,
-              });
-            } catch (statusErr) {
-              logger.warn(`[dispatch] invoice delivery status sync after accepted payment-failed notice failed for ${invoice?.id}: ${statusErr.message}`);
+            const unverifiedOutcome = deliveryUnverifiedProviderOutcome(sendErr);
+            if (unverifiedOutcome) {
+              paymentFailedNoticeDeliveryUnverified = true;
+              recordStructuredNotes.paymentFailedNoticeStatus = 'failed';
+              recordStructuredNotes.paymentFailedNoticeError = sendErr.message || 'provider delivery outcome is unknown';
+              recordStructuredNotes.paymentFailedNoticeDeliveryUnverifiedAt = new Date().toISOString();
+              const unverifiedNotes = { ...recordStructuredNotes };
+              await mergeRecordNotesKeys(record.id, {
+                paymentFailedNoticeStatus: recordStructuredNotes.paymentFailedNoticeStatus,
+                paymentFailedNoticeError: recordStructuredNotes.paymentFailedNoticeError,
+                paymentFailedNoticeDeliveryUnverifiedAt: recordStructuredNotes.paymentFailedNoticeDeliveryUnverifiedAt,
+              }).catch((updateErr) => logger.error(`[dispatch] payment-failed notice unverified-state update failed: ${updateErr.message}`));
+              record.structured_notes = unverifiedNotes;
+              logger.error(`[dispatch] Payment-failed notice delivery unverified for invoice ${invoice?.id} — send claim held for review: ${sendErr.message}`);
+            } else {
+              const providerAccepted = sendErr?.providerOutcome?.sent === true;
+              if (!providerAccepted) throw sendErr;
+              paymentFailedNoticeDelivered = true;
+              paymentFailedNoticeSent = true;
+              recordStructuredNotes.paymentFailedNoticeStatus = 'sent';
+              recordStructuredNotes.paymentFailedNoticeSentAt = new Date().toISOString();
+              recordStructuredNotes.paymentFailedNoticeAuditError = sendErr.message || 'post-send write failed';
+              const acceptedNotes = { ...recordStructuredNotes };
+              await mergeRecordNotesKeys(record.id, {
+                paymentFailedNoticeStatus: recordStructuredNotes.paymentFailedNoticeStatus,
+                paymentFailedNoticeSentAt: recordStructuredNotes.paymentFailedNoticeSentAt,
+                paymentFailedNoticeAuditError: recordStructuredNotes.paymentFailedNoticeAuditError,
+              }).catch((updateErr) => logger.error(`[dispatch] payment-failed notice accepted-state update failed: ${updateErr.message}`));
+              record.structured_notes = acceptedNotes;
+              try {
+                const InvoiceService = require('../services/invoice');
+                invoice = await InvoiceService.markDeliverySent(invoice.id, {
+                  sms: true,
+                  source: 'payment_failed_notice',
+                  payUrl,
+                });
+              } catch (statusErr) {
+                logger.warn(`[dispatch] invoice delivery status sync after accepted payment-failed notice failed for ${invoice?.id}: ${statusErr.message}`);
+              }
+              logger.warn(`[dispatch] Payment-failed notice for invoice ${invoice?.id} was accepted by the provider but a post-send write failed (${sendErr.message}) — recorded as sent, no failure bell, do not re-send`);
             }
-            logger.warn(`[dispatch] Payment-failed notice for invoice ${invoice?.id} was accepted by the provider but a post-send write failed (${sendErr.message}) — recorded as sent, no failure bell, do not re-send`);
           } finally {
             // A non-delivered exit (failed, deferred, or a throw anywhere
             // above) must give the claim back — a delivered notice instead
             // finalizes through markDeliverySent's own CAS above, which
             // releases the claim by flipping 'sending' → 'sent' (the same
             // mechanism every other pay-link sender uses).
-            if (!paymentFailedNoticeDelivered) {
+            if (!paymentFailedNoticeDelivered && !paymentFailedNoticeDeliveryUnverified) {
               await InvoiceServiceForDeclineClaim.restoreSendClaim(invoice.id, paymentFailedDeclineClaim.previousStatus, paymentFailedDeclineClaim.claimed)
                 .catch((restoreErr) => logger.warn(`[dispatch] payment-failed notice claim restore failed for invoice ${invoice.id}: ${restoreErr.message}`));
             }
@@ -11859,7 +11902,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // perform (GitHub r6 P1 #4131): an admin send holding the claim, or
           // a transient claim read failure, would otherwise turn a
           // guaranteed report-only closeout into the resumable 503.
-          && !paymentFailedNoticeSent;
+          && !paymentFailedNoticeSent
+          && !paymentFailedNoticeDeliveryUnverified;
         // EVERY collectible invoice is delivered under the ONE send claim
         // (Codex P1 #4131 r4, broadened r12 P1, r16 P1): the completion
         // takes claimInvoiceForSend — the same atomic draft/scheduled/… →
@@ -12203,6 +12247,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // never the whole snapshot.
           const smsNotesDelta = {
             completionSmsStatus: 'sending',
+            // Persist the uncertainty fence before calling the provider.
+            // Every definitive outcome below clears it in the same durable
+            // notes write; if later bookkeeping throws, a side-effects
+            // resume still cannot replay a message that may have gone out.
+            completionSmsDeliveryUnverifiedAt: new Date().toISOString(),
             completionSmsType: sentSmsType,
             completionSmsBody: sentSmsBody,
             completionSmsTruncated: completionSmsWasTruncated,
@@ -12262,7 +12311,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // from the snapshot for the invoice bookkeeping.
             invoiceLinkAllowed: allowCompletionInvoiceLink,
           };
-          let smsResult = await sendCustomerMessage(sendInput);
+          let smsResult = throwIfDeliveryUnverified(await sendCustomerMessage(sendInput));
           if (smsResult.channel === 'push') {
             sentSmsChannel = 'push';
             completionSmsAcceptedSnapshot.channel = 'push';
@@ -12274,10 +12323,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             delete fallbackMetadata.allowMediaUrls;
             fallbackMetadata.mms_fallback_reason = smsResult.reason || smsResult.code || 'provider_failure';
             completionSmsAcceptedSnapshot.channel = 'sms';
-            smsResult = await sendCustomerMessage({
+            smsResult = throwIfDeliveryUnverified(await sendCustomerMessage({
               ...sendInput,
               metadata: fallbackMetadata,
-            });
+            }));
             sentSmsChannel = 'sms';
             mmsFallbackToSms = true;
             smsNotesDelta.completionSmsMmsFallbackAt = new Date().toISOString();
@@ -12322,6 +12371,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               const deferredDelta = {
                 completionSmsStatus: 'deferred',
                 completionSmsDeferredTo: smsResult.nextAllowedAt,
+                completionSmsDeliveryUnverifiedAt: null,
               };
               // The balance clause never rides a frozen replay body (codex
               // P2, round 2): the send-window PREcheck at the line's compute
@@ -12418,6 +12468,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             };
             Object.assign(smsNotesDelta, {
               completionSmsStatus: policyBlocked ? 'blocked' : 'failed',
+              completionSmsDeliveryUnverifiedAt: null,
               completionSmsError: holdEnqueueFailed
                 ? `send-window requeue failed: ${completionHoldQueueError.message || completionHoldQueueError}`
                 : (smsResult.reason || smsResult.code || 'SMS send failed'),
@@ -12474,6 +12525,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           } else {
             Object.assign(smsNotesDelta, {
               completionSmsStatus: 'sent',
+              completionSmsDeliveryUnverifiedAt: null,
               sentSmsBody,
               sentSmsAt: new Date().toISOString(),
               sentSmsType,
@@ -12545,11 +12597,28 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // resume would send it again — GitHub Codex r2/r3/r4 P1s). No
         // failure bell, no release-for-resume, and the bundled review is
         // marked exactly as the success path would have.
+        const unverifiedOutcome = deliveryUnverifiedProviderOutcome(e);
         const providerAccepted = completionSmsProviderAccepted || e.providerOutcome?.sent === true;
-        if (providerAccepted) {
+        if (unverifiedOutcome) {
+          const snap = completionSmsAcceptedSnapshot || {};
+          if (invoice?.id && invoiceCreated && payUrl && snap.invoiceLinkAllowed) {
+            completionInvoiceDeliveryUnverified = true;
+          }
+          const unverifiedDelta = {
+            completionSmsStatus: 'failed',
+            completionSmsError: e.message || 'provider delivery outcome is unknown',
+            completionSmsDeliveryUnverifiedAt: new Date().toISOString(),
+          };
+          const unverifiedNotes = { ...parseJsonObject(record.structured_notes), ...unverifiedDelta };
+          await mergeRecordNotesKeys(record.id, unverifiedDelta)
+            .catch((updateErr) => logger.error(`Completion SMS unverified-state update failed: ${updateErr.message}`));
+          record.structured_notes = unverifiedNotes;
+          logger.error(`[dispatch] Completion SMS delivery unverified for service_record ${record.id} — send claim held for review: ${e.message}`);
+        } else if (providerAccepted) {
           const snap = completionSmsAcceptedSnapshot || {};
           const acceptedDelta = {
             completionSmsStatus: 'sent',
+            completionSmsDeliveryUnverifiedAt: null,
             ...(snap.body ? { sentSmsBody: snap.body } : {}),
             sentSmsAt: new Date().toISOString(),
             ...(snap.type ? { sentSmsType: snap.type } : {}),
@@ -12602,6 +12671,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             || completionSmsRejectedOutcome;
           const failedDelta = {
             completionSmsStatus: 'failed',
+            completionSmsDeliveryUnverifiedAt: null,
             completionSmsError: (rejected ? rejected.error : null) || e.message || 'SMS send failed',
             completionSmsFailedAt: new Date().toISOString(),
           };
@@ -13145,7 +13215,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // owns the delivery — claimInvoiceForSend refuses every other sender
     // while that row is live (GitHub r5 P1 #4131), and its replay finalizes
     // through markDeliverySent at actual delivery.
-    if (completionInvoiceSendClaim?.claimed && !completionInvoiceLinkDelivered) {
+    if (completionInvoiceSendClaim?.claimed && !completionInvoiceLinkDelivered && !completionInvoiceDeliveryUnverified) {
       await require('../services/invoice').restoreSendClaim(completionInvoiceSendClaim.invoiceId, completionInvoiceSendClaim.previousStatus, true);
       completionInvoiceSendClaim = null;
     }
