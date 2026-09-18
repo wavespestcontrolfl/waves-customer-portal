@@ -11107,14 +11107,26 @@ async function completeScheduledService(completionInput, packetContext = null) {
       && !resumingReleasedCompletion;
     // A provider rejection is known NOT delivered. If both status writes
     // failed, the pre-provider uncertainty marker remains, but the attempt's
-    // release error durably carries the exact marker it rejected. Ignore only
-    // that matching marker on the released retry; a later/unknown handoff
-    // has a different marker and remains fenced.
-    const releasedDefiniteRejectionMarker = resumingReleasedCompletion
+    // release error durably carries the exact marker it rejected. Repair only
+    // that matching marker on resume (including a stale-running reclaim); a
+    // later/unknown handoff has a different marker and remains fenced.
+    const resumedDefiniteRejectionMarker = resumingCommittedCompletion
       ? definiteRejectionMarkerFromAttemptError(completionAttempt?.error)
       : null;
     const completionSmsMarkerWasDefinitelyRejected = !!recordStructuredNotes.completionSmsDeliveryUnverifiedAt
-      && releasedDefiniteRejectionMarker === recordStructuredNotes.completionSmsDeliveryUnverifiedAt;
+      && resumedDefiniteRejectionMarker === recordStructuredNotes.completionSmsDeliveryUnverifiedAt;
+    if (completionSmsMarkerWasDefinitelyRejected) {
+      try {
+        await mergeRecordNotesKeys(record.id, { completionSmsDeliveryUnverifiedAt: null });
+        recordStructuredNotes.completionSmsDeliveryUnverifiedAt = null;
+        record.structured_notes = { ...parseJsonObject(record.structured_notes), completionSmsDeliveryUnverifiedAt: null };
+      } catch (clearErr) {
+        // Re-release the same marker-bound proof. A generic error here would
+        // erase the only durable fact that the provider rejected this exact
+        // attempt and make the next resume treat it as possibly delivered.
+        throw completionSmsDefiniteRejectionError(clearErr.message, resumedDefiniteRejectionMarker);
+      }
+    }
     const completionSmsAlreadyHandled = !!recordStructuredNotes.sentSmsBody
       || recordStructuredNotes.completionSmsStatus === 'sent'
       // 'deferred' = a send-window hold requeued the text on the
@@ -11126,7 +11138,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // distinguishes it from a definite failure and prevents a released
       // side-effects resume from replaying the text.
       || (!!recordStructuredNotes.completionSmsDeliveryUnverifiedAt && !completionSmsMarkerWasDefinitelyRejected)
-      || completionSmsSendingFresh;
+      || (completionSmsSendingFresh && !completionSmsMarkerWasDefinitelyRejected);
     // The pest-recap path (services/pest-recap.js) writes its own
     // service_records row and claims recap_sms_sent_at when it texts the
     // customer. That recap text and this completion SMS are two wordings of

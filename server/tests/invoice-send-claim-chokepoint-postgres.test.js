@@ -316,6 +316,22 @@ postgres('the shared send claim on a migrated database', () => {
         completionSmsDeliveryUnverifiedAt: expect.any(String),
       });
 
+      const claimSpy = jest.spyOn(InvoiceService, 'claimInvoiceForSend')
+        .mockRejectedValueOnce(new Error('intervening office claim conflict (injected)'));
+      let interrupted;
+      try {
+        interrupted = await complete(idempotencyKey);
+      } finally {
+        claimSpy.mockRestore();
+      }
+      expect(interrupted).toMatchObject({ status: 503, body: { code: 'completion_sms_send_failed' } });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      const releasedAgain = await mockPg('service_completion_attempts').where({ service_id: f.serviceId }).first();
+      expect(releasedAgain).toMatchObject({ status: 'side_effects_pending' });
+      expect(releasedAgain.error).toBe(released.error);
+      expect((await mockPg('service_records').where({ scheduled_service_id: f.serviceId }).first()).structured_notes)
+        .toMatchObject({ completionSmsDeliveryUnverifiedAt: null });
+
       const resumed = await complete(idempotencyKey);
       expect(resumed.status).toBe(200);
       expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
