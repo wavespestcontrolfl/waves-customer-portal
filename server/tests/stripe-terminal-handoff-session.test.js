@@ -55,6 +55,14 @@ describe('Stripe Terminal saved-card fence response', () => {
       code: 'payment_reconciliation_pending',
       reconciliationRequired: true,
     }));
+    expect(_test.terminalChargeFenceResponse({
+      code: 'DEPOSIT_RECONCILIATION_REQUIRED',
+      message: 'A received deposit is awaiting invoice reconciliation',
+    })).toEqual({
+      code: 'DEPOSIT_RECONCILIATION_REQUIRED',
+      error: 'A received deposit is awaiting invoice reconciliation',
+      reconciliationRequired: true,
+    });
   });
 });
 

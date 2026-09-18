@@ -212,6 +212,78 @@ test('no hook — the legacy pipeline is untouched', async () => {
   expect(sendViaTwilio).toHaveBeenCalledTimes(1);
 });
 
+test('invoice provider handoff wraps the unchanged dispatcher and preserves a push-routed outcome', async () => {
+  const order = [];
+  sendViaTwilio.mockImplementationOnce(async () => {
+    order.push('provider');
+    return { sent: true, provider: 'push', deliveryOutcome: 'accepted', providerMessageId: 'push:invoice' };
+  });
+  const withProviderHandoff = jest.fn(async (dispatch) => {
+    order.push('lock');
+    const outcome = await dispatch();
+    order.push('unlock');
+    return outcome;
+  });
+  const input = { ...BASE_INPUT, audience: 'customer', purpose: 'payment_link',
+    entryPoint: 'invoice_send_via_sms', customerId: 'cust-1', invoiceId: 'inv-1', withProviderHandoff };
+
+  await expect(sendCustomerMessage(input)).resolves.toMatchObject({
+    sent: true, channel: 'push', providerMessageId: 'push:invoice',
+  });
+  expect(order).toEqual(['lock', 'provider', 'unlock']);
+  expect(withProviderHandoff).toHaveBeenCalledTimes(1);
+  expect(sendViaTwilio.mock.calls[0][0]).not.toHaveProperty('withProviderHandoff');
+  expect(persistAudit.mock.calls[0][0].input).not.toHaveProperty('withProviderHandoff');
+});
+
+test.each([true, false])('invoice handoff retains the final provider check (allowed: %s)', async (allowed) => {
+  const order = [];
+  const preProviderCheck = jest.fn(async () => {
+    order.push('check');
+    return allowed ? { ok: true } : { ok: false, code: 'INVOICE_CHANGED', reason: 'invoice changed' };
+  });
+  const withProviderHandoff = async (dispatch) => {
+    order.push('lock');
+    const result = await dispatch();
+    order.push('unlock');
+    return result;
+  };
+  sendViaTwilio.mockImplementationOnce(async (providerInput, hooks) => {
+    expect(providerInput).not.toHaveProperty('preProviderCheck');
+    expect(providerInput).not.toHaveProperty('withProviderHandoff');
+    const verdict = await hooks.preSendCheck();
+    if (!verdict.ok) return { sent: false, deliveryOutcome: 'not_sent' };
+    order.push('send');
+    return { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-invoice' };
+  });
+
+  const result = await sendCustomerMessage({ ...BASE_INPUT, audience: 'customer', purpose: 'payment_link',
+    entryPoint: 'invoice_send_via_sms', customerId: 'cust-1', invoiceId: 'inv-1',
+    preProviderCheck, withProviderHandoff });
+
+  expect(preProviderCheck).toHaveBeenCalledTimes(1);
+  expect(order).toEqual(allowed ? ['lock', 'check', 'send', 'unlock'] : ['lock', 'check', 'unlock']);
+  expect(result).toMatchObject(allowed
+    ? { sent: true, deliveryOutcome: 'accepted' }
+    : { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'INVOICE_CHANGED' });
+  expect(persistAudit.mock.calls[0][0].input).not.toHaveProperty('preProviderCheck');
+  expect(persistAudit.mock.calls[0][0].input).not.toHaveProperty('withProviderHandoff');
+});
+
+test.each([
+  { entryPoint: 'other' },
+  { purpose: 'payment_receipt', entryPoint: 'invoice_receipt_sms' },
+  { audience: 'lead' },
+  { channel: 'push' },
+])('invoice provider handoff cannot cross another routing contract: %j', async (fields) => {
+  const result = await sendCustomerMessage({ ...BASE_INPUT, audience: 'customer', purpose: 'payment_link',
+    entryPoint: 'invoice_send_via_sms', customerId: 'cust-1', invoiceId: 'inv-1',
+    ...fields, withProviderHandoff: jest.fn() });
+  expect(result).toMatchObject({ sent: false, blocked: true });
+  expect(result.code).toBe(fields.channel === 'push' ? 'CONTRACT_VIOLATION' : 'UNSUPPORTED_PROVIDER_HANDOFF');
+  expect(sendViaTwilio).not.toHaveBeenCalled();
+});
+
 test('a pre-provider exception carries definitive non-delivery provenance', async () => {
   require('../services/messaging/validators/consent').loadContactState
     .mockRejectedValueOnce(Object.assign(new Error('contact lookup unavailable'), { status: 503 }));

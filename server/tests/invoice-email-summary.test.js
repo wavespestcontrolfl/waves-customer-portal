@@ -7,11 +7,13 @@
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/sendgrid-mail', () => ({
-  isConfigured: () => true,
+  isConfigured: jest.fn(() => true),
   newsletterGroupId: () => null,
   serviceGroupId: () => null,
   sendOne: jest.fn(),
 }));
+jest.mock('nodemailer', () => ({ createTransport: jest.fn(() => ({ sendMail: jest.fn().mockResolvedValue({}) })) }));
+jest.mock('../services/email-fallback-gate', () => ({ smtpFallbackAllowed: () => true }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(),
 }));
@@ -31,6 +33,14 @@ jest.mock('../services/payer', () => ({
   attachToInvoice: jest.fn(async () => null),
   payerRecipient: jest.fn(() => null),
   freezeApEmail: jest.fn(async () => null),
+}));
+jest.mock('../services/estimate-deposits', () => ({
+  assertInvoiceDepositSettlementReady: jest.fn(async () => {}),
+  withInvoiceDepositSettlement: jest.fn(async (invoiceId, callback) => {
+    const database = require('../models/db');
+    const current = await database('invoices').where({ id: invoiceId }).first();
+    return callback(database, current);
+  }),
 }));
 
 const db = require('../models/db');
@@ -80,7 +90,12 @@ function mockDb(invoice) {
 describe('sendInvoiceEmail service summary', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    require('../services/sendgrid-mail').isConfigured.mockReturnValue(true);
     EmailTemplates.sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'sg-1' } });
+    require('../services/estimate-deposits').withInvoiceDepositSettlement.mockImplementation(async (invoiceId, callback) => {
+      const current = await db('invoices').where({ id: invoiceId }).first();
+      return callback(db, current);
+    });
   });
 
   test('passes the invoice notes through as the invoice_summary template variable', async () => {
@@ -92,6 +107,120 @@ describe('sendInvoiceEmail service summary', () => {
     expect(result.ok).toBe(true);
     const args = EmailTemplates.sendTemplate.mock.calls[0][0];
     expect(args.payload.invoice_summary).toBe(invoice.notes);
+  });
+
+  test('does not render or dispatch an invoice email while its deposit is held', async () => {
+    mockDb(invoiceRow());
+    const fence = jest.spyOn(require('../services/estimate-deposits'), 'assertInvoiceDepositSettlementReady')
+      .mockRejectedValue(Object.assign(new Error('Deposit awaiting reconciliation'), {
+        code: 'DEPOSIT_RECONCILIATION_REQUIRED',
+      }));
+    try {
+      expect(await sendInvoiceEmail('inv-1')).toEqual({
+        ok: false, error: 'Deposit awaiting reconciliation', code: 'DEPOSIT_RECONCILIATION_REQUIRED',
+      });
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    } finally {
+      fence.mockRestore();
+    }
+  });
+
+  test.each([
+    ['reduced balance', { total: '101.00', line_items: [{ type: 'deposit_credit', amount: -49 }] }],
+    ['changed lines with the same total', { line_items: [{ type: 'deposit_credit', amount: -49 }, { amount: 49 }] }],
+  ])('blocks stale rendered email after %s', async (_label, changes) => {
+    mockDb(invoiceRow());
+    const dispatch = jest.fn();
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      mockDb(invoiceRow(changes));
+      const verdict = await withProviderHandoff(dispatch);
+      return { sent: verdict.ok, reason: verdict.reason };
+    });
+    const result = await sendInvoiceEmail('inv-1');
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/balance changed/);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test('dispatches an unchanged rendered invoice', async () => {
+    mockDb(invoiceRow());
+    const dispatch = jest.fn();
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      const verdict = await withProviderHandoff(dispatch);
+      return { sent: verdict.ok, reason: verdict.reason };
+    });
+    expect((await sendInvoiceEmail('inv-1', { recipientOverride: { email: 'office@example.com' } })).ok).toBe(true);
+    expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+
+  test('a commit failure after provider acceptance preserves the delivered result', async () => {
+    const invoice = invoiceRow();
+    mockDb(invoice);
+    const dispatch = jest.fn(async () => {});
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      const verdict = await withProviderHandoff(dispatch);
+      return { sent: verdict.ok, message: { provider_message_id: 'sg-accepted' } };
+    });
+    require('../services/estimate-deposits').withInvoiceDepositSettlement.mockImplementationOnce(async (_invoiceId, callback) => {
+      await callback(db, invoice);
+      throw new Error('commit connection lost');
+    });
+
+    await expect(sendInvoiceEmail('inv-1', { recipientOverride: { email: 'office@example.com' } }))
+      .resolves.toMatchObject({ ok: true, messageId: 'sg-accepted' });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+
+  test('a provider error is rethrown to the template library for delivery classification', async () => {
+    mockDb(invoiceRow());
+    const providerError = new Error('provider socket closed without a response');
+    let providerErrorPropagated = false;
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      try {
+        await withProviderHandoff(async () => { throw providerError; });
+      } catch (err) {
+        providerErrorPropagated = err === providerError;
+        throw err;
+      }
+      throw new Error('provider error was misclassified as a pre-dispatch refusal');
+    });
+
+    await expect(sendInvoiceEmail('inv-1', { recipientOverride: { email: 'office@example.com' } }))
+      .resolves.toMatchObject({ ok: false, error: providerError.message });
+    expect(providerErrorPropagated).toBe(true);
+  });
+
+  test('does not email a pay link for an invoice already covered in full', async () => {
+    mockDb(invoiceRow({ total: '0.00' }));
+    const dispatch = jest.fn();
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      const verdict = await withProviderHandoff(dispatch);
+      return { sent: verdict.ok, reason: verdict.reason };
+    });
+
+    await expect(sendInvoiceEmail('inv-1', { recipientOverride: { email: 'office@example.com' } }))
+      .resolves.toMatchObject({ ok: false, error: expect.stringMatching(/balance changed/) });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test('SMTP rejects a balance changed during PDF rendering', async () => {
+    const previousPassword = process.env.GOOGLE_SMTP_PASSWORD;
+    process.env.GOOGLE_SMTP_PASSWORD = 'synthetic-test-password';
+    require('../services/sendgrid-mail').isConfigured.mockReturnValue(false);
+    mockDb(invoiceRow());
+    require('../services/pdf/invoice-pdf').buildInvoicePDFBuffer.mockImplementationOnce(async () => {
+      mockDb(invoiceRow({ total: '101.00' }));
+      return Buffer.from('old-pdf');
+    });
+    try {
+      const result = await sendInvoiceEmail('inv-1');
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/balance changed/);
+      expect(require('nodemailer').createTransport.mock.results[0].value.sendMail).not.toHaveBeenCalled();
+    } finally {
+      if (previousPassword === undefined) delete process.env.GOOGLE_SMTP_PASSWORD;
+      else process.env.GOOGLE_SMTP_PASSWORD = previousPassword;
+    }
   });
 
   test('sends an empty summary variable when the invoice has no notes', async () => {

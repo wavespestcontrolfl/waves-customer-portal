@@ -64,7 +64,7 @@ jest.mock('../models/db', () => {
   // state.ops is an append-only statement log (raw calls + table updates, in
   // issue order) so tests can assert cross-statement ORDER — e.g. the accept
   // txn's rung-1 occupancy lock landing before its estimates UPDATE.
-  const state = { tables: {}, ops: [] };
+  const state = { tables: {}, ops: [], tryDepositLedgerBusy: false };
 
   const rowMatches = (row, ctx) => {
     for (const eq of ctx.eqFilters) {
@@ -169,6 +169,9 @@ jest.mock('../models/db', () => {
     // Advisory-lock statements (`pg_advisory_xact_lock`) flow through here —
     // logged so tests can assert rung-1 ordering against table mutations.
     state.ops.push({ type: 'raw', sql, bindings });
+    if (sql.includes('pg_try_advisory_xact_lock')) {
+      return { rows: [{ acquired: !(bindings?.[0] === 'estimate.deposit.ledger' && state.tryDepositLedgerBusy) }] };
+    }
     return { __raw: sql, bindings };
   };
   dbFn.schema = { hasColumn: async () => false };
@@ -340,6 +343,7 @@ function resetStore(estimateRow) {
     notification_prefs: [],
   };
   db.__state.ops = [];
+  db.__state.tryDepositLedgerBusy = false;
 }
 
 function storedEstimate() {
@@ -366,6 +370,37 @@ beforeEach(() => {
 });
 
 describe('FIX 1 — standard recurring conversion is atomic with acceptance', () => {
+  test('busy deposit ledger rolls back standard acceptance before its invoice mint', async () => {
+    resetStore(recurringPestEstimate());
+    db.__state.tryDepositLedgerBusy = true;
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-1', firstScheduledServiceId: null,
+      recurringConversionSkipped: false, deferredFollowUpReminderRows: [],
+    });
+
+    const response = await putAccept('tok-atomic-1-x0123456789');
+    expect(response.status).toBe(409);
+    expect(response.data.code).toBe('DEPOSIT_LEDGER_BUSY_RETRY');
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().price_locked_at == null).toBe(true);
+    expect(db.__state.tables.invoices).toHaveLength(0);
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+    expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+  });
+
+  test('busy deposit ledger rolls back invoice-mode acceptance before its invoice mint', async () => {
+    resetStore(recurringPestEstimate({ bill_by_invoice: true }));
+    db.__state.tryDepositLedgerBusy = true;
+
+    const response = await putAccept('tok-atomic-1-x0123456789');
+    expect(response.status).toBe(409);
+    expect(response.data.code).toBe('DEPOSIT_LEDGER_BUSY_RETRY');
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().price_locked_at == null).toBe(true);
+    expect(db.__state.tables.invoices).toHaveLength(0);
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+  });
+
   test('annual coverage overlap returns a billing code and rolls back acceptance', async () => {
     resetStore(recurringPestEstimate());
     const scheduledDate = require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86400000));

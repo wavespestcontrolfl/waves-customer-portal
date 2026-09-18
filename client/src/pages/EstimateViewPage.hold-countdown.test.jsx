@@ -614,4 +614,14 @@ describe('hold countdown bar', () => {
     expect(handler.indexOf("recoverFromDeadHold('configure');"))
       .toBeLessThan(handler.indexOf("recoverFromDeadHold(expired ?"));
   });
+  it('keeps a valid hold when invoice or deposit locking asks acceptance to retry', () => {
+    const src = pageSource;
+    const at = src.indexOf("if (['ACCEPT_INVOICE_BUSY_RETRY', 'DEPOSIT_LEDGER_BUSY_RETRY'].includes(body.code))");
+    const handler = src.slice(at, src.indexOf("if (['PER_APPLICATION_ADD_ON_UNPRICED'", at));
+    expect(at).toBeGreaterThan(0);
+    expect(handler).toContain('Your time is still held');
+    expect(handler).not.toContain('recoverFromDeadHold');
+    expect(handler).not.toContain('setReservation(null)');
+    expect(handler).not.toContain('setPaymentPreference(null)');
+  });
 });

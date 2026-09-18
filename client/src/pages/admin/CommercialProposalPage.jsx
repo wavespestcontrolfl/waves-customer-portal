@@ -9,7 +9,8 @@ import {
 import AdminCommandHeader from '../../components/admin/AdminCommandHeader';
 import ProposalBidForm from '../../components/estimates/ProposalBidForm';
 import { EstimateSendProvider, useEstimateSend } from '../../components/admin/EstimateSendDialog';
-import { PROPOSAL_UNITS, proposalLineAmount } from '@proposal-bid';
+import ProposalProjectCosting from '../../components/estimates/ProposalProjectCosting';
+import { PROPOSAL_UNITS, proposalLineAmount, proposalRevenueIssue } from '@proposal-bid';
 
 // Commercial proposal builder — the full-page surface for authoring the
 // multi-building, per-line-item commercial bid on an estimate (HOAs,
@@ -207,6 +208,7 @@ function CommercialProposalEditor() {
   const [taxRatePct, setTaxRatePct] = useState('0');
   const [terms, setTerms] = useState('');
   const [validThrough, setValidThrough] = useState('');
+  const [projectCosting, setProjectCosting] = useState({ revenueYears: 1, rows: [] });
   // The SAVED fixed date — the one the server enforces on send and Mark won.
   const [savedValidThrough, setSavedValidThrough] = useState('');
   const [bidToolsEnabled, setBidToolsEnabled] = useState(false);
@@ -281,6 +283,7 @@ function CommercialProposalEditor() {
     setTaxRatePct(String((Number(p.taxRate) || 0) * 100));
     setTerms(p.terms || '');
     setValidThrough(p.validThrough || '');
+    setProjectCosting(data.projectCosting || { revenueYears: 1, rows: [] });
     setSavedValidThrough(p.validThrough || '');
     setBidToolsEnabled(data.bidToolsEnabled === true);
     setBuildings(
@@ -375,6 +378,19 @@ function CommercialProposalEditor() {
   const totals = useMemo(
     () => computeTotals(programsMode ? [] : buildings, taxRate, correctiveWork, programsState),
     [programsMode, buildings, taxRate, correctiveWork, programsState],
+  );
+  // The save's revenue-side limits over the same itemization the sidebar
+  // sums: the costing card withholds profit and margin while any of it
+  // would be refused (GH codex P2 r8 on #4270).
+  // Every unpriced program row is refused by save() (it is dropped from
+  // the payload, so the reload would silently delete it), so any such row
+  // withholds the margin too, with the save's own message (GH codex P2
+  // r10 on #4270).
+  const revenueIssue = useMemo(
+    () => (programsState.some((row) => !programRowIsPriced(row))
+      ? 'Every program row needs a name, a per-application price of at least $0.01, and a whole-number frequency (1–52) — fix or remove it.'
+      : proposalRevenueIssue({ buildings: programsMode ? [] : buildings, correctiveWork, programs: programsState, taxRate })),
+    [programsMode, buildings, correctiveWork, programsState, taxRate],
   );
 
   // "Generate from estimate" (slice 1A-ii): pulls DRAFT sections derived
@@ -659,7 +675,7 @@ function CommercialProposalEditor() {
   // from what is actually on screen.
   const formRef = React.useRef(null);
   formRef.current = {
-    title, preparedFor, propertyAddress, taxRate, terms, validThrough,
+    title, preparedFor, propertyAddress, taxRate, terms, validThrough, projectCosting,
     buildings, scopeItems, programsState, correctiveWork, responsibilitiesText, commercialTerms,
     loadedAuthored, dirty,
   };
@@ -735,6 +751,7 @@ function CommercialProposalEditor() {
 
   const buildPayload = (f = formRef.current) => ({
     expectedEditVersion: loadedVersionRef.current,
+    ...(bidToolsEnabled ? { projectCosting: f.projectCosting } : {}),
     proposal: {
       title: f.title.trim() || 'Commercial Service Proposal',
       preparedFor: f.preparedFor.trim(),
@@ -1444,6 +1461,8 @@ function CommercialProposalEditor() {
           )}
 
           {bidToolsEnabled && !programsMode && <ProposalBidForm buildings={buildings} onDownload={downloadBidForm} disabled={saving || estimate?.status === 'sending'} />}
+          {(bidToolsEnabled || projectCosting.rows.length > 0) && <ProposalProjectCosting value={projectCosting} totals={totals} revenueIssue={revenueIssue} disabled={!!locked || !bidToolsEnabled}
+            onChange={(value) => { setProjectCosting(value); markEdit(); }} />}
 
           <Card>
             <CardHeader>

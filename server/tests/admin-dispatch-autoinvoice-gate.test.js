@@ -3,6 +3,15 @@ const { completionSavedCardFallbackPolicy } = require('../services/complete-sche
 const { membershipDuesCoverVisit } = require('../services/billing-lane');
 
 describe('completion saved-card fallback policy', () => {
+  test('the deposit-hold classifier suppresses completion payment prompts', () => {
+    const StripeService = require('../services/stripe');
+    const error = { code: 'DEPOSIT_RECONCILIATION_REQUIRED' };
+    expect(completionSavedCardFallbackPolicy({
+      suppressAlternateCollection: StripeService.savedCardChargeSuppressesAlternateCollection(error),
+      reconciliationRequired: StripeService.savedCardChargeNeedsReconciliation(error),
+    })).toEqual({ suppressFallback: true, retainRetryableFallback: false });
+  });
+
   test('suppresses fallback rails for a fresh in-progress claim', () => {
     expect(completionSavedCardFallbackPolicy({
       suppressAlternateCollection: true,

@@ -71,7 +71,12 @@ item. Legacy and unrelated invoice rows may omit the ownership fields.
 `/invoice.pdf`, `/attachments/:id` — the invoice pay surface; router-wide
 60/min limiter + url-safe 20-64 token format gate with generic 404,
 mirroring pay-statement.js; legacy 25-32 char invoice tokens remain
-valid. OWNER RULING 2026-08-16, superseding the earlier "no sibling-
+valid. A received estimate deposit awaiting invoice reconciliation blocks
+the pay-page GET and new collection with HTTP 409 and
+`reconciliationRequired: true`. The deposit ledger is the hold authority;
+payer-billed invoices are exempt. Recording an already-settled PaymentIntent
+and permanent receipt access remain available. OWNER RULING 2026-08-16,
+superseding the earlier "no sibling-
 invoice data on this surface" P0: with GATE_PAY_INCLUDE_BALANCE on, the
 pay page ITEMIZES the customer's other open self-pay invoices — numbers,
 dates, amounts, an accepted forwarded-link disclosure — and the Pay
@@ -325,6 +330,21 @@ country codes), or an active
 503 with empty TwiML before either consumer runs; the owned SID claim is
 released before that response. Twilio's configured retry/fallback policy
 governs redelivery),
+Accepted inbound SMS also requires a saved unified inbox message before a
+successful acknowledgment or ordinary downstream processing. A missing message
+returns 503 and releases only this delivery's owned inbound claim. Eligible
+STOP requests still persist suppression, recipient decline, and preference
+updates before that error; non-idempotent logs and alerts wait for redelivery.
+Those STOP effects and a permanent MessageSid application receipt commit
+atomically under the canonical phone lock. A failed consent transaction also
+returns 503. A retry of an applied STOP saves the inbox and completes deferred
+handling without changing consent again or sending an unsubscribe confirmation;
+it cannot undo a newer START. Receipts must remain for the lifetime of retries.
+Inbound media uses stable account/message/index storage keys across retries.
+Stale contact-correction reservations require a saved unified inbox message
+before promotion; failed route cancellation cannot replay an unrecorded source.
+Provider retry/fallback remains governed by the configured Twilio policy.
+
 `/api/webhooks/twilio/outbound-amd` +
 `/api/webhooks/twilio/outbound-dial-complete` (POST; machine-to-machine
 callbacks under the existing Twilio-signature-validated mount. The shared

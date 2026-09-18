@@ -572,6 +572,44 @@ describe('email template library rendering', () => {
     expect(result.sent).toBe(true);
   });
 
+  test('a provider error rethrown by a locked handoff follows provider recovery, not pre-dispatch abort', async () => {
+    const queuedMessage = { id: 'msg-provider-error', status: 'queued', subject_snapshot: 'S' };
+    const current = { ...queuedMessage };
+    const providerFailUpdate = chain({ returning: [] });
+    const providerError = new Error('provider socket closed without a response');
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [
+        chain({ returning: [queuedMessage] }),
+        chain({ first: current }),
+        providerFailUpdate,
+      ],
+      email_message_events: [chain()],
+    });
+    sendgrid.sendOne.mockImplementationOnce(async ({ customArgs }) => {
+      current.send_attempt_token = customArgs.send_attempt_token;
+      throw providerError;
+    });
+
+    await expect(EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+      withProviderHandoff: async (dispatch) => dispatch(),
+    })).rejects.toBe(providerError);
+
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect(providerFailUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed',
+      error_message: providerError.message,
+    }));
+    expect(providerFailUpdate.update).not.toHaveBeenCalledWith(expect.objectContaining({
+      error_message: 'aborted_by_caller_before_dispatch',
+    }));
+  });
+
   test('deduplicates membership.started categories before provider send', async () => {
     const queuedMessage = {
       id: 'msg-membership-started',
