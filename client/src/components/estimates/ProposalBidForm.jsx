@@ -8,7 +8,7 @@ export default function ProposalBidForm({ buildings, onDownload, disabled }) {
   const [pageNumber, setPageNumber] = useState(15);
   const [file, setFile] = useState(null);
   const [mapping, setMapping] = useState({});
-  const [details, setDetails] = useState({ companyName: 'Waves Pest Control, LLC', authorizedName: '', shippingMethod: '', leadTime: '', comments: '', ocipDeduct: '' });
+  const [details, setDetails] = useState({ companyName: 'Waves Pest Control, LLC', authorizedName: '', shippingMethod: '', leadTime: '', comments: '', ocipDeduct: '', submissionDate: '' });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const profile = BID_FORM_PROFILES[template];
@@ -33,7 +33,8 @@ export default function ProposalBidForm({ buildings, onDownload, disabled }) {
         <label className="block min-w-0">Original PDF<Input type="file" accept="application/pdf,.pdf" className="w-full min-w-0" disabled={busy || disabled} onChange={(e) => setFile(e.target.files?.[0] || null)} /></label>
         <label>Form page<Input type="number" min="1" max="100" step="1" value={pageNumber} disabled={busy || disabled} onChange={(e) => setPageNumber(e.target.value)} /></label>
       </div>
-      <p className="text-zinc-600">Set a fixed Valid through date in Commercial terms that meets the bid’s price hold. {profile.minimumValidThrough ? `For North Port Addendum No. 1, use ${new Date(`${profile.minimumValidThrough}T12:00:00Z`).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' })} or later (90 days after the amended September 22 deadline).` : 'Cove requires a 90-day hold; confirm the submission date when setting the end date.'}</p>
+      <p className="text-zinc-600">Set a fixed Valid through date in Commercial terms that meets the bid’s price hold. {profile.minimumValidThrough ? `For North Port Addendum No. 1, use ${new Date(`${profile.minimumValidThrough}T12:00:00Z`).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' })} or later (90 days after the amended September 22 deadline).` : 'Cove requires a 90-day hold after the submission date entered below. Set Valid through to at least 90 days later.'}</p>
+      {template === 'cove_termite' && <label className="block max-w-xs">Submission date<Input type="date" value={details.submissionDate} disabled={busy || disabled} onChange={(e) => setDetails((prev) => ({ ...prev, submissionDate: e.target.value }))} /></label>}
       <p className="text-zinc-600">Use One-time frequency for every quoted line and map each line to a form row. {template === 'cove_termite' ? 'Square-foot lines supply the SF breakdown; count each treated area once. Base-bid row prices include any quoted tax.' : 'Product lines use lb or gal; application lines use acres. Each of those rows must share a single unit price. The quote total is limited to $34,999.99.'}</p>
       {lines.map((line) => <label key={line.id} className="grid grid-cols-1 sm:grid-cols-2 gap-2 items-center border-b border-hairline border-zinc-100 pb-2">
         <span>{line.building} · {line.description}<span className="block text-zinc-600">{formatLineBasis(line)}</span></span>

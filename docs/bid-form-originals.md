@@ -28,7 +28,9 @@ The September 8 Addendum No. 1 moves the due date to September 22; the RFQ's
 90-day hold requires Valid through December 21, 2026 or later. Recheck later
 addenda before submission. Cove needs reviewed SF quantities for apartments,
 clubhouse and garages; base-bid rows include tax. Enter the OCIP deduct alternate
-explicitly, including zero. Other units may contribute dollars but never SF.
+explicitly, including zero. Enter the planned submission date; the exporter requires
+Valid through at least 90 calendar days later. Recheck both dates if submission
+moves. Other units may contribute dollars but never SF.
 
 The editor refuses changes made during its pre-export save. The PDF is downloaded
 only to the requesting device; this neither submits the bid nor delivers it to

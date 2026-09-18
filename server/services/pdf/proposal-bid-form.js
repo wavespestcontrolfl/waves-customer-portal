@@ -6,7 +6,7 @@ const { BID_FORM_PROFILES, roundCents, roundDecimal, proposalLineAmount, formatQ
 const { assertOriginalBidForm } = require('./bid-form-original');
 const invalid = (message) => Object.assign(new Error(message), { statusCode: 400 });
 
-function mapFormPrices(proposal, template, mapping = {}) {
+function mapFormPrices(proposal, template, mapping = {}, details = {}) {
   if (!mapping || typeof mapping !== 'object' || Array.isArray(mapping)) throw invalid('Choose a form row for every quoted line.');
   const profile = Object.hasOwn(BID_FORM_PROFILES, template) ? BID_FORM_PROFILES[template] : null;
   if (!profile) throw invalid('Choose a supported bid form.');
@@ -15,6 +15,12 @@ function mapFormPrices(proposal, template, mapping = {}) {
   // RFQ page 13: 90 days after bid due. Addendum No. 1 (September 8)
   // moves that due date to September 22, 2026; the end date is December 21.
   if (profile.minimumValidThrough && proposal.validThrough < profile.minimumValidThrough) throw invalid('North Port requires a 90-day price hold after the amended bid due date. Set Valid through to December 21, 2026 or later.');
+  if (template === 'cove_termite') {
+    if (!validDateOnly(details.submissionDate)) throw invalid('Enter the Cove submission date to verify its 90-day price hold.');
+    const holdEnd = new Date(`${details.submissionDate}T12:00:00Z`);
+    holdEnd.setUTCDate(holdEnd.getUTCDate() + 90);
+    if (new Date(`${proposal.validThrough}T12:00:00Z`) < holdEnd) throw invalid('Cove requires a 90-day price hold after the submission date. Extend Valid through before exporting.');
+  }
   if (proposal.programs?.length || proposal.correctiveWork?.length) throw invalid('These bid forms use one-time building line items. Move all quoted charges into that itemization before exporting.');
   const lines = proposal.buildings.flatMap((building) => building.lineItems);
   if (!lines.length || lines.some((line) => !line.id || line.frequency !== 'one_time')) throw invalid('Each bid-form line needs a saved identifier and One-time frequency. Save the building lines in the proposal builder first.');
@@ -69,7 +75,7 @@ async function buildProposalBidForm({ estimate, sourcePdf, template, pageNumber,
   // A lapsed fixed hold must never produce a submission-ready form with
   // expired prices (pre-push codex P1 on #4270); same 409 as sending.
   assertBidSendDate(estimate);
-  const prices = mapFormPrices(proposal, template, mapping);
+  const prices = mapFormPrices(proposal, template, mapping, details);
   let document;
   try { document = await PDFDocument.load(sourcePdf); } catch { throw invalid('The PDF could not be read. Upload the original, unencrypted form.'); }
   const page = assertOriginalBidForm(document, template, pageNumber);

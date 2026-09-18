@@ -239,3 +239,19 @@ it('updates costing eligibility when tax pushes the combined first invoice over 
   fireEvent.change(screen.getByLabelText('Tax rate (%) — taxable lines only'), { target: { value: '0' } });
   expect(screen.getByText('$95,999,990.00')).toBeInTheDocument();
 });
+
+
+it('includes the reviewed Cove submission date in the export request', async () => {
+  mount();
+  await screen.findByDisplayValue('Synthetic proposal');
+  fireEvent.change(screen.getByLabelText('Form layout'), { target: { value: 'cove_termite' } });
+  fireEvent.change(screen.getByLabelText('Submission date'), { target: { value: '2026-09-22' } });
+  fireEvent.change(screen.getByLabelText('Original PDF'), { target: { files: [new File(['%PDF-'], 'original.pdf', { type: 'application/pdf' })] } });
+  fireEvent.change(screen.getByLabelText('Form row for Quarterly service'), { target: { value: 'apartments' } });
+  vi.stubGlobal('URL', { ...URL, createObjectURL: () => 'blob:synthetic', revokeObjectURL: () => {} });
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+  fireEvent.click(screen.getByRole('button', { name: 'Download filled bid form' }));
+  await waitFor(() => expect(calls.some((call) => call.url.endsWith('/bid-form.pdf'))).toBe(true));
+  const options = JSON.parse(calls.find((call) => call.url.endsWith('/bid-form.pdf')).body.get('options'));
+  expect(options.details.submissionDate).toBe('2026-09-22');
+});

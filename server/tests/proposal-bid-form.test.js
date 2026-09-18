@@ -49,7 +49,7 @@ describe('required bid form price mapping', () => {
   });
   test('groups Cove SF and prices while reconciling included tax to the cent', () => {
     const proposal = normalized([line('a', 1000, 0.1001, 'sqft'), line('b', 1000, 0.1001, 'sqft'), line('c', 1000, 0.1001, 'sqft')].map((row) => ({ ...row, taxable: true })), { taxRate: 0.07 });
-    const result = mapFormPrices(proposal, 'cove_termite', { a: 'apartments', b: 'clubhouse', c: 'garages' });
+    const result = mapFormPrices(proposal, 'cove_termite', { a: 'apartments', b: 'clubhouse', c: 'garages' }, { submissionDate: '2026-09-22' });
     expect(result.total).toBe(321.32);
     expect(Object.values(result.amounts).reduce((sum, value) => sum + value, 0)).toBeCloseTo(321.32, 2);
   });
@@ -64,11 +64,23 @@ describe('required bid form price mapping', () => {
   });
   test('tax rounding never reduces an individual Cove base-bid row', () => {
     const proposal = normalized([line('a', 1, 0.05, 'sqft'), line('b', 1, 0.05, 'sqft'), line('c', 1, 0.01, 'sqft')].map((row) => ({ ...row, taxable: true })), { taxRate: 0.1 });
-    const result = mapFormPrices(proposal, 'cove_termite', { a: 'apartments', b: 'clubhouse', c: 'garages' });
+    const result = mapFormPrices(proposal, 'cove_termite', { a: 'apartments', b: 'clubhouse', c: 'garages' }, { submissionDate: '2026-09-22' });
     expect(result.total).toBe(0.12);
     expect(result.amounts.apartments).toBeGreaterThanOrEqual(0.05);
     expect(result.amounts.clubhouse).toBeGreaterThanOrEqual(0.05);
     expect(result.amounts.garages).toBeGreaterThanOrEqual(0.01);
     expect(Object.values(result.amounts).reduce((sum, value) => sum + value, 0)).toBeCloseTo(0.12, 2);
   });
+});
+
+
+test('Cove requires an explicit calendar submission date and the full 90-day hold', () => {
+  const lines = ['a', 'b', 'c'].map((id) => line(id, 1000, 0.1, 'sqft'));
+  const mapping = { a: 'apartments', b: 'clubhouse', c: 'garages' };
+  for (const submissionDate of [undefined, '', '2026-02-30']) {
+    expect(() => mapFormPrices(normalized(lines), 'cove_termite', mapping, { submissionDate })).toThrow(/submission date/);
+  }
+  expect(() => mapFormPrices(normalized(lines, { validThrough: '2026-12-20' }), 'cove_termite', mapping, { submissionDate: '2026-09-22' })).toThrow(/90-day price hold/);
+  expect(() => mapFormPrices(normalized(lines, { validThrough: '2026-12-21' }), 'cove_termite', mapping, { submissionDate: '2026-09-22' })).not.toThrow();
+  expect(() => mapFormPrices(normalized(lines, { validThrough: '2027-03-01' }), 'cove_termite', mapping, { submissionDate: '2026-12-01' })).not.toThrow();
 });
