@@ -19,6 +19,14 @@
  * Codes and how callers are expected to map them:
  *   estimate_terminal — estimate missing/archived/declined/expired/void/
  *                       accepted. Queue: dismiss. Approval: retire the draft.
+ *   annual_offer_withheld — the estimate selects the annual termite plan and
+ *                       the chokepoint guard (estimate-annual-guard.js) would
+ *                       refuse to deliver it (no send library ever rechecks
+ *                       this itself — see that module). Never queue, and
+ *                       never approve, a draft whose link the send chokepoint
+ *                       would just refuse. Queue: dismiss (a re-click
+ *                       re-qualifies once a fresh offer is delivered).
+ *                       Approval: HOLD (409, draft stays pending).
  *   converted         — customer / lead / phone-evidence conversion. For
  *                       ACCEPTED booking-kind clicks the evidence is
  *                       booking-specific (paid invoice / live appointment /
@@ -53,6 +61,7 @@ const {
 const { DEPOSIT_FOLLOWUP_WINDOW } = require('./estimate-deposits');
 const { loadSuppressionState } = require('./messaging/validators/suppression');
 const { readCachedLineType, NON_SMS_LINE_TYPES } = require('./messaging/validators/line-type');
+const { annualOfferVerdict } = require('./estimate-annual-guard');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 // Estimate statuses the cadence treats as terminal (estimate-follow-up.js).
@@ -483,6 +492,14 @@ async function evaluateClickFollowupGate({ estimate, kind, customerId, leadId, p
   if (!estimate || estimate.archived_at
       || (TERMINAL_STATUSES.has(estimate.status) && !acceptedBookingClick)) {
     return { ok: false, code: 'estimate_terminal' };
+  }
+
+  // 1.5 Delivery-guards slice (re-cut of #4569): never queue — or approve —
+  //     a click-followup draft whose link the send chokepoint would just
+  //     refuse. Cheap in-memory check on the already-loaded row, no extra
+  //     query, no lock.
+  if (annualOfferVerdict(estimate).withheld) {
+    return { ok: false, code: 'annual_offer_withheld' };
   }
 
   // 2. Conversion — customer evidence, then lead-side, then phone evidence.

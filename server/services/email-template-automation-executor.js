@@ -1160,6 +1160,12 @@ async function dispatchRun(run, automation, executionPayload) {
       suppressionGroupKey: automation.suppression_group_key || undefined,
       // Fires immediately before the provider call — the dispatch boundary.
       onQueued: () => { prepDispatched = true; },
+      // Delivery-guards slice (re-cut of #4569): an estimate-triggered
+      // automation run (auto-renew's estimate.auto_renewed, expiring
+      // reminders, etc.) shares the same chokepoint every other estimate
+      // sender routes through — this executor is generic across entity
+      // types, so only an 'estimate' run carries its id through.
+      ...(run.entity_type === 'estimate' && run.entity_id ? { estimateId: run.entity_id } : {}),
     });
     const { status, updated } = await finalizeSentRun(run, result);
     await settlePrepAfterSend(run, prepClaim, status);

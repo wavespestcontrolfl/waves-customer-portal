@@ -39,10 +39,14 @@ jest.mock('../services/messaging/audit', () => ({
 jest.mock('../services/messaging/providers/twilio-sms', () => ({
   sendViaTwilio: jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-real' })),
 }));
+jest.mock('../services/estimate-annual-guard', () => ({
+  annualHandoffGuard: jest.fn(() => async () => ({ blocked: false, reason: null, estimateId: null })),
+}));
 
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { persistAudit } = require('../services/messaging/audit');
 const { sendViaTwilio } = require('../services/messaging/providers/twilio-sms');
+const { annualHandoffGuard } = require('../services/estimate-annual-guard');
 
 const BASE_INPUT = {
   to: '+19415550142',
@@ -463,5 +467,114 @@ describe('grouped unit-move hold (MOVE_HOLD) at the canonical chokepoint (codex 
     db.mockImplementation(() => { throw new Error('never read'); });
     expect((await sendCustomerMessage({ ...BASE_INPUT })).sent).toBe(true);
     expect((await sendCustomerMessage({ ...APPT_INPUT, appointmentId: undefined })).sent).toBe(true);
+  });
+});
+
+describe('annual-offer delivery guard at the provider handoff (delivery-guards slice, re-cut of #4569)', () => {
+  // The guard (like the move hold / caller preProviderCheck it sits beside)
+  // only runs when the provider actually calls the preSendCheck hook it was
+  // handed — real Twilio does this immediately before messages.create(); the
+  // mock must do the same to exercise it.
+  const runViaProviderHook = () => sendViaTwilio.mockImplementationOnce(async (_providerInput, hooks) => {
+    const verdict = await hooks.preSendCheck();
+    if (!verdict.ok) return { sent: false, provider: 'twilio', deliveryOutcome: 'not_sent' };
+    return { sent: true, provider: 'twilio', deliveryOutcome: 'accepted', providerMessageId: 'SM-real' };
+  });
+  const ESTIMATE_INPUT = { ...BASE_INPUT, estimateId: 'est-1' };
+
+  test('estimateId present + withheld verdict blocks — no provider call, blocked result', async () => {
+    annualHandoffGuard.mockReturnValueOnce(async () => ({ blocked: true, reason: 'annual_offer_withheld', estimateId: 'est-1' }));
+    runViaProviderHook();
+    const result = await sendCustomerMessage(ESTIMATE_INPUT);
+    expect(result).toMatchObject({
+      sent: false, blocked: true, deliveryOutcome: 'not_sent',
+      code: 'ANNUAL_OFFER_WITHHELD', reason: 'annual_offer_withheld',
+    });
+    expect(annualHandoffGuard).toHaveBeenCalledWith({ db: expect.anything(), estimateIds: ['est-1'] });
+    expect(persistAudit).toHaveBeenCalledWith(expect.objectContaining({ validatorsFailed: ['annual_offer_guard_boundary'] }));
+  });
+
+  test('estimateIds (plural, grouped) present + withheld verdict blocks the whole send', async () => {
+    annualHandoffGuard.mockReturnValueOnce(async () => ({ blocked: true, reason: 'annual_offer_withheld', estimateId: 'est-2' }));
+    runViaProviderHook();
+    const result = await sendCustomerMessage({ ...BASE_INPUT, estimateIds: ['est-1', 'est-2'] });
+    expect(result).toMatchObject({ sent: false, blocked: true, code: 'ANNUAL_OFFER_WITHHELD' });
+    expect(annualHandoffGuard).toHaveBeenCalledWith({ db: expect.anything(), estimateIds: ['est-1', 'est-2'] });
+  });
+
+  test('estimateId present + delivered (not withheld) verdict dispatches to the provider', async () => {
+    annualHandoffGuard.mockReturnValueOnce(async () => ({ blocked: false, reason: null, estimateId: null }));
+    runViaProviderHook();
+    const result = await sendCustomerMessage(ESTIMATE_INPUT);
+    expect(result.sent).toBe(true);
+    expect(sendViaTwilio).toHaveBeenCalledTimes(1);
+  });
+
+  test('no estimateId/estimateIds — the guard is never consulted, behavior is unchanged', async () => {
+    runViaProviderHook();
+    const result = await sendCustomerMessage(BASE_INPUT);
+    expect(result.sent).toBe(true);
+    expect(annualHandoffGuard).not.toHaveBeenCalled();
+    expect(sendViaTwilio).toHaveBeenCalledTimes(1);
+  });
+
+  test('a guard infrastructure error fails the send closed, retryable — never a silent allow', async () => {
+    annualHandoffGuard.mockReturnValueOnce(async () => { throw new Error('estimates lookup unavailable'); });
+    runViaProviderHook();
+    const result = await sendCustomerMessage(ESTIMATE_INPUT);
+    expect(result).toMatchObject({
+      sent: false, blocked: true, deliveryOutcome: 'not_sent',
+      code: 'ANNUAL_OFFER_GUARD_FAILED', retryable: true,
+    });
+  });
+
+  test('composes with a caller preProviderCheck: caller check still runs, and its refusal short-circuits before the guard', async () => {
+    const preProviderCheck = jest.fn(async () => ({ ok: false, code: 'LINK_SOURCE_CHANGED', reason: 'visit changed' }));
+    sendViaTwilio.mockImplementationOnce(async (_providerInput, hooks) => {
+      const verdict = await hooks.preSendCheck();
+      expect(verdict).toMatchObject({ ok: false, code: 'LINK_SOURCE_CHANGED' });
+      return { sent: false, provider: 'twilio', deliveryOutcome: 'not_sent' };
+    });
+    const result = await sendCustomerMessage({ ...ESTIMATE_INPUT, preProviderCheck });
+    expect(preProviderCheck).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ sent: false, blocked: true, code: 'LINK_SOURCE_CHANGED' });
+    // The caller's own refusal wins first — the guard never gets a chance to run.
+    expect(annualHandoffGuard).not.toHaveBeenCalled();
+  });
+
+  test('composes with a caller preProviderCheck that passes: the guard still runs after it and can block', async () => {
+    const preProviderCheck = jest.fn(async () => ({ ok: true }));
+    annualHandoffGuard.mockReturnValueOnce(async () => ({ blocked: true, reason: 'annual_offer_withheld', estimateId: 'est-1' }));
+    runViaProviderHook();
+    const result = await sendCustomerMessage({ ...ESTIMATE_INPUT, preProviderCheck });
+    expect(preProviderCheck).toHaveBeenCalledTimes(1);
+    expect(annualHandoffGuard).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ sent: false, blocked: true, code: 'ANNUAL_OFFER_WITHHELD' });
+  });
+
+  test('composes with a caller withProviderHandoff (invoice lock): the guard still runs inside the lock', async () => {
+    const order = [];
+    const withProviderHandoff = jest.fn(async (dispatch) => {
+      order.push('lock');
+      const outcome = await dispatch();
+      order.push('unlock');
+      return outcome;
+    });
+    annualHandoffGuard.mockReturnValueOnce(async () => {
+      order.push('guard');
+      return { blocked: false, reason: null, estimateId: null };
+    });
+    sendViaTwilio.mockImplementationOnce(async (_providerInput, hooks) => {
+      const verdict = await hooks.preSendCheck();
+      expect(verdict.ok).toBe(true);
+      order.push('provider');
+      return { sent: true, provider: 'twilio', deliveryOutcome: 'accepted', providerMessageId: 'SM-real' };
+    });
+    const result = await sendCustomerMessage({
+      ...ESTIMATE_INPUT, audience: 'customer', purpose: 'payment_link',
+      entryPoint: 'invoice_send_via_sms', customerId: 'cust-1', invoiceId: 'inv-1', withProviderHandoff,
+    });
+    expect(result.sent).toBe(true);
+    expect(order).toEqual(['lock', 'guard', 'provider', 'unlock']);
   });
 });

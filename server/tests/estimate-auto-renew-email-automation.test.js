@@ -188,12 +188,18 @@ describe('estimate auto-renew email automation cutover', () => {
   test('a candidate that stays ungrouped still renews, with the update pinned to estimate_group_id IS NULL (regression guard)', async () => {
     const estimate = staleEstimate();
     const reread = query(estimate);
+    // Delivery-guards slice: the renewal transaction rereads+locks the row
+    // once more (loadAnnualOfferRow, forUpdate:true) immediately before the
+    // write — a non-annual estimate is never withheld, so the renewal
+    // proceeds exactly as before.
+    const guardRead = query(estimate);
     const update = query(1);
-    mockDb.__estimateQueries.push(query([estimate]), reread, update);
+    mockDb.__estimateQueries.push(query([estimate]), reread, guardRead, update);
 
     await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 1 });
 
     expect(reread.forUpdate).not.toHaveBeenCalled();
+    expect(guardRead.forUpdate).toHaveBeenCalled();
     expect(mockDb.raw).not.toHaveBeenCalledWith(expect.stringMatching(/pg_advisory_xact_lock/), expect.anything());
     expect(update.whereNull).toHaveBeenCalledWith('estimate_group_id');
     expect(update.update).toHaveBeenCalled();
@@ -201,7 +207,7 @@ describe('estimate auto-renew email automation cutover', () => {
 
   test('uses the email template automation executor when the gate is enabled', async () => {
     const estimate = staleEstimate();
-    mockDb.__estimateQueries.push(query([estimate]), query(estimate), query(1));
+    mockDb.__estimateQueries.push(query([estimate]), query(estimate), query(estimate), query(1));
 
     await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 1 });
 
@@ -240,7 +246,7 @@ describe('estimate auto-renew email automation cutover', () => {
       estimate_data: JSON.stringify({ noEngagementAutomation: true }),
     });
     const normal = staleEstimate();
-    mockDb.__estimateQueries.push(query([optedOut, normal]), query(normal), query(1));
+    mockDb.__estimateQueries.push(query([optedOut, normal]), query(normal), query(normal), query(1));
 
     await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 1 });
 
@@ -268,7 +274,7 @@ describe('estimate auto-renew email automation cutover', () => {
   test('keeps the direct template send fallback when the automation gate is disabled', async () => {
     mockIsEnabled.mockReturnValue(false);
     const estimate = staleEstimate();
-    mockDb.__estimateQueries.push(query([estimate]), query(estimate), query(1));
+    mockDb.__estimateQueries.push(query([estimate]), query(estimate), query(estimate), query(1));
 
     await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 1 });
 
@@ -280,11 +286,42 @@ describe('estimate auto-renew email automation cutover', () => {
       recipientId: 'customer-1',
       triggerEventId: 'estimate_auto_renew:estimate-1',
       categories: ['estimate_auto_renew'],
+      estimateId: 'estimate-1',
       payload: expect.objectContaining({
         estimate_id: 'estimate-1',
         new_expires_at: expect.any(String),
       }),
     }));
+  });
+
+  test('an estimate whose annual offer is currently withheld is never renewed or emailed (delivery-guards slice, re-cut of #4569)', async () => {
+    const priorGates = [process.env.GATE_TERMITE_ANNUAL_PLAN, process.env.GATE_CANCEL_FLOW_V2];
+    process.env.GATE_TERMITE_ANNUAL_PLAN = 'false';
+    process.env.GATE_CANCEL_FLOW_V2 = 'false';
+    try {
+      // Selects the annual plan, gate off, and no deliveryState fingerprint
+      // on record — annualPlanPublicReplayBlocked reads this as withheld.
+      const estimate = staleEstimate({
+        estimate_data: { result: { lineItems: [{ service: 'termite_bait', plan: 'annual_protection', stations: 15 }] } },
+      });
+      const peek = query(estimate);
+      // The renewal transaction's own forUpdate reread (loadAnnualOfferRow)
+      // immediately before the write — same withheld row.
+      const guardRead = query(estimate);
+      mockDb.__estimateQueries.push(query([estimate]), peek, guardRead);
+
+      await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 0 });
+
+      // No expires_at/renewal_count advance: the transaction returned 0
+      // rows updated before any UPDATE was ever issued.
+      expect(mockProcessTrigger).not.toHaveBeenCalled();
+      expect(mockSendTemplate).not.toHaveBeenCalled();
+      expect(mockEmailSend).not.toHaveBeenCalled();
+    } finally {
+      ['GATE_TERMITE_ANNUAL_PLAN', 'GATE_CANCEL_FLOW_V2'].forEach((key, index) => {
+        if (priorGates[index] === undefined) delete process.env[key]; else process.env[key] = priorGates[index];
+      });
+    }
   });
 });
 

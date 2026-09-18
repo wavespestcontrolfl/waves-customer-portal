@@ -112,6 +112,15 @@ const EstimateAutoRenew = {
               if (!current || (current.estimate_group_id || null) !== currentGroupId) return 0;
               if (await fixedBidBlocksExtension(trx, current)) return 0;
             }
+            // Delivery-guards slice (re-cut of #4569): the renewal UPDATE is
+            // itself a handoff — it extends expires_at and (below) emails the
+            // customer a link to an offer that may no longer be deliverable.
+            // Reread and lock the row fresh under this same transaction right
+            // before the write and skip the renewal entirely when withheld:
+            // no expires_at/renewal_count advance, no email.
+            const { loadAnnualOfferRow, annualOfferVerdict } = require('./estimate-annual-guard');
+            const guardRow = await loadAnnualOfferRow(trx, est.id, { forUpdate: true });
+            if (annualOfferVerdict(guardRow).withheld) return 0;
             return trx('estimates').where({ id: est.id })
               .whereRaw(FIXED_BID_VALIDITY_ABSENT_SQL)
               .modify((qb) => (currentGroupId
@@ -176,6 +185,7 @@ const EstimateAutoRenew = {
                       recipientType: est.customer_id ? 'customer' : 'lead',
                       recipientId: est.customer_id || null,
                       triggerEventId: `estimate_auto_renew:${est.id}`,
+                      estimateId: est.id,
                       categories: ['estimate_auto_renew'],
                     });
                     if (result.blocked) {

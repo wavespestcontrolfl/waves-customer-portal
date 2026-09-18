@@ -871,6 +871,12 @@ const QUEUED_IN_FLIGHT_MS = 2 * 60 * 1000;
 // retryable — never a delivery, never ambiguous.
 const ABORTED_BEFORE_DISPATCH = 'aborted_by_caller_before_dispatch';
 
+// A dispatchToProvider result that means "the annual-offer guard withheld
+// this send" rather than "sendgrid ran" — kept as a module-private sentinel
+// (never serialized) so the caller-composition branches below can tell it
+// apart from both a real provider result and a thrown error.
+const ANNUAL_OFFER_WITHHELD = Symbol('annual_offer_withheld');
+
 // The caller's locked handoff around one provider request, as a state
 // machine of its own: the request either ran (its result, or its error to
 // classify), was refused before it ran (abort before dispatch), or the
@@ -975,6 +981,14 @@ async function sendTemplate({
   // the provider outcome, and a caller failure after acceptance keeps the
   // acceptance.
   withProviderHandoff = null,
+  // Delivery-guards slice (re-cut of #4569): the estimate(s) this send is
+  // about. When present, the annual-offer guard runs inside the provider
+  // handoff — after a caller's own withProviderHandoff has acquired its
+  // lock, immediately before sendgrid.sendOne — and blocks the send if any
+  // one of them currently withholds its annual offer. No sender rechecks
+  // this itself; it just passes the id(s) through.
+  estimateId = null,
+  estimateIds = null,
 } = {}) {
   if (!to) throw new Error('recipient email required');
   let template;
@@ -1261,6 +1275,26 @@ async function sendTemplate({
     }
     return { sent: false, aborted: true, reason, message: aborted || { ...message, status: 'failed', error_message: reason }, rendered };
   };
+  // Delivery-guards slice: the annual-offer guard's own pre-dispatch abort.
+  // Same bookkeeping shape as abortBeforeDispatch (no provider id, the
+  // queued row becomes a retryable pre-provider failure) but its own reason
+  // and an explicit providerAttempted: false so callers can tell "the offer
+  // was withheld" apart from a lost sibling lease.
+  const ANNUAL_OFFER_WITHHELD_REASON = 'annual_offer_withheld';
+  const abortWithheldBeforeDispatch = async () => {
+    let blocked;
+    try {
+      [blocked] = await db('email_messages')
+        .where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken })
+        .update({ status: 'failed', error_message: ANNUAL_OFFER_WITHHELD_REASON, updated_at: new Date() }).returning('*');
+    } catch (err) {
+      logger.warn(`[email-template-library] annual offer guard bookkeeping failed for ${templateKey}: ${err.message}`);
+    }
+    return {
+      sent: false, blocked: true, reason: ANNUAL_OFFER_WITHHELD_REASON, providerAttempted: false,
+      message: blocked || { ...message, status: 'failed', error_message: ANNUAL_OFFER_WITHHELD_REASON }, rendered,
+    };
+  };
   if (typeof onQueued === 'function') {
     let keep = true;
     try {
@@ -1282,7 +1316,7 @@ async function sendTemplate({
       status: db.raw("CASE WHEN status = 'queued' THEN 'sent' ELSE status END"),
     }).returning('*');
   try {
-    const dispatchToProvider = () => sendgrid.sendOne({
+    const sendToProvider = () => sendgrid.sendOne({
         to,
         fromEmail,
         fromName,
@@ -1300,6 +1334,24 @@ async function sendTemplate({
         customArgs: { email_message_id: message.id, send_attempt_token: sendAttemptToken },
         suppressErrorLog: suppressProviderErrorLog,
       });
+    // Delivery-guards slice: estimateId/estimateIds route this send through
+    // the annual-offer guard as the innermost step of dispatchToProvider —
+    // composed so a caller's own withProviderHandoff (outermost) has already
+    // acquired its lock by the time the guard reads a fresh row, whether or
+    // not a caller handoff is present at all (both branches below call this
+    // same function). A guard error propagates like any other dispatch
+    // failure (below, the ordinary catch block); a withheld verdict resolves
+    // to the sentinel instead of throwing, so it aborts pre-dispatch without
+    // being misread as a real provider error.
+    const guardEstimateIds = Array.isArray(estimateIds) && estimateIds.length
+      ? estimateIds : (estimateId ? [estimateId] : []);
+    const dispatchToProvider = guardEstimateIds.length
+      ? async () => {
+          const { annualHandoffGuard } = require('./estimate-annual-guard');
+          const verdict = await annualHandoffGuard({ db, estimateIds: guardEstimateIds })();
+          return verdict.blocked ? ANNUAL_OFFER_WITHHELD : sendToProvider();
+        }
+      : sendToProvider;
     if (typeof withProviderHandoff === 'function') {
       const handoff = await runProviderHandoff({ withProviderHandoff, dispatchToProvider, templateKey });
       if (handoff.abortedBeforeDispatch) return abortBeforeDispatch();
@@ -1307,6 +1359,7 @@ async function sendTemplate({
     } else {
       result = await dispatchToProvider();
     }
+    if (result === ANNUAL_OFFER_WITHHELD) return abortWithheldBeforeDispatch();
     providerAccepted = true;
     // Record provider id + send time, and advance status to 'sent' ONLY while
     // still 'queued' — a fast delivery/bounce webhook (resolvable via

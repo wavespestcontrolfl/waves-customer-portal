@@ -15,7 +15,10 @@ jest.mock('../models/db', () => {
   mockDb.fn = { now: jest.fn(() => 'NOW()') };
   return mockDb;
 });
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({
+  ...jest.requireActual('../config/feature-gates'),
+  isEnabled: jest.fn(() => true),
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/estimate-conversion-guard', () => ({
   customerConvertedSince: jest.fn(async () => ({ converted: false })),
@@ -420,6 +423,29 @@ describe('runQueue — gate + suppression', () => {
     expect(counts.dismissed).toBe(1);
     expect(inserts.find((i) => i.table === 'click_followup_actions').payload).toMatchObject({ status: 'dismissed' });
     expect(inserts.find((i) => i.table === 'message_drafts')).toBeUndefined();
+  });
+
+  test('annual offer withheld (delivery-guards slice, re-cut of #4569) → dismissed, never drafted', async () => {
+    const gateKeys = ['GATE_TERMITE_ANNUAL_PLAN', 'GATE_CANCEL_FLOW_V2'];
+    const prior = gateKeys.map((key) => process.env[key]);
+    gateKeys.forEach((key) => delete process.env[key]);
+    try {
+      enqueue('short_code_clicks as scc', { rows: [makeClick()] });
+      enqueue('estimates', { first: makeEstimate({
+        estimate_data: { result: { lineItems: [{ service: 'termite_bait', plan: 'annual_protection', stations: 15 }] } },
+      }) });
+      enqueue('click_followup_actions', { insert: [{ id: 'act-1' }] }); // outcome row
+
+      const counts = await _internals.runQueue(NOW);
+
+      expect(counts.dismissed).toBe(1);
+      expect(inserts.find((i) => i.table === 'click_followup_actions').payload).toMatchObject({ status: 'dismissed' });
+      expect(inserts.find((i) => i.table === 'message_drafts')).toBeUndefined();
+    } finally {
+      gateKeys.forEach((key, index) => {
+        if (prior[index] === undefined) delete process.env[key]; else process.env[key] = prior[index];
+      });
+    }
   });
 
   test('known-landline (cached line type) → dismissed', async () => {
@@ -829,6 +855,23 @@ describe('evaluateClickFollowupGate — shared verdict codes', () => {
     expect((await gate.evaluateClickFollowupGate({ ...baseInput(), estimate: null })).code).toBe('estimate_terminal');
     expect((await gate.evaluateClickFollowupGate({ ...baseInput(), estimate: makeEstimate({ status: 'declined' }) })).code).toBe('estimate_terminal');
     expect((await gate.evaluateClickFollowupGate({ ...baseInput(), estimate: makeEstimate({ archived_at: new Date() }) })).code).toBe('estimate_terminal');
+  });
+
+  test('annual_offer_withheld: a withheld annual-plan offer is never queued (delivery-guards slice, re-cut of #4569)', async () => {
+    const gateKeys = ['GATE_TERMITE_ANNUAL_PLAN', 'GATE_CANCEL_FLOW_V2'];
+    const prior = gateKeys.map((key) => process.env[key]);
+    gateKeys.forEach((key) => delete process.env[key]);
+    try {
+      const estimate = makeEstimate({
+        estimate_data: { result: { lineItems: [{ service: 'termite_bait', plan: 'annual_protection', stations: 15 }] } },
+      });
+      const v = await gate.evaluateClickFollowupGate({ ...baseInput(), estimate });
+      expect(v).toEqual({ ok: false, code: 'annual_offer_withheld' });
+    } finally {
+      gateKeys.forEach((key, index) => {
+        if (prior[index] === undefined) delete process.env[key]; else process.env[key] = prior[index];
+      });
+    }
   });
 
   test("kind-aware 'accepted': booking clicks stay live, estimate clicks are terminal", async () => {

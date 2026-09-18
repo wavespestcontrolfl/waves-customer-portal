@@ -105,6 +105,34 @@ async function appointmentMoveHeld(input) {
   return require('../visit-groups').appointmentSendHeld(input.appointmentId, Number.isFinite(input.renderedSlotMs) ? input.renderedSlotMs : null);
 }
 
+// Annual-offer delivery guard (delivery-guards slice, re-cut of #4569): no
+// sender rechecks annual-plan eligibility itself — it passes estimateId(s)
+// through to this send library, and this is the ONE place a customer-facing
+// send is judged against the current fingerprint/gate state. Rechecked here,
+// at the actual Twilio handoff, for the same reason as the move hold above:
+// a withdrawal/replace landing during the caller's own awaits must still
+// hold the send.
+function annualOfferGuardEstimateIds(input) {
+  if (Array.isArray(input.estimateIds) && input.estimateIds.length) return input.estimateIds;
+  return input.estimateId ? [input.estimateId] : [];
+}
+async function annualOfferGuardVerdict(input) {
+  const estimateIds = annualOfferGuardEstimateIds(input);
+  if (!estimateIds.length) return { ok: true };
+  try {
+    const { annualHandoffGuard } = require('../estimate-annual-guard');
+    const db = require('../../models/db');
+    const verdict = await annualHandoffGuard({ db, estimateIds })();
+    return verdict.blocked
+      ? { ok: false, code: 'ANNUAL_OFFER_WITHHELD', reason: 'annual_offer_withheld', retryable: false }
+      : { ok: true };
+  } catch (err) {
+    // Fail closed — an infrastructure error here must block the send, never
+    // silently allow it through as though the offer were unaffected.
+    return { ok: false, code: err?.code || 'ANNUAL_OFFER_GUARD_FAILED', reason: err?.message || 'annual offer guard failed', retryable: true };
+  }
+}
+
 function nextProviderRetryAt(providerOutcome, now = new Date()) {
   if (!providerOutcome || !providerOutcome.retryable) return null;
   if (providerOutcome.nextAllowedAt) {
@@ -610,6 +638,8 @@ async function sendCustomerMessageCore(input) {
     if (!callerVerdict.ok) return rememberBoundaryBlock(callerVerdict, 'pre_send_check_boundary');
     const providerVerdict = await runCallerPreProviderCheck();
     if (!providerVerdict.ok) return rememberBoundaryBlock(providerVerdict, 'pre_provider_check_boundary');
+    const annualVerdict = await annualOfferGuardVerdict(sendInput);
+    if (!annualVerdict.ok) return rememberBoundaryBlock(annualVerdict, 'annual_offer_guard_boundary');
     // The awaited caller guard may itself straddle 20:00 ET. Keep this pure
     // clock check as the final operation before returning to the provider.
     const finalWindowVerdict = checkSendWindow(sendInput, policy, contactState);

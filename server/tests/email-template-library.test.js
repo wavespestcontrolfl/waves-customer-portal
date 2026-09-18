@@ -7,11 +7,15 @@ jest.mock('../services/sendgrid-mail', () => ({
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(async () => ({})),
 }));
+jest.mock('../services/estimate-annual-guard', () => ({
+  annualHandoffGuard: jest.fn(() => async () => ({ blocked: false, reason: null, estimateId: null })),
+}));
 
 const db = require('../models/db');
 const sendgrid = require('../services/sendgrid-mail');
 const NotificationService = require('../services/notification-service');
 const EmailTemplates = require('../services/email-template-library');
+const { annualHandoffGuard } = require('../services/estimate-annual-guard');
 
 function chain({ result = [], first, returning } = {}) {
   const q = {};
@@ -1434,5 +1438,183 @@ describe('email template library rendering', () => {
 
     expect(result).toEqual(expect.objectContaining({ sent: false, blocked: true }));
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  describe('annual-offer delivery guard at the provider handoff (delivery-guards slice, re-cut of #4569)', () => {
+    const queuedMessage = { id: 'msg-annual', status: 'queued', subject_snapshot: 'S' };
+    const sentMessage = { ...queuedMessage, status: 'sent', provider_message_id: 'sg-annual' };
+    const withheldMessage = { ...queuedMessage, status: 'failed', error_message: 'annual_offer_withheld' };
+
+    beforeEach(() => {
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_suppressions: [chain({ result: [] })],
+      });
+    });
+
+    const send = (fields) => EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+      ...fields,
+    });
+
+    test('estimateId present + a withheld row blocks: no provider call, blocked result, providerAttempted false', async () => {
+      const queueInsert = chain({ returning: [queuedMessage] });
+      const withheldUpdate = chain({ returning: [withheldMessage] });
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [queueInsert, withheldUpdate],
+      });
+      annualHandoffGuard.mockReturnValueOnce(async () => ({ blocked: true, reason: 'annual_offer_withheld', estimateId: 'est-1' }));
+
+      const result = await send({ estimateId: 'est-1' });
+
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      expect(result).toEqual(expect.objectContaining({
+        sent: false, blocked: true, reason: 'annual_offer_withheld', providerAttempted: false,
+      }));
+      expect(result.message.status).toBe('failed');
+      expect(annualHandoffGuard).toHaveBeenCalledWith({ db: expect.anything(), estimateIds: ['est-1'] });
+      expect(withheldUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', error_message: 'annual_offer_withheld' }));
+    });
+
+    test('estimateIds (plural, grouped) present + a withheld row blocks the whole send', async () => {
+      const queueInsert = chain({ returning: [queuedMessage] });
+      const withheldUpdate = chain({ returning: [withheldMessage] });
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [queueInsert, withheldUpdate],
+      });
+      annualHandoffGuard.mockReturnValueOnce(async () => ({ blocked: true, reason: 'annual_offer_withheld', estimateId: 'est-2' }));
+
+      const result = await send({ estimateIds: ['est-1', 'est-2'] });
+
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      expect(result).toEqual(expect.objectContaining({ sent: false, blocked: true, reason: 'annual_offer_withheld' }));
+      expect(annualHandoffGuard).toHaveBeenCalledWith({ db: expect.anything(), estimateIds: ['est-1', 'est-2'] });
+    });
+
+    test('estimateId present + a delivered (not withheld) row dispatches to the provider', async () => {
+      const queueInsert = chain({ returning: [queuedMessage] });
+      const sentUpdate = chain({ returning: [sentMessage] });
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [queueInsert, sentUpdate],
+      });
+      annualHandoffGuard.mockReturnValueOnce(async () => ({ blocked: false, reason: null, estimateId: null }));
+      sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-annual' });
+
+      const result = await send({ estimateId: 'est-1' });
+
+      expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      expect(result).toEqual(expect.objectContaining({ sent: true, providerAttempted: true }));
+    });
+
+    test('without estimateId/estimateIds the guard is never consulted — unchanged behavior', async () => {
+      const queueInsert = chain({ returning: [queuedMessage] });
+      const sentUpdate = chain({ returning: [sentMessage] });
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [queueInsert, sentUpdate],
+      });
+      sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-annual' });
+
+      const result = await send({});
+
+      expect(annualHandoffGuard).not.toHaveBeenCalled();
+      expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      expect(result.sent).toBe(true);
+    });
+
+    test('composes with a caller withProviderHandoff: caller lock outermost, guard innermost, still able to block', async () => {
+      const queueInsert = chain({ returning: [queuedMessage] });
+      const withheldUpdate = chain({ returning: [withheldMessage] });
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [queueInsert, withheldUpdate],
+      });
+      const order = [];
+      const withProviderHandoff = jest.fn(async (dispatch) => {
+        order.push('lock');
+        await dispatch();
+        order.push('unlock');
+      });
+      annualHandoffGuard.mockReturnValueOnce(async () => {
+        order.push('guard');
+        return { blocked: true, reason: 'annual_offer_withheld', estimateId: 'est-1' };
+      });
+
+      const result = await send({ estimateId: 'est-1', withProviderHandoff });
+
+      expect(order).toEqual(['lock', 'guard', 'unlock']);
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      expect(result).toEqual(expect.objectContaining({ sent: false, blocked: true, reason: 'annual_offer_withheld', providerAttempted: false }));
+    });
+
+    test('composes with a caller withProviderHandoff that is allowed through: guard runs inside the lock, then sendgrid', async () => {
+      const queueInsert = chain({ returning: [queuedMessage] });
+      const sentUpdate = chain({ returning: [sentMessage] });
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [queueInsert, sentUpdate],
+      });
+      const order = [];
+      const withProviderHandoff = jest.fn(async (dispatch) => {
+        order.push('lock');
+        await dispatch();
+        order.push('unlock');
+      });
+      annualHandoffGuard.mockReturnValueOnce(async () => {
+        order.push('guard');
+        return { blocked: false, reason: null, estimateId: null };
+      });
+      sendgrid.sendOne.mockImplementationOnce(async () => {
+        order.push('provider');
+        return { messageId: 'sg-annual' };
+      });
+
+      const result = await send({ estimateId: 'est-1', withProviderHandoff });
+
+      expect(order).toEqual(['lock', 'guard', 'provider', 'unlock']);
+      expect(result.sent).toBe(true);
+    });
+
+    test('a guard infrastructure error surfaces as a failure — never a handled/deduped success (#4569 "retry after handoff-check errors")', async () => {
+      const current = { ...queuedMessage };
+      const providerFailUpdate = chain({ returning: [] });
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [
+          chain({ returning: [queuedMessage] }),
+          chain({ first: current }),
+          providerFailUpdate,
+        ],
+        email_message_events: [chain()],
+      });
+      annualHandoffGuard.mockReturnValueOnce(async () => { throw new Error('estimates lookup unavailable'); });
+
+      await expect(send({ estimateId: 'est-1' })).rejects.toThrow('estimates lookup unavailable');
+
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      expect(providerFailUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'failed', error_message: 'estimates lookup unavailable',
+      }));
+    });
   });
 });

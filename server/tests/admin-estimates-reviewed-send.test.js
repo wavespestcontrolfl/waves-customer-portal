@@ -1017,6 +1017,15 @@ describe('annual provider delivery receipts', () => {
   test.each([
     ['email rejection', 'email', () => email.sendTemplate.mockRejectedValueOnce(new Error('Template disabled'))],
     ['suppressed SMS', 'sms', () => sendCustomerMessage.mockResolvedValueOnce({ sent: true, reason: 'SMS suppressed' })],
+    // Delivery-guards slice (re-cut of #4569): the annual-offer guard at the
+    // send chokepoint blocked this handoff — same "no receipt, not sent"
+    // contract as any other blocked/rejected channel.
+    ['annual offer withheld (email)', 'email', () => email.sendTemplate.mockResolvedValueOnce({
+      sent: false, blocked: true, reason: 'annual_offer_withheld', providerAttempted: false,
+    })],
+    ['annual offer withheld (sms)', 'sms', () => sendCustomerMessage.mockResolvedValueOnce({
+      sent: false, blocked: true, code: 'ANNUAL_OFFER_WITHHELD', reason: 'annual_offer_withheld',
+    })],
   ])('%s cannot issue an annual receipt', async (_name, method, arrange) => {
     row.estimate_data = annualData();
     arrange();
@@ -1141,6 +1150,28 @@ describe('annual provider delivery receipts', () => {
       expect(sibling.status).toBe('accepted');
       expect(sibling.annual_total).toBe('777');
       expect(dataOf(sibling).deliveryState?.annualPlanOfferFingerprint).toBe(actual ? fingerprint : undefined);
+    });
+
+    test('annual-offer delivery guard (delivery-guards slice, re-cut of #4569): a withheld sibling aborts the whole group send', async () => {
+      email.sendTemplate.mockResolvedValueOnce({
+        sent: false, blocked: true, reason: 'annual_offer_withheld', providerAttempted: false,
+      });
+      const response = await invoke('/:id/send', 'post', { sendMethod: 'email' });
+      expect(response.statusCode).toBe(422);
+      expect(response.body.success).toBe(false);
+      expect(response.body.channels.email).toMatchObject({ ok: false });
+      // The whole claimed set — anchor + sibling — rode the ONE provider
+      // call, so a withheld sibling aborts it rather than publishing the
+      // group around it (the customer's link shows every property).
+      expect(email.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+        estimateIds: expect.arrayContaining([row.id, sibling.id]),
+      }));
+      // The sibling was claimed ('sending') then released back to its
+      // pre-claim status — never published alongside a blocked anchor.
+      expect(sibling.status).toBe('draft');
+      expect(dataOf(sibling).groupPublishedByEstimateId).toBeUndefined();
+      expect(row.status).not.toBe('sent');
+      expect(annualPlanHasDeliveredOffer(sibling)).toBe(false);
     });
   });
 });
