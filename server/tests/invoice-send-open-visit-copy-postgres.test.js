@@ -113,8 +113,8 @@ postgres('invoice_sent copy selection for a linked visit (pre-push P1 #4131)', (
     expect(sentBody()).not.toMatch(/get started/i);
   });
 
-  test('past + OPEN visit: selects the pre-service copy rather than claiming completion', async () => {
-    const { invoiceId } = await fixture({ visitStatus: 'confirmed', serviceYmd: etDateString(addETDays(new Date(), -3)) });
+  test.each(['confirmed', 'rescheduled'])('past + %s visit: selects pre-service copy without claiming completion', async (visitStatus) => {
+    const { invoiceId } = await fixture({ visitStatus, serviceYmd: etDateString(addETDays(new Date(), -3)) });
     const result = await InvoiceService.sendViaSMS(invoiceId, { operatorInitiated: true });
     expect(result.sent).toBe(true);
     expect(sentBody()).toMatch(/get started/i);
