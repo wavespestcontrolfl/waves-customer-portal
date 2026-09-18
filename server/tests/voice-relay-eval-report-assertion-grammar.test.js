@@ -439,3 +439,119 @@ test.each([
 ])('modal contracted focus does not establish completion: %s', (text) => {
   expect(grammar.reportHasCompletedPredicate(text, /applied/.exec(text))).toBe(false);
 });
+
+test.each(["would've", "could've", "might've", 'would’ve', 'could’ve', 'might’ve'])('contracted modal perfect %s remains uncertain', (modal) => {
+  const hypothetical = `We ${modal} applied Talstar P to the exterior perimeter.`;
+  expect(grammar.reportFindingIsUncertain(hypothetical)).toBe(true);
+
+  const definite = 'We have applied Talstar P to the exterior perimeter.';
+  expect(grammar.reportFindingIsUncertain(definite)).toBe(false);
+});
+
+test.each(['requested', 'asked'])('%s-that subjunctive does not assert completed treatment', (request) => {
+  const requested = `We ${request} that Talstar P be applied to the exterior perimeter.`;
+  const requestedVerb = /applied/.exec(requested);
+  expect(grammar.reportFindingIsInstruction(requested, requested.indexOf('Talstar P'),
+    requested.indexOf('exterior perimeter'), requestedVerb, requested.length)).toBe(true);
+  expect(grammar.reportHasCompletedPredicate(requested, requestedVerb)).toBe(false);
+
+  const confirmed = 'We confirmed that Talstar P was applied to the exterior perimeter.';
+  const confirmedVerb = /applied/.exec(confirmed);
+  expect(grammar.reportFindingIsInstruction(confirmed, confirmed.indexOf('Talstar P'),
+    confirmed.indexOf('exterior perimeter'), confirmedVerb, confirmed.length)).toBe(false);
+  expect(grammar.reportHasCompletedPredicate(confirmed, confirmedVerb)).toBe(true);
+});
+
+test('but-not nominal contrast preserves the asserted product and denies the excluded product', () => {
+  const contrast = 'Talstar P, but not bait, was applied to the exterior perimeter.';
+  const verb = /applied/.exec(contrast);
+  expect(grammar.reportHasCompletedPredicate(contrast, verb)).toBe(true);
+  expect(grammar.reportClaimIsDenied(contrast, contrast, contrast.indexOf('Talstar P'),
+    contrast.indexOf('exterior perimeter'), verb, '')).toBe(false);
+  expect(grammar.reportClaimIsDenied(contrast, contrast, contrast.indexOf('bait'),
+    contrast.indexOf('exterior perimeter'), verb, '')).toBe(true);
+
+  const denied = 'Talstar P, but not bait, was not applied to the exterior perimeter.';
+  expect(grammar.reportClaimIsDenied(denied, denied, denied.indexOf('Talstar P'),
+    denied.indexOf('exterior perimeter'), /applied/.exec(denied), '')).toBe(true);
+});
+
+test('without difficulty differs from a true treatment denial', () => {
+  const affirmative = 'Talstar P was applied without difficulty to the exterior perimeter.';
+  expect(grammar.reportClaimIsDenied(affirmative, affirmative, affirmative.indexOf('Talstar P'),
+    affirmative.indexOf('exterior perimeter'), /applied/.exec(affirmative), '')).toBe(false);
+
+  const denied = 'We left without applying Talstar P to the exterior perimeter.';
+  expect(grammar.reportClaimIsDenied(denied, denied, denied.indexOf('Talstar P'),
+    denied.indexOf('exterior perimeter'), /applying/.exec(denied), '')).toBe(true);
+});
+
+test.each(['assume', 'assumed'])('active %s attribution remains uncertain', (assumption) => {
+  const uncertain = `We ${assumption} that Talstar P was applied to the exterior perimeter.`;
+  expect(grammar.reportFindingIsUncertain(uncertain)).toBe(true);
+
+  const definite = 'We confirmed that Talstar P was applied to the exterior perimeter.';
+  expect(grammar.reportFindingIsUncertain(definite)).toBe(false);
+});
+
+test.each([
+  ['We managed to apply Talstar P to the exterior perimeter.', true],
+  ['We failed to manage to apply Talstar P to the exterior perimeter.', false],
+  ['We expected to manage to apply Talstar P to the exterior perimeter.', false],
+  ['We did not manage to apply Talstar P to the exterior perimeter.', false],
+  ['We almost managed to apply Talstar P to the exterior perimeter.', false],
+])('successful resultative governor distinguishes completion: %s', (text, completed) => {
+  expect(grammar.reportHasCompletedPredicate(text, /apply/.exec(text))).toBe(completed);
+});
+
+test('future successful resultative is uncertain rather than completed evidence', () => {
+  const future = 'We will manage to apply Talstar P to the exterior perimeter.';
+  expect(grammar.reportFindingIsUncertain(future)).toBe(true);
+
+  const completed = 'We managed to apply Talstar P to the exterior perimeter.';
+  expect(grammar.reportFindingIsUncertain(completed)).toBe(false);
+});
+
+test.each([
+  ['were unable', 'We had Talstar P applied to the exterior perimeter.'],
+  ['failed', 'We have had Talstar P applied to the exterior perimeter.'],
+  ['forgot', 'We had Talstar P applied to the exterior perimeter.'],
+  ['neglected', 'We have had Talstar P applied to the exterior perimeter.'],
+  ['refused', 'We had Talstar P applied to the exterior perimeter.'],
+])('%s-to-have causative remains incomplete', (governor, completedCausative) => {
+  const incomplete = `We ${governor} to have Talstar P applied to the exterior perimeter.`;
+  expect(grammar.reportHasCompletedPredicate(incomplete, /applied/.exec(incomplete))).toBe(false);
+  expect(grammar.reportHasCompletedPredicate(completedCausative, /applied/.exec(completedCausative))).toBe(true);
+});
+
+
+test('causative object scope stops before a separate completed assertion', () => {
+  const text = 'We wanted the technician to have finished the report after he applied Talstar P to the exterior perimeter.';
+  expect(grammar.reportHasCompletedPredicate(text, /applied/.exec(text))).toBe(true);
+});
+
+
+test.each(['seemed', 'appeared'])('past tentative raising %s does not confirm managed completion', (raising) => {
+  const text = `We ${raising} to have managed to apply Talstar P to the exterior perimeter.`;
+  expect(grammar.reportFindingIsUncertain(text)).toBe(true);
+  const completed = 'We have managed to apply Talstar P to the exterior perimeter.';
+  expect(grammar.reportFindingIsUncertain(completed)).toBe(false);
+  expect(grammar.reportHasCompletedPredicate(completed, /apply/.exec(completed))).toBe(true);
+});
+
+
+test.each([
+  'We requested that invoice, Talstar P was applied to the exterior perimeter.',
+  'At your request that morning, Talstar P was applied to the exterior perimeter.',
+  'We received your request that morning, Talstar P was applied to the exterior perimeter.',
+])('demonstrative that does not create a request complement: %s', (text) => {
+  expect(grammar.reportFindingIsInstruction(text, text.indexOf('Talstar P'),
+    text.indexOf('exterior perimeter'), /applied/.exec(text), text.length)).toBe(false);
+});
+
+
+test('active request-that subjunctive governs the invariant put verb', () => {
+  const text = 'We requested that Sam put Talstar P around the exterior perimeter.';
+  expect(grammar.reportFindingIsInstruction(text, text.indexOf('Talstar P'),
+    text.indexOf('exterior perimeter'), /put/.exec(text), text.length)).toBe(true);
+});

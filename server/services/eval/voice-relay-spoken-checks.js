@@ -1723,8 +1723,8 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
 // Classify one bounded treatment assertion. Product/location ownership,
 // clause selection, shared coordinator governors and final report check
 // registration are separate consumers.
-const REPORT_UNCERTAINTY_RE = /\b(?:(?:can|must|may|might|could|would|should|will|shall)\s+(?:(?:not|never|already|also|just|now|\w+ly)\s+)*(?:be|get|have|apply|use|treat|spray|place|put|receive|go|complete|finish|show|say|state|report|confirm|verify|check|mention|document)\b|going to|(?:i|we)\s+(?:think|thought|believ(?:e|ed)|guess(?:ed)?|suppos(?:e|ed)|expect(?:ed)?)|my\s+(?:guess|belief|assumption)\s+is|(?:it|this|that)(?:['’]s|\s+is)\s+(?:possible|probable|unlikely|improbable)(?:\s+that)?|(?:it|this|that)\s+appears?\s+that|(?:appears?|seems?)\s+to\s+(?:have|be)|(?:is|are|was|were|has\s+been|have\s+been|had\s+been)\s+(?:believed|thought|assumed|considered|reported|said)\s+to\s+(?:have|be)|(?:it|this|that)\s+(?:seems?\s+that|looks?\s+like|sounds?\s+like)|there(?:['’]s|\s+is)\s+a\s+(?:chance|possibility)(?:\s+that)?|(?:pretend(?:s|ed|ing)?|imagin(?:e[sd]?|ing))\s+that|disput(?:e[sd]?|ing)\s+that|(?:incorrectly|falsely|mistakenly|erroneously)\s+(?:says?|said|states?|stated|reports?|reported)|plan(?:s|ned)? to|intend(?:s|ed|ing)?(?:\s+to)?|wish(?:es|ed|ing)?|maybe|perhaps|possibly|potentially|probably|likely|allegedly|supposedly|reportedly|apparently)\b/i;
-const REPORT_INSTRUCTION_RE = /(?:^\s*|,\s*)(?:please\s+)?(?:apply|use|put|treat|spray|place|confirm|verify|check|tell\s+me)\b|\b(?:(?:i|we)(?:\s+(?:need(?:ed)?|want(?:ed)?|ask(?:ed)?|request(?:ed)?)|['’]d\s+like|\s+would\s+like)\s+you\s+to\s+(?:confirm|verify|check|tell)|(?:i|we)\s+(?:need(?:ed)?|want(?:ed)?|request(?:ed)?)\s+(?:(?:a|your)\s+)?(?:confirmation|verification)\s+(?:that|whether|if)|please\s+let\s+me\s+know\s+(?:whether|if|that)|make sure|ensure|remember to|please\s+(?:confirm|verify|check|tell))\b/i;
+const REPORT_UNCERTAINTY_RE = /\b(?:(?:can|must|may|might|could|would|should|will|shall)\s+(?:(?:not|never|already|also|just|now|\w+ly)\s+)*(?:be|get|have|apply|use|treat|spray|place|put|receive|go|complete|finish|manage|show|say|state|report|confirm|verify|check|mention|document)\b|(?:would|could|should|might|must|may)['’]ve\b|going to|(?:i|we)\s+(?:think|thought|believ(?:e|ed)|guess(?:ed)?|suppos(?:e|ed)|assum(?:e|ed)|expect(?:ed)?)|my\s+(?:guess|belief|assumption)\s+is|(?:it|this|that)(?:['’]s|\s+is)\s+(?:possible|probable|unlikely|improbable)(?:\s+that)?|(?:it|this|that)\s+appear(?:s|ed)?\s+that|(?:appear(?:s|ed)?|seem(?:s|ed)?)\s+to\s+(?:have|be)|(?:is|are|was|were|has\s+been|have\s+been|had\s+been)\s+(?:believed|thought|assumed|considered|reported|said)\s+to\s+(?:have|be)|(?:it|this|that)\s+(?:seem(?:s|ed)?\s+that|looks?\s+like|sounds?\s+like)|there(?:['’]s|\s+is)\s+a\s+(?:chance|possibility)(?:\s+that)?|(?:pretend(?:s|ed|ing)?|imagin(?:e[sd]?|ing))\s+that|disput(?:e[sd]?|ing)\s+that|(?:incorrectly|falsely|mistakenly|erroneously)\s+(?:says?|said|states?|stated|reports?|reported)|plan(?:s|ned)? to|intend(?:s|ed|ing)?(?:\s+to)?|wish(?:es|ed|ing)?|maybe|perhaps|possibly|potentially|probably|likely|allegedly|supposedly|reportedly|apparently)\b/i;
+const REPORT_INSTRUCTION_RE = /(?:^\s*|,\s*)(?:please\s+)?(?:apply|use|put|treat|spray|place|confirm|verify|check|tell\s+me)\b|\b(?:(?:i|we)(?:\s+(?:need(?:ed)?|want(?:ed)?|ask(?:ed)?|request(?:ed)?)|['’]d\s+like|\s+would\s+like)\s+you\s+to\s+(?:confirm|verify|check|tell)|(?:i|we)\s+(?:need(?:ed)?|want(?:ed)?|request(?:ed)?)\s+(?:(?:a|your)\s+)?(?:confirmation|verification)\s+(?:that|whether|if)|please\s+let\s+me\s+know\s+(?:whether|if|that)|(?:ask(?:s|ed|ing)?|request(?:s|ed|ing)?)\s+that(?=\s+(?:[\w'’-]+\s+){1,6}(?:be|get|have|apply|use|treat|spray|place|put|receive)\b)|make sure|ensure|remember to|please\s+(?:confirm|verify|check|tell))\b/i;
 const REPORT_FINDING_VERB_RE = /\b(?:apply|applying|applied|place|placed|placing|use|used|using|treat|treated|treating|spray|sprayed|spraying|put|went|got|received)\b/i;
 const REPORT_COMPLETION_TIME = `(?:(?:on\\s+)?(?:${VISIT_TIME_RE.source})|yesterday|earlier|recently|last\\s+(?:week|month|year)|(?:before|after)\\s+(?:breakfast|lunch|dinner))(?:\\s+(?:this\\s+)?(?:morning|afternoon|evening|night))?`;
 const REPORT_COMPLETION_TIME_RE = new RegExp(REPORT_COMPLETION_TIME, 'gi');
@@ -1732,7 +1732,7 @@ const REPORT_BASE_TREATMENT_VERB_RE = /^(?:apply|use|spray|treat|place)$/i;
 const REPORT_COMPLETED_GERUND_RE = /^(?:applying|spraying|treating|placing|using)$/i;
 const REPORT_FINITE_PREDICATE_RE = new RegExp(`(?:${CLAUSE_FINITE_PREDICATE_RE.source}|\\b(?:treated|sprayed|used|put|went|got|received|completed|finished)\\b)`, 'i');
 const REPORT_COMPLETED_PASSIVE_RE = /(?:\b(?:was|were|got)(?:n['’]t\s+(?:only|just|merely|simply))?|\bdid(?:n['’]t\s+(?:only|just|merely|simply))?\s+(?:not\s+(?:only|just|merely|simply)\s+)?(?:(?:\w+ly|already|also|just|now)\s+)*get|(?:\b(?:has|have|had)(?:n['’]t\s+(?:only|just|merely|simply))?|['’](?:s|d|ve))(?:\s+(?:\w+ly|already|also|just|now))*\s+been)\s+(?:not\s+(?:only|just|merely|simply)\s+)?(?:(?:\w+ly|already|also|just|now)\s+)*$/i;
-const REPORT_NONCOMPLETION_GOVERNOR_RE = /(?:\b(?:supposed|expect(?:s|ed|ing)?|requir(?:e[sd]?|ing)|meant|schedul(?:e[sd]?|ing)|instruct(?:s|ed|ing)?|ask(?:s|ed|ing)?|told|direct(?:s|ed|ing)?|order(?:s|ed|ing)?|need(?:s|ed|ing)?|intend(?:s|ed|ing)?|plan(?:s|ned|ning)?|attempt(?:s|ed|ing)?|tr(?:y|ies|ied|ying)|hop(?:e[sd]?|ing)|failed|unable|refus(?:e[sd]?|ing)|declin(?:e[sd]?|ing)|forgot(?:ten)?|forget(?:s|ting)?|neglect(?:s|ed|ing)?|pretend(?:s|ed|ing)?|want(?:s|ed)?|ought)\s+(?:(?:me|us|you|him|her|them|(?:(?:the|our|your|their)\s+)?(?:[\w'’-]+\s+){0,3}(?:technician|tech|crew|team)|[\w\x27\u2019-]+(?:\s+[\w\x27\u2019-]+){0,2})\s+)?to(?:\s+(?:\w+ly|already|just|now))*(?:\s+(?:have(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?|be))?(?:\s+(?:\w+ly|already|just|now))*|\bplan(?:s|ned|ning)?\s+on\s+having(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?(?:\s+(?:\w+ly|already|just|now))*|\bimagin(?:e[sd]?|ing)\s+(?:that\s+)?(?:i|we|you|he|she|they|it)\s+(?:(?:had|has|have|was|were|already|just|now)\s+)*)\s*$/i;
+const REPORT_NONCOMPLETION_GOVERNOR_RE = /(?:\b(?:supposed|expect(?:s|ed|ing)?|requir(?:e[sd]?|ing)|meant|schedul(?:e[sd]?|ing)|instruct(?:s|ed|ing)?|ask(?:s|ed|ing)?|told|direct(?:s|ed|ing)?|order(?:s|ed|ing)?|need(?:s|ed|ing)?|intend(?:s|ed|ing)?|plan(?:s|ned|ning)?|attempt(?:s|ed|ing)?|tr(?:y|ies|ied|ying)|hop(?:e[sd]?|ing)|failed|unable|refus(?:e[sd]?|ing)|declin(?:e[sd]?|ing)|forgot(?:ten)?|forget(?:s|ting)?|neglect(?:s|ed|ing)?|pretend(?:s|ed|ing)?|want(?:s|ed)?|ought)\s+(?:(?:me|us|you|him|her|them|(?:(?:the|our|your|their)\s+)?(?:[\w'’-]+\s+){0,3}(?:technician|tech|crew|team)|[\w\x27\u2019-]+(?:\s+[\w\x27\u2019-]+){0,2})\s+)?to(?:\s+(?:\w+ly|already|just|now))*(?:\s+(?:have(?:\s+(?:\w+ly|already|just|now))*(?:\s+been|(?:\s+(?!(?:and|but|or|after|before|when|while|until|since|because|if|unless|that|which|who|was|were|is|are|has|have|had|did|applied|treated|sprayed|used|placed|put|got|received|finished|completed)\b)[\w'’-]+){1,6})?|be))?(?:\s+(?:\w+ly|already|just|now))*|\bplan(?:s|ned|ning)?\s+on\s+having(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?(?:\s+(?:\w+ly|already|just|now))*|\bimagin(?:e[sd]?|ing)\s+(?:that\s+)?(?:i|we|you|he|she|they|it)\s+(?:(?:had|has|have|was|were|already|just|now)\s+)*)\s*$/i;
 const REPORT_NONCOMPLETION_MODIFIER_RE = /\b(?:almost|nearly)(?:\s+(?:has|have|had|was|were|get|got|been|did)){0,2}(?:\s+(?:\w+ly|already|also|just|now))*\s*$/i;
 
 function reportFindingIsUncertain(text) {
@@ -1761,7 +1761,7 @@ function reportFindingIsInstruction(affirmed, subjectAt, locationAt, findingVerb
 // Nominal contrast names an excluded product without denying the main
 // predicate: "Talstar P, not bait, was applied". Preserve all match offsets.
 function reportWithoutNominalContrast(text, findingPositions = []) {
-  return text.replace(/,\s*not\s+([^,;.!?]+),(?=\s*(?:was|were|has|have|had|got)\b)/gi,
+  return text.replace(/,\s*(?:but\s+)?not\s+([^,;.!?]+),(?=\s*(?:was|were|has|have|had|got)\b)/gi,
     (contrast, nominal, at) => findingPositions.some((position) => position >= at && position < at + contrast.length)
       || CLAUSE_FINITE_PREDICATE_RE.test(nominal) || REPORT_FINDING_VERB_RE.test(nominal)
       || !/^(?:[\w'’-]+\s+){0,4}[\w'’-]+\s*$/i.test(nominal)
@@ -1777,13 +1777,14 @@ function reportHasCompletedPredicate(affirmed, findingVerb) {
   const prefix = reportWithoutNominalContrast(affirmed).slice(0, findingVerb.index)
     .replace(/\b(was|were|has|have|had|did)n['’]t\s+(?:only|just|merely|simply)\b/gi, '$1 ')
     .replace(/\bnot\s+(?:only|just|merely|simply)\b/gi, ' ');
-  const predicateIntroduction = prefix.replace(/\b(?:complet(?:e|ed)|finish(?:ed)?)\s*$/i, '');
+  const predicateIntroduction = prefix.replace(/\b(?:complet(?:e|ed)|finish(?:ed)?|manag(?:e|ed)\s+to)\s*$/i, '');
   if (REPORT_NONCOMPLETION_GOVERNOR_RE.test(predicateIntroduction)
       || REPORT_NONCOMPLETION_MODIFIER_RE.test(predicateIntroduction)
-      || (/(?:\b(?:am|is|are|being|get|gets|getting)|['’](?:m|re))\s+(?:(?:\w+ly|already|also|just|now)\s+)*$/i.test(prefix)
+      || (/(?:\b(?:am|is|are|be|being|get|gets|getting)|['’](?:m|re))\s+(?:(?:\w+ly|already|also|just|now)\s+)*$/i.test(prefix)
         && !REPORT_COMPLETED_PASSIVE_RE.test(prefix))) return false;
   if (REPORT_BASE_TREATMENT_VERB_RE.test(findingVerb[0])) {
-    return /\bdid\s+(?:not\s+only\s+)?(?:(?:already|also|just|now|\w+ly)\s+)*$/i.test(prefix);
+    return /\b(?:did\s+(?:(?:already|also|just|now|\w+ly)\s+)*(?:manage\s+to\s+)?|managed\s+to\s+)$/i.test(prefix)
+      && !clauseIsNegated(prefix);
   }
   if (REPORT_COMPLETED_GERUND_RE.test(findingVerb[0])) {
     return /\b(?:completed|finished|did\s+(?:(?:already|also|just|now|\w+ly)\s+)*(?:complete|finish))\s+$/i.test(prefix)
@@ -1804,7 +1805,7 @@ function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb
   if (subjectAt < 0 || locationAt < 0) return false;
   const firstAt = Math.min(subjectAt, locationAt, findingVerb ? findingVerb.index : affirmed.length);
   const lastAt = Math.max(subjectAt, locationAt, findingVerb ? findingVerb.index : 0) + 1;
-  const denyingEvidence = reportWithoutNominalContrast(affirmed, [subjectAt, locationAt]).replace(/\bwithout\s+(?:(?:any|an?)\s+)?(?:issues?|delays?|interruptions?|incidents?|problems?|complications?)\b/gi,
+  const denyingEvidence = reportWithoutNominalContrast(affirmed, [subjectAt, locationAt]).replace(/\bwithout\s+(?:(?:any|an?)\s+)?(?:issues?|delays?|interruptions?|incidents?|problems?|complications?|difficult(?:y|ies))\b/gi,
     (modifier) => ' '.repeat(modifier.length));
   return deniedSpans(denyingEvidence).some(([start, end]) => firstAt < end && lastAt > start);
 }
