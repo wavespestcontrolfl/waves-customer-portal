@@ -1726,7 +1726,8 @@ const REPORT_COMPLETION_TIME_RE = new RegExp(REPORT_COMPLETION_TIME, 'gi');
 
 function reportFindingIsUncertain(text) {
   // Consumers supply bounded finding evidence, excluding unrelated tails.
-  const normalized = text.replace(/\b(can)['’]t\b/gi, '$1 not')
+  const normalized = text.replace(/\bcannot\b/gi, 'can not')
+    .replace(/\b(can)['’]t\b/gi, '$1 not')
     .replace(/\bwon['’]t\b/gi, 'will not')
     .replace(/\bshan['’]t\b/gi, 'shall not')
     .replace(/\b(could|would|should|must|might|is|are|was|were|has|have|had|do|does|did)n['’]t\b/gi, '$1 not');
@@ -1738,18 +1739,26 @@ function reportFindingIsUncertain(text) {
         ? `${subject} had` : auxiliary;
     });
   const conditionalEvidence = text.replace(/\bas\s+if\b/gi, '');
-  const futureEvidence = text.replace(/\b(?:not|rather\s+than)\s+tomorrow\b/gi, '');
+  const futureEvidence = text.replace(/\b(?:not|rather\s+than)\s+(?:tomorrow|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b/gi, '');
   const scopedEvidence = evidence.replace(REPORT_COMPLETION_TIME_RE, '')
     .replace(/\bas\s+(?:the\s+)?report\s+suggest(?:s|ed)?\b/gi, '')
+    .replace(/\bas\s+(?:i|we|you|he|she|they|(?:the\s+)?(?:technician|tech|customer|client|homeowner|caller))\s+(?:expected|hoped)\b/gi,
+      (manner, at, source) => /\b(?:was|were|has|have|had)\s+(?:been\s+)?(?:applied|used|treated|sprayed|placed|put)\b/i.test(source.slice(0, at)) ? '' : manner)
     .replace(/\b(?:that|which)\s+(?:can|must|may|might|could|would|should|will|shall)\s+be\s+used\s+(?:outdoors?|outside)\b/gi, '')
     .replace(/\bwho\s+(?:can|must|may|might|could|would|should|will|shall)\s+verify\s+the\s+label\b/gi, '');
   return /\b(?:if|unless|assuming|provided\s+that)\b/i.test(conditionalEvidence)
     || /\b(?:tomorrow|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b/i.test(futureEvidence)
+    || /\b(?:is\s+about\s+to|is\s+to)\s+be\s+(?:applied|used|sprayed|placed|put)\b/i.test(scopedEvidence)
+    || /\bthere\s+(?:is|remains)\s+(?:(?:some|a(?:\s+\w+)?)\s+)?(?:chance|possibility)\b/i.test(scopedEvidence)
+    || /\b(?:(?:the\s+)?(?:technician|tech|customer|client|homeowner|caller)|he|she|they)\s+(?:assum(?:es|ed)|suppos(?:es|ed)|expect(?:s|ed)|suspect(?:s|ed))\b/i.test(scopedEvidence)
+    || /\b(?:is|remains)\s+(?:unconfirmed|unverified|unknown)\b/i.test(scopedEvidence)
+    || /\b(?:i|we)\s+can\s+not\s+(?:rule\s+out|exclude)\b/i.test(scopedEvidence)
+    || /\bit(?:(?:\s+(?:would|may)|['’]d)\s*)(?:seem|appear)\b/i.test(scopedEvidence)
     || clauseIsEpistemicallyHedged(scopedEvidence)
     || REPORT_UNCERTAINTY_RE.test(scopedEvidence
       // Preserve named-technician past-tense put; base auxiliaries retain modal meaning.
       .replace(/\b(?:[Tt]he|[Oo]ur|[Yy]our|[Tt]heir)\s+(?:technician|tech)\s+(?:Will|May)\b(?=\s+(?:(?:already|also|just|now|\w+ly)\s+)*put\b)/g, '')
-      .replace(/(^|,\s*)(\s*(?:(?:yes|okay|certainly|absolutely)[,:]?\s+)?)(i|we)\s+can\s+(?:(?:definitely|certainly|confidently|clearly|conclusively|now|already|also|fully|absolutely)\s+)*(confirm|verify)\b(?![^.!?;]*\b(?:whether|if)\b)(?:\s+that\b)?/gi, '$1$2$3 $4'));
+      .replace(/(^|,\s*|\bbased\s+on\s+the\s+report\s*,?\s*)(\s*(?:(?:yes|okay|certainly|absolutely)[,:]?\s+)?)(i|we)\s+can\s+(?:(?:definitely|certainly|confidently|clearly|conclusively|now|already|also|fully|absolutely)\s+)*(confirm|verify)\b(?![^.!?;]*\b(?:whether|if)\b)(?:\s+that\b)?/gi, '$1$2$3 $4'));
 }
 
 const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_free_visit_promise, no_third_party_disclosure, only_language, capture_lead_input_asserts });

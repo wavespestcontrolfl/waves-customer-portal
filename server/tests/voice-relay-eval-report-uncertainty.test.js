@@ -477,3 +477,48 @@ test.each([
 ])('shared epistemic vocabulary retains report certainty scope: %s', (text, uncertain) => {
   expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
 });
+
+test.each([
+  ['4043879184', 'Talstar P was applied yesterday, not next week.', false],
+  ['4043879184', 'Talstar P was applied yesterday, rather than next month.', false],
+  ['4043879184', 'Talstar P was applied yesterday, not next Friday.', false],
+  ['4043879184', 'Talstar P will be applied next week.', true],
+  ['4043879191', 'Based on the report we can confirm that Talstar P was applied.', false],
+  ['4043879191', 'Hopefully, based on the report we can confirm that Talstar P was applied.', true],
+  ['4043879191', 'If the report is accurate, we can confirm that Talstar P was applied.', true],
+  ['4043879194', 'Talstar P is about to be applied.', true],
+  ['4043879194', 'Talstar P is to be applied later today.', true],
+  ['4043879194', 'Talstar P was applied earlier today.', false],
+  ['4043879197', 'There is some chance Talstar P was applied.', true],
+  ['4043879197', 'There is a good chance that Talstar P was applied.', true],
+  ['4043879197', 'There remains a possibility Talstar P was applied.', true],
+  ['4043879197', 'There is confirmation Talstar P was applied.', false],
+  ['4043879202', 'The technician assumes Talstar P was applied.', true],
+  ['4043879202', 'The technician supposes Talstar P was applied.', true],
+  ['4043879202', 'The technician expects Talstar P was applied.', true],
+  ['4043879202', 'The technician suspects Talstar P was applied.', true],
+  ['4043879202', 'The technician confirmed Talstar P was applied.', false],
+  ['4043879204', 'Talstar P cannot have been applied.', true],
+  ['4043879204', 'Talstar P has been applied.', false],
+  ['4043879207', 'It is unconfirmed that Talstar P was applied.', true],
+  ['4043879207', 'It remains unverified whether Talstar P was applied.', true],
+  ['4043879207', 'It is unknown whether Talstar P was applied.', true],
+  ['4043879207', 'It is confirmed that Talstar P was applied.', false],
+  ['4043879210', "We can't rule out that Talstar P was applied.", true],
+  ['4043879210', 'We cannot exclude that Talstar P was applied.', true],
+  ['4043879210', 'We can confirm that Talstar P was applied.', false],
+  ['4043879213', 'It would seem that Talstar P was applied.', true],
+  ['4043879213', 'It may appear Talstar P was applied.', true],
+  ['4043879213', "It'd seem that Talstar P was applied.", true],
+  ['4043879213', 'Talstar P was applied.', false],
+  ['4043879217', 'Talstar P was applied as we expected.', false],
+  ['4043879217', 'Talstar P was applied as we hoped.', false],
+  ['4043879217', 'Talstar P was applied as the technician expected.', false],
+  ['4043879217', 'Talstar P was applied as the customer expected.', false],
+  ['4043879217', 'As we expected Talstar P to have been applied, we requested verification.', true],
+  ['4043879217', 'As we hoped that Talstar P had been applied, we requested verification.', true],
+  ['4043879217', 'We expected Talstar P was applied.', true],
+  ['4043879217', 'We hoped Talstar P was applied.', true],
+])('round-four report uncertainty %s: %s', (_finding, text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
