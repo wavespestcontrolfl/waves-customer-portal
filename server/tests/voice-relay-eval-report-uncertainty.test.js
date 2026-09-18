@@ -396,3 +396,14 @@ test.each([
 ])('4043636473 past possibility remains uncertain: %s', (text, uncertain) => {
   expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
 });
+
+test.each([
+  ['We are not sure Talstar P was applied.', true],
+  ["We're unsure Talstar P was applied.", true],
+  ['It is uncertain that Talstar P was applied.', true],
+  ['I am not quite certain Talstar P was applied.', true],
+  ['We are sure Talstar P was applied.', false],
+  ['I am certain Talstar P was applied.', false],
+])('explicit uncertainty differs from definite assurance: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
