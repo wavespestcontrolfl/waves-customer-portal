@@ -1460,8 +1460,17 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       invoiceRecipientEmail,
       invoiceRecipientName,
       saveBillingRecipient,
+      firstDelivery,
     } = req.body || {};
     const reviewDelayMinutes = parseReviewDelayMinutes(req.body || {});
+    // A caller can request a FIRST delivery (GitHub r6 P1 #4131):
+    // a linked invoice the visit's completion claimed
+    // and texted between the create's commit and this request is already
+    // delivered, and the claim must not be re-taken from 'sent' as a resend.
+    // The claim itself refuses (already_delivered) and this route reports it
+    // as a no-op success — the operator's own Send / Resend buttons never
+    // send the flag and keep resending deliberately.
+    const firstDeliveryOnly = firstDelivery === true;
     const overrideEmail = cleanEmail(invoiceRecipientEmail);
     const overrideName = cleanOptionalText(invoiceRecipientName);
     const shouldSaveBillingRecipient = saveBillingRecipient === true;
@@ -1497,13 +1506,73 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       }
     }
 
-    const result = await InvoiceService.sendViaSMSAndEmail(id, {
-      requestReview,
-      reviewDelayMinutes,
-      emailRecipientOverride,
-      operatorInitiated: true,
-      actorTechnicianId: req.technicianId || null,
-    });
+    // A pre-completion invoice linked to an OPEN visit (scheduled_service_id,
+    // no service_record_id yet) never enrolls a review ask at delivery
+    // (Codex P1 r4): the service may be days away, and sendViaSMSAndEmail
+    // defers only on an existing service record. The ask is dropped here
+    // (the quiet closeout never sends one either).
+    let linkage = null;
+    try {
+      linkage = await db('invoices').where({ id }).first('scheduled_service_id', 'service_record_id');
+    } catch (err) {
+      // Lookup outage (Codex P1 r8 #4131): fail CLOSED on the one thing this
+      // read decides. With a review ask on the request we cannot tell a
+      // standalone invoice from a pre-completion open-visit one, and
+      // forwarding the ask would enrol it days before the service — refuse
+      // the send (retryable) instead. Without an ask there is nothing to
+      // decide and the send proceeds (sendViaSMSAndEmail re-reads the row).
+      logger.warn(`[admin-invoices] linkage read failed before send for ${id}: ${err.message}`);
+      if (requestReview) {
+        return res.status(409).json({
+          error: 'Could not verify whether this invoice is linked to an open visit, so the review request could not be confirmed — retry the send',
+          code: 'linkage_unverifiable',
+        });
+      }
+    }
+    const preCompletionLinked = !!(linkage?.scheduled_service_id && !linkage?.service_record_id);
+    if (preCompletionLinked && requestReview) {
+      logger.info(`[admin-invoices] review ask dropped for invoice ${id}: linked to open visit ${linkage.scheduled_service_id}, sent before completion`);
+    }
+    let result;
+    try {
+      result = await InvoiceService.sendViaSMSAndEmail(id, {
+        requestReview: preCompletionLinked ? false : requestReview,
+        reviewDelayMinutes,
+        emailRecipientOverride,
+        operatorInitiated: true,
+        firstDeliveryOnly,
+        actorTechnicianId: req.technicianId || null,
+      });
+    } catch (err) {
+      // A FIRST delivery finding the visit's completion already owning it is
+      // a no-op success in both shapes: delivered (already_delivered), or
+      // queued for the send window (queued_pay_link — the completion's held
+      // text is live and delivers at 8 AM; Codex P2 r8 #4131). A 409 here
+      // made the client re-read the still-draft row and offer Resend on top
+      // of a scheduled customer text.
+      if (err?.code === 'queued_pay_link' && firstDeliveryOnly) {
+        logger.info(`[admin-invoices] first delivery of invoice ${id} skipped — the completion's queued text owns it: ${err.message}`);
+        return res.json({
+          ok: true,
+          queued_delivery: true,
+          sms: { ok: false, code: 'queued_pay_link' },
+          email: { ok: false, code: 'queued_pay_link' },
+        });
+      }
+      if (err?.code !== 'already_delivered') throw err;
+      logger.info(`[admin-invoices] first delivery of invoice ${id} skipped: ${err.message}`);
+      return res.json({
+        ok: true,
+        already_delivered: true,
+        sms: { ok: false, code: 'already_delivered' },
+        email: { ok: false, code: 'already_delivered' },
+      });
+    }
+    if (result.code === 'deposit_settlement_pending') {
+      // Nothing due (deposit-covered) but not settleable right now: a
+      // retryable conflict, never a $0 pay link (Codex P1 r7 #4131).
+      return res.status(409).json(result);
+    }
     if (!result.ok) {
       // Both channels failed. adminFetch toasts `body.error` — without a
       // top-level error the operator sees a bare "HTTP 400" instead of the
@@ -1523,6 +1592,66 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
   }
 });
 
+function scheduleInvoiceSend(conn, id, values) {
+  return conn('invoices')
+    .where({ id })
+    .whereIn('status', ['draft', 'scheduled'])
+    .whereNull('payer_statement_id')
+    .whereRaw("(scheduled_send_error IS NULL OR scheduled_send_error NOT LIKE 'payer_billed:%')")
+    .update(values)
+    .returning('*')
+    .then((rows) => rows[0] || null);
+}
+
+// The completion fence for a visit-linked invoice (GitHub P1 #4131 r2/r3).
+// The completion reuses the linked invoice: it would find the `scheduled`
+// row, text its pay link in the completion SMS, and markDeliverySent would
+// clear scheduled_send_at — so the customer would get it at completion, not
+// at the chosen time. Two states refuse, both read under the visit's mint
+// advisory lock (the lock the completion's invoice step holds), so the
+// check and the status flip cannot interleave with that step:
+//   - the visit is still OPEN (LINKED_VISIT_OPEN) — the completion is ahead;
+//   - the visit is closed but its completion attempt is still running or
+//     resumable (COMPLETION_IN_PROGRESS): `completed` commits before the
+//     closeout's invoice lookup and send (complete-scheduled-service.js —
+//     status at ~6397, lookup at ~7450), and the attempt row flips to
+//     side_effects_running inside that same commit and to succeeded only
+//     after delivery, so it is the durable "side effects finished" signal
+//     a status read alone lacks.
+// Refusing here keeps the completion path untouched; send now or keep a
+// draft. A legacy completion with no attempt row schedules normally.
+const isOpenVisitStatus = (status) => status == null
+  || ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'].includes(String(status));
+
+async function linkedVisitScheduleRefusal(trx, scheduledServiceId) {
+  const visit = await trx('scheduled_services').where({ id: scheduledServiceId }).first('id', 'status');
+  if (visit && isOpenVisitStatus(visit.status)) {
+    return {
+      error: 'This invoice is linked to an open visit — the completion sends it, so a future send time cannot be kept. Send it now or leave it as a draft.',
+      code: 'LINKED_VISIT_OPEN',
+    };
+  }
+  const CompletionAttempts = require('../services/completion-attempts');
+  const completion = await CompletionAttempts.completionStatusForService({ serviceId: scheduledServiceId }, trx);
+  if (completion.state === 'running' || completion.state === 'resumable') {
+    return {
+      error: "This visit's completion is still finishing — its invoice delivery has not completed, so a future send time cannot be kept yet. Try again once the closeout has finished, or send it now.",
+      code: 'COMPLETION_IN_PROGRESS',
+    };
+  }
+  return null;
+}
+
+async function scheduleLinkedInvoiceSend(invoiceId, scheduledServiceId, values) {
+  const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+  return db.transaction(async (trx) => {
+    await acquireScheduledInvoiceMintLock(trx, scheduledServiceId);
+    const refused = await linkedVisitScheduleRefusal(trx, scheduledServiceId);
+    if (refused) return { refusal: refused };
+    return { invoice: await scheduleInvoiceSend(trx, invoiceId, values) };
+  });
+}
+
 // POST /:id/schedule-send — send invoice later via the scheduler.
 router.post('/:id/schedule-send', requireAdmin, async (req, res, next) => {
   try {
@@ -1536,41 +1665,37 @@ router.post('/:id/schedule-send', requireAdmin, async (req, res, next) => {
     // Phase 2: never queue an accrued invoice into the individual send scheduler —
     // it is delivered on the consolidated statement (processScheduledSends would
     // churn failed sends against the statement-only send guard).
-    const target = await db('invoices').where({ id: req.params.id }).first('payer_statement_id');
+    const target = await db('invoices').where({ id: req.params.id })
+      .first('payer_statement_id', 'scheduled_service_id', 'scheduled_send_error');
     if (target?.payer_statement_id) {
       return res.status(400).json({ error: 'Invoice is billed on the payer’s monthly statement; it cannot be scheduled for individual send.' });
     }
-
     // A combined-visit invoice WITHDRAWN to a third-party payer records that
-    // move only in scheduled_send_error, and this route would clear it —
-    // making the invoice collectible from the homeowner again and queuing it
-    // for delivery to them (Codex #4311 r29 P0). The Bill-To reconciliation
-    // is what releases such a row; scheduling is refused until then.
-    const scheduleTarget = await db('invoices').where({ id: req.params.id }).first('scheduled_send_error');
-    if (require('../services/invoice-helpers').invoiceWithdrawnFromCustomer(scheduleTarget)) {
+    // move only in scheduled_send_error. The Bill-To reconciliation owns the
+    // release; never clear the stamp and queue a homeowner delivery here.
+    if (require('../services/invoice-helpers').invoiceWithdrawnFromCustomer(target)) {
       return res.status(409).json({
         error: 'This invoice is billed to a third-party payer and has been withdrawn from the customer — clear the Bill-To first.',
         code: 'invoice_withdrawn_from_customer',
       });
     }
-
-    const [invoice] = await db('invoices')
-      .where({ id: req.params.id })
-      .whereIn('status', ['draft', 'scheduled'])
-      .whereNull('payer_statement_id')
-      .whereRaw("(scheduled_send_error IS NULL OR scheduled_send_error NOT LIKE 'payer_billed:%')")
-      .update({
-        status: 'scheduled',
-        scheduled_send_at: when,
-        scheduled_send_attempts: 0,
-        scheduled_send_error: null,
-        scheduled_request_review: Boolean(requestReview),
-        scheduled_review_delay_minutes: requestReview ? reviewDelayMinutes : null,
-        updated_at: new Date(),
-      })
-      .returning('*');
-    if (!invoice) return res.status(404).json({ error: 'Not found' });
-    res.json({ ok: true, invoice });
+    const values = {
+      status: 'scheduled',
+      scheduled_send_at: when,
+      scheduled_send_attempts: 0,
+      scheduled_send_error: null,
+      scheduled_request_review: Boolean(requestReview),
+      scheduled_review_delay_minutes: requestReview ? reviewDelayMinutes : null,
+      updated_at: new Date(),
+    };
+    // A visit-linked invoice schedules under the completion fence (below);
+    // everything else takes the plain update.
+    const outcome = target?.scheduled_service_id
+      ? await scheduleLinkedInvoiceSend(req.params.id, target.scheduled_service_id, values)
+      : { invoice: await scheduleInvoiceSend(db, req.params.id, values) };
+    if (outcome.refusal) return res.status(409).json(outcome.refusal);
+    if (!outcome.invoice) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true, invoice: outcome.invoice });
   } catch (err) { next(err); }
 });
 

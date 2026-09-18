@@ -8,6 +8,7 @@ const { acquireOccupancyLock, acquireOccupancyLocks, findConflictingVisits } = r
 const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+const { completionInvoiceAlreadyDelivered } = require('../services/invoice-helpers');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled } = require('../config/feature-gates');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
@@ -3233,8 +3234,10 @@ async function extendedChargeGuardsClear(invoice, scheduledServiceId, autopayAct
 // question (Codex P1 — the shortcut excluded only void, and a canceled
 // latest invoice silenced the warning on a visit that then completed with
 // no replacement). Refunded is deliberately NOT here: completion suppresses
-// on it and parks a manual-billing alert instead of re-minting.
-const DEAD_ATTACHED_INVOICE_STATUSES = Object.freeze(['void', 'canceled', 'cancelled']);
+// on it and parks a manual-billing alert instead of re-minting. Shared with
+// admin-dispatch.js's own "newest invoice for this visit" feed (Codex round
+// 16 P1 #4131) via the ONE exported set, so the two can never drift apart.
+const { DEAD_INVOICE_STATUSES: DEAD_ATTACHED_INVOICE_STATUSES } = require('../services/invoice-helpers');
 
 function predictionFromAttachedInvoice(invoice, { autopayActive = false, chargeLikely = false, chargeGuardsClear = false, visitPayerBilled = false } = {}) {
   if (!invoice || DEAD_ATTACHED_INVOICE_STATUSES.includes(String(invoice.status || '').toLowerCase())) return null;
@@ -3824,7 +3827,7 @@ router.get('/', async (req, res, next) => {
           .where({ scheduled_service_id: s.id })
           .whereNotIn('status', DEAD_ATTACHED_INVOICE_STATUSES)
           .orderBy('created_at', 'desc')
-          .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id');
+          .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id', 'sent_at');
       } catch { /* scheduled_service_id may be absent before migration */ }
       // Whether the visit's recorded prepayment has ALREADY been consumed by
       // this invoice (Charge-now's applyPrepaidCredit reduces invoices.total
@@ -4044,6 +4047,10 @@ router.get('/', async (req, res, next) => {
           : null,
         checkoutInvoiceId: checkoutInvoice?.id || null,
         checkoutInvoiceStatus: checkoutInvoice?.status || null,
+        // Durable "already sent" for the completion (Codex P1 #4131 r3): an
+        // attached invoice already delivered through Charge Now or a
+        // scheduled send must not be re-texted.
+        completionInvoiceAlreadySent: completionInvoiceAlreadyDelivered(checkoutInvoice),
         checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
         checkoutInvoiceNumber: checkoutInvoice?.invoice_number || null,
         checkoutInvoiceLines: checkoutInvoice ? compactCheckoutInvoiceLines(checkoutInvoice.line_items) : [],
@@ -4377,7 +4384,7 @@ router.get('/week', async (req, res, next) => {
             .where({ scheduled_service_id: s.id })
             .whereNotIn('status', DEAD_ATTACHED_INVOICE_STATUSES)
             .orderBy('created_at', 'desc')
-            .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id');
+            .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id', 'sent_at');
         } catch { /* scheduled_service_id may be absent before migration */ }
         // Mirrors the day-view enrichment: has the visit's prepayment already
         // been consumed by this invoice? Gated to the prepaid+invoice overlap.
@@ -4585,6 +4592,7 @@ router.get('/week', async (req, res, next) => {
             : null,
           checkoutInvoiceId: checkoutInvoice?.id || null,
           checkoutInvoiceStatus: checkoutInvoice?.status || null,
+          completionInvoiceAlreadySent: completionInvoiceAlreadyDelivered(checkoutInvoice),
           checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
           checkoutInvoiceNumber: checkoutInvoice?.invoice_number || null,
           checkoutInvoiceLines: checkoutInvoice ? compactCheckoutInvoiceLines(checkoutInvoice.line_items) : [],

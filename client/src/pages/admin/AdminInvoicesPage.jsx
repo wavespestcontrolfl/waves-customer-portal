@@ -349,6 +349,12 @@ export function invoiceDepositCreditTotal(lineItems) {
 // send (SendInvoiceModal already reads the channels; the create path must
 // too). Exported for tests.
 export function invoiceCreatedSendToast(invoiceNumber, res) {
+  if (res?.already_delivered) {
+    return `Invoice created: ${invoiceNumber} — already delivered`;
+  }
+  if (res?.queued_delivery) {
+    return `Invoice created: ${invoiceNumber} — delivery already scheduled`;
+  }
   // Account credit fully covered the invoice at send time: sendViaSMSAndEmail
   // returns ok:true with covered_by_credit and BOTH channels not-ok — that is
   // a success (the invoice is prepaid, nothing to deliver), not a failed send.
@@ -5971,6 +5977,7 @@ function CreateInvoice({
           sendRes = await adminFetch(`/admin/invoices/${invoice.id}/send`, {
             method: "POST",
             body: JSON.stringify({
+              firstDelivery: true,
               requestReview,
               reviewDelayMinutes: reviewDelay,
               reviewTiming,
@@ -6234,7 +6241,7 @@ function CreateInvoice({
     try {
       const res = await adminFetch(`/admin/invoices/${pInv.id}/send`, {
         method: "POST",
-        body: JSON.stringify(retryReviewBody()),
+        body: JSON.stringify({ ...retryReviewBody(), firstDelivery: true }),
       });
       showToast(invoiceCreatedSendToast(pInv.invoice_number, res));
       onCreated();

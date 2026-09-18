@@ -1,6 +1,7 @@
 jest.mock('../models/db', () => {
   const database = jest.fn();
   database.raw = jest.fn((sql) => sql);
+  database.transaction = jest.fn(async (callback) => callback(database));
   return database;
 });
 jest.mock('../services/logger', () => ({
@@ -44,12 +45,13 @@ const { withInvoiceDepositSettlement } = require('../services/estimate-deposits'
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const InvoiceService = require('../services/invoice');
 
-function query({ first } = {}) {
+function query({ first, returning } = {}) {
   const q = {};
-  for (const method of ['where', 'whereIn', 'update', 'insert']) {
+  for (const method of ['where', 'whereIn', 'whereRaw', 'whereNull', 'forUpdate', 'clone', 'update', 'insert']) {
     q[method] = jest.fn(() => q);
   }
   q.first = jest.fn(async () => first);
+  q.returning = jest.fn(async () => returning || []);
   q.then = (resolve, reject) => Promise.resolve(1).then(resolve, reject);
   q.catch = (reject) => Promise.resolve(1).catch(reject);
   return q;
@@ -61,6 +63,7 @@ describe('invoice SMS provider handoff', () => {
     invoice_number: 'WPC-2026-1234',
     customer_id: 'cust-1',
     status: 'sending',
+    send_claim_token: 'handoff-owner',
     total: '100.00',
     credit_applied: 0,
     token: 'invoice-token',
@@ -69,21 +72,31 @@ describe('invoice SMS provider handoff', () => {
     line_items: [{ description: 'Service', amount: 100 }],
   };
   let invoiceReads;
+  let consumedQueueRows;
+  let queueQueries;
 
   beforeEach(() => {
     jest.clearAllMocks();
     invoiceReads = [invoice, invoice];
+    consumedQueueRows = [];
+    queueQueries = [];
     db.mockImplementation((table) => {
       if (table === 'invoices') return query({ first: invoiceReads.shift() || invoice });
       if (table === 'customers') {
         return query({ first: { id: 'cust-1', first_name: 'Pat', phone: '+19415550101' } });
       }
       if (table === 'activity_log') return query();
+      if (table === 'sms_log') {
+        const q = query({ returning: consumedQueueRows });
+        queueQueries.push(q);
+        return q;
+      }
       throw new Error(`Unexpected table: ${table}`);
     });
   });
 
   test('a commit failure after provider acceptance stays delivered and does not dispatch twice', async () => {
+    consumedQueueRows = [{ id: 'sms-adopted-1', scheduled_for: new Date('2026-09-01T12:00:00Z') }];
     const providerOutcome = {
       sent: true,
       blocked: false,
@@ -98,11 +111,20 @@ describe('invoice SMS provider handoff', () => {
       throw new Error('commit connection lost');
     });
 
-    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true }))
+    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'handoff-owner' }))
       .resolves.toMatchObject({ sent: true, payUrl: 'https://waves.test/l/invoice' });
 
     expect(dispatch).toHaveBeenCalledTimes(1);
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    // The preclaimed send adopted an earlier held text. Provider acceptance
+    // resolves that obligation even when closing the deposit transaction fails;
+    // restoring it to scheduled would deliver a duplicate pay link.
+    expect(queueQueries.some((q) => q.whereIn.mock.calls.some(
+      ([field, ids]) => field === 'id' && ids.includes('sms-adopted-1'),
+    ))).toBe(true);
+    expect(queueQueries.some((q) => q.update.mock.calls.some(
+      ([change]) => change.status === 'scheduled',
+    ))).toBe(false);
     expect(require('../services/logger').error).toHaveBeenCalledWith(
       expect.stringContaining('Provider outcome known for inv-1'),
     );
@@ -114,12 +136,12 @@ describe('invoice SMS provider handoff', () => {
       total: '75.00',
       line_items: [...invoice.line_items, { category: 'account_credit', amount: -25 }],
     };
-    invoiceReads = [invoice, credited];
+    invoiceReads = [invoice, invoice, credited];
     const dispatch = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
     sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => withProviderHandoff(dispatch));
     withInvoiceDepositSettlement.mockImplementation(async (_invoiceId, callback) => callback(db, credited));
 
-    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true }))
+    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'handoff-owner' }))
       .resolves.toMatchObject({ sent: true });
     expect(dispatch).toHaveBeenCalledTimes(1);
   });
@@ -130,12 +152,12 @@ describe('invoice SMS provider handoff', () => {
       total: '0.00',
       line_items: [...invoice.line_items, { category: 'deposit_credit', amount: -100 }],
     };
-    invoiceReads = [invoice, covered];
+    invoiceReads = [invoice, invoice, covered];
     const dispatch = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
     sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => withProviderHandoff(dispatch));
     withInvoiceDepositSettlement.mockImplementation(async (_invoiceId, callback) => callback(db, covered));
 
-    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true }))
+    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'handoff-owner' }))
       .rejects.toMatchObject({ code: 'INVOICE_BALANCE_CHANGED' });
     expect(dispatch).not.toHaveBeenCalled();
   });

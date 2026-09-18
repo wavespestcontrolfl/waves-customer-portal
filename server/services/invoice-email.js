@@ -26,6 +26,14 @@ const { publicPortalUrl } = require('../utils/portal-url');
 const { smtpFallbackAllowed } = require('./email-fallback-gate');
 const { isEnabled } = require('../config/feature-gates');
 
+// Keep aligned with invoice.js SEND_FINALIZABLE_STATUSES. Email preparation
+// can begin from any ordinary send/resend status, but the locked provider
+// boundary must refuse a cancellation/payment transition that landed while
+// the PDF or template was rendering.
+const INVOICE_EMAIL_FINALIZABLE_STATUSES = new Set([
+  'draft', 'scheduled', 'sent', 'viewed', 'overdue', 'sending',
+]);
+
 let cachedTransporter = null;
 function getTransporter() {
   if (cachedTransporter) return cachedTransporter;
@@ -112,6 +120,10 @@ function invoiceRecipientFor(customer, prefs, recipientOverride) {
 async function sendInvoiceEmail(invoiceId, options = {}) {
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { ok: false, error: 'Invoice not found' };
+  const claimToken = options.claimToken || null;
+  if ((invoice.send_claim_token || null) !== claimToken) {
+    return { ok: false, error: 'Invoice send claim changed; delivery not attempted', code: 'send_claim_lost' };
+  }
   try {
     await require('./estimate-deposits').assertInvoiceDepositSettlementReady(db, invoice, { lock: false });
   } catch (err) {
@@ -187,7 +199,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   // snapshot (shared with the project combined-send path), so the (async)
   // receipt and the pay page route to the same AP contact even if the payer row
   // is later edited/deactivated. Only runs on a successful send.
-  const persistPayerApIfNeeded = () => PayerService.freezeApEmail(invoice, recipient.email);
+  const persistPayerApIfNeeded = () => PayerService.freezeApEmail(invoice, recipient.email, db, { claimToken });
   // Provider ACCEPTED the message — stamp durable delivery evidence FIRST
   // (idempotent; the ambiguous-send UI reads it: a draft row carrying the
   // stamp is never offered an automatic resend), then run post-provider
@@ -197,11 +209,13 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   // would duplicate the delivered email).
   const markEmailDelivered = async () => {
     try {
-      await db('invoices')
-        .where({ id: invoice.id })
+      const updated = await db('invoices')
+        .where({ id: invoice.id, send_claim_token: claimToken })
         .update({ email_sent_at: new Date(), updated_at: new Date() });
+      if (updated === 0) return;
     } catch (err) {
       logger.warn(`[invoice-email] email_sent_at stamp failed for ${invoice.invoice_number}: ${err.message}`);
+      return;
     }
     try {
       await persistPayerApIfNeeded();
@@ -343,6 +357,12 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
       const outcome = await require('./estimate-deposits').withInvoiceDepositSettlement(
         invoice.id,
         async (trx, current) => {
+          if ((current.send_claim_token || null) !== claimToken) {
+            return { ok: false, reason: 'Invoice send claim changed; delivery not attempted', code: 'send_claim_lost' };
+          }
+          if (!INVOICE_EMAIL_FINALIZABLE_STATUSES.has(current.status)) {
+            return { ok: false, reason: `Invoice is no longer sendable (status: ${current.status || 'unknown'}); delivery not attempted`, code: 'invoice_not_sendable' };
+          }
           // Reconciliation can finish while the PDF or template renders,
           // leaving no pending ledger balance. Compare the locked row after
           // the ledger fence with the values used by BOTH the email and PDF.

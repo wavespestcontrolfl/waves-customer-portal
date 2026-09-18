@@ -160,6 +160,13 @@ describe("AdminInvoicesPage deposit credit chip", () => {
 });
 
 describe("AdminInvoicesPage create-path send toasts", () => {
+  it("does not suggest resending a first delivery already completed or queued elsewhere", () => {
+    expect(invoiceCreatedSendToast("WPC-2026-0001", { ok: true, already_delivered: true }))
+      .toBe("Invoice created: WPC-2026-0001 — already delivered");
+    expect(invoiceCreatedSendToast("WPC-2026-0001", { ok: true, queued_delivery: true }))
+      .toBe("Invoice created: WPC-2026-0001 — delivery already scheduled");
+  });
+
   it("reports both channels when the send fully succeeds", () => {
     expect(
       invoiceCreatedSendToast("WPC-2026-0001", {
