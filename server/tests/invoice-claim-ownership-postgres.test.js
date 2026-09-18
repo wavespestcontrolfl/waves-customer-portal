@@ -44,7 +44,7 @@ postgres('invoice send episode ownership', () => {
     visitId = randomUUID();
     await trx('customers').insert({ id: customerId, first_name: 'Synthetic', last_name: 'Claim', phone: '+12025550123', email: `${customerId}@example.invalid` });
     await trx('scheduled_services').insert({ id: visitId, customer_id: customerId, status: 'confirmed', scheduled_date: '2040-03-04', service_type: 'Pest Control' });
-    await trx('invoices').insert({ id: invoiceId, customer_id: customerId, scheduled_service_id: visitId, invoice_number: `TEST-${invoiceId}`, token: randomUUID(), status: 'draft', total: 117, subtotal: 117, line_items: '[]' });
+    await trx('invoices').insert({ id: invoiceId, customer_id: customerId, scheduled_service_id: visitId, invoice_number: `TEST-${invoiceId.slice(0, 8)}`, token: randomUUID(), status: 'draft', total: 117, subtotal: 117, line_items: '[]' });
   });
   afterEach(async () => { await trx.rollback(); mockConnection = database; });
   afterAll(async () => { await database.destroy(); });
