@@ -170,6 +170,8 @@ describe('source contracts', () => {
     expect(visitLockAt).toBeGreaterThan(customerLockAt);
     // …and the locked visit row's day is re-validated after the visit lock.
     expect(source.indexOf("{ code: 'issued_visit_rescheduled' }", visitLockAt)).toBeGreaterThan(visitLockAt);
+    expect(source.slice(visitLockAt, source.indexOf("{ code: 'issued_visit_rescheduled' }", visitLockAt)))
+      .toContain('issuedCloseoutServiceDayEligible(lockedDay');
   });
   test('GitHub r10: the locked status is the transition source; the zero-price conversion takes the mint advisory lock after the occupancy rung and before any row lock; the settled-statement retry runs on the daily statement tick', () => {
     const completion = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
@@ -513,6 +515,27 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     expect(await mockPg('service_records').where({ scheduled_service_id: f.serviceId })).toHaveLength(0);
     expect((await mockPg('invoices').where({ id: f.invoiceId }).first()).service_record_id).toBeNull();
     expect(await mockPg('audit_log').where({ resource_id: f.serviceId, action: 'visit.completion_on_invoice_issued_refused' }).first()).toMatchObject({ metadata: expect.objectContaining({ code: 'issued_visit_rescheduled' }) });
+  });
+
+  test('a sent closeout that loads the visit after it moved to today is refused, while paid still closes today', async () => {
+    await fixture({ serviceType: 'Fixture Quarterly Pest Control Service' });
+    await mockPg('scheduled_services').where({ id: f.serviceId }).update({ scheduled_date: etDateString() });
+    const { completeScheduledService } = require('../services/complete-scheduled-service');
+    const request = (trigger) => completeScheduledService({
+      serviceId: f.serviceId,
+      idempotencyKey: randomUUID(),
+      body: { visitOutcome: 'completed', backfill: true, sendCompletionSms: false, requestReview: false, invoiceAlreadySent: true },
+      actor: { techRole: 'admin', technicianId: f.techId, technician: null },
+      issuedInvoiceCloseout: { invoiceId: f.invoiceId, trigger },
+    });
+
+    expect(await request('sent')).toMatchObject({ status: 409, body: { code: 'issued_visit_rescheduled' } });
+    expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).toBe('confirmed');
+    expect(await mockPg('service_records').where({ scheduled_service_id: f.serviceId })).toHaveLength(0);
+
+    await mockPg('invoices').where({ id: f.invoiceId }).update({ status: 'paid', paid_at: new Date() });
+    expect(await request('paid')).toMatchObject({ status: 200, body: { success: true } });
+    expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).toBe('completed');
   });
 
   test('a void racing the closeout: the closeout queues behind the invoice-first void instead of deadlocking, then refuses (GitHub r6 P2)', async () => {

@@ -571,10 +571,10 @@ function serviceDateOnly(value) {
 // to 403 (Codex P1 on the fix round). Errors carry `status` so the call site
 // returns 403 for the authz failure vs 400 for the date validation.
 // allowSameDay: the invoice-issued closeout (invoice-issued-closeout.js) is
-// an internal trigger, never a panel submission — an invoice sent or paid
-// on the visit day proves the visit happened, so today qualifies; the
-// future never does. The HTTP body cannot set it (the route never passes
-// it), so the panel's past-only rule is unchanged.
+// an internal trigger, never a panel submission. It may enter the same-day
+// backfill lane, but the completion transaction rechecks its trigger against
+// the locked visit date: payment proves today's visit happened; delivery does
+// not. The HTTP body cannot set it, so the panel's past-only rule is unchanged.
 function backfillCompletionPlan({ backfill, scheduledDate, today = etDateString(), role, allowSameDay = false } = {}) {
   if (backfill !== true) return { active: false };
   if (role !== 'admin') {
@@ -5099,7 +5099,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // invoice re-resolves it on its new day.
           if (issuedInvoiceCloseout) {
             const lockedDay = serviceDateOnly(lockedSvcRow?.scheduled_date);
-            if (!lockedDay || lockedDay !== serviceDateOnly(svc.scheduled_date) || lockedDay > etDateString()) {
+            const { isLiveVisitStatus, issuedCloseoutServiceDayEligible } = require('../services/invoice-issued-closeout');
+            if (lockedDay !== serviceDateOnly(svc.scheduled_date)
+              || !issuedCloseoutServiceDayEligible(lockedDay, {
+                today: etDateString(),
+                trigger: issuedInvoiceCloseout.trigger,
+              })) {
               throw Object.assign(new Error('visit rescheduled during the issued-invoice closeout'), { code: 'issued_visit_rescheduled' });
             }
             // The office-only status set, re-checked on the LOCKED row (pre-push
@@ -5111,7 +5116,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // 16 P2 #4131) — a legacy NULL-status visit the resolver had just
             // admitted used to throw issued_visit_in_progress here on the
             // string-only check.
-            const { isLiveVisitStatus } = require('../services/invoice-issued-closeout');
             if (!isLiveVisitStatus(lockedSvcRow?.status)) {
               throw Object.assign(new Error('visit started by its technician during the issued-invoice closeout'), { code: 'issued_visit_in_progress' });
             }

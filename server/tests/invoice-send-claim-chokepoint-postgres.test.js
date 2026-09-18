@@ -296,11 +296,11 @@ postgres('the shared send claim on a migrated database', () => {
       return f;
     }
 
-    test('a visit-linked invoice retotalled to $0 before its scheduled send tick: no pay link, no follow-ups armed, and the scheduler keeps its own claim/token handling', async () => {
+    test('a visit-linked invoice retotalled to $0 settles before its scheduled send claim without consuming attempts', async () => {
       await scheduledZeroDueVisitInvoice();
 
       const summary = await InvoiceService.processScheduledSends({ limit: 5 });
-      expect(summary).toMatchObject({ sent: 0, failed: 1 });
+      expect(summary).toMatchObject({ sent: 0, failed: 0 });
       // THE bug: without the fix, processScheduledSends' own preclaim
       // ('scheduled' -> 'sending') makes both the pre-check in
       // sendViaSMSAndEmail (zeroDueOpenVisitSendOutcome) and claimInvoiceForSend's
@@ -310,17 +310,19 @@ postgres('the shared send claim on a migrated database', () => {
       expect(payLinkTexts()).toHaveLength(0);
 
       const invoice = await readInvoice(f.invoiceId);
-      // The scheduler's own token-matched restore recovered its row exactly
-      // like any other pre-delivery refusal in the allowClaimed branch —
-      // back to 'scheduled', still due, one attempt consumed — never
-      // stranded under 'sending' for the 10-minute stale sweep to park, and
-      // never silently re-armed either.
-      expect(invoice.status).toBe('scheduled');
+      expect(invoice.status).toBe('prepaid');
+      expect(invoice.prepaid_by).toBe('system:zero_balance');
+      // The settled status removes it from the due queue; settlement keeps
+      // the existing scheduling metadata without acquiring a send claim.
       expect(invoice.scheduled_send_at).not.toBeNull();
-      expect(invoice.scheduled_send_attempts).toBe(1);
-      expect(invoice.scheduled_send_error).toMatch(/not sent/i);
+      expect(invoice.scheduled_send_attempts).toBe(0);
+      expect(invoice.scheduled_send_error).toBeNull();
       expect(invoice.sent_at).toBeNull();
       expect(invoice.sms_sent_at).toBeNull();
+      expect(await InvoiceService.processScheduledSends({ limit: 5 }))
+        .toMatchObject({ sent: 0, failed: 0 });
+      expect((await readInvoice(f.invoiceId)).status).toBe('prepaid');
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
 
     test('control: a visit-linked invoice with a real balance due still sends normally through the same preclaimed path', async () => {

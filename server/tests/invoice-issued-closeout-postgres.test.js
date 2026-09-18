@@ -37,12 +37,25 @@ jest.mock('../services/service-completion-profiles', () => {
 const mockGate = { on: true };
 jest.mock('../config/feature-gates', () => ({ isEnabled: (gate) => gate === 'invoiceIssuedClosesVisit' && mockGate.on }));
 const { randomUUID } = require('node:crypto');
-const { resolveVisitForIssuedInvoice, closeOutVisitForIssuedInvoice, retrySettledStatementCloseouts } = require('../services/invoice-issued-closeout');
+const {
+  resolveVisitForIssuedInvoice,
+  closeOutVisitForIssuedInvoice,
+  retrySettledStatementCloseouts,
+  issuedCloseoutServiceDayEligible,
+} = require('../services/invoice-issued-closeout');
 const { recordAuditEvent } = require('../services/audit-log');
 
 const { backfillCompletionPlan, backfillCompletionEndInstant } = jest.requireActual('../services/complete-scheduled-service');
 
 describe('backfillCompletionPlan same-day switch', () => {
+  test('the shared issued-closeout date rule admits today only for payment', () => {
+    const options = { today: '2040-03-04' };
+    expect(issuedCloseoutServiceDayEligible('2040-03-04', { ...options, trigger: 'sent' })).toBe(false);
+    expect(issuedCloseoutServiceDayEligible('2040-03-04', { ...options, trigger: 'paid' })).toBe(true);
+    expect(issuedCloseoutServiceDayEligible('2040-03-03', { ...options, trigger: 'sent' })).toBe(true);
+    expect(issuedCloseoutServiceDayEligible('2040-03-05', { ...options, trigger: 'paid' })).toBe(false);
+  });
+
   test('the panel rule stays past-only; the internal issued-invoice trigger admits today, never the future', () => {
     const base = { backfill: true, role: 'admin', today: '2040-03-04' };
     expect(backfillCompletionPlan({ ...base, scheduledDate: '2040-03-04' }).error.code).toBe('backfill_not_past');

@@ -46,6 +46,14 @@ function dateOnly(value) {
   return m ? m[1] : null;
 }
 
+// Shared by the unlocked resolver and the canonical completion's locked
+// recheck. Delivery only proves a past visit happened; payment also proves a
+// same-day visit happened. Future or unparseable dates are never eligible.
+function issuedCloseoutServiceDayEligible(scheduledDate, { today = etDateString(), trigger = null } = {}) {
+  const day = dateOnly(scheduledDate);
+  return Boolean(day && day <= today && !(day === today && trigger === 'sent'));
+}
+
 // The visit this invoice names — directly (scheduled_service_id, the only
 // link the Invoices page writes at creation) or through its service record
 // (service_record_id → service_records.scheduled_service_id). A record-only
@@ -122,7 +130,7 @@ async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateStrin
   // and complete the visit before the tech arrives (Codex P1 r7 #4131).
   // Only a visit whose day has passed closes out on a send; money received
   // (trigger 'paid') still closes a same-day visit, as #4127 intended.
-  if (day === today && trigger === 'sent') return leaveOpen('visit_scheduled_today');
+  if (!issuedCloseoutServiceDayEligible(day, { today, trigger })) return leaveOpen('visit_scheduled_today');
   if (svc.visit_id) {
     const { openMembers } = require('./visit-groups');
     if ((await openMembers(conn, svc.visit_id)).length >= 2) return leaveOpen('grouped_visit');
@@ -446,6 +454,7 @@ module.exports = {
   retrySettledStatementCloseouts,
   OPEN_VISIT_STATUSES,
   isLiveVisitStatus,
+  issuedCloseoutServiceDayEligible,
   resolveVisitForIssuedInvoice,
   resumableIssuedCloseoutAttempt,
   closeOutVisitForIssuedInvoice,
