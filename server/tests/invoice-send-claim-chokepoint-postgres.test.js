@@ -18,6 +18,15 @@
  */
 jest.mock('../models/db', () => {
   const db = (table, ...args) => {
+    if (table === 'service_records' && mockFault.serviceRecordNotesUpdateFailures > 0) {
+      const failing = {};
+      failing.where = () => failing;
+      failing.update = () => {
+        mockFault.serviceRecordNotesUpdateFailures -= 1;
+        return Promise.reject(new Error('service record notes update failure (injected)'));
+      };
+      return failing;
+    }
     if (table === 'sms_log' && mockFault.smsRestoreOnce) {
       mockFault.smsRestoreOnce = false;
       const failing = {};
@@ -107,7 +116,7 @@ const CompletionAttempts = require('../services/completion-attempts');
 const { completeScheduledService } = require('../services/complete-scheduled-service');
 const connection = process.env.VISIT_PACKET_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
-const mockFault = { smsLogOnce: false, smsRestoreOnce: false, scheduledServicesLookupOnce: false };
+const mockFault = { smsLogOnce: false, smsRestoreOnce: false, scheduledServicesLookupOnce: false, serviceRecordNotesUpdateFailures: 0 };
 let database;
 let mockPg; // the per-test transaction while a test runs; the pool between tests
 jest.setTimeout(90000);
@@ -127,6 +136,7 @@ postgres('the shared send claim on a migrated database', () => {
     mockFault.smsLogOnce = false;
     mockFault.smsRestoreOnce = false;
     mockFault.scheduledServicesLookupOnce = false;
+    mockFault.serviceRecordNotesUpdateFailures = 0;
     mockRace.afterMint = null;
     sendCustomerMessage.mockImplementation(async () => ({ sent: true, channel: 'sms', providerMessageId: `SM${randomUUID().slice(0, 8)}` }));
     mockPg = await database.transaction();
@@ -170,11 +180,11 @@ postgres('the shared send claim on a migrated database', () => {
     return f;
   }
 
-  function complete(idempotencyKey = randomUUID()) {
+  function complete(idempotencyKey = randomUUID(), bodyOverrides = {}) {
     return completeScheduledService({
       serviceId: f.serviceId, idempotencyKey,
       body: { visitOutcome: 'completed', sendCompletionSms: true, requestReview: false, products: [], areasTreated: [],
-        customerRecap: 'The scheduled service was completed.', idempotencyKey },
+        customerRecap: 'The scheduled service was completed.', ...bodyOverrides, idempotencyKey },
       actor: { techRole: 'technician', technicianId: f.techId, technician: { id: f.techId, name: 'Fixture Technician' } },
     });
   }
@@ -278,6 +288,82 @@ postgres('the shared send claim on a migrated database', () => {
         completionSmsDeliveryUnverifiedAt: expect.any(String),
       });
       expect((await mockPg('invoices').where({ customer_id: f.customerId }).first())).toMatchObject({
+        status: 'sending', sent_at: null, sms_sent_at: null,
+      });
+    });
+
+    test('a released definite rejection overrides only its matching provisional marker when both failure-note writes fail', async () => {
+      await visitFixture();
+      const idempotencyKey = randomUUID();
+      sendCustomerMessage
+        .mockImplementationOnce(async () => {
+          // The pre-provider marker is already durable. Fail both attempts to
+          // replace it with the provider's definite rejection.
+          mockFault.serviceRecordNotesUpdateFailures = 2;
+          return { sent: false, terminal: false, code: 'PROVIDER_FAILURE', reason: 'provider rejected message' };
+        })
+        .mockImplementationOnce(async () => ({ sent: true, channel: 'sms', providerMessageId: `SM${randomUUID().slice(0, 8)}` }));
+
+      const rejected = await complete(idempotencyKey);
+      expect(rejected).toMatchObject({ status: 503, body: { code: 'completion_sms_send_failed' } });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      const released = await mockPg('service_completion_attempts').where({ service_id: f.serviceId }).first();
+      expect(released).toMatchObject({ status: 'side_effects_pending' });
+      expect(released.error).toMatch(/^\[completion_sms_definite_rejection marker=/);
+      const recordAfterReject = await mockPg('service_records').where({ scheduled_service_id: f.serviceId }).first();
+      expect(recordAfterReject.structured_notes).toMatchObject({
+        completionSmsStatus: 'sending',
+        completionSmsDeliveryUnverifiedAt: expect.any(String),
+      });
+
+      const resumed = await complete(idempotencyKey);
+      expect(resumed.status).toBe(200);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+      const recordAfterResume = await mockPg('service_records').where({ scheduled_service_id: f.serviceId }).first();
+      expect(recordAfterResume.structured_notes).toMatchObject({
+        completionSmsStatus: 'sent',
+        completionSmsDeliveryUnverifiedAt: null,
+      });
+      expect((await mockPg('invoices').where({ customer_id: f.customerId }).first())).toMatchObject({
+        status: 'sent',
+        sent_at: expect.any(Date),
+        sms_sent_at: expect.any(Date),
+      });
+    });
+
+    test('a recap-only completion with an office-claimed linked invoice sends its report without taking or disturbing that claim', async () => {
+      await visitFixture();
+      f.invoiceId = randomUUID();
+      await mockPg('invoices').insert({
+        id: f.invoiceId,
+        customer_id: f.customerId,
+        scheduled_service_id: f.serviceId,
+        invoice_number: `TST-${f.invoiceId.slice(0, 8)}`,
+        token: randomUUID().replace(/-/g, ''),
+        status: 'draft',
+        total: 117,
+        subtotal: 117,
+        credit_applied: 0,
+        line_items: JSON.stringify([{ description: 'Quarterly Pest Control Service', amount: 117, quantity: 1, unit_price: 117 }]),
+      });
+      const officeClaim = await InvoiceService.claimInvoiceForSend(f.invoiceId, { operatorInitiated: true });
+      expect(officeClaim).toMatchObject({ claimed: true, previousStatus: 'draft' });
+      const claimSpy = jest.spyOn(InvoiceService, 'claimInvoiceForSend')
+        .mockRejectedValue(new Error('office claim must not be contested (injected)'));
+
+      let result;
+      let claimCalls;
+      try {
+        result = await complete(randomUUID(), { oneTimeRecapOnly: true });
+        claimCalls = claimSpy.mock.calls.length;
+      } finally {
+        claimSpy.mockRestore();
+      }
+      expect(result.status).toBe(200);
+      expect(claimCalls).toBe(0);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(payLinkTexts()).toHaveLength(0);
+      expect(await readInvoice(f.invoiceId)).toMatchObject({
         status: 'sending', sent_at: null, sms_sent_at: null,
       });
     });

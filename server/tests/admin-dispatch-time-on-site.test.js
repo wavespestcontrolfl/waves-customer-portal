@@ -1501,7 +1501,8 @@ describe('post-commit structured_notes writers cannot clobber the correction', (
     // 'sent' stamp in the completion SMS catch (#3745 r4) — same shape.
     // 16 since #4131 records the accepted completion-invoice delivery stamp
     // through the same key merge rather than a whole-column snapshot write.
-    expect((source.match(/mergeRecordNotesKeys\(record\.id, /g) || []).length).toBe(16);
+    // Two more preserve uncertain decline-notice and completion-SMS outcomes.
+    expect((source.match(/mergeRecordNotesKeys\(record\.id, /g) || []).length).toBe(18);
   });
 
   test('the lawn synthesis gate merges only its lawnReportV2 key — never the whole column (codex P1 round 3)', () => {

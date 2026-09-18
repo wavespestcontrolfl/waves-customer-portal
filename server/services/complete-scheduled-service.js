@@ -33,6 +33,19 @@ function throwIfDeliveryUnverified(result) {
   throw err;
 }
 
+const COMPLETION_SMS_DEFINITE_REJECTION_PREFIX = '[completion_sms_definite_rejection marker=';
+
+function completionSmsDefiniteRejectionError(message, markerAt) {
+  return new Error(`${COMPLETION_SMS_DEFINITE_REJECTION_PREFIX}${markerAt || 'missing'}] ${message || 'Completion SMS provider failure'}`);
+}
+
+function definiteRejectionMarkerFromAttemptError(error) {
+  const value = String(error || '');
+  if (!value.startsWith(COMPLETION_SMS_DEFINITE_REJECTION_PREFIX)) return null;
+  const end = value.indexOf(']', COMPLETION_SMS_DEFINITE_REJECTION_PREFIX.length);
+  return end === -1 ? null : value.slice(COMPLETION_SMS_DEFINITE_REJECTION_PREFIX.length, end);
+}
+
 const PropertyZones = require('../services/property-zones');
 const TermiteStations = require('../services/termite-stations');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -11092,6 +11105,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
       && completionSmsAttemptedAt
       && Date.now() - completionSmsAttemptedAt < 10 * 60 * 1000
       && !resumingReleasedCompletion;
+    // A provider rejection is known NOT delivered. If both status writes
+    // failed, the pre-provider uncertainty marker remains, but the attempt's
+    // release error durably carries the exact marker it rejected. Ignore only
+    // that matching marker on the released retry; a later/unknown handoff
+    // has a different marker and remains fenced.
+    const releasedDefiniteRejectionMarker = resumingReleasedCompletion
+      ? definiteRejectionMarkerFromAttemptError(completionAttempt?.error)
+      : null;
+    const completionSmsMarkerWasDefinitelyRejected = !!recordStructuredNotes.completionSmsDeliveryUnverifiedAt
+      && releasedDefiniteRejectionMarker === recordStructuredNotes.completionSmsDeliveryUnverifiedAt;
     const completionSmsAlreadyHandled = !!recordStructuredNotes.sentSmsBody
       || recordStructuredNotes.completionSmsStatus === 'sent'
       // 'deferred' = a send-window hold requeued the text on the
@@ -11102,7 +11125,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // 'failed' closeout status surfaces office review; this durable marker
       // distinguishes it from a definite failure and prevents a released
       // side-effects resume from replaying the text.
-      || !!recordStructuredNotes.completionSmsDeliveryUnverifiedAt
+      || (!!recordStructuredNotes.completionSmsDeliveryUnverifiedAt && !completionSmsMarkerWasDefinitelyRejected)
       || completionSmsSendingFresh;
     // The pest-recap path (services/pest-recap.js) writes its own
     // service_records row and claims recap_sms_sent_at when it texts the
@@ -11925,7 +11948,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // the same claim as the reused shapes; nothing collectible is
         // texted outside it.
         let reusedInvoiceClaimedElsewhere = false;
-        if (linkOtherwiseEligible && invoice?.id) {
+        if (linkOtherwiseEligible && invoiceCreated && payUrl && invoice?.id) {
           try {
             const InvoiceServiceForClaim = require('../services/invoice');
             // firstDeliveryOnly (P1 #4131, this round — third overturned
@@ -12310,6 +12333,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // Block-scoped inside this try; the accepted-error catch reads it
             // from the snapshot for the invoice bookkeeping.
             invoiceLinkAllowed: allowCompletionInvoiceLink,
+            deliveryUnverifiedAt: smsNotesDelta.completionSmsDeliveryUnverifiedAt,
           };
           let smsResult = throwIfDeliveryUnverified(await sendCustomerMessage(sendInput));
           if (smsResult.channel === 'push') {
@@ -12517,9 +12541,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 });
               }
               if (resumable) {
-                return exitForCompletionSmsResume(holdEnqueueFailed
-                  ? completionHoldQueueError
-                  : new Error(smsResult.reason || smsResult.code || 'Completion SMS provider failure'));
+                return exitForCompletionSmsResume(completionSmsDefiniteRejectionError(
+                  holdEnqueueFailed
+                    ? (completionHoldQueueError.message || String(completionHoldQueueError))
+                    : (smsResult.reason || smsResult.code || 'Completion SMS provider failure'),
+                  completionSmsAcceptedSnapshot?.deliveryUnverifiedAt,
+                ));
               }
             }
           } else {
@@ -12705,7 +12732,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             });
           }
           if (resumable) {
-            return exitForCompletionSmsResume(new Error(rejected.error || 'Completion SMS provider failure'));
+            return exitForCompletionSmsResume(completionSmsDefiniteRejectionError(
+              rejected.error || 'Completion SMS provider failure',
+              completionSmsAcceptedSnapshot?.deliveryUnverifiedAt,
+            ));
           }
         }
       }

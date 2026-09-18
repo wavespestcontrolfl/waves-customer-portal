@@ -619,7 +619,7 @@ describe('completionInvoiceAlreadyDelivered', () => {
     // before the delivery lane, so an admin send can claim the fresh draft
     // in between). The earlier reused-only keys (preMintedInvoice /
     // adoptedConcurrentInvoice, r4 + r12) no longer gate it.
-    expect(completion).toMatch(/const linkOtherwiseEligible = !suppressCompletionInvoiceLink\s*&& includePayLink !== false[\s\S]{0,2200}?&& !invoice\?\.payer_id[\s\S]{0,900}?&& !paymentFailedNoticeSent\s*&& !paymentFailedNoticeDeliveryUnverified;[\s\S]{0,2200}?if \(linkOtherwiseEligible && invoice\?\.id\) \{/);
+    expect(completion).toMatch(/const linkOtherwiseEligible = !suppressCompletionInvoiceLink\s*&& includePayLink !== false[\s\S]{0,2200}?&& !invoice\?\.payer_id[\s\S]{0,900}?&& !paymentFailedNoticeSent\s*&& !paymentFailedNoticeDeliveryUnverified;[\s\S]{0,2200}?if \(linkOtherwiseEligible && invoiceCreated && payUrl && invoice\?\.id\) \{/);
     expect(completion).not.toMatch(/if \(linkOtherwiseEligible && invoice\?\.id\s*&& \(\(preMintedInvoice/);
     expect(completion).toMatch(/const allowCompletionInvoiceLink = linkOtherwiseEligible && !reusedInvoiceClaimedElsewhere;/);
     expect(completion).not.toMatch(/allowCompletionInvoiceLinkBase/);
