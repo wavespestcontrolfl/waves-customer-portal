@@ -198,6 +198,24 @@ describe("Invoice foundation workflow preservation", () => {
     expect(requests.find(request => request.key === key).body).toEqual({ title: null, notes: "Edited notes", email_message: null, due_date: "2099-12-31" });
   });
 
+  it.each(["now", "tomorrow_8"])("requests first delivery for %s creation and schedule-failure recovery", async (timing) => {
+    overrides.set("POST /api/admin/invoices", () => response({ ...invoice, status: "draft" }));
+    overrides.set(`POST /api/admin/invoices/${invoice.id}/schedule-send`, () => response({ error: "Schedule unavailable" }, 503));
+    const sendKey = `POST /api/admin/invoices/${invoice.id}/send`;
+    overrides.set(sendKey, () => response({ ok: true, already_delivered: true }));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Quarterly pest control" } });
+    fireEvent.change(screen.getByLabelText("Price ($)"), { target: { value: "120" } });
+    fireEvent.change(screen.getByLabelText("Send", { exact: true }), { target: { value: timing } });
+    fireEvent.click(screen.getByRole("button", { name: timing === "now" ? "Send invoice" : "Schedule invoice", exact: true }));
+    if (timing !== "now") fireEvent.click(await screen.findByRole("button", { name: "Send now", exact: true }));
+    await waitFor(() => expect(requests.filter(request => request.key === sendKey)).toHaveLength(1));
+    expect(requests.find(request => request.key === sendKey).body).toMatchObject({ firstDelivery: true });
+    expect(requests.filter(request => request.key === "POST /api/admin/invoices")).toHaveLength(1);
+  });
+
   it("keeps creation inputs after failure and never calls send when saving a draft", async () => {
     await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
     fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
