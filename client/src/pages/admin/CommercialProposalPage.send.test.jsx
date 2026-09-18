@@ -11,9 +11,9 @@ const fixture = {
   estimate: { id: 'synthetic-proposal', status: 'draft', editVersion: 'loaded-version', customerName: 'Synthetic Office', customerEmail: 'office@example.invalid', customerPhone: '+19415550100' },
   proposal: { enabled: true, title: 'Synthetic proposal', buildings: [{ name: 'Office', lineItems: [{ description: 'Quarterly service', quantity: 1, unitPrice: 100, frequency: 'quarterly', taxable: false }] }] },
 };
-let saved; let previewVersion; let failSave; let calls; let interloperAfterSave;
+let saved; let previewVersion; let failSave; let calls; let interloperAfterSave; let duringSave; let duringBidBlob;
 beforeEach(() => {
-  saved = structuredClone(fixture); previewVersion = 'loaded-version'; failSave = false; calls = []; interloperAfterSave = false;
+  saved = structuredClone(fixture); previewVersion = 'loaded-version'; failSave = false; calls = []; interloperAfterSave = false; duringSave = null; duringBidBlob = null;
   localStorage.setItem('waves_admin_token', 'synthetic-token');
   vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
     calls.push({ url: String(url), ...options });
@@ -25,6 +25,7 @@ beforeEach(() => {
     };
     else if (String(url).endsWith('/send')) data = { channels: { email: { ok: true, real: true } } };
     else if (options.method === 'PUT') {
+      if (duringSave) { const fn = duringSave; duringSave = null; fn(); }
       if (failSave) { status = 409; data = { error: 'Proposal changed; reload.' }; }
       else {
         saved.proposal = JSON.parse(options.body).proposal; saved.projectCosting = JSON.parse(options.body).projectCosting;
@@ -33,11 +34,46 @@ beforeEach(() => {
         if (interloperAfterSave) { saved.proposal = { ...saved.proposal, title: 'Interloper edit' }; saved.estimate.editVersion = 'interloper-version'; previewVersion = 'interloper-version'; }
       }
     } else data = saved;
-    return { ok: status < 400, status, json: async () => structuredClone(data), clone() { return this; } };
+    return { ok: status < 400, status, json: async () => structuredClone(data), blob: async () => { if (String(url).endsWith('/bid-form.pdf')) duringBidBlob?.(); return new Blob(['%PDF-']); }, clone() { return this; } };
   }));
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); localStorage.clear(); });
 const mount = () => render(<MemoryRouter initialEntries={['/estimates/synthetic-proposal/proposal']}><Routes><Route path="/estimates/:estimateId/proposal" element={<CommercialProposalPage />} /></Routes></MemoryRouter>);
+const bidFormExport = async () => {
+  mount();
+  await screen.findByDisplayValue('Synthetic proposal');
+  fireEvent.change(screen.getByLabelText('Original PDF'), { target: { files: [new File(['%PDF-'], 'original.pdf', { type: 'application/pdf' })] } });
+  fireEvent.change(screen.getByLabelText('Form row for Quarterly service'), { target: { value: 'application' } });
+  vi.stubGlobal('URL', { ...URL, createObjectURL: () => 'blob:synthetic', revokeObjectURL: () => {} });
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+  fireEvent.click(screen.getByRole('button', { name: 'Download filled bid form' }));
+};
+
+it('exports the bid form with the row mapping captured at the click after a clean save', async () => {
+  await bidFormExport();
+  await waitFor(() => expect(calls.some((call) => call.url.endsWith('/bid-form.pdf'))).toBe(true));
+  const options = JSON.parse(calls.find((call) => call.url.endsWith('/bid-form.pdf')).body.get('options'));
+  expect(options.template).toBe('north_port_pr27_02');
+  expect(options.expectedEditVersion).toBe('saved-version');
+  expect(Object.values(options.mapping)).toEqual(['application']);
+});
+
+it('refuses the export when a proposal edit lands while the pre-export save is in flight (GH codex P2 r6 on #4270)', async () => {
+  duringSave = () => fireEvent.change(screen.getByDisplayValue('Synthetic proposal'), { target: { value: 'Edited mid-save' } });
+  await bidFormExport();
+  await screen.findByRole('alert');
+  expect(screen.getByRole('alert')).toHaveTextContent('The proposal changed while the form was being prepared');
+  expect(calls.some((call) => call.url.endsWith('/bid-form.pdf'))).toBe(false);
+  expect(calls.filter((call) => call.method === 'PUT').length).toBeGreaterThanOrEqual(2);
+});
+
+it('rejects the generated bid when prices change while its response body is downloading', async () => {
+  duringBidBlob = () => fireEvent.change(screen.getByLabelText('Unit price', { exact: true }), { target: { value: '200' } });
+  await bidFormExport();
+  expect(await screen.findByRole('alert')).toHaveTextContent('The proposal changed while the form was being prepared');
+  expect(screen.getByLabelText('Unit price', { exact: true })).toHaveValue(200);
+  expect(HTMLAnchorElement.prototype.click).not.toHaveBeenCalled();
+});
 
 it('hides bid controls while disabled and omits fields that an older editor cannot edit', async () => {
   saved.bidToolsEnabled = false;

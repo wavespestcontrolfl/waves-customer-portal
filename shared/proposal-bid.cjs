@@ -3,6 +3,10 @@
 // Shared by the proposal editor, authoritative totals, and document renderers.
 // Quantities and unit rates retain four decimals; extended charges round once
 // to cents. No service rates or recommended pesticide application rates live here.
+const BID_FORM_PROFILES = {
+  north_port_pr27_02: { label: 'North Port PR27-02 · quote form', page: 15, minimumValidThrough: '2026-12-21', rows: { product: 'Product', application: 'Application', other: 'Additional item', freight: 'Freight' } },
+  cove_termite: { label: 'Cove + Willoughby · termite bid form', page: 3, rows: { apartments: 'Apartment buildings', clubhouse: 'Clubhouse', garages: 'Garages / maintenance' } },
+};
 const PROPOSAL_UNITS = {
   each: 'each', sqft: 'sq ft', lf: 'linear ft', acre: 'acres', lb: 'lb',
   gal: 'gal', hour: 'hours', day: 'days', trip: 'trips', lump_sum: 'lump sum',
@@ -164,4 +168,4 @@ function computeProjectCosts(costing, totals, { revenueIssue = null } = {}) {
   return { cost, revenue, revenueYears, profit, marginPercent: costsComplete && revenue > 0 ? roundDecimal(profit / revenue * 100, 2) : null, byCategory, costsComplete };
 }
 
-module.exports = { PROPOSAL_UNITS, PROPOSAL_COUNT_UNITS, proposalLineServiceCount, COST_CATEGORIES, roundDecimal, roundCents, proposalLineAmount, formatQuantity, formatUnitPrice, formatLineBasis, showsLineBasis, decimalValid, COST_ROW_LIMITS, costRowIssue, costRowOccurrences, programRevenueIssue, proposalRevenueIssue, computeProjectCosts };
+module.exports = { BID_FORM_PROFILES, PROPOSAL_UNITS, PROPOSAL_COUNT_UNITS, proposalLineServiceCount, COST_CATEGORIES, roundDecimal, roundCents, proposalLineAmount, formatQuantity, formatUnitPrice, formatLineBasis, showsLineBasis, decimalValid, COST_ROW_LIMITS, costRowIssue, costRowOccurrences, programRevenueIssue, proposalRevenueIssue, computeProjectCosts };
