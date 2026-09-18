@@ -22,7 +22,7 @@ The finite candidate families are:
 - `qualifier`: longest supported qualifier at a position, including `only`,
   `about`, `up to`, `at least`, and comparative phrases such as `no more than`.
 - `participant`: a pronoun or customer/client/account noun, optionally with
-  a supported determiner. This does not establish a subject, payer, or recipient.
+  a supported determiner (including `any`). This does not establish a subject, payer, or recipient.
 - `billing_head`: a supported lexical head with `head` and `roles`. A word such
   as `charge` can retain both `noun` and `action` roles.
 - `predicate`: a supported action head with a bounded auxiliary/qualifier
