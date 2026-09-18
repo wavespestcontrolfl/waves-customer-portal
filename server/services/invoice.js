@@ -2717,8 +2717,7 @@ const InvoiceService = {
     if (!serviceDateIsFutureET && invoice.scheduled_service_id) {
       try {
         const visit = await db("scheduled_services").where({ id: invoice.scheduled_service_id }).first("status");
-        linkedVisitIncomplete = visit?.status == null
-          || ["pending", "confirmed", "en_route", "on_site", "rescheduled"].includes(visit.status);
+        linkedVisitIncomplete = visit?.status !== "completed";
       } catch (err) {
         logger.warn(`[invoice] Linked visit status lookup failed for ${invoiceId}: ${err.message}`);
         linkedVisitIncomplete = true;
