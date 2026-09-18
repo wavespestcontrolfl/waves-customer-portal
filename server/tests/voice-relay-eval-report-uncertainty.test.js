@@ -407,3 +407,51 @@ test.each([
 ])('explicit uncertainty differs from definite assurance: %s', (text, uncertain) => {
   expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
 });
+
+test.each([
+  ["We can't confirm that Talstar P was applied.", true],
+  ['We can’t confirm that Talstar P was applied.', true],
+  ['We cannot confirm that Talstar P was applied.', true],
+  ['We can confirm that Talstar P was applied.', false],
+])('4043744101 inability to confirm remains uncertain: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['The report suggests that Talstar P was applied.', true],
+  ['The report suggested that Talstar P was applied.', true],
+  ['We applied Talstar P as the report suggests.', false],
+  ['We applied Talstar P as the report suggested.', false],
+  ['The report shows that Talstar P was applied.', false],
+])('4043744105 report suggestion differs from a positive report: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['We can clearly confirm that Talstar P was applied.', false],
+  ['We can conclusively verify that Talstar P was applied.', false],
+  ['We can possibly confirm that Talstar P was applied.', true],
+  ['We can probably verify that Talstar P was applied.', true],
+])('4043744107 conclusive can-confirm adverbs retain definite scope: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['Talstar P was applied with equipment that can be used outdoors.', false],
+  ['Talstar P was applied by a technician who can verify the label.', false],
+  ['Talstar P is the product that may have been applied.', true],
+  ['The technician who can verify the label might have applied Talstar P.', true],
+  ['Talstar P can be applied outdoors.', true],
+  ['That can be applied outdoors.', true],
+  ['The report might show that Talstar P was applied.', true],
+])('4043744112 relative modal does not govern completed treatment: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['The technician believes that Talstar P was applied.', true],
+  ['The customer thinks Talstar P was applied.', true],
+  ['The technician confirmed that Talstar P was applied.', false],
+])('4043744115 third-person belief remains tentative: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
