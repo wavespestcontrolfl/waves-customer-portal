@@ -361,7 +361,7 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
     }
   });
 
-  test('the CLAIM does NOT refuse a visit whose prepaid_method is the annual-prepay stamp when the stamp is stale (no live covering term) — governed by annualPrepayCoversVisit\'s own classification, not the out-of-band payments-row marker (pre-push audit P1 #4131 finding 2, fixing round-19\'s over-broad widening)', async () => {
+  test.each([[400, false], [0, true], [null, true]])('annual prepay amount %s is strictly classified before granting a send claim', async (prepaidAmount, unverifiable) => {
     const db = require('../models/db');
     const InvoiceService = require('../services/invoice');
     const { claimInvoiceForSend } = InvoiceService;
@@ -392,7 +392,7 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
       if (table === 'scheduled_services') {
         q.first = jest.fn(async () => ({
           id: 'svc-1', status: 'confirmed', customer_id: 'cust-1', service_type: 'Fixture Quarterly Pest Control Service',
-          prepaid_amount: 400, prepaid_method: ANNUAL_PREPAY_PREPAID_METHOD, annual_prepay_term_id: 'term-1',
+          prepaid_amount: prepaidAmount, prepaid_method: ANNUAL_PREPAY_PREPAID_METHOD, annual_prepay_term_id: 'term-1',
         }));
       }
       if (table === 'payments') q.first = jest.fn(async () => null);
@@ -400,9 +400,15 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
     });
     try {
       db.__state.status = 'draft';
-      expect(await claimInvoiceForSend('inv-1')).toMatchObject({ claimed: true, previousStatus: 'draft' });
-      expect(db.__state.status).toBe('sending');
-      expect(annualPrepayCoversVisit).toHaveBeenCalled();
+      if (unverifiable) {
+        annualPrepayCoversVisit.mockRejectedValueOnce(new Error('Annual prepay stamp is unverifiable'));
+        await expect(claimInvoiceForSend('inv-1')).rejects.toThrow('Annual prepay stamp is unverifiable');
+        expect(db.__state.status).toBe('draft');
+      } else {
+        expect(await claimInvoiceForSend('inv-1')).toMatchObject({ claimed: true, previousStatus: 'draft' });
+        expect(db.__state.status).toBe('sending');
+      }
+      expect(annualPrepayCoversVisit).toHaveBeenCalledWith(expect.objectContaining({ prepaid_amount: prepaidAmount }), expect.anything(), { throwOnError: true });
     } finally {
       db.mockImplementation(original);
       db.__state.status = 'draft';

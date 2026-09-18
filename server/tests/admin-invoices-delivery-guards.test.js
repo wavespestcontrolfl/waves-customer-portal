@@ -103,7 +103,7 @@ describe('POST /admin/invoices/:id/schedule-send on a linked visit (GitHub P1 #4
     });
   });
 
-  test.each([['confirmed'], [null]])('refuses a future send while the linked visit is still open (status %s) — the completion would send it first', async (status) => {
+  test.each([['confirmed'], ['rescheduled'], [null]])('refuses a future send while the linked visit is still open (status %s) — the completion would send it first', async (status) => {
     visitStatus = status;
     await withServer(async (baseUrl) => {
       const res = await scheduleSend(baseUrl);

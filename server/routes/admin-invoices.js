@@ -1621,7 +1621,7 @@ function scheduleInvoiceSend(conn, id, values) {
 // Refusing here keeps the completion path untouched; send now or keep a
 // draft. A legacy completion with no attempt row schedules normally.
 const isOpenVisitStatus = (status) => status == null
-  || ['pending', 'confirmed', 'en_route', 'on_site'].includes(String(status));
+  || ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'].includes(String(status));
 
 async function linkedVisitScheduleRefusal(trx, scheduledServiceId) {
   const visit = await trx('scheduled_services').where({ id: scheduledServiceId }).first('id', 'status');

@@ -1180,7 +1180,7 @@ async function visitInvoiceRefusalUnderClaim(claimedRow, claimedFromStatus, data
   //     a parallel annual rule here: a stamp that genuinely still covers
   //     the visit refuses like the create path does; a stale one refuses
   //     nothing, whatever its recorded amount says.
-  if (visit && !claimedRow.payer_id && Number(visit.prepaid_amount) > 0) {
+  if (visit && !claimedRow.payer_id) {
     const { ANNUAL_PREPAY_PREPAID_METHOD } = require("./annual-prepay-renewals");
     if (visit.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD) {
       const { prepaidRefusesOfficeInvoice } = require("./visit-prepaid-coverage");
@@ -1190,7 +1190,7 @@ async function visitInvoiceRefusalUnderClaim(claimedRow, claimedFromStatus, data
       // branch) — the same fail-closed direction as create's "don't offer
       // it", so no separate strict handling is needed here.
       if (await prepaidRefusesOfficeInvoice(visit, { payerBilled: false, conn: database })) return { kind: "visit_prepaid_covered" };
-    } else {
+    } else if (Number(visit.prepaid_amount) > 0) {
       const dueCents = Math.round(invoiceAmountDue(claimedRow) * 100);
       if (dueCents > 0) {
         const credited = await outOfBandPrepaidCreditApplied(claimedRow.id, claimedRow.scheduled_service_id, database);
