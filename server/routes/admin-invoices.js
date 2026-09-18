@@ -9,7 +9,6 @@ const db = require('../models/db');
 const { VALID_PAYMENT_METHODS, recordManualPayment, retireOpenPaymentIntentBeforeSettlement } = require('../services/invoice-manual-payment');
 const logger = require('../services/logger');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
-const { dateOnlyString } = require('../utils/date-only');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, visitRefusesSettlement } = require('../services/invoice-helpers');
 const CustomerCredit = require('../services/customer-credit');
@@ -594,139 +593,17 @@ router.get('/customers/search', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Visit statuses an office invoice may be linked to before the closeout —
-// the live vocabulary (job-status.js). Owner ruling 2026-09-07: an invoice
-// linked to its visit at creation is the ONLY way the completion knows the
-// visit is already billed; an unattached invoice is never paired by
-// inference, so the picker must offer the open visit, not just the record.
-const OPEN_VISIT_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
-// A NULL status is a live visit (the repository's live-visit convention —
-// prepaid-series.js liveRows; the column is nullable), so a legacy row must
-// be linkable here too (GitHub P1 #4131): left out, its office invoice stays
-// unattached and completion mints the duplicate this path exists to prevent.
-const isOpenVisitStatus = (status) => status == null || OPEN_VISIT_STATUSES.includes(String(status));
-
-// One open visit as the picker offers it, or null when the completion
-// would not bill it: the payer-aware, method-specific prepaid-coverage rule
-// (Codex P2 r3 — a homeowner prepayment never hides a PAYER's invoice, a
-// stale annual stamp hides nothing, cash/Zelle hides only when it reaches
-// the visit's would-be amount). Carries the pending estimate deposit the
-// linked mint will credit automatically (pre-push P1) so the form previews
-// the balance the customer will actually be sent — zero for a payer-billed
-// visit, since InvoiceService.create skips the homeowner's deposit when a
-// third-party Bill-To resolves (same resolver, same fail-soft-to-self-pay
-// contract). A resolver blip previews no credit rather than a wrong one.
-async function openVisitPickerRow(visit, customerId) {
-  const { pendingDepositCredit } = require('../services/estimate-deposits');
-  const { resolveForInvoice } = require('../services/payer');
-  const { prepaidRefusesOfficeInvoice } = require('../services/visit-prepaid-coverage');
-  let payerBilled = false;
-  let credit = null;
-  // An unverifiable payer or deposit (a failed ledger read) is NOT offered
-  // as deposit_credit 0 (Codex P1 r3): the form would submit an expected
-  // credit of 0, and after the mint's own retries a full-balance invoice
-  // could go out over a paid deposit. Fail closed — the visit is omitted.
-  try {
-    // STRICT payer resolution (Codex P1 r4): the resolver's default converts a
-    // failed lookup into self-pay, which would offer a Bill-To visit as the
-    // homeowner's — throwOnError makes the outage reach this catch.
-    const payer = await resolveForInvoice({ customerId, scheduledServiceId: visit.id, throwOnError: true });
-    payerBilled = !!payer?.payerId;
-    if (visit.source_estimate_id && !payerBilled) credit = await pendingDepositCredit(visit.source_estimate_id);
-  } catch (err) {
-    logger.warn(`[admin-invoices] picker: payer/deposit lookup failed for visit ${visit.id} — not offered: ${err.message}`);
-    return null;
-  }
-  // Unverifiable annual coverage (strict mode threw) is NOT offered either —
-  // fail closed toward "no new collectible invoice" (pre-push P0 r3).
-  try {
-    if (await prepaidRefusesOfficeInvoice(visit, { payerBilled })) return null;
-  } catch (err) {
-    logger.warn(`[admin-invoices] picker: prepaid coverage unverifiable for visit ${visit.id} — not offered: ${err.message}`);
-    return null;
-  }
-  // Internal columns (the coverage inputs, the estimate link) stay off the wire.
-  const { source_estimate_id: _estimate, prepaid_amount: _amount, prepaid_method: _method, estimated_price: _price,
-    annual_prepay_term_id: _term, customer_id: _customer, ...row } = visit;
-  return { ...row, deposit_credit: credit ? Number(credit.amount) : 0 };
-}
-
-// GET /service-records/:customerId — the visit picker's feed: recent
-// completed visits (service records) AND the customer's open visits.
-const PICKER_OPEN_VISIT_LIMIT = 20;
-const PICKER_CANDIDATE_BATCH = 40;
-const { COMPLETION_TERMINAL_INVOICE_STATUSES, completionTerminalInvoiceLookup } = require('../services/completion-invoice-candidate');
-
-// The completion's terminal-invoice rule for the office paths (Codex P1 r4):
-// a refunded invoice on the visit blocks any new mint until the refund is
-// final — the visit is parked for a human, exactly as at completion.
-async function linkedVisitRefundedInvoice(conn, visitId) {
-  return completionTerminalInvoiceLookup(conn, { scheduledServiceId: visitId });
-}
+// GET /service-records/:customerId — get recent services for a customer (to link invoice)
 router.get('/service-records/:customerId', async (req, res, next) => {
   try {
     const records = await db('service_records')
       .where({ customer_id: req.params.customerId })
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
-      // Plain YYYY-MM-DD like the open visits below: the picker labels build
-      // `new Date(date + 'T12:00:00')`, which a timestamp breaks ("Invalid
-      // Date" — seen in the ui-verify pass).
-      .select('service_records.id', db.raw("to_char(service_records.service_date, 'YYYY-MM-DD') as service_date"), 'service_records.service_type',
+      .select('service_records.id', 'service_records.service_date', 'service_records.service_type',
         'service_records.status', 'technicians.name as tech_name')
-      .orderBy('service_records.service_date', 'desc')
+      .orderBy('service_date', 'desc')
       .limit(20);
-    // Prepaid visits (recorded prepayment or annual-prepay coverage) are not
-    // offered — they need no new invoice and the create route refuses them.
-    // A visit that already carries an invoice the mint would adopt (not
-    // void, not terminal — the ONE rule in scheduled-invoice-mint) is not
-    // offered (pre-push P1): the linked create would refuse it as
-    // visit_already_invoiced on every retry, and such rows would eat the
-    // limit and hide eligible visits. Excluded in SQL, before the limit.
-    const { scopeAdoptableScheduledInvoices } = require('../services/scheduled-invoice-mint');
-    // Prepaid / unverifiable eligibility is decided per row (payer, ledger,
-    // annual term), so the SQL limit is a BATCH size, not the picker limit:
-    // successive batches are read until 20 eligible visits are collected or
-    // the candidates are exhausted (pre-push P1 r3) — 40 prepaid visits up
-    // front must not hide the eligible ones behind them.
-    const candidateBatch = (offset) => db('scheduled_services')
-      .where({ 'scheduled_services.customer_id': req.params.customerId })
-      .where((qb) => qb.whereNull('scheduled_services.status').orWhereIn('scheduled_services.status', OPEN_VISIT_STATUSES))
-      .whereNotExists(function adoptableInvoice() {
-        scopeAdoptableScheduledInvoices(this.select(db.raw('1')).from('invoices').whereRaw('invoices.scheduled_service_id = scheduled_services.id'));
-      })
-      // A REFUNDED invoice on the visit is a terminal blocker, not a
-      // re-bill (Codex P1 r4, same rule as the completion's
-      // completionTerminalInvoiceLookup): refund.failed can restore it, and
-      // a replacement minted meanwhile could never be reconciled. Not offered.
-      .whereNotExists(function refundedInvoice() {
-        this.select(db.raw('1')).from('invoices').whereRaw('invoices.scheduled_service_id = scheduled_services.id')
-          .whereIn('invoices.status', COMPLETION_TERMINAL_INVOICE_STATUSES);
-      })
-      .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
-      .select('scheduled_services.id', db.raw("to_char(scheduled_services.scheduled_date, 'YYYY-MM-DD') as scheduled_date"),
-        'scheduled_services.service_type', 'scheduled_services.status', 'scheduled_services.source_estimate_id',
-        'scheduled_services.prepaid_amount', 'scheduled_services.prepaid_method', 'scheduled_services.estimated_price',
-        // annualPrepayCoversVisit needs the term linkage (and the customer for
-        // the payer resolution) — without them every annual-prepaid candidate
-        // read as uncovered and ate the limit (pre-push P1 r3). Stripped from
-        // the response in openVisitPickerRow.
-        'scheduled_services.annual_prepay_term_id', 'scheduled_services.customer_id',
-        'technicians.name as tech_name')
-      .orderBy('scheduled_services.scheduled_date', 'asc')
-      .orderBy('scheduled_services.id', 'asc')
-      .offset(offset)
-      .limit(PICKER_CANDIDATE_BATCH);
-    const openVisits = [];
-    for (let offset = 0; openVisits.length < PICKER_OPEN_VISIT_LIMIT; offset += PICKER_CANDIDATE_BATCH) {
-      const candidates = await candidateBatch(offset);
-      for (const visit of candidates) {
-        const feedRow = await openVisitPickerRow(visit, req.params.customerId);
-        if (feedRow) openVisits.push(feedRow);
-        if (openVisits.length >= PICKER_OPEN_VISIT_LIMIT) break;
-      }
-      if (candidates.length < PICKER_CANDIDATE_BATCH) break;
-    }
-    res.json({ records, openVisits });
+    res.json({ records });
   } catch (err) { next(err); }
 });
 
@@ -1050,299 +927,58 @@ router.delete('/:id/attachments/:attachmentId', requireAdmin, async (req, res, n
 });
 
 // POST / — create invoice manually
-// ---- POST / — the create, as named steps ----
-// The handler is a straight line: validate → (linked: pre-check the open
-// visit → mint under the lock chain | unlinked: create) → stamp reconcile →
-// respond. Each step owns one decision so the billing path stays readable
-// (Codex r3: the inline version reached complexity 44 / depth 6).
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const nonNegativeOrNull = (v) => v == null || (Number.isFinite(Number(v)) && Number(v) >= 0);
-const numberOrNull = (v) => (v == null ? null : Number(v));
-const refusal = (status, body) => ({ refusal: { status, body } });
-const conflict = (code, message) => Object.assign(new Error(message), { status: 409, code });
-
-// Step 1 — shape validation. Returns the 400 message, or null.
-function validateCreateInvoiceBody(body) {
-  const { customerId, serviceRecordId, scheduledServiceId, expectedDepositCredit, expectedBalanceDue, lineItems, serviceDate } = body;
-  if (!customerId) return 'customerId required';
-  if (!lineItems?.length) return 'lineItems required';
-  if (serviceDate && !/^\d{4}-\d{2}-\d{2}$/.test(String(serviceDate))) return 'serviceDate must be YYYY-MM-DD';
-  if (serviceRecordId && scheduledServiceId) return 'Link the invoice to a completed visit OR an open visit, not both';
-  if (!nonNegativeOrNull(expectedDepositCredit)) return 'expectedDepositCredit must be a non-negative number';
-  if (!nonNegativeOrNull(expectedBalanceDue)) return 'expectedBalanceDue must be a non-negative number';
-  // The full 8-4-4-4-12 shape (Codex P2 r3): a 36-char near-miss bound
-  // against the uuid column is a Postgres syntax error — a 500, not a 400.
-  if (scheduledServiceId && !UUID_RE.test(String(scheduledServiceId))) return 'scheduledServiceId must be a uuid';
-  return null;
-}
-
-// The office prepaid rule (Codex P2 r3, pre-push P0 r3): a payer-billed
-// visit is never refused on the homeowner's prepay, an annual stamp refuses
-// only under a live term, and ANY positive out-of-band prepayment refuses —
-// this path has no crediting step, so a partial prepayment would otherwise
-// produce a fully collectible invoice. `conn` is the row lock's transaction
-// inside the chain.
-// Returns the PAYER the verdict was taken against alongside it (GitHub r11
-// P1 #4131) so the caller can pin it through creation — the verdict means
-// nothing if the invoice is then minted for a different party.
-async function linkedVisitPrepaid(conn, visit, { customerId }) {
-  const { resolveForInvoice } = require('../services/payer');
-  const { prepaidRefusesOfficeInvoice } = require('../services/visit-prepaid-coverage');
-  // STRICT (Codex P1 r4): a failed payer lookup must refuse, never read as
-  // self-pay — the callers turn the throw into visit_billing_unverifiable.
-  const payer = await resolveForInvoice({ database: conn, customerId, scheduledServiceId: visit.id, throwOnError: true });
-  const payerId = payer?.payerId || null;
-  return { payerId, prepaid: await prepaidRefusesOfficeInvoice(visit, { payerBilled: !!payerId, conn }) };
-}
-
-// Step 2 — the OPEN visit picked from the Invoices page (owner ruling
-// 2026-09-07), pre-checked before any lock: it must be this customer's,
-// still open (a closed or dead visit is linked through its service record
-// or not at all), and not already covered by a prepayment (the customer
-// would pay twice before completion — Charge Now owns prepaid crediting).
-// Fail closed.
-async function loadLinkedOpenVisit({ scheduledServiceId, customerId }) {
-  const visit = await db('scheduled_services').where({ id: scheduledServiceId }).first();
-  if (!visit || String(visit.customer_id) !== String(customerId)) {
-    return refusal(400, { error: 'That visit does not belong to this customer' });
-  }
-  if (!isOpenVisitStatus(visit.status)) {
-    return refusal(409, { error: `That visit is ${visit.status} — link a completed visit through its service record instead`, code: 'visit_not_open' });
-  }
-  const refunded = await linkedVisitRefundedInvoice(db, visit.id);
-  if (refunded) {
-    return refusal(409, { error: `That visit's invoice ${refunded.invoice_number || refunded.id} was refunded — the refund must be final before it can be billed again (bill it from the schedule once it is)`, code: 'visit_invoice_refunded' });
-  }
-  let prepaid;
-  try {
-    prepaid = await linkedVisitPrepaid(db, visit, { customerId });
-  } catch (err) {
-    logger.warn(`[admin-invoices] linked create: prepaid coverage unverifiable for visit ${visit.id} — refused: ${err.message}`);
-    return refusal(409, { error: 'That visit\'s billing (payer or prepaid coverage) could not be verified — nothing was created; try again', code: 'visit_billing_unverifiable' });
-  }
-  if (prepaid.prepaid) {
-    return refusal(409, { error: 'That visit is already prepaid — it needs no new invoice (use Charge now from the schedule to credit the prepayment)', code: 'visit_prepaid' });
-  }
-  return { visit };
-}
-
-// Step 3 — the same checks ROW-LOCKED inside the mint chain (pre-push P1):
-// a cancellation or prepayment finishing between the pre-check and the
-// lock must refuse, not get a fresh invoice on a dead or covered visit.
-// `payerPin` is an out-parameter (GitHub r11 P1 #4131): the payer this
-// hook's prepaid verdict was taken against is written onto it under the
-// lock, and buildCreateParams hands it to InvoiceService.create as
-// expectedPayerId. The mint's retry loop re-runs this hook per attempt, so
-// the pin is always the CURRENT attempt's verdict, never a stale one.
-// It also carries the LOCKED visit's scheduled_date out (Codex r19 P2
-// #4131): a client-supplied serviceDate can go stale (the visit is
-// rescheduled after the picker loads) or simply disagree with the visit
-// (an operator-edited date field) — either way buildCreateParams below
-// must derive the invoice's service_date from THIS row, not from
-// createArgs, or the linked invoice can show/text the customer the wrong
-// date and mis-key the pre-service/completed-service copy choice.
-function openVisitEligibilityInTrx({ visit, customerId, payerPin = null }) {
-  return async (trx) => {
-    const still = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first();
-    if (!still || String(still.customer_id) !== String(customerId) || !isOpenVisitStatus(still.status)) {
-      throw conflict('visit_not_open', `That visit is no longer open for this customer${still ? ` (${still.status})` : ''} — nothing was created`);
-    }
-    if (payerPin) payerPin.scheduledDate = still.scheduled_date;
-    // The mint derives its deposit ledger from the visit snapshot's
-    // source_estimate_id (Codex P1 r3): an estimate attached or relinked
-    // between the pre-check and this lock would be missed (or the old
-    // estimate's credit consumed) — refuse when the link moved; the form
-    // reloads the picker and previews the current credit.
-    if (String(still.source_estimate_id || '') !== String(visit.source_estimate_id || '')) {
-      throw conflict('visit_link_moved', 'That visit\'s estimate link changed while this invoice was being created — nothing was created; reload and try again');
-    }
-    // The visit's invoice rows are LOCKED before the refunded check and the
-    // mint's adoption query (GitHub r6 P1 #4131): the refund writers (the
-    // Stripe charge.refunded / refund.failed handlers, the deposit and
-    // annual-prepay refund flows) take no mint advisory lock, so a full
-    // refund committing between those two statements would let the adoption
-    // filter the now-refunded row out and mint a replacement that a later
-    // refund.failed restore leaves next to. Held here, a refund transition
-    // on these rows waits behind this create (adoption then sees the still-
-    // paid row and refuses visit_already_invoiced), or committed first and
-    // is seen (refused below). NOWAIT, never a wait: the refund paths lock
-    // invoice → customer while the mint chain already holds the customer
-    // KEY SHARE, so waiting here could form a cycle — a row a refund holds
-    // right now refuses instead, and the operator retries in a moment.
-    try {
-      await trx.raw('SELECT id FROM invoices WHERE scheduled_service_id = ? FOR UPDATE NOWAIT', [still.id]);
-    } catch (err) {
-      if (err?.code === '55P03') {
-        throw conflict('visit_billing_changing', 'That visit\'s previous invoice is being settled or refunded right now — nothing was created; try again in a moment');
-      }
-      throw err;
-    }
-    if (await linkedVisitRefundedInvoice(trx, still.id)) {
-      throw conflict('visit_invoice_refunded', 'That visit\'s previous invoice was refunded while this invoice was being created — nothing was created');
-    }
-    let prepaid;
-    try {
-      prepaid = await linkedVisitPrepaid(trx, still, { customerId });
-    } catch (err) {
-      throw conflict('visit_billing_unverifiable', `That visit's billing (payer or prepaid coverage) could not be verified under the lock — nothing was created (${err.message})`);
-    }
-    if (payerPin) payerPin.payerId = prepaid.payerId;
-    if (prepaid.prepaid) {
-      throw conflict('visit_prepaid', 'That visit was prepaid while this invoice was being created — nothing was created');
-    }
-  };
-}
-
-// Step 4 — a mint refusal as the HTTP response, or null for a real error.
-// visit_not_open | visit_link_moved | visit_invoice_refunded | visit_billing_changing | visit_prepaid | visit_billing_unverifiable | PAYER_CHANGED |
-// SCHEDULED_PRICE_MOVED |
-// DEPOSIT_CREDIT_CHANGED | DEPOSIT_CREDIT_UNVERIFIABLE | BALANCE_CHANGED. The drift figures ride along so
-// the form can show the balance the server would actually bill.
-const DRIFT_FIELDS = ['expectedDepositCredit', 'pendingDepositCredit', 'expectedBalanceDue', 'balanceDue', 'invoiceTotal', 'appliedDepositCredit'];
-function mintRefusalResponse(err) {
-  if (err?.status !== 409) return null;
-  const drift = {};
-  for (const k of DRIFT_FIELDS) if (err[k] != null) drift[k] = err[k];
-  return { status: 409, body: { error: err.message, code: err.code || 'visit_not_open', ...drift } };
-}
-
-// Step 5 — the linked create rides the ONE scheduled-visit mint helper
-// (Charge Now, billing recovery, completion all do) — pre-push P0 ×2: under
-// the mint lock chain it adopts an invoice another writer attached first
-// instead of cutting a second collectible one, and it applies and consumes
-// the visit's pending estimate deposit atomically (waves-billing deposit
-// invariant). Explicit operator lines bill what the operator typed
-// (allowPriceMovement: the stale-price refusal guards derived prices). The
-// previewed deposit and balance are checked inside the transaction (GitHub
-// P1 ×2) so the customer is never sent a balance the operator did not see.
-async function createInvoiceLinkedToOpenVisit({ visit, customerId, createArgs, expectedDepositCredit, expectedBalanceDue }) {
-  const { mintScheduledServiceInvoiceWithDeposit } = require('../services/scheduled-invoice-mint');
-  let minted;
-  // The payer the in-lock prepaid verdict was taken against (GitHub r11 P1
-  // #4131), carried into create() as expectedPayerId so creation cannot
-  // re-resolve its way to a different Bill-To — a default-payer clear or a
-  // payer deactivation racing the mint would otherwise fall back to self-pay
-  // and bill the homeowner for a visit the payer's prepayment covered.
-  // openVisitEligibilityInTrx always runs before buildCreateParams (the mint
-  // chain: advisory → key-share → eligibility hook → visit lock → create),
-  // so this is never still `undefined` at the create — the pin is live.
-  const payerPin = { payerId: undefined, scheduledDate: undefined };
-  try {
-    minted = await mintScheduledServiceInvoiceWithDeposit({
-      svc: visit,
-      allowPriceMovement: true,
-      expectedDepositCredit: numberOrNull(expectedDepositCredit),
-      expectedBalanceDue: numberOrNull(expectedBalanceDue),
-      assertEligibleInTrx: openVisitEligibilityInTrx({ visit, customerId, payerPin }),
-      // serviceDate comes from the LOCKED visit, never createArgs (Codex
-      // r19 P2 #4131): a rescheduled visit or an operator-edited date field
-      // must not carry a stale/arbitrary date onto the invoice this create
-      // links to it — the visit this invoice bills IS the service date.
-      buildCreateParams: () => ({
-        ...createArgs,
-        scheduledServiceId: visit.id,
-        expectedPayerId: payerPin.payerId,
-        serviceDate: dateOnlyString(payerPin.scheduledDate) || createArgs.serviceDate,
-      }),
-    });
-  } catch (err) {
-    const refused = mintRefusalResponse(err);
-    if (refused) return { refusal: refused };
-    throw err;
-  }
-  if (minted.reused) {
-    return refusal(409, {
-      error: `That visit already has invoice ${minted.invoice.invoice_number || minted.invoice.id} — open it instead of creating another`,
-      code: 'visit_already_invoiced',
-      invoiceId: minted.invoice.id,
-    });
-  }
-  return settleDepositCoveredInvoice(minted.invoice);
-}
-
-// A pending estimate deposit that covers the whole invoice leaves the mint
-// with nothing due (total 0 after the deposit is consumed) but still
-// 'draft' (Codex P1 r6 #4131). Exposing that row would text the customer a
-// $0 pay link on send-now, flip it to 'sent' and enrol it in the dunning
-// sequence (which checks status and payer, not the amount); the draft path
-// would do the same when the completion later reuses it. Close it through
-// the existing zero-balance transition instead — the same non-cash 'prepaid'
-// state the completion uses — and tell the client so it skips the send.
-// Fail CLOSED (Codex P1 r7): a refused or failed settlement (reminder lease
-// in flight, payment work already recorded, transient error) leaves the row
-// as minted but reports deliveryHeld — the client skips its send, and
-// sendViaSMSAndEmail refuses a zero-due open-visit invoice on its own
-// (settling it if it can) so no caller can text a $0 pay link. The
-// completion settles it again on the same authority.
-async function settleDepositCoveredInvoice(invoice) {
-  const { invoiceAmountDue } = require('../services/invoice-helpers');
-  if (!invoice || invoice.status !== 'draft' || invoiceAmountDue(invoice) > 0) return { invoice };
-  try {
-    const settlement = await InvoiceService.settleZeroBalance(invoice.id);
-    if (settlement.settled) {
-      logger.info(`[admin-invoices] invoice ${invoice.id} fully covered by the estimate deposit — settled (prepaid), nothing to send`);
-      return { invoice: settlement.invoice, settledByDeposit: true };
-    }
-    logger.warn(`[admin-invoices] invoice ${invoice.id} is fully deposit-covered but zero-balance settlement was refused: ${settlement.reason}`);
-    return { invoice, deliveryHeld: { code: 'deposit_settlement_pending', reason: settlement.reason || 'refused' } };
-  } catch (err) {
-    logger.error(`[admin-invoices] zero-balance settlement failed for deposit-covered invoice ${invoice.id}: ${err.message}`);
-    return { invoice, deliveryHeld: { code: 'deposit_settlement_pending', reason: err.message } };
-  }
-}
-
-// Step 6 — the unlinked / record-linked create. A record-linked invoice
-// serializes under the shared mint lock (owner ruling 2026-08-25, Codex
-// #3476): it must not commit between a completion-alert transaction's
-// coverage scans and its instruction write; the lookup FAILS CLOSED (Codex
-// P0) — only a successful read proving no scheduled visit may skip the
-// lock. A STAMPED invoice ("accepted estimate #<id>" in notes) serializes
-// on the alert's own dedupe advisory lock for the same reason (Codex P0).
-// Everything else keeps the untransacted best-effort path (see
-// InvoiceService.create's accrual comment).
-async function createInvoiceUnlinked({ createArgs, serviceRecordId, stampedEstimateId }) {
-  let linkedScheduledServiceId = null;
-  if (serviceRecordId) {
-    const srLink = await db('service_records').where({ id: serviceRecordId }).first('scheduled_service_id');
-    linkedScheduledServiceId = srLink?.scheduled_service_id || null;
-  }
-  // Persist the visit link too (Codex P0): reconciliation credits an
-  // invoice to a SECONDARY parked visit only via scheduled_service_id.
-  const args = { ...createArgs, ...(linkedScheduledServiceId ? { scheduledServiceId: linkedScheduledServiceId } : {}) };
-  if (!linkedScheduledServiceId && !stampedEstimateId) return InvoiceService.create(args);
-  return db.transaction(async (trx) => {
-    if (linkedScheduledServiceId) {
-      const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
-      await acquireScheduledInvoiceMintLock(trx, linkedScheduledServiceId);
-    }
-    if (stampedEstimateId) {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`unminted_setup_fee_manual_billing:${stampedEstimateId}`]);
-    }
-    return InvoiceService.create({ ...args, database: trx });
-  });
-}
-
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
-    const invalid = validateCreateInvoiceBody(req.body || {});
-    if (invalid) return res.status(400).json({ error: invalid });
-    const { customerId, serviceRecordId, scheduledServiceId, expectedDepositCredit, expectedBalanceDue, title, lineItems, notes, emailMessage, dueDate, taxRate, discountIds, serviceDate } = req.body;
-    // The exact linkage the setup-fee alert instructs — retired right after creation.
-    const stampedEstimateId = require('../services/setup-fee-alert-reconcile').acceptedEstimateIdFromNotes(notes);
-    const createArgs = { customerId, serviceRecordId, title, lineItems, notes, emailMessage, dueDate, taxRate, discountIds, serviceDate };
-
-    let outcome;
-    if (scheduledServiceId) {
-      outcome = await loadLinkedOpenVisit({ scheduledServiceId, customerId });
-      if (!outcome.refusal) {
-        outcome = await createInvoiceLinkedToOpenVisit({ visit: outcome.visit, customerId, createArgs, expectedDepositCredit, expectedBalanceDue });
-      }
-    } else {
-      outcome = { invoice: await createInvoiceUnlinked({ createArgs, serviceRecordId, stampedEstimateId }) };
+    const { customerId, serviceRecordId, title, lineItems, notes, emailMessage, dueDate, taxRate, discountIds, serviceDate } = req.body;
+    if (!customerId) return res.status(400).json({ error: 'customerId required' });
+    if (!lineItems?.length) return res.status(400).json({ error: 'lineItems required' });
+    if (serviceDate && !/^\d{4}-\d{2}-\d{2}$/.test(String(serviceDate))) {
+      return res.status(400).json({ error: 'serviceDate must be YYYY-MM-DD' });
     }
-    if (outcome.refusal) return res.status(outcome.refusal.status).json(outcome.refusal.body);
-    const { invoice, settledByDeposit = false, deliveryHeld = null } = outcome;
 
+    // Serialize LINKED manual creates under the shared mint lock (owner
+    // ruling 2026-08-25, Codex #3476): an invoice attached to a scheduled
+    // visit must not commit between a completion-alert transaction's
+    // coverage scans and its instruction write. Unlinked creates keep the
+    // untransacted best-effort path (see InvoiceService.create's accrual
+    // comment for why every create is not blanket-wrapped).
+    let linkedScheduledServiceId = null;
+    if (serviceRecordId) {
+      // FAIL CLOSED (Codex P0): a lookup error must not silently take the
+      // unlinked/unlocked path — only a successful read proving no
+      // scheduled visit may skip the mint lock. The error propagates and
+      // the operator retries.
+      const srLink = await db('service_records')
+        .where({ id: serviceRecordId })
+        .first('scheduled_service_id');
+      linkedScheduledServiceId = srLink?.scheduled_service_id || null;
+    }
+    // A STAMPED manual invoice ("accepted estimate #<id>" in notes — the
+    // exact linkage the setup-fee alert instructs) serializes on the
+    // alert's own dedupe advisory lock, so it can never commit between
+    // the alert transaction's coverage scans and its instruction write,
+    // and it retires the alert immediately after creation (Codex P0).
+    const stampedEstimateId = require('../services/setup-fee-alert-reconcile').acceptedEstimateIdFromNotes(notes);
+    const createArgs = {
+      customerId,
+      serviceRecordId,
+      // Persist the visit link too (Codex P0): reconciliation credits an
+      // invoice to a SECONDARY parked visit only via scheduled_service_id.
+      ...(linkedScheduledServiceId ? { scheduledServiceId: linkedScheduledServiceId } : {}),
+      title, lineItems, notes, emailMessage, dueDate, taxRate, discountIds, serviceDate,
+    };
+    const invoice = (linkedScheduledServiceId || stampedEstimateId)
+      ? await db.transaction(async (trx) => {
+        if (linkedScheduledServiceId) {
+          const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+          await acquireScheduledInvoiceMintLock(trx, linkedScheduledServiceId);
+        }
+        if (stampedEstimateId) {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`unminted_setup_fee_manual_billing:${stampedEstimateId}`]);
+        }
+        return InvoiceService.create({ ...createArgs, database: trx });
+      })
+      : await InvoiceService.create(createArgs);
     if (stampedEstimateId) {
       // Post-commit retirement: the new coverage rewrites/resolves the
       // parked alert now, not on the next completion. Best-effort — the
@@ -1364,14 +1000,6 @@ router.post('/', requireAdmin, async (req, res, next) => {
     res.status(201).json({
       ...invoice,
       payUrl,
-      // True when the linked visit's estimate deposit covered the whole
-      // invoice and it was settled at creation — the client skips its
-      // send-now call (there is no balance to text a pay link for).
-      settledByDeposit,
-      // Set when the deposit covers the invoice but settlement was refused or
-      // failed right now: the client must NOT send (a $0 pay link would go out
-      // and follow-ups would arm); the send path refuses it server-side too.
-      deliveryHeld,
     });
   } catch (err) {
     if (err?.isOperational && err.statusCode) {
@@ -1835,8 +1463,8 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       firstDelivery,
     } = req.body || {};
     const reviewDelayMinutes = parseReviewDelayMinutes(req.body || {});
-    // The Invoices-page create flow's immediate send is a FIRST delivery
-    // (GitHub r6 P1 #4131): a linked invoice the visit's completion claimed
+    // A caller can request a FIRST delivery (GitHub r6 P1 #4131):
+    // a linked invoice the visit's completion claimed
     // and texted between the create's commit and this request is already
     // delivered, and the claim must not be re-taken from 'sent' as a resend.
     // The claim itself refuses (already_delivered) and this route reports it
@@ -1882,8 +1510,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     // no service_record_id yet) never enrolls a review ask at delivery
     // (Codex P1 r4): the service may be days away, and sendViaSMSAndEmail
     // defers only on an existing service record. The ask is dropped here
-    // (the quiet closeout never sends one either); the form disables the
-    // toggle for linked open visits.
+    // (the quiet closeout never sends one either).
     let linkage = null;
     try {
       linkage = await db('invoices').where({ id }).first('scheduled_service_id', 'service_record_id');
@@ -1993,6 +1620,9 @@ function scheduleInvoiceSend(conn, id, values) {
 //     a status read alone lacks.
 // Refusing here keeps the completion path untouched; send now or keep a
 // draft. A legacy completion with no attempt row schedules normally.
+const isOpenVisitStatus = (status) => status == null
+  || ['pending', 'confirmed', 'en_route', 'on_site'].includes(String(status));
+
 async function linkedVisitScheduleRefusal(trx, scheduledServiceId) {
   const visit = await trx('scheduled_services').where({ id: scheduledServiceId }).first('id', 'status');
   if (visit && isOpenVisitStatus(visit.status)) {

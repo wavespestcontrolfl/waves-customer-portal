@@ -456,10 +456,8 @@ postgres('the shared send claim on a migrated database', () => {
   });
 
   describe('a PARTIAL cash/Zelle prepayment against a visit with an already-linked draft (round-19 P1 #4131 finding 1, partial-payment follow-on)', () => {
-    // The office's open-visit picker (admin-invoices.js) already linked a
-    // full-balance draft to this visit BEFORE any prepayment was recorded —
-    // exactly the round-17 mint-vs-stamp ordering, just with a partial
-    // amount this time.
+    // Existing precompletion billing paths can leave a linked draft before
+    // cash is recorded. Refuse a new send until its accounting is reconciled.
     async function linkedDraftVisitFixture() {
       f = { customerId: randomUUID(), techId: randomUUID(), serviceId: randomUUID(), invoiceId: randomUUID() };
       await mockPg('customers').insert({ id: f.customerId, first_name: 'Fixture', last_name: 'Partial', phone: '+12025550125',
@@ -475,19 +473,13 @@ postgres('the shared send claim on a migrated database', () => {
       return f;
     }
 
-    test('recording a partial prepay against the linked draft, then attempting an Immediate send: the customer is not asked for the full (or any) balance — the send is refused until the reconciler settles a top-up or the visit completes', async () => {
+    test('a partial prepaid stamp refuses a new invoice send without changing accounting', async () => {
       await linkedDraftVisitFixture();
       // The office's POST /:id/prepaid write itself: a direct
       // scheduled_services.prepaid_amount stamp, no row lock of its own.
       await mockPg('scheduled_services').where({ id: f.serviceId }).update({
         prepaid_amount: 50, prepaid_method: 'cash', prepaid_note: null, prepaid_at: new Date(),
       });
-      // The route's own reconciler runs right after the stamp in the same
-      // request. For a PARTIAL amount it deliberately leaves the invoice
-      // untouched (never writes a partial payment row — a later top-up to
-      // the full amount must apply cleanly against the ORIGINAL total).
-      const { reconcileExistingLinkedInvoiceOnPrepaidStamp } = require('../routes/admin-schedule')._test;
-      await reconcileExistingLinkedInvoiceOnPrepaidStamp(f.serviceId, { skip: false, actorTechnicianId: f.techId, actorRole: 'technician' });
       expect((await readInvoice(f.invoiceId))).toMatchObject({ status: 'draft', total: '117.00' });
 
       // An office Immediate send now must NOT collect the full $117 on top
@@ -503,20 +495,6 @@ postgres('the shared send claim on a migrated database', () => {
       expect((await readInvoice(f.invoiceId)).status).toBe('draft');
     });
 
-    test('once the office tops the prepayment up to the FULL amount, the reconciler finalizes the invoice paid and the send-claim guard is moot — no pay link, no over-collection', async () => {
-      await linkedDraftVisitFixture();
-      await mockPg('scheduled_services').where({ id: f.serviceId }).update({
-        prepaid_amount: 117, prepaid_method: 'cash', prepaid_note: null, prepaid_at: new Date(),
-      });
-      const { reconcileExistingLinkedInvoiceOnPrepaidStamp } = require('../routes/admin-schedule')._test;
-      await reconcileExistingLinkedInvoiceOnPrepaidStamp(f.serviceId, { skip: false, actorTechnicianId: f.techId, actorRole: 'technician' });
-      const invoice = await readInvoice(f.invoiceId);
-      expect(invoice.status).toBe('paid');
-      expect(invoice.payment_method).toBe('cash');
-      // Paid is no longer send-claimable at all — no pay link ever goes out.
-      await expect(InvoiceService.claimInvoiceForSend(f.invoiceId, { operatorInitiated: true })).rejects.toThrow(/paid/i);
-      expect(payLinkTexts()).toHaveLength(0);
-    });
   });
 
   describe('the payer AP invoice email records delivery before markDeliverySent (pre-push Codex P1 #4131 — third instance of the send-then-bookkeeping-throw shape)', () => {

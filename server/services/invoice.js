@@ -2005,14 +2005,6 @@ const InvoiceService = {
       // a party it was never derived for (e.g. a self-pay exempt 0% onto a
       // newly assigned non-exempt payer's AP invoice).
       frozenPayerId = undefined,
-      // The Bill-To identity the CALLER already took a billing decision
-      // against (GitHub r11 P1 #4131). Unlike frozenPayerId this has nothing
-      // to do with a frozen tax basis: it pins the payer a caller resolved
-      // under its own lock so create()'s definitive resolution below cannot
-      // silently land on a different party. `undefined` = the caller took no
-      // payer verdict (every create outside the open-visit picker); `null` =
-      // the caller verified self-pay.
-      expectedPayerId = undefined,
     } = createArgs;
 
     // Only the packet coordinator passes the second argument. Never accept
@@ -2178,83 +2170,27 @@ const InvoiceService = {
     // would fall back to the customer default (or self-pay) and bill the wrong
     // party. Reuse the same link resolved for the mint lock above; the row's own
     // scheduled_service_id linkage below is unchanged.
-    let payerResolution;
-    try {
-      payerResolution = await PayerService.resolveForInvoice({
-        database,
-        customerId,
-        customer,
-        scheduledServiceId: linkedScheduledServiceId,
-        // Fail closed under the statements gate: if payer resolution is uncertain,
-        // a NET-terms job must NOT silently fall back to self-pay and create an
-        // individually-collectible invoice instead of accruing. (Default fail-soft
-        // when the gate is off — unchanged for everyone today.)
-        // Also fail closed under a FROZEN Bill-To contract (codex pre-push r5
-        // P0): a fail-soft lookup error would report self-pay, match a frozen
-        // frozenPayerId === null, and mint the frozen (possibly exempt-0)
-        // rate onto the homeowner while a real non-exempt payer exists.
-        // Also fail closed whenever the CALLER pinned a payer verdict (Codex
-        // r12 P1 #4131): fail-soft here would synthesize self-pay on any
-        // final-lookup error, and self-pay can spuriously MATCH a self-pay
-        // pin (expectedPayerId === null) taken earlier under the caller's
-        // own lock — the equality check below would then pass even though a
-        // payer was assigned concurrently and the final resolution never
-        // actually verified it. A pin demands a VERIFIED final answer, not
-        // an unverifiable one that happens to look the same.
-        throwOnError: isEnabled("payerStatements") || frozenTaxAuthority || expectedPayerId !== undefined,
-      });
-    } catch (resolveErr) {
-      if (expectedPayerId !== undefined) {
-        // Same 409 contract as the explicit divergence check below — an
-        // unverifiable final resolution can't satisfy the pin any more than
-        // a verified mismatch can, so it gets the identical refusal instead
-        // of a raw lookup error escaping past the pin.
-        const payerChanged = new Error(
-          "That visit's Bill-To could not be verified while this invoice was being created — nothing was created; reload and try again",
-        );
-        payerChanged.statusCode = 409;
-        payerChanged.status = 409;
-        payerChanged.isOperational = true;
-        payerChanged.code = "PAYER_CHANGED";
-        throw payerChanged;
-      }
-      throw resolveErr;
-    }
     const {
       payerId: resolvedPayerId,
       poNumber: resolvedPoNumber,
       taxExempt: resolvedTaxExempt,
       snapshot: resolvedPayerSnapshot,
       paymentTerms: resolvedPaymentTerms,
-    } = payerResolution;
-
-    // PIN the caller's payer verdict (GitHub r11 P1 #4131). The Invoices-page
-    // open-visit create decides prepaid coverage from a payer it resolved
-    // under the visit's FOR UPDATE lock (linkedVisitPrepaid → "a payer-billed
-    // visit is never refused on the homeowner's prepay"), but the definitive
-    // resolution above reads `customers.payer_id` and `payers.active` again
-    // and the mint lock chain holds neither: a default-payer clear or a payer
-    // deactivation committing in between (READ COMMITTED sees it even inside
-    // the same transaction) would drop this create to self-pay and mint an
-    // individually collectible homeowner invoice for a visit whose prepayment
-    // was never applied. Pinned instead of re-decided, so prepaid eligibility
-    // and the invoice that gets written are evaluated against the SAME payer.
-    // Divergence fails CLOSED with a retryable 409 — thrown before the
-    // statement accrual and the insert, so the mint transaction rolls back
-    // and nothing is created; the form reloads and the operator sees the
-    // current Bill-To. Checked BEFORE the frozen-tax contract below: the two
-    // pins are independent, and a caller may hold either, both or neither.
-    if (expectedPayerId !== undefined
-      && String(resolvedPayerId || "") !== String(expectedPayerId || "")) {
-      const payerChanged = new Error(
-        "That visit's Bill-To changed while this invoice was being created — nothing was created; reload and try again",
-      );
-      payerChanged.statusCode = 409;
-      payerChanged.status = 409;
-      payerChanged.isOperational = true;
-      payerChanged.code = "PAYER_CHANGED";
-      throw payerChanged;
-    }
+    } = await PayerService.resolveForInvoice({
+      database,
+      customerId,
+      customer,
+      scheduledServiceId: linkedScheduledServiceId,
+      // Fail closed under the statements gate: if payer resolution is uncertain,
+      // a NET-terms job must NOT silently fall back to self-pay and create an
+      // individually-collectible invoice instead of accruing. (Default fail-soft
+      // when the gate is off — unchanged for everyone today.)
+      // Also fail closed under a FROZEN Bill-To contract (codex pre-push r5
+      // P0): a fail-soft lookup error would report self-pay, match a frozen
+      // frozenPayerId === null, and mint the frozen (possibly exempt-0)
+      // rate onto the homeowner while a real non-exempt payer exists.
+      throwOnError: isEnabled("payerStatements") || frozenTaxAuthority,
+    });
 
     // Phase 2 (gated by GATE_PAYER_STATEMENTS): a NET-terms payer invoice is held
     // from individual AP delivery and ACCRUED to the payer's OPEN monthly

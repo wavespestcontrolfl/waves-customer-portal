@@ -4048,8 +4048,8 @@ router.get('/', async (req, res, next) => {
         checkoutInvoiceId: checkoutInvoice?.id || null,
         checkoutInvoiceStatus: checkoutInvoice?.status || null,
         // Durable "already sent" for the completion (Codex P1 #4131 r3): an
-        // attached invoice already delivered (an Invoices-page linked create
-        // sent now, Charge Now, a scheduled send) must not be re-texted.
+        // attached invoice already delivered through Charge Now or a
+        // scheduled send must not be re-texted.
         completionInvoiceAlreadySent: completionInvoiceAlreadyDelivered(checkoutInvoice),
         checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
         checkoutInvoiceNumber: checkoutInvoice?.invoice_number || null,
@@ -11332,11 +11332,7 @@ const { mintScheduledServiceInvoiceWithDeposit } = require('../services/schedule
 // route keeps its own inline mint). Serialized on the SAME advisory lock as
 // Charge-now so the two mint paths can't race a visit into two open invoices.
 // Returns { invoice, reused } or { invoice: null, reason }.
-// `mintIfMissing: false` (round-17 P1 #4131 finding 1) reuses an EXISTING
-// linked invoice only and never mints — the always-on prepaid-stamp
-// reconciler below uses this so recording cash/Zelle never triggers the
-// separate, gated mint-a-new-invoice-and-notify feature by accident.
-async function mintOrReuseScheduledServiceInvoice(svc, { mintIfMissing = true } = {}) {
+async function mintOrReuseScheduledServiceInvoice(svc) {
   const InvoiceService = require('../services/invoice');
   const existing = await db('invoices')
     .where({ scheduled_service_id: svc.id })
@@ -11344,7 +11340,6 @@ async function mintOrReuseScheduledServiceInvoice(svc, { mintIfMissing = true } 
     .orderBy('created_at', 'desc')
     .first();
   if (existing) return { invoice: existing, reused: true };
-  if (!mintIfMissing) return { invoice: null, reason: 'no_invoice' };
   const amount = resolveScheduledServiceCharge({
     estimatedPrice: svc.estimated_price,
     isCallback: svc.is_callback,
@@ -11397,16 +11392,7 @@ async function mintOrReuseScheduledServiceInvoice(svc, { mintIfMissing = true } 
 // held at the window, the email leg still succeeds, and receipt_sent_at
 // stays claimed — permanently dropping the requested text (codex r21
 // local audit).
-// `notify: false` (round-17 P1 #4131 finding 1): the always-on prepaid-stamp
-// reconciler below wants this function's atomic paid-transition/closeout
-// side effects WITHOUT ever contacting the customer — the receipt SEND
-// stays behind the existing prepaidInvoiceReceipt gate + explicit
-// emailReceipt request. Claiming receipt_sent_at is skipped too, so a
-// later, explicitly-requested receipt still finds it unclaimed.
-async function sendPrepaidReceiptForInvoice(invoice, { operatorInitiated = false, notify = true } = {}) {
-  if (!notify) {
-    return { sent: false, reason: 'not_requested', invoiceId: invoice.id, invoiceNumber: invoice.invoice_number };
-  }
+async function sendPrepaidReceiptForInvoice(invoice, { operatorInitiated = false } = {}) {
   const claimed = await db('invoices')
     .where({ id: invoice.id })
     .whereNull('receipt_sent_at')
@@ -11466,13 +11452,7 @@ async function sendPrepaidReceiptForInvoice(invoice, { operatorInitiated = false
 // admits technicians (requireTechOrAdmin), so the closeout's own audit
 // must record 'technician' rather than folding every non-null actor into
 // 'admin' (GitHub r7 P2 #4127).
-// `mintIfMissing`/`notify` (round-17 P1 #4131 finding 1): both default true,
-// preserving this function's existing external contract exactly. The
-// always-on reconciler in POST /:id/prepaid passes both false — reuse an
-// EXISTING linked invoice only (never mint the separate gated feature's new
-// invoice) and never contact the customer, just finalize/closeout a payment
-// that already covers it.
-async function generatePrepaidReceiptForService(serviceId, { operatorInitiated = false, actorTechnicianId = null, actorRole = null, mintIfMissing = true, notify = true } = {}) {
+async function generatePrepaidReceiptForService(serviceId, { operatorInitiated = false, actorTechnicianId = null, actorRole = null } = {}) {
   const svc = await db('scheduled_services')
     .where('scheduled_services.id', serviceId)
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -11500,7 +11480,7 @@ async function generatePrepaidReceiptForService(serviceId, { operatorInitiated =
     logger.warn(`[schedule] prepaid-receipt payer resolve failed for service ${svc.id}: ${e.message}`);
   }
 
-  const minted = await mintOrReuseScheduledServiceInvoice(svc, { mintIfMissing });
+  const minted = await mintOrReuseScheduledServiceInvoice(svc);
   if (!minted.invoice) return { sent: false, reason: minted.reason || 'no_invoice' };
   const invoice = minted.invoice;
   if (invoice.payer_id) return { sent: false, reason: 'payer_billed' };
@@ -11520,7 +11500,7 @@ async function generatePrepaidReceiptForService(serviceId, { operatorInitiated =
   // (idempotently) send the receipt for the existing paid invoice.
   if (['paid', 'prepaid'].includes(invoice.status)) {
     await closeOutOnPaid();
-    return sendPrepaidReceiptForInvoice(invoice, { operatorInitiated, notify });
+    return sendPrepaidReceiptForInvoice(invoice, { operatorInitiated });
   }
 
   // Coverage gate: only finalize when the cash fully covers the amount due. A
@@ -11637,35 +11617,7 @@ async function generatePrepaidReceiptForService(serviceId, { operatorInitiated =
   // the visit it bills out quietly.
   await closeOutOnPaid();
 
-  return sendPrepaidReceiptForInvoice(outcome.invoice, { operatorInitiated, notify });
-}
-
-// Round-17 P1 (#4131 finding 1): a single visit can already carry a linked,
-// still-collectible invoice (the office invoice picker's open-visit link,
-// admin-invoices.js) whose mint's own row lock committed moments BEFORE
-// this route's prepaid UPDATE landed — the lock only made that write WAIT,
-// then apply right after commit, so nothing at mint time ever saw the
-// payment. Left unreconciled, that invoice stays fully collectible and an
-// Immediate send would text the customer its full balance despite the cash
-// just recorded. Chose to APPLY the payment to the existing invoice rather
-// than refuse either write: refusing the cash record would lose money
-// already received, and the mint has already committed by the time this
-// runs, so there is nothing left to refuse there either — applying is the
-// only option that leaves nobody worse off. Unconditional (not gated
-// behind prepaidInvoiceReceipt / emailReceipt, which govern the separate
-// mint-a-new-invoice-and-notify feature): never mints a NEW invoice
-// (mintIfMissing: false) and never contacts the customer (notify: false).
-// claimInvoiceForSend's own visit_prepaid_covered guard is the fail-closed
-// backstop for the narrow window before this reconciliation lands.
-async function reconcileExistingLinkedInvoiceOnPrepaidStamp(serviceId, { skip, actorTechnicianId, actorRole }) {
-  if (skip) return;
-  await generatePrepaidReceiptForService(serviceId, {
-    operatorInitiated: true,
-    actorTechnicianId,
-    actorRole,
-    mintIfMissing: false,
-    notify: false,
-  }).catch((err) => logger.warn(`[schedule] prepaid reconcile (existing linked invoice) failed for ${serviceId}: ${err.message}`));
+  return sendPrepaidReceiptForInvoice(outcome.invoice, { operatorInitiated });
 }
 
 // POST /api/admin/schedule/:id/prepaid — record payment taken in advance
@@ -11761,14 +11713,6 @@ router.post('/:id/prepaid', async (req, res, next) => {
       // Operator asked for a receipt but we won't send one — surface why.
       receipt = { sent: false, reason: decision.reason };
     }
-    // Round-17 P1 (#4131 finding 1) — see the helper's own doc comment.
-    // Skipped when decision.attempt already ran the same reconciliation as
-    // part of generatePrepaidReceiptForService above.
-    await reconcileExistingLinkedInvoiceOnPrepaidStamp(req.params.id, {
-      skip: decision.attempt || applyToSeries,
-      actorTechnicianId: req.technicianId || null,
-      actorRole: req.techRole || null,
-    });
     res.json({ success: true, ...updated[0], receipt });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
@@ -18552,8 +18496,6 @@ router._test = {
   resolveScheduledServiceCharge,
   shouldAttemptPrepaidReceipt,
   sendPrepaidReceiptForInvoice,
-  generatePrepaidReceiptForService,
-  reconcileExistingLinkedInvoiceOnPrepaidStamp,
   voidConversionInvoicesRestoringCredits,
   countUpcomingSeriesVisits,
   refreshRecurringPlanAlert,
