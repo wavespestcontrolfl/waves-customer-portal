@@ -306,3 +306,12 @@ test.each([
 ])('wish complements survive discourse prefixes without matching fulfilled wishes: %s', (text, uncertain) => {
   expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
 });
+
+test.each([
+  ['Talstar P was applied, if the report is accurate.', true],
+  ["We'd put Talstar P around the perimeter today if needed.", true],
+  ['Talstar P was applied, unless the report is mistaken.', true],
+  ['Talstar P was applied today.', false],
+])('trailing conditions preserve bounded evidence uncertainty: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});

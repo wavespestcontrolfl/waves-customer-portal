@@ -1730,7 +1730,7 @@ function reportFindingIsUncertain(text) {
     (auxiliary, subject, at) => (text.slice(at).search(REPORT_COMPLETION_TIME_RE) >= 0
       || /\b(?:before|after)\s+(?:i|we|you|he|she|they|it)\s+(?:arrived|left|returned|called)\b/i.test(text.slice(at)))
       ? `${subject} had` : auxiliary);
-  return /^\s*(?:(?:(?:only|even)\s+)?(?:if|unless)|assuming|provided\s+that)\b/i.test(text)
+  return /\b(?:if|unless|assuming|provided\s+that)\b/i.test(text)
     || /\b(?:tomorrow|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b/i.test(text)
     || REPORT_UNCERTAINTY_RE.test(evidence.replace(REPORT_COMPLETION_TIME_RE, '')
       // Preserve named-technician past-tense put; base auxiliaries retain modal meaning.
