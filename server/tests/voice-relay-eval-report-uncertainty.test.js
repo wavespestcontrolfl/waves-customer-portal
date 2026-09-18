@@ -592,6 +592,7 @@ test.each([
 test.each([
   ['4044395299', ['Talstar P is alleged to have been applied.', 'Talstar P was presumed to have been applied.'], 'Talstar P is confirmed to have been applied.'],
   ['4044395303', ['There is no evidence Talstar P was applied.', "There's no confirmation Talstar P was applied.", 'There is no evidence we applied Talstar P.', "There's no confirmation the technician applied Talstar P."], 'There is no evidence about ants Talstar P was applied.'],
+  ['first-person suspicion', ['We suspect that Talstar P was applied.', 'I suspected that Talstar P was applied.'], 'We confirmed that Talstar P was applied.'],
 ])('round-eight report uncertainty %s', (_finding, uncertainCases, definite) => {
   uncertainCases.forEach((text) => expect(grammar.reportFindingIsUncertain(text)).toBe(true));
   expect(grammar.reportFindingIsUncertain(definite)).toBe(false);
