@@ -1760,6 +1760,7 @@ function reportFindingIsUncertain(text) {
     || /\b(?:is|are|was|were|has|have|had)\s+not\s+necessarily\s+(?:been\s+)?(?:applied|used|treated|sprayed|placed|put)\b/i.test(scopedEvidence)
     || /\bought\s+to\s+(?:have\s+been|be)\s+(?:applied|used|treated|sprayed|placed|put)\b/i.test(scopedEvidence)
     || /\b(?:is|are|was|were|has\s+been|have\s+been|had\s+been)\s+(?:suspected|alleged|presumed)\s+to\s+(?:have|be)\b/i.test(scopedEvidence)
+    || /^\s*(?:well[,:]\s*)?(?:it|this|that)(?:['’]s|\s+(?:is|was))\s+not\s+clear\b/i.test(scopedEvidence)
     || /^\s*(?:well[,:]\s*)?(?:it|this|that)(?:['’]s|\s+(?:is|was))\s+(?:believed|thought|assumed|considered|reported|said|supposed|expected|suspected|alleged|presumed)\s+that\b/i.test(scopedEvidence)
     || /^\s*(?:well[,:]\s*)?(?:it|this|that)(?:(?:['’]s|\s+is)\s+yet|\s+has\s+yet|\s+remains)\s+to\s+be\s+(?:confirmed|verified)\s+(?:whether|if|that)\b/i.test(scopedEvidence)
     || /^\s*(?:well[,:]\s*)?there(?:['’]s|\s+(?:is|was))\s+no\s+(?:confirmation|evidence)\s+(?!(?:of|for|about)\b)(?=(?:(?:(?:the|a|an)\s+)?(?:[\w’'-]+\s+){1,4}(?:is|are|was|were|has|have|had)\s+(?:been\s+)?|(?:(?:i|we|you|he|she|they)|(?:the\s+)?(?:technician|tech|customer|client|homeowner|caller))\s+)(?:applied|used|treated|sprayed|placed|put)\b)/i.test(scopedEvidence)
@@ -1769,7 +1770,7 @@ function reportFindingIsUncertain(text) {
     || REPORT_UNCERTAINTY_RE.test(scopedEvidence
       // Preserve named-technician past-tense put; base auxiliaries retain modal meaning.
       .replace(/\b(?:[Tt]he|[Oo]ur|[Yy]our|[Tt]heir)\s+(?:technician|tech)\s+(?:Will|May)\b(?=\s+(?:(?:already|also|just|now|\w+ly)\s+)*put\b)/g, '')
-      .replace(/(^|,\s*|\bbased\s+on\s+the\s+report\s*,?\s*)(\s*(?:(?:yes|okay|certainly|absolutely)[,:]?\s+)?)(i|we)\s+can\s+(?:(?:definitely|certainly|confidently|clearly|conclusively|now|already|also|fully|absolutely)\s+)*(confirm|verify)\b(?![^.!?;]*\b(?:whether|if)\b)(?:\s+that\b)?/gi, '$1$2$3 $4'));
+      .replace(/(^|,\s*|\b(?:based\s+on|after\s+(?:reviewing|checking|reading))\s+(?:the\s+)?report\s*,?\s*)(\s*(?:(?:yes|okay|certainly|absolutely)[,:]?\s+)?)(i|we)\s+can\s+(?:(?:definitely|certainly|confidently|clearly|conclusively|now|already|also|fully|absolutely)\s+)*(confirm|verify)\b(?![^.!?;]*\b(?:whether|if)\b)(?:\s+that\b)?/gi, '$1$2$3 $4'));
 }
 
 const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_free_visit_promise, no_third_party_disclosure, only_language, capture_lead_input_asserts });
