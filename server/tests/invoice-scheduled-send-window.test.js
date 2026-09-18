@@ -68,6 +68,14 @@ const dueRow = {
   customer_id: 'cust-1',
 };
 
+const claimedRow = (overrides = {}) => ({
+  id: 'inv-1',
+  scheduled_request_review: false,
+  scheduled_review_delay_minutes: null,
+  send_claim_token: 'claim-1',
+  ...overrides,
+});
+
 describe('processScheduledSends send-window handling', () => {
   let sendSpy;
 
@@ -136,7 +144,7 @@ describe('processScheduledSends send-window handling', () => {
     const dueQuery = chain({ rows: [dueRow] });
     const phoneLookup = chain({ first: { phone: '+19415550123' } });
     const prefsLookup = chain({ first: { sms_enabled: false } });
-    const claim = chain({ returning: [{ id: 'inv-1', scheduled_request_review: false, scheduled_review_delay_minutes: null }] });
+    const claim = chain({ returning: [claimedRow()] });
     db
       .mockReturnValueOnce(staleRecovery)
       .mockReturnValueOnce(dueQuery)
@@ -147,7 +155,7 @@ describe('processScheduledSends send-window handling', () => {
 
     const result = await InvoiceService.processScheduledSends();
 
-    expect(sendSpy).toHaveBeenCalledWith('inv-1', expect.objectContaining({ allowClaimed: true }));
+    expect(sendSpy).toHaveBeenCalledWith('inv-1', expect.objectContaining({ allowClaimed: true, claimToken: 'claim-1' }));
     expect(result).toEqual({ sent: 1, failed: 0, deferred: 0 });
   });
 
@@ -155,7 +163,7 @@ describe('processScheduledSends send-window handling', () => {
     isWithinSendWindowET.mockReturnValue(false);
     const staleRecovery = chain();
     const dueQuery = chain({ rows: [{ ...dueRow, payer_id: 'payer-9' }] });
-    const claim = chain({ returning: [{ id: 'inv-1', scheduled_request_review: false, scheduled_review_delay_minutes: null }] });
+    const claim = chain({ returning: [claimedRow()] });
     db
       .mockReturnValueOnce(staleRecovery)
       .mockReturnValueOnce(dueQuery)
@@ -164,7 +172,7 @@ describe('processScheduledSends send-window handling', () => {
 
     const result = await InvoiceService.processScheduledSends();
 
-    expect(sendSpy).toHaveBeenCalledWith('inv-1', expect.objectContaining({ allowClaimed: true }));
+    expect(sendSpy).toHaveBeenCalledWith('inv-1', expect.objectContaining({ allowClaimed: true, claimToken: 'claim-1' }));
     expect(result).toEqual({ sent: 1, failed: 0, deferred: 0 });
   });
 
@@ -173,7 +181,7 @@ describe('processScheduledSends send-window handling', () => {
     const staleRecovery = chain();
     const dueQuery = chain({ rows: [dueRow] });
     const phoneLookup = chain({ first: { phone: null } });
-    const claim = chain({ returning: [{ id: 'inv-1', scheduled_request_review: false, scheduled_review_delay_minutes: null }] });
+    const claim = chain({ returning: [claimedRow()] });
     db
       .mockReturnValueOnce(staleRecovery)
       .mockReturnValueOnce(dueQuery)
@@ -183,7 +191,7 @@ describe('processScheduledSends send-window handling', () => {
 
     const result = await InvoiceService.processScheduledSends();
 
-    expect(sendSpy).toHaveBeenCalledWith('inv-1', expect.objectContaining({ allowClaimed: true }));
+    expect(sendSpy).toHaveBeenCalledWith('inv-1', expect.objectContaining({ allowClaimed: true, claimToken: 'claim-1' }));
     expect(result).toEqual({ sent: 1, failed: 0, deferred: 0 });
   });
 
@@ -191,7 +199,7 @@ describe('processScheduledSends send-window handling', () => {
     isWithinSendWindowET.mockReturnValue(true);
     const staleRecovery = chain();
     const dueQuery = chain({ rows: [dueRow] });
-    const claim = chain({ returning: [{ id: 'inv-1', scheduled_request_review: false, scheduled_review_delay_minutes: null }] });
+    const claim = chain({ returning: [claimedRow()] });
     db
       .mockReturnValueOnce(staleRecovery)
       .mockReturnValueOnce(dueQuery)
@@ -200,7 +208,7 @@ describe('processScheduledSends send-window handling', () => {
 
     const result = await InvoiceService.processScheduledSends();
 
-    expect(sendSpy).toHaveBeenCalledWith('inv-1', expect.objectContaining({ allowClaimed: true }));
+    expect(sendSpy).toHaveBeenCalledWith('inv-1', expect.objectContaining({ allowClaimed: true, claimToken: 'claim-1' }));
     expect(result).toEqual({ sent: 1, failed: 0, deferred: 0 });
   });
 
@@ -208,7 +216,7 @@ describe('processScheduledSends send-window handling', () => {
     isWithinSendWindowET.mockReturnValue(true); // guard passed at 19:59...
     const staleRecovery = chain();
     const dueQuery = chain({ rows: [dueRow] });
-    const claim = chain({ returning: [{ id: 'inv-1', scheduled_request_review: false, scheduled_review_delay_minutes: null }] });
+    const claim = chain({ returning: [claimedRow()] });
     const holdUpdate = chain();
     db
       .mockReturnValueOnce(staleRecovery)
@@ -243,7 +251,7 @@ describe('processScheduledSends send-window handling', () => {
     const update = chain();
     db.mockReturnValueOnce(chain())
       .mockReturnValueOnce(chain({ rows: [{ ...dueRow, scheduled_send_attempts: attempts }] }))
-      .mockReturnValueOnce(chain({ returning: [{ id: 'inv-1' }] }))
+      .mockReturnValueOnce(chain({ returning: [claimedRow()] }))
       .mockReturnValueOnce(update);
     sendSpy.mockResolvedValue({ ok: false, creditApplied: 0,
       sms: { code: 'APP_PROVIDER_RETRY', deferred: true, retryAfterMs: 900000, nextAllowedAt: new Date(Date.now() + 900000).toISOString() },
@@ -271,6 +279,7 @@ describe('processScheduledSends send-window handling', () => {
       const sendingInvoice = {
         id: 'inv-1',
         status: 'sending',
+        send_claim_token: 'claim-1',
         customer_id: 'cust-1',
         payer_id: null,
         scheduled_request_review: false,
@@ -280,7 +289,7 @@ describe('processScheduledSends send-window handling', () => {
         .mockReturnValueOnce(chain({ first: { payer_statement_id: null } })) // accrual pre-check
         .mockReturnValueOnce(chain({ first: sendingInvoice })); // claimInvoiceForSend read
 
-      const result = await InvoiceService.sendViaSMSAndEmail('inv-1', { allowClaimed: true });
+      const result = await InvoiceService.sendViaSMSAndEmail('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
 
       expect(sendInvoiceEmail).not.toHaveBeenCalled();
       expect(result.ok).toBe(false);
@@ -389,7 +398,7 @@ describe('processScheduledSends send-window handling', () => {
     isWithinSendWindowET.mockReturnValue(true);
     const staleRecovery = chain();
     const dueQuery = chain({ rows: [dueRow] });
-    const claim = chain({ returning: [{ id: 'inv-1', scheduled_request_review: false, scheduled_review_delay_minutes: null }] });
+    const claim = chain({ returning: [claimedRow()] });
     const failUpdate = chain();
     db
       .mockReturnValueOnce(staleRecovery)

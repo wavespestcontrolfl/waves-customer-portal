@@ -23,6 +23,7 @@ jest.mock('../routes/admin-sms-templates', () => ({
 }));
 jest.mock('../services/invoice-followups', () => ({ scheduleForInvoice: jest.fn(async () => true) }));
 jest.mock('../services/invoice-helpers', () => ({
+  ...jest.requireActual('../services/invoice-helpers'),
   INVOICE_UPDATE_ALLOWED_FIELDS: [],
   INVOICE_UNCOLLECTIBLE_STATUSES: [],
   assertInvoiceVoidable: jest.fn(),
@@ -61,6 +62,7 @@ describe('invoice SMS provider handoff', () => {
     invoice_number: 'WPC-2026-1234',
     customer_id: 'cust-1',
     status: 'sending',
+    send_claim_token: 'claim-1',
     total: '100.00',
     credit_applied: 0,
     token: 'invoice-token',
@@ -98,7 +100,7 @@ describe('invoice SMS provider handoff', () => {
       throw new Error('commit connection lost');
     });
 
-    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true }))
+    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
       .resolves.toMatchObject({ sent: true, payUrl: 'https://waves.test/l/invoice' });
 
     expect(dispatch).toHaveBeenCalledTimes(1);
@@ -119,7 +121,7 @@ describe('invoice SMS provider handoff', () => {
     sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => withProviderHandoff(dispatch));
     withInvoiceDepositSettlement.mockImplementation(async (_invoiceId, callback) => callback(db, credited));
 
-    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true }))
+    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
       .resolves.toMatchObject({ sent: true });
     expect(dispatch).toHaveBeenCalledTimes(1);
   });
@@ -135,7 +137,7 @@ describe('invoice SMS provider handoff', () => {
     sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => withProviderHandoff(dispatch));
     withInvoiceDepositSettlement.mockImplementation(async (_invoiceId, callback) => callback(db, covered));
 
-    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true }))
+    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
       .rejects.toMatchObject({ code: 'INVOICE_BALANCE_CHANGED' });
     expect(dispatch).not.toHaveBeenCalled();
   });

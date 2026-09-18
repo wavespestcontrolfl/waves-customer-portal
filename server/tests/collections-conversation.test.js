@@ -79,7 +79,6 @@ jest.mock('../services/collections/contact-ledger', () => ({
 }));
 jest.mock('../services/invoice', () => ({
   sendViaSMS: jest.fn(async () => ({ sent: true, ok: true })),
-  SEND_CLAIMABLE_STATUSES: ['draft', 'scheduled', 'sent', 'viewed', 'overdue'],
 }));
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(async () => ({ id: 'n1' })),

@@ -47,6 +47,7 @@ function chain({ first, returning } = {}) {
   const q = {};
   q.where = jest.fn(() => q);
   q.whereIn = jest.fn(() => q);
+  q.whereNull = jest.fn(() => q);
   q.select = jest.fn(() => q);
   q.update = jest.fn(() => q);
   q.first = jest.fn(async () => first);
