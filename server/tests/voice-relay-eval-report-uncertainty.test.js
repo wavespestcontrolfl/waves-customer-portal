@@ -488,6 +488,8 @@ test.each([
   ['4043879191', 'If the report is accurate, we can confirm that Talstar P was applied.', true],
   ['4043879194', 'Talstar P is about to be applied.', true],
   ['4043879194', 'Talstar P is to be applied later today.', true],
+  ['past-plan', 'Talstar P was about to be applied.', true],
+  ['past-plan', 'Talstar P was to be applied.', true],
   ['4043879194', 'Talstar P was applied earlier today.', false],
   ['4043879197', 'There is some chance Talstar P was applied.', true],
   ['4043879197', 'There is a good chance that Talstar P was applied.', true],

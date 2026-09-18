@@ -1751,7 +1751,7 @@ function reportFindingIsUncertain(text) {
     .replace(/\bwho\s+(?:can|must|may|might|could|would|should|will|shall)\s+verify\s+the\s+label\b/gi, '');
   return /\b(?:if|unless|assuming|provided\s+that)\b/i.test(conditionalEvidence)
     || /\b(?:tomorrow|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b/i.test(futureEvidence)
-    || /\b(?:is\s+about\s+to|is\s+to)\s+be\s+(?:applied|used|sprayed|placed|put)\b/i.test(scopedEvidence)
+    || /\b(?:is|was|are|were)\s+(?:about\s+)?to\s+be\s+(?:applied|used|sprayed|placed|put)\b/i.test(scopedEvidence)
     || /\bthere\s+(?:is|remains)\s+(?:(?:some|a(?:\s+\w+)?)\s+)?(?:chance|possibility)\b/i.test(scopedEvidence)
     || /\b(?:(?:the\s+)?(?:technician|tech|customer|client|homeowner|caller)|he|she|they)\s+(?:assum(?:es|ed)|suppos(?:es|ed)|expect(?:s|ed)|suspect(?:s|ed))\b/i.test(scopedEvidence)
     || /\b(?:is|was|remains|remained)\s+(?:(?:still|yet|currently)\s+)*(?:unconfirmed|unverified|unknown)\b/i.test(scopedEvidence)
