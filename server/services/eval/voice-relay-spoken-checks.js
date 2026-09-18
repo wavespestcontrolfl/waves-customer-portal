@@ -1727,7 +1727,7 @@ const REPORT_COMPLETION_TIME_RE = new RegExp(REPORT_COMPLETION_TIME, 'gi');
 function reportFindingIsUncertain(text) {
   // Consumers supply bounded finding evidence, excluding unrelated tails.
   const evidence = text.replace(/\b(i|we|you|he|she|they|it)['’]d(?=\s+(?:(?:already|also|just|now|\w+ly)\s+)*put\b)/gi,
-    (auxiliary, subject, at) => (text.slice(at).search(REPORT_COMPLETION_TIME_RE) >= 0
+    (auxiliary, subject, at) => (/\b(?:yesterday|earlier|recently|last\s+(?:week|month|year))\b/i.test(text.slice(at))
       || /\b(?:before|after)\s+(?:i|we|you|he|she|they|it)\s+(?:arrived|left|returned|called)\b/i.test(text.slice(at)))
       ? `${subject} had` : auxiliary);
   return /\b(?:if|unless|assuming|provided\s+that)\b/i.test(text)

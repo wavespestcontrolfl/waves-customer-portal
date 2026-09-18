@@ -315,3 +315,12 @@ test.each([
 ])('trailing conditions preserve bounded evidence uncertainty: %s', (text, uncertain) => {
   expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
 });
+
+test.each([
+  ["We'd put Talstar P around the perimeter tonight.", true],
+  ["We'd put Talstar P around the perimeter at 3 pm.", true],
+  ["We'd put Talstar P around the perimeter today.", true],
+  ["We'd put Talstar P around the perimeter yesterday.", false],
+])('had-put expansion requires explicit past evidence: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
