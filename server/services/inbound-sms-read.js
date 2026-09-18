@@ -125,8 +125,6 @@ async function resolveUnknownSenderPhoneMembership(scopedSids) {
     .select('m.twilio_sid', 'c.customer_id', db.raw('COALESCE(l.from_phone, c.contact_phone) as contact_phone'));
   const phonesWithLiveBell = await phonesWithLiveUnlinkedBell(candidateRows);
   for (const row of candidateRows) {
-    // Still unlinked (the ordinary case) OR promoted but this phone owns a
-    // live unlinked bell right now.
     const isUnknownSenderScoped = row.customer_id === null
       || (row.contact_phone && phonesWithLiveBell.has(row.contact_phone));
     if (isUnknownSenderScoped) {
@@ -201,14 +199,12 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
   // 3. Bell cross-clear — only threads with nothing unread left, bells that
   //    existed at entry, through the notification service.
   let notificationsCleared = 0;
-  // 3a. By message SID first: an unknown-sender thread has no customer_id,
-  //     so the customer-scoped clear below can never reach its bells; the
-  //     bell carries the SID it rang for (codex #4210 P2).
-  const unknownSenderSids = new Set();
+  // Reconcile generic sender bells separately from customer-linked bells.
   if (scopedSids.length) {
+    let knownSids = [];
     try {
       const membership = await resolveUnknownSenderPhoneMembership(scopedSids);
-      for (const sid of membership.unknownSenderSids) unknownSenderSids.add(sid);
+      knownSids = scopedSids.filter((sid) => !membership.unknownSenderSids.has(sid));
       // Promoted SIDs can own both bell types. Clear only their customer
       // link here; the generic bell remains protected by the phone lock.
       for (const [customerId, twilioSids] of membership.promotedSids) {
@@ -218,10 +214,8 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
         notificationsCleared += await retargetOrClearUnknownSenderBell(phone, now, role);
       }
     } catch (e) { logger.warn('[inbound-sms-read] unknown-sender bell retarget failed', { code: e.code || 'unknown' }); }
-    // The unknown-sender SIDs above are fully handled (retargeted or
-    // cleared) inside the per-phone lock; only known-customer SIDs still
-    // need the ordinary by-SID clear.
-    const knownSids = scopedSids.filter((sid) => !unknownSenderSids.has(sid));
+    // Generic bells require phone reconciliation; other SIDs clear directly.
+    // Membership failure must not turn unknown senders into unlocked SID clears.
     if (knownSids.length) {
       try {
         notificationsCleared += await NotificationService.markInboundSmsReadAdmin({ twilioSids: knownSids, before: now, role });

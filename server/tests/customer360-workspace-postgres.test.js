@@ -2,7 +2,10 @@
 // Uses synthetic records only; queries are real and fixtures are removed by id.
 // No application DATABASE_URL or provider client is used.
 jest.mock('../models/db', () => {
-  const db = (...args) => mockPg(...args);
+  const db = (...args) => {
+    if (args[0] === 'messages as m' && mockMembershipFailure) throw new Error('Synthetic membership lookup failure');
+    return mockPg(...args);
+  };
   db.raw = (...args) => mockPg.raw(...args);
   db.transaction = (work) => mockPg.transaction((trx) => {
     const connection = (table) => {
@@ -44,6 +47,7 @@ const ids = Array.from({ length: 4 }, () => randomUUID());
 const prefix = `C360-${randomBytes(4).toString('hex')}`;
 let mockPg;
 let mockAfterRemainingRead;
+let mockMembershipFailure;
 let technicianId;
 let invoiceId;
 let estimateId;
@@ -245,7 +249,7 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
       await run({ phone, conversationIds, messageIds, sids, bell,
         readBell: () => mockPg('notifications').where({ id: bell.id }).first() });
     } finally {
-      mockAfterRemainingRead = null;
+      mockAfterRemainingRead = null; mockMembershipFailure = false;
       await mockPg('sms_log').whereIn('twilio_sid', sids).delete();
       await mockPg('messages').whereIn('conversation_id', conversationIds).delete();
       if (bell) await mockPg('notifications').where({ id: bell.id }).delete();
@@ -282,6 +286,15 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
       } finally { await mockPg('notifications').where({ id: linked.id }).delete(); }
     });
   }, 30000);
+
+  test('membership failure cannot clear a generic bell with an unread sibling', async () => {
+    await withSender({}, async ({ messageIds, sids, readBell }) => {
+      mockMembershipFailure = true;
+      await markInboundSmsRead({ messageIds: [messageIds[0]], role: 'admin' });
+      expect((await readBell()).read_at).toBeNull();
+      expect((await readBell()).metadata.payload.twilioSid).toBe(sids[0]);
+    });
+  });
 
   test.each(['message IDs', 'conversation IDs'])('retrying %s reconciles a bell after the first read lock times out', async input => {
     await withSender({}, async ({ phone, messageIds, conversationIds, readBell }) => {
