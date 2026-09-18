@@ -277,10 +277,9 @@ function completionInvoiceAlreadyDelivered(invoice) {
 // firstDeliveryOnly for the first). Do not widen isLiveVisitStatus to
 // include these statuses: its own callers (the closeout resolver and the
 // locked re-check in complete-scheduled-service.js) depend on the
-// narrower set. Matches the admin-invoices.js open-visit-link picker's own
-// OPEN_VISIT_STATUSES, which independently arrived at the same four
-// statuses for the same "still open" question.
-const INVOICE_COPY_OPEN_VISIT_STATUSES = Object.freeze(['pending', 'confirmed', 'en_route', 'on_site']);
+// narrower set. A rescheduled visit is also incomplete while it awaits
+// confirmation; its earlier service date must not imply completion.
+const INVOICE_COPY_OPEN_VISIT_STATUSES = Object.freeze(['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site']);
 function isVisitIncompleteForInvoiceCopy(status) {
   return status == null || INVOICE_COPY_OPEN_VISIT_STATUSES.includes(String(status));
 }

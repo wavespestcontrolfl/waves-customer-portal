@@ -49,7 +49,7 @@ const WINDOW_OPEN = new Date('2026-08-07T12:00:00.000Z'); // 8:00 AM ET
 
 function chain({ rows, returning, first, updateCount = 1 } = {}) {
   const q = {};
-  for (const m of ['where', 'whereIn', 'whereNotNull', 'whereNull', 'whereRaw', 'orWhere', 'orderBy', 'limit', 'update', 'insert']) {
+  for (const m of ['where', 'whereIn', 'whereNotNull', 'whereNull', 'whereRaw', 'orWhere', 'orderBy', 'limit', 'update', 'insert', 'forUpdate', 'noWait']) {
     q[m] = jest.fn(() => q);
   }
   q.select = jest.fn(async () => rows || []);
@@ -454,6 +454,164 @@ describe('processScheduledSends send-window handling', () => {
     expect(result).toEqual({ sent: 0, failed: 1, deferred: 0 });
     const updateArgs = failUpdate.update.mock.calls[0][0];
     expect(updateArgs.scheduled_send_attempts).toBe(3);
+  });
+
+  test.each([0, 100])('scheduled zero due (total %s) settles before delivery ownership and stays settled on later ticks', async (total) => {
+    isWithinSendWindowET.mockReturnValue(true);
+    const row = {
+      ...dueRow, status: 'scheduled', total, credit_applied: total,
+      scheduled_service_id: 'visit-1', scheduled_send_at: new Date('2026-08-06T12:00:00Z'),
+    };
+    let deliveryClaims = 0;
+    const invoiceLocks = [];
+    const previousTransaction = db.transaction;
+    const stripeFence = jest.spyOn(require('../services/stripe'), 'assertNoInvoiceChargeReconciliationPending')
+      .mockResolvedValue(undefined);
+    const audit = jest.spyOn(require('../services/audit-log'), 'recordAuditEvent')
+      .mockResolvedValue(undefined);
+    db.mockReset();
+    db.transaction = jest.fn(async (callback) => callback(db));
+    db.mockImplementation((table) => {
+      const q = chain();
+      if (table !== 'invoices') {
+        q.first.mockResolvedValue(table === 'scheduled_services'
+          ? { id: 'visit-1', status: 'confirmed' }
+          : table === 'customers' ? { id: 'cust-1' } : undefined);
+        return q;
+      }
+      const filters = [];
+      q.where.mockImplementation((field, value) => {
+        if (typeof field === 'object') filters.push(...Object.entries(field));
+        else if (field === 'status') filters.push([field, value]);
+        return q;
+      });
+      const matches = () => filters.every(([key, value]) => row[key] === value);
+      q.first.mockImplementation(async () => matches() ? { ...row } : undefined);
+      q.select.mockImplementation(async () => matches() && row.scheduled_send_attempts < 5 ? [{ ...row }] : []);
+      q.update.mockImplementation((payload) => {
+        if (matches()) {
+          if (payload.status === 'sending') deliveryClaims += 1;
+          Object.assign(row, payload);
+        }
+        return q;
+      });
+      q.returning.mockImplementation(async () => [{ ...row }]);
+      q.forUpdate.mockImplementation(() => { invoiceLocks.push(q); return q; });
+      return q;
+    });
+    try {
+      for (let tick = 0; tick < 6; tick += 1) {
+        await expect(InvoiceService.processScheduledSends())
+          .resolves.toEqual({ sent: 0, failed: 0, deferred: 0 });
+      }
+      expect(row).toMatchObject({
+        status: 'prepaid', prepaid_prev_status: 'scheduled',
+        prepaid_by: 'system:zero_balance', scheduled_send_attempts: 2,
+      });
+      expect(deliveryClaims).toBe(0);
+      expect(invoiceLocks).toHaveLength(1);
+      expect(stripeFence).toHaveBeenCalledTimes(1);
+      expect(audit).toHaveBeenCalledWith(expect.objectContaining({ action: 'invoice.zero_balance_settled' }));
+      expect(sendSpy).not.toHaveBeenCalled();
+      expect(require('../services/invoice-email').sendInvoiceEmail).not.toHaveBeenCalled();
+    } finally {
+      db.mockReset();
+      if (previousTransaction) db.transaction = previousTransaction;
+      else delete db.transaction;
+      stripeFence.mockRestore();
+      audit.mockRestore();
+    }
+  });
+
+  test('a refused oldest zero-due row is deferred so a later payable row sends on the next limit-1 tick', async () => {
+    isWithinSendWindowET.mockReturnValue(true);
+    const originalDueAt = new Date('2026-08-06T12:00:00Z');
+    const zeroDueRow = {
+      ...dueRow,
+      id: 'zero-due',
+      status: 'scheduled',
+      total: 100,
+      credit_applied: 100,
+      scheduled_service_id: 'visit-1',
+      scheduled_send_at: originalDueAt,
+    };
+    const payableRow = {
+      ...dueRow,
+      id: 'payable',
+      status: 'scheduled',
+      total: 100,
+      credit_applied: 0,
+      scheduled_service_id: 'visit-2',
+      scheduled_send_at: new Date('2026-08-06T12:01:00Z'),
+    };
+    const refusalUpdate = chain();
+    const claim = chain({ returning: [{
+      id: 'payable', scheduled_request_review: false,
+      scheduled_review_delay_minutes: null, send_claim_token: 'payable-claim',
+    }] });
+    const settlement = jest.spyOn(InvoiceService, 'settleZeroBalance')
+      .mockResolvedValue({ settled: false, reason: 'existing_payment_work', invoice: zeroDueRow });
+    const startedAt = Date.now();
+    db
+      .mockReturnValueOnce(chain())
+      .mockReturnValueOnce(chain({ rows: [zeroDueRow] }))
+      .mockReturnValueOnce(refusalUpdate)
+      .mockReturnValueOnce(chain())
+      .mockReturnValueOnce(chain({ rows: [payableRow] }))
+      .mockReturnValueOnce(claim);
+    sendSpy.mockResolvedValue({ ok: true, sms: { ok: true }, email: { ok: true }, creditApplied: 0 });
+
+    try {
+      await expect(InvoiceService.processScheduledSends({ limit: 1 }))
+        .resolves.toEqual({ sent: 0, failed: 1, deferred: 0 });
+      await expect(InvoiceService.processScheduledSends({ limit: 1 }))
+        .resolves.toEqual({ sent: 1, failed: 0, deferred: 0 });
+
+      expect(refusalUpdate.where).toHaveBeenCalledWith({
+        id: 'zero-due', status: 'scheduled', scheduled_send_at: originalDueAt,
+      });
+      const deferred = refusalUpdate.update.mock.calls[0][0];
+      expect(deferred.scheduled_send_at.getTime()).toBeGreaterThanOrEqual(startedAt + 5 * 60 * 1000);
+      expect(deferred.scheduled_send_attempts).toBeUndefined();
+      expect(deferred.scheduled_send_error).toContain('existing_payment_work');
+      expect(sendSpy).toHaveBeenCalledTimes(1);
+      expect(sendSpy).toHaveBeenCalledWith('payable', expect.objectContaining({ allowClaimed: true }));
+      expect(settlement).toHaveBeenCalledTimes(1);
+    } finally {
+      settlement.mockRestore();
+    }
+  });
+
+  test('a concurrent reschedule wins the zero-due refusal deferral CAS', async () => {
+    isWithinSendWindowET.mockReturnValue(true);
+    const originalDueAt = new Date('2026-08-06T12:00:00Z');
+    const row = {
+      ...dueRow,
+      status: 'scheduled',
+      total: 100,
+      credit_applied: 100,
+      scheduled_service_id: 'visit-1',
+      scheduled_send_at: originalDueAt,
+    };
+    const refusalUpdate = chain({ updateCount: 0 });
+    const settlement = jest.spyOn(InvoiceService, 'settleZeroBalance')
+      .mockResolvedValue({ settled: false, reason: 'collection_stopped', invoice: row });
+    db
+      .mockReturnValueOnce(chain())
+      .mockReturnValueOnce(chain({ rows: [row] }))
+      .mockReturnValueOnce(refusalUpdate);
+
+    try {
+      await expect(InvoiceService.processScheduledSends({ limit: 1 }))
+        .resolves.toEqual({ sent: 0, failed: 1, deferred: 0 });
+      expect(refusalUpdate.where).toHaveBeenCalledWith({
+        id: 'inv-1', status: 'scheduled', scheduled_send_at: originalDueAt,
+      });
+      expect(refusalUpdate.update).toHaveBeenCalledTimes(1);
+      expect(refusalUpdate.update.mock.calls[0][0].scheduled_send_attempts).toBeUndefined();
+    } finally {
+      settlement.mockRestore();
+    }
   });
 
   test('an initial deposit readiness refusal keeps the scheduled retry slot instead of parking an ambiguous delivery', async () => {

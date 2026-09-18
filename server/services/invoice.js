@@ -3558,6 +3558,7 @@ const InvoiceService = {
     // finally's restore correctly skips the old row once a fresh
     // replacement secures the delivery instead.
     let delivered = false;
+    let deliveryUnverified = false;
     let queuedReplacementSecured = false;
     // Reversed on every non-delivered exit except payer_billed (matching
     // the pre-round-3 per-branch behavior exactly — this suppression is an
@@ -3895,6 +3896,7 @@ const InvoiceService = {
           const err = new Error(`payment-link SMS blocked: ${sendResult.code}`);
           err.code = sendResult.code;
           err.reason = sendResult.reason;
+          err.providerOutcome = sendResult;
           // Send-window deferral contract: a QUIET_HOURS_HOLD is "try again at
           // 8 AM", not a delivery failure — carry the hold metadata so
           // sendViaSMSAndEmail / processScheduledSends can reschedule instead
@@ -3990,6 +3992,17 @@ const InvoiceService = {
             invoiceId, invoice, payUrl, previousStatus, allowClaimed, actorTechnicianId, finalizeInvoiceAfterSms, consumedQueuedSendRows: queuedSendRowsToResolve, err,
           });
         }
+        if (err.providerOutcome?.deliveryOutcome === "uncertain") {
+          // The API request started, but its outcome is unknown. Releasing the
+          // claim or restoring an adopted text could duplicate an accepted SMS.
+          // Keep both held for the existing stale-claim review recovery; do not
+          // finalize delivery, reverse credit, requeue, or try another channel.
+          deliveryUnverified = true;
+          err.deliveryUnverified = true;
+          delete err.deliveryNeverAttempted;
+          logger.error(`[invoice] SMS delivery unverified for ${invoice.invoice_number} — send claim held for review: ${err.message}`);
+          throw err;
+        }
         // NOT delivered. A DIRECT caller (batch sendImmediately, the
         // AI-assistant send tool, the collections voice path — no wrapping
         // sendViaSMSAndEmail) has no other retry rail for a send-window /
@@ -4023,7 +4036,7 @@ const InvoiceService = {
       // second (restoreSendClaim's own contract), THEN credit reversed —
       // reverseAppliedCredit refuses a still-'sending' invoice, so it must
       // run after the restore, never before.
-      if (!delivered) {
+      if (!delivered && !deliveryUnverified) {
         // The queue row this claim's adoption cancelled is only safe to
         // leave cancelled when a fresh replacement now owns the delivery —
         // otherwise restore it so a failed send never silently drops a
@@ -4181,6 +4194,10 @@ const InvoiceService = {
           if (smsResult?.code) sms.code = smsResult.code;
         }
       } catch (err) {
+        // An uncertain provider result retains this claim and its adopted SMS
+        // obligation. The scheduled caller parks it through its existing review
+        // hold; a direct caller leaves it for stale recovery. No email fallback.
+        if (err.deliveryUnverified) throw err;
         sms.error = err.message;
         if (err.code) sms.code = err.code;
         // Preserve the send-window hold so callers with a retry rail
@@ -4609,9 +4626,15 @@ const InvoiceService = {
       .select(
         "id",
         "invoice_number",
+        "scheduled_send_at",
         "scheduled_send_attempts",
         "scheduled_request_review",
         "scheduled_review_delay_minutes",
+        // Zero-due settlement must run before this worker claims delivery.
+        "status",
+        "total",
+        "credit_applied",
+        "scheduled_service_id",
         // For the send-window pre-claim guard's SMS-leg check: a
         // payer-billed invoice is delivered email-only by design.
         "payer_id",
@@ -4639,6 +4662,31 @@ const InvoiceService = {
       nextSendWindowOpenET,
     } = require("./messaging/send-window");
     for (const inv of due) {
+      // A delivery preclaim changes scheduled -> sending, which the canonical
+      // zero-balance settlement rightly refuses as an in-flight send. Settle
+      // first, under its authoritative row lock and payment/visit fences. A
+      // refusal moves the row briefly out of the oldest-due page so it
+      // cannot starve later payable invoices; neither outcome spends a send
+      // attempt. Match the due-list timestamp exactly so an admin's concurrent
+      // reschedule remains authoritative.
+      const zeroDue = await zeroDueOpenVisitSendOutcome(inv, inv.id);
+      if (zeroDue) {
+        if (!zeroDue.ok) {
+          await db("invoices")
+            .where({
+              id: inv.id,
+              status: "scheduled",
+              scheduled_send_at: inv.scheduled_send_at,
+            })
+            .update({
+              scheduled_send_at: new Date(Date.now() + 5 * 60 * 1000),
+              scheduled_send_error: zeroDue.error,
+              updated_at: new Date(),
+            });
+          failed += 1;
+        }
+        continue;
+      }
       if (isEnabled("smsSendWindow") && !isWithinSendWindowET()) {
         // SMS-leg check: the window is an SMS fence, so an invoice with no
         // SMS leg must not have its EMAIL delayed by it — a third-party

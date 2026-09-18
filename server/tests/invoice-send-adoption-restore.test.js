@@ -100,6 +100,82 @@ const draftInvoice = {
   token: 'tok-1',
 };
 
+describe('uncertain invoice SMS delivery holds its claim and adopted obligation for review', () => {
+  test.each([
+    ['direct SMS', 'return'], ['direct SMS', 'throw'],
+    ['combined direct', 'return'], ['combined direct', 'throw'],
+    ['combined scheduled', 'return'], ['combined scheduled', 'throw'],
+  ])('%s with uncertain provider %s never restores or retries the adopted text', async (surface, providerResult) => {
+    jest.clearAllMocks();
+    db.mockReset();
+    const invoice = { ...draftInvoice, total: 100 };
+    const sending = { ...invoice, status: 'sending', send_claim_token: 'uncertain-claim' };
+    const queuedRow = { id: 'sms-uncertain-1', scheduled_for: new Date('2026-09-11T12:00:00Z') };
+    const consume = chain({ returning: [queuedRow] });
+    const untouched = chain({ first: sending });
+    const parkForReview = chain();
+    const customer = chain({ first: { id: 'cust-1', phone: '+19415550123', first_name: 'Pat' } });
+    const read = (row) => chain({ first: row });
+    const queueCheck = () => read(undefined);
+    const mocks = surface === 'direct SMS'
+      ? [read(invoice), read(invoice), queueCheck(), chain({ returning: [sending] }),
+        queueCheck(), consume, queueCheck(), customer, read(sending)]
+      : surface === 'combined direct'
+        ? [read(invoice), read(invoice), queueCheck(), chain({ returning: [sending] }),
+          queueCheck(), consume, queueCheck(), read(sending), queueCheck(), customer, read(sending)]
+        : [chain(), chain({ rows: [{ ...invoice, status: 'scheduled', scheduled_send_attempts: 2 }] }),
+          chain({ returning: [sending] }), read(sending), read(sending),
+          queueCheck(), consume, queueCheck(), read(sending), queueCheck(), customer, read(sending), parkForReview];
+    for (const q of mocks) db.mockReturnValueOnce(q);
+    db.mockReturnValue(untouched);
+    const outcome = {
+      sent: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_FAILURE',
+      reason: 'API timed out after request started',
+    };
+    if (providerResult === 'return') sendCustomerMessage.mockResolvedValueOnce(outcome);
+    else sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('provider audit failed after timeout'), {
+      providerOutcome: outcome,
+    }));
+    const { autoApplyAccountCreditIfEnabled, reverseAppliedCredit } = require('../services/customer-credit');
+    autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 25, fullyCovered: false });
+    const window = jest.spyOn(require('../services/messaging/send-window'), 'isWithinSendWindowET').mockReturnValue(true);
+    try {
+      if (surface === 'combined scheduled') {
+        await expect(InvoiceService.processScheduledSends())
+          .resolves.toEqual({ sent: 0, failed: 1, deferred: 0 });
+        expect(parkForReview.where).toHaveBeenCalledWith({
+          id: 'inv-1', status: 'sending', send_claim_token: 'uncertain-claim',
+        });
+        expect(parkForReview.update).toHaveBeenCalledWith(expect.objectContaining({
+          status: 'scheduled', scheduled_send_at: null,
+          scheduled_send_error: expect.stringMatching(/^Recovered from stale sending claim/),
+        }));
+        expect(parkForReview.update.mock.calls[0][0].scheduled_send_attempts).toBeUndefined();
+      } else {
+        const send = surface === 'direct SMS'
+          ? InvoiceService.sendViaSMS('inv-1') : InvoiceService.sendViaSMSAndEmail('inv-1', {});
+        await expect(send).rejects.toMatchObject({
+          deliveryUnverified: true, providerOutcome: { deliveryOutcome: 'uncertain' },
+        });
+      }
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(consume.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'cancelled' }));
+      expect(untouched.update).not.toHaveBeenCalled();
+      expect(untouched.insert).not.toHaveBeenCalled();
+      expect(sendInvoiceEmail).not.toHaveBeenCalled();
+      expect(reverseAppliedCredit).not.toHaveBeenCalled();
+      // No bookkeeping may claim acceptance or discharge the unresolved queue.
+      const providerStart = sendCustomerMessage.mock.invocationCallOrder[0];
+      const writesAfterProvider = mocks.filter((q) => q !== parkForReview).flatMap((q) =>
+        q.update.mock.invocationCallOrder.filter((order) => order > providerStart));
+      expect(writesAfterProvider).toEqual([]);
+    } finally {
+      window.mockRestore();
+      db.mockReset();
+    }
+  });
+});
+
 describe('claimInvoiceForSend adoption survives a failed replacement delivery', () => {
   beforeEach(() => jest.clearAllMocks());
 
