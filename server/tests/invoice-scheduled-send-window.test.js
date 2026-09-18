@@ -808,4 +808,112 @@ describe('processScheduledSends send-window handling', () => {
     const logger = require('../services/logger');
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('moved out from under this claim'));
   });
+
+  test('stale parking ends the old token episode, so an operator replacement claim survives the old worker restore', async () => {
+    isWithinSendWindowET.mockReturnValue(true);
+    const invoice = {
+      ...dueRow,
+      status: 'scheduled',
+      total: 117,
+      credit_applied: 0,
+      scheduled_service_id: null,
+      scheduled_send_at: new Date(Date.now() - 60_000),
+      scheduled_send_error: null,
+      send_claim_token: null,
+      updated_at: new Date(),
+    };
+    let forceStale = false;
+
+    const statefulQuery = (table) => {
+      if (table === 'sms_log') {
+        const empty = {};
+        for (const method of ['where', 'whereRaw', 'whereIn', 'whereNotNull']) empty[method] = jest.fn(() => empty);
+        empty.first = jest.fn(async () => undefined);
+        return empty;
+      }
+      expect(table).toBe('invoices');
+      const predicates = [];
+      let updateCount = null;
+      const q = {};
+      q.where = jest.fn((field, operator, value) => {
+        if (typeof field === 'function') return q; // attempt-cap disjunction
+        if (field && typeof field === 'object') {
+          for (const [key, expected] of Object.entries(field)) predicates.push(() => invoice[key] === expected);
+          return q;
+        }
+        if (field === 'updated_at' && operator === '<') predicates.push(() => forceStale);
+        else if (operator === '<=') predicates.push(() => invoice[field] != null && new Date(invoice[field]) <= new Date(value));
+        else predicates.push(() => invoice[field] === operator);
+        return q;
+      });
+      q.whereNotNull = jest.fn((field) => { predicates.push(() => invoice[field] != null); return q; });
+      q.whereNull = jest.fn((field) => { predicates.push(() => invoice[field] == null); return q; });
+      q.orWhere = jest.fn(() => q);
+      q.whereIn = jest.fn((field, values) => { predicates.push(() => values.includes(invoice[field])); return q; });
+      q.whereRaw = jest.fn(() => q);
+      q.orderBy = jest.fn(() => q);
+      q.limit = jest.fn(() => q);
+      const matches = () => predicates.every((predicate) => predicate());
+      q.update = jest.fn((payload) => {
+        updateCount = matches() ? 1 : 0;
+        if (updateCount) Object.assign(invoice, payload);
+        return q;
+      });
+      q.returning = jest.fn(async () => (updateCount ? [{ ...invoice }] : []));
+      q.select = jest.fn(async () => (matches() ? [{ ...invoice }] : []));
+      q.first = jest.fn(async () => (matches() ? { ...invoice } : undefined));
+      q.then = (resolve) => Promise.resolve(updateCount ?? (matches() ? [{ ...invoice }] : [])).then(resolve);
+      return q;
+    };
+    db.mockImplementation(statefulQuery);
+
+    let finishOldSend;
+    sendSpy.mockImplementation(() => new Promise((resolve) => { finishOldSend = resolve; }));
+    const oldWorker = InvoiceService.processScheduledSends({ limit: 1 });
+    for (let i = 0; i < 20 && !finishOldSend; i += 1) await Promise.resolve();
+    expect(finishOldSend).toBeDefined();
+    const oldToken = invoice.send_claim_token;
+    expect(oldToken).toEqual(expect.any(String));
+
+    forceStale = true;
+    await expect(InvoiceService.processScheduledSends({ limit: 1 }))
+      .resolves.toEqual({ sent: 0, failed: 0, deferred: 0 });
+    expect(invoice).toMatchObject({
+      status: 'scheduled', scheduled_send_at: null, send_claim_token: null,
+    });
+
+    const replacement = await InvoiceService.claimInvoiceForSend(invoice.id, { operatorInitiated: true });
+    expect(replacement).toMatchObject({ claimed: true, previousStatus: 'scheduled' });
+    expect(invoice).toMatchObject({ status: 'sending', send_claim_token: null });
+
+    finishOldSend({
+      ok: false,
+      sms: { ok: false, error: 'old worker failed after replacement began' },
+      email: { ok: false, error: 'old worker failed after replacement began' },
+      creditApplied: 0,
+    });
+    await expect(oldWorker).resolves.toEqual({ sent: 0, failed: 1, deferred: 0 });
+    expect(invoice).toMatchObject({ status: 'sending', send_claim_token: null });
+    expect(invoice.scheduled_send_error).toMatch(/^Recovered from stale sending claim/);
+    expect(require('../services/logger').warn)
+      .toHaveBeenCalledWith(expect.stringContaining('restore skipped'));
+
+    // Legacy rows may already be parked with the old token retained (or
+    // return to a claimable status through another lifecycle transition).
+    // The ordinary operator claim is itself a universal episode boundary.
+    Object.assign(invoice, {
+      status: 'scheduled',
+      scheduled_send_at: null,
+      scheduled_send_error: 'Recovered from stale sending claim — legacy row',
+      send_claim_token: oldToken,
+    });
+    const legacyReplacement = await InvoiceService.claimInvoiceForSend(invoice.id, { operatorInitiated: true });
+    expect(legacyReplacement).toMatchObject({ claimed: true, previousStatus: 'scheduled' });
+    expect(invoice).toMatchObject({ status: 'sending', send_claim_token: null });
+    const lateOldRestore = await db('invoices')
+      .where({ id: invoice.id, status: 'sending', send_claim_token: oldToken })
+      .update({ status: 'scheduled', send_claim_token: null });
+    expect(lateOldRestore).toBe(0);
+    expect(invoice.status).toBe('sending');
+  });
 });

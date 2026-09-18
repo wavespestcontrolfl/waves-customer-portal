@@ -6,13 +6,13 @@
  * round 16 fixed restoreSendClaim re-stamping it, round 18 found
  * autoApplyAccountCreditIfEnabled's partial credit apply doing the same
  * thing). The fix replaces that token with send_claim_token — a column
- * NO OTHER writer in the codebase touches, so no future writer can
- * invalidate the match by accident.
+ * no unrelated writer in the codebase touches. Stale recovery and a new
+ * ordinary claim deliberately clear it when ending/replacing an episode.
  *
  * This is the SOURCE CONTRACT that locks the shape in place — a future edit
  * that reintroduces updated_at as the match key, or that writes
- * send_claim_token from anywhere but this one claim/restore pair, fails
- * HERE, not at the next review round. No database required.
+ * send_claim_token outside claim/restore/episode invalidation, fails HERE,
+ * not at the next review round. No database required.
  */
 const fs = require('fs');
 const path = require('path');
@@ -53,12 +53,20 @@ describe('processScheduledSends send-claim token — source contract (round 18 #
     expect(helperBlock).toMatch(/\.update\(\{ \.\.\.payload, send_claim_token: null \}\)/);
   });
 
-  test('send_claim_token is written and read ONLY by this one claim/restore pair in invoice.js', () => {
+  test('a new ordinary claim clears any inherited scheduled-worker token atomically', () => {
+    expect(invoiceSource).toMatch(/\.where\(\{ id: invoiceId, status: current\.status \}\)\s*\n\s*\/\/ A new ordinary claim[\s\S]{0,300}?\.update\(\{ status: "sending", updated_at: new Date\(\), send_claim_token: null \}\)/);
+  });
+
+  test('send_claim_token is touched only by claim, token-matched restore, and claim-episode invalidation', () => {
     const occurrences = invoiceSource.split('send_claim_token').length - 1;
     // claim UPDATE, its returning() list, the restore WHERE, the restore
-    // UPDATE, plus explanatory prose in the comment directly above — any
-    // more than this and a new writer/reader has crept in unreviewed.
-    expect(occurrences).toBeLessThanOrEqual(6);
+    // UPDATE, stale recovery / ordinary-claim invalidation, plus explanatory
+    // prose in the comments directly above — any more means a new token
+    // consumer has crept in unreviewed.
+    expect(occurrences).toBeLessThanOrEqual(8);
+    const staleRecoveryAt = invoiceSource.indexOf('// Stale-claim recovery PARKS the row');
+    const staleRecoveryBlock = invoiceSource.slice(staleRecoveryAt, staleRecoveryAt + 1800);
+    expect(staleRecoveryBlock).toMatch(/status: "scheduled",[\s\S]{0,500}?send_claim_token: null,/);
   });
 
   test.each(OTHER_INTRA_CLAIM_WRITERS)('%s never references send_claim_token — an intra-claim writer here cannot invalidate the scheduled-send restore', (relPath) => {

@@ -1527,7 +1527,10 @@ async function claimInvoiceForSend(invoiceId, {
 
   const [invoice] = await database("invoices")
     .where({ id: invoiceId, status: current.status })
-    .update({ status: "sending", updated_at: new Date() })
+    // A new ordinary claim starts a distinct ownership episode. Clear any
+    // scheduled-worker token retained by a legacy parked/unvoided row so a
+    // late worker cannot restore over this replacement send.
+    .update({ status: "sending", updated_at: new Date(), send_claim_token: null })
     .returning("*");
   if (!invoice) {
     const latest = await database("invoices").where({ id: invoiceId }).first();
@@ -4609,6 +4612,11 @@ const InvoiceService = {
         status: "scheduled",
         scheduled_send_at: null,
         scheduled_send_error: require("./invoice-helpers").STALE_SEND_PARK_ERROR,
+        // End the stale worker's claim episode. An operator resend can claim
+        // this parked row immediately; if the old worker later resumes, its
+        // token-matched restore must not mistake that replacement 'sending'
+        // row for the claim it originally owned.
+        send_claim_token: null,
         updated_at: new Date(),
       });
 
@@ -4785,9 +4793,11 @@ const InvoiceService = {
       // 18's example; an email-delivery stamp is another) that have nothing
       // to do with this claim, and a restore keyed on that exact stamp
       // matches zero rows the moment any of them runs, stranding the
-      // invoice under 'sending' with its credit already consumed. This
-      // column is written ONLY here and read ONLY by the match below, so no
-      // other writer — present or future — can invalidate it by accident.
+      // invoice under 'sending' with its credit already consumed.
+      // A fresh value is minted ONLY by the scheduled claim helper and read
+      // by the match below. Restore paths and stale recovery may clear it to
+      // end that claim episode; unrelated writers never replace or retain it
+      // as ownership evidence for a later send.
       // A restore that only guards on status='sending' can still clobber a
       // row something else moved on mid-flight — the void sweep takes a
       // 'sending' row out from under a live claim by design
