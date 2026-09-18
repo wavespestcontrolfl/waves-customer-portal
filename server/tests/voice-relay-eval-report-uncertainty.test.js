@@ -1,0 +1,222 @@
+const { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: grammar } = require('../services/eval/voice-relay-spoken-checks');
+
+// Each classifier receives bounded evidence selected by its consumer. Passing
+// completion alone does not confirm a product, target, date or report readback.
+
+test('report grammar has no runner or value-rule registration', () => {
+  expect(SPOKEN_CHECK_RUNNERS).not.toHaveProperty('report_readback_confirms');
+  expect(SPOKEN_CHECK_VALUE_RULES).not.toHaveProperty('report_readback_confirms');
+});
+
+test.each([
+  ['There is a possibility that Talstar P was applied to the exterior perimeter.', true],
+  ["There's a possibility Talstar P was applied to the exterior perimeter.", true],
+  ['There is a chance that Talstar P was applied to the exterior perimeter.', true],
+  ['It is possible that Talstar P was applied to the exterior perimeter.', true],
+  ['Talstar P was allegedly applied to the exterior perimeter.', true],
+  ['It is likely that Talstar P was applied to the exterior perimeter.', true],
+  ['Talstar P was likely applied to the exterior perimeter.', true],
+  ['Talstar P likely was applied to the exterior perimeter.', true],
+  ['Talstar P has likely been applied to the exterior perimeter.', true],
+  ['The technician Will applied Talstar P to the exterior perimeter.', false],
+  ['The technician May applied Talstar P to the exterior perimeter.', false],
+  ['The technician Will may have applied Talstar P to the exterior perimeter.', true],
+  ['The technician May will apply Talstar P to the exterior perimeter.', true],
+  ['Talstar P could already have been applied to the exterior perimeter.', true],
+  ['Talstar P should be applied to the exterior perimeter.', true],
+  ['The report might show that Talstar P was applied to the exterior perimeter.', true],
+  ['We pretended that Talstar P was applied to the exterior perimeter.', true],
+  ['Talstar P was applied tomorrow to the exterior perimeter.', true],
+  ['Talstar P was applied yesterday to the exterior perimeter.', false],
+  ['Talstar P was applied to the exterior perimeter.', false],
+])('scoped report uncertainty: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  'Talstar P appears to have been applied to the exterior perimeter.',
+  'Talstar P seems to have been applied to the exterior perimeter.',
+  'Talstar P is believed to have been applied to the exterior perimeter.',
+  'Talstar P was thought to have been applied to the exterior perimeter.',
+  'Talstar P is assumed to have been applied to the exterior perimeter.',
+])('epistemic raising does not establish definite treatment: %s', (text) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(true);
+});
+
+test.each([
+  ['It is possible Talstar P was applied to the exterior perimeter.', true],
+  ['It is possible that Talstar P was applied to the exterior perimeter.', true],
+  ['We think that Talstar P was applied to the exterior perimeter.', true],
+  ['We believe Talstar P was applied to the exterior perimeter.', true],
+  ['We confirm that Talstar P was applied to the exterior perimeter.', false],
+  ['Talstar P was applied to the exterior perimeter.', false],
+])('uncertainty does not require an explicit that complement: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  'The technician imagined that Talstar P was applied to the exterior perimeter.',
+  'We imagine that Talstar P was applied to the exterior perimeter.',
+])('imagined assertions retain uncertainty: %s', (text) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(true);
+});
+
+test.each([
+  ['Talstar P might get applied to the exterior perimeter.', 'Talstar P did get applied to the exterior perimeter.'],
+  ['It is unlikely that Talstar P was applied to the exterior perimeter.', 'It is confirmed that Talstar P was applied to the exterior perimeter.'],
+  ['We thought Talstar P was applied to the exterior perimeter.', 'We confirmed Talstar P was applied to the exterior perimeter.'],
+])('uncertain construction differs from definite evidence: %s', (uncertain, definite) => {
+  expect(grammar.reportFindingIsUncertain(uncertain)).toBe(true);
+  expect(grammar.reportFindingIsUncertain(definite)).toBe(false);
+});
+
+test.each(["would've", "could've", "might've", 'would’ve', 'could’ve', 'might’ve'])('contracted modal perfect %s remains uncertain', (modal) => {
+  const hypothetical = `We ${modal} applied Talstar P to the exterior perimeter.`;
+  expect(grammar.reportFindingIsUncertain(hypothetical)).toBe(true);
+
+  const definite = 'We have applied Talstar P to the exterior perimeter.';
+  expect(grammar.reportFindingIsUncertain(definite)).toBe(false);
+});
+
+test.each(['assume', 'assumed'])('active %s attribution remains uncertain', (assumption) => {
+  const uncertain = `We ${assumption} that Talstar P was applied to the exterior perimeter.`;
+  expect(grammar.reportFindingIsUncertain(uncertain)).toBe(true);
+
+  const definite = 'We confirmed that Talstar P was applied to the exterior perimeter.';
+  expect(grammar.reportFindingIsUncertain(definite)).toBe(false);
+});
+
+test('future successful resultative is uncertain rather than completed evidence', () => {
+  const future = 'We will manage to apply Talstar P to the exterior perimeter.';
+  expect(grammar.reportFindingIsUncertain(future)).toBe(true);
+
+  const completed = 'We managed to apply Talstar P to the exterior perimeter.';
+  expect(grammar.reportFindingIsUncertain(completed)).toBe(false);
+});
+
+test('future successful gerund is uncertain rather than completed evidence', () => {
+  const future = 'We will succeed in applying Talstar P to the exterior perimeter.';
+  expect(grammar.reportFindingIsUncertain(future)).toBe(true);
+
+  const completed = 'We succeeded in applying Talstar P to the exterior perimeter.';
+  expect(grammar.reportFindingIsUncertain(completed)).toBe(false);
+});
+
+test.each([
+  ['The technician Will put Talstar P around the exterior perimeter.', false],
+  ['The technician May put Talstar P around the exterior perimeter.', false],
+  ['The technician Will may put Talstar P around the exterior perimeter.', true],
+  ['The technician May will put Talstar P around the exterior perimeter.', true],
+  ['The technician will put Talstar P around the exterior perimeter.', true],
+  ['The technician may put Talstar P around the exterior perimeter.', true],
+  ['We will put Talstar P around the exterior perimeter.', true],
+  ['We may put Talstar P around the exterior perimeter.', true],
+])('modal put preserves technician-name tense: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['We can confirm that Talstar P was applied to the exterior perimeter.', false],
+  ['I can verify that Talstar P was applied to the exterior perimeter.', false],
+  ['We might confirm that Talstar P was applied to the exterior perimeter.', true],
+  ['I might verify that Talstar P was applied to the exterior perimeter.', true],
+  ['We can confirm that Talstar P might have been applied to the exterior perimeter.', true],
+])('affirmative can-confirm differs from speculative confirmation: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  'We hope we can confirm that Talstar P was applied to the exterior perimeter.',
+  'I hope I can verify that Talstar P was applied to the exterior perimeter.',
+  'We are hoping we can confirm that Talstar P was applied to the exterior perimeter.',
+])('tentative governors retain can-confirm uncertainty: %s', (text) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(true);
+});
+
+test.each(['Yes, ', 'Okay, ', 'Certainly, ', 'Absolutely, '])('affirmative discourse prefix %s retains explicit confirmation', (prefix) => {
+  expect(grammar.reportFindingIsUncertain(`${prefix}we can confirm that Talstar P was applied to the exterior perimeter.`)).toBe(false);
+});
+
+test.each([
+  ['We can definitely confirm that Talstar P was applied to the exterior perimeter.', false],
+  ['We can now confirm that Talstar P was applied to the exterior perimeter.', false],
+  ['I can confidently verify that Talstar P was applied to the exterior perimeter.', false],
+  ['We can possibly confirm that Talstar P was applied to the exterior perimeter.', true],
+  ['I can probably confirm that Talstar P was applied to the exterior perimeter.', true],
+  ['We hope we can definitely confirm that Talstar P was applied to the exterior perimeter.', true],
+  ['We can definitely confirm that Talstar P might have been applied to the exterior perimeter.', true],
+])('adverbial can-confirm preserves certainty scope: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['falsely', 'shows'],
+  ['incorrectly', 'lists'],
+  ['mistakenly', 'documents'],
+  ['erroneously', 'records'],
+])('%s documented treatment differs from a positive %s record', (falsity, recordVerb) => {
+  const falseRecord = `The report ${falsity} ${recordVerb} Talstar P was applied to the exterior perimeter.`;
+  expect(grammar.reportFindingIsUncertain(falseRecord)).toBe(true);
+
+  const positiveRecord = `The report ${recordVerb} Talstar P was applied to the exterior perimeter.`;
+  expect(grammar.reportFindingIsUncertain(positiveRecord)).toBe(false);
+});
+
+test.each([
+  [
+    'We hope that Talstar P was applied to the exterior perimeter.',
+    'We confirmed that Talstar P was applied to the exterior perimeter.',
+  ],
+  [
+    'We hoped that Talstar P was applied to the exterior perimeter.',
+    'We documented that Talstar P was applied to the exterior perimeter.',
+  ],
+  [
+    'Hopefully, Talstar P was applied to the exterior perimeter.',
+    'Talstar P was applied to the exterior perimeter.',
+  ],
+])('hopeful completed-treatment assertion differs from definite evidence: %s', (hopeful, definite) => {
+  expect(grammar.reportFindingIsUncertain(hopeful)).toBe(true);
+  expect(grammar.reportFindingIsUncertain(definite)).toBe(false);
+});
+
+test.each([
+  ['The technician Hope applied Talstar P to the exterior perimeter.', false],
+  ['The technician Hope may have applied Talstar P to the exterior perimeter.', true],
+])('technician Hope retains name scope: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['Talstar P might still have been applied to the exterior perimeter.', true],
+  ['Talstar P may well have been applied to the exterior perimeter.', true],
+  ['Talstar P has been applied to the exterior perimeter.', false],
+])('modal adverbs preserve completed-treatment uncertainty: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['Talstar P was applied as intended.', false],
+  ['Talstar P was intended to be applied.', true],
+])('completed as-intended treatment differs from intended-to treatment: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['I can confirm Talstar P was applied.', false],
+  ['Yes, we can verify Talstar P was applied.', false],
+  ['We can confirm whether Talstar P was applied.', true],
+  ['We can verify if Talstar P was applied.', true],
+])('affirmative can-confirm permits an omitted that complement: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['We applied Talstar P as you wished.', false],
+  ['We wish that Talstar P was applied.', true],
+  ['We wish we had applied Talstar P.', true],
+  ['We wish Talstar P had been applied.', true],
+  ['We wished Talstar P had been applied.', true],
+])('fulfilled wishes differ from wished-for treatment: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
