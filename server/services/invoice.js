@@ -2711,6 +2711,20 @@ const InvoiceService = {
       }
     }
 
+    // An overdue or same-day appointment can still be open. Select copy
+    // from its completion state rather than implying that its date proves it ran.
+    let linkedVisitIncomplete = false;
+    if (!serviceDateIsFutureET && invoice.scheduled_service_id) {
+      try {
+        const visit = await db("scheduled_services").where({ id: invoice.scheduled_service_id }).first("status");
+        linkedVisitIncomplete = visit?.status == null
+          || ["pending", "confirmed", "en_route", "on_site", "rescheduled"].includes(visit.status);
+      } catch (err) {
+        logger.warn(`[invoice] Linked visit status lookup failed for ${invoiceId}: ${err.message}`);
+        linkedVisitIncomplete = true;
+      }
+    }
+
     // Annual-prepay invoices use a dedicated, coverage-aware template — the
     // generic invoice_sent copy ("...completed on {service_date}") misframes a
     // full year of prepaid visits as a single completed service. Resolve the
@@ -2769,7 +2783,7 @@ const InvoiceService = {
       // switch as the prepay variant (a disabled invoice_sent skips this too,
       // keeping the invoice retryable); a missing/disabled variant row falls
       // through to the standard copy below so the send is never blocked.
-      if (!body && serviceDateIsFutureET && invoiceSmsActive) {
+      if (!body && (serviceDateIsFutureET || linkedVisitIncomplete) && invoiceSmsActive) {
         body = await templates.getTemplate("invoice_sent_upfront", {
           first_name: customer.first_name || "",
           service_type: serviceType,

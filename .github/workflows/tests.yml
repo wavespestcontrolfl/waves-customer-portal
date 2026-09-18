@@ -69,7 +69,7 @@ jobs:
         working-directory: server
         env:
           VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/estimate-deposit-late-reconciliation.pg.test.js tests/estimate-converter-deposit-lock.pg.test.js
+        run: npx jest --ci --silent --runInBand tests/estimate-deposit-late-reconciliation.pg.test.js tests/estimate-converter-deposit-lock.pg.test.js tests/invoice-send-open-visit-copy-postgres.test.js
       - name: SMS operational transaction tests
         working-directory: server
         env:
