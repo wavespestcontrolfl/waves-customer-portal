@@ -565,3 +565,12 @@ test.each([
   uncertainCases.forEach((text) => expect(grammar.reportFindingIsUncertain(text)).toBe(true));
   expect(grammar.reportFindingIsUncertain(definite)).toBe(false);
 });
+
+test.each([
+  ['4044238375', ['It looks as though Talstar P was applied.', 'It sounds as though Talstar P was applied.'], 'Talstar P was applied as though ants were present.'],
+  ['4044238382', ['There is no confirmation that Talstar P was applied.', 'There is no evidence that Talstar P was applied.', "There's no evidence that Talstar P was applied.", 'There’s no confirmation that Talstar P was applied.'], 'There is confirmation that Talstar P was applied.'],
+  ['4044238391', ['Talstar P was not necessarily applied.', "Talstar P hasn't necessarily been applied."], 'Talstar P was necessarily applied.'],
+])('round-seven report uncertainty %s', (_finding, uncertainCases, definite) => {
+  uncertainCases.forEach((text) => expect(grammar.reportFindingIsUncertain(text)).toBe(true));
+  expect(grammar.reportFindingIsUncertain(definite)).toBe(false);
+});
