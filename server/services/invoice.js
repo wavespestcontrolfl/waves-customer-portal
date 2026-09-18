@@ -3460,7 +3460,7 @@ const InvoiceService = {
   /**
    * Send invoice via Twilio SMS — the unified service recap + invoice message.
    */
-  async sendViaSMS(invoiceId, { allowClaimed = false, payUrlParams = null, operatorInitiated = false, actorTechnicianId = null, adoptsQueuedInvoiceSend = true } = {}) {
+  async sendViaSMS(invoiceId, { allowClaimed = false, payUrlParams = null, operatorInitiated = false, actorTechnicianId = null, adoptsQueuedInvoiceSend = true, adoptedQueuedSendRows = [] } = {}) {
     // Direct callers (batch sendImmediately, the AI-assistant send tool, the
     // from-service SMS-only path) bypass sendViaSMSAndEmail, which applies credit
     // before its own claim — so apply it here too, or those pay links bill the
@@ -3497,6 +3497,10 @@ const InvoiceService = {
       });
     }
     const { invoice, previousStatus, claimed, consumedQueuedSendRows } = claim;
+    // A combined sender owns the adopted rows, including their restoration on
+    // failure. Its SMS leg must still discharge them before finalizing delivery:
+    // a crash during email must not leave a delivered obligation re-adoptable.
+    const queuedSendRowsToResolve = [...consumedQueuedSendRows, ...adoptedQueuedSendRows];
 
     // Direct callers (batch sendImmediately, the AI-assistant send tool, the
     // from-service SMS-only path) bypass sendViaSMSAndEmail, so apply credit here too
@@ -3510,7 +3514,7 @@ const InvoiceService = {
       smsCreditResult = await autoApplyAccountCreditIfEnabled(invoiceId);
       if (smsCreditResult?.fullyCovered) {
         await enrollPacketReviewAfterCredit(invoiceId, pre?.visit_completion_packet_id);
-        await resolveConsumedQueuedSend(consumedQueuedSendRows);
+        await resolveConsumedQueuedSend(queuedSendRowsToResolve);
         // Covered by credit IS success for the caller (the invoice is now 'prepaid',
         // settled — nothing to send). Direct callers check `sent || ok`, so flag
         // ok:true; sent stays false because no SMS went out. No claim to restore —
@@ -3563,7 +3567,7 @@ const InvoiceService = {
     let reverseCreditOnExit = true;
     try {
       if (smsCreditResult?.fullyCovered) {
-        await resolveConsumedQueuedSend(consumedQueuedSendRows);
+        await resolveConsumedQueuedSend(queuedSendRowsToResolve);
         delivered = true;
         // Covered by credit IS success for the caller (the invoice is now 'prepaid',
         // settled — nothing to send). Direct callers check `sent || ok`, so flag
@@ -3907,7 +3911,7 @@ const InvoiceService = {
 
         smsDelivered = true;
         delivered = true;
-        await resolveConsumedQueuedSend(consumedQueuedSendRows);
+        await resolveConsumedQueuedSend(queuedSendRowsToResolve);
         await finalizeInvoiceAfterSms();
 
         // Kick off the per-invoice automated follow-up sequence (Day 0/3/7/14/30)
@@ -3983,7 +3987,7 @@ const InvoiceService = {
           // operator review (delivery unverified, no automatic resend) — and
           // report the send as delivered.
           return await recoverPostDeliverySmsBookkeeping({
-            invoiceId, invoice, payUrl, previousStatus, allowClaimed, actorTechnicianId, finalizeInvoiceAfterSms, consumedQueuedSendRows, err,
+            invoiceId, invoice, payUrl, previousStatus, allowClaimed, actorTechnicianId, finalizeInvoiceAfterSms, consumedQueuedSendRows: queuedSendRowsToResolve, err,
           });
         }
         // NOT delivered. A DIRECT caller (batch sendImmediately, the
@@ -4165,6 +4169,7 @@ const InvoiceService = {
           // SMS rows. The nested channel claim must not re-adopt its own
           // in-flight pending marker as if it came from an older attempt.
           adoptsQueuedInvoiceSend: false,
+          adoptedQueuedSendRows: consumedQueuedSendRows,
           payUrlParams,
           operatorInitiated,
         });

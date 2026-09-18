@@ -671,6 +671,96 @@ describe('sendViaSMSAndEmail: the SMS queue restore decision is per-channel, not
     expect(anyRestoredToScheduled).toBe(false);
   });
 
+  test.each(['return', 'audit failure'])(
+    'a delivered combined SMS (%s) discharges its adopted row before the email crash boundary',
+    async (providerResult) => {
+      jest.clearAllMocks();
+      const sendingInvoice = { ...draftWithCustomer, status: 'sending', total: 117 };
+      const sentInvoice = { ...sendingInvoice, status: 'sent', sms_sent_at: new Date() };
+      let adoptionPending = true;
+      let queuedStatus = 'cancelled';
+      const resolution = chain();
+      resolution.update.mockImplementation(() => {
+        adoptionPending = false;
+        return resolution;
+      });
+      const smsFinalize = chain({ first: sentInvoice });
+      const fallback = chain({ first: sentInvoice });
+      db.mockReset();
+      db
+        .mockReturnValueOnce(chain({ first: accrualRow }))
+        .mockReturnValueOnce(chain({ first: draftWithCustomer }))
+        .mockReturnValueOnce(chain({ first: undefined }))
+        .mockReturnValueOnce(chain({ returning: [sendingInvoice] }))
+        .mockReturnValueOnce(chain({ first: undefined }))
+        .mockReturnValueOnce(chain({ returning: [CONSUMED_ROW] }))
+        .mockReturnValueOnce(chain({ first: undefined }))
+        .mockReturnValueOnce(chain({ first: sendingInvoice }))
+        .mockReturnValueOnce(chain({ first: undefined }))
+        .mockReturnValueOnce(chain({ first: { id: 'cust-1', phone: '+19415550123', first_name: 'Pat' } }))
+        .mockReturnValueOnce(chain({ first: sendingInvoice }))
+        .mockImplementation((table) => {
+          if (table === 'sms_log') return resolution;
+          if (table === 'invoices') return smsFinalize;
+          return fallback;
+        });
+      if (providerResult === 'return') {
+        sendCustomerMessage.mockResolvedValueOnce({ sent: true });
+      } else {
+        sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('accepted SMS audit failed'), {
+          providerOutcome: { sent: true, providerMessageId: 'SM-accepted' },
+        }));
+      }
+
+      let signalEmailStarted;
+      let releaseEmail;
+      const emailStarted = new Promise((resolve) => { signalEmailStarted = resolve; });
+      const emailFinished = new Promise((resolve) => { releaseEmail = resolve; });
+      sendInvoiceEmail.mockImplementationOnce(async () => {
+        signalEmailStarted({ adoptionPending, queuedStatus });
+        return emailFinished;
+      });
+      const firstSend = InvoiceService.sendViaSMSAndEmail('inv-1', {});
+      try {
+        const crashSnapshot = await emailStarted;
+        // The process can die here, after SMS finalization but before the
+        // wrapper's post-email bookkeeping. A later explicit resend must not
+        // treat that already-delivered SMS as an unresolved queued obligation.
+        db.mockReset();
+        const consumeOnResend = chain();
+        consumeOnResend.returning.mockImplementation(async () => adoptionPending ? [CONSUMED_ROW] : []);
+        const restoreQueue = chain();
+        restoreQueue.update.mockImplementation(() => {
+          queuedStatus = 'scheduled';
+          return restoreQueue;
+        });
+        const restoreClaim = chain();
+        db
+          .mockReturnValueOnce(chain({ first: { visit_completion_packet_id: null, payer_id: null } }))
+          .mockReturnValueOnce(chain({ first: sentInvoice }))
+          .mockReturnValueOnce(chain({ first: undefined }))
+          .mockReturnValueOnce(chain({ returning: [sendingInvoice] }))
+          .mockReturnValueOnce(chain({ first: undefined }))
+          .mockReturnValueOnce(consumeOnResend)
+          .mockReturnValueOnce(chain({ first: undefined }))
+          .mockReturnValueOnce(chain({ first: { id: 'cust-1', phone: null } }))
+          .mockImplementation((table) => table === 'sms_log' ? restoreQueue : restoreClaim);
+
+        await expect(InvoiceService.sendViaSMS('inv-1'))
+          .rejects.toThrow('Customer has no phone number');
+        expect(crashSnapshot).toEqual({ adoptionPending: false, queuedStatus: 'cancelled' });
+        expect(smsFinalize.update).toHaveBeenCalledWith(expect.objectContaining({ sms_sent_at: expect.any(Date) }));
+        expect(consumeOnResend.returning).toHaveBeenCalled();
+        expect(restoreQueue.update).not.toHaveBeenCalled();
+        expect(queuedStatus).toBe('cancelled');
+      } finally {
+        db.mockReturnValue(fallback);
+        releaseEmail({ ok: false, error: 'synthetic process stopped at email handoff' });
+        await firstSend;
+      }
+    },
+  );
+
   test('round-17 P1 (#4131 finding 2): SMS fails, email is provider-accepted, and the invoice finalize update THROWS — the consumed SMS queue row was restored first, and the throw still propagates', async () => {
     jest.clearAllMocks();
     const sendingInvoice = { ...draftWithCustomer, status: 'sending' };
