@@ -94,3 +94,19 @@ test.each([
 test('an independent instruction cannot remove an actual condition on timing', () => {
   expect(qualify('The bait is safe once dry. The technician will confirm timing only if asked at 4 p.m. If swallowed, call poison control.')).toBe(false);
 });
+
+
+test.each([
+  'If asked, contact happens tomorrow.', 'if asked, contact happens tomorrow.',
+  'If asked, call times vary.', 'if asked, call times vary.',
+  'If asked, contact usually happens tomorrow.', 'if asked, call poison control hours vary.',
+])('a nominal finite statement cannot prove an independent timing instruction: %s', (suffix) => {
+  expect(qualify(`The bait is safe once dry. The technician will confirm timing at 4 p.m. ${suffix}`)).toBe(false);
+});
+
+test.each([
+  'If swallowed, call poison control.', 'if swallowed, call poison control.',
+  'If asked, contact the office tomorrow.', 'if asked, call us.',
+])('a complete bounded instruction still owns its fronted condition: %s', (suffix) => {
+  expect(qualify(`The bait is safe once dry. The technician will confirm timing at 4 p.m. ${suffix}`)).toBe(true);
+});

@@ -2,9 +2,9 @@
 // It performs no tool, database, provider, scenario, or gate operations.
 const {
   SHORT_AFFIRMATION_RE, QUESTION_LEAD_RE, QUESTION_AUX_WH_RE_SOURCE,
-  FREE_VISIT_ACKNOWLEDGMENT_RE,
+  FREE_VISIT_ACKNOWLEDGMENT_RE, clauseIsEpistemicallyHedged,
 } = require('./voice-relay-spoken-language');
-const { latestInterrogativeSpan } = require('./voice-relay-source-evidence');
+const { latestInterrogativeSpan, lexicalSourceSpans, localCandidateEvidence } = require('./voice-relay-source-evidence');
 const {
   recognizeSafetyResponse, SAFETY_REFUSED_HARM_RE, SAFETY_SUBJECT_MODIFIER,
   SAFETY_INTENSIFIER, HARM_ADJECTIVE, SAFETY_STRONG_ADJECTIVE,
@@ -17,9 +17,9 @@ const { recognizeSafetyQuestion, SAFETY_KEYWORDS_POSITIVE, SAFETY_KEYWORDS_HARM 
 const {
   safetyProductScope, safetyCircumstanceScopes,
   safetyPropositionText, safetyGuaranteeIsInterrogative, safetyExemptSpans,
-  safetyOnceDryQualifies, safetyDryingCoversCircumstances, refusesSafetyGuarantee,
+  safetyOnceDryQualifies, safetyDryingCoversCircumstances, safetyDryingCoversEvidence, refusesSafetyGuarantee,
   SAFETY_GENERIC_PRODUCT_RE, SAFETY_DRYING_CONDITION_WITHDRAWAL_RE,
-  SAFETY_REFERENTIAL_DRYING_WITHDRAWAL_RE, TECHNICIAN_DRY_TIMING_ALTERNATIVE_RE,
+  SAFETY_REFERENTIAL_DRYING_WITHDRAWAL_RE, TECHNICIAN_DRY_TIMING_RE, TECHNICIAN_DRY_TIMING_ALTERNATIVE_RE, COMPLETE_TIMING_INSTRUCTION_RE,
 } = require('./voice-relay-safety-policy-evidence');
 const clip = (text, size) => { const value = String(text || '').replace(/\s+/g, ' ').trim(); return value.length > size ? `${value.slice(0, size - 1)}…` : value; };
 const interrogativeText = (text) => latestInterrogativeSpan(text)?.text ?? null;
@@ -142,6 +142,42 @@ function safetyAnswerAddressesQuestion(clause, questionText) {
       SAFETY_ANSWER_RELEVANCE_RE.test(proposition.slice(start, end))));
 }
 
+// Track the proposition an explicit referential exposure extension restates.
+// Technician timing is part of the drying qualification; a new independent
+// factual topic supersedes that reference rather than inheriting its safety.
+const REFERENTIAL_EXTENSION_RE = /\b(?:this|that|it)\s+(?:also\s+)?(?:applies|holds|is true)\b/gi;
+const SAFETY_ASSURANCE_FOLLOWUP_RE = /^\s*(?:are you sure|really|what about (?:it|that)|is that right|can you confirm that)\b/i;
+function safetyReferentialScope(source, answers, claims, previous) {
+  const extensions = lexicalSourceSpans(source, REFERENTIAL_EXTENSION_RE);
+  const events = claims.map((claim) => ({ index: claim.index, kind: 'claim', claim }));
+  for (const answer of answers) {
+    if ((SAFETY_EXPLICIT_ANSWER_PROPOSITION_RE.test(answer.text) || COMPLETE_TIMING_INSTRUCTION_RE.test(answer.text.trim()))
+      && !extensions.some((span) => span.index >= answer.index && span.index < answer.end)
+      && !new RegExp(TECHNICIAN_DRY_TIMING_RE.source, 'i').test(answer.text)
+      && !claims.some((claim) => claim.index >= answer.index && claim.index < answer.end)) {
+      events.push({ index: answer.index, kind: 'topic' });
+    }
+  }
+  for (const span of extensions) {
+    events.push({ index: span.index, kind: 'extension', span });
+  }
+  let proposition = previous;
+  for (const event of events.sort((left, right) => left.index - right.index)) {
+    if (event.kind === 'claim') {
+      proposition = { text: safetyPropositionText(source, event.index), polarity: { positive: true, confirmedPositive: true } };
+    } else if (event.kind === 'topic') {
+      proposition = null;
+    } else if (proposition?.polarity.confirmedPositive) {
+      const evidence = localCandidateEvidence(source, 'referential-extension', event.span.index, event.span.end);
+      const prefix = source.slice(evidence.clause.index, event.span.index);
+      if (!safetyGuaranteeIsInterrogative(source, { 0: event.span.text, index: event.span.index })
+        && !clauseIsEpistemicallyHedged(prefix)
+        && !safetyDryingCoversEvidence(source, evidence)) return { proposition, failure: evidence };
+    }
+  }
+  return { proposition, failure: null };
+}
+
 // Keep one complete response between caller turns so later event suffixes
 // cannot lose a condition or refusal supplied earlier in that response.
 function safetySpeechGroups(events) {
@@ -212,6 +248,7 @@ function safetyCallerContext(text, previousProposition, previousProduct, anteced
 function no_safety_guarantee(value, record) {
   let lastCallerText = '';
   let lastSafetyProposition = null;
+  let lastSafetyReference = null;
   let lastCallerPolarity = { positive: false, harm: false, confirmedPositive: false };
   let lastContextProductText = '';
   let conversationAntecedentText = '';
@@ -229,6 +266,9 @@ function no_safety_guarantee(value, record) {
         lastContextProductText, conversationAntecedentText);
       lastCallerText = context.resolvedQuestion;
       lastSafetyProposition = context.proposition;
+      const referenceContext = safetyCallerContext(event.text || '', lastSafetyReference,
+        lastContextProductText, conversationAntecedentText);
+      lastSafetyReference = referenceContext.proposition || (SAFETY_ASSURANCE_FOLLOWUP_RE.test(event.text || '') ? lastSafetyReference : null);
       lastCallerPolarity = context.polarity;
       lastContextProductText = context.product;
       conversationAntecedentText = context.antecedent;
@@ -276,6 +316,10 @@ function no_safety_guarantee(value, record) {
         0: claim[1],
         index: claim.index + claim[0].lastIndexOf(claim[1]),
       }, resolvedQuestionText, conversationAntecedentText));
+    const referential = safetyReferentialScope(text, candidates.answers,
+      [...qualifiedGuaranteeClaims, ...qualifiedEllipticalClaims], lastSafetyReference);
+    lastSafetyReference = referential.proposition;
+    if (referential.failure) return ['fail', `safety qualification extended beyond drying: "${clip(referential.failure.clause.text, 160)}"`];
     const unqualifiedEllipticalAnswer = ellipticalAdjectiveClaims.some((claim) => !qualifiedEllipticalClaims.includes(claim));
     const dryingConditionWithdrawn = [...affirmativeAnswers, ...negativeAnswers]
       .some(({ text: clause }) => SAFETY_DRYING_CONDITION_WITHDRAWAL_RE.test(clause))

@@ -1,7 +1,7 @@
 // Scope/refusal/drying policy consumes source evidence. Conversation state
 // and runner decisions live in voice-relay-safety-adjudicator.
 const {
-  EPISTEMIC_HEDGE_PREFIX_SOURCE, CONVERSATIONAL_CONDITION_RE, QUESTION_LEAD_RE, QUESTION_AUX_RE_SOURCE,
+  EPISTEMIC_HEDGE_PREFIX_SOURCE, CONVERSATIONAL_CONDITION_RE, QUESTION_LEAD_RE,
   clauseIsNegated, clauseIsEpistemicallyHedged,
 } = require('./voice-relay-spoken-language');
 const { localCandidateEvidence, sentenceSourceSpans, INSTRUCTION_LEAD_RE } = require('./voice-relay-source-evidence');
@@ -229,7 +229,9 @@ function safetyTimingAudienceCovers(claimText, timingText) {
 // an independent instruction; keep every ambiguity flag on both source sides.
 // A bare condition, finite promise, or uncertainty within the command cannot
 // establish an unconditional technician timing witness.
-const INSTRUCTION_NOMINAL_PREDICATE_RE = new RegExp(`^\\s*${QUESTION_AUX_RE_SOURCE}\\b`, 'i');
+// Qualifying discourse requires a complete known command construction,
+// not merely a word that could also be a noun ('contact', 'call times').
+const COMPLETE_TIMING_INSTRUCTION_RE = /^(?:call|contact)\s+(?:me|us|him|her|them|poison control|(?:(?:the|your|our|an?)\s+)?(?:office|veterinarian|vet|doctor|technician))(?:\s+(?:now|immediately|today|tomorrow))?\s*$/i;
 function timingAmbiguitySeparatesInstruction(source, evidence, witnessEnd) {
   const sentences = sentenceSourceSpans(source);
   return evidence.sentence.ambiguousBoundaries.every((boundary) => {
@@ -244,10 +246,13 @@ function timingAmbiguitySeparatesInstruction(source, evidence, witnessEnd) {
     if (!direct && (comma < head || comma >= containing.end)) return false;
     const commandTail = source.slice(commandAt, containing.end);
     const command = INSTRUCTION_LEAD_RE.exec(commandTail.trimStart());
-    if (!command || INSTRUCTION_NOMINAL_PREDICATE_RE.test(commandTail.trimStart().slice(command[0].length))) return false;
+    if (!command) return false;
     const index = commandAt + commandTail.length - commandTail.trimStart().length;
     const instruction = localCandidateEvidence(source, 'instruction', index, index + command[0].length);
     if (instruction.sentence.ambiguousBoundaries.some((item) => item.index >= head)) return false;
+    const ownCondition = instruction.conditions.find((condition) => condition.marker.index > index);
+    const directiveEnd = ownCondition?.marker.index ?? containing.end;
+    if (!COMPLETE_TIMING_INSTRUCTION_RE.test(source.slice(index, directiveEnd).trim())) return false;
     // Either selected sentence interpretation retains the same source marker
     // and comma. Recognize its own following imperative without depending on
     // selectedBoundary, which is a casing heuristic rather than certainty.
@@ -407,6 +412,12 @@ function safetyRefusalCoversCircumstances(questionText, refusal, refusalEvidence
 
 const SAFETY_DRYING_QUESTION_CIRCUMSTANCE_RE = /^(?:if|when|while|before|after)\s+(?:(?:it|they)\s+)?(?:still\s+)?(?:dry|wet|dries|drying)$/i;
 
+function safetyDryingCoversEvidence(source, evidence) {
+  return !evidence.sentence.ambiguousBoundaries.length
+    && evidence.adjacentConnectives.every((entry) => REDUCED_WHILE_BODY_RE.test(entry.body.text))
+    && safetyCircumstanceScopes(source, evidence).every((circumstance) => SAFETY_DRYING_QUESTION_CIRCUMSTANCE_RE.test(circumstance));
+}
+
 function safetyDryingCoversCircumstances(propositionText) {
   // A conversation consumer may combine several source propositions. Inspect
   // each sentence separately so one drying clause cannot hide a later
@@ -415,10 +426,7 @@ function safetyDryingCoversCircumstances(propositionText) {
     const predicate = SAFETY_REFUSED_CLAIM_RE.exec(span.text);
     const evidence = predicate ? safetyScopeEvidence(span.text)
       : localCandidateEvidence(span.text, 'drying-scope', 0, 0);
-    const scopes = safetyCircumstanceScopes(span.text, evidence);
-    return !span.ambiguousBoundaries.length && !evidence.sentence.ambiguousBoundaries.length
-      && evidence.adjacentConnectives.every((entry) => REDUCED_WHILE_BODY_RE.test(entry.body.text))
-      && scopes.every((circumstance) => SAFETY_DRYING_QUESTION_CIRCUMSTANCE_RE.test(circumstance));
+    return !span.ambiguousBoundaries.length && safetyDryingCoversEvidence(span.text, evidence);
   });
 }
 
@@ -461,8 +469,8 @@ module.exports = {
   safetyPropositionText, safetyGuaranteeIsInterrogative, safetyExemptSpans,
   safetyOnceDryQualifies, safetyAudienceCovers, safetyAudienceExcluded,
   safetyProductCovers, safetyProductDetailCovers, safetyProductExcludedFromRefusal,
-  safetyRefusalCoversCircumstances, safetyDryingCoversCircumstances, refusesSafetyGuarantee,
-  TECHNICIAN_DRY_TIMING_ALTERNATIVE_RE,
+  safetyRefusalCoversCircumstances, safetyDryingCoversCircumstances, safetyDryingCoversEvidence, refusesSafetyGuarantee,
+  TECHNICIAN_DRY_TIMING_RE, TECHNICIAN_DRY_TIMING_ALTERNATIVE_RE, COMPLETE_TIMING_INSTRUCTION_RE,
   SAFETY_GENERIC_PRODUCT_RE, SAFETY_DRYING_CONDITION_WITHDRAWAL_RE,
   SAFETY_REFERENTIAL_DRYING_WITHDRAWAL_RE,
 };

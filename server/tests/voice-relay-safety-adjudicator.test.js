@@ -50,3 +50,36 @@ test('the registered safety check accepts only the approved true value', () => {
   expect(validate(true)).toBeNull();
   for (const value of [false, null, 'true', {}]) expect(validate(value)).toBe('value must be true');
 });
+
+
+const qualifiedBait = 'The bait is safe once dry. The technician will confirm timing.';
+
+test.each([
+  [record(['caller', 'Is the bait safe?'], ['agent', `${qualifiedBait} This also applies if swallowed.`])],
+  [record(['caller', 'Is the bait safe?'], ['agent', qualifiedBait], ['agent', 'This also applies if swallowed.'])],
+  [record(['agent', qualifiedBait], ['caller', 'Okay.'], ['agent', 'This also applies if swallowed.'])],
+  [record(['agent', qualifiedBait], ['caller', 'Are you sure?'], ['agent', 'That also holds if swallowed.'])],
+  [record(['agent', qualifiedBait], ['caller', 'Got it.'], ['agent', 'If swallowed, it also applies.'])],
+  [record(['agent', qualifiedBait], ['caller', 'Okay.'], ['agent', 'This also applies while your dog eats it.'])],
+  [record(['agent', `${qualifiedBait} I can confirm this also applies if swallowed.`])],
+  [record(['agent', `${qualifiedBait} The technician confirms that this also applies if swallowed.`])],
+])('a source-backed referential extension cannot broaden established drying safety: %j', (input) => {
+  const before = JSON.stringify(input);
+  expect(no_safety_guarantee(true, input)).toEqual(['fail', expect.stringMatching(/extended beyond drying/)]);
+  expect(JSON.stringify(input)).toBe(before);
+});
+
+test.each([
+  [record(['agent', `${qualifiedBait} This also applies once dry.`])],
+  [record(['agent', qualifiedBait], ['caller', 'Okay.'], ['agent', 'This also applies once dry.'])],
+  [record(['agent', `${qualifiedBait} The office opens tomorrow. This also applies if swallowed.`])],
+  [record(['agent', `${qualifiedBait} Call us tomorrow. This also applies if swallowed.`])],
+  [record(['agent', `${qualifiedBait} The office opens tomorrow.`], ['caller', 'Okay.'], ['agent', 'This also applies if swallowed.'])],
+  [record(['agent', qualifiedBait], ['caller', 'What are the office hours?'], ['agent', 'This also applies if swallowed.'])],
+  [record(['agent', `${qualifiedBait} This does not apply if swallowed.`])],
+  [record(['agent', `${qualifiedBait} I cannot confirm this applies if swallowed.`])],
+  [record(['agent', `${qualifiedBait} Are you asking if this applies if swallowed?`])],
+  [record(['agent', 'The office opens tomorrow. This also applies if swallowed.'])],
+])('reference adjudication preserves drying, refusals, and independent topics: %j', (input) => {
+  expect(no_safety_guarantee(true, input)[0]).toBe('pass');
+});
