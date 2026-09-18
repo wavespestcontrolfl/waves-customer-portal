@@ -778,7 +778,9 @@ function CommercialProposalEditor() {
       const result = await response.json().catch(() => ({}));
       throw new Error(result.error || 'Could not prepare the bid form.');
     }
-    const url = URL.createObjectURL(await response.blob());
+    const blob = await response.blob();
+    if (editGenRef.current !== genAtClick) throw new Error('The proposal changed while the form was being prepared. Review the form row for each line and download again.');
+    const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url; link.download = `${options.template}-bid-form.pdf`; link.click();
     setTimeout(() => URL.revokeObjectURL(url), 10000);
