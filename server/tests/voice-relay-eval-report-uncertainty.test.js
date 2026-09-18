@@ -455,3 +455,12 @@ test.each([
 ])('4043744115 third-person belief remains tentative: %s', (text, uncertain) => {
   expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
 });
+
+test.each(["'", '’'])('negative contractions retain uncertainty with %s apostrophe', (apostrophe) => {
+  expect(grammar.reportFindingIsUncertain(`We couldn${apostrophe}t confirm that Talstar P was applied.`)).toBe(true);
+  expect(grammar.reportFindingIsUncertain(`We aren${apostrophe}t sure Talstar P was applied.`)).toBe(true);
+  expect(grammar.reportFindingIsUncertain(`Talstar P wouldn${apostrophe}t have been applied.`)).toBe(true);
+  expect(grammar.reportFindingIsUncertain(`Talstar P won${apostrophe}t be applied.`)).toBe(true);
+  expect(grammar.reportFindingIsUncertain('We could not confirm that Talstar P was applied.')).toBe(true);
+  expect(grammar.reportFindingIsUncertain('We are sure Talstar P was applied.')).toBe(false);
+});

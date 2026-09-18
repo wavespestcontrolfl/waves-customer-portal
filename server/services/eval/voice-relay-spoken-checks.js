@@ -1726,9 +1726,13 @@ const REPORT_COMPLETION_TIME_RE = new RegExp(REPORT_COMPLETION_TIME, 'gi');
 
 function reportFindingIsUncertain(text) {
   // Consumers supply bounded finding evidence, excluding unrelated tails.
-  const evidence = text.replace(/\b(i|we|you|he|she|they|it)['’]d(?=\s+(?:(?:already|also|just|now|\w+ly)\s+)*put\b)/gi,
+  const normalized = text.replace(/\b(can)['’]t\b/gi, '$1 not')
+    .replace(/\bwon['’]t\b/gi, 'will not')
+    .replace(/\bshan['’]t\b/gi, 'shall not')
+    .replace(/\b(could|would|should|must|might|is|are|was|were|has|have|had|do|does|did)n['’]t\b/gi, '$1 not');
+  const evidence = normalized.replace(/\b(i|we|you|he|she|they|it)['’]d(?=\s+(?:(?:already|also|just|now|\w+ly)\s+)*put\b)/gi,
     (auxiliary, subject, at) => {
-      const putClause = text.slice(at).split(/[,;!?]|\.(?=\s*(?:$|[A-Z]))/, 1)[0];
+      const putClause = normalized.slice(at).split(/[,;!?]|\.(?=\s*(?:$|[A-Z]))/, 1)[0];
       return /\b(?:yesterday|earlier|recently|last\s+(?:week|month|year))\b/i.test(putClause)
         || /\b(?:before|after)\s+(?:i|we|you|he|she|they|it)\s+(?:arrived|left|returned|called)\b/i.test(putClause)
         ? `${subject} had` : auxiliary;
