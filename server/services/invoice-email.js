@@ -355,6 +355,18 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
           if (!SEND_FINALIZABLE_STATUSES.includes(current.status)) {
             return { ok: false, reason: `Invoice is no longer sendable (status: ${current.status || 'unknown'}); delivery not attempted`, code: 'invoice_not_sendable' };
           }
+          let scheduledServiceId = current.scheduled_service_id || null;
+          if (!scheduledServiceId && current.service_record_id) {
+            const record = await trx('service_records')
+              .where({ id: current.service_record_id })
+              .first('scheduled_service_id');
+            scheduledServiceId = record?.scheduled_service_id || null;
+          }
+          const terminalVisit = await require('./invoice-helpers')
+            .visitRefusesSettlement(trx, scheduledServiceId);
+          if (terminalVisit) {
+            return { ok: false, reason: `Linked visit is ${terminalVisit}; delivery not attempted`, code: 'invoice_visit_terminal' };
+          }
           // Reconciliation can finish while the PDF or template renders,
           // leaving no pending ledger balance. Compare the locked row after
           // the ledger fence with the values used by BOTH the email and PDF.

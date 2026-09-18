@@ -147,6 +147,20 @@ describe('invoice SMS provider handoff', () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
+  test('blocks the provider handoff when the linked visit was cancelled during preparation', async () => {
+    const cancelled = { ...invoice, scheduled_service_id: 'svc-cancelled' };
+    invoiceReads = [cancelled, cancelled];
+    jest.spyOn(require('../services/invoice-helpers'), 'visitRefusesSettlement')
+      .mockResolvedValueOnce('cancelled');
+    const dispatch = jest.fn(async () => ({ sent: true }));
+    sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => withProviderHandoff(dispatch));
+    withInvoiceDepositSettlement.mockImplementation(async (_invoiceId, callback) => callback(db, cancelled));
+
+    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
+      .rejects.toMatchObject({ code: 'INVOICE_VISIT_TERMINAL' });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
   test('finishes direct-send bookkeeping when the finalize committed but its acknowledgement was lost', async () => {
     const state = { ...invoice, status: 'draft', send_claim_token: null };
     const ackLost = new Error('synthetic finalize acknowledgement lost');
@@ -170,7 +184,7 @@ describe('invoice SMS provider handoff', () => {
               ? (['draft', 'scheduled', 'sending'].includes(state.status) ? 'sent' : state.status)
               : value;
           }
-          if (payload.sms_sent_at && failFinalizeAck) {
+          if (payload.sms_sent_at && payload.status && failFinalizeAck) {
             failFinalizeAck = false;
             failure = ackLost;
           }

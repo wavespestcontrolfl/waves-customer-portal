@@ -95,9 +95,6 @@ const CANCELLED_SERVICE_VOIDABLE_STATUSES = [
   "sent",
   "viewed",
   "overdue",
-  // Cancellation invalidates the active delivery episode under the locked
-  // money/PaymentIntent fences below; its token is cleared with the void.
-  "sending",
   // 'prepaid' by ACCOUNT CREDIT (no cash) must be voidable here so a cancelled
   // service returns the customer's applied credit (restoreAccountCreditForVoidedInvoice).
   // The sweep's payment_recorded_at / paid-payment guard still skips cash-backed
@@ -2921,6 +2918,20 @@ const InvoiceService = {
                     code: "send_claim_lost", error: "Invoice send claim changed; delivery not attempted",
                     validator: "check_invoice_send_claim" };
                 }
+                let scheduledServiceId = current.scheduled_service_id || null;
+                if (!scheduledServiceId && current.service_record_id) {
+                  const record = await trx("service_records")
+                    .where({ id: current.service_record_id })
+                    .first("scheduled_service_id");
+                  scheduledServiceId = record?.scheduled_service_id || null;
+                }
+                const terminalVisit = await require("./invoice-helpers")
+                  .visitRefusesSettlement(trx, scheduledServiceId);
+                if (terminalVisit) {
+                  return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+                    code: "INVOICE_VISIT_TERMINAL", error: `Linked visit is ${terminalVisit}; delivery not attempted`,
+                    validator: "check_invoice_visit_status" };
+                }
                 const ownership = await require("./invoice-helpers").selfPayAtDispatch(invoiceId, trx)();
                 if (ownership.ok !== true) {
                   return { sent: false, blocked: true, deliveryOutcome: "not_sent",
@@ -3485,15 +3496,11 @@ const InvoiceService = {
       // invoice-issued closeout below writes them up as the actor of the
       // visit transition; null = an automated finalization (the system).
       actorTechnicianId = null,
-      // Tokenless callers may finalize only rows outside a live send episode.
-      claimToken = null,
     } = {},
   ) {
     const invoice = await db("invoices").where({ id: invoiceId }).first();
     if (!invoice) return null;
     if (!SEND_FINALIZABLE_STATUSES.includes(invoice.status)) return invoice;
-    if ((claimToken && invoice.send_claim_token !== claimToken)
-      || (!claimToken && invoice.send_claim_token != null)) return invoice;
 
     // Same contract as sendViaSMSAndEmail (the #1604 fix): callers that take
     // no review decision inherit the review request configured at schedule
@@ -3520,17 +3527,15 @@ const InvoiceService = {
       scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(db),
       scheduled_request_review: false,
       scheduled_review_delay_minutes: null,
-      send_claim_token: null,
       updated_at: now,
     };
     if (sms) updates.sms_sent_at = db.raw("COALESCE(sms_sent_at, ?)", [now]);
 
-    const [updated] = await whereSendClaimOwned(
-      db("invoices").where({ id: invoiceId }).whereIn("status", SEND_FINALIZABLE_STATUSES),
-      claimToken,
-    ).update(updates)
+    const [updated] = await db("invoices")
+      .where({ id: invoiceId })
+      .whereIn("status", SEND_FINALIZABLE_STATUSES)
+      .update(updates)
       .returning("*");
-    if (!updated) return invoice;
     const finalInvoice = updated || invoice;
 
     // First delivery via this path (combined project send / completion-with-

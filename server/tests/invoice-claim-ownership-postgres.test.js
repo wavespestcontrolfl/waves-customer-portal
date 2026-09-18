@@ -78,22 +78,28 @@ postgres('invoice send episode ownership', () => {
     expect(require('../services/invoice-issued-closeout').closeOutVisitForIssuedInvoice).not.toHaveBeenCalled();
   });
 
-  test('cancellation invalidates the token before provider handoff and after unvoid', async () => {
+  test('cancellation leaves an in-flight claim for review and the terminal-visit boundary blocks dispatch', async () => {
     let original;
     const dispatch = jest.fn(async () => ({ sent: true }));
     sendCustomerMessage.mockImplementationOnce(async ({ withProviderHandoff }) => {
       original = (await read()).send_claim_token;
       await trx('scheduled_services').where({ id: visitId }).update({ status: 'cancelled' });
-      expect(Array.from(await Invoice.voidOpenInvoicesForCancelledService(visitId))).toEqual([invoiceId]);
-      expect(await read()).toMatchObject({ status: 'void', send_claim_token: null });
-      await trx('scheduled_services').where({ id: visitId }).update({ status: 'confirmed' });
-      await Invoice.unvoidInvoice(invoiceId);
+      expect(Array.from(await Invoice.voidOpenInvoicesForCancelledService(visitId))).toEqual([]);
+      expect(await read()).toMatchObject({ status: 'sending', send_claim_token: original });
       return withProviderHandoff(dispatch);
     });
     await expect(Invoice.sendViaSMS(invoiceId)).rejects.toThrow();
     expect(dispatch).not.toHaveBeenCalled();
-    await Invoice.markDeliverySent(invoiceId, { sms: true, claimToken: original });
     expect(await read()).toMatchObject({ status: 'draft', send_claim_token: null, sent_at: null });
+    expect(original).toBeTruthy();
+
+    const staleToken = randomUUID();
+    await trx('invoices').where({ id: invoiceId }).update({ status: 'sent', send_claim_token: staleToken });
+    expect(Array.from(await Invoice.voidOpenInvoicesForCancelledService(visitId))).toEqual([invoiceId]);
+    expect(await read()).toMatchObject({ status: 'void', send_claim_token: null });
+    await trx('scheduled_services').where({ id: visitId }).update({ status: 'confirmed' });
+    await Invoice.unvoidInvoice(invoiceId);
+    expect(await read()).toMatchObject({ status: 'draft', send_claim_token: null });
   });
 
   test('successful direct send releases its token, and a resend mints a new one', async () => {
@@ -110,11 +116,12 @@ postgres('invoice send episode ownership', () => {
     expect(tokens[0]).not.toBe(tokens[1]);
   });
 
-  test('tokenless legacy finalization cannot finalize a claimed invoice', async () => {
+  test('legacy accepted-delivery finalization promotes a claimed row without erasing its episode token', async () => {
     const token = randomUUID();
     await trx('invoices').where({ id: invoiceId }).update({ status: 'sending', send_claim_token: token });
-    await Invoice.markDeliverySent(invoiceId, { sms: true });
-    expect(await read()).toMatchObject({ status: 'sending', send_claim_token: token, sent_at: null });
+    await Invoice.markDeliverySent(invoiceId, { sms: true, source: 'completion_sms_with_invoice' });
+    expect(await read()).toMatchObject({ status: 'sent', send_claim_token: token });
+    expect((await read()).sms_sent_at).toBeTruthy();
   });
 
   test('scheduled retry cannot restore a replacement claim', async () => {

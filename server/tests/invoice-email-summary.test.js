@@ -132,6 +132,21 @@ describe('sendInvoiceEmail service summary', () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
+  test('blocks the provider handoff when the linked visit was cancelled during rendering', async () => {
+    mockDb(invoiceRow({ status: 'sending', send_claim_token: 'original', scheduled_service_id: 'svc-cancelled' }));
+    jest.spyOn(require('../services/invoice-helpers'), 'visitRefusesSettlement')
+      .mockResolvedValueOnce('cancelled');
+    const dispatch = jest.fn();
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      const verdict = await withProviderHandoff(dispatch);
+      return { sent: verdict.ok, reason: verdict.reason };
+    });
+
+    await expect(sendInvoiceEmail('inv-1', { claimToken: 'original' }))
+      .resolves.toMatchObject({ ok: false, error: expect.stringMatching(/linked visit is cancelled/i) });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
   test.each(['draft', 'scheduled', 'sent', 'viewed', 'overdue', 'sending'])(
     'allows %s at the locked provider boundary',
     async (status) => {
