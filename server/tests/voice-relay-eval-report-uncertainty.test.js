@@ -464,3 +464,16 @@ test.each(["'", '’'])('negative contractions retain uncertainty with %s apostr
   expect(grammar.reportFindingIsUncertain('We could not confirm that Talstar P was applied.')).toBe(true);
   expect(grammar.reportFindingIsUncertain('We are sure Talstar P was applied.')).toBe(false);
 });
+
+test.each([
+  ['We doubt that Talstar P was applied.', true],
+  ['It is unclear whether Talstar P was applied.', true],
+  ['We do not know whether Talstar P was applied.', true],
+  ["We don't know whether Talstar P was applied.", true],
+  ['We don’t know whether Talstar P was applied.', true],
+  ['Without a doubt, Talstar P was applied.', false],
+  ['There is no doubt Talstar P was applied.', false],
+  ['We know Talstar P was applied.', false],
+])('shared epistemic vocabulary retains report certainty scope: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
