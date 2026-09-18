@@ -367,3 +367,22 @@ test('comma-separated finite assertions retain separate local negations', () => 
   expectExact(source, negative.clause);
   expectExact(source, positive.clause);
 });
+
+
+test.each(['Bifen', 'Bifen I/T', 'sprays', 'liquid bait'])(
+  'comma-spliced bare subject %s does not inherit an earlier denial', (subject) => {
+    const source = `The spray is not safe, ${subject} is safe for pets`;
+    const at = source.lastIndexOf('safe');
+    const evidence = localCandidateEvidence(source, 'adjective', at, at + 4);
+    expect(evidence.negations).toEqual([]);
+    expect(evidence.clause.text.trim()).toBe(`${subject} is safe for pets`);
+    expectExact(source, evidence.clause);
+  },
+);
+
+test('a comma followed by a finite condition keeps the condition attached', () => {
+  const source = 'The bait is safe, if pets are away';
+  const at = source.indexOf('safe');
+  const evidence = localCandidateEvidence(source, 'adjective', at, at + 4);
+  expect(evidence.conditions[0].text).toBe('if pets are away');
+});

@@ -110,7 +110,7 @@ const GRAMMATICAL_NEGATION_RE = /\b(?:not|never|cannot|no|nothing|nobody|neither
 // Refine evidence bounds only; the shared mechanical grammar stays intact.
 // Commas before reduced condition/audience phrases remain inside the clause.
 const FINITE_CLAUSE_LEAD_RE = new RegExp(
-  `^\\s*(?:(?:i|we|you|he|she|it|they|this|that|these|those|there)\\s+|(?:an?|the|our|your|their|my|his|her)\\s+(?:[\\w\\x27\\u2019-]+\\s+){1,5})${CLAUSE_FINITE_PREDICATE_RE.source}`,
+  `^\\s*(?:(?:i|we|you|he|she|it|they|this|that|these|those|there)\\s+|(?!(?:if|unless|when|while|before|after|once|until|provided|with|without|for|which|who|and|or|but)\\b)(?:[\\w/\\x27\\u2019-]+\\s+){1,6})${CLAUSE_FINITE_PREDICATE_RE.source}`,
   'i',
 );
 const CONDITION_CLAUSE_LEAD_RE = new RegExp(`^${CONDITION_MARKER_RE.source}`, 'i');
