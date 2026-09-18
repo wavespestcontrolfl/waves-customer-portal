@@ -6904,6 +6904,15 @@ function EstimateViewPageInner({ websiteMode = false }) {
             setPrepayConsentChecked(false);
             throw new Error(body.error || 'Your total changed while confirming — please confirm the updated amount.');
           }
+          if (['ACCEPT_INVOICE_BUSY_RETRY', 'DEPOSIT_LEDGER_BUSY_RETRY'].includes(body.code)) {
+            // Invoice/deposit settlement is briefly holding a lock. The
+            // acceptance transaction rolled back without invalidating this
+            // reservation, so keep the held time, plan selections, payment
+            // preference and any acknowledged prepay quote intact. Falling
+            // through to the generic slot-conflict recovery would DELETE the
+            // valid hold and make the customer pick again for a billing race.
+            throw new Error(body.error || 'We’re finishing another invoice update. Your time is still held — please try again.');
+          }
           if (['PER_APPLICATION_ADD_ON_UNPRICED', 'LEGACY_MONTHLY_TERMITE_UNCONVERTIBLE', 'INVOICE_MODE_PER_APPLICATION_UNRESOLVED', 'ANNUAL_PREPAY_OVERLAP'].includes(body.code)) {
             // A fail-closed billing refusal (docs/public-route-
             // contracts.md): nothing was booked and the office must resolve

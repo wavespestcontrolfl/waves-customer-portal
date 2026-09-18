@@ -1,8 +1,8 @@
 # Commercial bid builder
 
-The commercial proposal editor supports reviewed decimal quantities, unit pricing, and fixed validity dates. The branded proposal remains the scope-and-price document.
+The commercial proposal editor supports reviewed decimal quantities, unit pricing, and fixed validity dates. Admin proposal reads and saves also support private project costing. The branded proposal remains the scope-and-price document.
 
-New unit and validity controls are behind `GATE_COMMERCIAL_BID_BUILDER`, off by default. Unsetting it hides unused controls and leaves saved units and dates visible without editing. The server refuses changes to those fields from a stale editor while the gate is off. Older editors that omit the date preserve the stored hold. Saved quantities and price holds continue to govern documents, invoices and expiry.
+New unit and validity controls and private-cost writes are behind `GATE_COMMERCIAL_BID_BUILDER`, off by default. Unsetting it hides unused controls and leaves saved units and dates visible without editing; admin reads retain saved costs. The server refuses changes to those fields from a stale editor while the gate is off. Older editors that omit the date preserve the stored hold. Saved quantities and price holds continue to govern documents, invoices and expiry.
 
 ## Author a bid
 
@@ -52,6 +52,7 @@ Quantities are operator-reviewed inputs. Building coverage, gross floor area and
 
 ## Implementation and verification
 
+- Private inputs live in `estimate_data.proposalCosting`, returned only by the admin proposal endpoint. Customer projections and documents exclude them. Cost-only saves preserve matching pending scheduled-send review witnesses under the existing locks; stale reviews, customer-visible changes and first-time proposal enablement remain stale.
 - Quantities, units, rates and `validThrough` live in `estimate_data.proposal` and flow through the normalized public proposal and customer documents.
 - Shared four-decimal quantity/rate math is in `shared/proposal-bid.cjs`. Invoice displays use cent-formatted rates, so fractional bids retain the exact quantity/rate basis in the invoice description and bill their reviewed extended charge.
 - Proposal saves retain the existing status, price-lock, archive, delivery-claim and group locks and now check the loaded edit version. The expiry column changes atomically with the authored bid.

@@ -1961,7 +1961,7 @@ const gates = {
   // Kill switch: unset GATE_COMMERCIAL_ONETIME_SCOPED.
   commercialOneTimeScoped: gateEnvValue('GATE_COMMERCIAL_ONETIME_SCOPED'),
 
-  // Bid unit and validity controls; default off everywhere.
+  // Bid unit, private costing and validity controls; default off everywhere.
   // Readers always honor saved quantities and dates after the controls are off.
   commercialBidBuilder: gateEnvValue('GATE_COMMERCIAL_BID_BUILDER'),
 

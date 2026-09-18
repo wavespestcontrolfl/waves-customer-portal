@@ -93,7 +93,8 @@ function savedCardChargeNeedsReconciliation(err) {
 }
 
 function savedCardChargeSuppressesAlternateCollection(err) {
-  return savedCardChargeNeedsReconciliation(err) || err?.code === 'STRIPE_CHARGE_IN_PROGRESS';
+  return savedCardChargeNeedsReconciliation(err) || err?.code === 'STRIPE_CHARGE_IN_PROGRESS'
+    || err?.code === 'DEPOSIT_RECONCILIATION_REQUIRED';
 }
 
 function shouldTreatSavedCardFailureAsAmbiguous({ chargeSubmitted, error }) {
@@ -1992,6 +1993,10 @@ const StripeService = {
       }
       throw err;
     }
+    // The durable claim is made before the charge transaction. Avoid creating
+    // even a temporary claimed owner when a received deposit already blocks
+    // collection; the locked check below closes the race with a late receipt.
+    await require('./estimate-deposits').assertInvoiceDepositSettlementReady(db, invoice, { lock: false });
     assertInvoiceCollectible(invoice);
     // Third-party Bill-To: never charge a card on file for a payer-billed
     // invoice — the saved card belongs to invoice.customer_id (the homeowner),
@@ -2313,6 +2318,9 @@ const StripeService = {
             throw payerErr;
           }
         }
+        // All customer/invoice/visit locks are now held. Take the estimate
+        // ledger lock last and retain it through the Stripe submission.
+        await require('./estimate-deposits').assertInvoiceDepositSettlementReady(trx, lockedInvoice);
         // The pre-lock invoice read is only an early eligibility snapshot. Use
         // this locked baseline for reservation ownership so credit applied by a
         // concurrent request before our lock is never attributed to this attempt.
@@ -3511,6 +3519,10 @@ const StripeService = {
           .first();
         if (!lockedInvoice) throw new Error('Invoice not found');
         assertInvoiceCollectible(lockedInvoice);
+        // Preserve the original collectible status and provenance. Full
+        // account-credit coverage below changes lockedInvoice to prepaid,
+        // which the deposit guard correctly skips for pre-existing invoices.
+        const depositFenceInvoice = { ...lockedInvoice };
         // Stale-render fence, rechecked against the LOCKED row: the route's
         // version check reads unlocked, so an edit committing between that
         // check and this lock would price and stamp the PI from the edited
@@ -3538,6 +3550,11 @@ const StripeService = {
           fenceErr.savedCardPending = true;
           throw fenceErr;
         }
+        // Reject an already-received deposit before stale-PI triage or
+        // account-credit work. This read-only check cannot serialize with a
+        // receipt that lands afterward; the early-return and allocation
+        // branches below take the retained ledger lock at their last seam.
+        await require('./estimate-deposits').assertInvoiceDepositSettlementReady(trx, lockedInvoice, { lock: false });
 
         // Auto-apply only does anything when the customer actually has account
         // credit. Resolve the available balance once up front and gate BOTH the
@@ -3653,6 +3670,10 @@ const StripeService = {
           if (opts.holdCoverageForCapture
             && !lockedInvoice.stripe_payment_intent_id
             && availableCredit >= invoiceAmountDue(lockedInvoice)) {
+            // This path returns before combined sibling selection. Its
+            // invoice/customer locks are already held, so acquire the ledger
+            // lock here and retain it through the committed hold verdict.
+            await require('./estimate-deposits').assertInvoiceDepositSettlementReady(trx, depositFenceInvoice);
             coveredByCredit = true;
             captureHeld = true;
             return;
@@ -3663,6 +3684,11 @@ const StripeService = {
           const recredited = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
           if (recredited) Object.assign(lockedInvoice, recredited);
           if (!(invoiceAmountDue(lockedInvoice) > 0)) {
+            // Full account-credit coverage commits prepaid without reaching
+            // the later PI fence. The credit writes are in this transaction:
+            // a late receipt wins the ledger lock and makes this throw/roll
+            // back; otherwise this lock stays held through the prepaid commit.
+            await require('./estimate-deposits').assertInvoiceDepositSettlementReady(trx, depositFenceInvoice);
             // Same-trx plan completion — no webhook retry exists for a
             // credit-only settlement (codex r10 P1; defensive, see above).
             await require('./payment-plans').completeActivePlansForInvoice(invoiceId, trx);
@@ -3713,6 +3739,9 @@ const StripeService = {
         const combinedSiblingIds = combinedAllocation
           ? combinedAllocation.filter((a) => String(a.invoiceId) !== String(invoiceId)).map((a) => a.invoiceId)
           : [];
+        // Combined verification above fenced every locked allocation row;
+        // single-invoice setup still needs its own locked deposit verdict.
+        if (!combinedAllocation) await require('./estimate-deposits').assertInvoiceDepositSettlementReady(trx, lockedInvoice);
         combinedSummary = combinedAllocation
           ? {
             invoices: combinedAllocation.map((a) => ({
@@ -4338,7 +4367,19 @@ const StripeService = {
           return stripe.paymentIntents.update(effectivePaymentIntentId, updateParams);
         });
       } else {
-        paymentIntent = await stripe.paymentIntents.update(effectivePaymentIntentId, updateParams);
+        paymentIntent = await db.transaction(async (updateTrx) => {
+          const lockedInvoice = await updateTrx('invoices').where({ id: invoiceId }).forUpdate().first();
+          if (!lockedInvoice || !isInvoiceCollectibleStatus(lockedInvoice.status)
+            || String(lockedInvoice.stripe_payment_intent_id || '') !== effectivePaymentIntentId
+            || Math.round(invoiceAmountDue(lockedInvoice) * 100) !== baseCents) {
+            const err = new Error('The invoice balance changed since this page loaded — refreshing.');
+            err.statusCode = 409;
+            err.staleBalance = true;
+            throw err;
+          }
+          await require('./estimate-deposits').assertInvoiceDepositSettlementReady(updateTrx, lockedInvoice);
+          return stripe.paymentIntents.update(effectivePaymentIntentId, updateParams);
+        });
       }
       logger.info(`[stripe] PI ${effectivePaymentIntentId} updated → base=$${base} surcharge=0 total=$${base} (method=${selectedMethodCategory})`);
       // Keep the DB stamps and the PI's allocation in lockstep (codex r2
@@ -4434,7 +4475,7 @@ const StripeService = {
       // as-is, not wrapped as a generic update failure — and so must the
       // combined allocation's staleBalance 409 (the page reloads to live
       // amounts).
-      if (err && (err.sessionChanged || err.staleBalance)) throw err;
+      if (err && (err.sessionChanged || err.staleBalance || err.code === 'DEPOSIT_RECONCILIATION_REQUIRED')) throw err;
       // A prior confirm attempt (e.g. an abandoned ACH entry) can leave an
       // incompatible PaymentMethod attached to the PI, so narrowing
       // payment_method_types to the newly selected tender is rejected. Recover
@@ -4547,6 +4588,14 @@ const StripeService = {
           anchorInvoiceId: invoiceId,
           expectPaymentIntentId: oldPaymentIntentId,
         });
+      } else {
+        if (Math.round(invoiceAmountDue(lockedInvoice) * 100) !== baseCents) {
+          const err = new Error('The invoice balance changed since this page loaded — refreshing.');
+          err.statusCode = 409;
+          err.staleBalance = true;
+          throw err;
+        }
+        await require('./estimate-deposits').assertInvoiceDepositSettlementReady(trx, lockedInvoice);
       }
       // Guard against a racing setup/replace having already repointed the PI.
       if (String(lockedInvoice.stripe_payment_intent_id || '') !== String(oldPaymentIntentId)) {
@@ -4860,6 +4909,7 @@ const StripeService = {
           lockedBaseAmount = finalizeCombinedCtx.totalCents / 100;
         } else {
           lockedBaseAmount = invoiceAmountDue(lockedInvoice);
+          await require('./estimate-deposits').assertInvoiceDepositSettlementReady(finalizeTrx, lockedInvoice);
         }
         if (Math.abs(lockedBaseAmount - baseAmount) > 0.01) {
           throw new Error('Invoice total changed since quote was created. Please request a new quote.');
@@ -4928,6 +4978,7 @@ const StripeService = {
         funding,
       };
     } catch (err) {
+      if (err.code === 'DEPOSIT_RECONCILIATION_REQUIRED') throw err;
       if (savedCardChargeSuppressesAlternateCollection(err)) {
         if (savedCardChargeNeedsReconciliation(err)) {
           const parked = await parkInvoiceForSavedCardReconciliation({
