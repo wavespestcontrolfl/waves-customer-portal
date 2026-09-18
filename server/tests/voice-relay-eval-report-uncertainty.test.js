@@ -574,3 +574,17 @@ test.each([
   uncertainCases.forEach((text) => expect(grammar.reportFindingIsUncertain(text)).toBe(true));
   expect(grammar.reportFindingIsUncertain(definite)).toBe(false);
 });
+
+test.each([
+  ['Well, there is no evidence that Talstar P was applied.', true],
+  ['Well, there is confirmation that Talstar P was applied.', false],
+  ['Talstar P was applied where there is no evidence that ants were present.', false],
+  ['Talstar P was applied, as far as we know.', true],
+  ['Talstar P was applied, to the best of my knowledge.', true],
+  ['Talstar P was applied at 0.06 percent, as far as we know.', true],
+  ['We used 0.5 ounces of Talstar P, to the best of my knowledge.', true],
+  ['Talstar P was applied at 0.06 percent. As far as we know, ants were present.', false],
+  ['Talstar P was applied along the fence as far as we know.', false],
+])('pre-push bounded governor scope: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
