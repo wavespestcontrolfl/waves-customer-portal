@@ -172,6 +172,19 @@ describe('invoice SMS provider handoff', () => {
       .rejects.toMatchObject({ deliveryOutcome: 'uncertain' });
   });
 
+  test('an explicit nested provider uncertainty is retained at the direct-send boundary', async () => {
+    const providerError = Object.assign(new Error('provider wrapper failed'), {
+      providerOutcome: { deliveryOutcome: 'uncertain' },
+    });
+    sendCustomerMessage.mockRejectedValueOnce(providerError);
+
+    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
+      .rejects.toMatchObject({
+        deliveryOutcome: 'uncertain',
+        providerOutcome: { deliveryOutcome: 'uncertain' },
+      });
+  });
+
   test('finishes direct-send bookkeeping when the finalize committed but its acknowledgement was lost', async () => {
     const state = { ...invoice, status: 'draft', send_claim_token: null };
     const ackLost = new Error('synthetic finalize acknowledgement lost');

@@ -3050,6 +3050,7 @@ const InvoiceService = {
 
       return { sent: true, payUrl };
     } catch (err) {
+      err.deliveryOutcome ||= err.providerOutcome?.deliveryOutcome;
       if (smsDelivered) {
         // The customer HAS the pay-link text — this is a post-delivery
         // bookkeeping failure (invoice finalize, follow-up scheduling, lead
@@ -3128,6 +3129,13 @@ const InvoiceService = {
         // review; restoring it would make a definitely-refused cancelled-job
         // send eligible for dunning or scheduler retries again.
         logger.warn(`[invoice] Terminal-visit SMS refusal for ${invoice.invoice_number} could not be safely voided — claim retained for review`);
+        throw err;
+      }
+      if (err.deliveryOutcome === "uncertain") {
+        // The provider request started, but its result is unknown. Preserve
+        // this exact claim as the durable do-not-retry marker; restoring the
+        // prior status or credit could duplicate a delivered pay link.
+        logger.warn(`[invoice] SMS provider outcome is unverified for ${invoice.invoice_number} — claim retained for review`);
         throw err;
       }
       const restored = await restoreSendClaim(invoiceId, previousStatus, claimed, db, invoice.send_claim_token);
@@ -3289,6 +3297,7 @@ const InvoiceService = {
     // (allowClaimed) skip this — their whole send defers below instead.
     if (!allowClaimed
       && ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD", "APP_PROVIDER_RETRY"].includes(sms.code)
+      && sms.deliveryOutcome !== "uncertain"
       && sms.deferred
       && sms.nextAllowedAt
       && sms.heldBody
@@ -3404,6 +3413,8 @@ const InvoiceService = {
       && email.deliveryOutcome === "not_sent";
     const terminalVisitObserved = !ok && (sms.code === "INVOICE_VISIT_TERMINAL"
       || email.code === "INVOICE_VISIT_TERMINAL");
+    const deliveryOutcomeUncertain = !ok && (sms.deliveryOutcome === "uncertain"
+      || email.deliveryOutcome === "uncertain");
     let ownedDeliveryFinalized = false;
     if (ok) {
       const finalized = await whereSendClaimOwned(
@@ -3465,6 +3476,8 @@ const InvoiceService = {
       // delivery-unverified evidence; neither restore nor destructive void is
       // licensed until an operator resolves the ambiguous channel.
       logger.warn(`[invoice] Terminal visit detected for ${claim.invoice.invoice_number} with an unverified sibling-channel outcome — claim retained for review`);
+    } else if (deliveryOutcomeUncertain) {
+      logger.warn(`[invoice] Delivery outcome is unverified for ${claim.invoice.invoice_number} — claim retained for review`);
     } else {
       const restored = await restoreSendClaim(
         invoiceId,
@@ -3555,7 +3568,9 @@ const InvoiceService = {
     return { ok, sms, email, payUrl, creditApplied: sendCreditResult?.applied || 0,
       ...(terminalVisitRefused
         ? { code: "INVOICE_VISIT_TERMINAL" }
-        : terminalVisitObserved ? { code: "INVOICE_VISIT_TERMINAL_OUTCOME_UNCERTAIN" } : {}) };
+        : terminalVisitObserved
+          ? { code: "INVOICE_VISIT_TERMINAL_OUTCOME_UNCERTAIN" }
+          : deliveryOutcomeUncertain ? { code: "INVOICE_DELIVERY_OUTCOME_UNCERTAIN" } : {}) };
   },
 
   async markDeliverySent(
@@ -3924,6 +3939,11 @@ const InvoiceService = {
       if (result.code === "INVOICE_VISIT_TERMINAL_OUTCOME_UNCERTAIN") {
         held += 1;
         logger.warn(`[invoice] Scheduled send for ${inv.invoice_number} found a terminal visit after an unverified channel outcome — claim retained for review`);
+        continue;
+      }
+      if (result.code === "INVOICE_DELIVERY_OUTCOME_UNCERTAIN") {
+        held += 1;
+        logger.warn(`[invoice] Scheduled send for ${inv.invoice_number} has an unverified provider outcome — claim retained for review`);
         continue;
       }
 

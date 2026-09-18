@@ -137,6 +137,16 @@ postgres('invoice send episode ownership', () => {
     expect(tokens[0]).not.toBe(tokens[1]);
   });
 
+  test('an uncertain direct provider outcome retains its exact claim for review', async () => {
+    sendCustomerMessage.mockImplementationOnce(({ withProviderHandoff }) => (
+      withProviderHandoff(async () => { throw new Error('provider socket closed'); })
+    ));
+
+    await expect(Invoice.sendViaSMS(invoiceId)).rejects.toMatchObject({ deliveryOutcome: 'uncertain' });
+    expect(await read()).toMatchObject({ status: 'sending' });
+    expect((await read()).send_claim_token).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
   test('legacy accepted-delivery finalization promotes a claimed row without erasing its episode token', async () => {
     const token = randomUUID();
     await trx('invoices').where({ id: invoiceId }).update({ status: 'sending', send_claim_token: token });
@@ -178,6 +188,23 @@ postgres('invoice send episode ownership', () => {
     expect(require('../services/invoice-email').sendInvoiceEmail).not.toHaveBeenCalled();
     expect(await read()).toMatchObject({ status: 'void', send_claim_token: null, scheduled_send_attempts: 0 });
     expect(require('../services/inspection-credit').reverseInspectionCreditForBooking).toHaveBeenCalledTimes(1);
+  });
+
+  test('scheduled provider uncertainty retains its exact claim without spending an attempt', async () => {
+    await trx('invoices').where({ id: invoiceId }).update({
+      status: 'scheduled', scheduled_send_at: new Date(Date.now() - 60000), scheduled_send_attempts: 0,
+    });
+    sendCustomerMessage.mockImplementationOnce(({ withProviderHandoff }) => (
+      withProviderHandoff(async () => { throw new Error('provider socket closed'); })
+    ));
+    require('../services/invoice-email').sendInvoiceEmail.mockResolvedValueOnce({
+      ok: false, error: 'SMTP rejected', deliveryOutcome: 'not_sent',
+    });
+
+    await expect(Invoice.processScheduledSends({ limit: 1 }))
+      .resolves.toMatchObject({ sent: 0, failed: 0, deferred: 0 });
+    expect(await read()).toMatchObject({ status: 'sending', scheduled_send_attempts: 0 });
+    expect((await read()).send_claim_token).toMatch(/^[0-9a-f-]{36}$/);
   });
 
   test('nested SMS retains ownership for email; the outer send clears it', async () => {

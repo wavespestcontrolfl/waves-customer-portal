@@ -352,6 +352,29 @@ describe('processScheduledSends send-window handling', () => {
     }
   });
 
+  test('an uncertain held SMS is not queued and a definite email failure retains the claim', async () => {
+    const { sendInvoiceEmail } = require('../services/invoice-email');
+    const uncertain = Object.assign(new Error('provider outcome unknown'), {
+      code: 'PUSH_IN_FLIGHT', deliveryOutcome: 'uncertain', deferred: true,
+      nextAllowedAt: WINDOW_OPEN.toISOString(), smsBody: 'Pay at https://pay.example/abc',
+      toPhone: '+19415550123',
+    });
+    const smsSpy = jest.spyOn(InvoiceService, 'sendViaSMS').mockRejectedValue(uncertain);
+    sendInvoiceEmail.mockResolvedValueOnce({ ok: false, error: 'SMTP rejected', deliveryOutcome: 'not_sent' });
+    const draftInvoice = { ...dueRow, status: 'draft' };
+    db.mockReturnValueOnce(chain({ first: { payer_statement_id: null } }))
+      .mockReturnValueOnce(chain({ first: draftInvoice }))
+      .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending' }] }));
+    try {
+      await expect(InvoiceService.sendViaSMSAndEmail('inv-1')).resolves.toMatchObject({
+        ok: false, code: 'INVOICE_DELIVERY_OUTCOME_UNCERTAIN',
+      });
+      expect(db).toHaveBeenCalledTimes(3);
+    } finally {
+      smsSpy.mockRestore();
+    }
+  });
+
   test('terminal email refusal keeps a claim when the held SMS adopted a live queued delivery', async () => {
     const { sendInvoiceEmail } = require('../services/invoice-email');
     const held = Object.assign(new Error('payment-link SMS held'), {
@@ -515,5 +538,18 @@ describe('processScheduledSends send-window handling', () => {
       });
       expect(db).toHaveBeenCalledTimes(3);
     } finally { voidSpy.mockRestore(); }
+  });
+
+  test('scheduled delivery uncertainty retains the claim without spending an attempt', async () => {
+    isWithinSendWindowET.mockReturnValue(true);
+    db.mockReturnValueOnce(chain())
+      .mockReturnValueOnce(chain({ rows: [dueRow] }))
+      .mockReturnValueOnce(chain({ returning: [claimedRow()] }));
+    sendSpy.mockResolvedValue({ ok: false, code: 'INVOICE_DELIVERY_OUTCOME_UNCERTAIN',
+      sms: { error: 'provider outcome unknown', deliveryOutcome: 'uncertain' },
+      email: { error: 'SMTP rejected', deliveryOutcome: 'not_sent' }, creditApplied: 25 });
+
+    expect(await InvoiceService.processScheduledSends()).toEqual({ sent: 0, failed: 0, deferred: 0 });
+    expect(db).toHaveBeenCalledTimes(3);
   });
 });
