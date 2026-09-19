@@ -125,6 +125,12 @@ describe('buildAddressLines — spoken raw_text with conversational state-code w
       raw_text: "300 Seaglass, that's one word, S-E-A-G-L-A-S-S Circle. That's in Bradenton, 34211.",
     })).toEqual(['300 Seaglass Cir', 'Bradenton FL 34211']);
   });
+  test('an abbreviated other state followed by trailing speech still overrides the FL default (codex r1 P1)', () => {
+    expect(buildAddressLines({
+      street_line_1: '123 Main St', city: 'Venice', state: null,
+      raw_text: "123 Main Street, Venice, CA, but I don't know the ZIP",
+    })).toEqual(['123 Main St', 'Venice CA']);
+  });
   test('an explicit other state in raw_text still overrides the FL default', () => {
     expect(buildAddressLines({
       street_line_1: '123 Main St', city: 'Louisville', state: null,

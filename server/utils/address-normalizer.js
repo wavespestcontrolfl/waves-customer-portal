@@ -281,13 +281,14 @@ function normalizeState(value) {
 // Manatee County addresses out of the service area in one week
 // (2026-09-15..18), which vetoes every customer and lead write for the
 // call. Full state names ("Kentucky") stay free-position: they are never
-// conversational filler.
+// conversational filler. A comma or period ends a segment too, so an
+// explicit "…, Venice, CA, but I don't know the ZIP" keeps CA (codex r1 P1).
 function findState(value) {
-  const text = cleanString(value).replace(/[.,]/g, ' ');
+  const text = cleanString(value).replace(/\s*([.,])\s*/g, '$1 ').trim();
   if (!text) return { raw: '', state: '' };
   for (const token of STATE_TOKENS) {
     const pattern = token.length === 2
-      ? `\\b(${escapeRegExp(token)})(?=\\s*$|\\s+\\d{5}(?:-\\d{4})?\\b)`
+      ? `\\b(${escapeRegExp(token)})(?=\\s*(?:$|[.,])|\\s+\\d{5}(?:-\\d{4})?\\b)`
       : `\\b(${escapeRegExp(token)})\\b`;
     const match = text.match(new RegExp(pattern, 'i'));
     if (match) return { raw: match[1], state: normalizeState(token) };
@@ -632,7 +633,9 @@ function parseRawAddress(raw) {
     }
     line1 = parts.slice(0, unitEnd).join(' ');
     city = parts[unitEnd] || '';
-    const stateZip = parts.slice(unitEnd + 1).join(' ');
+    // Joined with the comma kept: findState treats a comma as the end of a
+    // segment, so "CA, but I don't know the ZIP" still reads CA.
+    const stateZip = parts.slice(unitEnd + 1).join(', ');
     zip = normalizeZip(stateZip);
     state = findState(stateZip).state;
   } else if (parts.length === 2) {
