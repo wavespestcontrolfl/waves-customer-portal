@@ -1093,3 +1093,33 @@ test.each([
     expect(grammar.reportClaimIsDenied(text, text, text.indexOf('Talstar P'),
       text.indexOf('exterior perimeter'), findingVerb)).toBe(denied);
   });
+
+test.each([
+  ['We lack evidence that Talstar P was applied to the exterior perimeter.', true, false],
+  ['There is insufficient evidence that Talstar P was applied to the exterior perimeter.', true, false],
+  ['The evidence fails to show that Talstar P was applied to the exterior perimeter.', true, false],
+  ['We have evidence that Talstar P was applied to the exterior perimeter.', false, false],
+  ['There is sufficient evidence that Talstar P was applied to the exterior perimeter.', false, false],
+  ['The evidence shows that Talstar P was applied to the exterior perimeter.', false, false],
+])('evidence absence remains an epistemic hedge: %s', (text, uncertain, denied) => {
+  const findingVerb = /applied/g.exec(text);
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+  expect(grammar.reportClaimIsDenied(text, text, text.indexOf('Talstar P'),
+    text.indexOf('exterior perimeter'), findingVerb)).toBe(denied);
+});
+
+test('an unrelated evidence-absence clause stays outside bounded finding evidence', () => {
+  const text = 'We lack evidence that the invoice was paid, but Talstar P was applied to the exterior perimeter.';
+  const findingEvidence = grammar.claimContext(text, text.indexOf('Talstar P'), text.length);
+  expect(findingEvidence).not.toMatch(/lack evidence/i);
+  expect(grammar.reportFindingIsUncertain(findingEvidence)).toBe(false);
+});
+
+test('unrelated evidence absence does not hedge a completed treatment', () => {
+  const text = 'We lack evidence of ants and Talstar P was applied to the exterior perimeter.';
+  const findingVerb = /applied/g.exec(text);
+  expect(grammar.reportHasCompletedPredicate(text, findingVerb)).toBe(true);
+  expect(grammar.reportFindingIsUncertain(text)).toBe(false);
+  expect(grammar.reportClaimIsDenied(text, text, text.indexOf('Talstar P'),
+    text.indexOf('exterior perimeter'), findingVerb)).toBe(false);
+});
