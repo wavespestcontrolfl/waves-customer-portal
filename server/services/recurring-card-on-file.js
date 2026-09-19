@@ -229,9 +229,16 @@ async function resolveRecurringCardPolicyForEstimate({
       logger.warn('[recurring-cof] live plan-customer check failed — card stays required', { error: err.message });
     }
   }
-  if (isPlanMember) {
-    return { enforced: true, required: false, exemptReason: 'existing_plan_customer' };
-  }
+  // The plan-member exemption is decided AFTER the payer and Auto Pay checks
+  // below: an existing member already on Auto Pay must classify as
+  // `autopay_already_active` (the completion auto-charge lane) — returning
+  // `existing_plan_customer` first put every member's second accept on the
+  // pay-link path, so a per-application member with a card on file got a
+  // due-today invoice texted and emailed instead of the visit charging their
+  // card after the tech completed it (prod incident 2026-09-18). The payer
+  // check stays ahead of the Auto Pay check for the same reason it does for
+  // non-members: a payer-billed invoice is never auto-charged at completion,
+  // so it must not be held from delivery either.
 
   if (resolvedCustomerId) {
     // Payer-billed: match the eventual invoice's payer precedence
@@ -285,7 +292,17 @@ async function resolveRecurringCardPolicyForEstimate({
     } catch (err) {
       logger.warn('[recurring-cof] autopay-active check failed — card stays required', { error: err.message });
     }
+  }
 
+  // Existing plan member NOT on Auto Pay: no capture demanded, invoices stay
+  // on the normal payable path. Deliberately ahead of the saved-method
+  // auto-satisfy below — a member who saved a card without enrolling is not
+  // enrolled into Auto Pay by a later accept.
+  if (isPlanMember) {
+    return { enforced: true, required: false, exemptReason: 'existing_plan_customer' };
+  }
+
+  if (resolvedCustomerId) {
     // Auto-satisfy (spec §3.2: existing customers with a saved card are
     // never re-asked): a saved CARD carrying an enrollment-qualifying v8+
     // consent skips capture, and the accept enrolls THAT method post-commit
