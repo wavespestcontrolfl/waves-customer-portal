@@ -318,3 +318,33 @@ describe('annual fallback contract preservation', () => {
     } finally { applyServerTermiteAnnualPlanPricingConfig(null, false); }
   });
 });
+
+describe("annual plan services row + preview identity (codex #4610 r1 P1/P2)", () => {
+  it("stamps the EXACT gross and post-discount annual on the termite row and labels the plan as one program", async () => {
+    const { applyServerTermiteAnnualPlanPricingConfig, termiteBaitSelectionLabel } = await import("./estimateEngine");
+    try {
+      applyServerTermiteAnnualPlanPricingConfig({ setup_per_station: 30, annual_base: 249, annual_step: 50, bracket_stations: 5, bracket_floor: 10 }, true);
+      const row = (E) => (E.recurring?.services || []).find((s) => s.service === "termite_bait");
+      // Bronze (one family): the row carries the exact fee, not round(fee/12) x 12.
+      const solo = calculateEstimate(termiteInput({ termiteBaitSystem: "trelona", termitePlan: "annual_protection" }));
+      const fee = solo.results.tmBait.annualFee;
+      expect(fee % 12).not.toBe(0); // the drift case ($299-style fee)
+      expect(row(solo)).toMatchObject({ plan: "annual_protection", annual: fee, annualAfterDiscount: fee, visitsPerYear: 1, perTreatment: fee });
+      expect(Math.round(row(solo).mo * 12 * 100) / 100).not.toBe(fee);
+      expect(solo.recurring.annualBeforeDiscount).toBe(fee);
+      // Silver (two families): post-discount annual is the exact 10%-off figure.
+      const bundled = calculateEstimate(termiteInput({ termiteBaitSystem: "trelona", termitePlan: "annual_protection", svcPest: true }));
+      expect(bundled.recurring.waveGuardTier).toBe("Silver");
+      expect(row(bundled)).toMatchObject({ annual: fee, annualAfterDiscount: Math.round(fee * 0.9 * 100) / 100 });
+      // Preview identity: the plan is one program, never "Trelona Basic".
+      expect(termiteBaitSelectionLabel(solo.results.tmBait)).toBe("Subterranean Termite Protection");
+      // Quarterly rows are untouched: no plan/annual stamps, legacy label intact.
+      const quarterly = calculateEstimate(termiteInput({ termiteBaitSystem: "trelona" }));
+      expect(row(quarterly).plan).toBeUndefined();
+      expect(row(quarterly).annual).toBeUndefined();
+      expect(termiteBaitSelectionLabel(quarterly.results.tmBait)).toBe("Trelona Basic");
+    } finally {
+      applyServerTermiteAnnualPlanPricingConfig(null, false);
+    }
+  });
+});

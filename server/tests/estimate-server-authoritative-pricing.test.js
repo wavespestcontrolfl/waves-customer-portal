@@ -443,3 +443,53 @@ describe('audited pricing validation and palm replay', () => {
     expect(old.serverTotals.annualTotal).toBe(128);
   });
 });
+
+describe('annual termite plan on the CLIENT_FALLBACK rail (codex #4610 r1 P1)', () => {
+  const gateEnv = { GATE_TERMITE_ANNUAL_PLAN: process.env.GATE_TERMITE_ANNUAL_PLAN, GATE_CANCEL_FLOW_V2: process.env.GATE_CANCEL_FLOW_V2 };
+  afterEach(() => {
+    for (const [k, v] of Object.entries(gateEnv)) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  });
+  const fallbackRecompute = async () => ({ recomputed: false, reason: 'NO_INPUTS' });
+  const clientPreview = { annualTotal: 749, monthlyTotal: 24.92, onetimeTotal: 450 };
+  const annualResult = () => ({
+    inputs: {},
+    result: {
+      results: { tmBait: { plan: 'annual_protection', setupFee: 450, annualFee: 299, sta: 15 } },
+      recurring: { grandTotal: 24.92, monthlyTotal: 24.92, annualTotal: 299, services: [{ service: 'termite_bait', mo: 24.92, plan: 'annual_protection', annual: 299 }] },
+      oneTime: { total: 450 },
+    },
+  });
+  const run = (estimateData) => resolveServerAuthoritativePricing({
+    estimateData, clientPreview, quoteRequired: false, now: NOW, recompute: fallbackRecompute,
+  });
+
+  test('fails CLOSED when either plan gate is off — the rejected program never persists as a fallback price', async () => {
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    delete process.env.GATE_CANCEL_FLOW_V2;
+    await expect(run(annualResult())).rejects.toMatchObject({ code: 'TERMITE_ANNUAL_PLAN_GATED', failClosed: true, statusCode: 400 });
+    process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+    await expect(run(annualResult())).rejects.toMatchObject({ code: 'TERMITE_ANNUAL_PLAN_GATED' });
+  });
+
+  test('persists as CLIENT_FALLBACK while both gates are open', async () => {
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+    process.env.GATE_CANCEL_FLOW_V2 = 'true';
+    const out = await run(annualResult());
+    expect(out.audit.pricing_authority).toBe('CLIENT_FALLBACK');
+    expect(out.totals).toEqual(clientPreview);
+    warn.mockRestore();
+  });
+
+  test('a quarterly fallback result is untouched by the closed gate', async () => {
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const data = annualResult();
+    data.result.results.tmBait = { plan: 'quarterly', sta: 15 };
+    const out = await run(data);
+    expect(out.audit.pricing_authority).toBe('CLIENT_FALLBACK');
+    warn.mockRestore();
+  });
+});

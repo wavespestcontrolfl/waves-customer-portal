@@ -131,6 +131,8 @@ export function termiteBaitMonitoringLabel(value) {
 }
 
 export function termiteBaitSelectionLabel(tmBait = {}, fallback = {}) {
+  // The annual plan is one program, not a system + monitoring tier pair.
+  if (tmBait.plan === 'annual_protection') return tmBait.planLabel || 'Subterranean Termite Protection';
   const system = tmBait.selectedSystem || tmBait.system || fallback.termiteBaitSystem;
   const tier = tmBait.selectedMonitoringTier || tmBait.monitoringTier || fallback.termiteMonitoringTier;
   return `${termiteBaitSystemLabel(system)} ${termiteBaitMonitoringLabel(tier)}`;
@@ -2849,6 +2851,12 @@ export function calculateEstimate(inputs) {
         // visit, perApp = the annual fee.
         perTreatment: onAnnualPlan ? annualFee : Math.round(monMonthly * 3 * 100) / 100,
         visitsPerYear: onAnnualPlan ? TERMITE_ANNUAL_PLAN.visitsPerYear : 4,
+        // The plan bills ONE exact annual fee ($299), never round(299/12) x 12
+        // = $299.04: persisted-row readers (recurringLineAnnualAmount,
+        // frequencyFromRecurringService) take a stamped annual ahead of the
+        // rounded monthly, so the row carries the same gross figure the
+        // aggregates use; annualAfterDiscount is stamped once the tier is known.
+        ...(onAnnualPlan ? { plan: 'annual_protection', planLabel: TERMITE_ANNUAL_PLAN.label, annual: annualFee } : {}),
       });
       // Bond rider (owner 2026-07-20) — mirrors server priceTermiteBond +
       // the engine's quote-time bondOptions snapshot. Fixed quarterly rate
@@ -3784,6 +3792,13 @@ export function calculateEstimate(inputs) {
   else if (ac === 3) { wt = 'Gold'; wd = 0.15; }
   else if (ac === 2) { wt = 'Silver'; wd = 0.10; }
   else if (ac === 1) { wt = 'Bronze'; wd = 0; }
+  // The annual termite plan row is WaveGuard-discountable like its line item;
+  // stamp the exact post-discount annual the server mapper would carry so a
+  // tier-discounted fallback row never reconstructs a drifted amount.
+  const annualTermiteRow = wgServices.find((s) => s.service === 'termite_bait' && s.plan === 'annual_protection');
+  if (annualTermiteRow && Number(annualTermiteRow.annual) > 0) {
+    annualTermiteRow.annualAfterDiscount = Math.round(annualTermiteRow.annual * (1 - wd) * 100) / 100;
+  }
   if (R.injection) {
     const annualBeforeCredits = R.injection.ann;
     const flatCreditAnnual = wt === 'Gold' || wt === 'Platinum'

@@ -2581,7 +2581,12 @@ function EstimateToolView() {
           satelliteUrl: satelliteData?.imageUrl || null,
         }),
       });
-      if (!r.ok) throw new Error("Save failed: " + r.status);
+      if (!r.ok) {
+        // A fail-closed policy refusal (e.g. the annual termite gate closed
+        // between Generate and Save) carries its reason; show it, not "400".
+        const refusal = await r.json().catch(() => null);
+        throw new Error(refusal?.error || refusal?.message || ("Save failed: " + r.status));
+      }
       const d = await r.json();
       const id = d.id || d.estimateId;
       setSavedId(id);
@@ -5476,31 +5481,51 @@ function EstimateToolView() {
                               </div>
                             ) : (
                               <>
-                                <TierGrid>
-                                  {" "}
-                                  {R.tmBait.ai != null && (
-                                    <TierRow
-                                      name="Advance"
-                                      detail={`${fmtInt(R.tmBait.ai)} install | Basic $35 | Premier $65/mo`}
-                                      price="$35-65"
-                                      recommended={R.tmBait.selectedSystem === "advance"}
-                                      dimmed={R.tmBait.selectedSystem && R.tmBait.selectedSystem !== "advance"}
-                                    />
-                                  )}{" "}
-                                  {R.tmBait.ti != null && (
-                                    <TierRow
-                                      name="Trelona"
-                                      detail={`${fmtInt(R.tmBait.ti)} install | Basic $35 | Premier $65/mo`}
-                                      price="$35-65"
-                                      recommended={R.tmBait.selectedSystem === "trelona"}
-                                      dimmed={R.tmBait.selectedSystem && R.tmBait.selectedSystem !== "trelona"}
-                                    />
-                                  )}{" "}
-                                </TierGrid>{" "}
-                                <div style={sModNote}>
-                                  Install cost is a one-time setup fee, not a
-                                  recurring charge
-                                </div>{" "}
+                                {R.tmBait.plan === 'annual_protection' ? (
+                                  <>
+                                    <TierGrid>
+                                      {" "}
+                                      <TierRow
+                                        name={R.tmBait.planLabel || 'Subterranean Termite Protection'}
+                                        detail={`${fmtInt(R.tmBait.setupFee)} station setup | ${R.tmBait.sta} Trelona stations | ${R.tmBait.visitsPerYear || 1} visit/yr`}
+                                        price={`$${fmtInt(R.tmBait.annualFee)}/yr`}
+                                        recommended
+                                      />{" "}
+                                    </TierGrid>{" "}
+                                    <div style={sModNote}>
+                                      Station setup is a one-time fee; the plan is
+                                      prepaid once per year, not billed monthly.
+                                    </div>{" "}
+                                  </>
+                                ) : (
+                                  <>
+                                    <TierGrid>
+                                      {" "}
+                                      {R.tmBait.ai != null && (
+                                        <TierRow
+                                          name="Advance"
+                                          detail={`${fmtInt(R.tmBait.ai)} install | Basic $35 | Premier $65/mo`}
+                                          price="$35-65"
+                                          recommended={R.tmBait.selectedSystem === "advance"}
+                                          dimmed={R.tmBait.selectedSystem && R.tmBait.selectedSystem !== "advance"}
+                                        />
+                                      )}{" "}
+                                      {R.tmBait.ti != null && (
+                                        <TierRow
+                                          name="Trelona"
+                                          detail={`${fmtInt(R.tmBait.ti)} install | Basic $35 | Premier $65/mo`}
+                                          price="$35-65"
+                                          recommended={R.tmBait.selectedSystem === "trelona"}
+                                          dimmed={R.tmBait.selectedSystem && R.tmBait.selectedSystem !== "trelona"}
+                                        />
+                                      )}{" "}
+                                    </TierGrid>{" "}
+                                    <div style={sModNote}>
+                                      Install cost is a one-time setup fee, not a
+                                      recurring charge
+                                    </div>{" "}
+                                  </>
+                                )}
                               </>
                             )}
                           </div>
@@ -5985,7 +6010,9 @@ function EstimateToolView() {
                                       textAlign: "right",
                                     }}
                                   >
-                                    {fmt(s.mo)}/mo
+                                    {s.plan === 'annual_protection' && Number(s.annual) > 0
+                                      ? `${fmt(s.annual)}/yr prepaid`
+                                      : `${fmt(s.mo)}/mo`}
                                   </div>{" "}
                                 </React.Fragment>
                               ))}

@@ -1284,6 +1284,25 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   }
 }
 
+// The browser fallback result's termite program (estimateEngine.js R.tmBait,
+// persisted under result.results). Only 'annual_protection' is gated.
+function clientFallbackSellsAnnualTermite(estimateData = {}) {
+  const tmBait = estimateData?.result?.results?.tmBait;
+  return !!tmBait && typeof tmBait === 'object'
+    && String(tmBait.plan || '').toLowerCase() === 'annual_protection';
+}
+
+function rejectGatedAnnualTermiteFallback(estimateData) {
+  if (!clientFallbackSellsAnnualTermite(estimateData)) return;
+  if (require('../config/feature-gates').termiteAnnualPlanSelectionEnabled()) return;
+  const err = new Error('The annual termite plan is not available right now (GATE_TERMITE_ANNUAL_PLAN / GATE_CANCEL_FLOW_V2 closed) — regenerate the estimate to price the quarterly program.');
+  err.statusCode = 400;
+  err.code = 'TERMITE_ANNUAL_PLAN_GATED';
+  err.isOperational = true;
+  err.failClosed = true; // never enters the CLIENT_FALLBACK rail
+  throw err;
+}
+
 // Decide the authoritative totals + audit columns for a save. Fails OPEN to the
 // client preview (so a broken engine never blocks Virginia's save) but LOUDLY:
 // every non-authoritative save is stamped CLIENT_FALLBACK (queryable column) and
@@ -1358,6 +1377,13 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
     return { totals: result.serverTotals, audit, fallbackReason: null };
   }
 
+  // A CLIENT_FALLBACK save persists the browser result WITHOUT the engine's
+  // live gate decision. The admin fallback prices the annual termite plan
+  // only on the server's gate word at Generate time; if either plan gate
+  // closed between Generate and Save, this shape would persist (and could
+  // later deliver) an annual program the engine no longer sells. Fail
+  // CLOSED like a gated add-on rather than stamping the rejected program.
+  rejectGatedAnnualTermiteFallback(estimateData);
   audit.pricing_authority = 'CLIENT_FALLBACK';
   if (result.reason === 'ENGINE_ERROR') {
     // Deploy-bug signal: a billed price that came from a broken engine.
