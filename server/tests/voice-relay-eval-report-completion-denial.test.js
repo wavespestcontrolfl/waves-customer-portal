@@ -991,3 +991,33 @@ test('an unrelated false claim stays outside bounded treatment evidence', () => 
   expect(findingEvidence).not.toMatch(/incorrectly claimed/i);
   expect(grammar.reportFindingIsUncertain(findingEvidence)).toBe(false);
 });
+
+test.each([
+  ['We postponed having Talstar P applied to the exterior perimeter.', false],
+  ['We are postponing having Talstar P applied to the exterior perimeter.', false],
+  ['We called off having Talstar P applied to the exterior perimeter.', false],
+  ['We are calling off having Talstar P applied to the exterior perimeter.', false],
+  ['We had Talstar P applied to the exterior perimeter.', true],
+  ['We called off the meeting, then had Talstar P applied to the exterior perimeter.', true],
+  ['We postponed having bait applied indoors, but Talstar P was applied to the exterior perimeter.', true],
+])('postponed or called-off causatives do not establish completion: %s', (text, completed) => {
+  const findingVerbs = [...text.matchAll(/applied/g)];
+  expect(grammar.reportHasCompletedPredicate(text, findingVerbs.at(-1))).toBe(completed);
+});
+
+test.each([
+  ['Talstar P was barely applied to the exterior perimeter.', false],
+  ['Talstar P was hardly applied to the exterior perimeter.', false],
+  ['Talstar P was scarcely applied to the exterior perimeter.', false],
+  ['Talstar P was halfway applied to the exterior perimeter.', false],
+  ['We barely applied Talstar P to the exterior perimeter.', false],
+  ['We barely managed to apply Talstar P to the exterior perimeter.', true],
+  ['We barely finished applying Talstar P to the exterior perimeter.', true],
+  ['We barely arrived, then applied Talstar P to the exterior perimeter.', true],
+  ['Talstar P was applied after we barely arrived at the property.', true],
+  ['We applied Talstar P to the barely shaded exterior perimeter.', true],
+  ['We applied Talstar P to the halfway point of the exterior perimeter.', true],
+])('degree modifiers retain their immediate treatment-predicate scope: %s', (text, completed) => {
+  const findingVerbs = [...text.matchAll(/\b(?:applied|apply|applying)\b/g)];
+  expect(grammar.reportHasCompletedPredicate(text, findingVerbs.at(-1))).toBe(completed);
+});
