@@ -915,3 +915,46 @@ test.each([
 ])('a later or negated partial modifier does not deny the selected predicate: %s', (text) => {
   expect(grammar.reportHasCompletedPredicate(text, /applied/.exec(text))).toBe(true);
 });
+
+test.each(["don't", "didn't", 'didn’t'])('contracted %s doubt remains a completed certainty assertion', (doubt) => {
+  const text = `We ${doubt} doubt that Talstar P was applied to the exterior perimeter.`;
+  const findingVerb = /applied/.exec(text);
+  expect(grammar.reportHasCompletedPredicate(text, findingVerb)).toBe(true);
+  expect(grammar.reportFindingIsUncertain(text)).toBe(false);
+  expect(grammar.reportClaimIsDenied(text, text, text.indexOf('Talstar P'),
+    text.indexOf('exterior perimeter'), findingVerb, '')).toBe(false);
+});
+
+test('actual doubt remains uncertain and denied', () => {
+  const text = 'We doubt that Talstar P was applied to the exterior perimeter.';
+  const findingVerb = /applied/.exec(text);
+  expect(grammar.reportFindingIsUncertain(text)).toBe(true);
+  expect(grammar.reportClaimIsDenied(text, text, text.indexOf('Talstar P'),
+    text.indexOf('exterior perimeter'), findingVerb, '')).toBe(true);
+});
+
+test.each([
+  ['We finished carefully applying Talstar P to the exterior perimeter.', true],
+  ['We finished fully applying Talstar P to the exterior perimeter.', true],
+  ['We did finish carefully applying Talstar P to the exterior perimeter.', true],
+  ['We planned to have finished carefully applying Talstar P to the exterior perimeter.', false],
+  ['We attempted to finish fully applying Talstar P to the exterior perimeter.', false],
+  ['We did not finish carefully applying Talstar P to the exterior perimeter.', false],
+  ['We almost finished carefully applying Talstar P to the exterior perimeter.', false],
+  ['We finished almost applying Talstar P to the exterior perimeter.', false],
+])('bounded manner adverbs retain their completion governor: %s', (text, completed) => {
+  expect(grammar.reportHasCompletedPredicate(text, /applying/.exec(text))).toBe(completed);
+});
+
+test.each([
+  ['We applied no product other than Talstar P to the exterior perimeter.', 'Talstar P', false],
+  ['No product other than Talstar P was applied to the exterior perimeter.', 'Talstar P', false],
+  ['We applied no products other than Talstar P to the exterior perimeter.', 'Talstar P', false],
+  ['We applied every product other than Talstar P to the exterior perimeter.', 'Talstar P', true],
+  ['We applied bait other than Talstar P to the exterior perimeter.', 'Talstar P', true],
+  ['We applied no product other than bait to the exterior perimeter.', 'bait', false],
+])('no-product other-than focus differs from a selected exclusion: %s', (text, subject, denied) => {
+  const subjectAt = text.indexOf(subject);
+  expect(grammar.reportClaimIsDenied(text, text, subjectAt, text.indexOf('exterior perimeter'),
+    /applied/.exec(text), text.slice(0, subjectAt))).toBe(denied);
+});

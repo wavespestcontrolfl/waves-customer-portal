@@ -1835,6 +1835,9 @@ const REPORT_FINDING_VERB_RE = /\b(?:apply|applying|applied|place|placed|placing
 const REPORT_BASE_TREATMENT_VERB_RE = /^(?:apply|use|spray|treat|place)$/i;
 
 const REPORT_COMPLETED_GERUND_RE = /^(?:applying|spraying|treating|placing|using|putting)$/i;
+const REPORT_COMPLETION_MANNER_SUFFIX = '(?:\\s+(?:carefully|fully)){0,2}\\s*';
+const REPORT_COMPLETION_INTRODUCTION_RE = new RegExp(`\\b(?:complet(?:e|ed)|finish(?:ed)?|done|manag(?:e|ed)\\s+to|succeed(?:ed)?\\s+(?:in|at)|(?:ended|wound)\\s+up)${REPORT_COMPLETION_MANNER_SUFFIX}$`, 'i');
+const REPORT_COMPLETED_GERUND_GOVERNOR_RE = new RegExp(`\\b(?:completed|finished|done|succeeded\\s+(?:in|at)|(?:ended|wound)\\s+up|did\\s+(?:(?:already|also|just|now|\\w+ly)\\s+)*(?:complete|finish|succeed\\s+(?:in|at)))${REPORT_COMPLETION_MANNER_SUFFIX}$`, 'i');
 
 const REPORT_COMPLETED_PASSIVE_RE = /(?:\b(?:was|were|got)(?:n['’]t\s+(?:only|just|merely|simply|exclusively|solely))?|\bdid(?:n['’]t\s+(?:only|just|merely|simply|exclusively|solely))?\s+(?:not\s+(?:only|just|merely|simply|exclusively|solely)\s+)?(?:(?:\w+ly|already|also|just|now)\s+)*get|(?:\b(?:has|have|had)(?:n['’]t\s+(?:only|just|merely|simply|exclusively|solely))?|['’](?:s|d|ve))(?:\s+(?:\w+ly|already|also|just|now))*\s+been)\s+(?:not\s+(?:only|just|merely|simply|exclusively|solely)\s+)?(?:(?:\w+ly|already|also|just|now)\s+)*$/i;
 
@@ -1851,7 +1854,7 @@ const REPORT_NONCOMPLETION_ASSURANCE_GOVERNOR_RE = new RegExp(
 
 const REPORT_NONCOMPLETION_MODIFIER_RE = /\b(?:(?:almost|nearly)(?!\s+immediately\b)(?:\s+(?:has|have|had|was|were|get|got|been|did)){0,2}(?:\s+(?:\w+ly|already|also|just|now))*|(?:only\s+)?(?:partially|incompletely))\s*$/i;
 const REPORT_POSTVERB_NONCOMPLETION_MODIFIER_RE = /^\s+(?:only\s+)?(?:partially|incompletely)(?=\s*(?:[,.!?;]|$)|\s+(?:around|along|throughout|across|on|to|at|in|inside|within|outside(?:\s+of)?)\b)/i;
-const REPORT_NEGATED_DOUBT_RE = /\b(?:i|we)\s+(?:do|did)\s+not\s+doubt(?:\s+that)?\b/gi;
+const REPORT_NEGATED_DOUBT_RE = /\b(?:i|we)\s+(?:do|did)(?:\s+not|n['’]t)\s+doubt(?:\s+that)?\b/gi;
 
 function reportWithoutNominalContrast(text, findingPositions = []) {
   return text.replace(/,\s*(?:but\s+)?not\s+([^,;.!?]+),(?=\s*(?:(?:was|were|has|have|had|got)|(?:around|along|throughout|across|on|to|at|in|inside|within|outside(?:\s+of)?))\b)/gi,
@@ -1875,7 +1878,7 @@ function reportHasCompletedPredicate(affirmed, findingVerb) {
     .replace(/^\s*(?:although|though|while)\b[^,]*,\s*/i, '');
   const completionPrefix = prefix.replace(REPORT_NEGATED_DOUBT_RE, '')
     .replace(REPORT_FRONTED_COMPLETION_TIME_RE, '');
-  const predicateIntroduction = prefix.replace(/\b(?:complet(?:e|ed)|finish(?:ed)?|done|manag(?:e|ed)\s+to|succeed(?:ed)?\s+(?:in|at)|(?:ended|wound)\s+up)\s*$/i, '');
+  const predicateIntroduction = prefix.replace(REPORT_COMPLETION_INTRODUCTION_RE, '');
   const governorIntroduction = predicateIntroduction
     .replace(/\b(?:receiv(?:e[sd]?|ing)|get(?:s|ting)?|got|have|has|had)\s+permission(?=\s+to\b)/i, 'were allowed')
     .replace(
@@ -1893,7 +1896,7 @@ function reportHasCompletedPredicate(affirmed, findingVerb) {
       && !clauseIsNegated(completionPrefix);
   }
   if (REPORT_COMPLETED_GERUND_RE.test(findingVerb[0])) {
-    return /\b(?:completed|finished|done|succeeded\s+(?:in|at)|(?:ended|wound)\s+up|did\s+(?:(?:already|also|just|now|\w+ly)\s+)*(?:complete|finish|succeed\s+(?:in|at)))\s+$/i.test(prefix)
+    return REPORT_COMPLETED_GERUND_GOVERNOR_RE.test(prefix)
       && !clauseIsNegated(completionPrefix);
   }
   // 's can mean active perfect "has"; passive product ownership separately
@@ -1903,11 +1906,11 @@ function reportHasCompletedPredicate(affirmed, findingVerb) {
 }
 
 function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb, precedingText) {
-  if (/(?:\b(?:anything|everything|all)\s+but|(?<!\bnothing\s+)(?<!\bno\s+products?\s+)\bexcept(?:\s+for)?(?:\s+the)?|(?<!\bnothing\s+)\bother\s+than)\s*$/i.test(precedingText)
+  if (/(?:\b(?:anything|everything|all)\s+but|(?<!\bnothing\s+)(?<!\bno\s+products?\s+)\bexcept(?:\s+for)?(?:\s+the)?|(?<!\bnothing\s+)(?<!\bno\s+products?\s+)\bother\s+than)\s*$/i.test(precedingText)
       || (!findingVerb && /\bor\s*$/i.test(precedingText))) return true;
   const affirmedWithoutFocus = affirmed.replace(/(?:\bnot|n['’]t)\s+(?:exclusively|solely)\b/gi,
     (focus) => ' '.repeat(focus.length))
-    .replace(/\bno\s+products?(?=\s+except(?:\s+for)?\b)/gi,
+    .replace(/\bno\s+products?(?=\s+(?:except(?:\s+for)?|other\s+than)\b)/gi,
       (focus) => ' '.repeat(focus.length));
   const affirmedWithoutNegatedDoubt = affirmedWithoutFocus.replace(REPORT_NEGATED_DOUBT_RE,
     (certainty) => ' '.repeat(certainty.length));
