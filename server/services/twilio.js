@@ -961,9 +961,31 @@ const TwilioService = {
         const explicitEstimateIds = (withheldLinksRewritten || options.withheldLinkPolicy === 'rewrite') ? [] : (Array.isArray(options.estimateIds) && options.estimateIds.length
           ? options.estimateIds
           : (options.estimateId ? [options.estimateId] : []));
-        const verdict = await annualHandoffGuard({
-          db: trx || db, estimateIds: explicitEstimateIds, texts: [body],
-        })();
+        // Pre-push audit P1 (round 13, twilio.js:964): a LOOKUP failure here
+        // (the guard's own DB read throwing — e.g. a transient Postgres
+        // error) is a pre-send infrastructure failure, never a provider
+        // outcome. Tagged the same shape as every other guard-failure
+        // sentinel in this codebase (annualOfferGuardFailed) so BOTH catch
+        // sites below — the withSmsHandoff catch and the outer no-handoff
+        // catch — can map it to a retryable, provider-NEVER-attempted
+        // refusal instead of letting it fall into the generic Twilio-error
+        // classification (formatTwilioSendError / isDefinitiveTwilioRejection),
+        // which treats an unrecognized error code as retryable:false and
+        // would permanently fail an unsent scheduled message over a purely
+        // transient DB blip.
+        let verdict;
+        try {
+          verdict = await annualHandoffGuard({
+            db: trx || db, estimateIds: explicitEstimateIds, texts: [body],
+          })();
+        } catch (guardErr) {
+          const err = new Error(`annual offer guard failed: ${guardErr.message}`);
+          err.code = 'ANNUAL_OFFER_GUARD_FAILED';
+          err.annualOfferGuardFailed = true;
+          err.retryable = true;
+          err.cause = guardErr;
+          throw err;
+        }
         if (verdict.blocked) {
           const err = new Error('annual_offer_withheld');
           err.code = 'ANNUAL_OFFER_WITHHELD';
@@ -1014,6 +1036,12 @@ const TwilioService = {
             // "handoff check failed, retryable" shape below, which would
             // tell a retry-on-boundary-failure caller to try again.
             verdict = { ok: false, code: 'ANNUAL_OFFER_WITHHELD', reason: 'annual_offer_withheld', retryable: false };
+          } else if (err && err.annualOfferGuardFailed) {
+            // Pre-push audit P1 (round 13): the guard's own DB read threw —
+            // a pre-send infrastructure failure, not a definite refusal and
+            // not a provider outcome. Retryable, same as sendWindowClosed
+            // below, and never the generic Twilio-failure-alert/retry path.
+            verdict = { ok: false, code: err.code || 'ANNUAL_OFFER_GUARD_FAILED', reason: err.message, retryable: true };
           } else if (err && err.sendWindowClosed) {
             // Round 5 P1: the final isStillValid recheck (inside dispatch,
             // above) closed after the guard's own DB reads — the SAME
@@ -1166,6 +1194,22 @@ const TwilioService = {
         return {
           success: false, sid: null, preSendBlocked: true,
           code: err.code || 'QUIET_HOURS_HOLD', error: err.message,
+          retryable: true, deliveryOutcome: 'not_sent',
+        };
+      }
+      // Pre-push audit P1 (round 13, twilio.js:964): no withSmsHandoff —
+      // the guard's own lookup failure (dispatch()'s wrapped throw) lands
+      // here directly. Without this, it would fall into the generic
+      // Twilio-failure classification below: formatTwilioSendError treats
+      // it as a provider error, and an unrecognized error code (e.g.
+      // PostgreSQL 57P01) defaults retryable:false there — permanently
+      // failing an unsent scheduled message over a transient DB read, not
+      // a real provider rejection. Same retryable/not-attempted shape as
+      // sendWindowClosed above; the SDK was never called.
+      if (err && err.annualOfferGuardFailed) {
+        return {
+          success: false, sid: null, preSendBlocked: true,
+          code: err.code || 'ANNUAL_OFFER_GUARD_FAILED', error: err.message,
           retryable: true, deliveryOutcome: 'not_sent',
         };
       }
