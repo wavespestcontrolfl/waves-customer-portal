@@ -122,6 +122,13 @@ describe('activity cadence stays inside its claim', () => {
     expect(relations(text).map((relation) => relation.relation)).toContain('plan_total');
     expect(relations(text).map((relation) => relation.evidence.reason)).not.toContain('activity_cadence');
   });
+  test.each([
+    'The plan is $98 monthly including service',
+    'Our price is $98 monthly with service reminders',
+    'Your payment is $98 monthly including treatments',
+  ])('a trailing period on an asserted price is not activity cadence: %s', (text) => {
+    expect(relations(text).map((relation) => relation.relation)).toContain('plan_total');
+  });
   test('activity cadence inside the same claim still excludes', () => {
     expect(relations('Monthly reminders mention the $98 price').map((relation) => relation.evidence.reason))
       .toEqual(['activity_cadence']);

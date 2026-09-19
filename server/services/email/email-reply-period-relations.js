@@ -193,7 +193,12 @@ function recognizeClause(clause) {
   function classify(amount, period, gap, claimStart, claimEnd, from, to) {
     if (bareMeasurement(amount)) return { relation: 'excluded', reason: 'bare_measurement' };
     if (tiedToUnit(amount)) return { relation: 'excluded', reason: 'visit_tied' };
-    if (activityCadence(period, claimEnd)) return { relation: 'excluded', reason: 'activity_cadence' };
+    // A period trailing an asserted price ("The plan is $98 monthly including
+    // service") is the price's cadence, not a modifier of a later activity
+    // noun; only a period that modifies the activity can exclude the pair.
+    const trailingAssertion = amount.end === period.start
+      && (assertedPriceLabel(amount, period, claimStart) || paymentAssertion(amount, period));
+    if (!trailingAssertion && activityCadence(period, claimEnd)) return { relation: 'excluded', reason: 'activity_cadence' };
     if (paymentAssertion(amount, period)) return { relation: 'plan_total', reason: 'payment_assertion' };
     if (explicitCurrencyPeriod(amount, period, gap)) return { relation: 'plan_total', reason: 'direct_currency_period' };
     const roles = rolesIn(from, to);
