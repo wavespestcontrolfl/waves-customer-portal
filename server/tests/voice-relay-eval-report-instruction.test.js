@@ -178,6 +178,17 @@ test.each([
 });
 
 test.each([
+  ['A technician, according to the report, put Talstar P around the exterior perimeter yesterday.', false],
+  ['Crew from our Bradenton office, as discussed, please put Talstar P around the exterior perimeter.', true],
+  ['Crew from our Bradenton office, as discussed, apply Talstar P around the exterior perimeter.', true],
+  ['Please, according to the report, put Talstar P around the exterior perimeter.', true],
+  ['Okay, according to the report, put Talstar P around the exterior perimeter.', true],
+])('a reporting aside after the subject is not an imperative boundary: %s', (text, instruction) => {
+  expect(grammar.reportFindingIsInstruction(text, text.indexOf('Talstar P'),
+    text.indexOf('exterior perimeter'), /put/.exec(text), text.length)).toBe(instruction);
+});
+
+test.each([
   ['Check the invoice, we managed to apply Talstar P around the exterior perimeter.', false],
   ['Check that we managed to apply Talstar P around the exterior perimeter.', true],
   ['Check the invoice, we applied Talstar P around the exterior perimeter.', false],
