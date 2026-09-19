@@ -25031,7 +25031,16 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
         logger.error(`[estimate-public] service-details email failed for estimate ${estimate.id}: ${reason}`);
         return res.status(502).json({ ok: false, error: 'Email could not be sent right now.' });
       }
-      if (result.blocked) return res.status(409).json({ ok: false, error: 'Email is unavailable for this address — text yourself the link instead.' });
+      if (result.blocked) {
+        // Codex round 1 audit (P0, AGENTS.md public-route rule): a
+        // suppression block is address-level (recipient unsubscribed/
+        // bounced) and safe to surface as 409 — it says nothing about the
+        // estimate's own state. An annual-offer withhold is row-level, like
+        // the customer-viewable/call-side-hold check above, and must be
+        // indistinguishable from an unknown token — the same generic 404.
+        if (result.reason === 'annual_offer_withheld') return res.status(404).json({ error: 'Estimate not found' });
+        return res.status(409).json({ ok: false, error: 'Email is unavailable for this address — text yourself the link instead.' });
+      }
       if (!result.sent) return res.status(502).json({ ok: false, error: 'Email could not be sent right now.' });
       return res.json({ ok: true, channel: 'email' });
     }
@@ -25181,6 +25190,10 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       if (smsResult?.claimHeldElsewhere) serviceDetailsSmsClaims.delete(dedupKey);
       else releaseClaims();
       if (smsResult?.withheld) return res.status(404).json({ error: 'Estimate not found' });
+      // Codex round 1 audit (P0): same row-level reasoning as the email
+      // branch above — the composed preSendCheck's annual-offer block is
+      // never distinguishable from an unknown/ineligible token.
+      if (smsResult?.code === 'ANNUAL_OFFER_WITHHELD') return res.status(404).json({ error: 'Estimate not found' });
       return res.status(502).json({ ok: false, error: 'Text could not be sent right now.' });
     }
     // Confirmed success only: start the dedup window and prune stale entries

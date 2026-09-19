@@ -919,6 +919,26 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
     content: Buffer.from(a.content, 'base64'),
     contentType: a.type || 'application/pdf',
   }));
+  // Pre-push audit P1: the SMTP fallback bypasses EmailTemplateLibrary.
+  // sendTemplate entirely, so the annual-offer guard never gets a chance to
+  // run on this path (reviewedProvider === 'smtp', or a fallback triggered
+  // by an eligible sendTemplate error) — compose it here, immediately
+  // before the provider handoff, on a fresh read of the anchor AND every
+  // grouped sibling this call carries. A blocked verdict maps to the same
+  // shape sendTemplate's own blocked branch returns above, so
+  // sendEstimateNowInner's existing not-ok handling (claim release, no
+  // delivery stamp) applies unchanged. A guard infrastructure error must be
+  // a definite failure here too — never a throw the caller's catch could
+  // read as an uncertain provider attempt.
+  try {
+    const { annualHandoffGuard } = require('../services/estimate-annual-guard');
+    const verdict = await annualHandoffGuard({ db, estimateIds: [estimate.id, ...(estimateIds || [])] })();
+    if (verdict.blocked) {
+      return { ok: false, blocked: true, error: 'annual_offer_withheld', providerAttempted: false, provider: 'smtp_fallback' };
+    }
+  } catch (err) {
+    return { ok: false, providerAttempted: false, error: err.message, provider: 'smtp_fallback' };
+  }
   onDispatch?.();
   await transporter.sendMail({
     from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',

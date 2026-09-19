@@ -17,6 +17,7 @@
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn() }));
+jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn() }));
 
 const ESTIMATE_ID = 'est-service-details-1';
 const TOKEN = 'sd-guard-token-abc123';
@@ -121,10 +122,16 @@ function sendServiceDetails(phoneSuffix) {
 }
 
 describe('service-details SMS: annual-offer guard composed into preSendCheck (Codex round 1 on #4608, P1)', () => {
-  test('a withheld annual estimate never reaches Twilio — the composed preSendCheck blocks it', async () => {
+  test('a withheld annual estimate never reaches Twilio — the composed preSendCheck blocks it with the SAME generic 404 as any other row-level withhold, and releases the dedup claim', async () => {
+    // Pre-push audit P0 (AGENTS.md public-route rule): ineligible rows must
+    // be indistinguishable from unknown tokens — the withheld outcome is a
+    // row-level fact (like the customer-viewable/call-side-hold check this
+    // route already applies as its LAST step), so it gets the same generic
+    // 404 docs/public-route-contracts.md documents for that check, never a
+    // distinct status that would confirm a live-but-ineligible row.
     const TwilioService = require('../services/twilio');
     let capturedVerdict;
-    TwilioService.sendSMS.mockImplementationOnce(async (_to, _body, options) => {
+    TwilioService.sendSMS.mockImplementation(async (_to, _body, options) => {
       capturedVerdict = await options.preSendCheck();
       if (!capturedVerdict.ok) return { success: false, sid: null, preSendBlocked: true, code: capturedVerdict.code, error: capturedVerdict.reason };
       return { success: true, sid: 'SM_fake' };
@@ -135,10 +142,59 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
 
     expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
     expect(capturedVerdict).toMatchObject({ ok: false, code: 'ANNUAL_OFFER_WITHHELD', reason: 'annual_offer_withheld' });
-    // The route reports the same generic "could not send" failure a
-    // window hold would produce — no Twilio dispatch happened.
-    expect(res.status).toBe(502);
-    expect(body).toEqual({ ok: false, error: 'Text could not be sent right now.' });
+    expect(res.status).toBe(404);
+    expect(body).toEqual({ error: 'Estimate not found' });
+
+    // Claim released: an immediate retry (same estimate+phone) reaches
+    // Twilio again — a leftover claim would instead short-circuit it before
+    // ever calling sendSMS a second time.
+    const retryRes = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
+    });
+    await retryRes.json();
+    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(2);
+  });
+
+  test('EMAIL channel: a withheld annual estimate gets the SAME generic 404 — never the address-suppression 409', async () => {
+    // The 409 branch is address-level (a suppressed/bounced recipient) and
+    // safe to reveal; an annual-offer withhold is row-level and must not be
+    // distinguishable from an unknown token, exactly like the SMS case.
+    const EmailTemplateLibrary = require('../services/email-template-library');
+    EmailTemplateLibrary.sendTemplate.mockResolvedValueOnce({
+      sent: false, blocked: true, reason: 'annual_offer_withheld', providerAttempted: false,
+    });
+    currentRow = baseEstimateRow();
+
+    const res = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'email' }),
+    });
+    const body = await res.json();
+
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(404);
+    expect(body).toEqual({ error: 'Estimate not found' });
+  });
+
+  test('EMAIL channel: an address-suppression block still returns 409 (unchanged) — only annual_offer_withheld maps to 404', async () => {
+    const EmailTemplateLibrary = require('../services/email-template-library');
+    EmailTemplateLibrary.sendTemplate.mockResolvedValueOnce({
+      sent: false, blocked: true, reason: 'suppressed', providerAttempted: false,
+    });
+    currentRow = baseEstimateRow();
+
+    const res = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'email' }),
+    });
+    const body = await res.json();
+
+    expect(res.status).toBe(409);
+    expect(body).toEqual({ ok: false, error: 'Email is unavailable for this address — text yourself the link instead.' });
   });
 
   test('a delivered (not withheld) annual estimate sends normally', async () => {
