@@ -699,3 +699,23 @@ test.each([
 ])('permission governors do not establish completed treatment: %s', (text, completed) => {
   expect(grammar.reportHasCompletedPredicate(text, /applied/.exec(text))).toBe(completed);
 });
+
+test.each([
+  ['We were set to have Talstar P applied to the exterior perimeter.', false],
+  ['We decided to have Talstar P applied to the exterior perimeter.', false],
+  ['We were deciding to have Talstar P applied to the exterior perimeter.', false],
+  ['We had Talstar P applied to the exterior perimeter.', true],
+  ['We decided yesterday, and we had Talstar P applied to the exterior perimeter.', true],
+])('prospective causative governors remain incomplete: %s', (text, completed) => {
+  expect(grammar.reportHasCompletedPredicate(text, /applied/.exec(text))).toBe(completed);
+});
+
+test.each([
+  ['On condition that the gate was open, Talstar P was applied to the exterior perimeter.', true],
+  ['As long as the gate was open, Talstar P was applied to the exterior perimeter.', true],
+  ['Talstar P was applied to the exterior perimeter, as long as the gate was open.', true],
+  ['We applied Talstar P to the exterior perimeter for as long as the visit lasted.', false],
+  ['We documented the property condition, then applied Talstar P to the exterior perimeter.', false],
+])('conditional clause markers differ from duration and target words: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
