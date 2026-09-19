@@ -464,6 +464,15 @@ async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars,
     },
     entryPoint: 'estimate_deposit_receipt',
     metadata: { original_message_type: 'deposit_receipt' },
+    // Round 8 P1 (SMS twin of deposit.receipt email's own withheldLinkPolicy
+    // 'rewrite'): the deposit is owed regardless of the annual offer's own
+    // state — a REFUSE here (the guard's default) would deny proof of
+    // payment. The seeded template body carries no link today, but it is a
+    // live, admin-editable sms_templates row (same trust boundary as the
+    // email body), so this guards the same way whether or not one is
+    // literally in the current text. Only receipt/payment templates get
+    // this — never the default.
+    withheldLinkPolicy: 'rewrite',
   });
   if (!result.sent) {
     // estimate_deposit_receipt is a customer-action entry point (owner

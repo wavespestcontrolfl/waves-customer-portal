@@ -32,6 +32,9 @@ jest.mock('../models/db', () => jest.fn());
 // bodies carry an estimate link — is unaffected; the tests below override it.
 jest.mock('../services/estimate-annual-guard', () => ({
   annualHandoffGuard: jest.fn(() => async () => ({ blocked: false, reason: null, estimateId: null })),
+  // Round 8 P1: default no-op (nothing rewritten) so every existing test
+  // in this file is unaffected; the withheldLinkPolicy tests below override it.
+  rewriteWithheldEstimateLinks: jest.fn(async ({ text }) => ({ html: undefined, text, rewrittenIds: [] })),
 }));
 jest.mock('../routes/admin-sms-templates', () => ({
   isTemplateActive: jest.fn(async () => true),
@@ -50,7 +53,7 @@ jest.mock('../services/logger', () => ({
 }));
 
 const TwilioService = require('../services/twilio');
-const { annualHandoffGuard } = require('../services/estimate-annual-guard');
+const { annualHandoffGuard, rewriteWithheldEstimateLinks } = require('../services/estimate-annual-guard');
 
 const TO = '+19415550123';
 const FROM = '+19413180000';
@@ -431,5 +434,58 @@ describe('annual-offer guard at the TRUE provider boundary (Codex round 3 on #46
     });
     expect(mockTwilioCreate).toHaveBeenCalledTimes(1);
     expect(result.success).toBe(true);
+  });
+
+  test('round 8 P1: withheldLinkPolicy "rewrite" strips a withheld estimate link from the body BEFORE the guard check and the SDK call, and the provider is called with the rewritten text', async () => {
+    const originalBody = 'Hello! We received your deposit. https://portal.wavespestcontrol.com/estimate/withheld-token-abc';
+    const rewrittenBody = 'Hello! We received your deposit. https://portal.wavespestcontrol.com';
+    rewriteWithheldEstimateLinks.mockResolvedValueOnce({ html: undefined, text: rewrittenBody, rewrittenIds: ['est-1'] });
+
+    const result = await TwilioService.sendSMS(TO, originalBody, {
+      messageType: 'deposit_receipt', fromNumber: FROM, withheldLinkPolicy: 'rewrite', estimateId: 'est-1',
+    });
+
+    // Runs AFTER stripSmsUrlScheme/normalizeGsmPunctuation (this file's own
+    // "direct SMS callers strip external links" test pins that behavior),
+    // so the scheme is already gone by the time the rewrite sees it — the
+    // estimate path/token survives either way.
+    expect(rewriteWithheldEstimateLinks).toHaveBeenCalledWith(expect.objectContaining({
+      text: expect.stringContaining('/estimate/withheld-token-abc'),
+    }));
+    expect(mockTwilioCreate).toHaveBeenCalledTimes(1);
+    const sentBody = mockTwilioCreate.mock.calls[0][0].body;
+    expect(sentBody).toBe(rewrittenBody);
+    expect(sentBody).not.toMatch(/\/estimate\//);
+    expect(sentBody).toContain('https://portal.wavespestcontrol.com');
+    // The guard's own re-derivation runs on the REWRITTEN body, and the
+    // explicit estimateId that survived the rewrite must NOT be forced
+    // through — it would refuse a body that no longer carries the link.
+    expect(annualHandoffGuard).toHaveBeenCalledWith(expect.objectContaining({
+      estimateIds: [], texts: [rewrittenBody],
+    }));
+    expect(result).toMatchObject({ success: true, withheldLinksRewritten: ['est-1'] });
+  });
+
+  test('round 8 P1: without withheldLinkPolicy (default refuse), a withheld estimate link still refuses — never silently rewritten', async () => {
+    annualHandoffGuard.mockReturnValueOnce(async () => ({ blocked: true, reason: 'annual_offer_withheld', estimateId: 'est-1' }));
+
+    const result = await TwilioService.sendSMS(TO, 'https://portal.wavespestcontrol.com/estimate/withheld-token-xyz', {
+      messageType: 'manual', fromNumber: FROM,
+    });
+
+    expect(rewriteWithheldEstimateLinks).not.toHaveBeenCalled();
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: false, guardBlocked: true, code: 'ANNUAL_OFFER_WITHHELD' });
+  });
+
+  test('round 8 P1: withheldLinkPolicy "rewrite" with nothing to rewrite sends the original body unchanged, no marker', async () => {
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM, withheldLinkPolicy: 'rewrite',
+    });
+
+    expect(rewriteWithheldEstimateLinks).toHaveBeenCalledTimes(1);
+    expect(mockTwilioCreate).toHaveBeenCalledTimes(1);
+    expect(mockTwilioCreate.mock.calls[0][0].body).toBe('Reminder body');
+    expect(result.withheldLinksRewritten).toBeUndefined();
   });
 });

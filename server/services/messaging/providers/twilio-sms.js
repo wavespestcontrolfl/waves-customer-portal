@@ -130,6 +130,13 @@ async function sendViaTwilio(input, { preSendCheck, withSmsHandoff } = {}) {
       // content derivation over the final body covers the rest.
       estimateId: input.estimateId || null,
       estimateIds: Array.isArray(input.estimateIds) ? input.estimateIds : undefined,
+      // Round 8 P1: send-customer-message.js's own wrapper already rewrote
+      // and cleared these above when this policy applies, so threading it
+      // through here is a defense-in-depth no-op for wrapper-routed sends
+      // (rewriteWithheldEstimateLinks finds nothing left to rewrite) — it's
+      // what makes twilio.js's OWN rewrite actually reachable for a raw/
+      // direct sendSMS caller that never goes through this wrapper at all.
+      withheldLinkPolicy: input.withheldLinkPolicy,
       // Push channel routing (services/twilio.js) treats operator-initiated
       // sends as sms_only — the operator explicitly chose the SMS channel.
       operatorInitiated: input.operatorInitiated === true,
@@ -267,6 +274,7 @@ async function sendViaTwilio(input, { preSendCheck, withSmsHandoff } = {}) {
       providerMessageId: result.sid || null,
       sentAt: new Date().toISOString(),
       raw: result,
+      ...(result.withheldLinksRewritten ? { withheldLinksRewritten: result.withheldLinksRewritten } : {}),
     };
   } catch (err) {
     const failure = classifyProviderFailure(err);

@@ -41,12 +41,15 @@ jest.mock('../services/messaging/providers/twilio-sms', () => ({
 }));
 jest.mock('../services/estimate-annual-guard', () => ({
   annualHandoffGuard: jest.fn(() => async () => ({ blocked: false, reason: null, estimateId: null })),
+  // Round 8 P1: default no-op (nothing rewritten) so every existing test
+  // in this file is unaffected; the withheldLinkPolicy tests override it.
+  rewriteWithheldEstimateLinks: jest.fn(async ({ text }) => ({ html: undefined, text, rewrittenIds: [] })),
 }));
 
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { persistAudit } = require('../services/messaging/audit');
 const { sendViaTwilio } = require('../services/messaging/providers/twilio-sms');
-const { annualHandoffGuard } = require('../services/estimate-annual-guard');
+const { annualHandoffGuard, rewriteWithheldEstimateLinks } = require('../services/estimate-annual-guard');
 
 const BASE_INPUT = {
   to: '+19415550142',
@@ -587,5 +590,73 @@ describe('annual-offer delivery guard at the provider handoff (delivery-guards s
     });
     expect(result.sent).toBe(true);
     expect(order).toEqual(['lock', 'guard', 'provider', 'unlock']);
+  });
+
+  test('round 8 P1: withheldLinkPolicy "rewrite" rewrites the body BEFORE segment counting and dispatch, and clears the explicit estimateId', async () => {
+    const originalBody = 'Receipt: https://portal.wavespestcontrol.com/estimate/withheld-token-abc';
+    const rewrittenBody = 'Receipt: https://portal.wavespestcontrol.com';
+    rewriteWithheldEstimateLinks.mockResolvedValueOnce({ html: undefined, text: rewrittenBody, rewrittenIds: ['est-1'] });
+    runViaProviderHook();
+
+    const result = await sendCustomerMessage({
+      ...BASE_INPUT,
+      body: originalBody,
+      estimateId: 'est-1',
+      withheldLinkPolicy: 'rewrite',
+    });
+
+    // Runs AFTER stripSmsUrlScheme/normalizeGsmPunctuation, so the scheme
+    // is already gone by the time the rewrite sees it — the estimate
+    // path/token survives either way.
+    expect(rewriteWithheldEstimateLinks).toHaveBeenCalledWith(expect.objectContaining({
+      text: expect.stringContaining('/estimate/withheld-token-abc'),
+    }));
+    // The provider (and, upstream of it, segment counting / the audit
+    // snapshot) sees the REWRITTEN body — never the raw withheld link —
+    // and the explicit id is cleared so it can't survive to refuse a body
+    // that no longer carries the link at all.
+    expect(sendViaTwilio.mock.calls[0][0]).toMatchObject({
+      body: rewrittenBody, estimateId: null, estimateIds: [],
+    });
+    expect(result).toMatchObject({ sent: true, withheldLinksRewritten: ['est-1'] });
+  });
+
+  test('round 8 P1: withheldLinkPolicy "rewrite" with nothing to rewrite leaves the body and explicit id untouched', async () => {
+    runViaProviderHook();
+    const result = await sendCustomerMessage({
+      ...BASE_INPUT,
+      body: 'Reminder body',
+      estimateId: 'est-1',
+      withheldLinkPolicy: 'rewrite',
+    });
+
+    expect(rewriteWithheldEstimateLinks).toHaveBeenCalledTimes(1);
+    expect(sendViaTwilio.mock.calls[0][0]).toMatchObject({
+      body: 'Reminder body', estimateId: 'est-1',
+    });
+    expect(result.withheldLinksRewritten).toBeUndefined();
+  });
+
+  test('round 8 P1: default withheldLinkPolicy (refuse) never calls rewriteWithheldEstimateLinks — non-receipt sends are unaffected', async () => {
+    runViaProviderHook();
+    await sendCustomerMessage({ ...BASE_INPUT, body: 'Reminder body', estimateId: 'est-1' });
+    expect(rewriteWithheldEstimateLinks).not.toHaveBeenCalled();
+  });
+
+  test('round 8 P1: a withheld estimate link with the default policy still reaches the guard unrewritten and can be refused at the boundary', async () => {
+    // Mirrors the "non-receipt SMS with a withheld link -> still refused"
+    // contract: no withheldLinkPolicy means no rewrite, so a blocked
+    // verdict from the (mocked) guard still refuses exactly as before.
+    annualHandoffGuard.mockReturnValueOnce(async () => ({ blocked: true, reason: 'annual_offer_withheld', estimateId: 'est-1' }));
+    runViaProviderHook();
+
+    const result = await sendCustomerMessage({
+      ...BASE_INPUT,
+      body: 'https://portal.wavespestcontrol.com/estimate/withheld-token-xyz',
+      estimateId: 'est-1',
+    });
+
+    expect(rewriteWithheldEstimateLinks).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ sent: false, blocked: true, code: 'ANNUAL_OFFER_WITHHELD' });
   });
 });

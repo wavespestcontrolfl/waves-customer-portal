@@ -314,6 +314,10 @@ describe('webhook + invoice credit', () => {
       to: '(941) 555-0100',
       purpose: 'payment_receipt',
       identityTrustLevel: 'phone_matches_customer',
+      // Round 8 P1 (SMS twin of deposit.receipt email's own
+      // withheldLinkPolicy 'rewrite'): the deposit is owed regardless of
+      // the annual offer's own state.
+      withheldLinkPolicy: 'rewrite',
     }));
 
     // Webhook replay — the row is already received; no second text.

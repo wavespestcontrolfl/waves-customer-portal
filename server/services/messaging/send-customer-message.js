@@ -387,6 +387,48 @@ async function sendCustomerMessageCore(input) {
     sendInput.body = normalizeGsmPunctuation(stripSmsUrlScheme(sendInput.body));
   }
 
+  // Round 8 P1: mirrors email's withheldLinkPolicy 'rewrite' (estimate-
+  // deposits.js's deposit.receipt) for SMS — the deposit receipt text
+  // carries the SAME estimate link and the guard's default REFUSE would
+  // deny proof of payment for an offer that changed state after the
+  // deposit, not before it. Unlike email (where the guard — and any
+  // rewrite — runs at the actual sendgrid.sendOne dispatch), the stored
+  // sms_log body and segment count are both computed HERE, well before the
+  // authoritative provider-boundary guard (services/twilio.js dispatch())
+  // ever runs — so the rewrite must happen here too, before segmentMeta
+  // and before any snapshot, or the stored/counted body would disagree
+  // with what Twilio actually sends. Text-only (rewriteWithheldEstimateLinks
+  // accepts html as undefined) since SMS has no html leg.
+  //
+  // Clearing estimateId/estimateIds here (not just leaving content
+  // derivation to find nothing) matches the email mechanism's own
+  // sendEstimateIds = [] override: an explicit id surviving past the
+  // rewrite would still union into the boundary guard's check and refuse
+  // a body that no longer carries the link at all, defeating the rewrite.
+  let withheldLinksRewritten;
+  if (sendInput.channel === 'sms' && sendInput.withheldLinkPolicy === 'rewrite'
+    && typeof sendInput.body === 'string') {
+    try {
+      const { rewriteWithheldEstimateLinks } = require('../estimate-annual-guard');
+      const db = require('../../models/db');
+      const rewritten = await rewriteWithheldEstimateLinks({ db, text: sendInput.body });
+      if (rewritten.rewrittenIds.length) {
+        sendInput.body = rewritten.text;
+        sendInput.estimateId = null;
+        sendInput.estimateIds = [];
+        withheldLinksRewritten = rewritten.rewrittenIds;
+        logger.warn(`[send_customer_message] rewrote ${rewritten.rewrittenIds.length} withheld estimate link(s) to the portal home for purpose=${sendInput.purpose}`);
+      }
+    } catch (err) {
+      // Fail OPEN to the unrewritten body, never fail the send outright —
+      // the authoritative boundary guard (twilio.js dispatch()) still runs
+      // on whatever body reaches it and fails CLOSED (refuses) on its own
+      // lookup error, so a rewrite-lookup hiccup degrades to "refused this
+      // one time", never to "sent the raw withheld link".
+      logger.warn(`[send_customer_message] withheld-link rewrite failed for purpose=${sendInput.purpose}: ${err.message}`);
+    }
+  }
+
   // 4. Load contact state once (consent + suppression share the lookup)
   let contactState = await loadContactState(sendInput);
   contactState = await loadSuppressionState(sendInput, contactState);
@@ -832,6 +874,9 @@ async function sendCustomerMessageCore(input) {
     auditLogId: audit.id,
     segmentCount: segmentMeta.segmentCount,
     encoding: segmentMeta.encoding,
+    ...((withheldLinksRewritten || providerOutcome.withheldLinksRewritten)
+      ? { withheldLinksRewritten: withheldLinksRewritten || providerOutcome.withheldLinksRewritten }
+      : {}),
   };
   } catch (err) {
     // A recursive fallback may already carry its more specific outcome.

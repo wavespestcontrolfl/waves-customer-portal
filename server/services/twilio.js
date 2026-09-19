@@ -596,6 +596,36 @@ const TwilioService = {
         || !!options.mediaUrl;
       if (!sendIsMms) body = normalizeGsmPunctuation(stripSmsUrlScheme(body));
 
+      // Round 8 P1: mirrors send-customer-message.js's own withheldLinkPolicy
+      // 'rewrite' (estimate-deposits.js's deposit receipt SMS, sent through
+      // that wrapper) for RAW/direct callers of sendSMS that bypass it
+      // entirely. Same placement rationale as that wrapper: before msgPayload
+      // is built below, before sms_log/conversations later write THIS body
+      // (on success), and before the guard's own content-derivation runs
+      // inside dispatch() further down — so a body opted into 'rewrite'
+      // never has its estimate link refused outright when whatever the
+      // message proves (a receipt) is owed regardless of the offer's state.
+      // Text-only: SMS has no html leg (rewriteWithheldEstimateLinks accepts
+      // html as undefined).
+      let withheldLinksRewritten;
+      if (options.withheldLinkPolicy === 'rewrite' && typeof body === 'string') {
+        try {
+          const { rewriteWithheldEstimateLinks } = require('./estimate-annual-guard');
+          const rewritten = await rewriteWithheldEstimateLinks({ db, text: body });
+          if (rewritten.rewrittenIds.length) {
+            body = rewritten.text;
+            withheldLinksRewritten = rewritten.rewrittenIds;
+            logger.warn(`[twilio] rewrote ${rewritten.rewrittenIds.length} withheld estimate link(s) to the portal home for ${maskPhone(to)} (messageType=${options.messageType || "n/a"})`);
+          }
+        } catch (err) {
+          // Fail OPEN to the unrewritten body — dispatch()'s own guard below
+          // still runs on whatever body reaches it and fails CLOSED on its
+          // own lookup error, so a rewrite-lookup hiccup degrades to
+          // "refused this one time", never to "sent the raw withheld link".
+          logger.warn(`[twilio] withheld-link rewrite failed for ${maskPhone(to)}: ${err.message}`);
+        }
+      }
+
       // Owner-SMS kill switch: when OWNER_SMS_DISABLED=true, suppress
       // every send addressed to one of the operator's known phones.
       // Push and bell still fire normally — only Twilio is silenced.
@@ -908,9 +938,14 @@ const TwilioService = {
         // require twilio.js back today, but a top-level require here would
         // make this module's load order hostage to that chain's regardless.
         const { annualHandoffGuard } = require('./estimate-annual-guard');
-        const explicitEstimateIds = Array.isArray(options.estimateIds) && options.estimateIds.length
+        // A rewrite already stripped the withheld link's literal text out
+        // of `body` above — an explicit id surviving past that would still
+        // union into this check and refuse a body that no longer carries
+        // the link at all, defeating the rewrite entirely (mirrors the
+        // email mechanism's own sendEstimateIds = [] override).
+        const explicitEstimateIds = withheldLinksRewritten ? [] : (Array.isArray(options.estimateIds) && options.estimateIds.length
           ? options.estimateIds
-          : (options.estimateId ? [options.estimateId] : []);
+          : (options.estimateId ? [options.estimateId] : []));
         const verdict = await annualHandoffGuard({
           db, estimateIds: explicitEstimateIds, texts: [body],
         })();
@@ -1095,7 +1130,7 @@ const TwilioService = {
         })
         .catch(() => {});
 
-      return { success: true, sid: message.sid, fromNumber, deliveryOutcome: "accepted" };
+      return { success: true, sid: message.sid, fromNumber, deliveryOutcome: "accepted", ...(withheldLinksRewritten ? { withheldLinksRewritten } : {}) };
     } catch (err) {
       // No withSmsHandoff (a plain `await dispatch()` above): the guard's
       // throw lands here directly. A permanent, non-retryable refusal —
