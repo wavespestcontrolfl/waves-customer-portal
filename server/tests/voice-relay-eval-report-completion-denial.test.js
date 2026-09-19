@@ -858,3 +858,60 @@ test.each([
   const verbs = [...text.matchAll(/\b(?:apply|applied)\b/g)];
   expect(grammar.reportHasCompletedPredicate(text, verbs.at(-1))).toBe(completed);
 });
+
+test.each([
+  'We aim to have applied Talstar P to the exterior perimeter.',
+  'The technician aims to have applied Talstar P to the exterior perimeter.',
+  'We aimed to have applied Talstar P to the exterior perimeter.',
+  'We are aiming to have applied Talstar P to the exterior perimeter.',
+  'We seek to have applied Talstar P to the exterior perimeter.',
+  'The technician seeks to have applied Talstar P to the exterior perimeter.',
+  'We sought to have applied Talstar P to the exterior perimeter.',
+  'We are seeking to have applied Talstar P to the exterior perimeter.',
+  'We propose to have applied Talstar P to the exterior perimeter.',
+  'The technician proposes to have applied Talstar P to the exterior perimeter.',
+  'We proposed to have applied Talstar P to the exterior perimeter.',
+  'We are proposing to have applied Talstar P to the exterior perimeter.',
+])('purpose and proposal governors do not establish completion: %s', (text) => {
+  expect(grammar.reportHasCompletedPredicate(text, /applied/.exec(text))).toBe(false);
+});
+
+test.each([
+  'We sought approval, then applied Talstar P to the exterior perimeter.',
+  'We proposed a schedule, then applied Talstar P to the exterior perimeter.',
+  'We aimed at the marked area, then applied Talstar P to the exterior perimeter.',
+])('an unrelated purpose verb does not deny a later completed finding: %s', (text) => {
+  expect(grammar.reportHasCompletedPredicate(text, /applied/.exec(text))).toBe(true);
+});
+
+test.each([
+  ['Kindly have Talstar P applied to the exterior perimeter.', true],
+  ['Immediately get Talstar P applied to the exterior perimeter.', true],
+  ['Please immediately have Talstar P applied to the exterior perimeter.', true],
+  ['We promptly had Talstar P applied to the exterior perimeter.', false],
+  ['Yesterday we had Talstar P applied to the exterior perimeter.', false],
+  ['Have already applied Talstar P to the exterior perimeter.', false],
+])('command adverbs preserve causative instruction scope: %s', (text, instruction) => {
+  expect(grammar.reportFindingIsInstruction(text, text.indexOf('Talstar P'),
+    text.indexOf('exterior perimeter'), /applied/.exec(text), text.length)).toBe(instruction);
+});
+
+test.each([
+  ['Talstar P was applied only partially to the exterior perimeter.', false],
+  ['Talstar P was applied incompletely to the exterior perimeter.', false],
+  ['Talstar P was fully applied to the exterior perimeter.', true],
+  ['We applied Talstar P completely to the exterior perimeter.', true],
+  ['We applied Talstar P to the partially shaded exterior perimeter.', true],
+  ['Talstar P was applied to the exterior perimeter, and bait was only partially applied indoors.', true],
+])('post-verb completion modifiers retain their predicate scope: %s', (text, completed) => {
+  expect(grammar.reportHasCompletedPredicate(text, /applied/.exec(text))).toBe(completed);
+});
+
+test.each([
+  'We applied bait and watered plants incompletely.',
+  'Talstar P was applied but worked only partially.',
+  'Talstar P was applied and bait only partially.',
+  'Talstar P was applied not only partially to the exterior perimeter.',
+])('a later or negated partial modifier does not deny the selected predicate: %s', (text) => {
+  expect(grammar.reportHasCompletedPredicate(text, /applied/.exec(text))).toBe(true);
+});
