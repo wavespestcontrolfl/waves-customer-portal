@@ -50,11 +50,13 @@ function recognizeClause(clause) {
   }
   // A unit before the amount ties it; a unit after the amount only ties it
   // when it is a genuine pricing unit ("$98 per visit"), never across a comma.
+  const connectorHasComma = (connector) => !!connector
+    && tokens.slice(connector.start, connector.end).some((token) => token.kind === 'sep' && token.text === ',');
   function tiedToUnit(amount) {
     return unitRelations.some((record) => VISIT_FAMILIES.has(UNIT_FAMILY[record.unit.kind])
       && !embeddedPlanPeriod(record.unit.start)
       && record.candidates.some((candidate) => {
-        if (candidate.amount !== amount || candidate.connector?.text === ',') return false;
+        if (candidate.amount !== amount || connectorHasComma(candidate.connector)) return false;
         return record.unit.start < amount.start || isPricingUnit(record.unit);
       }));
   }

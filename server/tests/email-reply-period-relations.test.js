@@ -116,6 +116,12 @@ describe('inactive email reply period relations', () => {
       expect(reasons(text)).toEqual(['money_period_claim']);
     },
   );
+  test.each([
+    'Per application, the price is $98 monthly', 'Per visit, our plan is $98 monthly', 'For each visit, the fee is $1176 yearly',
+  ])('a unit before a comma never ties the amount across the claim boundary: %s', (text) => {
+    expect(reasons(text)).toContain('money_period_claim');
+    expect(inspectEmailReplyPlanTotal({ text }).violations).toEqual(['customer_copy_compliance']);
+  });
   test.each(['Monthly visits cost $98 per application', 'Each visit is $98 monthly'])(
     'visit pricing stays tied to its unit: %s', (text) => {
       expect(kinds(text)).not.toContain('plan_total');
