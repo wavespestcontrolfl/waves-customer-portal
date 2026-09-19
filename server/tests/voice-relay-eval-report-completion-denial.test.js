@@ -636,3 +636,30 @@ test('emphatic imperative put differs from a completed past put', () => {
     completed.indexOf('exterior perimeter'), /put/.exec(completed), completed.length)).toBe(false);
   expect(grammar.reportHasCompletedPredicate(completed, /put/.exec(completed))).toBe(true);
 });
+
+test.each(['claimed', 'purported'])('%s perfect treatment remains an epistemic claim', (governor) => {
+  const claimed = `The technician ${governor} to have applied Talstar P to the exterior perimeter.`;
+  expect(grammar.reportHasCompletedPredicate(claimed, /applied/.exec(claimed))).toBe(false);
+
+  const confirmed = 'The technician confirmed that Talstar P was applied to the exterior perimeter.';
+  expect(grammar.reportHasCompletedPredicate(confirmed, /applied/.exec(confirmed))).toBe(true);
+
+  const completed = 'The technician has applied Talstar P to the exterior perimeter.';
+  expect(grammar.reportHasCompletedPredicate(completed, /applied/.exec(completed))).toBe(true);
+});
+
+test.each([
+  ['The exterior perimeter, not the supply closet, was treated with Talstar P.', true, false],
+  ['The exterior perimeter, not the early service area, was treated with Talstar P.', true, false],
+  ['The exterior perimeter, not recently, was treated with Talstar P.', false, true],
+  ['The exterior perimeter, not very carefully, was treated with Talstar P.', false, true],
+  ['The exterior perimeter, not a little early, was treated with Talstar P.', false, true],
+  ['The exterior perimeter, not a terribly long time ago, was treated with Talstar P.', false, true],
+  ['The exterior perimeter, not a particularly long time ago, was treated with Talstar P.', false, true],
+  ['The exterior perimeter, not a terribly short time ago, was treated with Talstar P.', false, true],
+])('article-led nominal contrasts distinguish -ly modifiers: %s', (text, completed, denied) => {
+  const findingVerb = /treated/.exec(text);
+  expect(grammar.reportHasCompletedPredicate(text, findingVerb)).toBe(completed);
+  expect(grammar.reportClaimIsDenied(text, text, text.indexOf('Talstar P'),
+    text.indexOf('exterior perimeter'), findingVerb, '')).toBe(denied);
+});
