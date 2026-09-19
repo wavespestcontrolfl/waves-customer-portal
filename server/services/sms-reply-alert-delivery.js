@@ -41,6 +41,30 @@ async function releaseUnknownSenderAlertClaim(From, token) {
     logger.warn('[twilio-webhook] alert-window claim release failed', { code: e.code || 'unknown' });
   }
 }
+async function renewUnknownSenderAlertLease(From, lease) {
+  if (!lease.token) return false;
+  const next = new Date(Date.now() + UNKNOWN_SENDER_ALERT_LEASE_MS);
+  try {
+    const updated = await db('sms_reply_alert_claims').where({ phone: From, expires_at: lease.token }).update({ expires_at: next });
+    if (updated > 0) lease.token = next;
+    return updated > 0;
+  } catch (e) {
+    logger.warn('[twilio-webhook] alert-window lease renew failed', { code: e.code || 'unknown' });
+    return false;
+  }
+}
+// Push fan-out is serial and unbounded, so a fixed lease can expire while
+// delivery runs. Renew it on a heartbeat and wait for any in-flight renewal
+// so confirm and release always address the current token.
+async function withLeaseHeartbeat(From, lease, work) {
+  if (!lease.token) return work();
+  let inflight = Promise.resolve(false);
+  const timer = setInterval(() => {
+    inflight = inflight.then(() => renewUnknownSenderAlertLease(From, lease)).catch(() => false);
+  }, UNKNOWN_SENDER_ALERT_LEASE_MS / 2);
+  if (typeof timer.unref === 'function') timer.unref();
+  try { return await work(); } finally { clearInterval(timer); await inflight; }
+}
 async function ringSmsReplyBell({ customer, From, MessageSid, message, afterRead }) {
   if (!customer && typeof afterRead !== 'function') throw new Error('Unknown SMS delivery requires read reconciliation');
   const { triggerNotification } = require('./notification-triggers');
@@ -122,8 +146,8 @@ async function dispatchUnknownSenderAlert({ From, MessageSid, message, recovery 
   // Without a recorded eligibility marker a failed delivery would be invisible
   // to recovery; report unhandled before claiming so the caller keeps the message.
   if (!recovery && !(await stampInboundSmsMeta(MessageSid, { sms_reply_eligible: true }, 'eligibility'))) return false;
-  const { claimed, token } = await claimUnknownSenderAlertWindow(From);
-  if (!claimed) {
+  const lease = await claimUnknownSenderAlertWindow(From);
+  if (!lease.claimed) {
     // Another owner holds this sender. A confirmed receipt covers this message
     // terminally; an in-progress lease leaves it eligible for recovery.
     if (!(await hasRecentUnknownSenderReceipt(From, MessageSid))) return true;
@@ -134,10 +158,10 @@ async function dispatchUnknownSenderAlert({ From, MessageSid, message, recovery 
       .catch(() => null);
     const meta = row?.metadata || {};
     if (meta.sms_reply_eligible !== true
-      || [meta.sms_reply_alerted, meta.sms_reply_covered, meta.sms_reply_suppressed, meta.sms_reply_ai_answered].includes(true)
+      || [meta.sms_reply_alerted, meta.sms_reply_covered, meta.sms_reply_read, meta.sms_reply_suppressed, meta.sms_reply_ai_answered].includes(true)
       || (meta.sms_reply_processing_until
       && new Date(meta.sms_reply_processing_until).getTime() > Date.now())) {
-      await releaseUnknownSenderAlertClaim(From, token);
+      await releaseUnknownSenderAlertClaim(From, lease.token);
       return false;
     }
   }
@@ -145,7 +169,7 @@ async function dispatchUnknownSenderAlert({ From, MessageSid, message, recovery 
     // Coverage is a terminal outcome: recovery must not re-alert this message
     // once the covering receipt ages out. Unrecorded coverage is not handled.
     const covered = await stampInboundSmsMeta(MessageSid, { sms_reply_covered: true }, 'coverage');
-    await releaseUnknownSenderAlertClaim(From, token);
+    await releaseUnknownSenderAlertClaim(From, lease.token);
     return covered;
   }
   let delivered = false;
@@ -153,7 +177,7 @@ async function dispatchUnknownSenderAlert({ From, MessageSid, message, recovery 
   let stats = {};
   let alreadyRead = false;
   try {
-    stats = await ringSmsReplyBell({ customer: null, From, MessageSid, message, afterRead }) || {};
+    stats = await withLeaseHeartbeat(From, lease, () => ringSmsReplyBell({ customer: null, From, MessageSid, message, afterRead })) || {};
     const { error, bellWritten, push } = stats;
     delivered = !error && Boolean(bellWritten || Number(push?.sent) > 0);
     suppressed = Boolean(stats.suppressed || stats.policySilenced);
@@ -162,11 +186,12 @@ async function dispatchUnknownSenderAlert({ From, MessageSid, message, recovery 
     else logger.error('[notifications] unknown-sender sms_reply trigger failed', { code: e.code || 'unknown' });
   }
   if (delivered && stats.receiptWritten !== false) {
-    await confirmUnknownSenderAlertWindow(From, token, stats.deliveredAt);
+    await confirmUnknownSenderAlertWindow(From, lease.token, stats.deliveredAt);
   } else {
-    await releaseUnknownSenderAlertClaim(From, token);
-    // Suppression is terminal only once its marker is recorded.
+    await releaseUnknownSenderAlertClaim(From, lease.token);
+    // Suppression and read-before-bell are terminal only once their marker is recorded.
     if (suppressed) suppressed = await stampInboundSmsMeta(MessageSid, { sms_reply_suppressed: true }, 'suppression');
+    if (alreadyRead) alreadyRead = await stampInboundSmsMeta(MessageSid, { sms_reply_read: true }, 'read');
   }
   return delivered || suppressed || alreadyRead;
 }

@@ -93,7 +93,7 @@ test('old committed evidence repairs its original timestamp instead of restartin
     .toEqual(new Date(created_at.getTime() + 4 * 60 * 60 * 1000));
 });
 
-test.each(['sms_reply_alerted', 'sms_reply_covered', 'sms_reply_suppressed', 'sms_reply_ai_answered'])('recovery rechecks terminal %s under its lease', async marker => {
+test.each(['sms_reply_alerted', 'sms_reply_covered', 'sms_reply_read', 'sms_reply_suppressed', 'sms_reply_ai_answered'])('recovery rechecks terminal %s under its lease', async marker => {
   row.metadata[marker] = true;
   expect(await dispatch({ recovery: true })).toBe(false);
   expect(triggerNotification).not.toHaveBeenCalled();
@@ -160,6 +160,39 @@ test.each([['error', 2], ['missing row', 1]])('an unrecorded eligibility marker 
   expect(triggerNotification).not.toHaveBeenCalled();
   expect(db.raw).not.toHaveBeenCalledWith(expect.stringContaining('INSERT INTO sms_reply_alert_claims'), expect.anything());
   expect(mutations.some(m => m.table === 'sms_reply_alert_claims')).toBe(false);
+});
+test('a message read before its bell is stamped terminal; an unrecorded read marker is not handled', async () => {
+  reads = [true];
+  expect(await dispatch()).toBe(true);
+  expect(triggerNotification).not.toHaveBeenCalled();
+  expect(row.metadata.sms_reply_read).toBe(true);
+  expect(mutations.some(m => m.table === 'sms_reply_alert_claims' && m.deleted)).toBe(true);
+  expect(await dispatch({ recovery: true })).toBe(false);
+  mutations.length = 0; reads = [true]; row.metadata = { sms_reply_eligible: true };
+  stampFailure = { marker: 'sms_reply_read', mode: 'error' };
+  expect(await dispatch()).toBe(false);
+  expect(stamps('sms_reply_read')).toHaveLength(2);
+});
+test('the sender lease is renewed through a slow push fan-out and confirmed under the renewed token', async () => {
+  jest.useFakeTimers();
+  try {
+    const LEASE_MS = 2 * 60 * 1000;
+    triggerNotification.mockImplementationOnce(() => new Promise(resolve => {
+      setTimeout(() => resolve({ bellWritten: true, push: { sent: 20 } }), LEASE_MS + 5000);
+    }));
+    const pending = dispatch();
+    await jest.advanceTimersByTimeAsync(LEASE_MS + 6000);
+    expect(await pending).toBe(true);
+    const claimWrites = mutations.filter(m => m.table === 'sms_reply_alert_claims' && m.patch);
+    const renewals = claimWrites.slice(0, -1);
+    const confirm = claimWrites[claimWrites.length - 1];
+    expect(renewals.length).toBeGreaterThanOrEqual(2);
+    renewals.forEach((renewal, index) => {
+      if (index > 0) expect(renewal.filter.expires_at.getTime()).toBe(renewals[index - 1].patch.expires_at.getTime());
+    });
+    expect(confirm.filter.expires_at.getTime()).toBe(renewals[renewals.length - 1].patch.expires_at.getTime());
+    expect(confirm.patch.expires_at.getTime()).toBeGreaterThan(renewals[renewals.length - 1].patch.expires_at.getTime());
+  } finally { jest.useRealTimers(); }
 });
 test('recovery waits for live AI work', async () => {
   row.metadata.sms_reply_processing_until = new Date(Date.now() + 60000).toISOString();
