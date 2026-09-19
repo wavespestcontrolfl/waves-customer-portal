@@ -194,12 +194,14 @@ const EstimateAutoRenew = {
                     } else if (result.aborted) {
                       // Pre-push audit P1: a pre-dispatch abort (the annual
                       // guard's own lookup threw, most likely) is a real
-                      // failure, never a handled/deduped outcome — leave
-                      // sentWithTemplateLibrary false so this falls through
-                      // to the SMTP fallback below like any other
-                      // template-path failure, instead of being silently
-                      // marked as if the template library had sent it.
-                      logger.warn(`[est-auto-renew] Email pre-dispatch abort for estimate ${est.id}: ${result.reason || 'aborted'}${result.error ? ` (${result.error})` : ''}`);
+                      // failure, never a handled/deduped outcome. It must NOT
+                      // fall through to the raw SMTP fallback either — that
+                      // path bypasses the guarded send library, so a guard
+                      // outage would send the link unguarded (fail-open).
+                      // Log it as a failure and stop; the direct path has no
+                      // durable retry (deferred, see PR body).
+                      logger.error(`[est-auto-renew] Email pre-dispatch abort for estimate ${est.id}: ${result.reason || 'aborted'}${result.error ? ` (${result.error})` : ''}`);
+                      sentWithTemplateLibrary = true;
                     } else {
                       sentWithTemplateLibrary = true;
                     }
@@ -213,6 +215,15 @@ const EstimateAutoRenew = {
                 if (!smtpFallbackAllowed()) {
                   logger.error(`[est-auto-renew] SMTP fallback disabled in production for estimate ${est.id} — SendGrid template send required`);
                 } else {
+                  // This raw SMTP send bypasses the guarded send library, so
+                  // it carries the chokepoint verdict itself: fresh row, no
+                  // lock, immediately before the provider call. Fails closed.
+                  const { loadAnnualOfferRow, annualOfferVerdict } = require('./estimate-annual-guard');
+                  const fallbackVerdict = annualOfferVerdict(await loadAnnualOfferRow(db, est.id));
+                  if (fallbackVerdict.withheld) {
+                    logger.warn(`[est-auto-renew] SMTP fallback withheld for estimate ${est.id}: ${fallbackVerdict.reason}`);
+                    throw Object.assign(new Error('annual offer withheld at SMTP fallback'), { code: 'ANNUAL_OFFER_WITHHELD' });
+                  }
                   await EmailService.send({
                     to: est.customer_email,
                     subject: 'Your Waves estimate was extended',
