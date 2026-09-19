@@ -87,6 +87,13 @@ async function ringSmsReplyBell({ customer, From, MessageSid, message, afterRead
   return stats;
 }
 
+// Durable per-message outcome markers; recovery treats each terminal one as settled.
+function stampInboundSmsMeta(MessageSid, patch, label) {
+  return db('sms_log').where({ direction: 'inbound', twilio_sid: MessageSid })
+    .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(patch)]) })
+    .catch((err) => logger.warn(`[twilio-webhook] sms_reply ${label} stamp failed`, { code: err.code || 'unknown' }));
+}
+
 // A previous delivered receipt can cover this phone independent of claim state.
 async function hasRecentUnknownSenderReceipt(From, excludeSid) {
   try {
@@ -105,9 +112,7 @@ async function hasRecentUnknownSenderReceipt(From, excludeSid) {
 
 // Use the same fenced lifecycle for webhooks and process-independent recovery.
 async function dispatchUnknownSenderAlert({ From, MessageSid, message, recovery = false, afterRead }) {
-  if (!recovery) await db('sms_log').where({ direction: 'inbound', twilio_sid: MessageSid })
-    .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ sms_reply_eligible: true })]) })
-    .catch((err) => logger.warn('[twilio-webhook] sms_reply eligibility stamp failed', { code: err.code || 'unknown' }));
+  if (!recovery) await stampInboundSmsMeta(MessageSid, { sms_reply_eligible: true }, 'eligibility');
   const { claimed, token } = await claimUnknownSenderAlertWindow(From);
   if (!claimed) return true;
   if (recovery) {
@@ -115,7 +120,7 @@ async function dispatchUnknownSenderAlert({ From, MessageSid, message, recovery 
       .catch(() => null);
     const meta = row?.metadata || {};
     if (meta.sms_reply_eligible !== true
-      || [meta.sms_reply_alerted, meta.sms_reply_suppressed, meta.sms_reply_ai_answered].includes(true)
+      || [meta.sms_reply_alerted, meta.sms_reply_covered, meta.sms_reply_suppressed, meta.sms_reply_ai_answered].includes(true)
       || (meta.sms_reply_processing_until
       && new Date(meta.sms_reply_processing_until).getTime() > Date.now())) {
       await releaseUnknownSenderAlertClaim(From, token);
@@ -123,6 +128,9 @@ async function dispatchUnknownSenderAlert({ From, MessageSid, message, recovery 
     }
   }
   if (await hasRecentUnknownSenderReceipt(From, MessageSid)) {
+    // Coverage is a terminal outcome: recovery must not re-alert this message
+    // once the covering receipt ages out of the window.
+    await stampInboundSmsMeta(MessageSid, { sms_reply_covered: true }, 'coverage');
     await releaseUnknownSenderAlertClaim(From, token);
     return true;
   }
@@ -143,11 +151,7 @@ async function dispatchUnknownSenderAlert({ From, MessageSid, message, recovery 
     await confirmUnknownSenderAlertWindow(From, token, stats.deliveredAt);
   } else {
     await releaseUnknownSenderAlertClaim(From, token);
-    if (suppressed) {
-      await db('sms_log').where({ direction: 'inbound', twilio_sid: MessageSid })
-        .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ sms_reply_suppressed: true })]) })
-        .catch((err) => logger.warn('[twilio-webhook] sms_reply suppression stamp failed', { code: err.code || 'unknown' }));
-    }
+    if (suppressed) await stampInboundSmsMeta(MessageSid, { sms_reply_suppressed: true }, 'suppression');
   }
   return delivered || suppressed || alreadyRead;
 }

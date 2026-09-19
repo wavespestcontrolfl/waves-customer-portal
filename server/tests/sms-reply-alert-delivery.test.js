@@ -6,13 +6,13 @@ const db = require('../models/db');
 const { triggerNotification } = require('../services/notification-triggers');
 const delivery = require('../services/sms-reply-alert-delivery');
 const input = { From: '+12025550101', MessageSid: 'SM-synthetic-delivery', message: 'Synthetic SMS' };
-let row, bell, receiptFailure, reads, mutations;
+let row, bell, receiptFailure, reads, mutations, priorReceipt;
 const afterRead = jest.fn();
 
 beforeEach(() => {
   jest.clearAllMocks();
   row = { metadata: { sms_reply_eligible: true } };
-  bell = null; receiptFailure = null; reads = []; mutations = [];
+  bell = null; receiptFailure = null; reads = []; mutations = []; priorReceipt = null;
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings,
     rows: sql.startsWith('INSERT INTO sms_reply_alert_claims') ? [{ phone: bindings[0] }] : [] }));
   db.mockImplementation(table => {
@@ -25,7 +25,7 @@ beforeEach(() => {
       };
     }
     query.first = async () => table === 'notifications' ? bell : table === 'messages'
-      ? { is_read: reads.shift() || false } : query.prior ? null : row;
+      ? { is_read: reads.shift() || false } : query.prior ? priorReceipt : row;
     query.update = async patch => {
       mutations.push({ table, filter: query.filter, patch });
       if (patch.metadata) {
@@ -89,8 +89,23 @@ test('old committed evidence repairs its original timestamp instead of restartin
     .toEqual(new Date(created_at.getTime() + 4 * 60 * 60 * 1000));
 });
 
-test.each(['sms_reply_alerted', 'sms_reply_suppressed', 'sms_reply_ai_answered'])('recovery rechecks terminal %s under its lease', async marker => {
+test.each(['sms_reply_alerted', 'sms_reply_covered', 'sms_reply_suppressed', 'sms_reply_ai_answered'])('recovery rechecks terminal %s under its lease', async marker => {
   row.metadata[marker] = true;
+  expect(await dispatch({ recovery: true })).toBe(false);
+  expect(triggerNotification).not.toHaveBeenCalled();
+});
+test('a message covered by a recent receipt is stamped terminal before its claim is released', async () => {
+  priorReceipt = { id: 'prior-delivered-receipt' };
+  expect(await dispatch()).toBe(true);
+  expect(triggerNotification).not.toHaveBeenCalled();
+  expect(row.metadata.sms_reply_covered).toBe(true);
+  expect(row.metadata.sms_reply_alerted).toBeUndefined();
+  const stampIndex = mutations.findIndex(m => m.table === 'sms_log' && m.patch && JSON.parse(m.patch.metadata.bindings[0]).sms_reply_covered);
+  const releaseIndex = mutations.findIndex(m => m.table === 'sms_reply_alert_claims' && m.deleted);
+  expect(stampIndex).toBeGreaterThanOrEqual(0);
+  expect(releaseIndex).toBeGreaterThan(stampIndex);
+  // Once the covering receipt ages out, recovery still treats this message as settled.
+  priorReceipt = null;
   expect(await dispatch({ recovery: true })).toBe(false);
   expect(triggerNotification).not.toHaveBeenCalled();
 });
