@@ -917,7 +917,20 @@ const TwilioService = {
       // during that preparation wrongly outranked the rejection.
       let message;
       let dispatchStarted = false;
-      const dispatch = async () => {
+      // Pre-push audit P2 (twilio.js:953, round 12): dispatch() takes an
+      // OPTIONAL trx — send-customer-message.js's own withSmsHandoff bridge
+      // (the sole path every withSmsHandoff caller in the repo funnels
+      // through) already holds a transaction from the caller's lock
+      // (lead-response-tools.js's withSmsConsentLock, reschedule-link-
+      // promises.js's, visit-completion-summary.js's, etc.) by the time it
+      // invokes this function — reading the guard through the plain root
+      // db instead requires a SECOND pool connection while the first is
+      // still held open, and under a small pool (DB_POOL_MAX=2 is an
+      // explicitly supported production config) concurrent handoffs can
+      // each hold one connection while waiting on another, starving the
+      // pool. Falls back to the plain db for the handoff-less path (a bare
+      // `await dispatch()`, no trx to reuse).
+      const dispatch = async (trx) => {
         // Codex round 3 on #4608 (P1 PRRT_kwDOR3YQi86j8Ydm — structural
         // move): the annual-offer guard must run at the TRUE provider
         // boundary — dispatch() is invoked either from INSIDE a caller's
@@ -949,7 +962,7 @@ const TwilioService = {
           ? options.estimateIds
           : (options.estimateId ? [options.estimateId] : []));
         const verdict = await annualHandoffGuard({
-          db, estimateIds: explicitEstimateIds, texts: [body],
+          db: trx || db, estimateIds: explicitEstimateIds, texts: [body],
         })();
         if (verdict.blocked) {
           const err = new Error('annual_offer_withheld');

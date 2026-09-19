@@ -754,7 +754,12 @@ async function sendCustomerMessageCore(input) {
       // Awaited: the caller's durable pre-provider transition must commit
       // before the SDK request.
       if (typeof onProviderStart === 'function') await onProviderStart();
-      await dispatch();
+      // Pre-push audit P2 (twilio.js:953, round 12): forward the held `trx`
+      // into twilio.js's own dispatch — its annual-offer recheck reads
+      // through this SAME transaction (falling back to the plain db only
+      // when there is none) instead of opening a second root-pool
+      // connection while this one is still held.
+      await dispatch(trx);
       return { ok: true };
     })),
     preSendCheck: providerPreSendCheck,

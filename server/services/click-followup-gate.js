@@ -61,7 +61,7 @@ const {
 const { DEPOSIT_FOLLOWUP_WINDOW } = require('./estimate-deposits');
 const { loadSuppressionState } = require('./messaging/validators/suppression');
 const { readCachedLineType, NON_SMS_LINE_TYPES } = require('./messaging/validators/line-type');
-const { annualOfferVerdict } = require('./estimate-annual-guard');
+const { annualHandoffGuard } = require('./estimate-annual-guard');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 // Estimate statuses the cadence treats as terminal (estimate-follow-up.js).
@@ -535,9 +535,21 @@ async function evaluateClickFollowupGate({ estimate, kind, customerId, leadId, p
   //    withheld annual estimate still retires the draft on its OWN code
   //    (converted / suppressed) instead of being held on annual_offer_withheld
   //    forever — a contact who already converted or opted out is never
-  //    coming back to re-qualify once the offer is redelivered. Cheap
-  //    in-memory check on the already-loaded row, no extra query, no lock.
-  if (annualOfferVerdict(estimate).withheld) {
+  //    coming back to re-qualify once the offer is redelivered.
+  //
+  // Pre-push audit P2 (round 12): group-aware, not the single-row
+  // annualOfferVerdict — the clicked anchor can be delivered/eligible on
+  // its own while a link-visible estimate_group_id sibling is withheld,
+  // exactly the gap the provider-boundary send guard (annualHandoffGuard)
+  // already closes for every other sender. Without this, queue time and
+  // approval time both pass the row-only check, a draft is created and its
+  // action reserved, and the SEND chokepoint (which DOES expand the group)
+  // then refuses every approval attempt — stranding the draft/action
+  // instead of retiring it here. One extra query only when the row
+  // actually has a group (loadLinkVisibleGroupSiblings short-circuits on
+  // no estimate_group_id).
+  const annualVerdict = await annualHandoffGuard({ db, estimateIds: [estimate.id] })();
+  if (annualVerdict.blocked) {
     return { ok: false, code: 'annual_offer_withheld' };
   }
 

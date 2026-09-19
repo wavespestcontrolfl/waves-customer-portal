@@ -308,6 +308,36 @@ describe('annual-offer guard at the TRUE provider boundary (Codex round 3 on #46
     expect(events).toEqual(['locked', 'guard', 'sdk', 'released']);
   });
 
+  // Pre-push audit P2 (twilio.js:953, round 12): dispatch() must reuse the
+  // handoff's OWN transaction for the guard read, not open a second
+  // root-pool connection while the first is still held.
+  test('with a caller withSmsHandoff, the guard\'s loader is called with the HELD trx, not the module db', async () => {
+    const db = require('../models/db');
+    const trxSentinel = { __isTrx: true };
+    let capturedDb;
+    annualHandoffGuard.mockImplementationOnce((args) => { capturedDb = args.db; return async () => ({ blocked: false, reason: null, estimateId: null }); });
+
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM,
+      withSmsHandoff: async dispatch => { await dispatch(trxSentinel); return { ok: true }; },
+    });
+
+    expect(result.success).toBe(true);
+    expect(capturedDb).toBe(trxSentinel);
+    expect(capturedDb).not.toBe(db);
+  });
+
+  test('with NO caller withSmsHandoff (plain dispatch), the guard\'s loader falls back to the module db', async () => {
+    const db = require('../models/db');
+    let capturedDb;
+    annualHandoffGuard.mockImplementationOnce((args) => { capturedDb = args.db; return async () => ({ blocked: false, reason: null, estimateId: null }); });
+
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM });
+
+    expect(result.success).toBe(true);
+    expect(capturedDb).toBe(db);
+  });
+
   test('a blocked verdict inside the lock never reaches the SDK — a permanent, non-retryable refusal, not the generic handoff-check-failed shape', async () => {
     annualHandoffGuard.mockReturnValueOnce(async () => ({ blocked: true, reason: 'annual_offer_withheld', estimateId: 'est-1' }));
 
