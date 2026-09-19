@@ -33,8 +33,9 @@ Two sources feed the candidates:
 ## Boundaries and uncertainty
 
 `a month ago` (and `mo`/`yr` forms) stays temporal, not a period, and so do
-the bounded extensions `a month or two ago` and `a year and a half ago`: the
-matcher's negative lookahead admits one `or`/`and` phrase before `ago`, and
+the bounded extensions `a month or two ago`, `a month or 2 ago` and `a year
+and 6 months ago`: the matcher's negative lookahead admits one `or`/`and`
+phrase (worded or numeric with an optional unit) before `ago`, and
 the recognizer feeds it up to six following words so the whole construction
 is visible while only the matched span is consumed. Inside a composite unit
 token every lexical start is tried, so `$98/monthly visit` reports the

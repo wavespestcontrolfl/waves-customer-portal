@@ -16,7 +16,11 @@ still violates under the trusted legacy flag. Only these strict literal
 the exemption never bypasses normalization limits or the review disposition.
 Scanner failures return their original reason in `violations`.
 
-The shared recognizer owns all vocabulary, amount/period pairing, claim
+Positive evidence first (owner ruling 2026-09-19): a money amount in the
+same claim as a month/year period is a finding, including account notices
+and cadence prose, because every result is reviewed by a person and a
+missed plan total costs more than an extra flag on a payment notice. The
+shared recognizer owns all vocabulary, amount/period pairing, claim
 boundaries, and exclusion evidence (bare measurements, visit/application
 ties, activity cadence, account events); this consumer has no parser of its
 own — it only asks whether any relation is a `plan_total` and applies the two

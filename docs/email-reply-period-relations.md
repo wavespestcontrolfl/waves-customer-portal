@@ -24,10 +24,9 @@ record:
 
 `amount` and `period` are the exact upstream objects from `amountRelations`
 and `periodPhrases` (identity, not a copy). `relation` is `'plan_total'` or
-`'excluded'`; `evidence.reason` names which rule decided it (for example
-`direct_currency_period`, `payment_assertion`, `price_cue`, `plan_cue`,
-`direct_gap`, `bare_measurement`, `visit_tied`, `activity_cadence`,
-`account_event`, or `no_price_cue`). `connector` is `null` when the amount and
+`'excluded'`; `evidence.reason` names which rule decided it (`money_period_claim`,
+`bare_number_price_cue`, `no_price_cue`, `bare_measurement`, or `visit_tied`).
+`connector` is `null` when the amount and
 period are directly adjacent, else `{ start, end, text }` over the gap
 tokens between them. `claim` bounds the anchor's own claim segment; `context`
 lists the context-phrase roles visible to that pair. Every field is
@@ -43,49 +42,38 @@ constant number of times regardless of clause length.
 
 ## Boundaries and uncertainty
 
-The module decides, using only typed evidence already on the clause:
+Positive evidence first (owner ruling 2026-09-19). A money amount in the
+same claim as a month/year period is a plan-total claim
+(`money_period_claim`); account notices such as `Your $98 monthly payment
+posted` and cadence prose such as `Monthly reminders mention the $98 price`
+are findings for a reviewer, not silent allowances. The only exclusions are:
 
-- **Bare-measurement exclusion**: a bare number immediately followed by a
-  `measurement` context role (or `%`) is never a price.
-- **Visit/application-tied amounts**: an amount already connected to a
-  visit/application unit (`unitRelations`) is excluded, unless the tie is a
-  comma before an unrelated noun — a colon, dash, or bare adjacency still
-  requires the unit itself to be a genuine pricing unit (`per`/`each`/
-  `every`/`for`/`a`/`-` prefixed, or `unit`/`forVisit` kind).
-- **Activity cadence**: an adjective-form period (`monthly`, `yearly`,
-  `annual`, `annually`, `annualized`) followed within four ordinary words by
-  an `activity` role noun, with no price predicate after it, describes a
-  cadence rather than a price.
-- **Account-event override**: an `account_event` role in the pair's context
-  excludes the pair unless an asserted price label or payment predicate
-  joins the amount — a bounded copula/qualifier/participant chain, chasing a
-  chained run of qualifier phrases and one trailing separator, not a raw
-  regex over the whole clause.
-- **Explicit currency+period direct joins**: a money amount in a direct gap
-  (separators and at most one copula) next to a period whose own text starts
-  with `/`, `per`, `a`, `each`, or `every`, or whose gap contains a copula.
-- **Bare numbers need a price cue**: a bare number only pairs when a
-  `billing_head` noun or a `priceCue` predicate is in the pair's bounded
-  context; a `plan` context role alone is not enough for a bare number.
-- **Claim boundaries**: a barrier token, a visit/application unit, or a
-  comma/`and`/`or`/`but` ends a claim, with the frozen adapter's bounded
-  continuations preserved: a fronted period comma at the very start of its
-  claim (`Annually, we charge $1176`), a bounded fronted plan phrase whose
-  comma leads into a pricing copula (`For the monthly plan, the price is
-  $98`), and `and`/comma immediately before the same billing predicate and
-  period (`The plan is $98 and is billed monthly`).
+- **Bare measurement** (`bare_measurement`): a bare number immediately
+  followed by a `measurement` context role or `%`.
+- **Visit/application-tied amounts** (`visit_tied`): an amount already
+  connected to a visit or application unit in `unitRelations` — a unit before
+  the amount, or a genuine pricing unit after it (`per`/`each`/`every`/
+  `for`/`a`/`-` prefixed, or `unit`/`forVisit` kind), never across a comma.
+  A visit token whose embedded period modifies a following plan word
+  (`The monthly visit plan costs $98`) is a period anchor instead.
+- **Bare numbers without a price cue** (`no_price_cue`): a bare number pairs
+  only when a `billing_head` noun (price or payment alike) or a `priceCue`
+  predicate is in the pair's bounded context (`bare_number_price_cue`).
 
-The module carries no price vocabulary of its own. A price label is a
-pricing-phrases `billing_head` noun (or a dual-role head whose predicate
-candidate carries `priceCue`) that the pricing context does not also mark
-with the `account` role (`payment`, `balance`, `pay`); the shared recognizers
-own every word list.
+Claim boundaries: a barrier token, a visit/application unit, or a comma /
+`and` / `or` / `but` ends a claim, with three bounded continuations: a
+fronted period comma at the start of its claim (`Annually, we charge
+$1176`), a fronted plan phrase whose comma leads into a pricing copula (`For
+the monthly plan, the price is $98`), and a comma and/or `and` before an
+optional pronoun, optional copula, billing predicate and period (`The plan
+is $98, and it is billed monthly`). Independent facts still break the claim
+(`The initial price is $98, service occurs monthly`).
 
-The module never attaches an amount to a unit or resolves a general English
-sentence; it consumes only the finite spans, roles, and candidates the
-upstream recognizers already computed. It does not know about
-`commercialProposal` or `legacyMonthlyPlan` — those are consumer policy, not
-period-relation evidence. The inherited normalization limits (8,192 UTF-8
+The module carries no price vocabulary of its own; word lists come from the
+pricing-phrases heads, `priceCue` predicates and pricing-context roles. It
+never attaches an amount to a unit or resolves a general English sentence,
+and it does not know about `commercialProposal` or `legacyMonthlyPlan` —
+those are consumer policy. The inherited normalization limits (8,192 UTF-8
 bytes, 512 whitespace tokens) apply through the upstream chain.
 
 ## Ownership and verification

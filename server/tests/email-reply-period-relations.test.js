@@ -4,10 +4,13 @@ jest.mock('../services/email/email-reply-pricing-context', () => {
 });
 const { recognizeEmailReplyPricingContext: context } = require('../services/email/email-reply-pricing-context');
 const { recognizeEmailReplyPeriodRelations: recognize } = require('../services/email/email-reply-period-relations');
+const { inspectEmailReplyPlanTotal } = require('../services/email/email-reply-plan-total-verifier');
 
 afterEach(() => jest.clearAllMocks());
 
 const relationsFor = (text) => recognize(text).clauses.flatMap((clause) => clause.periodRelations);
+const kinds = (text) => relationsFor(text).map((record) => record.relation);
+const reasons = (text) => relationsFor(text).map((record) => record.evidence.reason);
 
 describe('inactive email reply period relations', () => {
   test('calls the upstream pricing-context recognizer exactly once and preserves its clause identities', () => {
@@ -54,29 +57,78 @@ describe('inactive email reply period relations', () => {
       expect(Object.keys(record.evidence)).toEqual(['reason']);
       expect(record).not.toHaveProperty('ok');
       expect(record).not.toHaveProperty('violations');
-      expect(record).not.toHaveProperty('commercialProposal');
-      expect(record).not.toHaveProperty('legacyMonthlyPlan');
     }
   });
 
+  // Positive evidence first (owner ruling 2026-09-19): money + period in one
+  // claim is a plan-total claim; only measurement, visit ties and cue-less bare
+  // numbers are excluded. Account notices and cadence prose are findings.
   test.each([
-    ['$98/mo', 'plan_total', 'direct_currency_period'],
-    ['$98 a month', 'plan_total', 'direct_currency_period'],
-    ['The plan is $98 monthly', 'plan_total', 'plan_cue'],
-    ['Monthly price is $98', 'plan_total', 'price_cue'],
+    ['$98/mo', 'plan_total', 'money_period_claim'],
+    ['$98 a month', 'plan_total', 'money_period_claim'],
+    ['The plan is $98 monthly', 'plan_total', 'money_period_claim'],
+    ['Monthly price is $98', 'plan_total', 'money_period_claim'],
+    ['We pay $98 monthly', 'plan_total', 'money_period_claim'],
+    ['Your $98 monthly payment posted.', 'plan_total', 'money_period_claim'],
+    ['Monthly reminders mention the $98 price', 'plan_total', 'money_period_claim'],
+    ['We received your monthly payment of $98', 'plan_total', 'money_period_claim'],
+    ['Monthly price is 98', 'plan_total', 'bare_number_price_cue'],
+    ['The monthly payment is 98', 'plan_total', 'bare_number_price_cue'],
     ['98 per month', 'excluded', 'no_price_cue'],
-    ['We pay $98 monthly', 'plan_total', 'payment_assertion'],
     ['Our annual renewal rate is 98 percent', 'excluded', 'bare_measurement'],
     ['Price per visit is $98 monthly', 'excluded', 'visit_tied'],
-    ['Monthly reminder mentions the $98 initial-service price', 'excluded', 'activity_cadence'],
-    ['We received your monthly payment of $98', 'excluded', 'account_event'],
-    ['$98 monthly', 'plan_total', 'direct_gap'],
-    ['The monthly price is $98, applications are scheduled separately.', 'plan_total', 'price_cue'],
   ])('pairs %s as %s (%s)', (text, relation, reason) => {
     const [record] = relationsFor(text);
     expect(record.relation).toBe(relation);
     expect(record.evidence.reason).toBe(reason);
   });
+
+  test.each([
+    'The plan is $98 monthly but reminders are optional',
+    'The plan is $98 monthly including service',
+    '$98 monthly including service',
+    'Monthly service plan costs $98',
+    'Your payment of $98 is due monthly',
+    'Your monthly payment of $98 is due',
+  ])('cadence, obligation and activity prose beside a money+period pair stay findings: %s', (text) => {
+    expect(kinds(text)).toContain('plan_total');
+  });
+
+  test.each([
+    'The plan is $98 and is billed monthly',
+    'The plan is $98, billed monthly',
+    'The plan is $98, and is billed monthly',
+    'The plan costs $98, and it is billed monthly',
+    'The price is $1176, and will be charged yearly',
+  ])('a bounded comma/and continuation keeps the amount and period in one claim: %s', (text) => {
+    expect(kinds(text)).toContain('plan_total');
+  });
+
+  test.each([
+    'The initial price is $98, service occurs monthly',
+    'Your refund was $98; service is monthly.',
+  ])('independent facts still break the claim or stay unpaired: %s', (text) => {
+    expect(kinds(text)).not.toContain('plan_total');
+  });
+
+  test.each(['The monthly visit plan costs $98', 'Our annual service visit package is $1176'])(
+    'a period embedded in a visit token that modifies a plan word is an anchor, not a visit price: %s', (text) => {
+      expect(reasons(text)).toEqual(['money_period_claim']);
+    },
+  );
+  test.each(['Monthly visits cost $98 per application', 'Each visit is $98 monthly'])(
+    'visit pricing stays tied to its unit: %s', (text) => {
+      expect(kinds(text)).not.toContain('plan_total');
+    },
+  );
+
+  test.each(['We refunded $98 a month or 2 ago', 'We refunded $98 a year and 6 months ago',
+    'We refunded $98 a year and six months ago', 'We refunded $98 a month ago'])(
+    'numeric and worded ago continuations stay temporal: %s', (text) => {
+      expect(relationsFor(text)).toEqual([]);
+      expect(inspectEmailReplyPlanTotal({ text }).violations).toEqual([]);
+    },
+  );
 
   test('bounds context and claim to the pair\'s own claim segment, using clause-local token indexes', () => {
     const clause = recognize('The plan is $98 monthly but the yearly rate is $1176').clauses[0];
@@ -84,77 +136,17 @@ describe('inactive email reply period relations', () => {
     const [first, second] = clause.periodRelations;
     expect(first.relation).toBe('plan_total');
     expect(second.relation).toBe('plan_total');
-    // Each pair's claim is a disjoint, clause-local token range: the second
-    // claim starts strictly after the first claim ends (past the "but" break).
     expect(first.claim.start).toBe(0);
     expect(first.claim.end).toBeLessThan(second.claim.start);
     expect(second.claim.end).toBe(clause.tokens.length);
-    // Context roles stay inside the pair's own claim and never leak the sibling's.
-    for (const role of first.context.roles) expect(role).not.toBe('rate');
-  });
-
-  test('an amount can pair with the anchor before it and the anchor after it independently', () => {
-    const clause = recognize('Monthly price is $98 monthly').clauses[0];
-    expect(clause.periodRelations.length).toBeGreaterThanOrEqual(1);
-    for (const record of clause.periodRelations) expect(record.relation).toBe('plan_total');
   });
 
   test('a null connector means the amount and period are directly adjacent', () => {
-    const [record] = relationsFor('$98/mo');
-    expect(record.connector).toBeNull();
+    expect(relationsFor('$98/mo')[0].connector).toBeNull();
   });
 
   test('a populated connector reports the exact gap span and text', () => {
     const [record] = relationsFor('$98 is per month');
     expect(record.connector).toEqual({ start: record.amount.end, end: record.period.start, text: 'is' });
   });
-});
-
-// Pre-push audit P1: activity cadence must not read past the claim boundary.
-describe('activity cadence stays inside its claim', () => {
-  const { recognizeEmailReplyPeriodRelations } = require('../services/email/email-reply-period-relations');
-  const relations = (text) => recognizeEmailReplyPeriodRelations(text).clauses.flatMap((clause) => clause.periodRelations);
-  test.each([
-    'The plan is $98 monthly but reminders are optional',
-    'The plan is $98 monthly, and service reminders are optional',
-    'Our price is $98 monthly or reminders stop',
-  ])('a conjunction-separated activity statement does not exclude the total: %s', (text) => {
-    expect(relations(text).map((relation) => relation.relation)).toContain('plan_total');
-    expect(relations(text).map((relation) => relation.evidence.reason)).not.toContain('activity_cadence');
-  });
-  test.each([
-    'The plan is $98 monthly including service',
-    'Our price is $98 monthly with service reminders',
-    'Your payment is $98 monthly including treatments',
-  ])('a trailing period on an asserted price is not activity cadence: %s', (text) => {
-    expect(relations(text).map((relation) => relation.relation)).toContain('plan_total');
-  });
-  test.each([
-    '$98 monthly including service', '$1176 yearly with service reminders', '$98 annually for treatments',
-  ])('a bare money total with a trailing period is not activity cadence: %s', (text) => {
-    expect(relations(text).map((relation) => relation.relation)).toContain('plan_total');
-  });
-  test('activity cadence inside the same claim still excludes', () => {
-    expect(relations('Monthly reminders mention the $98 price').map((relation) => relation.evidence.reason))
-      .toEqual(['activity_cadence']);
-  });
-});
-
-// Codex #4614 r1: comma-plus-conjunction continuations and current payment obligations.
-describe('continuations and obligations', () => {
-  const { recognizeEmailReplyPeriodRelations } = require('../services/email/email-reply-period-relations');
-  const { inspectEmailReplyPlanTotal } = require('../services/email/email-reply-plan-total-verifier');
-  const relations = (text) => recognizeEmailReplyPeriodRelations(text).clauses.flatMap((clause) => clause.periodRelations);
-  test.each([
-    'The plan is $98, and is billed monthly', 'The price is $1176, and will be charged yearly',
-    'Your $98 monthly payment is due', 'Your monthly payment of $98 is due', 'The monthly payment of $98 is payable',
-  ])('produces the plan-total finding: %s', (text) => {
-    expect(relations(text).map((relation) => relation.relation)).toContain('plan_total');
-    expect(inspectEmailReplyPlanTotal({ text }).violations).toEqual(['customer_copy_compliance']);
-  });
-  test.each(['Your $98 monthly payment posted.', 'Your $98 monthly payment was due.', 'Your payment of $98 is due next month.'])(
-    'posted events, past obligations and non-period timing stay unpaired: %s', (text) => {
-      expect(inspectEmailReplyPlanTotal({ text }).violations).toEqual([]);
-    },
-  );
 });

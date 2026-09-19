@@ -26,7 +26,9 @@ function recognizeClause(clause) {
       // lookahead ("a month or two ago") can see the whole construction; only
       // the matched span is consumed.
       for (let at = start + 1; at < Math.min(tokens.length, start + 7); at += 1) {
-        if (tokens[at].kind !== 'word') break;
+        // Numbers ride along for the temporal lookahead only ("or 2 ago");
+        // no period pattern matches digits, so they are never consumed.
+        if (!['word', 'number', 'measurement'].includes(tokens[at].kind)) break;
         selected.push(tokens[at]);
       }
     }

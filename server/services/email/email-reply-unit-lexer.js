@@ -50,7 +50,7 @@ const PERIOD_PATTERNS = [
   ...PATTERNS.filter((pattern) => pattern.kind === 'period'),
   ...[
     // "a month ago", "a month or two ago", "a year and a half ago" stay temporal.
-    '(?:a|each|every)\\s+(?:months?|mos?|years?|yrs?)\\b(?!-[a-z]|(?:\\s+(?:or|and)\\s+(?:a\\s+)?[a-z]+)?\\s+ago\\b)',
+    '(?:a|each|every)\\s+(?:months?|mos?|years?|yrs?)\\b(?!-[a-z]|(?:\\s+(?:or|and)\\s+(?:a\\s+)?(?:[a-z]+|\\d+)(?:\\s+[a-z]+)?)?\\s+ago\\b)',
     'for\\s+the\\s+(?:months?|mos?|years?|yrs?)\\b(?!-[a-z])',
     'annualized\\b(?!-[a-z])',
   ].map((source) => ({ kind: 'period', re: new RegExp(source, 'iy') })),
