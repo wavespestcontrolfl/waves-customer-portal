@@ -390,12 +390,42 @@ describe('annual-offer guard at the TRUE provider boundary (Codex round 3 on #46
     expect(annualHandoffGuard).toHaveBeenCalledWith(expect.objectContaining({ estimateIds: [] }));
   });
 
-  test('a guard infrastructure error (the lookup itself throws) is NOT reported as a withheld/blocked refusal — it propagates like any other pre-send failure', async () => {
+  test('a guard infrastructure error (the lookup itself throws), with NO withSmsHandoff, resolves to a retryable, provider-never-attempted result — not a withheld/blocked refusal, and never a generic provider-failure throw (round 13 P1)', async () => {
     annualHandoffGuard.mockReturnValueOnce(async () => { throw new Error('estimates lookup unavailable'); });
 
-    await expect(TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM }))
-      .rejects.toThrow(/estimates lookup unavailable/);
+    // Pre-push audit P1 (twilio.js:964, round 13): a lookup failure here
+    // used to propagate as a bare throw, landing in the generic Twilio-
+    // error classification below — which treats an unrecognized error code
+    // as a definite, non-retryable provider failure. It must instead
+    // resolve to the SAME retryable/not-attempted shape sendWindowClosed
+    // gets, so a scheduled retry sweep tries again instead of marking an
+    // unsent message permanently failed.
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM });
+
     expect(mockTwilioCreate).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      success: false, sid: null, preSendBlocked: true,
+      code: 'ANNUAL_OFFER_GUARD_FAILED', retryable: true, deliveryOutcome: 'not_sent',
+    });
+    expect(result.error).toMatch(/estimates lookup unavailable/);
+    expect(require('../services/twilio-failure-alerts').alertTwilioFailure).not.toHaveBeenCalled();
+  });
+
+  test('a guard infrastructure error (the lookup itself throws) INSIDE a caller withSmsHandoff also resolves retryable, provider-never-attempted — never the generic handoff-check-failed shape or a Twilio SDK call (round 13 P1)', async () => {
+    annualHandoffGuard.mockReturnValueOnce(async () => { throw new Error('estimates lookup unavailable'); });
+
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM,
+      withSmsHandoff: async dispatch => { await dispatch(); return { ok: true }; },
+    });
+
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      success: false, preSendBlocked: true,
+      code: 'ANNUAL_OFFER_GUARD_FAILED', retryable: true,
+      validator: 'check_sms_handoff_authority',
+    });
+    expect(result.error).toMatch(/estimates lookup unavailable/);
   });
 
   test('round 5 P1: a guard that resolves after the window closes gets ONE more sync recheck immediately before the SDK call — no provider call, window refusal', async () => {
