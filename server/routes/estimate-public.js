@@ -25054,6 +25054,19 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
         return res.status(409).json({ ok: false, error: 'Email is unavailable for this address — text yourself the link instead.' });
       }
       if (!result.sent) return res.status(502).json({ ok: false, error: 'Email could not be sent right now.' });
+      if (result.deduped) {
+        // Pre-push audit P0 (round 5): "one send per estimate+service+day"
+        // (idempotencyKey) means a same-day repeat finds sendTemplate's own
+        // prior 'sent' row and returns success from THAT — without ever
+        // re-dispatching, so the guard (which only runs inside sendOne, on
+        // an actual dispatch) never gets a chance to run. A same-day repeat
+        // for a NOW-withheld estimate would otherwise answer 200 from this
+        // shortcut while a fresh request (a different day/service) answers
+        // 404 — the same existence-oracle leak the SMS side closes.
+        const { annualHandoffGuard } = require('../services/estimate-annual-guard');
+        const dedupeVerdict = await annualHandoffGuard({ db, estimateIds: [estimate.id] })();
+        if (dedupeVerdict.blocked) return res.status(404).json({ error: 'Estimate not found' });
+      }
       return res.json({ ok: true, channel: 'email' });
     }
 
@@ -25086,6 +25099,15 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       return res.status(502).json({ ok: false, error: 'Text could not be sent right now.' });
     }
     if (priorClaim?.sentAt && Date.now() - priorClaim.sentAt < SERVICE_DETAILS_SMS_DEDUP_MS) {
+      // Pre-push audit P0 (round 5, PRRT check "server/routes/estimate-
+      // public.js:25085"): this dedup hit answers success from a send that
+      // may have happened before a later withhold — recheck the annual
+      // verdict fresh before reporting it, the same generic-404 mapping
+      // every other withheld path on this route uses, or a stale success
+      // here (200) versus a fresh request's 404 is an existence oracle.
+      const { annualHandoffGuard } = require('../services/estimate-annual-guard');
+      const dedupVerdict = await annualHandoffGuard({ db, estimateIds: [estimate.id] })();
+      if (dedupVerdict.blocked) return res.status(404).json({ error: 'Estimate not found' });
       return res.json({ ok: true, channel: 'sms', deduped: true });
     }
     // Cross-process gate: a SLIDING unique claim (atomic stale-takeover
@@ -25155,22 +25177,35 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
         }
         return { success: false, claimHeldElsewhere: true };
       }
-      // Cross-restart cover (a pre-restart send has a log row but no Map
-      // entry; its claim row was taken over above), best-effort — a dedup
-      // query failure never blocks the send.
-      try {
-        if (tenDigits.length === 10 && await recentPacketSend()) {
-          return { success: true, deduped: true };
-        }
-      } catch (e) { logger.warn(`[estimate-public] service-details SMS dedup check skipped: ${e.message}`); }
       // Codex round 3 on #4608 (P0): stamps the claim row's outcome durably
       // so a concurrent loser's poll (above) can read the SAME refusal —
       // best-effort, never blocks the actual response to THIS request.
+      // Defined here (before the cross-restart cover below) so the P0 fix
+      // (round 5) can reuse it for that dedup path too.
       const markClaimWithheld = async () => {
         try {
           await db('sms_send_claims').where({ claim_key: claimKey }).update({ outcome: 'withheld' });
         } catch (e) { logger.warn(`[estimate-public] service-details SMS claim outcome write failed: ${e.message}`); }
       };
+      // Cross-restart cover (a pre-restart send has a log row but no Map
+      // entry; its claim row was taken over above), best-effort — a dedup
+      // query failure never blocks the send.
+      try {
+        if (tenDigits.length === 10 && await recentPacketSend()) {
+          // Pre-push audit P0 (round 5): this dedup hit answers success
+          // from a PRIOR send — recheck the annual verdict fresh before
+          // reporting it, or a since-withheld estimate answers 200 here
+          // while a fresh request answers 404 (the same existence-oracle
+          // leak the in-process dedup above closes).
+          const { annualHandoffGuard } = require('../services/estimate-annual-guard');
+          const recentSendVerdict = await annualHandoffGuard({ db, estimateIds: [estimate.id] })();
+          if (recentSendVerdict.blocked) {
+            await markClaimWithheld();
+            return { success: false, withheld: true };
+          }
+          return { success: true, deduped: true };
+        }
+      } catch (e) { logger.warn(`[estimate-public] service-details SMS dedup check skipped: ${e.message}`); }
       // Last read before the handoff — inside the claim, so a withheld send
       // releases it below and a later legitimate retap can send.
       if (!(await stillOnCustomerSurface())) {

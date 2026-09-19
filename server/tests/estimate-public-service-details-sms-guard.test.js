@@ -69,7 +69,10 @@ function makeDb(getRow) {
       const builder = {};
       builder.where = jest.fn(() => builder);
       builder.whereRaw = jest.fn(() => builder);
-      builder.first = jest.fn(async () => null);
+      // P0 (round 5): test-settable knob simulating "a packet was already
+      // sent" (recentPacketSend finding a durable sms_log row) — defaults
+      // to false (no prior send found) so every existing test is unaffected.
+      builder.first = jest.fn(async () => (db.__recentPacketFound ? { id: 'log-1' } : null));
       return builder;
     }
     if (table === 'sms_send_claims') {
@@ -89,6 +92,7 @@ function makeDb(getRow) {
   db.fn = { now: () => new Date('2026-01-01T12:00:00.000Z') };
   db.__claimAcquired = true;
   db.__claimOutcome = null;
+  db.__recentPacketFound = false;
   return db;
 }
 
@@ -128,6 +132,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockDb.__claimAcquired = true;
   mockDb.__claimOutcome = null;
+  mockDb.__recentPacketFound = false;
   priorGates = GATE_KEYS.map((key) => process.env[key]);
   GATE_KEYS.forEach((key) => delete process.env[key]);
 });
@@ -435,5 +440,126 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
     expect(capturedVerdict).toEqual({ ok: true });
     expect(res2.status).toBe(200);
     expect(body2).toEqual({ ok: true, channel: 'sms' });
+  });
+
+  test('P0 (round 5): a since-WITHHELD estimate with a prior packet send answers 404, not a stale dedup 200 (in-process dedup)', async () => {
+    // First request: eligible/delivered — sends and starts the in-process
+    // dedup window (serviceDetailsSmsClaims.set(dedupKey, { sentAt })).
+    const draft = baseEstimateRow({ customer_phone: '+19415551010' });
+    const fingerprint = annualPlanOfferFingerprint(draft);
+    draft.status = 'sent';
+    draft.estimate_data.deliveryState = { firstDeliveredAt: '2026-01-01T12:00:00Z', annualPlanOfferFingerprint: fingerprint };
+    currentRow = draft;
+    const TwilioService = require('../services/twilio');
+    TwilioService.sendSMS.mockImplementationOnce(async (_to, _body, options) => {
+      const verdict = await options.preSendCheck();
+      if (!verdict.ok) return { success: false, sid: null, preSendBlocked: true, code: verdict.code, error: verdict.reason };
+      return { success: true, sid: 'SM_fake' };
+    });
+    const res1 = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
+    });
+    expect(res1.status).toBe(200);
+
+    // The SAME estimate/service/phone becomes withheld before the dedup
+    // window (10 minutes) closes — a second request must NOT answer the
+    // stale 200 the in-process sentAt dedup would otherwise give it before
+    // the fix; it must recheck the verdict fresh and answer the SAME
+    // generic 404 a first-time request would.
+    currentRow = baseEstimateRow({ customer_phone: '+19415551010' });
+    TwilioService.sendSMS.mockClear();
+    const res2 = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
+    });
+    const body2 = await res2.json();
+
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(res2.status).toBe(404);
+    expect(body2).toEqual({ error: 'Estimate not found' });
+  });
+
+  test('P0 (round 5): a since-WITHHELD estimate answers 404 on the SMS cross-restart recentPacketSend dedup path too', async () => {
+    currentRow = baseEstimateRow({ customer_phone: '+19415551111' });
+    mockDb.__recentPacketFound = true;
+    const TwilioService = require('../services/twilio');
+
+    const res = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
+    });
+    const body = await res.json();
+
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(res.status).toBe(404);
+    expect(body).toEqual({ error: 'Estimate not found' });
+    expect(mockDb.__claimOutcome).toBe('withheld');
+  });
+
+  test('P0 (round 5): an ELIGIBLE estimate still gets the cross-restart recentPacketSend dedup success unchanged', async () => {
+    const draft = baseEstimateRow({ customer_phone: '+19415551212' });
+    const fingerprint = annualPlanOfferFingerprint(draft);
+    draft.status = 'sent';
+    draft.estimate_data.deliveryState = { firstDeliveredAt: '2026-01-01T12:00:00Z', annualPlanOfferFingerprint: fingerprint };
+    currentRow = draft;
+    mockDb.__recentPacketFound = true;
+    const TwilioService = require('../services/twilio');
+
+    const res = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
+    });
+    const body = await res.json();
+
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ ok: true, channel: 'sms', deduped: true });
+  });
+
+  test('P0 (round 5): a same-day EMAIL idempotency dedup for a since-WITHHELD estimate answers 404, not a stale 200', async () => {
+    const EmailTemplateLibrary = require('../services/email-template-library');
+    EmailTemplateLibrary.sendTemplate.mockResolvedValueOnce({
+      sent: true, deduped: true, message: { id: 'msg-historical' },
+    });
+    currentRow = baseEstimateRow();
+
+    const res = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'email' }),
+    });
+    const body = await res.json();
+
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(404);
+    expect(body).toEqual({ error: 'Estimate not found' });
+  });
+
+  test('P0 (round 5): a same-day EMAIL idempotency dedup for an ELIGIBLE estimate still succeeds unchanged', async () => {
+    const EmailTemplateLibrary = require('../services/email-template-library');
+    EmailTemplateLibrary.sendTemplate.mockResolvedValueOnce({
+      sent: true, deduped: true, message: { id: 'msg-historical-2' },
+    });
+    const draft = baseEstimateRow();
+    const fingerprint = annualPlanOfferFingerprint(draft);
+    draft.status = 'sent';
+    draft.estimate_data.deliveryState = { firstDeliveredAt: '2026-01-01T12:00:00Z', annualPlanOfferFingerprint: fingerprint };
+    currentRow = draft;
+
+    const res = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'email' }),
+    });
+    const body = await res.json();
+
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ ok: true, channel: 'email' });
   });
 });

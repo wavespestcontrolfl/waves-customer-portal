@@ -364,4 +364,72 @@ describe('annual-offer guard at the TRUE provider boundary (Codex round 3 on #46
       .rejects.toThrow(/estimates lookup unavailable/);
     expect(mockTwilioCreate).not.toHaveBeenCalled();
   });
+
+  test('round 5 P1: a guard that resolves after the window closes gets ONE more sync recheck immediately before the SDK call — no provider call, window refusal', async () => {
+    // The early preSendCheck() passes (window was fine THEN); by the time
+    // the guard's own DB reads resolve inside dispatch(), the window has
+    // closed — isStillValid() is the ONLY thing that can see that, since
+    // it is pure/synchronous and reruns at the true last moment.
+    const preSendCheck = jest.fn(async () => ({ ok: true }));
+    preSendCheck.isStillValid = jest.fn(() => false);
+
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM, preSendCheck,
+    });
+
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+    expect(preSendCheck.isStillValid).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      success: false, preSendBlocked: true, code: 'QUIET_HOURS_HOLD', retryable: true,
+    });
+    expect(require('../services/twilio-failure-alerts').alertTwilioFailure).not.toHaveBeenCalled();
+  });
+
+  test('round 5 P1: the same final recheck applies INSIDE a caller withSmsHandoff lock, after the guard, before the SDK call', async () => {
+    const events = [];
+    const preSendCheck = jest.fn(async () => ({ ok: true }));
+    preSendCheck.isStillValid = jest.fn(() => { events.push('isStillValid'); return false; });
+    annualHandoffGuard.mockReturnValueOnce(async () => { events.push('guard'); return { blocked: false, reason: null, estimateId: null }; });
+
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM, preSendCheck,
+      withSmsHandoff: async dispatch => {
+        events.push('locked');
+        await dispatch();
+        // dispatch() throws for this refusal — a real caller's own lock
+        // release happens around this callback (a try/finally the caller
+        // owns), not inside it, so nothing past the throw runs here.
+        events.push('released');
+        return { ok: true };
+      },
+    });
+
+    expect(events).toEqual(['locked', 'guard', 'isStillValid']);
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      success: false, preSendBlocked: true, code: 'QUIET_HOURS_HOLD', retryable: true,
+    });
+  });
+
+  test('round 5 P1: isStillValid() returning true lets the send proceed normally', async () => {
+    const preSendCheck = jest.fn(async () => ({ ok: true }));
+    preSendCheck.isStillValid = jest.fn(() => true);
+
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM, preSendCheck,
+    });
+
+    expect(preSendCheck.isStillValid).toHaveBeenCalledTimes(1);
+    expect(mockTwilioCreate).toHaveBeenCalledTimes(1);
+    expect(result.success).toBe(true);
+  });
+
+  test('round 5 P1: a preSendCheck with no isStillValid is unaffected (legacy/direct callers)', async () => {
+    const preSendCheck = jest.fn(async () => ({ ok: true }));
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM, preSendCheck,
+    });
+    expect(mockTwilioCreate).toHaveBeenCalledTimes(1);
+    expect(result.success).toBe(true);
+  });
 });

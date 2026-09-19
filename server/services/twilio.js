@@ -920,6 +920,27 @@ const TwilioService = {
           err.annualOfferWithheld = true;
           throw err;
         }
+        // Pre-push audit P1 (round 5): the guard above just awaited its own
+        // DB reads — real time the send-window boundary re-check (the
+        // caller's own preSendCheck, run once, earlier, before this
+        // handoff even started) never accounted for. Mirrors send-
+        // customer-message.js's own pattern for exactly this class of gap
+        // (push-channel-routing.js's post-attempt recheck): a caller
+        // wired through that pipeline exposes a synchronous, DB-free
+        // isStillValid() on its preSendCheck for precisely this — the
+        // LAST synchronous operation before the SDK request, so nothing
+        // async can follow it and reopen the race. A caller with no
+        // isStillValid (this legacy path bypasses sendCustomerMessage
+        // entirely for some direct callers) is unaffected — nothing to
+        // recheck without it.
+        if (typeof options.preSendCheck?.isStillValid === 'function'
+            && options.preSendCheck.isStillValid() !== true) {
+          const err = new Error('send window closed before the provider handoff');
+          err.code = 'QUIET_HOURS_HOLD';
+          err.sendWindowClosed = true;
+          err.retryable = true;
+          throw err;
+        }
         handoffAt = new Date();
         smsAttemptAt = handoffAt;
         dispatchStarted = true;
@@ -943,6 +964,12 @@ const TwilioService = {
             // "handoff check failed, retryable" shape below, which would
             // tell a retry-on-boundary-failure caller to try again.
             verdict = { ok: false, code: 'ANNUAL_OFFER_WITHHELD', reason: 'annual_offer_withheld', retryable: false };
+          } else if (err && err.sendWindowClosed) {
+            // Round 5 P1: the final isStillValid recheck (inside dispatch,
+            // above) closed after the guard's own DB reads — the SAME
+            // deferral contract as any other send-window hold (retryable,
+            // never treated as a definite failure).
+            verdict = { ok: false, code: err.code || 'QUIET_HOURS_HOLD', reason: err.message, retryable: true };
           } else if (!dispatchStarted) {
             verdict = { ok: false, code: 'SMS_HANDOFF_CHECK_FAILED',
               reason: 'SMS handoff authority check failed', retryable: true };
@@ -1080,6 +1107,16 @@ const TwilioService = {
           success: false, sid: null, guardBlocked: true, preSendBlocked: true,
           code: 'ANNUAL_OFFER_WITHHELD', error: 'annual_offer_withheld',
           deliveryOutcome: 'not_sent',
+        };
+      }
+      // Round 5 P1: same no-handoff landing spot for the final isStillValid
+      // recheck's refusal — retryable (a window hold, not a definite
+      // failure), never the Twilio-failure-alert path below.
+      if (err && err.sendWindowClosed) {
+        return {
+          success: false, sid: null, preSendBlocked: true,
+          code: err.code || 'QUIET_HOURS_HOLD', error: err.message,
+          retryable: true, deliveryOutcome: 'not_sent',
         };
       }
       if (deliveryOutcome === "uncertain" && isDefinitiveTwilioRejection(err)) {
