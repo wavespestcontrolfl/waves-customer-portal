@@ -130,6 +130,10 @@ describe('buildAddressLines — spoken raw_text with conversational state-code w
       street_line_1: '123 Main St', city: 'Venice', state: null,
       raw_text: "123 Main Street, Venice, CA, but I don't know the ZIP",
     })).toEqual(['123 Main St', 'Venice CA']);
+    expect(buildAddressLines({
+      street_line_1: '123 Main St', city: 'Venice', state: null,
+      raw_text: "123 Main Street, Venice, CA; but I don't know the ZIP",
+    })).toEqual(['123 Main St', 'Venice CA']);
   });
   test('an explicit other state in raw_text still overrides the FL default', () => {
     expect(buildAddressLines({

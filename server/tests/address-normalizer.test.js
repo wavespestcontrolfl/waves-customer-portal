@@ -693,6 +693,7 @@ describe('parseRawAddress — conversational words that are also state codes', (
   test('a code that ends a comma segment survives trailing speech (codex r1 P1)', () => {
     expect(parseRawAddress("123 Main St, Venice, CA, but I don't know the ZIP")).toMatchObject({ state: 'CA' });
     expect(parseRawAddress("123 Main St, Venice, CA. I don't know the ZIP")).toMatchObject({ state: 'CA' });
+    expect(parseRawAddress("123 Main St, Venice, CA; but I don't know the ZIP")).toMatchObject({ state: 'CA' });
   });
   test('a full state name anywhere in the tail is still a state', () => {
     expect(parseRawAddress('Louisville, Kentucky')).toMatchObject({ state: 'KY' });
