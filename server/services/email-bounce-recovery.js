@@ -492,20 +492,20 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
   }
   try {
     let result;
-    // Pre-push audit P1: set inside dispatchToProvider when the annual-offer
-    // guard blocks — read below in BOTH the visit-summary and ordinary
-    // branches, since dispatchToProvider is the SAME function either way.
+    // Codex round 3 on #4608 (structural move): set inside dispatchToProvider
+    // when sendgrid.sendOne's OWN annual-offer guard (the authoritative
+    // check, run at the true provider boundary) refuses — read below in
+    // BOTH the visit-summary and ordinary branches, since dispatchToProvider
+    // is the SAME function either way.
     let annualWithheld = false;
     const dispatchToProvider = async () => {
-      // Pre-push audit P1: bounce recovery re-sends the SAME stored
-      // html/text to a CORRECTED address, straight through sendgrid.sendOne
-      // — bypassing email-template-library.js's own chokepoint guard
-      // entirely. Composed here, immediately before the actual request.
-      // Explicit id when the original send's trigger_event_id names one
-      // (best-effort parse; an id that resolves no row is simply not this
-      // guard's job — harmless), unioned with content derivation from the
-      // stored snapshot being re-sent.
-      const { annualHandoffGuard } = require('./estimate-annual-guard');
+      // Bounce recovery re-sends the SAME stored html/text to a CORRECTED
+      // address, straight through sendgrid.sendOne — its own content
+      // derivation over that html/text covers this without composing the
+      // guard here separately. Explicit id when the original send's
+      // trigger_event_id names one (best-effort parse; an id that resolves
+      // no row is simply not the guard's job — harmless).
+      //
       // Pre-push audit P1: trigger ids are not all "<prefix>:<id>" —
       // estimate_extended is "estimate_extended:<id>:<iso-expiry>", so the
       // last-segment helper above yields a timestamp there. Take the segment
@@ -514,29 +514,29 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
       // the link in the stored body), so an unparseable trigger can never
       // send a garbage value into the estimates query and loop as transient.
       const sourceEstimateId = guardEstimateIdFromTriggerEvent(bouncedMessage.trigger_event_id);
-      const verdict = await annualHandoffGuard({
-        db,
-        estimateIds: sourceEstimateId ? [sourceEstimateId] : [],
-        texts: [bouncedMessage.html_snapshot, bouncedMessage.text_snapshot],
-      })();
-      if (verdict.blocked) {
-        annualWithheld = true;
-        return;
+      try {
+        result = await sendgrid.sendOne({
+          to: correctedEmail,
+          fromEmail: message.from_email_snapshot,
+          fromName: message.from_name_snapshot,
+          replyTo: message.reply_to_snapshot,
+          subject: message.subject_snapshot,
+          html: bouncedMessage.html_snapshot || undefined,
+          text: bouncedMessage.text_snapshot || undefined,
+          categories,
+          asmGroupId: asmGroupIdForStream(bouncedMessage.suppression_group_key_snapshot),
+          // So a fast delivery/bounce webhook can resolve this row even before
+          // provider_message_id is committed below.
+          customArgs: { email_message_id: String(message.id), send_attempt_token: message.send_attempt_token },
+          estimateIds: sourceEstimateId ? [sourceEstimateId] : [],
+        });
+      } catch (err) {
+        if (err && err.annualOfferWithheld) {
+          annualWithheld = true;
+          return;
+        }
+        throw err;
       }
-      result = await sendgrid.sendOne({
-        to: correctedEmail,
-        fromEmail: message.from_email_snapshot,
-        fromName: message.from_name_snapshot,
-        replyTo: message.reply_to_snapshot,
-        subject: message.subject_snapshot,
-        html: bouncedMessage.html_snapshot || undefined,
-        text: bouncedMessage.text_snapshot || undefined,
-        categories,
-        asmGroupId: asmGroupIdForStream(bouncedMessage.suppression_group_key_snapshot),
-        // So a fast delivery/bounce webhook can resolve this row even before
-        // provider_message_id is committed below.
-        customArgs: { email_message_id: String(message.id), send_attempt_token: message.send_attempt_token },
-      });
     };
     if (bouncedMessage.template_key === 'service.visit_summary') {
       // Domain correction changes the destination, not the customer's consent

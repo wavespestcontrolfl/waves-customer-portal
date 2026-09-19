@@ -216,10 +216,81 @@ function annualHandoffGuard({ db, estimateIds, texts }) {
   };
 }
 
+// Codex round 3 on #4608 (P1 PRRT_kwDOR3YQi86j8Ydp, over-blocking):
+// deposit.receipt (estimate-deposits.js) carries a REQUIRED estimate_url
+// CTA and can legitimately fire while the annual offer it links is
+// withheld (the deposit itself is owed regardless) — refusing the whole
+// receipt denies the customer proof of payment. Same precedent
+// estimate-deposits.js's OWN pricing-authority CTA swap already applies
+// (point the link at the portal home instead of refusing outright), just
+// run generically here, AFTER render, against whatever estimate link(s)
+// literally appear in the final html/text — so any future receipt/payment
+// template with a bearer link gets the same treatment without a bespoke
+// pre-render lookup per caller.
+//
+// Only for a caller that opts in (sendTemplate's withheldLinkPolicy:
+// 'rewrite') — never the default. For EVERY literal long-token or short-
+// code link found in the content, runs annualHandoffGuard scoped to THAT
+// one id (which itself expands to its link-visible group siblings, same
+// as any other guard call) — a block on the id OR any sibling means
+// visiting that specific link is unsafe, so the link itself is replaced,
+// regardless of which estimate in the group actually triggered it. A
+// sibling that never appears as a literal link in this content is left
+// alone: nothing in the message points at it.
+async function rewriteWithheldEstimateLinks({ db, html, text }) {
+  // Every caller in this codebase builds these links as
+  // `${publicPortalUrl()}/estimate/<token>` / `${publicPortalUrl()}/l/<code>`
+  // with nothing trailing — stripping the matched `/estimate/<token>` or
+  // `/l/<code>` substring therefore leaves exactly the bare portal-home URL
+  // in place, with no need to reconstruct or re-inject it.
+  let outHtml = html;
+  let outText = text;
+  const texts = [html, text].filter((t) => typeof t === 'string' && t);
+  const rewrittenIds = [];
+  if (!texts.length) return { html: outHtml, text: outText, rewrittenIds };
+
+  const longTokens = [...extractMatches(texts, LONG_LINK_TOKEN_RE)];
+  const shortCodes = [...extractMatches(texts, SHORT_LINK_CODE_RE, { trimTrailingDash: true })];
+  if (!longTokens.length && !shortCodes.length) return { html: outHtml, text: outText, rewrittenIds };
+
+  const replaceAll = (needle) => {
+    if (!needle) return;
+    if (typeof outHtml === 'string' && outHtml.includes(needle)) outHtml = outHtml.split(needle).join('');
+    if (typeof outText === 'string' && outText.includes(needle)) outText = outText.split(needle).join('');
+  };
+
+  if (longTokens.length) {
+    const tokenRows = await db('estimates').whereIn('token', longTokens).select('id', 'token');
+    for (const row of tokenRows) {
+      const verdict = await annualHandoffGuard({ db, estimateIds: [row.id], texts: [] })();
+      if (verdict.blocked) {
+        rewrittenIds.push(row.id);
+        replaceAll(`/estimate/${row.token}`);
+      }
+    }
+  }
+  if (shortCodes.length) {
+    const codeRows = await db('short_codes')
+      .whereIn('code', shortCodes.map((code) => code.toLowerCase()))
+      .where({ entity_type: 'estimates' })
+      .whereNotNull('entity_id')
+      .select('code', 'entity_id');
+    for (const row of codeRows) {
+      const verdict = await annualHandoffGuard({ db, estimateIds: [row.entity_id], texts: [] })();
+      if (verdict.blocked) {
+        if (!rewrittenIds.includes(row.entity_id)) rewrittenIds.push(row.entity_id);
+        replaceAll(`/l/${row.code}`);
+      }
+    }
+  }
+  return { html: outHtml, text: outText, rewrittenIds };
+}
+
 module.exports = {
   loadAnnualOfferRow,
   annualOfferVerdict,
   estimateIdsFromContent,
   annualHandoffGuard,
+  rewriteWithheldEstimateLinks,
   LONG_LINK_TOKEN_RE,
 };

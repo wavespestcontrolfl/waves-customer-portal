@@ -48,7 +48,15 @@ function baseEstimateRow(overrides = {}) {
 }
 
 function makeDb(getRow) {
-  const raw = jest.fn(() => ({ rows: [{ id: 'claim-1' }] }));
+  // Codex round 3 on #4608 (P0 PRRT_kwDOR3YQi86j8Ydq): two test-settable
+  // knobs simulate "another process holds this claim" —
+  // db.__claimAcquired = false makes the INSERT...ON CONFLICT claim-acquire
+  // read as already-held (empty rows), and db.__claimOutcome simulates that
+  // other process's durable stamp on the SAME claim row, which the loser's
+  // poll (services/estimate-public.js) now reads via sms_send_claims.first().
+  // Both default to the prior behavior (always acquired, no stamped outcome)
+  // so every existing test is unaffected.
+  const raw = jest.fn(() => ({ rows: db.__claimAcquired === false ? [] : [{ id: 'claim-1' }] }));
   const db = jest.fn((table) => {
     if (table === 'estimates') {
       const builder = {};
@@ -68,12 +76,19 @@ function makeDb(getRow) {
       const builder = {};
       builder.where = jest.fn(() => builder);
       builder.del = jest.fn(async () => 0);
+      builder.update = jest.fn(async (payload) => {
+        if (payload && payload.outcome) db.__claimOutcome = payload.outcome;
+        return 1;
+      });
+      builder.first = jest.fn(async () => (db.__claimOutcome ? { outcome: db.__claimOutcome } : null));
       return builder;
     }
     throw new Error(`estimate-public-service-details-sms-guard test: unexpected table ${table}`);
   });
   db.raw = raw;
   db.fn = { now: () => new Date('2026-01-01T12:00:00.000Z') };
+  db.__claimAcquired = true;
+  db.__claimOutcome = null;
   return db;
 }
 
@@ -86,9 +101,11 @@ const { annualPlanOfferFingerprint } = require('../services/estimate-offer-versi
 let server;
 let base;
 let currentRow;
+let mockDb;
 
 beforeAll((done) => {
-  jest.doMock('../models/db', () => makeDb(() => currentRow));
+  mockDb = makeDb(() => currentRow);
+  jest.doMock('../models/db', () => mockDb);
   const app = express();
   app.use(express.json());
   app.use('/api/estimates', require('../routes/estimate-public'));
@@ -109,6 +126,8 @@ const GATE_KEYS = ['GATE_TERMITE_ANNUAL_PLAN', 'GATE_CANCEL_FLOW_V2'];
 let priorGates;
 beforeEach(() => {
   jest.clearAllMocks();
+  mockDb.__claimAcquired = true;
+  mockDb.__claimOutcome = null;
   priorGates = GATE_KEYS.map((key) => process.env[key]);
   GATE_KEYS.forEach((key) => delete process.env[key]);
 });
@@ -297,4 +316,50 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
     expect(bodies).toEqual(expect.arrayContaining([{ ok: true, channel: 'sms' }]));
     expect(bodies).toEqual(expect.arrayContaining([{ ok: true, channel: 'sms', deduped: true }]));
   });
+
+  test('P0 (Codex round 3 on #4608, PRRT_kwDOR3YQi86j8Ydq): a claim held elsewhere whose recorded outcome is withheld returns the SAME generic 404 as the winner, never a distinguishable 502', async () => {
+    // Simulates the CROSS-PROCESS race: another process/replica already won
+    // the sms_send_claims claim_key (the INSERT...ON CONFLICT reads as
+    // already-held) and had already stamped its durable refusal on that
+    // row before this request's claim-acquire attempt even ran — exactly
+    // what services/twilio.js's own preSendCheck composition never gets a
+    // chance to run for THIS request, since it never reaches sendSMS at
+    // all. Before the fix, the poll loop only ever checked sms_log (a
+    // withheld winner writes no log row) and fell through to the generic
+    // claimHeldElsewhere 502 — a DIFFERENT status than the winner's own 404
+    // for the exact same row, an existence-oracle leak.
+    mockDb.__claimAcquired = false;
+    mockDb.__claimOutcome = 'withheld';
+    currentRow = baseEstimateRow({ customer_phone: '+19415550505' });
+
+    const res = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
+    });
+    const body = await res.json();
+
+    const TwilioService = require('../services/twilio');
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(res.status).toBe(404);
+    expect(body).toEqual({ error: 'Estimate not found' });
+  }, 10000);
+
+  test('a claim held elsewhere with NO recorded outcome (still working, or a genuinely stuck winner) keeps the existing retryable 502 — not silently reclassified', async () => {
+    mockDb.__claimAcquired = false;
+    mockDb.__claimOutcome = null;
+    currentRow = baseEstimateRow({ customer_phone: '+19415550606' });
+
+    const res = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
+    });
+    const body = await res.json();
+
+    const TwilioService = require('../services/twilio');
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(res.status).toBe(502);
+    expect(body).toEqual({ ok: false, error: 'Text could not be sent right now.' });
+  }, 10000);
 });

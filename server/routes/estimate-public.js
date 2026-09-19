@@ -25106,6 +25106,18 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
         // winner's sms_log row) earns a deduped success — a still-in-flight
         // or failed winner must NOT be reported as sent, so poll briefly and
         // otherwise return a retryable failure.
+        //
+        // Codex round 3 on #4608 (P0 PRRT_kwDOR3YQi86j8Ydq): a withheld
+        // winner never reaches Twilio, so it never writes an sms_log row —
+        // recentPacketSend() alone can never distinguish "withheld" from
+        // "still working on it", and this loser fell all the way through to
+        // the generic claimHeldElsewhere 502 while the winner itself answers
+        // a generic 404 for the SAME row — an existence-oracle leak (a
+        // concurrent pair of requests could tell a withheld estimate apart
+        // from an unknown one purely by which status code came back). Also
+        // poll the claim row's own `outcome` column, which the winner stamps
+        // durably (below) BEFORE it releases — a loser that sees it answers
+        // the identical 404 the winner would.
         for (let attempt = 0; attempt < 3; attempt += 1) {
           await new Promise((resolve) => { setTimeout(resolve, 1500); });
           try {
@@ -25113,6 +25125,10 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
               return { success: true, deduped: true };
             }
           } catch (e) { logger.warn(`[estimate-public] service-details SMS dedup poll skipped: ${e.message}`); }
+          try {
+            const claimRow = await db('sms_send_claims').where({ claim_key: claimKey }).first('outcome');
+            if (claimRow?.outcome === 'withheld') return { success: false, withheld: true };
+          } catch (e) { logger.warn(`[estimate-public] service-details SMS claim outcome poll skipped: ${e.message}`); }
         }
         return { success: false, claimHeldElsewhere: true };
       }
@@ -25124,10 +25140,21 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           return { success: true, deduped: true };
         }
       } catch (e) { logger.warn(`[estimate-public] service-details SMS dedup check skipped: ${e.message}`); }
+      // Codex round 3 on #4608 (P0): stamps the claim row's outcome durably
+      // so a concurrent loser's poll (above) can read the SAME refusal —
+      // best-effort, never blocks the actual response to THIS request.
+      const markClaimWithheld = async () => {
+        try {
+          await db('sms_send_claims').where({ claim_key: claimKey }).update({ outcome: 'withheld' });
+        } catch (e) { logger.warn(`[estimate-public] service-details SMS claim outcome write failed: ${e.message}`); }
+      };
       // Last read before the handoff — inside the claim, so a withheld send
       // releases it below and a later legitimate retap can send.
-      if (!(await stillOnCustomerSurface())) return { success: false, withheld: true };
-      return TwilioService.sendSMS(
+      if (!(await stillOnCustomerSurface())) {
+        await markClaimWithheld();
+        return { success: false, withheld: true };
+      }
+      const smsSendResult = await TwilioService.sendSMS(
         contact.customerPhone,
         `Waves Pest Control: here's the full ${serviceTitle} details packet you requested — how visits work, products, labels & safety sheets: ${pdfUrl}`,
         {
@@ -25172,6 +25199,11 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           },
         },
       );
+      // Codex round 3 on #4608 (P0): the SAME durable stamp for the OTHER
+      // withheld path — the composed preSendCheck's annual-offer block,
+      // resolved above as a coded refusal rather than a throw.
+      if (smsSendResult?.code === 'ANNUAL_OFFER_WITHHELD') await markClaimWithheld();
+      return smsSendResult;
     })();
     serviceDetailsSmsClaims.set(dedupKey, { promise: sendPromise });
     const releaseClaims = () => {
@@ -25191,15 +25223,27 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       throw err;
     }
     if (!smsResult?.success) {
+      const withheld = smsResult?.withheld || smsResult?.code === 'ANNUAL_OFFER_WITHHELD';
       // Never release a claim we never held — deleting the WINNER's live
       // claim would reopen the duplicate window it is guarding.
-      if (smsResult?.claimHeldElsewhere) serviceDetailsSmsClaims.delete(dedupKey);
-      else releaseClaims();
-      if (smsResult?.withheld) return res.status(404).json({ error: 'Estimate not found' });
-      // Codex round 1 audit (P0): same row-level reasoning as the email
-      // branch above — the composed preSendCheck's annual-offer block is
-      // never distinguishable from an unknown/ineligible token.
-      if (smsResult?.code === 'ANNUAL_OFFER_WITHHELD') return res.status(404).json({ error: 'Estimate not found' });
+      if (smsResult?.claimHeldElsewhere) {
+        serviceDetailsSmsClaims.delete(dedupKey);
+      } else if (withheld) {
+        // Codex round 3 on #4608 (P0 PRRT_kwDOR3YQi86j8Ydq): keep the DB
+        // claim row (its outcome is already stamped 'withheld' inside
+        // sendPromise, above) so a concurrent loser's poll can still read
+        // it — deleting it immediately, the way an ordinary failure does,
+        // could erase the marker before a loser polling on a 1.5s cadence
+        // ever sees it, reopening the exact leak this closes. Only the
+        // in-process Map entry clears; the DB row expires on its own via
+        // the 10-minute staleness window (or a fresh retap's takeover
+        // upsert) — a retap moments later still re-checks eligibility
+        // fresh rather than trusting a stale marker indefinitely.
+        serviceDetailsSmsClaims.delete(dedupKey);
+      } else {
+        releaseClaims();
+      }
+      if (withheld) return res.status(404).json({ error: 'Estimate not found' });
       return res.status(502).json({ ok: false, error: 'Text could not be sent right now.' });
     }
     // Confirmed success only: start the dedup window and prune stale entries

@@ -615,6 +615,16 @@ async function sendDepositReceiptEmail({ estimate, customer, prefs, amountDollar
       triggerEventId: `deposit_receipt:${paymentIntentId}`,
       idempotencyKey: `deposit_receipt:${paymentIntentId}`,
       categories: ['deposit_receipt'],
+      // Codex round 3 on #4608 (P1 PRRT_kwDOR3YQi86j8Ydp, over-blocking):
+      // the deposit is owed regardless of the annual offer's own state — a
+      // REFUSE here (the annual-offer guard's default) would deny the
+      // customer proof of payment. Same precedent as the pricing-authority
+      // CTA swap above (estimateUrl already falls back to the portal home
+      // under THAT gate): if the annual guard would refuse, swap its link
+      // for the portal home too and still send, rather than failing the
+      // whole receipt. Only receipt/payment templates get this — never the
+      // default.
+      withheldLinkPolicy: 'rewrite',
       // SendGrid rejection bodies can echo the recipient address — keep them
       // out of the provider log (redaction below covers this catch).
       suppressProviderErrorLog: true,

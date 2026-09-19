@@ -1,5 +1,5 @@
 const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
-const { loadAnnualOfferRow, annualOfferVerdict, estimateIdsFromContent, annualHandoffGuard, LONG_LINK_TOKEN_RE } = require('../services/estimate-annual-guard');
+const { loadAnnualOfferRow, annualOfferVerdict, estimateIdsFromContent, annualHandoffGuard, rewriteWithheldEstimateLinks, LONG_LINK_TOKEN_RE } = require('../services/estimate-annual-guard');
 const { ESTIMATE_TOKEN_RE } = require('../routes/estimate-public');
 
 const PLAN_LINE = { service: 'termite_bait', plan: 'annual_protection', stations: 15 };
@@ -500,5 +500,72 @@ describe('annualHandoffGuard group expansion (Codex round 2 on #4608, P1)', () =
     // the base id — no group-sibling query at all.
     expect(calls).toHaveLength(1);
     expect(calls[0].where).toEqual({ id: 'est-1' });
+  });
+});
+
+describe('rewriteWithheldEstimateLinks (Codex round 3 on #4608, P1 PRRT_kwDOR3YQi86j8Ydp, over-blocking)', () => {
+  test('a withheld estimate link is rewritten to the bare portal-home URL, and its id is reported', async () => {
+    const withheldRow = row(undefined, { id: 'est-withheld', token: 'withheld-token-a12345' });
+    const db = fakeGroupDb([withheldRow]);
+    const html = '<p>View it: https://portal.wavespestcontrol.com/estimate/withheld-token-a12345</p>';
+    const text = 'https://portal.wavespestcontrol.com/estimate/withheld-token-a12345';
+
+    const result = await rewriteWithheldEstimateLinks({ db, html, text });
+
+    expect(result.rewrittenIds).toEqual(['est-withheld']);
+    expect(result.html).toBe('<p>View it: https://portal.wavespestcontrol.com</p>');
+    expect(result.text).toBe('https://portal.wavespestcontrol.com');
+  });
+
+  test('a delivered (not withheld) estimate link is left untouched', async () => {
+    const deliveredRow = delivered({ id: 'est-delivered', token: 'delivered-token-b123456' });
+    const db = fakeGroupDb([deliveredRow]);
+    const html = '<p>https://portal.wavespestcontrol.com/estimate/delivered-token-b123456</p>';
+
+    const result = await rewriteWithheldEstimateLinks({ db, html, text: '' });
+
+    expect(result.rewrittenIds).toEqual([]);
+    expect(result.html).toBe(html);
+  });
+
+  test('an anchor link is rewritten when its OWN offer is fine but a link-visible group sibling is withheld', async () => {
+    const anchor = delivered({ id: 'anchor-2', estimate_group_id: 'grp-rw-1', token: 'anchor-token-c1234567' });
+    const sibling = row(undefined, {
+      id: 'sibling-withheld-2', estimate_group_id: 'grp-rw-1', archived_at: null,
+      status: 'sent', expires_at: null, token: 'sibling-token-never-linked',
+    });
+    const db = fakeGroupDb([anchor, sibling]);
+    const html = '<p>https://portal.wavespestcontrol.com/estimate/anchor-token-c1234567</p>';
+
+    const result = await rewriteWithheldEstimateLinks({ db, html, text: '' });
+
+    // The anchor's own link is what gets rewritten — the sibling's token
+    // never appeared in the content at all, so there is nothing of its own
+    // to swap; visiting the anchor's link is what exposes the sibling.
+    expect(result.rewrittenIds).toEqual(['anchor-2']);
+    expect(result.html).toBe('<p>https://portal.wavespestcontrol.com</p>');
+  });
+
+  test('no estimate link in the content: no rewrite, no query', async () => {
+    const calls = [];
+    const db = fakeGroupDb([], calls);
+
+    const result = await rewriteWithheldEstimateLinks({ db, html: '<p>Hi Sam!</p>', text: 'Hi Sam!' });
+
+    expect(result).toEqual({ html: '<p>Hi Sam!</p>', text: 'Hi Sam!', rewrittenIds: [] });
+    expect(calls).toHaveLength(0);
+  });
+
+  test('multiple withheld links in the same content are all rewritten, deduped by id', async () => {
+    const withheldRow = row(undefined, { id: 'est-dup', token: 'dup-token-d1234567890' });
+    const db = fakeGroupDb([withheldRow]);
+    const html = '<p>https://portal.wavespestcontrol.com/estimate/dup-token-d1234567890</p>';
+    const text = 'Same one again: https://portal.wavespestcontrol.com/estimate/dup-token-d1234567890';
+
+    const result = await rewriteWithheldEstimateLinks({ db, html, text });
+
+    expect(result.rewrittenIds).toEqual(['est-dup']);
+    expect(result.html).toBe('<p>https://portal.wavespestcontrol.com</p>');
+    expect(result.text).toBe('Same one again: https://portal.wavespestcontrol.com');
   });
 });

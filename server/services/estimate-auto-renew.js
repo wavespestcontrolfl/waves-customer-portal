@@ -118,9 +118,23 @@ const EstimateAutoRenew = {
             // Reread and lock the row fresh under this same transaction right
             // before the write and skip the renewal entirely when withheld:
             // no expires_at/renewal_count advance, no email.
-            const { loadAnnualOfferRow, annualOfferVerdict } = require('./estimate-annual-guard');
-            const guardRow = await loadAnnualOfferRow(trx, est.id, { forUpdate: true });
-            if (annualOfferVerdict(guardRow).withheld) return 0;
+            //
+            // Codex round 3 on #4608 (P1 PRRT_kwDOR3YQi86j8Ydo): the single-
+            // row verdict missed a link-visible WITHHELD SIBLING — a non-
+            // annual anchor whose group link also surfaces a withheld annual
+            // sibling still got its token reactivated (and consumed its one
+            // renewal_count). annualHandoffGuard itself expands to
+            // link-visible group siblings (the SAME membership this group
+            // lock above already establishes), so a block on ANY member —
+            // anchor or sibling — now stops the anchor's renewal too. The
+            // FOR UPDATE reread stays: it locks the anchor row fresh for the
+            // UPDATE below; the guard's own (unlocked, by design — a
+            // chokepoint recheck must never contend with this transaction's
+            // own lock) reads run right after, on the same trx connection.
+            const { loadAnnualOfferRow, annualHandoffGuard } = require('./estimate-annual-guard');
+            await loadAnnualOfferRow(trx, est.id, { forUpdate: true });
+            const guardVerdict = await annualHandoffGuard({ db: trx, estimateIds: [est.id] })();
+            if (guardVerdict.blocked) return 0;
             return trx('estimates').where({ id: est.id })
               .whereRaw(FIXED_BID_VALIDITY_ABSENT_SQL)
               .modify((qb) => (currentGroupId

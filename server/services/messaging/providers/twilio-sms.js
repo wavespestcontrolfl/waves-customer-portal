@@ -125,6 +125,11 @@ async function sendViaTwilio(input, { preSendCheck, withSmsHandoff } = {}) {
       requestNotification: input.metadata?.appOnly ? { id: input.metadata.service_request_id,
         status: input.metadata.request_status, version: input.metadata.request_status_version } : undefined,
       messageType,
+      // The explicit addition to twilio.js's OWN annual-offer guard (the
+      // authoritative check, run at the actual provider boundary) — its
+      // content derivation over the final body covers the rest.
+      estimateId: input.estimateId || null,
+      estimateIds: Array.isArray(input.estimateIds) ? input.estimateIds : undefined,
       // Push channel routing (services/twilio.js) treats operator-initiated
       // sends as sms_only — the operator explicitly chose the SMS channel.
       operatorInitiated: input.operatorInitiated === true,

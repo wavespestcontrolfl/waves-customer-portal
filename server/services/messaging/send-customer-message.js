@@ -107,11 +107,17 @@ async function appointmentMoveHeld(input) {
 
 // Annual-offer delivery guard (delivery-guards slice, re-cut of #4569): no
 // sender rechecks annual-plan eligibility itself — it passes estimateId(s)
-// through to this send library, and this is the ONE place a customer-facing
-// send is judged against the current fingerprint/gate state. Rechecked here,
-// at the actual Twilio handoff, for the same reason as the move hold above:
-// a withdrawal/replace landing during the caller's own awaits must still
-// hold the send.
+// through to this send library. Codex round 3 on #4608 (structural move,
+// P1 PRRT_kwDOR3YQi86j8Ydm): the AUTHORITATIVE check now lives one layer
+// further down, inside services/twilio.js's sendSMS — the true provider
+// boundary, run from INSIDE whatever locked withSmsHandoff a caller
+// supplies, immediately before messages.create(). This call stays only as
+// an early, cheap refusal: it runs before providerPreSendCheck's other
+// rechecks (suppression, consent, window) and before any lock is acquired,
+// so an already-withheld send fails fast without the cost of getting that
+// far — but it is NOT the last word; twilio.js re-derives and re-verdicts
+// fresh, after the lock, right before the SDK call, and that is the check
+// that actually decides whether the SMS goes out.
 function annualOfferGuardEstimateIds(input) {
   if (Array.isArray(input.estimateIds) && input.estimateIds.length) return input.estimateIds;
   return input.estimateId ? [input.estimateId] : [];

@@ -992,13 +992,25 @@ async function sendTemplate({
   // acceptance.
   withProviderHandoff = null,
   // Delivery-guards slice (re-cut of #4569): the estimate(s) this send is
-  // about. When present, the annual-offer guard runs inside the provider
-  // handoff — after a caller's own withProviderHandoff has acquired its
-  // lock, immediately before sendgrid.sendOne — and blocks the send if any
-  // one of them currently withholds its annual offer. No sender rechecks
-  // this itself; it just passes the id(s) through.
+  // about. When present, passed through to sendgrid.sendOne as an explicit
+  // addition to its own content derivation. Codex round 3 on #4608
+  // (structural move): the annual-offer guard's AUTHORITATIVE check now
+  // runs inside sendOne itself, the true provider boundary — not here. This
+  // library stays the bookkeeping layer: it turns sendOne's refusal into
+  // the failed queued row (abortWithheldBeforeDispatch below). No sender
+  // rechecks the guard itself; it just passes the id(s) through.
   estimateId = null,
   estimateIds = null,
+  // 'refuse' (default): a withheld link blocks the whole send, as above.
+  // 'rewrite': for receipt/payment-class templates ONLY (deposit.receipt) —
+  // never the default, and never inferred. When sendOne's guard would
+  // refuse, every withheld estimate link (long or short) in the RENDERED
+  // html/text is swapped for the portal home URL first, and the send
+  // proceeds; the result carries withheldLinksRewritten: [ids]. Precedent:
+  // estimate-deposits.js's own pricing-authority CTA swap for the same
+  // reason (the deposit is owed regardless of the offer's own state) — see
+  // estimate-annual-guard.js's rewriteWithheldEstimateLinks.
+  withheldLinkPolicy = 'refuse',
 } = {}) {
   if (!to) throw new Error('recipient email required');
   let template;
@@ -1350,14 +1362,20 @@ async function sendTemplate({
       status: db.raw("CASE WHEN status = 'queued' THEN 'sent' ELSE status END"),
     }).returning('*');
   try {
-    const sendToProvider = () => sendgrid.sendOne({
+    // Codex round 3 on #4608 (structural move): the annual-offer guard's
+    // AUTHORITATIVE check now runs inside sendgrid.sendOne itself, the true
+    // provider boundary — not here. `estimateIds` is passed straight
+    // through as sendOne's explicit addition to its own content derivation
+    // over the FINAL html/text; this library's job is only to turn sendOne's
+    // refusal into the bookkeeping below.
+    const sendToProvider = (html, text, guardIds) => sendgrid.sendOne({
         to,
         fromEmail,
         fromName,
         replyTo,
         subject: message.subject_snapshot,
-        html: rendered.html,
-        text: rendered.text,
+        html,
+        text,
         categories: allCategories,
         asmGroupId,
         attachments,
@@ -1367,41 +1385,58 @@ async function sendTemplate({
         // reject a stale prior-attempt event. See email-bounce-recovery.js.
         customArgs: { email_message_id: message.id, send_attempt_token: sendAttemptToken },
         suppressErrorLog: suppressProviderErrorLog,
+        estimateIds: guardIds,
       });
-    // Delivery-guards slice: estimateId/estimateIds route this send through
-    // the annual-offer guard as the innermost step of dispatchToProvider —
-    // composed so a caller's own withProviderHandoff (outermost) has already
-    // acquired its lock by the time the guard reads a fresh row, whether or
-    // not a caller handoff is present at all (both branches below call this
-    // same function). Neither guard outcome is allowed to throw out of this
-    // function: a withheld verdict and a guard LOOKUP error (pre-push audit
-    // P1 — a throw here must never fall into the ordinary provider-error
-    // catch below, which infers retryable/uncertain from provider evidence
-    // that a never-attempted SendGrid call cannot have produced) both
-    // resolve to their own sentinel instead, so dispatchToProvider always
-    // either sends or reports a real, non-throwing outcome.
-    //
     // Codex round 1 on #4608 (P1): keying this ONLY on estimateId/estimateIds
     // made the guard opt-in — the estimate-public.js service-details email
     // (and any future sender) can carry an estimate link without ever
-    // passing an id. ALWAYS wrap dispatchToProvider with the guard step —
-    // annualHandoffGuard unions any explicit id with whatever
-    // estimateIdsFromContent finds in the FINAL rendered html/text, and
-    // runs no query at all when there is neither, so this costs nothing on
-    // every send that carries no estimate content whatsoever.
+    // passing an id. sendOne's own content derivation covers that; this is
+    // only the explicit addition.
     const guardEstimateIds = Array.isArray(estimateIds) && estimateIds.length
       ? estimateIds : (estimateId ? [estimateId] : []);
+    // dispatchToProvider is composed so a caller's own withProviderHandoff
+    // (outermost) has already acquired its lock by the time sendOne's guard
+    // reads a fresh row, whether or not a caller handoff is present at all
+    // (both branches below call this same function). Neither guard outcome
+    // is allowed to throw out of this function: a withheld verdict and a
+    // guard LOOKUP error (pre-push audit P1 — must never fall into the
+    // ordinary provider-error catch below, which infers retryable/uncertain
+    // from provider evidence that a never-attempted SendGrid call cannot
+    // have produced) both resolve to their own sentinel instead, so
+    // dispatchToProvider always either sends or reports a real,
+    // non-throwing outcome.
     const dispatchToProvider = async () => {
-      const { annualHandoffGuard } = require('./estimate-annual-guard');
-      let verdict;
-      try {
-        verdict = await annualHandoffGuard({
-          db, estimateIds: guardEstimateIds, texts: [rendered.html, rendered.text],
-        })();
-      } catch (err) {
-        return { [ANNUAL_OFFER_GUARD_FAILED]: true, error: err };
+      let sendHtml = rendered.html;
+      let sendText = rendered.text;
+      let sendEstimateIds = guardEstimateIds;
+      let withheldLinksRewritten;
+      if (withheldLinkPolicy === 'rewrite') {
+        try {
+          const { rewriteWithheldEstimateLinks } = require('./estimate-annual-guard');
+          const rewritten = await rewriteWithheldEstimateLinks({ db, html: sendHtml, text: sendText });
+          if (rewritten.rewrittenIds.length) {
+            sendHtml = rewritten.html;
+            sendText = rewritten.text;
+            // The withheld link(s) are gone from the content being sent —
+            // forcing the original explicit id through would make sendOne's
+            // own guard refuse anyway (it unions explicit ids with content
+            // derivation), defeating the whole point of the rewrite.
+            sendEstimateIds = [];
+            withheldLinksRewritten = rewritten.rewrittenIds;
+            logger.warn(`[email-template-library] rewrote ${rewritten.rewrittenIds.length} withheld estimate link(s) to the portal home for ${templateKey} (${message.id})`);
+          }
+        } catch (err) {
+          return { [ANNUAL_OFFER_GUARD_FAILED]: true, error: err };
+        }
       }
-      return verdict.blocked ? ANNUAL_OFFER_WITHHELD : sendToProvider();
+      try {
+        const providerResult = await sendToProvider(sendHtml, sendText, sendEstimateIds);
+        return withheldLinksRewritten ? { ...providerResult, withheldLinksRewritten } : providerResult;
+      } catch (err) {
+        if (err?.annualOfferWithheld) return ANNUAL_OFFER_WITHHELD;
+        if (err?.annualOfferGuardFailed) return { [ANNUAL_OFFER_GUARD_FAILED]: true, error: err };
+        throw err;
+      }
     };
     if (typeof withProviderHandoff === 'function') {
       const handoff = await runProviderHandoff({ withProviderHandoff, dispatchToProvider, templateKey });
@@ -1435,7 +1470,10 @@ async function sendTemplate({
     // it) — callers that budget provider attempts key off this, not `sent`,
     // because a pre-send dedupe of a previously-sent message also reports
     // sent: true.
-    return { sent: true, providerAttempted: true, providerAccepted, message: updated, rendered };
+    return {
+      sent: true, providerAttempted: true, providerAccepted, message: updated, rendered,
+      ...(result?.withheldLinksRewritten ? { withheldLinksRewritten: result.withheldLinksRewritten } : {}),
+    };
   } catch (err) {
     // PII-sensitive callers suppress the transport log — the persisted error
     // and the audit reason must honor the same flag, or the raw provider body

@@ -806,26 +806,6 @@ function makeRecoveryDb({ estimateRow, customerRow, messageRow, recoveryId = 're
 }
 
 describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery re-sends', () => {
-  const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
-  const PLAN_LINE = { service: 'termite_bait', plan: 'annual_protection', stations: 15 };
-  const annualRow = (token, overrides = {}) => ({
-    id: 'est-recovery-1', status: 'draft', expires_at: null, token,
-    estimate_data: { result: { lineItems: [PLAN_LINE] } },
-    customer_id: 'c1', property_id: 'prop-1', estimate_group_id: null, customer_name: 'Jane Customer',
-    customer_phone: '9415550100', customer_email: 'jane@gmial.com', address: 'Synthetic property',
-    notes: null, monthly_total: 0, annual_total: 299, onetime_total: 450,
-    show_one_time_option: false, bill_by_invoice: false, waveguard_tier: null,
-    service_interest: null, category: null, source: null,
-    ...overrides,
-  });
-  const deliveredAnnualRow = (token) => {
-    const estimateRow = annualRow(token, { status: 'sent' });
-    estimateRow.estimate_data.deliveryState = {
-      firstDeliveredAt: '2026-01-01T12:00:00Z',
-      annualPlanOfferFingerprint: annualPlanOfferFingerprint(estimateRow),
-    };
-    return estimateRow;
-  };
   const orig = { ...process.env };
   beforeEach(() => {
     delete process.env.EMAIL_BOUNCE_RECOVERY;
@@ -835,24 +815,52 @@ describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery 
   });
   afterEach(() => { process.env = { ...orig }; });
 
-  test('a stored html/text pointing at a WITHHELD annual estimate stops the resend permanently, never reaching sendOne', async () => {
-    const estimateRow = annualRow('recovery-token-a');
+  // Codex round 3 on #4608: the annual-offer guard's AUTHORITATIVE check
+  // moved to sendgrid.sendOne itself (the true provider boundary) — which
+  // this test file mocks away entirely. These tests simulate sendOne's own
+  // refusal contract (an error flagged .annualOfferWithheld /
+  // .annualOfferGuardFailed) rather than exercising a real guard query
+  // through the fake table-routed db — that content-derivation mechanism
+  // now belongs to sendgrid-mail's own test suite. What THIS file must
+  // still prove: it calls sendOne with the bounced message's stored
+  // html/text and correctly maps sendOne's refusal onto its bookkeeping.
+  function annualOfferWithheldError() {
+    const err = new Error('annual_offer_withheld');
+    err.code = 'ANNUAL_OFFER_WITHHELD';
+    err.annualOfferWithheld = true;
+    err.retryable = false;
+    return err;
+  }
+  function annualOfferGuardFailedError(message = 'estimates lookup unavailable') {
+    const err = new Error(`annual offer guard failed: ${message}`);
+    err.code = 'ANNUAL_OFFER_GUARD_FAILED';
+    err.annualOfferGuardFailed = true;
+    return err;
+  }
+
+  test('sendOne refuses as withheld: the resend stops permanently', async () => {
     const messageRow = { id: 'msg-annual-1', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com', subject_snapshot: 'S' };
-    const mockDb = makeRecoveryDb({ estimateRow, customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
+    const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
     db.mockImplementation(mockDb);
+    sendgrid.sendOne.mockRejectedValueOnce(annualOfferWithheldError());
 
     const res = await recovery.attemptRecovery(
       {
         id: 'orig-annual-1', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'jane@gmial.com',
         template_key: 'estimate.expiring_notice', suppression_group_key_snapshot: 'service_operational', categories: ['email_template'],
-        trigger_event_id: `estimate_delivery:${estimateRow.id}`,
-        html_snapshot: `<p>Your estimate is expiring: https://portal.wavespestcontrol.com/estimate/${estimateRow.token}</p>`,
-        text_snapshot: `View it: https://portal.wavespestcontrol.com/estimate/${estimateRow.token}`,
+        trigger_event_id: 'estimate_delivery:3f2a1b4c-1111-4222-8333-444455556666',
+        html_snapshot: '<p>Your estimate is expiring: https://portal.wavespestcontrol.com/estimate/recovery-token-a</p>',
+        text_snapshot: 'View it: https://portal.wavespestcontrol.com/estimate/recovery-token-a',
       },
       { event: 'bounce', type: 'bounce' },
     );
 
-    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
+      html: '<p>Your estimate is expiring: https://portal.wavespestcontrol.com/estimate/recovery-token-a</p>',
+      text: 'View it: https://portal.wavespestcontrol.com/estimate/recovery-token-a',
+      estimateIds: ['3f2a1b4c-1111-4222-8333-444455556666'],
+    }));
     expect(res).toEqual({ skipped: 'annual_offer_withheld' });
     // dispatchRecoveryMessage's own permanent-refusal bookkeeping: the stored
     // row is marked 'blocked' with the withheld reason, guarded on still-'queued'
@@ -868,10 +876,9 @@ describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery 
     expect(ledgerUpdate.data).toMatchObject({ status: 'recipient_unauthorized' });
   });
 
-  test('a DELIVERED (not withheld) annual estimate link still resends normally through sendOne', async () => {
-    const estimateRow = deliveredAnnualRow('recovery-token-b');
+  test('sendOne accepts: the resend goes out normally', async () => {
     const messageRow = { id: 'msg-annual-2', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com', subject_snapshot: 'S' };
-    const mockDb = makeRecoveryDb({ estimateRow, customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
+    const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
     db.mockImplementation(mockDb);
     sendgrid.sendOne.mockResolvedValue({ messageId: 'pm-annual-delivered' });
 
@@ -879,8 +886,7 @@ describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery 
       {
         id: 'orig-annual-2', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'jane@gmial.com',
         template_key: 'estimate.expiring_notice', suppression_group_key_snapshot: 'service_operational', categories: ['email_template'],
-        trigger_event_id: `estimate_delivery:${estimateRow.id}`,
-        html_snapshot: `<p>https://portal.wavespestcontrol.com/estimate/${estimateRow.token}</p>`,
+        html_snapshot: '<p>https://portal.wavespestcontrol.com/estimate/recovery-token-b</p>',
         text_snapshot: '',
       },
       { event: 'bounce', type: 'bounce' },
@@ -890,11 +896,11 @@ describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery 
     expect(res).toMatchObject({ resent: true });
   });
 
-  test('a stored body with no estimate link never issues the guard\'s own estimates query', async () => {
+  test('sendOne refuses with a guard INFRASTRUCTURE failure: the ordinary failure path applies, not the permanent withheld one', async () => {
     const messageRow = { id: 'msg-annual-3', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com', subject_snapshot: 'S' };
     const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
     db.mockImplementation(mockDb);
-    sendgrid.sendOne.mockResolvedValue({ messageId: 'pm-no-link' });
+    sendgrid.sendOne.mockRejectedValueOnce(annualOfferGuardFailedError());
 
     const res = await recovery.attemptRecovery(
       {
@@ -907,11 +913,10 @@ describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery 
     );
 
     expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
-    expect(res).toMatchObject({ resent: true });
-    // The guard's own whereIn('token', ...) content-derivation scan never ran
-    // (correctedAddressOwnedByOther's PRE-EXISTING 'estimates' ownership scan
-    // still legitimately does — that's not this guard's query).
-    expect(mockDb._state.tokenQueried).toBe(false);
+    expect(res).not.toEqual({ skipped: 'annual_offer_withheld' });
+    const messageUpdate = mockDb._calls.find((c) => c.table === 'email_messages' && c.data.status === 'failed');
+    expect(messageUpdate).toBeTruthy();
+    expect(messageUpdate.data.error_message).toMatch(/annual offer guard failed/);
   });
 });
 

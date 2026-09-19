@@ -888,6 +888,38 @@ const TwilioService = {
       let message;
       let dispatchStarted = false;
       const dispatch = async () => {
+        // Codex round 3 on #4608 (P1 PRRT_kwDOR3YQi86j8Ydm — structural
+        // move): the annual-offer guard must run at the TRUE provider
+        // boundary — dispatch() is invoked either from INSIDE a caller's
+        // locked withSmsHandoff (after its own suppression/consent/window
+        // rechecks, right below), or, for handoff-less callers, directly —
+        // either way this is the LAST await before messages.create(). A
+        // preSendCheck alone is not enough: it runs BEFORE a caller's own
+        // withSmsHandoff acquires its lock (lead-response-tools'
+        // send_lead_response is exactly that gap), so a state change
+        // between the check and the lock could still reach Twilio.
+        //
+        // Guarded BEFORE dispatchStarted flips true / deliveryOutcome
+        // becomes "uncertain": a blocked verdict must read as "never
+        // attempted", not a failed attempt, both to this method's own
+        // outer catch and to the withSmsHandoff catch below. Lazy-required:
+        // estimate-annual-guard.js's own chain (estimate-offer-version.js /
+        // feature-gates.js / estimate-termite-program-rows.js) does not
+        // require twilio.js back today, but a top-level require here would
+        // make this module's load order hostage to that chain's regardless.
+        const { annualHandoffGuard } = require('./estimate-annual-guard');
+        const explicitEstimateIds = Array.isArray(options.estimateIds) && options.estimateIds.length
+          ? options.estimateIds
+          : (options.estimateId ? [options.estimateId] : []);
+        const verdict = await annualHandoffGuard({
+          db, estimateIds: explicitEstimateIds, texts: [body],
+        })();
+        if (verdict.blocked) {
+          const err = new Error('annual_offer_withheld');
+          err.code = 'ANNUAL_OFFER_WITHHELD';
+          err.annualOfferWithheld = true;
+          throw err;
+        }
         handoffAt = new Date();
         smsAttemptAt = handoffAt;
         dispatchStarted = true;
@@ -906,7 +938,12 @@ const TwilioService = {
           verdict = await options.withSmsHandoff(dispatch);
         } catch (err) {
           if (!acceptedMessage && dispatchStarted) throw err;
-          if (!dispatchStarted) {
+          if (err && err.annualOfferWithheld) {
+            // Permanent, non-retryable refusal — never the generic
+            // "handoff check failed, retryable" shape below, which would
+            // tell a retry-on-boundary-failure caller to try again.
+            verdict = { ok: false, code: 'ANNUAL_OFFER_WITHHELD', reason: 'annual_offer_withheld', retryable: false };
+          } else if (!dispatchStarted) {
             verdict = { ok: false, code: 'SMS_HANDOFF_CHECK_FAILED',
               reason: 'SMS handoff authority check failed', retryable: true };
           } else {
@@ -1033,6 +1070,18 @@ const TwilioService = {
 
       return { success: true, sid: message.sid, fromNumber, deliveryOutcome: "accepted" };
     } catch (err) {
+      // No withSmsHandoff (a plain `await dispatch()` above): the guard's
+      // throw lands here directly. A permanent, non-retryable refusal —
+      // never the generic Twilio-failure-alert/retry path below, which
+      // would fire a false ops alert and misclassify this as an ambiguous
+      // provider failure for a request that was never attempted.
+      if (err && err.annualOfferWithheld) {
+        return {
+          success: false, sid: null, guardBlocked: true, preSendBlocked: true,
+          code: 'ANNUAL_OFFER_WITHHELD', error: 'annual_offer_withheld',
+          deliveryOutcome: 'not_sent',
+        };
+      }
       if (deliveryOutcome === "uncertain" && isDefinitiveTwilioRejection(err)) {
         deliveryOutcome = "not_sent";
       }

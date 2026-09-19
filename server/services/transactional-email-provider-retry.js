@@ -382,44 +382,49 @@ async function retryOne(message) {
         .update({ error_message: HANDOFF_STARTED, updated_at: new Date() });
       if (Number(started) !== 1) throw new Error('Visit summary retry claim was reclaimed before the provider request');
     }
-    // Pre-push audit P1: an automatic provider retry re-sends the SAME
-    // stored html/text a fresh send would, straight through sendgrid.sendOne
-    // — bypassing email-template-library.js's own chokepoint guard entirely.
-    // Composed here instead, immediately before the actual request. Content-
-    // derived only (estimateIds: []): a retried email_messages row has no
-    // structured estimate reference to pass as an explicit id — the guard's
-    // own regex scan of html_snapshot/text_snapshot is the only source. A
-    // blocked verdict never calls sendgrid.sendOne (state.blocked signals the
-    // caller to stop the retry permanently, below); a guard THROW propagates
-    // like any other pre-send failure here (dispatchStarted is still false),
-    // landing in retryOne's/retrySummaryThroughHandoff's existing "not
-    // dispatched" branches, which already retry-later via markRetryFailure —
-    // never treated as sent.
-    const { annualHandoffGuard } = require('./estimate-annual-guard');
-    const verdict = await annualHandoffGuard({
-      db, estimateIds: [], texts: [message.html_snapshot, message.text_snapshot],
-    })();
-    if (verdict.blocked) {
-      state.blocked = true;
-      return;
-    }
+    // Codex round 3 on #4608 (structural move): the annual-offer guard's
+    // AUTHORITATIVE check now runs inside sendgrid.sendOne itself, the true
+    // provider boundary — an automatic retry re-sends the SAME stored
+    // html/text a fresh send would, and sendOne's own content derivation
+    // over that html/text covers it without composing the guard here
+    // separately (no explicit id: a retried email_messages row has no
+    // structured estimate reference to pass as one).
+    //
+    // dispatchStarted flips true optimistically (a real sendOne attempt is
+    // about to happen) and is reverted on catching sendOne's OWN blocked
+    // refusal (.annualOfferWithheld) — that refusal means the wire was
+    // never touched, so both this file's own catch below and
+    // retrySummaryThroughHandoff's (visit-completion-summary.js's) must see
+    // "never attempted", not a failed attempt. state.blocked signals the
+    // caller to stop the retry permanently (below); any OTHER thrown error
+    // (a real provider failure) propagates unchanged into the existing
+    // "not dispatched"/"uncertain" classification this file already has.
     state.dispatchStarted = true;
-    state.result = await sendgrid.sendOne({
-      to: message.recipient_email_snapshot,
-      fromEmail: message.from_email_snapshot,
-      fromName: message.from_name_snapshot,
-      replyTo: message.reply_to_snapshot,
-      subject: message.subject_snapshot,
-      html: message.html_snapshot,
-      text: message.text_snapshot,
-      categories: asArray(message.categories),
-      asmGroupId,
-      customArgs: {
-        email_message_id: message.id,
-        send_attempt_token: message.send_attempt_token,
-      },
-      suppressErrorLog: true,
-    });
+    try {
+      state.result = await sendgrid.sendOne({
+        to: message.recipient_email_snapshot,
+        fromEmail: message.from_email_snapshot,
+        fromName: message.from_name_snapshot,
+        replyTo: message.reply_to_snapshot,
+        subject: message.subject_snapshot,
+        html: message.html_snapshot,
+        text: message.text_snapshot,
+        categories: asArray(message.categories),
+        asmGroupId,
+        customArgs: {
+          email_message_id: message.id,
+          send_attempt_token: message.send_attempt_token,
+        },
+        suppressErrorLog: true,
+      });
+    } catch (err) {
+      if (err && err.annualOfferWithheld) {
+        state.dispatchStarted = false;
+        state.blocked = true;
+        return;
+      }
+      throw err;
+    }
   };
   try {
     // A visit summary is a bearer link: its recipient, the customer's

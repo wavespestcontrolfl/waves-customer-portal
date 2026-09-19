@@ -25,6 +25,14 @@ jest.mock('../config/feature-gates', () => ({
   gateEnvValue: jest.fn(() => false),
 }));
 jest.mock('../models/db', () => jest.fn());
+// Codex round 3 on #4608 (structural move, P1 PRRT_kwDOR3YQi86j8Ydm): the
+// annual-offer guard's AUTHORITATIVE check now lives inside sendSMS's own
+// dispatch(), the true provider boundary. Mocked transparently (always
+// allowed) by default so every existing test in this file — none of whose
+// bodies carry an estimate link — is unaffected; the tests below override it.
+jest.mock('../services/estimate-annual-guard', () => ({
+  annualHandoffGuard: jest.fn(() => async () => ({ blocked: false, reason: null, estimateId: null })),
+}));
 jest.mock('../routes/admin-sms-templates', () => ({
   isTemplateActive: jest.fn(async () => true),
 }));
@@ -42,6 +50,7 @@ jest.mock('../services/logger', () => ({
 }));
 
 const TwilioService = require('../services/twilio');
+const { annualHandoffGuard } = require('../services/estimate-annual-guard');
 
 const TO = '+19415550123';
 const FROM = '+19413180000';
@@ -261,6 +270,98 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
       explicitPushOnly: true, withSmsHandoff: jest.fn(),
     });
     expect(result).toMatchObject({ success: false, code: 'UNSUPPORTED_SMS_HANDOFF' });
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe('annual-offer guard at the TRUE provider boundary (Codex round 3 on #4608, P1 PRRT_kwDOR3YQi86j8Ydm — structural move)', () => {
+  // This is a SIBLING describe, not nested under the first one — its
+  // beforeEach (jest.clearAllMocks + mockTwilioCreate's default resolve)
+  // never runs for tests here, so a queued once-value left over from the
+  // FIRST describe's last test (several of which chain
+  // mockRejectedValueOnce/mockImplementationOnce on the SAME shared
+  // mockTwilioCreate) can otherwise leak in. Reset fully, independently.
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockTwilioCreate.mockResolvedValue({ sid: 'SM_ok' });
+    annualHandoffGuard.mockReturnValue(async () => ({ blocked: false, reason: null, estimateId: null }));
+  });
+
+  test('runs INSIDE a caller withSmsHandoff lock — AFTER it acquires, not before (closes the preSendCheck-before-the-lock gap)', async () => {
+    const events = [];
+    annualHandoffGuard.mockReturnValueOnce(async () => { events.push('guard'); return { blocked: false, reason: null, estimateId: null }; });
+    mockTwilioCreate.mockImplementation(async () => { events.push('sdk'); return { sid: 'SM_ok' }; });
+
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM,
+      withSmsHandoff: async dispatch => {
+        events.push('locked');
+        await dispatch();
+        events.push('released');
+        return { ok: true };
+      },
+    });
+
+    expect(result.success).toBe(true);
+    expect(events).toEqual(['locked', 'guard', 'sdk', 'released']);
+  });
+
+  test('a blocked verdict inside the lock never reaches the SDK — a permanent, non-retryable refusal, not the generic handoff-check-failed shape', async () => {
+    annualHandoffGuard.mockReturnValueOnce(async () => ({ blocked: true, reason: 'annual_offer_withheld', estimateId: 'est-1' }));
+
+    const result = await TwilioService.sendSMS(TO, 'Your estimate is expiring: https://portal.wavespestcontrol.com/estimate/withheld-token-abc', {
+      messageType: 'manual', fromNumber: FROM,
+      withSmsHandoff: async dispatch => { await dispatch(); return { ok: true }; },
+    });
+
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      success: false, preSendBlocked: true, code: 'ANNUAL_OFFER_WITHHELD', error: 'annual_offer_withheld',
+    });
+    // Never the generic "handoff check failed, retryable" shape — this is a
+    // definite, permanent refusal.
+    expect(result.retryable).not.toBe(true);
+  });
+
+  test('a blocked verdict with NO caller handoff (plain dispatch) is a clean guardBlocked refusal — never a Twilio-failure alert or a thrown/wrapped error', async () => {
+    annualHandoffGuard.mockReturnValueOnce(async () => ({ blocked: true, reason: 'annual_offer_withheld', estimateId: 'est-1' }));
+
+    const result = await TwilioService.sendSMS(TO, 'https://portal.wavespestcontrol.com/estimate/withheld-token-xyz', {
+      messageType: 'manual', fromNumber: FROM,
+    });
+
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      success: false, guardBlocked: true, code: 'ANNUAL_OFFER_WITHHELD', error: 'annual_offer_withheld', deliveryOutcome: 'not_sent',
+    });
+    expect(require('../services/twilio-failure-alerts').alertTwilioFailure).not.toHaveBeenCalled();
+  });
+
+  test('estimateId / estimateIds options are threaded through as the guard\'s explicit addition, alongside the final normalized body as content', async () => {
+    await TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM, estimateId: 'est-solo',
+    });
+    expect(annualHandoffGuard).toHaveBeenCalledWith(expect.objectContaining({
+      estimateIds: ['est-solo'], texts: ['Reminder body'],
+    }));
+
+    annualHandoffGuard.mockClear();
+    await TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM, estimateIds: ['est-a', 'est-b'],
+    });
+    expect(annualHandoffGuard).toHaveBeenCalledWith(expect.objectContaining({
+      estimateIds: ['est-a', 'est-b'], texts: ['Reminder body'],
+    }));
+
+    annualHandoffGuard.mockClear();
+    await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM });
+    expect(annualHandoffGuard).toHaveBeenCalledWith(expect.objectContaining({ estimateIds: [] }));
+  });
+
+  test('a guard infrastructure error (the lookup itself throws) is NOT reported as a withheld/blocked refusal — it propagates like any other pre-send failure', async () => {
+    annualHandoffGuard.mockReturnValueOnce(async () => { throw new Error('estimates lookup unavailable'); });
+
+    await expect(TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM }))
+      .rejects.toThrow(/estimates lookup unavailable/);
     expect(mockTwilioCreate).not.toHaveBeenCalled();
   });
 });

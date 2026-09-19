@@ -111,12 +111,62 @@ function asmBlockFor(groupId) {
   return { group_id: Number(groupId) };
 }
 
+// Codex round 3 on #4608 (P1 PRRT_kwDOR3YQi86j8Ydm/Ydn — structural move):
+// the annual-offer guard now lives HERE, the true provider boundary,
+// immediately before the actual SendGrid request — not in any higher-level
+// handoff (sendTemplate, the provider retry sweep, bounce recovery, a raw
+// caller) that could sit above it and be bypassed. estimateIds is an
+// explicit addition; the guard's own content derivation over html/text is
+// the authoritative source either way, and runs no query at all when
+// neither is present.
+//
+// A blocked verdict throws a DISTINCT, non-retryable refusal (never an
+// HTTP request attempted) so every caller — sendTemplate, the retry sweep,
+// bounce recovery, or anything calling sendOne directly — can tell "the
+// offer was withheld" apart from a real provider failure: check
+// err.annualOfferWithheld (permanent, do not retry the same content) or
+// err.annualOfferGuardFailed (the guard's own lookup broke — transient,
+// treat like any other pre-send infra failure, never as sent).
+//
+// Lazy-required: estimate-annual-guard.js pulls in estimate-offer-version.js
+// / feature-gates.js / estimate-termite-program-rows.js, none of which
+// require sendgrid-mail.js back today, but a top-level require here would
+// make this module's own load order hostage to that chain's — same
+// precedent as every other guard install site in this slice.
+async function runAnnualOfferGuard({ estimateIds, html, text }) {
+  const { annualHandoffGuard } = require('./estimate-annual-guard');
+  const db = require('../models/db');
+  let verdict;
+  try {
+    verdict = await annualHandoffGuard({
+      db,
+      estimateIds: Array.isArray(estimateIds) ? estimateIds : (estimateIds ? [estimateIds] : []),
+      texts: [html, text],
+    })();
+  } catch (err) {
+    const guardErr = new Error(`annual offer guard failed: ${err.message}`);
+    guardErr.code = 'ANNUAL_OFFER_GUARD_FAILED';
+    guardErr.annualOfferGuardFailed = true;
+    guardErr.cause = err;
+    throw guardErr;
+  }
+  if (verdict.blocked) {
+    const err = new Error('annual_offer_withheld');
+    err.code = 'ANNUAL_OFFER_WITHHELD';
+    err.annualOfferWithheld = true;
+    err.retryable = false;
+    throw err;
+  }
+}
+
 /**
  * Send one email. Used for test sends and one-off transactional. Returns
  * { messageId } where messageId is read from the X-Message-Id response header.
  */
-async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments, customArgs, suppressErrorLog, disableTracking = false }) {
+async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments, customArgs, suppressErrorLog, disableTracking = false, estimateIds }) {
   if (!to || !subject) throw new Error('sendOne: to + subject required');
+
+  await runAnnualOfferGuard({ estimateIds, html, text });
 
   const payload = {
     personalizations: [{
@@ -363,9 +413,17 @@ function isDefiniteRejection(err) {
   return DEFINITE_REJECTION_STATUSES.has(Number(err?.status));
 }
 
+// A sendOne guard refusal has no HTTP status (no request was ever made) —
+// isDefiniteRejection alone would call it ambiguous. Callers that branch on
+// "was this a real, non-retryable refusal" should check this first.
+function isAnnualOfferWithheld(err) {
+  return !!err?.annualOfferWithheld;
+}
+
 module.exports = {
   isConfigured,
   isDefiniteRejection,
+  isAnnualOfferWithheld,
   sendOne,
   clearBlockedAddress,
   sendBatch,

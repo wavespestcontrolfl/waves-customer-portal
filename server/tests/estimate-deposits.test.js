@@ -429,6 +429,10 @@ describe('webhook + invoice credit', () => {
       triggerEventId: 'deposit_receipt:pi_1',
       // Provider rejection bodies can echo the address — never log raw.
       suppressProviderErrorLog: true,
+      // Codex round 3 on #4608 (P1, over-blocking): the deposit is owed
+      // regardless of the annual offer's own state — rewrite the withheld
+      // link rather than refusing the whole receipt.
+      withheldLinkPolicy: 'rewrite',
       payload: expect.objectContaining({
         first_name: 'Sam',
         amount: '$70',
