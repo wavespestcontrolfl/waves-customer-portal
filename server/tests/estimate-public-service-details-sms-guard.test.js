@@ -62,7 +62,19 @@ function makeDb(getRow) {
       const builder = {};
       builder.where = jest.fn(() => builder);
       builder.forUpdate = jest.fn(() => builder);
-      builder.first = jest.fn(async () => ({ ...getRow() }));
+      // P1 (round 7): test-settable knob simulating the annual guard's own
+      // DB read failing — loadAnnualOfferRow (estimate-annual-guard.js)
+      // is the ONLY .first() caller on this table that passes explicit
+      // column names, so throwing only when called WITH args targets just
+      // the guard's read, leaving the route's own plain .first() estimate
+      // loads (token lookup, stillOnCustomerSurface) unaffected. Defaults
+      // to false so every existing test is unaffected.
+      builder.first = jest.fn(async (...cols) => {
+        if (db.__annualLookupThrows && cols.length > 0) {
+          throw new Error('estimates lookup unavailable (simulated)');
+        }
+        return { ...getRow() };
+      });
       return builder;
     }
     if (table === 'sms_log') {
@@ -93,6 +105,7 @@ function makeDb(getRow) {
   db.__claimAcquired = true;
   db.__claimOutcome = null;
   db.__recentPacketFound = false;
+  db.__annualLookupThrows = false;
   return db;
 }
 
@@ -133,6 +146,7 @@ beforeEach(() => {
   mockDb.__claimAcquired = true;
   mockDb.__claimOutcome = null;
   mockDb.__recentPacketFound = false;
+  mockDb.__annualLookupThrows = false;
   priorGates = GATE_KEYS.map((key) => process.env[key]);
   GATE_KEYS.forEach((key) => delete process.env[key]);
 });
@@ -611,4 +625,87 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
     expect(res.status).toBe(200);
     expect(body).toEqual({ ok: true, channel: 'sms', deduped: true });
   }, 10000);
+
+  test('P1 (round 7): a guard lookup failure at a top-level response site reaches the handler\'s normal error path, never a hang', async () => {
+    // Codex round 7 P1: `return withheldOr(...)` without awaiting meant a
+    // rejected guard lookup could not be caught by the route's own
+    // try/catch — Express 4 does not forward a rejected async-handler
+    // promise, so the request would simply hang with no response at all.
+    // `await` at every call site (this is the email dedup/success site)
+    // makes the rejection surface inside the try, reaching next(err) and
+    // the app's normal error-handling middleware.
+    mockDb.__annualLookupThrows = true;
+    currentRow = baseEstimateRow({ customer_phone: '+19415551616' });
+    const EmailTemplateLibrary = require('../services/email-template-library');
+    EmailTemplateLibrary.sendTemplate.mockResolvedValueOnce({ sent: true, message: { id: 'msg-lookup-fail' } });
+
+    const res = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'email' }),
+    });
+    const body = await res.json();
+
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+    // The test app's error middleware: res.status(err.status || 500).json({ error: err.message }).
+    expect(res.status).toBe(500);
+    expect(body.error).toMatch(/estimates lookup unavailable/);
+  });
+
+  test('P1 (round 7): a final-site withhold (the offer changes between dispatch and the final recheck) clears the claim so a later retap can proceed', async () => {
+    const draft = baseEstimateRow({ customer_phone: '+19415551717' });
+    const fingerprint = annualPlanOfferFingerprint(draft);
+    draft.status = 'sent';
+    draft.estimate_data.deliveryState = { firstDeliveredAt: '2026-01-01T12:00:00Z', annualPlanOfferFingerprint: fingerprint };
+    currentRow = draft;
+    const TwilioService = require('../services/twilio');
+    TwilioService.sendSMS.mockImplementationOnce(async (_to, _body, options) => {
+      const verdict = await options.preSendCheck();
+      if (!verdict.ok) return { success: false, sid: null, preSendBlocked: true, code: verdict.code, error: verdict.reason };
+      // The offer withdraws AFTER dispatch decided to send (preSendCheck
+      // passed) but BEFORE the route's own final response-site recheck.
+      currentRow = baseEstimateRow({ customer_phone: '+19415551717' });
+      return { success: true, sid: 'SM_fake' };
+    });
+
+    const res1 = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
+    });
+    const body1 = await res1.json();
+
+    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+    expect(res1.status).toBe(404);
+    expect(body1).toEqual({ error: 'Estimate not found' });
+    // Round 7 P1: the claim's durable outcome is stamped (a concurrent
+    // poller would read the SAME refusal) exactly like every other
+    // withheld branch on this route.
+    expect(mockDb.__claimOutcome).toBe('withheld');
+
+    // A later retap for the SAME estimate/service/phone, now genuinely
+    // eligible again, must not be stuck behind a claim this response
+    // declined to report success for — the in-process Map entry must have
+    // been cleared, not left marking a pending/successful send.
+    const redraft = baseEstimateRow({ customer_phone: '+19415551717' });
+    const fingerprint2 = annualPlanOfferFingerprint(redraft);
+    redraft.status = 'sent';
+    redraft.estimate_data.deliveryState = { firstDeliveredAt: '2026-01-01T12:00:00Z', annualPlanOfferFingerprint: fingerprint2 };
+    currentRow = redraft;
+    TwilioService.sendSMS.mockImplementationOnce(async (_to, _body, options) => {
+      const verdict = await options.preSendCheck();
+      if (!verdict.ok) return { success: false, sid: null, preSendBlocked: true, code: verdict.code, error: verdict.reason };
+      return { success: true, sid: 'SM_fake_2' };
+    });
+    const res2 = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
+    });
+    const body2 = await res2.json();
+
+    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(2);
+    expect(res2.status).toBe(200);
+    expect(body2).toEqual({ ok: true, channel: 'sms' });
+  });
 });

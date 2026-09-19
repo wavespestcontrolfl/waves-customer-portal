@@ -25080,7 +25080,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       // answers through withheldOr, so a same-day repeat for a NOW-withheld
       // estimate can never answer 200 from a shortcut a fresh request would
       // answer 404 for.
-      return withheldOr(() => res.json({ ok: true, channel: 'email' }));
+      return await withheldOr(() => res.json({ ok: true, channel: 'email' }));
     }
 
     if (!contact.customerPhone) return res.status(400).json({ error: 'No phone on this estimate' });
@@ -25124,7 +25124,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       // — but recheck here too rather than relying on that alone, so this
       // response site is unconditionally covered on its own, the same as
       // every other one on this route.
-      if (shared?.success) return withheldOr(() => res.json({ ok: true, channel: 'sms', deduped: true }));
+      if (shared?.success) return await withheldOr(() => res.json({ ok: true, channel: 'sms', deduped: true }));
       if (shared?.withheld || shared?.code === 'ANNUAL_OFFER_WITHHELD') return res.status(404).json({ error: 'Estimate not found' });
       return res.status(502).json({ ok: false, error: 'Text could not be sent right now.' });
     }
@@ -25132,7 +25132,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       // Pre-push audit P0 (round 5 / structural fix round 6): this dedup hit
       // answers success from a send that may have happened before a later
       // withhold — recheck the annual verdict fresh before reporting it.
-      return withheldOr(() => res.json({ ok: true, channel: 'sms', deduped: true }));
+      return await withheldOr(() => res.json({ ok: true, channel: 'sms', deduped: true }));
     }
     // Cross-process gate: a SLIDING unique claim (atomic stale-takeover
     // upsert — no bucket edges) covers rolling-deploy overlap and any future
@@ -25197,7 +25197,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
               // through the SAME helper (onEligible/onBlocked return plain
               // values here — this closure is not allowed to write `res`
               // itself, the outer code does that once, below).
-              return withheldOr(
+              return await withheldOr(
                 () => ({ success: true, deduped: true }),
                 async () => { await markClaimWithheld(); return { success: false, withheld: true }; },
               );
@@ -25218,7 +25218,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           // Pre-push audit P0 (round 5 / structural fix round 6): this
           // dedup hit answers success from a PRIOR send — recheck through
           // the same helper as every other dedup site on this route.
-          return withheldOr(
+          return await withheldOr(
             () => ({ success: true, deduped: true }),
             async () => { await markClaimWithheld(); return { success: false, withheld: true }; },
           );
@@ -25329,7 +25329,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // gets). A blocked verdict here skips the success bookkeeping below
     // entirely — never marks the in-process dedup window, never answers
     // 200 for a response this same call is about to call withheld.
-    return withheldOr(() => {
+    return await withheldOr(() => {
       // Confirmed success only: start the dedup window and prune stale
       // entries (Map here; expired claim rows fire-and-forget — one row per
       // send, so a daily horizon keeps the table trivial).
@@ -25347,6 +25347,19 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
         .del()
         .catch(() => {});
       return res.json({ ok: true, channel: 'sms', ...(smsResult.deduped ? { deduped: true } : {}) });
+    }, async () => {
+      // Pre-push audit P1 (round 7): the offer changed between the send
+      // (or dedup hit) and THIS final response — declining to report the
+      // success this call was about to report must not leave the claim
+      // pending. Same cleanup every other withheld branch on this route
+      // uses: stamp the durable outcome (a concurrent poller reads the
+      // SAME refusal) and clear the in-process Map entry — never
+      // releaseClaims()'s DB delete here, for the same reason the other
+      // withheld branches keep the row: a concurrent loser mid-poll must
+      // still be able to read it before it expires on its own.
+      await markClaimWithheld();
+      serviceDetailsSmsClaims.delete(dedupKey);
+      return res.status(404).json({ error: 'Estimate not found' });
     });
   } catch (err) { next(err); }
 });
