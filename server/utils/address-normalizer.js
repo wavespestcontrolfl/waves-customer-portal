@@ -274,30 +274,44 @@ function normalizeState(value) {
 }
 
 // State codes that are also ordinary spoken words. Spoken raw text carries
-// them as English — "it's Palmetto, so, OR it could be Ellenton" / "that's
-// IN Parrish, 34219" — and reading them as Oregon / Indiana marks a served
-// Florida address out of the service area, which vetoes every customer
-// and lead write for the call (four calls in the week of 2026-09-15).
-// Only THESE codes are held to a positional rule: they count as a state
-// only where a state sits — the end of a segment (sentence punctuation
-// , . ; : ! ? ends one), directly before a ZIP, or directly before a
-// trailing country ("Portland, OR USA"). Every other code ("CA", "CO",
-// "TX") and every full state name ("Kentucky") reads from any position as
-// before, so unpunctuated ASR trailing speech ("Venice, CA but I don't
-// know the ZIP") keeps its explicit geography (codex r1–r4 P1).
+// them as English — "it's Palmetto, so, or it could be Ellenton" / "that's
+// in Parrish, 34219" / "I live in 34221" — and reading them as Oregon /
+// Indiana marks a served Florida address out of the service area, which
+// vetoes every customer and lead write for the call (four calls in the
+// week of 2026-09-15). Punctuation or a ZIP next to the word is not enough
+// to tell the two apart (codex r5 P1), so THESE codes are a state only when
+// they are written as a deliberate abbreviation: uppercase in the source
+// ("Portland, OR 97201", "Boise, ID"), or starting their own segment
+// directly before a ZIP ("…, or 97201"). "OK" and "LA" are common all-caps
+// words ("OK", Los Angeles) and get only the segment+ZIP route. Every other
+// code ("CA", "CO", "TX") and every full state name ("Kentucky") reads from
+// any position exactly as before, so unpunctuated ASR trailing speech
+// ("Venice, CA but I don't know the ZIP") keeps its explicit geography.
 const FILLER_STATE_CODES = new Set(['AL', 'DE', 'HI', 'ID', 'IN', 'LA', 'MA', 'ME', 'OH', 'OK', 'OR', 'PA']);
+const FILLER_CODES_UPPERCASE_AMBIGUOUS = new Set(['OK', 'LA']);
+const SEGMENT_PUNCTUATION = /[.,;:!?]/;
 const TRAILING_COUNTRY = /\s*(?:usa|u\.s\.a\.?|u\.s\.|us|united states(?: of america)?)\s*[.,;:!?]?\s*$/i;
 function findState(value) {
-  const text = cleanString(value)
-    .replace(/\s*([.,;:!?])\s*/g, '$1 ')
-    .replace(TRAILING_COUNTRY, '')
-    .trim();
-  if (!text) return { raw: '', state: '' };
+  // Country first, before any punctuation rewrite ("U.S.A." must still
+  // match its own dotted form — codex r5 P1).
+  const base = cleanString(value).replace(TRAILING_COUNTRY, '').trim();
+  if (!base) return { raw: '', state: '' };
+  // Full names match with punctuation removed ("North, Carolina" is still
+  // North Carolina); codes see the punctuation, which marks segment starts.
+  const plain = base.replace(/[.,;:!?]/g, ' ').replace(/\s+/g, ' ').trim();
+  const segmented = base.replace(/\s*([.,;:!?])\s*/g, '$1 ').trim();
   for (const token of STATE_TOKENS) {
-    const pattern = FILLER_STATE_CODES.has(token)
-      ? `\\b(${escapeRegExp(token)})(?=\\s*(?:$|[.,;:!?])|\\s+\\d{5}(?:-\\d{4})?\\b)`
-      : `\\b(${escapeRegExp(token)})\\b`;
-    const match = text.match(new RegExp(pattern, 'i'));
+    const tok = escapeRegExp(token);
+    let match = null;
+    if (token.length > 2) {
+      match = plain.match(new RegExp(`\\b(${tok})\\b`, 'i'));
+    } else if (!FILLER_STATE_CODES.has(token)) {
+      match = segmented.match(new RegExp(`\\b(${tok})\\b`, 'i'));
+    } else {
+      match = (!FILLER_CODES_UPPERCASE_AMBIGUOUS.has(token) && segmented.match(new RegExp(`\\b(${tok})\\b`)))
+        || segmented.match(new RegExp(`(?:^|${SEGMENT_PUNCTUATION.source}\\s*)(${tok})(?=\\s+\\d{5}(?:-\\d{4})?\\b)`, 'i'))
+        || null;
+    }
     if (match) return { raw: match[1], state: normalizeState(token) };
   }
   return { raw: '', state: '' };

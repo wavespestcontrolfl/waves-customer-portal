@@ -705,6 +705,21 @@ describe('parseRawAddress — conversational words that are also state codes', (
     expect(parseRawAddress("123 Main St, Venice, CA but I don't know the ZIP")).toMatchObject({ state: 'CA' });
     expect(parseRawAddress('123 Main St, Denver, CO and the ZIP is unknown')).toMatchObject({ state: 'CO' });
   });
+  test('a filler code next to punctuation or a ZIP is still speech unless written as an abbreviation (codex r5 P1)', () => {
+    expect(parseRawAddress("123 Main St, Palmetto, and it's in, I think, Parrish, 34219")).toMatchObject({ state: '', zip: '34219' });
+    expect(parseRawAddress('123 Main St, Palmetto, I live in 34221')).toMatchObject({ state: '', zip: '34221' });
+    expect(parseRawAddress("It's OK, 123 Main St, Palmetto, 34221")).toMatchObject({ state: '' });
+    expect(parseRawAddress('123 Main St, Boise, ID')).toMatchObject({ state: 'ID' });
+    expect(parseRawAddress('123 Main St, Portland, or 97201')).toMatchObject({ state: 'OR', zip: '97201' });
+    expect(parseRawAddress('123 Main St, Tulsa, OK 74103')).toMatchObject({ state: 'OK', zip: '74103' });
+  });
+  test('punctuation inside a multi-word state name still reads the state (codex r5 P1)', () => {
+    expect(parseRawAddress('123 Main St, Charlotte, North, Carolina 28202')).toMatchObject({ state: 'NC', zip: '28202' });
+  });
+  test('a dotted country suffix is stripped before the state check (codex r5 P1)', () => {
+    expect(parseRawAddress('123 Main St, Portland, OR U.S.A.')).toMatchObject({ state: 'OR' });
+    expect(parseRawAddress('123 Main St, Portland, OR U.S.')).toMatchObject({ state: 'OR' });
+  });
   test('a full state name anywhere in the tail is still a state', () => {
     expect(parseRawAddress('Louisville, Kentucky')).toMatchObject({ state: 'KY' });
     expect(parseRawAddress("213 6th Avenue Southwest, Ruskin, Florida")).toMatchObject({ state: 'FL' });
