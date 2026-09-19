@@ -34,8 +34,8 @@ beforeEach(() => {
           if (receiptFailure === 'error') throw new Error('Receipt unavailable');
           return 0;
         }
-        if ((delta.sms_reply_eligible || delta.sms_reply_covered || delta.sms_reply_suppressed) && stampFailure) {
-          if (stampFailure === 'error') throw new Error('Marker unavailable');
+        if (stampFailure && delta[stampFailure.marker]) {
+          if (stampFailure.mode === 'error') throw new Error('Marker unavailable');
           return 0;
         }
         row.metadata = { ...row.metadata, ...delta };
@@ -116,9 +116,10 @@ test('a message covered by a recent receipt is stamped terminal before its claim
 const stamps = key => mutations.filter(m => m.table === 'sms_log' && m.patch && JSON.parse(m.patch.metadata.bindings[0])[key]);
 test.each([['error', 2], ['missing row', 1]])('unrecorded coverage (%s) is not reported handled and keeps recovery able to retry', async (failure, attempts) => {
   priorReceipt = { id: 'prior-delivered-receipt' };
-  stampFailure = failure;
+  stampFailure = { marker: 'sms_reply_covered', mode: failure };
   expect(await dispatch()).toBe(false);
   expect(triggerNotification).not.toHaveBeenCalled();
+  expect(row.metadata.sms_reply_eligible).toBe(true);
   expect(stamps('sms_reply_covered')).toHaveLength(attempts);
   expect(row.metadata.sms_reply_covered).toBeUndefined();
   expect(mutations.some(m => m.table === 'sms_reply_alert_claims' && m.deleted)).toBe(true);
@@ -145,14 +146,15 @@ test('losing the claim to an in-progress lease leaves the message eligible for r
 });
 test('suppression is terminal only once its marker is recorded', async () => {
   triggerNotification.mockResolvedValueOnce({ bellWritten: false, push: null, suppressed: true });
-  stampFailure = 'error';
+  stampFailure = { marker: 'sms_reply_suppressed', mode: 'error' };
   expect(await dispatch()).toBe(false);
+  expect(triggerNotification).toHaveBeenCalledTimes(1);
   expect(stamps('sms_reply_suppressed')).toHaveLength(2);
   expect(row.metadata.sms_reply_suppressed).toBeUndefined();
   expect(mutations.some(m => m.table === 'sms_reply_alert_claims' && m.deleted)).toBe(true);
 });
 test.each([['error', 2], ['missing row', 1]])('an unrecorded eligibility marker (%s) is reported unhandled before any claim or delivery', async (failure, attempts) => {
-  stampFailure = failure;
+  stampFailure = { marker: 'sms_reply_eligible', mode: failure };
   expect(await dispatch()).toBe(false);
   expect(stamps('sms_reply_eligible')).toHaveLength(attempts);
   expect(triggerNotification).not.toHaveBeenCalled();
