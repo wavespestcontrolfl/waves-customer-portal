@@ -958,3 +958,36 @@ test.each([
   expect(grammar.reportClaimIsDenied(text, text, subjectAt, text.indexOf('exterior perimeter'),
     /applied/.exec(text), text.slice(0, subjectAt))).toBe(denied);
 });
+
+test.each([
+  ['We were prevented from having Talstar P applied to the exterior perimeter.', false],
+  ['We were prohibited from having Talstar P applied to the exterior perimeter.', false],
+  ['We were forbidden from having Talstar P applied to the exterior perimeter.', false],
+  ['We were forbidden to have Talstar P applied to the exterior perimeter.', false],
+  ['We forbade the technician to have Talstar P applied to the exterior perimeter.', false],
+  ['We had Talstar P applied to the exterior perimeter.', true],
+  ['We were prevented from having bait applied indoors, but Talstar P was applied to the exterior perimeter.', true],
+])('prevention and prohibition governors do not establish completion: %s', (text, completed) => {
+  const findingVerbs = [...text.matchAll(/applied/g)];
+  expect(grammar.reportHasCompletedPredicate(text, findingVerbs.at(-1))).toBe(completed);
+});
+
+test.each([
+  ['The report incorrectly claimed that Talstar P was applied to the exterior perimeter.', true],
+  ['The reports erroneously claim that Talstar P was applied to the exterior perimeter.', true],
+  ['The report falsely claims that Talstar P was applied to the exterior perimeter.', true],
+  ['The report is mistakenly claiming that Talstar P was applied to the exterior perimeter.', true],
+  ['The report incorrectly stated that Talstar P was applied to the exterior perimeter.', true],
+  ['The report correctly claimed that Talstar P was applied to the exterior perimeter.', false],
+  ['The report accurately claims that Talstar P was applied to the exterior perimeter.', false],
+  ['The report claimed that Talstar P was applied to the exterior perimeter.', false],
+])('false attribution differs from a genuine report claim: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test('an unrelated false claim stays outside bounded treatment evidence', () => {
+  const text = 'The report incorrectly claimed that the invoice was paid, but Talstar P was applied to the exterior perimeter.';
+  const findingEvidence = grammar.claimContext(text, text.indexOf('Talstar P'), text.length);
+  expect(findingEvidence).not.toMatch(/incorrectly claimed/i);
+  expect(grammar.reportFindingIsUncertain(findingEvidence)).toBe(false);
+});
