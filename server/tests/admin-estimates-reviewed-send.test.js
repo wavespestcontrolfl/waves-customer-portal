@@ -1173,6 +1173,28 @@ describe('annual provider delivery receipts', () => {
       expect(row.status).not.toBe('sent');
       expect(annualPlanHasDeliveredOffer(sibling)).toBe(false);
     });
+
+    test('pre-push audit P1: a guard infrastructure error leaves channels.email ok:false and NOT uncertain, and releases the group claim', async () => {
+      email.sendTemplate.mockResolvedValueOnce({
+        sent: false, aborted: true, guardError: true, reason: 'annual_offer_guard_failed',
+        providerAttempted: false, error: 'estimates lookup unavailable',
+      });
+      const response = await invoke('/:id/send', 'post', { sendMethod: 'email' });
+      expect(response.statusCode).toBe(422);
+      expect(response.body.success).toBe(false);
+      expect(response.body.channels.email).toMatchObject({ ok: false });
+      // Never uncertain: sendTemplate resolved (didn't throw), so the
+      // admin-estimates catch block that COMPUTES `uncertain` from a
+      // possible-but-unproven provider attempt is never reached — this is
+      // the exact misclassification the pre-push audit flagged (a thrown
+      // guard error, after onQueued had already fired, read as an uncertain
+      // delivery even though SendGrid was never called).
+      expect(response.body.channels.email.uncertain).toBeUndefined();
+      // The sibling was claimed ('sending') then released back to its
+      // pre-claim status — a guard infra failure never publishes.
+      expect(sibling.status).toBe('draft');
+      expect(row.status).not.toBe('sent');
+    });
   });
 });
 

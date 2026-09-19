@@ -1593,27 +1593,66 @@ describe('email template library rendering', () => {
       expect(result.sent).toBe(true);
     });
 
-    test('a guard infrastructure error surfaces as a failure — never a handled/deduped success (#4569 "retry after handoff-check errors")', async () => {
-      const current = { ...queuedMessage };
-      const providerFailUpdate = chain({ returning: [] });
+    test('a guard infrastructure error is a DEFINITE pre-dispatch failure — never uncertain, never a handled/deduped success (pre-push audit P1)', async () => {
+      // Resolves (never throws) so a caller like admin-estimates.js's
+      // sendEstimateEmail — whose onQueued sets emailDispatchStarted before
+      // this guard ever runs — cannot compute `uncertain` from a thrown
+      // provider-shaped error the SDK never actually produced.
+      const queueInsert = chain({ returning: [queuedMessage] });
+      const guardFailedUpdate = chain({ returning: [{ ...queuedMessage, status: 'failed', error_message: 'annual_offer_guard_failed: estimates lookup unavailable' }] });
       setDbQueues({
         email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
         email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
         email_suppressions: [chain({ result: [] })],
-        email_messages: [
-          chain({ returning: [queuedMessage] }),
-          chain({ first: current }),
-          providerFailUpdate,
-        ],
-        email_message_events: [chain()],
+        email_messages: [queueInsert, guardFailedUpdate],
       });
       annualHandoffGuard.mockReturnValueOnce(async () => { throw new Error('estimates lookup unavailable'); });
 
-      await expect(send({ estimateId: 'est-1' })).rejects.toThrow('estimates lookup unavailable');
+      const result = await send({ estimateId: 'est-1' });
 
       expect(sendgrid.sendOne).not.toHaveBeenCalled();
-      expect(providerFailUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
-        status: 'failed', error_message: 'estimates lookup unavailable',
+      expect(result).toEqual(expect.objectContaining({
+        sent: false, aborted: true, guardError: true, reason: 'annual_offer_guard_failed',
+        providerAttempted: false, error: 'estimates lookup unavailable',
+      }));
+      expect(result.message.status).toBe('failed');
+      expect(guardFailedUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'failed', error_message: 'annual_offer_guard_failed: estimates lookup unavailable',
+      }));
+      expect(guardFailedUpdate.where).toHaveBeenCalledWith(expect.objectContaining({ id: 'msg-annual', status: 'queued' }));
+    });
+
+    test('a guard infrastructure error with a caller withProviderHandoff present: the same definite failure, and the lock still releases', async () => {
+      const queueInsert = chain({ returning: [queuedMessage] });
+      const guardFailedUpdate = chain({ returning: [{ ...queuedMessage, status: 'failed', error_message: 'annual_offer_guard_failed: estimates lookup unavailable' }] });
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [queueInsert, guardFailedUpdate],
+      });
+      const order = [];
+      const withProviderHandoff = jest.fn(async (dispatch) => {
+        order.push('lock');
+        await dispatch();
+        order.push('unlock');
+      });
+      annualHandoffGuard.mockReturnValueOnce(async () => {
+        order.push('guard');
+        throw new Error('estimates lookup unavailable');
+      });
+
+      const result = await send({ estimateId: 'est-1', withProviderHandoff });
+
+      // withProviderHandoff's own dispatch() callback never throws — the
+      // guard error resolves to a sentinel INSIDE dispatchToProvider — so
+      // the caller's lock unwinds normally instead of seeing an exception
+      // (runProviderHandoff still reads this as "ran with a result").
+      expect(order).toEqual(['lock', 'guard', 'unlock']);
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      expect(result).toEqual(expect.objectContaining({
+        sent: false, aborted: true, guardError: true, reason: 'annual_offer_guard_failed',
+        providerAttempted: false, error: 'estimates lookup unavailable',
       }));
     });
   });

@@ -877,6 +877,16 @@ const ABORTED_BEFORE_DISPATCH = 'aborted_by_caller_before_dispatch';
 // apart from both a real provider result and a thrown error.
 const ANNUAL_OFFER_WITHHELD = Symbol('annual_offer_withheld');
 
+// Property key on a dispatchToProvider result meaning "the guard's own row
+// lookup threw" (pre-push audit P1). Caught INSIDE the guarded
+// dispatchToProvider below so the failure resolves as an ordinary
+// (non-throwing) result instead of reaching the provider-error catch block
+// — that catch computes retryable/uncertain from provider evidence
+// (providerAccepted, a thrown SDK error's shape) that was never gathered
+// here, since SendGrid was never called. The wrapper carries the error so
+// abortGuardFailedBeforeDispatch (below) can report it verbatim.
+const ANNUAL_OFFER_GUARD_FAILED = Symbol('annual_offer_guard_failed');
+
 // The caller's locked handoff around one provider request, as a state
 // machine of its own: the request either ran (its result, or its error to
 // classify), was refused before it ran (abort before dispatch), or the
@@ -1295,6 +1305,30 @@ async function sendTemplate({
       message: blocked || { ...message, status: 'failed', error_message: ANNUAL_OFFER_WITHHELD_REASON }, rendered,
     };
   };
+  // Pre-push audit P1: a guard INFRASTRUCTURE error (the row lookup threw —
+  // DB unavailable, etc.) is a definite pre-dispatch failure, never an
+  // uncertain or handled/deduped send. Same bookkeeping shape as
+  // abortWithheldBeforeDispatch — the queued row becomes a retryable
+  // pre-provider failure scoped to THIS attempt — but its own reason
+  // (carrying the underlying error message) and an explicit `aborted` +
+  // `guardError` pair so callers can distinguish "the guard said no" from
+  // "the guard itself broke": the second must never be read as a possible
+  // provider attempt.
+  const abortGuardFailedBeforeDispatch = async (err) => {
+    const reason = `annual_offer_guard_failed: ${err.message}`;
+    let failed;
+    try {
+      [failed] = await db('email_messages')
+        .where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken })
+        .update({ status: 'failed', error_message: reason, updated_at: new Date() }).returning('*');
+    } catch (bookkeepingErr) {
+      logger.warn(`[email-template-library] annual offer guard failure bookkeeping failed for ${templateKey}: ${bookkeepingErr.message}`);
+    }
+    return {
+      sent: false, aborted: true, guardError: true, reason: 'annual_offer_guard_failed', providerAttempted: false,
+      error: err.message, message: failed || { ...message, status: 'failed', error_message: reason }, rendered,
+    };
+  };
   if (typeof onQueued === 'function') {
     let keep = true;
     try {
@@ -1339,16 +1373,24 @@ async function sendTemplate({
     // composed so a caller's own withProviderHandoff (outermost) has already
     // acquired its lock by the time the guard reads a fresh row, whether or
     // not a caller handoff is present at all (both branches below call this
-    // same function). A guard error propagates like any other dispatch
-    // failure (below, the ordinary catch block); a withheld verdict resolves
-    // to the sentinel instead of throwing, so it aborts pre-dispatch without
-    // being misread as a real provider error.
+    // same function). Neither guard outcome is allowed to throw out of this
+    // function: a withheld verdict and a guard LOOKUP error (pre-push audit
+    // P1 — a throw here must never fall into the ordinary provider-error
+    // catch below, which infers retryable/uncertain from provider evidence
+    // that a never-attempted SendGrid call cannot have produced) both
+    // resolve to their own sentinel instead, so dispatchToProvider always
+    // either sends or reports a real, non-throwing outcome.
     const guardEstimateIds = Array.isArray(estimateIds) && estimateIds.length
       ? estimateIds : (estimateId ? [estimateId] : []);
     const dispatchToProvider = guardEstimateIds.length
       ? async () => {
           const { annualHandoffGuard } = require('./estimate-annual-guard');
-          const verdict = await annualHandoffGuard({ db, estimateIds: guardEstimateIds })();
+          let verdict;
+          try {
+            verdict = await annualHandoffGuard({ db, estimateIds: guardEstimateIds })();
+          } catch (err) {
+            return { [ANNUAL_OFFER_GUARD_FAILED]: true, error: err };
+          }
           return verdict.blocked ? ANNUAL_OFFER_WITHHELD : sendToProvider();
         }
       : sendToProvider;
@@ -1360,6 +1402,10 @@ async function sendTemplate({
       result = await dispatchToProvider();
     }
     if (result === ANNUAL_OFFER_WITHHELD) return abortWithheldBeforeDispatch();
+    // Pre-push audit P1: both the withProviderHandoff branch and the direct
+    // branch above assign `result` from the SAME dispatchToProvider, so this
+    // one check covers either caller shape.
+    if (result && result[ANNUAL_OFFER_GUARD_FAILED]) return abortGuardFailedBeforeDispatch(result.error);
     providerAccepted = true;
     // Record provider id + send time, and advance status to 'sent' ONLY while
     // still 'queued' — a fast delivery/bounce webhook (resolvable via

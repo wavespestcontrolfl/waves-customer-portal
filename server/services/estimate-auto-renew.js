@@ -190,8 +190,19 @@ const EstimateAutoRenew = {
                     });
                     if (result.blocked) {
                       logger.warn(`[est-auto-renew] Email suppressed for estimate ${est.id}: ${result.reason || 'suppressed'}`);
+                      sentWithTemplateLibrary = true;
+                    } else if (result.aborted) {
+                      // Pre-push audit P1: a pre-dispatch abort (the annual
+                      // guard's own lookup threw, most likely) is a real
+                      // failure, never a handled/deduped outcome — leave
+                      // sentWithTemplateLibrary false so this falls through
+                      // to the SMTP fallback below like any other
+                      // template-path failure, instead of being silently
+                      // marked as if the template library had sent it.
+                      logger.warn(`[est-auto-renew] Email pre-dispatch abort for estimate ${est.id}: ${result.reason || 'aborted'}${result.error ? ` (${result.error})` : ''}`);
+                    } else {
+                      sentWithTemplateLibrary = true;
                     }
-                    sentWithTemplateLibrary = true;
                   }
                 } catch (e) {
                   if (!canFallbackFromTemplateEmailError(e) && !canFallbackFromAutomationEmailError(e)) throw e;
