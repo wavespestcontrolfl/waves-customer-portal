@@ -141,6 +141,12 @@ describe('buildAddressLines — spoken raw_text with conversational state-code w
       raw_text: '123 Main Street, Portland, OR United States',
     })).toEqual(['123 Main St', 'Portland OR']);
   });
+  test('an unambiguous code before unpunctuated trailing speech still overrides the FL default (codex r4 P1)', () => {
+    expect(buildAddressLines({
+      street_line_1: '123 Main St', city: 'Venice', state: null,
+      raw_text: "123 Main Street, Venice, CA but I don't know the ZIP",
+    })).toEqual(['123 Main St', 'Venice CA']);
+  });
   test('an explicit other state in raw_text still overrides the FL default', () => {
     expect(buildAddressLines({
       street_line_1: '123 Main St', city: 'Louisville', state: null,

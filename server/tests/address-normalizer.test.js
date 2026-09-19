@@ -701,6 +701,10 @@ describe('parseRawAddress — conversational words that are also state codes', (
     expect(parseRawAddress('123 Main St, Portland, OR USA')).toMatchObject({ state: 'OR' });
     expect(parseRawAddress('123 Main St, Sarasota, FL 34236 USA')).toMatchObject({ state: 'FL', zip: '34236' });
   });
+  test('an unambiguous code before unpunctuated trailing speech keeps the state (codex r4 P1)', () => {
+    expect(parseRawAddress("123 Main St, Venice, CA but I don't know the ZIP")).toMatchObject({ state: 'CA' });
+    expect(parseRawAddress('123 Main St, Denver, CO and the ZIP is unknown')).toMatchObject({ state: 'CO' });
+  });
   test('a full state name anywhere in the tail is still a state', () => {
     expect(parseRawAddress('Louisville, Kentucky')).toMatchObject({ state: 'KY' });
     expect(parseRawAddress("213 6th Avenue Southwest, Ruskin, Florida")).toMatchObject({ state: 'FL' });

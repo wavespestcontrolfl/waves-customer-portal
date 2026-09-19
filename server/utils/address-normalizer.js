@@ -273,18 +273,19 @@ function normalizeState(value) {
   return US_STATE_ABBREVIATIONS[state.toLowerCase()] || '';
 }
 
-// A two-letter code is only a state when it sits where a state sits: the
-// end of the segment, directly before a ZIP ("Sarasota FL 34236",
-// "Groton, CT"), or directly before a trailing country ("Portland, OR
-// USA", codex r3 P1). Spoken raw text carries ordinary words that are also
-// codes — "it's Palmetto, so, OR it could be Ellenton" / "that's IN
-// Parrish, 34219" — and reading them as Oregon / Indiana marks a served
+// State codes that are also ordinary spoken words. Spoken raw text carries
+// them as English — "it's Palmetto, so, OR it could be Ellenton" / "that's
+// IN Parrish, 34219" — and reading them as Oregon / Indiana marks a served
 // Florida address out of the service area, which vetoes every customer
 // and lead write for the call (four calls in the week of 2026-09-15).
-// Full state names ("Kentucky") stay free-position: they are never
-// conversational filler. Sentence punctuation (, . ; : ! ?) ends a segment
-// too, so an explicit "…, Venice, CA, but I don't know the ZIP" or
-// "…, Venice, CA; but …" keeps CA (codex r1 + r2 P1).
+// Only THESE codes are held to a positional rule: they count as a state
+// only where a state sits — the end of a segment (sentence punctuation
+// , . ; : ! ? ends one), directly before a ZIP, or directly before a
+// trailing country ("Portland, OR USA"). Every other code ("CA", "CO",
+// "TX") and every full state name ("Kentucky") reads from any position as
+// before, so unpunctuated ASR trailing speech ("Venice, CA but I don't
+// know the ZIP") keeps its explicit geography (codex r1–r4 P1).
+const FILLER_STATE_CODES = new Set(['AL', 'DE', 'HI', 'ID', 'IN', 'LA', 'MA', 'ME', 'OH', 'OK', 'OR', 'PA']);
 const TRAILING_COUNTRY = /\s*(?:usa|u\.s\.a\.?|u\.s\.|us|united states(?: of america)?)\s*[.,;:!?]?\s*$/i;
 function findState(value) {
   const text = cleanString(value)
@@ -293,7 +294,7 @@ function findState(value) {
     .trim();
   if (!text) return { raw: '', state: '' };
   for (const token of STATE_TOKENS) {
-    const pattern = token.length === 2
+    const pattern = FILLER_STATE_CODES.has(token)
       ? `\\b(${escapeRegExp(token)})(?=\\s*(?:$|[.,;:!?])|\\s+\\d{5}(?:-\\d{4})?\\b)`
       : `\\b(${escapeRegExp(token)})\\b`;
     const match = text.match(new RegExp(pattern, 'i'));
