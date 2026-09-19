@@ -766,3 +766,24 @@ test.each(['putting green', 'golf green', 'putting area'])(
       text.indexOf('exterior perimeter'), verb, '')).toBe(false);
   },
 );
+
+test.each([
+  ['We started to put Talstar P around the exterior perimeter.', false],
+  ['We began to put Talstar P around the exterior perimeter.', false],
+  ['We were beginning to put Talstar P around the exterior perimeter.', false],
+  ['We put Talstar P around the exterior perimeter.', true],
+  ['We started the visit and put Talstar P around the exterior perimeter.', true],
+])('starting an invariant treatment predicate does not establish completion: %s', (text, completed) => {
+  expect(grammar.reportHasCompletedPredicate(text, /\bput\b/.exec(text))).toBe(completed);
+});
+
+test.each([
+  ['Talstar P was applied not without difficulty to the exterior perimeter.', false],
+  ['Talstar P was applied not without trouble to the exterior perimeter.', false],
+  ['Talstar P was not applied without difficulty to the exterior perimeter.', true],
+  ['Talstar P was applied without difficulty to the exterior perimeter.', false],
+  ['Talstar P was applied without treating the exterior perimeter.', true],
+])('affirmative not-without adjuncts retain their full polarity: %s', (text, denied) => {
+  expect(grammar.reportClaimIsDenied(text, text, text.indexOf('Talstar P'),
+    text.indexOf('exterior perimeter'), /applied/.exec(text), '')).toBe(denied);
+});
