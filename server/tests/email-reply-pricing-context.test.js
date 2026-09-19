@@ -24,6 +24,18 @@ describe('inactive typed pricing context', () => {
     expect(result).not.toHaveProperty('violations');
   });
 
+  test.each([
+    ['The plan visit is $98.', 'plan', ['plan']],
+    ['Our monthly service visit is $98.', 'service', ['activity']],
+  ])('preserves context roles inside composite unit tokens: %s', (text, word, roles) => {
+    const clause = recognize(text).clauses[0];
+    const embedded = clause.contextPhrases.find((phrase) => phrase.embedded);
+    expect(embedded).toMatchObject({ text: word, roles, embedded: true });
+    expect(embedded.token).toBe(clause.tokens[embedded.start]);
+    expect(embedded.token.kind).not.toBe('word');
+    expect(embedded.token.text.slice(embedded.offsets.start, embedded.offsets.end).toLowerCase()).toBe(word);
+  });
+
   test('retains scanner stemming and ambiguous payment roles', () => {
     const result = recognize('We paid $98 monthly.');
     const context = result.clauses[0].contextPhrases[0];

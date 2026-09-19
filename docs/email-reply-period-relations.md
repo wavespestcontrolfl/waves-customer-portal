@@ -75,6 +75,12 @@ The module decides, using only typed evidence already on the clause:
   $98`), and `and`/comma immediately before the same billing predicate and
   period (`The plan is $98 and is billed monthly`).
 
+The module carries no price vocabulary of its own. A price label is a
+pricing-phrases `billing_head` noun (or a dual-role head whose predicate
+candidate carries `priceCue`) that the pricing context does not also mark
+with the `account` role (`payment`, `balance`, `pay`); the shared recognizers
+own every word list.
+
 The module never attaches an amount to a unit or resolves a general English
 sentence; it consumes only the finite spans, roles, and candidates the
 upstream recognizers already computed. It does not know about
@@ -86,8 +92,11 @@ bytes, 512 whitespace tokens) apply through the upstream chain.
 
 `email-reply-pricing-context.js` and everything under it (period phrases,
 price evidence, unit/amount relations, pricing phrases and clauses, the unit
-and amount lexers) are unchanged and unowned by this module — it only adds
-relation evidence over their output. `server/services/comms-lint.js` remains
+and amount lexers) are unowned by this module — it only adds relation
+evidence over their output. The three upstream corrections that shipped
+alongside it (extended temporal `ago` phrases, context roles inside composite
+unit tokens, punctuation-prefixed embedded periods) are documented in the
+period-phrase and pricing-context docs. `server/services/comms-lint.js` remains
 the live raw-text `no-plan-total` policy; it is unaffected.
 
 Run `npx jest server/tests/email-reply-period-relations.test.js --runInBand`

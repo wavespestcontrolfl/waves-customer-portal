@@ -9,7 +9,9 @@ function recognizeClause(clause) {
   for (let start = 0; start < tokens.length; start += 1) {
     const token = tokens[start];
     if (UNIT_KINDS.has(token.kind)) {
-      for (const word of token.text.matchAll(/\S+/g)) {
+      // Try every lexical start inside the token ("/monthly visit" starts
+      // with a slash), not only each whitespace chunk's first offset.
+      for (const word of token.text.matchAll(/[a-z]+/gi)) {
         const matched = matchEmailReplyPeriodAt(token.text, word.index);
         if (!matched) continue;
         periodPhrases.push({ start, end: start + 1, text: matched.text, period: matched.period,
@@ -20,7 +22,10 @@ function recognizeClause(clause) {
     if (!['word', 'period'].includes(token.kind)) continue;
     const selected = [token];
     if (token.kind === 'word') {
-      for (let at = start + 1; at < Math.min(tokens.length, start + 3); at += 1) {
+      // Up to six following words feed the matcher so its bounded temporal
+      // lookahead ("a month or two ago") can see the whole construction; only
+      // the matched span is consumed.
+      for (let at = start + 1; at < Math.min(tokens.length, start + 7); at += 1) {
         if (tokens[at].kind !== 'word') break;
         selected.push(tokens[at]);
       }

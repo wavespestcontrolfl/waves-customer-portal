@@ -1,9 +1,8 @@
 const { recognizeEmailReplyPricingContext } = require('./email-reply-pricing-context');
 
-// Finite price-word vocabulary shared with the pricing-phrases billing_head heads;
-// 'payment'/'balance'/'pay' are deliberately excluded here (account evidence, not a price label).
-const PRICE_WORDS = new Set(['price', 'cost', 'fee', 'rate', 'charge', 'bill', 'invoice',
-  'amount', 'total', 'run', 'dues', 'subscription', 'spread']);
+// No price vocabulary of its own: a price label is a pricing-phrases
+// billing_head noun (or a predicate carrying its priceCue) that the pricing
+// context does not also mark as account evidence (payment, balance, pay).
 const PAYMENT_ACTIONS = new Set(['total', 'totals', 'equal', 'equals', 'come to']);
 const BILLING_PREDICATES = new Set(['bill', 'charge', 'invoice', 'pay']);
 const CLAIM_BREAK_WORDS = new Set(['and', 'or', 'but']);
@@ -26,8 +25,17 @@ function recognizeClause(clause) {
   const rolesIn = (from, to) => new Set(contextPhrases
     .filter((phrase) => phrase.start >= from && phrase.end <= to)
     .flatMap((phrase) => phrase.roles));
+  const accountAt = (pos) => contextPhrases.some((phrase) => phrase.start === pos
+    && !phrase.embedded && phrase.roles.includes('account'));
+  // A dual-role head such as "run"/"charge" is a price label through the
+  // predicate candidate pricing-phrases emits at the same start (priceCue).
+  const cueAt = (pos) => phrases.some((phrase) => phrase.type === 'predicate'
+    && phrase.headStart === pos && phrase.priceCue === true);
+  const priceLabel = (phrase) => !!phrase && !accountAt(phrase.start)
+    && (phrase.type === 'billing_head' ? (phrase.roles.includes('noun') || cueAt(phrase.start))
+      : phrase.priceCue === true);
   const priceHeadIn = (from, to) => heads.some((head) => head.start >= from && head.end <= to
-    && PRICE_WORDS.has(head.head));
+    && priceLabel(head));
 
   // A unit before the amount always ties it; a unit after the amount only ties
   // it when the unit itself is a genuine pricing unit (per/each/every/for/a/-)
@@ -81,14 +89,12 @@ function recognizeClause(clause) {
     for (let index = period.end; index < Math.min(tokens.length, period.end + 5); index += 1) {
       const roles = rolesIn(index, index + 1);
       if (roles.has('activity')) { activity = index; continue; }
-      const head = headAt(index);
-      if (tokens[index].kind !== 'word' || (head && PRICE_WORDS.has(head.head))
+      if (tokens[index].kind !== 'word' || priceLabel(headAt(index))
         || roles.has('plan') || roles.has('account')) break;
     }
     if (activity < 0) return false;
     const next = tokens[activity + 1]?.kind === 'be' ? activity + 2 : activity + 1;
-    const predicate = headAt(next);
-    return !(predicate && PRICE_WORDS.has(predicate.head));
+    return !priceLabel(headAt(next));
   }
   // The head or bare copula immediately before the amount, chasing the same
   // qualifier chain: {head} for a predicate/billing_head label, or
@@ -97,7 +103,7 @@ function recognizeClause(clause) {
     const at = skipQualifiers(amountStart);
     const head = phrases.find((phrase) => (phrase.type === 'predicate' || phrase.type === 'billing_head')
       && phrase.end === at);
-    if (head) return { head: head.head };
+    if (head) return { head: head.head, phrase: head };
     if (tokens[at - 1]?.kind !== 'be') return null;
     return { copulaAt: at - 1, present: !isPastCopula(tokens[at - 1]) };
   }
@@ -133,9 +139,9 @@ function recognizeClause(clause) {
   }
   function assertedPriceLabel(amount, period, claimStart) {
     const label = labelBefore(amount.start);
-    if (label?.head && PRICE_WORDS.has(label.head)) return true;
+    if (label?.phrase && priceLabel(label.phrase)) return true;
     const suffix = suffixNounAfterPeriod(amount, period);
-    if (suffix && PRICE_WORDS.has(suffix.head)) return true;
+    if (priceLabel(suffix)) return true;
     if (!label || label.head) return false;
     return priceHeadIn(claimStart, label.copulaAt) || rolesIn(claimStart, label.copulaAt).has('plan');
   }
@@ -143,8 +149,7 @@ function recognizeClause(clause) {
   function pricingStartsAt(from, bound) {
     let pos = from;
     if (isWord(tokens[pos], JOIN_WORDS)) pos += 1;
-    const head = headAt(pos);
-    if (!((head && PRICE_WORDS.has(head.head)) || rolesIn(pos, pos + 1).has('plan'))) return false;
+    if (!(priceLabel(headAt(pos)) || rolesIn(pos, pos + 1).has('plan'))) return false;
     return tokens[pos + 1]?.kind === 'be' && pos + 2 <= bound;
   }
   function frontedPeriodComma(claimStart, at) {

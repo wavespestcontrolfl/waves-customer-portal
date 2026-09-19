@@ -39,10 +39,21 @@ describe('inactive supplemental period phrases', () => {
   );
 
   test.each(['a month ago', 'a year ago', 'a mo ago', 'a yr ago',
+    'a month or two ago', 'a year and a half ago', 'each month or so ago',
     'every yearbook', 'monthly-related', 'annualized-policy', 'the month',
     'a, month', 'each @ month', 'for the; year', 'each monthlies'])(
     'leaves temporal or unsupported syntax unresolved: %s', (text) => {
       expect(periods(text)).toEqual([]);
+    },
+  );
+
+  test.each(['$98/monthly visit', 'The $98/annual visit plan'])(
+    'scans punctuation-prefixed embedded periods: %s', (text) => {
+      const clause = recognize(text).clauses[0];
+      const phrase = clause.periodPhrases.find((candidate) => candidate.embedded);
+      expect(phrase).toBeDefined();
+      expect(phrase.tokens[0].text.slice(phrase.offsets.start, phrase.offsets.end)).toBe(phrase.text);
+      expect(['month', 'year']).toContain(phrase.period);
     },
   );
 
