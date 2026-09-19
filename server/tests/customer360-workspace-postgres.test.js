@@ -92,15 +92,18 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
     try {
       await mockPg('conversations').insert({ id: conversationId, channel: 'sms', contact_phone: phone, our_endpoint_id: '+12025550199' });
       await mockPg('messages').insert({ id: messageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: sid, body: args.message });
+      const legacyRow = { direction: 'inbound', from_phone: phone, to_phone: '+12025550199', twilio_sid: sid, message_body: args.message, is_read: false };
+      await mockPg('sms_log').insert({ ...legacyRow, metadata: {} });
       trigger.mockImplementationOnce(async (_key, _payload, options) => {
         await mockPg('notifications').insert({ id: notificationId, recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic committed bell',
           created_at: createdAt, read_at: new Date(), metadata: { dedupeKey: options.dedupeKey, payload: { twilioSid: 'SM-synthetic-retarget' } } });
+        // Receipt loss after the bell committed: the legacy row vanishes before the receipt write.
+        await mockPg('sms_log').where({ twilio_sid: sid }).delete();
         return { bellWritten: true, push: { sent: 1 } };
       });
-      await alertDelivery.dispatchUnknownSenderAlert(args); // No legacy row: receipt update returns zero.
+      await alertDelivery.dispatchUnknownSenderAlert(args); // Eligibility recorded; receipt update returns zero.
       expect(await mockPg('sms_reply_alert_claims').where({ phone }).first()).toBeUndefined();
-      await mockPg('sms_log').insert({ direction: 'inbound', from_phone: phone, to_phone: '+12025550199', twilio_sid: sid,
-        message_body: args.message, is_read: false, metadata: { sms_reply_eligible: true } });
+      await mockPg('sms_log').insert({ ...legacyRow, metadata: { sms_reply_eligible: true } });
       await alertDelivery.dispatchUnknownSenderAlert({ ...args, recovery: true });
       expect(trigger).toHaveBeenCalledTimes(1);
       expect((await mockPg('notifications').where({ id: notificationId }).first()).read_at).not.toBeNull();
