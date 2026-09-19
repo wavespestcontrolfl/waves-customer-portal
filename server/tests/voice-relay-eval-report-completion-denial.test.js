@@ -491,3 +491,41 @@ test.each([
   expect(grammar.reportClaimIsDenied(text, text, subjectAt, locationAt,
     findingVerb, precedingText)).toBe(denied);
 });
+
+test.each([
+  ['Talstar P was due to be applied to the exterior perimeter.', false],
+  ['Talstar P was due to have been applied to the exterior perimeter.', false],
+  ['Due to dry weather, Talstar P was applied to the exterior perimeter.', true],
+  ['Talstar P, not during this visit, was applied to the exterior perimeter.', false],
+  ['Talstar P was not exclusively applied to the exterior perimeter; it was also applied indoors.', true],
+  ["Talstar P wasn't solely applied to the exterior perimeter.", true],
+  ['We almost immediately applied Talstar P to the exterior perimeter.', true],
+  ['Talstar P was almost applied to the exterior perimeter.', false],
+  ['We almost finished applying Talstar P to the exterior perimeter.', false],
+])('review completion boundary: %s', (text, completed) => {
+  expect(grammar.reportHasCompletedPredicate(text, /\b(?:applied|applying)\b/.exec(text))).toBe(completed);
+});
+
+test.each([
+  ['Talstar P, not during this visit, was applied to the exterior perimeter.', true, ''],
+  ['Talstar P, not bait, was applied to the exterior perimeter.', false, ''],
+  ['We applied all products except for Talstar P to the exterior perimeter.', true, 'subject'],
+  ['We applied Talstar P everywhere except for the exterior perimeter.', true, 'location'],
+  ['Talstar P was not exclusively applied to the exterior perimeter; it was also applied indoors.', false, ''],
+  ["Talstar P wasn't solely applied to the exterior perimeter.", false, ''],
+  ['Talstar P was not applied to the exterior perimeter.', true, ''],
+  ['Talstar P was applied without trouble around the exterior perimeter.', false, ''],
+  ['Talstar P was applied without further delay to the exterior perimeter.', false, ''],
+  ['We treated the exterior perimeter without Talstar P.', true, ''],
+  ['We left without applying Talstar P to the exterior perimeter.', true, ''],
+  ['We applied Talstar P to the exterior perimeter, if anything, more thoroughly than usual.', false, ''],
+  ['If anything, including Talstar P, was applied to the exterior perimeter, it should be in the report.', true, ''],
+  ['If it rained, Talstar P was applied to the exterior perimeter.', true, ''],
+])('review denial boundary: %s', (text, denied, precedingOwner) => {
+  const subjectAt = text.indexOf('Talstar P');
+  const locationAt = text.indexOf('exterior perimeter');
+  const precedingAt = precedingOwner === 'subject' ? subjectAt : locationAt;
+  const precedingText = precedingOwner ? text.slice(0, precedingAt) : '';
+  expect(grammar.reportClaimIsDenied(text, text, subjectAt, locationAt,
+    /\b(?:applied|applying|treated)\b/.exec(text), precedingText)).toBe(denied);
+});

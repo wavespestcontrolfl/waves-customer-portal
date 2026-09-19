@@ -1835,9 +1835,9 @@ const REPORT_BASE_TREATMENT_VERB_RE = /^(?:apply|use|spray|treat|place)$/i;
 
 const REPORT_COMPLETED_GERUND_RE = /^(?:applying|spraying|treating|placing|using)$/i;
 
-const REPORT_COMPLETED_PASSIVE_RE = /(?:\b(?:was|were|got)(?:n['’]t\s+(?:only|just|merely|simply))?|\bdid(?:n['’]t\s+(?:only|just|merely|simply))?\s+(?:not\s+(?:only|just|merely|simply)\s+)?(?:(?:\w+ly|already|also|just|now)\s+)*get|(?:\b(?:has|have|had)(?:n['’]t\s+(?:only|just|merely|simply))?|['’](?:s|d|ve))(?:\s+(?:\w+ly|already|also|just|now))*\s+been)\s+(?:not\s+(?:only|just|merely|simply)\s+)?(?:(?:\w+ly|already|also|just|now)\s+)*$/i;
+const REPORT_COMPLETED_PASSIVE_RE = /(?:\b(?:was|were|got)(?:n['’]t\s+(?:only|just|merely|simply|exclusively|solely))?|\bdid(?:n['’]t\s+(?:only|just|merely|simply|exclusively|solely))?\s+(?:not\s+(?:only|just|merely|simply|exclusively|solely)\s+)?(?:(?:\w+ly|already|also|just|now)\s+)*get|(?:\b(?:has|have|had)(?:n['’]t\s+(?:only|just|merely|simply|exclusively|solely))?|['’](?:s|d|ve))(?:\s+(?:\w+ly|already|also|just|now))*\s+been)\s+(?:not\s+(?:only|just|merely|simply|exclusively|solely)\s+)?(?:(?:\w+ly|already|also|just|now)\s+)*$/i;
 
-const REPORT_NONCOMPLETION_GOVERNOR_RE = /(?:\b(?:(?:about|ready)\s+to|prepar(?:e[sd]?|ing)\s+to)(?:\s+(?:\w+ly|already|just|now))*(?:\s+(?:have(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?|be))?(?:\s+(?:\w+ly|already|just|now))*|\b(?:supposed|expect(?:s|ed|ing)?|requir(?:e[sd]?|ing)|meant|schedul(?:e[sd]?|ing)|instruct(?:s|ed|ing)?|ask(?:s|ed|ing)?|told|direct(?:s|ed|ing)?|order(?:s|ed|ing)?|need(?:s|ed|ing)?|intend(?:s|ed|ing)?|plan(?:s|ned|ning)?|attempt(?:s|ed|ing)?|tr(?:y|ies|ied|ying)|hop(?:e[sd]?|ing)|failed|unable|refus(?:e[sd]?|ing)|declin(?:e[sd]?|ing)|forgot(?:ten)?|forget(?:s|ting)?|neglect(?:s|ed|ing)?|pretend(?:s|ed|ing)?|want(?:s|ed)?|ought)\s+(?:(?:me|us|you|him|her|them|(?:(?:the|our|your|their)\s+)?(?:[\w'’-]+\s+){0,3}(?:technician|tech|crew|team)|[\w\x27\u2019-]+(?:\s+[\w\x27\u2019-]+){0,2})\s+)?to(?:\s+(?:\w+ly|already|just|now))*(?:\s+(?:have(?:\s+(?:\w+ly|already|just|now))*(?:\s+been|(?:\s+(?!(?:and|but|or|after|before|when|while|until|since|because|if|unless|that|which|who|was|were|is|are|has|have|had|did|applied|treated|sprayed|used|placed|put|got|received|finished|completed)\b)[\w'’-]+){1,6})?|be))?(?:\s+(?:\w+ly|already|just|now))*|\bplan(?:s|ned|ning)?\s+on\s+having(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?(?:\s+(?:\w+ly|already|just|now))*|\bimagin(?:e[sd]?|ing)\s+(?:that\s+)?(?:i|we|you|he|she|they|it)\s+(?:(?:had|has|have|was|were|already|just|now)\s+)*)\s*$/i;
+const REPORT_NONCOMPLETION_GOVERNOR_RE = /(?:\b(?:(?:about|due|ready)\s+to|prepar(?:e[sd]?|ing)\s+to)(?:\s+(?:\w+ly|already|just|now))*(?:\s+(?:have(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?|be))?(?:\s+(?:\w+ly|already|just|now))*|\b(?:supposed|expect(?:s|ed|ing)?|requir(?:e[sd]?|ing)|meant|schedul(?:e[sd]?|ing)|instruct(?:s|ed|ing)?|ask(?:s|ed|ing)?|told|direct(?:s|ed|ing)?|order(?:s|ed|ing)?|need(?:s|ed|ing)?|intend(?:s|ed|ing)?|plan(?:s|ned|ning)?|attempt(?:s|ed|ing)?|tr(?:y|ies|ied|ying)|hop(?:e[sd]?|ing)|failed|unable|refus(?:e[sd]?|ing)|declin(?:e[sd]?|ing)|forgot(?:ten)?|forget(?:s|ting)?|neglect(?:s|ed|ing)?|pretend(?:s|ed|ing)?|want(?:s|ed)?|ought)\s+(?:(?:me|us|you|him|her|them|(?:(?:the|our|your|their)\s+)?(?:[\w'’-]+\s+){0,3}(?:technician|tech|crew|team)|[\w\x27\u2019-]+(?:\s+[\w\x27\u2019-]+){0,2})\s+)?to(?:\s+(?:\w+ly|already|just|now))*(?:\s+(?:have(?:\s+(?:\w+ly|already|just|now))*(?:\s+been|(?:\s+(?!(?:and|but|or|after|before|when|while|until|since|because|if|unless|that|which|who|was|were|is|are|has|have|had|did|applied|treated|sprayed|used|placed|put|got|received|finished|completed)\b)[\w'’-]+){1,6})?|be))?(?:\s+(?:\w+ly|already|just|now))*|\bplan(?:s|ned|ning)?\s+on\s+having(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?(?:\s+(?:\w+ly|already|just|now))*|\bimagin(?:e[sd]?|ing)\s+(?:that\s+)?(?:i|we|you|he|she|they|it)\s+(?:(?:had|has|have|was|were|already|just|now)\s+)*)\s*$/i;
 
 const REPORT_NONCOMPLETION_ASSURANCE_GOVERNOR_RE = new RegExp(
   `\\b(?:(?:attempt(?:s|ed|ing)?|tr(?:y|ies|ied|ying)|fail(?:s|ed|ing)?|work(?:s|ed|ing)?)(?:\\s+(?:\\w+ly|hard))*`
@@ -1848,22 +1848,22 @@ const REPORT_NONCOMPLETION_ASSURANCE_GOVERNOR_RE = new RegExp(
   'i',
 );
 
-const REPORT_NONCOMPLETION_MODIFIER_RE = /\b(?:almost|nearly)(?:\s+(?:has|have|had|was|were|get|got|been|did)){0,2}(?:\s+(?:\w+ly|already|also|just|now))*\s*$/i;
+const REPORT_NONCOMPLETION_MODIFIER_RE = /\b(?:almost|nearly)(?!\s+immediately\b)(?:\s+(?:has|have|had|was|were|get|got|been|did)){0,2}(?:\s+(?:\w+ly|already|also|just|now))*\s*$/i;
 
 function reportWithoutNominalContrast(text, findingPositions = []) {
   return text.replace(/,\s*(?:but\s+)?not\s+([^,;.!?]+),(?=\s*(?:was|were|has|have|had|got)\b)/gi,
     (contrast, nominal, at) => findingPositions.some((position) => position >= at && position < at + contrast.length)
       || CLAUSE_FINITE_PREDICATE_RE.test(nominal) || REPORT_FINDING_VERB_RE.test(nominal)
       || !/^(?:[\w'’-]+\s+){0,4}[\w'’-]+\s*$/i.test(nominal)
-      || /\b(?:even|once|twice|yet|ever|always|often|again|anymore|today|yesterday|tomorrow|at\s+all|(?!(?:family|fly|butterfly|dragonfly)\b)\w+ly)\b/i.test(nominal)
+      || /\b(?:during|even|once|twice|yet|ever|always|often|again|anymore|today|yesterday|tomorrow|at\s+all|(?!(?:family|fly|butterfly|dragonfly)\b)\w+ly)\b/i.test(nominal)
       ? contrast : ' '.repeat(contrast.length));
 }
 
 function reportHasCompletedPredicate(affirmed, findingVerb) {
   if (!findingVerb) return false;
   const prefix = reportWithoutNominalContrast(affirmed).slice(0, findingVerb.index)
-    .replace(/\b(was|were|has|have|had|did)n['’]t\s+(?:only|just|merely|simply)\b/gi, '$1 ')
-    .replace(/\bnot\s+(?:only|just|merely|simply)\b/gi, ' ')
+    .replace(/\b(was|were|has|have|had|did)n['’]t\s+(?:only|just|merely|simply|exclusively|solely)\b/gi, '$1 ')
+    .replace(/\bnot\s+(?:only|just|merely|simply|exclusively|solely)\b/gi, ' ')
     .replace(/\bdid\s*,[^,;.!?]+,\s*/gi, 'did ')
     .replace(/^\s*(?:although|though|while)\b[^,]*,\s*/i, '');
   const predicateIntroduction = prefix.replace(/\b(?:complet(?:e|ed)|finish(?:ed)?|done|manag(?:e|ed)\s+to|succeed(?:ed)?\s+(?:in|at))\s*$/i, '');
@@ -1887,9 +1887,12 @@ function reportHasCompletedPredicate(affirmed, findingVerb) {
 }
 
 function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb, precedingText) {
-  if (/(?:\b(?:anything|all)\s+but|\bexcept(?:\s+the)?)\s*$/i.test(precedingText)
+  if (/(?:\b(?:anything|all)\s+but|\bexcept(?:\s+for)?(?:\s+the)?)\s*$/i.test(precedingText)
       || (!findingVerb && /\bor\s*$/i.test(precedingText))) return true;
-  if (propositionIsExplicitlyDenied(affirmed, Math.min(subjectAt, locationAt), findingVerb)) return true;
+  const affirmedWithoutFocus = affirmed.replace(/(?:\bnot|n['’]t)\s+(?:exclusively|solely)\b/gi,
+    (focus) => ' '.repeat(focus.length));
+  if (propositionIsExplicitlyDenied(affirmedWithoutFocus,
+    Math.min(subjectAt, locationAt), findingVerb)) return true;
   // A trailing inquiry/duration adjunct does not condition the finding.
   // Keep markers before the matched evidence, and true trailing conditions.
   const claimOffset = affirmed.indexOf(claim);
@@ -1898,6 +1901,9 @@ function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb
   const tailAt = claimOffset >= 0 && subjectAt >= 0 && locationAt >= 0
     ? Math.max(0, evidenceEnd - claimOffset) : claim.length;
   const maskUnownedConditions = (text, offset) => text
+    .replace(/\bif\s+anything(?=\s*,)/gi, (idiom, at) => (
+      offset + at >= evidenceEnd ? ' '.repeat(idiom.length) : idiom
+    ))
     .replace(/\beven\s+if\b(?:\s*,[^,;.!?]+,)?[^,;.!?]*(?:,|(?=[;.!?]|$))/gi, (condition, at) => {
       const start = offset + at;
       const end = start + condition.length;
@@ -1914,8 +1920,8 @@ function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb
   if (subjectAt < 0 || locationAt < 0) return false;
   const lastAt = Math.max(subjectAt, locationAt, findingVerb ? findingVerb.index : 0) + 1;
   const denyingEvidence = maskUnownedConditions(
-    reportWithoutNominalContrast(affirmed, [subjectAt, locationAt]), 0,
-  ).replace(/\bwithout\s+(?:(?:any|an?)\s+)?(?:issues?|delays?|interruptions?|incidents?|problems?|complications?|difficult(?:y|ies))\b/gi,
+    reportWithoutNominalContrast(affirmedWithoutFocus, [subjectAt, locationAt]), 0,
+  ).replace(/\bwithout\s+(?:(?:any|an?)\s+)?(?:further\s+)?(?:issues?|delays?|interruptions?|incidents?|problems?|complications?|difficult(?:y|ies)|trouble)\b/gi,
     (modifier) => ' '.repeat(modifier.length));
   return deniedSpans(denyingEvidence).some(([start, end]) => firstAt < end && lastAt > start);
 }
