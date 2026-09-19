@@ -147,6 +147,37 @@ test.each([
 });
 
 test.each([
+  ['That said, check the invoice, Talstar P was applied to the exterior perimeter.', false],
+  ['That said, check that Talstar P was applied to the exterior perimeter.', true],
+])('a complement before the instruction does not govern its finding: %s', (text, instruction) => {
+  expect(grammar.reportFindingIsInstruction(text, text.indexOf('Talstar P'),
+    text.indexOf('exterior perimeter'), /applied/.exec(text), text.length)).toBe(instruction);
+});
+
+test.each([
+  ['Check the invoice, a technician from our Bradenton service team applied Talstar P to the exterior perimeter.', false],
+  ['Check that a technician from our Bradenton service team applied Talstar P to the exterior perimeter.', true],
+  ['Please have, as discussed, a technician from our local Bradenton pest control team carefully put Talstar P around the exterior perimeter.', true],
+  ['Check the invoice, a technician from our local Bradenton pest control team carefully put Talstar P around the exterior perimeter.', false],
+])('a modified actor subject keeps its governing scope: %s', (text, instruction) => {
+  expect(grammar.reportFindingIsInstruction(text, text.indexOf('Talstar P'),
+    text.indexOf('exterior perimeter'), /applied/.exec(text), text.length)).toBe(instruction);
+});
+
+test.each([
+  ['Please have, as discussed, a technician from our Bradenton service team put Talstar P around the exterior perimeter.', true],
+  ['We have, as discussed, a technician from our Bradenton service team put Talstar P around the exterior perimeter.', false],
+  ['Have, as discussed, a technician from our Bradenton service team put Talstar P around the exterior perimeter.', true],
+  ['We had, as discussed, a technician from our Bradenton service team put Talstar P around the exterior perimeter.', false],
+  ['Please get, as discussed, a technician from our Bradenton service team to put Talstar P around the exterior perimeter.', true],
+  ['We got, as discussed, a technician from our Bradenton service team to put Talstar P around the exterior perimeter.', false],
+  ['Please have the invoice, as discussed, a technician from our Bradenton service team put Talstar P around the exterior perimeter.', false],
+])('an interrupted causative request keeps only its own finding: %s', (text, instruction) => {
+  expect(grammar.reportFindingIsInstruction(text, text.indexOf('Talstar P'),
+    text.indexOf('exterior perimeter'), /put/.exec(text), text.length)).toBe(instruction);
+});
+
+test.each([
   ['Check the invoice, we managed to apply Talstar P around the exterior perimeter.', false],
   ['Check that we managed to apply Talstar P around the exterior perimeter.', true],
   ['Check the invoice, we applied Talstar P around the exterior perimeter.', false],

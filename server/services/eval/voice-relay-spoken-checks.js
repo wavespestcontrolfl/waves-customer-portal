@@ -1782,6 +1782,7 @@ const REPORT_FINITE_PREDICATE_RE = new RegExp(`(?:${CLAUSE_FINITE_PREDICATE_RE.s
 function reportFindingIsInstruction(affirmed, subjectAt, locationAt, findingVerb, findingEvidenceEnd) {
   const firstFindingAt = Math.min(subjectAt, locationAt, findingVerb ? findingVerb.index : Infinity);
   const actorSubject = /(?:i|we|you|he|she|they|it|(?:(?:the|our|your|their)\s+(?:[\w'’-]+(?:\s+and\s+[\w'’-]+)?\s+){0,4})?(?:technician|tech|customer|client|homeowner|caller|crew|team))/.source;
+  const modifiedActorSubject = /(?:(?:a|an|the|our|your|their)\s+)?(?:technician|tech|customer|client|homeowner|caller|crew|team)(?:\s+(?:from|on|with|at|of|for)(?:\s+[\w'’-]+){1,6})?/.source;
   const subjectAside = new RegExp(`(^|,\\s*)(\\s*${actorSubject}(?:\\s+(?:(?:am|is|are|was|were)\\s+(?:asked|requested)|(?:has|have|had)\\s+been\\s+(?:asked|requested)|am|is|are|was|were|do|does|did|has|have|had|will|would|should|can|could|may|might|must|shall))?),\\s*[^,]+,\\s*`, 'gi');
   const completedAssurance = /(?:\b(?:i|we|you|he|she|they|(?:(?:the|our|your|their)\s+)?(?:technician|tech|customer|client|homeowner|caller|crew|team))\s+did\s+|^\s*(?:i|we|they)\s+)(?:(?:already|also|just|now|\w+ly)\s+)*(?:make\s+sure|ensure)\b/i;
   const commaEvidence = affirmed.slice(0, firstFindingAt)
@@ -1796,23 +1797,29 @@ function reportFindingIsInstruction(affirmed, subjectAt, locationAt, findingVerb
     const right = affirmed.slice(commaAt + 1, findingEvidenceEnd);
     const clauseRight = right.replace(subjectAside, '$1$2 ');
     const instructionLeft = left.replace(completedAssurance, '');
-    const complement = /\b(that|whether|if)\b([^.!?;]*)$/i.exec(left);
+    const instruction = REPORT_INSTRUCTION_RE.exec(instructionLeft);
+    const complement = instruction
+      && /\b(that|whether|if)\b([^.!?;]*)$/i.exec(instructionLeft.slice(instruction.index));
     const complementAdjunct = complement
       && /^\s*,?\s*(?:after|before|while|when|although|because|since|despite|during|according\s+to|based\s+on|as)\b[^,]*$/i.test(complement[2]);
     const coordinatedFinding = /^(?!\s*(?:i|we|you|he|she|they|it)\b)\s*(?:[\w'’-]+\s+){1,6}(?:are|were|have)\b/i.test(right);
     const demonstrativeObject = complement && /^that$/i.test(complement[1])
       && /^\s+(?:[\w'’-]+\s+){0,3}[\w'’-]+\s*$/.test(complement[2])
       && !complementAdjunct && !coordinatedFinding;
-    const interruptedComplement = REPORT_INSTRUCTION_RE.test(instructionLeft)
-      && /\b(?:confirm|verify|check|tell\s+me)\s*$/i.test(left.replace(
-        /,\s*(?:after|before|while|when|although|because|since|despite|during|according\s+to|based\s+on|as)\b[^,]*$/i, '',
-      ))
-      && /^\s*(?:(?:after|before|while|when|although|because|since|despite|during|according\s+to|based\s+on|as)\b[^,]*,\s*)?(?:that|whether|if)\b/i.test(right);
-    if (interruptedComplement) continue;
-    if (REPORT_INSTRUCTION_RE.test(instructionLeft) && complement && !demonstrativeObject
+    const instructionBeforeAside = left.replace(
+      /,\s*(?:after|before|while|when|although|because|since|despite|during|according\s+to|based\s+on|as)\b[^,]*$/i, '',
+    );
+    const interruptedRequest = instruction && (
+      (/\b(?:confirm|verify|check|tell\s+me)\s*$/i.test(instructionBeforeAside)
+        && /^\s*(?:(?:after|before|while|when|although|because|since|despite|during|according\s+to|based\s+on|as)\b[^,]*,\s*)?(?:that|whether|if)\b/i.test(right))
+      || (/\b(?:have|get)\s*$/i.test(instructionBeforeAside)
+        && new RegExp(`^\\s*(?:(?:after|before|while|when|although|because|since|despite|during|according\\s+to|based\\s+on|as)\\b[^,]*,\\s*)?${modifiedActorSubject}\\s+(?:to\\s+)?(?:(?:already|also|just|now|\\w+ly)\\s+)*(?:apply|use|put|treat|spray|place)\\b`, 'i').test(right))
+    );
+    if (interruptedRequest) continue;
+    if (instruction && complement && !demonstrativeObject
         && (complementAdjunct
           || !REPORT_FINITE_PREDICATE_RE.test(complement[2]))) continue;
-    if (new RegExp(`^\\s*(?:${actorSubject}\\s+(?:(?:already|also|just|now|\\w+ly)\\s+)*|(?:[\\w'’-]+\\s+){1,6})${REPORT_FINITE_PREDICATE_RE.source}`, 'i').test(
+    if (new RegExp(`^\\s*(?:(?:${actorSubject}|${modifiedActorSubject})\\s+(?:(?:already|also|just|now|\\w+ly)\\s+)*|(?:[\\w'’-]+\\s+){1,6})${REPORT_FINITE_PREDICATE_RE.source}`, 'i').test(
       clauseRight,
     )) governingStart = commaAt + 1;
   }
