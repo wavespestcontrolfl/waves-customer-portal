@@ -147,6 +147,22 @@ test.each([
 });
 
 test.each([
+  ['The customer told me to confirm that Talstar P was applied to the exterior perimeter.', true],
+  ['The customer tells me to confirm that Talstar P was applied to the exterior perimeter.', true],
+  ['I was told to confirm that Talstar P was applied to the exterior perimeter.', true],
+  ['I am being told to confirm that Talstar P was applied to the exterior perimeter.', true],
+  ['The customer, according to the report, told me to confirm that Talstar P was applied to the exterior perimeter.', true],
+  ['I was, according to the report, told to confirm that Talstar P was applied to the exterior perimeter.', true],
+  ['The customer told me that Talstar P was applied to the exterior perimeter.', false],
+  ['I was told that Talstar P was applied to the exterior perimeter.', false],
+  ['The customer told me to confirm the invoice, Talstar P was applied to the exterior perimeter.', false],
+  ['I was told to confirm the invoice, Talstar P was applied to the exterior perimeter.', false],
+])('tell-recipient request governs only its own finding: %s', (text, instruction) => {
+  expect(grammar.reportFindingIsInstruction(text, text.indexOf('Talstar P'),
+    text.indexOf('exterior perimeter'), /applied/.exec(text), text.length)).toBe(instruction);
+});
+
+test.each([
   ['That said, check the invoice, Talstar P was applied to the exterior perimeter.', false],
   ['That said, check that Talstar P was applied to the exterior perimeter.', true],
 ])('a complement before the instruction does not govern its finding: %s', (text, instruction) => {
