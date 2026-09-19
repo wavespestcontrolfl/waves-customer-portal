@@ -713,6 +713,16 @@ describe('parseRawAddress — conversational words that are also state codes', (
     expect(parseRawAddress('123 Main St, Portland, or 97201')).toMatchObject({ state: 'OR', zip: '97201' });
     expect(parseRawAddress('123 Main St, Tulsa, OK 74103')).toMatchObject({ state: 'OK', zip: '74103' });
   });
+  test('a ZIP-less abbreviation that ends the address is still a state (codex r6 P1)', () => {
+    expect(parseRawAddress('123 Main St, Tulsa, OK')).toMatchObject({ state: 'OK' });
+    expect(parseRawAddress('123 Main St, Tulsa, OK.')).toMatchObject({ state: 'OK' });
+    expect(parseRawAddress('123 Main St, Boise, Id')).toMatchObject({ state: 'ID' });
+    expect(parseRawAddress('123 Main St, Tulsa OK 74103')).toMatchObject({ state: 'OK', zip: '74103' });
+    expect(normalizeLeadAddress({ raw: '123 Main St, Tulsa, OK' })).toMatchObject({ state: 'OK' });
+    expect(normalizeLeadAddress({ raw: '123 Main St, Boise, Id' })).toMatchObject({ state: 'ID' });
+    // …while a lowercase verb or a contraction before the word is still speech.
+    expect(parseRawAddress("123 Main St, Palmetto, it's in 34221")).toMatchObject({ state: '', zip: '34221' });
+  });
   test('punctuation inside a multi-word state name still reads the state (codex r5 P1)', () => {
     expect(parseRawAddress('123 Main St, Charlotte, North, Carolina 28202')).toMatchObject({ state: 'NC', zip: '28202' });
   });

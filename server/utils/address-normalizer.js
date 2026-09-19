@@ -281,15 +281,21 @@ function normalizeState(value) {
 // week of 2026-09-15). Punctuation or a ZIP next to the word is not enough
 // to tell the two apart (codex r5 P1), so THESE codes are a state only when
 // they are written as a deliberate abbreviation: uppercase in the source
-// ("Portland, OR 97201", "Boise, ID"), or starting their own segment
-// directly before a ZIP ("…, or 97201"). "OK" and "LA" are common all-caps
-// words ("OK", Los Angeles) and get only the segment+ZIP route. Every other
+// ("Portland, OR 97201", "Boise, ID"), or in address-tail position — the
+// whole terminal segment ("…, Tulsa, OK", "…, Boise, Id"; codex r6 P1) or
+// directly before a ZIP, preceded by a segment start or a capitalized
+// locality ("…, or 97201", "Tulsa OK 74103") but never by a lowercase
+// verb or a contraction ("I live in 34221", "it's in, I think"). "OK" and
+// "LA" are common all-caps words ("OK", Los Angeles) and get only the
+// address-tail route. Every other
 // code ("CA", "CO", "TX") and every full state name ("Kentucky") reads from
 // any position exactly as before, so unpunctuated ASR trailing speech
 // ("Venice, CA but I don't know the ZIP") keeps its explicit geography.
 const FILLER_STATE_CODES = new Set(['AL', 'DE', 'HI', 'ID', 'IN', 'LA', 'MA', 'ME', 'OH', 'OK', 'OR', 'PA']);
 const FILLER_CODES_UPPERCASE_AMBIGUOUS = new Set(['OK', 'LA']);
 const SEGMENT_PUNCTUATION = /[.,;:!?]/;
+// "OR" → "[Oo][Rr]": a case-insensitive literal inside a case-sensitive regex.
+const anyCase = (token) => token.split('').map((c) => `[${c.toUpperCase()}${c.toLowerCase()}]`).join('');
 const TRAILING_COUNTRY = /\s*(?:usa|u\.s\.a\.?|u\.s\.|us|united states(?: of america)?)\s*[.,;:!?]?\s*$/i;
 function findState(value) {
   // Country first, before any punctuation rewrite ("U.S.A." must still
@@ -309,7 +315,11 @@ function findState(value) {
       match = segmented.match(new RegExp(`\\b(${tok})\\b`, 'i'));
     } else {
       match = (!FILLER_CODES_UPPERCASE_AMBIGUOUS.has(token) && segmented.match(new RegExp(`\\b(${tok})\\b`)))
-        || segmented.match(new RegExp(`(?:^|${SEGMENT_PUNCTUATION.source}\\s*)(${tok})(?=\\s+\\d{5}(?:-\\d{4})?\\b)`, 'i'))
+        // Case-sensitive on purpose: the code may be in any case ("Id"),
+        // but the preceding locality must actually be capitalized.
+        || segmented.match(new RegExp(
+          `(?:^|${SEGMENT_PUNCTUATION.source}\\s*|(?:^|\\s)[A-Z][A-Za-z]*\\s+)(${anyCase(token)})(?=\\s*${SEGMENT_PUNCTUATION.source}?\\s*(?:$|\\d{5}(?:-\\d{4})?\\b))`,
+        ))
         || null;
     }
     if (match) return { raw: match[1], state: normalizeState(token) };
