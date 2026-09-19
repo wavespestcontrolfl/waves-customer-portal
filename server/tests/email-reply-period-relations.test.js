@@ -109,3 +109,21 @@ describe('inactive email reply period relations', () => {
     expect(record.connector).toEqual({ start: record.amount.end, end: record.period.start, text: 'is' });
   });
 });
+
+// Pre-push audit P1: activity cadence must not read past the claim boundary.
+describe('activity cadence stays inside its claim', () => {
+  const { recognizeEmailReplyPeriodRelations } = require('../services/email/email-reply-period-relations');
+  const relations = (text) => recognizeEmailReplyPeriodRelations(text).clauses.flatMap((clause) => clause.periodRelations);
+  test.each([
+    'The plan is $98 monthly but reminders are optional',
+    'The plan is $98 monthly, and service reminders are optional',
+    'Our price is $98 monthly or reminders stop',
+  ])('a conjunction-separated activity statement does not exclude the total: %s', (text) => {
+    expect(relations(text).map((relation) => relation.relation)).toContain('plan_total');
+    expect(relations(text).map((relation) => relation.evidence.reason)).not.toContain('activity_cadence');
+  });
+  test('activity cadence inside the same claim still excludes', () => {
+    expect(relations('Monthly reminders mention the $98 price').map((relation) => relation.evidence.reason))
+      .toEqual(['activity_cadence']);
+  });
+});

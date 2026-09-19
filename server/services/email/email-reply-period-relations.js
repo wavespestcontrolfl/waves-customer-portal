@@ -83,10 +83,12 @@ function recognizeClause(clause) {
       q = phrases.find((p) => p.type === 'qualifier' && p.end === at)) at = q.start;
     return at;
   }
-  function activityCadence(period) {
+  // Bounded to the current claim: a conjunction or comma ends the claim, so
+  // "The plan is $98 monthly but reminders are optional" keeps its total.
+  function activityCadence(period, claimEnd) {
     if (!ACTIVITY_PERIOD_FORMS.has(period.text)) return false;
     let activity = -1;
-    for (let index = period.end; index < Math.min(tokens.length, period.end + 5); index += 1) {
+    for (let index = period.end; index < Math.min(claimEnd, period.end + 5); index += 1) {
       const roles = rolesIn(index, index + 1);
       if (roles.has('activity')) { activity = index; continue; }
       if (tokens[index].kind !== 'word' || priceLabel(headAt(index))
@@ -94,7 +96,7 @@ function recognizeClause(clause) {
     }
     if (activity < 0) return false;
     const next = tokens[activity + 1]?.kind === 'be' ? activity + 2 : activity + 1;
-    return !priceLabel(headAt(next));
+    return next >= claimEnd || !priceLabel(headAt(next));
   }
   // The head or bare copula immediately before the amount, chasing the same
   // qualifier chain: {head} for a predicate/billing_head label, or
@@ -188,10 +190,10 @@ function recognizeClause(clause) {
     return isWord(token, CLAIM_BREAK_WORDS) && !(token.text === 'and' && continuesPrice(claimStart, at));
   }
 
-  function classify(amount, period, gap, claimStart, from, to) {
+  function classify(amount, period, gap, claimStart, claimEnd, from, to) {
     if (bareMeasurement(amount)) return { relation: 'excluded', reason: 'bare_measurement' };
     if (tiedToUnit(amount)) return { relation: 'excluded', reason: 'visit_tied' };
-    if (activityCadence(period)) return { relation: 'excluded', reason: 'activity_cadence' };
+    if (activityCadence(period, claimEnd)) return { relation: 'excluded', reason: 'activity_cadence' };
     if (paymentAssertion(amount, period)) return { relation: 'plan_total', reason: 'payment_assertion' };
     if (explicitCurrencyPeriod(amount, period, gap)) return { relation: 'plan_total', reason: 'direct_currency_period' };
     const roles = rolesIn(from, to);
@@ -234,7 +236,7 @@ function recognizeClause(clause) {
       const gap = tokens.slice(earlier.data.end, later.pos);
       const from = pair > 1 ? anchors[pair - 2].data.end : claimStart;
       const to = pair + 1 < anchors.length ? anchors[pair + 1].pos : at;
-      const result = classify(amountAnchor.data, periodAnchor.data, gap, claimStart, from, to);
+      const result = classify(amountAnchor.data, periodAnchor.data, gap, claimStart, at, from, to);
       periodRelations.push({
         amount: amountAnchor.data,
         period: periodAnchor.data,
