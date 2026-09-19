@@ -564,3 +564,75 @@ test('a relative report-access assumption does not condition completed treatment
   expect(grammar.reportClaimIsDenied(text, text, text.indexOf('Talstar P'),
     text.indexOf('exterior perimeter'), /applied/.exec(text), '')).toBe(false);
 });
+
+test.each([
+  ['We promised to have applied Talstar P to the exterior perimeter by noon.', false],
+  ['We agreed to have applied Talstar P to the exterior perimeter by noon.', false],
+  ['We planned to end up applying Talstar P to the exterior perimeter.', false],
+  ['We almost ended up applying Talstar P to the exterior perimeter.', false],
+  ['We did not end up applying Talstar P to the exterior perimeter.', false],
+  ['We ended up applying Talstar P to the exterior perimeter.', true],
+  ['We wound up applying Talstar P to the exterior perimeter.', true],
+])('commitment and resultative governors retain completion scope: %s', (text, completed) => {
+  expect(grammar.reportHasCompletedPredicate(text, /\b(?:applied|applying)\b/.exec(text))).toBe(completed);
+});
+
+test.each([
+  ['Talstar P was only partially applied to the exterior perimeter.', false],
+  ['Talstar P was partially applied to the exterior perimeter.', false],
+  ['Talstar P was incompletely applied to the exterior perimeter.', false],
+  ['Talstar P was fully applied to the exterior perimeter.', true],
+])('partial completion modifiers retain predicate scope: %s', (text, completed) => {
+  expect(grammar.reportHasCompletedPredicate(text, /applied/.exec(text))).toBe(completed);
+});
+
+test('bare provided condition differs from the provided treatment verb', () => {
+  const conditional = 'Provided Talstar P was applied to the exterior perimeter, the report is ready.';
+  expect(grammar.reportFindingIsUncertain(conditional)).toBe(true);
+
+  const treatment = 'We provided Talstar P to the exterior perimeter.';
+  expect(grammar.reportFindingIsUncertain(treatment)).toBe(false);
+});
+
+test('other-than exclusion denies only the excluded product', () => {
+  const excluded = 'We applied every product other than Talstar P to the exterior perimeter.';
+  expect(grammar.reportClaimIsDenied(excluded, excluded, excluded.indexOf('Talstar P'),
+    excluded.indexOf('exterior perimeter'), /applied/.exec(excluded),
+    excluded.slice(0, excluded.indexOf('Talstar P')))).toBe(true);
+
+  const included = 'We applied Talstar P and every other product to the exterior perimeter.';
+  expect(grammar.reportClaimIsDenied(included, included, included.indexOf('Talstar P'),
+    included.indexOf('exterior perimeter'), /applied/.exec(included), '')).toBe(false);
+
+  for (const spacing of [' ', '  ']) {
+    const focused = `We applied nothing${spacing}other than Talstar P to the exterior perimeter.`;
+    expect(grammar.reportClaimIsDenied(focused, focused, focused.indexOf('Talstar P'),
+      focused.indexOf('exterior perimeter'), /applied/.exec(focused),
+      focused.slice(0, focused.indexOf('Talstar P')))).toBe(false);
+  }
+});
+
+test('negated doubt remains a completed certainty assertion', () => {
+  const certain = 'We do not doubt that Talstar P was applied to the exterior perimeter.';
+  const certainVerb = /applied/.exec(certain);
+  expect(grammar.reportHasCompletedPredicate(certain, certainVerb)).toBe(true);
+  expect(grammar.reportFindingIsUncertain(certain)).toBe(false);
+  expect(grammar.reportClaimIsDenied(certain, certain, certain.indexOf('Talstar P'),
+    certain.indexOf('exterior perimeter'), certainVerb, '')).toBe(false);
+
+  const doubtful = 'We doubt that Talstar P was applied to the exterior perimeter.';
+  expect(grammar.reportFindingIsUncertain(doubtful)).toBe(true);
+  expect(grammar.reportClaimIsDenied(doubtful, doubtful, doubtful.indexOf('Talstar P'),
+    doubtful.indexOf('exterior perimeter'), /applied/.exec(doubtful), '')).toBe(true);
+});
+
+test('emphatic imperative put differs from a completed past put', () => {
+  const imperative = 'Please do put Talstar P around the exterior perimeter.';
+  expect(grammar.reportFindingIsInstruction(imperative, imperative.indexOf('Talstar P'),
+    imperative.indexOf('exterior perimeter'), /put/.exec(imperative), imperative.length)).toBe(true);
+
+  const completed = 'We did put Talstar P around the exterior perimeter.';
+  expect(grammar.reportFindingIsInstruction(completed, completed.indexOf('Talstar P'),
+    completed.indexOf('exterior perimeter'), /put/.exec(completed), completed.length)).toBe(false);
+  expect(grammar.reportHasCompletedPredicate(completed, /put/.exec(completed))).toBe(true);
+});
