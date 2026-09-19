@@ -1,5 +1,5 @@
 const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
-const { loadAnnualOfferRow, annualOfferVerdict, estimateIdsFromContent, annualHandoffGuard, rewriteWithheldEstimateLinks, withheldLinkPolicyForTemplate, LONG_LINK_TOKEN_RE } = require('../services/estimate-annual-guard');
+const { loadAnnualOfferRow, annualOfferVerdict, estimateIdsFromContent, annualHandoffGuard, rewriteWithheldEstimateLinks, withheldLinkPolicyForTemplate, withheldLinkPolicyForSmsPurpose, LONG_LINK_TOKEN_RE } = require('../services/estimate-annual-guard');
 const { ESTIMATE_TOKEN_RE } = require('../routes/estimate-public');
 
 const PLAN_LINE = { service: 'termite_bait', plan: 'annual_protection', stations: 15 };
@@ -656,5 +656,31 @@ describe('withheldLinkPolicyForTemplate (round 9 structural fix, P1: template-ke
     expect(withheldLinkPolicyForTemplate(undefined)).toBe('refuse');
     expect(withheldLinkPolicyForTemplate(null)).toBe('refuse');
     expect(withheldLinkPolicyForTemplate('')).toBe('refuse');
+  });
+});
+
+describe('withheldLinkPolicyForSmsPurpose (round 11 structural fix, P1: purpose/message-type-keyed rewrite for SMS)', () => {
+  test('purpose "payment_receipt" resolves to "rewrite" — the customer-linked deposit receipt path', () => {
+    expect(withheldLinkPolicyForSmsPurpose('payment_receipt')).toBe('rewrite');
+    expect(withheldLinkPolicyForSmsPurpose('payment_receipt', 'some_other_message_type')).toBe('rewrite');
+  });
+
+  test('message-type "deposit_receipt" resolves to "rewrite" even when purpose does not match — covers the LEAD path (estimate_followup on the immediate send, conversational on a scheduled replay) and any scheduled retry that only carries the message type', () => {
+    expect(withheldLinkPolicyForSmsPurpose('estimate_followup', 'deposit_receipt')).toBe('rewrite');
+    expect(withheldLinkPolicyForSmsPurpose('conversational', 'deposit_receipt')).toBe('rewrite');
+    expect(withheldLinkPolicyForSmsPurpose(undefined, 'deposit_receipt')).toBe('rewrite');
+  });
+
+  test('every other purpose/message-type combination resolves to the default "refuse"', () => {
+    expect(withheldLinkPolicyForSmsPurpose('conversational')).toBe('refuse');
+    expect(withheldLinkPolicyForSmsPurpose('appointment', 'service_complete')).toBe('refuse');
+    expect(withheldLinkPolicyForSmsPurpose('marketing_offers', 'seasonal_promo')).toBe('refuse');
+  });
+
+  test('missing/blank/non-string args resolve to "refuse", never throw', () => {
+    expect(withheldLinkPolicyForSmsPurpose()).toBe('refuse');
+    expect(withheldLinkPolicyForSmsPurpose(undefined, undefined)).toBe('refuse');
+    expect(withheldLinkPolicyForSmsPurpose(null, null)).toBe('refuse');
+    expect(withheldLinkPolicyForSmsPurpose('', '')).toBe('refuse');
   });
 });

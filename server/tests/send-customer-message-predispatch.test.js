@@ -44,12 +44,20 @@ jest.mock('../services/estimate-annual-guard', () => ({
   // Round 8 P1: default no-op (nothing rewritten) so every existing test
   // in this file is unaffected; the withheldLinkPolicy tests override it.
   rewriteWithheldEstimateLinks: jest.fn(async ({ text }) => ({ html: undefined, text, rewrittenIds: [] })),
+  // Round 11 structural fix (P1): default 'refuse' (like the real function
+  // for any non-receipt purpose/message-type) so every existing test in
+  // this file is unaffected — they all either pass an explicit
+  // withheldLinkPolicy or exercise the default-refuse path directly; the
+  // purpose-resolution mechanism itself is covered by
+  // estimate-annual-guard.test.js and estimate-deposits.test.js's
+  // scheduled-retry test.
+  withheldLinkPolicyForSmsPurpose: jest.fn(() => 'refuse'),
 }));
 
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { persistAudit } = require('../services/messaging/audit');
 const { sendViaTwilio } = require('../services/messaging/providers/twilio-sms');
-const { annualHandoffGuard, rewriteWithheldEstimateLinks } = require('../services/estimate-annual-guard');
+const { annualHandoffGuard, rewriteWithheldEstimateLinks, withheldLinkPolicyForSmsPurpose } = require('../services/estimate-annual-guard');
 
 const BASE_INPUT = {
   to: '+19415550142',
@@ -658,5 +666,44 @@ describe('annual-offer delivery guard at the provider handoff (delivery-guards s
 
     expect(rewriteWithheldEstimateLinks).not.toHaveBeenCalled();
     expect(result).toMatchObject({ sent: false, blocked: true, code: 'ANNUAL_OFFER_WITHHELD' });
+  });
+
+  // Round 11 structural fix (P1, pre-push audit on 029ae44d53): a scheduled
+  // retry of the deposit receipt SMS (scheduler.js's replayInput) carries
+  // NO explicit withheldLinkPolicy of its own — it forwards `purpose`
+  // (payment_receipt, via purposeForScheduledMessageType) and
+  // metadata.original_message_type (deposit_receipt, forwarded from the
+  // queued sms_log row's own message_type), exactly like this input. This
+  // pins that send-customer-message.js resolves the policy itself from
+  // those two labels (withheldLinkPolicyForSmsPurpose) instead of needing
+  // the retry path to pass one, so the retry is REWRITTEN, not refused.
+  test('round 11 (P1): a scheduled retry of the deposit receipt SMS (no explicit withheldLinkPolicy, purpose+message-type shaped like scheduler.js\'s replayInput) resolves "rewrite" and is sent with the link stripped', async () => {
+    const originalBody = 'Receipt: https://portal.wavespestcontrol.com/estimate/withheld-token-retry';
+    const rewrittenBody = 'Receipt: https://portal.wavespestcontrol.com';
+    withheldLinkPolicyForSmsPurpose.mockReturnValueOnce('rewrite');
+    rewriteWithheldEstimateLinks.mockResolvedValueOnce({ html: undefined, text: rewrittenBody, rewrittenIds: ['est-1'] });
+    runViaProviderHook();
+
+    const result = await sendCustomerMessage({
+      ...BASE_INPUT,
+      audience: 'customer',
+      purpose: 'payment_receipt',
+      body: originalBody,
+      estimateId: 'est-1',
+      entryPoint: 'scheduled_sms_cron',
+      metadata: { original_message_type: 'deposit_receipt', scheduled_sms_log_id: 'log-1' },
+      // No withheldLinkPolicy — this is the whole point of the fix.
+    });
+
+    // The resolver is consulted with exactly the two labels a retry
+    // carries — no explicit policy overrode it.
+    expect(withheldLinkPolicyForSmsPurpose).toHaveBeenCalledWith('payment_receipt', 'deposit_receipt');
+    expect(rewriteWithheldEstimateLinks).toHaveBeenCalledWith(expect.objectContaining({
+      text: expect.stringContaining('/estimate/withheld-token-retry'),
+    }));
+    expect(sendViaTwilio.mock.calls[0][0]).toMatchObject({
+      body: rewrittenBody, estimateId: null, estimateIds: [],
+    });
+    expect(result).toMatchObject({ sent: true, withheldLinksRewritten: ['est-1'] });
   });
 });

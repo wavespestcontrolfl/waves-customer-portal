@@ -346,6 +346,31 @@ function withheldLinkPolicyForTemplate(templateKey) {
   return RECEIPT_LINK_POLICY_TEMPLATE_KEYS.has(String(templateKey || '')) ? 'rewrite' : 'refuse';
 }
 
+// Pre-push audit P1 (029ae44d53 round 11): the SMS twin of
+// withheldLinkPolicyForTemplate — SMS has no per-provider templateKey (the
+// email boundary's equivalent), so this keys on whichever of two labels a
+// caller has: `purpose` ('payment_receipt' for a customer-linked deposit
+// receipt) and the stored sms_log `message_type` / metadata.
+// original_message_type ('deposit_receipt' — the SAME label for BOTH the
+// customer AND the lead audience, and for BOTH an immediate send and its
+// scheduled retry/requeue, unlike `purpose`, which diverges for a lead:
+// estimate_followup on the immediate send, conversational on a scheduled
+// replay via purposeForScheduledMessageType). Matching EITHER label is
+// enough to resolve 'rewrite' — a caller with neither gets the safe
+// 'refuse' default. estimate-deposits.js's sendDepositReceiptSms no longer
+// needs its own explicit override: every retry/requeue of that receipt
+// (scheduler.js's replayInput forwards the ORIGINAL sms_log.message_type
+// as metadata.original_message_type) resolves the SAME policy here,
+// structurally, the same way sendOne resolves the email side's.
+const RECEIPT_SMS_PURPOSES = new Set(['payment_receipt']);
+const RECEIPT_SMS_MESSAGE_TYPES = new Set(['deposit_receipt']);
+
+function withheldLinkPolicyForSmsPurpose(purpose, messageType) {
+  if (RECEIPT_SMS_PURPOSES.has(String(purpose || ''))) return 'rewrite';
+  if (RECEIPT_SMS_MESSAGE_TYPES.has(String(messageType || ''))) return 'rewrite';
+  return 'refuse';
+}
+
 module.exports = {
   loadAnnualOfferRow,
   annualOfferVerdict,
@@ -353,5 +378,6 @@ module.exports = {
   annualHandoffGuard,
   rewriteWithheldEstimateLinks,
   withheldLinkPolicyForTemplate,
+  withheldLinkPolicyForSmsPurpose,
   LONG_LINK_TOKEN_RE,
 };

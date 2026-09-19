@@ -314,11 +314,15 @@ describe('webhook + invoice credit', () => {
       to: '(941) 555-0100',
       purpose: 'payment_receipt',
       identityTrustLevel: 'phone_matches_customer',
-      // Round 8 P1 (SMS twin of deposit.receipt email's own
-      // withheldLinkPolicy 'rewrite'): the deposit is owed regardless of
-      // the annual offer's own state.
-      withheldLinkPolicy: 'rewrite',
+      // Round 11 structural fix (P1): no explicit withheldLinkPolicy any
+      // more — send-customer-message.js resolves 'rewrite' on its own from
+      // purpose payment_receipt / metadata.original_message_type
+      // deposit_receipt (estimate-annual-guard.js's
+      // withheldLinkPolicyForSmsPurpose), the SAME resolution a scheduled
+      // retry of this receipt gets.
+      metadata: expect.objectContaining({ original_message_type: 'deposit_receipt' }),
     }));
+    expect(sendCustomerMessage.mock.calls[0][0]).not.toHaveProperty('withheldLinkPolicy');
 
     // Webhook replay — the row is already received; no second text.
     await handleDepositIntentSucceeded(succeededPi);

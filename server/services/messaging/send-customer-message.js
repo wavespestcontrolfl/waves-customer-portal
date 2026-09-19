@@ -400,16 +400,33 @@ async function sendCustomerMessageCore(input) {
   // with what Twilio actually sends. Text-only (rewriteWithheldEstimateLinks
   // accepts html as undefined) since SMS has no html leg.
   //
+  // Round 11 structural fix (P1, pre-push audit on 029ae44d53): the policy
+  // is resolved HERE from the message's own purpose/message-type via
+  // withheldLinkPolicyForSmsPurpose — the SAME place both an immediate
+  // send AND a scheduled retry/requeue of it pass through — rather than
+  // relying on each caller to pass an explicit withheldLinkPolicy. A
+  // scheduled-SMS replay (scheduler.js) carries no explicit policy of its
+  // own; without this it would refuse a retried deposit receipt instead of
+  // rewriting it, exactly like the email retry sweep before sendOne
+  // resolved its policy from templateKey. An explicit sendInput.
+  // withheldLinkPolicy still wins when a caller passes one.
+  //
   // Clearing estimateId/estimateIds here (not just leaving content
   // derivation to find nothing) matches the email mechanism's own
   // sendEstimateIds = [] override: an explicit id surviving past the
   // rewrite would still union into the boundary guard's check and refuse
   // a body that no longer carries the link at all, defeating the rewrite.
+  // AnnualGuard.withheldLinkPolicyForSmsPurpose is cheap (a Set lookup) —
+  // resolved unconditionally so the channel/body-type check below stays a
+  // single flat condition instead of an extra nested if.
+  const AnnualGuard = require('../estimate-annual-guard');
+  const resolvedSmsWithheldLinkPolicy = sendInput.withheldLinkPolicy
+    || AnnualGuard.withheldLinkPolicyForSmsPurpose(sendInput.purpose, sendInput.metadata?.original_message_type);
   let withheldLinksRewritten;
-  if (sendInput.channel === 'sms' && sendInput.withheldLinkPolicy === 'rewrite'
-    && typeof sendInput.body === 'string') {
+  if (sendInput.channel === 'sms' && typeof sendInput.body === 'string'
+    && resolvedSmsWithheldLinkPolicy === 'rewrite') {
     try {
-      const { rewriteWithheldEstimateLinks } = require('../estimate-annual-guard');
+      const { rewriteWithheldEstimateLinks } = AnnualGuard;
       const db = require('../../models/db');
       const rewritten = await rewriteWithheldEstimateLinks({ db, text: sendInput.body });
       // Pre-push audit P1: the rewrite policy means "never refuse this
