@@ -1776,6 +1776,59 @@ function reportFindingIsUncertain(text) {
       .replace(/(^|,\s*|\b(?:based\s+on|after\s+(?:reviewing|checking|reading))\s+(?:the\s+)?report\s*,?\s*)(\s*(?:(?:yes|okay|certainly|absolutely)[,:]?\s+)?)(i|we)\s+can\s+(?:(?:definitely|certainly|confidently|clearly|conclusively|now|already|also|fully|absolutely)\s+)*(confirm|verify)\b(?![^.!?;]*\b(?:whether|if)\b)(?:\s+that\b)?/gi, '$1$2$3 $4'));
 }
 
+const REPORT_INSTRUCTION_RE = /(?:^\s*|[,:]\s*)(?:please\s+)?(?:apply|use|put|treat|spray|place|have(?!\s+(?:(?:not\s+(?:only|just|merely|simply)|already|also|just|now|\w+ly)\s+)*(?:had|been|applied|used|sprayed|treated|placed|put|got|received|succeeded|finished|completed|managed|confirmed|verified|checked)\b)|get|(?:(?:do|\w+ly)\s+)*(?:confirm|verify|check)|tell\s+me|let\s+me\s+know)\b|\b(?:[\w\x27\u2019-]+(?:\s+(?:need(?:s|ed)?|want(?:s|ed)?|ask(?:s|ed)?|request(?:s|ed)?|tells?|told)|['’]d\s+like|\s+would\s+like|(?:\s+(?:am|is|are|was|were)|['’](?:m|re|s))\s+(?:asking|requesting|telling))\s+(?:me|us|you|him|her|them|(?:(?:the|our|your|their)\s+)?(?:[\w'’-]+\s+){0,3}(?:technician|tech|crew|team)|[\w'’-]+(?:\s+[\w'’-]+){0,2})\s+to\s+(?:(?:\w+ly)\s+)*(?:confirm|verify|check|tell)|[\w\x27\u2019-]+(?:\s+(?:need(?:s|ed)?|want(?:s|ed)?|request(?:s|ed)?|ask(?:s|ed)?\s+for)|[\x27\u2019]d\s+like|\s+would\s+like)\s+(?:(?:a|your)\s+)?(?:confirmation|verification)\s+(?:that|whether|if)|please\s+let\s+me\s+know\s+(?:whether|if|that)|(?:ask(?:s|ed|ing)?|request(?:s|ed|ing)?)\s+(?:that|whether|if)|(?:(?:am|is|are|was|were)\s+(?:being\s+)?|(?:has|have|had)\s+been\s+|[\x27\u2019](?:ve|s|d)\s+been\s+)(?:(?:\w+ly)\s+)*(?:asked|requested|told)\s+to\s+(?:(?:\w+ly)\s+)*(?:confirm|verify|check|tell)|make sure|ensure|remember to|please\s+(?:(?:do|\w+ly)\s+)*(?:confirm|verify|check|tell))\b/i;
+const REPORT_FINITE_PREDICATE_RE = new RegExp(`(?:${CLAUSE_FINITE_PREDICATE_RE.source}|\\b(?:treated|sprayed|used|put|went|got|received|completed|finished|managed|succeeded|confirmed|verified|checked)\\b)`, 'i');
+
+function reportFindingIsInstruction(affirmed, subjectAt, locationAt, findingVerb, findingEvidenceEnd) {
+  const firstFindingAt = Math.min(subjectAt, locationAt, findingVerb ? findingVerb.index : Infinity);
+  const actorSubject = /(?:i|we|you|he|she|they|it|(?:(?:a|an|the|our|your|their)\s+(?:[\w'’-]+(?:\s+and\s+[\w'’-]+)?\s+){0,4})?(?:technician|tech|customer|client|homeowner|caller|crew|team))/.source;
+  const modifiedActorSubject = /(?:(?:a|an|the|our|your|their)\s+)?(?:technician|tech|customer|client|homeowner|caller|crew|team)(?:\s+(?:from|on|with|at|of|for)(?:\s+[\w'’-]+){1,6})?/.source;
+  const subjectAside = new RegExp(`(^|,\\s*)(\\s*${actorSubject}(?:\\s+(?:(?:am|is|are|was|were)\\s+(?:asked|requested|told)|(?:has|have|had)\\s+been\\s+(?:asked|requested|told)|am|is|are|was|were|do|does|did|has|have|had|will|would|should|can|could|may|might|must|shall))?),\\s*[^,]+,\\s*`, 'gi');
+  const completedAssurance = /(?:\b(?:i|we|you|he|she|they|(?:(?:the|our|your|their)\s+)?(?:technician|tech|customer|client|homeowner|caller|crew|team))\s+did\s+|^\s*(?:i|we|they)\s+)(?:(?:already|also|just|now|\w+ly)\s+)*(?:make\s+sure|ensure)\b/i;
+  const commaEvidence = affirmed.slice(0, firstFindingAt)
+    .replace(subjectAside, (aside, boundary) => boundary
+      + aside.slice(boundary.length).replace(/,/g, ' '));
+  // A comma before the finding can end an unrelated instruction; a later
+  // instruction after the matched treatment is outside its evidence span.
+  let governingStart = 0;
+  for (const comma of commaEvidence.matchAll(/,/g)) {
+    const commaAt = comma.index;
+    const left = affirmed.slice(governingStart, commaAt);
+    const right = affirmed.slice(commaAt + 1, findingEvidenceEnd);
+    const clauseRight = right.replace(subjectAside, '$1$2 ');
+    const instructionLeft = left.replace(completedAssurance, '');
+    const instruction = REPORT_INSTRUCTION_RE.exec(instructionLeft);
+    const complement = instruction
+      && /\b(that|whether|if)\b([^.!?;]*)$/i.exec(instructionLeft.slice(instruction.index));
+    const complementAdjunct = complement
+      && /^\s*,?\s*(?:after|before|while|when|although|because|since|despite|during|according\s+to|based\s+on|as)\b[^,]*$/i.test(complement[2]);
+    const coordinatedFinding = /^(?!\s*(?:i|we|you|he|she|they|it)\b)\s*(?:[\w'’-]+\s+){1,6}(?:are|were|have)\b/i.test(right);
+    const demonstrativeObject = complement && /^that$/i.test(complement[1])
+      && /^\s+(?:[\w'’-]+\s+){0,3}[\w'’-]+\s*$/.test(complement[2])
+      && !complementAdjunct && !coordinatedFinding;
+    const instructionBeforeAside = left.replace(
+      /,\s*(?:after|before|while|when|although|because|since|despite|during|according\s+to|based\s+on|as)\b[^,]*$/i, '',
+    );
+    const interruptedRequest = instruction && (
+      (/\b(?:confirm|verify|check|tell\s+me)\s*$/i.test(instructionBeforeAside)
+        && /^\s*(?:(?:after|before|while|when|although|because|since|despite|during|according\s+to|based\s+on|as)\b[^,]*,\s*)?(?:that|whether|if)\b/i.test(right))
+      || (/\b(?:have|get)\s*$/i.test(instructionBeforeAside)
+        && new RegExp(`^\\s*(?:(?:after|before|while|when|although|because|since|despite|during|according\\s+to|based\\s+on|as)\\b[^,]*,\\s*)?${modifiedActorSubject}\\s+(?:to\\s+)?(?:(?:already|also|just|now|\\w+ly)\\s+)*(?:apply|use|put|treat|spray|place)\\b`, 'i').test(right))
+    );
+    if (interruptedRequest) continue;
+    if (instruction && complement && !demonstrativeObject
+        && (complementAdjunct
+          || !REPORT_FINITE_PREDICATE_RE.test(complement[2]))) continue;
+    if (new RegExp(`^\\s*(?:(?:${actorSubject}|${modifiedActorSubject})\\s+(?:(?:already|also|just|now|\\w+ly)\\s+)*|(?:[\\w'’-]+\\s+){1,6})${REPORT_FINITE_PREDICATE_RE.source}`, 'i').test(
+      clauseRight,
+    )) governingStart = commaAt + 1;
+  }
+  return REPORT_INSTRUCTION_RE.test(
+    affirmed.slice(governingStart, findingEvidenceEnd)
+      .replace(subjectAside, '$1$2 ').replace(completedAssurance, ''),
+  );
+}
+
 const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_free_visit_promise, no_third_party_disclosure, only_language, capture_lead_input_asserts });
 
-module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, spokenDigits, assertedMatch, EPISTEMIC_REFUSAL_VERBS, EPISTEMIC_DENIAL_WORDS, clauseBounds, clauseOf, claimContext, clauseIsNegated, clauseIsEpistemicallyHedged, cueInSameClause, reportFindingIsUncertain } };
+module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, spokenDigits, assertedMatch, EPISTEMIC_REFUSAL_VERBS, EPISTEMIC_DENIAL_WORDS, clauseBounds, clauseOf, claimContext, clauseIsNegated, clauseIsEpistemicallyHedged, cueInSameClause, reportFindingIsUncertain, reportFindingIsInstruction } };
