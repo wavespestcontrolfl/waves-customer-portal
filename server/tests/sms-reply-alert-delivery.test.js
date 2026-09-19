@@ -6,15 +6,15 @@ const db = require('../models/db');
 const { triggerNotification } = require('../services/notification-triggers');
 const delivery = require('../services/sms-reply-alert-delivery');
 const input = { From: '+12025550101', MessageSid: 'SM-synthetic-delivery', message: 'Synthetic SMS' };
-let row, bell, receiptFailure, reads, mutations, priorReceipt;
+let row, bell, receiptFailure, reads, mutations, priorReceipt, stampFailure, claimHeld;
 const afterRead = jest.fn();
 
 beforeEach(() => {
   jest.clearAllMocks();
   row = { metadata: { sms_reply_eligible: true } };
-  bell = null; receiptFailure = null; reads = []; mutations = []; priorReceipt = null;
+  bell = null; receiptFailure = null; reads = []; mutations = []; priorReceipt = null; stampFailure = null; claimHeld = false;
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings,
-    rows: sql.startsWith('INSERT INTO sms_reply_alert_claims') ? [{ phone: bindings[0] }] : [] }));
+    rows: sql.startsWith('INSERT INTO sms_reply_alert_claims') && !claimHeld ? [{ phone: bindings[0] }] : [] }));
   db.mockImplementation(table => {
     const query = { filter: null, prior: false };
     for (const method of ['whereRaw', 'whereNot', 'where']) {
@@ -32,6 +32,10 @@ beforeEach(() => {
         const delta = JSON.parse(patch.metadata.bindings[0]);
         if (delta.sms_reply_alerted && receiptFailure) {
           if (receiptFailure === 'error') throw new Error('Receipt unavailable');
+          return 0;
+        }
+        if ((delta.sms_reply_covered || delta.sms_reply_suppressed) && stampFailure) {
+          if (stampFailure === 'error') throw new Error('Marker unavailable');
           return 0;
         }
         row.metadata = { ...row.metadata, ...delta };
@@ -108,6 +112,44 @@ test('a message covered by a recent receipt is stamped terminal before its claim
   priorReceipt = null;
   expect(await dispatch({ recovery: true })).toBe(false);
   expect(triggerNotification).not.toHaveBeenCalled();
+});
+const stamps = key => mutations.filter(m => m.table === 'sms_log' && m.patch && JSON.parse(m.patch.metadata.bindings[0])[key]);
+test.each([['error', 2], ['missing row', 1]])('unrecorded coverage (%s) is not reported handled and keeps recovery able to retry', async (failure, attempts) => {
+  priorReceipt = { id: 'prior-delivered-receipt' };
+  stampFailure = failure;
+  expect(await dispatch()).toBe(false);
+  expect(triggerNotification).not.toHaveBeenCalled();
+  expect(stamps('sms_reply_covered')).toHaveLength(attempts);
+  expect(row.metadata.sms_reply_covered).toBeUndefined();
+  expect(mutations.some(m => m.table === 'sms_reply_alert_claims' && m.deleted)).toBe(true);
+});
+test('losing the claim to a confirmed receipt stamps coverage and reports handled', async () => {
+  claimHeld = true;
+  priorReceipt = { id: 'prior-delivered-receipt' };
+  expect(await dispatch()).toBe(true);
+  expect(triggerNotification).not.toHaveBeenCalled();
+  expect(row.metadata.sms_reply_covered).toBe(true);
+  expect(mutations.some(m => m.table === 'sms_reply_alert_claims')).toBe(false);
+  priorReceipt = null; claimHeld = false;
+  expect(await dispatch({ recovery: true })).toBe(false);
+  expect(triggerNotification).not.toHaveBeenCalled();
+});
+test('losing the claim to an in-progress lease leaves the message eligible for recovery', async () => {
+  claimHeld = true;
+  expect(await dispatch()).toBe(true);
+  expect(triggerNotification).not.toHaveBeenCalled();
+  expect(row.metadata).toEqual({ sms_reply_eligible: true });
+  claimHeld = false;
+  expect(await dispatch({ recovery: true })).toBe(true);
+  expect(triggerNotification).toHaveBeenCalledTimes(1);
+});
+test('suppression is terminal only once its marker is recorded', async () => {
+  triggerNotification.mockResolvedValueOnce({ bellWritten: false, push: null, suppressed: true });
+  stampFailure = 'error';
+  expect(await dispatch()).toBe(false);
+  expect(stamps('sms_reply_suppressed')).toHaveLength(2);
+  expect(row.metadata.sms_reply_suppressed).toBeUndefined();
+  expect(mutations.some(m => m.table === 'sms_reply_alert_claims' && m.deleted)).toBe(true);
 });
 test('recovery waits for live AI work', async () => {
   row.metadata.sms_reply_processing_until = new Date(Date.now() + 60000).toISOString();

@@ -87,11 +87,18 @@ async function ringSmsReplyBell({ customer, From, MessageSid, message, afterRead
   return stats;
 }
 
-// Durable per-message outcome markers; recovery treats each terminal one as settled.
-function stampInboundSmsMeta(MessageSid, patch, label) {
-  return db('sms_log').where({ direction: 'inbound', twilio_sid: MessageSid })
-    .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(patch)]) })
-    .catch((err) => logger.warn(`[twilio-webhook] sms_reply ${label} stamp failed`, { code: err.code || 'unknown' }));
+// Durable per-message outcome markers; recovery treats each terminal one as
+// settled. Resolves true only when the row was updated, after one retry, so a
+// caller never reports a terminal outcome that was not recorded.
+async function stampInboundSmsMeta(MessageSid, patch, label) {
+  const write = () => db('sms_log').where({ direction: 'inbound', twilio_sid: MessageSid })
+    .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(patch)]) });
+  return write().then((updated) => updated > 0)
+    .catch(() => write().then((updated) => updated > 0))
+    .catch((err) => {
+      logger.warn(`[twilio-webhook] sms_reply ${label} stamp failed`, { code: err.code || 'unknown' });
+      return false;
+    });
 }
 
 // A previous delivered receipt can cover this phone independent of claim state.
@@ -114,7 +121,12 @@ async function hasRecentUnknownSenderReceipt(From, excludeSid) {
 async function dispatchUnknownSenderAlert({ From, MessageSid, message, recovery = false, afterRead }) {
   if (!recovery) await stampInboundSmsMeta(MessageSid, { sms_reply_eligible: true }, 'eligibility');
   const { claimed, token } = await claimUnknownSenderAlertWindow(From);
-  if (!claimed) return true;
+  if (!claimed) {
+    // Another owner holds this sender. A confirmed receipt covers this message
+    // terminally; an in-progress lease leaves it eligible for recovery.
+    if (!(await hasRecentUnknownSenderReceipt(From, MessageSid))) return true;
+    return stampInboundSmsMeta(MessageSid, { sms_reply_covered: true }, 'coverage');
+  }
   if (recovery) {
     const row = await db('sms_log').where({ direction: 'inbound', twilio_sid: MessageSid }).first('metadata')
       .catch(() => null);
@@ -129,10 +141,10 @@ async function dispatchUnknownSenderAlert({ From, MessageSid, message, recovery 
   }
   if (await hasRecentUnknownSenderReceipt(From, MessageSid)) {
     // Coverage is a terminal outcome: recovery must not re-alert this message
-    // once the covering receipt ages out of the window.
-    await stampInboundSmsMeta(MessageSid, { sms_reply_covered: true }, 'coverage');
+    // once the covering receipt ages out. Unrecorded coverage is not handled.
+    const covered = await stampInboundSmsMeta(MessageSid, { sms_reply_covered: true }, 'coverage');
     await releaseUnknownSenderAlertClaim(From, token);
-    return true;
+    return covered;
   }
   let delivered = false;
   let suppressed = false;
@@ -151,7 +163,8 @@ async function dispatchUnknownSenderAlert({ From, MessageSid, message, recovery 
     await confirmUnknownSenderAlertWindow(From, token, stats.deliveredAt);
   } else {
     await releaseUnknownSenderAlertClaim(From, token);
-    if (suppressed) await stampInboundSmsMeta(MessageSid, { sms_reply_suppressed: true }, 'suppression');
+    // Suppression is terminal only once its marker is recorded.
+    if (suppressed) suppressed = await stampInboundSmsMeta(MessageSid, { sms_reply_suppressed: true }, 'suppression');
   }
   return delivered || suppressed || alreadyRead;
 }
