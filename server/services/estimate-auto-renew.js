@@ -218,9 +218,9 @@ const EstimateAutoRenew = {
                   // This raw SMTP send bypasses the guarded send library, so
                   // it carries the chokepoint verdict itself: fresh row, no
                   // lock, immediately before the provider call. Fails closed.
-                  const { loadAnnualOfferRow, annualOfferVerdict } = require('./estimate-annual-guard');
-                  const fallbackVerdict = annualOfferVerdict(await loadAnnualOfferRow(db, est.id));
-                  if (fallbackVerdict.withheld) {
+                  const { annualHandoffGuard } = require('./estimate-annual-guard');
+                  const fallbackVerdict = await annualHandoffGuard({ db, estimateIds: [est.id] })();
+                  if (fallbackVerdict.blocked) {
                     logger.warn(`[est-auto-renew] SMTP fallback withheld for estimate ${est.id}: ${fallbackVerdict.reason}`);
                     throw Object.assign(new Error('annual offer withheld at SMTP fallback'), { code: 'ANNUAL_OFFER_WITHHELD' });
                   }
