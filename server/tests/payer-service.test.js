@@ -344,3 +344,30 @@ describe('PayerService.findOrCreatePayerByEmail', () => {
     expect(out.payer.display_name).toBe('James Brenner');
   });
 });
+
+describe('PayerService.freezeApEmail claim ownership', () => {
+  test.each(['original', 'replacement'])('updates only the original claim when current owner is %s', async (currentToken) => {
+    const row = { id: 'i1', send_claim_token: currentToken, payer_snapshot: { ap_email: 'current@example.com' } };
+    const invoice = { id: 'i1', payer_id: 7, payer: { ap_email: 'old@example.com' } };
+    const database = jest.fn(() => {
+      const conditions = {};
+      const q = {
+        where: (values) => { Object.assign(conditions, values); return q; },
+        update: async (values) => {
+          if (!Object.entries(conditions).every(([key, value]) => row[key] === value)) return 0;
+          Object.assign(row, values);
+          return 1;
+        },
+      };
+      return q;
+    });
+    await PayerService.freezeApEmail(invoice, 'delivered@example.com', database, { claimToken: 'original' });
+    if (currentToken === 'original') {
+      expect(JSON.parse(row.payer_snapshot).ap_email).toBe('delivered@example.com');
+      expect(invoice.payer.ap_email).toBe('delivered@example.com');
+    } else {
+      expect(row.payer_snapshot.ap_email).toBe('current@example.com');
+      expect(invoice.payer.ap_email).toBe('old@example.com');
+    }
+  });
+});

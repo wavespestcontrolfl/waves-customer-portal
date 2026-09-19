@@ -34,7 +34,7 @@ describe("DiscountsSection", () => {
     });
     expect(createButton).toHaveClass("ui-action");
     expect(
-      screen.getByText("+ New Discount", { selector: "strong" }).parentElement,
+      (await screen.findByText("+ New Discount", { selector: "strong" })).parentElement,
     ).toHaveTextContent(
       "No discounts yet. Click + New Discount to add your first one.",
     );

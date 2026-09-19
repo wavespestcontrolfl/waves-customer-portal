@@ -51,7 +51,7 @@ const { isStaffedHours } = require('./staffed-hours');
 const { callSupervision } = require('./supervision');
 const { writeCallOutcome } = require('./outcomes');
 const flags = require('./flags');
-const { invoiceAmountDue } = require('../../invoice-helpers');
+const { invoiceAmountDue, SEND_CLAIMABLE_STATUSES } = require('../../invoice-helpers');
 const { etCalendarDayOf, etDateString } = require('../../../utils/datetime-et');
 const { anchorInvoiceOf, orderByDue, dueDayOf, invoiceDaysOverdue, accountDaysOverdue, dunningTierForOverdue, registerForTier } = require('../account-anchor');
 
@@ -62,7 +62,6 @@ const { anchorInvoiceOf, orderByDue, dueDayOf, invoiceDaysOverdue, accountDaysOv
 // oldest-due SENDABLE invoice instead; the dunning clock still anchors on
 // the oldest-due invoice of any status.
 function linkAnchorOf(invoices = []) {
-  const { SEND_CLAIMABLE_STATUSES } = require('../../invoice');
   return orderByDue(invoices).find((inv) => SEND_CLAIMABLE_STATUSES.includes(String(inv.status || ''))) || null;
 }
 
