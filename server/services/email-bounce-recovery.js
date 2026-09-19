@@ -253,6 +253,14 @@ async function resolveCustomerEmailField(bouncedMessage, bouncedEmail) {
 // 'estimate_delivery:<id>' / 'estimate_followup_<stage>:<id>'), so a no-customer
 // recovery can scope its gate + commit to the ACTUAL source estimate rather than
 // any row that happens to share the typo.
+const ESTIMATE_ID_SHAPE_RE = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|\d{1,18})$/i;
+function guardEstimateIdFromTriggerEvent(triggerEventId) {
+  const s = String(triggerEventId || '');
+  if (!/^estimate/.test(s)) return null;
+  const candidate = s.split(':')[1] || '';
+  return ESTIMATE_ID_SHAPE_RE.test(candidate) ? candidate : null;
+}
+
 function sourceEstimateIdFromTriggerEvent(triggerEventId) {
   const s = String(triggerEventId || '');
   if (!/^estimate/.test(s) || !s.includes(':')) return null;
@@ -484,21 +492,59 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
   }
   try {
     let result;
+    // Codex round 3 on #4608 (structural move): set inside dispatchToProvider
+    // when sendgrid.sendOne's OWN annual-offer guard (the authoritative
+    // check, run at the true provider boundary) refuses — read below in
+    // BOTH the visit-summary and ordinary branches, since dispatchToProvider
+    // is the SAME function either way.
+    let annualWithheld = false;
     const dispatchToProvider = async () => {
-      result = await sendgrid.sendOne({
-        to: correctedEmail,
-        fromEmail: message.from_email_snapshot,
-        fromName: message.from_name_snapshot,
-        replyTo: message.reply_to_snapshot,
-        subject: message.subject_snapshot,
-        html: bouncedMessage.html_snapshot || undefined,
-        text: bouncedMessage.text_snapshot || undefined,
-        categories,
-        asmGroupId: asmGroupIdForStream(bouncedMessage.suppression_group_key_snapshot),
-        // So a fast delivery/bounce webhook can resolve this row even before
-        // provider_message_id is committed below.
-        customArgs: { email_message_id: String(message.id), send_attempt_token: message.send_attempt_token },
-      });
+      // Bounce recovery re-sends the SAME stored html/text to a CORRECTED
+      // address, straight through sendgrid.sendOne — its own content
+      // derivation over that html/text covers this without composing the
+      // guard here separately. Explicit id when the original send's
+      // trigger_event_id names one (best-effort parse; an id that resolves
+      // no row is simply not the guard's job — harmless).
+      //
+      // Pre-push audit P1: trigger ids are not all "<prefix>:<id>" —
+      // estimate_extended is "estimate_extended:<id>:<iso-expiry>", so the
+      // last-segment helper above yields a timestamp there. Take the segment
+      // right after the prefix and accept it only when it is shaped like an
+      // estimate id; anything else is dropped (the content scan still covers
+      // the link in the stored body), so an unparseable trigger can never
+      // send a garbage value into the estimates query and loop as transient.
+      const sourceEstimateId = guardEstimateIdFromTriggerEvent(bouncedMessage.trigger_event_id);
+      try {
+        result = await sendgrid.sendOne({
+          to: correctedEmail,
+          fromEmail: message.from_email_snapshot,
+          fromName: message.from_name_snapshot,
+          replyTo: message.reply_to_snapshot,
+          subject: message.subject_snapshot,
+          html: bouncedMessage.html_snapshot || undefined,
+          text: bouncedMessage.text_snapshot || undefined,
+          categories,
+          asmGroupId: asmGroupIdForStream(bouncedMessage.suppression_group_key_snapshot),
+          // So a fast delivery/bounce webhook can resolve this row even before
+          // provider_message_id is committed below.
+          customArgs: { email_message_id: String(message.id), send_attempt_token: message.send_attempt_token },
+          estimateIds: sourceEstimateId ? [sourceEstimateId] : [],
+          // Round 9 structural fix (P1): resolves the SAME rewrite-vs-refuse
+          // policy a fresh send of this template would get (estimate-annual-
+          // guard.js's withheldLinkPolicyForTemplate) — a bounce-recovered
+          // deposit receipt whose stored content still carries a withheld
+          // link is rewritten and re-sent to the corrected address, not
+          // refused permanently just because this recovery path has no
+          // explicit opinion of its own.
+          templateKey: bouncedMessage.template_key,
+        });
+      } catch (err) {
+        if (err && err.annualOfferWithheld) {
+          annualWithheld = true;
+          return;
+        }
+        throw err;
+      }
     };
     if (bouncedMessage.template_key === 'service.visit_summary') {
       // Domain correction changes the destination, not the customer's consent
@@ -521,7 +567,7 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
         logger.warn(`[bounce-recovery] visit summary handoff guard failed after acceptance for ${message.id}: ${err.message}`);
       }
       if (!result) {
-        const reason = fence?.reason || 'visit_summary_unavailable';
+        const reason = annualWithheld ? 'annual_offer_withheld' : (fence?.reason || 'visit_summary_unavailable');
         await db('email_messages').where({ id: message.id, status: 'queued' })
           .update({ status: 'blocked', error_message: reason, updated_at: new Date() }).catch(() => {});
         // No provider request follows: settle the summary aggregate from the ledger.
@@ -531,6 +577,11 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
       }
     } else {
       await dispatchToProvider();
+      if (annualWithheld) {
+        await db('email_messages').where({ id: message.id, status: 'queued' })
+          .update({ status: 'blocked', error_message: 'annual_offer_withheld', updated_at: new Date() }).catch(() => {});
+        return { ok: false, suppressed: true, reason: 'annual_offer_withheld' };
+      }
     }
     // Always record the provider id + send time. These are safe regardless of
     // any concurrent webhook.
@@ -538,6 +589,14 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
       provider_message_id: result.messageId,
       sent_at: new Date(),
       updated_at: new Date(),
+      // Round 9 structural fix (P1): sendOne rewrote a withheld estimate
+      // link before this recovery send actually went out — persist the
+      // rewritten bytes onto the recovery row so it reflects what the
+      // corrected address actually received, same as a fresh sendTemplate
+      // send does (email-template-library.js).
+      ...(result.withheldLinksRewritten?.length
+        ? { html_snapshot: result.html, text_snapshot: result.text }
+        : {}),
     });
     // Advance to 'sent' ONLY if still 'queued' — a fast delivery/bounce webhook
     // (resolvable via custom_args.email_message_id before this commit) may have
@@ -1186,6 +1245,7 @@ async function alertBouncedContactAddress(bouncedEmail, ev = {}) {
 }
 
 module.exports = {
+  guardEstimateIdFromTriggerEvent,
   RECOVERY_CATEGORY,
   recoveryEnabled,
   minConfidence,

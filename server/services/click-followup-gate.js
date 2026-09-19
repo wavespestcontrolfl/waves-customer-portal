@@ -28,6 +28,14 @@
  *                       flip the action to converted.
  *   suppressed        — opt-out / wrong number / DNC / known landline.
  *                       Queue: dismiss. Approval: retire the draft.
+ *   annual_offer_withheld — the estimate selects the annual termite plan and
+ *                       the chokepoint guard (estimate-annual-guard.js) would
+ *                       refuse to deliver it (no send library ever rechecks
+ *                       this itself — see that module). Never queue, and
+ *                       never approve, a draft whose link the send chokepoint
+ *                       would just refuse. Queue: dismiss (a re-click
+ *                       re-qualifies once a fresh offer is delivered).
+ *                       Approval: HOLD (409, draft stays pending).
  *   cadence_due       — an estimate-followup stage (incl. the gated
  *                       deposit-abandonment stage) fires within 24h.
  *                       Queue: dismiss this click. Approval: HOLD (409,
@@ -53,6 +61,7 @@ const {
 const { DEPOSIT_FOLLOWUP_WINDOW } = require('./estimate-deposits');
 const { loadSuppressionState } = require('./messaging/validators/suppression');
 const { readCachedLineType, NON_SMS_LINE_TYPES } = require('./messaging/validators/line-type');
+const { annualHandoffGuard } = require('./estimate-annual-guard');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 // Estimate statuses the cadence treats as terminal (estimate-follow-up.js).
@@ -519,14 +528,39 @@ async function evaluateClickFollowupGate({ estimate, kind, customerId, leadId, p
     return { ok: false, code: 'suppressed' };
   }
 
-  // 4. Cadence stages: the legacy timestamp stages, the gated
+  // 4. Delivery-guards slice (re-cut of #4569; reordered — Codex round 1 on
+  //    #4608 P2): never queue — or approve — a click-followup draft whose
+  //    link the send chokepoint would just refuse. Moved to AFTER
+  //    conversion and suppression so a converted or suppressed contact on a
+  //    withheld annual estimate still retires the draft on its OWN code
+  //    (converted / suppressed) instead of being held on annual_offer_withheld
+  //    forever — a contact who already converted or opted out is never
+  //    coming back to re-qualify once the offer is redelivered.
+  //
+  // Pre-push audit P2 (round 12): group-aware, not the single-row
+  // annualOfferVerdict — the clicked anchor can be delivered/eligible on
+  // its own while a link-visible estimate_group_id sibling is withheld,
+  // exactly the gap the provider-boundary send guard (annualHandoffGuard)
+  // already closes for every other sender. Without this, queue time and
+  // approval time both pass the row-only check, a draft is created and its
+  // action reserved, and the SEND chokepoint (which DOES expand the group)
+  // then refuses every approval attempt — stranding the draft/action
+  // instead of retiring it here. One extra query only when the row
+  // actually has a group (loadLinkVisibleGroupSiblings short-circuits on
+  // no estimate_group_id).
+  const annualVerdict = await annualHandoffGuard({ db, estimateIds: [estimate.id] })();
+  if (annualVerdict.blocked) {
+    return { ok: false, code: 'annual_offer_withheld' };
+  }
+
+  // 5. Cadence stages: the legacy timestamp stages, the gated
   //    deposit-abandonment stage, and the engagement engine's queued jobs.
   if (cadenceStageDueSoon(estimate, now) || await depositStageDueSoon(estimate, now)
       || await engagementJobDueSoon(estimate, now)) {
     return { ok: false, code: 'cadence_due' };
   }
 
-  // 5. Recent-touch holds.
+  // 6. Recent-touch holds.
   const contact = { customerId: customerId || estimate.customer_id || null, phone };
   if (await hasRecentOutboundSms(contact)) {
     return { ok: false, code: 'recent_outbound' };
