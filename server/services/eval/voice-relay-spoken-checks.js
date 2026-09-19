@@ -1776,7 +1776,7 @@ function reportFindingIsUncertain(text) {
       .replace(/(^|,\s*|\b(?:based\s+on|after\s+(?:reviewing|checking|reading))\s+(?:the\s+)?report\s*,?\s*)(\s*(?:(?:yes|okay|certainly|absolutely)[,:]?\s+)?)(i|we)\s+can\s+(?:(?:definitely|certainly|confidently|clearly|conclusively|now|already|also|fully|absolutely)\s+)*(confirm|verify)\b(?![^.!?;]*\b(?:whether|if)\b)(?:\s+that\b)?/gi, '$1$2$3 $4'));
 }
 
-const REPORT_INSTRUCTION_RE = /(?:^\s*|[,:]\s*)(?:please\s+)?(?:apply|use|put|treat|spray|place|have(?!\s+(?:(?:not\s+(?:only|just|merely|simply)|already|also|just|now|\w+ly)\s+)*(?:had|been|applied|used|sprayed|treated|placed|put|got|received|succeeded|finished|completed|managed|confirmed|verified|checked)\b)|get|(?:(?:do|\w+ly)\s+)*(?:confirm|verify|check)|tell\s+me|let\s+me\s+know)\b|\b(?:[\w\x27\u2019-]+(?:\s+(?:need(?:s|ed)?|want(?:s|ed)?|ask(?:s|ed)?|request(?:s|ed)?)|['’]d\s+like|\s+would\s+like|(?:\s+(?:am|is|are|was|were)|['’](?:m|re|s))\s+(?:asking|requesting))\s+(?:me|us|you|him|her|them|(?:(?:the|our|your|their)\s+)?(?:[\w'’-]+\s+){0,3}(?:technician|tech|crew|team)|[\w'’-]+(?:\s+[\w'’-]+){0,2})\s+to\s+(?:(?:\w+ly)\s+)*(?:confirm|verify|check|tell)|[\w\x27\u2019-]+\s+(?:need(?:s|ed)?|want(?:s|ed)?|request(?:s|ed)?|ask(?:s|ed)?\s+for)\s+(?:(?:a|your)\s+)?(?:confirmation|verification)\s+(?:that|whether|if)|please\s+let\s+me\s+know\s+(?:whether|if|that)|(?:ask(?:s|ed|ing)?|request(?:s|ed|ing)?)\s+that|(?:(?:am|is|are|was|were)\s+(?:being\s+)?|(?:has|have|had)\s+been\s+|[\x27\u2019](?:ve|s|d)\s+been\s+)(?:(?:\w+ly)\s+)*(?:asked|requested)\s+to\s+(?:(?:\w+ly)\s+)*(?:confirm|verify|check|tell)|make sure|ensure|remember to|please\s+(?:(?:do|\w+ly)\s+)*(?:confirm|verify|check|tell))\b/i;
+const REPORT_INSTRUCTION_RE = /(?:^\s*|[,:]\s*)(?:please\s+)?(?:apply|use|put|treat|spray|place|have(?!\s+(?:(?:not\s+(?:only|just|merely|simply)|already|also|just|now|\w+ly)\s+)*(?:had|been|applied|used|sprayed|treated|placed|put|got|received|succeeded|finished|completed|managed|confirmed|verified|checked)\b)|get|(?:(?:do|\w+ly)\s+)*(?:confirm|verify|check)|tell\s+me|let\s+me\s+know)\b|\b(?:[\w\x27\u2019-]+(?:\s+(?:need(?:s|ed)?|want(?:s|ed)?|ask(?:s|ed)?|request(?:s|ed)?)|['’]d\s+like|\s+would\s+like|(?:\s+(?:am|is|are|was|were)|['’](?:m|re|s))\s+(?:asking|requesting))\s+(?:me|us|you|him|her|them|(?:(?:the|our|your|their)\s+)?(?:[\w'’-]+\s+){0,3}(?:technician|tech|crew|team)|[\w'’-]+(?:\s+[\w'’-]+){0,2})\s+to\s+(?:(?:\w+ly)\s+)*(?:confirm|verify|check|tell)|[\w\x27\u2019-]+(?:\s+(?:need(?:s|ed)?|want(?:s|ed)?|request(?:s|ed)?|ask(?:s|ed)?\s+for)|[\x27\u2019]d\s+like|\s+would\s+like)\s+(?:(?:a|your)\s+)?(?:confirmation|verification)\s+(?:that|whether|if)|please\s+let\s+me\s+know\s+(?:whether|if|that)|(?:ask(?:s|ed|ing)?|request(?:s|ed|ing)?)\s+(?:that|whether|if)|(?:(?:am|is|are|was|were)\s+(?:being\s+)?|(?:has|have|had)\s+been\s+|[\x27\u2019](?:ve|s|d)\s+been\s+)(?:(?:\w+ly)\s+)*(?:asked|requested)\s+to\s+(?:(?:\w+ly)\s+)*(?:confirm|verify|check|tell)|make sure|ensure|remember to|please\s+(?:(?:do|\w+ly)\s+)*(?:confirm|verify|check|tell))\b/i;
 const REPORT_FINITE_PREDICATE_RE = new RegExp(`(?:${CLAUSE_FINITE_PREDICATE_RE.source}|\\b(?:treated|sprayed|used|put|went|got|received|completed|finished|managed|succeeded|confirmed|verified|checked)\\b)`, 'i');
 
 function reportFindingIsInstruction(affirmed, subjectAt, locationAt, findingVerb, findingEvidenceEnd) {
@@ -1796,21 +1796,21 @@ function reportFindingIsInstruction(affirmed, subjectAt, locationAt, findingVerb
     const right = affirmed.slice(commaAt + 1, findingEvidenceEnd);
     const clauseRight = right.replace(subjectAside, '$1$2 ');
     const instructionLeft = left.replace(completedAssurance, '');
-    const complement = /\b(that|whether)\b([^.!?;]*)$/i.exec(left);
+    const complement = /\b(that|whether|if)\b([^.!?;]*)$/i.exec(left);
     const complementAdjunct = complement
-      && /^\s+(?:after|before|while|when|according\s+to|based\s+on|as)\b[^,]*$/i.test(complement[2]);
+      && /^\s*,?\s*(?:after|before|while|when|although|because|since|despite|during|according\s+to|based\s+on|as)\b[^,]*$/i.test(complement[2]);
     const coordinatedFinding = /^(?!\s*(?:i|we|you|he|she|they|it)\b)\s*(?:[\w'’-]+\s+){1,6}(?:are|were|have)\b/i.test(right);
     const demonstrativeObject = complement && /^that$/i.test(complement[1])
       && /^\s+(?:[\w'’-]+\s+){0,3}[\w'’-]+\s*$/.test(complement[2])
       && !complementAdjunct && !coordinatedFinding;
-    const parentheticalAside = complement
-      && /^,\s*as\s+(?:[\w'’-]+\s+){0,7}[\w'’-]+\s*$/i.test(complement[2]);
     const interruptedComplement = REPORT_INSTRUCTION_RE.test(instructionLeft)
-      && /\b(?:confirm|verify|check|tell\s+me)\s*,\s*(?:after|before|while|when|according\s+to|based\s+on|as)\b[^,]*$/i.test(left)
-      && /^\s*(?:that|whether|if)\b/i.test(right);
+      && /\b(?:confirm|verify|check|tell\s+me)\s*$/i.test(left.replace(
+        /,\s*(?:after|before|while|when|although|because|since|despite|during|according\s+to|based\s+on|as)\b[^,]*$/i, '',
+      ))
+      && /^\s*(?:(?:after|before|while|when|although|because|since|despite|during|according\s+to|based\s+on|as)\b[^,]*,\s*)?(?:that|whether|if)\b/i.test(right);
     if (interruptedComplement) continue;
     if (REPORT_INSTRUCTION_RE.test(instructionLeft) && complement && !demonstrativeObject
-        && (parentheticalAside || complementAdjunct
+        && (complementAdjunct
           || !REPORT_FINITE_PREDICATE_RE.test(complement[2]))) continue;
     if (new RegExp(`^\\s*(?:${actorSubject}\\s+(?:(?:already|also|just|now|\\w+ly)\\s+)*|(?:[\\w'’-]+\\s+){1,6})${REPORT_FINITE_PREDICATE_RE.source}`, 'i').test(
       clauseRight,
