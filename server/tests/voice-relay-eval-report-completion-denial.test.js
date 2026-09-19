@@ -819,3 +819,42 @@ test.each([
   expect(grammar.reportClaimIsDenied(text, text, text.indexOf('Talstar P'),
     text.indexOf('exterior perimeter'), /applied/.exec(text), '')).toBe(true);
 });
+
+test.each([
+  ['We disputed having applied Talstar P to the exterior perimeter.', false],
+  ['We dispute having Talstar P applied to the exterior perimeter.', false],
+  ['We are disputing having Talstar P applied to the exterior perimeter.', false],
+  ['We had Talstar P applied to the exterior perimeter.', true],
+  ['We disputed bait, then applied Talstar P to the exterior perimeter.', true],
+])('disputing a gerund complement does not establish completion: %s', (text, completed) => {
+  const verbs = [...text.matchAll(/applied/g)];
+  expect(grammar.reportHasCompletedPredicate(text, verbs.at(-1))).toBe(completed);
+});
+
+test.each([
+  ['Talstar P is always applied to the exterior perimeter.', false],
+  ['Talstar P is still applied to the exterior perimeter.', false],
+  ['Talstar P and bait are always applied to the exterior perimeter.', false],
+  ['Talstar P is routinely applied to the exterior perimeter.', false],
+  ['Talstar P was always applied to the exterior perimeter.', true],
+  ['Talstar P was still applied to the exterior perimeter.', true],
+  ['Talstar P has always been applied to the exterior perimeter.', true],
+  ['Talstar P is not always applied to the exterior perimeter.', false],
+])('present habitual passive differs from past or perfect completion: %s', (text, completed) => {
+  expect(grammar.reportHasCompletedPredicate(text, /applied/.exec(text))).toBe(completed);
+});
+
+test.each([
+  ['Before noon, we applied Talstar P to the exterior perimeter.', true],
+  ['Before 2 PM, we applied Talstar P to the exterior perimeter.', true],
+  ['Before Tuesday, we applied Talstar P to the exterior perimeter.', true],
+  ['Before lunch, we applied Talstar P to the exterior perimeter.', true],
+  ['Before applying bait, we applied Talstar P to the exterior perimeter.', false],
+  ['Before the visit, we applied Talstar P to the exterior perimeter.', false],
+  ['Before noon, we planned to have applied Talstar P to the exterior perimeter.', false],
+  ['Before noon, we did not apply Talstar P to the exterior perimeter.', false],
+  ['Before noon, Talstar P was not applied to the exterior perimeter.', false],
+])('fronted before-time adjuncts retain completion polarity: %s', (text, completed) => {
+  const verbs = [...text.matchAll(/\b(?:apply|applied)\b/g)];
+  expect(grammar.reportHasCompletedPredicate(text, verbs.at(-1))).toBe(completed);
+});
