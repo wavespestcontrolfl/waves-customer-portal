@@ -1064,3 +1064,32 @@ test.each([
   const findingVerb = /\b(?:applied|applying)\b/.exec(text);
   expect(grammar.reportHasCompletedPredicate(text, findingVerb)).toBe(false);
 });
+
+test.each([
+  ['We canceled getting Talstar P applied to the exterior perimeter.', false],
+  ['We cancelled having Talstar P applied to the exterior perimeter.', false],
+  ['We cancel getting Talstar P applied to the exterior perimeter.', false],
+  ['We are cancelling having Talstar P applied to the exterior perimeter.', false],
+  ['We had Talstar P applied to the exterior perimeter.', true],
+  ['We canceled the visit, then had Talstar P applied to the exterior perimeter.', true],
+  ['We canceled getting bait applied indoors, but Talstar P was applied to the exterior perimeter.', true],
+])('canceled causatives do not establish completion: %s', (text, completed) => {
+  const findingVerbs = [...text.matchAll(/applied/g)];
+  expect(grammar.reportHasCompletedPredicate(text, findingVerbs.at(-1))).toBe(completed);
+});
+
+test.each([
+  ["The technician doesn't doubt that Talstar P was applied to the exterior perimeter.", true, false, false],
+  ['The technician doesn’t doubt that Talstar P was applied to the exterior perimeter.', true, false, false],
+  ['She does not doubt that Talstar P was applied to the exterior perimeter.', true, false, false],
+  ['They did not doubt that Talstar P was applied to the exterior perimeter.', true, false, false],
+  ['We doubt that Talstar P was applied to the exterior perimeter.', true, true, true],
+  ["The technician doesn't doubt that Talstar P was not applied to the exterior perimeter.", false, false, true],
+])('negated doubt remains certainty for supported report actors: %s',
+  (text, completed, uncertain, denied) => {
+    const findingVerb = /applied/g.exec(text);
+    expect(grammar.reportHasCompletedPredicate(text, findingVerb)).toBe(completed);
+    expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+    expect(grammar.reportClaimIsDenied(text, text, text.indexOf('Talstar P'),
+      text.indexOf('exterior perimeter'), findingVerb)).toBe(denied);
+  });
