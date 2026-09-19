@@ -263,6 +263,14 @@ test.each([
   ['Check the invoice, our licensed and experienced senior service technician did, according to the report, apply Talstar P to the exterior perimeter.', false],
   ['Check that our licensed and experienced senior service technician did, according to the report, apply Talstar P to the exterior perimeter.', true],
   ['Check the invoice, our licensed and experienced senior service technician carefully confirmed that Talstar P was applied to the exterior perimeter.', false],
+  ['Check the technician, we did, according to the report, make sure that Talstar P was applied to the exterior perimeter.', false],
+  ['Check the invoice, we did, according to the report, make sure that Talstar P was applied to the exterior perimeter.', false],
+  ['Please confirm the invoice, including all the details about how Talstar P was applied to the exterior perimeter.', true],
+  ["I've been asked to confirm that Talstar P was applied to the exterior perimeter.", true],
+  ['I’ve been asked to confirm that Talstar P was applied to the exterior perimeter.', true],
+  ['We are being asked to confirm that Talstar P was applied to the exterior perimeter.', true],
+  ["I've confirmed that Talstar P was applied to the exterior perimeter.", false],
+  ['We are confirming that Talstar P was applied to the exterior perimeter.', false],
 ])('resultative comma boundary keeps instruction scope: %s', (text, instruction) => {
   expect(grammar.reportFindingIsInstruction(text, text.indexOf('Talstar P'),
     text.indexOf('exterior perimeter'), /\b(?:applied?|applying)\b/.exec(text), text.length)).toBe(instruction);
