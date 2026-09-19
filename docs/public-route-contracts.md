@@ -344,6 +344,13 @@ Inbound media uses stable account/message/index storage keys across retries.
 Stale contact-correction reservations require a saved unified inbox message
 before promotion; failed route cancellation cannot replay an unrecorded source.
 Provider retry/fallback remains governed by the configured Twilio policy.
+The shared SMS-alert delivery protocol uses a two-minute owned sender lease,
+confirmed to four hours only after actual bell/push delivery evidence and a
+durable legacy receipt. Committed bells keep immutable message keys so lost
+receipts can be repaired without dispatching again; repair preserves original
+delivery time. Deliberate suppression is terminal. Push-only retries reuse the
+message tag without renotification; provider acceptance followed by a crash
+before receipt persistence remains ambiguous and can repeat a provider handoff.
 
 `/api/webhooks/twilio/outbound-amd` +
 `/api/webhooks/twilio/outbound-dial-complete` (POST; machine-to-machine

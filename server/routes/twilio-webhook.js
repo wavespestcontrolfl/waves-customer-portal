@@ -1967,24 +1967,8 @@ router.post('/status', async (req, res) => {
  * (throws { alreadyRead }), re-check right before the push leaves, and
  * retire the SID-scoped bell if the thread was read while it was written.
  */
-async function ringSmsReplyBell({ customer, From, MessageSid, message }) {
-  const { triggerNotification } = require('../services/notification-triggers');
-  const unifiedStillUnread = () => db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read')
-    .then((r) => r?.is_read !== true).catch(() => true); // fail open: unknown → still ring
-  if (!(await unifiedStillUnread())) throw Object.assign(new Error('thread already read'), { alreadyRead: true });
-  const stats = await triggerNotification('sms_reply', {
-    fromName: `${customer.first_name} ${customer.last_name}`,
-    fromPhone: From,
-    message,
-    threadId: customer.id,
-    twilioSid: MessageSid, // stored in metadata.payload — correlates THIS bell to THIS message
-  }, { beforePush: unifiedStillUnread });
-  try {
-    if (!(await unifiedStillUnread())) {
-      await require('../services/notification-service').markInboundSmsReadAdmin({ customerId: customer.id, twilioSid: MessageSid });
-    }
-  } catch (e) { logger.warn(`[notifications] sms_reply post-check failed: ${e.message}`); }
-  return stats;
+async function ringSmsReplyBell(args) {
+  return require('../services/sms-reply-alert-delivery').ringSmsReplyBell(args);
 }
 
 async function lastOutboundAskedQuestion(toPhone, ourNumber) {
