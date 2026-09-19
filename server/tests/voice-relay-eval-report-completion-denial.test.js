@@ -719,3 +719,50 @@ test.each([
 ])('conditional clause markers differ from duration and target words: %s', (text, uncertain) => {
   expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
 });
+
+test.each([
+  ['We decided against having Talstar P applied to the exterior perimeter.', false],
+  ['We avoided having Talstar P applied to the exterior perimeter.', false],
+  ['We are avoiding having Talstar P applied to the exterior perimeter.', false],
+  ['We had Talstar P applied to the exterior perimeter.', true],
+  ['We avoided having bait applied indoors, but we had Talstar P applied to the exterior perimeter.', true],
+])('negative gerund governors do not establish completed treatment: %s', (text, completed) => {
+  expect(grammar.reportHasCompletedPredicate(text, /applied(?![\s\S]*applied)/.exec(text))).toBe(completed);
+});
+
+test.each([
+  ['We applied nothing except Talstar P to the exterior perimeter.', false, 'subject'],
+  ['We applied nothing  except Talstar P to the exterior perimeter.', false, 'subject'],
+  ['We applied nothing except for Talstar P to the exterior perimeter.', false, 'subject'],
+  ['We applied no product except Talstar P to the exterior perimeter.', false, 'subject'],
+  ['We applied no product  except Talstar P to the exterior perimeter.', false, 'subject'],
+  ['We applied no products except Talstar P to the exterior perimeter.', false, 'subject'],
+  ['We applied everything except Talstar P to the exterior perimeter.', true, 'subject'],
+  ['We applied Talstar P everywhere except the exterior perimeter.', true, 'location'],
+])('negative exceptives distinguish focused products from exclusions: %s', (text, denied, owner) => {
+  const subjectAt = text.indexOf('Talstar P');
+  const locationAt = text.indexOf('exterior perimeter');
+  const ownerAt = owner === 'subject' ? subjectAt : locationAt;
+  expect(grammar.reportClaimIsDenied(text, text, subjectAt, locationAt,
+    /applied/.exec(text), text.slice(0, ownerAt))).toBe(denied);
+});
+
+test.each([
+  ['We finished putting Talstar P around the exterior perimeter.', true],
+  ['We completed putting Talstar P around the exterior perimeter.', true],
+  ['We started putting Talstar P around the exterior perimeter.', false],
+  ['We were putting Talstar P around the exterior perimeter.', false],
+  ['We put Talstar P around the exterior perimeter.', true],
+])('putting uses the existing completed-gerund grammar: %s', (text, completed) => {
+  expect(grammar.reportHasCompletedPredicate(text, /\b(?:putting|put)\b/.exec(text))).toBe(completed);
+});
+
+test.each(['putting green', 'golf green', 'putting area'])(
+  'article-led nominal contrasts preserve gerund modifiers: %s', (place) => {
+    const text = `The exterior perimeter, not the ${place}, was treated with Talstar P.`;
+    const verb = /treated/.exec(text);
+    expect(grammar.reportHasCompletedPredicate(text, verb)).toBe(true);
+    expect(grammar.reportClaimIsDenied(text, text, text.indexOf('Talstar P'),
+      text.indexOf('exterior perimeter'), verb, '')).toBe(false);
+  },
+);
