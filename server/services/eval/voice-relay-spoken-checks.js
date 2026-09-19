@@ -1837,7 +1837,7 @@ const REPORT_COMPLETED_GERUND_RE = /^(?:applying|spraying|treating|placing|using
 
 const REPORT_COMPLETED_PASSIVE_RE = /(?:\b(?:was|were|got)(?:n['’]t\s+(?:only|just|merely|simply|exclusively|solely))?|\bdid(?:n['’]t\s+(?:only|just|merely|simply|exclusively|solely))?\s+(?:not\s+(?:only|just|merely|simply|exclusively|solely)\s+)?(?:(?:\w+ly|already|also|just|now)\s+)*get|(?:\b(?:has|have|had)(?:n['’]t\s+(?:only|just|merely|simply|exclusively|solely))?|['’](?:s|d|ve))(?:\s+(?:\w+ly|already|also|just|now))*\s+been)\s+(?:not\s+(?:only|just|merely|simply|exclusively|solely)\s+)?(?:(?:\w+ly|already|also|just|now)\s+)*$/i;
 
-const REPORT_NONCOMPLETION_GOVERNOR_RE = /(?:\b(?:(?:about|due|ready)\s+to|prepar(?:e[sd]?|ing)\s+to)(?:\s+(?:\w+ly|already|just|now))*(?:\s+(?:have(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?|be))?(?:\s+(?:\w+ly|already|just|now))*|\b(?:supposed|expect(?:s|ed|ing)?|requir(?:e[sd]?|ing)|meant|schedul(?:e[sd]?|ing)|instruct(?:s|ed|ing)?|ask(?:s|ed|ing)?|told|direct(?:s|ed|ing)?|order(?:s|ed|ing)?|need(?:s|ed|ing)?|intend(?:s|ed|ing)?|plan(?:s|ned|ning)?|promis(?:e[sd]?|ing)|agree(?:s|d|ing)?|claim(?:s|ed|ing)?|purport(?:s|ed|ing)?|attempt(?:s|ed|ing)?|tr(?:y|ies|ied|ying)|hop(?:e[sd]?|ing)|failed|unable|refus(?:e[sd]?|ing)|declin(?:e[sd]?|ing)|forgot(?:ten)?|forget(?:s|ting)?|neglect(?:s|ed|ing)?|pretend(?:s|ed|ing)?|want(?:s|ed)?|ought)\s+(?:(?:me|us|you|him|her|them|(?:(?:the|our|your|their)\s+)?(?:[\w'’-]+\s+){0,3}(?:technician|tech|crew|team)|[\w\x27\u2019-]+(?:\s+[\w\x27\u2019-]+){0,2})\s+)?to(?:\s+(?:\w+ly|already|just|now))*(?:\s+(?:have(?:\s+(?:\w+ly|already|just|now))*(?:\s+been|(?:\s+(?!(?:and|but|or|after|before|when|while|until|since|because|if|unless|that|which|who|was|were|is|are|has|have|had|did|applied|treated|sprayed|used|placed|put|got|received|finished|completed)\b)[\w'’-]+){1,6})?|be))?(?:\s+(?:\w+ly|already|just|now))*|\bplan(?:s|ned|ning)?\s+on\s+having(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?(?:\s+(?:\w+ly|already|just|now))*|\bimagin(?:e[sd]?|ing)\s+(?:that\s+)?(?:i|we|you|he|she|they|it)\s+(?:(?:had|has|have|was|were|already|just|now)\s+)*)\s*$/i;
+const REPORT_NONCOMPLETION_GOVERNOR_RE = /(?:\b(?:(?:about|due|ready)\s+to|prepar(?:e[sd]?|ing)\s+to)(?:\s+(?:\w+ly|already|just|now))*(?:\s+(?:have(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?|be))?(?:\s+(?:\w+ly|already|just|now))*|\b(?:supposed|expect(?:s|ed|ing)?|requir(?:e[sd]?|ing)|meant|schedul(?:e[sd]?|ing)|instruct(?:s|ed|ing)?|ask(?:s|ed|ing)?|told|direct(?:s|ed|ing)?|order(?:s|ed|ing)?|need(?:s|ed|ing)?|intend(?:s|ed|ing)?|plan(?:s|ned|ning)?|promis(?:e[sd]?|ing)|agree(?:s|d|ing)?|claim(?:s|ed|ing)?|purport(?:s|ed|ing)?|authoriz(?:e[sd]?|ing)|allow(?:s|ed|ing)?|attempt(?:s|ed|ing)?|tr(?:y|ies|ied|ying)|hop(?:e[sd]?|ing)|fail(?:s|ed|ing)?|unable|refus(?:e[sd]?|ing)|declin(?:e[sd]?|ing)|forgot(?:ten)?|forget(?:s|ting)?|neglect(?:s|ed|ing)?|pretend(?:s|ed|ing)?|want(?:s|ed)?|ought)\s+(?:(?:me|us|you|him|her|them|(?:(?:the|our|your|their)\s+)?(?:[\w'’-]+\s+){0,3}(?:technician|tech|crew|team)|[\w\x27\u2019-]+(?:\s+[\w\x27\u2019-]+){0,2})\s+)?to(?:\s+(?:\w+ly|already|just|now))*(?:\s+(?:have(?:\s+(?:\w+ly|already|just|now))*(?:\s+been|(?:\s+(?!(?:and|but|or|after|before|when|while|until|since|because|if|unless|that|which|who|was|were|is|are|has|have|had|did|applied|treated|sprayed|used|placed|put|got|received|finished|completed)\b)[\w'’-]+){1,6})?|be))?(?:\s+(?:\w+ly|already|just|now))*|\bplan(?:s|ned|ning)?\s+on\s+having(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?(?:\s+(?:\w+ly|already|just|now))*|\bimagin(?:e[sd]?|ing)\s+(?:that\s+)?(?:i|we|you|he|she|they|it)\s+(?:(?:had|has|have|was|were|already|just|now)\s+)*)\s*$/i;
 
 const REPORT_NONCOMPLETION_ASSURANCE_GOVERNOR_RE = new RegExp(
   `\\b(?:(?:attempt(?:s|ed|ing)?|tr(?:y|ies|ied|ying)|fail(?:s|ed|ing)?|work(?:s|ed|ing)?)(?:\\s+(?:\\w+ly|hard))*`
@@ -1871,10 +1871,12 @@ function reportHasCompletedPredicate(affirmed, findingVerb) {
     .replace(/^\s*(?:although|though|while)\b[^,]*,\s*/i, '');
   const completionPrefix = prefix.replace(REPORT_NEGATED_DOUBT_RE, '');
   const predicateIntroduction = prefix.replace(/\b(?:complet(?:e|ed)|finish(?:ed)?|done|manag(?:e|ed)\s+to|succeed(?:ed)?\s+(?:in|at)|(?:ended|wound)\s+up)\s*$/i, '');
-  const governorIntroduction = predicateIntroduction.replace(
-    /\bget(?:\s+(?:\w+ly|already|just|now))*(?:\s+(?!(?:and|but|or|after|before|when|while|until|since|because|if|unless|that|which|who|was|were|is|are|has|have|had|did|applied|treated|sprayed|used|placed|put|got|received|finished|completed)\b)[\w'’-]+){1,6}\s*$/i,
-    '',
-  );
+  const governorIntroduction = predicateIntroduction
+    .replace(/\b(?:receiv(?:e[sd]?|ing)|get(?:s|ting)?|got|have|has|had)\s+permission(?=\s+to\b)/i, 'were allowed')
+    .replace(
+      /\bget(?:\s+(?:\w+ly|already|just|now))*(?:\s+(?!(?:and|but|or|after|before|when|while|until|since|because|if|unless|that|which|who|was|were|is|are|has|have|had|did|applied|treated|sprayed|used|placed|put|got|received|finished|completed)\b)[\w'’-]+){1,6}\s*$/i,
+      '',
+    );
   if (REPORT_NONCOMPLETION_GOVERNOR_RE.test(governorIntroduction)
       || REPORT_NONCOMPLETION_ASSURANCE_GOVERNOR_RE.test(predicateIntroduction)
       || REPORT_NONCOMPLETION_MODIFIER_RE.test(predicateIntroduction)
@@ -1924,6 +1926,9 @@ function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb
       const end = start + condition.length;
       return end <= firstAt || start >= evidenceEnd ? ' '.repeat(condition.length) : condition;
     })
+    .replace(/\bas\s+if\b[^,;.!?]*?(?=\s+(?:(?:but|and)\s+(?:(?:also|instead)\s+)?(?:only\s+if|if|unless|assuming|provided\s+that)|(?:only\s+if|unless|assuming|provided\s+that))\b|[,;.!?]|$)/gi, (manner, at) => (
+      offset + at >= evidenceEnd ? ' '.repeat(manner.length) : manner
+    ))
     .replace(/\bwhether\b[^;.!?]*?\bor\s+not\b/gi, (condition, at) => (
       offset + at >= evidenceEnd ? ' '.repeat(condition.length) : condition
     ));

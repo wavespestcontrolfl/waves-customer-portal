@@ -663,3 +663,39 @@ test.each([
   expect(grammar.reportClaimIsDenied(text, text, text.indexOf('Talstar P'),
     text.indexOf('exterior perimeter'), findingVerb, '')).toBe(denied);
 });
+
+test.each([
+  ['We fail to get Talstar P applied to the exterior perimeter.', false],
+  ['The technician fails to get Talstar P applied to the exterior perimeter.', false],
+  ['We are failing to get Talstar P applied to the exterior perimeter.', false],
+  ['We failed to get Talstar P applied to the exterior perimeter.', false],
+  ['We managed to get Talstar P applied to the exterior perimeter.', true],
+  ['We got Talstar P applied to the exterior perimeter.', true],
+])('inflected fail governors retain causative completion scope: %s', (text, completed) => {
+  expect(grammar.reportHasCompletedPredicate(text, /applied/.exec(text))).toBe(completed);
+});
+
+test.each([
+  ['We applied Talstar P to the exterior perimeter as if painting a line.', false],
+  ['As if Talstar P was applied to the exterior perimeter, the report would show it.', true],
+  ['We applied Talstar P to the exterior perimeter as if painting a line but only if the gate was open.', true],
+  ['We applied Talstar P to the exterior perimeter as if painting a line unless it rained.', true],
+  ['We applied Talstar P to the exterior perimeter as if painting a line only if the gate was open.', true],
+  ['We applied Talstar P to the exterior perimeter if the gate was open.', true],
+  ['We checked if Talstar P was applied to the exterior perimeter.', true],
+])('post-finding as-if manner differs from a governing condition: %s', (text, denied) => {
+  expect(grammar.reportClaimIsDenied(text, text, text.indexOf('Talstar P'),
+    text.indexOf('exterior perimeter'), /applied/.exec(text), '')).toBe(denied);
+});
+
+test.each([
+  ['We were authorized to have Talstar P applied to the exterior perimeter.', false],
+  ['We were allowed to have Talstar P applied to the exterior perimeter.', false],
+  ['We received permission to have Talstar P applied to the exterior perimeter.', false],
+  ['We had permission to have Talstar P applied to the exterior perimeter.', false],
+  ['The technician has permission to have Talstar P applied to the exterior perimeter.', false],
+  ['We had Talstar P applied to the exterior perimeter.', true],
+  ['We were authorized to apply bait later, but we applied Talstar P to the exterior perimeter.', true],
+])('permission governors do not establish completed treatment: %s', (text, completed) => {
+  expect(grammar.reportHasCompletedPredicate(text, /applied/.exec(text))).toBe(completed);
+});
