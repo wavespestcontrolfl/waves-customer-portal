@@ -1021,3 +1021,19 @@ test.each([
   const findingVerbs = [...text.matchAll(/\b(?:applied|apply|applying)\b/g)];
   expect(grammar.reportHasCompletedPredicate(text, findingVerbs.at(-1))).toBe(completed);
 });
+
+test.each([
+  ['Be sure to have Talstar P applied to the exterior perimeter.', true],
+  ['Please be sure to have Talstar P applied to the exterior perimeter.', true],
+  ['Kindly be sure to have Talstar P applied to the exterior perimeter.', true],
+  ['We were sure to have Talstar P applied to the exterior perimeter.', false],
+  ['I was sure that Talstar P was applied to the exterior perimeter.', false],
+  ['We made sure Talstar P was applied to the exterior perimeter.', false],
+  ['Be sure to have bait applied indoors, but Talstar P was applied to the exterior perimeter.', false],
+])('be-sure causative imperative differs from a completed assertion: %s', (text, instruction) => {
+  const findingVerbs = [...text.matchAll(/applied/g)];
+  const findingVerb = findingVerbs.at(-1);
+  expect(grammar.reportFindingIsInstruction(text, text.indexOf('Talstar P'),
+    text.indexOf('exterior perimeter'), findingVerb, text.length)).toBe(instruction);
+  expect(grammar.reportHasCompletedPredicate(text, findingVerb)).toBe(true);
+});
