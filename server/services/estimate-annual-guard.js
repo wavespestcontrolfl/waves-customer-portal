@@ -249,39 +249,75 @@ async function rewriteWithheldEstimateLinks({ db, html, text }) {
   const rewrittenIds = [];
   if (!texts.length) return { html: outHtml, text: outText, rewrittenIds };
 
-  const longTokens = [...extractMatches(texts, LONG_LINK_TOKEN_RE)];
+  const literalLongTokens = [...extractMatches(texts, LONG_LINK_TOKEN_RE)];
   const shortCodes = [...extractMatches(texts, SHORT_LINK_CODE_RE, { trimTrailingDash: true })];
-  if (!longTokens.length && !shortCodes.length) return { html: outHtml, text: outText, rewrittenIds };
+  if (!literalLongTokens.length && !shortCodes.length) return { html: outHtml, text: outText, rewrittenIds };
 
   const replaceAll = (needle) => {
     if (!needle) return;
     if (typeof outHtml === 'string' && outHtml.includes(needle)) outHtml = outHtml.split(needle).join('');
     if (typeof outText === 'string' && outText.includes(needle)) outText = outText.split(needle).join('');
   };
+  // Shared per-link verdict check: any of the three link shapes below
+  // (literal long token, direct-entity short code, target_url-derived short
+  // code) reduces to "is THIS estimate withheld — if so, record its id once
+  // and strip THIS literal substring".
+  const blockAndStrip = async (estimateId, needle) => {
+    const verdict = await annualHandoffGuard({ db, estimateIds: [estimateId], texts: [] })();
+    if (!verdict.blocked) return;
+    if (!rewrittenIds.includes(estimateId)) rewrittenIds.push(estimateId);
+    replaceAll(needle);
+  };
 
-  if (longTokens.length) {
-    const tokenRows = await db('estimates').whereIn('token', longTokens).select('id', 'token');
-    for (const row of tokenRows) {
-      const verdict = await annualHandoffGuard({ db, estimateIds: [row.id], texts: [] })();
-      if (verdict.blocked) {
-        rewrittenIds.push(row.id);
-        replaceAll(`/estimate/${row.token}`);
-      }
-    }
-  }
+  // Pre-push audit P1 (d9b71d84bb round 10): mirrors estimateIdsFromContent's
+  // own target_url rescan (above) — a short code whose target_url is ITSELF
+  // an estimate link (the composer/most senders mint entity_type 'estimates'
+  // directly, but a code minted for some other purpose can still happen to
+  // target one) was previously judged withheld by the OUTER guard call
+  // (which uses estimateIdsFromContent, target_url rescan included) but
+  // never REWRITTEN here (this function's old short-code query filtered to
+  // entity_type 'estimates' only) — the link survived in the sent content
+  // while the guard, seeing it in the content, refused the whole receipt
+  // anyway. Split short codes into DIRECT entity-mapped rows and rows whose
+  // target_url embeds a long token needing its own id resolution.
+  const directCodeRows = [];
+  const targetTokenByCode = new Map();
+  const targetDerivedTokens = new Set();
   if (shortCodes.length) {
     const codeRows = await db('short_codes')
       .whereIn('code', shortCodes.map((code) => code.toLowerCase()))
-      .where({ entity_type: 'estimates' })
-      .whereNotNull('entity_id')
-      .select('code', 'entity_id');
+      .select('code', 'target_url', 'entity_type', 'entity_id');
     for (const row of codeRows) {
-      const verdict = await annualHandoffGuard({ db, estimateIds: [row.entity_id], texts: [] })();
-      if (verdict.blocked) {
-        if (!rewrittenIds.includes(row.entity_id)) rewrittenIds.push(row.entity_id);
-        replaceAll(`/l/${row.code}`);
+      if (row.entity_type === 'estimates' && row.entity_id) {
+        directCodeRows.push(row);
+      } else if (row.target_url) {
+        for (const token of extractMatches([row.target_url], LONG_LINK_TOKEN_RE)) {
+          targetTokenByCode.set(row.code, token);
+          targetDerivedTokens.add(token);
+        }
       }
     }
+  }
+
+  // One combined estimates lookup: literal /estimate/<token> links in the
+  // content itself, plus any short code's target_url-derived token.
+  const allTokens = new Set([...literalLongTokens, ...targetDerivedTokens]);
+  const tokenToRow = new Map();
+  if (allTokens.size) {
+    const tokenRows = await db('estimates').whereIn('token', [...allTokens]).select('id', 'token');
+    for (const row of tokenRows) tokenToRow.set(row.token, row);
+  }
+
+  for (const token of literalLongTokens) {
+    const row = tokenToRow.get(token);
+    if (row) await blockAndStrip(row.id, `/estimate/${row.token}`);
+  }
+  for (const row of directCodeRows) {
+    await blockAndStrip(row.entity_id, `/l/${row.code}`);
+  }
+  for (const [code, token] of targetTokenByCode) {
+    const row = tokenToRow.get(token);
+    if (row) await blockAndStrip(row.id, `/l/${code}`);
   }
   return { html: outHtml, text: outText, rewrittenIds };
 }

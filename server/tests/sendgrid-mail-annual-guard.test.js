@@ -236,4 +236,33 @@ describe('sendgrid-mail sendOne: withheldLinkPolicy rewrite at the provider boun
     expect(err.annualOfferWithheld).toBe(true);
     expect(global.fetch).not.toHaveBeenCalled();
   });
+
+  // Pre-push audit P1 (d9b71d84bb round 10): rewriteWithheldEstimateLinks
+  // does its own DB reads (resolving long tokens / short codes to rows) —
+  // a failure there is a pre-dispatch guard-infrastructure failure exactly
+  // like a runAnnualOfferGuard lookup failure, not a provider error. It
+  // must carry the SAME annualOfferGuardFailed tag so sendTemplate (and the
+  // retry sweep, and bounce recovery) map it to their definite pre-dispatch
+  // abort instead of an uncertain/provider-error classification.
+  test('a rewrite lookup failure is tagged annualOfferGuardFailed exactly like a guard lookup failure — never reaches fetch', async () => {
+    withheldLinkPolicyForTemplate.mockReturnValue('rewrite');
+    rewriteWithheldEstimateLinks.mockRejectedValueOnce(new Error('short_codes lookup unavailable'));
+    const sendgrid = require('../services/sendgrid-mail');
+
+    const err = await sendgrid.sendOne({
+      to: 'customer@example.test', fromEmail: 'contact@example.test', subject: 'S',
+      html: '<p>https://portal.example/estimate/some-tok</p>', text: 't', templateKey: 'deposit.receipt',
+    }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(Error);
+    expect(err.annualOfferGuardFailed).toBe(true);
+    expect(err.code).toBe('ANNUAL_OFFER_GUARD_FAILED');
+    expect(err.annualOfferWithheld).toBeUndefined();
+    expect(err.message).toMatch(/short_codes lookup unavailable/);
+    // The guard itself (annualHandoffGuard, inside runAnnualOfferGuard) is
+    // never even reached — the rewrite step failed first.
+    expect(annualHandoffGuard).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(sendgrid.isAnnualOfferWithheld(err)).toBe(false);
+  });
 });

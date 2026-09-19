@@ -171,13 +171,31 @@ async function runAnnualOfferGuard({ estimateIds, html, text }) {
 // Returns the (possibly rewritten) content to send, the (possibly stripped)
 // explicit estimate ids, and withheldLinksRewritten only when a rewrite
 // actually fired.
+// Pre-push audit P1 (d9b71d84bb round 10): rewriteWithheldEstimateLinks does
+// its own DB reads (resolving long tokens and short codes to rows) — a
+// failure there (DB unavailable, etc.) is a pre-dispatch guard-infrastructure
+// failure exactly like a runAnnualOfferGuard lookup failure, not a provider
+// error. Tagged with the SAME annualOfferGuardFailed shape here, at the
+// point of the throw, so every caller (sendOne's own try/catch below,
+// sendTemplate, the retry sweep, bounce recovery) maps it to the same
+// definite pre-dispatch abort without needing to know this rewrite step
+// exists.
 async function resolveWithheldLinkRewrite({ html, text, estimateIds, templateKey, withheldLinkPolicy }) {
   const { withheldLinkPolicyForTemplate, rewriteWithheldEstimateLinks } = require('./estimate-annual-guard');
   const resolvedPolicy = withheldLinkPolicy || withheldLinkPolicyForTemplate(templateKey);
   if (resolvedPolicy !== 'rewrite') return { sendHtml: html, sendText: text, sendEstimateIds: estimateIds };
 
   const db = require('../models/db');
-  const rewritten = await rewriteWithheldEstimateLinks({ db, html, text });
+  let rewritten;
+  try {
+    rewritten = await rewriteWithheldEstimateLinks({ db, html, text });
+  } catch (err) {
+    const guardErr = new Error(`annual offer guard failed: ${err.message}`);
+    guardErr.code = 'ANNUAL_OFFER_GUARD_FAILED';
+    guardErr.annualOfferGuardFailed = true;
+    guardErr.cause = err;
+    throw guardErr;
+  }
   if (!rewritten.rewrittenIds.length) return { sendHtml: html, sendText: text, sendEstimateIds: estimateIds };
 
   logger.warn(`[sendgrid] rewrote ${rewritten.rewrittenIds.length} withheld estimate link(s) to the portal home for template "${templateKey || 'unknown'}"`);

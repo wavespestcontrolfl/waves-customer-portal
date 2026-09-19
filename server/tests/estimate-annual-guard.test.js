@@ -568,6 +568,72 @@ describe('rewriteWithheldEstimateLinks (Codex round 3 on #4608, P1 PRRT_kwDOR3YQ
     expect(result.html).toBe('<p>https://portal.wavespestcontrol.com</p>');
     expect(result.text).toBe('Same one again: https://portal.wavespestcontrol.com');
   });
+
+  // Pre-push audit P1 (d9b71d84bb round 10): short_codes rows this fixture
+  // combines fakeGroupDb (estimates, for annualHandoffGuard's own per-id
+  // lookups) with a plain whereIn/select stub (short_codes) — routed by
+  // table, same pattern as the content-derivation describe block above.
+  function fakeRewriteDb({ estimates = [], shortCodes = [] } = {}) {
+    const estimatesDb = fakeGroupDb(estimates);
+    return (table) => {
+      if (table === 'short_codes') {
+        return {
+          whereIn(col, vals) {
+            return { select: async () => shortCodes.filter((r) => vals.includes(r[col])) };
+          },
+        };
+      }
+      return estimatesDb(table);
+    };
+  }
+
+  test('a short code minted for something else whose target_url is itself a withheld estimate link is rewritten too (mirrors estimateIdsFromContent\'s own target_url rescan)', async () => {
+    const withheldRow = row(undefined, { id: 'est-target-url', token: 'target-url-token-e12345' });
+    const db = fakeRewriteDb({
+      estimates: [withheldRow],
+      shortCodes: [{
+        code: 'xyz9code', entity_type: null, entity_id: null,
+        target_url: 'https://portal.wavespestcontrol.com/estimate/target-url-token-e12345',
+      }],
+    });
+    const html = '<p>View it: https://portal.wavespestcontrol.com/l/xyz9code</p>';
+    const text = 'https://portal.wavespestcontrol.com/l/xyz9code';
+
+    const result = await rewriteWithheldEstimateLinks({ db, html, text });
+
+    expect(result.rewrittenIds).toEqual(['est-target-url']);
+    expect(result.html).toBe('<p>View it: https://portal.wavespestcontrol.com</p>');
+    expect(result.text).toBe('https://portal.wavespestcontrol.com');
+  });
+
+  test('a short code minted for something else whose target_url resolves to a DELIVERED estimate is left untouched', async () => {
+    const deliveredRow = delivered({ id: 'est-target-url-ok', token: 'target-url-token-f123456' });
+    const db = fakeRewriteDb({
+      estimates: [deliveredRow],
+      shortCodes: [{
+        code: 'abc1code', entity_type: null, entity_id: null,
+        target_url: 'https://portal.wavespestcontrol.com/estimate/target-url-token-f123456',
+      }],
+    });
+    const html = '<p>https://portal.wavespestcontrol.com/l/abc1code</p>';
+
+    const result = await rewriteWithheldEstimateLinks({ db, html, text: '' });
+
+    expect(result.rewrittenIds).toEqual([]);
+    expect(result.html).toBe(html);
+  });
+
+  test('a short code for something else entirely (target_url carries no estimate link) is left alone, no crash', async () => {
+    const db = fakeRewriteDb({
+      shortCodes: [{ code: 'inv1code', entity_type: 'invoices', entity_id: 'inv-1', target_url: 'https://portal.wavespestcontrol.com/pay/invoice-1' }],
+    });
+    const html = 'Pay here: https://portal.wavespestcontrol.com/l/inv1code';
+
+    const result = await rewriteWithheldEstimateLinks({ db, html, text: '' });
+
+    expect(result.rewrittenIds).toEqual([]);
+    expect(result.html).toBe(html);
+  });
 });
 
 describe('withheldLinkPolicyForTemplate (round 9 structural fix, P1: template-keyed rewrite at the provider)', () => {
