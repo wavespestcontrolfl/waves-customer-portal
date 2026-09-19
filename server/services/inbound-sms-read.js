@@ -188,40 +188,34 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
     .andWhere(scope).whereNotNull('twilio_sid').pluck('twilio_sid')).filter(Boolean);
   const mirrorSids = (await q().whereNotNull('twilio_sid').pluck('twilio_sid')).filter(Boolean);
   const updated = await q().update({ is_read: true, read_at: now, read_by_admin_user_id: adminUserId || null, updated_at: now });
-  if (mirrorSids.length) {
-    try {
-      await db('sms_log').where({ direction: 'inbound' }).whereIn('twilio_sid', mirrorSids)
-        .andWhere(function unread() { this.where({ is_read: false }).orWhereNull('is_read'); })
-        .update({ is_read: true });
-    } catch (e) { logger.warn('[inbound-sms-read] sms_log read mirror failed', { code: e.code || 'unknown' }); }
-  }
+  try {
+    await db('sms_log').where({ direction: 'inbound' }).whereIn('twilio_sid', mirrorSids)
+      .andWhere(function unread() { this.where({ is_read: false }).orWhereNull('is_read'); })
+      .update({ is_read: true });
+  } catch (e) { logger.warn('[inbound-sms-read] sms_log read mirror failed', { code: e.code || 'unknown' }); }
 
   // 3. Bell cross-clear — only threads with nothing unread left, bells that
   //    existed at entry, through the notification service.
   let notificationsCleared = 0;
   // Reconcile generic sender bells separately from customer-linked bells.
-  if (scopedSids.length) {
-    let knownSids = [];
-    try {
-      const membership = await resolveUnknownSenderPhoneMembership(scopedSids);
-      knownSids = scopedSids.filter((sid) => !membership.unknownSenderSids.has(sid));
-      // Promoted SIDs can own both bell types. Clear only their customer
-      // link here; the generic bell remains protected by the phone lock.
-      for (const [customerId, twilioSids] of membership.promotedSids) {
-        notificationsCleared += await NotificationService.markInboundSmsReadAdmin({ customerId, twilioSids, before: now, role });
-      }
-      for (const phone of membership.phones) {
-        notificationsCleared += await retargetOrClearUnknownSenderBell(phone, now, role);
-      }
-    } catch (e) { logger.warn('[inbound-sms-read] unknown-sender bell retarget failed', { code: e.code || 'unknown' }); }
-    // Generic bells require phone reconciliation; other SIDs clear directly.
-    // Membership failure must not turn unknown senders into unlocked SID clears.
-    if (knownSids.length) {
-      try {
-        notificationsCleared += await NotificationService.markInboundSmsReadAdmin({ twilioSids: knownSids, before: now, role });
-      } catch (e) { logger.warn('[inbound-sms-read] bell clear by sid failed', { code: e.code || 'unknown' }); }
+  let knownSids = [];
+  try {
+    const membership = await resolveUnknownSenderPhoneMembership(scopedSids);
+    knownSids = scopedSids.filter((sid) => !membership.unknownSenderSids.has(sid));
+    // Promoted SIDs can own both bell types. Clear only their customer
+    // link here; the generic bell remains protected by the phone lock.
+    for (const [customerId, twilioSids] of membership.promotedSids) {
+      notificationsCleared += await NotificationService.markInboundSmsReadAdmin({ customerId, twilioSids, before: now, role });
     }
-  }
+    for (const phone of membership.phones) {
+      notificationsCleared += await retargetOrClearUnknownSenderBell(phone, now, role);
+    }
+  } catch (e) { logger.warn('[inbound-sms-read] unknown-sender bell retarget failed', { code: e.code || 'unknown' }); }
+  // Generic bells require phone reconciliation; other SIDs clear directly.
+  // Membership failure must not turn unknown senders into unlocked SID clears.
+  try {
+    notificationsCleared += await NotificationService.markInboundSmsReadAdmin({ twilioSids: knownSids, before: now, role });
+  } catch (e) { logger.warn('[inbound-sms-read] bell clear by sid failed', { code: e.code || 'unknown' }); }
   notificationsCleared += await clearCustomerThreadCrossBells({ ids, convs, now, role });
 
   return { updated, notificationsCleared };
