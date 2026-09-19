@@ -1867,7 +1867,11 @@ function reportHasCompletedPredicate(affirmed, findingVerb) {
     .replace(/\bdid\s*,[^,;.!?]+,\s*/gi, 'did ')
     .replace(/^\s*(?:although|though|while)\b[^,]*,\s*/i, '');
   const predicateIntroduction = prefix.replace(/\b(?:complet(?:e|ed)|finish(?:ed)?|done|manag(?:e|ed)\s+to|succeed(?:ed)?\s+(?:in|at))\s*$/i, '');
-  if (REPORT_NONCOMPLETION_GOVERNOR_RE.test(predicateIntroduction)
+  const governorIntroduction = predicateIntroduction.replace(
+    /\bget(?:\s+(?:\w+ly|already|just|now))*(?:\s+(?!(?:and|but|or|after|before|when|while|until|since|because|if|unless|that|which|who|was|were|is|are|has|have|had|did|applied|treated|sprayed|used|placed|put|got|received|finished|completed)\b)[\w'’-]+){1,6}\s*$/i,
+    '',
+  );
+  if (REPORT_NONCOMPLETION_GOVERNOR_RE.test(governorIntroduction)
       || REPORT_NONCOMPLETION_ASSURANCE_GOVERNOR_RE.test(predicateIntroduction)
       || REPORT_NONCOMPLETION_MODIFIER_RE.test(predicateIntroduction)
       || (/(?:\b(?:am|is|are|be|being|get|gets|getting)|['’](?:m|re))\s+(?:(?:\w+ly|already|also|just|now)\s+)*$/i.test(prefix)
@@ -1887,7 +1891,7 @@ function reportHasCompletedPredicate(affirmed, findingVerb) {
 }
 
 function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb, precedingText) {
-  if (/(?:\b(?:anything|all)\s+but|\bexcept(?:\s+for)?(?:\s+the)?)\s*$/i.test(precedingText)
+  if (/(?:\b(?:anything|everything|all)\s+but|\bexcept(?:\s+for)?(?:\s+the)?)\s*$/i.test(precedingText)
       || (!findingVerb && /\bor\s*$/i.test(precedingText))) return true;
   const affirmedWithoutFocus = affirmed.replace(/(?:\bnot|n['’]t)\s+(?:exclusively|solely)\b/gi,
     (focus) => ' '.repeat(focus.length));
@@ -1905,6 +1909,11 @@ function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb
       offset + at >= evidenceEnd ? ' '.repeat(idiom.length) : idiom
     ))
     .replace(/\beven\s+if\b(?:\s*,[^,;.!?]+,)?[^,;.!?]*(?:,|(?=[;.!?]|$))/gi, (condition, at) => {
+      const start = offset + at;
+      const end = start + condition.length;
+      return end <= firstAt || start >= evidenceEnd ? ' '.repeat(condition.length) : condition;
+    })
+    .replace(/\bregardless\s+of\s+whether\b[^,;.!?]*?(?=\s+(?:but|and)\s+(?:(?:also|instead)\s+)?(?:only\s+if|if|unless|assuming|provided\s+that)\b|[,;.!?]|$)/gi, (condition, at) => {
       const start = offset + at;
       const end = start + condition.length;
       return end <= firstAt || start >= evidenceEnd ? ' '.repeat(condition.length) : condition;

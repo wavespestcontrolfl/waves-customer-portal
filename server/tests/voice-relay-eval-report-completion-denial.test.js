@@ -476,7 +476,7 @@ test.each([
   ['We applied Talstar P everywhere except the exterior perimeter.', true, 'location'],
   ['We applied Talstar P to the exterior perimeter.', false, ''],
   ['We applied all but bait to the exterior perimeter.', true, 'subject', 'bait'],
-  ['We applied everything but bait to the exterior perimeter.', false, 'subject', 'bait'],
+  ['We applied everything but bait to the exterior perimeter.', true, 'subject', 'bait'],
   ['Even if Talstar P was applied to the exterior perimeter, we treated the lawn.', true, ''],
   ['Even if, according to the report, Talstar P was applied to the exterior perimeter, we treated the lawn.', true, ''],
   ['Even if, according to the report, it rained, Talstar P was applied to the exterior perimeter.', false, ''],
@@ -528,4 +528,39 @@ test.each([
   const precedingText = precedingOwner ? text.slice(0, precedingAt) : '';
   expect(grammar.reportClaimIsDenied(text, text, subjectAt, locationAt,
     /\b(?:applied|applying|treated)\b/.exec(text), precedingText)).toBe(denied);
+});
+
+test.each([
+  ['We failed to get Talstar P applied to the exterior perimeter.', false],
+  ['We attempted to get Talstar P applied to the exterior perimeter.', false],
+  ['We asked the technician to get Talstar P applied to the exterior perimeter.', false],
+  ['We managed to get Talstar P applied to the exterior perimeter.', true],
+  ['We got Talstar P applied to the exterior perimeter.', true],
+])('causative get retains its completion governor: %s', (text, completed) => {
+  expect(grammar.reportHasCompletedPredicate(text, /applied/.exec(text))).toBe(completed);
+});
+
+test.each([
+  ['We applied everything but bait to the exterior perimeter.', 'bait', true, 'subject'],
+  ['We applied everything, including bait, to the exterior perimeter.', 'bait', false, ''],
+  ['We applied Talstar P to the exterior perimeter regardless of whether it rained.', 'Talstar P', false, ''],
+  ['Regardless of whether it rained, we applied Talstar P to the exterior perimeter.', 'Talstar P', false, ''],
+  ['We applied Talstar P to the exterior perimeter regardless of whether it rained but only if we had access.', 'Talstar P', true, ''],
+  ['We applied Talstar P to the exterior perimeter regardless of whether it rained and unless the gate was locked.', 'Talstar P', true, ''],
+  ['We applied Talstar P to the exterior perimeter regardless of whether it rained but also only if we had access.', 'Talstar P', true, ''],
+  ['We applied Talstar P to the exterior perimeter regardless of whether it rained but also treated indoors.', 'Talstar P', false, ''],
+  ['We applied Talstar P to the exterior perimeter regardless of whether it rained and instead used bait indoors.', 'Talstar P', false, ''],
+  ['We applied Talstar P to the exterior perimeter only if it did not rain.', 'Talstar P', true, ''],
+])('exclusions and concessive conditions retain finding scope: %s', (text, subject, denied, precedingOwner) => {
+  const subjectAt = text.indexOf(subject);
+  const locationAt = text.indexOf('exterior perimeter');
+  const precedingText = precedingOwner === 'subject' ? text.slice(0, subjectAt) : '';
+  expect(grammar.reportClaimIsDenied(text, text, subjectAt, locationAt,
+    /applied/.exec(text), precedingText)).toBe(denied);
+});
+
+test('a relative report-access assumption does not condition completed treatment', () => {
+  const text = 'Talstar P was applied to the exterior perimeter, which you can see in the report, assuming you have it.';
+  expect(grammar.reportClaimIsDenied(text, text, text.indexOf('Talstar P'),
+    text.indexOf('exterior perimeter'), /applied/.exec(text), '')).toBe(false);
 });
