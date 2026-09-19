@@ -2,24 +2,52 @@
 // Uses synthetic records only; queries are real and fixtures are removed by id.
 // No application DATABASE_URL or provider client is used.
 jest.mock('../models/db', () => {
-  const db = (...args) => mockPg(...args);
+  const db = (...args) => {
+    if (args[0] === 'messages as m' && mockMembershipFailure) throw new Error('Synthetic membership lookup failure');
+    return mockPg(...args);
+  };
   db.raw = (...args) => mockPg.raw(...args);
+  db.transaction = (work) => mockPg.transaction((trx) => {
+    const connection = (table) => {
+      const query = trx(table);
+      if (table === 'messages as m' && mockAfterRemainingRead) {
+        const first = query.first.bind(query);
+        query.first = async (...args) => {
+          const row = await first(...args);
+          const afterRead = mockAfterRemainingRead;
+          mockAfterRemainingRead = null;
+          await afterRead();
+          return row;
+        };
+      }
+      return query;
+    };
+    connection.raw = trx.raw.bind(trx);
+    return work(connection);
+  });
   Object.defineProperty(db, 'schema', { get: () => mockPg.schema });
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
-jest.mock('../services/notification-service', () => ({ markInboundSmsReadAdmin: jest.fn().mockResolvedValue(0) }));
+jest.mock('../services/notification-service', () => ({
+  markInboundSmsReadAdmin: (...args) => jest.requireActual('../services/notification-service').markInboundSmsReadAdmin(...args),
+  scopeAdminFeedToRole: (...args) => jest.requireActual('../services/notification-service').scopeAdminFeedToRole(...args),
+}));
 const { randomUUID, randomBytes } = require('node:crypto');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { invoiceOverdueSql, invoiceDaysOverdue } = require('../services/collections/account-anchor');
 const router = require('../routes/admin-customers');
-const { countUnreadInboundSms, markInboundSmsRead } = require('../services/inbound-sms-read');
+const { countUnreadInboundSms, markInboundSmsRead, retargetOrClearUnknownSenderBell } = require('../services/inbound-sms-read');
+const { appendMessage } = require('../services/conversations');
+const realNotificationService = jest.requireActual('../services/notification-service');
 const { openBalanceSummary } = require('../services/open-balance');
 const connection = process.env.C360_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 const ids = Array.from({ length: 4 }, () => randomUUID());
 const prefix = `C360-${randomBytes(4).toString('hex')}`;
 let mockPg;
+let mockAfterRemainingRead;
+let mockMembershipFailure;
 let technicianId;
 let invoiceId;
 let estimateId;
@@ -191,4 +219,191 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
     expect((await mockPg('messages').where({ id: laterMessage }).first()).is_read).toBe(false);
     expect(await countUnreadInboundSms({ customerId: ids[1] })).toEqual({ conversations: 1, messages: 1 });
   }, 30000);
+
+  // Reuse one synthetic sender fixture across identity, scope and race cases.
+  async function withSender({ promoted = false, crossNumber = false, bellAfterEntry = false } = {}, run) {
+    const phone = `+1941${randomBytes(4).readUInt32BE().toString().padStart(10, '0').slice(-7)}`;
+    const conversationIds = [randomUUID(), randomUUID()];
+    const messageIds = [randomUUID(), randomUUID()];
+    const sids = messageIds.map(id => `SM-synthetic-${id}`);
+    let bell;
+    try {
+      await mockPg('conversations').insert(conversationIds.map((id, i) => ({
+        id, customer_id: promoted ? ids[3] : null, channel: 'sms',
+        contact_phone: promoted ? null : phone, our_endpoint_id: `+1941555029${i}`,
+      })));
+      await mockPg('messages').insert(messageIds.map((id, i) => ({
+        id, conversation_id: conversationIds[crossNumber ? i : 0], channel: 'sms',
+        direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: sids[i],
+        body: 'Synthetic sender text', created_at: new Date(Date.now() - (2 - i) * 60000),
+      })));
+      if (promoted) await mockPg('sms_log').insert(sids.map(twilio_sid => ({
+        direction: 'inbound', from_phone: phone, to_phone: '+19415550290',
+        twilio_sid, message_body: 'Synthetic promoted twin', customer_id: ids[3], is_read: false,
+      })));
+      [bell] = await mockPg('notifications').insert({
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic sender bell',
+        link: '/admin/communications', metadata: JSON.stringify({ payload: { twilioSid: sids[0] } }),
+        created_at: new Date(Date.now() + (bellAfterEntry ? 300000 : -60000)),
+      }).returning('*');
+      await run({ phone, conversationIds, messageIds, sids, bell,
+        readBell: () => mockPg('notifications').where({ id: bell.id }).first() });
+    } finally {
+      mockAfterRemainingRead = null; mockMembershipFailure = false;
+      await mockPg('sms_log').whereIn('twilio_sid', sids).delete();
+      await mockPg('messages').whereIn('conversation_id', conversationIds).delete();
+      if (bell) await mockPg('notifications').where({ id: bell.id }).delete();
+      await mockPg('conversations').whereIn('id', conversationIds).delete();
+    }
+  }
+
+  test.each([
+    ['same conversation', {}], ['different business numbers', { crossNumber: true }],
+    ['promoted conversation with durable legacy sender', { promoted: true, crossNumber: true }],
+  ])('sender bell retargets to an unread sibling in %s', async (_name, options) => {
+    await withSender(options, async ({ messageIds, sids, readBell }) => {
+      await markInboundSmsRead({ messageIds: [messageIds[0]], role: 'admin' });
+      expect((await readBell()).read_at).toBeNull();
+      expect((await readBell()).metadata.payload.twilioSid).toBe(sids[1]);
+      expect((await mockPg('messages').where({ id: messageIds[1] }).first()).is_read).toBe(false);
+      await markInboundSmsRead({ messageIds: [messageIds[1]], role: 'admin' });
+      expect((await readBell()).read_at).not.toBeNull();
+    });
+  }, 30000);
+
+  test('promoted reads clear their linked bell while preserving the generic unread sibling', async () => {
+    await withSender({ promoted: true }, async ({ messageIds, sids, readBell }) => {
+      const [linked] = await mockPg('notifications').insert({
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic linked bell',
+        link: `/admin/communications?thread=${ids[3]}`, metadata: JSON.stringify({ payload: { twilioSid: sids[0] } }),
+        created_at: new Date(Date.now() - 60000),
+      }).returning('id');
+      try {
+        await markInboundSmsRead({ messageIds: [messageIds[0]], role: 'admin' });
+        expect((await mockPg('notifications').where({ id: linked.id }).first()).read_at).not.toBeNull();
+        expect((await readBell()).read_at).toBeNull();
+        expect((await readBell()).metadata.payload.twilioSid).toBe(sids[1]);
+      } finally { await mockPg('notifications').where({ id: linked.id }).delete(); }
+    });
+  }, 30000);
+
+  test('membership failure cannot clear a generic bell with an unread sibling', async () => {
+    await withSender({}, async ({ messageIds, sids, readBell }) => {
+      mockMembershipFailure = true;
+      await markInboundSmsRead({ messageIds: [messageIds[0]], role: 'admin' });
+      expect((await readBell()).read_at).toBeNull();
+      expect((await readBell()).metadata.payload.twilioSid).toBe(sids[0]);
+    });
+  });
+
+  test.each(['message IDs', 'conversation IDs'])('retrying %s reconciles a bell after the first read lock times out', async input => {
+    await withSender({}, async ({ phone, messageIds, conversationIds, readBell }) => {
+      const scope = input === 'message IDs' ? { messageIds }
+        : { conversationIds, readBefore: new Date() };
+      const lock = await mockPg.transaction();
+      try {
+        await lock.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`inbound_sms_bell_retarget:${phone}`]);
+        expect(await markInboundSmsRead({ ...scope, role: 'admin' })).toMatchObject({ updated: 2, notificationsCleared: 0 });
+        expect((await readBell()).read_at).toBeNull();
+      } finally { await lock.rollback(); }
+      // Both rows are already read, so the retry updates no messages. It
+      // must still revisit the sender bell that the timed-out attempt left.
+      expect(await markInboundSmsRead({ ...scope, role: 'admin' })).toMatchObject({ updated: 0, notificationsCleared: 1 });
+      expect((await readBell()).read_at).not.toBeNull();
+    });
+  }, 30000);
+
+  test('technician reads cannot retarget or clear hidden sender bells', async () => {
+    await withSender({}, async ({ messageIds, sids, readBell }) => {
+      // Legacy metadata without a techVisible trigger is hidden by default.
+      await markInboundSmsRead({ messageIds: [messageIds[0]], role: 'technician' });
+      expect((await readBell()).metadata.payload.twilioSid).toBe(sids[0]);
+      expect((await readBell()).read_at).toBeNull();
+      await markInboundSmsRead({ messageIds: [messageIds[1]], role: 'technician' });
+      expect((await readBell()).metadata.payload.twilioSid).toBe(sids[0]);
+      expect((await readBell()).read_at).toBeNull();
+    });
+  }, 30000);
+
+  test('conversation-ID reads clear the sender bell once all scoped messages are read', async () => {
+    await withSender({}, async ({ conversationIds, readBell }) => {
+      await markInboundSmsRead({ conversationIds, readBefore: new Date(), role: 'admin' });
+      expect((await readBell()).read_at).not.toBeNull();
+    });
+  }, 30000);
+
+  test.each([false, true])('concurrent sender reads converge after promotion=%s', async (promoted) => {
+    await withSender({ promoted }, async ({ messageIds, readBell }) => {
+      await Promise.all(messageIds.map(id => markInboundSmsRead({ messageIds: [id], role: 'admin' })));
+      expect((await readBell()).read_at).not.toBeNull();
+    });
+  }, 30000);
+
+  test('a read preserves a bell created after request entry', async () => {
+    await withSender({ bellAfterEntry: true }, async ({ messageIds, readBell }) => {
+      await markInboundSmsRead({ messageIds, role: 'admin' });
+      expect((await readBell()).read_at).toBeNull();
+    });
+  }, 30000);
+
+  test('clear rechecks unread messages inserted after its initial SELECT', async () => {
+    await withSender({}, async ({ phone, conversationIds, messageIds, readBell }) => {
+      await mockPg('messages').whereIn('id', messageIds).update({ is_read: true });
+      // This writer deliberately omits the phone lock. Insert on another
+      // connection after the real SELECT completes and before the UPDATE.
+      mockAfterRemainingRead = () => mockPg('messages').insert({
+        conversation_id: conversationIds[0], channel: 'sms', direction: 'inbound',
+        author_type: 'lead', is_read: false, twilio_sid: `SM-race-${randomUUID()}`, body: 'New arrival',
+      });
+      expect(await retargetOrClearUnknownSenderBell(phone, new Date())).toBe(0);
+      expect((await readBell()).read_at).toBeNull();
+    });
+  }, 30000);
+
+  test('an inbound append waits for the sender read-clear lock before committing', async () => {
+    await withSender({}, async ({ phone, conversationIds }) => {
+      const sid = `SM-append-${randomUUID()}`;
+      let lockTrx;
+      let appended;
+      try {
+        lockTrx = await mockPg.transaction();
+        await lockTrx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`inbound_sms_bell_retarget:${phone}`]);
+        appended = appendMessage({ conversationId: conversationIds[0], channel: 'sms', direction: 'inbound',
+          authorType: 'lead', contactPhone: phone, twilioSid: sid, body: 'Synthetic locked append' })
+          .then(value => ({ value }), error => ({ error }));
+        let waiter;
+        const deadline = Date.now() + 2000;
+        do {
+          ({ rows: [waiter] } = await mockPg.raw("SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND wait_event = 'advisory' LIMIT 1"));
+          if (!waiter) await new Promise(resolve => setTimeout(resolve, 10));
+        } while (!waiter && Date.now() < deadline);
+        expect(waiter).toBeDefined();
+        expect(await mockPg('messages').where({ twilio_sid: sid }).first()).toBeUndefined();
+        await lockTrx.commit();
+        lockTrx = null;
+        const result = await appended;
+        if (result.error) throw result.error;
+        expect(result.value.twilio_sid).toBe(sid);
+      } finally {
+        if (lockTrx) await lockTrx.rollback();
+        if (appended) await appended;
+      }
+    });
+  }, 30000);
+
+  test('SID-only notification clears bind one or several SIDs and preserve unrelated bells', async () => {
+    const sids = [randomUUID(), randomUUID(), randomUUID()];
+    const bells = [];
+    try {
+      for (const sid of sids) bells.push((await mockPg('notifications').insert({
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic SID bell',
+        link: '/admin/communications', metadata: JSON.stringify({ payload: { twilioSid: sid } }),
+        created_at: new Date(Date.now() - 60000),
+      }).returning('*'))[0]);
+      expect(await realNotificationService.markInboundSmsReadAdmin({ twilioSids: sids.slice(0, 2), role: 'admin' })).toBe(2);
+      expect((await mockPg('notifications').where({ id: bells[2].id }).first()).read_at).toBeNull();
+      expect(await realNotificationService.markInboundSmsReadAdmin({ twilioSid: sids[2], role: 'admin' })).toBe(1);
+    } finally { await mockPg('notifications').whereIn('id', bells.map(bell => bell.id)).delete(); }
+  }, 30000);
+
 });
