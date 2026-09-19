@@ -562,4 +562,53 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
     expect(res.status).toBe(200);
     expect(body).toEqual({ ok: true, channel: 'email' });
   });
+
+  test('P0 (round 6, structural fix): the cross-process LOSER finding the winner\'s durable sms_log row for a since-WITHHELD estimate answers 404, not the stale deduped 200', async () => {
+    // Another process holds the claim (claimAcquired = false), so this
+    // request takes the polling loop below — and finds DURABLE proof (a
+    // real sms_log row) that the winner already sent the packet. Before
+    // this fix that alone was enough to answer deduped:true/200; the
+    // send may have happened before a later withhold, so it must recheck
+    // the verdict exactly like every other dedup site on this route.
+    mockDb.__claimAcquired = false;
+    mockDb.__recentPacketFound = true;
+    currentRow = baseEstimateRow({ customer_phone: '+19415551313' });
+    const TwilioService = require('../services/twilio');
+
+    const res = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
+    });
+    const body = await res.json();
+
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(res.status).toBe(404);
+    expect(body).toEqual({ error: 'Estimate not found' });
+    // The loser also stamps the claim row's durable outcome, same as the
+    // winner-side cross-restart dedup site does.
+    expect(mockDb.__claimOutcome).toBe('withheld');
+  }, 10000);
+
+  test('P0 (round 6, structural fix): the cross-process LOSER finding the winner\'s durable sms_log row for an ELIGIBLE estimate still gets the dedup success unchanged', async () => {
+    mockDb.__claimAcquired = false;
+    mockDb.__recentPacketFound = true;
+    const draft = baseEstimateRow({ customer_phone: '+19415551414' });
+    const fingerprint = annualPlanOfferFingerprint(draft);
+    draft.status = 'sent';
+    draft.estimate_data.deliveryState = { firstDeliveredAt: '2026-01-01T12:00:00Z', annualPlanOfferFingerprint: fingerprint };
+    currentRow = draft;
+    const TwilioService = require('../services/twilio');
+
+    const res = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
+    });
+    const body = await res.json();
+
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ ok: true, channel: 'sms', deduped: true });
+  }, 10000);
 });

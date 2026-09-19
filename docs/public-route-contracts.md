@@ -586,11 +586,15 @@ before either provider path; both provider paths re-read the row and repeat
 the customer-viewable + call-side-hold check as the LAST step before the
 SendGrid/Twilio handoff, so a clarify hold or archive that lands during the
 PDF render withholds the packet with the same generic 404 and releases the
-SMS dedup claim so a later legitimate retap can send; that same LAST-step
-handoff check now also includes the annual termite offer guard
-(server/services/estimate-annual-guard.js) — a changed or never-delivered
-annual offer while either annual gate is off is withheld with the same
-generic 404 and the SMS dedup claim is released, exactly like the
+SMS dedup claim so a later legitimate retap can send; every success or
+deduplicated response on either channel rechecks the annual guard
+(server/services/estimate-annual-guard.js) through one shared helper
+(withheldOr) before answering — the fresh-dispatch success, the in-process
+and cross-restart SMS dedup hits, the cross-process claim-loser's dedup
+hit, and the email per-day idempotency dedup all funnel through it, so a
+changed or never-delivered annual offer can never surface through a
+shortcut that skips the check — mapping a blocked verdict to the same
+generic 404, with the SMS dedup claim stamped/released exactly like the
 customer-viewable/call-side-hold case; no new request shape, no new
 payload).
 `/api/estimates/:token/bond` (PUT; customer bond-term switcher on the
