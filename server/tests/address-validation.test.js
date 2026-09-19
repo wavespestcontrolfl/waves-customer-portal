@@ -109,21 +109,21 @@ describe('deriveStatus (Google AV → provider-neutral status)', () => {
 });
 
 describe('buildAddressLines — spoken raw_text with conversational state-code words', () => {
-  // A 2026-09-17 call: the tail "so, or it could be
-  // Bradenton" was read as Oregon, the lines went to Google as
-  // "Lakewood Ranch OR 34211", and the non-Florida override marked a
-  // Manatee County address out_of_service_area.
+  // Synthetic transcripts in the extractor's shape. A spoken tail like
+  // "so, or it could be Ellenton" used to read as Oregon, the lines went
+  // to Google as "Palmetto OR 34221", and the non-Florida override marked
+  // a served Manatee County address out_of_service_area.
   test('"or" in the spoken tail does not become Oregon', () => {
     expect(buildAddressLines({
-      street_line_1: '1200 Harbor Ln', city: 'Lakewood Ranch', state: 'FL', postal_code: '34211',
-      raw_text: "1200 Harbor Lane. It's Lakewood Ranch, so, or it could be Bradenton, but it's 34211",
-    })).toEqual(['1200 Harbor Ln', 'Lakewood Ranch FL 34211']);
+      street_line_1: '1200 Harbor Ln', city: 'Palmetto', state: 'FL', postal_code: '34221',
+      raw_text: "1200 Harbor Lane. It's Palmetto, so, or it could be Ellenton, but it's 34221",
+    })).toEqual(['1200 Harbor Ln', 'Palmetto FL 34221']);
   });
   test('"in" in the spoken tail does not become Indiana', () => {
     expect(buildAddressLines({
-      street_line_1: '300 Seaglass Cir', city: 'Bradenton', state: 'FL', postal_code: '34211',
-      raw_text: "300 Seaglass, that's one word, S-E-A-G-L-A-S-S Circle. That's in Bradenton, 34211.",
-    })).toEqual(['300 Seaglass Cir', 'Bradenton FL 34211']);
+      street_line_1: '300 Seaglass Cir', city: 'Ellenton', state: 'FL', postal_code: '34222',
+      raw_text: "300 Seaglass, that's one word, S-E-A-G-L-A-S-S Circle. That's in Ellenton, 34222.",
+    })).toEqual(['300 Seaglass Cir', 'Ellenton FL 34222']);
   });
   test('an abbreviated other state followed by trailing speech still overrides the FL default (codex r1 P1)', () => {
     expect(buildAddressLines({
@@ -134,6 +134,12 @@ describe('buildAddressLines — spoken raw_text with conversational state-code w
       street_line_1: '123 Main St', city: 'Venice', state: null,
       raw_text: "123 Main Street, Venice, CA; but I don't know the ZIP",
     })).toEqual(['123 Main St', 'Venice CA']);
+  });
+  test('an abbreviated other state before a trailing country still overrides the FL default (codex r3 P1)', () => {
+    expect(buildAddressLines({
+      street_line_1: '123 Main St', city: 'Portland', state: null,
+      raw_text: '123 Main Street, Portland, OR United States',
+    })).toEqual(['123 Main St', 'Portland OR']);
   });
   test('an explicit other state in raw_text still overrides the FL default', () => {
     expect(buildAddressLines({

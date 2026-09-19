@@ -672,15 +672,16 @@ describe('splitStreetLineUnitParts', () => {
 });
 
 describe('parseRawAddress — conversational words that are also state codes', () => {
-  // Spoken raw_text from the call extractor. "or" / "in" are English here,
-  // not Oregon / Indiana; reading them as a state marked the address out of
-  // the service area and vetoed every customer write for the call.
+  // Synthetic spoken raw_text in the call extractor's shape. "or" / "in"
+  // are English here, not Oregon / Indiana; reading them as a state marks
+  // the address out of the service area and vetoes every customer write
+  // for the call.
   test('"or" mid-sentence is not Oregon', () => {
-    expect(parseRawAddress("1200 Harbor Lane. It's Lakewood Ranch, so, or it could be Bradenton, but it's 34211"))
-      .toMatchObject({ state: '', zip: '34211' });
+    expect(parseRawAddress("1200 Harbor Lane. It's Palmetto, so, or it could be Ellenton, but it's 34221"))
+      .toMatchObject({ state: '', zip: '34221' });
   });
   test('"in" before a locality is not Indiana', () => {
-    expect(parseRawAddress("88 Cypress Court, Bradenton. It's in the River Club."))
+    expect(parseRawAddress("88 Cypress Court, Palmetto. It's in the Oak Grove section."))
       .toMatchObject({ state: '' });
     expect(parseRawAddress("5100 Heron, H-E-R-O-N, Park Court, and it's in Parrish, 34219"))
       .toMatchObject({ state: '', zip: '34219' });
@@ -694,6 +695,11 @@ describe('parseRawAddress — conversational words that are also state codes', (
     expect(parseRawAddress("123 Main St, Venice, CA, but I don't know the ZIP")).toMatchObject({ state: 'CA' });
     expect(parseRawAddress("123 Main St, Venice, CA. I don't know the ZIP")).toMatchObject({ state: 'CA' });
     expect(parseRawAddress("123 Main St, Venice, CA; but I don't know the ZIP")).toMatchObject({ state: 'CA' });
+  });
+  test('a code before a trailing country keeps the state (codex r3 P1)', () => {
+    expect(parseRawAddress('123 Main St, Portland, OR United States')).toMatchObject({ state: 'OR' });
+    expect(parseRawAddress('123 Main St, Portland, OR USA')).toMatchObject({ state: 'OR' });
+    expect(parseRawAddress('123 Main St, Sarasota, FL 34236 USA')).toMatchObject({ state: 'FL', zip: '34236' });
   });
   test('a full state name anywhere in the tail is still a state', () => {
     expect(parseRawAddress('Louisville, Kentucky')).toMatchObject({ state: 'KY' });

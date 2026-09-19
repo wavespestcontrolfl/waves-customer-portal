@@ -274,18 +274,23 @@ function normalizeState(value) {
 }
 
 // A two-letter code is only a state when it sits where a state sits: the
-// end of the segment, or directly before a ZIP ("Sarasota FL 34236",
-// "Groton, CT"). Spoken raw text carries ordinary words that are also codes
-// — "it's Lakewood Ranch, so, OR it could be Bradenton" / "that's IN
-// Bradenton, 34211" — and reading them as Oregon / Indiana marked four
-// Manatee County addresses out of the service area in one week
-// (2026-09-15..18), which vetoes every customer and lead write for the
-// call. Full state names ("Kentucky") stay free-position: they are never
+// end of the segment, directly before a ZIP ("Sarasota FL 34236",
+// "Groton, CT"), or directly before a trailing country ("Portland, OR
+// USA", codex r3 P1). Spoken raw text carries ordinary words that are also
+// codes — "it's Palmetto, so, OR it could be Ellenton" / "that's IN
+// Parrish, 34219" — and reading them as Oregon / Indiana marks a served
+// Florida address out of the service area, which vetoes every customer
+// and lead write for the call (four calls in the week of 2026-09-15).
+// Full state names ("Kentucky") stay free-position: they are never
 // conversational filler. Sentence punctuation (, . ; : ! ?) ends a segment
 // too, so an explicit "…, Venice, CA, but I don't know the ZIP" or
 // "…, Venice, CA; but …" keeps CA (codex r1 + r2 P1).
+const TRAILING_COUNTRY = /\s*(?:usa|u\.s\.a\.?|u\.s\.|us|united states(?: of america)?)\s*[.,;:!?]?\s*$/i;
 function findState(value) {
-  const text = cleanString(value).replace(/\s*([.,;:!?])\s*/g, '$1 ').trim();
+  const text = cleanString(value)
+    .replace(/\s*([.,;:!?])\s*/g, '$1 ')
+    .replace(TRAILING_COUNTRY, '')
+    .trim();
   if (!text) return { raw: '', state: '' };
   for (const token of STATE_TOKENS) {
     const pattern = token.length === 2
