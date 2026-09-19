@@ -119,7 +119,9 @@ async function hasRecentUnknownSenderReceipt(From, excludeSid) {
 
 // Use the same fenced lifecycle for webhooks and process-independent recovery.
 async function dispatchUnknownSenderAlert({ From, MessageSid, message, recovery = false, afterRead }) {
-  if (!recovery) await stampInboundSmsMeta(MessageSid, { sms_reply_eligible: true }, 'eligibility');
+  // Without a recorded eligibility marker a failed delivery would be invisible
+  // to recovery; report unhandled before claiming so the caller keeps the message.
+  if (!recovery && !(await stampInboundSmsMeta(MessageSid, { sms_reply_eligible: true }, 'eligibility'))) return false;
   const { claimed, token } = await claimUnknownSenderAlertWindow(From);
   if (!claimed) {
     // Another owner holds this sender. A confirmed receipt covers this message

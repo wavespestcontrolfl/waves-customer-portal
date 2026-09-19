@@ -34,7 +34,7 @@ beforeEach(() => {
           if (receiptFailure === 'error') throw new Error('Receipt unavailable');
           return 0;
         }
-        if ((delta.sms_reply_covered || delta.sms_reply_suppressed) && stampFailure) {
+        if ((delta.sms_reply_eligible || delta.sms_reply_covered || delta.sms_reply_suppressed) && stampFailure) {
           if (stampFailure === 'error') throw new Error('Marker unavailable');
           return 0;
         }
@@ -150,6 +150,14 @@ test('suppression is terminal only once its marker is recorded', async () => {
   expect(stamps('sms_reply_suppressed')).toHaveLength(2);
   expect(row.metadata.sms_reply_suppressed).toBeUndefined();
   expect(mutations.some(m => m.table === 'sms_reply_alert_claims' && m.deleted)).toBe(true);
+});
+test.each([['error', 2], ['missing row', 1]])('an unrecorded eligibility marker (%s) is reported unhandled before any claim or delivery', async (failure, attempts) => {
+  stampFailure = failure;
+  expect(await dispatch()).toBe(false);
+  expect(stamps('sms_reply_eligible')).toHaveLength(attempts);
+  expect(triggerNotification).not.toHaveBeenCalled();
+  expect(db.raw).not.toHaveBeenCalledWith(expect.stringContaining('INSERT INTO sms_reply_alert_claims'), expect.anything());
+  expect(mutations.some(m => m.table === 'sms_reply_alert_claims')).toBe(false);
 });
 test('recovery waits for live AI work', async () => {
   row.metadata.sms_reply_processing_until = new Date(Date.now() + 60000).toISOString();
