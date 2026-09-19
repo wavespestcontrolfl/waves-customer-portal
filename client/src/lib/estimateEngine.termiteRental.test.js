@@ -206,3 +206,115 @@ describe("termite station rental — client fallback engine", () => {
       .toBe("rent");
   });
 });
+
+describe("annual protection plan mirror (ruling A-1 = P1; server gate word via featureAvailable)", () => {
+  it("prices setup + annual fee only when the server says the plan is available, and retires bond + rental on it", async () => {
+    const { applyServerTermiteAnnualPlanPricingConfig } = await import("./estimateEngine");
+    try {
+      // Gate off (default): a plan request is ignored — today's program.
+      const off = calculateEstimate(termiteInput({ termiteBaitSystem: "trelona", termitePlan: "annual_protection", termiteBondTerm: "5yr" }));
+      expect(off.results.tmBait.plan).toBe("quarterly");
+      expect(off.results.tmBait.setupFee).toBeUndefined();
+      applyServerTermiteAnnualPlanPricingConfig({ setup_per_station: 30, annual_base: 249, annual_step: 50, bracket_stations: 5, bracket_floor: 10 }, true);
+      const on = calculateEstimate(termiteInput({ termiteBaitSystem: "trelona", termitePlan: "annual_protection", termiteBondTerm: "5yr", termiteOwnership: "rent" }));
+      const sta = on.results.tmBait.sta;
+      const brackets = Math.max(0, Math.ceil((sta - 10) / 5));
+      expect(on.results.tmBait).toMatchObject({ plan: "annual_protection", setupFee: sta * 30, annualFee: 249 + brackets * 50, visitsPerYear: 1, stationsOwnedBy: "waves" });
+      expect(on.results.tmBait.pricingKnobs).toMatchObject({ plan: "annual_protection", setupPerStation: 30, annualBase: 249 });
+      expect(on.results.tmBond).toBeUndefined();
+      expect(on.results.tmBait.rented).toBeUndefined();
+      expect(on.results.tmBait.bondOptions).toBeUndefined();
+      const row = on.recurring.services.find((s) => s.service === "termite_bait");
+      expect(row).toMatchObject({ perTreatment: 249 + brackets * 50, visitsPerYear: 1 });
+      expect(on.oneTime.tmInstall).toBe(sta * 30);
+      // Exact annual fee in the aggregates (never the rounded monthly × 12), and Trelona forced on the plan.
+      expect(on.recurring.annualBeforeDiscount).toBe(249 + brackets * 50);
+      const adv = calculateEstimate(termiteInput({ termiteBaitSystem: "advance", termitePlan: "annual_protection" }));
+      expect(adv.results.tmBait.system).toBe("trelona");
+      expect(adv.results.tmBait.sta).toBe(sta);
+      // camelCase aliases the bridge accepts mirror too.
+      applyServerTermiteAnnualPlanPricingConfig({ setupPerStation: 35, annualBase: 259 }, true);
+      const alias = calculateEstimate(termiteInput({ termiteBaitSystem: "trelona", termitePlan: "annual_protection" }));
+      expect(alias.results.tmBait.setupFee).toBe(alias.results.tmBait.sta * 35);
+      expect(alias.results.tmBait.annualFee).toBe(259 + Math.max(0, Math.ceil((alias.results.tmBait.sta - 10) / 5)) * 50);
+      // A failed gate lookup fails closed.
+      applyServerTermiteAnnualPlanPricingConfig(null, false);
+      expect(calculateEstimate(termiteInput({ termiteBaitSystem: "trelona", termitePlan: "annual_protection" })).results.tmBait.plan).toBe("quarterly");
+    } finally {
+      applyServerTermiteAnnualPlanPricingConfig(null, false);
+    }
+  });
+
+  it("treats explicit null plan knobs as missing, matching the server defaults", async () => {
+    const { applyServerTermiteAnnualPlanPricingConfig } = await import("./estimateEngine");
+    try {
+      expect(applyServerTermiteAnnualPlanPricingConfig({ annual_step: 0, bracket_floor: 0 }, true))
+        .toMatchObject({ annualStep: 0, bracketFloor: 0 });
+      // Number(null) is zero in JavaScript, but the server bridge treats null
+      // as missing. A client zero here would turn a 15-station $299 plan into
+      // $249 when a save falls back to the browser engine.
+      const applied = applyServerTermiteAnnualPlanPricingConfig({ annual_step: null, bracket_floor: null }, true);
+      expect(applied).toMatchObject({ annualStep: 50, bracketFloor: 10 });
+      const estimate = calculateEstimate(termiteInput({ termiteBaitSystem: "trelona", termitePlan: "annual_protection", termitePerimeterLF: 224 }));
+      expect(estimate.results.tmBait.sta).toBe(15);
+      expect(estimate.results.tmBait.annualFee).toBe(299);
+    } finally {
+      applyServerTermiteAnnualPlanPricingConfig(null, false);
+    }
+  });
+});
+
+// The fallback envelope can be saved and replayed; it must carry the same
+// contract terms and one-time setup identity as the authoritative mapper.
+describe('annual fallback contract preservation', () => {
+  it('stamps cadence, coverage and setup without double-counting its price', async () => {
+    const { applyServerTermiteAnnualPlanPricingConfig } = await import('./estimateEngine');
+    try {
+      applyServerTermiteAnnualPlanPricingConfig(null, true);
+      const estimate = calculateEstimate(termiteInput({ termitePlan: 'annual_protection', termitePerimeterLF: 224 }));
+      expect(estimate.results.tmBait.pricingKnobs).toMatchObject({
+        plan: 'annual_protection', visitsPerYear: 1, coverageMonths: 12, label: 'Subterranean Termite Protection',
+      });
+      expect(estimate.results.tmBait).toMatchObject({
+        planLabel: 'Subterranean Termite Protection',
+        planTerms: { visitsPerYear: 1, coverageMonths: 12, retreatOnly: true, subterraneanOnly: true, renewal: 'annual' },
+      });
+      const setup = estimate.oneTime.items.filter((item) => item.service === 'termite_bait_installation');
+      expect(setup).toHaveLength(1);
+      expect(setup[0]).toMatchObject({ name: 'Station Setup', kind: 'setup', price: 450, tierDiscountable: false });
+      expect(estimate.oneTime.tmInstall).toBe(450);
+      expect(estimate.oneTime.total).toBe(450);
+      expect(estimate.totals.year1).toBe(749);
+    } finally { applyServerTermiteAnnualPlanPricingConfig(null, false); }
+  });
+
+  it.each([
+    ['setupPerStation', 'setup_per_station', 1, 200, 30],
+    ['annualBase', 'annual_base', 1, 2000, 249],
+    ['annualStep', 'annual_step', 0, 500, 50],
+    ['bracketStations', 'bracket_stations', 1, 50, 5],
+    ['bracketFloor', 'bracket_floor', 0, 100, 10],
+  ])('mirrors authoritative integer bounds for %s', async (key, snake, min, max, fallback) => {
+    const { applyServerTermiteAnnualPlanPricingConfig } = await import('./estimateEngine');
+    try {
+      for (const invalid of [min - 1, max + 1, min + 0.5]) {
+        expect(applyServerTermiteAnnualPlanPricingConfig({ [snake]: invalid }, true)[key]).toBe(fallback);
+        expect(applyServerTermiteAnnualPlanPricingConfig({ [key]: invalid }, true)[key]).toBe(fallback);
+      }
+      for (const valid of [min, max]) {
+        expect(applyServerTermiteAnnualPlanPricingConfig({ [snake]: valid }, true)[key]).toBe(valid);
+        expect(applyServerTermiteAnnualPlanPricingConfig({ [key]: valid }, true)[key]).toBe(valid);
+      }
+    } finally { applyServerTermiteAnnualPlanPricingConfig(null, false); }
+  });
+
+  it.each([249.5, 2490])('rejects invalid annual base %s before pricing', async (annualBase) => {
+    const { applyServerTermiteAnnualPlanPricingConfig } = await import('./estimateEngine');
+    try {
+      applyServerTermiteAnnualPlanPricingConfig({ annual_base: annualBase }, true);
+      const estimate = calculateEstimate(termiteInput({ termitePlan: 'annual_protection', termitePerimeterLF: 224 }));
+      expect(estimate.results.tmBait.annualFee).toBe(299);
+      expect(estimate.results.tmBait.pricingKnobs.annualBase).toBe(249);
+    } finally { applyServerTermiteAnnualPlanPricingConfig(null, false); }
+  });
+});
