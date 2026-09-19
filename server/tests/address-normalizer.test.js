@@ -670,3 +670,28 @@ describe('splitStreetLineUnitParts', () => {
     expect(splitStreetLineUnitParts('Apt 4, Sarasota')).toEqual({ street: 'Apt 4', unit: '', tail: 'Sarasota' });
   });
 });
+
+describe('parseRawAddress — conversational words that are also state codes', () => {
+  // Spoken raw_text from the call extractor. "or" / "in" are English here,
+  // not Oregon / Indiana; reading them as a state marked the address out of
+  // the service area and vetoed every customer write for the call.
+  test('"or" mid-sentence is not Oregon', () => {
+    expect(parseRawAddress("1200 Harbor Lane. It's Lakewood Ranch, so, or it could be Bradenton, but it's 34211"))
+      .toMatchObject({ state: '', zip: '34211' });
+  });
+  test('"in" before a locality is not Indiana', () => {
+    expect(parseRawAddress("88 Cypress Court, Bradenton. It's in the River Club."))
+      .toMatchObject({ state: '' });
+    expect(parseRawAddress("5100 Heron, H-E-R-O-N, Park Court, and it's in Parrish, 34219"))
+      .toMatchObject({ state: '', zip: '34219' });
+  });
+  test('a code at the segment end or before a ZIP is still a state', () => {
+    expect(parseRawAddress('123 Main St, Portland, OR 97201')).toMatchObject({ state: 'OR', zip: '97201' });
+    expect(parseRawAddress('123 Main St, Groton, CT')).toMatchObject({ state: 'CT' });
+    expect(parseRawAddress('123 Main St, Sarasota FL 34236 United States')).toMatchObject({ state: 'FL', zip: '34236' });
+  });
+  test('a full state name anywhere in the tail is still a state', () => {
+    expect(parseRawAddress('Louisville, Kentucky')).toMatchObject({ state: 'KY' });
+    expect(parseRawAddress("213 6th Avenue Southwest, Ruskin, Florida")).toMatchObject({ state: 'FL' });
+  });
+});

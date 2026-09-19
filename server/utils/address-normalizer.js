@@ -273,12 +273,24 @@ function normalizeState(value) {
   return US_STATE_ABBREVIATIONS[state.toLowerCase()] || '';
 }
 
+// A two-letter code is only a state when it sits where a state sits: the
+// end of the segment, or directly before a ZIP ("Sarasota FL 34236",
+// "Groton, CT"). Spoken raw text carries ordinary words that are also codes
+// — "it's Lakewood Ranch, so, OR it could be Bradenton" / "that's IN
+// Bradenton, 34211" — and reading them as Oregon / Indiana marked four
+// Manatee County addresses out of the service area in one week
+// (2026-09-15..18), which vetoes every customer and lead write for the
+// call. Full state names ("Kentucky") stay free-position: they are never
+// conversational filler.
 function findState(value) {
   const text = cleanString(value).replace(/[.,]/g, ' ');
   if (!text) return { raw: '', state: '' };
   for (const token of STATE_TOKENS) {
-    const match = text.match(new RegExp(`\\b${escapeRegExp(token)}\\b`, 'i'));
-    if (match) return { raw: match[0], state: normalizeState(token) };
+    const pattern = token.length === 2
+      ? `\\b(${escapeRegExp(token)})(?=\\s*$|\\s+\\d{5}(?:-\\d{4})?\\b)`
+      : `\\b(${escapeRegExp(token)})\\b`;
+    const match = text.match(new RegExp(pattern, 'i'));
+    if (match) return { raw: match[1], state: normalizeState(token) };
   }
   return { raw: '', state: '' };
 }
