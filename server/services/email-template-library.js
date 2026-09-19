@@ -1423,6 +1423,26 @@ async function sendTemplate({
             // derivation), defeating the whole point of the rewrite.
             sendEstimateIds = [];
             withheldLinksRewritten = rewritten.rewrittenIds;
+            // Pre-push audit P1 (b49be57b12 round 4): the STORED row must
+            // match what actually goes out. A retry or bounce recovery
+            // re-sends straight from html_snapshot/text_snapshot
+            // (transactional-email-provider-retry.js, email-bounce-
+            // recovery.js) — without this write, either would re-send the
+            // ORIGINAL content, withheld link and all, back through
+            // sendOne's own guard (a retry that can never succeed). Same
+            // scoped pre-dispatch bookkeeping shape as abortWithheldBefore
+            // Dispatch below (id + still-queued + THIS attempt's token), so
+            // a superseded/reclaimed row is never touched. Best-effort: a
+            // write failure here must not block a send whose content is
+            // already correctly rewritten in memory — only the STORED
+            // snapshot would lag, logged for follow-up.
+            try {
+              await db('email_messages')
+                .where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken })
+                .update({ html_snapshot: sendHtml, text_snapshot: sendText, updated_at: new Date() });
+            } catch (persistErr) {
+              logger.warn(`[email-template-library] rewritten-content persist failed for ${templateKey} (${message.id}): ${persistErr.message}`);
+            }
             logger.warn(`[email-template-library] rewrote ${rewritten.rewrittenIds.length} withheld estimate link(s) to the portal home for ${templateKey} (${message.id})`);
           }
         } catch (err) {

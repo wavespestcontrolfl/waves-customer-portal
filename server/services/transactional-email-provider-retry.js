@@ -418,8 +418,21 @@ async function retryOne(message) {
         suppressErrorLog: true,
       });
     } catch (err) {
-      if (err && err.annualOfferWithheld) {
+      // Pre-push audit P1 (b49be57b12 round 4): a guard INFRASTRUCTURE
+      // failure (.annualOfferGuardFailed) happens at the exact same
+      // pre-request point as a blocked verdict — sendOne's own guard check,
+      // before any HTTP call — so it must revert dispatchStarted exactly
+      // like the withheld case, or retrySummaryThroughHandoff's catch below
+      // (state.dispatchStarted && !state.result) wrongly reads "the wire
+      // was touched, settle uncertain" for a request that was never
+      // attempted. Unlike withheld, it is NOT a permanent stop: rethrown
+      // unchanged so the ordinary retry-later classification applies (this
+      // file's ownnot-dispatched branches, both here and in retryOne's own
+      // catch), same as any other pre-send recheck failure.
+      if (err && (err.annualOfferWithheld || err.annualOfferGuardFailed)) {
         state.dispatchStarted = false;
+      }
+      if (err && err.annualOfferWithheld) {
         state.blocked = true;
         return;
       }

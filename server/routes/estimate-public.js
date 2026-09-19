@@ -24921,6 +24921,18 @@ router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, r
 // estimate:service:phone → epoch ms. See the dedup comment at the SMS branch.
 const serviceDetailsSmsClaims = new Map();
 const SERVICE_DETAILS_SMS_DEDUP_MS = 10 * 60 * 1000;
+// Pre-push audit P1 (b49be57b12 round 4): the concurrent-loser poll loop
+// below (3 attempts * 1.5s = 4.5s) is the whole window a genuinely
+// concurrent request needs to observe a withheld winner's durable stamp.
+// A claim row past this age is provably not concurrent with the request
+// that stamped it — comfortable margin over 4.5s — so a withheld claim
+// becomes reclaimable here, distinct from (and far shorter than) the
+// crash-recovery staleness window below. Without this, a withheld claim
+// row was only ever reclaimable after the FULL 10-minute crash-recovery
+// window, so a legitimate retap minutes later — after a fresh delivery
+// makes the offer eligible again — found the claim still held and could
+// never send.
+const WITHHELD_SMS_CLAIM_RECLAIM_SECONDS = 6;
 
 router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (req, res, next) => {
   try {
@@ -25090,12 +25102,23 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       // Claim acquired = fresh insert OR takeover of a claim older than the
       // window (a crashed winner never blocks forever). Claim-infra failure
       // fails OPEN to sending — dedup is protection, not a send gate.
+      //
+      // Pre-push audit P1 (b49be57b12 round 4): a SECOND, much shorter
+      // takeover path for a claim the winner stamped 'withheld' — that
+      // outcome is durable on purpose (so a concurrent loser can read it,
+      // above/below) but must not hold the claim_key for the full crash-
+      // recovery window, or a legitimate retap after a real delivery makes
+      // the offer eligible again could never send. `outcome = NULL` on
+      // takeover so a subsequent read (this send's own, or a later crash-
+      // recovery cycle) never sees the stale marker.
       let claimAcquired = true;
       try {
         const claim = await db.raw(
           `INSERT INTO sms_send_claims (claim_key) VALUES (?)
-           ON CONFLICT (claim_key) DO UPDATE SET created_at = NOW()
+           ON CONFLICT (claim_key) DO UPDATE SET created_at = NOW(), outcome = NULL
            WHERE sms_send_claims.created_at < NOW() - interval '10 minutes'
+              OR (sms_send_claims.outcome = 'withheld'
+                  AND sms_send_claims.created_at < NOW() - interval '${WITHHELD_SMS_CLAIM_RECLAIM_SECONDS} seconds')
            RETURNING id`,
           [claimKey],
         );
@@ -25235,10 +25258,10 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
         // it — deleting it immediately, the way an ordinary failure does,
         // could erase the marker before a loser polling on a 1.5s cadence
         // ever sees it, reopening the exact leak this closes. Only the
-        // in-process Map entry clears; the DB row expires on its own via
-        // the 10-minute staleness window (or a fresh retap's takeover
-        // upsert) — a retap moments later still re-checks eligibility
-        // fresh rather than trusting a stale marker indefinitely.
+        // in-process Map entry clears; the DB row becomes reclaimable on its
+        // own (round 4 P1) once WITHHELD_SMS_CLAIM_RECLAIM_SECONDS has
+        // passed — a retap moments later still re-checks eligibility fresh
+        // rather than being stuck behind the crash-recovery window.
         serviceDetailsSmsClaims.delete(dedupKey);
       } else {
         releaseClaims();

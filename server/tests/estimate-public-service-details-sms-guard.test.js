@@ -362,4 +362,78 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
     expect(res.status).toBe(502);
     expect(body).toEqual({ ok: false, error: 'Text could not be sent right now.' });
   }, 10000);
+
+  test('P1 (round 4): the claim-acquire SQL carries a short reclaim window for a withheld outcome, distinct from the crash-recovery staleness window', async () => {
+    currentRow = baseEstimateRow({ customer_phone: '+19415550808' });
+    const TwilioService = require('../services/twilio');
+    TwilioService.sendSMS.mockImplementationOnce(async (_to, _body, options) => {
+      const verdict = await options.preSendCheck();
+      if (!verdict.ok) return { success: false, sid: null, preSendBlocked: true, code: verdict.code, error: verdict.reason };
+      return { success: true, sid: 'SM_fake' };
+    });
+
+    await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
+    });
+
+    const sql = mockDb.raw.mock.calls[mockDb.raw.mock.calls.length - 1][0];
+    expect(sql).toMatch(/INSERT INTO sms_send_claims/);
+    // The general crash-recovery window stays 10 minutes...
+    expect(sql).toMatch(/created_at < NOW\(\) - interval '10 minutes'/);
+    // ...but a claim whose outcome is 'withheld' takes over on a much
+    // shorter window — otherwise it would only ever be reclaimable after
+    // the full 10 minutes, and a legitimate retap moments later (once a
+    // fresh delivery makes the offer eligible again) could never send.
+    expect(sql).toMatch(/outcome = 'withheld'/);
+    expect(sql).toMatch(/created_at < NOW\(\) - interval '\d+ seconds'/);
+  });
+
+  test('P1 (round 4): a withheld winner does not permanently block a later, non-concurrent retap once the claim is reclaimed', async () => {
+    // First request: withheld — stamps the claim row's outcome.
+    currentRow = baseEstimateRow({ customer_phone: '+19415550909' });
+    const TwilioService = require('../services/twilio');
+    TwilioService.sendSMS.mockImplementationOnce(async (_to, _body, options) => {
+      const verdict = await options.preSendCheck();
+      if (!verdict.ok) return { success: false, sid: null, preSendBlocked: true, code: verdict.code, error: verdict.reason };
+      return { success: true, sid: 'SM_fake' };
+    });
+    const res1 = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
+    });
+    expect(res1.status).toBe(404);
+    expect(mockDb.__claimOutcome).toBe('withheld');
+
+    // Second request ("after the window"): the claim-acquire SQL's own
+    // short reclaim clause is what would let a real Postgres take the row
+    // back over past WITHHELD_SMS_CLAIM_RECLAIM_SECONDS — simulated here by
+    // the claim being acquired again (claimAcquired stays true by default,
+    // matching a takeover having succeeded), with the offer now genuinely
+    // deliverable. Must send normally, not read the stale 'withheld' marker
+    // as still governing this fresh request.
+    const draft = baseEstimateRow({ customer_phone: '+19415550909' });
+    const fingerprint = annualPlanOfferFingerprint(draft);
+    draft.status = 'sent';
+    draft.estimate_data.deliveryState = { firstDeliveredAt: '2026-01-01T12:00:00Z', annualPlanOfferFingerprint: fingerprint };
+    currentRow = draft;
+    let capturedVerdict;
+    TwilioService.sendSMS.mockImplementationOnce(async (_to, _body, options) => {
+      capturedVerdict = await options.preSendCheck();
+      if (!capturedVerdict.ok) return { success: false, sid: null, preSendBlocked: true, code: capturedVerdict.code, error: capturedVerdict.reason };
+      return { success: true, sid: 'SM_fake_2' };
+    });
+    const res2 = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
+    });
+    const body2 = await res2.json();
+
+    expect(capturedVerdict).toEqual({ ok: true });
+    expect(res2.status).toBe(200);
+    expect(body2).toEqual({ ok: true, channel: 'sms' });
+  });
 });

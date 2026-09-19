@@ -1695,12 +1695,16 @@ describe('email template library rendering', () => {
 
     test('a withheld link is rewritten to the portal home and the send proceeds, marked withheldLinksRewritten', async () => {
       const queueInsert = chain({ returning: [queuedMessage] });
+      // Pre-push audit P1 (b49be57b12 round 4): the STORED row must be
+      // updated with the rewritten content BEFORE dispatch — a third
+      // email_messages call ahead of the post-send acceptance update.
+      const persistUpdate = chain({ result: [1] });
       const sentUpdate = chain({ returning: [sentMessage] });
       setDbQueues({
         email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
         email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
         email_suppressions: [chain({ result: [] })],
-        email_messages: [queueInsert, sentUpdate],
+        email_messages: [queueInsert, persistUpdate, sentUpdate],
       });
       rewriteWithheldEstimateLinks.mockResolvedValueOnce({
         html: '<p>https://portal.wavespestcontrol.com</p>',
@@ -1721,6 +1725,21 @@ describe('email template library rendering', () => {
         estimateIds: [],
       }));
       expect(result).toEqual(expect.objectContaining({ sent: true, withheldLinksRewritten: ['est-1'] }));
+      // The queued row's own snapshot fields are updated to the REWRITTEN
+      // content — no estimate link survives in the stored record — scoped
+      // to this attempt (id + still-queued + send_attempt_token), the same
+      // pre-dispatch bookkeeping shape as the other guard writes.
+      expect(persistUpdate.where).toHaveBeenCalledWith(expect.objectContaining({
+        id: 'msg-rewrite', status: 'queued', send_attempt_token: expect.any(String),
+      }));
+      expect(persistUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+        html_snapshot: '<p>https://portal.wavespestcontrol.com</p>',
+        text_snapshot: 'https://portal.wavespestcontrol.com',
+      }));
+      expect(persistUpdate.update.mock.calls[0][0].html_snapshot).not.toMatch(/\/estimate\//);
+      // Persisted BEFORE the provider request, not after.
+      expect(persistUpdate.update.mock.invocationCallOrder[0])
+        .toBeLessThan(sendgrid.sendOne.mock.invocationCallOrder[0]);
     });
 
     test('nothing to rewrite (no withheld link in the content): sends the original render unchanged, no marker', async () => {

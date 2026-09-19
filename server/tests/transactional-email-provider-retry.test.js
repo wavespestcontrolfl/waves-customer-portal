@@ -478,5 +478,63 @@ describe('transactional email provider retry classification', () => {
       // the way a definite (guard-blocked or provider-rejected) outcome would.
       expect(messagesChain._lastUpdate?.provider_retry_next_at).not.toBeNull();
     });
+
+    test('pre-push audit P1 (b49be57b12 round 4): a VISIT SUMMARY retry whose guard INFRASTRUCTURE failure occurs settles as a definite failure, NOT uncertain (dispatchStarted must be reverted, not just for the withheld case)', async () => {
+      const chain = {};
+      chain.where = jest.fn(() => chain);
+      chain.update = jest.fn((payload) => { chain._lastUpdate = payload; return chain; });
+      chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
+      chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'failed', template_key: 'service.visit_summary', recipient_email_snapshot: 'a@example.com' }]);
+      db.mockReturnValue(chain);
+      emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'service.visit_summary' } });
+      emailTemplates.activeSuppressionFor.mockResolvedValue(null);
+      sendgrid.sendOne.mockRejectedValueOnce(annualOfferGuardFailedError());
+
+      const stored = message({
+        template_key: 'service.visit_summary', trigger_event_id: 'visit_summary:00000000-0000-4000-8000-000000000001',
+        send_attempt_token: 'attempt-annual-5', provider_retry_count: 0,
+      });
+      const result = await retry.retryOne(stored);
+
+      // Never uncertain — the provider was never attempted, sendOne's own
+      // guard refused before the wire. Before the fix, dispatchStarted
+      // stayed true for this flag (only annualOfferWithheld reset it), so
+      // retrySummaryThroughHandoff's own catch wrongly read "the wire was
+      // touched" and settled this as markRetryUncertain instead.
+      expect(result.uncertain).not.toBe(true);
+      expect(result.sent).toBe(false);
+      expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      // markRetryFailure's shape (retry-later, NOT markRetryUncertain's
+      // null-next-at "settled, never requeued" shape).
+      expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'failed', provider_retry_next_at: expect.any(Date),
+      }));
+      expect(chain.update).not.toHaveBeenCalledWith(expect.objectContaining({
+        error_message: expect.stringMatching(/^Provider outcome unknown/),
+      }));
+    });
+
+    test('pre-push audit P1 (b49be57b12 round 4): a VISIT SUMMARY retry whose guard says WITHHELD still settles as the existing permanent stop, unaffected by the guardFailed fix', async () => {
+      const chain = {};
+      chain.where = jest.fn(() => chain);
+      chain.update = jest.fn((payload) => { chain._lastUpdate = payload; return chain; });
+      chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
+      chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'blocked', template_key: 'service.visit_summary' }]);
+      db.mockReturnValue(chain);
+      emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'service.visit_summary' } });
+      emailTemplates.activeSuppressionFor.mockResolvedValue(null);
+      sendgrid.sendOne.mockRejectedValueOnce(annualOfferWithheldError());
+
+      const stored = message({
+        template_key: 'service.visit_summary', trigger_event_id: 'visit_summary:00000000-0000-4000-8000-000000000001',
+        send_attempt_token: 'attempt-annual-6', provider_retry_count: 0,
+      });
+      const result = await retry.retryOne(stored);
+
+      expect(result).toMatchObject({ sent: false, stopped: true, reason: 'annual_offer_withheld' });
+      expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'blocked', error_message: 'annual_offer_withheld', provider_retry_next_at: null,
+      }));
+    });
   });
 });
