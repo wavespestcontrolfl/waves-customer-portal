@@ -1829,6 +1829,97 @@ function reportFindingIsInstruction(affirmed, subjectAt, locationAt, findingVerb
   );
 }
 
+const REPORT_FINDING_VERB_RE = /\b(?:apply|applying|applied|place|placed|placing|use|used|using|treat|treated|treating|spray|sprayed|spraying|put|went|got|received)\b/i;
+
+const REPORT_BASE_TREATMENT_VERB_RE = /^(?:apply|use|spray|treat|place)$/i;
+
+const REPORT_COMPLETED_GERUND_RE = /^(?:applying|spraying|treating|placing|using)$/i;
+
+const REPORT_COMPLETED_PASSIVE_RE = /(?:\b(?:was|were|got)(?:n['’]t\s+(?:only|just|merely|simply))?|\bdid(?:n['’]t\s+(?:only|just|merely|simply))?\s+(?:not\s+(?:only|just|merely|simply)\s+)?(?:(?:\w+ly|already|also|just|now)\s+)*get|(?:\b(?:has|have|had)(?:n['’]t\s+(?:only|just|merely|simply))?|['’](?:s|d|ve))(?:\s+(?:\w+ly|already|also|just|now))*\s+been)\s+(?:not\s+(?:only|just|merely|simply)\s+)?(?:(?:\w+ly|already|also|just|now)\s+)*$/i;
+
+const REPORT_NONCOMPLETION_GOVERNOR_RE = /(?:\b(?:(?:about|ready)\s+to|prepar(?:e[sd]?|ing)\s+to)(?:\s+(?:\w+ly|already|just|now))*(?:\s+(?:have(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?|be))?(?:\s+(?:\w+ly|already|just|now))*|\b(?:supposed|expect(?:s|ed|ing)?|requir(?:e[sd]?|ing)|meant|schedul(?:e[sd]?|ing)|instruct(?:s|ed|ing)?|ask(?:s|ed|ing)?|told|direct(?:s|ed|ing)?|order(?:s|ed|ing)?|need(?:s|ed|ing)?|intend(?:s|ed|ing)?|plan(?:s|ned|ning)?|attempt(?:s|ed|ing)?|tr(?:y|ies|ied|ying)|hop(?:e[sd]?|ing)|failed|unable|refus(?:e[sd]?|ing)|declin(?:e[sd]?|ing)|forgot(?:ten)?|forget(?:s|ting)?|neglect(?:s|ed|ing)?|pretend(?:s|ed|ing)?|want(?:s|ed)?|ought)\s+(?:(?:me|us|you|him|her|them|(?:(?:the|our|your|their)\s+)?(?:[\w'’-]+\s+){0,3}(?:technician|tech|crew|team)|[\w\x27\u2019-]+(?:\s+[\w\x27\u2019-]+){0,2})\s+)?to(?:\s+(?:\w+ly|already|just|now))*(?:\s+(?:have(?:\s+(?:\w+ly|already|just|now))*(?:\s+been|(?:\s+(?!(?:and|but|or|after|before|when|while|until|since|because|if|unless|that|which|who|was|were|is|are|has|have|had|did|applied|treated|sprayed|used|placed|put|got|received|finished|completed)\b)[\w'’-]+){1,6})?|be))?(?:\s+(?:\w+ly|already|just|now))*|\bplan(?:s|ned|ning)?\s+on\s+having(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?(?:\s+(?:\w+ly|already|just|now))*|\bimagin(?:e[sd]?|ing)\s+(?:that\s+)?(?:i|we|you|he|she|they|it)\s+(?:(?:had|has|have|was|were|already|just|now)\s+)*)\s*$/i;
+
+const REPORT_NONCOMPLETION_ASSURANCE_GOVERNOR_RE = new RegExp(
+  `\\b(?:(?:attempt(?:s|ed|ing)?|tr(?:y|ies|ied|ying)|fail(?:s|ed|ing)?|work(?:s|ed|ing)?)(?:\\s+(?:\\w+ly|hard))*`
+    + '|(?:mak(?:e|es|ing)|made)\\s+(?:an?|every)\\s+(?:effort|attempt))'
+    + '\\s+to(?:\\s+(?:\\w+ly|already|just|now))*\\s+(?:ensure|make\\s+sure)(?:\\s+that)?'
+    + '\\s+(?:(?!(?:but|after|before|when|while|until|since|because|if|unless|that|which|who|was|were|has|have|had|did|is|are|got)\\b)[\\w\x27\u2019-]+\\s+){1,8}'
+    + REPORT_COMPLETED_PASSIVE_RE.source,
+  'i',
+);
+
+const REPORT_NONCOMPLETION_MODIFIER_RE = /\b(?:almost|nearly)(?:\s+(?:has|have|had|was|were|get|got|been|did)){0,2}(?:\s+(?:\w+ly|already|also|just|now))*\s*$/i;
+
+function reportWithoutNominalContrast(text, findingPositions = []) {
+  return text.replace(/,\s*(?:but\s+)?not\s+([^,;.!?]+),(?=\s*(?:was|were|has|have|had|got)\b)/gi,
+    (contrast, nominal, at) => findingPositions.some((position) => position >= at && position < at + contrast.length)
+      || CLAUSE_FINITE_PREDICATE_RE.test(nominal) || REPORT_FINDING_VERB_RE.test(nominal)
+      || !/^(?:[\w'’-]+\s+){0,4}[\w'’-]+\s*$/i.test(nominal)
+      || /\b(?:even|once|twice|yet|ever|always|often|again|anymore|today|yesterday|tomorrow|at\s+all|(?!(?:family|fly|butterfly|dragonfly)\b)\w+ly)\b/i.test(nominal)
+      ? contrast : ' '.repeat(contrast.length));
+}
+
+function reportHasCompletedPredicate(affirmed, findingVerb) {
+  if (!findingVerb) return false;
+  const prefix = reportWithoutNominalContrast(affirmed).slice(0, findingVerb.index)
+    .replace(/\b(was|were|has|have|had|did)n['’]t\s+(?:only|just|merely|simply)\b/gi, '$1 ')
+    .replace(/\bnot\s+(?:only|just|merely|simply)\b/gi, ' ')
+    .replace(/\bdid\s*,[^,;.!?]+,\s*/gi, 'did ')
+    .replace(/^\s*(?:although|though|while)\b[^,]*,\s*/i, '');
+  const predicateIntroduction = prefix.replace(/\b(?:complet(?:e|ed)|finish(?:ed)?|done|manag(?:e|ed)\s+to|succeed(?:ed)?\s+(?:in|at))\s*$/i, '');
+  if (REPORT_NONCOMPLETION_GOVERNOR_RE.test(predicateIntroduction)
+      || REPORT_NONCOMPLETION_ASSURANCE_GOVERNOR_RE.test(predicateIntroduction)
+      || REPORT_NONCOMPLETION_MODIFIER_RE.test(predicateIntroduction)
+      || (/(?:\b(?:am|is|are|be|being|get|gets|getting)|['’](?:m|re))\s+(?:(?:\w+ly|already|also|just|now)\s+)*$/i.test(prefix)
+        && !REPORT_COMPLETED_PASSIVE_RE.test(prefix))) return false;
+  if (REPORT_BASE_TREATMENT_VERB_RE.test(findingVerb[0])) {
+    return /\b(?:did\s+(?:(?:already|also|just|now|\w+ly)\s+)*(?:manage\s+to\s+)?|managed\s+to\s+)$/i.test(prefix)
+      && !clauseIsNegated(prefix);
+  }
+  if (REPORT_COMPLETED_GERUND_RE.test(findingVerb[0])) {
+    return /\b(?:completed|finished|done|succeeded\s+(?:in|at)|did\s+(?:(?:already|also|just|now|\w+ly)\s+)*(?:complete|finish|succeed\s+(?:in|at)))\s+$/i.test(prefix)
+      && !clauseIsNegated(prefix);
+  }
+  // 's can mean active perfect "has"; passive product ownership separately
+  // requires a completed passive prefix, such as "was" or "'s been".
+  return REPORT_FINDING_VERB_RE.test(findingVerb[0])
+    && !clauseIsNegated(prefix);
+}
+
+function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb, precedingText) {
+  if (/(?:\b(?:anything|all)\s+but|\bexcept(?:\s+the)?)\s*$/i.test(precedingText)
+      || (!findingVerb && /\bor\s*$/i.test(precedingText))) return true;
+  if (propositionIsExplicitlyDenied(affirmed, Math.min(subjectAt, locationAt), findingVerb)) return true;
+  // A trailing inquiry/duration adjunct does not condition the finding.
+  // Keep markers before the matched evidence, and true trailing conditions.
+  const claimOffset = affirmed.indexOf(claim);
+  const firstAt = Math.min(subjectAt, locationAt, findingVerb ? findingVerb.index : affirmed.length);
+  const evidenceEnd = Math.max(subjectAt, locationAt, findingVerb ? findingVerb.index : 0) + 1;
+  const tailAt = claimOffset >= 0 && subjectAt >= 0 && locationAt >= 0
+    ? Math.max(0, evidenceEnd - claimOffset) : claim.length;
+  const maskUnownedConditions = (text, offset) => text
+    .replace(/\beven\s+if\b(?:\s*,[^,;.!?]+,)?[^,;.!?]*(?:,|(?=[;.!?]|$))/gi, (condition, at) => {
+      const start = offset + at;
+      const end = start + condition.length;
+      return end <= firstAt || start >= evidenceEnd ? ' '.repeat(condition.length) : condition;
+    })
+    .replace(/\bwhether\b[^;.!?]*?\bor\s+not\b/gi, (condition, at) => (
+      offset + at >= evidenceEnd ? ' '.repeat(condition.length) : condition
+    ));
+  const scopedClaim = maskUnownedConditions(claim, Math.max(0, claimOffset));
+  const conditionalClaim = scopedClaim.slice(0, tailAt) + scopedClaim.slice(tailAt)
+    .replace(/\b(after\s+(?:checking|verifying|confirming|asking|determining)\s+)(?:if|whether)\b/gi, '$1');
+  if (/\b(?:(?:only\s+)?if|unless|whether)\b/i.test(conditionalClaim)
+      || clauseIsEpistemicallyHedged(claim)) return true;
+  if (subjectAt < 0 || locationAt < 0) return false;
+  const lastAt = Math.max(subjectAt, locationAt, findingVerb ? findingVerb.index : 0) + 1;
+  const denyingEvidence = maskUnownedConditions(
+    reportWithoutNominalContrast(affirmed, [subjectAt, locationAt]), 0,
+  ).replace(/\bwithout\s+(?:(?:any|an?)\s+)?(?:issues?|delays?|interruptions?|incidents?|problems?|complications?|difficult(?:y|ies))\b/gi,
+    (modifier) => ' '.repeat(modifier.length));
+  return deniedSpans(denyingEvidence).some(([start, end]) => firstAt < end && lastAt > start);
+}
+
 const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_free_visit_promise, no_third_party_disclosure, only_language, capture_lead_input_asserts });
 
-module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, spokenDigits, assertedMatch, EPISTEMIC_REFUSAL_VERBS, EPISTEMIC_DENIAL_WORDS, clauseBounds, clauseOf, claimContext, clauseIsNegated, clauseIsEpistemicallyHedged, cueInSameClause, reportFindingIsUncertain, reportFindingIsInstruction } };
+module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, spokenDigits, assertedMatch, EPISTEMIC_REFUSAL_VERBS, EPISTEMIC_DENIAL_WORDS, clauseBounds, clauseOf, claimContext, clauseIsNegated, clauseIsEpistemicallyHedged, cueInSameClause, reportFindingIsUncertain, reportFindingIsInstruction, reportClaimIsDenied, reportHasCompletedPredicate, REPORT_COMPLETED_PASSIVE_RE } };
