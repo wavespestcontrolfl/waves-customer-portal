@@ -116,13 +116,22 @@ function annualOfferGuardEstimateIds(input) {
   if (Array.isArray(input.estimateIds) && input.estimateIds.length) return input.estimateIds;
   return input.estimateId ? [input.estimateId] : [];
 }
+// Codex round 1 on #4608 (P1): keying this ONLY on a caller-supplied
+// estimateId made the guard opt-in — a composer manual SMS whose body
+// carries a minted estimate link, and the estimate-public.js service-
+// details email, never passed one and sailed straight past it. Always run
+// the guard (never short-circuit on 'no explicit ids') and let it derive
+// the estimate from the final message body/content itself — estimate-
+// annual-guard.js's estimateIdsFromContent runs no query at all when
+// neither an explicit id nor a link is present, so this costs nothing on
+// the vast majority of sends that carry no estimate content whatsoever.
 async function annualOfferGuardVerdict(input) {
-  const estimateIds = annualOfferGuardEstimateIds(input);
-  if (!estimateIds.length) return { ok: true };
   try {
     const { annualHandoffGuard } = require('../estimate-annual-guard');
     const db = require('../../models/db');
-    const verdict = await annualHandoffGuard({ db, estimateIds })();
+    const verdict = await annualHandoffGuard({
+      db, estimateIds: annualOfferGuardEstimateIds(input), texts: [input.body],
+    })();
     return verdict.blocked
       ? { ok: false, code: 'ANNUAL_OFFER_WITHHELD', reason: 'annual_offer_withheld', retryable: false }
       : { ok: true };

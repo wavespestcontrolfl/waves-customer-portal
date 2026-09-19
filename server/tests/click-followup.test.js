@@ -874,6 +874,54 @@ describe('evaluateClickFollowupGate — shared verdict codes', () => {
     }
   });
 
+  describe('annual_offer_withheld ordering (Codex round 1 on #4608, P2): AFTER conversion + suppression, before cadence', () => {
+    const withGatesOff = async (fn) => {
+      const gateKeys = ['GATE_TERMITE_ANNUAL_PLAN', 'GATE_CANCEL_FLOW_V2'];
+      const prior = gateKeys.map((key) => process.env[key]);
+      gateKeys.forEach((key) => delete process.env[key]);
+      try {
+        return await fn();
+      } finally {
+        gateKeys.forEach((key, index) => {
+          if (prior[index] === undefined) delete process.env[key]; else process.env[key] = prior[index];
+        });
+      }
+    };
+    const withheldAnnualEstimate = (overrides = {}) => makeEstimate({
+      estimate_data: { result: { lineItems: [{ service: 'termite_bait', plan: 'annual_protection', stations: 15 }] } },
+      ...overrides,
+    });
+
+    test('a converted contact on a withheld annual estimate retires on its OWN code, not annual_offer_withheld', async () => {
+      customerConvertedSince.mockResolvedValueOnce({ converted: true, reason: 'paid-invoice' });
+      await withGatesOff(async () => {
+        const v = await gate.evaluateClickFollowupGate({ ...baseInput(), estimate: withheldAnnualEstimate() });
+        expect(v).toMatchObject({ ok: false, code: 'converted' });
+      });
+    });
+
+    test('a suppressed contact on a withheld annual estimate retires as suppressed, not annual_offer_withheld', async () => {
+      loadSuppressionState.mockImplementationOnce(async (input, state) => {
+        state.suppression = { reason: 'opt_out_keyword' };
+        return state;
+      });
+      await withGatesOff(async () => {
+        const v = await gate.evaluateClickFollowupGate({ ...baseInput(), estimate: withheldAnnualEstimate() });
+        expect(v).toMatchObject({ ok: false, code: 'suppressed' });
+      });
+    });
+
+    test('an otherwise-eligible contact on a withheld annual estimate gets annual_offer_withheld', async () => {
+      // customerConvertedSince and loadSuppressionState keep their default
+      // beforeEach mocks (not converted, no suppression record) — the
+      // annual check is the first thing left to refuse it.
+      await withGatesOff(async () => {
+        const v = await gate.evaluateClickFollowupGate({ ...baseInput(), estimate: withheldAnnualEstimate() });
+        expect(v).toEqual({ ok: false, code: 'annual_offer_withheld' });
+      });
+    });
+  });
+
   test("kind-aware 'accepted': booking clicks stay live, estimate clicks are terminal", async () => {
     const accepted = makeEstimate({ status: 'accepted' });
     expect((await gate.evaluateClickFollowupGate({ ...baseInput(), estimate: accepted, kind: 'estimate' })).code)

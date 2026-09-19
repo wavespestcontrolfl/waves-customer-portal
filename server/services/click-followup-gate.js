@@ -19,14 +19,6 @@
  * Codes and how callers are expected to map them:
  *   estimate_terminal — estimate missing/archived/declined/expired/void/
  *                       accepted. Queue: dismiss. Approval: retire the draft.
- *   annual_offer_withheld — the estimate selects the annual termite plan and
- *                       the chokepoint guard (estimate-annual-guard.js) would
- *                       refuse to deliver it (no send library ever rechecks
- *                       this itself — see that module). Never queue, and
- *                       never approve, a draft whose link the send chokepoint
- *                       would just refuse. Queue: dismiss (a re-click
- *                       re-qualifies once a fresh offer is delivered).
- *                       Approval: HOLD (409, draft stays pending).
  *   converted         — customer / lead / phone-evidence conversion. For
  *                       ACCEPTED booking-kind clicks the evidence is
  *                       booking-specific (paid invoice / live appointment /
@@ -36,6 +28,14 @@
  *                       flip the action to converted.
  *   suppressed        — opt-out / wrong number / DNC / known landline.
  *                       Queue: dismiss. Approval: retire the draft.
+ *   annual_offer_withheld — the estimate selects the annual termite plan and
+ *                       the chokepoint guard (estimate-annual-guard.js) would
+ *                       refuse to deliver it (no send library ever rechecks
+ *                       this itself — see that module). Never queue, and
+ *                       never approve, a draft whose link the send chokepoint
+ *                       would just refuse. Queue: dismiss (a re-click
+ *                       re-qualifies once a fresh offer is delivered).
+ *                       Approval: HOLD (409, draft stays pending).
  *   cadence_due       — an estimate-followup stage (incl. the gated
  *                       deposit-abandonment stage) fires within 24h.
  *                       Queue: dismiss this click. Approval: HOLD (409,
@@ -494,14 +494,6 @@ async function evaluateClickFollowupGate({ estimate, kind, customerId, leadId, p
     return { ok: false, code: 'estimate_terminal' };
   }
 
-  // 1.5 Delivery-guards slice (re-cut of #4569): never queue — or approve —
-  //     a click-followup draft whose link the send chokepoint would just
-  //     refuse. Cheap in-memory check on the already-loaded row, no extra
-  //     query, no lock.
-  if (annualOfferVerdict(estimate).withheld) {
-    return { ok: false, code: 'annual_offer_withheld' };
-  }
-
   // 2. Conversion — customer evidence, then lead-side, then phone evidence.
   //    ACCEPTED booking-kind clicks take a different first step: acceptance
   //    already created/linked the customer, stamped a live pipeline stage,
@@ -536,14 +528,27 @@ async function evaluateClickFollowupGate({ estimate, kind, customerId, leadId, p
     return { ok: false, code: 'suppressed' };
   }
 
-  // 4. Cadence stages: the legacy timestamp stages, the gated
+  // 4. Delivery-guards slice (re-cut of #4569; reordered — Codex round 1 on
+  //    #4608 P2): never queue — or approve — a click-followup draft whose
+  //    link the send chokepoint would just refuse. Moved to AFTER
+  //    conversion and suppression so a converted or suppressed contact on a
+  //    withheld annual estimate still retires the draft on its OWN code
+  //    (converted / suppressed) instead of being held on annual_offer_withheld
+  //    forever — a contact who already converted or opted out is never
+  //    coming back to re-qualify once the offer is redelivered. Cheap
+  //    in-memory check on the already-loaded row, no extra query, no lock.
+  if (annualOfferVerdict(estimate).withheld) {
+    return { ok: false, code: 'annual_offer_withheld' };
+  }
+
+  // 5. Cadence stages: the legacy timestamp stages, the gated
   //    deposit-abandonment stage, and the engagement engine's queued jobs.
   if (cadenceStageDueSoon(estimate, now) || await depositStageDueSoon(estimate, now)
       || await engagementJobDueSoon(estimate, now)) {
     return { ok: false, code: 'cadence_due' };
   }
 
-  // 5. Recent-touch holds.
+  // 6. Recent-touch holds.
   const contact = { customerId: customerId || estimate.customer_id || null, phone };
   if (await hasRecentOutboundSms(contact)) {
     return { ok: false, code: 'recent_outbound' };

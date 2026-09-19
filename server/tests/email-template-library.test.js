@@ -1478,7 +1478,9 @@ describe('email template library rendering', () => {
         sent: false, blocked: true, reason: 'annual_offer_withheld', providerAttempted: false,
       }));
       expect(result.message.status).toBe('failed');
-      expect(annualHandoffGuard).toHaveBeenCalledWith({ db: expect.anything(), estimateIds: ['est-1'] });
+      expect(annualHandoffGuard).toHaveBeenCalledWith(expect.objectContaining({
+        db: expect.anything(), estimateIds: ['est-1'], texts: expect.any(Array),
+      }));
       expect(withheldUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', error_message: 'annual_offer_withheld' }));
     });
 
@@ -1497,7 +1499,9 @@ describe('email template library rendering', () => {
 
       expect(sendgrid.sendOne).not.toHaveBeenCalled();
       expect(result).toEqual(expect.objectContaining({ sent: false, blocked: true, reason: 'annual_offer_withheld' }));
-      expect(annualHandoffGuard).toHaveBeenCalledWith({ db: expect.anything(), estimateIds: ['est-1', 'est-2'] });
+      expect(annualHandoffGuard).toHaveBeenCalledWith(expect.objectContaining({
+        db: expect.anything(), estimateIds: ['est-1', 'est-2'], texts: expect.any(Array),
+      }));
     });
 
     test('estimateId present + a delivered (not withheld) row dispatches to the provider', async () => {
@@ -1518,7 +1522,12 @@ describe('email template library rendering', () => {
       expect(result).toEqual(expect.objectContaining({ sent: true, providerAttempted: true }));
     });
 
-    test('without estimateId/estimateIds the guard is never consulted — unchanged behavior', async () => {
+    test('without estimateId/estimateIds and no estimate link in the rendered content — the guard still runs (content derivation) but stays a fast no-op', async () => {
+      // Codex round 1 on #4608 (P1): the guard is ALWAYS wrapped around
+      // dispatchToProvider now — it derives an estimate id from the
+      // rendered html/text, so a caller that omits estimateId is no longer
+      // exempt. This template's fixture body carries no estimate link, so
+      // the send proceeds exactly as before.
       const queueInsert = chain({ returning: [queuedMessage] });
       const sentUpdate = chain({ returning: [sentMessage] });
       setDbQueues({
@@ -1531,7 +1540,9 @@ describe('email template library rendering', () => {
 
       const result = await send({});
 
-      expect(annualHandoffGuard).not.toHaveBeenCalled();
+      expect(annualHandoffGuard).toHaveBeenCalledWith(expect.objectContaining({
+        db: expect.anything(), estimateIds: [], texts: expect.any(Array),
+      }));
       expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
       expect(result.sent).toBe(true);
     });

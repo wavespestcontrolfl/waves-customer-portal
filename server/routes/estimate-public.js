@@ -25011,6 +25011,10 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           // but a retap shouldn't stack identical emails.
           idempotencyKey: `estimate_service_details:${estimate.id}:${serviceKey}:${etDateString()}`,
           categories: ['estimate_service_details'],
+          // Codex round 1 on #4608 (P1): content derivation would catch the
+          // estimate_url in the payload anyway, but the explicit id is
+          // cheaper (no regex/DB round trip through the rendered body).
+          estimateId: estimate.id,
           attachments: [{
             filename: `Waves_${serviceTitle.replace(/[^A-Za-z0-9]+/g, '_')}_Details.pdf`,
             content: buffer.toString('base64'),
@@ -25122,15 +25126,34 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           // through the canonical validator anyway (this legacy path
           // bypasses sendCustomerMessage) so any future change to that
           // classification automatically applies here too.
-          preSendCheck: () => {
+          //
+          // Codex round 1 on #4608 (P1): this path bypasses sendCustomerMessage
+          // entirely, so the chokepoint guard never gets a chance to run —
+          // composed in here instead, window check first (unchanged shape/
+          // priority), then the annual-offer guard on THIS estimate. A
+          // blocked verdict returns the same not-ok shape checkSendWindow
+          // does, so TwilioService.sendSMS withholds the send exactly like a
+          // window hold — no Twilio call — and the existing claim-release
+          // path above (a rejected sendPromise) runs unchanged. A guard
+          // infra error is caught by TwilioService's own preSendCheck
+          // wrapper and fails closed the same way (see services/twilio.js
+          // runPreSendCheck).
+          preSendCheck: async () => {
             const { checkSendWindow } = require('../services/messaging/validators/send-window');
-            return checkSendWindow({
+            const windowVerdict = checkSendWindow({
               channel: 'sms',
               audience: 'customer',
               purpose: 'conversational',
               conversationalContext: true,
               to: contact.customerPhone,
             }, null, null);
+            if (!windowVerdict.ok) return windowVerdict;
+            const { annualHandoffGuard } = require('../services/estimate-annual-guard');
+            const verdict = await annualHandoffGuard({ db, estimateIds: [estimate.id] })();
+            if (verdict.blocked) {
+              return { ok: false, code: 'ANNUAL_OFFER_WITHHELD', reason: 'annual_offer_withheld', retryable: false };
+            }
+            return { ok: true };
           },
         },
       );

@@ -1,5 +1,5 @@
 const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
-const { loadAnnualOfferRow, annualOfferVerdict, annualHandoffGuard } = require('../services/estimate-annual-guard');
+const { loadAnnualOfferRow, annualOfferVerdict, estimateIdsFromContent, annualHandoffGuard } = require('../services/estimate-annual-guard');
 
 const PLAN_LINE = { service: 'termite_bait', plan: 'annual_protection', stations: 15 };
 const QUARTERLY_LINE = { ...PLAN_LINE, plan: 'quarterly' };
@@ -165,5 +165,162 @@ describe('annualHandoffGuard', () => {
       first: async () => { throw new Error('connection lost'); },
     });
     await expect(annualHandoffGuard({ db, estimateIds: ['est-1'] })()).rejects.toThrow('connection lost');
+  });
+});
+
+// Table-routed fake for estimateIdsFromContent's two possible queries:
+// estimates (.whereIn('token', ...).select('id')) and short_codes
+// (.whereIn('code', ...).select(...)). Each db(table) call is recorded on
+// `calls` so tests can assert exactly how many queries ran (or none).
+function fakeContentDb({ estimates = [], shortCodes = [] } = {}, calls = []) {
+  return (table) => {
+    calls.push(table);
+    const builder = {
+      whereIn(col, vals) {
+        builder.select = async () => {
+          const source = table === 'short_codes' ? shortCodes : estimates;
+          return source.filter((r) => vals.includes(r[col]));
+        };
+        return builder;
+      },
+    };
+    return builder;
+  };
+}
+
+describe('estimateIdsFromContent', () => {
+  test('long link with a query string and trailing punctuation resolves its token', async () => {
+    const calls = [];
+    const db = fakeContentDb({ estimates: [{ id: 'est-1', token: 'abc123token' }] }, calls);
+    const ids = await estimateIdsFromContent(db, [
+      'View your estimate: https://portal.wavespestcontrol.com/estimate/abc123token?utm=sms&ref=1).',
+    ]);
+    expect(ids).toEqual(['est-1']);
+    expect(calls).toEqual(['estimates']);
+  });
+
+  test('a short code whose entity_type is estimates resolves entity_id directly, without a second query', async () => {
+    const calls = [];
+    const db = fakeContentDb({
+      shortCodes: [{ code: 'k3j9code', target_url: 'https://portal.wavespestcontrol.com/estimate/abc123token', entity_type: 'estimates', entity_id: 'est-42' }],
+    }, calls);
+    const ids = await estimateIdsFromContent(db, ['You can view your estimate here: https://portal.wavespestcontrol.com/l/k3j9code']);
+    expect(ids).toEqual(['est-42']);
+    // entity_type already answered it — no second (estimates) query needed.
+    expect(calls).toEqual(['short_codes']);
+  });
+
+  test('a short code minted for something else whose target_url is itself a long estimate link resolves via the re-scan', async () => {
+    const calls = [];
+    const db = fakeContentDb({
+      estimates: [{ id: 'est-77', token: 'longtoken1' }],
+      shortCodes: [{ code: 'xyz9', target_url: 'https://portal.wavespestcontrol.com/estimate/longtoken1', entity_type: null, entity_id: null }],
+    }, calls);
+    const ids = await estimateIdsFromContent(db, ['https://portal.wavespestcontrol.com/l/xyz9']);
+    expect(ids).toEqual(['est-77']);
+    expect(calls).toEqual(['short_codes', 'estimates']);
+  });
+
+  test('a short code for something else entirely (target_url carries no estimate link) is ignored', async () => {
+    const calls = [];
+    const db = fakeContentDb({
+      shortCodes: [{ code: 'inv1code', target_url: 'https://portal.wavespestcontrol.com/pay/invoice-1', entity_type: 'invoices', entity_id: 'inv-1' }],
+    }, calls);
+    const ids = await estimateIdsFromContent(db, ['Pay here: https://portal.wavespestcontrol.com/l/inv1code']);
+    expect(ids).toEqual([]);
+    // The short code resolved to a non-estimate entity and its target has no
+    // estimate link either — no estimates query needed.
+    expect(calls).toEqual(['short_codes']);
+  });
+
+  test('no links at all in any text runs NO query', async () => {
+    const calls = [];
+    const db = fakeContentDb({}, calls);
+    const ids = await estimateIdsFromContent(db, ['Hi Sam, your technician is on the way!', undefined, null, '']);
+    expect(ids).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
+  test('a single non-array texts argument is accepted', async () => {
+    const calls = [];
+    const db = fakeContentDb({ estimates: [{ id: 'est-1', token: 'solotoken1' }] }, calls);
+    const ids = await estimateIdsFromContent(db, 'https://portal.wavespestcontrol.com/estimate/solotoken1');
+    expect(ids).toEqual(['est-1']);
+  });
+
+  test('multiple long tokens and short codes across several texts are deduped into one id set', async () => {
+    const calls = [];
+    const db = fakeContentDb({
+      estimates: [{ id: 'est-1', token: 'tok1' }, { id: 'est-2', token: 'tok2' }],
+      shortCodes: [{ code: 'sc1code', target_url: 'https://portal.wavespestcontrol.com/estimate/tok1', entity_type: 'estimates', entity_id: 'est-1' }],
+    }, calls);
+    const ids = await estimateIdsFromContent(db, [
+      'https://portal.wavespestcontrol.com/estimate/tok1 and again https://portal.wavespestcontrol.com/estimate/tok1',
+      'https://portal.wavespestcontrol.com/l/sc1code',
+      'https://portal.wavespestcontrol.com/estimate/tok2',
+    ]);
+    expect(ids.slice().sort()).toEqual(['est-1', 'est-2']);
+    expect(calls).toEqual(['short_codes', 'estimates']);
+  });
+});
+
+describe('annualHandoffGuard content derivation (Codex round 1 on #4608, P1)', () => {
+  // Proves the composer manual SMS (admin-communications.js) and
+  // composer-customer-links.js need NO code change: their body carries only
+  // a short link, no explicit estimateId — the guard still resolves and
+  // blocks a withheld estimate through it, purely from the short_codes
+  // entity_type/entity_id the composer's own mint already stamps.
+  test('a short code row with entity_type "estimates" resolves to a withheld estimate — blocked, no explicit id needed', async () => {
+    const withheldRow = row(); // annual plan, no delivered fingerprint -> withheld
+    const calls = [];
+    const shortCodesDb = fakeContentDb({
+      shortCodes: [{ code: 'compose1', target_url: 'https://portal.wavespestcontrol.com/estimate/synthetic-token', entity_type: 'estimates', entity_id: withheldRow.id }],
+    }, calls);
+    // annualHandoffGuard's per-id loop uses loadAnnualOfferRow's
+    // where({id}).first(...) shape — union the two fake db behaviors so one
+    // db instance answers both the content-derivation queries and the
+    // per-id row lookups the guard makes afterward.
+    const loaderDb = fakeDb({ [withheldRow.id]: withheldRow });
+    const db = (table) => (table === 'short_codes' ? shortCodesDb(table) : loaderDb(table));
+
+    const verdict = await annualHandoffGuard({
+      db, estimateIds: [], texts: ['You can view your estimate here: https://portal.wavespestcontrol.com/l/compose1'],
+    })();
+
+    expect(verdict).toEqual({ blocked: true, reason: 'annual_offer_withheld', estimateId: withheldRow.id });
+  });
+
+  test('the same short code resolving to a DELIVERED estimate is never blocked', async () => {
+    const deliveredRow = delivered();
+    const shortCodesDb = fakeContentDb({
+      shortCodes: [{ code: 'compose2', target_url: 'https://portal.wavespestcontrol.com/estimate/synthetic-token', entity_type: 'estimates', entity_id: deliveredRow.id }],
+    });
+    const loaderDb = fakeDb({ [deliveredRow.id]: deliveredRow });
+    const db = (table) => (table === 'short_codes' ? shortCodesDb(table) : loaderDb(table));
+
+    const verdict = await annualHandoffGuard({
+      db, estimateIds: [], texts: ['You can view your estimate here: https://portal.wavespestcontrol.com/l/compose2'],
+    })();
+
+    expect(verdict).toEqual({ blocked: false, reason: null, estimateId: null });
+  });
+
+  test('an explicit estimateId is a UNION with content derivation, not a replacement', async () => {
+    const explicitWithheld = row(undefined, { id: 'explicit-withheld' });
+    const contentDelivered = delivered({ id: 'content-delivered' });
+    const shortCodesDb = fakeContentDb({
+      shortCodes: [{ code: 'union1', target_url: '', entity_type: 'estimates', entity_id: 'content-delivered' }],
+    });
+    const loaderDb = fakeDb({ 'explicit-withheld': explicitWithheld, 'content-delivered': contentDelivered });
+    const db = (table) => (table === 'short_codes' ? shortCodesDb(table) : loaderDb(table));
+
+    // The content link alone resolves to a delivered (not withheld)
+    // estimate, but the caller ALSO passed an explicit withheld id — the
+    // union still blocks on it.
+    const verdict = await annualHandoffGuard({
+      db, estimateIds: ['explicit-withheld'], texts: ['https://portal.wavespestcontrol.com/l/union1'],
+    })();
+
+    expect(verdict).toEqual({ blocked: true, reason: 'annual_offer_withheld', estimateId: 'explicit-withheld' });
   });
 });

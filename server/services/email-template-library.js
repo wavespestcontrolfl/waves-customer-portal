@@ -1380,20 +1380,29 @@ async function sendTemplate({
     // that a never-attempted SendGrid call cannot have produced) both
     // resolve to their own sentinel instead, so dispatchToProvider always
     // either sends or reports a real, non-throwing outcome.
+    //
+    // Codex round 1 on #4608 (P1): keying this ONLY on estimateId/estimateIds
+    // made the guard opt-in — the estimate-public.js service-details email
+    // (and any future sender) can carry an estimate link without ever
+    // passing an id. ALWAYS wrap dispatchToProvider with the guard step —
+    // annualHandoffGuard unions any explicit id with whatever
+    // estimateIdsFromContent finds in the FINAL rendered html/text, and
+    // runs no query at all when there is neither, so this costs nothing on
+    // every send that carries no estimate content whatsoever.
     const guardEstimateIds = Array.isArray(estimateIds) && estimateIds.length
       ? estimateIds : (estimateId ? [estimateId] : []);
-    const dispatchToProvider = guardEstimateIds.length
-      ? async () => {
-          const { annualHandoffGuard } = require('./estimate-annual-guard');
-          let verdict;
-          try {
-            verdict = await annualHandoffGuard({ db, estimateIds: guardEstimateIds })();
-          } catch (err) {
-            return { [ANNUAL_OFFER_GUARD_FAILED]: true, error: err };
-          }
-          return verdict.blocked ? ANNUAL_OFFER_WITHHELD : sendToProvider();
-        }
-      : sendToProvider;
+    const dispatchToProvider = async () => {
+      const { annualHandoffGuard } = require('./estimate-annual-guard');
+      let verdict;
+      try {
+        verdict = await annualHandoffGuard({
+          db, estimateIds: guardEstimateIds, texts: [rendered.html, rendered.text],
+        })();
+      } catch (err) {
+        return { [ANNUAL_OFFER_GUARD_FAILED]: true, error: err };
+      }
+      return verdict.blocked ? ANNUAL_OFFER_WITHHELD : sendToProvider();
+    };
     if (typeof withProviderHandoff === 'function') {
       const handoff = await runProviderHandoff({ withProviderHandoff, dispatchToProvider, templateKey });
       if (handoff.abortedBeforeDispatch) return abortBeforeDispatch();

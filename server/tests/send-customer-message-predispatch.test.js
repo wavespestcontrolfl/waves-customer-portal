@@ -490,7 +490,9 @@ describe('annual-offer delivery guard at the provider handoff (delivery-guards s
       sent: false, blocked: true, deliveryOutcome: 'not_sent',
       code: 'ANNUAL_OFFER_WITHHELD', reason: 'annual_offer_withheld',
     });
-    expect(annualHandoffGuard).toHaveBeenCalledWith({ db: expect.anything(), estimateIds: ['est-1'] });
+    expect(annualHandoffGuard).toHaveBeenCalledWith({
+      db: expect.anything(), estimateIds: ['est-1'], texts: ['What is the service address?'],
+    });
     expect(persistAudit).toHaveBeenCalledWith(expect.objectContaining({ validatorsFailed: ['annual_offer_guard_boundary'] }));
   });
 
@@ -499,7 +501,9 @@ describe('annual-offer delivery guard at the provider handoff (delivery-guards s
     runViaProviderHook();
     const result = await sendCustomerMessage({ ...BASE_INPUT, estimateIds: ['est-1', 'est-2'] });
     expect(result).toMatchObject({ sent: false, blocked: true, code: 'ANNUAL_OFFER_WITHHELD' });
-    expect(annualHandoffGuard).toHaveBeenCalledWith({ db: expect.anything(), estimateIds: ['est-1', 'est-2'] });
+    expect(annualHandoffGuard).toHaveBeenCalledWith({
+      db: expect.anything(), estimateIds: ['est-1', 'est-2'], texts: ['What is the service address?'],
+    });
   });
 
   test('estimateId present + delivered (not withheld) verdict dispatches to the provider', async () => {
@@ -510,11 +514,18 @@ describe('annual-offer delivery guard at the provider handoff (delivery-guards s
     expect(sendViaTwilio).toHaveBeenCalledTimes(1);
   });
 
-  test('no estimateId/estimateIds — the guard is never consulted, behavior is unchanged', async () => {
+  test('no estimateId/estimateIds and a body with no estimate link — the guard still runs (content derivation) but stays a fast no-op', async () => {
+    // Codex round 1 on #4608 (P1): the guard is ALWAYS consulted now — it
+    // derives an estimate id from the body content, so a caller that omits
+    // estimateId is no longer exempt. This body carries no estimate link, so
+    // the (mocked) guard sees an empty explicit id list and gets the body as
+    // texts, and the send proceeds exactly as before.
     runViaProviderHook();
     const result = await sendCustomerMessage(BASE_INPUT);
     expect(result.sent).toBe(true);
-    expect(annualHandoffGuard).not.toHaveBeenCalled();
+    expect(annualHandoffGuard).toHaveBeenCalledWith({
+      db: expect.anything(), estimateIds: [], texts: ['What is the service address?'],
+    });
     expect(sendViaTwilio).toHaveBeenCalledTimes(1);
   });
 
