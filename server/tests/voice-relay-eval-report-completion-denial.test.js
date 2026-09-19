@@ -787,3 +787,35 @@ test.each([
   expect(grammar.reportClaimIsDenied(text, text, text.indexOf('Talstar P'),
     text.indexOf('exterior perimeter'), /applied/.exec(text), '')).toBe(denied);
 });
+
+test.each([
+  ['We considered having Talstar P applied to the exterior perimeter.', false],
+  ['We discussed having Talstar P applied to the exterior perimeter.', false],
+  ['We considered having applied Talstar P to the exterior perimeter.', false],
+  ['We are considering having Talstar P applied to the exterior perimeter.', false],
+  ['We had Talstar P applied to the exterior perimeter.', true],
+  ['We discussed bait, then had Talstar P applied to the exterior perimeter.', true],
+])('deliberating about a gerund complement does not establish completion: %s', (text, completed) => {
+  expect(grammar.reportHasCompletedPredicate(text, /applied/.exec(text))).toBe(completed);
+});
+
+test.each([
+  ['We applied Talstar P, but not bait, to the exterior perimeter.', 'Talstar P', 'exterior perimeter', false],
+  ['We applied Talstar P, but not bait, to the exterior perimeter.', 'bait', 'exterior perimeter', true],
+  ['We applied Talstar P, but not the exterior perimeter, to the garage.', 'Talstar P', 'exterior perimeter', true],
+  ['We applied Talstar P, but not during this visit, to the exterior perimeter.', 'Talstar P', 'exterior perimeter', true],
+])('post-object nominal contrast preserves matched finding scope: %s / %s / %s',
+  (text, subject, location, denied) => {
+    const findingVerb = /applied/.exec(text);
+    expect(grammar.reportClaimIsDenied(text, text, text.indexOf(subject), text.indexOf(location),
+      findingVerb, '')).toBe(denied);
+  });
+
+test.each([
+  'We applied Talstar P, but not on this visit, to the exterior perimeter.',
+  'We applied Talstar P, but not this time, to the exterior perimeter.',
+  'We applied Talstar P, but not at every service, to the exterior perimeter.',
+])('temporal post-object exclusions remain denied: %s', (text) => {
+  expect(grammar.reportClaimIsDenied(text, text, text.indexOf('Talstar P'),
+    text.indexOf('exterior perimeter'), /applied/.exec(text), '')).toBe(true);
+});
