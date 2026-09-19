@@ -107,3 +107,54 @@ describe('deriveStatus (Google AV → provider-neutral status)', () => {
     expect(deriveStatus(result(), 'DESOTO COUNTY').status).toBe(STATUSES.VALIDATED_ACCEPT);
   });
 });
+
+describe('buildAddressLines — spoken raw_text with conversational state-code words', () => {
+  // Synthetic transcripts in the extractor's shape. A spoken tail like
+  // "so, or it could be Ellenton" used to read as Oregon, the lines went
+  // to Google as "Palmetto OR 34221", and the non-Florida override marked
+  // a served Manatee County address out_of_service_area.
+  test('"or" in the spoken tail does not become Oregon', () => {
+    expect(buildAddressLines({
+      street_line_1: '1200 Harbor Ln', city: 'Palmetto', state: 'FL', postal_code: '34221',
+      raw_text: "1200 Harbor Lane. It's Palmetto, so, or it could be Ellenton, but it's 34221",
+    })).toEqual(['1200 Harbor Ln', 'Palmetto FL 34221']);
+  });
+  test('"in" in the spoken tail does not become Indiana', () => {
+    expect(buildAddressLines({
+      street_line_1: '300 Seaglass Cir', city: 'Ellenton', state: 'FL', postal_code: '34222',
+      raw_text: "300 Seaglass, that's one word, S-E-A-G-L-A-S-S Circle. That's in Ellenton, 34222.",
+    })).toEqual(['300 Seaglass Cir', 'Ellenton FL 34222']);
+  });
+  test('an abbreviated other state followed by trailing speech still overrides the FL default (codex r1 P1)', () => {
+    expect(buildAddressLines({
+      street_line_1: '123 Main St', city: 'Venice', state: null,
+      raw_text: "123 Main Street, Venice, CA, but I don't know the ZIP",
+    })).toEqual(['123 Main St', 'Venice CA']);
+    expect(buildAddressLines({
+      street_line_1: '123 Main St', city: 'Venice', state: null,
+      raw_text: "123 Main Street, Venice, CA; but I don't know the ZIP",
+    })).toEqual(['123 Main St', 'Venice CA']);
+  });
+  test('an abbreviated other state before a trailing country still overrides the FL default (codex r3 P1)', () => {
+    expect(buildAddressLines({
+      street_line_1: '123 Main St', city: 'Portland', state: null,
+      raw_text: '123 Main Street, Portland, OR United States',
+    })).toEqual(['123 Main St', 'Portland OR']);
+  });
+  test('an unambiguous code before unpunctuated trailing speech still overrides the FL default (codex r4 P1)', () => {
+    expect(buildAddressLines({
+      street_line_1: '123 Main St', city: 'Venice', state: null,
+      raw_text: "123 Main Street, Venice, CA but I don't know the ZIP",
+    })).toEqual(['123 Main St', 'Venice CA']);
+  });
+  test('an explicit other state in raw_text still overrides the FL default', () => {
+    expect(buildAddressLines({
+      street_line_1: '123 Main St', city: 'Louisville', state: null,
+      raw_text: '123 Main Street, Louisville, Kentucky',
+    })).toEqual(['123 Main St', 'Louisville KY']);
+    expect(buildAddressLines({
+      street_line_1: '123 Main St', city: 'Portland', state: null, postal_code: '97201',
+      raw_text: '123 Main Street, Portland, OR 97201',
+    })).toEqual(['123 Main St', 'Portland OR 97201']);
+  });
+});
