@@ -16,6 +16,12 @@
  */
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The concurrent-dedup tests (Codex round 2 on #4608, P0) fire several
+// requests against the same ephemeral server across this file's tests —
+// bypass the route's real 6/hour serviceDetailsSendLimiter so test volume
+// never collides with production rate-limiting, which is not what these
+// tests exercise.
+jest.mock('express-rate-limit', () => () => (req, res, next) => next());
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn() }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn() }));
 
@@ -224,5 +230,71 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
     expect(capturedVerdict).toEqual({ ok: true });
     expect(res.status).toBe(200);
     expect(body).toEqual({ ok: true, channel: 'sms' });
+  });
+
+  test('P0 (Codex round 2 on #4608): two OVERLAPPING SMS requests for a withheld annual estimate both get the generic 404 — the concurrent-dedup branch shares the winner outcome, never a distinguishable 502', async () => {
+    const TwilioService = require('../services/twilio');
+    TwilioService.sendSMS.mockImplementation(async (_to, _body, options) => {
+      const verdict = await options.preSendCheck();
+      // Hold the in-flight promise open briefly so the second concurrent
+      // request's dedup check reliably finds priorClaim.promise still
+      // pending (not yet resolved) — reproducing the real overlap window.
+      await new Promise((resolve) => { setTimeout(resolve, 40); });
+      if (!verdict.ok) return { success: false, sid: null, preSendBlocked: true, code: verdict.code, error: verdict.reason };
+      return { success: true, sid: 'SM_fake' };
+    });
+
+    currentRow = baseEstimateRow({ customer_phone: '+19415550303' });
+    const send = () => fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
+    });
+
+    const [res1, res2] = await Promise.all([send(), send()]);
+    const [body1, body2] = await Promise.all([res1.json(), res2.json()]);
+
+    // Exactly ONE real dispatch attempt — the loser shared the winner's
+    // in-flight promise instead of starting a second one.
+    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+    expect(res1.status).toBe(404);
+    expect(body1).toEqual({ error: 'Estimate not found' });
+    expect(res2.status).toBe(404);
+    expect(body2).toEqual({ error: 'Estimate not found' });
+  });
+
+  test('the existing dedup-SUCCESS case is unchanged: the loser of an overlapping successful send reports deduped:true, not 404', async () => {
+    const TwilioService = require('../services/twilio');
+    TwilioService.sendSMS.mockImplementation(async (_to, _body, options) => {
+      const verdict = await options.preSendCheck();
+      await new Promise((resolve) => { setTimeout(resolve, 40); });
+      if (!verdict.ok) return { success: false, sid: null, preSendBlocked: true, code: verdict.code, error: verdict.reason };
+      return { success: true, sid: 'SM_fake' };
+    });
+
+    const draft = baseEstimateRow({ customer_phone: '+19415550404' });
+    const fingerprint = annualPlanOfferFingerprint(draft);
+    draft.status = 'sent';
+    draft.estimate_data.deliveryState = { firstDeliveredAt: '2026-01-01T12:00:00Z', annualPlanOfferFingerprint: fingerprint };
+    currentRow = draft;
+
+    const send = () => fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
+    });
+
+    const [res1, res2] = await Promise.all([send(), send()]);
+    const [body1, body2] = await Promise.all([res1.json(), res2.json()]);
+    const bodies = [body1, body2];
+
+    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+    expect(res1.status).toBe(200);
+    expect(res2.status).toBe(200);
+    // One of the two is the real send, the other the deduped echo of it —
+    // order between two concurrent requests isn't guaranteed, so assert the
+    // SET of outcomes rather than which slot got which.
+    expect(bodies).toEqual(expect.arrayContaining([{ ok: true, channel: 'sms' }]));
+    expect(bodies).toEqual(expect.arrayContaining([{ ok: true, channel: 'sms', deduped: true }]));
   });
 });

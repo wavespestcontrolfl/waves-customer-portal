@@ -25062,9 +25062,15 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     const priorClaim = serviceDetailsSmsClaims.get(dedupKey);
     if (priorClaim?.promise) {
       // A send for this exact packet is in flight — share ITS outcome rather
-      // than declaring success for a text that may still fail.
+      // than declaring success for a text that may still fail. Codex round 2
+      // on #4608 (P0): this shares the SAME resolved value the winner below
+      // maps to a generic 404 for a withheld row — mirror that mapping here
+      // too (AGENTS.md public-route rule), or the loser of the race would
+      // answer a distinguishable 502 for what the winner calls 404,
+      // revealing a live-but-ineligible row through request timing alone.
       const shared = await priorClaim.promise.catch(() => null);
       if (shared?.success) return res.json({ ok: true, channel: 'sms', deduped: true });
+      if (shared?.withheld || shared?.code === 'ANNUAL_OFFER_WITHHELD') return res.status(404).json({ error: 'Estimate not found' });
       return res.status(502).json({ ok: false, error: 'Text could not be sent right now.' });
     }
     if (priorClaim?.sentAt && Date.now() - priorClaim.sentAt < SERVICE_DETAILS_SMS_DEDUP_MS) {
@@ -26441,6 +26447,8 @@ async function handleEstimateAsk(req, res, next) {
 }
 
 module.exports = router;
+// Codex round 2 on #4608: exported so estimate-annual-guard.js's content-derivation regex tests can assert exact parity against the canonical token format gate, instead of a hand-copied literal that could silently drift from it.
+module.exports.ESTIMATE_TOKEN_RE = ESTIMATE_TOKEN_RE;
 module.exports.refuseFrozenRestartMutation = refuseFrozenRestartMutation;
 module.exports.acceptVisitEstimatedPrice = acceptVisitEstimatedPrice;
 module.exports.selectTierCeiling = selectTierCeiling;

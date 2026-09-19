@@ -1,5 +1,6 @@
 const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
-const { loadAnnualOfferRow, annualOfferVerdict, estimateIdsFromContent, annualHandoffGuard } = require('../services/estimate-annual-guard');
+const { loadAnnualOfferRow, annualOfferVerdict, estimateIdsFromContent, annualHandoffGuard, LONG_LINK_TOKEN_RE } = require('../services/estimate-annual-guard');
+const { ESTIMATE_TOKEN_RE } = require('../routes/estimate-public');
 
 const PLAN_LINE = { service: 'termite_bait', plan: 'annual_protection', stations: 15 };
 const QUARTERLY_LINE = { ...PLAN_LINE, plan: 'quarterly' };
@@ -191,9 +192,9 @@ function fakeContentDb({ estimates = [], shortCodes = [] } = {}, calls = []) {
 describe('estimateIdsFromContent', () => {
   test('long link with a query string and trailing punctuation resolves its token', async () => {
     const calls = [];
-    const db = fakeContentDb({ estimates: [{ id: 'est-1', token: 'abc123token' }] }, calls);
+    const db = fakeContentDb({ estimates: [{ id: 'est-1', token: 'abc123tokenfifteen' }] }, calls);
     const ids = await estimateIdsFromContent(db, [
-      'View your estimate: https://portal.wavespestcontrol.com/estimate/abc123token?utm=sms&ref=1).',
+      'View your estimate: https://portal.wavespestcontrol.com/estimate/abc123tokenfifteen?utm=sms&ref=1).',
     ]);
     expect(ids).toEqual(['est-1']);
     expect(calls).toEqual(['estimates']);
@@ -202,7 +203,7 @@ describe('estimateIdsFromContent', () => {
   test('a short code whose entity_type is estimates resolves entity_id directly, without a second query', async () => {
     const calls = [];
     const db = fakeContentDb({
-      shortCodes: [{ code: 'k3j9code', target_url: 'https://portal.wavespestcontrol.com/estimate/abc123token', entity_type: 'estimates', entity_id: 'est-42' }],
+      shortCodes: [{ code: 'k3j9code', target_url: 'https://portal.wavespestcontrol.com/estimate/abc123tokenfifteen', entity_type: 'estimates', entity_id: 'est-42' }],
     }, calls);
     const ids = await estimateIdsFromContent(db, ['You can view your estimate here: https://portal.wavespestcontrol.com/l/k3j9code']);
     expect(ids).toEqual(['est-42']);
@@ -213,8 +214,8 @@ describe('estimateIdsFromContent', () => {
   test('a short code minted for something else whose target_url is itself a long estimate link resolves via the re-scan', async () => {
     const calls = [];
     const db = fakeContentDb({
-      estimates: [{ id: 'est-77', token: 'longtoken1' }],
-      shortCodes: [{ code: 'xyz9', target_url: 'https://portal.wavespestcontrol.com/estimate/longtoken1', entity_type: null, entity_id: null }],
+      estimates: [{ id: 'est-77', token: 'longtoken1fifteen' }],
+      shortCodes: [{ code: 'xyz9', target_url: 'https://portal.wavespestcontrol.com/estimate/longtoken1fifteen', entity_type: null, entity_id: null }],
     }, calls);
     const ids = await estimateIdsFromContent(db, ['https://portal.wavespestcontrol.com/l/xyz9']);
     expect(ids).toEqual(['est-77']);
@@ -243,21 +244,21 @@ describe('estimateIdsFromContent', () => {
 
   test('a single non-array texts argument is accepted', async () => {
     const calls = [];
-    const db = fakeContentDb({ estimates: [{ id: 'est-1', token: 'solotoken1' }] }, calls);
-    const ids = await estimateIdsFromContent(db, 'https://portal.wavespestcontrol.com/estimate/solotoken1');
+    const db = fakeContentDb({ estimates: [{ id: 'est-1', token: 'solotoken1fifteen' }] }, calls);
+    const ids = await estimateIdsFromContent(db, 'https://portal.wavespestcontrol.com/estimate/solotoken1fifteen');
     expect(ids).toEqual(['est-1']);
   });
 
   test('multiple long tokens and short codes across several texts are deduped into one id set', async () => {
     const calls = [];
     const db = fakeContentDb({
-      estimates: [{ id: 'est-1', token: 'tok1' }, { id: 'est-2', token: 'tok2' }],
-      shortCodes: [{ code: 'sc1code', target_url: 'https://portal.wavespestcontrol.com/estimate/tok1', entity_type: 'estimates', entity_id: 'est-1' }],
+      estimates: [{ id: 'est-1', token: 'tok1fifteencharsx' }, { id: 'est-2', token: 'tok2fifteencharsx' }],
+      shortCodes: [{ code: 'sc1code', target_url: 'https://portal.wavespestcontrol.com/estimate/tok1fifteencharsx', entity_type: 'estimates', entity_id: 'est-1' }],
     }, calls);
     const ids = await estimateIdsFromContent(db, [
-      'https://portal.wavespestcontrol.com/estimate/tok1 and again https://portal.wavespestcontrol.com/estimate/tok1',
+      'https://portal.wavespestcontrol.com/estimate/tok1fifteencharsx and again https://portal.wavespestcontrol.com/estimate/tok1fifteencharsx',
       'https://portal.wavespestcontrol.com/l/sc1code',
-      'https://portal.wavespestcontrol.com/estimate/tok2',
+      'https://portal.wavespestcontrol.com/estimate/tok2fifteencharsx',
     ]);
     expect(ids.slice().sort()).toEqual(['est-1', 'est-2']);
     expect(calls).toEqual(['short_codes', 'estimates']);
@@ -322,5 +323,182 @@ describe('annualHandoffGuard content derivation (Codex round 1 on #4608, P1)', (
     })();
 
     expect(verdict).toEqual({ blocked: true, reason: 'annual_offer_withheld', estimateId: 'explicit-withheld' });
+  });
+});
+
+describe('LONG_LINK_TOKEN_RE mirrors the canonical ESTIMATE_TOKEN_RE exactly (Codex round 2 on #4608, P1)', () => {
+  // Extract whatever LONG_LINK_TOKEN_RE captures when the sample is embedded
+  // as a long link followed by a non-charset stopper (a space) — mirrors
+  // real usage (a token never sits at the very end of a message with
+  // nothing after it in practice, but the stopper also proves the charset
+  // boundary is exact either way).
+  function extractedToken(sample) {
+    LONG_LINK_TOKEN_RE.lastIndex = 0;
+    const match = LONG_LINK_TOKEN_RE.exec(`https://portal.wavespestcontrol.com/estimate/${sample} `);
+    return match ? match[1] : null;
+  }
+
+  test.each([
+    ['abcdefghij12345', 'exactly 15 chars, alnum only (minimum valid length)'],
+    ['a'.repeat(64), '64 chars (maximum valid length)'],
+    ['a'.repeat(65), '65 chars — over the max, invalid'],
+    ['short', 'under 15 chars, invalid'],
+    ['abc_def-ghi_jkl_mno', 'contains both _ and - as interior content, valid'],
+    ['trailing-dash-token-', 'ends in -, valid content per the canonical gate'],
+    ['trailing_underscore_', 'ends in _, valid content per the canonical gate'],
+    ['has spaces in it here', 'contains a space, invalid'],
+    ['has.dots.in.it.here12', 'contains a dot, invalid'],
+  ])('%j (%s): extraction parity with ESTIMATE_TOKEN_RE', (sample) => {
+    const canonicalAccepts = ESTIMATE_TOKEN_RE.test(sample);
+    const extracted = extractedToken(sample);
+    if (canonicalAccepts) {
+      // The guard's regex must capture the token WHOLE — no truncation of
+      // valid `_`/`-` content — exactly what the public gate would accept.
+      expect(extracted).toBe(sample);
+    } else {
+      // An invalid sample (too short/long, or containing a character
+      // outside the canonical charset) must never be captured whole either
+      // — either no match at all, or a match that stops short of the full
+      // (invalid) string.
+      expect(extracted).not.toBe(sample);
+    }
+  });
+});
+
+// ── Group expansion (Codex round 2 on #4608, P1) ──────────────────────────
+// A small but faithful in-memory knex stand-in supporting exactly the chain
+// pricing-authority-gate.js's applyLinkVisibleSiblingScope uses (whereIn /
+// whereNotIn / whereNull / whereRaw / nested where+orWhere / orWhereIn),
+// PLUS loadAnnualOfferRow's own where({id}).first(...cols) shape — the same
+// db instance serves both the per-id verdict loop and the group-sibling
+// query. Each builder method returns a NEW builder wrapping an updated row
+// predicate (AND by default; the nested-callback forms compose true
+// AND/OR), so the same composition knex itself does is reproduced exactly
+// for this fixed, known query shape — not a general-purpose knex emulator.
+function fakeGroupDb(rows, calls = []) {
+  const allRows = () => rows;
+  const makeBuilder = (pred = () => true) => {
+    const builder = {
+      _pred: pred,
+      where(arg) {
+        if (typeof arg === 'function') {
+          const result = arg(makeBuilder(() => true));
+          return makeBuilder((row) => pred(row) && result._pred(row));
+        }
+        return makeBuilder((row) => pred(row) && Object.entries(arg).every(([k, v]) => row[k] === v));
+      },
+      orWhere(...args) {
+        if (typeof args[0] === 'function') {
+          const result = args[0](makeBuilder(() => true));
+          return makeBuilder((row) => pred(row) || result._pred(row));
+        }
+        const [col, op, val] = args.length === 3 ? args : [args[0], '=', args[1]];
+        const cmp = { '>': (a, b) => a > b, '<': (a, b) => a < b, '>=': (a, b) => a >= b, '<=': (a, b) => a <= b, '=': (a, b) => a === b }[op];
+        return makeBuilder((row) => {
+          if (pred(row)) return true;
+          const rv = row[col];
+          if (rv == null) return false;
+          const a = rv instanceof Date ? rv : new Date(rv);
+          const b = val instanceof Date ? val : new Date(val);
+          return cmp(a.getTime(), b.getTime());
+        });
+      },
+      whereIn(col, arr) { return makeBuilder((row) => pred(row) && arr.includes(row[col])); },
+      orWhereIn(col, arr) { return makeBuilder((row) => pred(row) || arr.includes(row[col])); },
+      whereNotIn(col, arr) { return makeBuilder((row) => pred(row) && !arr.includes(row[col])); },
+      whereNull(col) { return makeBuilder((row) => pred(row) && row[col] == null); },
+      whereRaw() { return builder; }, // no-op AND-true: test fixtures never set the invalidation markers
+      forUpdate() { return builder; },
+      first: async (..._cols) => allRows().filter(pred)[0] || null,
+      select: async (..._cols) => allRows().filter(pred),
+    };
+    return builder;
+  };
+  return (table) => {
+    calls.push(table);
+    if (table !== 'estimates') throw new Error(`fakeGroupDb: unexpected table ${table}`);
+    return makeBuilder();
+  };
+}
+
+describe('annualHandoffGuard group expansion (Codex round 2 on #4608, P1)', () => {
+  test('anchor delivered + a link-visible sibling withheld -> blocked on the sibling', async () => {
+    const anchor = delivered({ id: 'anchor-1', estimate_group_id: 'grp-1' });
+    const sibling = row(undefined, {
+      id: 'sibling-withheld', estimate_group_id: 'grp-1', archived_at: null,
+      status: 'sent', expires_at: null, // live + unexpired -> link-visible
+    });
+    const calls = [];
+    const db = fakeGroupDb([anchor, sibling], calls);
+
+    const verdict = await annualHandoffGuard({ db, estimateIds: ['anchor-1'] })();
+
+    expect(verdict).toEqual({ blocked: true, reason: 'annual_offer_withheld', estimateId: 'sibling-withheld' });
+  });
+
+  test('anchor delivered + a NON-visible (draft) sibling with a stale fingerprint -> allowed', async () => {
+    const anchor = delivered({ id: 'anchor-1', estimate_group_id: 'grp-2' });
+    const draftSibling = row(undefined, {
+      id: 'sibling-draft', estimate_group_id: 'grp-2', archived_at: null,
+      status: 'draft', // draft is never link-visible (not live, not terminal)
+    });
+    const calls = [];
+    const db = fakeGroupDb([anchor, draftSibling], calls);
+
+    const verdict = await annualHandoffGuard({ db, estimateIds: ['anchor-1'] })();
+
+    expect(verdict).toEqual({ blocked: false, reason: null, estimateId: null });
+  });
+
+  test('anchor delivered + an ARCHIVED sibling with a stale fingerprint -> allowed', async () => {
+    const anchor = delivered({ id: 'anchor-1', estimate_group_id: 'grp-3' });
+    const archivedSibling = row(undefined, {
+      id: 'sibling-archived', estimate_group_id: 'grp-3', archived_at: new Date('2026-01-01T00:00:00Z'),
+      status: 'sent',
+    });
+    const db = fakeGroupDb([anchor, archivedSibling]);
+
+    const verdict = await annualHandoffGuard({ db, estimateIds: ['anchor-1'] })();
+
+    expect(verdict).toEqual({ blocked: false, reason: null, estimateId: null });
+  });
+
+  test('anchor delivered + an EXPIRED-live sibling (status sent/viewed but expires_at in the past) with a stale fingerprint -> allowed', async () => {
+    const anchor = delivered({ id: 'anchor-1', estimate_group_id: 'grp-4' });
+    const expiredSibling = row(undefined, {
+      id: 'sibling-expired', estimate_group_id: 'grp-4', archived_at: null,
+      status: 'sent', expires_at: new Date('2020-01-01T00:00:00Z'),
+    });
+    const db = fakeGroupDb([anchor, expiredSibling]);
+
+    const verdict = await annualHandoffGuard({ db, estimateIds: ['anchor-1'] })();
+
+    expect(verdict).toEqual({ blocked: false, reason: null, estimateId: null });
+  });
+
+  test('a TERMINAL (declined) sibling is link-visible but never withheld itself (annualPlanPublicReplayBlocked exempts accepted/declined) -> allowed', async () => {
+    const anchor = delivered({ id: 'anchor-1', estimate_group_id: 'grp-5' });
+    const declinedSibling = row(undefined, {
+      id: 'sibling-declined', estimate_group_id: 'grp-5', archived_at: null,
+      status: 'declined', // terminal -> link-visible, but never withheld regardless of fingerprint
+    });
+    const db = fakeGroupDb([anchor, declinedSibling]);
+
+    const verdict = await annualHandoffGuard({ db, estimateIds: ['anchor-1'] })();
+
+    expect(verdict).toEqual({ blocked: false, reason: null, estimateId: null });
+  });
+
+  test('no estimate_group_id on any base row -> single-row path unchanged, no extra query', async () => {
+    const calls = [];
+    const db = fakeDb({ 'est-1': delivered({ id: 'est-1' }) }, calls);
+
+    const verdict = await annualHandoffGuard({ db, estimateIds: ['est-1'] })();
+
+    expect(verdict).toEqual({ blocked: false, reason: null, estimateId: null });
+    // Exactly one call: loadAnnualOfferRow's own where({id}).first(...) for
+    // the base id — no group-sibling query at all.
+    expect(calls).toHaveLength(1);
+    expect(calls[0].where).toEqual({ id: 'est-1' });
   });
 });
