@@ -484,7 +484,30 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
   }
   try {
     let result;
+    // Pre-push audit P1: set inside dispatchToProvider when the annual-offer
+    // guard blocks — read below in BOTH the visit-summary and ordinary
+    // branches, since dispatchToProvider is the SAME function either way.
+    let annualWithheld = false;
     const dispatchToProvider = async () => {
+      // Pre-push audit P1: bounce recovery re-sends the SAME stored
+      // html/text to a CORRECTED address, straight through sendgrid.sendOne
+      // — bypassing email-template-library.js's own chokepoint guard
+      // entirely. Composed here, immediately before the actual request.
+      // Explicit id when the original send's trigger_event_id names one
+      // (best-effort parse; an id that resolves no row is simply not this
+      // guard's job — harmless), unioned with content derivation from the
+      // stored snapshot being re-sent.
+      const { annualHandoffGuard } = require('./estimate-annual-guard');
+      const sourceEstimateId = sourceEstimateIdFromTriggerEvent(bouncedMessage.trigger_event_id);
+      const verdict = await annualHandoffGuard({
+        db,
+        estimateIds: sourceEstimateId ? [sourceEstimateId] : [],
+        texts: [bouncedMessage.html_snapshot, bouncedMessage.text_snapshot],
+      })();
+      if (verdict.blocked) {
+        annualWithheld = true;
+        return;
+      }
       result = await sendgrid.sendOne({
         to: correctedEmail,
         fromEmail: message.from_email_snapshot,
@@ -521,7 +544,7 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
         logger.warn(`[bounce-recovery] visit summary handoff guard failed after acceptance for ${message.id}: ${err.message}`);
       }
       if (!result) {
-        const reason = fence?.reason || 'visit_summary_unavailable';
+        const reason = annualWithheld ? 'annual_offer_withheld' : (fence?.reason || 'visit_summary_unavailable');
         await db('email_messages').where({ id: message.id, status: 'queued' })
           .update({ status: 'blocked', error_message: reason, updated_at: new Date() }).catch(() => {});
         // No provider request follows: settle the summary aggregate from the ledger.
@@ -531,6 +554,11 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
       }
     } else {
       await dispatchToProvider();
+      if (annualWithheld) {
+        await db('email_messages').where({ id: message.id, status: 'queued' })
+          .update({ status: 'blocked', error_message: 'annual_offer_withheld', updated_at: new Date() }).catch(() => {});
+        return { ok: false, suppressed: true, reason: 'annual_offer_withheld' };
+      }
     }
     // Always record the provider id + send time. These are safe regardless of
     // any concurrent webhook.

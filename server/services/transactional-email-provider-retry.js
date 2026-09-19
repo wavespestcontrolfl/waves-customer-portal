@@ -303,7 +303,15 @@ async function retrySummaryThroughHandoff(message, dispatchToProvider, state) {
     logger.warn(`[email-provider-retry] visit summary handoff guard failed after acceptance for ${message.id}: ${err.message}`);
   }
   if (!state.result) {
-    return { outcome: await stopRetry(message, { status: 'blocked', reason: `Suppressed before retry: ${fence?.reason || 'visit_summary_unavailable'}` }) };
+    // Pre-push audit P1 (2eb19ceff7): the annual-offer guard (inside
+    // dispatchToProvider, above) also resolves without setting state.result
+    // when it blocks — distinguish that from the summary re-authorization's
+    // own "unavailable" verdict so the row's error_message names the real
+    // reason.
+    return { outcome: await stopRetry(message, {
+      status: 'blocked',
+      reason: state.blocked ? 'annual_offer_withheld' : `Suppressed before retry: ${fence?.reason || 'visit_summary_unavailable'}`,
+    }) };
   }
   return { result: state.result };
 }
@@ -357,7 +365,7 @@ async function retryOne(message) {
   // dispatchStarted is set immediately before the Mail Send request: a
   // failure clearing the provider block is provably pre-send and keeps the
   // ordinary retry schedule.
-  const state = { dispatchStarted: false, result: null };
+  const state = { dispatchStarted: false, result: null, blocked: false };
   const dispatchToProvider = async () => {
     // Blocks are a provider-specific suppression distinct from hard bounces.
     // If it remains, SendGrid will drop the retry before attempting delivery.
@@ -373,6 +381,27 @@ async function retryOne(message) {
         .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued', error_message: HANDOFF_PENDING })
         .update({ error_message: HANDOFF_STARTED, updated_at: new Date() });
       if (Number(started) !== 1) throw new Error('Visit summary retry claim was reclaimed before the provider request');
+    }
+    // Pre-push audit P1: an automatic provider retry re-sends the SAME
+    // stored html/text a fresh send would, straight through sendgrid.sendOne
+    // — bypassing email-template-library.js's own chokepoint guard entirely.
+    // Composed here instead, immediately before the actual request. Content-
+    // derived only (estimateIds: []): a retried email_messages row has no
+    // structured estimate reference to pass as an explicit id — the guard's
+    // own regex scan of html_snapshot/text_snapshot is the only source. A
+    // blocked verdict never calls sendgrid.sendOne (state.blocked signals the
+    // caller to stop the retry permanently, below); a guard THROW propagates
+    // like any other pre-send failure here (dispatchStarted is still false),
+    // landing in retryOne's/retrySummaryThroughHandoff's existing "not
+    // dispatched" branches, which already retry-later via markRetryFailure —
+    // never treated as sent.
+    const { annualHandoffGuard } = require('./estimate-annual-guard');
+    const verdict = await annualHandoffGuard({
+      db, estimateIds: [], texts: [message.html_snapshot, message.text_snapshot],
+    })();
+    if (verdict.blocked) {
+      state.blocked = true;
+      return;
     }
     state.dispatchStarted = true;
     state.result = await sendgrid.sendOne({
@@ -402,6 +431,9 @@ async function retryOne(message) {
       if (handoff.outcome) return handoff.outcome;
     } else {
       await dispatchToProvider();
+    }
+    if (state.blocked) {
+      return await stopRetry(message, { status: 'blocked', reason: 'annual_offer_withheld' });
     }
     return await recordRetrySend(message, state.result);
   } catch (err) {

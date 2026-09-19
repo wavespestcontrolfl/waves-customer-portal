@@ -745,3 +745,172 @@ describe('commitRecoveryOnDelivery persists lead/estimate source address (codex 
     expect(body).not.toContain('estimates.customer_email');
   });
 });
+
+// Pre-push audit P1 (2eb19ceff7): dispatchRecoveryMessage (only reachable
+// through attemptRecovery — it is not itself exported) re-sends the SAME
+// stored html/text to a corrected address straight through sendgrid.sendOne.
+// This routes 'estimates' through ONE chain that answers three distinct
+// call shapes without colliding: resolveCustomerEmailField/on-file gate
+// never touches 'estimates' here (the bounced address is the customer's
+// OWN email column, so bouncedAddressStillOnFile short-circuits true on
+// match.field before any estimates/leads read); correctedAddressOwnedByOther
+// always runs its exact + gmail-mailbox ownership scan regardless of the
+// guard (`.whereRaw(...).select('customer_id')` — tracked separately from
+// the guard's own `.whereIn('token', ...)` scan so a real "no link" case
+// can assert the guard issued no query while that pre-existing scan still
+// legitimately runs).
+function makeRecoveryDb({ estimateRow, customerRow, messageRow, recoveryId = 'rec-annual' } = {}) {
+  const state = { tokenQueried: false };
+  const calls = [];
+  const fn = jest.fn((table) => {
+    const chain = {};
+    for (const m of ['whereRaw', 'whereNot', 'andWhere', 'orWhereRaw', 'onConflict', 'ignore', 'modify', 'whereNotIn']) {
+      chain[m] = jest.fn(() => chain);
+    }
+    chain.where = jest.fn((cond) => {
+      if (table === 'estimates' && cond && typeof cond === 'object' && 'id' in cond) chain._estId = cond.id;
+      return chain;
+    });
+    chain.whereIn = jest.fn((col, vals) => {
+      if (table === 'estimates' && col === 'token') { state.tokenQueried = true; chain._tokenVals = vals; }
+      return chain;
+    });
+    chain.insert = jest.fn(() => chain);
+    chain.first = jest.fn(() => {
+      if (table === 'customers') return Promise.resolve(customerRow || null);
+      if (table === 'estimates') {
+        return Promise.resolve(estimateRow && chain._estId === estimateRow.id ? estimateRow : undefined);
+      }
+      return Promise.resolve(null);
+    });
+    chain.select = jest.fn(() => {
+      if (table === 'estimates' && chain._tokenVals) {
+        return Promise.resolve(estimateRow && chain._tokenVals.includes(estimateRow.token) ? [{ id: estimateRow.id }] : []);
+      }
+      return Promise.resolve([]);
+    });
+    chain.returning = jest.fn(() => {
+      if (table === 'email_bounce_recoveries') return Promise.resolve([{ id: recoveryId }]);
+      if (table === 'email_messages') return Promise.resolve([messageRow]);
+      return Promise.resolve([]);
+    });
+    chain.update = jest.fn((data) => { calls.push({ table, data }); return Promise.resolve(1); });
+    chain.then = (res, rej) => Promise.resolve([]).then(res, rej);
+    chain.catch = (rej) => Promise.resolve([]).catch(rej);
+    return chain;
+  });
+  fn.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+  fn._calls = calls;
+  fn._state = state;
+  return fn;
+}
+
+describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery re-sends', () => {
+  const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
+  const PLAN_LINE = { service: 'termite_bait', plan: 'annual_protection', stations: 15 };
+  const annualRow = (token, overrides = {}) => ({
+    id: 'est-recovery-1', status: 'draft', expires_at: null, token,
+    estimate_data: { result: { lineItems: [PLAN_LINE] } },
+    customer_id: 'c1', property_id: 'prop-1', estimate_group_id: null, customer_name: 'Jane Customer',
+    customer_phone: '9415550100', customer_email: 'jane@gmial.com', address: 'Synthetic property',
+    notes: null, monthly_total: 0, annual_total: 299, onetime_total: 450,
+    show_one_time_option: false, bill_by_invoice: false, waveguard_tier: null,
+    service_interest: null, category: null, source: null,
+    ...overrides,
+  });
+  const deliveredAnnualRow = (token) => {
+    const estimateRow = annualRow(token, { status: 'sent' });
+    estimateRow.estimate_data.deliveryState = {
+      firstDeliveredAt: '2026-01-01T12:00:00Z',
+      annualPlanOfferFingerprint: annualPlanOfferFingerprint(estimateRow),
+    };
+    return estimateRow;
+  };
+  const orig = { ...process.env };
+  beforeEach(() => {
+    delete process.env.EMAIL_BOUNCE_RECOVERY;
+    delete process.env.EMAIL_RECOVERY_MIN_CONFIDENCE;
+    emailLib.loadTemplateByKey.mockResolvedValue(undefined); // falls to the email_suppressions fallback (no rows -> not suppressed)
+    sendgrid.sendOne.mockReset();
+  });
+  afterEach(() => { process.env = { ...orig }; });
+
+  test('a stored html/text pointing at a WITHHELD annual estimate stops the resend permanently, never reaching sendOne', async () => {
+    const estimateRow = annualRow('recovery-token-a');
+    const messageRow = { id: 'msg-annual-1', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com', subject_snapshot: 'S' };
+    const mockDb = makeRecoveryDb({ estimateRow, customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
+    db.mockImplementation(mockDb);
+
+    const res = await recovery.attemptRecovery(
+      {
+        id: 'orig-annual-1', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'jane@gmial.com',
+        template_key: 'estimate.expiring_notice', suppression_group_key_snapshot: 'service_operational', categories: ['email_template'],
+        trigger_event_id: `estimate_delivery:${estimateRow.id}`,
+        html_snapshot: `<p>Your estimate is expiring: https://portal.wavespestcontrol.com/estimate/${estimateRow.token}</p>`,
+        text_snapshot: `View it: https://portal.wavespestcontrol.com/estimate/${estimateRow.token}`,
+      },
+      { event: 'bounce', type: 'bounce' },
+    );
+
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(res).toEqual({ skipped: 'annual_offer_withheld' });
+    // dispatchRecoveryMessage's own permanent-refusal bookkeeping: the stored
+    // row is marked 'blocked' with the withheld reason, guarded on still-'queued'
+    // (never overwrites a row a concurrent webhook already terminalized).
+    const messageUpdate = mockDb._calls.find((c) => c.table === 'email_messages' && c.data.status === 'blocked');
+    expect(messageUpdate).toMatchObject({ data: { status: 'blocked', error_message: 'annual_offer_withheld' } });
+    // This row carries no provider_retry_next_at (bounce-recovery rows never
+    // do), so transactional-email-provider-retry.js's claimDueRetries sweep
+    // (whereNotNull('provider_retry_next_at')) can never re-pick it.
+    expect(messageUpdate.data.provider_retry_next_at).toBeUndefined();
+    // The ledger itself also reflects the suppression, not a bare send failure.
+    const ledgerUpdate = mockDb._calls.filter((c) => c.table === 'email_bounce_recoveries').pop();
+    expect(ledgerUpdate.data).toMatchObject({ status: 'recipient_unauthorized' });
+  });
+
+  test('a DELIVERED (not withheld) annual estimate link still resends normally through sendOne', async () => {
+    const estimateRow = deliveredAnnualRow('recovery-token-b');
+    const messageRow = { id: 'msg-annual-2', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com', subject_snapshot: 'S' };
+    const mockDb = makeRecoveryDb({ estimateRow, customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
+    db.mockImplementation(mockDb);
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'pm-annual-delivered' });
+
+    const res = await recovery.attemptRecovery(
+      {
+        id: 'orig-annual-2', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'jane@gmial.com',
+        template_key: 'estimate.expiring_notice', suppression_group_key_snapshot: 'service_operational', categories: ['email_template'],
+        trigger_event_id: `estimate_delivery:${estimateRow.id}`,
+        html_snapshot: `<p>https://portal.wavespestcontrol.com/estimate/${estimateRow.token}</p>`,
+        text_snapshot: '',
+      },
+      { event: 'bounce', type: 'bounce' },
+    );
+
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect(res).toMatchObject({ resent: true });
+  });
+
+  test('a stored body with no estimate link never issues the guard\'s own estimates query', async () => {
+    const messageRow = { id: 'msg-annual-3', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com', subject_snapshot: 'S' };
+    const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
+    db.mockImplementation(mockDb);
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'pm-no-link' });
+
+    const res = await recovery.attemptRecovery(
+      {
+        id: 'orig-annual-3', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'jane@gmial.com',
+        template_key: 'quote.request_received', suppression_group_key_snapshot: 'service_operational', categories: ['email_template'],
+        html_snapshot: '<p>Hi Jane, your technician is on the way!</p>',
+        text_snapshot: 'Hi Jane, your technician is on the way!',
+      },
+      { event: 'bounce', type: 'bounce' },
+    );
+
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect(res).toMatchObject({ resent: true });
+    // The guard's own whereIn('token', ...) content-derivation scan never ran
+    // (correctedAddressOwnedByOther's PRE-EXISTING 'estimates' ownership scan
+    // still legitimately does — that's not this guard's query).
+    expect(mockDb._state.tokenQueried).toBe(false);
+  });
+});

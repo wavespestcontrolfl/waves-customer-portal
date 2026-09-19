@@ -362,4 +362,131 @@ describe('transactional email provider retry classification', () => {
       provider_retry_count: 'GREATEST(provider_retry_count - 1, 0)',
     }));
   });
+
+  describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): automatic provider retries', () => {
+    const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
+    const PLAN_LINE = { service: 'termite_bait', plan: 'annual_protection', stations: 15 };
+    const annualRow = (token, overrides = {}) => ({
+      id: 'est-annual-1', status: 'draft', expires_at: null, token,
+      estimate_data: { result: { lineItems: [PLAN_LINE] } },
+      customer_id: 'cust-1', property_id: 'prop-1', estimate_group_id: null, customer_name: 'Synthetic Customer',
+      customer_phone: '9415550100', customer_email: 'synthetic@example.test', address: 'Synthetic property',
+      notes: null, monthly_total: 0, annual_total: 299, onetime_total: 450,
+      show_one_time_option: false, bill_by_invoice: false, waveguard_tier: null,
+      service_interest: null, category: null, source: null,
+      ...overrides,
+    });
+    const deliveredAnnualRow = (token) => {
+      const estimateRow = annualRow(token, { status: 'sent' });
+      estimateRow.estimate_data.deliveryState = {
+        firstDeliveredAt: '2026-01-01T12:00:00Z',
+        annualPlanOfferFingerprint: annualPlanOfferFingerprint(estimateRow),
+      };
+      return estimateRow;
+    };
+
+    // db('estimates') is used two ways by the guard: whereIn('token', ..).select('id')
+    // (content derivation) and where({id}).first(...) (the verdict load). Group-sibling
+    // expansion never fires here — every fixture row's estimate_group_id is null, so
+    // loadLinkVisibleGroupSiblings returns [] before issuing a third query.
+    function routeEstimatesTable(estimateRow) {
+      const chain = {};
+      chain.where = jest.fn((cond) => { chain._id = cond && cond.id; return chain; });
+      chain.whereIn = jest.fn((col, vals) => { chain._col = col; chain._vals = vals; return chain; });
+      chain.first = jest.fn(async () => (estimateRow && chain._id === estimateRow.id ? estimateRow : undefined));
+      chain.select = jest.fn(async () => (
+        estimateRow && chain._col === 'token' && chain._vals.includes(estimateRow.token) ? [{ id: estimateRow.id }] : []
+      ));
+      return chain;
+    }
+
+    function emailMessagesChain(returningRow) {
+      const chain = {};
+      chain.where = jest.fn(() => chain);
+      chain.update = jest.fn((payload) => { chain._lastUpdate = payload; return chain; });
+      chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
+      chain.returning = jest.fn(async () => [returningRow || { id: 'message-1', status: 'blocked' }]);
+      return chain;
+    }
+
+    beforeEach(() => {
+      emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'estimate.expiring_notice' } });
+      emailTemplates.activeSuppressionFor.mockResolvedValue(null);
+      sendgrid.clearBlockedAddress.mockResolvedValue({ cleared: true });
+    });
+
+    test('a stored html/text pointing at a WITHHELD annual estimate stops the retry permanently, never reaching sendOne', async () => {
+      const estimateRow = annualRow('synthetic-token-a');
+      const messagesChain = emailMessagesChain({ id: 'message-1', status: 'blocked', error_message: 'annual_offer_withheld' });
+      const estimatesChain = routeEstimatesTable(estimateRow);
+      db.mockImplementation((table) => {
+        if (table === 'email_messages') return messagesChain;
+        if (table === 'estimates') return estimatesChain;
+        throw new Error(`unexpected table ${table}`);
+      });
+
+      const stored = message({
+        template_key: 'estimate.expiring_notice',
+        send_attempt_token: 'attempt-annual-1',
+        html_snapshot: `<p>Your estimate is expiring: https://portal.wavespestcontrol.com/estimate/${estimateRow.token}</p>`,
+        text_snapshot: `View it: https://portal.wavespestcontrol.com/estimate/${estimateRow.token}`,
+      });
+      const result = await retry.retryOne(stored);
+
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ sent: false, stopped: true, reason: 'annual_offer_withheld' });
+      // stopRetry's own bookkeeping shape: permanent, never re-queued.
+      expect(messagesChain._lastUpdate).toEqual(expect.objectContaining({
+        status: 'blocked',
+        error_message: 'annual_offer_withheld',
+        provider_retry_next_at: null,
+      }));
+      // claimDueRetries requires provider_retry_next_at NOT NULL — this row can never match again.
+      expect(messagesChain._lastUpdate.provider_retry_next_at).toBeNull();
+    });
+
+    test('a DELIVERED (not withheld) annual estimate link still sends normally through sendOne', async () => {
+      const estimateRow = deliveredAnnualRow('synthetic-token-b');
+      const messagesChain = emailMessagesChain({ id: 'message-1', status: 'sent' });
+      const estimatesChain = routeEstimatesTable(estimateRow);
+      db.mockImplementation((table) => {
+        if (table === 'email_messages') return messagesChain;
+        if (table === 'estimates') return estimatesChain;
+        throw new Error(`unexpected table ${table}`);
+      });
+      sendgrid.sendOne.mockResolvedValue({ messageId: 'provider-annual-delivered' });
+
+      const stored = message({
+        template_key: 'estimate.expiring_notice',
+        send_attempt_token: 'attempt-annual-2',
+        html_snapshot: `<p>https://portal.wavespestcontrol.com/estimate/${estimateRow.token}</p>`,
+        text_snapshot: '',
+      });
+      const result = await retry.retryOne(stored);
+
+      expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      expect(result.sent).toBe(true);
+    });
+
+    test('a stored body with no estimate link never queries the estimates table at all', async () => {
+      const messagesChain = emailMessagesChain({ id: 'message-1', status: 'sent' });
+      db.mockImplementation((table) => {
+        if (table === 'email_messages') return messagesChain;
+        throw new Error(`unexpected table ${table}`);
+      });
+      sendgrid.sendOne.mockResolvedValue({ messageId: 'provider-no-link' });
+
+      const stored = message({
+        template_key: 'estimate.expiring_notice',
+        send_attempt_token: 'attempt-annual-3',
+        html_snapshot: '<p>Hi Sam, your technician is on the way!</p>',
+        text_snapshot: 'Hi Sam, your technician is on the way!',
+      });
+      const result = await retry.retryOne(stored);
+
+      expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      expect(result.sent).toBe(true);
+      expect(db.mock.calls.some(([table]) => table === 'estimates')).toBe(false);
+    });
+  });
 });
