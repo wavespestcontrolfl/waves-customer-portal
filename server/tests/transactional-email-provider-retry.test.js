@@ -422,6 +422,12 @@ describe('transactional email provider retry classification', () => {
       expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
       expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
         html: stored.html_snapshot, text: stored.text_snapshot,
+        // Round 9 structural fix (P1): templateKey is passed through so
+        // sendOne can resolve its own rewrite-vs-refuse policy — a
+        // NON-receipt template (estimate.expiring_notice) resolves
+        // 'refuse', so a withheld link in it is still refused permanently
+        // here, never silently rewritten.
+        templateKey: 'estimate.expiring_notice',
       }));
       expect(result).toMatchObject({ sent: false, stopped: true, reason: 'annual_offer_withheld' });
       // stopRetry's own bookkeeping shape: permanent, never re-queued.
@@ -452,6 +458,45 @@ describe('transactional email provider retry classification', () => {
 
       expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
       expect(result.sent).toBe(true);
+    });
+
+    test('round 9 structural fix (P1): a retried deposit.receipt whose stored content still carries a withheld link is rewritten by sendOne and sent — the stored snapshot is updated to match', async () => {
+      const messagesChain = emailMessagesChain({ id: 'message-1', status: 'sent', template_key: 'deposit.receipt' });
+      db.mockImplementation((table) => {
+        if (table === 'email_messages') return messagesChain;
+        throw new Error(`unexpected table ${table}`);
+      });
+      const rewrittenHtml = '<p>https://portal.wavespestcontrol.com</p>';
+      const rewrittenText = 'https://portal.wavespestcontrol.com';
+      sendgrid.sendOne.mockResolvedValue({
+        messageId: 'provider-deposit-receipt-retry',
+        withheldLinksRewritten: ['est-withheld-1'],
+        html: rewrittenHtml,
+        text: rewrittenText,
+      });
+
+      const stored = message({
+        template_key: 'deposit.receipt',
+        send_attempt_token: 'attempt-annual-rewrite',
+        html_snapshot: '<p>https://portal.wavespestcontrol.com/estimate/synthetic-token-withheld</p>',
+        text_snapshot: 'https://portal.wavespestcontrol.com/estimate/synthetic-token-withheld',
+      });
+      const result = await retry.retryOne(stored);
+
+      // templateKey lets sendOne resolve 'rewrite' for this template on its
+      // own — this sweep has no explicit opinion of its own to forward.
+      expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
+        html: stored.html_snapshot, text: stored.text_snapshot, templateKey: 'deposit.receipt',
+      }));
+      expect(result.sent).toBe(true);
+      expect(result.stopped).not.toBe(true);
+      // The stored row's snapshot fields are updated to match what actually
+      // went out, in the SAME write as the provider acceptance bookkeeping.
+      expect(messagesChain._lastUpdate).toEqual(expect.objectContaining({
+        provider_message_id: 'provider-deposit-receipt-retry',
+        html_snapshot: rewrittenHtml,
+        text_snapshot: rewrittenText,
+      }));
     });
 
     test('sendOne refuses with a guard INFRASTRUCTURE failure: not a permanent stop — the ordinary retry-later classification applies (provider never attempted)', async () => {

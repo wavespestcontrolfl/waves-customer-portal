@@ -143,6 +143,17 @@ const GATE_KEYS = ['GATE_TERMITE_ANNUAL_PLAN', 'GATE_CANCEL_FLOW_V2'];
 let priorGates;
 beforeEach(() => {
   jest.clearAllMocks();
+  // Round 9 structural fix: the early verdict gate (before ANY claim/dedup
+  // machinery) means a withheld-row test's queued mockImplementationOnce/
+  // mockResolvedValueOnce on these two provider mocks is now frequently
+  // NEVER CONSUMED (the request is blocked before the mock is ever
+  // called) — jest.clearAllMocks() clears call counts but NOT a leftover
+  // queued "once" implementation, so it would otherwise leak into a LATER
+  // test's own queue and be consumed out of order. mockReset() (safe here:
+  // both are bare jest.fn() with no default implementation to lose) clears
+  // that queue too.
+  require('../services/twilio').sendSMS.mockReset();
+  require('../services/email-template-library').sendTemplate.mockReset();
   mockDb.__claimAcquired = true;
   mockDb.__claimOutcome = null;
   mockDb.__recentPacketFound = false;
@@ -156,60 +167,80 @@ afterEach(() => {
   });
 });
 
-function sendServiceDetails(phoneSuffix) {
-  currentRow = baseEstimateRow({ customer_phone: `+1941555${phoneSuffix}` });
-  return fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
-  });
-}
-
 describe('service-details SMS: annual-offer guard composed into preSendCheck (Codex round 1 on #4608, P1)', () => {
-  test('a withheld annual estimate never reaches Twilio — the composed preSendCheck blocks it with the SAME generic 404 as any other row-level withhold, and releases the dedup claim', async () => {
+  test('a withheld annual estimate never reaches Twilio — blocked at the early verdict gate (round 9) with the SAME generic 404 as any other row-level withhold, and never touches the claim machinery at all', async () => {
     // Pre-push audit P0 (AGENTS.md public-route rule): ineligible rows must
     // be indistinguishable from unknown tokens — the withheld outcome is a
     // row-level fact (like the customer-viewable/call-side-hold check this
     // route already applies as its LAST step), so it gets the same generic
     // 404 docs/public-route-contracts.md documents for that check, never a
     // distinct status that would confirm a live-but-ineligible row.
+    //
+    // Round 9 structural fix: the verdict is now checked ONCE, immediately
+    // after the existing eligibility gates and BEFORE any claim/dedup
+    // machinery on either channel — so a withheld estimate never reaches
+    // TwilioService.sendSMS (or the composed preSendCheck inside it) at
+    // all, and no claim is ever acquired to release.
     const TwilioService = require('../services/twilio');
-    let capturedVerdict;
-    TwilioService.sendSMS.mockImplementation(async (_to, _body, options) => {
-      capturedVerdict = await options.preSendCheck();
-      if (!capturedVerdict.ok) return { success: false, sid: null, preSendBlocked: true, code: capturedVerdict.code, error: capturedVerdict.reason };
-      return { success: true, sid: 'SM_fake' };
-    });
+    currentRow = baseEstimateRow({ customer_phone: '+19415550101' });
 
-    const res = await sendServiceDetails('0101');
+    const res = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
+    });
     const body = await res.json();
 
-    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
-    expect(capturedVerdict).toMatchObject({ ok: false, code: 'ANNUAL_OFFER_WITHHELD', reason: 'annual_offer_withheld' });
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
     expect(res.status).toBe(404);
     expect(body).toEqual({ error: 'Estimate not found' });
 
-    // Claim released: an immediate retry (same estimate+phone) reaches
-    // Twilio again — a leftover claim would instead short-circuit it before
-    // ever calling sendSMS a second time.
+    // A retry for the SAME still-withheld estimate is blocked the identical
+    // way — there was never a claim to leak or get stuck behind.
     const retryRes = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
     });
-    await retryRes.json();
-    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(2);
+    const retryBody = await retryRes.json();
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(retryRes.status).toBe(404);
+    expect(retryBody).toEqual({ error: 'Estimate not found' });
   });
 
   test('EMAIL channel: a withheld annual estimate gets the SAME generic 404 — never the address-suppression 409', async () => {
     // The 409 branch is address-level (a suppressed/bounced recipient) and
     // safe to reveal; an annual-offer withhold is row-level and must not be
     // distinguishable from an unknown token, exactly like the SMS case.
+    // Round 9 structural fix: blocked at the early verdict gate now, so
+    // sendTemplate is never even called for a withheld row.
+    const EmailTemplateLibrary = require('../services/email-template-library');
+    currentRow = baseEstimateRow();
+
+    const res = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'email' }),
+    });
+    const body = await res.json();
+
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    expect(res.status).toBe(404);
+    expect(body).toEqual({ error: 'Estimate not found' });
+  });
+
+  test('EMAIL channel: an address-suppression block still returns 409 (unchanged) — only annual_offer_withheld maps to 404', async () => {
+    // ELIGIBLE row: the early verdict gate must pass here so this test
+    // actually reaches sendTemplate's OWN (unrelated) suppression mapping.
     const EmailTemplateLibrary = require('../services/email-template-library');
     EmailTemplateLibrary.sendTemplate.mockResolvedValueOnce({
-      sent: false, blocked: true, reason: 'annual_offer_withheld', providerAttempted: false,
+      sent: false, blocked: true, reason: 'suppressed', providerAttempted: false,
     });
-    currentRow = baseEstimateRow();
+    const draft = baseEstimateRow();
+    const fingerprint = annualPlanOfferFingerprint(draft);
+    draft.status = 'sent';
+    draft.estimate_data.deliveryState = { firstDeliveredAt: '2026-01-01T12:00:00Z', annualPlanOfferFingerprint: fingerprint };
+    currentRow = draft;
 
     const res = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
       method: 'POST',
@@ -219,24 +250,6 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
     const body = await res.json();
 
     expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
-    expect(res.status).toBe(404);
-    expect(body).toEqual({ error: 'Estimate not found' });
-  });
-
-  test('EMAIL channel: an address-suppression block still returns 409 (unchanged) — only annual_offer_withheld maps to 404', async () => {
-    const EmailTemplateLibrary = require('../services/email-template-library');
-    EmailTemplateLibrary.sendTemplate.mockResolvedValueOnce({
-      sent: false, blocked: true, reason: 'suppressed', providerAttempted: false,
-    });
-    currentRow = baseEstimateRow();
-
-    const res = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ service: 'pest_control', channel: 'email' }),
-    });
-    const body = await res.json();
-
     expect(res.status).toBe(409);
     expect(body).toEqual({ ok: false, error: 'Email is unavailable for this address — text yourself the link instead.' });
   });
@@ -270,18 +283,13 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
     expect(body).toEqual({ ok: true, channel: 'sms' });
   });
 
-  test('P0 (Codex round 2 on #4608): two OVERLAPPING SMS requests for a withheld annual estimate both get the generic 404 — the concurrent-dedup branch shares the winner outcome, never a distinguishable 502', async () => {
+  test('P0 (Codex round 2 on #4608): two OVERLAPPING SMS requests for a withheld annual estimate both get the generic 404 — blocked at the early verdict gate for EACH, no provider call for either', async () => {
+    // Round 9 structural fix: both concurrent requests now resolve their
+    // OWN early verdict independently (before either ever reaches the
+    // claim/dedup machinery this describe block's OTHER concurrency test
+    // still exercises for the eligible/success case below) — neither
+    // depends on sharing the other's in-flight outcome to answer 404.
     const TwilioService = require('../services/twilio');
-    TwilioService.sendSMS.mockImplementation(async (_to, _body, options) => {
-      const verdict = await options.preSendCheck();
-      // Hold the in-flight promise open briefly so the second concurrent
-      // request's dedup check reliably finds priorClaim.promise still
-      // pending (not yet resolved) — reproducing the real overlap window.
-      await new Promise((resolve) => { setTimeout(resolve, 40); });
-      if (!verdict.ok) return { success: false, sid: null, preSendBlocked: true, code: verdict.code, error: verdict.reason };
-      return { success: true, sid: 'SM_fake' };
-    });
-
     currentRow = baseEstimateRow({ customer_phone: '+19415550303' });
     const send = () => fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
       method: 'POST',
@@ -292,13 +300,47 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
     const [res1, res2] = await Promise.all([send(), send()]);
     const [body1, body2] = await Promise.all([res1.json(), res2.json()]);
 
-    // Exactly ONE real dispatch attempt — the loser shared the winner's
-    // in-flight promise instead of starting a second one.
-    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
     expect(res1.status).toBe(404);
     expect(body1).toEqual({ error: 'Estimate not found' });
     expect(res2.status).toBe(404);
     expect(body2).toEqual({ error: 'Estimate not found' });
+  });
+
+  test('P0 (round 9): a loser whose winner is STILL IN FLIGHT (no recorded outcome, no sms_log row yet — the poll would time out) answers 404 immediately, without ever polling, for a withheld estimate', async () => {
+    // This is the exact gap no per-site patch could close (round 9 audit,
+    // "server/routes/estimate-public.js:25207"): the claim is held by
+    // another process (claimAcquired = false), that process has NOT YET
+    // recorded an outcome (still working — __claimOutcome stays null) and
+    // has NOT YET written a durable sms_log row (__recentPacketFound stays
+    // false) — before this fix, the loser's poll loop (3 attempts * 1.5s)
+    // would find neither and fall through to the generic claimHeldElsewhere
+    // 502 after ~4.5s, a DIFFERENT status than a fresh request for the SAME
+    // withheld estimate. The early verdict gate now answers before the
+    // claim machinery is ever consulted at all — fast, and without needing
+    // the winner to have settled anything yet.
+    mockDb.__claimAcquired = false;
+    mockDb.__claimOutcome = null;
+    mockDb.__recentPacketFound = false;
+    currentRow = baseEstimateRow({ customer_phone: '+19415550707' });
+    const TwilioService = require('../services/twilio');
+
+    const startedAt = Date.now();
+    const res = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
+    });
+    const body = await res.json();
+    const elapsedMs = Date.now() - startedAt;
+
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(res.status).toBe(404);
+    expect(body).toEqual({ error: 'Estimate not found' });
+    // The old poll loop alone takes >=4500ms (3 * 1500ms) before falling
+    // through to 502 — answering well under that proves this never
+    // touched the poll at all, rather than merely also ending in 404.
+    expect(elapsedMs).toBeLessThan(1000);
   });
 
   test('the existing dedup-SUCCESS case is unchanged: the loser of an overlapping successful send reports deduped:true, not 404', async () => {
@@ -364,10 +406,18 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
     expect(body).toEqual({ error: 'Estimate not found' });
   }, 10000);
 
-  test('a claim held elsewhere with NO recorded outcome (still working, or a genuinely stuck winner) keeps the existing retryable 502 — not silently reclassified', async () => {
+  test('a claim held elsewhere with NO recorded outcome, for an ELIGIBLE estimate (still working, or a genuinely stuck winner) keeps the existing retryable 502 — not silently reclassified', async () => {
+    // ELIGIBLE row: the early verdict gate must pass here so this test
+    // actually reaches the claim-poll machinery being exercised — a
+    // withheld row would answer 404 at the gate regardless of claim state
+    // (see the round 9 test above), which is a DIFFERENT guarantee.
     mockDb.__claimAcquired = false;
     mockDb.__claimOutcome = null;
-    currentRow = baseEstimateRow({ customer_phone: '+19415550606' });
+    const draft = baseEstimateRow({ customer_phone: '+19415550606' });
+    const fingerprint = annualPlanOfferFingerprint(draft);
+    draft.status = 'sent';
+    draft.estimate_data.deliveryState = { firstDeliveredAt: '2026-01-01T12:00:00Z', annualPlanOfferFingerprint: fingerprint };
+    currentRow = draft;
 
     const res = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
       method: 'POST',
@@ -383,7 +433,17 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
   }, 10000);
 
   test('P1 (round 4): the claim-acquire SQL carries a short reclaim window for a withheld outcome, distinct from the crash-recovery staleness window', async () => {
-    currentRow = baseEstimateRow({ customer_phone: '+19415550808' });
+    // ELIGIBLE row: round 9's early verdict gate runs BEFORE any claim
+    // acquisition, so a withheld row would never reach this SQL at all —
+    // this test's job is to pin the SQL SHAPE the (still-live) claim-acquire
+    // step uses, which applies to every eligible request regardless of
+    // whether some earlier, unrelated request left a stale withheld stamp
+    // on the row it is about to reclaim.
+    const draft = baseEstimateRow({ customer_phone: '+19415550808' });
+    const fingerprint = annualPlanOfferFingerprint(draft);
+    draft.status = 'sent';
+    draft.estimate_data.deliveryState = { firstDeliveredAt: '2026-01-01T12:00:00Z', annualPlanOfferFingerprint: fingerprint };
+    currentRow = draft;
     const TwilioService = require('../services/twilio');
     TwilioService.sendSMS.mockImplementationOnce(async (_to, _body, options) => {
       const verdict = await options.preSendCheck();
@@ -397,7 +457,10 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
       body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
     });
 
-    const sql = mockDb.raw.mock.calls[mockDb.raw.mock.calls.length - 1][0];
+    // Round 9: this is no longer necessarily the LAST db.raw call (a
+    // later cross-restart dedup lookup also uses db.raw) — find the
+    // claim-acquire call specifically.
+    const sql = mockDb.raw.mock.calls.map((call) => call[0]).find((s) => /INSERT INTO sms_send_claims/.test(s));
     expect(sql).toMatch(/INSERT INTO sms_send_claims/);
     // The general crash-recovery window stays 10 minutes...
     expect(sql).toMatch(/created_at < NOW\(\) - interval '10 minutes'/);
@@ -409,51 +472,40 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
     expect(sql).toMatch(/created_at < NOW\(\) - interval '\d+ seconds'/);
   });
 
-  test('P1 (round 4): a withheld winner does not permanently block a later, non-concurrent retap once the claim is reclaimed', async () => {
-    // First request: withheld — stamps the claim row's outcome.
-    currentRow = baseEstimateRow({ customer_phone: '+19415550909' });
-    const TwilioService = require('../services/twilio');
-    TwilioService.sendSMS.mockImplementationOnce(async (_to, _body, options) => {
-      const verdict = await options.preSendCheck();
-      if (!verdict.ok) return { success: false, sid: null, preSendBlocked: true, code: verdict.code, error: verdict.reason };
-      return { success: true, sid: 'SM_fake' };
-    });
-    const res1 = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
-    });
-    expect(res1.status).toBe(404);
-    expect(mockDb.__claimOutcome).toBe('withheld');
-
-    // Second request ("after the window"): the claim-acquire SQL's own
-    // short reclaim clause is what would let a real Postgres take the row
-    // back over past WITHHELD_SMS_CLAIM_RECLAIM_SECONDS — simulated here by
-    // the claim being acquired again (claimAcquired stays true by default,
-    // matching a takeover having succeeded), with the offer now genuinely
-    // deliverable. Must send normally, not read the stale 'withheld' marker
-    // as still governing this fresh request.
+  test('P1 (round 4): a claim row a PRIOR run already stamped withheld does not permanently block a later, non-concurrent, ELIGIBLE retap once the claim-acquire SQL reclaims it', async () => {
+    // Round 9 structural fix: a request that is ITSELF withheld from the
+    // start never reaches claim acquisition any more (see the round 9 test
+    // above and round 7's final-site-withhold test for that path). What
+    // this test still needs to prove is the OTHER half of the mechanism:
+    // a claim row some earlier, unrelated run already stamped
+    // outcome='withheld' (e.g. via the final-site recheck) is not a
+    // permanent tombstone — the claim-acquire SQL's short reclaim window
+    // (pinned above) lets a later, genuinely eligible request take the row
+    // back over and send normally, rather than reading the stale marker as
+    // still governing a fresh request.
+    mockDb.__claimOutcome = 'withheld';
     const draft = baseEstimateRow({ customer_phone: '+19415550909' });
     const fingerprint = annualPlanOfferFingerprint(draft);
     draft.status = 'sent';
     draft.estimate_data.deliveryState = { firstDeliveredAt: '2026-01-01T12:00:00Z', annualPlanOfferFingerprint: fingerprint };
     currentRow = draft;
+    const TwilioService = require('../services/twilio');
     let capturedVerdict;
     TwilioService.sendSMS.mockImplementationOnce(async (_to, _body, options) => {
       capturedVerdict = await options.preSendCheck();
       if (!capturedVerdict.ok) return { success: false, sid: null, preSendBlocked: true, code: capturedVerdict.code, error: capturedVerdict.reason };
       return { success: true, sid: 'SM_fake_2' };
     });
-    const res2 = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+    const res = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
     });
-    const body2 = await res2.json();
+    const body = await res.json();
 
     expect(capturedVerdict).toEqual({ ok: true });
-    expect(res2.status).toBe(200);
-    expect(body2).toEqual({ ok: true, channel: 'sms' });
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ ok: true, channel: 'sms' });
   });
 
   test('P0 (round 5): a since-WITHHELD estimate with a prior packet send answers 404, not a stale dedup 200 (in-process dedup)', async () => {
@@ -497,6 +549,8 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
   });
 
   test('P0 (round 5): a since-WITHHELD estimate answers 404 on the SMS cross-restart recentPacketSend dedup path too', async () => {
+    // Round 9: blocked at the early verdict gate now, before any claim is
+    // ever acquired — so there is no claim row left behind to stamp.
     currentRow = baseEstimateRow({ customer_phone: '+19415551111' });
     mockDb.__recentPacketFound = true;
     const TwilioService = require('../services/twilio');
@@ -511,7 +565,7 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
     expect(TwilioService.sendSMS).not.toHaveBeenCalled();
     expect(res.status).toBe(404);
     expect(body).toEqual({ error: 'Estimate not found' });
-    expect(mockDb.__claimOutcome).toBe('withheld');
+    expect(mockDb.__claimOutcome).toBeNull();
   });
 
   test('P0 (round 5): an ELIGIBLE estimate still gets the cross-restart recentPacketSend dedup success unchanged', async () => {
@@ -536,6 +590,9 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
   });
 
   test('P0 (round 5): a same-day EMAIL idempotency dedup for a since-WITHHELD estimate answers 404, not a stale 200', async () => {
+    // Round 9: blocked at the early verdict gate now, before sendTemplate's
+    // own idempotency dedup lookup ever runs — the queued mockResolvedValueOnce
+    // below is never consumed (confirmed unreachable via .not.toHaveBeenCalled()).
     const EmailTemplateLibrary = require('../services/email-template-library');
     EmailTemplateLibrary.sendTemplate.mockResolvedValueOnce({
       sent: true, deduped: true, message: { id: 'msg-historical' },
@@ -549,7 +606,7 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
     });
     const body = await res.json();
 
-    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
     expect(res.status).toBe(404);
     expect(body).toEqual({ error: 'Estimate not found' });
   });
@@ -599,9 +656,12 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
     expect(TwilioService.sendSMS).not.toHaveBeenCalled();
     expect(res.status).toBe(404);
     expect(body).toEqual({ error: 'Estimate not found' });
-    // The loser also stamps the claim row's durable outcome, same as the
-    // winner-side cross-restart dedup site does.
-    expect(mockDb.__claimOutcome).toBe('withheld');
+    // Round 9: blocked at the early verdict gate now, before this request
+    // ever reaches the claim-acquire/poll machinery below — so there is no
+    // claim row for THIS request to stamp (mockDb.__claimAcquired = false
+    // here simulates another process already holding it, but that other
+    // process's own claim-outcome bookkeeping is untouched by this request).
+    expect(mockDb.__claimOutcome).toBeNull();
   }, 10000);
 
   test('P0 (round 6, structural fix): the cross-process LOSER finding the winner\'s durable sms_log row for an ELIGIBLE estimate still gets the dedup success unchanged', async () => {
@@ -634,6 +694,11 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
     // `await` at every call site (this is the email dedup/success site)
     // makes the rejection surface inside the try, reaching next(err) and
     // the app's normal error-handling middleware.
+    // Round 9: the guard lookup this simulates now runs at the EARLY
+    // verdict gate itself (before sendTemplate is ever reached), so the
+    // queued mockResolvedValueOnce below is never consumed — but the same
+    // guarantee this test exists for still holds: an await'd rejection at
+    // that gate reaches the route's own try/catch, not a hang.
     mockDb.__annualLookupThrows = true;
     currentRow = baseEstimateRow({ customer_phone: '+19415551616' });
     const EmailTemplateLibrary = require('../services/email-template-library');
@@ -646,7 +711,7 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
     });
     const body = await res.json();
 
-    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
     // The test app's error middleware: res.status(err.status || 500).json({ error: err.message }).
     expect(res.status).toBe(500);
     expect(body.error).toMatch(/estimates lookup unavailable/);

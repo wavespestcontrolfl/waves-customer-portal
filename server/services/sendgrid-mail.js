@@ -159,14 +159,53 @@ async function runAnnualOfferGuard({ estimateIds, html, text }) {
   }
 }
 
+// Round 9 structural fix (P1): `templateKey` resolves the rewrite-vs-refuse
+// policy at THIS provider boundary via estimate-annual-guard.js's
+// withheldLinkPolicyForTemplate — the one place every path that reaches
+// sendOne (a fresh sendTemplate call, the automatic retry sweep, or bounce
+// recovery) shares, so a retried/bounce-recovered receipt whose stored
+// content still carries a withheld link gets the SAME rewrite a fresh send
+// would, not a permanent refusal just because that caller had no explicit
+// opinion of its own. `withheldLinkPolicy` is an explicit override for a
+// caller that already knows better than the template-keyed default.
+// Returns the (possibly rewritten) content to send, the (possibly stripped)
+// explicit estimate ids, and withheldLinksRewritten only when a rewrite
+// actually fired.
+async function resolveWithheldLinkRewrite({ html, text, estimateIds, templateKey, withheldLinkPolicy }) {
+  const { withheldLinkPolicyForTemplate, rewriteWithheldEstimateLinks } = require('./estimate-annual-guard');
+  const resolvedPolicy = withheldLinkPolicy || withheldLinkPolicyForTemplate(templateKey);
+  if (resolvedPolicy !== 'rewrite') return { sendHtml: html, sendText: text, sendEstimateIds: estimateIds };
+
+  const db = require('../models/db');
+  const rewritten = await rewriteWithheldEstimateLinks({ db, html, text });
+  if (!rewritten.rewrittenIds.length) return { sendHtml: html, sendText: text, sendEstimateIds: estimateIds };
+
+  logger.warn(`[sendgrid] rewrote ${rewritten.rewrittenIds.length} withheld estimate link(s) to the portal home for template "${templateKey || 'unknown'}"`);
+  return {
+    sendHtml: rewritten.html,
+    sendText: rewritten.text,
+    // The withheld link(s) are gone from the content being sent — forcing
+    // the original explicit id(s) through would make the guard below
+    // refuse anyway (it unions explicit ids with content derivation),
+    // defeating the whole point of the rewrite.
+    sendEstimateIds: [],
+    withheldLinksRewritten: rewritten.rewrittenIds,
+  };
+}
+
 /**
  * Send one email. Used for test sends and one-off transactional. Returns
- * { messageId } where messageId is read from the X-Message-Id response header.
+ * { messageId } where messageId is read from the X-Message-Id response header
+ * (plus withheldLinksRewritten: [ids] when the rewrite policy above fired).
  */
-async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments, customArgs, suppressErrorLog, disableTracking = false, estimateIds }) {
+async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments, customArgs, suppressErrorLog, disableTracking = false, estimateIds, templateKey, withheldLinkPolicy }) {
   if (!to || !subject) throw new Error('sendOne: to + subject required');
 
-  await runAnnualOfferGuard({ estimateIds, html, text });
+  const { sendHtml, sendText, sendEstimateIds, withheldLinksRewritten } = await resolveWithheldLinkRewrite({
+    html, text, estimateIds, templateKey, withheldLinkPolicy,
+  });
+
+  await runAnnualOfferGuard({ estimateIds: sendEstimateIds, html: sendHtml, text: sendText });
 
   const payload = {
     personalizations: [{
@@ -181,8 +220,8 @@ async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, 
     reply_to: { email: replyTo || 'contact@wavespestcontrol.com' },
     subject,
     content: [
-      ...(text ? [{ type: 'text/plain', value: text }] : []),
-      ...(html ? [{ type: 'text/html', value: html }] : []),
+      ...(sendText ? [{ type: 'text/plain', value: sendText }] : []),
+      ...(sendHtml ? [{ type: 'text/html', value: sendHtml }] : []),
     ],
     categories: categories || undefined,
     asm: asmBlockFor(asmGroupId),
@@ -219,7 +258,13 @@ async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, 
     err.body = text;
     throw err;
   }
-  return { messageId: res.headers.get('x-message-id') || null };
+  const messageId = res.headers.get('x-message-id') || null;
+  // html/text ride along ONLY when a rewrite fired, so a caller that keeps
+  // its own durable snapshot (email-template-library.js, the retry sweep,
+  // bounce recovery) can persist the exact bytes actually sent — without
+  // this, a caller's stored row would keep showing the withheld link even
+  // though the customer received the rewritten portal-home CTA.
+  return withheldLinksRewritten ? { messageId, withheldLinksRewritten, html: sendHtml, text: sendText } : { messageId };
 }
 
 // A SendGrid "blocked" event adds the recipient to the provider's Blocks

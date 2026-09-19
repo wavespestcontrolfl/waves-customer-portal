@@ -433,10 +433,6 @@ describe('webhook + invoice credit', () => {
       triggerEventId: 'deposit_receipt:pi_1',
       // Provider rejection bodies can echo the address — never log raw.
       suppressProviderErrorLog: true,
-      // Codex round 3 on #4608 (P1, over-blocking): the deposit is owed
-      // regardless of the annual offer's own state — rewrite the withheld
-      // link rather than refusing the whole receipt.
-      withheldLinkPolicy: 'rewrite',
       payload: expect.objectContaining({
         first_name: 'Sam',
         amount: '$70',
@@ -446,6 +442,13 @@ describe('webhook + invoice credit', () => {
         company_phone: '(941) 297-5749',
       }),
     }));
+    // Round 9 structural fix (P1): the explicit withheldLinkPolicy:
+    // 'rewrite' override is gone — 'deposit.receipt' is one of
+    // estimate-annual-guard.js's withheldLinkPolicyForTemplate keys, so
+    // sendgrid.sendOne (via templateKey, which sendTemplate always
+    // forwards) resolves 'rewrite' for it on its own, for THIS send and any
+    // later retry or bounce recovery of it too.
+    expect(mockSendTemplate.mock.calls[0][0]).not.toHaveProperty('withheldLinkPolicy');
   });
 
   it('portal-wide email opt-out (email_enabled=false) suppresses the receipt email', async () => {

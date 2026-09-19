@@ -286,11 +286,36 @@ async function rewriteWithheldEstimateLinks({ db, html, text }) {
   return { html: outHtml, text: outText, rewrittenIds };
 }
 
+// Round 9 structural fix (P1): the rewrite-vs-refuse choice used to be a
+// caller-supplied boolean (estimate-deposits.js passing withheldLinkPolicy:
+// 'rewrite' explicitly to email-template-library.js's sendTemplate) — a
+// retried or bounce-recovered send re-enters through
+// transactional-email-provider-retry.js / email-bounce-recovery.js, which
+// call sendgrid.sendOne directly and never had that caller's own opinion to
+// forward, so a stored deposit receipt whose content still carried the
+// withheld link was refused permanently instead of rewritten. The policy is
+// a property of the TEMPLATE, not the caller: resolved in ONE place, keyed
+// on template_key, so every path that eventually reaches sendOne (a fresh
+// send, an automatic retry, or bounce recovery) gets the same answer for
+// the same template. A payment/receipt template rewrites — the amount is
+// owed regardless of the annual offer's own state, same precedent as the
+// pricing-authority CTA swap in estimate-deposits.js; everything else keeps
+// the default 'refuse'.
+const RECEIPT_LINK_POLICY_TEMPLATE_KEYS = new Set([
+  'deposit.receipt',
+  'invoice.receipt',
+]);
+
+function withheldLinkPolicyForTemplate(templateKey) {
+  return RECEIPT_LINK_POLICY_TEMPLATE_KEYS.has(String(templateKey || '')) ? 'rewrite' : 'refuse';
+}
+
 module.exports = {
   loadAnnualOfferRow,
   annualOfferVerdict,
   estimateIdsFromContent,
   annualHandoffGuard,
   rewriteWithheldEstimateLinks,
+  withheldLinkPolicyForTemplate,
   LONG_LINK_TOKEN_RE,
 };

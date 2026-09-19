@@ -24964,6 +24964,35 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
         return res.status(404).json({ error: 'Estimate not found' });
       }
     }
+
+    // Structural fix (round 9, P0 "server/routes/estimate-public.js:25207"
+    // — the 5th finding on this route across 8 local-audit rounds; every
+    // prior round closed one MORE success/dedup site that skipped the
+    // recheck, and the claim-poll timeout site — a loser whose winner is
+    // still in flight has no recorded outcome and no sms_log row yet, so
+    // its poll times out and answers 502 while a fresh request for the
+    // SAME withheld estimate answers 404 — was the one no per-site patch
+    // could close, because it depends on ANOTHER request's timing. Moved
+    // here instead: this is now the VERY NEXT gate after the existing
+    // customer-viewable/call-side-hold/pricing-authority checks above,
+    // BEFORE channel/service validation, BEFORE contact resolution, and
+    // BEFORE any claim acquisition, dedup, or polling on either channel.
+    // A loser no longer depends on the winner's recorded outcome (or on
+    // ever reaching the claim machinery at all) to answer 404 for a
+    // withheld estimate — its OWN fresh read already decides that here,
+    // before either branch below even starts. The success-site withheldOr
+    // calls further down stay: the offer can still change DURING the
+    // send/dedup window between this read and the actual response, and
+    // the durable claim-outcome column stays useful for a genuinely
+    // in-flight concurrent winner that later resolves. This early gate is
+    // what closes the oracle for every remaining branch, including "the
+    // winner has no outcome yet".
+    const withheldOr = async (onEligible, onBlocked = () => res.status(404).json({ error: 'Estimate not found' })) => {
+      const { annualHandoffGuard } = require('../services/estimate-annual-guard');
+      const verdict = await annualHandoffGuard({ db, estimateIds: [estimate.id] })();
+      return verdict.blocked ? onBlocked() : onEligible();
+    };
+    return await withheldOr(async () => {
     const serviceKey = String(req.body?.service || '');
     const channel = String(req.body?.channel || '');
     if (!['email', 'sms'].includes(channel)) {
@@ -24998,27 +25027,6 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // Same canonical host every other estimate link uses
     // (admin-estimate-persistence.estimateViewUrl).
     const pdfUrl = `https://portal.wavespestcontrol.com/api/estimates/${estimate.token}/service-details/${serviceKey}/pdf`;
-
-    // Structural fix (round 6, P0 "server/routes/estimate-public.js:25174" —
-    // cross-process dedup was the FOURTH success-return found missing this
-    // recheck, one at a time, across five rounds): every success or
-    // deduplicated response this route can produce, on EITHER channel, now
-    // funnels through this ONE helper instead of each call site composing
-    // its own annualHandoffGuard call. A blocked verdict always answers the
-    // SAME generic 404 (never a distinguishable status) — the family the
-    // customer-viewable/call-side-hold checks above already use — after any
-    // caller-supplied cleanup (onBlocked; e.g. stamping a claim row's
-    // durable outcome). onEligible/onBlocked may themselves write the HTTP
-    // response (the top-level call sites) OR return a plain value for the
-    // caller to interpret later (the two sites living inside sendPromise's
-    // closure below, which must never write to `res` directly — the outer
-    // code reads sendPromise's resolved value and does its own claim
-    // bookkeeping before it, too, answers through this same helper).
-    const withheldOr = async (onEligible, onBlocked = () => res.status(404).json({ error: 'Estimate not found' })) => {
-      const { annualHandoffGuard } = require('../services/estimate-annual-guard');
-      const verdict = await annualHandoffGuard({ db, estimateIds: [estimate.id] })();
-      return verdict.blocked ? onBlocked() : onEligible();
-    };
 
     if (channel === 'email') {
       if (!contact.customerEmail) return res.status(400).json({ error: 'No email on this estimate' });
@@ -25360,6 +25368,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       await markClaimWithheld();
       serviceDetailsSmsClaims.delete(dedupKey);
       return res.status(404).json({ error: 'Estimate not found' });
+    });
     });
   } catch (err) { next(err); }
 });

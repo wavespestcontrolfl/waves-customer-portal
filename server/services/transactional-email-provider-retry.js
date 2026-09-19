@@ -329,6 +329,13 @@ async function recordRetrySend(message, result) {
         error_message: null,
         updated_at: new Date(),
         status: db.raw("CASE WHEN status = 'queued' THEN 'sent' ELSE status END"),
+        // Round 9 structural fix (P1): sendOne rewrote a withheld estimate
+        // link before this retry actually sent — persist the rewritten
+        // bytes so the stored row reflects what the customer received, same
+        // as a fresh sendTemplate send does (email-template-library.js).
+        ...(result.withheldLinksRewritten?.length
+          ? { html_snapshot: result.html, text_snapshot: result.text }
+          : {}),
       })
       .returning('*');
   } catch (err) {
@@ -390,6 +397,15 @@ async function retryOne(message) {
     // separately (no explicit id: a retried email_messages row has no
     // structured estimate reference to pass as one).
     //
+    // Round 9 structural fix (P1): `templateKey: message.template_key`
+    // lets sendOne resolve the SAME rewrite-vs-refuse policy a fresh send
+    // of this template would get (estimate-annual-guard.js's
+    // withheldLinkPolicyForTemplate) — a stored deposit receipt whose
+    // content still carries a withheld link (queued before an earlier
+    // rewrite persisted, or re-rendered) is rewritten and retried
+    // successfully here, not refused permanently just because this sweep
+    // has no explicit opinion of its own.
+    //
     // dispatchStarted flips true optimistically (a real sendOne attempt is
     // about to happen) and is reverted on catching sendOne's OWN blocked
     // refusal (.annualOfferWithheld) — that refusal means the wire was
@@ -416,6 +432,7 @@ async function retryOne(message) {
           send_attempt_token: message.send_attempt_token,
         },
         suppressErrorLog: true,
+        templateKey: message.template_key,
       });
     } catch (err) {
       // Pre-push audit P1 (b49be57b12 round 4): a guard INFRASTRUCTURE

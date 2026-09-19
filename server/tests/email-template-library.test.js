@@ -7,24 +7,21 @@ jest.mock('../services/sendgrid-mail', () => ({
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(async () => ({})),
 }));
-jest.mock('../services/estimate-annual-guard', () => ({
-  annualHandoffGuard: jest.fn(() => async () => ({ blocked: false, reason: null, estimateId: null })),
-  rewriteWithheldEstimateLinks: jest.fn(async ({ html, text }) => ({ html, text, rewrittenIds: [] })),
-}));
 
 const db = require('../models/db');
 const sendgrid = require('../services/sendgrid-mail');
 const NotificationService = require('../services/notification-service');
 const EmailTemplates = require('../services/email-template-library');
-const { rewriteWithheldEstimateLinks } = require('../services/estimate-annual-guard');
 
 // Codex round 3 on #4608 (structural move): the annual-offer guard's
 // AUTHORITATIVE check now runs inside sendgrid.sendOne, which this file
 // mocks away entirely — so these tests simulate sendOne's own refusal
 // contract (an error flagged .annualOfferWithheld / .annualOfferGuardFailed)
-// rather than mocking annualHandoffGuard directly. estimate-annual-guard.js
-// stays mocked here only because rewriteWithheldEstimateLinks (used by the
-// withheldLinkPolicy: 'rewrite' tests) lives in the same module.
+// rather than mocking annualHandoffGuard directly. Round 9 structural fix
+// (P1): the rewrite-vs-refuse decision (estimate-annual-guard.js's
+// withheldLinkPolicyForTemplate + rewriteWithheldEstimateLinks) also moved
+// into sendOne — this file no longer needs to mock estimate-annual-guard.js
+// at all, since email-template-library.js itself no longer requires it.
 function annualOfferWithheldError(estimateId = 'est-1') {
   const err = new Error('annual_offer_withheld');
   err.code = 'ANNUAL_OFFER_WITHHELD';
@@ -1672,12 +1669,22 @@ describe('email template library rendering', () => {
     });
   });
 
-  describe('withheldLinkPolicy: rewrite (Codex round 3 on #4608, P1 over-blocking)', () => {
+  describe('withheldLinkPolicy: rewrite (round 9 structural move — resolved by sendOne, not here)', () => {
+    // Codex round 3 on #4608 originally had THIS library call
+    // rewriteWithheldEstimateLinks itself before dispatch. Round 9 (P1)
+    // moved that decision into sendgrid.sendOne (the true provider
+    // boundary, keyed on templateKey via estimate-annual-guard.js's
+    // withheldLinkPolicyForTemplate) so a retry or bounce recovery — which
+    // call sendOne directly, never through this library — get the SAME
+    // rewrite. sendgrid is mocked wholesale in this file, so these tests
+    // pin what THIS library still owns: forwarding templateKey (and an
+    // explicit policy override, only when the caller set one) into the
+    // sendOne call, and persisting whatever sendOne reports it rewrote onto
+    // the stored row.
     const queuedMessage = { id: 'msg-rewrite', status: 'queued', subject_snapshot: 'S' };
     const sentMessage = { ...queuedMessage, status: 'sent', provider_message_id: 'sg-rewrite' };
 
     beforeEach(() => {
-      rewriteWithheldEstimateLinks.mockReset();
       setDbQueues({
         email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
         email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
@@ -1689,15 +1696,48 @@ describe('email template library rendering', () => {
       templateKey: 'deposit.receipt',
       to: 'sam@example.com',
       payload: { first_name: 'Sam', estimate_url: 'https://example.com/estimate/withheld-token-123456', expires_at: 'June 12' },
-      withheldLinkPolicy: 'rewrite',
       ...fields,
     });
 
-    test('a withheld link is rewritten to the portal home and the send proceeds, marked withheldLinksRewritten', async () => {
+    test('templateKey is always forwarded to sendOne, so it can resolve the policy itself', async () => {
       const queueInsert = chain({ returning: [queuedMessage] });
-      // Pre-push audit P1 (b49be57b12 round 4): the STORED row must be
-      // updated with the rewritten content BEFORE dispatch — a third
-      // email_messages call ahead of the post-send acceptance update.
+      const sentUpdate = chain({ returning: [sentMessage] });
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [queueInsert, sentUpdate],
+      });
+      sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-rewrite' });
+
+      await send({});
+
+      expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ templateKey: 'deposit.receipt' }));
+      // No explicit override was passed — sendOne's own template-keyed
+      // resolution must govern, not a policy this library injects.
+      expect(sendgrid.sendOne.mock.calls[0][0]).not.toHaveProperty('withheldLinkPolicy');
+    });
+
+    test('an explicit withheldLinkPolicy override is forwarded through to sendOne', async () => {
+      const queueInsert = chain({ returning: [queuedMessage] });
+      const sentUpdate = chain({ returning: [sentMessage] });
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [queueInsert, sentUpdate],
+      });
+      sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-rewrite' });
+
+      await send({ withheldLinkPolicy: 'rewrite' });
+
+      expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
+        templateKey: 'deposit.receipt', withheldLinkPolicy: 'rewrite',
+      }));
+    });
+
+    test('sendOne performing the rewrite (withheldLinksRewritten + the rewritten bytes on the result) persists the stored row after dispatch, marked withheldLinksRewritten', async () => {
+      const queueInsert = chain({ returning: [queuedMessage] });
       const persistUpdate = chain({ result: [1] });
       const sentUpdate = chain({ returning: [sentMessage] });
       setDbQueues({
@@ -1706,29 +1746,24 @@ describe('email template library rendering', () => {
         email_suppressions: [chain({ result: [] })],
         email_messages: [queueInsert, persistUpdate, sentUpdate],
       });
-      rewriteWithheldEstimateLinks.mockResolvedValueOnce({
+      sendgrid.sendOne.mockResolvedValue({
+        messageId: 'sg-rewrite',
+        withheldLinksRewritten: ['est-1'],
         html: '<p>https://portal.wavespestcontrol.com</p>',
         text: 'https://portal.wavespestcontrol.com',
-        rewrittenIds: ['est-1'],
       });
-      sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-rewrite' });
 
       const result = await send({});
 
-      expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
-      // The withheld link's estimate id must NOT be forced through as an
-      // explicit id — its link is already gone from the content, and
-      // forcing it would make sendOne's own guard refuse anyway.
-      expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
-        html: '<p>https://portal.wavespestcontrol.com</p>',
-        text: 'https://portal.wavespestcontrol.com',
-        estimateIds: [],
-      }));
       expect(result).toEqual(expect.objectContaining({ sent: true, withheldLinksRewritten: ['est-1'] }));
       // The queued row's own snapshot fields are updated to the REWRITTEN
-      // content — no estimate link survives in the stored record — scoped
-      // to this attempt (id + still-queued + send_attempt_token), the same
-      // pre-dispatch bookkeeping shape as the other guard writes.
+      // content sendOne reported sending — no estimate link survives in the
+      // stored record — scoped to this attempt (id + still-queued +
+      // send_attempt_token), the same pre-dispatch bookkeeping shape as the
+      // other guard writes. This necessarily happens AFTER sendOne returns
+      // now (this library only learns about the rewrite from its result),
+      // not before dispatch as it did when this library did the rewrite
+      // itself.
       expect(persistUpdate.where).toHaveBeenCalledWith(expect.objectContaining({
         id: 'msg-rewrite', status: 'queued', send_attempt_token: expect.any(String),
       }));
@@ -1737,12 +1772,9 @@ describe('email template library rendering', () => {
         text_snapshot: 'https://portal.wavespestcontrol.com',
       }));
       expect(persistUpdate.update.mock.calls[0][0].html_snapshot).not.toMatch(/\/estimate\//);
-      // Persisted BEFORE the provider request, not after.
-      expect(persistUpdate.update.mock.invocationCallOrder[0])
-        .toBeLessThan(sendgrid.sendOne.mock.invocationCallOrder[0]);
     });
 
-    test('nothing to rewrite (no withheld link in the content): sends the original render unchanged, no marker', async () => {
+    test('sendOne reporting no rewrite: nothing is persisted, no marker on the result', async () => {
       const queueInsert = chain({ returning: [queuedMessage] });
       const sentUpdate = chain({ returning: [sentMessage] });
       setDbQueues({
@@ -1751,7 +1783,6 @@ describe('email template library rendering', () => {
         email_suppressions: [chain({ result: [] })],
         email_messages: [queueInsert, sentUpdate],
       });
-      rewriteWithheldEstimateLinks.mockImplementationOnce(async ({ html, text }) => ({ html, text, rewrittenIds: [] }));
       sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-rewrite' });
 
       const result = await send({});
@@ -1759,22 +1790,6 @@ describe('email template library rendering', () => {
       expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
       expect(result).toEqual(expect.objectContaining({ sent: true }));
       expect(result.withheldLinksRewritten).toBeUndefined();
-    });
-
-    test('default policy (refuse) never calls rewriteWithheldEstimateLinks', async () => {
-      const queueInsert = chain({ returning: [queuedMessage] });
-      const sentUpdate = chain({ returning: [sentMessage] });
-      setDbQueues({
-        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
-        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
-        email_suppressions: [chain({ result: [] })],
-        email_messages: [queueInsert, sentUpdate],
-      });
-      sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-rewrite' });
-
-      await send({ withheldLinkPolicy: undefined });
-
-      expect(rewriteWithheldEstimateLinks).not.toHaveBeenCalled();
     });
   });
 });

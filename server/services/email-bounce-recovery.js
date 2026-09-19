@@ -529,6 +529,14 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
           // provider_message_id is committed below.
           customArgs: { email_message_id: String(message.id), send_attempt_token: message.send_attempt_token },
           estimateIds: sourceEstimateId ? [sourceEstimateId] : [],
+          // Round 9 structural fix (P1): resolves the SAME rewrite-vs-refuse
+          // policy a fresh send of this template would get (estimate-annual-
+          // guard.js's withheldLinkPolicyForTemplate) — a bounce-recovered
+          // deposit receipt whose stored content still carries a withheld
+          // link is rewritten and re-sent to the corrected address, not
+          // refused permanently just because this recovery path has no
+          // explicit opinion of its own.
+          templateKey: bouncedMessage.template_key,
         });
       } catch (err) {
         if (err && err.annualOfferWithheld) {
@@ -581,6 +589,14 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
       provider_message_id: result.messageId,
       sent_at: new Date(),
       updated_at: new Date(),
+      // Round 9 structural fix (P1): sendOne rewrote a withheld estimate
+      // link before this recovery send actually went out — persist the
+      // rewritten bytes onto the recovery row so it reflects what the
+      // corrected address actually received, same as a fresh sendTemplate
+      // send does (email-template-library.js).
+      ...(result.withheldLinksRewritten?.length
+        ? { html_snapshot: result.html, text_snapshot: result.text }
+        : {}),
     });
     // Advance to 'sent' ONLY if still 'queued' — a fast delivery/bounce webhook
     // (resolvable via custom_args.email_message_id before this commit) may have

@@ -1001,16 +1001,18 @@ async function sendTemplate({
   // rechecks the guard itself; it just passes the id(s) through.
   estimateId = null,
   estimateIds = null,
-  // 'refuse' (default): a withheld link blocks the whole send, as above.
-  // 'rewrite': for receipt/payment-class templates ONLY (deposit.receipt) —
-  // never the default, and never inferred. When sendOne's guard would
-  // refuse, every withheld estimate link (long or short) in the RENDERED
-  // html/text is swapped for the portal home URL first, and the send
-  // proceeds; the result carries withheldLinksRewritten: [ids]. Precedent:
-  // estimate-deposits.js's own pricing-authority CTA swap for the same
-  // reason (the deposit is owed regardless of the offer's own state) — see
-  // estimate-annual-guard.js's rewriteWithheldEstimateLinks.
-  withheldLinkPolicy = 'refuse',
+  // Round 9 structural fix (P1): the rewrite-vs-refuse choice is resolved
+  // by sendOne itself from `templateKey` (estimate-annual-guard.js's
+  // withheldLinkPolicyForTemplate — 'rewrite' for receipt/payment-class
+  // templates like deposit.receipt, 'refuse' for everything else) — NOT
+  // defaulted here any more, so an explicit caller override (rare) is the
+  // only thing this param carries; leaving it unset lets the template-keyed
+  // default govern. When a withheld link is rewritten (long or short, in
+  // the RENDERED html/text), the send proceeds and the result carries
+  // withheldLinksRewritten: [ids]. Precedent: estimate-deposits.js's own
+  // pricing-authority CTA swap for the same reason (the deposit is owed
+  // regardless of the offer's own state).
+  withheldLinkPolicy = null,
 } = {}) {
   if (!to) throw new Error('recipient email required');
   let template;
@@ -1368,6 +1370,14 @@ async function sendTemplate({
     // through as sendOne's explicit addition to its own content derivation
     // over the FINAL html/text; this library's job is only to turn sendOne's
     // refusal into the bookkeeping below.
+    //
+    // Round 9 structural fix (P1): the rewrite-vs-refuse decision itself
+    // also moved into sendOne, keyed on `templateKey` (estimate-annual-
+    // guard.js's withheldLinkPolicyForTemplate) — the SAME resolution the
+    // retry sweep and bounce recovery now share, since they call sendOne
+    // directly with no caller opinion of their own. This library forwards
+    // `withheldLinkPolicy` only when a caller explicitly passed one (an
+    // override); otherwise sendOne's template-keyed default governs.
     const sendToProvider = (html, text, guardIds) => sendgrid.sendOne({
         to,
         fromEmail,
@@ -1386,6 +1396,8 @@ async function sendTemplate({
         customArgs: { email_message_id: message.id, send_attempt_token: sendAttemptToken },
         suppressErrorLog: suppressProviderErrorLog,
         estimateIds: guardIds,
+        templateKey,
+        ...(withheldLinkPolicy ? { withheldLinkPolicy } : {}),
       });
     // Codex round 1 on #4608 (P1): keying this ONLY on estimateId/estimateIds
     // made the guard opt-in — the estimate-public.js service-details email
@@ -1406,52 +1418,38 @@ async function sendTemplate({
     // dispatchToProvider always either sends or reports a real,
     // non-throwing outcome.
     const dispatchToProvider = async () => {
-      let sendHtml = rendered.html;
-      let sendText = rendered.text;
-      let sendEstimateIds = guardEstimateIds;
-      let withheldLinksRewritten;
-      if (withheldLinkPolicy === 'rewrite') {
-        try {
-          const { rewriteWithheldEstimateLinks } = require('./estimate-annual-guard');
-          const rewritten = await rewriteWithheldEstimateLinks({ db, html: sendHtml, text: sendText });
-          if (rewritten.rewrittenIds.length) {
-            sendHtml = rewritten.html;
-            sendText = rewritten.text;
-            // The withheld link(s) are gone from the content being sent —
-            // forcing the original explicit id through would make sendOne's
-            // own guard refuse anyway (it unions explicit ids with content
-            // derivation), defeating the whole point of the rewrite.
-            sendEstimateIds = [];
-            withheldLinksRewritten = rewritten.rewrittenIds;
-            // Pre-push audit P1 (b49be57b12 round 4): the STORED row must
-            // match what actually goes out. A retry or bounce recovery
-            // re-sends straight from html_snapshot/text_snapshot
-            // (transactional-email-provider-retry.js, email-bounce-
-            // recovery.js) — without this write, either would re-send the
-            // ORIGINAL content, withheld link and all, back through
-            // sendOne's own guard (a retry that can never succeed). Same
-            // scoped pre-dispatch bookkeeping shape as abortWithheldBefore
-            // Dispatch below (id + still-queued + THIS attempt's token), so
-            // a superseded/reclaimed row is never touched. Best-effort: a
-            // write failure here must not block a send whose content is
-            // already correctly rewritten in memory — only the STORED
-            // snapshot would lag, logged for follow-up.
-            try {
-              await db('email_messages')
-                .where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken })
-                .update({ html_snapshot: sendHtml, text_snapshot: sendText, updated_at: new Date() });
-            } catch (persistErr) {
-              logger.warn(`[email-template-library] rewritten-content persist failed for ${templateKey} (${message.id}): ${persistErr.message}`);
-            }
-            logger.warn(`[email-template-library] rewrote ${rewritten.rewrittenIds.length} withheld estimate link(s) to the portal home for ${templateKey} (${message.id})`);
-          }
-        } catch (err) {
-          return { [ANNUAL_OFFER_GUARD_FAILED]: true, error: err };
-        }
-      }
       try {
-        const providerResult = await sendToProvider(sendHtml, sendText, sendEstimateIds);
-        return withheldLinksRewritten ? { ...providerResult, withheldLinksRewritten } : providerResult;
+        const providerResult = await sendToProvider(rendered.html, rendered.text, guardEstimateIds);
+        if (providerResult?.withheldLinksRewritten?.length) {
+          // Pre-push audit P1 (b49be57b12 round 4), still true under the
+          // round 9 structural move: the STORED row should match what
+          // actually went out. sendOne already rewrote the content it sent
+          // to SendGrid (providerResult.html/text carry the rewritten
+          // bytes) — persist them here so the stored snapshot reflects the
+          // portal-home CTA the customer actually received, not the
+          // withheld link. Not required for correctness of a LATER retry or
+          // bounce recovery any more (both now pass templateKey through to
+          // sendOne themselves and would independently re-derive the same
+          // rewrite from the original snapshot), only for audit fidelity of
+          // this row. Same scoped pre-dispatch bookkeeping shape as
+          // abortWithheldBeforeDispatch below (id + still-queued + THIS
+          // attempt's token), so a superseded/reclaimed row is never
+          // touched. Best-effort: a write failure here must not block a
+          // send that already succeeded.
+          try {
+            await db('email_messages')
+              .where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken })
+              .update({
+                html_snapshot: providerResult.html,
+                text_snapshot: providerResult.text,
+                updated_at: new Date(),
+              });
+          } catch (persistErr) {
+            logger.warn(`[email-template-library] rewritten-content persist failed for ${templateKey} (${message.id}): ${persistErr.message}`);
+          }
+          logger.warn(`[email-template-library] rewrote ${providerResult.withheldLinksRewritten.length} withheld estimate link(s) to the portal home for ${templateKey} (${message.id})`);
+        }
+        return providerResult;
       } catch (err) {
         if (err?.annualOfferWithheld) return ANNUAL_OFFER_WITHHELD;
         if (err?.annualOfferGuardFailed) return { [ANNUAL_OFFER_GUARD_FAILED]: true, error: err };

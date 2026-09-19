@@ -1,5 +1,5 @@
 const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
-const { loadAnnualOfferRow, annualOfferVerdict, estimateIdsFromContent, annualHandoffGuard, rewriteWithheldEstimateLinks, LONG_LINK_TOKEN_RE } = require('../services/estimate-annual-guard');
+const { loadAnnualOfferRow, annualOfferVerdict, estimateIdsFromContent, annualHandoffGuard, rewriteWithheldEstimateLinks, withheldLinkPolicyForTemplate, LONG_LINK_TOKEN_RE } = require('../services/estimate-annual-guard');
 const { ESTIMATE_TOKEN_RE } = require('../routes/estimate-public');
 
 const PLAN_LINE = { service: 'termite_bait', plan: 'annual_protection', stations: 15 };
@@ -567,5 +567,28 @@ describe('rewriteWithheldEstimateLinks (Codex round 3 on #4608, P1 PRRT_kwDOR3YQ
     expect(result.rewrittenIds).toEqual(['est-dup']);
     expect(result.html).toBe('<p>https://portal.wavespestcontrol.com</p>');
     expect(result.text).toBe('Same one again: https://portal.wavespestcontrol.com');
+  });
+});
+
+describe('withheldLinkPolicyForTemplate (round 9 structural fix, P1: template-keyed rewrite at the provider)', () => {
+  test('deposit.receipt resolves to "rewrite" — the deposit is owed regardless of the annual offer\'s own state', () => {
+    expect(withheldLinkPolicyForTemplate('deposit.receipt')).toBe('rewrite');
+  });
+
+  test('invoice.receipt resolves to "rewrite" — same payment-receipt precedent', () => {
+    expect(withheldLinkPolicyForTemplate('invoice.receipt')).toBe('rewrite');
+  });
+
+  test('every other template key resolves to the default "refuse"', () => {
+    expect(withheldLinkPolicyForTemplate('service.visit_summary')).toBe('refuse');
+    expect(withheldLinkPolicyForTemplate('invoice.sent')).toBe('refuse');
+    expect(withheldLinkPolicyForTemplate('payment.autopay_enabled')).toBe('refuse');
+    expect(withheldLinkPolicyForTemplate('estimate.follow_up')).toBe('refuse');
+  });
+
+  test('a missing/blank/non-string templateKey resolves to "refuse", never throws', () => {
+    expect(withheldLinkPolicyForTemplate(undefined)).toBe('refuse');
+    expect(withheldLinkPolicyForTemplate(null)).toBe('refuse');
+    expect(withheldLinkPolicyForTemplate('')).toBe('refuse');
   });
 });

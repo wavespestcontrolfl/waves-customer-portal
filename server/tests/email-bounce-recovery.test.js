@@ -896,6 +896,39 @@ describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery 
     expect(res).toMatchObject({ resent: true });
   });
 
+  test('round 9 structural fix (P1): a bounce-recovered deposit.receipt whose stored content still carries a withheld link is rewritten by sendOne and re-sent — the recovery row snapshot is updated to match', async () => {
+    const messageRow = { id: 'msg-annual-rewrite', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com', subject_snapshot: 'S' };
+    const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
+    db.mockImplementation(mockDb);
+    const rewrittenHtml = '<p>https://portal.wavespestcontrol.com</p>';
+    const rewrittenText = 'https://portal.wavespestcontrol.com';
+    sendgrid.sendOne.mockResolvedValue({
+      messageId: 'pm-deposit-receipt-recovered',
+      withheldLinksRewritten: ['est-withheld-2'],
+      html: rewrittenHtml,
+      text: rewrittenText,
+    });
+
+    const res = await recovery.attemptRecovery(
+      {
+        id: 'orig-annual-rewrite', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'jane@gmial.com',
+        template_key: 'deposit.receipt', suppression_group_key_snapshot: 'service_operational', categories: ['email_template'],
+        html_snapshot: '<p>https://portal.wavespestcontrol.com/estimate/recovery-token-withheld</p>',
+        text_snapshot: 'https://portal.wavespestcontrol.com/estimate/recovery-token-withheld',
+      },
+      { event: 'bounce', type: 'bounce' },
+    );
+
+    // templateKey lets sendOne resolve 'rewrite' for deposit.receipt on its
+    // own — bounce recovery has no explicit opinion of its own to forward.
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ templateKey: 'deposit.receipt' }));
+    expect(res).toMatchObject({ resent: true });
+    // The recovery row's snapshot is updated to the rewritten bytes sendOne
+    // reported sending, in the same write as the provider acceptance.
+    const messageUpdate = mockDb._calls.find((c) => c.table === 'email_messages' && c.data.provider_message_id === 'pm-deposit-receipt-recovered');
+    expect(messageUpdate).toMatchObject({ data: { html_snapshot: rewrittenHtml, text_snapshot: rewrittenText } });
+  });
+
   test('sendOne refuses with a guard INFRASTRUCTURE failure: the ordinary failure path applies, not the permanent withheld one', async () => {
     const messageRow = { id: 'msg-annual-3', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com', subject_snapshot: 'S' };
     const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
