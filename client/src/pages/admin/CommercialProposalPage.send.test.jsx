@@ -27,7 +27,8 @@ beforeEach(() => {
     else if (options.method === 'PUT') {
       if (failSave) { status = 409; data = { error: 'Proposal changed; reload.' }; }
       else {
-        saved.proposal = JSON.parse(options.body).proposal; saved.estimate.editVersion = 'saved-version'; previewVersion = 'saved-version';
+        saved.proposal = JSON.parse(options.body).proposal; saved.projectCosting = JSON.parse(options.body).projectCosting;
+        saved.estimate.editVersion = 'saved-version'; previewVersion = 'saved-version';
         data = { editVersion: 'saved-version' };
         if (interloperAfterSave) { saved.proposal = { ...saved.proposal, title: 'Interloper edit' }; saved.estimate.editVersion = 'interloper-version'; previewVersion = 'interloper-version'; }
       }
@@ -42,42 +43,54 @@ it('hides bid controls while disabled and omits fields that an older editor cann
   saved.bidToolsEnabled = false;
   mount(); await screen.findByDisplayValue('Synthetic proposal');
   expect(screen.queryByLabelText('Quantity unit')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Add project cost' })).toBeNull();
   expect(screen.queryByLabelText(/Valid through \(Eastern time\)/)).toBeNull();
   fireEvent.change(screen.getByDisplayValue('Synthetic proposal'), { target: { value: 'Ordinary edit' } });
   fireEvent.click(screen.getByRole('button', { name: 'Save proposal' }));
   await screen.findByRole('button', { name: 'Saved' });
   const payload = JSON.parse(calls.find((call) => call.method === 'PUT').body);
+  expect(payload).not.toHaveProperty('projectCosting');
   expect(payload.proposal).not.toHaveProperty('validThrough');
 });
 
-it('preserves decimal quantities, units, unit rates, and validity through save/reload', async () => {
+it('preserves decimal quantities, units, unit rates, validity and private cost inputs through save/reload', async () => {
   mount();
   await screen.findByDisplayValue('Synthetic proposal');
   fireEvent.change(screen.getByLabelText('Quantity', { exact: true }), { target: { value: '25.8' } });
   fireEvent.change(screen.getByLabelText('Quantity unit'), { target: { value: 'acre' } });
   fireEvent.change(screen.getByLabelText('Unit price', { exact: true }), { target: { value: '0.0755' } });
   fireEvent.change(screen.getByLabelText(/Valid through \(Eastern time\)/), { target: { value: '2026-12-21' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Add project cost' }));
+  fireEvent.change(screen.getByLabelText('Cost description'), { target: { value: 'Private crew hours' } });
+  fireEvent.change(screen.getByLabelText('Cost quantity', { exact: true }), { target: { value: '40' } });
+  fireEvent.change(screen.getByLabelText('Cost per unit'), { target: { value: '35' } });
   fireEvent.click(screen.getByRole('button', { name: 'Save proposal' }));
   await screen.findByRole('button', { name: 'Saved' });
   const payload = JSON.parse(calls.find((call) => call.method === 'PUT').body);
   expect(payload.proposal.buildings[0].lineItems[0]).toMatchObject({ quantity: '25.8', unit: 'acre', unitPrice: '0.0755' });
   expect(payload.proposal.validThrough).toBe('2026-12-21');
+  expect(payload.projectCosting.rows[0]).toMatchObject({ quantity: '40', unitCost: '35', description: 'Private crew hours' });
+  expect(JSON.stringify(payload.proposal)).not.toContain('Private crew hours');
   expect(screen.getByLabelText('Quantity', { exact: true })).toHaveValue(25.8);
+  expect(screen.getByLabelText('Cost description')).toHaveValue('Private crew hours');
 });
 
 it('keeps saved bid details visible but read-only after the gate is disabled', async () => {
   saved.bidToolsEnabled = false;
   saved.proposal.validThrough = '2099-12-21';
   Object.assign(saved.proposal.buildings[0].lineItems[0], { id: 'saved-line', unit: 'acre', quantity: 25.8, unitPrice: 0.0755 });
+  saved.projectCosting = { revenueYears: 1, rows: [{ category: 'labor', phase: 'Phase A', description: 'Private crew hours', quantity: 40, unit: 'hour', unitCost: 35, occurrences: 1 }] };
   mount(); await screen.findByDisplayValue('Synthetic proposal');
   expect(screen.getByLabelText('Quantity unit')).toBeDisabled();
   expect(screen.getByLabelText('Quantity unit')).toHaveValue('acre');
   expect(screen.getByLabelText(/Valid through \(Eastern time\)/)).toBeDisabled();
+  expect(screen.getByLabelText('Cost description')).toBeDisabled();
   fireEvent.change(screen.getByDisplayValue('Synthetic proposal'), { target: { value: 'Ordinary bid title edit' } });
   fireEvent.click(screen.getByRole('button', { name: 'Save proposal' }));
   await screen.findByRole('button', { name: 'Saved' });
   const payload = JSON.parse(calls.find((call) => call.method === 'PUT').body);
   expect(payload.proposal.buildings[0].lineItems[0]).toMatchObject({ unit: 'acre', quantity: 25.8, unitPrice: 0.0755 });
+  expect(payload).not.toHaveProperty('projectCosting');
   expect(payload.proposal).not.toHaveProperty('validThrough');
 });
 
@@ -146,6 +159,19 @@ it('duplicates a unit-bearing building as a unit-less copy while the gate is off
   expect(payload.proposal.buildings[1].lineItems[0].id).not.toBe('saved-line');
 });
 
+it('withholds the costing margin while any program row is incomplete, exactly as the save refuses it (GH codex P2 r10 on #4270)', async () => {
+  mount();
+  await screen.findByDisplayValue('Synthetic proposal');
+  fireEvent.click(screen.getByRole('button', { name: 'Add project cost' }));
+  fireEvent.change(screen.getByLabelText('Cost description'), { target: { value: 'Private crew hours' } });
+  fireEvent.change(screen.getByLabelText('Cost quantity', { exact: true }), { target: { value: '1' } });
+  fireEvent.change(screen.getByLabelText('Cost per unit'), { target: { value: '1' } });
+  expect(screen.getByText('$399.00')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Add program' }));
+  expect(screen.queryByText('$399.00')).not.toBeInTheDocument();
+  expect(screen.getByText(/Fix the quoted itemization before comparing costs: Every program row needs a name/)).toBeInTheDocument();
+});
+
 it('offers neither Review and send nor Mark won while the saved fixed date has passed, and again once a later date is saved (GH codex P2 r5 on #4309)', async () => {
   saved.estimate.status = 'sent';
   saved.proposal.validThrough = '2020-01-01';
@@ -162,4 +188,18 @@ it('offers neither Review and send nor Mark won while the saved fixed date has p
   await screen.findByRole('button', { name: 'Saved' });
   expect(screen.getByRole('button', { name: 'Review and send' })).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Mark won' })).toBeInTheDocument();
+});
+
+it('updates costing eligibility when tax pushes the combined first invoice over capacity', async () => {
+  saved.proposal = { ...saved.proposal, taxRate: 0,
+    programs: [{ label: 'Synthetic program', pricePerApplication: 95000000, frequencyPerYear: 1, taxable: true }],
+    correctiveWork: [{ label: 'Synthetic correction', amount: 1000000, taxable: false }],
+  };
+  saved.projectCosting = { revenueYears: 1, rows: [{ category: 'labor', description: 'Synthetic cost', quantity: 1, unit: 'hour', unitCost: 10, occurrences: 1 }] };
+  mount(); await screen.findByText('$95,999,990.00');
+  fireEvent.change(screen.getByLabelText('Tax rate (%) — taxable lines only'), { target: { value: '7' } });
+  expect(screen.queryByText('$95,999,990.00')).not.toBeInTheDocument();
+  expect(screen.getByText(/combined acceptance invoice/)).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText('Tax rate (%) — taxable lines only'), { target: { value: '0' } });
+  expect(screen.getByText('$95,999,990.00')).toBeInTheDocument();
 });
