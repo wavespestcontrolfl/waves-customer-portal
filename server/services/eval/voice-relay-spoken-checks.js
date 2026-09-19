@@ -1883,12 +1883,13 @@ function reportHasCompletedPredicate(affirmed, findingVerb) {
   const governorIntroduction = predicateIntroduction
     .replace(/\b(?:receiv(?:e[sd]?|ing)|get(?:s|ting)?|got|have|has|had)\s+permission(?=\s+to\b)/i, 'were allowed')
     .replace(
-      /\bget(?:\s+(?:\w+ly|already|just|now))*(?:\s+(?!(?:and|but|or|after|before|when|while|until|since|because|if|unless|that|which|who|was|were|is|are|has|have|had|did|applied|treated|sprayed|used|placed|put|got|received|finished|completed)\b)[\w'’-]+){1,6}\s*$/i,
+      /\b(?:get|got|have|has|had)(?:\s+(?:\w+ly|already|just|now))*(?:\s+(?!(?:and|but|or|after|before|when|while|until|since|because|if|unless|that|which|who|was|were|is|are|has|have|had|did|applied|treated|sprayed|used|placed|put|got|received|finished|completed)\b)[\w'’-]+){1,6}\s*$/i,
       '',
     );
   if (REPORT_NONCOMPLETION_GOVERNOR_RE.test(governorIntroduction)
       || REPORT_NONCOMPLETION_ASSURANCE_GOVERNOR_RE.test(predicateIntroduction)
       || REPORT_NONCOMPLETION_MODIFIER_RE.test(predicateIntroduction)
+      || REPORT_NONCOMPLETION_MODIFIER_RE.test(governorIntroduction)
       || REPORT_NONCOMPLETION_PREDICATE_MODIFIER_RE.test(prefix)
       || REPORT_POSTVERB_NONCOMPLETION_MODIFIER_RE.test(predicateContinuation)
       || (/(?:\b(?:am|is|are|be|being|get|gets|getting)|['’](?:m|re))\s+(?:(?:\w+ly|already|also|always|just|now|still)\s+)*$/i.test(prefix)

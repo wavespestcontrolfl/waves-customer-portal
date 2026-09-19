@@ -1037,3 +1037,30 @@ test.each([
     text.indexOf('exterior perimeter'), findingVerb, text.length)).toBe(instruction);
   expect(grammar.reportHasCompletedPredicate(text, findingVerb)).toBe(true);
 });
+
+test.each([
+  ['We almost got Talstar P applied to the exterior perimeter.', false],
+  ['We nearly had Talstar P applied to the exterior perimeter.', false],
+  ['We almost had Talstar P applied to the exterior perimeter.', false],
+  ['We nearly got Talstar P applied to the exterior perimeter.', false],
+  ['We actually got Talstar P applied to the exterior perimeter.', true],
+  ['We actually had Talstar P applied to the exterior perimeter.', true],
+  ['We already got Talstar P applied to the exterior perimeter.', true],
+  ['We had Talstar P applied to the exterior perimeter.', true],
+  ['We almost got access, then had Talstar P applied to the exterior perimeter.', true],
+  ['We nearly had lunch, then got Talstar P applied to the exterior perimeter.', true],
+])('near causative completion retains its bounded governor: %s', (text, completed) => {
+  const findingVerbs = [...text.matchAll(/applied/g)];
+  expect(grammar.reportHasCompletedPredicate(text, findingVerbs.at(-1))).toBe(completed);
+});
+
+test.each([
+  'Talstar P has been partially applied to the exterior perimeter.',
+  'Talstar P had almost been applied to the exterior perimeter.',
+  'We had Talstar P partially applied to the exterior perimeter.',
+  'We have nearly finished applying Talstar P to the exterior perimeter.',
+  'We have almost finished carefully applying Talstar P to the exterior perimeter.',
+])('causative normalization retains direct noncompletion modifiers: %s', (text) => {
+  const findingVerb = /\b(?:applied|applying)\b/.exec(text);
+  expect(grammar.reportHasCompletedPredicate(text, findingVerb)).toBe(false);
+});
