@@ -129,8 +129,32 @@ describe('activity cadence stays inside its claim', () => {
   ])('a trailing period on an asserted price is not activity cadence: %s', (text) => {
     expect(relations(text).map((relation) => relation.relation)).toContain('plan_total');
   });
+  test.each([
+    '$98 monthly including service', '$1176 yearly with service reminders', '$98 annually for treatments',
+  ])('a bare money total with a trailing period is not activity cadence: %s', (text) => {
+    expect(relations(text).map((relation) => relation.relation)).toContain('plan_total');
+  });
   test('activity cadence inside the same claim still excludes', () => {
     expect(relations('Monthly reminders mention the $98 price').map((relation) => relation.evidence.reason))
       .toEqual(['activity_cadence']);
   });
+});
+
+// Codex #4614 r1: comma-plus-conjunction continuations and current payment obligations.
+describe('continuations and obligations', () => {
+  const { recognizeEmailReplyPeriodRelations } = require('../services/email/email-reply-period-relations');
+  const { inspectEmailReplyPlanTotal } = require('../services/email/email-reply-plan-total-verifier');
+  const relations = (text) => recognizeEmailReplyPeriodRelations(text).clauses.flatMap((clause) => clause.periodRelations);
+  test.each([
+    'The plan is $98, and is billed monthly', 'The price is $1176, and will be charged yearly',
+    'Your $98 monthly payment is due', 'Your monthly payment of $98 is due', 'The monthly payment of $98 is payable',
+  ])('produces the plan-total finding: %s', (text) => {
+    expect(relations(text).map((relation) => relation.relation)).toContain('plan_total');
+    expect(inspectEmailReplyPlanTotal({ text }).violations).toEqual(['customer_copy_compliance']);
+  });
+  test.each(['Your $98 monthly payment posted.', 'Your $98 monthly payment was due.', 'Your payment of $98 is due next month.'])(
+    'posted events, past obligations and non-period timing stay unpaired: %s', (text) => {
+      expect(inspectEmailReplyPlanTotal({ text }).violations).toEqual([]);
+    },
+  );
 });

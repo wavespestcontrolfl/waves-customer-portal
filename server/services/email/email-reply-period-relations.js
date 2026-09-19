@@ -5,6 +5,7 @@ const { recognizeEmailReplyPricingContext } = require('./email-reply-pricing-con
 // context does not also mark as account evidence (payment, balance, pay).
 const PAYMENT_ACTIONS = new Set(['total', 'totals', 'equal', 'equals', 'come to']);
 const BILLING_PREDICATES = new Set(['bill', 'charge', 'invoice', 'pay']);
+const OBLIGATION_PREDICATES = new Set(['due', 'payable']);
 const CLAIM_BREAK_WORDS = new Set(['and', 'or', 'but']);
 const JOIN_WORDS = new Set(['the', 'a', 'an', 'our', 'your', 'my', 'their', 'his', 'her', 'its']);
 const ACTIVITY_PERIOD_FORMS = new Set(['monthly', 'yearly', 'annual', 'annually', 'annualized']);
@@ -117,8 +118,25 @@ function recognizeClause(clause) {
     return copula?.kind === 'be' && !isPastCopula(copula)
       && headAt(period.start - 2)?.head === 'payment';
   }
+  // "Your $98 monthly payment is due" / "Your monthly payment of $98 is
+  // due": a payment head in the claim followed by a copula and a current
+  // obligation predicate asserts the amount; a posted/received event does not.
+  function paymentObligation(amount, period) {
+    const first = Math.min(amount.start, period.start);
+    const last = Math.max(amount.end, period.end);
+    const paymentNear = heads.some((head) => head.head === 'payment'
+      && head.start >= first - 4 && head.end <= last + 1);
+    // The present copula sits after the payment head ("payment is due") or
+    // after the amount ("payment of $98 is due"); either way the obligation
+    // predicate follows it within the claim.
+    return paymentNear && phrases.some((phrase) => phrase.type === 'predicate'
+      && OBLIGATION_PREDICATES.has(phrase.head)
+      && phrase.headStart >= last && phrase.headStart <= last + 2
+      && tokens[phrase.headStart - 1]?.kind === 'be' && !isPastCopula(tokens[phrase.headStart - 1]));
+  }
   function paymentAssertion(amount, period) {
     if (paymentPeriodOrder(amount, period)) return true;
+    if (paymentObligation(amount, period)) return true;
     const record = amountByStart.get(amount.start);
     const asserted = record?.candidates.some((candidate) => {
       const { anchor } = candidate;
@@ -171,10 +189,16 @@ function recognizeClause(clause) {
   // same billing predicate + period; independent facts still break the claim.
   function continuesPrice(claimStart, at) {
     let next = at + 1;
+    let amountEnd = at;
     if (isWord(tokens[at], new Set(['and']))) {
+      // ", and is billed monthly" — the amount ends before the comma.
+      if (tokens[at - 1]?.kind === 'sep' && tokens[at - 1].text === ',') amountEnd = at - 1;
       if (tokens[next]?.kind === 'be') next += 1;
-    } else if (!(tokens[at].kind === 'sep' && tokens[at].text === ',')) return false;
-    const amount = amountByEnd.get(at);
+    } else if (tokens[at].kind === 'sep' && tokens[at].text === ',') {
+      if (isWord(tokens[next], new Set(['and']))) next += 1;
+      if (tokens[next]?.kind === 'be') next += 1;
+    } else return false;
+    const amount = amountByEnd.get(amountEnd);
     const period = periodByStart.get(next + 1);
     if (!amount || !period || !isWord(tokens[next], BILLING_PREDICATES)) return false;
     return assertedPriceLabel(amount, period, claimStart) || paymentAssertion(amount, period);
@@ -197,7 +221,7 @@ function recognizeClause(clause) {
     // service") is the price's cadence, not a modifier of a later activity
     // noun; only a period that modifies the activity can exclude the pair.
     const trailingAssertion = amount.end === period.start
-      && (assertedPriceLabel(amount, period, claimStart) || paymentAssertion(amount, period));
+      && (amount.kind === 'money' || assertedPriceLabel(amount, period, claimStart) || paymentAssertion(amount, period));
     if (!trailingAssertion && activityCadence(period, claimEnd)) return { relation: 'excluded', reason: 'activity_cadence' };
     if (paymentAssertion(amount, period)) return { relation: 'plan_total', reason: 'payment_assertion' };
     if (explicitCurrencyPeriod(amount, period, gap)) return { relation: 'plan_total', reason: 'direct_currency_period' };
