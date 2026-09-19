@@ -253,6 +253,14 @@ async function resolveCustomerEmailField(bouncedMessage, bouncedEmail) {
 // 'estimate_delivery:<id>' / 'estimate_followup_<stage>:<id>'), so a no-customer
 // recovery can scope its gate + commit to the ACTUAL source estimate rather than
 // any row that happens to share the typo.
+const ESTIMATE_ID_SHAPE_RE = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|\d{1,18})$/i;
+function guardEstimateIdFromTriggerEvent(triggerEventId) {
+  const s = String(triggerEventId || '');
+  if (!/^estimate/.test(s)) return null;
+  const candidate = s.split(':')[1] || '';
+  return ESTIMATE_ID_SHAPE_RE.test(candidate) ? candidate : null;
+}
+
 function sourceEstimateIdFromTriggerEvent(triggerEventId) {
   const s = String(triggerEventId || '');
   if (!/^estimate/.test(s) || !s.includes(':')) return null;
@@ -498,7 +506,14 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
       // guard's job — harmless), unioned with content derivation from the
       // stored snapshot being re-sent.
       const { annualHandoffGuard } = require('./estimate-annual-guard');
-      const sourceEstimateId = sourceEstimateIdFromTriggerEvent(bouncedMessage.trigger_event_id);
+      // Pre-push audit P1: trigger ids are not all "<prefix>:<id>" —
+      // estimate_extended is "estimate_extended:<id>:<iso-expiry>", so the
+      // last-segment helper above yields a timestamp there. Take the segment
+      // right after the prefix and accept it only when it is shaped like an
+      // estimate id; anything else is dropped (the content scan still covers
+      // the link in the stored body), so an unparseable trigger can never
+      // send a garbage value into the estimates query and loop as transient.
+      const sourceEstimateId = guardEstimateIdFromTriggerEvent(bouncedMessage.trigger_event_id);
       const verdict = await annualHandoffGuard({
         db,
         estimateIds: sourceEstimateId ? [sourceEstimateId] : [],
@@ -1214,6 +1229,7 @@ async function alertBouncedContactAddress(bouncedEmail, ev = {}) {
 }
 
 module.exports = {
+  guardEstimateIdFromTriggerEvent,
   RECOVERY_CATEGORY,
   recoveryEnabled,
   minConfidence,

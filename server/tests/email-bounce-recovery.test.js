@@ -914,3 +914,15 @@ describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery 
     expect(mockDb._state.tokenQueried).toBe(false);
   });
 });
+
+describe('annual guard trigger-id parsing (pre-push audit P1)', () => {
+  const { guardEstimateIdFromTriggerEvent } = require('../services/email-bounce-recovery');
+  test('takes the id segment after the prefix and validates its shape', () => {
+    expect(guardEstimateIdFromTriggerEvent('estimate_extended:3f2a1b4c-1111-4222-8333-444455556666:2026-09-19T00:00:00.000Z'))
+      .toBe('3f2a1b4c-1111-4222-8333-444455556666');
+    expect(guardEstimateIdFromTriggerEvent('estimate_auto_renew:12345')).toBe('12345');
+    expect(guardEstimateIdFromTriggerEvent('estimate_extended:not-an-id:2026-09-19T00:00:00.000Z')).toBeNull();
+    expect(guardEstimateIdFromTriggerEvent('invoice_reminder:12345')).toBeNull();
+    expect(guardEstimateIdFromTriggerEvent(null)).toBeNull();
+  });
+});
