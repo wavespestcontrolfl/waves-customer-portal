@@ -412,10 +412,14 @@ async function sendCustomerMessageCore(input) {
       const { rewriteWithheldEstimateLinks } = require('../estimate-annual-guard');
       const db = require('../../models/db');
       const rewritten = await rewriteWithheldEstimateLinks({ db, text: sendInput.body });
+      // Pre-push audit P1: the rewrite policy means "never refuse this
+      // message on the estimate's account, only strip its links" — so the
+      // explicit id is dropped whether or not a link was found. A link-free
+      // receipt for a withheld estimate must still go out.
+      sendInput.estimateId = null;
+      sendInput.estimateIds = [];
       if (rewritten.rewrittenIds.length) {
         sendInput.body = rewritten.text;
-        sendInput.estimateId = null;
-        sendInput.estimateIds = [];
         withheldLinksRewritten = rewritten.rewrittenIds;
         logger.warn(`[send_customer_message] rewrote ${rewritten.rewrittenIds.length} withheld estimate link(s) to the portal home for purpose=${sendInput.purpose}`);
       }

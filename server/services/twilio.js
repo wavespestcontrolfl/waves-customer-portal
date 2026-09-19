@@ -943,7 +943,9 @@ const TwilioService = {
         // union into this check and refuse a body that no longer carries
         // the link at all, defeating the rewrite entirely (mirrors the
         // email mechanism's own sendEstimateIds = [] override).
-        const explicitEstimateIds = withheldLinksRewritten ? [] : (Array.isArray(options.estimateIds) && options.estimateIds.length
+        // Pre-push audit P1: under the rewrite policy the explicit id never
+        // refuses — links are stripped instead — even when the body had none.
+        const explicitEstimateIds = (withheldLinksRewritten || options.withheldLinkPolicy === 'rewrite') ? [] : (Array.isArray(options.estimateIds) && options.estimateIds.length
           ? options.estimateIds
           : (options.estimateId ? [options.estimateId] : []));
         const verdict = await annualHandoffGuard({

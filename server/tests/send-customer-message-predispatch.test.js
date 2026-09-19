@@ -621,7 +621,7 @@ describe('annual-offer delivery guard at the provider handoff (delivery-guards s
     expect(result).toMatchObject({ sent: true, withheldLinksRewritten: ['est-1'] });
   });
 
-  test('round 8 P1: withheldLinkPolicy "rewrite" with nothing to rewrite leaves the body and explicit id untouched', async () => {
+  test('withheldLinkPolicy "rewrite" with nothing to rewrite leaves the body untouched but still drops the explicit id (a link-free receipt must send)', async () => {
     runViaProviderHook();
     const result = await sendCustomerMessage({
       ...BASE_INPUT,
@@ -632,7 +632,7 @@ describe('annual-offer delivery guard at the provider handoff (delivery-guards s
 
     expect(rewriteWithheldEstimateLinks).toHaveBeenCalledTimes(1);
     expect(sendViaTwilio.mock.calls[0][0]).toMatchObject({
-      body: 'Reminder body', estimateId: 'est-1',
+      body: 'Reminder body', estimateId: null, estimateIds: [],
     });
     expect(result.withheldLinksRewritten).toBeUndefined();
   });
