@@ -241,6 +241,65 @@ describe('processScheduledSends send-window handling', () => {
     expect(result).toEqual({ sent: 1, failed: 0, deferred: 0 });
   });
 
+  test('a queued-text refusal for one preclaimed invoice defers its exact claim and the batch continues', async () => {
+    // reconcileQueuedSendUnderClaim throws queued_pay_link for a preclaimed
+    // invoice when a deferred text still owns the pay link — the worker
+    // must give that EXACT claim back to the queue (scheduled, past the
+    // text's own slot) and keep processing the rest of the batch, not let
+    // the refusal escape and abort every invoice behind it.
+    isWithinSendWindowET.mockReturnValue(true);
+    const dueRowB = { ...dueRow, id: 'inv-2', invoice_number: 'WPC-2026-1043' };
+    const scheduledFor = new Date('2026-08-07T13:00:00.000Z'); // later than now + 10min
+    const staleRecovery = chain();
+    const dueQuery = chain({ rows: [dueRow, dueRowB] });
+    const claimA = chain({ returning: [claimedRow()] });
+    const deferralUpdate = chain();
+    const claimB = chain({ returning: [claimedRow({ id: 'inv-2', send_claim_token: 'claim-2' })] });
+    db
+      .mockReturnValueOnce(staleRecovery)
+      .mockReturnValueOnce(dueQuery)
+      .mockReturnValueOnce(claimA)
+      .mockReturnValueOnce(deferralUpdate)
+      .mockReturnValueOnce(claimB);
+    sendSpy
+      .mockImplementationOnce(async () => {
+        throw Object.assign(new Error('Invoice send already in progress — a text carrying this pay link is queued for the send window'), {
+          code: 'queued_pay_link', scheduledFor,
+        });
+      })
+      .mockImplementationOnce(async () => ({ ok: true, sms: { ok: true }, email: { ok: true }, creditApplied: 0 }));
+
+    const result = await InvoiceService.processScheduledSends();
+
+    expect(sendSpy).toHaveBeenCalledWith('inv-1', expect.objectContaining({ allowClaimed: true, claimToken: 'claim-1' }));
+    expect(sendSpy).toHaveBeenCalledWith('inv-2', expect.objectContaining({ allowClaimed: true, claimToken: 'claim-2' }));
+    // The exact claim (matched by ITS OWN token) went back to 'scheduled',
+    // deferred past the queued text's slot, never finalized or failed.
+    expect(deferralUpdate.where).toHaveBeenCalledWith({ id: 'inv-1', status: 'sending', send_claim_token: 'claim-1' });
+    const deferralPayload = deferralUpdate.update.mock.calls[0][0];
+    expect(deferralPayload.status).toBe('scheduled');
+    expect(deferralPayload.send_claim_token).toBeNull();
+    expect(deferralPayload.scheduled_send_at.getTime()).toBeGreaterThanOrEqual(scheduledFor.getTime());
+    // The second invoice, behind the refused one in the batch, still sent.
+    expect(result).toEqual({ sent: 1, failed: 0, deferred: 1 });
+  });
+
+  test('a non-queue error from the preclaimed send still propagates', async () => {
+    isWithinSendWindowET.mockReturnValue(true);
+    const staleRecovery = chain();
+    const dueQuery = chain({ rows: [dueRow] });
+    const claim = chain({ returning: [claimedRow()] });
+    db
+      .mockReturnValueOnce(staleRecovery)
+      .mockReturnValueOnce(dueQuery)
+      .mockReturnValueOnce(claim);
+    sendSpy.mockImplementationOnce(async () => {
+      throw Object.assign(new Error('synthetic failure'), { code: 'boom' });
+    });
+
+    await expect(InvoiceService.processScheduledSends()).rejects.toMatchObject({ code: 'boom' });
+  });
+
   test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD'])('%s reschedules at nextAllowedAt without spending an attempt', async (code) => {
     isWithinSendWindowET.mockReturnValue(true); // guard passed at 19:59...
     const staleRecovery = chain();
