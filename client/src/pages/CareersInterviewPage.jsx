@@ -353,30 +353,6 @@ export default function CareersInterviewPage() {
             </BrandButton>
           </div>
 
-          <div style={{ marginTop: 20, borderTop: '1px solid var(--border, #E7E2D7)', paddingTop: 16 }}>
-            {withdrawStep === 'idle' ? (
-              <button type="button" style={LOW_EMPHASIS_LINK_STYLE} onClick={() => setWithdrawStep('confirming')}>
-                I&rsquo;m no longer interested
-              </button>
-            ) : (
-              <div role="alert">
-                <p style={BODY_STYLE}>Are you sure? This will withdraw your application.</p>
-                {withdrawError && <div style={ERROR_BANNER_STYLE}>{withdrawError}</div>}
-                <div style={{ display: 'flex', gap: 10, marginTop: 10, flexWrap: 'wrap' }}>
-                  <BrandButton
-                    variant="secondary"
-                    disabled={withdrawStep === 'submitting'}
-                    onClick={() => setWithdrawStep('idle')}
-                  >
-                    Cancel
-                  </BrandButton>
-                  <BrandButton disabled={withdrawStep === 'submitting'} onClick={confirmWithdraw}>
-                    {withdrawStep === 'submitting' ? 'Submitting…' : 'Yes, withdraw'}
-                  </BrandButton>
-                </div>
-              </div>
-            )}
-          </div>
         </BrandCard>
       ) : (
         <BrandCard padding={24}>
@@ -481,6 +457,34 @@ export default function CareersInterviewPage() {
           </BrandButton>
         </BrandCard>
       )}
+
+      {/* Withdrawing is offered in BOTH states: an applicant who was invited
+          but is not interested should be able to say so without first
+          booking a time (local audit P1). */}
+        <div style={{ marginTop: 20, paddingTop: 4 }}>
+          {withdrawStep === 'idle' ? (
+            <button type="button" style={LOW_EMPHASIS_LINK_STYLE} onClick={() => setWithdrawStep('confirming')}>
+              I&rsquo;m no longer interested
+            </button>
+          ) : (
+            <div role="alert">
+              <p style={BODY_STYLE}>Are you sure? This will withdraw your application.</p>
+              {withdrawError && <div style={ERROR_BANNER_STYLE}>{withdrawError}</div>}
+              <div style={{ display: 'flex', gap: 10, marginTop: 10, flexWrap: 'wrap' }}>
+                <BrandButton
+                  variant="secondary"
+                  disabled={withdrawStep === 'submitting'}
+                  onClick={() => setWithdrawStep('idle')}
+                >
+                  Cancel
+                </BrandButton>
+                <BrandButton disabled={withdrawStep === 'submitting'} onClick={confirmWithdraw}>
+                  {withdrawStep === 'submitting' ? 'Submitting…' : 'Yes, withdraw'}
+                </BrandButton>
+              </div>
+            </div>
+          )}
+        </div>
     </CustomerColumn>
   );
 }

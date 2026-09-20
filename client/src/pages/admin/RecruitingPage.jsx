@@ -774,8 +774,9 @@ export default function RecruitingPage() {
                   ))}
               </div>
 
-              {["interview", "offer", "hired"].includes(detail.status) &&
-                (detail.interview_booked_at || detail.interview_url) && (
+              {(["offer", "hired"].includes(detail.status)
+                ? Boolean(detail.interview_booked_at || detail.interview_url)
+                : detail.status === "interview") && (
                   <div className="mb-4 border-hairline border rounded p-3">
                     <div className="text-ui-caption font-medium text-ink-secondary mb-1">
                       Interview
@@ -786,16 +787,22 @@ export default function RecruitingPage() {
                         {formatETDateTime(detail.interview_at)}
                       </div>
                     ) : (
+                      // A candidate moved to Interview "without notifying" has
+                      // no link yet — offer to send one from here (the same
+                      // resend path mints the token) instead of forcing a
+                      // stage round-trip (local audit P1).
                       <div className="flex items-center justify-between gap-3 flex-wrap">
                         <span className="text-14 text-zinc-600">
-                          Link sent, waiting for the applicant to pick a time.
+                          {detail.interview_url
+                            ? "Link sent, waiting for the applicant to pick a time."
+                            : "No scheduling link sent yet."}
                         </span>
                         <Button
                           size="sm"
                           variant="secondary"
                           onClick={() => openStageDialog("interview", { resend: true })}
                         >
-                          Resend link
+                          {detail.interview_url ? "Resend link" : "Send link"}
                         </Button>
                       </div>
                     )}
