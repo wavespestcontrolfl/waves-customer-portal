@@ -578,6 +578,8 @@ describe('round-3 guards', () => {
   });
 
   test('the same live stop on a FUTURE date is not in progress and optimizes normally', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+    jest.setSystemTime(new Date('2026-09-19T17:00:00Z')); // Fixture date is tomorrow in ET.
     stopsByDate[DATE] = chronologyDay().map((s) => (s.id === 'T1' ? { ...s, status: 'on_site' } : s));
     mockOptimizerOrder(['T2', 'T1', 'U']);
     const { status, body } = await optimizeRoute({ technicianId: 't1', date: DATE });
