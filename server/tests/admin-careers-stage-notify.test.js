@@ -327,6 +327,18 @@ describe('PATCH /:id/status', () => {
     expect(mockDb.__rows()[0].interview_token).toBeNull();
   });
 
+  test('a SELECTED channel with an explicitly blank body is refused with 400 — never silently the default template (Codex r16 P2)', async () => {
+    mockDb.__setRows([appRow({ status: 'reviewed' })]);
+    const blankSms = await patch('aaaaaaaa-0000-4000-8000-000000000001', { status: 'interview', notify: { sms: true, sms_body: '   ' } });
+    expect(blankSms.status).toBe(400);
+    expect(blankSms.body.error).toMatch(/text message is empty/i);
+    const blankEmail = await patch('aaaaaaaa-0000-4000-8000-000000000001', { status: 'interview', notify: { email: true, email_body: '' } });
+    expect(blankEmail.status).toBe(400);
+    expect(blankEmail.body.error).toMatch(/email body is empty/i);
+    expect(mockDb.__rows()[0].status).toBe('reviewed'); // nothing committed
+    expect(mockSendStageComms).not.toHaveBeenCalled();
+  });
+
   test('an edited body missing the interview link is refused with 400, before any write', async () => {
     mockBodyKeepsInterviewLink.mockReturnValue(false);
     mockDb.__setRows([appRow({ status: 'reviewed' })]);

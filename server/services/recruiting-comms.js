@@ -472,9 +472,19 @@ async function channelEligibility(app) {
       logger.warn(`[recruiting-comms] suppression lookup failed for preview (application ${app.id}): ${errorSummary(err)}`);
     }
   }
-  const email = contact.email
-    ? { available: true, to: maskEmail(contact.email), reason: null }
-    : { available: false, to: null, reason: 'no_email' };
+  let email = { available: false, to: null, reason: 'no_email' };
+  if (contact.email) {
+    email = { available: true, to: maskEmail(contact.email), reason: null };
+    try {
+      // Same ledger the send consults (checkEmailPreProviderGates): a
+      // bounced/unsubscribed address must not be advertised as a usable
+      // invite channel (Codex r16 P2).
+      const suppression = await activeSuppressionFor(RECRUITING_SUPPRESSION_TEMPLATE, contact.email, RECRUITING_SUPPRESSION_GROUP_KEY);
+      if (suppression) email = { available: false, to: maskEmail(contact.email), reason: 'suppressed' };
+    } catch (err) {
+      logger.warn(`[recruiting-comms] email suppression lookup failed for preview (application ${app.id}): ${errorSummary(err)}`);
+    }
+  }
   return { sms, email };
 }
 

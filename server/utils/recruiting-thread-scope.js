@@ -99,18 +99,22 @@ const SMS_EVIDENCE_OUTCOMES = ['handoff', 'sent', 'uncertain'];
  * the ONE calculation every reader ranks recruiting evidence by (the reply
  * classifier and the composer's owning-application pick must agree, Codex
  * r14 P2). NaN for anything that is not delivery evidence.
- *   at                  — ledger creation (the 'pending' write)
  *   handoff_at          — stamped at the provider boundary (immediate path)
  *   replay_attempted_at — stamped by the replay rail right before Twilio
- *   finalized_at        — settlement time, once settled as sent/uncertain
+ *   at                  — ledger creation; the fallback for an entry that
+ *                         predates the boundary stamps
+ * Settlement (finalized_at) is deliberately NOT used: Twilio's response or
+ * the post-send persistence can lag, and a stamp later than the real
+ * handoff would hide a customer text that genuinely followed the recruiting
+ * text (Codex r16 P1). Delivery ORDER is the provider boundary.
  */
 function effectiveSendMs(entry) {
   if (!entry || entry.channel !== 'sms' || !SMS_EVIDENCE_OUTCOMES.includes(entry.outcome)) return NaN;
-  const settledAt = entry.outcome === 'handoff' ? null : entry.finalized_at;
-  const stamps = [entry.at, entry.handoff_at, entry.replay_attempted_at, settledAt]
+  const boundary = [entry.handoff_at, entry.replay_attempted_at]
     .map((v) => Date.parse(v || ''))
     .filter((ms) => Number.isFinite(ms));
-  return stamps.length ? Math.max(...stamps) : NaN;
+  if (boundary.length) return Math.max(...boundary);
+  return Date.parse(entry.at || '');
 }
 
 module.exports = {

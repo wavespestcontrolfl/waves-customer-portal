@@ -210,25 +210,42 @@ function buildStatusPatchPlan(req) {
     ? req.body.notify
     : null;
 
-  const smsBodyOverride = notify && typeof notify.sms_body === 'string'
-    ? stripControlChars(notify.sms_body).slice(0, MAX_SMS_BODY_CHARS)
-    : null;
-  const emailSubjectOverride = notify && typeof notify.email_subject === 'string'
-    ? stripControlChars(notify.email_subject).slice(0, MAX_EMAIL_SUBJECT_CHARS)
-    : null;
-  const emailBodyOverride = notify && typeof notify.email_body === 'string'
-    ? stripControlChars(notify.email_body).slice(0, MAX_EMAIL_BODY_CHARS)
-    : null;
+  const overrides = parseNotifyOverrides(notify);
   const wantSms = Boolean(notify && notify.sms === true);
   const wantEmail = Boolean(notify && notify.email === true);
+  const blank = blankSelectedOverride({ wantSms, wantEmail, ...overrides });
+  if (blank) return { error: { code: 400, body: { error: blank } } };
 
   return {
     plan: {
       status, note, resend, notify,
-      smsBodyOverride, emailSubjectOverride, emailBodyOverride,
+      ...overrides,
       wantSms, wantEmail,
     },
   };
+}
+
+// Admin-edited copy: present only when the request carried the string
+// (null = "use the default template").
+function parseNotifyOverrides(notify) {
+  const text = (key, max) => (notify && typeof notify[key] === 'string' ? stripControlChars(notify[key]).slice(0, max) : null);
+  return {
+    smsBodyOverride: text('sms_body', MAX_SMS_BODY_CHARS),
+    emailSubjectOverride: text('email_subject', MAX_EMAIL_SUBJECT_CHARS),
+    emailBodyOverride: text('email_body', MAX_EMAIL_BODY_CHARS),
+  };
+}
+
+// An explicitly submitted blank value for a SELECTED channel is a refusal,
+// never "use the default": the preview showed an empty message, so Confirm
+// must not send the substantive template behind it (Codex r16 P2). Returns
+// the refusal message, or null.
+function blankSelectedOverride({ wantSms, wantEmail, smsBodyOverride, emailSubjectOverride, emailBodyOverride }) {
+  const blank = (v) => v !== null && !v.trim();
+  if (wantSms && blank(smsBodyOverride)) return 'The text message is empty';
+  if (wantEmail && blank(emailBodyOverride)) return 'The email body is empty';
+  if (wantEmail && blank(emailSubjectOverride)) return 'The email subject is empty';
+  return null;
 }
 
 // Edited bodies must keep either the real link (if a token already exists)

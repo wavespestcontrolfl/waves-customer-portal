@@ -446,22 +446,6 @@ router.post('/sms', async (req, res, next) => {
     if (fromNumber && !TWILIO_NUMBERS.findByNumber(fromNumber)) {
       return res.status(400).json({ error: 'fromNumber must be a Waves Twilio number' });
     }
-    // Texting an applicant from the composer stays on the recruiting rail
-    // (Codex r7 P0): owner-only, typed job_owner_reply, handoff evidence on
-    // the application — never a 'manual' customer text that would hand the
-    // applicant's next reply to the customer pipeline.
-    if (await isRecruitingPhone(to, undefined, { activeOnly: true })) {
-      if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
-      if (media.length > 0) return res.status(400).json({ error: 'Attachments are not supported for applicant texts' });
-      const RecruitingComms = require('../services/recruiting-comms');
-      const applicationId = await RecruitingComms.openApplicationIdForPhone(to);
-      if (!applicationId) return res.status(409).json({ error: 'No open application for this applicant — text them from the recruiting queue' });
-      const reply = await RecruitingComms.sendOwnerReply({ applicationId, body: cleanBody, by: req.technicianId, fromNumber: fromNumber || undefined });
-      if (!['sent', 'uncertain', 'deferred'].includes(reply.outcome)) {
-        return res.status(422).json({ error: `Applicant text ${reply.outcome}` });
-      }
-      return res.json({ success: true, recruiting: true, outcome: reply.outcome });
-    }
     let trustedCustomerId;
     if (customerId) {
       const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'phone');
@@ -472,6 +456,26 @@ router.post('/sms', async (req, res, next) => {
         return res.status(400).json({ error: 'to must match the selected customer phone' });
       }
       trustedCustomerId = customer.id;
+    }
+    // Texting an applicant from the composer stays on the recruiting rail
+    // (Codex r7 P0): owner-only, typed job_owner_reply, handoff evidence on
+    // the application — never a 'manual' customer text that would hand the
+    // applicant's next reply to the customer pipeline. A VALIDATED customerId
+    // is explicit customer context (a shared applicant/customer phone texted
+    // from the customer's thread) and keeps the ordinary path — the reply
+    // classifier then sees the newer customer text and routes the next reply
+    // to the customer pipeline (Codex r16 P1).
+    if (!trustedCustomerId && await isRecruitingPhone(to, undefined, { activeOnly: true })) {
+      if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+      if (media.length > 0) return res.status(400).json({ error: 'Attachments are not supported for applicant texts' });
+      const RecruitingComms = require('../services/recruiting-comms');
+      const applicationId = await RecruitingComms.openApplicationIdForPhone(to);
+      if (!applicationId) return res.status(409).json({ error: 'No open application for this applicant — text them from the recruiting queue' });
+      const reply = await RecruitingComms.sendOwnerReply({ applicationId, body: cleanBody, by: req.technicianId, fromNumber: fromNumber || undefined });
+      if (!['sent', 'uncertain', 'deferred'].includes(reply.outcome)) {
+        return res.status(422).json({ error: `Applicant text ${reply.outcome}` });
+      }
+      return res.json({ success: true, recruiting: true, outcome: reply.outcome });
     }
 
     const reviewLooking = !!reviewRequestId || require('../services/review-ask-history').looksLikeReviewAsk(cleanBody);

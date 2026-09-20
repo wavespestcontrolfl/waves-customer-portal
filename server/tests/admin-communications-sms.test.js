@@ -412,6 +412,32 @@ describe('admin communications SMS route', () => {
     });
   });
 
+  test('a VALIDATED customerId is explicit customer context: an active applicant phone attached to that customer takes the ordinary path, not the recruiting rail (Codex r16 P1)', async () => {
+    const { isRecruitingPhone } = require('../utils/recruiting-thread-scope');
+    isRecruitingPhone.mockResolvedValue(true);
+    db.mockImplementation((table) => {
+      const first = jest.fn(async () => (table === 'customers' ? { id: 'cust-A', phone: '+15551234567' } : null));
+      return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), whereRaw: jest.fn(function () { return this; }), orderBy: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1) };
+    });
+    sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM-cust' });
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', body: 'Your tech is on the way.', messageType: 'manual', customerId: 'cust-A' }),
+        });
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body.recruiting).toBeUndefined();
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+        expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({ to: '+15551234567', audience: expect.any(String) });
+      });
+    } finally {
+      isRecruitingPhone.mockResolvedValue(false);
+    }
+  });
+
   test('allows desktop manual sends with exact quote prices', async () => {
     sendCustomerMessage.mockResolvedValue({
       sent: true,

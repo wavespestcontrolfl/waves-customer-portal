@@ -101,8 +101,10 @@ describe('matchApplicantReply', () => {
   });
   test('a replayed text uses its ACTUAL send time: a customer text sent between queue and replay does not override', async () => {
     // queued at day -1 (overnight), replayed by the cron at 08:00 (day 0);
-    // the customer text at day -0.5 is OLDER than the real handoff.
-    state.apps = [{ id: 'app-1', comms_history: [{ ...sentEntry(1), outcome: 'sent', finalized_at: new Date(NOW - 3600000).toISOString() }] }];
+    // the customer text at day -0.5 is OLDER than the real handoff. The
+    // registry stamps replay_attempted_at right before Twilio; settlement
+    // (finalized_at) is not a delivery-order stamp (Codex r16 P1).
+    state.apps = [{ id: 'app-1', comms_history: [{ ...sentEntry(1), outcome: 'sent', replay_attempted_at: new Date(NOW - 3600000).toISOString(), finalized_at: new Date(NOW - 3500000).toISOString() }] }];
     state.newerCustomerText = null; // the route's created_at > handoff predicate would not match the -0.5d text
     await expect(matchApplicantReply('+19415550142', '+19415550199')).resolves.toEqual({ applicationId: 'app-1' });
     const q = customerTextProbe();
@@ -124,6 +126,16 @@ describe('matchApplicantReply', () => {
     const q = customerTextProbe();
     const bound = q.where.mock.calls.find((c) => c[0] === 'created_at')[2];
     expect(Math.abs(bound.getTime() - (NOW - 1800000))).toBeLessThan(1000);
+  });
+  test('a LATE settlement never moves the text after a customer text that really followed it: the bound is handoff_at, not finalized_at', async () => {
+    // handoff at -2h, Twilio response persisted at -10m; a customer text at
+    // -1h must still override, so the probe bound is the handoff instant.
+    state.apps = [{ id: 'app-1', comms_history: [{ ...sentEntry(3), outcome: 'sent', handoff_at: new Date(NOW - 7200000).toISOString(), finalized_at: new Date(NOW - 600000).toISOString() }] }];
+    state.newerCustomerText = { id: 'sms-newer' };
+    await expect(matchApplicantReply('+19415550142', '+19415550199')).resolves.toBeNull();
+    const q = customerTextProbe();
+    const bound = q.where.mock.calls.find((c) => c[0] === 'created_at')[2];
+    expect(Math.abs(bound.getTime() - (NOW - 7200000))).toBeLessThan(1000);
   });
   test('a pending entry (before the provider boundary) is NOT delivery evidence', async () => {
     state.apps = [{ id: 'app-1', comms_history: [{ ...sentEntry(0.1), outcome: 'pending' }] }];

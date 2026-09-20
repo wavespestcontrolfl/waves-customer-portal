@@ -230,6 +230,18 @@ describe('channel eligibility', () => {
     expect(result.sms.reason).toBe('suppressed');
   });
 
+  test('an email on the suppression ledger (bounce/unsubscribe) -> email unavailable, reason suppressed', async () => {
+    mockActiveSuppressionFor.mockResolvedValueOnce({ suppression_type: 'bounce', group_key: null });
+    const result = await RecruitingComms.channelEligibility(baseApp());
+    expect(result.email).toEqual({ available: false, to: 'j***@example.com', reason: 'suppressed' });
+  });
+
+  test('an email suppression lookup failure keeps the preview informational (available) — the send re-checks authoritatively', async () => {
+    mockActiveSuppressionFor.mockRejectedValueOnce(new Error('ledger down'));
+    const result = await RecruitingComms.channelEligibility(baseApp());
+    expect(result.email.available).toBe(true);
+  });
+
   test('phone present and not suppressed -> sms available, masked', async () => {
     const app = baseApp();
     const result = await RecruitingComms.channelEligibility(app);

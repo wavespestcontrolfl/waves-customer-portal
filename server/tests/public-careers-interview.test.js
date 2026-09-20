@@ -280,6 +280,29 @@ describe('GET /interview/:token', () => {
   });
 });
 
+describe('GET /interview/:token while the slot read is down', () => {
+  test('a BOOKED applicant still sees their committed time (slots are decoration); an unbooked one gets the generic 500', async () => {
+    mockListInterviewSlots.mockRejectedValue(new Error('availability read timed out'));
+    mockDb.__setRows([appRow({
+      interview_mode: 'phone',
+      interview_at: '2027-03-16T20:00:00.000Z',
+      interview_end_at: '2027-03-16T20:30:00.000Z',
+      interview_booked_at: '2027-03-15T00:00:00.000Z',
+    })]);
+    const booked = await fetch(`${base}/api/public/careers/interview/${TOKEN}`);
+    expect(booked.status).toBe(200);
+    const body = await booked.json();
+    expect(body.status).toBe('booked');
+    expect(body.booked.start).toBe('2027-03-16T20:00:00.000Z');
+    expect(body.slots).toEqual([]);
+
+    mockDb.__setRows([appRow()]);
+    const open = await fetch(`${base}/api/public/careers/interview/${TOKEN}`);
+    expect(open.status).toBe(500);
+    mockListInterviewSlots.mockReset();
+  });
+});
+
 describe('POST /interview/:token/book', () => {
   test('books under the booking advisory lock, listing slots through the transaction after the lock', async () => {
     const offered = { start: '2027-03-16T20:00:00.000Z', end: '2027-03-16T20:30:00.000Z', date: '2027-03-16', label: 'Tue Mar 16, 4:00 PM' };

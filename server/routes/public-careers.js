@@ -194,7 +194,10 @@ router.get('/interview/:token', interviewLimiter, async (req, res) => {
   try {
     const application = await db('job_applications').where({ interview_token: req.params.token }).first();
     if (!application || application.status !== 'interview') return res.status(404).json({ error: 'Not found' });
-    return res.json(await interviewViewPayload(application));
+    // A booked applicant reopening the link must see their committed time
+    // even while the ancillary slot read is down (Codex r16 P2); the slot
+    // list is only required while there is nothing booked to show.
+    return res.json(await interviewViewPayload(application, { slotsRequired: !application.interview_booked_at }));
   } catch (err) {
     logger.error(`[careers] interview GET failed: ${errorSummary(err)}`);
     return res.status(500).json({ error: 'Something went wrong.' });
