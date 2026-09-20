@@ -47,7 +47,15 @@ const CALLBACK_COORDINATED_SUBJECT_RE = new RegExp(
 // "while you review or call her" means "you review or [you] call her", not
 // a Waves promise. "she agrees, and email him" stays bridgeable because the
 // comma separates the aside from the resumed main-clause coordination.
-const CALLBACK_SUBORDINATE_BRIDGE = '\\b(?:you|she|he|it|they|one|who)\\b\\s+(?:[a-z]+\\s+){0,3}[a-z]+\\s*\\b(?:and|or|but|so|then)\\b';
+// Verb agreement, not just a subject word, decides whether the intervening
+// clause actually governs the coordinated action: "you review or call her"
+// reads as "you review or [you] call her" because "you" can also govern the
+// following base-form contact verb, but singular "she" cannot — "she
+// reviews and call her" can only mean "[we] call her", so an -s finite verb
+// after a third-person-singular subject does not count as a bridge. A
+// plural/second-person subject keeps matching on any final word since its
+// base-form verb never carries that -s.
+const CALLBACK_SUBORDINATE_BRIDGE = `\\b(?:you|they|one|who)\\b\\s+(?:(?!(?:and|or|but|so|then)\\b)[a-z]+\\s+){0,3}(?!(?:and|or|but|so|then)\\b)[a-z]+\\s*\\b(?:and|or|but|so|then)\\b|\\b(?:she|he|it)\\b\\s+(?:(?!(?:and|or|but|so|then)\\b)[a-z]+\\s+){0,3}(?!(?:and|or|but|so|then)\\b)[a-z]+(?<!s)\\s*\\b(?:and|or|but|so|then)\\b`;
 // Two branches, deliberately not one: a BASE verb may sit up to three filler
 // words after the modal ("will go ahead and call her"), while an -ING verb
 // counts only through "be". The future progressive ("will be calling her")
@@ -63,7 +71,11 @@ const CALLBACK_ACTION_LEAD = `(?:(?:not\\s+)?(?:go ahead and|make sure to|be sur
 // "plan whether to call", "try not to call") — a structural guard on the
 // infinitive shape catches every governing verb at once, rather than
 // enumerating them.
-const CALLBACK_ACTION_DELIBERATION_GUARD = `(?!(?:[a-z]+\\s+){0,3}(?:whether|if)\\s+to\\s+${CALLBACK_VERB}\\b)(?!(?:[a-z]+\\s+){0,3}not\\s+to\\s+${CALLBACK_VERB}\\b)`;
+// A finite embedded question ("see if they call her", "check whether they
+// call her") is the same deliberation as the infinitive shape above, just
+// with its own subject and a finite verb instead of "to" + the base verb —
+// Waves only promises to observe or check, not to make the call itself.
+const CALLBACK_ACTION_DELIBERATION_GUARD = `(?!(?:[a-z]+\\s+){0,3}(?:whether|if)\\s+to\\s+${CALLBACK_VERB}\\b)(?!(?:[a-z]+\\s+){0,3}not\\s+to\\s+${CALLBACK_VERB}\\b)(?!(?:[a-z]+\\s+){0,3}(?:whether|if)\\s+(?!to\\b)[a-z]+\\s+${CALLBACK_VERB}\\b)`;
 const CALLBACK_VERB_PERFECT = '(?:called|phoned|rung|reached(?: out to)?|contacted|got(?:ten)? in touch with|followed up with|got(?:ten)? back to|spoken (?:with|to)|talked (?:to|with)|texted|emailed)';
 const CALLBACK_ACTION = `(?:${CALLBACK_ACTION_DELIBERATION_GUARD}${CALLBACK_ACTION_LEAD}${CALLBACK_VERB}|${CALLBACK_ADVERB}have\\s+${CALLBACK_ADVERB}${CALLBACK_VERB_PERFECT}|${CALLBACK_ADVERB}be\\s+${CALLBACK_ADVERB}${CALLBACK_VERB_ING})`;
 // Delegating the call is promising it: "have the office call her", "make
@@ -136,7 +148,13 @@ const CALLBACK_UNICODE_WORD_END = '(?![\\p{L}\\p{N}_])';
 // the recipient span early. A preposition-led timing phrase ("within an
 // hour", "in an hour") is unaffected: the word right after the recipient
 // there is the preposition, not a determiner.
-const CALLBACK_OBJECT_COMPLEMENT = '(?!\\s+(?:an?|the|this|that|these|those|some|any|another|my|our|your|his|their)\\s+[a-z])';
+// A determiner-led TIMING phrase ("this afternoon", "some time tomorrow")
+// is not an object complement even though it shares the same
+// determiner-then-word shape as "this nickname" / "that name" / "some
+// fool"; excluding the bounded timing nouns from the word right after the
+// determiner keeps those ordinary callback times from being rejected.
+const CALLBACK_OBJECT_COMPLEMENT_TIMING_NOUN = `(?:afternoon|morning|evening|weekend|week|month|year|time|day|${WEEKDAYS}|minute|hour|moment)`;
+const CALLBACK_OBJECT_COMPLEMENT = `(?!\\s+(?:an?|the|this|that|these|those|some|any|another|my|our|your|his|their)\\s+(?!${CALLBACK_OBJECT_COMPLEMENT_TIMING_NOUN}\\b)[a-z])`;
 const callbackTarget = (targets, action, lightAction) => `(?:${action}\\s+(?:${targets})(?:[\\x27\\u2019]s\\s+${CALLBACK_RECIPIENT_CHANNEL}|\\s+${CALLBACK_RECIPIENT_CHANNEL})?${CALLBACK_UNICODE_WORD_END}${CALLBACK_OBJECT_COMPLEMENT}${CALLBACK_PHRASE_END}|${lightAction}\\s+(?:(?:${targets})(?:[\\x27\\u2019]s)?\\s+(?:an?\\s+)?${CALLBACK_CONTACT_NOUN}\\b${CALLBACK_PHRASE_END}|an?\\s+${CALLBACK_CONTACT_NOUN}\\s+(?:to|for)\\s+(?:${targets})${CALLBACK_UNICODE_WORD_END}${CALLBACK_PHRASE_END}))`;
 const CALLBACK_RECIPIENT_ACTION = `(?:be\\s+(?:called|phoned|rung|contacted|texted|emailed|reached(?: out to)?|followed up with)\\s+by|(?:get|receive)\\s+an?\\s+${CALLBACK_CONTACT_NOUN}\\s+from|hear from)`;
 // The same promise as a noun instead of a verb: "is scheduled for a call
@@ -144,7 +162,7 @@ const CALLBACK_RECIPIENT_ACTION = `(?:be\\s+(?:called|phoned|rung|contacted|text
 // direct promiser-first form and, mirroring CALLBACK_RECIPIENT_ACTION
 // above, as a recipient-first passive ("she is booked for a call with the
 // office").
-const CALLBACK_SCHEDULED_CALL_NOUN = '(?:is|are|was|am)\\s+(?:scheduled|booked|set\\s+up)\\s+for\\s+(?:an?\\s+)?(?:phone\\s+)?call\\s+with';
+const CALLBACK_SCHEDULED_CALL_NOUN = `(?:is|are|was|am)\\s+(?:scheduled|booked|set\\s+up)\\s+for\\s+(?:an?\\s+)?${CALLBACK_CONTACT_NOUN}\\s+with`;
 // Whom every scenario's account holder can be called without naming her: a
 // pronoun, or the role the caller is asking about. The fixture's `targets`
 // add the names and relationships this scenario's account holder goes by
@@ -170,7 +188,7 @@ function recognizeCallbackCandidates(text, valueTargets) {
   const barePromisedContact = `(?:${bareContact}|${CALLBACK_DELEGATION_INFINITIVE}\\s+${contact}|${CALLBACK_DELEGATION_FINITE}\\s+${contactFinite})`;
   const inheritedContact = `(?:and|or|but|so|then)\\s+${CALLBACK_COORDINATED_MODAL}\\s+${promisedContact}`;
   const shiftedRecipient = '(?:you|me|us|him|her|them|(?:your|my|our|his|their)\\s+[a-z][\\w\\x27\\u2019-]*)';
-  const inheritedBareContact = `(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+(?:(?![.!?;]|\\b${CALLBACK_ACTOR_SHIFT}\\s+${shiftedRecipient}\\b|${CALLBACK_COORDINATED_SUBJECT_RE.source}|${CALLBACK_SUBORDINATE_BRIDGE}).){1,120}?\\b(?:and|or|but|so|then)\\s+${barePromisedContact}`;
+  const inheritedBareContact = `${CALLBACK_UNICODE_WORD_START}(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+(?:(?![.!?;]|\\b${CALLBACK_ACTOR_SHIFT}\\s+${shiftedRecipient}\\b|${CALLBACK_COORDINATED_SUBJECT_RE.source}|${CALLBACK_SUBORDINATE_BRIDGE}).){1,120}?\\b(?:and|or|but|so|then)\\s+${barePromisedContact}`;
   const wavesActor = `(?:${CALLBACK_PROMISER}|me|us)\\b(?![\\x27\\u2019]s\\b)${CALLBACK_PHRASE_END}`;
   const recipientFirst = `${recipientTargets}${CALLBACK_MODAL}\\s+${CALLBACK_ADVERB}${CALLBACK_RECIPIENT_ACTION}\\s+${wavesActor}`;
   const scheduledCallDirect = `${CALLBACK_PROMISER}\\s+${CALLBACK_SCHEDULED_CALL_NOUN}\\s+(?:${targets})${CALLBACK_UNICODE_WORD_END}${CALLBACK_PHRASE_END}`;
@@ -193,6 +211,7 @@ function recognizeCallbackCandidates(text, valueTargets) {
     ...[...text.matchAll(re)].map((match) => ({ match, bare: false })),
     ...inheritedMatches.map((match) => ({ match, bare: true })),
   ];
+  const seenCandidates = new Set();
   return matches.map(({ match, bare }) => {
     const start = match.index;
     const end = start + match[0].length;
@@ -237,7 +256,19 @@ function recognizeCallbackCandidates(text, valueTargets) {
       actor,
       recipient,
     };
-  });
+  })
+    // A coordinated commitment can satisfy both the primary expression and
+    // the independent inherited-action scan ("We will check and call her."),
+    // producing identical direct and bare-coordinated candidates for the
+    // same commitment. Direct candidates are built first (see `matches`
+    // above), so keeping the first occurrence per (span, actor, recipient)
+    // keeps the direct kind and drops its bare-coordinated duplicate.
+    .filter((candidate) => {
+      const key = `${candidate.source.start}|${candidate.source.end}|${candidate.actor.text}|${candidate.recipient ? candidate.recipient.text : ''}`;
+      if (seenCandidates.has(key)) return false;
+      seenCandidates.add(key);
+      return true;
+    });
 }
 
 module.exports = {
