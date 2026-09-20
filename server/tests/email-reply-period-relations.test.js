@@ -105,6 +105,26 @@ describe('inactive email reply period relations', () => {
   });
 
   test.each([
+    'The plan is billed monthly and costs $98',
+    'The annual package includes setup and costs $1176',
+    'Our plan is billed monthly and it runs $98',
+  ])('a period-first coordinated price predicate stays in one claim: %s', (text) => {
+    expect(kinds(text)).toContain('plan_total');
+  });
+
+  test.each(['The plan costs $98 every calendar month', 'The fee is $1176 per calendar year'])(
+    'calendar-qualified periods are periods: %s', (text) => {
+      expect(reasons(text)).toEqual(['money_period_claim']);
+    },
+  );
+
+  test.each(['The non-monthly visit plan costs $98', 'The bi-annual visit package is $1176'])(
+    'a negated or compound hyphenated cadence inside a visit token is not a period: %s', (text) => {
+      expect(kinds(text)).not.toContain('plan_total');
+    },
+  );
+
+  test.each([
     'The initial price is $98, service occurs monthly',
     'Your refund was $98; service is monthly.',
   ])('independent facts still break the claim or stay unpaired: %s', (text) => {

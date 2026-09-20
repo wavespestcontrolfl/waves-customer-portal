@@ -47,6 +47,16 @@ describe('inactive supplemental period phrases', () => {
     },
   );
 
+  test.each(['every calendar month', 'per calendar year', 'a calendar month'])(
+    'accepts a calendar qualifier inside a supplemental period: %s', (text) => {
+      expect(periods(text).map((phrase) => [phrase.text, phrase.period]))
+        .toEqual([[text, /month/.test(text) ? 'month' : 'year']]);
+    },
+  );
+  test('skips a cadence fragment behind a lexical hyphen inside a visit token', () => {
+    expect(recognize('The non-monthly visit plan costs $98').clauses[0].periodPhrases).toEqual([]);
+  });
+
   test.each(['$98/monthly visit', 'The $98/annual visit plan'])(
     'scans punctuation-prefixed embedded periods: %s', (text) => {
       const clause = recognize(text).clauses[0];

@@ -52,6 +52,9 @@ const PERIOD_PATTERNS = [
     // "a month ago", "a month or two ago", "a year and a half ago" stay temporal.
     '(?:a|each|every)\\s+(?:months?|mos?|years?|yrs?)\\b(?!-[a-z]|(?:\\s+(?:or|and)\\s+(?:a\\s+)?(?:[a-z]+|\\d+)(?:\\s+[a-z]+)?)?\\s+ago\\b)',
     'for\\s+the\\s+(?:months?|mos?|years?|yrs?)\\b(?!-[a-z])',
+    // "every calendar month", "per calendar year": the calendar qualifier is
+    // part of the period, never a separate word.
+    '(?:per|a|each|every)\\s+calendar\\s+(?:months?|mos?|years?|yrs?)\\b(?!-[a-z])',
     'annualized\\b(?!-[a-z])',
   ].map((source) => ({ kind: 'period', re: new RegExp(source, 'iy') })),
 ];

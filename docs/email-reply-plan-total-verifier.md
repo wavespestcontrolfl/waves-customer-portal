@@ -21,17 +21,21 @@ same claim as a month/year period is a finding, including account notices
 and cadence prose, because every result is reviewed by a person and a
 missed plan total costs more than an extra flag on a payment notice. The
 shared recognizer owns all vocabulary, amount/period pairing, claim
-boundaries, and exclusion evidence (bare measurements, visit/application
-ties, activity cadence, account events); this consumer has no parser of its
-own — it only asks whether any relation is a `plan_total` and applies the two
+boundaries, and the only exclusion evidence there is (a bare measurement, an
+amount tied to a visit/application unit, a bare number with no price cue);
+activity cadence and account events are NOT exclusions — a money amount
+beside a period in such prose is a finding. This consumer has no parser of
+its own — it only asks whether any relation is a `plan_total` and applies the two
 trusted exemption flags. It does not check company names, regulatory
 language, presentation, account facts, or every possible English pricing
 construction. The inherited finite grammar, amount, period, and newline
 limits remain. Every result still needs review, so unknown phrasing cannot
 become a compliant/sendable result here.
 
-The test suite preserves all 235 frozen plan-total tests and their original
-`{ok,violations}` expectations, projected onto the `needs_review` disposition
-with no `ok` field on any actual result. `server/services/comms-lint.js`
+The test suite keeps every frozen plan-total case: 195 retain their original
+`{ok,violations}` expectations, and the 60 that the owner ruling flips from
+allowed to a finding live verbatim in an `owner ruling 2026-09-19` block; no
+rejected expectation was weakened. All are projected onto the `needs_review`
+disposition with no `ok` field on any actual result. `server/services/comms-lint.js`
 remains the live raw-text `no-plan-total` policy; it is unaffected, and no
 runtime migration is authorized here.

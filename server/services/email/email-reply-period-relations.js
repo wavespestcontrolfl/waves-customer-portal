@@ -19,6 +19,7 @@ function recognizeClause(clause) {
   const amountByEnd = new Map(amountRelations.map((record) => [record.amount.end, record.amount]));
   const periodByStart = new Map(periodPhrases.map((period) => [period.start, period]));
   const heads = phrases.filter((phrase) => phrase.type === 'billing_head');
+  let anchors = [];
   const rolesIn = (from, to) => new Set(contextPhrases
     .filter((phrase) => phrase.start >= from && phrase.end <= to)
     .flatMap((phrase) => phrase.roles));
@@ -99,6 +100,20 @@ function recognizeClause(clause) {
     return !!amountByEnd.get(amountEnd) && isWord(tokens[next], BILLING_PREDICATES)
       && !!periodByStart.get(next + 1);
   }
+  // "The plan is billed monthly and costs $98": when the claim so far holds a
+  // period and no amount, "and" may continue into a bounded [pronoun]
+  // [copula] price predicate whose amount follows within four tokens.
+  function continuesPeriod(at) {
+    if (!anchors.some((anchor) => anchor.kind === 'period') || anchors.some((anchor) => anchor.kind === 'amount')) return false;
+    let next = at + 1;
+    const participant = phrases.find((phrase) => phrase.type === 'participant' && phrase.start === next);
+    if (participant) next = participant.end;
+    if (tokens[next]?.kind === 'be') next += 1;
+    const cue = cueAt(next) || (heads.find((head) => head.start === next) && priceLabel(heads.find((head) => head.start === next)));
+    if (!cue) return false;
+    for (let pos = next + 1; pos <= next + 4 && pos < tokens.length; pos += 1) if (amountByStart.has(pos)) return true;
+    return false;
+  }
   function breaksClaim(claimStart, at) {
     const token = tokens[at];
     if (token.kind === 'barrier') return true;
@@ -106,7 +121,7 @@ function recognizeClause(clause) {
     if (token.kind === 'sep' && token.text === ',') {
       return !frontedPeriodComma(claimStart, at) && !frontedPlanComma(claimStart, at) && !continuesPrice(at);
     }
-    return isWord(token, CLAIM_BREAK_WORDS) && !(token.text === 'and' && continuesPrice(at));
+    return isWord(token, CLAIM_BREAK_WORDS) && !(token.text === 'and' && (continuesPrice(at) || continuesPeriod(at)));
   }
 
   function classify(amount, from, to) {
@@ -120,7 +135,7 @@ function recognizeClause(clause) {
 
   const periodRelations = [];
   let claimStart = 0;
-  let anchors = [];
+  anchors = [];
   // Anchors are bounded by claim breaks, so only adjacent, differing-type pairs
   // are ever compared; each token is inspected a constant number of times.
   for (let at = 0; at <= tokens.length; at += 1) {

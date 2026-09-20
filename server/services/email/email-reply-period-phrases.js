@@ -12,6 +12,9 @@ function recognizeClause(clause) {
       // Try every lexical start inside the token ("/monthly visit" starts
       // with a slash), not only each whitespace chunk's first offset.
       for (const word of token.text.matchAll(/[a-z]+/gi)) {
+        // A fragment behind a lexical hyphen ("non-monthly visit plan") is a
+        // negated or compound modifier, not a cadence; a slash still scans.
+        if (word.index > 0 && token.text[word.index - 1] === '-') continue;
         const matched = matchEmailReplyPeriodAt(token.text, word.index);
         if (!matched) continue;
         periodPhrases.push({ start, end: start + 1, text: matched.text, period: matched.period,
