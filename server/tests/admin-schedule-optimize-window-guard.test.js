@@ -142,6 +142,18 @@ beforeAll((done) => {
 });
 afterAll((done) => { server.close(done); });
 
+// DATE is a fixed calendar day and the guard chain compares its windows to
+// the CLOCK, so every case runs at 07:00 ET that day (before any stop's
+// window) unless it pins its own time — unpinned, cases flip as real time
+// passes the first window on 2026-09-20 (the clock trap #4624 pinned for the
+// "future date" case only). Describes that need another time call
+// setSystemTime themselves; useRealTimers below resets between cases.
+beforeEach(() => {
+  jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+  jest.setSystemTime(new Date('2026-09-20T11:00:00Z')); // 07:00 ET
+});
+afterEach(() => { jest.useRealTimers(); });
+
 beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.GATE_ROUTE_REORDER_WINDOW_FIT;
