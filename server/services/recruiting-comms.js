@@ -574,7 +574,17 @@ async function sendStageComms(app, stage, opts = {}) {
           // Channel isolation: a throw here must not lose the email leg's
           // outcome (or vice versa) — record it as a failed attempt.
           logger.error(`[recruiting-comms] sms leg threw (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
-          sendRes = { sent: false, blocked: false, deliveryOutcome: 'not_sent', code: `threw:${errorSummary(err)}` };
+          // The pipeline can throw AFTER provider acceptance (e.g. audit
+          // persistence) and attaches err.providerOutcome — keep that
+          // evidence; a throw with no provider outcome is 'uncertain', never
+          // 'failed', because the applicant may already hold the text and a
+          // reply must stay owner-only (local audit P0).
+          const po = err && err.providerOutcome && typeof err.providerOutcome === 'object' ? err.providerOutcome : null;
+          if (po && (po.sent === true || po.deliveryOutcome === 'accepted' || po.deliveryOutcome === 'sent')) {
+            sendRes = { ...po, sent: true, blocked: false, code: po.code || `threw_after_accept:${errorSummary(err)}` };
+          } else {
+            sendRes = { ...(po || {}), sent: false, blocked: false, deliveryOutcome: 'uncertain', code: (po && po.code) || `threw:${errorSummary(err)}` };
+          }
         }
         let outcome = sendRes.sent
           ? 'sent'

@@ -544,3 +544,21 @@ describe('reconcileCommsHistoryEntryByOutcome', () => {
     expect(row.comms_history.map((e) => e.outcome)).toEqual(['blocked', 'uncertain', 'uncertain']);
   });
 });
+
+describe('sendStageComms — pipeline throw after provider acceptance', () => {
+  test('err.providerOutcome with sent:true is preserved as sent; a bare throw is uncertain, never failed', async () => {
+    mockRenderSmsTemplate.mockResolvedValue('Hi Jane.');
+    const app = baseApp();
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    mockSendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit persistence failed'), { providerOutcome: { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM9' } }));
+    let result = await RecruitingComms.sendStageComms(app, 'application_received', { sms: true, email: false, by: 'system' });
+    expect(result.sms).toBe('sent');
+    let stored = mockDb.__tables.job_applications.find((r) => r.id === 'app-1');
+    expect(stored.comms_history[0]).toMatchObject({ outcome: 'sent' });
+    mockSendCustomerMessage.mockRejectedValueOnce(new Error('boom'));
+    result = await RecruitingComms.sendStageComms(app, 'application_received', { sms: true, email: false, by: 'system' });
+    expect(result.sms).toBe('uncertain');
+    stored = mockDb.__tables.job_applications.find((r) => r.id === 'app-1');
+    expect(stored.comms_history[1]).toMatchObject({ outcome: 'uncertain' });
+  });
+});

@@ -98,6 +98,13 @@ describe('matchApplicantReply', () => {
     const bound = q.where.mock.calls.find((c) => c[0] === 'created_at')[2];
     expect(Math.abs(bound.getTime() - (NOW - 3600000))).toBeLessThan(1000);
   });
+  test('an in-flight replay (handoff with replay_attempted_at) uses the attempt time, so a customer text sent between enqueue and replay does not override', async () => {
+    state.apps = [{ id: 'app-1', comms_history: [{ ...sentEntry(1), outcome: 'handoff', replay_attempted_at: new Date(NOW - 1800000).toISOString() }] }];
+    await expect(matchApplicantReply('+19415550142', '+19415550199')).resolves.toEqual({ applicationId: 'app-1' });
+    const q = mockDb.mock.results.find((r) => r.value && r.value.whereNot.mock.calls.length).value;
+    const bound = q.where.mock.calls.find((c) => c[0] === 'created_at')[2];
+    expect(Math.abs(bound.getTime() - (NOW - 1800000))).toBeLessThan(1000);
+  });
   test('a queued (deferred) recruiting text is owner-only context for a reply too', async () => {
     state.apps = [{ id: 'app-1', comms_history: [{ ...sentEntry(0.1), outcome: 'deferred' }] }];
     await expect(matchApplicantReply('+19415550142', '+19415550199')).resolves.toEqual({ applicationId: 'app-1' });

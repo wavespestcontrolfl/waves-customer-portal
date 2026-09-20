@@ -70,9 +70,13 @@ async function matchApplicantReply(fromPhone, toNumber) {
       // cron went out at finalized_at, not when it was queued — the newer-
       // customer-text comparison below must use the moment the applicant
       // could actually have received it (local audit P0).
-      const queuedAt = Date.parse(entry.at || '');
-      const sentAt = ['sent', 'uncertain'].includes(entry.outcome) ? Date.parse(entry.finalized_at || '') : NaN;
-      const at = Number.isFinite(sentAt) ? Math.max(sentAt, Number.isFinite(queuedAt) ? queuedAt : sentAt) : queuedAt;
+      // ... and a replay attempt in flight (or one that never finalized after
+      // a crash) went out at replay_attempted_at, stamped by the registry's
+      // recheck before dispatch.
+      const stamps = [entry.at, entry.replay_attempted_at, ['sent', 'uncertain'].includes(entry.outcome) ? entry.finalized_at : null]
+        .map((v) => Date.parse(v || ''))
+        .filter((ms) => Number.isFinite(ms));
+      const at = stamps.length ? Math.max(...stamps) : NaN;
       if (!Number.isFinite(at) || at < cutoff) continue;
       if (!best || at > best.at) best = { at, applicationId: app.id, fromNumber: entry.from_number || null };
     }
