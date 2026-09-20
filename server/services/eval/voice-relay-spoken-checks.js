@@ -1657,7 +1657,14 @@ function reportFindingIsUncertain(text) {
   const evidence = normalized.replace(/\b(i|we|you|he|she|they|it)['’]d(?=\s+(?:(?:already|also|just|now|\w+ly)\s+)*put\b)/gi,
     (auxiliary, subject, at) => {
       const putClause = normalized.slice(at).split(/[,;!?]|\.(?=\s*(?:$|[A-Z]))/, 1)[0];
-      return /\b(?:yesterday|earlier|recently|last\s+(?:week|month|year))\b/i.test(putClause)
+      const pastTime = /\b(?:yesterday|earlier|recently|last\s+(?:week|month|year))\b/i.exec(putClause);
+      const put = /\bput\b/i.exec(putClause);
+      const putEnd = put ? put.index + put[0].length : 0;
+      const interveningFinding = pastTime && [...putClause.slice(putEnd, pastTime.index)
+        .matchAll(new RegExp(REPORT_FINDING_VERB_RE.source, 'gi'))]
+        .some((candidate) => !REPORT_BASE_TREATMENT_VERB_RE.test(candidate[0])
+          && !REPORT_COMPLETED_GERUND_RE.test(candidate[0]));
+      return (pastTime && put && !interveningFinding)
         || /\b(?:before|after)\s+(?:i|we|you|he|she|they|it)\s+(?:arrived|left|returned|called)\b/i.test(putClause)
         ? `${subject} had` : auxiliary;
     });
@@ -1879,6 +1886,227 @@ function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb
   return deniedSpans(denyingEvidence).some(([start, end]) => firstAt < end && lastAt > start);
 }
 
+// ── Single-treatment product/location relationships ─────────────────────
+// These frames classify a single bounded assertion and never infer ownership
+// across coordinated products, locations or predicates. Consumers separately
+// reject uncertain, denied, requested, interrogative or hypothetical evidence.
+const REPORT_PRODUCT_OBJECT_VERB_RE = /^(?:apply|applying|applied|place|placed|placing|use|used|using|treat|treated|treating|spray|sprayed|spraying|put|putting|got|received)$/i;
+const REPORT_LOCATION_RECIPIENT_VERB_RE = /^(?:got|received)$/i;
+const REPORT_NOUN_LED_PREFIX_RE = /^\s*(?:(?:the|a|an|your|our|their|his|her|my|its)\s*)?$/i;
+const REPORT_LOCATION_RECIPIENT_PREDICATE_RE = /^\s*(?:(?:itself|has|have|had|already|also|just|now|\w+ly)\s+)*$/i;
+const REPORT_DIRECT_OBJECT_GAP_RE = /^\s*(?:(?:only|just)\s+|(?:nothing|no\s+products?)\s+(?:except(?:\s+for)?|other\s+than)\s+)?(?:(?:the|a|an|your|our|their|his|her|my|its)\s+)?(?:(?:diluted|liquid|granular|(?:freshly\s+)?mixed)\s+){0,2}$/i;
+const REPORT_WENT_LOCATION_RE = /^\s*(?:around|along)\b/i;
+const REPORT_ADVERBIAL_LOCATION_RE = /^(?:indoors|outdoors|inside|outside)$/i;
+const REPORT_ADVERBIAL_LOCATION_GAP_RE = new RegExp(`^\\s*(?:${REPORT_COMPLETION_TIME}\\s*)?$`, 'i');
+const REPORT_LOCATION_NOUN_PREFIX = `(?:(?:almost|nearly|likely|potentially|apparently)\\s+)?(?:(?:the|a|an|your|our|their|his|her|my|its)\\s+)?(?:(?:full|entire|whole|outer|inner|front|rear|back|side|northern|southern|eastern|western|exterior|interior)\\s+){0,2}`;
+const REPORT_LOCATION_TARGET_PREFIX_RE = new RegExp(`^\\s*${REPORT_LOCATION_NOUN_PREFIX}$`, 'i');
+const REPORT_TREATMENT_LOCATION_LINK_RE = /\b(?:around|along|throughout|across|on|to|at|in|inside|within|outside(?:\s+of)?)\b/i;
+const REPORT_FRONTED_LOCATION_PREFIX_RE = new RegExp(`^\\s*${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+${REPORT_LOCATION_NOUN_PREFIX}$`, 'i');
+const REPORT_LOCATION_DETOUR_RE = /\b(?:after|before|while|when|because|since|following|until|unless|according\s+to)\b/i;
+const REPORT_CONCISE_COMPLETION_RE = new RegExp(`^(?:(?:(?:was|were|is|are|has been|have been|had been)\\s+)?(?:(?:already|actually|just)\\s+)*completed(?:\\s+${REPORT_COMPLETION_TIME})?|as\\s+(?:noted|documented|recorded|shown)\\s+in\\s+the\\s+report)?\\s*$`, 'i');
+const REPORT_PRODUCT_FORMULATION = '(?:liquid|granules|gel|dust|bait|spray|insecticide|pesticide|concentrate)';
+const REPORT_PRODUCT_FORMULATION_RE = new RegExp(`^(?:[a-z0-9](?:\\s+|$))?(?:${REPORT_PRODUCT_FORMULATION})?$`, 'i');
+const REPORT_CUSTODY_OBJECT_RE = new RegExp(`^\\s+(?:[a-z0-9]\\s+)?(?:(?:${REPORT_PRODUCT_FORMULATION}|granular|diluted|mixed)\\s+){0,2}(?:containers?|bottles?|labels?|packages?|packaging|cans?|boxes?|bags?|jars?|jugs?|tanks?|packets?|shipments?|deliver(?:y|ies)|inventory|supplies)\\b`, 'i');
+const REPORT_TREATMENT_ADJUNCT = '(?:with|using)\\s+(?:(?:the|a|an|your|our)\\s+)?(?:(?:backpack|hand|powered|pump|electric)\\s+){0,2}(?:sprayer|equipment|tool|brush|duster|rig)|by\\s+(?:(?:the|our|your|their)\\s+)?(?:technician|tech|crew|team|hand)|(?:not\\s+)?without\\s+(?:(?:any|an?)\\s+)?(?:further\\s+)?(?:issues?|delays?|interruptions?|incidents?|problems?|complications?|difficult(?:y|ies)|trouble)';
+const REPORT_TREATMENT_ADJUNCTS = `(?:${REPORT_TREATMENT_ADJUNCT})(?:\\s+(?:${REPORT_TREATMENT_ADJUNCT})){0,2}`;
+const REPORT_TREATMENT_ADJUNCT_RE = new RegExp(`^${REPORT_TREATMENT_ADJUNCTS}$`, 'i');
+const REPORT_TARGET_TIME_RE = new RegExp(`(?:\\b(?:at|on)\\s+)?(?:${REPORT_COMPLETION_TIME})`, 'gi');
+
+// Only named area nouns/adverbs establish a location alternative. A
+// location-first with/using frame may instead present product alternatives.
+const REPORT_ALTERNATIVE_LOCATION = `${REPORT_LOCATION_NOUN_PREFIX}(?:perimeter|foundation|garage|porch|yard|lawn|kitchen|bathroom|bedroom|basement|attic|crawlspace|patio|deck|shed|rooms?|walls?|areas?)|indoors|outdoors|inside|outside`;
+const REPORT_ALTERNATIVE_LOCATION_FIRST_RE = new RegExp(`^\\s*(?:${REPORT_ALTERNATIVE_LOCATION})\\s*$`, 'i');
+const REPORT_ALTERNATIVE_LOCATION_TAIL_RE = new RegExp(`^\\s*(?:${REPORT_ALTERNATIVE_LOCATION})(?=\\s*(?:$|[.!?;,]|\\b(?:before|after|for|against|at|on)\\b))`, 'i');
+const REPORT_ALTERNATIVE_PRODUCT_RE = /^\s*(?:(?:the|a|an|your|our|their)\s+)?(?:(?:diluted|liquid|granular|(?:freshly\s+)?mixed)\s+){0,2}(?:bait|dust|liquid|spray|granules|gel|insecticide|pesticide)\s*$/i;
+const REPORT_ALTERNATIVE_LABEL_RE = /^\s*(?:(?:the|a|an|your|our|their)\s+)?[A-Z][A-Za-z0-9'’-]*(?:\s+[A-Z0-9][A-Za-z0-9'’-]*){0,2}\s*$/i;
+
+function reportHasAlternativeLocation(affirmed, locationAt, orTail) {
+  if (locationAt < 0) return false;
+  const retainedOr = /\bor\b/i.exec(affirmed.slice(locationAt));
+  const beforeOr = affirmed.slice(locationAt, retainedOr ? locationAt + retainedOr.index : affirmed.length);
+  const alternativeTail = /^(?:or|and\s*\/\s*or)\b/i.test(orTail)
+    ? orTail.replace(/^and\s*\/\s*/i, '') : retainedOr && affirmed.slice(locationAt + retainedOr.index);
+  if (!alternativeTail) return false;
+  const alternative = alternativeTail.replace(/^or\s+/i, '');
+  const locationFirst = REPORT_NOUN_LED_PREFIX_RE.test(affirmed.slice(0, locationAt))
+    || /\b(?:treated|sprayed|applied|placed|used)\s+(?:(?:the|a|an|your|our|their)\s+)?$/i.test(affirmed.slice(0, locationAt));
+  const productLink = /\b(?:with|using)\s+/i.exec(beforeOr);
+  if (locationFirst && productLink) {
+    const firstProduct = beforeOr.slice(productLink.index + productLink[0].length).replace(/^either\s+/i, '');
+    const alternativeProduct = alternative.split(/[.!?;,]|\s+(?:for|against|to\s+control)\b/i)[0];
+    const nonProduct = /\b(?:for|against|before|after|at|on|to|via|backpack|sprayer|equipment|tools?|brush|duster|gear|rig|hand|powered|pump|electric)\b/i;
+    if (nonProduct.test(firstProduct) || nonProduct.test(alternativeProduct)
+        || CLAUSE_FINITE_PREDICATE_RE.test(firstProduct) || CLAUSE_FINITE_PREDICATE_RE.test(alternativeProduct)) return false;
+    return (REPORT_ALTERNATIVE_PRODUCT_RE.test(firstProduct) || REPORT_ALTERNATIVE_LABEL_RE.test(firstProduct))
+      && (REPORT_ALTERNATIVE_PRODUCT_RE.test(alternativeProduct) || REPORT_ALTERNATIVE_LABEL_RE.test(alternativeProduct));
+  }
+  return REPORT_ALTERNATIVE_LOCATION_FIRST_RE.test(beforeOr)
+    && REPORT_ALTERNATIVE_LOCATION_TAIL_RE.test(alternative.replace(
+      new RegExp(`^\\s*(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source})\\s+`, 'i'), '',
+    ));
+}
+
+// Direct products may be objects of an active treatment, passive subjects,
+// or products introduced by with/using after a location-first treatment.
+function reportVerbGovernsProduct(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb) {
+  const evidence = reportWithoutNominalContrast(affirmed, [subjectAt, locationAt]);
+  if (locationAt < subjectAt && /^\s*(?:with|using)\s+(?:(?:diluted|liquid|granular|(?:freshly\s+)?mixed)\s+){0,2}$/i.test(
+    evidence.slice(Math.max(locationAt + locationLength, findingVerb.index + findingVerb[0].length), subjectAt),
+  )) return true;
+  if (findingVerb.index < subjectAt) {
+    return REPORT_PRODUCT_OBJECT_VERB_RE.test(findingVerb[0])
+      && REPORT_DIRECT_OBJECT_GAP_RE.test(evidence.slice(findingVerb.index + findingVerb[0].length, subjectAt));
+  }
+  const predicatePrefix = evidence.slice(subjectAt + subjectLength, findingVerb.index)
+    .replace(/,\s*according\s+to\s+the\s+report\s*,/gi, (aside) => ' '.repeat(aside.length));
+  if (/^went$/i.test(findingVerb[0])) {
+    return REPORT_NOUN_LED_PREFIX_RE.test(evidence.slice(0, subjectAt) + predicatePrefix)
+      && REPORT_WENT_LOCATION_RE.test(evidence.slice(findingVerb.index + findingVerb[0].length, locationAt + locationLength));
+  }
+  const passive = REPORT_COMPLETED_PASSIVE_RE.exec(predicatePrefix);
+  return (REPORT_NOUN_LED_PREFIX_RE.test(evidence.slice(0, subjectAt)) && !predicatePrefix.trim())
+    || Boolean(passive && REPORT_PRODUCT_FORMULATION_RE.test(predicatePrefix.slice(0, passive.index).trim()));
+}
+
+// A treatment target must be linked directly to the matched predicate and
+// product. Equipment, pest observations and nearby areas cannot lend targets.
+function reportLocationIsTreatmentTarget(affirmed, subjectAt, subjectLength, locationAt, locationLength, locationRecipient, findingVerb) {
+  if (locationRecipient) return true;
+  const evidence = reportWithoutNominalContrast(affirmed, [subjectAt, locationAt]);
+  const relationshipStart = Math.max(subjectAt + subjectLength, findingVerb.index + findingVerb[0].length);
+  if (locationAt < subjectAt) {
+    const beforeLocation = evidence.slice(0, locationAt);
+    const locationToProduct = evidence.slice(locationAt + locationLength, subjectAt);
+    const productLink = /^\s*(?:with|using)\s+(?:(?:diluted|liquid|granular|(?:freshly\s+)?mixed)\s+){0,2}$/i.test(locationToProduct);
+    if (findingVerb.index < locationAt && productLink
+        && new RegExp(`\\b(?:treated|sprayed|applied|placed|used|treat|spray|apply|place|use)\\s+${REPORT_LOCATION_NOUN_PREFIX}$`, 'i').test(beforeLocation)) return true;
+    const passiveLink = /^\s*(?:with|using)\s+(?:(?:diluted|liquid|granular|(?:freshly\s+)?mixed)\s+){0,2}$/i.test(
+      evidence.slice(findingVerb.index + findingVerb[0].length, subjectAt),
+    );
+    const passivePrefix = evidence.slice(locationAt + locationLength, findingVerb.index);
+    const passive = REPORT_COMPLETED_PASSIVE_RE.exec(passivePrefix);
+    if (locationAt < findingVerb.index && REPORT_LOCATION_TARGET_PREFIX_RE.test(beforeLocation)
+        && passive && !passivePrefix.slice(0, passive.index).trim() && passiveLink) return true;
+    const tail = evidence.slice(relationshipStart).replace(REPORT_TARGET_TIME_RE, '');
+    const explicitTarget = new RegExp(`^\\s*(?:(?:${REPORT_TREATMENT_ADJUNCTS})\\s+)?(?:(?:only|just|mostly|\\w+ly)\\s+)*(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}|indoors|outdoors)`, 'i');
+    return REPORT_FRONTED_LOCATION_PREFIX_RE.test(beforeLocation) && !explicitTarget.test(tail);
+  }
+  const locationLink = evidence.slice(relationshipStart, locationAt).replace(REPORT_TARGET_TIME_RE, '');
+  if (findingVerb.index < locationAt
+      && REPORT_ADVERBIAL_LOCATION_RE.test(evidence.slice(locationAt, locationAt + locationLength))
+      && REPORT_ADVERBIAL_LOCATION_GAP_RE.test(locationLink)) return true;
+  const links = [...locationLink.matchAll(new RegExp(REPORT_TREATMENT_LOCATION_LINK_RE.source, 'gi'))];
+  if (links.length !== 1 || REPORT_LOCATION_DETOUR_RE.test(locationLink)) return false;
+  const targetPrefix = locationLink.slice(links[0].index + links[0][0].length)
+    .replace(/^\s*(?:apply|place|put|spray|treat|use)\s+/i, '');
+  const leadingGap = locationLink.slice(0, links[0].index)
+    .replace(/^\s*(?:(?:already|also|just|now|again|only|\w+ly)\s+)*/i, '').trim();
+  return REPORT_LOCATION_TARGET_PREFIX_RE.test(targetPrefix)
+    && (REPORT_PRODUCT_FORMULATION_RE.test(leadingGap) || REPORT_TREATMENT_ADJUNCT_RE.test(leadingGap));
+}
+
+function reportAttachedTargetEnd(affirmed, coreEnd, subjectAt, findingVerb) {
+  const knownStart = Math.min(...[affirmed.length, subjectAt, findingVerb.index]
+    .filter((position) => position > coreEnd));
+  const beforeKnown = affirmed.slice(coreEnd, knownStart);
+  const relative = /^\s+(?:that|which|who|where)\b[^,;.!?]*/i.exec(
+    beforeKnown,
+  );
+  return coreEnd + (relative
+    && (knownStart === affirmed.length || relative[0].length < beforeKnown.length)
+    ? relative[0].length : 0);
+}
+
+function reportFrontedTreatmentTargetSpan(
+  evidence, subjectAt, subjectLength, locationAt, locationLength, findingVerb, targetEnd,
+) {
+  const relationshipStart = Math.max(subjectAt + subjectLength, findingVerb.index + findingVerb[0].length);
+  const beforeLocation = evidence.slice(0, locationAt);
+  const locationToProduct = evidence.slice(locationAt + locationLength, subjectAt);
+  const productLink = /^\s*(?:with|using)\s+(?:(?:diluted|liquid|granular|(?:freshly\s+)?mixed)\s+){0,2}$/i.test(locationToProduct);
+  if (findingVerb.index < locationAt && productLink
+      && new RegExp(`\\b(?:treated|sprayed|applied|placed|used|treat|spray|apply|place|use)\\s+${REPORT_LOCATION_NOUN_PREFIX}$`, 'i').test(beforeLocation)) return { start: locationAt, end: targetEnd };
+  const passiveLink = /^\s*(?:with|using)\s+(?:(?:diluted|liquid|granular|(?:freshly\s+)?mixed)\s+){0,2}$/i.test(
+    evidence.slice(findingVerb.index + findingVerb[0].length, subjectAt),
+  );
+  const passivePrefix = evidence.slice(locationAt + locationLength, findingVerb.index);
+  const passive = REPORT_COMPLETED_PASSIVE_RE.exec(passivePrefix);
+  if (locationAt < findingVerb.index && REPORT_LOCATION_TARGET_PREFIX_RE.test(beforeLocation)
+      && passive && !passivePrefix.slice(0, passive.index).trim() && passiveLink) return { start: locationAt, end: targetEnd };
+  const tail = evidence.slice(relationshipStart).replace(REPORT_TARGET_TIME_RE, '');
+  const explicitTarget = new RegExp(`^\\s*(?:(?:${REPORT_TREATMENT_ADJUNCTS})\\s+)?(?:(?:only|just|mostly|\\w+ly)\\s+)*(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}|indoors|outdoors)`, 'i');
+  return REPORT_FRONTED_LOCATION_PREFIX_RE.test(beforeLocation) && !explicitTarget.test(tail)
+    ? { start: 0, end: targetEnd } : null;
+}
+
+function reportTreatmentTargetSpan(affirmed, subjectAt, subjectLength, locationAt, locationLength, locationRecipient, findingVerb) {
+  const coreEnd = locationAt + locationLength;
+  if (Math.max(locationAt, subjectAt) < Math.min(coreEnd, subjectAt + subjectLength)) return null;
+  if (locationRecipient) {
+    return { start: locationAt, end: reportAttachedTargetEnd(affirmed, coreEnd, subjectAt, findingVerb) };
+  }
+  const evidence = reportWithoutNominalContrast(affirmed, [subjectAt, locationAt]);
+  const relationshipStart = Math.max(subjectAt + subjectLength, findingVerb.index + findingVerb[0].length);
+  if (locationAt < subjectAt) {
+    return reportFrontedTreatmentTargetSpan(
+      evidence, subjectAt, subjectLength, locationAt, locationLength, findingVerb,
+      reportAttachedTargetEnd(affirmed, coreEnd, subjectAt, findingVerb),
+    );
+  }
+  const targetEnd = reportAttachedTargetEnd(affirmed, coreEnd, subjectAt, findingVerb);
+  const locationLink = evidence.slice(relationshipStart, locationAt)
+    .replace(REPORT_TARGET_TIME_RE, (time) => ' '.repeat(time.length));
+  if (findingVerb.index < locationAt
+      && (REPORT_ADVERBIAL_LOCATION_RE.test(evidence.slice(locationAt, coreEnd))
+        || /^where\s+\S(?:[^,;.!?]*[^\s,;.!?])?/i.exec(evidence.slice(locationAt))?.[0].length === locationLength)
+      && REPORT_ADVERBIAL_LOCATION_GAP_RE.test(locationLink)) return { start: locationAt, end: targetEnd };
+  const links = [...locationLink.matchAll(new RegExp(REPORT_TREATMENT_LOCATION_LINK_RE.source, 'gi'))];
+  if (links.length !== 1 || REPORT_LOCATION_DETOUR_RE.test(locationLink)) return false;
+  const targetPrefix = locationLink.slice(links[0].index + links[0][0].length)
+    .replace(/^\s*(?:apply|place|put|spray|treat|use)\s+/i, '');
+  const leadingGap = locationLink.slice(0, links[0].index)
+    .replace(/^\s*(?:(?:already|also|just|now|again|only|\w+ly)\s+)*/i, '').trim();
+  return REPORT_LOCATION_TARGET_PREFIX_RE.test(targetPrefix)
+    && (REPORT_PRODUCT_FORMULATION_RE.test(leadingGap) || REPORT_TREATMENT_ADJUNCT_RE.test(leadingGap))
+    ? { start: relationshipStart + links[0].index + links[0][0].length, end: targetEnd } : null;
+}
+
+function reportHasCompletedFinding(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb) {
+  if (subjectAt < 0 || locationAt < 0 || !findingVerb || !reportHasCompletedPredicate(affirmed, findingVerb)) return false;
+  if (REPORT_CUSTODY_OBJECT_RE.test(affirmed.slice(subjectAt + subjectLength))) return false;
+  const productFrame = findingVerb.index < subjectAt
+    ? affirmed.slice(findingVerb.index + findingVerb[0].length, locationAt)
+    : affirmed.slice(0, findingVerb.index);
+  if (/\b(?:or|alternatively|one\s+of\s+them)\b/i.test(productFrame)) return false;
+  const locationRecipient = REPORT_LOCATION_RECIPIENT_VERB_RE.test(findingVerb[0]);
+  if (locationRecipient && (locationAt > findingVerb.index
+      || !REPORT_LOCATION_TARGET_PREFIX_RE.test(affirmed.slice(0, locationAt))
+      || !REPORT_LOCATION_RECIPIENT_PREDICATE_RE.test(affirmed.slice(locationAt + locationLength, findingVerb.index)))) return false;
+  const target = reportTreatmentTargetSpan(
+    affirmed, subjectAt, subjectLength, locationAt, locationLength, locationRecipient, findingVerb,
+  );
+  if (!target || !reportVerbGovernsProduct(
+    affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb,
+  )) return false;
+  const treatmentEvidence = affirmed.slice(0, target.start)
+    + ' '.repeat(target.end - target.start) + affirmed.slice(target.end);
+  return !reportFindingIsUncertain(treatmentEvidence);
+}
+
+function reportHasConciseFinding(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb) {
+  if (subjectAt < 0 || locationAt < 0) return false;
+  const firstAt = Math.min(subjectAt, locationAt);
+  const evidenceEnd = Math.max(subjectAt + subjectLength, locationAt + locationLength);
+  const locationPrefix = affirmed.slice(subjectAt + subjectLength, locationAt)
+    .replace(/^\s*[a-z0-9]\b(?=\s+(?:(?:is|are|was|were|has|have|had)\b|(?:around|along|throughout|across|on|to|at|in|inside|within|outside)\b))/i, '')
+    .replace(/^\s*(?:(?:is|are|was|were|has|have|had)\s+(?:been\s+)?)?/i, '');
+  const qualifier = affirmed.slice(evidenceEnd).replace(/^[\s,:—–-]+/, '')
+    .replace(/^(?:perimeter|area|wall|walls|zone|edge)\b[\s,]*/i, '');
+  return !findingVerb && /^(?:(?:the|a|an|your|our|their|his|her|my|its|granular)\s*)?$/i.test(affirmed.slice(0, firstAt).trim())
+    && REPORT_FRONTED_LOCATION_PREFIX_RE.test(locationPrefix)
+    && REPORT_CONCISE_COMPLETION_RE.test(qualifier);
+}
+
 const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_free_visit_promise, no_third_party_disclosure, only_language, capture_lead_input_asserts });
 
-module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, spokenDigits, assertedMatch, EPISTEMIC_REFUSAL_VERBS, EPISTEMIC_DENIAL_WORDS, clauseBounds, clauseOf, claimContext, clauseIsNegated, clauseIsEpistemicallyHedged, cueInSameClause, reportFindingIsUncertain, reportFindingIsInstruction, reportClaimIsDenied, reportHasCompletedPredicate, REPORT_COMPLETED_PASSIVE_RE } };
+module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, spokenDigits, assertedMatch, EPISTEMIC_REFUSAL_VERBS, EPISTEMIC_DENIAL_WORDS, clauseBounds, clauseOf, claimContext, clauseIsNegated, clauseIsEpistemicallyHedged, cueInSameClause, reportFindingIsUncertain, reportFindingIsInstruction, reportClaimIsDenied, reportHasCompletedPredicate, REPORT_COMPLETED_PASSIVE_RE, reportHasAlternativeLocation, reportVerbGovernsProduct, reportLocationIsTreatmentTarget, reportHasCompletedFinding, reportHasConciseFinding } };
