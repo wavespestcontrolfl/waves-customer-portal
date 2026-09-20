@@ -2011,7 +2011,6 @@ module.exports = {
   repenIfWorkMergedDuringClaim,
   customerCallDoNotContact,
   emailSuppressedForNewLead,
-  firstTouchHoldIsStale,
   sendFailedMarkerFor,
   // Claim-fence primitives (Codex #3084 r27, CAS renewal since r28) — the
   // fanout's coalesced resend holds claims too and must honor the same
