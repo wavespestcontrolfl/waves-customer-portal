@@ -1310,7 +1310,9 @@ describe('email_dictation_unambiguous (GATE_FIRST_TOUCH_AUTO_RELEASE)', () => {
     };
     return chain;
   };
-  const mx = async () => [{ exchange: 'mx.example.com', priority: 10 }];
+  const notFound = async () => { const e = new Error('ENOTFOUND'); e.code = 'ENOTFOUND'; throw e; };
+  const dns = (resolveMx) => ({ resolveMx, resolve4: notFound, resolve6: notFound });
+  const mx = dns(async () => [{ exchange: 'mx.example.com', priority: 10 }]);
   const noSuppression = async () => false;
   const notOwned = async () => false;
   const run = async (conn, opts = {}) => {
@@ -1318,7 +1320,7 @@ describe('email_dictation_unambiguous (GATE_FIRST_TOUCH_AUTO_RELEASE)', () => {
     const email = nextEmail();
     fakeConn.current = email;
     await loadUnambiguousEmailEvidence(conn, [cardFor(email)], (id, key) => flags.push([id, key]), {
-      now: NOW, resolveMx: mx, suppressed: noSuppression, ownedByOther: notOwned, enabled: () => true, ...opts,
+      now: NOW, dnsDeps: mx, suppressed: noSuppression, ownedByOther: notOwned, enabled: () => true, ...opts,
     });
     return flags;
   };
@@ -1340,8 +1342,12 @@ describe('email_dictation_unambiguous (GATE_FIRST_TOUCH_AUTO_RELEASE)', () => {
     expect(await run(fakeConn(), { ownedByOther: async () => true })).toEqual([]);
     expect(await run(fakeConn(), { ownedByOther: async () => { throw new Error('db'); } })).toEqual([]);
   });
-  test('loader: a null MX record or an unresolvable domain is not deliverable', async () => {
-    expect(await run(fakeConn(), { resolveMx: async () => [{ exchange: '.', priority: 0 }] })).toEqual([]);
-    expect(await run(fakeConn(), { resolveMx: async () => { throw new Error('ENOTFOUND'); } })).toEqual([]);
+  test('loader: a null MX record, an unresolvable domain, or a transient resolver error is not deliverable', async () => {
+    expect(await run(fakeConn(), { dnsDeps: dns(async () => [{ exchange: '.', priority: 0 }]) })).toEqual([]);
+    expect(await run(fakeConn(), { dnsDeps: dns(notFound) })).toEqual([]);
+    expect(await run(fakeConn(), { dnsDeps: dns(async () => { const e = new Error('timeout'); e.code = 'ETIMEOUT'; throw e; }) })).toEqual([]);
+  });
+  test('loader: an apex A record (implicit MX) is deliverable, as the intake arbiter already rules', async () => {
+    expect(await run(fakeConn(), { dnsDeps: { resolveMx: notFound, resolve4: async () => ['203.0.113.10'], resolve6: notFound } })).toEqual([['t1', 'email_unambiguous']]);
   });
 });

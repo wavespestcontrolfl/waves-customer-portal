@@ -1208,39 +1208,43 @@ function unambiguousDictationTarget(item, { now = new Date(), maxAgeDays = FIRST
   return target;
 }
 
-// MX answers are cached process-wide for a short while (codex r1 P2): the
-// sweep runs this loader once unlocked and once more inside the locked
-// revalidation pass, and a DNS wait must never sit on the per-call
-// advisory locks admin triage transitions take. The unlocked pass fills
-// the cache; the locked pass reads it. Lookups run in parallel with one
-// timeout each, so a batch waits ~3 s at most, not 3 s per domain.
-const MX_CACHE_TTL_MS = 10 * 60 * 1000;
-const mxCache = new Map(); // domain → { ok, at }
-const MX_TIMEOUT_MS = 3000;
-async function domainAcceptsMail(domain, resolveMx, now = Date.now()) {
-  const hit = mxCache.get(domain);
-  if (hit && now - hit.at < MX_CACHE_TTL_MS) return hit.ok;
-  let ok = false;
-  try {
-    const mx = await Promise.race([
-      resolveMx(domain),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('mx_timeout')), MX_TIMEOUT_MS)),
-    ]);
-    // A "null MX" (RFC 7505: a single record whose exchange is the root)
-    // advertises that the domain accepts NO mail (codex r1 P2).
-    ok = Array.isArray(mx) && mx.some((r) => {
-      const ex = String(r?.exchange || '').trim().replace(/\.$/, '');
-      return ex.length > 0;
-    });
-  } catch (_e) {
-    ok = false; // fail closed: an unverifiable domain keeps its read-back
+// Domain deliverability comes from the ONE classifier the intake arbiter
+// already uses (contact-quarantine-arbiter.gatherEmailDomainEvidence: MX,
+// null-MX, implicit-MX A/AAAA fallback, transient-vs-authoritative
+// errors — codex r2 P1: no parallel DNS classifier). Verdicts are cached
+// process-wide for a short while: the sweep runs this loader once unlocked
+// and once more inside the locked revalidation pass, and a DNS wait must
+// never sit on the per-call advisory locks admin triage transitions take.
+// The unlocked pass fills the cache; the locked pass reads it.
+const DOMAIN_CACHE_TTL_MS = 10 * 60 * 1000;
+const domainVerdicts = new Map(); // domain → { deliverable, at }
+async function deliverableDomains(targets, dnsDeps, now = Date.now()) {
+  const out = new Map();
+  const lookup = [];
+  for (const target of targets) {
+    const domain = target.split('@')[1];
+    const hit = domainVerdicts.get(domain);
+    if (hit && now - hit.at < DOMAIN_CACHE_TTL_MS) out.set(domain, hit.deliverable === true);
+    else if (!lookup.includes(target)) lookup.push(target);
   }
-  mxCache.set(domain, { ok, at: now });
-  return ok;
+  if (lookup.length) {
+    const { gatherEmailDomainEvidence } = require('./contact-quarantine-arbiter');
+    let evidence = [];
+    try {
+      evidence = await gatherEmailDomainEvidence(lookup, dnsDeps || {});
+    } catch (_e) {
+      evidence = []; // fail closed: unknown stays unknown, nothing releases
+    }
+    for (const e of evidence) {
+      domainVerdicts.set(e.domain, { deliverable: e.deliverable, at: now });
+      out.set(e.domain, e.deliverable === true);
+    }
+  }
+  return out;
 }
 
 async function loadUnambiguousEmailEvidence(conn, items, flag, {
-  now = new Date(), resolveMx = null, suppressed = null, ownedByOther = null, enabled = null,
+  now = new Date(), dnsDeps = null, suppressed = null, ownedByOther = null, enabled = null,
 } = {}) {
   const isOn = enabled || (() => require('../config/feature-gates').isEnabled('firstTouchAutoRelease'));
   if (!isOn()) return;
@@ -1274,7 +1278,6 @@ async function loadUnambiguousEmailEvidence(conn, items, flag, {
     .select('call_log_id')).map((r) => String(r.call_log_id)));
   const isSuppressed = suppressed || require('./lead-first-touch-resume').emailSuppressedForNewLead;
   const isOwnedByOther = ownedByOther || require('./email-bounce-recovery').correctedAddressOwnedByOther;
-  const mx = resolveMx || require('dns').promises.resolveMx;
   const eligible = [];
   for (const [itemId, { item, target }] of targets) {
     if (heldByCall.get(String(item.call_log_id)) !== target) continue;
@@ -1292,8 +1295,7 @@ async function loadUnambiguousEmailEvidence(conn, items, flag, {
     eligible.push({ itemId, target });
   }
   if (!eligible.length) return;
-  const domains = [...new Set(eligible.map(({ target }) => target.split('@')[1]))];
-  const verdicts = new Map(await Promise.all(domains.map(async (d) => [d, await domainAcceptsMail(d, mx)])));
+  const verdicts = await deliverableDomains(eligible.map(({ target }) => target), dnsDeps, now.getTime());
   for (const { itemId, target } of eligible) {
     if (verdicts.get(target.split('@')[1]) === true) flag(itemId, 'email_unambiguous');
   }

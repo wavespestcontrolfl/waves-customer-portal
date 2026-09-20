@@ -236,6 +236,13 @@ const mockNewsletter = jest.fn(async () => ({ subscribed: true, confirmationEmai
 jest.mock('../services/call-recording-processor', () => ({
   resumeNewsletterForCallCustomer: (...a) => mockNewsletter(...a),
 }));
+let mockOwnedElsewhere = false;
+jest.mock('../services/email-bounce-recovery', () => ({
+  correctedAddressOwnedByOther: async () => {
+    if (mockOwnedElsewhere === 'throw') throw new Error('db');
+    return mockOwnedElsewhere;
+  },
+}));
 
 const {
   resumeHeldFirstTouch,
@@ -261,6 +268,7 @@ beforeEach(() => {
   mockHolds = null;
   mockClaimFails = false;
   mockDncRow = null;
+  mockOwnedElsewhere = false;
   mockSuppressionRow = null;
   mockHoldUpdates = [];
   mockCustomerRow = { id: 'cust-1', first_name: 'Pat', last_name: 'Sample' };
@@ -1494,7 +1502,9 @@ describe('DOI dedupe guard and ledger sweep', () => {
     const swept = await sweepAbandonedFirstTouchHolds({});
     expect(mockHoldUpdates[0]).toMatchObject({ status: 'pending' }); // recovery pass first
     expect(mockHoldUpdates[1]).toMatchObject({ status: 'blocked', last_error: 'first_touch_stale' });
-    expect(swept.expired).toBe(1);
+    // Two retire writes (by hold age, by source-call age); the fake answers 1 row each.
+    expect(mockHoldUpdates[2]).toMatchObject({ status: 'blocked', last_error: 'first_touch_stale' });
+    expect(swept.expired).toBe(2);
     expect(mockEnroll).not.toHaveBeenCalled();
   });
   test('a hold older than the first-touch window is retired at the claim path, whatever release path reaches it', async () => {
@@ -1506,6 +1516,28 @@ describe('DOI dedupe guard and ledger sweep', () => {
     expect(res.skipped).toBe('first_touch_stale');
     expect(mockHoldUpdates.some((p) => p.status === 'blocked' && p.last_error === 'first_touch_stale')).toBe(true);
     expect(mockEnroll).not.toHaveBeenCalled();
+  });
+  test('a fresh hold on an OLD source call is retired at the claim path too', async () => {
+    const oldCall = new Date(Date.now() - 40 * 24 * 3600 * 1000).toISOString();
+    mockHolds = [baseHold({ created_at: new Date().toISOString() })];
+    mockDncRow = { id: 'call-1', created_at: oldCall }; // the call_log first() read
+    mockTriageFirstQueue = [null, { status: 'resolved' }];
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1', source: 'triage_resolve' });
+    expect(res.skipped).toBe('first_touch_stale');
+    expect(mockEnroll).not.toHaveBeenCalled();
+  });
+  test('an address on file for another party never releases; a failing ownership check fails closed', async () => {
+    for (const knob of [true, 'throw']) {
+      mockOwnedElsewhere = knob;
+      mockEnroll.mockClear(); mockHoldUpdates.length = 0;
+      mockHolds = [baseHold({ created_at: new Date().toISOString() })];
+      mockTriageFirstQueue = [null, { status: 'resolved' }];
+      const res = await resumeHeldFirstTouch({ callLogId: 'call-1', source: 'ledger_sweep' });
+      expect(res.resumed).toBe(false);
+      expect(res.skipped).toBe('email_owned_elsewhere');
+      expect(mockHoldUpdates.some((p) => p.status === 'pending' && p.last_error === 'email_owned_elsewhere')).toBe(true);
+      expect(mockEnroll).not.toHaveBeenCalled();
+    }
   });
   test('the sweep recovers rows stranded released with unreleased merged work', async () => {
     // A transient failure in the merged-work re-pend leaves the row

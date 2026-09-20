@@ -72,10 +72,17 @@ const FIRST_TOUCH_HOLD_MAX_AGE_DAYS = (() => {
   const n = Number(process.env.FIRST_TOUCH_HOLD_MAX_AGE_DAYS);
   return Number.isFinite(n) && n > 0 ? n : 14;
 })();
-function firstTouchHoldIsStale(hold, now = Date.now()) {
-  const created = hold?.created_at ? new Date(hold.created_at).getTime() : NaN;
-  if (!Number.isFinite(created)) return false; // unknown age: not this guard's call
-  return now - created > FIRST_TOUCH_HOLD_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
+// Aged from the hold AND from the source call (codex #4622 r2 P1): a
+// force-reprocess of a months-old call with no ledger row mints a fresh
+// hold, and that must not reset the shelf life of the customer's actual
+// inquiry. An unknown timestamp is not this guard's call.
+function firstTouchHoldIsStale(hold, { callCreatedAt = null, now = Date.now() } = {}) {
+  const limit = FIRST_TOUCH_HOLD_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
+  const stale = (value) => {
+    const t = value ? new Date(value).getTime() : NaN;
+    return Number.isFinite(t) && now - t > limit;
+  };
+  return stale(hold?.created_at) || stale(callCreatedAt);
 }
 
 async function findPendingHolds({ callLogId = null, customerId = null, restrictToCallLogIds = null, dbh }) {
@@ -650,7 +657,13 @@ async function resumeHeldFirstTouch({
       // (codex #4622 r1 P1): a hold older than the first-touch window is
       // never sent — not by an operator resolve landing between sweeps,
       // not by a reclaimed stale 'releasing' row, not by a correction.
-      if (firstTouchHoldIsStale(hold)) {
+      let callCreatedAt = null;
+      if (hold.call_log_id) {
+        try {
+          callCreatedAt = (await dbh('call_log').where({ id: hold.call_log_id }).first('created_at'))?.created_at || null;
+        } catch (_e) { callCreatedAt = null; }
+      }
+      if (firstTouchHoldIsStale(hold, { callCreatedAt })) {
         await settleHold(hold.id, { status: 'blocked', last_error: 'first_touch_stale' }, dbh, claimStamp);
         logger.info(`[first-touch-resume] hold ${hold.id}: older than ${FIRST_TOUCH_HOLD_MAX_AGE_DAYS} days — retired as first_touch_stale (${source})`);
         result.skipped = result.skipped || 'first_touch_stale';
@@ -724,6 +737,26 @@ async function resumeHeldFirstTouch({
         logger.info(`[first-touch-resume] customer ${holdCustomerId}: do-not-contact veto — hold blocked (${source})`);
         result.skipped = result.skipped || 'do_not_contact';
         continue;
+      }
+      // Ownership at the ACTUAL release (codex #4622 r2 P1): a card resolved
+      // by the nightly resolver sends minutes later from the ledger sweep,
+      // and another lead can claim the address in between. Every automated
+      // release re-asks the intake path's own question — an address on
+      // file for another party never gets this customer's first touch. An
+      // explicit operator correction (the `email` override) is the one
+      // path that already answered it. Fail closed on a lookup error; the
+      // row stays pending for a correction.
+      if (!email) {
+        let ownedElsewhere = true;
+        try {
+          ownedElsewhere = await require('./email-bounce-recovery').correctedAddressOwnedByOther(resumeEmail, holdCustomerId, dbh);
+        } catch (_e) { ownedElsewhere = true; }
+        if (ownedElsewhere) {
+          await settleHold(hold.id, { status: 'pending', last_error: 'email_owned_elsewhere' }, dbh, claimStamp);
+          logger.info(`[first-touch-resume] customer ${holdCustomerId}: address on file for another party — hold stays pending (${source})`);
+          result.skipped = result.skipped || 'email_owned_elsewhere';
+          continue;
+        }
       }
       if (await emailSuppressedForNewLead(resumeEmail, dbh)) {
         // Back to pending: a corrected address after a bounce releases it.
@@ -1870,9 +1903,18 @@ async function sweepAbandonedFirstTouchHolds({ dbh = db, limit = 10 } = {}) {
           this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
         })
         .update({ status: 'blocked', last_error: 'first_touch_stale', updated_at: new Date() });
-      if (expired) {
-        swept.expired = Number(expired) || 0;
-        logger.info(`[first-touch-resume] ledger sweep retired ${swept.expired} hold(s) older than ${FIRST_TOUCH_HOLD_MAX_AGE_DAYS} days as first_touch_stale`);
+      // …and by the SOURCE CALL's age, for fresh holds on old calls.
+      const expiredByCall = await dbh('first_touch_holds')
+        .where({ status: 'pending' })
+        .whereIn('call_log_id', dbh('call_log').select('id').where('created_at', '<', cutoff))
+        .where(function notDenied() {
+          this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
+        })
+        .update({ status: 'blocked', last_error: 'first_touch_stale', updated_at: new Date() });
+      const retired = (Number(expired) || 0) + (Number(expiredByCall) || 0);
+      if (retired) {
+        swept.expired = retired;
+        logger.info(`[first-touch-resume] ledger sweep retired ${retired} hold(s) older than ${FIRST_TOUCH_HOLD_MAX_AGE_DAYS} days (hold or source call) as first_touch_stale`);
       }
     } catch (staleErr) {
       logger.warn(`[first-touch-resume] staleness pass failed: ${staleErr.code || staleErr.name || 'db_error'} — next sweep retries`);
