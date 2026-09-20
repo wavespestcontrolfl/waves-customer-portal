@@ -10,14 +10,6 @@
  * comms_history: append-only log of every applicant-facing send attempt
  * (sent/blocked/failed/skipped), masked recipient only — see
  * server/services/recruiting-comms.js.
- *
- * sms_templates seeding is INSERT-ONLY: a template_key that already exists
- * is left untouched (an owner may have hand-edited the copy through the
- * templates admin UI before this migration re-runs in some environment
- * order), never overwritten on every deploy. down() mirrors this — it drops
- * only the job_applications columns/constraint this migration added and
- * leaves whatever is in sms_templates alone, since those rows may since
- * carry owner edits or a live send history this migration did not create.
  */
 
 const ROLES = ['technician', 'sales', 'other'];
@@ -129,13 +121,9 @@ exports.up = async function up(knex) {
 
   if (await knex.schema.hasTable('sms_templates')) {
     for (const tpl of TEMPLATES) {
-
+       
       const existing = await knex('sms_templates').where({ template_key: tpl.template_key }).first();
-      // Insert-only: a pre-existing row (owner-edited copy, or a re-run in
-      // some environment ordering) is left exactly as it is — never
-      // overwritten by the seed on every deploy.
-      if (existing) continue;
-      await knex('sms_templates').insert({
+      const row = {
         template_key: tpl.template_key,
         name: tpl.name,
         category: tpl.category,
@@ -143,16 +131,25 @@ exports.up = async function up(knex) {
         variables: JSON.stringify(tpl.variables),
         sort_order: tpl.sort_order,
         is_active: true,
-      });
+      };
+      if (existing) {
+         
+        await knex('sms_templates').where({ template_key: tpl.template_key }).update({
+          name: row.name, category: row.category, body: row.body, variables: row.variables,
+          sort_order: row.sort_order, updated_at: new Date(),
+        });
+      } else {
+         
+        await knex('sms_templates').insert(row);
+      }
     }
   }
 };
 
 exports.down = async function down(knex) {
-  // sms_templates rows are left in place — this migration only seeds them
-  // insert-only (never overwrites), so it does not own them exclusively and
-  // must not delete rows that may carry owner edits or live send history.
-  // Reverting only undoes the job_applications schema change below.
+  if (await knex.schema.hasTable('sms_templates')) {
+    await knex('sms_templates').whereIn('template_key', TEMPLATES.map((t) => t.template_key)).del();
+  }
 
   if (await knex.schema.hasTable('job_applications')) {
     await knex.raw('ALTER TABLE job_applications DROP CONSTRAINT IF EXISTS job_applications_interview_mode_check');
