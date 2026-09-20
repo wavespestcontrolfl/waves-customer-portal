@@ -443,6 +443,7 @@ async function findConflictingVisits({
   excludeCustomerId = null,
   excludeStatuses = DEFAULT_EXCLUDE_STATUSES,
   includeHolds = true,
+  includeInterviews = true,
   travel,
   arrivalWindow,
 } = {}) {
@@ -469,9 +470,9 @@ async function findConflictingVisits({
   }
 
   if (travel !== undefined && travelGapEnabled()) {
-    return findConflictingVisitsWithTravel({
+    return withInterviewConflicts(await findConflictingVisitsWithTravel({
       db, date, windowStart, windowEnd, excludeIds, excludeCustomerId, excludeStatuses, includeHolds, travel,
-    });
+    }), { db, date, windowStart, windowEnd, includeInterviews });
   }
 
   const query = db('scheduled_services')
@@ -510,9 +511,47 @@ async function findConflictingVisits({
   // SQL already filters ordinary visits. Combined members need the full
   // allocation span, while callers still receive the original database rows.
   const occupied = occupiedRows(rows);
-  return rows.filter((row, index) => row.reservation_service_mix?.version !== 2
+  const visits = rows.filter((row, index) => row.reservation_service_mix?.version !== 2
     || (occupied[index].startMin != null && windowsOverlap(timeToMinutes(windowStart), timeToMinutes(windowEnd),
       occupied[index].startMin, occupied[index].endMin)));
+  return withInterviewConflicts(visits, { db, date, windowStart, windowEnd, includeInterviews });
+}
+
+// ---- recruiting interviews as occupancy ------------------------------------
+// The owner's booked interviews (job_applications.interview_at, PR #4623)
+// occupy the calendar like a visit. They are appended here — the ONE
+// conflict reader every customer and staff booking path consults — as
+// synthetic rows (`conflict_reason: 'interview'`, id `interview:<appId>`,
+// no customer, window = interview ±15 min) so no caller needs a second
+// probe. Best-effort: a recruiting read error is logged and yields no
+// interview rows — it must never take customer scheduling down.
+// `includeInterviews: false` opts a caller out (none do today).
+async function withInterviewConflicts(visits, { db, date, windowStart, windowEnd, includeInterviews }) {
+  if (includeInterviews === false) return visits;
+  let windows = [];
+  try {
+    windows = await require('../interview-slots').bookedInterviewWindowsForDate(String(date).split('T')[0], { conn: db });
+  } catch (err) {
+    require('../logger').warn(`[occupancy] interview occupancy read failed for ${String(date).split('T')[0]}: ${err.name || 'Error'}${err.code ? ` ${err.code}` : ''}`);
+    return visits;
+  }
+  const startMin = timeToMinutes(windowStart);
+  const endMin = timeToMinutes(windowEnd);
+  const interviews = windows
+    .filter((w) => windowsOverlap(startMin, endMin, timeToMinutes(w.start), timeToMinutes(w.end)))
+    .map((w) => ({
+      id: `interview:${w.applicationId || 'unknown'}`,
+      customer_id: null,
+      status: 'interview',
+      service_type: 'Interview',
+      scheduled_date: String(date).split('T')[0],
+      window_start: w.start,
+      window_end: w.end,
+      estimated_duration_minutes: Math.max(0, timeToMinutes(w.end) - timeToMinutes(w.start)),
+      reservation_expires_at: null,
+      conflict_reason: 'interview',
+    }));
+  return interviews.length ? [...visits, ...interviews] : visits;
 }
 
 /**

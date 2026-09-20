@@ -2142,19 +2142,23 @@ timezone, booked, slots}` — `slots` come from
 time, 30-minute slots, 15-minute buffer against the owner's own route
 stops, and against every other applicant's booked interview) and are
 ALWAYS present, booked or not, so "Change time" needs no second fetch.
-Booked interviews are ALSO occupancy for customer scheduling: the
-availability engine merges `bookedInterviewWindowsForDate` (interview ±15
-minutes, `interview`/`offer` rows) into its occupied set in both the slot
-builder and the confirm path, best-effort. An identical `{mode, start}`
+Booked interviews are ALSO occupancy for customer scheduling: the shared
+conflict reader `findConflictingVisits` (scheduling/occupancy.js — every
+customer and staff booking path) appends them as synthetic conflict rows
+(`conflict_reason:'interview'`, interview ±15 minutes, `interview`/`offer`
+rows, best-effort), and the availability slot builder merges the same
+windows into its occupied set. An identical `{mode, start}`
 retry of the current booking is answered with the current payload and no
 side effects. POST `/book` re-validates the client's chosen `start` against that SAME
 live offered set — the client's slot choice is never trusted — and
 writes `interview_mode`/`interview_at`/`interview_end_at`/
-`interview_booked_at` inside ONE transaction that first takes the
-`pg_advisory_xact_lock(hashtext('recruiting_interview_book'))` booking
-lock, re-lists the offered slots THROUGH that transaction, and row-locks
-the application (`FOR UPDATE`) — two applicants who both saw a free slot
-are serialized, two taps on one application cannot overwrite each other,
+`interview_booked_at` inside ONE transaction that first takes the SHARED
+date-wide occupancy lock (`acquireOccupancyLock`, scheduling/occupancy.js
+rung 1 — the same lock every customer scheduling writer takes for that
+day), re-lists the offered slots THROUGH that transaction, and row-locks
+the application (`FOR UPDATE`) — two applicants who both saw a free slot,
+or an applicant and a customer confirm on the same day, are serialized;
+two taps on one application cannot overwrite each other,
 and the status_history entry is appended in SQL; the write is still
 conditional on `status='interview' AND interview_token=?`, a 0-row result
 (a race with a withdraw) is a 409, never a silent overwrite. Privacy

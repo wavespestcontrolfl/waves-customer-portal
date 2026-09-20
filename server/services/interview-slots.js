@@ -219,14 +219,14 @@ async function bookedInterviewWindowsForDate(dateStr, { conn = db } = {}) {
     .whereNotNull('interview_at')
     .where('interview_at', '>=', dayStart)
     .where('interview_at', '<', dayEnd)
-    .select('interview_at', 'interview_end_at');
+    .select('id', 'interview_at', 'interview_end_at');
   return rows.map((r) => {
     const startMs = new Date(r.interview_at).getTime() - BUFFER_MINUTES * 60 * 1000;
     const endMs = (r.interview_end_at ? new Date(r.interview_end_at).getTime() : new Date(r.interview_at).getTime() + SLOT_MINUTES * 60 * 1000)
       + BUFFER_MINUTES * 60 * 1000;
     const sp = etParts(new Date(Math.max(startMs, dayStart.getTime())));
     const ep = etParts(new Date(Math.min(endMs, dayEnd.getTime() - 60 * 1000)));
-    return { start: `${pad2(sp.hour)}:${pad2(sp.minute)}`, end: `${pad2(ep.hour)}:${pad2(ep.minute)}` };
+    return { start: `${pad2(sp.hour)}:${pad2(sp.minute)}`, end: `${pad2(ep.hour)}:${pad2(ep.minute)}`, applicationId: r.id };
   });
 }
 

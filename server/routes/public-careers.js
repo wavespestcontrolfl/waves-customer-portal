@@ -27,6 +27,8 @@ const { ipFallbackKey } = require('../middleware/rate-limit-key');
 const { noStore } = require('../middleware/no-store');
 const { createJobApplication } = require('../services/job-applications');
 const { listInterviewSlots, formatSlotLabel } = require('../services/interview-slots');
+const { acquireOccupancyLock } = require('../services/scheduling/occupancy');
+const { etParts } = require('../utils/datetime-et');
 const { contactOf, firstNameOf, errorSummary } = require('../services/recruiting-comms');
 const { WAVES_ADDRESS_LINE } = require('../constants/business');
 
@@ -140,10 +142,11 @@ router.use('/interview', noStore, (req, res, next) => {
   next();
 });
 
-// One advisory lock serializes every booking write: slot availability is
-// re-listed INSIDE the transaction that holds it, so two applicants who
-// both saw the same free slot cannot both land on it.
-const BOOKING_LOCK_KEY = 'recruiting_interview_book';
+// Interview bookings serialize on the SAME date-wide occupancy lock every
+// customer scheduling writer takes (scheduling/occupancy.js, rung 1), so a
+// concurrent customer confirm and an interview book for one day cannot both
+// read an empty calendar; slot availability is re-listed INSIDE the locked
+// transaction.
 
 // Format gate before any DB read — runs before the route's own handler
 // stack (limiter included) for every /interview/:token path.
@@ -195,8 +198,17 @@ router.post('/interview/:token/book', interviewLimiter, async (req, res) => {
     const mode = req.body && req.body.mode;
     const start = req.body && req.body.start;
 
+    // The slot's ET calendar date keys the shared occupancy lock; a start
+    // that is not a parseable instant can never be an offered slot.
+    const startMs = Date.parse(String(start || ''));
+    if (!Number.isFinite(startMs)) {
+      return res.status(400).json({ error: 'That time is no longer available.' });
+    }
+    const sp = etParts(new Date(startMs));
+    const slotDateStr = `${sp.year}-${String(sp.month).padStart(2, '0')}-${String(sp.day).padStart(2, '0')}`;
+
     const outcome = await db.transaction(async (trx) => {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [BOOKING_LOCK_KEY]);
+      await acquireOccupancyLock(trx, slotDateStr);
 
       // Row lock: a concurrent book/withdraw for THIS application waits here
       // and then re-derives from the committed row, never from a stale read.
