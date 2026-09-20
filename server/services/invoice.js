@@ -3373,9 +3373,8 @@ const InvoiceService = {
         }
         const queueResolutionError = await resolveAdoptedRowsAfterDelivery(invoiceId, invoice.send_claim_token, consumedQueuedSendRows, invoice.invoice_number);
         await releaseDirectSmsClaim();
-        return queueResolutionError
-          ? { sent: true, payUrl, finalizeError: err.message, queueResolutionError }
-          : { sent: true, payUrl, finalizeError: err.message };
+        if (queueResolutionError) return { sent: true, payUrl, finalizeError: err.message, queueResolutionError };
+        return { sent: true, payUrl, finalizeError: err.message };
       }
       if (claimed && err.code === "INVOICE_VISIT_TERMINAL" && err.deliveryOutcome === "not_sent") {
         const scheduledServiceId = await linkedScheduledServiceId(invoice);
@@ -3490,7 +3489,7 @@ const InvoiceService = {
           sms: { ok: false, code: "send_claim_lost" }, email: { ok: false, code: "send_claim_lost" } };
       }
       await enrollPacketReviewAfterCredit(invoiceId, accrualPre?.visit_completion_packet_id);
-      await resolveConsumedQueuedSend(invoiceId, claim.invoice.send_claim_token, consumedQueuedSendRows);
+      await resolveAdoptedRowsAfterDelivery(invoiceId, claim.invoice.send_claim_token, consumedQueuedSendRows, claim.invoice.invoice_number);
       return {
         ok: true,
         covered_by_credit: true,
@@ -3694,12 +3693,13 @@ const InvoiceService = {
     const deliveryOutcomeUncertain = !ok && (sms.deliveryOutcome === "uncertain"
       || email.deliveryOutcome === "uncertain");
     let ownedDeliveryFinalized = false;
+    let queueResolutionError = null;
     if (ok) {
       // Settle the adopted rows BEFORE the finalize below clears
       // send_claim_token — both the resolve and the restore are token-scoped
       // so they can never touch a queue row this claim episode didn't adopt.
       if (smsObligationDischarged) {
-        await resolveConsumedQueuedSend(invoiceId, claim.invoice.send_claim_token, consumedQueuedSendRows);
+        queueResolutionError = await resolveAdoptedRowsAfterDelivery(invoiceId, claim.invoice.send_claim_token, consumedQueuedSendRows, claim.invoice.invoice_number);
       } else if (sms.deliveryOutcome === "uncertain") {
         if (consumedQueuedSendRows.length) logger.warn(`[invoice] SMS outcome unverified for ${claim.invoice.invoice_number} — adopted queued text left pending for review`);
       } else if (consumedQueuedSendRows.length) {
@@ -3774,11 +3774,7 @@ const InvoiceService = {
       let rowsToRestore = consumedQueuedSendRows;
       if (smsObligationDischarged && consumedQueuedSendRows.length) {
         rowsToRestore = [];
-        try {
-          await resolveConsumedQueuedSend(invoiceId, claim.invoice.send_claim_token, consumedQueuedSendRows);
-        } catch (e) {
-          logger.error(`[invoice] Could not resolve the adopted queued text for ${claim.invoice.invoice_number} behind its replacement: ${e.message}`);
-        }
+        queueResolutionError = await resolveAdoptedRowsAfterDelivery(invoiceId, claim.invoice.send_claim_token, consumedQueuedSendRows, claim.invoice.invoice_number);
       }
       const restored = await restoreSendClaim(
         invoiceId,
@@ -3868,6 +3864,7 @@ const InvoiceService = {
       }
     }
     return { ok, sms, email, payUrl, creditApplied: sendCreditResult?.applied || 0,
+      ...(queueResolutionError ? { queueResolutionError } : {}),
       ...(terminalVisitRefused
         ? { code: "INVOICE_VISIT_TERMINAL" }
         : terminalVisitObserved
