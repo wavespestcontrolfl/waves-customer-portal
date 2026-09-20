@@ -142,6 +142,17 @@ beforeAll((done) => {
 });
 afterAll((done) => { server.close(done); });
 
+// Every case in this file boards the hardcoded fixture DATE. On the real
+// clock the suite expired case by case as ET time passed that date's
+// service windows (#4624 pinned one case, #4635 a second, then a dozen
+// more went red the same afternoon). Pin the clock the day before DATE for
+// the whole file; the in-progress-clock cases below re-pin their own time.
+beforeEach(() => {
+  jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+  jest.setSystemTime(new Date('2026-09-19T17:00:00Z')); // 13:00 ET, the day before DATE
+});
+afterEach(() => { jest.useRealTimers(); });
+
 beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.GATE_ROUTE_REORDER_WINDOW_FIT;
