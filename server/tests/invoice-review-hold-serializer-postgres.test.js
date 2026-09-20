@@ -68,10 +68,12 @@ describeOrSkip('InvoiceService.getById / .list — review_hold serializer field 
   });
 
   afterAll(async () => {
+    // db.destroy() happens ONCE, in the second describe below — both
+    // blocks share this file's single required `db` connection pool, and
+    // destroying it here would strand the second block's own beforeAll.
     if (parkedId) await db('invoices').where({ id: parkedId }).del();
     if (unrelatedId) await db('invoices').where({ id: unrelatedId }).del();
     if (customerId) await db('customers').where({ id: customerId }).del();
-    await db.destroy();
   });
 
   test('getById: a parked row carries review_hold: true; an unrelated-error row carries review_hold: false', async () => {
@@ -87,5 +89,92 @@ describeOrSkip('InvoiceService.getById / .list — review_hold serializer field 
     const unrelatedRow = invoices.find((i) => i.id === unrelatedId);
     expect(parkedRow.review_hold).toBe(true);
     expect(unrelatedRow.review_hold).toBe(false);
+  });
+});
+
+/**
+ * Round-3 P2 (PR #4633, commit ba77bf88e5): claimInvoiceForSend's atomic
+ * flip carries the review-hold guard as a real PostgreSQL WHERE predicate —
+ * `NOT (status = 'scheduled' AND scheduled_send_at IS NULL AND
+ * COALESCE(scheduled_send_error, '') LIKE ?)`. Before the COALESCE, a
+ * scheduled row with NO scheduled_send_error at all made the LIKE (and so
+ * the whole NOT) evaluate to SQL NULL, and PostgreSQL only matches WHERE on
+ * TRUE — never NULL — so the flip's UPDATE touched zero rows and EVERY
+ * send on such a row failed as "not sendable", even though it was never
+ * parked. This suite proves the real predicate against a real PostgreSQL
+ * connection, not a mock.
+ */
+describeOrSkip('claimInvoiceForSend — the atomic flip predicate against real PostgreSQL (round-3 P2, PR #4633)', () => {
+  const db = require('../models/db');
+  const { claimInvoiceForSend } = require('../services/invoice');
+  const { STALE_SEND_PARK_ERROR } = require('../services/invoice-helpers');
+  const tag = `rhold-flip-${Date.now().toString(36)}`;
+  let customerId;
+  let noErrorId;
+  let parkedId;
+
+  beforeAll(async () => {
+    [{ id: customerId }] = await db('customers')
+      .insert({
+        first_name: 'ReviewHoldFlip',
+        last_name: tag,
+        email: `${tag}@example.test`,
+        phone: '+19410000001',
+      })
+      .returning('id');
+    // A scheduled, never-parked row with NO scheduled_send_error at all —
+    // the exact shape the pre-COALESCE predicate could never claim.
+    [{ id: noErrorId }] = await db('invoices')
+      .insert({
+        customer_id: customerId,
+        invoice_number: `T-${tag}-noerror`,
+        token: `tok-${tag}-noerror`,
+        title: 'review_hold flip NULL-error regression',
+        line_items: JSON.stringify([]),
+        subtotal: 10,
+        total: 10,
+        status: 'scheduled',
+        scheduled_send_at: null,
+        scheduled_send_error: null,
+      })
+      .returning('id');
+    [{ id: parkedId }] = await db('invoices')
+      .insert({
+        customer_id: customerId,
+        invoice_number: `T-${tag}-parked`,
+        token: `tok-${tag}-parked`,
+        title: 'review_hold flip parked regression',
+        line_items: JSON.stringify([]),
+        subtotal: 10,
+        total: 10,
+        status: 'scheduled',
+        scheduled_send_at: null,
+        scheduled_send_error: STALE_SEND_PARK_ERROR,
+      })
+      .returning('id');
+  });
+
+  afterAll(async () => {
+    if (noErrorId) await db('invoices').where({ id: noErrorId }).del();
+    if (parkedId) await db('invoices').where({ id: parkedId }).del();
+    if (customerId) await db('customers').where({ id: customerId }).del();
+    await db.destroy();
+  });
+
+  test('a scheduled row with scheduled_send_error NULL (never parked) IS claimed — flips to sending with a token', async () => {
+    const result = await claimInvoiceForSend(noErrorId, { firstDeliveryOnly: true });
+    expect(result.claimed).toBe(true);
+    expect(result.invoice.status).toBe('sending');
+    expect(result.invoice.send_claim_token).toEqual(expect.any(String));
+    const row = await db('invoices').where({ id: noErrorId }).first('status', 'send_claim_token');
+    expect(row.status).toBe('sending');
+    expect(row.send_claim_token).toBe(result.invoice.send_claim_token);
+  });
+
+  test('a parked row is refused with the stale-claim review hold error', async () => {
+    await expect(claimInvoiceForSend(parkedId, { firstDeliveryOnly: true }))
+      .rejects.toMatchObject({ code: 'stale_claim_review_hold' });
+    const row = await db('invoices').where({ id: parkedId }).first('status');
+    expect(row.status).toBe('scheduled');
   });
 });
