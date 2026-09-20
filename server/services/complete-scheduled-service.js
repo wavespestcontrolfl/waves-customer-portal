@@ -33,7 +33,7 @@ function throwIfDeliveryUnverified(result) {
   throw err;
 }
 
-const COMPLETION_SMS_DEFINITE_REJECTION_PREFIX = '[completion_sms_definite_rejection marker=';
+const { COMPLETION_SMS_DEFINITE_REJECTION_PREFIX } = CompletionAttempts;
 
 function completionSmsDefiniteRejectionError(message, markerAt) {
   return new Error(`${COMPLETION_SMS_DEFINITE_REJECTION_PREFIX}${markerAt || 'missing'}] ${message || 'Completion SMS provider failure'}`);

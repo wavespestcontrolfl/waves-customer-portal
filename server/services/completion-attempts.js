@@ -2,6 +2,11 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 
+// Marker-bound proof that a completion SMS provider attempt was definitely
+// rejected, embedded in the attempt error by complete-scheduled-service and
+// read back here so a release cannot drop it. One authority for the prefix.
+const COMPLETION_SMS_DEFINITE_REJECTION_PREFIX = '[completion_sms_definite_rejection marker=';
+
 // A pending attempt that hasn't transitioned to succeeded/failed within
 // this window is treated as orphaned (caller process crashed between
 // INSERT and markSucceeded/markFailed). Without a reclaim path, the
@@ -689,15 +694,14 @@ async function releaseCompletionAttemptForResume(attempt, err, knex = db) {
   if (!attempt?.id) return false;
   try {
     const newError = err?.message || String(err || 'Completion side effect failed');
-    const rejectionPrefix = '[completion_sms_definite_rejection marker=';
     // A released completion may fail again before reaching the SMS lane.
     // Keep marker-bound proof that the prior provider attempt was definitely
     // rejected until a newer definite rejection replaces it or success clears
     // the attempt error. The completion route matches the embedded marker to
     // structured_notes, so stale proof can never authorize a newer handoff.
-    const durableError = newError.startsWith(rejectionPrefix)
+    const durableError = newError.startsWith(COMPLETION_SMS_DEFINITE_REJECTION_PREFIX)
       ? newError
-      : (String(attempt.error || '').startsWith(rejectionPrefix) ? attempt.error : newError);
+      : (String(attempt.error || '').startsWith(COMPLETION_SMS_DEFINITE_REJECTION_PREFIX) ? attempt.error : newError);
     const [released] = await knex('service_completion_attempts')
       .where({ id: attempt.id, status: 'side_effects_running' })
       .update({
@@ -818,6 +822,7 @@ async function storeResolvedSnapshot(
 }
 
 module.exports = {
+  COMPLETION_SMS_DEFINITE_REJECTION_PREFIX,
   claimCompletionAttempt,
   completionStatusForService,
   hashCompletionRequest,

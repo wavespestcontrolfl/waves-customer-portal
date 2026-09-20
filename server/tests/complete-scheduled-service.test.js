@@ -9,6 +9,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/completion-attempts', () => ({
+  COMPLETION_SMS_DEFINITE_REJECTION_PREFIX: jest.requireActual('../services/completion-attempts').COMPLETION_SMS_DEFINITE_REJECTION_PREFIX,
   claimCompletionAttempt: jest.fn(),
   hashCompletionRequest: jest.fn(() => 'synthetic-request-hash'),
   markCompletionAttemptFailed: jest.fn(async () => {}),
