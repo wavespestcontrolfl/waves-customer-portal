@@ -114,6 +114,7 @@ async function checkRecruitingApplicationEligibility(meta, conn, lock) {
 // superseded by a newer attempt of the same stage in the ledger (Codex r7
 // P2) or by a token that changed since this row was queued.
 function checkRecruitingStageSupersession(meta, app, stage) {
+  if (stage === 'application_received') return checkReceiptSupersession(meta, app);
   if (stage !== 'interview_invite' && stage !== 'interview_confirmation') return null;
   const status = String(app.status || '');
   if (status !== 'interview') return { eligible: false, reason: `application-${status}` };
@@ -132,6 +133,23 @@ function checkRecruitingStageSupersession(meta, app, stage) {
     return { eligible: false, reason: 'interview-token-changed' };
   }
   return null;
+}
+
+// A queued application receipt ("we'll reach out within 2 business days")
+// is stale once the owner has moved on: the application advanced past the
+// review stages, or a LATER stage/owner text is already live in the ledger
+// (Codex #4623 r17). Either way the applicant must not get the older
+// acknowledgment after the newer message.
+const LIVE_SMS_OUTCOMES = ['pending', 'handoff', 'sent', 'uncertain', 'deferred'];
+function checkReceiptSupersession(meta, app) {
+  const status = String(app.status || '');
+  if (status !== 'new' && status !== 'reviewed') return { eligible: false, reason: `application-advanced-${status}` };
+  const history = Array.isArray(app.comms_history) ? app.comms_history : [];
+  const mine = history.find((e) => e && e.id === meta.ledger_entry_id);
+  const mineAt = mine ? Date.parse(mine.at || '') : NaN;
+  const later = history.some((e) => e && e.id !== meta.ledger_entry_id && e.channel === 'sms' && e.stage !== 'application_received'
+    && LIVE_SMS_OUTCOMES.includes(e.outcome) && Number.isFinite(mineAt) && Date.parse(e.at || '') > mineAt);
+  return later ? { eligible: false, reason: 'superseded-by-later-stage' } : null;
 }
 
 // Booking version: interview_confirmation only — the queued copy names a

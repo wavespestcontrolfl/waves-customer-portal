@@ -594,7 +594,10 @@ async function newerEmailAttemptExists(applicationId, templateKey, messageRow) {
     // 'uncertain' is live too: a newer attempt that timed out at SendGrid
     // may already be in the applicant's inbox (Codex r15 P2).
     .whereIn('status', ['queued', 'sent', 'uncertain'])
-    .whereRaw('queued_at > ?', [messageRow.queued_at])
+    // Total order (Codex r17 P2): two attempts inserted in the same
+    // millisecond tie on queued_at, so the row id breaks the tie — exactly
+    // one of two concurrent attempts sees the other as newer.
+    .whereRaw('(queued_at > ? OR (queued_at = ? AND id > ?))', [messageRow.queued_at, messageRow.queued_at, messageRow.id])
     .first('id');
   return Boolean(newer);
 }

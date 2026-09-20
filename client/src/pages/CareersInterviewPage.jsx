@@ -16,7 +16,7 @@
  * ET wall-clock server-side (server/utils/datetime-et.js). This page never
  * calls toISOString() to build a displayed date or time.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
 import {
@@ -226,13 +226,21 @@ function InterviewBookingPanel({ token, data, onDataChange, onInactiveLink }) {
 
   const groups = useMemo(() => groupSlotsByDay(data?.slots), [data?.slots]);
 
+  // Every booking attempt and every refresh bumps this; a refresh response
+  // only lands when nothing newer started after it, so a slow re-fetch from
+  // a slot conflict can never overwrite a booking that committed in the
+  // meantime with stale "open" data (Codex r17 P2).
+  const attemptSeq = useRef(0);
+
   // Quiet re-fetch after a slot turns out to be taken — refreshes the slot
   // list without dropping the applicant into the full-page loading state.
   const refreshSlots = useCallback(async () => {
+    const seq = ++attemptSeq.current;
     try {
       const res = await fetch(`${API_BASE}/public/careers/interview/${encodeURIComponent(token)}`);
-      if (!res.ok) return;
+      if (!res.ok || seq !== attemptSeq.current) return;
       const body = await res.json();
+      if (seq !== attemptSeq.current) return;
       onDataChange(body);
     } catch {
       // best-effort; the inline error already told them to pick again
@@ -248,6 +256,7 @@ function InterviewBookingPanel({ token, data, onDataChange, onInactiveLink }) {
 
   const confirmBooking = async () => {
     if (!mode || !selectedSlot || booking) return;
+    attemptSeq.current += 1; // any in-flight slot refresh is now stale
     setBooking(true);
     setBookError('');
     try {

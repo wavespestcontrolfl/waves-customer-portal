@@ -1973,14 +1973,17 @@ router.post('/ai-draft', async (req, res, next) => {
     // Look up customer context
     const customer = await db('customers').where('phone', 'like', `%${cleanPhone}`).first();
 
-    // Get recent SMS history for context (recruiting rows never reach a
-    // non-admin prompt, defence in depth behind the guard above).
+    // Get recent SMS history for context. Recruiting rows (job_*) are
+    // excluded for EVERY caller, admin included: this is a customer-copy
+    // prompt, and an applicant sharing the phone must never have interview
+    // discussion or the bearer scheduling link fed into a service reply
+    // (Codex #4623 r17). /log keeps showing them to admins.
     const recentSms = await excludeUnresolvedSendReservations(
       db('sms_log').where(function () {
         this.where('from_phone', 'like', `%${cleanPhone}`).orWhere('to_phone', 'like', `%${cleanPhone}`);
       }),
     )
-      .modify((q) => hideRecruitingThreadsFromNonAdmin(q, req, 'sms_log.message_type'))
+      .whereRaw("COALESCE(sms_log.message_type, '') NOT LIKE 'job\\_%'")
       .orderBy('created_at', 'desc')
       .limit(5);
 
@@ -3341,6 +3344,19 @@ router.get('/scheduled', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// A queued recruiting text cancelled here never reaches the replay rail's
+// onTerminal, so its comms_history entry would stay 'deferred' and the
+// recruiting queue would keep promising an automatic send (Codex #4623 r17).
+// Same never-downgrade posture as onTerminal: a never-attempted row is
+// proven undelivered → 'blocked'.
+async function reconcileCancelledRecruitingText(meta, trx) {
+  if (!meta || meta.entry_point !== 'recruiting_comms_deferred' || !meta.job_application_id || !meta.ledger_entry_id) return;
+  const { reconcileCommsHistoryEntryByOutcome } = require('../services/recruiting-comms');
+  await reconcileCommsHistoryEntryByOutcome(meta.job_application_id, meta.ledger_entry_id, {
+    deferred: { outcome: 'blocked', code: 'cancelled_by_admin', finalized_at: new Date().toISOString() },
+  }, trx);
+}
+
 // DELETE /api/admin/communications/scheduled/:id — cancel scheduled message
 router.delete('/scheduled/:id', async (req, res, next) => {
   try {
@@ -3409,6 +3425,7 @@ router.delete('/scheduled/:id', async (req, res, next) => {
       if (!row) return;
 
       const meta = parseJson(row.metadata, {});
+      await reconcileCancelledRecruitingText(meta, trx);
       const decisionIds = [
         meta.agent_decision_id,
         ...(Array.isArray(meta.parked_decision_ids) ? meta.parked_decision_ids : []),

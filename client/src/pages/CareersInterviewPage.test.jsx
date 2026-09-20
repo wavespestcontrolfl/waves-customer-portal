@@ -112,6 +112,39 @@ describe('CareersInterviewPage — booking failure clears the selected slot', ()
   });
 });
 
+describe('CareersInterviewPage — a slow slot refresh never undoes a booking that committed after it', () => {
+  it('keeps the booked state when the conflict-triggered GET resolves after a later successful POST', async () => {
+    let releaseRefresh;
+    const slowRefresh = new Promise((resolve) => { releaseRefresh = resolve; });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))                                  // initial load
+      .mockResolvedValueOnce(jsonResponse({ error: 'That time is no longer available.' }, 400)) // first book: conflict
+      .mockReturnValueOnce(slowRefresh)                                                      // conflict refresh (slow)
+      .mockResolvedValueOnce(jsonResponse(bookedPayload({ booked: { mode: 'phone', start: '2026-09-22T21:00:00.000Z', end: '2026-09-22T21:30:00.000Z', label: 'Tue Sep 22, 5:00 PM' } }))); // second book: success
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderPage();
+    expect(await screen.findByText(/Hi Jordan/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('radio', { name: /Phone call/i }));
+    fireEvent.click(screen.getByRole('button', { name: '4:30 PM' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm interview time' }));
+    await screen.findByText(/no longer available/i);
+
+    // the applicant picks another time and books it while the refresh is still in flight
+    fireEvent.click(screen.getByRole('button', { name: '5:00 PM' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm interview time' }));
+    expect(await screen.findByText(/booked/i)).toBeInTheDocument();
+    expect(screen.getByText(/Tue Sep 22, 5:00 PM/)).toBeInTheDocument();
+
+    // the stale refresh finally resolves with "open" data — it must be ignored
+    releaseRefresh(jsonResponse(openPayload()));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.getByText(/Tue Sep 22, 5:00 PM/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Confirm interview time' })).not.toBeInTheDocument();
+  });
+});
+
 describe('CareersInterviewPage — book returns 404 (application left the Interview stage)', () => {
   it('a 404 from /book is treated as the same inactive-link terminal state as a 409, not a slot conflict', async () => {
     const fetchMock = vi.fn()

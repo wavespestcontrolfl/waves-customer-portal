@@ -1143,6 +1143,15 @@ describe('recruiting_comms_deferred (PR #4623)', () => {
     expect(await recheckDeferredReplay(ENTRY, { ...meta, stage: 'interview_confirmation', interview_at: '2027-03-16T20:00:00.000Z', interview_mode: 'phone' })).toMatchObject({ eligible: true });
     db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'reviewed', interview_token: null }));
     expect(await recheckDeferredReplay(ENTRY, { ...meta, stage: 'application_received', interview_token: null })).toMatchObject({ eligible: true });
+    // A queued receipt yields once the owner moved on (Codex r17 P2): the
+    // application advanced past review, or a later-stage / owner text is live.
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'interview', interview_token: 'a'.repeat(64) }));
+    expect(await recheckDeferredReplay(ENTRY, { ...meta, stage: 'application_received', interview_token: null })).toMatchObject({ eligible: false, reason: 'application-advanced-interview' });
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'new', interview_token: null, comms_history: [
+      { id: meta.ledger_entry_id, at: '2027-03-16T02:00:00.000Z', stage: 'application_received', channel: 'sms', outcome: 'deferred' },
+      { id: 'owner-1', at: '2027-03-16T03:00:00.000Z', stage: 'owner_reply', channel: 'sms', outcome: 'sent' },
+    ] }));
+    expect(await recheckDeferredReplay(ENTRY, { ...meta, stage: 'application_received', interview_token: null })).toMatchObject({ eligible: false, reason: 'superseded-by-later-stage' });
     recSpy.mockRestore();
     spy.mockRestore();
   });

@@ -217,31 +217,43 @@ async function refreshRecruitingPhoneCache() {
 
 /**
  * true  — the phone has an open application in the snapshot (fail closed)
- * false — the snapshot is loaded and the phone is not in it (fail open)
- * null  — no snapshot could ever be loaded (unknown: fail closed)
+ * false — a CURRENT snapshot is loaded and the phone is not in it (fail open)
+ * null  — unknown: no snapshot could ever be loaded, or the refresh just
+ *         failed and the phone is absent from the stale one (fail closed)
  */
 async function isPlausibleRecruitingPhone(fromPhone) {
   const variants = phoneMatchDigits(fromPhone);
   const last10 = variants.length ? variants[variants.length - 1].slice(-10) : null;
   if (!last10) return false;
+  let refreshFailed = false;
   if (!phoneCache.digits || Date.now() - phoneCache.loadedAt > RECRUITING_PHONE_CACHE_TTL_MS) {
     try {
       phoneCache.loading = phoneCache.loading || refreshRecruitingPhoneCache();
       await phoneCache.loading;
     } catch (err) {
+      refreshFailed = true;
       logger.warn(`[recruiting-inbound] phone snapshot refresh failed (${err && err.name ? err.name : 'Error'}${err && err.code ? ` ${err.code}` : ''}) — keeping the last snapshot`);
     } finally {
       phoneCache.loading = null;
     }
   }
   if (!phoneCache.digits) return null;
-  return phoneCache.digits.has(last10);
+  if (phoneCache.digits.has(last10)) return true;
+  // A negative from a snapshot whose refresh just failed is not evidence: an
+  // application (and its first text) created since that snapshot is absent
+  // from it, and 'false' would hand the applicant's reply to the customer
+  // pipeline during the outage (Codex r17 P1). Only a positive survives a
+  // failed refresh; a negative stays unknown → the webhook's fail-closed retry.
+  return refreshFailed ? null : false;
 }
 
 function _resetRecruitingPhoneCacheForTests() {
   phoneCache.digits = null; phoneCache.loadedAt = 0; phoneCache.loading = null;
 }
+function _expireRecruitingPhoneCacheForTests() {
+  phoneCache.loadedAt = 0;
+}
 
 module.exports = {
   isPlausibleRecruitingPhone,
-  _resetRecruitingPhoneCacheForTests, matchApplicantReply, recordApplicantReply, OPEN_STATUSES, RECENT_OUTBOUND_DAYS, REPLY_MESSAGE_TYPE, NON_CONVERSATIONAL_OUTBOUND };
+  _resetRecruitingPhoneCacheForTests, _expireRecruitingPhoneCacheForTests, matchApplicantReply, recordApplicantReply, OPEN_STATUSES, RECENT_OUTBOUND_DAYS, REPLY_MESSAGE_TYPE, NON_CONVERSATIONAL_OUTBOUND };
