@@ -3653,6 +3653,13 @@ const InvoiceService = {
     }
 
     const ok = sms.ok || email.ok;
+    // An adopted queued pay-link text is discharged by the SMS leg's OWN
+    // outcome only: provider acceptance or a replacement on the scheduled
+    // rail. Email success says nothing about it — a definite SMS failure
+    // beside a delivered email must give the original queued text back
+    // (before finalize clears the token) or the customer never receives it;
+    // an uncertain SMS outcome leaves the adopted rows pending for review.
+    const smsObligationDischarged = sms.ok === true || sms.scheduled === true;
     const smsDefinitelyNotSent = (sms.deliveryOutcome === "not_sent" && sms.scheduled !== true)
       || (claim.invoice?.payer_id && sms.code === "payer_billed");
     const terminalVisitRefused = !ok
@@ -3665,10 +3672,17 @@ const InvoiceService = {
       || email.deliveryOutcome === "uncertain");
     let ownedDeliveryFinalized = false;
     if (ok) {
-      // Resolve BEFORE the finalize below clears send_claim_token — the
-      // resolve is itself token-scoped so it can never discharge a queue row
-      // this exact claim episode didn't adopt.
-      await resolveConsumedQueuedSend(invoiceId, claim.invoice.send_claim_token, consumedQueuedSendRows);
+      // Settle the adopted rows BEFORE the finalize below clears
+      // send_claim_token — both the resolve and the restore are token-scoped
+      // so they can never touch a queue row this claim episode didn't adopt.
+      if (smsObligationDischarged) {
+        await resolveConsumedQueuedSend(invoiceId, claim.invoice.send_claim_token, consumedQueuedSendRows);
+      } else if (sms.deliveryOutcome === "uncertain") {
+        if (consumedQueuedSendRows.length) logger.warn(`[invoice] SMS outcome unverified for ${claim.invoice.invoice_number} — adopted queued text left pending for review`);
+      } else if (consumedQueuedSendRows.length) {
+        const queueRestored = await restoreSendClaim(invoiceId, previousStatus, false, consumedQueuedSendRows, db, claim.invoice.send_claim_token);
+        if (!queueRestored) logger.error(`[invoice] Could not give back the adopted queued pay-link text for ${claim.invoice.invoice_number} after an email-only delivery — a later resend re-adopts it`);
+      }
       const finalized = await whereSendClaimOwned(
         db("invoices").where({ id: invoiceId }).whereIn("status", SEND_FINALIZABLE_STATUSES),
         claim.invoice.send_claim_token,
@@ -3731,11 +3745,23 @@ const InvoiceService = {
     } else if (deliveryOutcomeUncertain) {
       logger.warn(`[invoice] Delivery outcome is unverified for ${claim.invoice.invoice_number} — claim retained for review`);
     } else {
+      // A replacement already sits on the scheduled rail (quiet-hours hold
+      // met again): the adopted rows are discharged by it, and restoring
+      // them too would queue the same pay link twice.
+      let rowsToRestore = consumedQueuedSendRows;
+      if (smsObligationDischarged && consumedQueuedSendRows.length) {
+        rowsToRestore = [];
+        try {
+          await resolveConsumedQueuedSend(invoiceId, claim.invoice.send_claim_token, consumedQueuedSendRows);
+        } catch (e) {
+          logger.error(`[invoice] Could not resolve the adopted queued text for ${claim.invoice.invoice_number} behind its replacement: ${e.message}`);
+        }
+      }
       const restored = await restoreSendClaim(
         invoiceId,
         previousStatus,
         claimed,
-        consumedQueuedSendRows,
+        rowsToRestore,
         db,
         claim.invoice.send_claim_token,
       );
