@@ -2088,14 +2088,53 @@ with 400 fail-closed (malformed shapes, non-string or over-length
 answers, over-length city, unknown role all reject; answer keys are an
 ALLOWLIST — unknown keys are dropped by contract, and `source` is
 server-sanitized attribution, not applicant content). Applicants
-are NEVER customers or leads — the route never touches either table —
-and nothing sends applicant-facing comms (owner contacts every applicant
-himself). Post-insert side effects are fire-and-forget: an AI ranking
+are NEVER customers or leads — the route never touches either table.
+Post-insert side effects are fire-and-forget: an AI ranking
 screen that is assist-only (it never changes status or any
 applicant-facing outcome — every decision is the owner's, which also
-keeps us clear of automated-employment-decision law) and an owner
-bell/push. Treat the gate, the limiters, the no-customer/no-lead rule,
-and the no-comms contract as security-critical.)
+keeps us clear of automated-employment-decision law), an owner
+bell/push, and — as of the recruiting-comms lane, `GATE_RECRUITING_COMMS`
+— the applicant's own submit confirmation: an email whenever one is on
+file, plus SMS only when `sms_consent` was checked on the form. While
+that gate is dark the confirmation is skipped entirely (byte-identical to
+before the lane); it is never a blocking part of the request either way.
+Treat the gate, the limiters, the no-customer/no-lead rule, and the
+fire-and-forget-only comms contract as security-critical.)
+`/api/public/careers/interview/:token` (GET; `/interview/:token/book` and
+`/interview/:token/withdraw`, both POST — the interview self-scheduling
+funnel a `job_interview_invite` text/email sends the applicant, gated
+`GATE_RECRUITING_COMMS` (404 for the WHOLE `/interview/*` family before
+even the limiter runs, layered under the existing `jobApplications` prefix
+gate in index.js, which stays independent). `interview_token` is 64
+lowercase hex chars, minted once (first move to `interview`, never
+rotated in this PR) and format-gated via `router.param` before any
+database read — malformed, unknown, and non-`interview`-status tokens all
+answer the same generic `{error:'Not found'}` 404. A 30/10min per-IP
+limiter (prod only, `ipFallbackKey`) sits behind both gates. GET returns
+`{first_name, status:'open'|'booked', mode_options, in_person_address,
+timezone, booked, slots}` — `slots` come from
+`server/services/interview-slots.js` (weekly window template, 4-hour lead
+time, 30-minute slots, 15-minute buffer against the owner's own route
+stops, and against every other applicant's booked interview) and are
+ALWAYS present, booked or not, so "Change time" needs no second fetch.
+POST `/book` re-validates the client's chosen `start` against that SAME
+live offered set — the client's slot choice is never trusted — and
+writes `interview_mode`/`interview_at`/`interview_end_at`/
+`interview_booked_at` through an atomic `UPDATE … WHERE id=? AND
+status='interview' AND interview_token=?`; a 0-row result (a race with a
+withdraw or a concurrent booking) is a 409, never a silent overwrite.
+A successful book fires (fire-and-forget) the `interview_confirmation`
+comms — SMS only with `sms_consent` or evidence the owner already texted
+this applicant by hand — and the `job_interview_booked` admin
+bell/push. POST `/withdraw` is the same atomic-update shape targeting
+`status='withdrawn'` (0 rows ⇒ 404) and fires `job_application_withdrawn`.
+Neither admin notification carries applicant PII (mode + a formatted time
+label only), matching `new_job_application`'s contract — the recruiting
+queue itself stays `requireAdmin`. No logger call anywhere in this family
+ever receives a raw phone, email, name, or message body — only ids and
+masked forms. Treat the gate-before-limiter ordering, the token format
+gate, the atomic conditional updates, and the no-PII-in-notifications rule
+as security-critical.)
 `/api/estimates/:token/service-opt-out` (PUT; the customer drops ONE
 recurring service line from a sent estimate. Unlike the bond and interior
 switchers this route re-prices the WHOLE estimate through the canonical

@@ -316,6 +316,16 @@ app.use('/api/public/careers', (req, res, next) => {
   }
   next();
 });
+// Interview self-scheduling family (GATE_RECRUITING_COMMS): privacy
+// headers on every response (token route baseline), then the same
+// unobservable-when-dark 404 — here, ahead of the global /api limiter, so a
+// dark probe can never be answered with a 429 instead of the generic 404.
+app.use('/api/public/careers/interview', require('./middleware/no-store').noStore, (req, res, next) => {
+  if (!require('./config/feature-gates').isEnabled('recruitingComms')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
 app.use('/api/public/pest-identifier', (req, res, next) => {
   // Tokenized report READS stay available while the funnel is dark — sent
   // reports are owner-initiated communications (admin manual send), and an

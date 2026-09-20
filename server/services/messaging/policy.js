@@ -34,7 +34,10 @@
  *   'retention'           |   // win-back, churn-save, check-in
  *   'marketing'           |   // promo, deal, seasonal pitch
  *   'internal_briefing'   |   // BI SMS to operator/owner
- *   'support_resolution'      // resolving an open complaint/ticket
+ *   'support_resolution'  |   // resolving an open complaint/ticket
+ *   'application_received' |  // recruiting: submit confirmation (audience 'applicant')
+ *   'interview_invite'     |  // recruiting: self-scheduling link
+ *   'interview_confirmation'  // recruiting: booked/rebooked confirmation
  * )} MessagePurpose
  *
  * @typedef {(
@@ -70,7 +73,7 @@
  * @property {Object}              [metadata]
  */
 
-const MESSAGE_AUDIENCES = ['customer', 'lead', 'internal', 'tech', 'admin'];
+const MESSAGE_AUDIENCES = ['customer', 'lead', 'internal', 'tech', 'admin', 'applicant'];
 const MESSAGE_CHANNELS = ['sms', 'email', 'portal_chat', 'website_chat'];
 const MESSAGE_PURPOSES = [
   'conversational',
@@ -99,6 +102,10 @@ const MESSAGE_PURPOSES = [
   'marketing_seasonal',
   'internal_briefing',
   'support_resolution',
+  // Recruiting comms (GATE_RECRUITING_COMMS), audience 'applicant' only.
+  'application_received',
+  'interview_invite',
+  'interview_confirmation',
 ];
 const IDENTITY_TRUST_LEVELS = [
   'anonymous',
@@ -447,6 +454,39 @@ const PURPOSE_POLICY = {
     minIdentityTrust: 'phone_matches_customer',
     requireIds: ['customerId'],
   },
+  // Recruiting comms (GATE_RECRUITING_COMMS), audience 'applicant' only —
+  // same shape as estimate_followup (the nearest lead purpose): a phone
+  // provided on a form, transactional-only, no customer/lead id to require.
+  // consentBasis is always explicit transactional_allowed from the caller
+  // (server/services/recruiting-comms.js), never inferred from a
+  // notification_prefs row (applicants have none).
+  application_received: {
+    allowEmoji: false,
+    allowExactPrice: false,
+    maxSegments: 2,
+    requireConsent: 'transactional',
+    prefsColumn: null,
+    minIdentityTrust: 'phone_provided_unverified',
+    requireIds: [],
+  },
+  interview_invite: {
+    allowEmoji: false,
+    allowExactPrice: false,
+    maxSegments: 2,
+    requireConsent: 'transactional',
+    prefsColumn: null,
+    minIdentityTrust: 'phone_provided_unverified',
+    requireIds: [],
+  },
+  interview_confirmation: {
+    allowEmoji: false,
+    allowExactPrice: false,
+    maxSegments: 2,
+    requireConsent: 'transactional',
+    prefsColumn: null,
+    minIdentityTrust: 'phone_provided_unverified',
+    requireIds: [],
+  },
 };
 
 /**
@@ -467,7 +507,7 @@ function resolvePolicy(audience, purpose) {
     throw new Error(`messaging/policy: unknown purpose "${purpose}"`);
   }
   const policy = { ...base };
-  if (audience === 'customer' || audience === 'lead') {
+  if (audience === 'customer' || audience === 'lead' || audience === 'applicant') {
     policy.allowEmoji = false;
   } else if (audience === 'internal') {
     // BI / operator surfaces — keep purpose default.

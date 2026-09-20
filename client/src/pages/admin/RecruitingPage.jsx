@@ -25,6 +25,8 @@ import {
   DialogBody,
   DialogFooter,
   Textarea,
+  Input,
+  Checkbox,
   UiSurface,
   Tabs,
   TabList,
@@ -125,12 +127,264 @@ function formatETDateTime(dateStr) {
   });
 }
 
+const STATUS_LABEL = Object.fromEntries(STATUS_TABS.map(({ key, label }) => [key, label]));
+
+const SMS_UNAVAILABLE_REASON = {
+  no_phone: "no phone on file",
+  suppressed: "suppressed",
+};
+
+const EMAIL_UNAVAILABLE_REASON = {
+  no_email: "no email on file",
+};
+
+const STAGE_LABEL = {
+  application_received: "Application received",
+  interview_invite: "Interview invite",
+  interview_confirmation: "Interview confirmation",
+};
+
+const OUTCOME_LABEL = {
+  sent: "sent",
+  blocked: "blocked",
+  failed: "failed",
+  skipped: "skipped",
+  disabled: "disabled",
+};
+
+// "Text sent · Email sent" / "Text blocked" — joins only the channels that
+// were actually requested (PATCH reports 'not_requested' for the other).
+function summarizeSent(sent) {
+  if (!sent) return null;
+  const parts = [];
+  if (sent.sms && sent.sms !== "not_requested") {
+    parts.push(`Text ${OUTCOME_LABEL[sent.sms] || sent.sms}`);
+  }
+  if (sent.email && sent.email !== "not_requested") {
+    parts.push(`Email ${OUTCOME_LABEL[sent.email] || sent.email}`);
+  }
+  return parts.length ? parts.join(" · ") : "No message sent.";
+}
+
+function channelLabel(kind, channel) {
+  const base = kind === "sms" ? "Text" : "Email";
+  if (!channel) return base;
+  if (channel.available) return `${base} ${channel.to || ""}`.trim();
+  const reasonMap = kind === "sms" ? SMS_UNAVAILABLE_REASON : EMAIL_UNAVAILABLE_REASON;
+  const reason = reasonMap[channel.reason] || "unavailable";
+  return `${base} — ${reason}`;
+}
+
 function RecommendationBadge({ recommendation }) {
   if (!recommendation) return <Badge>Unscored</Badge>;
   const label =
     { strong: "Strong", possible: "Possible", weak: "Weak" }[recommendation] ||
     recommendation;
   return <Badge>{label}</Badge>;
+}
+
+// comms_history is append-only, newest last — reverse for display.
+function MessagesList({ history }) {
+  const [openKey, setOpenKey] = useState(null);
+  if (!history?.length) return null;
+  const items = [...history].reverse();
+  return (
+    <div className="mb-4">
+      <div className="text-ui-caption font-medium text-ink-secondary mb-1.5">
+        Messages
+      </div>
+      <div className="flex flex-col gap-1.5">
+        {items.map((entry, i) => {
+          const key = `${entry.at}-${entry.channel}-${i}`;
+          const open = openKey === key;
+          return (
+            <div key={key} className="border-hairline border rounded p-2">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <span className="text-14 text-zinc-600">
+                  {formatETDateTime(entry.at)} · {entry.channel} ·{" "}
+                  {STAGE_LABEL[entry.stage] || entry.stage} · {entry.outcome}
+                </span>
+                {entry.body && (
+                  <button
+                    type="button"
+                    className="text-13 text-zinc-500 underline u-focus-ring min-h-11 md:min-h-0"
+                    onClick={() => setOpenKey(open ? null : key)}
+                  >
+                    {open ? "Hide" : "Show"}
+                  </button>
+                )}
+              </div>
+              {open && entry.body && (
+                <div className="mt-1.5 text-14 text-zinc-800 whitespace-pre-wrap">
+                  {entry.body}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Preview-before-send: click a stage → GET stage-preview → this dialog.
+// Stacks above the detail Dialog (layer 130 over the default 120 — the
+// pattern in _DesignSystemExamples' NestedOverlaysExample). Confirm sends
+// the PATCH; on success the form gives way to a plain outcome summary and
+// a single Close button.
+function StageChangeDialog({
+  open,
+  title,
+  preview,
+  previewLoading,
+  previewError,
+  note,
+  onNoteChange,
+  smsChecked,
+  onSmsCheckedChange,
+  emailChecked,
+  onEmailCheckedChange,
+  smsBody,
+  onSmsBodyChange,
+  emailSubject,
+  onEmailSubjectChange,
+  emailBody,
+  onEmailBodyChange,
+  moveWithoutNotifying,
+  onMoveWithoutNotifyingChange,
+  sendResult,
+  busy,
+  error,
+  onConfirm,
+  onClose,
+}) {
+  const templated = Boolean(preview?.templated);
+  const smsAvailable = Boolean(preview?.channels?.sms?.available);
+  const emailAvailable = Boolean(preview?.channels?.email?.available);
+
+  return (
+    <Dialog open={open} onClose={busy ? undefined : onClose} layer={130} size="lg">
+      <DialogHeader>
+        <DialogTitle>{title}</DialogTitle>
+      </DialogHeader>
+      <DialogBody>
+        {previewLoading && (
+          <div className="text-14 text-zinc-500 py-4 text-center">Loading preview…</div>
+        )}
+        {previewError && (
+          <ActionFeedback error className="mb-3">
+            {previewError}
+          </ActionFeedback>
+        )}
+
+        {!previewLoading && !previewError && preview && (
+          <>
+            {sendResult ? (
+              <ActionFeedback>{summarizeSent(sendResult)}</ActionFeedback>
+            ) : (
+              <>
+                <Textarea
+                  value={note}
+                  onChange={(e) => onNoteChange(e.target.value)}
+                  placeholder="Optional note for this status change…"
+                  rows={2}
+                  className="mb-4"
+                />
+
+                {templated && (
+                  <div className="flex flex-col gap-3 border-hairline border rounded p-3">
+                    {!preview.sending_enabled && (
+                      <div className="text-13 text-zinc-500">
+                        Sending is off (GATE_RECRUITING_COMMS)
+                      </div>
+                    )}
+
+                    <Checkbox
+                      id="stage-notify-sms"
+                      label={channelLabel("sms", preview.channels?.sms)}
+                      checked={smsChecked}
+                      disabled={!smsAvailable || moveWithoutNotifying}
+                      onChange={(e) => onSmsCheckedChange(e.target.checked)}
+                    />
+                    {smsChecked && !moveWithoutNotifying && (
+                      <div>
+                        <Textarea
+                          value={smsBody}
+                          onChange={(e) => onSmsBodyChange(e.target.value.slice(0, 320))}
+                          rows={3}
+                          maxLength={320}
+                        />
+                        <div className="text-13 text-zinc-400 text-right mt-0.5">
+                          {smsBody.length}/320
+                        </div>
+                      </div>
+                    )}
+
+                    <Checkbox
+                      id="stage-notify-email"
+                      label={channelLabel("email", preview.channels?.email)}
+                      checked={emailChecked}
+                      disabled={!emailAvailable || moveWithoutNotifying}
+                      onChange={(e) => onEmailCheckedChange(e.target.checked)}
+                    />
+                    {emailChecked && !moveWithoutNotifying && (
+                      <div className="flex flex-col gap-2">
+                        <Input
+                          value={emailSubject}
+                          onChange={(e) => onEmailSubjectChange(e.target.value.slice(0, 150))}
+                          maxLength={150}
+                          placeholder="Subject"
+                        />
+                        <Textarea
+                          value={emailBody}
+                          onChange={(e) => onEmailBodyChange(e.target.value.slice(0, 4000))}
+                          rows={6}
+                          maxLength={4000}
+                        />
+                      </div>
+                    )}
+
+                    <Checkbox
+                      id="stage-move-without-notifying"
+                      label="Move without notifying"
+                      checked={moveWithoutNotifying}
+                      onChange={(e) => onMoveWithoutNotifyingChange(e.target.checked)}
+                    />
+                  </div>
+                )}
+
+                {error && (
+                  <ActionFeedback error className="mt-3">
+                    {error}
+                  </ActionFeedback>
+                )}
+              </>
+            )}
+          </>
+        )}
+      </DialogBody>
+      <DialogFooter>
+        {sendResult ? (
+          <Button size="sm" onClick={onClose}>
+            Close
+          </Button>
+        ) : (
+          <>
+            <Button size="sm" variant="ghost" onClick={onClose} disabled={busy}>
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              onClick={onConfirm}
+              disabled={busy || previewLoading || !preview}
+            >
+              {busy ? "Sending…" : "Confirm"}
+            </Button>
+          </>
+        )}
+      </DialogFooter>
+    </Dialog>
+  );
 }
 
 export default function RecruitingPage() {
@@ -197,6 +451,9 @@ export default function RecruitingPage() {
   const closeDetail = useCallback(() => {
     detailSeq.current += 1; // invalidate any in-flight open
     setDetail(null);
+    // The stage dialog nests inside the detail dialog's lifetime — closing
+    // the outer one must not leave the inner one open over a null detail.
+    setStageDialog(null);
   }, []);
 
   // Bell deep link: consume ?application=<id> and clear it. Reacts to the
@@ -213,20 +470,94 @@ export default function RecruitingPage() {
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams, openDetail]);
 
-  const setStatus = async (id, status) => {
+  // Stage-change dialog (preview-before-send): { status, resend } while
+  // open, null when closed. Nests above the detail Dialog (layer 130).
+  const [stageDialog, setStageDialog] = useState(null);
+  const [preview, setPreview] = useState(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState(null);
+  const [smsChecked, setSmsChecked] = useState(false);
+  const [emailChecked, setEmailChecked] = useState(false);
+  const [smsBody, setSmsBody] = useState("");
+  const [emailSubject, setEmailSubject] = useState("");
+  const [emailBody, setEmailBody] = useState("");
+  const [moveWithoutNotifying, setMoveWithoutNotifying] = useState(false);
+  const [sendResult, setSendResult] = useState(null);
+  const [stageError, setStageError] = useState(null);
+
+  // Invalidates an in-flight preview fetch the same way detailSeq guards
+  // openDetail — closing the dialog (or reopening it for a different
+  // stage) must not let a slow response land on the wrong stage.
+  const previewSeq = useRef(0);
+
+  const openStageDialog = useCallback(
+    async (status, { resend = false } = {}) => {
+      if (!detail) return;
+      const seq = ++previewSeq.current;
+      setStageDialog({ status, resend });
+      setPreview(null);
+      setPreviewError(null);
+      setSendResult(null);
+      setStageError(null);
+      setNote("");
+      setMoveWithoutNotifying(false);
+      setPreviewLoading(true);
+      try {
+        const data = await adminFetch(
+          `/admin/careers/${detail.id}/stage-preview?status=${encodeURIComponent(status)}`,
+        );
+        if (seq !== previewSeq.current) return;
+        setPreview(data);
+        setSmsChecked(Boolean(data.templated && data.channels?.sms?.available));
+        setEmailChecked(Boolean(data.templated && data.channels?.email?.available));
+        setSmsBody(data.sms_body || "");
+        setEmailSubject(data.email_subject || "");
+        setEmailBody(data.email_body || "");
+      } catch (err) {
+        if (seq === previewSeq.current) setPreviewError(err.message);
+      } finally {
+        if (seq === previewSeq.current) setPreviewLoading(false);
+      }
+    },
+    [detail],
+  );
+
+  const closeStageDialog = useCallback(() => {
+    previewSeq.current += 1; // invalidate any in-flight preview fetch
+    setStageDialog(null);
+  }, []);
+
+  const confirmStage = async () => {
+    if (!stageDialog || !detail) return;
     setBusy(true);
+    setStageError(null);
     try {
-      const data = await adminFetch(`/admin/careers/${id}/status`, {
+      const body = { status: stageDialog.status };
+      if (note.trim()) body.note = note.trim();
+      if (stageDialog.resend) body.resend = true;
+      const wantsNotify =
+        preview?.templated &&
+        !moveWithoutNotifying &&
+        (smsChecked || emailChecked);
+      if (wantsNotify) {
+        body.notify = {
+          sms: smsChecked,
+          email: emailChecked,
+          sms_body: smsBody,
+          email_subject: emailSubject,
+          email_body: emailBody,
+        };
+      }
+      const data = await adminFetch(`/admin/careers/${detail.id}/status`, {
         method: "PATCH",
-        body: JSON.stringify({ status, note: note.trim() || undefined }),
+        body: JSON.stringify(body),
       });
       setDetail(data.application);
-      // A note belongs to exactly one transition — a second status click
-      // must not re-append it under the wrong entry (codex P2).
+      setSendResult(data.sent || null);
       setNote("");
       await load(tab);
     } catch (err) {
-      setError(err.message);
+      setStageError(err.message);
     } finally {
       setBusy(false);
     }
@@ -234,6 +565,11 @@ export default function RecruitingPage() {
 
   const contact = detail?.contact_snapshot || {};
   const screen = detail?.ai_screen || null;
+  const stageDialogTitle = stageDialog
+    ? stageDialog.resend
+      ? "Resend interview link"
+      : `Move to ${STATUS_LABEL[stageDialog.status] || stageDialog.status}`
+    : "";
 
   return (
     <UiSurface density="comfortable" className="mx-auto max-w-[1300px]">
@@ -327,6 +663,12 @@ export default function RecruitingPage() {
                         >
                           {app.ai_score != null ? app.ai_score : "—"}
                         </span>
+                        {app.interview_at && (
+                          <span className="text-14 text-zinc-500">
+                            {app.interview_mode === "in_person" ? "In person" : "Phone"} ·{" "}
+                            {formatETDateTime(app.interview_at)}
+                          </span>
+                        )}
                         <span className="text-14 text-zinc-400">
                           {formatETDateTime(app.created_at)}
                         </span>
@@ -432,12 +774,35 @@ export default function RecruitingPage() {
                   ))}
               </div>
 
-              <Textarea
-                value={note}
-                onChange={(e) => setNote(e.target.value)}
-                placeholder="Optional note for this status change…"
-                rows={2}
-              />
+              {["interview", "offer", "hired"].includes(detail.status) &&
+                (detail.interview_booked_at || detail.interview_url) && (
+                  <div className="mb-4 border-hairline border rounded p-3">
+                    <div className="text-ui-caption font-medium text-ink-secondary mb-1">
+                      Interview
+                    </div>
+                    {detail.interview_booked_at ? (
+                      <div className="text-14 text-zinc-800">
+                        {detail.interview_mode === "in_person" ? "In person" : "Phone call"} ·{" "}
+                        {formatETDateTime(detail.interview_at)}
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-between gap-3 flex-wrap">
+                        <span className="text-14 text-zinc-600">
+                          Link sent, waiting for the applicant to pick a time.
+                        </span>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => openStageDialog("interview", { resend: true })}
+                        >
+                          Resend link
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+              <MessagesList history={detail.comms_history} />
             </DialogBody>
             <DialogFooter>
               <div className="flex flex-wrap gap-1.5">
@@ -447,8 +812,7 @@ export default function RecruitingPage() {
                       key={key}
                       size="sm"
                       variant="secondary"
-                      disabled={busy}
-                      onClick={() => setStatus(detail.id, key)}
+                      onClick={() => openStageDialog(key)}
                     >
                       {label}
                     </Button>
@@ -462,6 +826,33 @@ export default function RecruitingPage() {
           </>
         )}
       </Dialog>
+
+      <StageChangeDialog
+        open={Boolean(stageDialog)}
+        title={stageDialogTitle}
+        preview={preview}
+        previewLoading={previewLoading}
+        previewError={previewError}
+        note={note}
+        onNoteChange={setNote}
+        smsChecked={smsChecked}
+        onSmsCheckedChange={setSmsChecked}
+        emailChecked={emailChecked}
+        onEmailCheckedChange={setEmailChecked}
+        smsBody={smsBody}
+        onSmsBodyChange={setSmsBody}
+        emailSubject={emailSubject}
+        onEmailSubjectChange={setEmailSubject}
+        emailBody={emailBody}
+        onEmailBodyChange={setEmailBody}
+        moveWithoutNotifying={moveWithoutNotifying}
+        onMoveWithoutNotifyingChange={setMoveWithoutNotifying}
+        sendResult={sendResult}
+        busy={busy}
+        error={stageError}
+        onConfirm={confirmStage}
+        onClose={closeStageDialog}
+      />
     </UiSurface>
   );
 }

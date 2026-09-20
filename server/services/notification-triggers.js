@@ -207,6 +207,41 @@ const TRIGGER_REGISTRY = {
         : '/admin/recruiting',
     }),
   },
+  // Fired by the public interview self-scheduling route (POST
+  // /interview/:token/book) when an applicant picks or changes a time.
+  // Same no-PII contract as new_job_application: mode + when label only,
+  // no name/phone/email cross the requireAdmin boundary.
+  job_interview_booked: {
+    label: 'Interview booked',
+    category: 'job_application',
+    priority: 'high',
+    group: 'Leads & Sales',
+    adminRoleOnly: true,
+    build: (p) => ({
+      title: 'Interview booked',
+      body: p.whenLabel
+        ? `${p.mode === 'in_person' ? 'In person' : 'Phone'} interview — ${p.whenLabel}.`
+        : 'An applicant booked an interview time.',
+      link: p.applicationId
+        ? `/admin/recruiting?application=${p.applicationId}`
+        : '/admin/recruiting',
+    }),
+  },
+  // Fired by the public interview link's "I'm no longer interested" action.
+  job_application_withdrawn: {
+    label: 'Applicant withdrew',
+    category: 'job_application',
+    priority: 'normal',
+    group: 'Leads & Sales',
+    adminRoleOnly: true,
+    build: (p) => ({
+      title: 'Applicant withdrew',
+      body: 'An applicant is no longer interested — open the recruiting queue.',
+      link: p.applicationId
+        ? `/admin/recruiting?application=${p.applicationId}`
+        : '/admin/recruiting',
+    }),
+  },
   // Fired by reschedule-intent-flagger when an inbound SMS reads as a
   // reschedule/away request while a visit is still armed — the automation
   // does not act on these, so the owner must (2026-08-05 incident class:
@@ -862,6 +897,12 @@ function pushTagFor(triggerKey, payload = {}) {
     // Per-application tag: two applications arriving before the owner opens
     // notifications must not collapse into one push (same-tag replacement).
     return `waves-new_job_application-${payload.applicationId || 'unknown-application'}`;
+  }
+  if (triggerKey === 'job_interview_booked' || triggerKey === 'job_application_withdrawn') {
+    // Per-application tag, same reasoning as new_job_application above — a
+    // rebooked time (a second job_interview_booked for the same applicant)
+    // may legitimately replace its own earlier push.
+    return `waves-${triggerKey}-${payload.applicationId || 'unknown-application'}`;
   }
   if (triggerKey === 'service_report_token_mint_failed' || triggerKey === 'completion_sms_failed') {
     // Per-service-record tag: an outage that fails several completions must
