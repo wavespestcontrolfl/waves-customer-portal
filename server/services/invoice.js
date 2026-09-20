@@ -881,8 +881,12 @@ const QUEUE_ADOPTION_PENDING_KEY = "invoice_send_adoption_pending";
 // Live = queued, mid-send, or delivered-but-unfinalized.
 const LIVE_PAY_LINK_QUEUE_ROW_SQL = "(status IN ('scheduled', 'sending') OR (status = 'sent' AND metadata->>'finalize_pending' = 'true'))";
 // The adopter's view: the same, except a still-scheduled invoice_send_deferred
-// row is its own (about to be consumed), not a blocker.
-const ADOPTABLE_PAY_LINK_QUEUE_ROW_SQL = "(status = 'sending' OR (status = 'sent' AND metadata->>'finalize_pending' = 'true') OR (status = 'scheduled' AND metadata->>'entry_point' <> ?))";
+// row is its own (about to be consumed), not a blocker. A scheduled row the
+// stale-finalization sweep re-queued with finalize_only (scheduler.js) is
+// NOT unsent work: its text already reached the provider and only the
+// bookkeeping is owed, so it blocks like a delivered row.
+const FINALIZE_ONLY_ROW_SQL = "COALESCE(metadata->>'finalize_only', 'false') = 'true'";
+const ADOPTABLE_PAY_LINK_QUEUE_ROW_SQL = `(status = 'sending' OR (status = 'sent' AND metadata->>'finalize_pending' = 'true') OR (status = 'scheduled' AND (metadata->>'entry_point' <> ? OR ${FINALIZE_ONLY_ROW_SQL})))`;
 async function queuedPayLinkText(invoiceId, { adoptsQueuedInvoiceSend = false, database = db } = {}) {
   const query = database("sms_log")
     .whereRaw("metadata->>'invoice_id' = ?", [String(invoiceId)])
@@ -910,6 +914,8 @@ async function consumeQueuedInvoiceSend(invoiceId, database = db) {
     // so a later authorized retry can adopt the unresolved row again without
     // mistaking historical, successfully superseded cancellations for work.
     .whereRaw(`(status = 'scheduled' OR (status = 'cancelled' AND metadata->>'${QUEUE_ADOPTION_PENDING_KEY}' = 'true'))`)
+    // Never consume a delivered row awaiting finalization only.
+    .whereRaw(`NOT (${FINALIZE_ONLY_ROW_SQL})`)
     .update({
       status: "cancelled",
       updated_at: new Date(),
@@ -988,6 +994,21 @@ async function resolveConsumedQueuedSend(invoiceId, claimToken, consumedRows, da
     resolutionErr.code = "queued_sms_resolution_failed";
     resolutionErr.cause = err;
     throw resolutionErr;
+  }
+}
+
+// After the provider accepted the text (or credit settled the invoice) the
+// send is a success whatever happens to the queue bookkeeping: a failed
+// resolution must never surface as a failed send, or the caller records a
+// delivered SMS as not sent and can restore the adopted queued text on top
+// of it. Returns the bookkeeping error message, or null.
+async function resolveAdoptedRowsAfterDelivery(invoiceId, claimToken, consumedRows, invoiceNumber) {
+  try {
+    await resolveConsumedQueuedSend(invoiceId, claimToken, consumedRows);
+    return null;
+  } catch (e) {
+    logger.error(`[invoice] Adopted queued text for ${invoiceNumber || invoiceId} stays pending after a delivered send — resolution failed: ${e.message}`);
+    return e.message;
   }
 }
 
@@ -2888,7 +2909,7 @@ const InvoiceService = {
           .update({ send_claim_token: null, updated_at: new Date() });
         if (!cleared) throw sendClaimLostError();
         await enrollPacketReviewAfterCredit(invoiceId, pre?.visit_completion_packet_id);
-        await resolveConsumedQueuedSend(invoiceId, invoice.send_claim_token, consumedQueuedSendRows);
+        await resolveAdoptedRowsAfterDelivery(invoiceId, invoice.send_claim_token, consumedQueuedSendRows, invoice.invoice_number);
         // Covered by credit IS success for the caller (the invoice is now 'prepaid',
         // settled — nothing to send). Direct callers check `sent || ok`, so flag
         // ok:true; sent stays false because no SMS went out. No claim to restore —
@@ -3286,10 +3307,10 @@ const InvoiceService = {
         await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId });
       }
 
-      await resolveConsumedQueuedSend(invoiceId, invoice.send_claim_token, consumedQueuedSendRows);
+      const queueResolutionError = await resolveAdoptedRowsAfterDelivery(invoiceId, invoice.send_claim_token, consumedQueuedSendRows, invoice.invoice_number);
       await releaseDirectSmsClaim();
 
-      return { sent: true, payUrl };
+      return queueResolutionError ? { sent: true, payUrl, queueResolutionError } : { sent: true, payUrl };
     } catch (err) {
       err.deliveryOutcome ||= err.providerOutcome?.deliveryOutcome;
       if (smsDelivered) {
@@ -3350,9 +3371,11 @@ const InvoiceService = {
             logger.error(`[invoice] issued-invoice closeout failed (post-recovery) for ${invoice.invoice_number}: ${e.message}`);
           }
         }
-        await resolveConsumedQueuedSend(invoiceId, invoice.send_claim_token, consumedQueuedSendRows);
+        const queueResolutionError = await resolveAdoptedRowsAfterDelivery(invoiceId, invoice.send_claim_token, consumedQueuedSendRows, invoice.invoice_number);
         await releaseDirectSmsClaim();
-        return { sent: true, payUrl, finalizeError: err.message };
+        return queueResolutionError
+          ? { sent: true, payUrl, finalizeError: err.message, queueResolutionError }
+          : { sent: true, payUrl, finalizeError: err.message };
       }
       if (claimed && err.code === "INVOICE_VISIT_TERMINAL" && err.deliveryOutcome === "not_sent") {
         const scheduledServiceId = await linkedScheduledServiceId(invoice);
