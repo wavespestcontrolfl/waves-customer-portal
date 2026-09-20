@@ -593,3 +593,18 @@ describe('outbound choke point normalizes applicant SMS', () => {
     expect(src).toMatch(/\['customer', 'lead', 'applicant'\]\.includes\(sendInput\.audience\) && !sendHasMedia/);
   });
 });
+
+describe('owner reply on the recruiting rail', () => {
+  test('sendOwnerReply sends job_owner_reply under purpose applicant_reply from the reply line, with handoff evidence', async () => {
+    mockSendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, deliveryOutcome: 'accepted' });
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    const res = await RecruitingComms.sendOwnerReply({ applicationId: 'app-1', body: 'See you Tuesday!', by: 'tech-1', fromNumber: '+19415550777' });
+    expect(res.outcome).toBe('sent');
+    const input = mockSendCustomerMessage.mock.calls[0][0];
+    expect(input).toMatchObject({ audience: 'applicant', purpose: 'applicant_reply', entryPoint: 'recruiting_owner_reply', operatorInitiated: true });
+    expect(input.metadata).toMatchObject({ original_message_type: 'job_owner_reply', fromNumber: '+19415550777', adminUserId: 'tech-1' });
+    const stored = mockDb.__tables.job_applications.find((r) => r.id === 'app-1');
+    expect(stored.comms_history[0]).toMatchObject({ stage: 'owner_reply', outcome: 'sent', from_number: '+19415550777', by: 'tech-1' });
+  });
+});

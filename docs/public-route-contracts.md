@@ -2192,7 +2192,13 @@ a thread shared with an applicant stay visible —
 applicant rows (`audience='applicant'`) out of the compliance export, and
 refuses (403) a non-admin `POST /api/admin/communications/ai-draft` for a
 phone that has ever been party to a recruiting text
-(`isRecruitingPhone`) before any history for that phone is loaded.
+(`isRecruitingPhone`) before any history for that phone is loaded. An
+OWNER texting an applicant from a shared surface — the dashboard inbox
+reply on a `job_applicant_reply` row, or the Communications composer to
+a recruiting phone — rides the recruiting rail (`sendOwnerReply`: purpose
+`applicant_reply`, message_type `job_owner_reply`, sent from the line the
+applicant texted, handoff evidence on the application), never a 'manual'
+customer text; a non-admin is refused (403) on both.
 Applicant texts obey the 8am–8pm ET send window; a held send is queued
 on the scheduled-SMS rail (`sms_log` status `scheduled`, metadata
 `audience:'applicant'` + `purpose` + `consent_basis` + the ledger entry id

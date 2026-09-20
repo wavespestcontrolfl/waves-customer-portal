@@ -36,6 +36,13 @@ jest.mock('../utils/recruiting-thread-scope', () => {
   const real = jest.requireActual('../utils/recruiting-thread-scope');
   return { ...real, isRecruitingPhone: (...a) => mockIsRecruitingPhone(...a) };
 });
+const mockSendOwnerReply = jest.fn(async () => ({ outcome: 'sent', applicationId: 'app-1' }));
+const mockOpenAppId = jest.fn(async () => 'app-1');
+jest.mock('../services/recruiting-comms', () => ({
+  sendOwnerReply: (...a) => mockSendOwnerReply(...a),
+  openApplicationIdForPhone: (...a) => mockOpenAppId(...a),
+  errorSummary: (e) => (e && e.name) || 'Error',
+}));
 
 const express = require('express');
 const db = require('../models/db');
@@ -136,5 +143,27 @@ describe('GET /scheduled recruiting boundary', () => {
     res = await fetch(`${base}/api/admin/communications/scheduled`, { headers: { Authorization: 'Bearer admin' } });
     expect(res.status).toBe(200);
     expect(smsLogQuery.orWhere).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /sms composer recruiting boundary', () => {
+  async function smsAs(role) {
+    return fetch(`${base}/api/admin/communications/sms`, {
+      method: 'POST', headers: { Authorization: `Bearer ${role}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: '+19415550142', body: 'See you Tuesday', fromNumber: undefined }),
+    });
+  }
+  test('technician texting an applicant phone is refused (403)', async () => {
+    mockIsRecruitingPhone.mockResolvedValueOnce(true);
+    const res = await smsAs('tech');
+    expect(res.status).toBe(403);
+    expect(mockSendOwnerReply).not.toHaveBeenCalled();
+  });
+  test('admin texting an applicant phone rides the recruiting rail (sendOwnerReply), never a manual customer text', async () => {
+    mockIsRecruitingPhone.mockResolvedValueOnce(true);
+    const res = await smsAs('admin');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ success: true, recruiting: true, outcome: 'sent' });
+    expect(mockSendOwnerReply).toHaveBeenCalledWith(expect.objectContaining({ applicationId: 'app-1', body: 'See you Tuesday', by: 'admin-1' }));
   });
 });

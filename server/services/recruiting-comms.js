@@ -37,6 +37,17 @@ const STAGE_KEYS = {
   application_received: 'job_application_received',
   interview_invite: 'job_interview_invite',
   interview_confirmation: 'job_interview_confirmation',
+  // owner_reply: no template — the body is the owner's own words
+  // (dashboard inbox reply / composer); message_type job_owner_reply.
+  owner_reply: null,
+};
+// Stage → sendCustomerMessage purpose (policy.js). Every stage except the
+// owner-authored reply is its own purpose name.
+const STAGE_PURPOSE = {
+  application_received: 'application_received',
+  interview_invite: 'interview_invite',
+  interview_confirmation: 'interview_confirmation',
+  owner_reply: 'applicant_reply',
 };
 
 const INTERVIEW_LINK_PLACEHOLDER = '[interview link]';
@@ -562,7 +573,9 @@ async function sendStageComms(app, stage, opts = {}) {
         // The number the text goes out from — durable routing evidence the
         // reply classifier compares the inbound `To` against, so it never
         // depends on the post-acceptance (best-effort) sms_log row.
-        const applicantFromNumber = await outboundNumberForApplicants();
+        // A reply goes back out on the line the applicant texted (opts.fromNumber);
+        // automated stages use the resolved applicant line.
+        const applicantFromNumber = opts.fromNumber || await outboundNumberForApplicants();
         handoffEntry.from_number = applicantFromNumber;
         try {
           await appendCommsHistory(app.id, [handoffEntry]);
@@ -579,11 +592,12 @@ async function sendStageComms(app, stage, opts = {}) {
           body,
           channel: 'sms',
           audience: 'applicant',
-          purpose: stage,
-          entryPoint: 'recruiting_comms',
+          purpose: STAGE_PURPOSE[stage] || stage,
+          entryPoint: opts.entryPoint || 'recruiting_comms',
           identityTrustLevel: 'phone_provided_unverified',
           consentBasis: { status: 'transactional_allowed', source: 'job_application' },
-          metadata: { original_message_type: `job_${stage}`, job_application_id: app.id, ...(applicantFromNumber ? { fromNumber: applicantFromNumber } : {}) },
+          ...(opts.by && opts.by !== 'system' && opts.by !== 'applicant' ? { operatorInitiated: true } : {}),
+          metadata: { original_message_type: `job_${stage}`, job_application_id: app.id, ...(opts.by && opts.by !== 'system' && opts.by !== 'applicant' ? { adminUserId: opts.by } : {}), ...(applicantFromNumber ? { fromNumber: applicantFromNumber } : {}) },
           });
         } catch (err) {
           // Channel isolation: a throw here must not lose the email leg's
@@ -719,7 +733,43 @@ async function sendStageComms(app, stage, opts = {}) {
   }
 }
 
+/**
+ * Owner-authored reply to an applicant from a shared surface (dashboard
+ * inbox / composer): rides the recruiting rail — job_owner_reply message
+ * type (hidden from non-admin readers), handoff evidence with the reply
+ * line's number, so the applicant's NEXT reply still classifies owner-only.
+ * @returns {Promise<{ outcome: string, applicationId: string|null }>}
+ */
+async function sendOwnerReply({ applicationId, body, by, fromNumber }) {
+  const text = String(body || '').trim();
+  if (!applicationId || !text) return { outcome: 'skipped', applicationId: applicationId || null };
+  const app = await db('job_applications').where({ id: applicationId }).first();
+  if (!app) return { outcome: 'skipped', applicationId };
+  const result = await sendStageComms(app, 'owner_reply', {
+    sms: true, email: false, by: by || 'system', smsBody: text, fromNumber: fromNumber || undefined, entryPoint: 'recruiting_owner_reply',
+  });
+  return { outcome: result.sms, applicationId };
+}
+
+// The open application a shared-surface text to this phone belongs to
+// (most recently updated open one). Applicants are never customers, so
+// this is the only linkage a composer has.
+async function openApplicationIdForPhone(phone) {
+  const { phoneMatchDigits } = require('../utils/phone');
+  const variants = phoneMatchDigits(String(phone || ''));
+  if (!variants.length) return null;
+  const row = await db('job_applications')
+    .whereRaw("regexp_replace(COALESCE(contact_snapshot->>'phone', ''), '[^0-9]', '', 'g') = ANY (?::text[])", [variants])
+    .whereIn('status', ['new', 'reviewed', 'interview', 'offer'])
+    .orderBy('updated_at', 'desc')
+    .first('id');
+  return row ? row.id : null;
+}
+
 module.exports = {
+  openApplicationIdForPhone,
+  sendOwnerReply,
+  STAGE_PURPOSE,
   reconcileCommsHistoryEntryByOutcome,
   outboundNumberForApplicants,
   finalizeCommsHistoryEntry,

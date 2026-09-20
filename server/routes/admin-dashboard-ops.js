@@ -3,7 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
-const { hideRecruitingThreadsFromNonAdmin } = require('../utils/recruiting-thread-scope');
+const { hideRecruitingThreadsFromNonAdmin, isRecruitingMessageType } = require('../utils/recruiting-thread-scope');
 const { etDateString } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
@@ -76,11 +76,31 @@ router.post('/inbox/:id/reply', async (req, res, next) => {
       .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
       .where('messages.id', req.params.id), req)
       .select(
-        'messages.id', 'messages.conversation_id',
+        'messages.id', 'messages.conversation_id', 'messages.message_type', 'messages.metadata',
         'conversations.customer_id', 'conversations.our_endpoint_id', 'conversations.contact_phone'
       )
       .first();
     if (!original) return res.status(404).json({ error: 'Message not found' });
+
+    // Replying to an applicant stays on the recruiting rail (Codex r7 P0):
+    // owner-only, typed job_owner_reply, with handoff evidence on the
+    // application so the applicant's next text still classifies owner-only.
+    if (isRecruitingMessageType(original.message_type)) {
+      if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+      const meta = typeof original.metadata === 'string' ? (() => { try { return JSON.parse(original.metadata); } catch { return {}; } })() : (original.metadata || {});
+      const { sendOwnerReply } = require('../services/recruiting-comms');
+      const reply = await sendOwnerReply({
+        applicationId: meta.job_application_id || null,
+        body: body.trim(),
+        by: req.technicianId,
+        fromNumber: original.our_endpoint_id || undefined,
+      });
+      if (!['sent', 'uncertain', 'deferred'].includes(reply.outcome)) {
+        return res.status(422).json({ error: `Applicant text ${reply.outcome}` });
+      }
+      await require('../services/inbound-sms-read').markInboundSmsRead({ messageIds: [req.params.id], adminUserId: req.technicianId || null, role: req.techRole || null }).catch(() => {});
+      return res.json({ success: true, recruiting: true });
+    }
 
     const replyTo = original.contact_phone
       || (await db('customers').where({ id: original.customer_id }).first())?.phone;

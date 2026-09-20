@@ -37,7 +37,8 @@
  *   'support_resolution'  |   // resolving an open complaint/ticket
  *   'application_received' |  // recruiting: submit confirmation (audience 'applicant')
  *   'interview_invite'     |  // recruiting: self-scheduling link
- *   'interview_confirmation'  // recruiting: booked/rebooked confirmation
+ *   'interview_confirmation' | // recruiting: booked/rebooked confirmation
+ *   'applicant_reply'         // recruiting: owner-authored reply to an applicant
  * )} MessagePurpose
  *
  * @typedef {(
@@ -106,6 +107,7 @@ const MESSAGE_PURPOSES = [
   'application_received',
   'interview_invite',
   'interview_confirmation',
+  'applicant_reply',
 ];
 const IDENTITY_TRUST_LEVELS = [
   'anonymous',
@@ -482,6 +484,18 @@ const PURPOSE_POLICY = {
     allowEmoji: false,
     allowExactPrice: false,
     maxSegments: 2,
+    requireConsent: 'transactional',
+    prefsColumn: null,
+    minIdentityTrust: 'phone_provided_unverified',
+    requireIds: [],
+  },
+  // Owner-authored reply to an applicant (dashboard inbox / composer) —
+  // stays on the recruiting rail so shared readers hide it and the reply
+  // classifier keeps the thread owner-only.
+  applicant_reply: {
+    allowEmoji: false,
+    allowExactPrice: false,
+    maxSegments: 3,
     requireConsent: 'transactional',
     prefsColumn: null,
     minIdentityTrust: 'phone_provided_unverified',
