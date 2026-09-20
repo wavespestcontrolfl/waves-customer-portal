@@ -103,15 +103,31 @@ function buildKnownProductNamePattern(names) {
 // after it is never safe: when the name's last character is itself
 // non-word ("(OMRI)") and what follows is also non-word ("."), word|nonword
 // adjacency never holds, so "\b" fails even though the identity matched.
+// The opening boundary mirrors the closing non-word lookahead above: a "\b"
+// here is never safe either, since a runtime name can start with punctuation
+// ("#1 EcoGuard Wonder"), and "\b" never holds between two non-word
+// characters (the position before "#" when preceded by, say, a sentence
+// boundary). "(?<!\w)" requires only that the preceding character not be a
+// word character, which is what should gate a name regardless of which
+// character — word or non-word — it itself opens with.
 function buildBrandSubject(knownProductNamePattern) {
-  return `\\b(?:${knownProductNamePattern}(?!\\w)|(?!${SAFETY_SUBJECT_DETERMINER_CAPITALIZED}\\b)[A-Z][a-z]+\\s+${SAFETY_BRAND_FORMULATION}\\b)`;
+  return `(?<!\\w)(?:${knownProductNamePattern}(?!\\w)|(?!${SAFETY_SUBJECT_DETERMINER_CAPITALIZED}\\b)[A-Z][a-z]+\\s+${SAFETY_BRAND_FORMULATION}\\b)`;
 }
 
 const SAFETY_PRODUCT_RELATIVE = '(?:\\s+(?:(?:(?:that|which)\\s+)?(?:we|they|you|(?:your|our|my|the)\\s+tech(?:nician)?)\\s+(?:(?:have|had|has|just|already|recently)\\s+)*(?:use|used|apply|applied|spray|sprayed|put down)|(?:that|which)\\s+(?:is|are|was|were|has been|have been|had been)\\s+(?:(?:just|already|recently)\\s+)*(?:used|applied|sprayed|put down)|(?:(?:just|already|recently)\\s+)*(?:used|applied|sprayed|put down)))?';
 
+// Bounded adverb allowed between a perfect/modal auxiliary and be/been so
+// "has always been safe" and "will definitely be safe" still yield a
+// guarantee candidate. Deliberately excludes negations (not/never): "will
+// not be" and "has never been" must keep failing this slot outright, not
+// match it as an adverb, so those stay non-guarantees.
+const SAFETY_SUBJECT_VERB_ADVERB = '(?:always|definitely|certainly|still|also|generally|usually|completely|totally|perfectly|absolutely)';
+
 // Apostrophe-optional, mirroring the negation grammar's cant/wont handling:
-// ASR transcripts frequently drop the apostrophe (its/theyre/thats).
-const SAFETY_SUBJECT_VERB = `${SAFETY_PRODUCT_RELATIVE}(?:[\\x27\\u2019]?(?:s|re)|[\\x27\\u2019]?ll\\s+be|\\s+(?:is|are|was|were|will be|would be|should be|has been|have been|had been|is going to be|are going to be))`;
+// ASR transcripts frequently drop the apostrophe (its/theyre/thats). The
+// contracted-perfect branch ('s been / 've been) is likewise apostrophe-
+// optional.
+const SAFETY_SUBJECT_VERB = `${SAFETY_PRODUCT_RELATIVE}(?:[\\x27\\u2019]?(?:s|ve)\\s+(?:${SAFETY_SUBJECT_VERB_ADVERB}\\s+)?been|[\\x27\\u2019]?(?:s|re)|[\\x27\\u2019]?ll\\s+(?:${SAFETY_SUBJECT_VERB_ADVERB}\\s+)?be|\\s+(?:is|are|was|were|will\\s+(?:${SAFETY_SUBJECT_VERB_ADVERB}\\s+)?be|would\\s+(?:${SAFETY_SUBJECT_VERB_ADVERB}\\s+)?be|should\\s+(?:${SAFETY_SUBJECT_VERB_ADVERB}\\s+)?be|has\\s+(?:${SAFETY_SUBJECT_VERB_ADVERB}\\s+)?been|have\\s+(?:${SAFETY_SUBJECT_VERB_ADVERB}\\s+)?been|had\\s+(?:${SAFETY_SUBJECT_VERB_ADVERB}\\s+)?been|is going to be|are going to be))`;
 
 const SAFETY_INTENSIFIER = '(?:(?:completely|totally|perfectly|entirely|absolutely|fully|100%|100 percent|one hundred percent|a hundred percent|definitely|certainly|surely|very|quite|pretty|always|actually|also|generally|usually|typically)\\s+)?';
 
@@ -131,7 +147,7 @@ const SAFETY_FILLER_ADJECTIVE = vocabAlt(SAFETY_FILLER_ADJECTIVES);
 
 const HARM_ADJECTIVE = vocabAlt(HARM_WORDS);
 
-const SAFETY_AUDIENCE_NOUN = '(?:dogs?|puppy|cats?|kittens?|pets?|animals?|children|kids|people|humans?|bab(?:y|ies))';
+const SAFETY_AUDIENCE_NOUN = '(?:dogs?|pupp(?:y|ies)|cats?|kittens?|pets?|animals?|child(?:ren)?|kids?|people|humans?|bab(?:y|ies))';
 
 const SAFETY_AUDIENCE_POSSESSIVE = '(?:(?:my|your|our|their|his|her)\\s+)?';
 
@@ -270,10 +286,22 @@ function buildProductGrammar(productNames) {
     `\\b${SAFETY_AUDIENCE_SUBJECT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_COORDINATED_ADJECTIVE_PREFIX}${SAFETY_GUARANTEED_MODIFIER}${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b${audienceProductRelation}`,
     'gi',
   );
+  // Compiled case-insensitively so the generic SAFETY_SUBJECT_WITH_PRODUCT
+  // branch (ordinary lowercase subject-noun words) still matches regardless
+  // of sentence-initial capitalization. That same 'i' flag would otherwise
+  // also loosen the brandSubject branch's title-case/uppercase-code brand
+  // heuristic into no constraint at all ("blue sky is." / "service day
+  // is."), so the proposed brand is captured here and revalidated below
+  // with the case-sensitive brandIdentityRe, exactly like the sibling
+  // named-product patterns above.
   const repeatedProductAnswerRe = new RegExp(
-    `^\\s*(?:${SAFETY_SUBJECT_WITH_PRODUCT}|${brandSubject})\\s+(?:(?:is|are|will|would|can|could|does|do|did)(?:\\s+not)?|cannot|(?:isn|aren|won|wouldn|can|couldn|doesn|don|didn)['’]t)[.!\\s]*$`,
+    `^\\s*(?:${SAFETY_SUBJECT_WITH_PRODUCT}|(${brandSubject}))\\s+(?:(?:is|are|will|would|can|could|does|do|did)(?:\\s+not)?|cannot|(?:isn|aren|won|wouldn|can|couldn|doesn|don|didn)['’]t)[.!\\s]*$`,
     'i',
   );
+  const repeatedProductAnswer = (text) => {
+    const match = repeatedProductAnswerRe.exec(text);
+    return !!match && (match[1] === undefined || brandIdentityRe.test(match[1]));
+  };
 
   const guaranteeRes = Object.freeze([
     SAFETY_PRODUCT_STRONG_GUARANTEE_RE,
@@ -303,7 +331,7 @@ function buildProductGrammar(productNames) {
     brandSubject, brandMentionRe, brandIdentityRe, namesProduct,
     audienceProductRelation, namedProductGuaranteeRe, namedProductNoHarmRe,
     namedProductKeepSafeRe, audienceProductGuaranteeRe, repeatedProductAnswerRe,
-    guaranteeRes,
+    repeatedProductAnswer, guaranteeRes,
   };
 }
 
@@ -352,13 +380,16 @@ const SAFETY_LEAD_INTENSIFIER = '(?:totally|completely|perfectly)\\s+';
 
 // "Certainly"/"absolutely"/"definitely"/"totally"/"of course" are genuine
 // standalone affirmations only when nothing follows them or when they
-// complete positively; directly preceding a HARM_WORD reverses the answer
-// ("Totally unsafe.", "Definitely dangerous."), so those five leads carry a
-// negative lookahead the unconditional affirmations (yes/sure/no problem)
-// do not need.
+// complete positively. A HARM_WORD anywhere later in the same answer
+// reverses it ("Totally unsafe.", "Definitely very unsafe.", "Absolutely
+// completely harmful.", "Of course it is unsafe.") even when other words
+// (intensifiers, a copula, a subject) sit between the lead and the harm
+// word, so the whole remainder is validated character-by-character — never
+// advancing past a position where an un-negated HARM_WORD starts — rather
+// than only rejecting a harm adjective directly adjacent to the lead.
 const SAFETY_AFFIRMATIVE_LEAD_RE = new RegExp(
   '^\\s*(?:(?:yes|yeah|yep|yup|sure|no problem)\\b'
-  + `|(?:certainly|absolutely|definitely|totally|of course)\\b(?!\\s+${HARM_ADJECTIVE}\\b)`
+  + `|(?:certainly|absolutely|definitely|totally|of course)\\b(?:(?!${SAFETY_ADJECTIVE_NEGATION}${HARM_ADJECTIVE}\\b)[\\s\\S])*$`
   + `|(?:it is|it['’]s)\\s+(?:${SAFETY_LEAD_INTENSIFIER})?${SAFETY_LEAD_COMPLETION}\\b`
   + `|(?:it is|it['’]s|they are|they['’]re)\\s*,?\\s*(?:yes)?[.!\\s]*$`
   + `|(?:it|they)(?:\\s+will|['’]ll)\\s+be[.!\\s]*$)`,
@@ -378,8 +409,12 @@ const SAFETY_NEGATIVE_LEAD_RE = /^\s*(?:no(?!\s+(?:problem|one|person)\b)|nope|n
 // the corrected clause, whose own polarity regexes then decide it.
 const SAFETY_ANSWER_COPULAR_LEAD = '(?:it is(?:\\s+not)?|it[\\x27\\u2019]s(?:\\s+not)?|it isn[\\x27\\u2019]t|they are(?:\\s+not)?|they[\\x27\\u2019]re(?:\\s+not)?|they aren[\\x27\\u2019]t)';
 
+// ASR punctuates a self-correction as often as it doesn't ("Yes, actually,
+// no."), so the separator after the discourse marker accepts an optional
+// comma (with surrounding spaces) the same way whitespace alone already
+// did, rather than demanding whitespace immediately after the marker.
 const SAFETY_INDEPENDENT_ANSWER_SPLIT_RE = new RegExp(
-  '[.!?;]+(?=\\s|$)|,\\s*(?:but|however|actually|wait|no wait|sorry|i mean)\\s+'
+  '[.!?;]+(?=\\s|$)|,\\s*(?:but|however|actually|wait|no wait|sorry|i mean)(?:\\s*,\\s*|\\s+)'
   + `(?=(?:yes|yeah|yep|yup|sure|certainly|absolutely|definitely|totally|of course|no problem|no|nope|nah|correct|right|exactly|${SAFETY_ANSWER_COPULAR_LEAD})\\b)`,
   'i',
 );
@@ -434,7 +469,7 @@ function recognizeSafetyResponse(text, options = {}) {
       text: answer, index, end: clause.end,
       evidence: answer.trim() ? localCandidateEvidence(text, 'answer', index, clause.end) : null,
       confirmation: SAFETY_PROPOSITION_CONFIRMATION_RE.test(answer),
-      repeatedProduct: grammar.repeatedProductAnswerRe.test(answer),
+      repeatedProduct: grammar.repeatedProductAnswer(answer),
       affirmative: (SAFETY_AFFIRMATIVE_LEAD_RE.test(answer) || SHORT_AFFIRMATION_RE.test(answer))
         && !SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(answer),
       negative: SAFETY_NEGATIVE_LEAD_RE.test(answer) || SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(answer),
