@@ -2990,7 +2990,7 @@ const InvoiceService = {
       }
       claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, adoptsQueuedInvoiceSend, operatorInitiated });
     } else {
-      claim = await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, adoptsQueuedInvoiceSend, operatorInitiated });
+      claim = await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, adoptsQueuedInvoiceSend, firstDeliveryOnly, operatorInitiated });
     }
     const { invoice, previousStatus, claimed, consumedQueuedSendRows = [] } = claim;
 
