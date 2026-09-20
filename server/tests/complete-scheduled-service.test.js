@@ -274,3 +274,46 @@ describe('completion SMS delivery-unverified classifiers', () => {
     expect(definiteRejectionMarkerFromAttemptError('[completion_sms_definite_rejection marker=abc without a closing bracket')).toBeNull();
   });
 });
+
+describe('quiet-hours completion SMS deferral clears the pre-send uncertainty marker (commit 1c882ef6df)', () => {
+  // The pre-send completionSmsDeliveryUnverifiedAt marker is stamped just
+  // before the provider handoff (see the classifiers above) so a thrown
+  // uncertain outcome is never mistaken for a definite one. A QUIET_HOURS_HOLD
+  // response is a DEFINITE non-delivery whose obligation moves to the queued
+  // replay — but terminalDeferredCompletionSend's own write (services/
+  // dispatch-completion-deferred.js) only ever sets completionSmsStatus,
+  // completionSmsError and completionSmsFailedAt; it merges into
+  // structured_notes and never touches completionSmsDeliveryUnverifiedAt.
+  // A pre-send marker left in place by the deferral write would therefore
+  // survive a terminal replay failure untouched and, per the
+  // completionSmsAlreadyHandled guard beside completionSmsMarkerWasDefinitely-
+  // Rejected, block every later completion retry despite the definite
+  // non-delivery the terminal failure just recorded. This function is ~13k
+  // lines deep with no functional harness reaching this exact branch
+  // (confirmed: no test in this repo drives completeScheduledService's own
+  // completion-SMS QUIET_HOURS_HOLD deferral to a real sendCustomerMessage
+  // call), so the fix is pinned structurally, matching this repo's own
+  // "source contracts" convention (tests/invoice-issued-closeout-completion-
+  // postgres.test.js) for exactly this situation.
+  test('the deferredDelta written with the queue insertion clears completionSmsDeliveryUnverifiedAt', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    // The SAME object also carries the marker clear inside the atomic
+    // db.transaction that inserts the dispatch_completion_deferred queue
+    // row and merges these exact keys into structured_notes — so this one
+    // object literal IS the fix: reverting the added key desyncs the
+    // written notes from the queue row that now owns delivery.
+    expect(source).toMatch(
+      /const deferredDelta = \{\s*\n\s*completionSmsStatus: 'deferred',\s*\n\s*completionSmsDeferredTo: smsResult\.nextAllowedAt,\s*\n(?:\s*\/\/[^\n]*\n)*\s*completionSmsDeliveryUnverifiedAt: null,\s*\n\s*\};/,
+    );
+    // Confirms the SAME object (not a stray copy) is what actually reaches
+    // structured_notes, atomically with the queue insert.
+    const deferredDeltaAt = source.indexOf("const deferredDelta = {");
+    const txAt = source.indexOf('await db.transaction(async (trx) => {', deferredDeltaAt);
+    const mergeAt = source.indexOf('JSON.stringify(deferredDelta)', txAt);
+    expect(deferredDeltaAt).toBeGreaterThan(-1);
+    expect(txAt).toBeGreaterThan(deferredDeltaAt);
+    expect(mergeAt).toBeGreaterThan(txAt);
+  });
+});
