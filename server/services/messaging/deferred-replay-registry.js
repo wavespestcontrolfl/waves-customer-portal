@@ -624,19 +624,24 @@ const REGISTRY = {
           // confirmation — the queued copy names the wrong one.
           if ((meta.interview_mode || null) !== (app.interview_mode || null)) return { eligible: false, reason: 'interview-mode-changed' };
         }
-        // An attempt is about to go out: move the queued entry to 'handoff'
-        // BEFORE dispatch so an ambiguous/timed-out provider result still
-        // leaves durable evidence that the applicant may hold the text.
-        if (meta.ledger_entry_id) {
-          const { reconcileCommsHistoryEntryByOutcome } = require('../recruiting-comms');
-          await reconcileCommsHistoryEntryByOutcome(meta.job_application_id, meta.ledger_entry_id, {
-            deferred: { outcome: 'handoff', replay_attempted_at: new Date().toISOString() },
-          });
-        }
         return { eligible: true };
       } catch (err) {
         return failClosed('recruiting-comms', meta.job_application_id, err);
       }
+    },
+    // The canonical sender's locked handoff (Codex r8 P1): the queued entry
+    // moves to 'handoff' IMMEDIATELY before the provider request — after
+    // every fresh suppression/consent check has passed — so a text blocked
+    // at those checks never leaves 'handoff' evidence, while an ambiguous
+    // or timed-out provider result still does.
+    async smsHandoff(meta, dispatch) {
+      if (meta.job_application_id && meta.ledger_entry_id) {
+        const { reconcileCommsHistoryEntryByOutcome } = require('../recruiting-comms');
+        await reconcileCommsHistoryEntryByOutcome(meta.job_application_id, meta.ledger_entry_id, {
+          deferred: { outcome: 'handoff', replay_attempted_at: new Date().toISOString() },
+        });
+      }
+      return dispatch();
     },
     async finalize(meta) {
       if (!meta.job_application_id || !meta.ledger_entry_id) return { ok: true };

@@ -163,9 +163,17 @@ const interviewLimiter = rateLimit({
   skip: () => process.env.NODE_ENV !== 'production',
 });
 
-async function interviewViewPayload(application) {
+async function interviewViewPayload(application, { slotsRequired = true } = {}) {
   const contact = contactOf(application);
-  const slots = await listInterviewSlots({ excludeApplicationId: application.id });
+  let slots = [];
+  try {
+    slots = await listInterviewSlots({ excludeApplicationId: application.id });
+  } catch (err) {
+    // After a booking has COMMITTED the slot list is decoration — the
+    // applicant must see their booked time, never a 500 (Codex r8 P2).
+    if (slotsRequired) throw err;
+    logger.warn(`[careers] post-commit slot list unavailable: ${errorSummary(err)}`);
+  }
   return {
     first_name: firstNameOf(contact.name),
     status: application.interview_booked_at ? 'booked' : 'open',
@@ -274,7 +282,7 @@ router.post('/interview/:token/book', interviewLimiter, async (req, res) => {
     if (outcome.notFound) return res.status(404).json({ error: 'Not found' });
     if (outcome.badRequest) return res.status(400).json({ error: outcome.badRequest });
     if (outcome.conflict) return res.status(409).json({ error: 'This link is no longer active.' });
-    if (outcome.unchanged) return res.json(await interviewViewPayload(outcome.updated));
+    if (outcome.unchanged) return res.json(await interviewViewPayload(outcome.updated, { slotsRequired: false }));
     const { updated, matched } = outcome;
 
     // Fire-and-forget, in TWO INDEPENDENT blocks: a confirmation-comms
@@ -322,7 +330,7 @@ router.post('/interview/:token/book', interviewLimiter, async (req, res) => {
       logger.error(`[careers] interview book notification failed: ${errorSummary(err)}`);
     });
 
-    return res.json(await interviewViewPayload(updated));
+    return res.json(await interviewViewPayload(updated, { slotsRequired: false }));
   } catch (err) {
     logger.error(`[careers] interview book failed: ${errorSummary(err)}`);
     return res.status(500).json({ error: 'Something went wrong.' });

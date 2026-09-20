@@ -75,6 +75,8 @@ function shouldCaptureReply({ channel, direction, authorType, adminUserId, messa
   if (!normalizeText(body)) return false;
   if (authorType !== 'admin' && !adminUserId) return false;
   if (NON_HUMAN_REPLY_MESSAGE_TYPES.includes(String(messageType || '').toLowerCase())) return false;
+  // Recruiting texts (job_*, PR #4623) are hiring content, never customer-response training data.
+  if (/^job_/.test(String(messageType || '').toLowerCase())) return false;
   return true;
 }
 

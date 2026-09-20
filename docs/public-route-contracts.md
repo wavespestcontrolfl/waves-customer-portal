@@ -2211,7 +2211,9 @@ and the application's interview token/time, replayed by
 services/scheduler.js under the applicant policy through the
 `recruiting_comms_deferred` deferred-replay registry entry — the recheck
 fails closed on the gate, a missing/closed application, a changed token
-or a rebooked time/mode, and on a NEWER attempt of the same stage in the
+or a rebooked time/mode (the ledger entry moves to `handoff` only in the
+locked provider handoff, after the fresh suppression/consent checks pass —
+never at recheck), and on a NEWER attempt of the same stage in the
 ledger (a resend supersedes a queued invite even after the worker claimed
 it); the recheck marks the queued entry `handoff`
 before dispatch, finalize marks it `sent`, and a terminal block never

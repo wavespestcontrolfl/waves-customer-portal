@@ -321,10 +321,15 @@ router.patch('/:id/status', async (req, res) => {
           const finalEmailBody = wantEmail && emailBodyOverride
             ? RecruitingComms.substituteInterviewLinkPlaceholder(emailBodyOverride, finalInterviewUrl)
             : undefined;
+          const stillEligible = async () => {
+            const now = await db('job_applications').where({ id: updated.id }).first('status', 'interview_token');
+            return Boolean(now && now.status === 'interview' && now.interview_token === updated.interview_token);
+          };
           sent = await RecruitingComms.sendStageComms(updated, 'interview_invite', {
             sms: wantSms,
             email: wantEmail,
             by: req.technicianId,
+            stillEligible,
             smsBody: finalSmsBody,
             emailSubject: wantEmail && emailSubjectOverride ? emailSubjectOverride : undefined,
             emailBody: finalEmailBody,

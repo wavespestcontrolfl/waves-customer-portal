@@ -1165,13 +1165,21 @@ describe('recruiting_comms_deferred (PR #4623)', () => {
     spy.mockRestore();
   });
 
-  test('recheck marks the queued entry in flight (deferred -> handoff) BEFORE dispatch', async () => {
+  test('recheck never stamps; the locked smsHandoff stamps deferred -> handoff immediately before dispatch', async () => {
     const gatesSpy = jest.spyOn(gates, 'isEnabled').mockImplementation(() => true);
     const comms = require('../services/recruiting-comms');
     const spy = jest.spyOn(comms, 'reconcileCommsHistoryEntryByOutcome').mockResolvedValue(undefined);
     db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'reviewed', interview_token: null }));
     expect(await recheckDeferredReplay(ENTRY, { ...meta, stage: 'application_received', interview_token: null })).toMatchObject({ eligible: true });
+    expect(spy).not.toHaveBeenCalled();
+    const { deferredSmsHandoff } = require('../services/messaging/deferred-replay-registry');
+    const handoff = deferredSmsHandoff(ENTRY, meta);
+    const order = [];
+    spy.mockImplementation(async () => { order.push('stamp'); });
+    const dispatch = jest.fn(async () => { order.push('dispatch'); return { sent: true }; });
+    await expect(handoff(dispatch)).resolves.toEqual({ sent: true });
     expect(spy).toHaveBeenCalledWith('app-1', 'e-1', { deferred: expect.objectContaining({ outcome: 'handoff' }) });
+    expect(order).toEqual(['stamp', 'dispatch']);
     spy.mockRestore(); gatesSpy.mockRestore();
   });
 

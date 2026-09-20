@@ -550,9 +550,19 @@ async function sendStageComms(app, stage, opts = {}) {
   const contact = contactOf(app);
   const vars = buildVars(app, stage);
   const entries = [];
+  // Authoritative eligibility immediately before EACH provider leg
+  // (Codex r8 P2): the caller's check re-reads the application so a stage
+  // change during the (long) SMS leg can never let the email leg deliver an
+  // invite whose link already 404s.
+  const legEligible = async () => {
+    if (typeof opts.stillEligible !== 'function') return true;
+    try { return (await opts.stillEligible()) !== false; } catch { return false; }
+  };
 
   if (wantSms) {
-    if (!contact.phone) {
+    if (!(await legEligible())) {
+      result.sms = 'stale';
+    } else if (!contact.phone) {
       result.sms = 'skipped';
     } else {
       let body = opts.smsBody;
@@ -619,19 +629,25 @@ async function sendStageComms(app, stage, opts = {}) {
           ? 'sent'
           : (sendRes.blocked ? 'blocked' : (sendRes.deliveryOutcome === 'uncertain' ? 'uncertain' : 'failed'));
         let deferredUntil = null;
-        // A newer invite (immediate or queued) retires any invite still
-        // queued for this application — one stable token must never reach
-        // the applicant twice (Codex r6 P2).
-        if (stage === 'interview_invite' && (sendRes.sent || (sendRes.retryable && sendRes.nextAllowedAt))) {
+        // A newer invite retires any invite still queued for this application
+        // — one stable token must never reach the applicant twice — but only
+        // once the replacement EXISTS (sent, or its queue row persisted), so a
+        // failed replacement never strands the applicant with no invite at
+        // all (Codex r8 P2). The replay rail's own supersession (a newer
+        // ledger attempt) covers rows the worker already claimed.
+        const retireQueuedInvites = async (exceptRowId) => {
+          if (stage !== 'interview_invite') return;
           try {
             await db('sms_log')
               .where({ status: 'scheduled', message_type: 'job_interview_invite' })
               .whereRaw("metadata->>'job_application_id' = ?", [app.id])
+              .modify((q) => { if (exceptRowId) q.whereNot('id', exceptRowId); })
               .update({ status: 'cancelled', updated_at: new Date() });
           } catch (err) {
             logger.warn(`[recruiting-comms] retiring queued invites failed (application ${app.id}): ${errorSummary(err)}`);
           }
-        }
+        };
+        if (sendRes.sent) await retireQueuedInvites(null);
         if (!sendRes.sent && sendRes.retryable && sendRes.nextAllowedAt) {
           // Held by the send window (8am–8pm ET): queue the text on the
           // scheduled-SMS rail the cron replays (services/scheduler.js) —
@@ -639,7 +655,7 @@ async function sendStageComms(app, stage, opts = {}) {
           // when the window opens (Codex r5 P1). The rail re-derives the
           // applicant policy from the metadata stamped here.
           try {
-            await db('sms_log').insert({
+            const inserted = await db('sms_log').insert({
               customer_id: null,
               direction: 'outbound',
               from_phone: applicantFromNumber,
@@ -667,9 +683,11 @@ async function sendStageComms(app, stage, opts = {}) {
                 consent_basis: { status: 'transactional_allowed', source: 'job_application' },
                 original_block_code: sendRes.code || null,
               }),
-            });
+            }).returning('id');
+            const queuedRowId = Array.isArray(inserted) ? (inserted[0] && (inserted[0].id || inserted[0])) : null;
             outcome = 'deferred';
             deferredUntil = new Date(sendRes.nextAllowedAt).toISOString();
+            await retireQueuedInvites(queuedRowId);
           } catch (err) {
             logger.error(`[recruiting-comms] deferred queue insert failed (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
           }
@@ -693,7 +711,9 @@ async function sendStageComms(app, stage, opts = {}) {
 
   async function finishStage() {
   if (wantEmail) {
-    if (!contact.email) {
+    if (!(await legEligible())) {
+      result.email = 'stale';
+    } else if (!contact.email) {
       result.email = 'skipped';
     } else {
       const built = buildEmailContent(app, stage, vars);

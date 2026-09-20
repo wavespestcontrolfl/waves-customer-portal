@@ -7,6 +7,10 @@ jest.mock('../models/db', () => {
   fn.transaction = jest.fn(async (cb) => cb(fn));
   return fn;
 });
+jest.mock('../utils/recruiting-thread-scope', () => {
+  const real = jest.requireActual('../utils/recruiting-thread-scope');
+  return { ...real, isRecruitingPhone: jest.fn(async () => false) };
+});
 jest.mock('../services/twilio', () => ({}));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),

@@ -305,6 +305,19 @@ describe('POST /interview/:token/book', () => {
 
   const OFFERED = { start: '2027-03-16T20:00:00.000Z', end: '2027-03-16T20:30:00.000Z', date: '2027-03-16', label: 'Tue Mar 16, 4:00 PM' };
 
+  test('a slot-list read failure AFTER the booking committed still answers 200 with the booked payload', async () => {
+    mockDb.__setRows([appRow()]);
+    mockListInterviewSlots.mockResolvedValueOnce([OFFERED]).mockRejectedValueOnce(Object.assign(new Error('timeout'), { code: '57014' }));
+    const res = await fetch(`${base}/api/public/careers/interview/${TOKEN}/book`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'phone', start: OFFERED.start }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe('booked');
+    expect(body.slots).toEqual([]);
+  });
+
   test('a retried identical booking is idempotent: no rewrite, no second confirmation, no second bell', async () => {
     mockDb.__setRows([appRow({
       interview_mode: 'phone', interview_at: OFFERED.start, interview_end_at: OFFERED.end,

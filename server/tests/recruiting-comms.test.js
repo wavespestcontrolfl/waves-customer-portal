@@ -43,19 +43,24 @@ function makeDb() {
     tables[table] = tables[table] || [];
     const rows = tables[table];
     let whereCond = {};
+    const excludeIds = [];
     const builder = {
       where(cond) { whereCond = { ...whereCond, ...cond }; return builder; },
       whereRaw() { return builder; },
       insert(row) {
         const inserted = { id: row.id || `id-${rows.length + 1}`, ...row };
         rows.push(inserted);
-        return { returning: async () => [inserted] };
+        const p = Promise.resolve([inserted]);
+        p.returning = async () => [inserted];
+        return p;
       },
+      whereNot(col, val) { excludeIds.push(val); return builder; },
+      modify(fn) { fn(builder); return builder; },
       update(payload) {
         const resolved = { ...payload };
         if (resolved.comms_history && resolved.comms_history.__raw) {
           const { sql, bindings } = resolved.comms_history;
-          const matches = rows.filter((r) => Object.entries(whereCond).every(([k, v]) => r[k] === v));
+          const matches = rows.filter((r) => Object.entries(whereCond).every(([k, v]) => r[k] === v) && !excludeIds.includes(r.id));
           if (/e->>'outcome' = \?/.test(sql)) {
             // Mirror reconcileCommsHistoryEntryByOutcome: (id, outcome, patch) triples.
             for (const r of matches) {
@@ -82,7 +87,7 @@ function makeDb() {
           }
           delete resolved.comms_history;
         }
-        const matches = rows.filter((r) => Object.entries(whereCond).every(([k, v]) => r[k] === v));
+        const matches = rows.filter((r) => Object.entries(whereCond).every(([k, v]) => r[k] === v) && !excludeIds.includes(r.id));
         for (const r of matches) Object.assign(r, resolved);
         const promise = Promise.resolve(matches.length);
         promise.catch = (fn) => Promise.resolve(matches.length).catch(fn);
@@ -565,7 +570,45 @@ describe('sendStageComms — pipeline throw after provider acceptance', () => {
 });
 
 describe('sendStageComms — invite supersedes queued invites; suppression lookup failure settles the ledger', () => {
-  test('a new interview invite retires invites still queued for the same application', async () => {
+  test('a held invite retires the older queued invite only AFTER its own queue row persisted (never strands the applicant)', async () => {
+    mockRenderSmsTemplate.mockResolvedValue('Pick a time: https://x/careers/interview/a');
+    mockSendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, retryable: true, deferred: true, nextAllowedAt: '2027-03-17T12:00:00.000Z', code: 'SEND_WINDOW_CLOSED' });
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    mockDb.__tables.sms_log = [{ id: 'q1', status: 'scheduled', message_type: 'job_interview_invite', metadata: JSON.stringify({ job_application_id: 'app-1' }) }];
+    const order = [];
+    const original = mockDb.getMockImplementation();
+    mockDb.mockImplementation((table) => {
+      const api = original(table);
+      if (table === 'sms_log') {
+        const origInsert = api.insert; const origUpdate = api.update;
+        api.insert = (row) => { order.push('insert'); return origInsert(row); };
+        api.update = (payload) => { order.push('retire'); return origUpdate(payload); };
+      }
+      return api;
+    });
+    await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: true, email: false, by: 'tech-1' });
+    mockDb.mockImplementation(original);
+    expect(order).toEqual(['insert', 'retire']);
+    const rows = mockDb.__tables.sms_log;
+    expect(rows.find((r) => r.id === 'q1').status).toBe('cancelled');
+    expect(rows.filter((r) => r.status === 'scheduled')).toHaveLength(1); // the replacement
+  });
+
+  test('stillEligible is consulted before EACH provider leg; a stage change mid-send stales the email leg only', async () => {
+    mockRenderSmsTemplate.mockResolvedValue('Pick a time: https://x/careers/interview/a');
+    mockSendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, deliveryOutcome: 'accepted' });
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    const answers = [true, false];
+    const stillEligible = jest.fn(async () => answers.shift());
+    const result = await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: true, email: true, by: 'tech-1', stillEligible });
+    expect(stillEligible).toHaveBeenCalledTimes(2);
+    expect(result).toEqual({ sms: 'sent', email: 'stale' });
+    expect(mockSendOne).not.toHaveBeenCalled();
+  });
+
+  test('a sent interview invite retires invites still queued for the same application', async () => {
     mockRenderSmsTemplate.mockResolvedValue('Pick a time: https://x/careers/interview/a');
     mockSendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, deliveryOutcome: 'accepted' });
     const app = baseApp({ interview_token: 'a'.repeat(64) });
