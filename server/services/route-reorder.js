@@ -1103,7 +1103,8 @@ async function runRouteReorder(opts = {}, conn = db) {
             saved_meters: savedMeters,
             source: result.source,
             ...(repair ? { before_window_feasible: false, after_window_feasible: true,
-              distance_change_meters: afterMeters - beforeMeters } : {}),
+              distance_change_meters: afterMeters - beforeMeters,
+              ...(repair.rebuilt ? { stale_order_rebuilt: true } : {}) } : {}),
           };
           // Window chronology + feasibility guard, THE SAME decision
           // chooseWindowSafeOrder makes for the admin optimize endpoints
