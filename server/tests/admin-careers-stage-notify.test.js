@@ -242,6 +242,17 @@ describe('PATCH /:id/status', () => {
     expect(row.interview_token).toBe('e'.repeat(64)); // the link itself is kept
   });
 
+  test('rejected -> offer also clears the stale booking (offer blocks a slot too)', async () => {
+    mockDb.__setRows([appRow({
+      status: 'rejected', interview_token: 'g'.repeat(64), interview_mode: 'in_person',
+      interview_at: '2027-03-16T20:00:00.000Z', interview_booked_at: '2027-03-01T15:00:00.000Z',
+    })]);
+    const { status } = await patch('aaaaaaaa-0000-4000-8000-000000000001', { status: 'offer' });
+    expect(status).toBe(200);
+    expect(mockDb.__rows()[0].interview_booked_at).toBeNull();
+    expect(mockDb.__rows()[0].interview_at).toBeNull();
+  });
+
   test('offer -> interview keeps the booking (offer still blocks the slot)', async () => {
     mockDb.__setRows([appRow({
       status: 'offer', interview_token: 'f'.repeat(64), interview_mode: 'phone',

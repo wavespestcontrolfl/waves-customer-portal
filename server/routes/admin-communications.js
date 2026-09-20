@@ -6,6 +6,7 @@ const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { hideRecruitingThreadsFromNonAdmin } = require('../utils/recruiting-thread-scope');
 const { resolveLocation } = require('../config/locations');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
@@ -1643,6 +1644,10 @@ router.get('/log', async (req, res, next) => {
         'customers.first_name', 'customers.last_name', 'customers.phone as customer_phone'
       )
       .orderBy('messages.created_at', 'desc');
+
+    // Recruiting threads (applicant texts carry a bearer interview link) are
+    // owner-only — see utils/recruiting-thread-scope.js.
+    query = hideRecruitingThreadsFromNonAdmin(query, req);
 
     // Exclude internal admin phone messages from either side of the conversation.
     for (const phone of ADMIN_PHONES) {

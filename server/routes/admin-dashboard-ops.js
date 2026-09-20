@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { hideRecruitingThreadsFromNonAdmin } = require('../utils/recruiting-thread-scope');
 const { etDateString } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
@@ -13,11 +14,11 @@ router.use(adminAuthenticate, requireTechOrAdmin);
  * inbox SMS-only (voice gets its own surface in the PR 4 redesign). */
 router.get('/inbox', async (req, res, next) => {
   try {
-    const rows = await db('messages')
+    const rows = await hideRecruitingThreadsFromNonAdmin(db('messages')
       .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
       .leftJoin('customers', 'conversations.customer_id', 'customers.id')
       .where('messages.channel', 'sms')
-      .where('messages.direction', 'inbound')
+      .where('messages.direction', 'inbound'), req)
       .select(
         'messages.id', 'messages.body', 'messages.is_read', 'messages.created_at',
         'messages.message_type',
@@ -69,9 +70,9 @@ router.post('/inbox/:id/reply', async (req, res, next) => {
     const { body } = req.body;
     if (!body || !body.trim()) return res.status(400).json({ error: 'Reply body is required' });
 
-    const original = await db('messages')
+    const original = await hideRecruitingThreadsFromNonAdmin(db('messages')
       .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
-      .where('messages.id', req.params.id)
+      .where('messages.id', req.params.id), req)
       .select(
         'messages.id', 'messages.conversation_id',
         'conversations.customer_id', 'conversations.our_endpoint_id', 'conversations.contact_phone'

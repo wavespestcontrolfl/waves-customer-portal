@@ -232,12 +232,13 @@ router.patch('/:id/status', async (req, res) => {
           });
           updatePayload.status = status;
           updatePayload.status_history = JSON.stringify(history);
-          // Re-entering Interview from a non-blocking stage (rejected,
+          // Entering a slot-blocking stage (interview OR offer — both hold
+          // a slot in interview-slots.js) from a non-blocking one (rejected,
           // withdrawn, new, ...): the old booking's slot was released to
           // other applicants the moment the row left interview/offer, so it
           // must not come back silently — clear it and let the applicant
           // re-pick through the link under the booking lock (local audit).
-          if (status === 'interview' && !['interview', 'offer'].includes(row.status)) {
+          if (['interview', 'offer'].includes(status) && !['interview', 'offer'].includes(row.status)) {
             updatePayload.interview_mode = null;
             updatePayload.interview_at = null;
             updatePayload.interview_end_at = null;
