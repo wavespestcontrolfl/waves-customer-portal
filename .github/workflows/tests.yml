@@ -137,7 +137,7 @@ jobs:
         working-directory: server
         env:
           DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/invoice-claim-ownership-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/invoice-claim-ownership-postgres.test.js tests/invoice-review-hold-serializer-postgres.test.js
       - name: Historical invoice repair transaction tests
         working-directory: server
         env:

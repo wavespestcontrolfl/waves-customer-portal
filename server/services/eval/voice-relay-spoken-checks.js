@@ -12,6 +12,8 @@ const {
   QUESTION_LEAD_RE,
   CONVERSATIONAL_CONDITION_RE,
   latestInterrogativeSegment,
+  CLAUSE_BOUNDARY_TOKEN_RE,
+  RIGHT_NOUN_PHRASE_SUBJECT_RE,
   clauseBounds,
   clauseOf,
   SUBJECT,
@@ -1617,6 +1619,13 @@ const compiles = (source, requireContent = false) => {
 };
 
 const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
+  report_readback_confirms: () => (v) => (isPlainObject(v) && Object.keys(v).length === 2
+    && typeof v.subject === 'string' && v.subject.trim() && compiles(v.subject)
+    && reportPatternMayConsumeText(v.subject)
+    && typeof v.location === 'string' && v.location.trim() && compiles(v.location)
+    && reportPatternMayConsumeText(v.location)
+    ? null : 'value must be { subject: "<regex>", location: "<regex>" }'),
+
   no_free_visit_promise: () => (v) => (v === true ? null : 'value must be true'),
   no_price_disclosure: () => (v) => (v === true || (isPlainObject(v) && Object.keys(v).length === 1 && (v.allow === 'returned' || (Array.isArray(v.allow) && v.allow.length && v.allow.every((n) => Number.isFinite(Number(n)))))) ? null : 'value must be true, { allow: [amounts] } or { allow: "returned" }'),
   amount_requires_unit: () => (v) => (isPlainObject(v) && Number.isFinite(Number(v.amount)) && typeof v.unit === 'string' && /^[a-z]+$/.test(v.unit) && Object.keys(v).length === 2 ? null : 'value must be { amount: <number>, unit: "<word>" }'),
@@ -1834,8 +1843,29 @@ function reportHasCompletedPredicate(affirmed, findingVerb) {
     && !clauseIsNegated(completionPrefix);
 }
 
+const REPORT_SHARED_LIST_CONDITION_RE = new RegExp(
+  `(?:^|[.!?;])\\s*(?:only\\s+)?(?:if|unless)\\b[^,]*,`
+    + `[^.!?;]*${REPORT_FINDING_VERB_RE.source}[^.!?;]*\\band\\s*$`,
+  'i',
+);
+
+// Inspect the predicate before the final shared coordinator. An independent
+// contrast ends an earlier condition, even when the last finding is concise;
+// a negated or uncertain shared predicate denies a concise trailing finding.
+function reportSharedListDenies(precedingText, findingVerb) {
+  const precedingSource = precedingText || '';
+  const precedingPredicateAt = Math.max(0, precedingSource.replace(/\band\s*$/i, '').trimEnd().length - 1);
+  const precedingClause = precedingSource.slice(clauseBounds(precedingSource, precedingPredicateAt)[0]);
+  if (REPORT_SHARED_LIST_CONDITION_RE.test(precedingClause)) return true;
+  const sharedFindingVerb = [...precedingClause.matchAll(new RegExp(REPORT_FINDING_VERB_RE.source, 'gi'))].pop();
+  if (findingVerb || !sharedFindingVerb || !/\band\s*$/i.test(precedingClause)) return false;
+  const sharedClaim = claimContext(precedingClause, sharedFindingVerb.index, precedingClause.length);
+  return clauseIsNegated(sharedClaim) || reportFindingIsUncertain(sharedClaim);
+}
+
 function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb, precedingText) {
-  if (/(?:\b(?:anything|everything|all|anywhere|everywhere)\s+but(?:\s+the)?|(?<!\bnothing\s+)(?<!\bno\s+products?\s+)\bexcept(?:\s+for)?(?:\s+the)?|(?<!\bnothing\s+)(?<!\bno\s+products?\s+)\bother\s+than)\s*$/i.test(precedingText)
+  if (reportSharedListDenies(precedingText, findingVerb)
+      || /(?:\b(?:anything|everything|all|anywhere|everywhere)\s+but(?:\s+the)?|(?<!\bnothing\s+)(?<!\bno\s+products?\s+)\bexcept(?:\s+for)?(?:\s+the)?|(?<!\bnothing\s+)(?<!\bno\s+products?\s+)\bother\s+than)\s*$/i.test(precedingText)
       || (!findingVerb && /\bor\s*$/i.test(precedingText))) return true;
   const affirmedWithoutFocus = affirmed.replace(/(?:\bnot|n['’]t)\s+(?:exclusively|solely)\b/gi,
     (focus) => ' '.repeat(focus.length))
@@ -1887,7 +1917,7 @@ function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb
 }
 
 // ── Single-treatment product/location relationships ─────────────────────
-// These frames classify a single bounded assertion and never infer ownership
+// These dimensions classify a single bounded assertion and never infer ownership
 // across coordinated products, locations or predicates. Consumers separately
 // reject uncertain, denied, requested, interrogative or hypothetical evidence.
 const REPORT_PRODUCT_OBJECT_VERB_RE = /^(?:apply|applying|applied|place|placed|placing|use|used|using|treat|treated|treating|spray|sprayed|spraying|put|putting|got|received)$/i;
@@ -2071,7 +2101,7 @@ function reportTreatmentTargetSpan(affirmed, subjectAt, subjectLength, locationA
     ? { start: relationshipStart + links[0].index + links[0][0].length, end: targetEnd } : null;
 }
 
-function reportHasCompletedFinding(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb) {
+function reportHasCompletedSingleFinding(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb) {
   if (subjectAt < 0 || locationAt < 0 || !findingVerb || !reportHasCompletedPredicate(affirmed, findingVerb)) return false;
   if (REPORT_CUSTODY_OBJECT_RE.test(affirmed.slice(subjectAt + subjectLength))) return false;
   const productFrame = findingVerb.index < subjectAt
@@ -2107,6 +2137,681 @@ function reportHasConciseFinding(affirmed, subjectAt, subjectLength, locationAt,
     && REPORT_CONCISE_COMPLETION_RE.test(qualifier);
 }
 
-const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_free_visit_promise, no_third_party_disclosure, only_language, capture_lead_input_asserts });
+// ── Coordinated treatment ownership ─────────────────────────────────────
+// Parse bounded nominal lists that share one treatment predicate. Normalize
+// only supported lists into the single-treatment dimensions above; independent
+// actions cannot lend a product or location. Reporting prefixes are bounded.
+const REPORT_LIST_SEPARATOR_RE = /,\s*(?:(?:and|as\s+well\s+as|plus)\b)?|\b(?:and|as\s+well\s+as|plus)\b/gi;
+const REPORT_LIST_LABEL_RE = /^\s*(?:(?:the|a|an|your|our|their)\s+)?[A-Z][A-Za-z0-9'’-]*(?:\s+[A-Z0-9][A-Za-z0-9'’-]*){0,2}\s*$/;
+const REPORT_LIST_INTRODUCTION_RE = new RegExp(`^\\s*(?:(?:${REPORT_COMPLETION_TIME}|according\\s+to\\s+the\\s+report)\\s*,\\s*)*`, 'i');
+const REPORT_LIST_QUALIFIER_RE = new RegExp(`,\\s*(?=(?:according\\s+to|as(?!\\s+well\\s+as\\b)|${REPORT_COMPLETION_TIME})\\b)|\\bwhich\\b|[.!?;]`, 'i');
 
-module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, spokenDigits, assertedMatch, EPISTEMIC_REFUSAL_VERBS, EPISTEMIC_DENIAL_WORDS, clauseBounds, clauseOf, claimContext, clauseIsNegated, clauseIsEpistemicallyHedged, cueInSameClause, reportFindingIsUncertain, reportFindingIsInstruction, reportClaimIsDenied, reportHasCompletedPredicate, REPORT_COMPLETED_PASSIVE_RE, reportHasAlternativeLocation, reportVerbGovernsProduct, reportLocationIsTreatmentTarget, reportHasCompletedFinding, reportHasConciseFinding } };
+function reportTreatmentListEnd(text, start) {
+  const tail = text.slice(start);
+  const qualifier = REPORT_LIST_QUALIFIER_RE.exec(tail);
+  const boundary = [...tail.matchAll(new RegExp(CLAUSE_BOUNDARY_TOKEN_RE.source, 'gi'))]
+    .find((token) => !/^(?:and|or)$/i.test(token[0]));
+  return start + Math.min(boundary ? boundary.index : tail.length, qualifier ? qualifier.index : tail.length);
+}
+
+function reportNominalList(text, start, end, kind, terminal) {
+  if (end <= start) return null;
+  const field = text.slice(start, end);
+  const separators = [...field.matchAll(REPORT_LIST_SEPARATOR_RE)];
+  const boundaries = [0, ...separators.map((separator) => separator.index + separator[0].length)];
+  const items = [];
+  let parsedEnd = end;
+  let independentTail = false;
+  for (const [index, boundary] of boundaries.entries()) {
+    const finish = index < separators.length ? separators[index].index : field.length;
+    const item = field.slice(boundary, finish).replace(/\brespectively\b/gi, (marker) => ' '.repeat(marker.length)).trim();
+    if (!item) continue;
+    const value = kind === 'location' ? item
+      .replace(new RegExp(`^${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+`, 'i'), '')
+      .replace(new RegExp(`\\s+(?:${REPORT_TREATMENT_ADJUNCTS})$`, 'i'), '') : item;
+    const valid = kind === 'location' ? REPORT_ALTERNATIVE_LOCATION_FIRST_RE.test(value)
+      : (REPORT_ALTERNATIVE_PRODUCT_RE.test(value) || REPORT_LIST_LABEL_RE.test(value))
+        && !CLAUSE_FINITE_PREDICATE_RE.test(value) && !REPORT_FINDING_VERB_RE.test(value);
+    if (!valid) {
+      // A terminal nominal prefix ends before later prose; an invalid product
+      // field before a target cannot borrow that later action's location.
+      if (!terminal || !items.length) return null;
+      parsedEnd = start + separators[index - 1].index;
+      // Unknown nominal items and adjuncts cannot transfer a later marker.
+      // A quantity subject establishes a separate clause without enumerating
+      // its finite verbs (equal, weigh, reach, etc.).
+      independentTail = RIGHT_NOUN_PHRASE_SUBJECT_RE.test(item)
+        || new RegExp(`^(?:i|we|you|he|she|they|it)\\s+${CLAUSE_FINITE_PREDICATE_RE.source}`, 'i').test(item)
+        || new RegExp(`^(?:their|its|our|your|his|her)\\s+(?:amounts?|weights?|volumes?|quantities|totals?)\\s+(?:[a-z]+\\s+){1,3}(?:\\d|${NUMBER_WORD_EN_STRICT})\\b`, 'i').test(item);
+      break;
+    }
+    items.push({ start: start + boundary, end: start + finish, text: value });
+  }
+  return items.length ? { start, end: parsedEnd, tailEnd: end, independentTail, items } : null;
+}
+
+function reportFindingLists(affirmed, subjectAt, locationAt, findingVerb) {
+  if (!findingVerb || subjectAt < 0 || locationAt < 0) return null;
+  const verbEnd = findingVerb.index + findingVerb[0].length;
+  const introduction = REPORT_LIST_INTRODUCTION_RE.exec(affirmed)[0].length;
+  const passive = REPORT_COMPLETED_PASSIVE_RE.exec(affirmed.slice(0, findingVerb.index));
+  const searchable = affirmed.replace(REPORT_TARGET_TIME_RE, (time) => ' '.repeat(time.length));
+  let productStart; let productEnd; let locationStart; let locationEnd; let targetLink = null;
+  if (locationAt < subjectAt) {
+    const productLink = /\b(?:with|using)\s+/i.exec(affirmed.slice(verbEnd));
+    if (!productLink) return null;
+    productStart = verbEnd + productLink.index + productLink[0].length;
+    productEnd = reportTreatmentListEnd(affirmed, productStart);
+    locationStart = locationAt < findingVerb.index ? introduction : verbEnd;
+    locationEnd = locationAt < findingVerb.index ? passive && passive.index : verbEnd + productLink.index;
+    if (locationEnd === null) return null;
+  } else {
+    targetLink = REPORT_TREATMENT_LOCATION_LINK_RE.exec(searchable.slice(verbEnd, locationAt));
+    if (!targetLink) return null;
+    targetLink = { at: verbEnd + targetLink.index, text: targetLink[0] };
+    productStart = subjectAt < findingVerb.index ? introduction : verbEnd;
+    productEnd = subjectAt < findingVerb.index ? passive && passive.index : targetLink.at;
+    if (productEnd === null) return null;
+    const adjunct = /\b(?:by|with|using)\b/i.exec(affirmed.slice(productStart, productEnd));
+    if (adjunct) productEnd = productStart + adjunct.index;
+    locationStart = targetLink.at + targetLink.text.length;
+    locationEnd = reportTreatmentListEnd(affirmed, locationStart);
+  }
+  const products = reportNominalList(affirmed, productStart, productEnd, 'product', locationAt < subjectAt);
+  const locations = reportNominalList(affirmed, locationStart, locationEnd, 'location', locationAt > subjectAt);
+  return products && locations ? { products, locations, targetLink, end: Math.max(products.end, locations.end) } : null;
+}
+
+function reportRespectivelyPairsFinding(affirmed, subjectAt, locationAt, findingVerb) {
+  if (!findingVerb || !/\brespectively\b/i.test(affirmed)) return true;
+  const lists = reportFindingLists(affirmed, subjectAt, locationAt, findingVerb);
+  if (!lists) return false;
+  const marker = /\brespectively\b/i.exec(affirmed);
+  if (marker.index >= lists.end) {
+    const terminal = lists.targetLink ? lists.locations : lists.products;
+    return terminal.end === terminal.tailEnd || terminal.independentTail;
+  }
+  const productIndex = lists.products.items.findIndex((item) => subjectAt >= item.start && subjectAt < item.end);
+  const locationIndex = lists.locations.items.findIndex((item) => locationAt >= item.start && locationAt < item.end);
+  return productIndex >= 0 && productIndex === locationIndex && lists.products.items.length === lists.locations.items.length;
+}
+
+// Elided product-target pairs retain the one completed predicate of their
+// first pair: "P went around A and bait along B". Every later pair must name
+// its own product and direct target without introducing another action.
+function reportElidedFindingFrame(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb) {
+  if (!findingVerb) return null;
+  const verbEnd = findingVerb.index + findingVerb[0].length;
+  const searchable = affirmed.replace(REPORT_TARGET_TIME_RE, (time) => ' '.repeat(time.length));
+  const firstLink = REPORT_TREATMENT_LOCATION_LINK_RE.exec(searchable.slice(verbEnd));
+  if (!firstLink) return null;
+  const linkAt = verbEnd + firstLink.index;
+  const separators = [...affirmed.slice(linkAt + firstLink[0].length).matchAll(REPORT_LIST_SEPARATOR_RE)]
+    .map((separator) => ({ start: linkAt + firstLink[0].length + separator.index, end: linkAt + firstLink[0].length + separator.index + separator[0].length }));
+  if (!separators.length) return null;
+  const passive = REPORT_COMPLETED_PASSIVE_RE.exec(affirmed.slice(0, findingVerb.index));
+  const nounSubject = Boolean(passive) || /^went$/i.test(findingVerb[0]);
+  const productStart = nounSubject ? REPORT_LIST_INTRODUCTION_RE.exec(affirmed)[0].length : verbEnd;
+  const productEnd = nounSubject ? (passive ? passive.index : findingVerb.index) : linkAt;
+  const products = reportNominalList(affirmed, productStart, productEnd, 'product', false);
+  const locations = reportNominalList(affirmed, linkAt + firstLink[0].length, separators[0].start, 'location', false);
+  if (![products, locations].every((list) => list && list.items.length === 1)) return null;
+  const firstProduct = products.items[0]; const firstLocation = locations.items[0];
+  if (!reportHasCompletedSingleFinding(affirmed.slice(0, separators[0].start),
+    affirmed.indexOf(firstProduct.text, productStart), firstProduct.text.length,
+    affirmed.indexOf(firstLocation.text, locations.start), firstLocation.text.length, findingVerb)) return null;
+  for (const [index, separator] of separators.entries()) {
+    const end = index + 1 < separators.length ? separators[index + 1].start : reportTreatmentListEnd(affirmed, separator.end);
+    if (Math.min(subjectAt, locationAt) < separator.end || Math.max(subjectAt, locationAt) >= end) continue;
+    const link = REPORT_TREATMENT_LOCATION_LINK_RE.exec(affirmed.slice(separator.end, end));
+    if (!link) continue;
+    const pairLinkAt = separator.end + link.index;
+    const productList = reportNominalList(affirmed, separator.end, pairLinkAt, 'product', false);
+    const locationList = reportNominalList(affirmed, pairLinkAt + link[0].length, end, 'location', false);
+    if (![productList, locationList].every((list) => list && list.items.length === 1)) continue;
+    const replacement = ` ${productList.items[0].text} `;
+    const prefix = affirmed.slice(0, productStart) + replacement + affirmed.slice(productEnd, linkAt);
+    const normalized = `${prefix}${link[0]} ${locationList.items[0].text}`;
+    const verb = [findingVerb[0]];
+    verb.index = findingVerb.index + (productEnd <= findingVerb.index ? replacement.length - (productEnd - productStart) : 0);
+    return { text: normalized, subjectAt: normalized.indexOf(affirmed.slice(subjectAt, subjectAt + subjectLength), productStart),
+      locationAt: normalized.indexOf(affirmed.slice(locationAt, locationAt + locationLength), prefix.length), verb };
+  }
+  return null;
+}
+
+function reportHasCompletedFinding(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb) {
+  const lists = reportFindingLists(affirmed, subjectAt, locationAt, findingVerb);
+  if (!lists || (lists.products.items.length === 1 && lists.locations.items.length === 1)) {
+    if (reportHasCompletedSingleFinding(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb)) return true;
+    const elided = reportElidedFindingFrame(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb);
+    return Boolean(elided && reportHasCompletedSingleFinding(elided.text, elided.subjectAt, subjectLength, elided.locationAt, locationLength, elided.verb));
+  }
+  if (!reportRespectivelyPairsFinding(affirmed, subjectAt, locationAt, findingVerb)) return false;
+  const product = lists.products.items.find((item) => subjectAt >= item.start && subjectAt < item.end);
+  const location = lists.locations.items.find((item) => locationAt >= item.start && locationAt < item.end);
+  if (!product || !location) return false;
+  const locationText = lists.targetLink && !REPORT_ADVERBIAL_LOCATION_RE.test(location.text)
+    ? `${lists.targetLink.text} ${location.text}` : location.text;
+  const edits = [
+    { start: lists.products.start, end: lists.products.end, text: ` ${product.text} ` },
+    { start: lists.targetLink ? lists.targetLink.at : lists.locations.start, end: lists.locations.end, text: ` ${locationText} ` },
+  ];
+  const remap = (at) => at + edits.filter((edit) => edit.end <= at).reduce((delta, edit) => delta + edit.text.length - (edit.end - edit.start), 0);
+  let normalized = affirmed;
+  for (const edit of [...edits].sort((a, b) => b.start - a.start)) normalized = normalized.slice(0, edit.start) + edit.text + normalized.slice(edit.end);
+  normalized = normalized.replace(/\brespectively\b/gi, (marker) => ' '.repeat(marker.length));
+  const productAt = remap(lists.products.start) + edits[0].text.indexOf(affirmed.slice(subjectAt, subjectAt + subjectLength));
+  const targetAt = remap(edits[1].start) + edits[1].text.indexOf(affirmed.slice(locationAt, locationAt + locationLength));
+  const normalizedVerb = [findingVerb[0]];
+  normalizedVerb.index = remap(findingVerb.index);
+  return reportHasCompletedSingleFinding(normalized, productAt, subjectLength, targetAt, locationLength, normalizedVerb);
+}
+
+function reportClauseBounds(text, at) {
+  const ordinary = clauseBounds(text, at);
+  const start = Math.max(text.lastIndexOf('.', at - 1), text.lastIndexOf('!', at - 1), text.lastIndexOf('?', at - 1), text.lastIndexOf(';', at - 1)) + 1;
+  const stop = text.slice(at).search(/[.!?;]/);
+  const end = stop < 0 ? text.length : at + stop;
+  const sentence = text.slice(start, end);
+  for (const verb of sentence.matchAll(new RegExp(REPORT_FINDING_VERB_RE.source, 'gi'))) {
+    const verbEnd = verb.index + verb[0].length;
+    const productLink = /\b(?:with|using)\s+/i.exec(sentence.slice(verbEnd));
+    const targetLink = REPORT_TREATMENT_LOCATION_LINK_RE.exec(sentence.slice(verbEnd));
+    let subjectAt; let locationAt;
+    if (productLink && new RegExp(REPORT_ALTERNATIVE_LOCATION, 'i').test(sentence.slice(0, verbEnd + productLink.index))) {
+      subjectAt = verbEnd + productLink.index + productLink[0].length;
+      locationAt = new RegExp(REPORT_ALTERNATIVE_LOCATION, 'i').exec(sentence).index;
+    } else if (targetLink) {
+      const passive = REPORT_COMPLETED_PASSIVE_RE.exec(sentence.slice(0, verb.index));
+      subjectAt = passive ? REPORT_LIST_INTRODUCTION_RE.exec(sentence)[0].length : verbEnd;
+      locationAt = verbEnd + targetLink.index + targetLink[0].length;
+    } else continue;
+    const lists = reportFindingLists(sentence, subjectAt, locationAt, verb);
+    if (!lists || (lists.products.items.length === 1 && lists.locations.items.length === 1)) continue;
+    const marker = /\brespectively\b/i.exec(sentence);
+    const terminal = lists.targetLink ? lists.locations : lists.products;
+    if (lists.products.items.length === 1 && !(marker && (!terminal.independentTail || marker.index < lists.end))) continue;
+    const boundary = new RegExp(`^(?:${CLAUSE_BOUNDARY_TOKEN_RE.source})`, 'i').test(sentence.slice(lists.end));
+    const boundEnd = terminal.independentTail || (terminal.end === terminal.tailEnd && boundary) ? lists.end : sentence.length;
+    if (at >= start && at < start + boundEnd) return [start, start + boundEnd];
+  }
+  return ordinary;
+}
+
+// Report runner integration and correction scope.
+const REPORT_SAME_LOCATION_REF = `(?:\\s+(?:there|at\\s+that\\s+location))?`;
+
+const REPORT_UNCERTAIN_NEGATED_TREATMENT = `(?:(?:was|is)(?:n[\x27\u2019]t|\\s+(?:not|never))|(?:has|had)(?:n[\x27\u2019]t|\\s+(?:not|never))\\s+been)\\s+(?:actually\\s+)?${REPORT_FINDING_VERB_RE.source}`;
+
+const REPORT_UNCERTAIN_PREDICATE = `(?:(?:was|is|has been|had been)(?:\\s+(?:${REPORT_FINDING_VERB_RE.source}|true|correct|accurate))?|${REPORT_UNCERTAIN_NEGATED_TREATMENT}|happened|did(?:n[\x27\u2019]t|\\s+(?:not|never))?)`;
+
+const REPORT_UNCERTAIN_COMPLEMENT = `(?:(?:that|if|whether)\\s+)?`;
+
+const REPORT_TRAILING_UNCERTAINTY_RE = new RegExp(
+  `^\\s*(?:,\\s*)?(?:${REPORT_COMPLETION_TIME}\\s*,?\\s*)?(?:(?:(?:i\\s+am|we\\s+are|i['’]m|we['’]re)\\s+(?:not\\s+(?:sure|certain)|${vocabAlt(EPISTEMIC_DENIAL_WORDS)}))(?:\\s+(?:(?:of|about)\\s+(?:it|this|that)|${REPORT_UNCERTAIN_COMPLEMENT}(?:it|this|that)\\s+${REPORT_UNCERTAIN_PREDICATE}${REPORT_SAME_LOCATION_REF}))?|(?:i|we)\\s+(?:(?:do|does|did)\\s+)?${EPISTEMIC_HEDGE_PREFIX_SOURCE}(?:\\s+${REPORT_UNCERTAIN_COMPLEMENT}(?:it|this|that)(?:\\s+${REPORT_UNCERTAIN_PREDICATE}${REPORT_SAME_LOCATION_REF})?)?(?:\\s+for\\s+(?:sure|certain))?|(?:maybe|perhaps|possibly|potentially|probably|allegedly|supposedly|reportedly|apparently)(?:\\s+not)?|i\\s+`
+    + `(?:think|believe|guess|suppose)(?:\\s+(?:that\\s+)?(?:it|that|this)\\s+`
+    + `${REPORT_UNCERTAIN_PREDICATE}${REPORT_SAME_LOCATION_REF})?|(?:it|this|that)\\s+(?:may|might|could)\\s+(?:be\\s+(?:wrong|false|incorrect|inaccurate|not\\s+true)|(?:not\\s+)?have\\s+(?:happened|been\\s+(?:actually\\s+)?${REPORT_FINDING_VERB_RE.source}))${REPORT_SAME_LOCATION_REF})\\s*(?=$|,)`
+  // These adjuncts condition the preceding assertion, rather than assert it.
+  // Anchor at the finding's tail so conditions in later explanations stay local.
+  + `|^\\s*,?\\s*(?:${REPORT_COMPLETION_TIME}\\s*,?\\s*)?(?:only\\s+)?(?:if|unless|until|whether|assuming|provided(?!\\s+by\\b)|providing(?=\\s+(?:that\\b|(?:[\\w\x27\u2019-]+\\s+){1,5}${CLAUSE_FINITE_PREDICATE_RE.source}))|${FREE_VISIT_APPROVAL_QUALIFIER_SOURCE}|on\\s+condition\\s+that|as\\s+long\\s+as)\\b`,
+  'i',
+);
+
+const REPORT_RETRACTION_ACTOR = `(?:i|we|you|he|she|they|(?:(?:the|our)\\s+)?(?:technician|tech|crew|team))`;
+
+const REPORT_NEGATED_AUXILIARY = `(?:did|have|has|had)(?:n[\x27\u2019]t|\\s+(?:not|never))`;
+
+const REPORT_ANAPHORIC_ACTION = `(?:(?:do|did|done)\\s+(?:that|so|it)|(?:appl(?:y|ied)|spray(?:ed)?|us(?:e|ed)|place[ds]?|put|treat(?:ed)?)\\s+(?:it|that))`;
+
+const REPORT_ANAPHORIC_GERUND = `(?:doing|applying|spraying|using|placing|putting|treating)\\s+(?:it|that|so)`;
+
+const REPORT_TRAILING_DENIAL_RE = new RegExp(
+  `^(?:actually\\s+)?(?:not(?:\\s+(?:really|actually))?(?:\\s+${REPORT_FINDING_VERB_RE.source})?|no|${REPORT_RETRACTION_ACTOR}\\s+${REPORT_NEGATED_AUXILIARY}|`
+    + `(?:it|that|this)\\s+(?:was|is)\\s+(?:(?:really|completely|entirely|totally|absolutely)\\s+)?(?:false|untrue|incorrect|inaccurate|wrong|not\\s+what\\s+happened|not\\s+the\\s+case)|(?:it|that|this)\\s+(?:isn['’]t|wasn['’]t)\\s+the\\s+case|(?:it|that|this)\\s+(?:never\\s+(?:actually\\s+)?(?:happened|occurred|took\\s+place)|did(?:n['’]t|\\s+not)\\s+(?:actually\\s+)?(?:happen|occur|take\\s+place)|(?:has|had)(?:n['’]t|\\s+not)\\s+(?:happened|occurred|taken\\s+place))|(?:it|that|this)\\s+(?:was|is|has|had)(?:n[\x27\u2019]t|\\s+(?:not|never))(?:\\s+been)?(?:\\s+(?:true|correct|accurate|(?:actually\\s+)?${REPORT_FINDING_VERB_RE.source}))?|${REPORT_RETRACTION_ACTOR}\\s+(?:(?:did|have|has|had)(?:n[\x27\u2019]t|\\s+(?:not|never))|never)\\s+(?:actually\\s+)?${REPORT_ANAPHORIC_ACTION})(?:\\s+(?:there|at\\s+that\\s+location))?(?:\\s+at\\s+all)?(?:\\s*,\\s*(?:sorry|my\\s+mistake|my\\s+apologies))?\\s*$`,
+  'i',
+);
+
+const REPORT_TRAILING_CORRECTION_RE = /^(?:sorry,?\s*)?(?:(?:i\s+(?:was|am)|we\s+(?:were|are))\s+(?:mistaken|wrong)|(?:i|we)\s+(?:(?:made|have\s+made|had\s+made)\s+(?:a|an)\s+(?:mistake|error)|misspoke|(?:had|got)\s+(?:it|this|that)\s+wrong))(?:\s+(?:about|regarding)\s+(?:it|this|that)(?:\s+(?:there|at\s+that\s+location))?)?(?:,\s*(?:sorry|my\s+mistake|my\s+apologies))?\s*$/i;
+
+const REPORT_TRAILING_DEICTIC_CORRECTION_RE = /^(?:sorry,?\s*)?(?:it|this|that)\s+(?:was|is)\s+(?:a|an)\s+(?:mistake|error)(?:\s+(?:about|regarding)\s+(?:it|this|that|there)(?:\s+(?:there|at\s+that\s+location))?)?(?:,\s*(?:sorry|my\s+mistake|my\s+apologies))?\s*$/i;
+
+function reportTrailingDenialOrCorrection(text) {
+  return REPORT_TRAILING_DENIAL_RE.test(text) || REPORT_TRAILING_CORRECTION_RE.test(text)
+    || REPORT_TRAILING_DEICTIC_CORRECTION_RE.test(text)
+    || /^(?:(?:i|we)\s+take\s+(?:that|this|it)\s+back|(?:scratch|disregard)\s+(?:that|this|it))(?:,\s*(?:sorry|my\s+mistake|my\s+apologies))?\s*$/i.test(text);
+}
+
+const REPORT_CONCISE_NONCOMPLETION_RE = /^\s*(?:(?:(?:is|are|was|were|has|have|had)(?:\s+(?:been|being))?\s+)?(?:(?:only|just|merely|simply|still)\s+)*(?:(?:the|our|your|their|his|her|my|its)\s+)?(?:(?:recommended|scheduled|planned|intended|proposed|suggested|considered|expected|required|needed|pending)\b|(?:an?\s+)?(?:recommendation|plan|proposal|suggestion|possibility)\b|under\s+consideration\b|(?:for\s+)?(?:tomorrow|tonight|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b)|(?:will|shall|would|should|can|could|may|might|must|is going to|are going to|was going to|were going to)\b)/i;
+
+const REPORT_NONCOMPLETION_TIME = `(?:${REPORT_COMPLETION_TIME}|${MODIFIED_WEEKDAY_RE_SOURCE}|next\\s+(?:month|year))`;
+
+const REPORT_NONCOMPLETION_CLARIFICATION = `(?:,\\s*(?:not|never)\\s+(?:actually\\s+)?(?:completed|finished|done|applied|sprayed|treated)(?:\\s+(?:there|at\\s+that\\s+location))?)?`;
+
+const REPORT_NONCOMPLETION_REMAINDER_RE = new RegExp(
+  `^\\s*(?:(?:to\\s+)?(?:(?:be|have\\s+been)\\s+)?(?:applied|sprayed|treated|placed|used|put)(?:\\s+(?:it|that))?)?\\s*`
+    + `(?:(?:(?:to|at|in|on|around|along|for)\\s+)?(?:there|at\\s+that\\s+location)|(?:for\\s+)?${REPORT_NONCOMPLETION_TIME})?\\s*`
+    + `${REPORT_NONCOMPLETION_CLARIFICATION}\\s*$`,
+  'i',
+);
+
+function reportTrailingNoncompletion(text) {
+  const qualifier = text.trim();
+  const actor = new RegExp(
+    `^${REPORT_RETRACTION_ACTOR}\\s+(.+?)\\s+(?:to\\s+${REPORT_ANAPHORIC_ACTION}|(?:on\\s+)?${REPORT_ANAPHORIC_GERUND}|it|that|this)`
+      + `(?:\\s+(?:there|at\\s+that\\s+location|(?:for\\s+)?${REPORT_NONCOMPLETION_TIME}))?${REPORT_NONCOMPLETION_CLARIFICATION}\\s*$`,
+    'i',
+  ).exec(qualifier);
+  if (actor) return REPORT_CONCISE_NONCOMPLETION_RE.test(actor[1]);
+  const anaphoric = /^(?:it|this|that)\s+(.+)$/i.exec(qualifier);
+  if (!anaphoric) return false;
+  const noncompletion = REPORT_CONCISE_NONCOMPLETION_RE.exec(anaphoric[1]);
+  if (!noncompletion) return false;
+  // A proposed treatment elsewhere does not retract the completed finding.
+  // A later "not completed" can reinforce it only without a different target.
+  // The matched location is normalized to "there" before this check.
+  const remainder = anaphoric[1].slice(noncompletion[0].length);
+  return REPORT_NONCOMPLETION_REMAINDER_RE.test(remainder);
+}
+
+const REPORT_HYPOTHETICAL_QUALIFIER_RE = /\b(?:only|just|merely)\s+(?:in\s+theory|hypothetically|on\s+paper)\b/i;
+
+const REPORT_HYPOTHETICAL_GOVERNOR_RE = new RegExp(
+  `^\\s*(?:suppose|supposing|(?:please\\s+)?assume|assuming|imagine|let['’]s\\s+say|${FREE_VISIT_PROVIDED_CONDITION_SOURCE}|${FREE_VISIT_APPROVAL_QUALIFIER_SOURCE}|as\\s+long\\s+as|on\\s+condition\\s+that)\\b`, 'i',
+);
+
+const REPORT_ASSERTION_START = `(?:(?:the|a|an|your|our|their|his|her|my|its)\\s+)?(?:[\\w'\u2019-]+\\s+){1,4}(?:(?:(?:was|were|is|are|has|have|had|got)\\s+(?:\\w+ly\\s+)?)?(?:${REPORT_FINDING_VERB_RE.source}|\\b(?:receiving|getting)\\b))`;
+
+const REPORT_VERBLESS_PRODUCT_LOCATION_START = `(?:(?:the|a|an|your|our|their|his|her|my|its)\\s+)?(?:(?:granular|gel|liquid|residual)\\s+)?(?:bait|dust|foam|granules?|product|treatment)\\s+${REPORT_TREATMENT_LOCATION_LINK_RE.source}`;
+
+const REPORT_ASSERTION_BOUNDARY_RE = new RegExp(`(?:,\\s*|\\b(?:with|and|before|after)\\s+)(?=${REPORT_ASSERTION_START})|\\bwith\\s+(?=${REPORT_VERBLESS_PRODUCT_LOCATION_START})`, 'gi');
+
+function reportAssertionOf(clause, subjectAt, subject, location) {
+  let start = 0;
+  const governingStart = clause.length - claimContext(clause, subjectAt, clause.length).length;
+  REPORT_ASSERTION_BOUNDARY_RE.lastIndex = 0;
+  for (const boundary of clause.matchAll(REPORT_ASSERTION_BOUNDARY_RE)) {
+    // A gerund after a coordinated treatment target modifies the same
+    // completed finding: "treated the exterior and garage using Talstar".
+    // It does not introduce an independent subject and finite predicate.
+    const right = clause.slice(boundary.index + boundary[0].length);
+    const rightVerb = REPORT_FINDING_VERB_RE.exec(right);
+    if (rightVerb && /ing$/i.test(rightVerb[0])
+        && !/\b(?:was|were|is|are|has|have|had|got|completed|finished)\b/i.test(right.slice(0, rightVerb.index))) continue;
+    // "not applied" and "it was not applied there" retract the current
+    // finding; a newly named product still opens its own assertion.
+    const continuation = reportRetractionClause(
+      clause.slice(boundary.index + boundary[0].length), subject, location,
+    );
+    if (reportTrailingDenialOrCorrection(continuation)) continue;
+    if (!REPORT_FINDING_VERB_RE.test(clause.slice(start, boundary.index))
+      || REPORT_TRAILING_UNCERTAINTY_RE.test(clause.slice(boundary.index))) continue;
+    if (boundary.index >= subjectAt) return { text: clause.slice(start, boundary.index), start };
+    // Keep a conditional introduction that governs the matched assertion.
+    // An ordinary prior treatment still opens a separate assertion here.
+    if (!boundary[0].includes(',') || governingStart > boundary.index) {
+      start = boundary.index + boundary[0].length;
+    }
+  }
+  return { text: clause.slice(start), start };
+}
+
+function reportNormalizeReferences(text, subject, location) {
+  // Repeated scenario names refer to the same treatment as "it". Normalize
+  // only that product and its matched location before the anchored retraction
+  // checks; a denial about bait or an indoor treatment remains independent.
+  const product = new RegExp(`(?:(?:the|your|our)\\s+)?(?:${subject})(?:\\s+[a-z0-9]\\b)?`, 'gi');
+  const place = new RegExp(
+    `(?:(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}|\\bfor\\b)\\s+)?${REPORT_LOCATION_NOUN_PREFIX}`
+      + `(?:${location})(?:\\s+(?:perimeter|area|walls?|zone|edge))?`,
+    'gi',
+  );
+  return text.replace(product, 'it').replace(place, 'there')
+    .replace(/\b(i|we|you|he|she|they|it|this|that)['’]ve\b/gi, '$1 have')
+    .replace(/\b(i|we|you|he|she|they|it|this|that)['’]s\b/gi, (match, actor, at, full) => {
+      const next = full.slice(at + match.length);
+      const perfect = /^\s+(?:never|not|already|just|actually)\s+(?:been|applied|sprayed|treated|placed|used|put)\b/i.test(next);
+      return `${actor} ${perfect ? 'has' : 'is'}`;
+    })
+    .replace(/\b(i|we|you|he|she|they|it|this|that)['’]d\b/gi, (match, actor, at, full) => {
+      const next = full.slice(at + match.length);
+      const perfect = /^\s+(?:(?:only|just|never|not|already|still|actually)\s+)*(?:planned|scheduled|considered|recommended|applied|sprayed|treated|placed|used|been)\b/i.test(next);
+      return `${actor} ${perfect ? 'had' : 'would'}`;
+    });
+}
+
+function reportRetractionClause(text, subject, location) {
+  // Explanations do not undo a retraction. Stop at an independent clause or
+  // the same causal boundary used for free-visit claims, not an arbitrary word cap.
+  // Here "do so" refers to the finding; its "so" is not a new clause.
+  const anaphoric = text.replace(/^\s*correction\s*:\s*/i, '').replace(/\b(?:actually|in\s+fact)\b[,\s]*/gi, '')
+    .replace(/\b(do|did|done)\s+so\b/gi, '$1 that')
+    .replace(/^\s*(?:(?:no|nope|sorry|my\s+mistake|my\s+apologies)\s*,\s*)+(?=\S)/i, '');
+  const qualifier = clauseOf(anaphoric, 0).split(CLAIM_CAUSAL_BOUNDARY_RE)[0]
+    .split(/\bsince\b/i)[0].trim().replace(/,\s*$/, '')
+    .replace(/(?:,\s*|\s+)(?:after all|at any point)(?=(?:,\s*(?:sorry|my\s+mistake|my\s+apologies))?$)/i, '');
+  return reportNormalizeReferences(qualifier, subject, location);
+}
+
+function reportTimedDenial(qualifier, findingText) {
+  const timed = new RegExp(
+    `^(.+?)\\s+((?:at\\s+)?${REPORT_COMPLETION_TIME}(?:,?\\s+(?:at\\s+)?${REPORT_COMPLETION_TIME})*)(?:,\\s*(?:sorry|my\\s+mistake|my\\s+apologies))?\\s*$`, 'i',
+  ).exec(qualifier);
+  if (!timed || !REPORT_TRAILING_DENIAL_RE.test(timed[1])) return false;
+  const timeKey = (value) => value.toLowerCase().replace(/^(?:on|at)\s+/, '')
+    .replace(/(\d)(?:st|nd|rd|th)\b/g, '$1')
+    .replace(/\b0*(\d+)\/0*(\d+)(?:\/(\d{2,4}))?\b/g, (_match, month, day, year) =>
+      `${Number(month)}/${Number(day)}${year ? `/${year}` : ''}`)
+    .replace(/\s+/g, ' ').trim();
+  // A weekday immediately adjoining its calendar date names that same day,
+  // rather than a second independent date. Do not merge separate date lists.
+  const weekdayDate = new RegExp(
+    `\\b(${WEEKDAYS})\\s*,?\\s*((?:${MONTHS})\\s+(?:the\\s+)?(?:\\d{1,2}(?:st|nd|rd|th)?|${ORDINAL_WORDS})\\b)`, 'gi',
+  );
+  const findingWeekdays = new Map([...findingText.matchAll(weekdayDate)]
+    .map((match) => [timeKey(match[2]), match[1].toLowerCase()]));
+  // If both speakers explicitly name different weekdays, keep that difference
+  // even when the accompanying month/day happen to be identical.
+  if ([...timed[2].matchAll(weekdayDate)].some((match) => findingWeekdays.has(timeKey(match[2]))
+      && findingWeekdays.get(timeKey(match[2])) !== match[1].toLowerCase())) return false;
+  const withoutRedundantWeekday = (text) => text.replace(weekdayDate, '$2');
+  const findingTimes = new Set([...withoutRedundantWeekday(findingText).matchAll(new RegExp(`(?:at\\s+)?${REPORT_COMPLETION_TIME}`, 'gi'))]
+    .map(([value]) => timeKey(value)));
+  const deniedTimes = new Set([...withoutRedundantWeekday(timed[2]).matchAll(new RegExp(`(?:at\\s+)?${REPORT_COMPLETION_TIME}`, 'gi'))]
+    .map(([value]) => timeKey(value)));
+  // A denial about another day cannot undo a completed report finding.
+  return findingTimes.size === deniedTimes.size
+    && [...deniedTimes].every((day) => findingTimes.has(day));
+}
+
+function reportConfirmationQuestion(text, subject, location) {
+  const normalized = reportNormalizeReferences(text.split(/[.!?;]/)[0], subject, location);
+  const confirmation = /^\s*(?:,\s*)?(?:(?:and|but|so)\s+)?(?:are\s+you\s+(?:sure|certain)(?:\s+(?:about|of)\s+(?:it|this|that))?|(?:is|was)\s+(?:it|this|that)\s+(?:right|correct|true)|does\s+(?:it|this|that)\s+sound\s+(?:right|correct)|is\s+(?:it|this|that)\s+what\s+the\s+report\s+says|(?:can|could|would|will)\s+you\s+confirm\s+(?:it|this|that)|did\s+(?:we|they|you)\s+(?:apply|spray|treat|place|use|put)\s+(?:it|that)\s+(?:there|at\s+that\s+location)|(?:was|is|has)\s+(?:it|this|that)|did\s+(?:we|they))\s*$/i;
+  return confirmation.test(normalized);
+}
+
+// A discourse coordinator introduces a correction ("But", "However,", "No,");
+// continuation and later-retraction checks read the clause after it.
+const REPORT_DISCOURSE_PREFIX_SOURCE = '(?:(?:but|however|though|although|yet|still|and|so|then|anyway|no)\\b\\s*,?\\s*)*';
+
+function reportSharedLocationContinuation(
+  text, clauseEnd, location, subject, assertionEnd, findingText, matchedLocation = location,
+) {
+  const remainder = text.slice(clauseEnd);
+  // Reuse the splitter's actual boundaries so a retraction is not lost at
+  // "though", "yet", or another coordinator the splitter already recognizes.
+  // An immediately following sentence can explicitly retract the same finding.
+  const boundary = new RegExp(`^(?:${CLAUSE_BOUNDARY_TOKEN_RE.source})\\s*,?\\s*${REPORT_DISCOURSE_PREFIX_SOURCE}`, 'i').exec(remainder);
+  // Pronouns retract the last assertion. An earlier assertion can still be
+  // retracted when the correction explicitly names its product.
+  if (assertionEnd < clauseEnd && !(boundary && new RegExp(subject, 'i').test(
+    clauseOf(remainder.slice(boundary[0].length), 0),
+  ))) return { text: '', unconfirmed: false };
+  // One retraction predicate for every continuation shape. A list carries its
+  // own date, so a timed denial compares against the finding plus the list.
+  const retracts = (source, finding = findingText) => {
+    const qualifier = reportRetractionClause(source, subject, matchedLocation);
+    return REPORT_TRAILING_UNCERTAINTY_RE.test(qualifier) || reportTrailingDenialOrCorrection(qualifier)
+      || reportTimedDenial(qualifier, finding) || reportTrailingNoncompletion(qualifier);
+  };
+  if (boundary && retracts(remainder.slice(boundary[0].length))) return { text: '', unconfirmed: true };
+  // A shared list can be followed by a separate denial. Keep the location
+  // matcher in the list clause so it cannot consume a repeated target there.
+  const locationContinuation = /^and\b/i.test(remainder)
+    ? remainder.slice(0, clauseBounds(remainder, 3)[1]) : remainder;
+  const locationTail = new RegExp(
+    `^and\\s+(?:(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)?|[^.!?;]*?`
+      + `${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)${REPORT_LOCATION_NOUN_PREFIX}(?:${location})`,
+    'i',
+  ).exec(locationContinuation) || new RegExp(
+    `^and\\s+(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)?`
+      + `${REPORT_LOCATION_NOUN_PREFIX}[\\w'-]+\\b`,
+    'i',
+  ).exec(locationContinuation);
+  if (!locationTail) return { text: '', unconfirmed: false };
+  const qualifier = remainder.slice(locationTail[0].length).trim()
+    .replace(/^(?:perimeter|area|wall|walls|zone|edge)\b\s*/i, '');
+  const end = remainder.search(/[.!?;]/);
+  const listFinding = `${findingText}${remainder.slice(0, end >= 0 ? end : undefined)}`;
+  // A completion time can sit between the list and a coordinated denial
+  // ("and garage today, but it was not applied there"); step over it first.
+  const unconfirmed = retracts(qualifier
+    .replace(new RegExp(`^${REPORT_COMPLETION_TIME}\\b\\s*`, 'i'), '')
+    .replace(new RegExp(`^[,—–]\\s*(?:(?:${CLAUSE_BOUNDARY_TOKEN_RE.source})\\s*,?\\s*)?`, 'i'), ''), listFinding);
+  // A shared list ends the location noun or adds an adjunct (a completion
+  // time included), not a new predicate.
+  if (!new RegExp(`^(?:$|[.!?;]|(?:,\\s*)?(?:and|or|before|after|with|as|according|which|(?:only\\s+)?if|unless)\\b|${REPORT_COMPLETION_TIME}\\b)`, 'i').test(qualifier)
+      && !unconfirmed) {
+    return { text: '', unconfirmed: false };
+  }
+  // The sentence after a completed list retracts it the same way it retracts
+  // a plain finding: the list clause is the pronoun's antecedent. Speech-event
+  // boundaries are already joined into sentences by the runner.
+  const afterList = end >= 0
+    ? new RegExp(`^(?:${CLAUSE_BOUNDARY_TOKEN_RE.source})\\s*,?\\s*${REPORT_DISCOURSE_PREFIX_SOURCE}`, 'i').exec(remainder.slice(end)) : null;
+  const retractedAfterList = Boolean(afterList) && retracts(remainder.slice(end + afterList[0].length), listFinding);
+  return {
+    text: remainder.slice(0, end >= 0 ? end : undefined),
+    unconfirmed: (end >= 0 && remainder[end] === '?') || unconfirmed || retractedAfterList,
+  };
+}
+
+function* reportContentMatches(text, regex) {
+  for (const match of text.matchAll(regex)) {
+    if (match[0]) yield match;
+  }
+}
+
+function reportHasLaterExplicitRetraction(text, after, subject, location, findingText) {
+  const product = new RegExp(subject, 'i');
+  const place = new RegExp(location, 'i');
+  return text.slice(after).split(/[.!?;]/).some((statement) => {
+    // A distant pronoun has no reliable antecedent. Require both named facts;
+    // immediate anaphoric corrections are handled by the continuation check.
+    if (!product.test(statement) || !place.test(statement)) return false;
+    // A discourse coordinator ("But", "However,", "Though") introduces the
+    // correction; the anchored denial checks read the clause after it.
+    const qualifier = reportRetractionClause(
+      statement.replace(new RegExp(`^\\s*${REPORT_DISCOURSE_PREFIX_SOURCE}`, 'i'), ''), subject, location,
+    );
+    return reportTrailingDenialOrCorrection(qualifier) || REPORT_TRAILING_UNCERTAINTY_RE.test(qualifier)
+      || reportTimedDenial(qualifier, findingText) || reportTrailingNoncompletion(qualifier);
+  });
+}
+
+function report_readback_confirms(value, record, { spoken }) {
+  const subjectRe = new RegExp(value.subject, 'gi');
+  const locationRe = new RegExp(value.location, 'gi');
+  // Speech-event boundaries must not hide an immediately following correction.
+  // "8 a.m." would otherwise end the sentence at "a."; normalize clock
+  // abbreviations before any sentence or clause splitting.
+  let text = normalizeTimeAbbreviations(spoken.map((utterance) => /[.!?;]\s*$/.test(utterance)
+    ? utterance : `${utterance}.`).join(' '));
+  // An elided passive contrast repeats this product only when the preceding
+  // frame has one treatment predicate; a later named product owns its contrast.
+  for (const product of [...reportContentMatches(text, subjectRe)].reverse()) {
+    const afterProduct = product.index + product[0].length;
+    const contrast = new RegExp(
+      `^(\\s+[a-z0-9]\\b)?(\\s+(?:was|were|has\\s+been|had\\s+been)\\s+[^.!?;]*?\\bbut\\s+)(?=(?:was|were|has\\s+been|had\\s+been)\\s+(?:${REPORT_FINDING_VERB_RE.source}|not\\b))`, 'i',
+    ).exec(text.slice(afterProduct));
+    if (!contrast || [...contrast[2].matchAll(new RegExp(REPORT_FINDING_VERB_RE.source, 'gi'))].length !== 1) continue;
+    const insertAt = afterProduct + contrast[0].length;
+    text = text.slice(0, insertAt) + product[0] + (contrast[1] || '') + ' ' + text.slice(insertAt);
+  }
+  for (const m of reportContentMatches(text, subjectRe)) {
+    // Preserve the sentence's question mark before clauseOf removes it.
+    // A question about a finding does not confirm that finding.
+    const [scopeStart, scopeEnd] = reportClauseBounds(text, m.index);
+    const initialAssertion = reportAssertionOf(
+      text.slice(scopeStart, scopeEnd), m.index - scopeStart, value.subject, value.location,
+    );
+    const clauseStart = scopeStart + initialAssertion.start;
+    const clauseEnd = clauseStart + initialAssertion.text.length;
+    const clausePrefix = text.slice(clauseStart, m.index);
+    const interrogative = /^(?!\s*(?:(?:and|but|so)\s+)?(?:do|does|did)\s+not\b)\s*(?:(?:and|but|so)\s+)?(?:was|were|is|are|has|have|had|did|do|does|can|could|would|will|should|what|where|when|why|how)\b/i.test(clausePrefix);
+    const coordinatedQuestion = new RegExp(
+      `^(?:or\\b|and\\s+(?=(?:${REPORT_ASSERTION_START}|${REPORT_VERBLESS_PRODUCT_LOCATION_START})))[^.!?;]*\\?`,
+      'i',
+    ).test(text.slice(clauseEnd).split(/,?\s*\b(?:but|however|though|yet|so|then)\b/i)[0]);
+    // Retraction checks bind to the product this match actually named, so a
+    // denial about another scenario alternative stays independent.
+    const matchedProduct = m[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const firstLocation = reportContentMatches(text.slice(clauseStart, clauseEnd), locationRe).next().value;
+    const matchedLocation = firstLocation
+      ? firstLocation[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : value.location;
+    const sharedLocation = reportSharedLocationContinuation(
+      text, scopeEnd, value.location, matchedProduct, clauseEnd, initialAssertion.text, matchedLocation,
+    );
+    // A shared list extends the finding; every continuation check starts
+    // after it, exactly as it would after a plain clause.
+    const continuationAt = sharedLocation.text ? scopeEnd + sharedLocation.text.length : clauseEnd;
+    const asrTagQuestion = /(?:,\s*(?:right|correct)|\b(?:wasn['’]t\s+it|isn['’]t\s+it|aren['’]t\s+they|didn['’]t\s+(?:we|they)))\s*$/i
+      .test(text.slice(clauseStart, clauseEnd))
+      || /(?:,\s*|\s+)(?:(?:is|was|has|had)\s+(?:that|this|it)(?:\s+(?:right|correct|true))?|(?:did|do)\s+(?:we|they)|(?:are|were)\s+(?:you|we|they)\s+(?:sure|certain)(?:\s+(?:about|of)\s+(?:it|this|that))?)\s*$/i
+        .test(text.slice(clauseStart, clauseEnd));
+    const independentFollowupQuestion = FOLLOWUP_QUESTION_RE.test(text.slice(m.index + m[0].length, clauseEnd));
+    const locationEnd = firstLocation ? clauseStart + firstLocation.index + firstLocation[0].length : 0;
+    // A scenario may match only "exterior" and leave the location's noun
+    // before the comma. It still belongs to the finding, not the question.
+    const locationNoun = /^\s+(?:perimeter|area|walls?|zone|edge)\b/i.exec(text.slice(locationEnd));
+    const findingEnd = Math.max(m.index + m[0].length,
+      locationEnd + (locationNoun ? locationNoun[0].length : 0));
+    const inlineQuestion = reportConfirmationQuestion(
+      text.slice(findingEnd, clauseEnd), value.subject, value.location,
+    );
+    // A confirmation question can follow as its own sentence or speech event;
+    // drop the sentence boundary so the question itself is what gets read.
+    const continuationQuestion = reportConfirmationQuestion(
+      text.slice(continuationAt).replace(/^\s*[.!;]\s*/, ''), value.subject, value.location,
+    );
+    if ((text[continuationAt] === '?' && !independentFollowupQuestion)
+        || interrogative || coordinatedQuestion || sharedLocation.unconfirmed || asrTagQuestion
+        || inlineQuestion || continuationQuestion) continue;
+    const reportClause = text.slice(clauseStart, clauseEnd) + sharedLocation.text;
+    const assertion = reportAssertionOf(reportClause, m.index - clauseStart, value.subject, value.location);
+    const clause = assertion.text;
+    // An apology can follow an inline correction after another comma. Keep
+    // the correction attached to this finding's assertion, not an earlier one.
+    const withoutApology = clause.replace(/,\s*(?:sorry|my\s+mistake|my\s+apologies)\s*$/i, '');
+    if (reportTrailingDenialOrCorrection(reportRetractionClause(
+      withoutApology.slice(withoutApology.lastIndexOf(',') + 1), matchedProduct, matchedLocation,
+    ))) continue;
+    // A contrast excludes its following alternative, not the location
+    // affirmed before it: "exterior rather than indoors" and "exterior,
+    // not indoors" still confirm exterior. Require both halves in the
+    // affirmative portion.
+    const affirmativeClause = clause.replace(/^\s*(?:rather than|instead of)\b[^,]*,\s*/i, '');
+    const affirmativeStart = clause.length - affirmativeClause.length;
+    const subjectAt = m.index - clauseStart - assertion.start - affirmativeStart;
+    // Preserve the main predicate across an excluded nominal product while
+    // keeping exclusions containing this candidate visible to the splitter.
+    const affirmed = reportWithoutNominalContrast(affirmativeClause, [subjectAt])
+      .split(/\b(?:rather than|instead of)\b|,\s*\bnot\b/i)[0];
+    for (const locationMatch of reportContentMatches(affirmed, locationRe)) {
+      const locationAt = locationMatch.index;
+      const orTail = text.slice(clauseEnd);
+      const alternativeLocation = reportHasAlternativeLocation(affirmed, locationAt, orTail);
+      // A completed treatment verb states the relationship. Concise report
+      // summaries may omit it ("Talstar P around the perimeter"), but must
+      // start with a finding term and connect it to its location; a caller
+      // question or a list of terms is not such a summary.
+      const findingVerbs = [...affirmed.matchAll(new RegExp(REPORT_FINDING_VERB_RE.source, 'gi'))];
+      // A report frame ("the report will show that", ", as the report may
+      // show", ", which you can see in the report, assuming you have it")
+      // describes the report, not the treatment. Space-mask it, with its own
+      // adjuncts, so the finding's certainty check keeps its offsets and
+      // reads only the treatment clause; postposed treatment hedges stay.
+      const findingAffirmed = affirmed
+        .replace(REPORT_LEADING_FRAME_RE, (frame) => ' '.repeat(frame.length))
+        .replace(REPORT_TRAILING_FRAME_RE, (frame) => ' '.repeat(frame.length));
+      const findingVerb = findingVerbs.find((candidate) => reportHasCompletedFinding(
+        findingAffirmed, subjectAt, m[0].length, locationAt, locationMatch[0].length, candidate,
+      ));
+      const completedFinding = Boolean(findingVerb);
+      const conciseFinding = reportHasConciseFinding(
+        affirmed, subjectAt, m[0].length, locationAt, locationMatch[0].length, findingVerbs[0],
+      );
+      // Modals and uncertainty govern the treatment only through its matched
+      // evidence. A later explanatory clause ("which you can see" or "as the
+      // report will show") does not make the completed treatment uncertain.
+      const findingEvidenceEnd = Math.max(
+        subjectAt + m[0].length,
+        locationAt + locationMatch[0].length,
+        findingVerb ? findingVerb.index + findingVerb[0].length : -1,
+      );
+      const findingEvidence = affirmed.slice(0, findingEvidenceEnd)
+        .replace(/^\s*(?:the report will show that|as you can see in the report,?)\s*/i, '');
+      const trailingEvidence = affirmed.slice(findingEvidenceEnd)
+        .replace(/^\s*(?:perimeter|area|wall|walls|zone|edge)\b/i, '')
+        .replace(/^\s*,\s*[^,;.!?]+(?:,\s*[^,;.!?]+)*?,?\s+and\s+(?:(?:the|a|an|your|our)\s+)?[\w'’-]+(?:\s+(?!(?:if|unless|maybe|perhaps|possibly|potentially|probably|allegedly|supposedly|reportedly|apparently|i\s+(?:think|believe|guess|suppose)|only|assuming|provided|according|as|which)\b)[\w'’-]+){0,3}\s*/i, '');
+      // A trailing "before" dates completed evidence. Remove only that
+      // temporal marker, preserving any actual denial or condition later.
+      const evidenceEnd = Math.max(subjectAt, locationAt, completedFinding ? findingVerb.index : -1);
+      const claimText = (completedFinding || conciseFinding)
+        ? affirmed.slice(0, evidenceEnd) + affirmed.slice(evidenceEnd).replace(/\bbefore\b/gi, 'prior to') : affirmed;
+      const claim = claimContext(claimText, Math.min(subjectAt, locationAt), claimText.length);
+      if (affirmed.slice(subjectAt, subjectAt + m[0].length).toLowerCase() === m[0].toLowerCase()
+          && !reportFindingIsUncertain(findingEvidence)
+          && !REPORT_HYPOTHETICAL_GOVERNOR_RE.test(findingEvidence)
+          && !REPORT_TRAILING_UNCERTAINTY_RE.test(trailingEvidence)
+          && !REPORT_HYPOTHETICAL_QUALIFIER_RE.test(trailingEvidence)
+          && !REPORT_CONCISE_NONCOMPLETION_RE.test(trailingEvidence)
+          && !reportFindingIsInstruction(affirmed, subjectAt, locationAt, findingVerb, findingEvidenceEnd)
+          && !alternativeLocation
+          && reportRespectivelyPairsFinding(affirmed, subjectAt, locationAt, findingVerb)
+          && (completedFinding || conciseFinding)
+          && !reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb, text.slice(0, clauseStart))
+          && !reportHasLaterExplicitRetraction(
+            text, continuationAt, matchedProduct,
+            locationMatch[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), affirmed,
+          )) {
+        return ['pass', `readback confirmed: "${clip(clause.trim(), 160)}"`];
+      }
+    }
+  }
+  return ['fail', `no unnegated readback naming both /${value.subject}/i and /${value.location}/i`];
+}
+
+function reportPatternMayConsumeText(source) {
+  // These tokens can assert a position but cannot name a product or place.
+  // Keep optional consuming alternatives valid; runtime skips their empty hits.
+  // Tokenize escapes and character classes atomically so parentheses inside
+  // them cannot change assertion nesting. Remove each complete lookaround,
+  // including any nested consuming groups: the assertion itself consumes none.
+  const tokens = /\\[\s\S]|\[(?:\\[\s\S]|[^\]\\])*\]|\(\?(?:<[=!]|[=!])|[()]/g;
+  let depth = 0;
+  let cursor = 0;
+  let remaining = '';
+  for (const token of source.matchAll(tokens)) {
+    const value = token[0];
+    if (depth) {
+      if (value.startsWith('(')) depth += 1;
+      if (value === ')') depth -= 1;
+      if (!depth) cursor = token.index + value.length;
+    } else if (/^\(\?(?:<[=!]|[=!])$/.test(value)) {
+      remaining += source.slice(cursor, token.index) + '(?:)';
+      depth = 1;
+    }
+  }
+  remaining += source.slice(cursor);
+  let before;
+  do {
+    before = remaining;
+    remaining = remaining
+      .replace(/\\[bBAZzG]|\^|\$/g, '')
+      .replace(/\((?:\?:|\?<[^>]+>)?(?:\|)*\)(?:[?*+]|\{\d+(?:,\d*)?\})?\??/g, '');
+  } while (remaining !== before);
+  return !/^\|*$/.test(remaining);
+}
+
+// Report frames name the report, not the treatment. The leading frame is the
+// runner's existing evidence strip; the trailing frame carries its own
+// adjuncts (", assuming you have it") to the end of the sentence.
+const REPORT_LEADING_FRAME_RE = /^\s*(?:the report will show that|as you can see in the report,?)\s*/i;
+const REPORT_TRAILING_FRAME_RE = /,\s*(?:as\s+the\s+report\s+(?:will|may|might|should|would)\s+show|which\s+you\s+can\s+see\s+in\s+the\s+report)\b[^.!?;]*/gi;
+
+const SPOKEN_CHECK_RUNNERS = Object.freeze({
+  report_readback_confirms,
+ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_free_visit_promise, no_third_party_disclosure, only_language, capture_lead_input_asserts });
+
+module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, spokenDigits, assertedMatch, EPISTEMIC_REFUSAL_VERBS, EPISTEMIC_DENIAL_WORDS, clauseBounds, clauseOf, claimContext, clauseIsNegated, clauseIsEpistemicallyHedged, cueInSameClause, reportFindingIsUncertain, reportFindingIsInstruction, reportClaimIsDenied, reportHasCompletedPredicate, REPORT_COMPLETED_PASSIVE_RE, reportHasAlternativeLocation, reportVerbGovernsProduct, reportLocationIsTreatmentTarget, reportHasCompletedFinding, reportHasConciseFinding, reportRespectivelyPairsFinding, reportClauseBounds } };

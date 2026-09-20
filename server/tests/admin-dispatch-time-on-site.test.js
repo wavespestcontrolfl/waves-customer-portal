@@ -1499,7 +1499,11 @@ describe('post-commit structured_notes writers cannot clobber the correction', (
     // 'failed' stamp for a report-v1 visit with no public token — a
     // key-merge, not a whole-column write. 15 with the accepted-but-unaudited
     // 'sent' stamp in the completion SMS catch (#3745 r4) — same shape.
-    expect((source.match(/mergeRecordNotesKeys\(record\.id, /g) || []).length).toBe(15);
+    // 17 with the completion-SMS uncertainty hold (#4632): the resume-side
+    // clear of completionSmsDeliveryUnverifiedAt once a marker-bound definite
+    // rejection is proven, and the unverified-outcome stamp in the completion
+    // SMS catch — both key-merges, not whole-column writes.
+    expect((source.match(/mergeRecordNotesKeys\(record\.id, /g) || []).length).toBe(17);
   });
 
   test('the lawn synthesis gate merges only its lawnReportV2 key — never the whole column (codex P1 round 3)', () => {

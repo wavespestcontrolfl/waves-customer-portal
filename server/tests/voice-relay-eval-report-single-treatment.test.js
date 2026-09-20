@@ -3,9 +3,9 @@ const { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: grammar } = 
 // Classifiers receive one bounded treatment frame; coordinator ownership and
 // final confirmation (including uncertainty/instructions) are separate concerns.
 
-test('report grammar has no runner or value-rule registration', () => {
-  expect(SPOKEN_CHECK_RUNNERS).not.toHaveProperty('report_readback_confirms');
-  expect(SPOKEN_CHECK_VALUE_RULES).not.toHaveProperty('report_readback_confirms');
+test('report grammar has runner and value-rule registration', () => {
+  expect(SPOKEN_CHECK_RUNNERS).toHaveProperty('report_readback_confirms');
+  expect(SPOKEN_CHECK_VALUE_RULES).toHaveProperty('report_readback_confirms');
 });
 
 test.each([
@@ -278,8 +278,12 @@ test.each([
   'We used Talstar P and walked to the exterior perimeter.',
   'The exterior perimeter and equipment were treated with Talstar P.',
 ])('single frame does not infer coordinator ownership: %s', (text) => {
-  expect(grammar.reportHasCompletedFinding(text, text.indexOf('Talstar P'), 9,
-    text.indexOf('exterior perimeter'), 18, /\b(?:applied|used|treated)\b/.exec(text))).toBe(false);
+  const verb = /\b(?:applied|used|treated)\b/.exec(text);
+  const productOwned = grammar.reportVerbGovernsProduct(text, text.indexOf('Talstar P'), 9,
+    text.indexOf('exterior perimeter'), 18, verb);
+  const targetOwned = grammar.reportLocationIsTreatmentTarget(text, text.indexOf('Talstar P'), 9,
+    text.indexOf('exterior perimeter'), 18, false, verb);
+  expect(productOwned && targetOwned).toBe(false);
 });
 
 // Preserve established report findings when the product has a reporting aside
