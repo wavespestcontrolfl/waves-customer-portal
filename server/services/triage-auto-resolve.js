@@ -142,6 +142,7 @@ const RULE_NOTES = {
   // owed action was PERFORMED after the card was filed.
   quote_fulfilled: 'Auto-resolved: an estimate linked to this call was delivered after the call; the promised quote went out.',
   email_engaged: 'Auto-resolved: the email captured on this call opened or clicked a later message; the read-back is moot.',
+  email_dictation_unambiguous: 'Auto-resolved: the email was dictated unambiguously (V1, V2 and the release target agree, no digit doubt, domain accepts mail); released without a read-back.',
   caller_phone_added: "Auto-resolved: the caller's number was added as a service contact on the account after this call.",
   booking_created: 'Auto-resolved: a live appointment matching the requested window was booked after this card was filed.',
   visit_completed_at_address: 'Auto-resolved: a visit was completed at the address this call named; the address is proven.',
@@ -962,6 +963,10 @@ const CLASSIFY_RULES = [
   // CARD — see loadEvidence for the exact predicates.
   { rule: 'quote_fulfilled', action: 'resolve', when: (item, ev) => item.reason_code === 'quote_promised' && ev?.estimate_direct === true },
   { rule: 'email_engaged', action: 'resolve', when: (item, ev) => item.reason_code === 'email_unverified' && ev?.email_engaged === true },
+  // GATE_FIRST_TOUCH_AUTO_RELEASE: the read-back question answers itself
+  // when the dictation left nothing to read back — see
+  // unambiguousDictationTarget / loadUnambiguousEmailEvidence.
+  { rule: 'email_dictation_unambiguous', action: 'resolve', when: (item, ev) => item.reason_code === 'email_unverified' && ev?.email_unambiguous === true },
   // Clearing the authorization question must not make a confirmed-but-
   // unbooked call (the routing block kept its appointment from being
   // created, and no not_confirmed sibling exists) read as fully resolved
@@ -1149,6 +1154,95 @@ async function loadEmailEvidence(conn, items, flag) {
       && strictlyAfter(r.sent_at, item.created_at)
       && (strictlyAfter(r.opened_at, item.created_at) || strictlyAfter(r.clicked_at, item.created_at)));
     if (hit) flag(item.id, 'email_engaged');
+  }
+}
+
+// email_unverified → the dictation was UNAMBIGUOUS, so there is nothing to
+// read back (GATE_FIRST_TOUCH_AUTO_RELEASE; 2026-09-20 audit finding 3:
+// 123 holds pending, oldest 2026-08-04, 9 released ever — every
+// call-captured email waits on a read-back card nobody works, and a fresh
+// lead with no other email sent can never produce the engagement evidence
+// the rule above needs). Pure and exported for tests: returns the lower-
+// cased release target, or null.
+const FIRST_TOUCH_AUTO_RELEASE_MAX_AGE_DAYS = (() => {
+  const n = Number(process.env.FIRST_TOUCH_AUTO_RELEASE_MAX_AGE_DAYS);
+  return Number.isFinite(n) && n > 0 ? n : 7;
+})();
+const UNAMBIGUOUS_MIN_CONFIDENCE = 0.9;
+const emailLc = (v) => String(v || '').trim().toLowerCase();
+function unambiguousDictationTarget(item, { now = new Date(), maxAgeDays = FIRST_TOUCH_AUTO_RELEASE_MAX_AGE_DAYS } = {}) {
+  if (item.reason_code !== 'email_unverified' || !item.call_customer_id) return null;
+  // The first touch has a shelf life: a read-back left for a week is stale
+  // work for a human, never a late automatic send.
+  if (ageDays(item.created_at, now) > maxAgeDays) return null;
+  const payload = parseMaybeJson(item.payload) || {};
+  // An arbiter that could not decide ("adopt_with_confirmation": the
+  // digits were heard three ways; "review"; "reject") is exactly the doubt
+  // a read-back exists for. Only NO arbiter (the decoders agreed and no
+  // quarantine was needed) or a decisive adopt qualifies.
+  const verdict = payload.arbiter?.verdict;
+  if (verdict && verdict !== 'adopt') return null;
+  const candidates = Array.isArray(payload.email_candidates) ? payload.email_candidates : [];
+  if (candidates.length !== 1) return null;
+  const top = candidates[0] || {};
+  if (!(Number(top.confidence) >= UNAMBIGUOUS_MIN_CONFIDENCE)) return null;
+  const target = emailLc(payload.email_release_target || top.value);
+  if (!target || !/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(target)) return null;
+  if (emailLc(top.value) !== target) return null;
+  // V1 and V2 heard the same address as the target — three-way agreement.
+  const v1 = parseMaybeJson(item.call_extraction_v1) || {};
+  const v2 = parseMaybeJson(item.call_extraction) || {};
+  if (emailLc(v1.email) !== target || emailLc(v2.caller?.email) !== target) return null;
+  // The name/email mismatch flag is its own doubt about this address.
+  const flags = Array.isArray(v2.triage_flags) ? v2.triage_flags : [];
+  if (flags.includes('name_email_mismatch')) return null;
+  return target;
+}
+
+async function domainAcceptsMail(domain, cache, resolveMx) {
+  if (cache.has(domain)) return cache.get(domain);
+  let ok = false;
+  try {
+    const mx = await Promise.race([
+      resolveMx(domain),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('mx_timeout')), 3000)),
+    ]);
+    ok = Array.isArray(mx) && mx.length > 0;
+  } catch (_e) {
+    ok = false; // fail closed: an unverifiable domain keeps its read-back
+  }
+  cache.set(domain, ok);
+  return ok;
+}
+
+async function loadUnambiguousEmailEvidence(conn, items, flag, { now = new Date(), resolveMx = null } = {}) {
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled('firstTouchAutoRelease')) return;
+  const targets = new Map();
+  for (const item of items) {
+    const target = unambiguousDictationTarget(item, { now });
+    if (target) targets.set(item.id, { item, target });
+  }
+  if (!targets.size) return;
+  // The hold that would actually send must be pending, un-denied, and
+  // aimed at this exact address — the ledger, not the card, carries the
+  // send target.
+  const holds = await conn('first_touch_holds')
+    .whereIn('call_log_id', [...new Set([...targets.values()].map(({ item }) => item.call_log_id))])
+    .where({ status: 'pending' })
+    .whereNot('held_email', '')
+    .where(function notDenied() {
+      this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
+    })
+    .select('call_log_id', 'held_email');
+  const heldByCall = new Map(holds.map((h) => [String(h.call_log_id), emailLc(h.held_email)]));
+  const mx = resolveMx || require('dns').promises.resolveMx;
+  const mxCache = new Map();
+  for (const [itemId, { item, target }] of targets) {
+    if (heldByCall.get(String(item.call_log_id)) !== target) continue;
+    const domain = target.split('@')[1];
+    if (!(await domainAcceptsMail(domain, mxCache, mx))) continue;
+    flag(itemId, 'email_unambiguous');
   }
 }
 
@@ -1746,6 +1840,7 @@ async function loadEvidence(conn, items) {
   }
   await loadEstimateEvidence(conn, candidates, flag);
   await loadEmailEvidence(conn, candidates, flag);
+  await loadUnambiguousEmailEvidence(conn, candidates, flag);
   await loadContactEvidence(conn, candidates, flag);
   await loadVisitEvidence(conn, candidates, flag);
   return evidence;
@@ -1876,6 +1971,8 @@ async function sweep({ now = new Date() } = {}) {
 }
 
 module.exports = {
+  unambiguousDictationTarget,
+  loadUnambiguousEmailEvidence,
   runTriageAutoResolve,
   classifyTriageItem,
   hasNewAddressEvidence,

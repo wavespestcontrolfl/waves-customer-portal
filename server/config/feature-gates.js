@@ -1477,6 +1477,17 @@ const gates = {
   // call named. Every rule needs evidence that postdates the CARD, never
   // same-customer coincidence. Off → the four original rules only.
   triageAutoResolveEvidence: process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE === 'true',
+  // First-touch auto-release (2026-09-20 call-agent audit, finding 3): a
+  // call-captured email whose read-back card is still open resolves on its
+  // own when the dictation was UNAMBIGUOUS — no arbiter digit doubt, V1 and
+  // V2 and the release target all agree, top candidate >= 0.9, no
+  // name/email mismatch on the call, the domain has MX, the pending hold
+  // targets that exact address, and the card is younger than
+  // FIRST_TOUCH_AUTO_RELEASE_MAX_AGE_DAYS (default 7). The ledger sweep
+  // then releases the hold — the new-lead drip and newsletter opt-in go
+  // out. Layered on triageAutoResolve + triageAutoResolveEvidence. Sends
+  // customer email — owner-flip only. Ships DARK.
+  firstTouchAutoRelease: process.env.GATE_FIRST_TOUCH_AUTO_RELEASE === 'true',
   // Bounce-triggered call-audio email re-verification: a hard bounce on a
   // call-captured address re-runs the source RECORDING through transcription
   // (letter-fidelity contact pass) + a deterministic name-anchored candidate

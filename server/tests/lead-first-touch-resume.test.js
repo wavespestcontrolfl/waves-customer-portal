@@ -1489,6 +1489,14 @@ describe('DOI dedupe guard and ledger sweep', () => {
     expect(mockEnroll).not.toHaveBeenCalled();
   });
 
+  test('the sweep retires pending holds older than the first-touch window as first_touch_stale, after the recovery pass', async () => {
+    mockHolds = [];
+    const swept = await sweepAbandonedFirstTouchHolds({});
+    expect(mockHoldUpdates[0]).toMatchObject({ status: 'pending' }); // recovery pass first
+    expect(mockHoldUpdates[1]).toMatchObject({ status: 'blocked', last_error: 'first_touch_stale' });
+    expect(swept.expired).toBe(1);
+    expect(mockEnroll).not.toHaveBeenCalled();
+  });
   test('the sweep recovers rows stranded released with unreleased merged work', async () => {
     // A transient failure in the merged-work re-pend leaves the row
     // 'released' with a held flag uncovered — the fenced outer recovery

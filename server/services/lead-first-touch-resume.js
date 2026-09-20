@@ -62,6 +62,16 @@ async function emailSuppressedForNewLead(email, dbh) {
 // claim older than the stale window belongs to a dead worker and is
 // reclaimable.
 const STALE_CLAIM_MS = 10 * 60 * 1000;
+// A first touch has a shelf life (2026-09-20 audit: 123 pending holds, the
+// oldest from 2026-08-04, would all have mailed a "welcome, new lead" weeks
+// late the day their cards were finally resolved). A pending hold older
+// than this retires as blocked/first_touch_stale — terminal, never sent;
+// the correction fanout retargets only pending/releasing rows, so a stale
+// hold is never resurrected either.
+const FIRST_TOUCH_HOLD_MAX_AGE_DAYS = (() => {
+  const n = Number(process.env.FIRST_TOUCH_HOLD_MAX_AGE_DAYS);
+  return Number.isFinite(n) && n > 0 ? n : 14;
+})();
 
 async function findPendingHolds({ callLogId = null, customerId = null, restrictToCallLogIds = null, dbh }) {
   if (!(await dbh.schema.hasTable('first_touch_holds'))) return [];
@@ -1825,6 +1835,25 @@ async function sweepAbandonedFirstTouchHolds({ dbh = db, limit = 10 } = {}) {
         });
     } catch (recoverErr) {
       logger.warn(`[first-touch-resume] merged-work recovery pass failed: ${recoverErr.code || recoverErr.name || 'db_error'} — next sweep retries`);
+    }
+    // Staleness pass: retire pending holds past the first-touch window
+    // before scanning for releases. Deny-stamped rows keep their stamp —
+    // the correction path owns them.
+    try {
+      const cutoff = new Date(Date.now() - FIRST_TOUCH_HOLD_MAX_AGE_DAYS * 24 * 60 * 60 * 1000);
+      const expired = await dbh('first_touch_holds')
+        .where({ status: 'pending' })
+        .where('created_at', '<', cutoff)
+        .where(function notDenied() {
+          this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
+        })
+        .update({ status: 'blocked', last_error: 'first_touch_stale', updated_at: new Date() });
+      if (expired) {
+        swept.expired = Number(expired) || 0;
+        logger.info(`[first-touch-resume] ledger sweep retired ${swept.expired} hold(s) older than ${FIRST_TOUCH_HOLD_MAX_AGE_DAYS} days as first_touch_stale`);
+      }
+    } catch (staleErr) {
+      logger.warn(`[first-touch-resume] staleness pass failed: ${staleErr.code || staleErr.name || 'db_error'} — next sweep retries`);
     }
     // Eligibility filters live IN the query (Codex #3084 r13): a limit
     // applied before filtering would let ten old ineligible rows (live

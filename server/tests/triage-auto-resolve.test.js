@@ -17,6 +17,7 @@ jest.mock('../config/twilio-numbers', () => ({
 const {
   runTriageAutoResolve,
   classifyTriageItem,
+  unambiguousDictationTarget,
   RULE_NOTES,
   SPAM_AGE_DAYS,
   ADVISORY_AGE_DAYS,
@@ -1237,5 +1238,53 @@ describe('evidence helpers', () => {
       if (OLD === undefined) delete process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE;
       else process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE = OLD;
     }
+  });
+});
+
+describe('email_dictation_unambiguous (GATE_FIRST_TOUCH_AUTO_RELEASE)', () => {
+  const V2 = (email, flags = ['no_sms_consent_captured']) => ({ caller: { email }, triage_flags: flags, property: NO_ADDR_EXTRACTION.property });
+  const V1 = (email) => JSON.stringify({ first_name: 'Pat', last_name: 'Lee', email });
+  const card = (over = {}) => item({
+    reason_code: 'email_unverified', call_customer_id: 'cust-1',
+    payload: { flag: 'email_unverified', email_release_target: 'pat.lee@example.com', email_candidates: [{ value: 'pat.lee@example.com', confidence: 0.95 }] },
+    call_extraction: V2('pat.lee@example.com'),
+    call_extraction_v1: V1('pat.lee@example.com'),
+    ...over,
+  });
+  test('the classify rule resolves on the evidence flag', () => {
+    expect(classifyTriageItem(card(), evidenceFor('t1', { email_unambiguous: true }), { now: NOW }))
+      .toEqual({ action: 'resolve', rule: 'email_dictation_unambiguous' });
+    expect(classifyTriageItem(card({ reason_code: 'email_invalid' }), evidenceFor('t1', { email_unambiguous: true }), { now: NOW })).toBeNull();
+  });
+  test('three-way agreement with no arbiter doubt yields the target', () => {
+    expect(unambiguousDictationTarget(card(), { now: NOW })).toBe('pat.lee@example.com');
+  });
+  test('an arbiter that asked for confirmation, or reviewed, or rejected, keeps the read-back', () => {
+    for (const verdict of ['adopt_with_confirmation', 'review', 'reject']) {
+      const c = card(); c.payload.arbiter = { verdict, chosen_value: 'pat.lee@example.com' };
+      expect(unambiguousDictationTarget(c, { now: NOW })).toBeNull();
+    }
+    const adopted = card(); adopted.payload.arbiter = { verdict: 'adopt', chosen_value: 'pat.lee@example.com' };
+    expect(unambiguousDictationTarget(adopted, { now: NOW })).toBe('pat.lee@example.com');
+  });
+  test('V1 / V2 / target disagreement keeps the read-back', () => {
+    expect(unambiguousDictationTarget(card({ call_extraction_v1: V1('pat.lee77@example.com') }), { now: NOW })).toBeNull();
+    expect(unambiguousDictationTarget(card({ call_extraction: V2('patlee@example.com') }), { now: NOW })).toBeNull();
+    const c = card(); c.payload.email_candidates = [{ value: 'other@example.com', confidence: 0.95 }];
+    expect(unambiguousDictationTarget(c, { now: NOW })).toBeNull();
+  });
+  test('low candidate confidence, two candidates, or a name/email mismatch keeps the read-back', () => {
+    const low = card(); low.payload.email_candidates = [{ value: 'pat.lee@example.com', confidence: 0.6 }];
+    expect(unambiguousDictationTarget(low, { now: NOW })).toBeNull();
+    const two = card(); two.payload.email_candidates = [{ value: 'pat.lee@example.com', confidence: 0.95 }, { value: 'pat.lee@example.org', confidence: 0.4 }];
+    expect(unambiguousDictationTarget(two, { now: NOW })).toBeNull();
+    expect(unambiguousDictationTarget(card({ call_extraction: V2('pat.lee@example.com', ['name_email_mismatch']) }), { now: NOW })).toBeNull();
+  });
+  test('a card older than the first-touch window is stale work for a human, never an automatic send', () => {
+    expect(unambiguousDictationTarget(card({ created_at: OLD_8D }), { now: NOW })).toBeNull();
+    expect(unambiguousDictationTarget(card({ created_at: OLD_8D }), { now: NOW, maxAgeDays: 30 })).toBe('pat.lee@example.com');
+  });
+  test('an unlinked call gets no evidence', () => {
+    expect(unambiguousDictationTarget(card({ call_customer_id: null }), { now: NOW })).toBeNull();
   });
 });
