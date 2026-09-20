@@ -682,6 +682,7 @@ async function sendStageComms(app, stage, opts = {}) {
 }
 
 module.exports = {
+  reconcileCommsHistoryEntryByOutcome,
   outboundNumberForApplicants,
   finalizeCommsHistoryEntry,
   errorSummary,
