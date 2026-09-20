@@ -1,6 +1,6 @@
 const {
   vocabAlt,
-  CERTAINTY_IDIOM_RE, EPISTEMIC_HEDGE_RE, clauseIsNegated, clauseIsEpistemicallyHedged,
+  CERTAINTY_IDIOM_RE, EPISTEMIC_HEDGE_RE, EPISTEMIC_HEDGE_PREFIX_SOURCE, clauseIsNegated, clauseIsEpistemicallyHedged,
   EPISTEMIC_REFUSAL_VERBS,
   EPISTEMIC_DENIAL_WORDS,
   SENTENCE_SPLIT_RE,
