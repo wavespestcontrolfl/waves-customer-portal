@@ -18,6 +18,7 @@ const {
   runTriageAutoResolve,
   classifyTriageItem,
   unambiguousDictationTarget,
+  loadUnambiguousEmailEvidence,
   RULE_NOTES,
   SPAM_AGE_DAYS,
   ADVISORY_AGE_DAYS,
@@ -1244,13 +1245,14 @@ describe('evidence helpers', () => {
 describe('email_dictation_unambiguous (GATE_FIRST_TOUCH_AUTO_RELEASE)', () => {
   const V2 = (email, flags = ['no_sms_consent_captured']) => ({ caller: { email }, triage_flags: flags, property: NO_ADDR_EXTRACTION.property });
   const V1 = (email) => JSON.stringify({ first_name: 'Pat', last_name: 'Lee', email });
-  const card = (over = {}) => item({
+  const cardFor = (email, over = {}) => item({
     reason_code: 'email_unverified', call_customer_id: 'cust-1',
-    payload: { flag: 'email_unverified', email_release_target: 'pat.lee@example.com', email_candidates: [{ value: 'pat.lee@example.com', confidence: 0.95 }] },
-    call_extraction: V2('pat.lee@example.com'),
-    call_extraction_v1: V1('pat.lee@example.com'),
+    payload: { flag: 'email_unverified', email_release_target: email, email_candidates: [{ value: email, confidence: 0.95 }] },
+    call_extraction: V2(email),
+    call_extraction_v1: V1(email),
     ...over,
   });
+  const card = (over = {}) => cardFor('pat.lee@example.com', over);
   test('the classify rule resolves on the evidence flag', () => {
     expect(classifyTriageItem(card(), evidenceFor('t1', { email_unambiguous: true }), { now: NOW }))
       .toEqual({ action: 'resolve', rule: 'email_dictation_unambiguous' });
@@ -1286,5 +1288,60 @@ describe('email_dictation_unambiguous (GATE_FIRST_TOUCH_AUTO_RELEASE)', () => {
   });
   test('an unlinked call gets no evidence', () => {
     expect(unambiguousDictationTarget(card({ call_customer_id: null }), { now: NOW })).toBeNull();
+  });
+  test('a card with no filing-time release target never auto-resolves (candidates are spellings awaiting read-back)', () => {
+    const c = card(); delete c.payload.email_release_target;
+    expect(unambiguousDictationTarget(c, { now: NOW })).toBeNull();
+  });
+  test('the shelf life is aged from the CALL too — a force-reprocessed old call gets no fresh window', () => {
+    const oldCall = new Date(NOW.getTime() - 40 * 24 * 3600 * 1000).toISOString();
+    expect(unambiguousDictationTarget(card({ created_at: FRESH, call_created_at: oldCall }), { now: NOW })).toBeNull();
+  });
+
+  // The loader's external checks, with a stub connection + injected predicates.
+  // Each loader case uses its own domain: MX verdicts are cached process-wide.
+  let n = 0;
+  const nextEmail = () => `pat.lee@mx${++n}.example`;
+  const fakeConn = ({ holds = null, mismatch = [] } = {}) => (table) => {
+    const rows = table === 'first_touch_holds' ? (holds || [{ call_log_id: 'call-1', held_email: fakeConn.current }]) : (table === 'triage_items' ? mismatch : []);
+    const chain = {
+      whereIn: () => chain, where: () => chain, whereNot: () => chain, whereNull: () => chain, orWhereNot: () => chain,
+      select: async () => rows,
+    };
+    return chain;
+  };
+  const mx = async () => [{ exchange: 'mx.example.com', priority: 10 }];
+  const noSuppression = async () => false;
+  const notOwned = async () => false;
+  const run = async (conn, opts = {}) => {
+    const flags = [];
+    const email = nextEmail();
+    fakeConn.current = email;
+    await loadUnambiguousEmailEvidence(conn, [cardFor(email)], (id, key) => flags.push([id, key]), {
+      now: NOW, resolveMx: mx, suppressed: noSuppression, ownedByOther: notOwned, enabled: () => true, ...opts,
+    });
+    return flags;
+  };
+  test('loader: gated off → no evidence at all', async () => {
+    expect(await run(fakeConn(), { enabled: () => false })).toEqual([]);
+  });
+  test('loader: a pending hold on the exact address + MX → evidence', async () => {
+    expect(await run(fakeConn())).toEqual([['t1', 'email_unambiguous']]);
+  });
+  test('loader: no pending hold, or a hold aimed elsewhere → no evidence', async () => {
+    expect(await run(fakeConn({ holds: [] }))).toEqual([]);
+    expect(await run(fakeConn({ holds: [{ call_log_id: 'call-1', held_email: 'other@example.com' }] }))).toEqual([]);
+  });
+  test('loader: a live name_email_mismatch card keeps the read-back', async () => {
+    expect(await run(fakeConn({ mismatch: [{ call_log_id: 'call-1' }] }))).toEqual([]);
+  });
+  test('loader: a suppressed address, an address owned by another customer, or a failing check → no evidence', async () => {
+    expect(await run(fakeConn(), { suppressed: async () => true })).toEqual([]);
+    expect(await run(fakeConn(), { ownedByOther: async () => true })).toEqual([]);
+    expect(await run(fakeConn(), { ownedByOther: async () => { throw new Error('db'); } })).toEqual([]);
+  });
+  test('loader: a null MX record or an unresolvable domain is not deliverable', async () => {
+    expect(await run(fakeConn(), { resolveMx: async () => [{ exchange: '.', priority: 0 }] })).toEqual([]);
+    expect(await run(fakeConn(), { resolveMx: async () => { throw new Error('ENOTFOUND'); } })).toEqual([]);
   });
 });

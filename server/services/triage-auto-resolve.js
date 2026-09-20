@@ -1173,8 +1173,12 @@ const emailLc = (v) => String(v || '').trim().toLowerCase();
 function unambiguousDictationTarget(item, { now = new Date(), maxAgeDays = FIRST_TOUCH_AUTO_RELEASE_MAX_AGE_DAYS } = {}) {
   if (item.reason_code !== 'email_unverified' || !item.call_customer_id) return null;
   // The first touch has a shelf life: a read-back left for a week is stale
-  // work for a human, never a late automatic send.
+  // work for a human, never a late automatic send. Aged from the CALL as
+  // well as the card (codex r1 P1): a force-reprocess of an old call mints
+  // a fresh card and a fresh hold, and must not reset the shelf life of
+  // the customer's actual inquiry.
   if (ageDays(item.created_at, now) > maxAgeDays) return null;
+  if (item.call_created_at && ageDays(item.call_created_at, now) > maxAgeDays) return null;
   const payload = parseMaybeJson(item.payload) || {};
   // An arbiter that could not decide ("adopt_with_confirmation": the
   // digits were heard three ways; "review"; "reject") is exactly the doubt
@@ -1186,7 +1190,12 @@ function unambiguousDictationTarget(item, { now = new Date(), maxAgeDays = FIRST
   if (candidates.length !== 1) return null;
   const top = candidates[0] || {};
   if (!(Number(top.confidence) >= UNAMBIGUOUS_MIN_CONFIDENCE)) return null;
-  const target = emailLc(payload.email_release_target || top.value);
+  // The FILING-TIME release target is required (codex r1 P1): a card with
+  // no snapshot — legacy, or a recovery marker — treats its candidates as
+  // spellings awaiting read-back and fails closed, the same contract the
+  // engagement arm keeps. The candidate is compared against it, never
+  // substituted for it.
+  const target = emailLc(payload.email_release_target);
   if (!target || !/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(target)) return null;
   if (emailLc(top.value) !== target) return null;
   // V1 and V2 heard the same address as the target — three-way agreement.
@@ -1199,36 +1208,54 @@ function unambiguousDictationTarget(item, { now = new Date(), maxAgeDays = FIRST
   return target;
 }
 
-async function domainAcceptsMail(domain, cache, resolveMx) {
-  if (cache.has(domain)) return cache.get(domain);
+// MX answers are cached process-wide for a short while (codex r1 P2): the
+// sweep runs this loader once unlocked and once more inside the locked
+// revalidation pass, and a DNS wait must never sit on the per-call
+// advisory locks admin triage transitions take. The unlocked pass fills
+// the cache; the locked pass reads it. Lookups run in parallel with one
+// timeout each, so a batch waits ~3 s at most, not 3 s per domain.
+const MX_CACHE_TTL_MS = 10 * 60 * 1000;
+const mxCache = new Map(); // domain → { ok, at }
+const MX_TIMEOUT_MS = 3000;
+async function domainAcceptsMail(domain, resolveMx, now = Date.now()) {
+  const hit = mxCache.get(domain);
+  if (hit && now - hit.at < MX_CACHE_TTL_MS) return hit.ok;
   let ok = false;
   try {
     const mx = await Promise.race([
       resolveMx(domain),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('mx_timeout')), 3000)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('mx_timeout')), MX_TIMEOUT_MS)),
     ]);
-    ok = Array.isArray(mx) && mx.length > 0;
+    // A "null MX" (RFC 7505: a single record whose exchange is the root)
+    // advertises that the domain accepts NO mail (codex r1 P2).
+    ok = Array.isArray(mx) && mx.some((r) => {
+      const ex = String(r?.exchange || '').trim().replace(/\.$/, '');
+      return ex.length > 0;
+    });
   } catch (_e) {
     ok = false; // fail closed: an unverifiable domain keeps its read-back
   }
-  cache.set(domain, ok);
+  mxCache.set(domain, { ok, at: now });
   return ok;
 }
 
-async function loadUnambiguousEmailEvidence(conn, items, flag, { now = new Date(), resolveMx = null } = {}) {
-  const { isEnabled } = require('../config/feature-gates');
-  if (!isEnabled('firstTouchAutoRelease')) return;
+async function loadUnambiguousEmailEvidence(conn, items, flag, {
+  now = new Date(), resolveMx = null, suppressed = null, ownedByOther = null, enabled = null,
+} = {}) {
+  const isOn = enabled || (() => require('../config/feature-gates').isEnabled('firstTouchAutoRelease'));
+  if (!isOn()) return;
   const targets = new Map();
   for (const item of items) {
     const target = unambiguousDictationTarget(item, { now });
     if (target) targets.set(item.id, { item, target });
   }
   if (!targets.size) return;
+  const callIds = [...new Set([...targets.values()].map(({ item }) => item.call_log_id))];
   // The hold that would actually send must be pending, un-denied, and
   // aimed at this exact address — the ledger, not the card, carries the
   // send target.
   const holds = await conn('first_touch_holds')
-    .whereIn('call_log_id', [...new Set([...targets.values()].map(({ item }) => item.call_log_id))])
+    .whereIn('call_log_id', callIds)
     .where({ status: 'pending' })
     .whereNot('held_email', '')
     .where(function notDenied() {
@@ -1236,13 +1263,39 @@ async function loadUnambiguousEmailEvidence(conn, items, flag, { now = new Date(
     })
     .select('call_log_id', 'held_email');
   const heldByCall = new Map(holds.map((h) => [String(h.call_log_id), emailLc(h.held_email)]));
+  // A LIVE name/email mismatch card is an unanswered identity question
+  // about this very address, whatever the rolling flags say after a
+  // force-reprocess (codex r1 P1); the ledger's own release guard only
+  // watches the two email codes, so it is checked here.
+  const mismatchLive = new Set((await conn('triage_items')
+    .whereIn('call_log_id', callIds)
+    .where({ reason_code: 'name_email_mismatch' })
+    .whereIn('status', ['open', 'in_progress'])
+    .select('call_log_id')).map((r) => String(r.call_log_id)));
+  const isSuppressed = suppressed || require('./lead-first-touch-resume').emailSuppressedForNewLead;
+  const isOwnedByOther = ownedByOther || require('./email-bounce-recovery').correctedAddressOwnedByOther;
   const mx = resolveMx || require('dns').promises.resolveMx;
-  const mxCache = new Map();
+  const eligible = [];
   for (const [itemId, { item, target }] of targets) {
     if (heldByCall.get(String(item.call_log_id)) !== target) continue;
-    const domain = target.split('@')[1];
-    if (!(await domainAcceptsMail(domain, mxCache, mx))) continue;
-    flag(itemId, 'email_unambiguous');
+    if (mismatchLive.has(String(item.call_log_id))) continue;
+    // Fail closed on every external check: a suppressed address (a prior
+    // hard bounce) stays open for the owner's correction instead of
+    // parking the hold behind a resolved card; an address on file for
+    // ANOTHER customer is the privacy leak the intake and bounce paths
+    // already refuse (codex r1 P1 x2).
+    let blocked = true;
+    try {
+      blocked = (await isSuppressed(target, conn)) || (await isOwnedByOther(target, item.call_customer_id, conn));
+    } catch (_e) { blocked = true; }
+    if (blocked) continue;
+    eligible.push({ itemId, target });
+  }
+  if (!eligible.length) return;
+  const domains = [...new Set(eligible.map(({ target }) => target.split('@')[1]))];
+  const verdicts = new Map(await Promise.all(domains.map(async (d) => [d, await domainAcceptsMail(d, mx)])));
+  for (const { itemId, target } of eligible) {
+    if (verdicts.get(target.split('@')[1]) === true) flag(itemId, 'email_unambiguous');
   }
 }
 

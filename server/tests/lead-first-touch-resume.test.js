@@ -1497,6 +1497,16 @@ describe('DOI dedupe guard and ledger sweep', () => {
     expect(swept.expired).toBe(1);
     expect(mockEnroll).not.toHaveBeenCalled();
   });
+  test('a hold older than the first-touch window is retired at the claim path, whatever release path reaches it', async () => {
+    const old = new Date(Date.now() - 20 * 24 * 3600 * 1000).toISOString();
+    mockHolds = [baseHold({ created_at: old })];
+    mockTriageFirstQueue = [null, { status: 'resolved' }];
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1', source: 'triage_resolve' });
+    expect(res.resumed).toBe(false);
+    expect(res.skipped).toBe('first_touch_stale');
+    expect(mockHoldUpdates.some((p) => p.status === 'blocked' && p.last_error === 'first_touch_stale')).toBe(true);
+    expect(mockEnroll).not.toHaveBeenCalled();
+  });
   test('the sweep recovers rows stranded released with unreleased merged work', async () => {
     // A transient failure in the merged-work re-pend leaves the row
     // 'released' with a held flag uncovered — the fenced outer recovery

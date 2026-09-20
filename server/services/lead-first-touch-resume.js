@@ -72,6 +72,11 @@ const FIRST_TOUCH_HOLD_MAX_AGE_DAYS = (() => {
   const n = Number(process.env.FIRST_TOUCH_HOLD_MAX_AGE_DAYS);
   return Number.isFinite(n) && n > 0 ? n : 14;
 })();
+function firstTouchHoldIsStale(hold, now = Date.now()) {
+  const created = hold?.created_at ? new Date(hold.created_at).getTime() : NaN;
+  if (!Number.isFinite(created)) return false; // unknown age: not this guard's call
+  return now - created > FIRST_TOUCH_HOLD_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
+}
 
 async function findPendingHolds({ callLogId = null, customerId = null, restrictToCallLogIds = null, dbh }) {
   if (!(await dbh.schema.hasTable('first_touch_holds'))) return [];
@@ -640,6 +645,17 @@ async function resumeHeldFirstTouch({
       if (!claimStamp) continue; // another release path owns it
       inFlightHoldId = hold.id;
       claimStamps.set(hold.id, claimStamp);
+
+      // Shelf life, enforced on the canonical path every release takes
+      // (codex #4622 r1 P1): a hold older than the first-touch window is
+      // never sent — not by an operator resolve landing between sweeps,
+      // not by a reclaimed stale 'releasing' row, not by a correction.
+      if (firstTouchHoldIsStale(hold)) {
+        await settleHold(hold.id, { status: 'blocked', last_error: 'first_touch_stale' }, dbh, claimStamp);
+        logger.info(`[first-touch-resume] hold ${hold.id}: older than ${FIRST_TOUCH_HOLD_MAX_AGE_DAYS} days — retired as first_touch_stale (${source})`);
+        result.skipped = result.skipped || 'first_touch_stale';
+        continue;
+      }
 
       // A deny-stamped hold means the operator resolved the card WITHOUT
       // approving the address (Codex #3084 r14) — no automated trigger
@@ -1842,7 +1858,13 @@ async function sweepAbandonedFirstTouchHolds({ dbh = db, limit = 10 } = {}) {
     try {
       const cutoff = new Date(Date.now() - FIRST_TOUCH_HOLD_MAX_AGE_DAYS * 24 * 60 * 60 * 1000);
       const expired = await dbh('first_touch_holds')
-        .where({ status: 'pending' })
+        .where(function scope() {
+          this.where({ status: 'pending' })
+            .orWhere(function stale() {
+              this.where({ status: 'releasing' })
+                .where('updated_at', '<', new Date(Date.now() - STALE_CLAIM_MS));
+            });
+        })
         .where('created_at', '<', cutoff)
         .where(function notDenied() {
           this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
@@ -1962,6 +1984,7 @@ module.exports = {
   repenIfWorkMergedDuringClaim,
   customerCallDoNotContact,
   emailSuppressedForNewLead,
+  firstTouchHoldIsStale,
   sendFailedMarkerFor,
   // Claim-fence primitives (Codex #3084 r27, CAS renewal since r28) — the
   // fanout's coalesced resend holds claims too and must honor the same
