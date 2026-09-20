@@ -185,3 +185,30 @@ describe('matchApplicantReply — unprovisioned recruiting schema', () => {
     await expect(matchApplicantReply('+19415550142', '+19415550199')).rejects.toBeTruthy();
   });
 });
+
+describe('isPlausibleRecruitingPhone — blast-radius bound for the fail-closed path', () => {
+  const { isPlausibleRecruitingPhone, _resetRecruitingPhoneCacheForTests } = require('../services/recruiting-inbound');
+  beforeEach(() => { _resetRecruitingPhoneCacheForTests(); mockDb.mockClear(); });
+
+  function snapshot(rows) {
+    mockDb.mockImplementation(() => {
+      const q = { whereIn: jest.fn(() => q), select: jest.fn(async () => rows) };
+      return q;
+    });
+  }
+
+  test('true for a phone with an open application, false otherwise, and the snapshot is reused within the TTL', async () => {
+    snapshot([{ digits: '19415550142' }]);
+    await expect(isPlausibleRecruitingPhone('+19415550142')).resolves.toBe(true);
+    await expect(isPlausibleRecruitingPhone('+19415550999')).resolves.toBe(false);
+    expect(mockDb).toHaveBeenCalledTimes(1);
+  });
+
+  test('a refresh failure keeps the last snapshot; with no snapshot ever loaded the answer is unknown (null → fail closed)', async () => {
+    mockDb.mockImplementation(() => { throw Object.assign(new Error('down'), { code: '57014' }); });
+    await expect(isPlausibleRecruitingPhone('+19415550142')).resolves.toBeNull();
+    snapshot([{ digits: '9415550142' }]);
+    await expect(isPlausibleRecruitingPhone('+19415550142')).resolves.toBe(true);
+    _resetRecruitingPhoneCacheForTests();
+  });
+});

@@ -274,7 +274,11 @@ recruiting replies (classification is NOT gated — `GATE_RECRUITING_COMMS`
 is the send / public-link kill switch only; applicants texted before it
 was turned off keep classifying from stored evidence for the window; a
 database with no recruiting tables at all (42P01) answers "not a
-recruiting reply", every other lookup error fails closed): an inbound
+recruiting reply"; any other lookup error fails closed — 503, claim
+released, nothing persisted — ONLY for a phone that is plausibly an
+applicant (a 60-second snapshot of open applications' phones, or no
+snapshot available at all); every other phone continues on the ordinary
+path so a recruiting-store hiccup never stalls the inbound pipeline): an inbound
 from a phone that
 (a) belongs to an OPEN job application (new/reviewed/interview/offer)
 AND (b) has a `job_*` SMS `handoff`/`sent`/`uncertain` entry (the `handoff`

@@ -187,4 +187,57 @@ async function recordApplicantReply({ applicationId, from, to, body, messageSid,
   return { persisted: true, duplicate };
 }
 
-module.exports = { matchApplicantReply, recordApplicantReply, OPEN_STATUSES, RECENT_OUTBOUND_DAYS, REPLY_MESSAGE_TYPE, NON_CONVERSATIONAL_OUTBOUND };
+// ---- blast-radius bound for the fail-closed path ---------------------------
+// The webhook fails CLOSED (503, claim released) when classification is
+// unavailable — but only for phones that are PLAUSIBLY applicants, or the
+// whole inbound pipeline would stall on a recruiting-store hiccup (local
+// audit P1). A short-lived snapshot of open applications' phones answers
+// that cheaply; a refresh failure keeps the last snapshot, and "never
+// loaded" is treated as unknown (conservative: fail closed).
+const RECRUITING_PHONE_CACHE_TTL_MS = 60 * 1000;
+const phoneCache = { digits: null, loadedAt: 0, loading: null };
+
+async function refreshRecruitingPhoneCache() {
+  const rows = await db('job_applications')
+    .whereIn('status', OPEN_STATUSES)
+    .select(db.raw("regexp_replace(COALESCE(contact_snapshot->>'phone', ''), '[^0-9]', '', 'g') AS digits"));
+  const set = new Set();
+  for (const r of rows) {
+    const d = String(r.digits || '');
+    if (d.length >= 10) { set.add(d.slice(-10)); }
+  }
+  phoneCache.digits = set;
+  phoneCache.loadedAt = Date.now();
+  return set;
+}
+
+/**
+ * true  — the phone has an open application in the snapshot (fail closed)
+ * false — the snapshot is loaded and the phone is not in it (fail open)
+ * null  — no snapshot could ever be loaded (unknown: fail closed)
+ */
+async function isPlausibleRecruitingPhone(fromPhone) {
+  const variants = phoneMatchDigits(fromPhone);
+  const last10 = variants.length ? variants[variants.length - 1].slice(-10) : null;
+  if (!last10) return false;
+  if (!phoneCache.digits || Date.now() - phoneCache.loadedAt > RECRUITING_PHONE_CACHE_TTL_MS) {
+    try {
+      phoneCache.loading = phoneCache.loading || refreshRecruitingPhoneCache();
+      await phoneCache.loading;
+    } catch (err) {
+      logger.warn(`[recruiting-inbound] phone snapshot refresh failed (${err && err.name ? err.name : 'Error'}${err && err.code ? ` ${err.code}` : ''}) — keeping the last snapshot`);
+    } finally {
+      phoneCache.loading = null;
+    }
+  }
+  if (!phoneCache.digits) return null;
+  return phoneCache.digits.has(last10);
+}
+
+function _resetRecruitingPhoneCacheForTests() {
+  phoneCache.digits = null; phoneCache.loadedAt = 0; phoneCache.loading = null;
+}
+
+module.exports = {
+  isPlausibleRecruitingPhone,
+  _resetRecruitingPhoneCacheForTests, matchApplicantReply, recordApplicantReply, OPEN_STATUSES, RECENT_OUTBOUND_DAYS, REPLY_MESSAGE_TYPE, NON_CONVERSATIONAL_OUTBOUND };

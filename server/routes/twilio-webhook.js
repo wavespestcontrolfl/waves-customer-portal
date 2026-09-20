@@ -383,9 +383,20 @@ router.post('/sms', async (req, res) => {
         recruitingReply = await require('../services/recruiting-inbound').matchApplicantReply(From, To);
       }
     } catch (e) {
-      logger.error(`[recruiting-inbound] match failed (${e.name || 'Error'}${e.code ? ` ${e.code}` : ''}) — deferring inbound for retry`);
-      if (claimOwned && !persisted) await releaseInboundWebhook(MessageSid);
-      return res.status(503).type('text/xml').send('<Response></Response>');
+      // Fail CLOSED only where it matters (local audit P1): a phone that is
+      // plausibly an applicant (open-application snapshot, or no snapshot
+      // available at all) defers for a Twilio retry — release the claim and
+      // 503 with nothing persisted. Every other phone continues on the
+      // ordinary path so a recruiting-store hiccup never stalls the whole
+      // inbound pipeline.
+      const plausible = await require('../services/recruiting-inbound').isPlausibleRecruitingPhone(From).catch(() => null);
+      if (plausible !== false) {
+        logger.error(`[recruiting-inbound] match failed (${e.name || 'Error'}${e.code ? ` ${e.code}` : ''}) — deferring inbound for retry`);
+        if (claimOwned && !persisted) await releaseInboundWebhook(MessageSid);
+        return res.status(503).type('text/xml').send('<Response></Response>');
+      }
+      logger.warn(`[recruiting-inbound] match failed (${e.name || 'Error'}${e.code ? ` ${e.code}` : ''}) — not a known applicant phone, continuing on the ordinary path`);
+      recruitingReply = null;
     }
 
     // The unified inbox is required before acknowledging an accepted SMS.
