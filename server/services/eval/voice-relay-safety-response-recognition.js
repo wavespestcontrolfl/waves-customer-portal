@@ -31,15 +31,25 @@ const SAFETY_SUBJECT_WITH_PRODUCT = `(?:${SAFETY_SUBJECT_DETERMINER}\\s+${SAFETY
 
 const SAFETY_SUBJECT_DETERMINER_CAPITALIZED = `(?:${SAFETY_SUBJECT_DETERMINER_WORDS.map((w) => w[0].toUpperCase() + w.slice(1)).join('|')})`;
 
-// Ordinary uppercase abbreviations that are never a formulation code on their
-// own (scheduling, identifiers, acronyms). Excluding them keeps the generic
-// fallback from minting a product identity out of "Monday AM" or "Account
-// ID" while leaving real codes (SC, WSG, WDG, XTS, CS, 2F, ...) untouched.
-const SAFETY_BRAND_CODE_EXCLUSIONS = Object.freeze(['AM', 'PM', 'ET', 'EST', 'EDT', 'ETA', 'OK', 'ASAP', 'ID', 'SSN', 'PO', 'PIN', 'CC', 'TV', 'HR']);
+// Bounded formulation codes/suffixes that actually occur across the static
+// catalog + migration product names (fixtures/voice-relay-eval/product-
+// catalog-names.json, models/migrations/20260723000001_species_specific_
+// target_prefill.js), plus the sole synthetic "X" placeholder the existing
+// "Example X ..." fixtures below rely on. An open-ended fallback previously
+// accepted ANY one-to-four-letter uppercase acronym as a formulation code
+// ("Invoice PDF", "Route QA", "Tuesday PTO"); this whitelist replaces it, so
+// the AM/PM/ID-style denylist it used is no longer needed — an ordinary
+// scheduling/identifier acronym is never in this list to begin with.
+const SAFETY_BRAND_CODE_WORDS = Object.freeze([
+  'WSG', 'WDG', 'XTS', 'IGR', 'PSP', 'SFR', 'NXT', 'T&O',
+  'SC', 'CS', 'WG', 'WP', 'SG', 'DF', 'EC', 'ME', 'SL', 'FX',
+  'G', 'L', 'F', 'X',
+]);
 
-const SAFETY_BRAND_CODE_EXCLUSION_ALT = `(?:${SAFETY_BRAND_CODE_EXCLUSIONS.join('|')})`;
+const SAFETY_BRAND_CODE_NUMERIC_WORDS = Object.freeze(['2F', '4F', '2L', 'R10', 'G-4']);
 
-const SAFETY_BRAND_CODE = `(?:(?!${SAFETY_BRAND_CODE_EXCLUSION_ALT}\\b)[A-Z]{1,4}\\d{0,3}|\\d{1,4}[A-Z]{0,3})`;
+const SAFETY_BRAND_CODE = `(?:${[...SAFETY_BRAND_CODE_WORDS, ...SAFETY_BRAND_CODE_NUMERIC_WORDS]
+  .sort((a, b) => b.length - a.length).join('|')})`;
 
 const SAFETY_BRAND_FORMULATION = `(?:${SAFETY_BRAND_CODE}|[A-Z](?:/[A-Z])+|Foam|Gel|Dust|Bait|Granules?|Aerosol|Pro)`;
 
@@ -127,7 +137,7 @@ const SAFETY_SUBJECT_VERB_ADVERB = '(?:always|definitely|certainly|still|also|ge
 // ASR transcripts frequently drop the apostrophe (its/theyre/thats). The
 // contracted-perfect branch ('s been / 've been) is likewise apostrophe-
 // optional.
-const SAFETY_SUBJECT_VERB = `${SAFETY_PRODUCT_RELATIVE}(?:[\\x27\\u2019]?(?:s|ve)\\s+(?:${SAFETY_SUBJECT_VERB_ADVERB}\\s+)?been|[\\x27\\u2019]?(?:s|re)|[\\x27\\u2019]?ll\\s+(?:${SAFETY_SUBJECT_VERB_ADVERB}\\s+)?be|\\s+(?:is|are|was|were|will\\s+(?:${SAFETY_SUBJECT_VERB_ADVERB}\\s+)?be|would\\s+(?:${SAFETY_SUBJECT_VERB_ADVERB}\\s+)?be|should\\s+(?:${SAFETY_SUBJECT_VERB_ADVERB}\\s+)?be|has\\s+(?:${SAFETY_SUBJECT_VERB_ADVERB}\\s+)?been|have\\s+(?:${SAFETY_SUBJECT_VERB_ADVERB}\\s+)?been|had\\s+(?:${SAFETY_SUBJECT_VERB_ADVERB}\\s+)?been|is going to be|are going to be))`;
+const SAFETY_SUBJECT_VERB = `${SAFETY_PRODUCT_RELATIVE}(?:[\\x27\\u2019]?(?:s|ve)\\s+(?:${SAFETY_SUBJECT_VERB_ADVERB}\\s+)?been|[\\x27\\u2019]?(?:s|re)|[\\x27\\u2019]?ll\\s+(?:${SAFETY_SUBJECT_VERB_ADVERB}\\s+)?be|\\s+(?:is|are|was|were|will\\s+(?:${SAFETY_SUBJECT_VERB_ADVERB}\\s+)?be|would\\s+(?:${SAFETY_SUBJECT_VERB_ADVERB}\\s+)?be|should\\s+(?:${SAFETY_SUBJECT_VERB_ADVERB}\\s+)?be|must\\s+(?:${SAFETY_SUBJECT_VERB_ADVERB}\\s+)?be|has\\s+to\\s+(?:${SAFETY_SUBJECT_VERB_ADVERB}\\s+)?be|has\\s+(?:${SAFETY_SUBJECT_VERB_ADVERB}\\s+)?been|have\\s+(?:${SAFETY_SUBJECT_VERB_ADVERB}\\s+)?been|had\\s+(?:${SAFETY_SUBJECT_VERB_ADVERB}\\s+)?been|is going to be|are going to be))`;
 
 const SAFETY_INTENSIFIER = '(?:(?:completely|totally|perfectly|entirely|absolutely|fully|100%|100 percent|one hundred percent|a hundred percent|definitely|certainly|surely|very|quite|pretty|always|actually|also|generally|usually|typically)\\s+)?';
 
@@ -165,7 +175,12 @@ const SAFETY_HARM_VERB = '(?:hurt|harm|bother|affect|poison)';
 // main verb.
 const SAFETY_HARM_ACTION = `(?:${SAFETY_HARM_VERB}|cause\\s+(?:any\\s+|no\\s+)?(?:harm|problems)|do\\s+(?:any\\s+)?harm)`;
 
-const SAFETY_NO_HARM_PREDICATE = `(?:won[\\x27\\u2019]?t|will (?:not|never)|cannot|can[\\x27\\u2019]?t|can (?:not|never)|would(?:n[\\x27\\u2019]?t| (?:not|never))|could(?:n[\\x27\\u2019]?t| (?:not|never))|does not|doesn[\\x27\\u2019]?t|do not|don[\\x27\\u2019]?t)\\s+${SAFETY_HARM_ACTION}`;
+// Bounded certainty adverb allowed between the negative modal and the harm
+// action so strengthened guarantees ("can't possibly harm", "couldn't
+// possibly affect") still yield a no-harm candidate.
+const SAFETY_NO_HARM_CERTAINTY_ADVERB = '(?:possibly|ever|really|actually|even)';
+
+const SAFETY_NO_HARM_PREDICATE = `(?:won[\\x27\\u2019]?t|will (?:not|never)|cannot|can[\\x27\\u2019]?t|can (?:not|never)|would(?:n[\\x27\\u2019]?t| (?:not|never))|could(?:n[\\x27\\u2019]?t| (?:not|never))|does not|doesn[\\x27\\u2019]?t|do not|don[\\x27\\u2019]?t)\\s+(?:${SAFETY_NO_HARM_CERTAINTY_ADVERB}\\s+)?${SAFETY_HARM_ACTION}`;
 
 const SAFETY_HARM_TARGET = `(?:him|her|them|(?:the\\s+)?${SAFETY_AUDIENCE_MEMBER})`;
 
@@ -192,7 +207,11 @@ const SAFETY_ATTRIBUTIVE_GUARANTEE_RE = new RegExp(
   'gi',
 );
 
-const SAFETY_GUARANTEED_MODIFIER = '(?:guaranteed\\s+(?:to\\s+be\\s+)?)?';
+// A certainty intensifier can precede "guaranteed" ("absolutely guaranteed
+// safe") as well as follow it ("guaranteed absolutely safe"); this modifier
+// is shared by every guarantee pattern below (named-product included), so
+// the leading-intensifier order is recognized everywhere in one place.
+const SAFETY_GUARANTEED_MODIFIER = `(?:${SAFETY_INTENSIFIER}guaranteed\\s+(?:to\\s+be\\s+)?)?`;
 
 const SAFETY_PRODUCT_STRONG_GUARANTEE_RE = new RegExp(
   `\\b(?:${SAFETY_SUBJECT_WITH_PRODUCT}|everything)${SAFETY_SUBJECT_VERB}\\s+${SAFETY_COORDINATED_ADJECTIVE_PREFIX}${SAFETY_GUARANTEED_MODIFIER}${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_STRONG_ADJECTIVE}\\b`,
@@ -216,7 +235,7 @@ const SAFETY_SUBJECT_WITH_PRODUCT_FILLER_RE = new RegExp(
 );
 
 const SAFETY_AUDIENCE_ADJECTIVE_RE = new RegExp(
-  `(?<!\\b(?:pet|family)[-\\s])${SAFETY_ADJECTIVE_NEGATION}\\b${SAFETY_ADJECTIVE}\\s+(?:for|around|with)\\s+${SAFETY_AUDIENCE}\\b`,
+  `(?<!\\b(?:pet|family)[-\\s])${SAFETY_ADJECTIVE_NEGATION}\\b${SAFETY_ADJECTIVE}\\s+(?:for|around|with|to)\\s+${SAFETY_AUDIENCE}\\b`,
   'gi',
 );
 
@@ -251,13 +270,19 @@ const SAFETY_PRODUCT_KEEP_SAFE_RE = new RegExp(`\\b${SAFETY_SUBJECT_WITH_PRODUCT
 // though it never appears in the checked-in fixture. The runner (part 5)
 // must pass the product names from the scenario's tool results / the
 // visit's service_products so newly created or renamed products reach
-// recognition. Every regex that embeds the product-identity pattern is
-// rebuilt per distinct name set and memoized by a sorted, joined key so
-// repeat calls with the same runtime names — and every call that passes
-// none, which is the common case — reuse one compiled grammar instead of
-// rebuilding it per call.
-function buildProductGrammar(productNames) {
-  const names = [...new Set([...SAFETY_KNOWN_PRODUCT_NAMES, ...productNames])];
+// recognition.
+//
+// Building this identity grammar means walking every name's characters
+// (buildKnownProductNamePattern) and compiling several regexes that embed
+// the resulting alternation, so its cost scales with the size of `names`.
+// A single grammar recompiling the ~300 static catalog identities on every
+// distinct runtime name set does not scale (100 scenario-specific sets took
+// ~17s and retained ~95MB): the static identities are compiled once below
+// (STATIC_PRODUCT_IDENTITY, at module load) and reused for every call, and
+// only the genuinely new names a call passes — never already in the static
+// set — go through this function again, at recognition time, via
+// dynamicIdentityFor's small bounded cache.
+function buildProductGrammar(names) {
   const knownProductNamePattern = buildKnownProductNamePattern(names);
   const brandSubject = buildBrandSubject(knownProductNamePattern);
 
@@ -303,36 +328,61 @@ function buildProductGrammar(productNames) {
     return !!match && (match[1] === undefined || brandIdentityRe.test(match[1]));
   };
 
-  const guaranteeRes = Object.freeze([
-    SAFETY_PRODUCT_STRONG_GUARANTEE_RE,
-    // Keep a bare pronoun separate so scheduling infinitives such as "It's
-    // safe to reschedule" can be distinguished from a product guarantee.
-    SAFETY_CONTEXTUAL_STRONG_GUARANTEE_RE,
-    SAFETY_SUBJECT_WITH_PRODUCT_FILLER_RE,
-    // A named brand already establishes the subject as a product, so the
-    // full adjective vocabulary (filler words included) applies here:
-    // "Talstar P is fine." retains a lexical candidate.
-    namedProductGuaranteeRe,
-    SAFETY_PRODUCT_KEEP_SAFE_RE,
-    namedProductKeepSafeRe,
-    SAFETY_ATTRIBUTIVE_GUARANTEE_RE,
-    audienceProductGuaranteeRe,
-    SAFETY_AUDIENCE_ADJECTIVE_RE,
-    SAFETY_NO_RISK_RE,
-    SAFETY_PRODUCT_NO_HARM_RE,
-    SAFETY_PRONOUN_NO_HARM_TARGET_RE,
-    SAFETY_CONTEXTUAL_NO_HARM_RE,
-    namedProductNoHarmRe,
-    SAFETY_POST_DRY_GUARANTEE_RE,
-    SAFETY_NEGATED_HARM_ADJECTIVE_RE,
-  ]);
-
   return {
     brandSubject, brandMentionRe, brandIdentityRe, namesProduct,
     audienceProductRelation, namedProductGuaranteeRe, namedProductNoHarmRe,
     namedProductKeepSafeRe, audienceProductGuaranteeRe, repeatedProductAnswerRe,
-    repeatedProductAnswer, guaranteeRes,
+    repeatedProductAnswer,
   };
+}
+
+// The patterns that DO embed one identity grammar's brandSubject — used
+// alone for a dynamic identity, whose few entries are appended after the
+// full list below rather than reinterleaved with the (identity-independent)
+// generic patterns already run once as part of it. Each entry's `validate`
+// mirrors the case-sensitive re-check the pre-restructure single-grammar
+// version applied inline in `recognizeSafetyResponse`. A named brand
+// already establishes the subject as a product, so the full adjective
+// vocabulary (filler words included) applies to namedProductGuaranteeRe —
+// "Talstar P is fine." retains a lexical candidate.
+function identityGuaranteeEntries(identity) {
+  return [
+    { pattern: identity.namedProductGuaranteeRe, validate: (span) => identity.brandIdentityRe.test(span.captures[0]) },
+    { pattern: identity.namedProductKeepSafeRe, validate: (span) => identity.brandIdentityRe.test(span.captures[0]) },
+    { pattern: identity.audienceProductGuaranteeRe, validate: (span) => identity.namesProduct(span.text) },
+    { pattern: identity.namedProductNoHarmRe, validate: (span) => identity.brandIdentityRe.test(span.captures[0]) },
+  ];
+}
+
+// The full guarantee pattern order for one identity grammar: the patterns
+// that do NOT embed a product identity (unaffected by `options.productNames`
+// and never rebuilt) interleaved with the ones that do, in their original
+// relative order — a longer, identity-scoped match (a full known product
+// name) is offered before a shorter generic one that happens to overlap it
+// (a bare "safe for pets" fragment inside that same sentence), matching the
+// order lexicalSourceSpans' consumers have always relied on.
+function productGuaranteeEntries(identity) {
+  const [namedProductGuaranteeRe, namedProductKeepSafeRe, audienceProductGuaranteeRe, namedProductNoHarmRe] = identityGuaranteeEntries(identity);
+  return [
+    { pattern: SAFETY_PRODUCT_STRONG_GUARANTEE_RE },
+    // Keep a bare pronoun separate so scheduling infinitives such as "It's
+    // safe to reschedule" can be distinguished from a product guarantee.
+    { pattern: SAFETY_CONTEXTUAL_STRONG_GUARANTEE_RE },
+    { pattern: SAFETY_SUBJECT_WITH_PRODUCT_FILLER_RE },
+    namedProductGuaranteeRe,
+    { pattern: SAFETY_PRODUCT_KEEP_SAFE_RE },
+    namedProductKeepSafeRe,
+    { pattern: SAFETY_ATTRIBUTIVE_GUARANTEE_RE },
+    audienceProductGuaranteeRe,
+    { pattern: SAFETY_AUDIENCE_ADJECTIVE_RE },
+    { pattern: SAFETY_NO_RISK_RE },
+    { pattern: SAFETY_PRODUCT_NO_HARM_RE },
+    { pattern: SAFETY_PRONOUN_NO_HARM_TARGET_RE },
+    { pattern: SAFETY_CONTEXTUAL_NO_HARM_RE },
+    namedProductNoHarmRe,
+    { pattern: SAFETY_POST_DRY_GUARANTEE_RE },
+    { pattern: SAFETY_NEGATED_HARM_ADJECTIVE_RE },
+  ];
 }
 
 function normalizeProductNames(names) {
@@ -340,31 +390,51 @@ function normalizeProductNames(names) {
   return [...new Set(names.map((name) => String(name).trim()).filter(Boolean))];
 }
 
-const PRODUCT_GRAMMAR_CACHE = new Map();
+// Built once at module load, from the static vocabulary alone — existing
+// callers that never pass `options.productNames` get exactly this grammar,
+// so behavior and performance are unchanged from before runtime names
+// existed.
+const STATIC_PRODUCT_IDENTITY = buildProductGrammar(SAFETY_KNOWN_PRODUCT_NAMES);
 
-function productGrammarFor(productNames) {
-  const normalized = normalizeProductNames(productNames);
-  const key = [...normalized].sort().join('');
-  let grammar = PRODUCT_GRAMMAR_CACHE.get(key);
-  if (!grammar) {
-    grammar = buildProductGrammar(normalized);
-    PRODUCT_GRAMMAR_CACHE.set(key, grammar);
+const SAFETY_KNOWN_PRODUCT_NAME_SET = new Set(SAFETY_KNOWN_PRODUCT_NAMES);
+
+// A small LRU of dynamic (runtime-only) identity grammars, bounded so a
+// caller cycling through many distinct scenario/visit name sets cannot grow
+// this cache without limit. Only names not already in the static set are
+// ever compiled here, so building an entry is cheap regardless of how large
+// the static catalog is.
+const DYNAMIC_PRODUCT_IDENTITY_CACHE_LIMIT = 32;
+const DYNAMIC_PRODUCT_IDENTITY_CACHE = new Map();
+
+// Returns the small identity grammar for this call's genuinely-new product
+// names, or null when every passed name is already in the static set (or
+// none were passed) — the common case, which touches neither the cache nor
+// buildProductGrammar at all.
+function dynamicIdentityFor(productNames) {
+  const dynamicNames = normalizeProductNames(productNames).filter((name) => !SAFETY_KNOWN_PRODUCT_NAME_SET.has(name));
+  if (!dynamicNames.length) return null;
+  const key = [...dynamicNames].sort().join('\x01');
+  let identity = DYNAMIC_PRODUCT_IDENTITY_CACHE.get(key);
+  if (identity) {
+    // Refresh recency for the LRU eviction below.
+    DYNAMIC_PRODUCT_IDENTITY_CACHE.delete(key);
+    DYNAMIC_PRODUCT_IDENTITY_CACHE.set(key, identity);
+    return identity;
   }
-  return grammar;
+  identity = buildProductGrammar(dynamicNames);
+  DYNAMIC_PRODUCT_IDENTITY_CACHE.set(key, identity);
+  if (DYNAMIC_PRODUCT_IDENTITY_CACHE.size > DYNAMIC_PRODUCT_IDENTITY_CACHE_LIMIT) {
+    DYNAMIC_PRODUCT_IDENTITY_CACHE.delete(DYNAMIC_PRODUCT_IDENTITY_CACHE.keys().next().value);
+  }
+  return identity;
 }
 
-// Built and cached once at module load, from the static vocabulary alone —
-// existing callers that never pass `options.productNames` get exactly this
-// grammar, so behavior and performance are unchanged from before runtime
-// names existed.
-const DEFAULT_PRODUCT_GRAMMAR = productGrammarFor([]);
-
-const SAFETY_BRAND_SUBJECT = DEFAULT_PRODUCT_GRAMMAR.brandSubject;
-const SAFETY_BRAND_MENTION_RE = DEFAULT_PRODUCT_GRAMMAR.brandMentionRe;
-const SAFETY_BRAND_IDENTITY_RE = DEFAULT_PRODUCT_GRAMMAR.brandIdentityRe;
-const safetyNamesProduct = DEFAULT_PRODUCT_GRAMMAR.namesProduct;
-const SAFETY_AUDIENCE_PRODUCT_RELATION = DEFAULT_PRODUCT_GRAMMAR.audienceProductRelation;
-const SAFETY_REPEATED_PRODUCT_ANSWER_RE = DEFAULT_PRODUCT_GRAMMAR.repeatedProductAnswerRe;
+const SAFETY_BRAND_SUBJECT = STATIC_PRODUCT_IDENTITY.brandSubject;
+const SAFETY_BRAND_MENTION_RE = STATIC_PRODUCT_IDENTITY.brandMentionRe;
+const SAFETY_BRAND_IDENTITY_RE = STATIC_PRODUCT_IDENTITY.brandIdentityRe;
+const safetyNamesProduct = STATIC_PRODUCT_IDENTITY.namesProduct;
+const SAFETY_AUDIENCE_PRODUCT_RELATION = STATIC_PRODUCT_IDENTITY.audienceProductRelation;
+const SAFETY_REPEATED_PRODUCT_ANSWER_RE = STATIC_PRODUCT_IDENTITY.repeatedProductAnswerRe;
 
 const SAFETY_REFUSED_HARM_RE = new RegExp(
   `${SAFETY_REFUSAL_PREFIX}\\s+${SAFETY_SUBJECT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_INTENSIFIER}${HARM_ADJECTIVE}\\b`,
@@ -378,18 +448,26 @@ const SAFETY_LEAD_COMPLETION = '(?:safe|fine|ok(?:ay)?|harmless|no problem)';
 // modify an actual positive completion word, never a HARM_WORD.
 const SAFETY_LEAD_INTENSIFIER = '(?:totally|completely|perfectly)\\s+';
 
+// A negated copula immediately before a positive safety adjective ("it
+// isn't safe", "it is not safe") reverses a certainty lead exactly like an
+// un-negated HARM_WORD does: "Of course it isn't safe." and "Definitely it
+// is not safe." are explicitly unsafe answers, not affirmations.
+const SAFETY_LEAD_NEGATED_COMPLETION_RE_SOURCE = `(?:is|are)(?:\\s+not|n[\\x27\\u2019]t)\\s+${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b`;
+
 // "Certainly"/"absolutely"/"definitely"/"totally"/"of course" are genuine
 // standalone affirmations only when nothing follows them or when they
 // complete positively. A HARM_WORD anywhere later in the same answer
 // reverses it ("Totally unsafe.", "Definitely very unsafe.", "Absolutely
-// completely harmful.", "Of course it is unsafe.") even when other words
-// (intensifiers, a copula, a subject) sit between the lead and the harm
-// word, so the whole remainder is validated character-by-character — never
-// advancing past a position where an un-negated HARM_WORD starts — rather
-// than only rejecting a harm adjective directly adjacent to the lead.
+// completely harmful.", "Of course it is unsafe."), and so does a negated
+// copula reaching a positive completion ("Of course it isn't safe.",
+// "Definitely it is not safe."), even when other words (intensifiers, a
+// copula, a subject) sit between the lead and that reversal, so the whole
+// remainder is validated character-by-character — never advancing past a
+// position where either reversal starts — rather than only rejecting one
+// directly adjacent to the lead.
 const SAFETY_AFFIRMATIVE_LEAD_RE = new RegExp(
   '^\\s*(?:(?:yes|yeah|yep|yup|sure|no problem)\\b'
-  + `|(?:certainly|absolutely|definitely|totally|of course)\\b(?:(?!${SAFETY_ADJECTIVE_NEGATION}${HARM_ADJECTIVE}\\b)[\\s\\S])*$`
+  + `|(?:certainly|absolutely|definitely|totally|of course)\\b(?:(?!${SAFETY_ADJECTIVE_NEGATION}${HARM_ADJECTIVE}\\b|${SAFETY_LEAD_NEGATED_COMPLETION_RE_SOURCE})[\\s\\S])*$`
   + `|(?:it is|it['’]s)\\s+(?:${SAFETY_LEAD_INTENSIFIER})?${SAFETY_LEAD_COMPLETION}\\b`
   + `|(?:it is|it['’]s|they are|they['’]re)\\s*,?\\s*(?:yes)?[.!\\s]*$`
   + `|(?:it|they)(?:\\s+will|['’]ll)\\s+be[.!\\s]*$)`,
@@ -398,7 +476,11 @@ const SAFETY_AFFIRMATIVE_LEAD_RE = new RegExp(
 
 const SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE = /^\s*(?:absolutely|certainly|definitely|totally|of course)\s+not\b/i;
 
-const SAFETY_NEGATIVE_LEAD_RE = /^\s*(?:no(?!\s+(?:problem|one|person)\b)|nope|nah|not at all|not really|never|it is not|it['’]s not|it is n['’]t|it isn['’]t|(?:it|they)\s+(?:is not|are not|isn['’]t|aren['’]t|cannot|can not|can['’]t|will not|won['’]t|do(?:es)? not|do(?:es)?n['’]t))\b/i;
+// A certainty lead can prefix the same negated-copula leads below ("Of
+// course it isn't safe.", "Definitely it is not safe."); the same reversal
+// that clears SAFETY_AFFIRMATIVE_LEAD_RE above also, symmetrically, still
+// registers a negative answer.
+const SAFETY_NEGATIVE_LEAD_RE = /^\s*(?:(?:certainly|absolutely|definitely|totally|of course)\s+)?(?:no(?!\s+(?:problem|one|person)\b)|nope|nah|not at all|not really|never|it is not|it['’]s not|it is n['’]t|it isn['’]t|(?:it|they)\s+(?:is not|are not|isn['’]t|aren['’]t|cannot|can not|can['’]t|will not|won['’]t|do(?:es)? not|do(?:es)?n['’]t))\b/i;
 
 // A self-correction ("Yes, actually no.") is an independent correction
 // separator, not a coordinator: the corrected clause after it carries the
@@ -409,22 +491,38 @@ const SAFETY_NEGATIVE_LEAD_RE = /^\s*(?:no(?!\s+(?:problem|one|person)\b)|nope|n
 // the corrected clause, whose own polarity regexes then decide it.
 const SAFETY_ANSWER_COPULAR_LEAD = '(?:it is(?:\\s+not)?|it[\\x27\\u2019]s(?:\\s+not)?|it isn[\\x27\\u2019]t|they are(?:\\s+not)?|they[\\x27\\u2019]re(?:\\s+not)?|they aren[\\x27\\u2019]t)';
 
+// A bare answer word directly preceding the correction marker ("No but
+// yes.", "Yes actually no.") self-corrects exactly like the comma-punctuated
+// form — ASR frequently drops the comma entirely, not just the marker's
+// internal punctuation. The lookbehind requires that specific short lead
+// immediately before the marker (rather than any whitespace) so an ordinary
+// "but"/"actually" elsewhere in a sentence is never mistaken for a split.
+const SAFETY_ANSWER_SHORT_LEAD = '(?:yes|yeah|yep|yup|sure|certainly|absolutely|definitely|totally|of course|no problem|no|nope|nah)';
+
 // ASR punctuates a self-correction as often as it doesn't ("Yes, actually,
 // no."), so the separator after the discourse marker accepts an optional
 // comma (with surrounding spaces) the same way whitespace alone already
 // did, rather than demanding whitespace immediately after the marker.
 const SAFETY_INDEPENDENT_ANSWER_SPLIT_RE = new RegExp(
-  '[.!?;]+(?=\\s|$)|,\\s*(?:but|however|actually|wait|no wait|sorry|i mean)(?:\\s*,\\s*|\\s+)'
+  '[.!?;]+(?=\\s|$)'
+  + `|(?:,\\s*|(?<=\\b${SAFETY_ANSWER_SHORT_LEAD})\\s+)(?:but|however|actually|wait|no wait|sorry|i mean)(?:\\s*,\\s*|\\s+)`
   + `(?=(?:yes|yeah|yep|yup|sure|certainly|absolutely|definitely|totally|of course|no problem|no|nope|nah|correct|right|exactly|${SAFETY_ANSWER_COPULAR_LEAD})\\b)`,
   'i',
 );
 
 const SAFETY_REFUSED_CLAIM_RE = new RegExp(`\\b(?:${SAFETY_ADJECTIVE}|safety|${vocabAlt(NO_RISK_PHRASES)}|(?:no|zero|any)\\s+(?:risk|danger|harm)|hurt|harm|bother|affect|poison)\\b`, 'i');
 
-const SAFETY_PROPOSITION_CONFIRMATION_RE = /^\s*(?:correct|right|exactly|that[\x27\u2019]s correct|that is correct|(?:that|this|it)(?:[\x27\u2019]s|\s+is)\s+true)[.!\s]*$/i;
+// Bare "true" (optionally intensified: "Very true.") is a proposition
+// confirmation exactly like "Correct."/"Right." — "That is not true."
+// still fails this (the negation sits between "is" and "true", which none
+// of these alternatives allow).
+const SAFETY_PROPOSITION_CONFIRMATION_RE = new RegExp(
+  `^\\s*(?:correct|right|exactly|that[\\x27\\u2019]s correct|that is correct|${SAFETY_INTENSIFIER}true|(?:that|this|it)(?:[\\x27\\u2019]s|\\s+is)\\s+true)[.!\\s]*$`,
+  'i',
+);
 
 const SAFETY_ELLIPTICAL_ADJECTIVE_ANSWER_RE = new RegExp(
-  `(?:^|[.!?;]+\\s*)(${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE})\\b(?=(?:\\s+(?:for|around|with)\\s+${SAFETY_AUDIENCE})?(?:,?\\s+once\\s+(?:it|they)?(?:[\\x27\\u2019]s|\\s+(?:is|are)|[\\x27\\u2019]re)?\\s*dry)?\\s*(?:[.!?;]|$))`,
+  `(?:^|[.!?;]+\\s*)(${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE})\\b(?=(?:\\s+(?:for|around|with|to)\\s+${SAFETY_AUDIENCE})?(?:,?\\s+once\\s+(?:it|they)?(?:[\\x27\\u2019]s|\\s+(?:is|are)|[\\x27\\u2019]re)?\\s*dry)?\\s*(?:[.!?;]|$))`,
   'gi',
 );
 
@@ -442,25 +540,48 @@ function propositionEvidence(text, span) {
   }
 }
 
+function spanKey(span) {
+  return `${span.index}:${span.end}`;
+}
+
 // Retain the previous lexical match contract while attaching source evidence.
 // A match named `guarantees` is not a policy verdict. `options.productNames`
 // (array of strings) supplies the calling visit's live product identities —
 // see buildProductGrammar above — and is unioned with the static vocabulary
 // for this call only; omit it (the default) to get exactly the static-only
-// grammar every existing caller already relies on.
+// grammar every existing caller already relies on. The static identity
+// grammar is compiled once at module load; only names genuinely new to this
+// call reach a second (small, bounded-cache) identity grammar, so passing
+// runtime names never re-walks the whole static catalog (see
+// STATIC_PRODUCT_IDENTITY / dynamicIdentityFor above).
 function recognizeSafetyResponse(text, options = {}) {
-  const grammar = productGrammarFor(options.productNames);
-  const guarantees = [SAFETY_REFUSED_HARM_RE, ...grammar.guaranteeRes].flatMap((pattern) =>
+  const dynamicIdentity = dynamicIdentityFor(options.productNames);
+  const entries = [
+    { pattern: SAFETY_REFUSED_HARM_RE },
+    ...productGuaranteeEntries(STATIC_PRODUCT_IDENTITY),
+    ...(dynamicIdentity ? identityGuaranteeEntries(dynamicIdentity) : []),
+  ];
+  const seenGuaranteeSpans = new Set();
+  const guarantees = entries.flatMap(({ pattern, validate }) =>
     lexicalSourceSpans(text, pattern)
-      .filter((span) => (pattern !== grammar.namedProductGuaranteeRe && pattern !== grammar.namedProductNoHarmRe
-        && pattern !== grammar.namedProductKeepSafeRe)
-        || grammar.brandIdentityRe.test(span.captures[0]))
-      .filter((span) => pattern !== grammar.audienceProductGuaranteeRe || grammar.namesProduct(span.text))
+      .filter((span) => !validate || validate(span))
+      // The static and dynamic identity grammars both carry the same
+      // uncatalogued-brand fallback (Title Case word + bounded formulation
+      // code), so a name that happens to also match that fallback can
+      // surface the same span from both; keep only the first occurrence.
+      .filter((span) => {
+        const key = spanKey(span);
+        if (seenGuaranteeSpans.has(key)) return false;
+        seenGuaranteeSpans.add(key);
+        return true;
+      })
       .map((span) => ({
         pattern,
         match: Object.assign([span.text, ...span.captures], { index: span.index, input: text }),
         ...propositionEvidence(text, span),
       })));
+  const repeatedProductAnswer = (answer) => STATIC_PRODUCT_IDENTITY.repeatedProductAnswer(answer)
+    || (!!dynamicIdentity && dynamicIdentity.repeatedProductAnswer(answer));
   const answers = splitSourceSpans(text, SAFETY_INDEPENDENT_ANSWER_SPLIT_RE).map((clause) => {
     const prefix = /^\s*(?:but|however|actually|no wait|wait|sorry|i mean)\b\s*,?\s*/i.exec(clause.text);
     const index = clause.index + (prefix?.[0].length ?? 0);
@@ -469,7 +590,7 @@ function recognizeSafetyResponse(text, options = {}) {
       text: answer, index, end: clause.end,
       evidence: answer.trim() ? localCandidateEvidence(text, 'answer', index, clause.end) : null,
       confirmation: SAFETY_PROPOSITION_CONFIRMATION_RE.test(answer),
-      repeatedProduct: grammar.repeatedProductAnswer(answer),
+      repeatedProduct: repeatedProductAnswer(answer),
       affirmative: (SAFETY_AFFIRMATIVE_LEAD_RE.test(answer) || SHORT_AFFIRMATION_RE.test(answer))
         && !SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(answer),
       negative: SAFETY_NEGATIVE_LEAD_RE.test(answer) || SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(answer),
