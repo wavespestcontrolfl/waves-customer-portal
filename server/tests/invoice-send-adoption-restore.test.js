@@ -97,7 +97,11 @@ function makeSmsLogTable(initialRows) {
       let simpleWhere = {};
       const q = {};
       q.where = jest.fn((crit) => { Object.assign(simpleWhere, crit); return q; });
-      q.whereIn = jest.fn((field, values) => { if (field === 'id') idFilter = values; return q; });
+      q.whereIn = jest.fn((field, values) => {
+        if (field === 'id') idFilter = values;
+        else rawFilters.push((row) => values.includes(row[field]));
+        return q;
+      });
       q.whereNull = jest.fn(() => q);
       q.forUpdate = jest.fn(() => q);
       q.whereRaw = jest.fn((sql, bindings) => {
@@ -135,6 +139,15 @@ function makeSmsLogTable(initialRows) {
         return candidates;
       };
       q.first = jest.fn(async () => matched()[0]);
+      // A held-SMS requeue inserts a fresh row on the scheduled rail — the
+      // replacement invoice_send_deferred text a queued-hold discharge
+      // leaves behind.
+      q.insert = jest.fn((payload) => {
+        const metadata = typeof payload.metadata === 'string' ? JSON.parse(payload.metadata) : (payload.metadata || {});
+        rows.push({ ...payload, metadata });
+        q.__affected = 1;
+        return q;
+      });
       q.update = jest.fn((payload) => {
         const targets = matched();
         q.__matched = targets;
@@ -198,10 +211,12 @@ jest.mock('../services/customer-credit', () => ({
 }));
 jest.mock('../services/lead-estimate-link', () => ({ convertLeadFromEvent: jest.fn(async () => null) }));
 jest.mock('../services/invoice-issued-closeout', () => ({ closeOutVisitForIssuedInvoice: jest.fn(async () => null) }));
+jest.mock('../services/invoice-email', () => ({ sendInvoiceEmail: jest.fn() }));
 
 const db = require('../models/db');
 const { withInvoiceDepositSettlement } = require('../services/estimate-deposits');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { sendInvoiceEmail } = require('../services/invoice-email');
 const InvoiceService = require('../services/invoice');
 
 function customerQuery(customer) {
@@ -334,5 +349,92 @@ describe('invoice send claim adoption of a queued pay-link SMS', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     // Refused before ever claiming — the invoice never left 'draft'.
     expect(invoices.state()).toMatchObject({ status: 'draft', send_claim_token: null });
+  });
+  // The combined send (sendViaSMSAndEmail) discharges an adopted queued
+  // pay-link text by the SMS leg's OWN outcome, never by email success or
+  // the combined `ok`: email says nothing about whether the customer's
+  // ORIGINAL queued text is still owed (round-0 audit, commit 5ca48b748e).
+  describe("sendViaSMSAndEmail settles the adopted queued SMS by the SMS leg's own outcome, not the combined result", () => {
+    test('email-only delivery gives back the adopted queued SMS', async () => {
+      // The SMS leg fails DEFINITELY (not_sent, no hold/defer code) while
+      // the email leg delivers — email success must not discharge the
+      // customer's original queued text; it goes back under the claim
+      // before finalize clears the token.
+      sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => (
+        withProviderHandoff(async () => ({
+          sent: false, blocked: true, deliveryOutcome: 'not_sent',
+          code: 'PROVIDER_REJECTED', reason: 'number opted out',
+        }))
+      ));
+      sendInvoiceEmail.mockResolvedValueOnce({ ok: true });
+
+      const result = await InvoiceService.sendViaSMSAndEmail('inv-1');
+
+      expect(result).toMatchObject({ ok: true, sms: { ok: false }, email: { ok: true } });
+      // The invoice still finalizes sent — one delivered channel is enough.
+      expect(invoices.state()).toMatchObject({ status: 'sent', send_claim_token: null });
+      // But the queued text the SMS leg's own failure never delivered is
+      // handed back exactly as it was — not silently dropped.
+      const row = smsLog.rows().find((r) => r.id === 'sms-queued-1');
+      expect(row.status).toBe('scheduled');
+      expect(row.scheduled_for).toEqual(ORIGINAL_SCHEDULED_FOR);
+      expect(row.metadata.cancelled_reason).toBeUndefined();
+      expect(row.metadata[QUEUE_ADOPTION_PENDING_KEY]).toBeUndefined();
+    });
+
+    test('a provider-accepted SMS leg resolves the adopted row instead of restoring it', async () => {
+      // The SMS leg itself is provider-accepted this time — its own outcome
+      // discharges the adopted text; the row is never given back.
+      sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => (
+        withProviderHandoff(async () => ({ sent: true, deliveryOutcome: 'accepted' }))
+      ));
+      sendInvoiceEmail.mockResolvedValueOnce({ ok: true });
+
+      const result = await InvoiceService.sendViaSMSAndEmail('inv-1');
+
+      expect(result).toMatchObject({ ok: true, sms: { ok: true }, email: { ok: true } });
+      expect(invoices.state()).toMatchObject({ status: 'sent', send_claim_token: null });
+      const row = smsLog.rows().find((r) => r.id === 'sms-queued-1');
+      expect(row.status).toBe('cancelled');
+      expect(row.metadata.cancelled_reason).toBe('superseded_by_live_send');
+      expect(row.metadata[QUEUE_ADOPTION_PENDING_KEY]).toBeUndefined();
+      expect(row.metadata.adoption_resolved_at).toEqual(expect.any(String));
+    });
+
+    test('a queued replacement discharges the adopted SMS instead of restoring it', async () => {
+      // The SMS leg is held (quiet hours) and requeues a REPLACEMENT text on
+      // the scheduled rail (sms.scheduled = true) — that replacement now
+      // owns delivery, so the ORIGINAL adopted row must be resolved
+      // (discharged), never restored: restoring it too would leave TWO
+      // scheduled copies of the same pay link.
+      sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => (
+        withProviderHandoff(async () => ({
+          sent: false, blocked: true, deferred: true,
+          code: 'QUIET_HOURS_HOLD', reason: 'outside send window',
+          nextAllowedAt: '2026-09-12T12:00:00.000Z',
+        }))
+      ));
+      sendInvoiceEmail.mockResolvedValueOnce({ ok: false, error: 'SMTP rejected' });
+
+      const result = await InvoiceService.sendViaSMSAndEmail('inv-1');
+
+      expect(result).toMatchObject({ ok: false, sms: { ok: false, scheduled: true }, email: { ok: false } });
+      // The invoice claim gave back to its previous status — no channel
+      // delivered, so nothing here is finalized.
+      expect(invoices.state()).toMatchObject({ status: 'draft', send_claim_token: null });
+      // Exactly one 'scheduled' row remains for this invoice: the
+      // replacement — the original was consumed by the adoption and is
+      // never re-scheduled behind its own replacement.
+      const scheduledRows = smsLog.rows().filter((r) => (
+        r.status === 'scheduled' && r.metadata.invoice_id === 'inv-1'
+      ));
+      expect(scheduledRows).toHaveLength(1);
+      expect(scheduledRows[0].id).not.toBe('sms-queued-1');
+      const original = smsLog.rows().find((r) => r.id === 'sms-queued-1');
+      expect(original.status).toBe('cancelled');
+      expect(original.metadata.cancelled_reason).toBe('superseded_by_live_send');
+      expect(original.metadata[QUEUE_ADOPTION_PENDING_KEY]).toBeUndefined();
+      expect(original.metadata.adoption_resolved_at).toEqual(expect.any(String));
+    });
   });
 });
