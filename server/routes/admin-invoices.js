@@ -1695,6 +1695,11 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       }
       throw err;
     }
+    if (result.code === 'deposit_settlement_pending') {
+      // Nothing due (deposit-covered) but not settleable right now: a
+      // retryable conflict, never a $0 pay link (#4131 slice 4).
+      return res.status(409).json(result);
+    }
     if (!result.ok) {
       // Both channels failed. adminFetch toasts `body.error` — without a
       // top-level error the operator sees a bare "HTTP 400" instead of the

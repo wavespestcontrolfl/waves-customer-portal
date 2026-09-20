@@ -331,3 +331,102 @@ describe('claimPacketInvoiceForSend — the queue worker due-claim is never a fi
       .rejects.toThrow(/cannot be a first delivery or override the review hold/);
   });
 });
+
+// claimInvoiceForSend's zero-due re-checks (#4131 slice 4): a visit-linked
+// invoice whose amount due has gone to zero (credit, prepaid coverage, a
+// retotal) must never have a claim handed out for it — settle it instead.
+// InvoiceService.settleZeroBalance is a full-transaction method with its own
+// extensive coverage elsewhere; these tests mock it directly so a failure
+// here always points at the RE-CHECK wiring, not settleZeroBalance itself.
+describe('claimInvoiceForSend — zero-due visit invoice guard (#4131 slice 4)', () => {
+  let settleSpy;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    settleSpy = jest.spyOn(InvoiceService, 'settleZeroBalance');
+  });
+
+  afterEach(() => settleSpy.mockRestore());
+
+  function zeroDueRow(overrides = {}) {
+    return {
+      id: INVOICE_ID, status: 'draft', scheduled_service_id: 'svc-1',
+      total: 100, credit_applied: 100, send_claim_token: null,
+      scheduled_send_at: null, scheduled_send_error: null,
+      ...overrides,
+    };
+  }
+
+  test('a zero-due visit invoice is settled and refused BEFORE the claim ever flips the row', async () => {
+    const { invoicesTable, currentRow } = makeDb(zeroDueRow());
+    settleSpy.mockResolvedValue({ settled: true, invoice: { ...zeroDueRow(), status: 'prepaid' } });
+
+    await expect(claimInvoiceForSend(INVOICE_ID)).rejects.toMatchObject({ code: 'zero_due' });
+
+    expect(settleSpy).toHaveBeenCalledWith(INVOICE_ID, expect.anything());
+    // Never flipped to 'sending' — the guard runs BEFORE the claim update.
+    expect(invoicesTable.update).not.toHaveBeenCalled();
+    expect(currentRow().status).toBe('draft');
+  });
+
+  test('a zero-due visit invoice that cannot settle right now is refused as retryable, not a $0 claim', async () => {
+    makeDb(zeroDueRow());
+    settleSpy.mockResolvedValue({ settled: false, reason: 'invoice_delivery_in_flight', invoice: null });
+
+    await expect(claimInvoiceForSend(INVOICE_ID)).rejects.toMatchObject({ code: 'deposit_settlement_pending' });
+  });
+
+  test('a total that is exactly covered by credit, but NOT visit-linked, claims normally (guard is visit-linked only)', async () => {
+    const row = zeroDueRow({ scheduled_service_id: null });
+    makeDb(row);
+
+    const result = await claimInvoiceForSend(INVOICE_ID);
+    expect(result.claimed).toBe(true);
+    expect(settleSpy).not.toHaveBeenCalled();
+  });
+
+  test('a retotal to zero landing between the pre-claim read and the flip is caught by the post-claim re-check and restores the row', async () => {
+    // The pre-claim read sees a normal $100-due invoice (no scheduled_service_id
+    // yet visible to the guard because total/credit don't net to zero); the
+    // retotal actually lands in the window the ABA mutation models, changing
+    // BOTH the credit and the visit link atomically — mirroring a real retotal
+    // that flips both scheduled_service_id linkage and amount due together.
+    const { currentRow } = makeDb(
+      { id: INVOICE_ID, status: 'draft', scheduled_service_id: null, total: 100, credit_applied: 0,
+        send_claim_token: null, scheduled_send_at: null, scheduled_send_error: null },
+      { mutateAfterFirstRead: { scheduled_service_id: 'svc-1', credit_applied: 100 } },
+    );
+    settleSpy.mockResolvedValue({ settled: true, invoice: { id: INVOICE_ID, status: 'prepaid' } });
+
+    await expect(claimInvoiceForSend(INVOICE_ID)).rejects.toMatchObject({ code: 'zero_due' });
+
+    expect(settleSpy).toHaveBeenCalledWith(INVOICE_ID, expect.anything());
+    // The claim was taken (the flip DID match, on the pre-mutation predicate)
+    // and then given all the way back — never left sitting on 'sending'.
+    expect(currentRow().status).toBe('draft');
+    expect(currentRow().send_claim_token).toBeNull();
+  });
+
+  test('a PRECLAIMED row (the scheduled-send worker\'s own claim) rediscovering zero-due marks the throw deliveryNeverAttempted', async () => {
+    // processScheduledSends preclaims (flips scheduled -> sending) BEFORE
+    // calling back in with allowClaimed: true; this models the rare race
+    // where the retotal lands in between. The allowClaimed branch never
+    // touches the invoice row itself, so the caller's own retry handling —
+    // not this claim — must decide what happens next; the flag is how it
+    // knows this is safe to treat as an ordinary (retryable) send failure.
+    makeDb({
+      id: INVOICE_ID, status: 'sending', scheduled_service_id: 'svc-1',
+      total: 100, credit_applied: 100, send_claim_token: 'worker-tok',
+      scheduled_send_at: null, scheduled_send_error: null,
+    });
+    settleSpy.mockResolvedValue({ settled: true, invoice: { id: INVOICE_ID, status: 'prepaid' } });
+
+    let caught = null;
+    try {
+      await claimInvoiceForSend(INVOICE_ID, { allowClaimed: true, claimToken: 'worker-tok' });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toMatchObject({ code: 'zero_due', deliveryNeverAttempted: true });
+  });
+});
