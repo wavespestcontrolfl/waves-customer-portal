@@ -1489,6 +1489,46 @@ describe('DOI dedupe guard and ledger sweep', () => {
     expect(mockEnroll).not.toHaveBeenCalled();
   });
 
+  test('the sweep retires holds older than the first-touch window as first_touch_stale, after the recovery pass', async () => {
+    mockHolds = [];
+    const swept = await sweepAbandonedFirstTouchHolds({});
+    expect(mockHoldUpdates[0]).toMatchObject({ status: 'pending' }); // recovery pass first
+    // Two retire writes (by hold age, by source-call age); the fake answers 1 row each.
+    expect(mockHoldUpdates[1]).toMatchObject({ status: 'blocked', last_error: 'first_touch_stale' });
+    expect(mockHoldUpdates[2]).toMatchObject({ status: 'blocked', last_error: 'first_touch_stale' });
+    expect(swept.expired).toBe(2);
+    expect(mockEnroll).not.toHaveBeenCalled();
+  });
+  test('a hold older than the first-touch window is retired at the claim path, whatever release path reaches it', async () => {
+    const old = new Date(Date.now() - 20 * 24 * 3600 * 1000).toISOString();
+    mockHolds = [baseHold({ created_at: old })];
+    mockTriageFirstQueue = [null, { status: 'resolved' }];
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1', source: 'triage_resolve' });
+    expect(res.resumed).toBe(false);
+    expect(res.skipped).toBe('first_touch_stale');
+    expect(mockHoldUpdates.some((p) => p.status === 'blocked' && p.last_error === 'first_touch_stale')).toBe(true);
+    expect(mockEnroll).not.toHaveBeenCalled();
+  });
+  test('a fresh hold on an OLD source call is retired at the claim path too', async () => {
+    const oldCall = new Date(Date.now() - 40 * 24 * 3600 * 1000).toISOString();
+    mockHolds = [baseHold({ created_at: new Date().toISOString() })];
+    mockDncRow = { id: 'call-1', created_at: oldCall }; // the call_log first() read
+    mockTriageFirstQueue = [null, { status: 'resolved' }];
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1', source: 'triage_resolve' });
+    expect(res.skipped).toBe('first_touch_stale');
+    expect(mockEnroll).not.toHaveBeenCalled();
+  });
+  test('an unreadable source-call age re-pends the hold instead of passing the shelf-life guard', async () => {
+    mockHolds = [baseHold({ created_at: new Date().toISOString() })];
+    mockDncRow = Promise.reject(new Error('db')); // the call_log first() read fails
+    mockDncRow.catch(() => {});
+    mockTriageFirstQueue = [null, { status: 'resolved' }];
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1', source: 'ledger_sweep' });
+    expect(res.resumed).toBe(false);
+    expect(res.skipped).toBe('call_age_unavailable');
+    expect(mockHoldUpdates.some((p) => p.status === 'pending' && p.last_error === 'call_age_unavailable')).toBe(true);
+    expect(mockEnroll).not.toHaveBeenCalled();
+  });
   test('the sweep recovers rows stranded released with unreleased merged work', async () => {
     // A transient failure in the merged-work re-pend leaves the row
     // 'released' with a held flag uncovered — the fenced outer recovery
