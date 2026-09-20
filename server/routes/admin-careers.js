@@ -128,21 +128,12 @@ router.get('/:id', async (req, res) => {
     // now seen. Fire-and-forget after the response.
     // Bounded to the snapshot the owner actually saw (Codex r18 P2): a
     // reply that committed after the detail row was loaded is not in this
-    // response, so it keeps its unread flag for the next open.
+    // response, so it keeps its unread flag for the next open. Through the
+    // ONE inbound read writer (Codex r20 P1): read stamp + admin attribution,
+    // legacy mirror, backlog-marker strip and the applicant-reply bell.
     void (async () => {
-      const readAt = new Date();
-      await db('sms_log')
-        .where({ direction: 'inbound', message_type: 'job_applicant_reply' })
-        .whereRaw("metadata->>'job_application_id' = ?", [row.id])
-        .where('created_at', '<=', loadedAt)
-        .andWhere(function unread() { this.where({ is_read: false }).orWhereNull('is_read'); })
-        .update({ is_read: true });
-      await db('messages')
-        .where({ direction: 'inbound', message_type: 'job_applicant_reply' })
-        .whereRaw("metadata->>'job_application_id' = ?", [row.id])
-        .where('created_at', '<=', loadedAt)
-        .andWhere(function unread() { this.where({ is_read: false }).orWhereNull('is_read'); })
-        .update({ is_read: true, read_at: readAt });
+      const { markInboundSmsRead } = require('../services/inbound-sms-read');
+      await markInboundSmsRead({ applicationId: row.id, readBefore: loadedAt, adminUserId: req.technicianId, role: req.techRole });
     })().catch((err) => {
       logger.warn(`[admin-careers] reply read-ack failed (application ${req.params.id}): ${RecruitingComms.errorSummary(err)}`);
     });

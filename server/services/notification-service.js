@@ -537,6 +537,21 @@ const NotificationService = {
     return q.update({ read_at: new Date() });
   },
 
+  // Applicant-reply bells for one application, once the owner has opened
+  // it in Recruiting (PR #4623 r20): read up to the snapshot they saw.
+  async markApplicantRepliesReadAdmin({ applicationId, before = new Date(), role } = {}) {
+    if (!applicationId) return 0;
+    return scopeAdminFeedToRole(
+      db('notifications').where({ recipient_type: 'admin', category: 'job_application' }),
+      role,
+    )
+      .whereRaw("COALESCE(metadata->>'triggerKey', '') = 'job_applicant_reply'")
+      .whereRaw("metadata->'payload'->>'applicationId' = ?", [String(applicationId)])
+      .whereNull('read_at')
+      .where('created_at', '<=', before)
+      .update({ read_at: new Date() });
+  },
+
   // Retire superseded call alerts without crossing triggers: voicemail
   // supersedes a missed call; a booking supersedes a repeat-caller alert.
   // System writer (no role scoping): every admin copy is retired.

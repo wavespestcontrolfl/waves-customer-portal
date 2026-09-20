@@ -250,6 +250,20 @@ describe('channel eligibility', () => {
     expect(result.email.available).toBe(true);
   });
 
+  test('receiptStillEligible: true only while the application is new/reviewed with no later-stage or owner text live (Codex r20 P2)', async () => {
+    mockDb.__tables.job_applications.push(
+      { id: 'r-new', status: 'new', comms_history: [{ id: 'e1', stage: 'application_received', channel: 'sms', outcome: 'pending' }] },
+      { id: 'r-adv', status: 'interview', comms_history: [] },
+      { id: 'r-owner', status: 'new', comms_history: [{ id: 'e2', stage: 'owner_reply', channel: 'sms', outcome: 'sent' }] },
+      { id: 'r-email-only', status: 'reviewed', comms_history: [{ id: 'e3', stage: 'interview_invite', channel: 'email', outcome: 'sent' }, { id: 'e4', stage: 'applicant_reply', channel: 'sms', outcome: 'received' }] },
+    );
+    await expect(RecruitingComms.receiptStillEligible('r-new')).resolves.toBe(true);
+    await expect(RecruitingComms.receiptStillEligible('r-adv')).resolves.toBe(false);
+    await expect(RecruitingComms.receiptStillEligible('r-owner')).resolves.toBe(false);
+    await expect(RecruitingComms.receiptStillEligible('r-email-only')).resolves.toBe(true);
+    await expect(RecruitingComms.receiptStillEligible('missing')).resolves.toBe(false);
+  });
+
   test('phone present and not suppressed -> sms available, masked', async () => {
     const app = baseApp();
     const result = await RecruitingComms.channelEligibility(app);
@@ -758,6 +772,22 @@ describe('eligibility at the provider boundaries', () => {
     expect(mockSendOne).not.toHaveBeenCalled();
     const ledger = mockDb.__tables.email_messages.find((r) => r.recipient_id === 'app-1');
     expect(ledger.status).toBe('failed');
+  });
+
+  test('email: the application row is held through the SendGrid request and the final eligibility read runs inside that lock (Codex r20 P1)', async () => {
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    mockDb.__tables.email_messages = [];
+    const seenConns = [];
+    // gate check → true, locked boundary check → false (the applicant withdrew while SendGrid's guards ran)
+    const answers = [true, true, false];
+    const stillEligible = jest.fn(async (conn) => { seenConns.push(conn); return answers.shift(); });
+    mockSendOne.mockClear();
+    const result = await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: false, email: true, by: 'tech-1', stillEligible });
+    expect(result.email).toBe('stale');
+    expect(mockSendOne).not.toHaveBeenCalled();
+    expect(seenConns[seenConns.length - 1]).toBe(mockDb); // the held transaction
+    expect(mockDb.__tables.email_messages[0]).toMatchObject({ status: 'failed', error_message: expect.stringMatching(/stale/) });
   });
 
   test('SMS: the handoff is stamped BEFORE the eligibility read, which is the last await before the provider (Codex r14)', async () => {

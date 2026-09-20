@@ -22,6 +22,7 @@ const { renderSmsTemplate } = require('./sms-template-renderer');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { loadSuppressionState } = require('./messaging/validators/suppression');
 const { activeSuppressionFor } = require('./email-template-library');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const sendgrid = require('./sendgrid-mail');
 const { isEnabled } = require('../config/feature-gates');
 const { portalUrl } = require('../utils/portal-url');
@@ -293,9 +294,9 @@ function buildEmailContent(app, stage, vars) {
 // Settle the ledger row this send attempt owns — the shared tail of every
 // pre-provider gate and the provider call itself. A no-op when the insert
 // never produced a row (there is nothing to settle).
-async function settleEmailRow(messageRow, sendAttemptToken, patch) {
+async function settleEmailRow(messageRow, sendAttemptToken, patch, conn = db) {
   if (!messageRow) return;
-  await db('email_messages')
+  await conn('email_messages')
     .where({ id: messageRow.id, send_attempt_token: sendAttemptToken })
     // 'sending' = this attempt claimed the provider boundary (claimEmailAttempt)
     .whereIn('status', ['queued', 'sending'])
@@ -378,7 +379,25 @@ async function checkEmailPreProviderGates({ app, stage, to, templateKey, message
 
 // The provider call itself + outcome classification. Only reached once every
 // pre-provider gate has cleared.
-async function sendEmailToProvider({ app, stage, to, subject, html, text, templateKey, messageRow, sendAttemptToken }) {
+// Holds the application row FOR UPDATE through the SendGrid request (Codex
+// r20 P1) — the same posture as the SMS locked handoff: a reject / withdraw
+// / rebook cannot commit between the caller's final eligibility read (made
+// through this transaction) and the provider request, so a dead invite or
+// an obsolete confirmation never leaves.
+async function sendEmailToProvider({ app, stage, to, subject, html, text, templateKey, messageRow, sendAttemptToken, beforeProvider }) {
+  return db.transaction(async (trx) => {
+    await trx('job_applications').where({ id: app.id }).forUpdate().first('id');
+    if (typeof beforeProvider === 'function' && (await beforeProvider(trx)) === false) {
+      await settleEmailRow(messageRow, sendAttemptToken, {
+        status: 'failed', error_message: 'stale: application changed before the provider handoff',
+      }, trx);
+      return { outcome: 'stale', code: 'recruiting_stale' };
+    }
+    return dispatchEmailToProvider({ app, stage, to, subject, html, text, templateKey, messageRow, sendAttemptToken, trx });
+  });
+}
+
+async function dispatchEmailToProvider({ app, stage, to, subject, html, text, templateKey, messageRow, sendAttemptToken, trx }) {
   try {
     const result = await sendgrid.sendOne({
       to,
@@ -401,7 +420,7 @@ async function sendEmailToProvider({ app, stage, to, subject, html, text, templa
       status: 'sent',
       provider_message_id: result && result.messageId ? result.messageId : null,
       sent_at: new Date(),
-    });
+    }, trx);
     return { outcome: 'sent', code: null };
   } catch (err) {
     // A definite 4xx rejection (sendgrid.isDefiniteRejection — the same
@@ -415,7 +434,7 @@ async function sendEmailToProvider({ app, stage, to, subject, html, text, templa
     await settleEmailRow(messageRow, sendAttemptToken, {
       status,
       error_message: String((err && err.message) || 'send failed').slice(0, 500),
-    });
+    }, trx);
     logger.warn(`[recruiting-comms] SendGrid send failed (application ${app.id}, stage ${stage}, status ${(err && err.status) || 'unknown'}, outcome ${status})`);
     return { outcome: status, code: err && err.status ? `sendgrid_${err.status}` : 'send_failed' };
   }
@@ -443,7 +462,20 @@ async function sendRawEmail({ app, stage, to, subject, html, text, beforeProvide
   const gated = await checkEmailPreProviderGates({ app, stage, to, templateKey, messageRow, sendAttemptToken, beforeProvider });
   if (gated) return gated;
 
-  return sendEmailToProvider({ app, stage, to, subject, html, text, templateKey, messageRow, sendAttemptToken });
+  return sendEmailToProvider({ app, stage, to, subject, html, text, templateKey, messageRow, sendAttemptToken, beforeProvider });
+}
+
+// The application receipt ("we'll reach out within 2 business days") is only
+// worth sending while the owner has not moved on (Codex r20 P2): the
+// application is still new/reviewed and no later-stage or owner text is
+// live in the ledger — the same rule the replay recheck applies to a queued
+// receipt (deferred-replay-registry checkReceiptSupersession). Reads through
+// `conn` so the locked handoffs can consult it inside their transaction.
+async function receiptStillEligible(applicationId, conn = db) {
+  const row = await conn('job_applications').where({ id: applicationId }).first('status', 'comms_history');
+  if (!row || !['new', 'reviewed'].includes(String(row.status || ''))) return false;
+  const history = Array.isArray(row.comms_history) ? row.comms_history : [];
+  return !history.some((e) => e && e.channel === 'sms' && e.stage !== 'application_received' && LIVE_ATTEMPT_OUTCOMES.includes(e.outcome));
 }
 
 // The interview_confirmation SMS is applicant-triggered (fire-and-forget off
@@ -705,7 +737,7 @@ function classifySmsOutcome(sendRes) {
 // Queued invites for this application, oldest first — read through `conn`
 // (the caller's transaction) so the decision and the writes are one unit.
 async function queuedInterviewInvites(app, conn) {
-  return conn('sms_log')
+  return excludeUnresolvedSendReservations(conn('sms_log'))
     .where({ status: 'scheduled', message_type: 'job_interview_invite' })
     .whereRaw("metadata->>'job_application_id' = ?", [app.id])
     .select('id', 'metadata', 'created_at');
@@ -1093,6 +1125,7 @@ async function openApplicationIdForPhone(phone) {
 }
 
 module.exports = {
+  receiptStillEligible,
   openApplicationIdForPhone,
   sendOwnerReply,
   STAGE_PURPOSE,

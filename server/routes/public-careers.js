@@ -104,11 +104,15 @@ router.post('/apply', applyIpLimiter, applyPhoneLimiter, async (req, res) => {
     // Email whenever one is on file; SMS only with sms_consent.
     if (isEnabled('recruitingComms')) {
       void (async () => {
-        const { sendStageComms } = require('../services/recruiting-comms');
+        const { sendStageComms, receiptStillEligible } = require('../services/recruiting-comms');
         await sendStageComms(row, 'application_received', {
           sms: row.sms_consent === true,
           email: true,
           by: 'system',
+          // Re-checked inside each locked provider handoff (Codex r20 P2): an
+          // admin who advanced or rejected the applicant while this ran must
+          // not be followed by the older receipt.
+          stillEligible: (conn) => receiptStillEligible(row.id, conn),
         });
       })().catch((err) => {
         logger.error(`[careers] application_received comms failed: ${errorSummary(err)}`);

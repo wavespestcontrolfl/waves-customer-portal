@@ -41,3 +41,23 @@ test('countUnreadInboundSms fails closed: no role → recruiting rows excluded; 
   await countUnreadInboundSms({ role: 'admin' }).catch(() => {});
   expect(calls.filter(([t]) => t === 'messages').some(([, q]) => q.orWhere.mock.calls.some((c) => c[0] === 'messages.message_type'))).toBe(false);
 });
+
+test('an application scope reads that application\'s applicant replies up to the snapshot and clears its bells through the notification service (PR #4623 r20)', async () => {
+  const { markInboundSmsRead } = require('../services/inbound-sms-read');
+  const NotificationService = require('../services/notification-service');
+  const bellSpy = jest.spyOn(NotificationService, 'markApplicantRepliesReadAdmin').mockResolvedValue(2);
+  const sidSpy = jest.spyOn(NotificationService, 'markInboundSmsReadAdmin').mockResolvedValue(0);
+  const chains = [];
+  db.mockImplementation(() => { const q = chain([]); chains.push(q); return q; });
+  const readBefore = new Date('2027-03-16T15:00:00.000Z');
+  await expect(markInboundSmsRead({ applicationId: 'app-1', adminUserId: 'admin-1', role: 'admin' })).rejects.toThrow(/readBefore required/);
+  const result = await markInboundSmsRead({ applicationId: 'app-1', readBefore, adminUserId: 'admin-1', role: 'admin' });
+  // the scope names the application's reply rows, bounded to the snapshot
+  const scoped = chains.filter((q) => q.whereRaw.mock.calls.some((c) => /job_application_id/.test(c[0]) && c[1][0] === 'app-1'));
+  expect(scoped.length).toBeGreaterThan(0);
+  expect(scoped[0].where.mock.calls.some((c) => c[0] === 'created_at' && c[1] === '<=' && c[2] === readBefore)).toBe(true);
+  expect(scoped[0].where.mock.calls.some((c) => c[0] && c[0].message_type === 'job_applicant_reply')).toBe(true);
+  expect(bellSpy).toHaveBeenCalledWith({ applicationId: 'app-1', before: readBefore, role: 'admin' });
+  expect(result.notificationsCleared).toBeGreaterThanOrEqual(2);
+  bellSpy.mockRestore(); sidSpy.mockRestore();
+});

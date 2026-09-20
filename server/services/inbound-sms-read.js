@@ -160,17 +160,29 @@ async function clearBacklogResetMarkers({ scope, ids, convs }) {
   } catch (e) { logger.warn('[inbound-sms-read] backlog-reset marker clear failed', { code: e.code || 'unknown' }); }
 }
 
-async function markInboundSmsRead({ messageIds = [], conversationIds = [], readBefore = null, adminUserId = null, role } = {}) {
+// `applicationId` — the recruiting scope (PR #4623 r20): opening an
+// application in Recruiting reads its applicant replies (job_applicant_reply
+// rows carrying that application id) up to the snapshot the owner saw
+// (readBefore), through this one writer — same read stamp, legacy mirror,
+// backlog-marker strip and bell reconciliation as any other read.
+async function markInboundSmsRead({ messageIds = [], conversationIds = [], applicationId = null, readBefore = null, adminUserId = null, role } = {}) {
   const ids = messageIds.filter((id) => typeof id === 'string' && id.trim());
   const convs = conversationIds.filter((id) => typeof id === 'string' && id.trim());
-  if (!ids.length && !convs.length) return { updated: 0, notificationsCleared: 0 };
-  if (convs.length && !(readBefore instanceof Date && !Number.isNaN(readBefore.getTime()))) {
-    throw new Error('readBefore required when marking a conversation read');
+  if (!ids.length && !convs.length && !applicationId) return { updated: 0, notificationsCleared: 0 };
+  if ((convs.length || applicationId) && !(readBefore instanceof Date && !Number.isNaN(readBefore.getTime()))) {
+    throw new Error('readBefore required when marking a conversation or application read');
   }
   const now = new Date();
   const scope = function scope() {
     if (ids.length) this.whereIn('id', ids);
     if (convs.length) this.orWhere(function conv() { this.whereIn('conversation_id', convs).where('created_at', '<=', readBefore); });
+    if (applicationId) {
+      this.orWhere(function applicant() {
+        this.where({ message_type: 'job_applicant_reply' })
+          .whereRaw("metadata->>'job_application_id' = ?", [String(applicationId)])
+          .where('created_at', '<=', readBefore);
+      });
+    }
   };
 
   // 1. Strip backlog-reset markers across the request scope regardless of
@@ -222,6 +234,11 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
     notificationsCleared += await NotificationService.markInboundSmsReadAdmin({ twilioSids: knownSids, before: now, role });
   } catch (e) { logger.warn('[inbound-sms-read] bell clear by sid failed', { code: e.code || 'unknown' }); }
   notificationsCleared += await clearCustomerThreadCrossBells({ ids, convs, now, role });
+  if (applicationId) {
+    try {
+      notificationsCleared += await NotificationService.markApplicantRepliesReadAdmin({ applicationId, before: readBefore, role });
+    } catch (e) { logger.warn('[inbound-sms-read] applicant-reply bell clear failed', { code: e.code || 'unknown' }); }
+  }
 
   return { updated, notificationsCleared };
 }
