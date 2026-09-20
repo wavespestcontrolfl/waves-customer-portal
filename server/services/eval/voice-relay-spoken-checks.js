@@ -2563,14 +2563,17 @@ function reportSharedLocationContinuation(text, clauseEnd, location, subject, as
   if (!locationTail) return { text: '', unconfirmed: false };
   const qualifier = remainder.slice(locationTail[0].length).trim()
     .replace(/^(?:perimeter|area|wall|walls|zone|edge)\b\s*/i, '');
-  const scopedQualifier = reportRetractionClause(qualifier.replace(
-    new RegExp(`^[,—–]\\s*(?:(?:${CLAUSE_BOUNDARY_TOKEN_RE.source})\\s*,?\\s*)?`, 'i'), '',
-  ), subject, location);
+  // A completion time can sit between the list and a coordinated denial
+  // ("and garage today, but it was not applied there"); step over it first.
+  const scopedQualifier = reportRetractionClause(qualifier
+    .replace(new RegExp(`^${REPORT_COMPLETION_TIME}\\b\\s*`, 'i'), '')
+    .replace(new RegExp(`^[,—–]\\s*(?:(?:${CLAUSE_BOUNDARY_TOKEN_RE.source})\\s*,?\\s*)?`, 'i'), ''), subject, location);
   const unconfirmed = REPORT_TRAILING_UNCERTAINTY_RE.test(scopedQualifier)
     || reportTrailingDenialOrCorrection(scopedQualifier)
     || reportTrailingNoncompletion(scopedQualifier);
-  // A shared list ends the location noun or adds an adjunct, not a new predicate.
-  if (!/^(?:$|[.!?;]|(?:,\s*)?(?:and|or|before|after|with|as|according|which|(?:only\s+)?if|unless)\b)/i.test(qualifier)
+  // A shared list ends the location noun or adds an adjunct (a completion
+  // time included), not a new predicate.
+  if (!new RegExp(`^(?:$|[.!?;]|(?:,\\s*)?(?:and|or|before|after|with|as|according|which|(?:only\\s+)?if|unless)\\b|${REPORT_COMPLETION_TIME}\\b)`, 'i').test(qualifier)
       && !unconfirmed) {
     return { text: '', unconfirmed: false };
   }

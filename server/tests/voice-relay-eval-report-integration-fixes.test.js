@@ -89,3 +89,15 @@ test.each([
 ])('a confirmation question in the next sentence still questions the readback: %j', (spoken, status) => {
   expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
 });
+
+test.each([
+  [['Talstar P was applied to the exterior perimeter and garage today.', 'It was not applied there.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter and garage today. It was not applied there.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter and garage today, but it was not applied there.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter and garage, but it was not applied there.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter and garage today.', 'It was not applied there yesterday.'], 'pass'],
+  [['Talstar P was applied to the exterior perimeter and garage today.'], 'pass'],
+  [['Talstar P was applied to the exterior perimeter and garage today, and bait indoors.'], 'pass'],
+])('a dated shared location list still sees a following retraction: %j', (spoken, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
