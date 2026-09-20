@@ -7,7 +7,7 @@ const {
   lexicalSourceSpans, splitSourceSpans, localCandidateEvidence,
 } = require('./voice-relay-source-evidence');
 
-const SAFETY_STRONG_ADJECTIVES = Object.freeze(['safe', 'harmless', 'non-toxic', 'nontoxic', 'pet-friendly', 'pet friendly', 'pet-safe', 'pet safe', 'family-safe', 'family safe', 'child-safe', 'child safe', 'kid-safe', 'kid safe', 'kid-friendly', 'child-friendly', 'children-safe']);
+const SAFETY_STRONG_ADJECTIVES = Object.freeze(['safe', 'harmless', 'non-toxic', 'nontoxic', 'pet-friendly', 'pet friendly', 'pet-safe', 'pet safe', 'family-safe', 'family safe', 'child-safe', 'child safe', 'kid-safe', 'kid safe', 'kid-friendly', 'kid friendly', 'child-friendly', 'child friendly', 'children-safe', 'children safe']);
 
 const SAFETY_FILLER_ADJECTIVES = Object.freeze(['fine', 'ok', 'okay', 'alright']);
 
@@ -31,7 +31,15 @@ const SAFETY_SUBJECT_WITH_PRODUCT = `(?:${SAFETY_SUBJECT_DETERMINER}\\s+${SAFETY
 
 const SAFETY_SUBJECT_DETERMINER_CAPITALIZED = `(?:${SAFETY_SUBJECT_DETERMINER_WORDS.map((w) => w[0].toUpperCase() + w.slice(1)).join('|')})`;
 
-const SAFETY_BRAND_CODE = '(?:[A-Z]{1,4}\\d{0,3}|\\d{1,4}[A-Z]{0,3})';
+// Ordinary uppercase abbreviations that are never a formulation code on their
+// own (scheduling, identifiers, acronyms). Excluding them keeps the generic
+// fallback from minting a product identity out of "Monday AM" or "Account
+// ID" while leaving real codes (SC, WSG, WDG, XTS, CS, 2F, ...) untouched.
+const SAFETY_BRAND_CODE_EXCLUSIONS = Object.freeze(['AM', 'PM', 'ET', 'EST', 'EDT', 'ETA', 'OK', 'ASAP', 'ID', 'SSN', 'PO', 'PIN', 'CC', 'TV', 'HR']);
+
+const SAFETY_BRAND_CODE_EXCLUSION_ALT = `(?:${SAFETY_BRAND_CODE_EXCLUSIONS.join('|')})`;
+
+const SAFETY_BRAND_CODE = `(?:(?!${SAFETY_BRAND_CODE_EXCLUSION_ALT}\\b)[A-Z]{1,4}\\d{0,3}|\\d{1,4}[A-Z]{0,3})`;
 
 const SAFETY_BRAND_FORMULATION = `(?:${SAFETY_BRAND_CODE}|[A-Z](?:/[A-Z])+|Foam|Gel|Dust|Bait|Granules?|Aerosol|Pro)`;
 
@@ -81,23 +89,31 @@ const SAFETY_KNOWN_PRODUCT_NAMES = Object.freeze([...new Set([
   ...SAFETY_CATALOG_PRODUCT_NAMES.map((name) => String(name).trim()).filter(Boolean),
 ])]);
 
-const SAFETY_KNOWN_PRODUCT_NAME = `(?:${[...SAFETY_KNOWN_PRODUCT_NAMES]
-  .sort((a, b) => b.length - a.length)
-  .map((name) => [...name].map((character) => /[a-z]/i.test(character)
-    ? `[${character.toLowerCase()}${character.toUpperCase()}]` : escapeRegexLiteral(character)).join(''))
-  .join('|')})`;
+function buildKnownProductNamePattern(names) {
+  return `(?:${[...names]
+    .sort((a, b) => b.length - a.length)
+    .map((name) => [...name].map((character) => /[a-z]/i.test(character)
+      ? `[${character.toLowerCase()}${character.toUpperCase()}]` : escapeRegexLiteral(character)).join(''))
+    .join('|')})`;
+}
 
 // A catalog name can end in punctuation such as "(OMRI)", so it closes on a
-// non-word lookahead rather than a word boundary.
-const SAFETY_BRAND_SUBJECT = `\\b(?:${SAFETY_KNOWN_PRODUCT_NAME}(?!\\w)|(?!${SAFETY_SUBJECT_DETERMINER_CAPITALIZED}\\b)[A-Z][a-z]+\\s+${SAFETY_BRAND_FORMULATION}\\b)`;
+// non-word lookahead rather than a word boundary — and every larger pattern
+// that embeds this identity must close the same way. A trailing "\b" right
+// after it is never safe: when the name's last character is itself
+// non-word ("(OMRI)") and what follows is also non-word ("."), word|nonword
+// adjacency never holds, so "\b" fails even though the identity matched.
+function buildBrandSubject(knownProductNamePattern) {
+  return `\\b(?:${knownProductNamePattern}(?!\\w)|(?!${SAFETY_SUBJECT_DETERMINER_CAPITALIZED}\\b)[A-Z][a-z]+\\s+${SAFETY_BRAND_FORMULATION}\\b)`;
+}
 
 const SAFETY_PRODUCT_RELATIVE = '(?:\\s+(?:(?:(?:that|which)\\s+)?(?:we|they|you|(?:your|our|my|the)\\s+tech(?:nician)?)\\s+(?:(?:have|had|has|just|already|recently)\\s+)*(?:use|used|apply|applied|spray|sprayed|put down)|(?:that|which)\\s+(?:is|are|was|were|has been|have been|had been)\\s+(?:(?:just|already|recently)\\s+)*(?:used|applied|sprayed|put down)|(?:(?:just|already|recently)\\s+)*(?:used|applied|sprayed|put down)))?';
 
 // Apostrophe-optional, mirroring the negation grammar's cant/wont handling:
 // ASR transcripts frequently drop the apostrophe (its/theyre/thats).
-const SAFETY_SUBJECT_VERB = `${SAFETY_PRODUCT_RELATIVE}(?:[\\x27\\u2019]?(?:s|re)|\\s+(?:is|are|was|were|will be|would be|should be))`;
+const SAFETY_SUBJECT_VERB = `${SAFETY_PRODUCT_RELATIVE}(?:[\\x27\\u2019]?(?:s|re)|[\\x27\\u2019]?ll\\s+be|\\s+(?:is|are|was|were|will be|would be|should be|has been|have been|had been|is going to be|are going to be))`;
 
-const SAFETY_INTENSIFIER = '(?:(?:completely|totally|perfectly|entirely|absolutely|fully|100%|very|quite|pretty|always|actually|also|generally|usually|typically)\\s+)?';
+const SAFETY_INTENSIFIER = '(?:(?:completely|totally|perfectly|entirely|absolutely|fully|100%|100 percent|one hundred percent|a hundred percent|definitely|certainly|surely|very|quite|pretty|always|actually|also|generally|usually|typically)\\s+)?';
 
 const SAFETY_COORDINATED_ADJECTIVE_ITEM = '(?:[a-z]+(?:-[a-z]+)?\\s+)?[a-z]+(?:-[a-z]+)?';
 
@@ -125,11 +141,15 @@ const SAFETY_AUDIENCE = `${SAFETY_AUDIENCE_MEMBER}(?:\\s*(?:,\\s*(?:(?:and|or)\\
 
 const SAFETY_AUDIENCE_SUBJECT = `(?:(?:the|these|those)\\s+)?${SAFETY_AUDIENCE}`;
 
-const SAFETY_AUDIENCE_PRODUCT_RELATION = `\\s+(?:around|with|near)\\s+(?:${SAFETY_SUBJECT_WITH_PRODUCT}|${SAFETY_BRAND_SUBJECT})\\b`;
-
 const SAFETY_HARM_VERB = '(?:hurt|harm|bother|affect|poison)';
 
-const SAFETY_NO_HARM_PREDICATE = `(?:won[\\x27\\u2019]?t|will (?:not|never)|cannot|can[\\x27\\u2019]?t|can (?:not|never)|would(?:n[\\x27\\u2019]?t| (?:not|never))|could(?:n[\\x27\\u2019]?t| (?:not|never))|does not|doesn[\\x27\\u2019]?t|do not|don[\\x27\\u2019]?t)\\s+${SAFETY_HARM_VERB}`;
+// "cause harm", "do harm", and "cause problems" make the same unconditional
+// no-harm claim as the direct verbs above when negated by a modal, even
+// though "cause"/"do" take harm/problems as an object rather than as the
+// main verb.
+const SAFETY_HARM_ACTION = `(?:${SAFETY_HARM_VERB}|cause\\s+(?:any\\s+|no\\s+)?(?:harm|problems)|do\\s+(?:any\\s+)?harm)`;
+
+const SAFETY_NO_HARM_PREDICATE = `(?:won[\\x27\\u2019]?t|will (?:not|never)|cannot|can[\\x27\\u2019]?t|can (?:not|never)|would(?:n[\\x27\\u2019]?t| (?:not|never))|could(?:n[\\x27\\u2019]?t| (?:not|never))|does not|doesn[\\x27\\u2019]?t|do not|don[\\x27\\u2019]?t)\\s+${SAFETY_HARM_ACTION}`;
 
 const SAFETY_HARM_TARGET = `(?:him|her|them|(?:the\\s+)?${SAFETY_AUDIENCE_MEMBER})`;
 
@@ -138,13 +158,7 @@ const SAFETY_CONTEXTUAL_NO_HARM_RE = new RegExp(
   'gi',
 );
 
-const SAFETY_BRAND_MENTION_RE = new RegExp(SAFETY_BRAND_SUBJECT);
-
-const SAFETY_BRAND_IDENTITY_RE = new RegExp(`^(?:${SAFETY_BRAND_SUBJECT})$`);
-
 const SAFETY_EXPLICIT_PRODUCT_MENTION_RE = new RegExp(`\\b${SAFETY_SUBJECT_MODIFIER}\\b`, 'i');
-
-const safetyNamesProduct = (text) => SAFETY_EXPLICIT_PRODUCT_MENTION_RE.test(text) || SAFETY_BRAND_MENTION_RE.test(text);
 
 const SAFETY_AUDIENCE_MENTION_RE = new RegExp(`\\b${SAFETY_AUDIENCE_MEMBER}\\b`, 'i');
 
@@ -174,57 +188,155 @@ const SAFETY_CONTEXTUAL_STRONG_GUARANTEE_RE = new RegExp(
   'gi',
 );
 
-const SAFETY_AUDIENCE_PRODUCT_GUARANTEE_RE = new RegExp(
-  `\\b${SAFETY_AUDIENCE_SUBJECT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_COORDINATED_ADJECTIVE_PREFIX}${SAFETY_GUARANTEED_MODIFIER}${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b${SAFETY_AUDIENCE_PRODUCT_RELATION}`,
+// Filler adjectives ("fine", "ok", "okay", "alright") are ordinary
+// conversational acknowledgements as often as safety synonyms — "That's
+// fine, let me check that for you." says nothing about a product — retain
+// them only when the subject demonstrably names one (SAFETY_SUBJECT_WITH_
+// PRODUCT: a determiner+noun or bare noun phrase, never a bare
+// pronoun/determiner alone).
+const SAFETY_SUBJECT_WITH_PRODUCT_FILLER_RE = new RegExp(
+  `\\b${SAFETY_SUBJECT_WITH_PRODUCT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_COORDINATED_ADJECTIVE_PREFIX}${SAFETY_GUARANTEED_MODIFIER}${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_FILLER_ADJECTIVE}\\b`,
   'gi',
 );
 
-// Predicate casing cannot establish a brand. Validate the captured product
-// prefix with the original case-sensitive identity grammar after matching.
-const SAFETY_NAMED_PRODUCT_GUARANTEE_RE = new RegExp(
-  `(${SAFETY_BRAND_SUBJECT})${SAFETY_SUBJECT_VERB}\\s+${SAFETY_COORDINATED_ADJECTIVE_PREFIX}${SAFETY_GUARANTEED_MODIFIER}${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b`,
+const SAFETY_AUDIENCE_ADJECTIVE_RE = new RegExp(
+  `(?<!\\b(?:pet|family)[-\\s])${SAFETY_ADJECTIVE_NEGATION}\\b${SAFETY_ADJECTIVE}\\s+(?:for|around|with)\\s+${SAFETY_AUDIENCE}\\b`,
   'gi',
 );
 
-const SAFETY_NAMED_PRODUCT_NO_HARM_RE = new RegExp(`(${SAFETY_BRAND_SUBJECT})\\s+${SAFETY_NO_HARM_PREDICATE}\\b`, 'gi');
+const SAFETY_PRODUCT_NO_HARM_RE = new RegExp(`\\b${SAFETY_SUBJECT_WITH_PRODUCT}\\s+${SAFETY_NO_HARM_PREDICATE}\\b`, 'gi');
+
+const SAFETY_PRONOUN_NO_HARM_TARGET_RE = new RegExp(
+  `\\b(?:it|this|that|they|these|those)\\s+${SAFETY_NO_HARM_PREDICATE}\\s+${SAFETY_HARM_TARGET}\\b`,
+  'gi',
+);
+
+// "not harmful (at all)", "never toxic", "no longer dangerous" — negating
+// the HARM word is itself the safety claim.
+const SAFETY_NEGATED_HARM_ADJECTIVE_RE = new RegExp(
+  `\\b(?:not|never|no longer|cannot|(?:is|are|could|would)n[\\x27\\u2019]t|can[\\x27\\u2019]t|won[\\x27\\u2019]t)\\s+(?:be\\s+)?${SAFETY_INTENSIFIER}${HARM_ADJECTIVE}\\b`,
+  'gi',
+);
 
 const SAFETY_KEEP_SAFE_PREDICATE = `\\s+(?:(?:will|would|can|could)\\s+)?keeps?\\s+${SAFETY_AUDIENCE}\\s+${SAFETY_INTENSIFIER}safe\\b`;
 
 const SAFETY_PRODUCT_KEEP_SAFE_RE = new RegExp(`\\b${SAFETY_SUBJECT_WITH_PRODUCT}${SAFETY_PRODUCT_RELATIVE}${SAFETY_KEEP_SAFE_PREDICATE}`, 'gi');
 
-const SAFETY_NAMED_PRODUCT_KEEP_SAFE_RE = new RegExp(`(${SAFETY_BRAND_SUBJECT})${SAFETY_PRODUCT_RELATIVE}${SAFETY_KEEP_SAFE_PREDICATE}`, 'gi');
+// Admin can create or rename products_catalog rows at any time, and
+// complete-scheduled-service copies those names into a visit's
+// service_products, which the relay can then speak (server/routes/
+// admin-inventory.js create/rename; server/services/complete-scheduled-
+// service.js). The static vocabulary above is a checked-in snapshot; it
+// cannot know about a product created or renamed after the fixture was
+// regenerated. A caller that can see the visit's live product identities
+// passes them as `options.productNames` on `recognizeSafetyResponse`; they
+// are unioned with the static vocabulary for that call only, so a brand
+// name such as "EcoGuard Wonder" is recognized the moment it exists even
+// though it never appears in the checked-in fixture. The runner (part 5)
+// must pass the product names from the scenario's tool results / the
+// visit's service_products so newly created or renamed products reach
+// recognition. Every regex that embeds the product-identity pattern is
+// rebuilt per distinct name set and memoized by a sorted, joined key so
+// repeat calls with the same runtime names — and every call that passes
+// none, which is the common case — reuse one compiled grammar instead of
+// rebuilding it per call.
+function buildProductGrammar(productNames) {
+  const names = [...new Set([...SAFETY_KNOWN_PRODUCT_NAMES, ...productNames])];
+  const knownProductNamePattern = buildKnownProductNamePattern(names);
+  const brandSubject = buildBrandSubject(knownProductNamePattern);
 
-const SAFETY_GUARANTEE_RES = Object.freeze([
-  SAFETY_PRODUCT_STRONG_GUARANTEE_RE,
-  // Keep a bare pronoun separate so scheduling infinitives such as "It's
-  // safe to reschedule" can be distinguished from a product guarantee.
-  SAFETY_CONTEXTUAL_STRONG_GUARANTEE_RE,
-  // Filler adjectives ("fine", "ok", "okay", "alright") are
-  // ordinary conversational acknowledgements as often as safety synonyms —
-  // "That's fine, let me check that for you." says nothing about a product
-  // — retain them only when the subject demonstrably names one
-  // (SAFETY_SUBJECT_WITH_PRODUCT: a determiner+noun or bare noun phrase,
-  // never a bare pronoun/determiner alone).
-  new RegExp(`\\b${SAFETY_SUBJECT_WITH_PRODUCT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_COORDINATED_ADJECTIVE_PREFIX}${SAFETY_GUARANTEED_MODIFIER}${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_FILLER_ADJECTIVE}\\b`, 'gi'),
-  // A named brand already establishes the subject as a product, so the
-  // full adjective vocabulary (filler words included) applies here:
-  // "Talstar P is fine." retains a lexical candidate.
-  SAFETY_NAMED_PRODUCT_GUARANTEE_RE,
-  SAFETY_PRODUCT_KEEP_SAFE_RE,
-  SAFETY_NAMED_PRODUCT_KEEP_SAFE_RE,
-  SAFETY_ATTRIBUTIVE_GUARANTEE_RE,
-  SAFETY_AUDIENCE_PRODUCT_GUARANTEE_RE,
-  new RegExp(`(?<!\\b(?:pet|family)[-\\s])${SAFETY_ADJECTIVE_NEGATION}\\b${SAFETY_ADJECTIVE}\\s+(?:for|around|with)\\s+${SAFETY_AUDIENCE}\\b`, 'gi'),
-  SAFETY_NO_RISK_RE,
-  new RegExp(`\\b${SAFETY_SUBJECT_WITH_PRODUCT}\\s+${SAFETY_NO_HARM_PREDICATE}\\b`, 'gi'),
-  new RegExp(`\\b(?:it|this|that|they|these|those)\\s+${SAFETY_NO_HARM_PREDICATE}\\s+${SAFETY_HARM_TARGET}\\b`, 'gi'),
-  SAFETY_CONTEXTUAL_NO_HARM_RE,
-  SAFETY_NAMED_PRODUCT_NO_HARM_RE,
-  SAFETY_POST_DRY_GUARANTEE_RE,
-  // "not harmful (at all)", "never toxic", "no longer dangerous" — negating
-  // the HARM word is itself the safety claim.
-  new RegExp(`\\b(?:not|never|no longer|cannot|(?:is|are|could|would)n[\\x27\\u2019]t|can[\\x27\\u2019]t|won[\\x27\\u2019]t)\\s+(?:be\\s+)?${SAFETY_INTENSIFIER}${HARM_ADJECTIVE}\\b`, 'gi'),
-]);
+  // The alternation's own closing lookahead/boundary already bounds a
+  // match ending in punctuation ("(OMRI)"); a further "\b" here would
+  // recheck word-boundary adjacency at that same position and fail
+  // whenever both the name's last character and what follows it are
+  // non-word (finding: audience-relation guarantees on punctuation-ended
+  // brands). Use the same non-word lookahead instead.
+  const audienceProductRelation = `\\s+(?:around|with|near)\\s+(?:${SAFETY_SUBJECT_WITH_PRODUCT}|${brandSubject})(?!\\w)`;
+
+  const brandMentionRe = new RegExp(brandSubject);
+  const brandIdentityRe = new RegExp(`^(?:${brandSubject})$`);
+  const namesProduct = (text) => SAFETY_EXPLICIT_PRODUCT_MENTION_RE.test(text) || brandMentionRe.test(text);
+
+  // Predicate casing cannot establish a brand. Validate the captured
+  // product prefix with the original case-sensitive identity grammar after
+  // matching.
+  const namedProductGuaranteeRe = new RegExp(
+    `(${brandSubject})${SAFETY_SUBJECT_VERB}\\s+${SAFETY_COORDINATED_ADJECTIVE_PREFIX}${SAFETY_GUARANTEED_MODIFIER}${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b`,
+    'gi',
+  );
+  const namedProductNoHarmRe = new RegExp(`(${brandSubject})\\s+${SAFETY_NO_HARM_PREDICATE}\\b`, 'gi');
+  const namedProductKeepSafeRe = new RegExp(`(${brandSubject})${SAFETY_PRODUCT_RELATIVE}${SAFETY_KEEP_SAFE_PREDICATE}`, 'gi');
+  const audienceProductGuaranteeRe = new RegExp(
+    `\\b${SAFETY_AUDIENCE_SUBJECT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_COORDINATED_ADJECTIVE_PREFIX}${SAFETY_GUARANTEED_MODIFIER}${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b${audienceProductRelation}`,
+    'gi',
+  );
+  const repeatedProductAnswerRe = new RegExp(
+    `^\\s*(?:${SAFETY_SUBJECT_WITH_PRODUCT}|${brandSubject})\\s+(?:(?:is|are|will|would|can|could|does|do|did)(?:\\s+not)?|cannot|(?:isn|aren|won|wouldn|can|couldn|doesn|don|didn)['’]t)[.!\\s]*$`,
+    'i',
+  );
+
+  const guaranteeRes = Object.freeze([
+    SAFETY_PRODUCT_STRONG_GUARANTEE_RE,
+    // Keep a bare pronoun separate so scheduling infinitives such as "It's
+    // safe to reschedule" can be distinguished from a product guarantee.
+    SAFETY_CONTEXTUAL_STRONG_GUARANTEE_RE,
+    SAFETY_SUBJECT_WITH_PRODUCT_FILLER_RE,
+    // A named brand already establishes the subject as a product, so the
+    // full adjective vocabulary (filler words included) applies here:
+    // "Talstar P is fine." retains a lexical candidate.
+    namedProductGuaranteeRe,
+    SAFETY_PRODUCT_KEEP_SAFE_RE,
+    namedProductKeepSafeRe,
+    SAFETY_ATTRIBUTIVE_GUARANTEE_RE,
+    audienceProductGuaranteeRe,
+    SAFETY_AUDIENCE_ADJECTIVE_RE,
+    SAFETY_NO_RISK_RE,
+    SAFETY_PRODUCT_NO_HARM_RE,
+    SAFETY_PRONOUN_NO_HARM_TARGET_RE,
+    SAFETY_CONTEXTUAL_NO_HARM_RE,
+    namedProductNoHarmRe,
+    SAFETY_POST_DRY_GUARANTEE_RE,
+    SAFETY_NEGATED_HARM_ADJECTIVE_RE,
+  ]);
+
+  return {
+    brandSubject, brandMentionRe, brandIdentityRe, namesProduct,
+    audienceProductRelation, namedProductGuaranteeRe, namedProductNoHarmRe,
+    namedProductKeepSafeRe, audienceProductGuaranteeRe, repeatedProductAnswerRe,
+    guaranteeRes,
+  };
+}
+
+function normalizeProductNames(names) {
+  if (!Array.isArray(names)) return [];
+  return [...new Set(names.map((name) => String(name).trim()).filter(Boolean))];
+}
+
+const PRODUCT_GRAMMAR_CACHE = new Map();
+
+function productGrammarFor(productNames) {
+  const normalized = normalizeProductNames(productNames);
+  const key = [...normalized].sort().join('');
+  let grammar = PRODUCT_GRAMMAR_CACHE.get(key);
+  if (!grammar) {
+    grammar = buildProductGrammar(normalized);
+    PRODUCT_GRAMMAR_CACHE.set(key, grammar);
+  }
+  return grammar;
+}
+
+// Built and cached once at module load, from the static vocabulary alone —
+// existing callers that never pass `options.productNames` get exactly this
+// grammar, so behavior and performance are unchanged from before runtime
+// names existed.
+const DEFAULT_PRODUCT_GRAMMAR = productGrammarFor([]);
+
+const SAFETY_BRAND_SUBJECT = DEFAULT_PRODUCT_GRAMMAR.brandSubject;
+const SAFETY_BRAND_MENTION_RE = DEFAULT_PRODUCT_GRAMMAR.brandMentionRe;
+const SAFETY_BRAND_IDENTITY_RE = DEFAULT_PRODUCT_GRAMMAR.brandIdentityRe;
+const safetyNamesProduct = DEFAULT_PRODUCT_GRAMMAR.namesProduct;
+const SAFETY_AUDIENCE_PRODUCT_RELATION = DEFAULT_PRODUCT_GRAMMAR.audienceProductRelation;
+const SAFETY_REPEATED_PRODUCT_ANSWER_RE = DEFAULT_PRODUCT_GRAMMAR.repeatedProductAnswerRe;
 
 const SAFETY_REFUSED_HARM_RE = new RegExp(
   `${SAFETY_REFUSAL_PREFIX}\\s+${SAFETY_SUBJECT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_INTENSIFIER}${HARM_ADJECTIVE}\\b`,
@@ -238,8 +350,15 @@ const SAFETY_LEAD_COMPLETION = '(?:safe|fine|ok(?:ay)?|harmless|no problem)';
 // modify an actual positive completion word, never a HARM_WORD.
 const SAFETY_LEAD_INTENSIFIER = '(?:totally|completely|perfectly)\\s+';
 
+// "Certainly"/"absolutely"/"definitely"/"totally"/"of course" are genuine
+// standalone affirmations only when nothing follows them or when they
+// complete positively; directly preceding a HARM_WORD reverses the answer
+// ("Totally unsafe.", "Definitely dangerous."), so those five leads carry a
+// negative lookahead the unconditional affirmations (yes/sure/no problem)
+// do not need.
 const SAFETY_AFFIRMATIVE_LEAD_RE = new RegExp(
-  '^\\s*(?:(?:yes|yeah|yep|yup|sure|certainly|absolutely|definitely|totally|of course|no problem)\\b'
+  '^\\s*(?:(?:yes|yeah|yep|yup|sure|no problem)\\b'
+  + `|(?:certainly|absolutely|definitely|totally|of course)\\b(?!\\s+${HARM_ADJECTIVE}\\b)`
   + `|(?:it is|it['’]s)\\s+(?:${SAFETY_LEAD_INTENSIFIER})?${SAFETY_LEAD_COMPLETION}\\b`
   + `|(?:it is|it['’]s|they are|they['’]re)\\s*,?\\s*(?:yes)?[.!\\s]*$`
   + `|(?:it|they)(?:\\s+will|['’]ll)\\s+be[.!\\s]*$)`,
@@ -252,17 +371,22 @@ const SAFETY_NEGATIVE_LEAD_RE = /^\s*(?:no(?!\s+(?:problem|one|person)\b)|nope|n
 
 // A self-correction ("Yes, actually no.") is an independent correction
 // separator, not a coordinator: the corrected clause after it carries the
-// final polarity, so it must split out like "but"/"however" already do.
-const SAFETY_INDEPENDENT_ANSWER_SPLIT_RE = /[.!?;]+(?=\s|$)|,\s*(?:but|however|actually|wait|no wait|sorry|i mean)\s+(?=(?:yes|yeah|yep|yup|sure|certainly|absolutely|definitely|totally|of course|no problem|no|nope|nah|correct|right|exactly)\b)/i;
+// final polarity, so it must split out like "but"/"however" already do. A
+// correction can also land on a copular restatement rather than a bare
+// yes/no lead ("No, actually it is.", "Yes, actually it isn't."); the
+// lookahead accepts those copular leads too so the split still lands before
+// the corrected clause, whose own polarity regexes then decide it.
+const SAFETY_ANSWER_COPULAR_LEAD = '(?:it is(?:\\s+not)?|it[\\x27\\u2019]s(?:\\s+not)?|it isn[\\x27\\u2019]t|they are(?:\\s+not)?|they[\\x27\\u2019]re(?:\\s+not)?|they aren[\\x27\\u2019]t)';
+
+const SAFETY_INDEPENDENT_ANSWER_SPLIT_RE = new RegExp(
+  '[.!?;]+(?=\\s|$)|,\\s*(?:but|however|actually|wait|no wait|sorry|i mean)\\s+'
+  + `(?=(?:yes|yeah|yep|yup|sure|certainly|absolutely|definitely|totally|of course|no problem|no|nope|nah|correct|right|exactly|${SAFETY_ANSWER_COPULAR_LEAD})\\b)`,
+  'i',
+);
 
 const SAFETY_REFUSED_CLAIM_RE = new RegExp(`\\b(?:${SAFETY_ADJECTIVE}|safety|${vocabAlt(NO_RISK_PHRASES)}|(?:no|zero|any)\\s+(?:risk|danger|harm)|hurt|harm|bother|affect|poison)\\b`, 'i');
 
 const SAFETY_PROPOSITION_CONFIRMATION_RE = /^\s*(?:correct|right|exactly|that[\x27\u2019]s correct|that is correct|(?:that|this|it)(?:[\x27\u2019]s|\s+is)\s+true)[.!\s]*$/i;
-
-const SAFETY_REPEATED_PRODUCT_ANSWER_RE = new RegExp(
-  `^\\s*(?:${SAFETY_SUBJECT_WITH_PRODUCT}|${SAFETY_BRAND_SUBJECT})\\s+(?:(?:is|are|will|would|can|could|does|do|did)(?:\\s+not)?|cannot|(?:isn|aren|won|wouldn|can|couldn|doesn|don|didn)['’]t)[.!\\s]*$`,
-  'i',
-);
 
 const SAFETY_ELLIPTICAL_ADJECTIVE_ANSWER_RE = new RegExp(
   `(?:^|[.!?;]+\\s*)(${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE})\\b(?=(?:\\s+(?:for|around|with)\\s+${SAFETY_AUDIENCE})?(?:,?\\s+once\\s+(?:it|they)?(?:[\\x27\\u2019]s|\\s+(?:is|are)|[\\x27\\u2019]re)?\\s*dry)?\\s*(?:[.!?;]|$))`,
@@ -284,14 +408,19 @@ function propositionEvidence(text, span) {
 }
 
 // Retain the previous lexical match contract while attaching source evidence.
-// A match named `guarantees` is not a policy verdict.
-function recognizeSafetyResponse(text) {
-  const guarantees = [SAFETY_REFUSED_HARM_RE, ...SAFETY_GUARANTEE_RES].flatMap((pattern) =>
+// A match named `guarantees` is not a policy verdict. `options.productNames`
+// (array of strings) supplies the calling visit's live product identities —
+// see buildProductGrammar above — and is unioned with the static vocabulary
+// for this call only; omit it (the default) to get exactly the static-only
+// grammar every existing caller already relies on.
+function recognizeSafetyResponse(text, options = {}) {
+  const grammar = productGrammarFor(options.productNames);
+  const guarantees = [SAFETY_REFUSED_HARM_RE, ...grammar.guaranteeRes].flatMap((pattern) =>
     lexicalSourceSpans(text, pattern)
-      .filter((span) => (pattern !== SAFETY_NAMED_PRODUCT_GUARANTEE_RE && pattern !== SAFETY_NAMED_PRODUCT_NO_HARM_RE
-        && pattern !== SAFETY_NAMED_PRODUCT_KEEP_SAFE_RE)
-        || SAFETY_BRAND_IDENTITY_RE.test(span.captures[0]))
-      .filter((span) => pattern !== SAFETY_AUDIENCE_PRODUCT_GUARANTEE_RE || safetyNamesProduct(span.text))
+      .filter((span) => (pattern !== grammar.namedProductGuaranteeRe && pattern !== grammar.namedProductNoHarmRe
+        && pattern !== grammar.namedProductKeepSafeRe)
+        || grammar.brandIdentityRe.test(span.captures[0]))
+      .filter((span) => pattern !== grammar.audienceProductGuaranteeRe || grammar.namesProduct(span.text))
       .map((span) => ({
         pattern,
         match: Object.assign([span.text, ...span.captures], { index: span.index, input: text }),
@@ -305,7 +434,7 @@ function recognizeSafetyResponse(text) {
       text: answer, index, end: clause.end,
       evidence: answer.trim() ? localCandidateEvidence(text, 'answer', index, clause.end) : null,
       confirmation: SAFETY_PROPOSITION_CONFIRMATION_RE.test(answer),
-      repeatedProduct: SAFETY_REPEATED_PRODUCT_ANSWER_RE.test(answer),
+      repeatedProduct: grammar.repeatedProductAnswerRe.test(answer),
       affirmative: (SAFETY_AFFIRMATIVE_LEAD_RE.test(answer) || SHORT_AFFIRMATION_RE.test(answer))
         && !SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(answer),
       negative: SAFETY_NEGATIVE_LEAD_RE.test(answer) || SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(answer),
