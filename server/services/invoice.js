@@ -1058,6 +1058,7 @@ async function fenceAdoptedRowsBeforeHandoff(consumedRows, claimToken, database 
 function queuedPayLinkError(queued) {
   const e = new Error(`Invoice send already in progress — a text carrying this pay link is queued for the send window${queued.scheduled_for ? ` (${new Date(queued.scheduled_for).toISOString()})` : ""}; it delivers then`);
   e.code = "queued_pay_link";
+  e.scheduledFor = queued.scheduled_for ? new Date(queued.scheduled_for) : null;
   return e;
 }
 
@@ -4270,12 +4271,28 @@ const InvoiceService = {
         .where({ id: inv.id, status: "sending", send_claim_token: claimed.send_claim_token })
         .update({ ...payload, send_claim_token: null });
 
-      const result = await this.sendViaSMSAndEmail(claimed.id, {
-        requestReview: Boolean(claimed.scheduled_request_review),
-        reviewDelayMinutes: claimed.scheduled_review_delay_minutes,
-        allowClaimed: true,
-        claimToken: claimed.send_claim_token,
-      });
+      let result;
+      try {
+        result = await this.sendViaSMSAndEmail(claimed.id, {
+          requestReview: Boolean(claimed.scheduled_request_review),
+          reviewDelayMinutes: claimed.scheduled_review_delay_minutes,
+          allowClaimed: true,
+          claimToken: claimed.send_claim_token,
+        });
+      } catch (err) {
+        if (err?.code !== "queued_pay_link") throw err;
+        // A live deferred text already owns this pay link's delivery, so
+        // the reconciliation refused the preclaimed send and deliberately
+        // left this worker's 'sending' claim alone. Give the exact claim
+        // back to the queue, deferred past the text's slot (or ten minutes
+        // out when unknown) so the next pass finds the invoice finalized
+        // by that delivery, and keep the batch moving.
+        const retryAt = new Date(Math.max(Date.now() + 10 * 60 * 1000, err.scheduledFor?.getTime?.() || 0));
+        await restoreClaimedInvoice({ status: "scheduled", scheduled_send_at: retryAt, updated_at: new Date() });
+        logger.info(`[invoice] Scheduled send for ${inv.invoice_number} deferred to ${retryAt.toISOString()}: ${err.message}`);
+        deferred += 1;
+        continue;
+      }
       if (result.ok) {
         sent += 1;
         continue;
