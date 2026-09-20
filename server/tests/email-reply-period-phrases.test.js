@@ -39,7 +39,7 @@ describe('inactive supplemental period phrases', () => {
   );
 
   test.each(['a month ago', 'a year ago', 'a mo ago', 'a yr ago',
-    'a month or two ago', 'a year and a half ago', 'each month or so ago',
+    'a month or two ago', 'a year and a half ago', 'each month or so ago', 'a calendar month ago',
     'every yearbook', 'monthly-related', 'annualized-policy', 'the month',
     'a, month', 'each @ month', 'for the; year', 'each monthlies'])(
     'leaves temporal or unsupported syntax unresolved: %s', (text) => {

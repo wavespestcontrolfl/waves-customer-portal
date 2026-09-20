@@ -76,6 +76,40 @@ and it does not know about `commercialProposal` or `legacyMonthlyPlan` —
 those are consumer policy. The inherited normalization limits (8,192 UTF-8
 bytes, 512 whitespace tokens) apply through the upstream chain.
 
+## Supported sentence shapes and known limitations
+
+This is an inactive evidence module with no runtime caller; every result is
+`needs_review` and a missed phrasing is never a send. Under the review
+standard for such modules (AGENTS.md, "Inactive evidence modules") it ships
+with a finite supported grammar, and later phrasings are backlog items here,
+not blockers.
+
+Supported: a money amount and a period in one claim in either order, with
+any gap that contains no claim break; the three comma/`and` continuations
+above plus the period-first form (`billed monthly and costs $98`); periods
+from the scanner (`monthly`, `/mo`, `per year`), the supplemental matcher
+(`a/each/every month|year`, `for the month`, `annualized`, `every calendar
+month`), and a period embedded in a visit token that modifies a following
+plan word; bare numbers with a billing noun or price predicate in the claim;
+exclusions for `98 percent` / `98 feet`, amounts tied to a visit or
+application unit, and cue-less bare numbers.
+
+Known limitations (backlog, from Codex round 4 on #4614):
+
+- Fronted plan clauses introduced by `Under`, `On` or `With` (`Under the
+  monthly plan, the price is $98`) break at the comma; only `For` is kept.
+- A plan word folded into the same composite visit token as the period
+  (`The monthly plan visit subscription is $98`) is not read as a plan anchor.
+- `an application` is not recognized as an attached pricing unit, so `$98
+  an application` beside a period over-flags.
+- Compound measurements (`98 square feet`, `98 linear feet`) are not
+  excluded; only a measurement word directly after the number is.
+- `a year and six months ago` is read as a period and over-flags; the
+  temporal guard admits only `or <quantity>` and `and a half` before `ago`
+  so that `$98 a month and two years ago` keeps its real recurring price.
+
+Over-flags cost a reviewer a glance; misses are listed here for follow-up.
+
 ## Ownership and verification
 
 `email-reply-pricing-context.js` and everything under it (period phrases,

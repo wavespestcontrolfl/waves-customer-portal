@@ -148,8 +148,13 @@ describe('inactive email reply period relations', () => {
     },
   );
 
-  test.each(['We refunded $98 a month or 2 ago', 'We refunded $98 a year and 6 months ago',
-    'We refunded $98 a year and six months ago', 'We refunded $98 a month ago'])(
+  test.each(['The plan costs $98 a month and two years ago it cost less', 'The plan costs $98 a month and 2 years ago it cost less'])(
+    'a coordinated historical clause never erases the preceding recurring price: %s', (text) => {
+      expect(kinds(text)).toContain('plan_total');
+    },
+  );
+  test.each(['We refunded $98 a month or 2 ago', 'We refunded $98 a year and a half ago',
+    'We refunded $98 a calendar month ago', 'We received $1176 a calendar year ago', 'We refunded $98 a month ago'])(
     'numeric and worded ago continuations stay temporal: %s', (text) => {
       expect(relationsFor(text)).toEqual([]);
       expect(inspectEmailReplyPlanTotal({ text }).violations).toEqual([]);

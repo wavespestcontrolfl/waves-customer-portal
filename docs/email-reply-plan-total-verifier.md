@@ -32,6 +32,11 @@ construction. The inherited finite grammar, amount, period, and newline
 limits remain. Every result still needs review, so unknown phrasing cannot
 become a compliant/sendable result here.
 
+Review standard: this consumer and its evidence chain are inactive modules
+with no runtime caller, merged on green CI with no P0 under the AGENTS.md
+"Inactive evidence modules" rule; unsupported phrasings are tracked in the
+period-relations doc's known-limitations list.
+
 The test suite keeps every frozen plan-total case: 195 retain their original
 `{ok,violations}` expectations, and the 60 that the owner ruling flips from
 allowed to a finding live verbatim in an `owner ruling 2026-09-19` block; no
