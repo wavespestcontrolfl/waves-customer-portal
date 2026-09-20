@@ -4,7 +4,7 @@ const {
   EPISTEMIC_HEDGE_PREFIX_SOURCE, CONVERSATIONAL_CONDITION_RE, QUESTION_LEAD_RE,
   clauseIsNegated, clauseIsEpistemicallyHedged,
 } = require('./voice-relay-spoken-language');
-const { localCandidateEvidence, sentenceSourceSpans } = require('./voice-relay-source-evidence');
+const { localCandidateEvidence, sentenceSourceSpans, latestInterrogativeSpan } = require('./voice-relay-source-evidence');
 const {
   SAFETY_REFUSAL_PREFIX, SAFETY_SUBJECT_MODIFIER, SAFETY_INTENSIFIER, HARM_ADJECTIVE,
   SAFETY_ADDITIVE_ADJECTIVE_PREFIX, SAFETY_COORDINATED_ADJECTIVE_SEPARATOR,
@@ -13,7 +13,7 @@ const {
   SAFETY_SUBJECT_VERB, SAFETY_BRAND_SUBJECT, SAFETY_AUDIENCE_SUBJECT,
   SAFETY_AUDIENCE_PRODUCT_RELATION, safetyNamesProduct, SAFETY_AUDIENCE_NOUN,
   SAFETY_AUDIENCE_POSSESSIVE, SAFETY_COORDINATED_ADJECTIVE_PREFIX,
-  SAFETY_GUARANTEED_MODIFIER, SAFETY_PRODUCT_RELATIVE,
+  SAFETY_GUARANTEED_MODIFIER, SAFETY_PRODUCT_RELATIVE, dynamicIdentityFor,
 } = require('./voice-relay-safety-response-recognition');
 const { recognizeSafetyQuestion, SAFETY_NON_PREFIX } = require('./voice-relay-safety-question-recognition');
 
@@ -43,7 +43,7 @@ function safetyAudienceScopes(text) {
   const audiences = scopedPhrases
     .flatMap((scope) => [...scope[1].matchAll(SAFETY_AUDIENCE_MEMBER_RE)]);
   return new Set(audiences.map((match) => {
-    if (/^(?:dogs?|puppy)$/i.test(match[1])) return 'dog';
+    if (/^(?:dogs?|pupp(?:y|ies))$/i.test(match[1])) return 'dog';
     if (/^(?:cats?|kittens?)$/i.test(match[1])) return 'cat';
     if (/^pets?$/i.test(match[1])) return 'pet';
     if (/^animals?$/i.test(match[1])) return 'animal';
@@ -88,13 +88,35 @@ function safetyBrandMentionMembers(text) {
     ? parts : [text];
 }
 
-function safetyProductScope(text) {
+// A caller's full utterance can carry a product mention outside the
+// selected safety question ("The spray is scheduled tomorrow. Is the bait
+// safe?"); scan only that selected interrogative span so the unrelated
+// sentence's product never widens the required scope. Declarative
+// claim/refusal text (no recognized question in it) is scanned in full,
+// exactly as before.
+function safetyProductScopeSource(text) {
+  const latest = latestInterrogativeSpan(text);
+  return latest ? latest.text : text;
+}
+
+// options.productNames carries the calling visit's live product identities
+// (see dynamicIdentityFor in voice-relay-safety-response-recognition) so a
+// product created or renamed after the checked-in fixture was regenerated
+// still scopes correctly; omit it (the default) for the static-only
+// grammar every existing caller already relies on.
+function safetyProductScope(text, options = {}) {
+  const source = safetyProductScopeSource(text);
   const scopes = new Set(SAFETY_SPECIFIC_PRODUCT_SCOPES
-    .filter(([, pattern]) => pattern.test(text))
+    .filter(([, pattern]) => pattern.test(source))
     .map(([scope]) => scope));
-  for (const match of text.matchAll(new RegExp(SAFETY_BRAND_MENTION_RE.source, 'g'))) {
-    for (const member of safetyBrandMentionMembers(match[0])) {
-      scopes.add(`brand:${member.toLowerCase().replace(/\s+/g, ' ')}`);
+  const dynamicIdentity = dynamicIdentityFor(options.productNames);
+  const brandPatterns = dynamicIdentity
+    ? [SAFETY_BRAND_MENTION_RE, dynamicIdentity.brandMentionRe] : [SAFETY_BRAND_MENTION_RE];
+  for (const brandPattern of brandPatterns) {
+    for (const match of source.matchAll(new RegExp(brandPattern.source, 'g'))) {
+      for (const member of safetyBrandMentionMembers(match[0])) {
+        scopes.add(`brand:${member.toLowerCase().replace(/\s+/g, ' ')}`);
+      }
     }
   }
   return scopes;
@@ -145,7 +167,10 @@ function safetyGuaranteeIsInterrogative(text, match) {
   const prefix = text.slice(evidence.clause.index, match.index);
   const context = text.slice(evidence.clause.index, match.index + match[0].length);
   const assertionTag = !prefix.trim() && SAFETY_ASSERTION_TAG_RE.test(text.slice(evidence.end, evidence.clause.end));
-  return (text[evidence.clause.end] === '?' && (QUESTION_LEAD_RE.test(context) || (!prefix.trim() && !assertionTag)))
+  // A coordinated candidate ("safe and the spray") can end its clause
+  // before the sentence's own terminator; the enclosing sentence bound is
+  // what actually carries the question mark for an auxiliary-led question.
+  return (text[evidence.sentence.end] === '?' && (QUESTION_LEAD_RE.test(context) || (!prefix.trim() && !assertionTag)))
     || SAFETY_EMBEDDED_QUESTION_RE.test(prefix);
 }
 
@@ -219,6 +244,11 @@ const TECHNICIAN_DRY_TIMING_RE = new RegExp(
   'gi',
 );
 const TECHNICIAN_EXPLICIT_DRY_TIMING_RE = /\b(?:drying(?: time)?|re-?entry(?: time| timing)?|when\b[^.!?;]{0,16}\bdry)\s*$/i;
+// A named fixed interval ("dries in 30 minutes", "safe after two hours",
+// "re-enter in 4 hours") is a banned specific figure even when it rides
+// alongside the sanctioned "safe once dry" idiom; it must defeat the
+// exemption rather than hide behind it.
+const SAFETY_FIXED_DRYING_FIGURE_RE = /\b(?:dr(?:y|ies|ying)|re-?enter(?:s|ing)?|re-?entry|safe|ready)\b[^.!?;]{0,30}?\b(?:in|after|within)\s+(?:about\s+)?(?:\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty|forty(?:-five)?|fifty|sixty)\s*(?:minutes?|mins?|hours?|hrs?)\b/i;
 const TECHNICIAN_VISIT_TIMING_RE = /\b(?:appointment|arrival|schedule|scheduling)\s+(?:time|timing)\b|\btiming\s+(?:for|of)\s+(?:(?:the|your|our)\s+)?(?:appointment|arrival|schedule)\b/i;
 const SAFETY_COORDINATED_DRYING_WITHDRAWAL_RE = /^\s*,?\s*(?:and|or|but)\s+(?:even\s+)?(?:before\s+(?:it|they)\s+(?:dr(?:y|ies)|(?:is|are)\s+dry)|(?:while|when)\s+(?:(?:it|they)\s+(?:is|are)\s+)?wet)\b(?=\s*(?:[.!?;,]|$))/i;
 
@@ -245,7 +275,25 @@ function safetyTimingAudienceCovers(claimText, timingText) {
     || safetyAudienceCovers(positiveTimingText, claimText);
 }
 
-function safetyOnceDryQualifies(text, claim, questionText = null, antecedentText = '') {
+// The exemption only ever covers a dry-state condition. A question about a
+// different circumstance -- an unrelated domain such as ingestion, or the
+// explicitly opposite wet state -- is never qualified by "once dry", even
+// once its audience and product both match.
+function safetyOnceDryCoversQuestion(claim, drying, questionText, fullClaimClause, options) {
+  return safetyAudienceCovers(`${claim[0]}${drying[0]}`, questionText)
+    && safetyProductCovers(fullClaimClause, questionText, options)
+    && safetyDryingCoversCircumstances(questionText)
+    && !safetyCircumstanceScopes(questionText).some((circumstance) => /\bwet\b/i.test(circumstance));
+}
+
+// What follows the drying claim can still defeat the exemption: an explicit
+// wet-state withdrawal, or a banned fixed drying/re-entry figure hiding
+// behind the otherwise-approved idiom.
+function safetyOnceDryWithdrawnBy(dryingSuffix) {
+  return SAFETY_COORDINATED_DRYING_WITHDRAWAL_RE.test(dryingSuffix) || SAFETY_FIXED_DRYING_FIGURE_RE.test(dryingSuffix);
+}
+
+function safetyOnceDryQualifies(text, claim, questionText = null, antecedentText = '', options = {}) {
   const evidence = localCandidateEvidence(text, 'drying-claim', claim.index, claim.index + claim[0].length);
   const claimClause = text.slice(evidence.clause.index, claim.index + claim[0].length);
   const fullClaimClause = safetyPropositionText(text, claim.index);
@@ -260,16 +308,15 @@ function safetyOnceDryQualifies(text, claim, questionText = null, antecedentText
     || PET_SPECULATIVE_GUIDANCE_RE.test(claimClause)
     || clauseIsEpistemicallyHedged(claimClause)) return false;
   const drying = SAFETY_ONCE_DRY_AFTER_RE.exec(text.slice(claim.index + claim[0].length));
-  if (!drying || (questionText !== null
-    && (!safetyAudienceCovers(`${claim[0]}${drying[0]}`, questionText)
-      || !safetyProductCovers(fullClaimClause, questionText)))) return false;
+  if (!drying
+    || (questionText !== null && !safetyOnceDryCoversQuestion(claim, drying, questionText, fullClaimClause, options))) return false;
   const dryingSuffix = text.slice(claim.index + claim[0].length + drying[0].length);
-  if (SAFETY_COORDINATED_DRYING_WITHDRAWAL_RE.test(dryingSuffix)) return false;
+  if (safetyOnceDryWithdrawnBy(dryingSuffix)) return false;
   const precedingClaimText = text.slice(0, claim.index);
-  const precedingProductText = safetyProductScope(precedingClaimText).size
+  const precedingProductText = safetyProductScope(precedingClaimText, options).size
     ? precedingClaimText : antecedentText;
   const claimedProductText = questionText === null
-    ? `${fullClaimClause} ${claim[0]}${drying[0]} ${safetyProductScope(fullClaimClause).size ? '' : precedingProductText}`
+    ? `${fullClaimClause} ${claim[0]}${drying[0]} ${safetyProductScope(fullClaimClause, options).size ? '' : precedingProductText}`
     : `${fullClaimClause} ${questionText}`;
   return [...text.matchAll(TECHNICIAN_DRY_TIMING_RE)].some((match) => {
     const timingEvidence = localCandidateEvidence(text, 'drying-timing', match.index, match.index + match[0].length);
@@ -286,7 +333,7 @@ function safetyOnceDryQualifies(text, claim, questionText = null, antecedentText
       && (!PET_TRAILING_CONDITION_RE.test(suffix) || PET_INDEPENDENT_CONDITIONAL_ACTION_RE.test(suffix))
       && !TECHNICIAN_DRY_TIMING_ALTERNATIVE_RE.test(suffix)
       && !TECHNICIAN_DRY_TIMING_OBJECT_NEGATION_RE.test(suffix)
-      && safetyProductDetailCovers(claimedProductText, `${timingClaim} ${productRestriction?.[0] || ''}`)
+      && safetyProductDetailCovers(claimedProductText, `${timingClaim} ${productRestriction?.[0] || ''}`, options)
       && safetyTimingAudienceCovers(claimedProductText, timingScope)
       && !safetyAudienceExcluded(claimedProductText, timingScope)
       && !PET_SPECULATIVE_GUIDANCE_RE.test(claim)
@@ -307,8 +354,15 @@ const safetyClauseContinues = (before, after, boundary) => SAFETY_CLAUSE_CONTINU
 const SAFETY_DRYING_CONDITION_WITHDRAWAL_RE = /\b(?:even\s+)?(?:before\s+(?:(?:it|they)\s+(?:dr(?:y|ies)|(?:is|are)\s+dry)|drying)|(?:if|while|when)\s+(?:(?:it|they)\s+(?:is|are)\s+|still\s+)?wet)\b/i;
 const SAFETY_REFERENTIAL_DRYING_WITHDRAWAL_RE = /\b(?:that|this|it)\s+(?:also\s+)?(?:applies|holds|is true)\s+(?:even\s+)?(?:before\s+(?:(?:it|they)\s+(?:dr(?:y|ies)|(?:is|are)\s+dry)|drying)|(?:if|while|when)\s+(?:(?:it|they)\s+(?:is|are)\s+|still\s+)?wet)\b/i;
 
+// A direct harm verb ("will harm dogs") reads as an affirmative harm claim
+// with any named subject, not only a pronoun -- a refusal to confirm harm
+// to a named product ("the bait will harm dogs") leaves the same preceding
+// "Yes" unretracted as a pronoun subject would. The adjective branch must
+// not fire on its own negation ("is not harmful" denies harm -- the same
+// polarity as an ordinary safety refusal, not a harm claim to except out).
 const SAFETY_REFUSED_AFFIRMATIVE_HARM_RE = new RegExp(
-  `\\b${SAFETY_NON_PREFIX}(?:${HARM_ADJECTIVE})\\b|\\b(?:it|this|that|they|these|those)\\s+(?:(?:will|would|can|could|may|might|does|do|did)\\s+|is going to\\s+)(?:hurt|harm|bother|affect|poison)\\b`
+  `\\b${SAFETY_NON_PREFIX}(?<!\\bnot\\s)(?:${HARM_ADJECTIVE})\\b`
+  + `|\\b(?:it|this|that|they|these|those|${SAFETY_SUBJECT_WITH_PRODUCT}|${SAFETY_BRAND_SUBJECT})\\s+(?:(?:will|would|can|could|may|might|does|do|did)\\s+|is going to\\s+)(?:hurt|harm|bother|affect|poison)\\b`
   + `|\\b(?:not|never|no longer|(?:is|are)n['’]t)\\s+${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b`,
   'i',
 );
@@ -350,9 +404,9 @@ function safetyAudienceExcluded(claimText, detailText) {
     });
 }
 
-function safetyProductCovers(claimText, questionText) {
-  const questionedProducts = safetyProductScope(questionText);
-  const claimedProducts = safetyProductScope(claimText);
+function safetyProductCovers(claimText, questionText, options = {}) {
+  const questionedProducts = safetyProductScope(questionText, options);
+  const claimedProducts = safetyProductScope(claimText, options);
   // A generic product scope covers the whole class, not an absent subject.
   // A named subset cannot qualify an assurance about that broader class.
   if (!questionedProducts.size && SAFETY_GENERIC_PRODUCT_RE.test(questionText)
@@ -364,23 +418,23 @@ function safetyProductCovers(claimText, questionText) {
 const SAFETY_PRODUCT_EXCLUSION_RE = /\b(?:not(?!\s+only\b)|except(?:\s+for)?|excluding)\b[^,.!?;—–]*/gi;
 const SAFETY_GENERIC_PRODUCT_RE = /\b(?:pesticides?|products?|treatments?|chemicals?)\b/i;
 
-function safetyProductDetailCovers(claimText, detailText) {
-  const claimedProducts = safetyProductScope(claimText);
-  const mentionedProducts = safetyProductScope(detailText);
+function safetyProductDetailCovers(claimText, detailText, options = {}) {
+  const claimedProducts = safetyProductScope(claimText, options);
+  const mentionedProducts = safetyProductScope(detailText, options);
   if ([...detailText.matchAll(SAFETY_PRODUCT_EXCLUSION_RE)]
     .some((exclusion) => SAFETY_GENERIC_PRODUCT_RE.test(exclusion[0]))) return false;
   if (!mentionedProducts.size) return true;
   if (!claimedProducts.size && SAFETY_GENERIC_PRODUCT_RE.test(claimText)) return false;
   for (const exclusion of detailText.matchAll(SAFETY_PRODUCT_EXCLUSION_RE)) {
-    for (const product of safetyProductScope(exclusion[0])) mentionedProducts.delete(product);
+    for (const product of safetyProductScope(exclusion[0], options)) mentionedProducts.delete(product);
   }
   return [...claimedProducts].every((product) => mentionedProducts.has(product));
 }
 
-function safetyProductExcludedFromRefusal(questionText, refusal) {
-  const questionedProducts = safetyProductScope(questionText);
+function safetyProductExcludedFromRefusal(questionText, refusal, options = {}) {
+  const questionedProducts = safetyProductScope(questionText, options);
   return [...refusal.matchAll(SAFETY_PRODUCT_EXCLUSION_RE)]
-    .some((exclusion) => [...safetyProductScope(exclusion[0])]
+    .some((exclusion) => [...safetyProductScope(exclusion[0], options)]
       .some((product) => questionedProducts.has(product)));
 }
 
@@ -410,7 +464,7 @@ function safetyDryingCoversCircumstances(propositionText) {
   });
 }
 
-function refusesSafetyGuarantee(text, questionText, afterIndex = -1) {
+function refusesSafetyGuarantee(text, questionText, afterIndex = -1, options = {}) {
   const refusals = safetyExemptSpans(text).flatMap(([start, end]) => {
     if (start <= afterIndex) return [];
     const refusalEvidence = localCandidateEvidence(text, 'refused-scope', start, end);
@@ -428,12 +482,12 @@ function refusesSafetyGuarantee(text, questionText, afterIndex = -1) {
       || !safetyAudienceCovers(refusal, questionText)
       || safetyAudienceExcluded(questionText, refusal)
       || !safetyRefusalCoversCircumstances(questionText, refusal, refusalEvidence, text)
-      || safetyProductExcludedFromRefusal(questionText, refusal)) return [];
+      || safetyProductExcludedFromRefusal(questionText, refusal, options)) return [];
     return [refusal];
   });
   if (!refusals.length) return false;
-  return refusals.some((refusal) => !safetyProductScope(refusal).size)
-    || safetyProductCovers(refusals.join(' '), questionText);
+  return refusals.some((refusal) => !safetyProductScope(refusal, options).size)
+    || safetyProductCovers(refusals.join(' '), questionText, options);
 }
 
 const PET_SPECULATIVE_GUIDANCE_RE = /\b(?:might|may|could|would|should|maybe|perhaps|possibly|potentially|think|believe|hope[sd]?|refuse[sd]?|decline[sd]?|failed|unable)\b/i;
