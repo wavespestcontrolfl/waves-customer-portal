@@ -53,6 +53,17 @@ async function isRecruitingPhone(phone, database = require('../models/db')) {
   const { excludeUnresolvedSendReservations } = require('../services/messaging/review-ask-reservation');
   const variants = phoneMatchDigits(String(phone || ''));
   if (!variants.length) return false;
+  // DURABLE evidence first (local audit P0): an application on this phone
+  // whose ledger holds an SMS attempt (handoff/sent/uncertain/deferred) —
+  // written BEFORE any provider call — makes the phone recruiting context
+  // even when the best-effort sms_log row never landed.
+  const ledger = await database('job_applications')
+    .whereRaw("regexp_replace(COALESCE(contact_snapshot->>'phone', ''), '[^0-9]', '', 'g') = ANY (?::text[])", [variants])
+    .whereRaw(`jsonb_path_exists(COALESCE(comms_history, '[]'::jsonb), '$[*] ? (@.channel == "sms" && (@.outcome == "handoff" || @.outcome == "sent" || @.outcome == "uncertain" || @.outcome == "deferred"))')`)
+    .first('id');
+  if (ledger) return true;
+  // Provider-log evidence second (covers inbound-only history, e.g. an
+  // applicant reply that arrived before any outbound).
   const row = await excludeUnresolvedSendReservations(database('sms_log'))
     .where('message_type', 'like', `${RECRUITING_MESSAGE_TYPE_PREFIX}%`)
     .whereRaw(

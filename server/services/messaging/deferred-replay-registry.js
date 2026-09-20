@@ -635,6 +635,13 @@ const REGISTRY = {
     // at those checks never leaves 'handoff' evidence, while an ambiguous
     // or timed-out provider result still does.
     async smsHandoff(meta, dispatch) {
+      // Re-validate eligibility at the provider boundary itself (local audit
+      // P1): the recheck ran earlier in the claim; the application can have
+      // closed / rebooked / been superseded in between.
+      const again = await REGISTRY.recruiting_comms_deferred.recheck(meta);
+      if (!again || again.eligible === false) {
+        return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'RECRUITING_STALE_AT_HANDOFF', reason: (again && again.reason) || 'ineligible' };
+      }
       if (meta.job_application_id && meta.ledger_entry_id) {
         const { reconcileCommsHistoryEntryByOutcome } = require('../recruiting-comms');
         await reconcileCommsHistoryEntryByOutcome(meta.job_application_id, meta.ledger_entry_id, {

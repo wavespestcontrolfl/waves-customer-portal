@@ -53,30 +53,34 @@ describe('hideRecruitingThreadsFromNonAdmin (message-level)', () => {
 });
 
 describe('isRecruitingPhone', () => {
-  function fakeDatabase(row) {
-    const q = {};
-    ['where', 'whereRaw', 'whereNot', 'whereNotIn', 'andWhere', 'whereNull', 'orWhere', 'orWhereNull', 'modify'].forEach((m) => { q[m] = jest.fn(() => q); });
-    q.first = jest.fn(async () => row);
-    const database = jest.fn(() => q);
-    database.q = q;
+  function fakeDatabase({ ledgerRow = null, smsRow = null } = {}) {
+    const make = (row) => {
+      const q = {};
+      ['where', 'whereRaw', 'whereNot', 'whereNotIn', 'andWhere', 'whereNull', 'orWhere', 'orWhereNull', 'modify'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.first = jest.fn(async () => row);
+      return q;
+    };
+    const qs = { job_applications: make(ledgerRow), sms_log: make(smsRow) };
+    const database = jest.fn((table) => qs[table]);
+    database.qs = qs;
     return database;
   }
 
-  test('true when any job_* sms_log row involves the phone (either direction)', async () => {
-    const database = fakeDatabase({ id: 'x' });
+  test('durable ledger evidence (an application on the phone with an SMS attempt) decides first', async () => {
+    const database = fakeDatabase({ ledgerRow: { id: 'app-1' } });
     await expect(isRecruitingPhone('(941) 555-0142', database)).resolves.toBe(true);
-    expect(database).toHaveBeenCalledWith('sms_log');
-    expect(database.q.where).toHaveBeenCalledWith('message_type', 'like', 'job_%');
-    // the first whereRaw is the shared unresolved-reservation filter; the phone predicate follows
-    const [sql, bindings] = database.q.whereRaw.mock.calls.find((c) => /to_phone/.test(c[0]));
-    expect(sql).toMatch(/to_phone/);
-    expect(sql).toMatch(/from_phone/);
-    expect(bindings).toEqual([['19415550142', '9415550142'], ['19415550142', '9415550142']]);
+    expect(database).toHaveBeenCalledWith('job_applications');
+    expect(database).not.toHaveBeenCalledWith('sms_log');
+    const [sql, bindings] = database.qs.job_applications.whereRaw.mock.calls[0];
+    expect(sql).toMatch(/contact_snapshot->>'phone'/);
+    expect(bindings).toEqual([['19415550142', '9415550142']]);
+    expect(database.qs.job_applications.whereRaw.mock.calls[1][0]).toMatch(/jsonb_path_exists/);
   });
 
-  test('false with no such row, and false without a query for an unparseable phone', async () => {
-    await expect(isRecruitingPhone('+19415550142', fakeDatabase(null))).resolves.toBe(false);
-    const database = fakeDatabase({ id: 'x' });
+  test('falls back to a job_* sms_log row (either direction); false with neither; no query for an unparseable phone', async () => {
+    await expect(isRecruitingPhone('+19415550142', fakeDatabase({ smsRow: { id: 'x' } }))).resolves.toBe(true);
+    await expect(isRecruitingPhone('+19415550142', fakeDatabase())).resolves.toBe(false);
+    const database = fakeDatabase({ ledgerRow: { id: 'x' } });
     await expect(isRecruitingPhone('nope', database)).resolves.toBe(false);
     expect(database).not.toHaveBeenCalled();
   });

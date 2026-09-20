@@ -2192,7 +2192,8 @@ a thread shared with an applicant stay visible —
 applicant rows (`audience='applicant'`) out of the compliance export, and
 refuses (403) a non-admin `POST /api/admin/communications/ai-draft` for a
 phone that has ever been party to a recruiting text
-(`isRecruitingPhone`) before any history for that phone is loaded. An
+(`isRecruitingPhone` — durable applicant-ledger evidence first, the
+provider log second) before any history for that phone is loaded. An
 OWNER texting an applicant from a shared surface — the dashboard inbox
 reply on a `job_applicant_reply` row, or the Communications composer to
 a recruiting phone — rides the recruiting rail (`sendOwnerReply`: purpose
@@ -2212,8 +2213,10 @@ services/scheduler.js under the applicant policy through the
 `recruiting_comms_deferred` deferred-replay registry entry — the recheck
 fails closed on the gate, a missing/closed application, a changed token
 or a rebooked time/mode (the ledger entry moves to `handoff` only in the
-locked provider handoff, after the fresh suppression/consent checks pass —
-never at recheck), and on a NEWER attempt of the same stage in the
+locked provider handoff, after the fresh suppression/consent checks pass
+and after the eligibility recheck is run AGAIN at that boundary — a stale
+application answers `RECRUITING_STALE_AT_HANDOFF` with no provider call;
+never at the claim-time recheck), and on a NEWER attempt of the same stage in the
 ledger (a resend supersedes a queued invite even after the worker claimed
 it); the recheck marks the queued entry `handoff`
 before dispatch, finalize marks it `sent`, and a terminal block never

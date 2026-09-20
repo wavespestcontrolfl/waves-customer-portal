@@ -1147,6 +1147,17 @@ describe('recruiting_comms_deferred (PR #4623)', () => {
     spy.mockRestore();
   });
 
+  test('the locked handoff refuses (no provider call) when the application went stale between claim and provider', async () => {
+    const gatesSpy = jest.spyOn(gates, 'isEnabled').mockImplementation(() => true);
+    const { deferredSmsHandoff } = require('../services/messaging/deferred-replay-registry');
+    const handoff = deferredSmsHandoff(ENTRY, meta);
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'withdrawn', interview_token: 'a'.repeat(64) }));
+    const dispatch = jest.fn(async () => ({ sent: true }));
+    await expect(handoff(dispatch)).resolves.toMatchObject({ sent: false, blocked: true, code: 'RECRUITING_STALE_AT_HANDOFF' });
+    expect(dispatch).not.toHaveBeenCalled();
+    gatesSpy.mockRestore();
+  });
+
   test('a newer attempt of the same stage in the ledger supersedes this queued invite (even if already claimed)', async () => {
     const spy = jest.spyOn(gates, 'isEnabled').mockImplementation(() => true);
     const history = [
@@ -1177,6 +1188,8 @@ describe('recruiting_comms_deferred (PR #4623)', () => {
     const order = [];
     spy.mockImplementation(async () => { order.push('stamp'); });
     const dispatch = jest.fn(async () => { order.push('dispatch'); return { sent: true }; });
+    // the handoff re-validates at the boundary: a still-eligible interview application
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'interview', interview_token: 'a'.repeat(64), comms_history: [] }));
     await expect(handoff(dispatch)).resolves.toEqual({ sent: true });
     expect(spy).toHaveBeenCalledWith('app-1', 'e-1', { deferred: expect.objectContaining({ outcome: 'handoff' }) });
     expect(order).toEqual(['stamp', 'dispatch']);
