@@ -372,12 +372,20 @@ router.post('/sms', async (req, res) => {
     // off can still reply for the evidence window, and those replies must
     // keep classifying from stored evidence. A database with no recruiting
     // tables at all answers "not a recruiting reply" (see the matcher).
-    // A standalone compliance command (STOP / START / HELP) is never an
-    // applicant reply to route and must never wait on this lookup: it
-    // skips classification entirely so a recruiting-store outage can never
-    // delay a suppression write (Codex r10 P1).
+    // A standalone compliance command (STOP / START / HELP) must never WAIT
+    // on this lookup: a recruiting-store outage can never delay a
+    // suppression write (Codex r10 P1). It is still classified best-effort
+    // (Codex r22 P2) so the persisted row carries the recruiting type and
+    // stays out of technician-visible readers — a lookup failure simply
+    // leaves it untyped and the compliance action proceeds.
     const complianceCommand = Boolean(detectSmsOptCommand(Body || '').action);
     let recruitingReply = null;
+    if (complianceCommand) {
+      recruitingReply = await require('../services/recruiting-inbound').matchApplicantReply(From, To).catch((e) => {
+        logger.warn(`[recruiting-inbound] match failed on a compliance command (${e.name || 'Error'}${e.code ? ` ${e.code}` : ''}) — proceeding untyped`);
+        return null;
+      });
+    }
     try {
       if (!complianceCommand) {
         recruitingReply = await require('../services/recruiting-inbound').matchApplicantReply(From, To);

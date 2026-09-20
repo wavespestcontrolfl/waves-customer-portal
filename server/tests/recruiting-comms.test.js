@@ -701,6 +701,18 @@ describe('sendStageComms — invite supersedes queued invites; suppression looku
     expect(history.find((e) => e.id === 'old-entry')).toMatchObject({ outcome: 'blocked', code: 'superseded_by_newer_queue' });
   });
 
+  test('a gate-suppressed send (sent:true + deliveryOutcome not_sent) is NOT delivery: blocked, no handoff evidence, queued invites untouched (Codex r22 P1)', async () => {
+    mockRenderSmsTemplate.mockResolvedValue('Pick a time: https://x/careers/interview/a');
+    mockSendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, suppressed: true, deliveryOutcome: 'not_sent', code: 'TEMPLATE_DISABLED' });
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    mockDb.__tables.sms_log = [{ id: 'q1', status: 'scheduled', message_type: 'job_interview_invite', created_at: new Date(Date.now() - 3600000), metadata: JSON.stringify({ job_application_id: 'app-1' }) }];
+    const result = await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: true, email: false, by: 'tech-1' });
+    expect(result.sms).toBe('blocked');
+    expect(mockDb.__tables.job_applications.find((r) => r.id === 'app-1').comms_history[0]).toMatchObject({ outcome: 'blocked', code: 'TEMPLATE_DISABLED' });
+    expect(mockDb.__tables.sms_log.find((r) => r.id === 'q1').status).toBe('scheduled');
+  });
+
   test('a sent interview invite retires invites still queued for the same application', async () => {
     mockRenderSmsTemplate.mockResolvedValue('Pick a time: https://x/careers/interview/a');
     mockSendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, deliveryOutcome: 'accepted' });
@@ -788,6 +800,25 @@ describe('eligibility at the provider boundaries', () => {
     expect(mockSendOne).not.toHaveBeenCalled();
     expect(seenConns[seenConns.length - 1]).toBe(mockDb); // the held transaction
     expect(mockDb.__tables.email_messages[0]).toMatchObject({ status: 'failed', error_message: expect.stringMatching(/stale/) });
+  });
+
+  test('email: a suppression that lands after the pre-provider gate is caught under the address lock right before SendGrid (Codex r22 P1)', async () => {
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    mockDb.__tables.email_messages = [];
+    mockSendOne.mockClear();
+    mockDb.raw.mockClear();
+    mockActiveSuppressionFor
+      .mockResolvedValueOnce(null)                                   // pre-provider gate: clean
+      .mockResolvedValueOnce({ suppression_type: 'bounce', group_key: null }); // locked re-read: the webhook just wrote a bounce
+    const result = await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: false, email: true, by: 'tech-1' });
+    expect(result.email).toBe('blocked');
+    expect(mockSendOne).not.toHaveBeenCalled();
+    // the address key was taken inside the handoff transaction
+    expect(mockDb.raw.mock.calls.some((c) => /pg_advisory_xact_lock/.test(c[0]) && /customer-email:jane@example.com/.test(String(c[1])))).toBe(true);
+    // the re-read went through the held transaction
+    expect(mockActiveSuppressionFor.mock.calls[1][3]).toBe(mockDb);
+    expect(mockDb.__tables.email_messages[0]).toMatchObject({ status: 'blocked' });
   });
 
   test('email: SendGrid acceptance survives a failed ledger settlement / rejected commit — never reported as failed (Codex r21 P2)', async () => {

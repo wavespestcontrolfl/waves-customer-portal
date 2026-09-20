@@ -529,6 +529,11 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated) {
 
   const confirmStage = async () => {
     if (!stageDialog || !detail) return;
+    // The submission is bound to THIS applicant (Codex r19 P2 / r22 P2): if
+    // the detail switches while the PATCH is in flight, neither its response
+    // nor its failure may touch the new applicant's dialog or busy state.
+    const submittedFor = detail.id;
+    const seq = ++submitSeq.current;
     setBusy(true);
     setStageError(null);
     try {
@@ -548,11 +553,6 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated) {
           email_body: emailBody,
         };
       }
-      // The submission is bound to THIS applicant (Codex r19 P2): if the
-      // detail switches while the PATCH is in flight, the response must not
-      // replace the new applicant's detail or record the old send result.
-      const submittedFor = detail.id;
-      const seq = ++submitSeq.current;
       const data = await adminFetch(`/admin/careers/${submittedFor}/status`, {
         method: "PATCH",
         body: JSON.stringify(body),
@@ -563,9 +563,9 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated) {
       setNote("");
       await load(tab);
     } catch (err) {
-      setStageError(err.message);
+      if (seq === submitSeq.current) setStageError(err.message);
     } finally {
-      setBusy(false);
+      if (seq === submitSeq.current) setBusy(false);
     }
   };
 
@@ -576,6 +576,7 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated) {
   const resetForNewApplicant = useCallback(() => {
     previewSeq.current += 1;
     submitSeq.current += 1; // any in-flight stage PATCH now belongs to the previous applicant
+    setBusy(false);
     setStageDialog(null);
     setPreview(null);
     setPreviewLoading(false);

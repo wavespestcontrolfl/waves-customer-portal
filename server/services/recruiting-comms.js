@@ -23,6 +23,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { loadSuppressionState } = require('./messaging/validators/suppression');
 const { activeSuppressionFor } = require('./email-template-library');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+const { lockCustomerEmail } = require('../utils/customer-comms-lock');
 const sendgrid = require('./sendgrid-mail');
 const { isEnabled } = require('../config/feature-gates');
 const { portalUrl } = require('../utils/portal-url');
@@ -399,6 +400,22 @@ async function sendEmailToProvider({ app, stage, to, subject, html, text, templa
         }, trx);
         return { outcome: 'stale', code: 'recruiting_stale' };
       }
+      // The address's shared suppression lock (the SendGrid webhook takes the
+      // same key before writing a bounce/complaint/unsubscribe), then the
+      // suppression ledger re-read through this transaction right before the
+      // request (Codex r22 P1): a suppression landing after the pre-provider
+      // gate can no longer be overtaken by this send. Row lock → address key
+      // is the established order.
+      await lockCustomerEmail(trx, to);
+      const suppression = await activeSuppressionFor(RECRUITING_SUPPRESSION_TEMPLATE, to, RECRUITING_SUPPRESSION_GROUP_KEY, trx);
+      if (suppression) {
+        await settleEmailRow(messageRow, sendAttemptToken, {
+          status: 'blocked',
+          error_message: `Suppressed: ${suppression.suppression_type}${suppression.group_key ? ` (${suppression.group_key})` : ''}`.slice(0, 500),
+        }, trx);
+        logger.info(`[recruiting-comms] email blocked by suppression at the handoff (application ${app.id}, stage ${stage})`);
+        return { outcome: 'blocked', code: 'email_suppressed' };
+      }
       provider = await dispatchEmailToProvider({ app, stage, to, subject, html, text, templateKey, messageRow, sendAttemptToken });
       return null;
     });
@@ -728,18 +745,24 @@ function substituteInterviewLinkPlaceholder(body, interviewUrl) {
 // so) is proof nothing was sent — never 'uncertain' (Codex r12 P1).
 function classifySmsThrow(err) {
   const po = err && err.providerOutcome && typeof err.providerOutcome === 'object' ? err.providerOutcome : null;
+  // A definite non-delivery is checked FIRST (Codex r22 P1): the provider
+  // adapter can answer sent:true together with deliveryOutcome 'not_sent'
+  // (a disabled template / SMS gate suppressed the send) — nothing left.
+  if (po && po.deliveryOutcome === 'not_sent') {
+    return { ...po, sent: false, blocked: Boolean(po.blocked || po.suppressed), deliveryOutcome: 'not_sent', code: po.code || `threw_pre_provider:${errorSummary(err)}` };
+  }
   if (po && (po.sent === true || po.deliveryOutcome === 'accepted' || po.deliveryOutcome === 'sent')) {
     return { ...po, sent: true, blocked: false, code: po.code || `threw_after_accept:${errorSummary(err)}` };
-  }
-  if (po && po.deliveryOutcome === 'not_sent') {
-    return { ...po, sent: false, blocked: Boolean(po.blocked), deliveryOutcome: 'not_sent', code: po.code || `threw_pre_provider:${errorSummary(err)}` };
   }
   return { ...(po || {}), sent: false, blocked: false, deliveryOutcome: 'uncertain', code: (po && po.code) || `threw:${errorSummary(err)}` };
 }
 
 // sendCustomerMessage's result (or classifySmsThrow's synthesized stand-in)
-// into one of the leg's outcome strings.
+// into one of the leg's outcome strings. The definitive 'not_sent' outranks
+// the sent flag (Codex r22 P1): a gate-suppressed send reports sent:true
+// with deliveryOutcome 'not_sent', and that is not delivery evidence.
 function classifySmsOutcome(sendRes) {
+  if (sendRes.deliveryOutcome === 'not_sent') return (sendRes.blocked || sendRes.suppressed) ? 'blocked' : 'failed';
   if (sendRes.sent) return 'sent';
   if (sendRes.blocked) return 'blocked';
   if (sendRes.deliveryOutcome === 'uncertain') return 'uncertain';
@@ -903,14 +926,14 @@ async function runSmsDelivery({ app, stage, opts, contact, applicantFromNumber, 
   }
 
   let outcome = classifySmsOutcome(sendRes);
-  if (sendRes.sent) await retireQueuedInterviewInvites(app, stage);
+  if (outcome === 'sent') await retireQueuedInterviewInvites(app, stage);
 
   let deferredLedgerDone = false;
   // Queue ONLY a text proven not sent (a validator hold such as the send
   // window). A provider timeout / 5xx after the boundary is 'uncertain' even
   // when the pipeline marks it retryable: the applicant may already hold it,
   // so it keeps its handoff evidence and is never replayed (Codex r15 P1).
-  if (!sendRes.sent && sendRes.deliveryOutcome === 'not_sent' && sendRes.retryable && sendRes.nextAllowedAt) {
+  if (outcome !== 'sent' && sendRes.deliveryOutcome === 'not_sent' && sendRes.retryable && sendRes.nextAllowedAt) {
     const queued = await queueDeferredSms({ app, stage, contact, body, applicantFromNumber, handoffEntry, sendRes });
     // 'deferred' = queued (ledger settled in the same transaction);
     // 'superseded' = an overlapping queued invite already owns the send

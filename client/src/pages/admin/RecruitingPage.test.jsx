@@ -139,14 +139,18 @@ describe('RecruitingPage — stage change dialog', () => {
     // the detail switches to applicant B while A's PATCH is still pending
     fireEvent.click(screen.getAllByText('Casey Kim')[0]);
     await screen.findByText(/Casey Kim — /); // B's detail title
-    // A's response finally lands
-    releasePatch(apiResponse({ application: detailFixture({ status: 'interview' }), sent: { sms: 'sent', email: 'sent' } }));
+    // A's request finally FAILS (Codex r22 P2): its error must not surface in B's context
+    releasePatch({ ok: false, status: 500, json: vi.fn(async () => ({ error: 'Stage change failed for applicant A' })) });
     await new Promise((r) => setTimeout(r, 0));
     await new Promise((r) => setTimeout(r, 0));
-    // B is still the open detail; A's detail/send result never rendered over it
+    // B is still the open detail; A's failure never rendered over it
     expect(screen.getByText(/Casey Kim — /)).toBeInTheDocument();
     expect(screen.queryByText(/Jordan Lee — /)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Stage change failed for applicant A/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Text sent/)).not.toBeInTheDocument();
+    // B's own stage workflow is usable (busy was reset on the switch)
+    fireEvent.click(await screen.findByRole('button', { name: 'Interview' }));
+    expect(await screen.findByRole('heading', { name: 'Move to Interview' })).toBeInTheDocument();
   });
 
   it('closes and clears the stage dialog when the detail switches to another applicant while it is open', async () => {
