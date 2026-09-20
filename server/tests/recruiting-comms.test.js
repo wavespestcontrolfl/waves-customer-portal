@@ -26,6 +26,7 @@ const mockSendOne = jest.fn(async () => ({ messageId: 'sg-1' }));
 // Real DEFINITE_REJECTION_STATUSES semantics (sendgrid-mail.js) — a definite
 // 4xx rejection is the only class that keeps a send 'failed'; everything
 // else (no status, or a status outside this set) is ambiguous.
+jest.mock('../services/twilio', () => ({ deriveOutboundNumber: jest.fn(async () => '+19415550199') }));
 jest.mock('../services/sendgrid-mail', () => ({
   sendOne: (...args) => mockSendOne(...args),
   isDefiniteRejection: (err) => new Set([400, 401, 403, 404, 405, 413, 415, 422, 429]).has(Number(err && err.status)),
@@ -469,7 +470,9 @@ describe('sendStageComms pre-handoff evidence', () => {
     expect(result.sms).toBe('sent');
     expect(seenAtHandoff).toEqual(['handoff']);
     // durable routing evidence rides the handoff entry
-    expect(mockDb.__tables.job_applications.find((r) => r.id === 'app-1').comms_history[0]).toHaveProperty('from_number');
+    expect(mockDb.__tables.job_applications.find((r) => r.id === 'app-1').comms_history[0]).toHaveProperty('from_number', '+19415550199');
+    // the same resolved number is forced on the send itself
+    expect(mockSendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({ fromNumber: '+19415550199' });
     const stored = mockDb.__tables.job_applications.find((r) => r.id === 'app-1');
     expect(stored.comms_history).toHaveLength(1); // reconciled in place, not appended twice
     expect(stored.comms_history[0]).toMatchObject({ channel: 'sms', outcome: 'sent', finalized_at: expect.any(String) });
@@ -511,7 +514,7 @@ describe('sendStageComms — send-window hold', () => {
     const result = await RecruitingComms.sendStageComms(app, 'application_received', { sms: true, email: false, by: 'system' });
     expect(result.sms).toBe('deferred');
     const queued = (mockDb.__tables.sms_log || []).find((r) => r.status === 'scheduled');
-    expect(queued).toMatchObject({ customer_id: null, direction: 'outbound', message_type: 'job_application_received', to_phone: '9415550142' });
+    expect(queued).toMatchObject({ customer_id: null, direction: 'outbound', message_type: 'job_application_received', to_phone: '9415550142', from_phone: '+19415550199' });
     expect(queued.scheduled_for.toISOString()).toBe('2027-03-17T12:00:00.000Z');
     expect(JSON.parse(queued.metadata)).toMatchObject({ audience: 'applicant', purpose: 'application_received', job_application_id: 'app-1', consent_basis: { status: 'transactional_allowed' } });
     const stored = mockDb.__tables.job_applications.find((r) => r.id === 'app-1');

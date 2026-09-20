@@ -63,12 +63,20 @@ function errorSummary(err) {
   return err.code ? `${name} ${err.code}` : name;
 }
 
-// Applicant texts carry no customer location, so services/twilio.js sends
-// them from the default outbound line — mirror that choice here for the
-// ledger (services/twilio.js getFromNumber → TWILIO_NUMBERS.getOutboundNumber).
-function outboundNumberForApplicants() {
+// The ONE sender number for applicant texts — resolved through the same
+// derivation services/twilio.js applies to a send with no customer location
+// (deriveOutboundNumber → the Bradenton outbound line), then used for the
+// durable ledger entry, the immediate send (metadata.fromNumber) and any
+// queued replay row (from_phone), so the number an applicant replies TO is
+// by construction the number the reply classifier compares against.
+async function outboundNumberForApplicants() {
   try {
-    return require('../config/twilio-numbers').getOutboundNumber() || null;
+    const TwilioService = require('./twilio');
+    const derived = await TwilioService.deriveOutboundNumber({});
+    if (derived) return derived;
+  } catch { /* fall through to the config default */ }
+  try {
+    return require('../config/twilio-numbers').getOutboundNumber('bradenton') || null;
   } catch {
     return null;
   }
@@ -517,7 +525,8 @@ async function sendStageComms(app, stage, opts = {}) {
         // The number the text goes out from — durable routing evidence the
         // reply classifier compares the inbound `To` against, so it never
         // depends on the post-acceptance (best-effort) sms_log row.
-        handoffEntry.from_number = outboundNumberForApplicants();
+        const applicantFromNumber = await outboundNumberForApplicants();
+        handoffEntry.from_number = applicantFromNumber;
         try {
           await appendCommsHistory(app.id, [handoffEntry]);
         } catch (err) {
@@ -537,7 +546,7 @@ async function sendStageComms(app, stage, opts = {}) {
           entryPoint: 'recruiting_comms',
           identityTrustLevel: 'phone_provided_unverified',
           consentBasis: { status: 'transactional_allowed', source: 'job_application' },
-          metadata: { original_message_type: `job_${stage}`, job_application_id: app.id },
+          metadata: { original_message_type: `job_${stage}`, job_application_id: app.id, ...(applicantFromNumber ? { fromNumber: applicantFromNumber } : {}) },
           });
         } catch (err) {
           // Channel isolation: a throw here must not lose the email leg's
@@ -559,7 +568,7 @@ async function sendStageComms(app, stage, opts = {}) {
             await db('sms_log').insert({
               customer_id: null,
               direction: 'outbound',
-              from_phone: outboundNumberForApplicants(),
+              from_phone: applicantFromNumber,
               to_phone: contact.phone,
               message_body: body,
               status: 'scheduled',
