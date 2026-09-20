@@ -18,6 +18,24 @@ test('only calibrated timing with known durations produces a lateness card', () 
   expect(unknown[0].payload).toEqual({ date: '2040-09-10', issues: [expect.stringContaining('needs a service duration')] });
 });
 
+test('a double-booking is carded first, without a calibrated drive model, and never for a same-customer pair', () => {
+  // Staff saves commit through a clash by owner ruling (advisory only), so
+  // the planned-board card is the only place a second customer in the same
+  // slot becomes visible before the reminder text goes out.
+  const clash = { doubleBookedVisits: [{ ids: ['a', 'b'], minutes: 60 }], missingCoordinates: ['c'] };
+  const alerts = buildRouteQualityAlerts(day(clash), 'legacy');
+  expect(alerts).toHaveLength(1);
+  expect(alerts[0].payload.issues).toEqual([
+    expect.stringContaining("2 visits overlap another customer's promised window"),
+    expect.stringContaining('without a usable location'),
+  ]);
+  expect(alerts[0].payload).not.toHaveProperty('departureMinutes');
+  // day-quality already drops same-customer pairs; an empty list makes no card.
+  expect(buildRouteQualityAlerts(day({ doubleBookedVisits: [] }), 'calibrated')).toEqual([]);
+  // Older measurement rows without the field still build.
+  expect(buildRouteQualityAlerts(day({ doubleBookedVisits: undefined }), 'calibrated')).toEqual([]);
+});
+
 test('location and grouped-work exceptions remain visible without a calibrated drive model', () => {
   const alerts = buildRouteQualityAlerts(day({ missingCoordinates: ['job'], uncertaintyReasons: ['grouped_work_requires_review'] }), 'legacy');
   expect(alerts).toHaveLength(1);

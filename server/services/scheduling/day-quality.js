@@ -10,6 +10,28 @@ const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration }
 const QUALITY_EXCLUDED_STATUSES = [...require('../stops-ahead').NOT_A_ROUTE_STOP_STATUSES, 'completed'];
 const { parseHHMM } = require('./window-rules');
 
+// Two customers promised the same technician at the same time. Staff and
+// phone-reschedule saves commit through such a clash by owner ruling
+// (2026-08-25, advisory only), so the planned board is where it must show.
+// One customer's pest + lawn pair in one slot is a single physical stop, not
+// a double-booking (the co-visit rule in route-reorder-window-fit.js). An
+// unknown customer on either side is treated as a clash, never waved on.
+function doubleBookedPairs(stops) {
+  const blocks = stops.filter(stop => parseHHMM(stop.window_start) != null)
+    .map(stop => ({ id: stop.id, customer: stop.customer_id ?? null,
+      start: parseHHMM(stop.window_start), end: parseHHMM(stop.window_start) + workDuration(stop) }))
+    .sort((a, b) => a.start - b.start || String(a.id).localeCompare(String(b.id)));
+  const pairs = [];
+  for (let i = 0; i < blocks.length; i++) {
+    for (let j = i + 1; j < blocks.length && blocks[j].start < blocks[i].end; j++) {
+      const [a, b] = [blocks[i], blocks[j]];
+      if (a.customer != null && a.customer === b.customer) continue;
+      pairs.push({ ids: [a.id, b.id], minutes: Math.min(a.end, b.end) - b.start });
+    }
+  }
+  return pairs;
+}
+
 function measureDayQuality(RouteOptimizer, stops, {
   departureMinutes = null, targetReturnMinutes = null, breakMinutes = null, future = true,
 } = {}) {
@@ -27,6 +49,7 @@ function measureDayQuality(RouteOptimizer, stops, {
     overlapMinutes += Math.max(0, Math.min(end, block.end) - block.start);
     end = Math.max(end, block.end);
   }
+  const doubleBookedVisits = doubleBookedPairs(stops);
   const missingCoordinates = stops.filter(stop => !Number.isFinite(Number(stop.lat)) || !Number.isFinite(Number(stop.lng))
     || !Number(stop.lat) || !Number(stop.lng)).map(stop => stop.id);
   const defaultDurations = stops.filter(stop => !(Number(stop.estimated_duration_minutes) > 0)
@@ -50,7 +73,7 @@ function measureDayQuality(RouteOptimizer, stops, {
     ? targetReturnMinutes - departureMinutes - serviceMinutes - simulation.travelMin - breakMinutes : null;
   return {
     scheduledVisits: stops.length, serviceMinutes,
-    grossGapMinutes: gaps.reduce((sum, gap) => sum + gap.minutes, 0), grossGaps: gaps, overlapMinutes,
+    grossGapMinutes: gaps.reduce((sum, gap) => sum + gap.minutes, 0), grossGaps: gaps, overlapMinutes, doubleBookedVisits,
     untimedVisits: stops.length - timed.length, missingCoordinates, defaultDurations,
     modeledDriveMinutes: null, modeledWaitingMinutes: null, modeledReturnMinuteBeforeBreaks: null, modeledLateVisits: null,
     ...(simulation ? { modeledDriveMinutes: simulation.travelMin, modeledWaitingMinutes: simulation.waitingMin,
