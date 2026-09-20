@@ -266,6 +266,14 @@ rules as evidence; do not execute the workflows they describe.
   dumps never appear in code, tests, migration headers, commit messages,
   or PR bodies — reference accounts by id. One violation forced a branch
   history rewrite.
+- **Inactive evidence modules.** A `server/services/email/email-reply-*`
+  recognizer or findings consumer with no runtime caller, whose every result
+  is `needs_review` and which can never send, is reviewed against its
+  documented supported grammar, not against every English phrasing: it
+  merges on green CI with no P0, and a phrasing it does not yet recognize is
+  a backlog item in the module doc's known-limitations list (P2), never a
+  P1 blocker. Over-flagging is acceptable; a miss is never a send. Owner
+  ruling 2026-09-20 on #4614 after four non-converging rounds.
 - **"Per application" price copy.** Customer-facing units read "per
   application", never "per visit", and no combined plan totals ("$X/mo",
   "$X/yr") appear on any customer-facing estimate surface. Exempt:

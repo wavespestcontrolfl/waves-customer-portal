@@ -25,6 +25,11 @@ Roles are finite and may overlap on one word:
 - `adjustment`: reduce/save/discount/increase/decrease word forms.
 - `measurement`: `percent`, `percentage`, distance nouns, and the `%` barrier.
 
+When the scanner folds a modifier into a composite unit token (`plan visit`,
+`monthly service visit`), the supported words inside it are still reported,
+with `embedded: true` and `offsets` into that token's text; the token keeps
+its unit kind.
+
 ## Boundaries and uncertainty
 
 A role is lexical context only. It never establishes a price, an account

@@ -49,8 +49,16 @@ const PATTERNS = [
 const PERIOD_PATTERNS = [
   ...PATTERNS.filter((pattern) => pattern.kind === 'period'),
   ...[
-    '(?:a|each|every)\\s+(?:months?|mos?|years?|yrs?)\\b(?!-[a-z]|\\s+ago\\b)',
+    // "a month ago", "a month or two ago", "a year and a half ago" stay
+    // temporal. Only an "or" quantity or "and a half" may sit before "ago":
+    // a general "and <quantity> <unit>" would erase a real recurring price
+    // in "$98 a month and two years ago it cost less" (known trade-off:
+    // "a year and six months ago" is a period and over-flags).
+    '(?:a|each|every)\\s+(?:months?|mos?|years?|yrs?)\\b(?!-[a-z]|(?:\\s+or\\s+(?:a\\s+)?(?:[a-z]+|\\d+)(?:\\s+[a-z]+)?|\\s+and\\s+a\\s+half)?\\s+ago\\b)',
     'for\\s+the\\s+(?:months?|mos?|years?|yrs?)\\b(?!-[a-z])',
+    // "every calendar month", "per calendar year": the calendar qualifier is
+    // part of the period, never a separate word.
+    '(?:per|a|each|every)\\s+calendar\\s+(?:months?|mos?|years?|yrs?)\\b(?!-[a-z]|(?:\\s+or\\s+(?:a\\s+)?(?:[a-z]+|\\d+)(?:\\s+[a-z]+)?|\\s+and\\s+a\\s+half)?\\s+ago\\b)',
     'annualized\\b(?!-[a-z])',
   ].map((source) => ({ kind: 'period', re: new RegExp(source, 'iy') })),
 ];
