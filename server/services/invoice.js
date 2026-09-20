@@ -1257,6 +1257,15 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, {
   firstDeliveryOnly = false,
   operatorInitiated = false,
 } = {}) {
+  // requireDue is the scheduled-send worker's claim: an automatic queue
+  // send, never a first-delivery request. Its due predicate (scheduled_send_at
+  // <= now) is also why a parked row (scheduled_send_at NULL) can never be
+  // claimed here, so the review hold holds by construction. Keep the two
+  // flags mutually exclusive rather than threading the first-delivery
+  // guards into a branch no caller can reach with them.
+  if (requireDue && firstDeliveryOnly) {
+    throw new Error("claimPacketInvoiceForSend: requireDue is the queue worker's claim and cannot be a first delivery");
+  }
   const Packets = require("./visit-completion-packets");
   return db.transaction(async (trx) => {
     // The worker's claim keeps the scheduled queue's own predicates: due
