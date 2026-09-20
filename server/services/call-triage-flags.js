@@ -1080,11 +1080,12 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
   const modelFlags = suppressAddressFlagsForAV(suppressUnsupportedModelFlags(extraction.triage_flags, extraction), opts.addressValidation);
   const deterministicFlags = computeDeterministicTriageFlags(extraction, opts);
   const mergedFlags = mergeTriageFlags(modelFlags, deterministicFlags);
-  // Unconfirmed calls only — a confirmed booking keeps the fail-open
-  // contract below (see onFileAddressSatisfaction).
-  const bookingConfirmedWithStart = extraction.scheduling?.status === 'confirmed'
-    && !!extraction.scheduling?.confirmed_start_at;
-  const onFile = bookingConfirmedWithStart
+  // Unconfirmed calls only — EVERY confirmed status keeps the fail-open
+  // contract below (see onFileAddressSatisfaction), including a confirmed
+  // booking still missing its start time: the operator resolving that time
+  // must still see the address review (codex #4617 r2 P2).
+  const bookingConfirmed = extraction.scheduling?.status === 'confirmed';
+  const onFile = bookingConfirmed
     ? { flags: mergedFlags, satisfied: [] }
     : onFileAddressSatisfaction(mergedFlags, extraction, opts);
   out.onFileAddressSatisfiedFlags = onFile.satisfied;

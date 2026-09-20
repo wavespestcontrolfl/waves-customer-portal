@@ -88,6 +88,13 @@ describe('canAutoRoute with the on-file address', () => {
     expect(r.appointmentBlockingFlags).toEqual(expect.arrayContaining(['address_unverifiable']));
     expect(r.onFileAddressSatisfiedFlags).toBeUndefined();
   });
+  test('a CONFIRMED booking with NO start time is still a confirmed booking: address flags stay (codex r2 P2)', () => {
+    const ex = unconfirmed(['address_unverifiable'], { scheduling: { status: 'confirmed', confirmed_start_at: null } });
+    const r = canAutoRoute(ex, { callerAni: ANI, contactPhone: ANI, knownCustomer: KNOWN });
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toEqual(expect.arrayContaining(['address_unverifiable']));
+    expect(r.onFileAddressSatisfiedFlags).toBeUndefined();
+  });
   test('a CONFIRMED booking under fail-open still carries the advisory read-back (failedOpenFlags), not the satisfied list', () => {
     const ex = unconfirmed(['address_unverifiable'], { scheduling: { status: 'confirmed', confirmed_start_at: '2026-09-22T09:00:00-04:00' } });
     const r = canAutoRoute(ex, { callerAni: ANI, contactPhone: ANI, knownCustomer: KNOWN, failOpen: true });
