@@ -159,3 +159,91 @@ test.each([
 ])('a fixed drying or re-entry figure defeats the once-dry exemption: %s', (text) => {
   expect(qualify(text)).toBe(false);
 });
+
+test.each([
+  ['Is the bait safe before it dries?', false],
+  ['Is the bait safe before drying?', false],
+  ['Is the bait safe while wet?', false],
+  ['Is the bait safe?', true],
+])('once-dry qualification rejects pre-dry question circumstances the same way it rejects wet: %s', (question, expected) => {
+  expect(qualify('Yes. The bait is safe once dry. The technician will confirm timing.', question)).toBe(expected);
+});
+
+test.each([
+  ['The treatment dries in 30 minutes. The bait is safe once dry. The technician will confirm timing.', false],
+  ['It is safe after two hours. The bait is safe once dry. The technician will confirm timing.', false],
+  ['The bait is safe once dry. The technician will confirm timing.', true],
+])('the fixed-figure guard scans the whole relevant response, not only the text after "once dry": %s', (text, expected) => {
+  expect(qualify(text)).toBe(expected);
+});
+
+test.each([
+  ['Yes. I cannot confirm whether EcoGuard Wonder will harm dogs.', 'Is EcoGuard Wonder safe for dogs?', { productNames: ['EcoGuard Wonder'] }, false],
+  ['Yes. I cannot confirm whether EcoGuard Wonder is safe for dogs.', 'Is EcoGuard Wonder safe for dogs?', { productNames: ['EcoGuard Wonder'] }, true],
+  ['Yes. I cannot confirm whether the bait will harm dogs.', 'Is the bait safe for dogs?', {}, false],
+])('a refused affirmative harm claim is classified for a runtime product name the same as a static one: %s', (text, question, options, expected) => {
+  expect(policy.refusesSafetyGuarantee(text, question, -1, options)).toBe(expected);
+});
+
+test('coordinated runtime-only product identities split into separate per-product scopes', () => {
+  const options = { productNames: ['EcoGuard Wonder', 'NatureShield Max'] };
+  expect([...policy.safetyProductScope('EcoGuard Wonder and NatureShield Max', options)])
+    .toEqual(['brand:ecoguard wonder', 'brand:natureshield max']);
+  expect(policy.refusesSafetyGuarantee(
+    'Yes. I cannot confirm whether EcoGuard Wonder is safe. I cannot confirm whether NatureShield Max is safe.',
+    'Are EcoGuard Wonder and NatureShield Max safe?', -1, options,
+  )).toBe(true);
+  expect(policy.refusesSafetyGuarantee(
+    'Yes. I cannot confirm whether EcoGuard Wonder is safe.',
+    'Are EcoGuard Wonder and NatureShield Max safe?', -1, options,
+  )).toBe(false);
+});
+
+test.each([
+  ['Yes. I cannot confirm whether the bait is safe for babies.', 'Is the bait safe for my family?', false],
+  ['Yes. I cannot confirm whether the bait is safe for my family.', 'Is the bait safe for babies?', true],
+  ['Yes. I cannot confirm whether the bait is safe for my family.', 'Is the bait safe for my family?', true],
+  ['Yes. I cannot confirm whether the bait is safe for puppies.', 'Is the bait safe for my family?', false],
+])('family is a broader audience scope than child -- a refusal about babies does not cover a family question: %s', (text, question, expected) => {
+  expect(policy.refusesSafetyGuarantee(text, question, 0)).toBe(expected);
+});
+
+test.each([
+  ['The bait is safe once dry. It is false that the technician will confirm timing.', false],
+  ['The bait is safe once dry. The technician will not be confirming timing.', false],
+  ['The bait is safe once dry. No technician will confirm timing.', false],
+  ['The bait is safe once dry. The technician will confirm timing.', true],
+])('a proposition-level denial of technician confirmation defeats the once-dry exemption: %s', (text, expected) => {
+  expect(qualify(text)).toBe(expected);
+});
+
+test.each([
+  ['Are the products harmless', true],
+  ['The bait is safe.', false],
+])('an auxiliary-led question is interrogative even without a literal question mark: %s', (text, expected) => {
+  const claim = recognizeSafetyResponse(text).guarantees[0]?.match;
+  expect(claim && policy.safetyGuaranteeIsInterrogative(text, claim)).toBe(expected);
+});
+
+test.each([
+  ['Yes. I cannot confirm whether the bait is safe. I cannot confirm whether it is harmless.', 'Are the bait and spray safe?', false],
+  ['Yes. I cannot confirm whether the bait is safe. I cannot confirm whether the spray is harmless.', 'Are the bait and spray safe?', true],
+  ['Yes. I cannot confirm whether it is safe.', 'Is the bait safe?', true],
+])('an unscoped follow-up refusal does not override an explicit partial product scope already established: %s', (text, question, expected) => {
+  expect(policy.refusesSafetyGuarantee(text, question, 0)).toBe(expected);
+});
+
+test.each([
+  ['Yes. I cannot confirm whether the bait is safe if swallowed.', 'Is the bait safe when dry or if swallowed?', false],
+  ['Yes. I cannot confirm whether the bait is safe when dry. I cannot confirm whether the bait is safe if swallowed.', 'Is the bait safe when dry or if swallowed?', true],
+  ['Yes. I cannot confirm whether the bait is safe.', 'Is the bait safe when dry or if swallowed?', true],
+])('every disjunctive question circumstance must be covered, not just one alternative: %s', (text, question, expected) => {
+  expect(policy.refusesSafetyGuarantee(text, question, 0)).toBe(expected);
+});
+
+test.each([
+  ['I cannot confirm whether the bait is safe for dogs. I cannot confirm whether the bait is safe for cats.', 'Is the bait safe for dogs and cats?', true],
+  ['I cannot confirm whether the bait is safe for dogs.', 'Is the bait safe for dogs and cats?', false],
+])('audience coverage accumulates across accepted refusals, like product coverage: %s', (text, question, expected) => {
+  expect(policy.refusesSafetyGuarantee(text, question, -1)).toBe(expected);
+});
