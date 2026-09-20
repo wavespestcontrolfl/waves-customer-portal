@@ -305,6 +305,24 @@ describe('POST /interview/:token/book', () => {
 
   const OFFERED = { start: '2027-03-16T20:00:00.000Z', end: '2027-03-16T20:30:00.000Z', date: '2027-03-16', label: 'Tue Mar 16, 4:00 PM' };
 
+  test('the confirmation passes a per-leg stillEligible check (status, token, booked time, slot, mode)', async () => {
+    mockDb.__setRows([appRow()]);
+    mockListInterviewSlots.mockResolvedValue([OFFERED]);
+    mockSendStageComms.mockClear();
+    const res = await fetch(`${base}/api/public/careers/interview/${TOKEN}/book`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'phone', start: OFFERED.start }),
+    });
+    expect(res.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(mockSendStageComms).toHaveBeenCalledTimes(1);
+    const opts = mockSendStageComms.mock.calls[0][2];
+    expect(typeof opts.stillEligible).toBe('function');
+    await expect(opts.stillEligible()).resolves.toBe(true);
+    mockDb.__rows()[0].interview_mode = 'in_person'; // a rebook with a different mode mid-send
+    await expect(opts.stillEligible()).resolves.toBe(false);
+  });
+
   test('a slot-list read failure AFTER the booking committed still answers 200 with the booked payload', async () => {
     mockDb.__setRows([appRow()]);
     mockListInterviewSlots.mockResolvedValueOnce([OFFERED]).mockRejectedValueOnce(Object.assign(new Error('timeout'), { code: '57014' }));

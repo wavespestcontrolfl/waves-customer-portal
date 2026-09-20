@@ -184,3 +184,15 @@ describe('POST /schedule-sms recruiting boundary', () => {
     expect(db).not.toHaveBeenCalledWith('sms_log');
   });
 });
+
+describe('POST /ai-draft identity normalization', () => {
+  test('a foreign-prefixed number with the same 10 digits is judged on those 10 digits (no guard bypass)', async () => {
+    mockIsRecruitingPhone.mockResolvedValueOnce(true);
+    const res = await fetch(`${base}/api/admin/communications/ai-draft`, {
+      method: 'POST', headers: { Authorization: 'Bearer tech', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ customerPhone: '+449415550142', lastMessage: 'hi' }),
+    });
+    expect(res.status).toBe(403);
+    expect(mockIsRecruitingPhone).toHaveBeenLastCalledWith('9415550142');
+  });
+});

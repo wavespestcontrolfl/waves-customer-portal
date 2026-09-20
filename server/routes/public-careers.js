@@ -295,14 +295,21 @@ router.post('/interview/:token/book', interviewLimiter, async (req, res) => {
       // in immediately after this transaction commits must not send a
       // confirmation for a booking the applicant no longer holds. The owner
       // bell block below is intentionally independent of this check.
-      const current = await db('job_applications').where({ id: updated.id }).first();
       const sameInstant = (a, b) => Boolean(a) && Boolean(b) && new Date(a).getTime() === new Date(b).getTime();
-      const stillCurrent = current
-        && current.status === 'interview'
-        && current.interview_token === updated.interview_token
-        && sameInstant(current.interview_booked_at, updated.interview_booked_at)
-        && sameInstant(current.interview_at, updated.interview_at);
-      if (!stillCurrent) {
+      // Authoritative freshness check, consulted by sendStageComms before
+      // EACH channel (Codex r8 P1): a rebook or withdraw landing while the
+      // SMS leg is in flight must not let the email leg send an obsolete
+      // time or mode.
+      const stillEligible = async () => {
+        const current = await db('job_applications').where({ id: updated.id }).first();
+        return Boolean(current
+          && current.status === 'interview'
+          && current.interview_token === updated.interview_token
+          && sameInstant(current.interview_booked_at, updated.interview_booked_at)
+          && sameInstant(current.interview_at, updated.interview_at)
+          && (current.interview_mode || null) === (updated.interview_mode || null));
+      };
+      if (!(await stillEligible())) {
         logger.info(`[careers] interview confirmation skipped — application ${updated.id} no longer matches the committed booking`);
         return;
       }
@@ -314,6 +321,7 @@ router.post('/interview/:token/book', interviewLimiter, async (req, res) => {
         sms: RecruitingComms.confirmationSmsEligible(updated, { priorSmsSent }),
         email: true,
         by: 'applicant',
+        stillEligible,
       });
     })().catch((err) => {
       logger.error(`[careers] interview book confirmation comms failed: ${errorSummary(err)}`);

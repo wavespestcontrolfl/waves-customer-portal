@@ -1952,23 +1952,31 @@ router.post('/ai-draft', async (req, res, next) => {
     const { customerPhone, lastMessage } = req.body;
     if (!customerPhone) return res.status(400).json({ error: 'customerPhone required' });
 
+    // ONE normalized identity for both the recruiting guard and the history
+    // read (Codex r8 P0): the history is keyed by the last 10 digits, so the
+    // guard must judge exactly that identity — a foreign prefix on the same
+    // 10 digits must not slip past the guard and into the prompt.
+    const cleanPhone = String(customerPhone).replace(/\D/g, '').slice(-10);
+    if (cleanPhone.length !== 10) return res.status(400).json({ error: 'customerPhone must be a 10-digit NANP number' });
+
     // Recruiting boundary (utils/recruiting-thread-scope.js): applicant
     // history carries the bearer interview link and is owner-only — refuse a
     // non-admin BEFORE any history for this phone is loaded into a prompt.
-    if (req.techRole !== 'admin' && await isRecruitingPhone(customerPhone)) {
+    if (req.techRole !== 'admin' && await isRecruitingPhone(cleanPhone)) {
       return res.status(403).json({ error: 'Admin access required' });
     }
 
     // Look up customer context
-    const cleanPhone = customerPhone.replace(/\D/g, '').slice(-10);
     const customer = await db('customers').where('phone', 'like', `%${cleanPhone}`).first();
 
-    // Get recent SMS history for context
+    // Get recent SMS history for context (recruiting rows never reach a
+    // non-admin prompt, defence in depth behind the guard above).
     const recentSms = await excludeUnresolvedSendReservations(
       db('sms_log').where(function () {
         this.where('from_phone', 'like', `%${cleanPhone}`).orWhere('to_phone', 'like', `%${cleanPhone}`);
       }),
     )
+      .modify((q) => hideRecruitingThreadsFromNonAdmin(q, req, 'sms_log.message_type'))
       .orderBy('created_at', 'desc')
       .limit(5);
 
