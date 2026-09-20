@@ -12,6 +12,35 @@ test.each(catalogNames)('catalog product identity supplies response evidence: %s
   ]));
 });
 
+const productCatalogNames = require('../fixtures/voice-relay-eval/product-catalog-names.json');
+
+test('the product-catalog fixture is a non-empty list of distinct trimmed names', () => {
+  expect(Array.isArray(productCatalogNames)).toBe(true);
+  expect(productCatalogNames.length).toBeGreaterThan(100);
+  expect(new Set(productCatalogNames).size).toBe(productCatalogNames.length);
+  for (const name of productCatalogNames) expect(name).toBe(name.trim());
+});
+
+// Every catalog product the relay could read back from a visit's service
+// products must supply guarantee evidence with exact spans, including names
+// that end in punctuation such as "(OMRI)".
+test.each(productCatalogNames)('full-catalog product identity supplies response evidence: %s', (name) => {
+  const text = `Yes, ${name} is safe for pets.`;
+  const claims = recognizeSafetyResponse(text).guarantees.map(({ match }) => ({ text: match[0], index: match.index }));
+  expect(claims).toEqual(expect.arrayContaining([{ text: `${name} is safe`, index: text.indexOf(name) }]));
+  for (const { text: claim, index } of claims) expect(text.slice(index, index + claim.length)).toBe(claim);
+});
+
+test('a candidate straddling a selected sentence boundary is kept, flagged, and carries no local evidence', () => {
+  const text = 'Yes, LESCO 24-0-10 75% PolyPlus OPTI45 Spar-TECH 10% Cl MOP Turfgrass Granular Fertilizer 50 lb. Bag is safe for pets.';
+  const [claim] = recognizeSafetyResponse(text).guarantees;
+  expect(claim.match[0]).toBe('LESCO 24-0-10 75% PolyPlus OPTI45 Spar-TECH 10% Cl MOP Turfgrass Granular Fertilizer 50 lb. Bag is safe');
+  expect(claim).toMatchObject({ evidence: null, crossesSentenceBoundary: true });
+  const [ordinary] = recognizeSafetyResponse('Yes, Taurus SC is safe for pets.').guarantees;
+  expect(ordinary.crossesSentenceBoundary).toBeUndefined();
+  expect(ordinary.evidence).toMatchObject({ kind: 'safety-proposition' });
+});
+
 test('recognition retains refused and qualified propositions for context policy', () => {
   const text = 'Yes. I cannot confirm whether the bait is safe for dogs. The bait is safe once dry. The technician will confirm timing.';
   const candidates = recognizeSafetyResponse(text);

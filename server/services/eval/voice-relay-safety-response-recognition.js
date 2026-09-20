@@ -35,9 +35,17 @@ const SAFETY_BRAND_CODE = '(?:[A-Z]{1,4}\\d{0,3}|\\d{1,4}[A-Z]{0,3})';
 
 const SAFETY_BRAND_FORMULATION = `(?:${SAFETY_BRAND_CODE}|[A-Z](?:/[A-Z])+|Foam|Gel|Dust|Bait|Granules?|Aerosol|Pro)`;
 
-// Static product identities from 20260723000001_species_specific_target_prefill.
-// These supplement the existing formulation grammar without catalog queries.
-const SAFETY_KNOWN_PRODUCT_NAMES = Object.freeze([
+// Static product identities: the species-target set from
+// 20260723000001_species_specific_target_prefill plus every products_catalog
+// name captured in fixtures/voice-relay-eval/product-catalog-names.json
+// (regenerate with: select name from products_catalog order by name).
+// The relay can only speak product names that reach it through a visit's
+// service_products rows, which come from that catalog, so the fixture must
+// cover the whole catalog rather than one migration's subset. No catalog
+// queries happen at eval time.
+const SAFETY_CATALOG_PRODUCT_NAMES = require('../../fixtures/voice-relay-eval/product-catalog-names.json');
+
+const SAFETY_MIGRATION_PRODUCT_NAMES = Object.freeze([
   "Roundup", "Bifenthrin", "2,4-D",
   "Bifen I/T", "Bifen XTS", "Taurus SC",
   "Termidor SC", "Bora-Care", "Suspend SC",
@@ -68,13 +76,20 @@ const SAFETY_KNOWN_PRODUCT_NAMES = Object.freeze([
   "LESCO Green Flo 6-0-0 10% Ca", "0-0-16 Winterizer", "16-4-8 + Micros",
 ]);
 
+const SAFETY_KNOWN_PRODUCT_NAMES = Object.freeze([...new Set([
+  ...SAFETY_MIGRATION_PRODUCT_NAMES,
+  ...SAFETY_CATALOG_PRODUCT_NAMES.map((name) => String(name).trim()).filter(Boolean),
+])]);
+
 const SAFETY_KNOWN_PRODUCT_NAME = `(?:${[...SAFETY_KNOWN_PRODUCT_NAMES]
   .sort((a, b) => b.length - a.length)
   .map((name) => [...name].map((character) => /[a-z]/i.test(character)
     ? `[${character.toLowerCase()}${character.toUpperCase()}]` : escapeRegexLiteral(character)).join(''))
   .join('|')})`;
 
-const SAFETY_BRAND_SUBJECT = `\\b(?:${SAFETY_KNOWN_PRODUCT_NAME}|(?!${SAFETY_SUBJECT_DETERMINER_CAPITALIZED}\\b)[A-Z][a-z]+\\s+${SAFETY_BRAND_FORMULATION})\\b`;
+// A catalog name can end in punctuation such as "(OMRI)", so it closes on a
+// non-word lookahead rather than a word boundary.
+const SAFETY_BRAND_SUBJECT = `\\b(?:${SAFETY_KNOWN_PRODUCT_NAME}(?!\\w)|(?!${SAFETY_SUBJECT_DETERMINER_CAPITALIZED}\\b)[A-Z][a-z]+\\s+${SAFETY_BRAND_FORMULATION}\\b)`;
 
 const SAFETY_PRODUCT_RELATIVE = '(?:\\s+(?:(?:(?:that|which)\\s+)?(?:we|they|you|(?:your|our|my|the)\\s+tech(?:nician)?)\\s+(?:(?:have|had|has|just|already|recently)\\s+)*(?:use|used|apply|applied|spray|sprayed|put down)|(?:that|which)\\s+(?:is|are|was|were|has been|have been|had been)\\s+(?:(?:just|already|recently)\\s+)*(?:used|applied|sprayed|put down)|(?:(?:just|already|recently)\\s+)*(?:used|applied|sprayed|put down)))?';
 
@@ -254,6 +269,20 @@ const SAFETY_ELLIPTICAL_ADJECTIVE_ANSWER_RE = new RegExp(
   'gi',
 );
 
+// A lexical match can straddle what the shared sentence splitter selected as a
+// boundary (a product name such as "... 50 lb. Bag is safe"). The shared
+// evidence layer refuses such a span; keep the candidate, report no local
+// evidence, and flag it so policy treats the proposition as unresolved
+// rather than silently passing or crashing the eval.
+function propositionEvidence(text, span) {
+  try {
+    return { evidence: localCandidateEvidence(text, 'safety-proposition', span.index, span.end) };
+  } catch (error) {
+    if (!(error instanceof RangeError)) throw error;
+    return { evidence: null, crossesSentenceBoundary: true };
+  }
+}
+
 // Retain the previous lexical match contract while attaching source evidence.
 // A match named `guarantees` is not a policy verdict.
 function recognizeSafetyResponse(text) {
@@ -266,7 +295,7 @@ function recognizeSafetyResponse(text) {
       .map((span) => ({
         pattern,
         match: Object.assign([span.text, ...span.captures], { index: span.index, input: text }),
-        evidence: localCandidateEvidence(text, 'safety-proposition', span.index, span.end),
+        ...propositionEvidence(text, span),
       })));
   const answers = splitSourceSpans(text, SAFETY_INDEPENDENT_ANSWER_SPLIT_RE).map((clause) => {
     const prefix = /^\s*(?:but|however|actually|no wait|wait|sorry|i mean)\b\s*,?\s*/i.exec(clause.text);
