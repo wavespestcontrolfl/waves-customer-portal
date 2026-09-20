@@ -236,8 +236,8 @@ function buildEmailContent(app, stage, vars) {
       ? `Hola ${first}, gracias por postularte a Waves Pest Control. Revisamos cada solicitud y te contactaremos en un plazo de 2 dias habiles.`
       : `Hi ${first}, thanks for applying to Waves Pest Control. We read every application and will reach out within 2 business days.`;
     const contactLine = isEs
-      ? `Si tienes preguntas, responde a este correo o llama al ${WAVES_SUPPORT_PHONE_DISPLAY}.`
-      : `If you have questions, reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`;
+      ? `Si tienes preguntas, llama o envia un mensaje de texto al ${WAVES_SUPPORT_PHONE_DISPLAY}.`
+      : `If you have questions, call or text ${WAVES_SUPPORT_PHONE_DISPLAY}.`;
     return {
       subject,
       html: wrapEmailHtml({ heading: subject, paragraphs: [intro, contactLine] }),
@@ -590,7 +590,12 @@ async function sendStageComms(app, stage, opts = {}) {
         // application through this ledger, so the entry must exist — durably
         // — before the text can possibly be answered. A failed evidence write
         // refuses the send (fail closed) rather than texting untracked.
-        const handoffEntry = historyEntry({ stage, channel: 'sms', to: contact.phone, outcome: 'handoff', code: null, body, by });
+        // Written as 'pending' (NOT delivery evidence) before the pipeline;
+        // moved to 'handoff' inside the pipeline's preSendCheck — right before
+        // Twilio, after suppression/consent/line-type — so a customer reply
+        // arriving during those validators is never diverted by a send that
+        // then gets blocked (Codex r13 P2).
+        const handoffEntry = historyEntry({ stage, channel: 'sms', to: contact.phone, outcome: 'pending', code: null, body, by });
         // The number the text goes out from — durable routing evidence the
         // reply classifier compares the inbound `To` against, so it never
         // depends on the post-acceptance (best-effort) sms_log row.
@@ -619,11 +624,18 @@ async function sendStageComms(app, stage, opts = {}) {
           consentBasis: { status: 'transactional_allowed', source: 'job_application' },
           // Authoritative eligibility at the ACTUAL provider boundary (Codex r9
           // P2): the pipeline runs this right before Twilio, after every validator.
-          ...(typeof opts.stillEligible === 'function' ? {
-            preSendCheck: async () => ((await legEligible())
-              ? { ok: true }
-              : { ok: false, code: 'RECRUITING_STALE', reason: 'application changed before the provider handoff' }),
-          } : {}),
+          // Provider boundary (runs right before Twilio, after every validator):
+          // stamp pending → handoff (durable delivery evidence), then the
+          // caller's authoritative eligibility check when one is supplied.
+          preSendCheck: async () => {
+            if (!(await legEligible())) {
+              return { ok: false, code: 'RECRUITING_STALE', reason: 'application changed before the provider handoff' };
+            }
+            await reconcileCommsHistoryEntryByOutcome(app.id, handoffEntry.id, {
+              pending: { outcome: 'handoff', handoff_at: new Date().toISOString() },
+            });
+            return { ok: true };
+          },
           ...(opts.by && opts.by !== 'system' && opts.by !== 'applicant' ? { operatorInitiated: true } : {}),
           metadata: { original_message_type: `job_${stage}`, job_application_id: app.id, ...(opts.by && opts.by !== 'system' && opts.by !== 'applicant' ? { adminUserId: opts.by } : {}), ...(applicantFromNumber ? { fromNumber: applicantFromNumber } : {}) },
           });

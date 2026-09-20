@@ -2221,7 +2221,13 @@ recruiting-store outage can never delay a suppression write; the recruiting
 ledger still counts as compliance ELIGIBILITY evidence (an applicant's STOP
 is honored even when the provider-log writes failed), failing open. Reply evidence is scoped to the line the reply arrived on
 before the newest entry is chosen (two recruiting lines = two threads).
-Every applicant send re-checks eligibility at the ACTUAL provider
+The immediate SMS ledger entry is written `pending` (not evidence) before
+the pipeline and moved to `handoff` inside the pipeline's preSendCheck —
+right before Twilio, after suppression/consent/line-type — so a send
+blocked by a validator never leaves delivery evidence. Applicant emails
+never invite an email reply (questions go to the phone), stay off the
+generic transactional retry rail, and never resolve to a customer in
+bounce recovery. Every applicant send re-checks eligibility at the ACTUAL provider
 boundary (a `preSendCheck` inside the SMS pipeline; a `beforeProvider`
 check immediately before SendGrid — a stale one settles its ledger row
 `failed` and sends nothing). Applicant texts obey the 8am–8pm ET send window; a held send is queued

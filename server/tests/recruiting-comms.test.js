@@ -479,18 +479,22 @@ describe('sendStageComms channel isolation', () => {
 });
 
 describe('sendStageComms pre-handoff evidence', () => {
-  test('the SMS ledger entry exists BEFORE sendCustomerMessage is called, and is reconciled in place afterwards', async () => {
+  test('the SMS ledger entry is written as pending BEFORE the pipeline, becomes handoff at the provider boundary (preSendCheck), and is reconciled in place afterwards', async () => {
     mockRenderSmsTemplate.mockResolvedValue('Hi Jane.');
     const app = baseApp();
     mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
-    let seenAtHandoff = null;
-    mockSendCustomerMessage.mockImplementation(async () => {
-      seenAtHandoff = mockDb.__tables.job_applications.find((r) => r.id === 'app-1').comms_history.map((e) => e.outcome);
+    let seenBeforeProvider = null; let seenAtProvider = null;
+    mockSendCustomerMessage.mockImplementation(async (input) => {
+      const outcomes = () => mockDb.__tables.job_applications.find((r) => r.id === 'app-1').comms_history.map((e) => e.outcome);
+      seenBeforeProvider = outcomes();
+      await input.preSendCheck({ channel: 'sms' }); // the pipeline runs this right before Twilio
+      seenAtProvider = outcomes();
       return { sent: true, blocked: false, deliveryOutcome: 'accepted' };
     });
     const result = await RecruitingComms.sendStageComms(app, 'application_received', { sms: true, email: false, by: 'system' });
     expect(result.sms).toBe('sent');
-    expect(seenAtHandoff).toEqual(['handoff']);
+    expect(seenBeforeProvider).toEqual(['pending']);
+    expect(seenAtProvider).toEqual(['handoff']);
     // durable routing evidence rides the handoff entry
     expect(mockDb.__tables.job_applications.find((r) => r.id === 'app-1').comms_history[0]).toHaveProperty('from_number', '+19415550199');
     // the same resolved number is forced on the send itself
@@ -712,5 +716,17 @@ describe('owner reply — boundary guard and evidence-owning application', () =>
       { ...baseApp(), id: 'app-new', status: 'new', updated_at: '2027-03-15T00:00:00.000Z', comms_history: [] },
     );
     await expect(RecruitingComms.openApplicationIdForPhone('+19415550142')).resolves.toBe('app-old');
+  });
+});
+
+describe('applicant emails never invite an email reply', () => {
+  test('copy directs questions to the phone, not a reply', () => {
+    const app = baseApp();
+    for (const stage of ['application_received', 'interview_invite', 'interview_confirmation']) {
+      for (const language of ['en', 'es']) {
+        const built = RecruitingComms.buildEmailContent({ ...app, language, interview_token: 'a'.repeat(64), interview_mode: 'phone', interview_at: '2027-03-16T20:00:00.000Z' }, stage, RecruitingComms.buildVars({ ...app, language, interview_token: 'a'.repeat(64), interview_mode: 'phone', interview_at: '2027-03-16T20:00:00.000Z' }, stage));
+        expect((built.text || '').toLowerCase()).not.toMatch(/reply to this email|responde a este correo/);
+      }
+    }
   });
 });
