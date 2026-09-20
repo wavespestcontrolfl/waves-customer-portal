@@ -3529,6 +3529,10 @@ router.get('/compliance-export', async (req, res, next) => {
 
     if (req.query.customerId) auditQuery = auditQuery.where({ customer_id: req.query.customerId });
     if (normalizedPhone) auditQuery = auditQuery.where({ to_hash: phoneHash(normalizedPhone) });
+    // Applicant sends are owner-only (body_preview holds the whole invite,
+    // bearer interview link included) — same boundary as /log, see
+    // utils/recruiting-thread-scope.js.
+    if (req.techRole !== 'admin') auditQuery = auditQuery.whereNot({ audience: 'applicant' });
 
     const auditRows = await auditQuery.select(
       'id',
