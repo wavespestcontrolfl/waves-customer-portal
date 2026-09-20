@@ -670,3 +670,8 @@ describe('interview read bounds straddle midnight by the buffer (PR #4623, Codex
     expect(rows[0]).toMatchObject({ window_start: '23:50', window_end: '23:59' });
   });
 });
+
+test('knex still marks transactors with isTransaction (the savepoint decision depends on it)', () => {
+  const src = require('fs').readFileSync(require.resolve('knex/lib/execution/transaction.js'), 'utf8');
+  expect(src).toMatch(/transactor\.isTransaction = true/);
+});

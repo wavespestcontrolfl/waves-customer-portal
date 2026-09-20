@@ -582,6 +582,9 @@ async function bookedInterviewConflictRows(db, dateStr, startMin, endMin) {
   // (knex nests a transaction as one): a failure rolls back only the
   // savepoint, so the caller's transaction stays usable for its own
   // insert/update instead of dying with 25P02 (Codex r7 P1).
+  // `isTransaction` is knex's own marker on a transactor (knex 3.x,
+  // lib/execution/transaction.js: `transactor.isTransaction = true`) —
+  // pinned by scheduling-occupancy.test.js against a knex upgrade.
   const res = (db.isTransaction && typeof db.transaction === 'function')
     ? await db.transaction((sp) => sp.raw(sql, bindings))
     : await db.raw(sql, bindings);
