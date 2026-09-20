@@ -69,12 +69,33 @@ const SAFETY_SPECIFIC_PRODUCT_SCOPES = Object.freeze([
   ['fumigant', /\bfumigants?\b/i],
 ]);
 
+// Mirrors SAFETY_SUBJECT_COORDINATOR (voice-relay-safety-response-recognition,
+// not exported): the response/question recognizers keep a coordinated
+// product subject ("Bifen I/T and Termidor Foam") as one matched span so its
+// full text stays available as evidence, but per-member product coverage
+// needs each name on its own -- a refusal naming only one member must not
+// read as covering both, and a question naming two must not read as one
+// unmatchable compound product. Split only where every resulting piece is
+// itself a complete brand mention on its own: this leaves a product name
+// that happens to contain "and" ("Tim-bor Professional Insecticide and
+// Fungicide") untouched, since its second half is not a brand by itself.
+const SAFETY_BRAND_COORDINATOR_RE = /\s*,\s*(?:(?:and|or)\s+)?|\s+(?:and|or)\s+/;
+const SAFETY_BRAND_MENTION_ANCHORED_RE = new RegExp(`^${SAFETY_BRAND_MENTION_RE.source}$`);
+
+function safetyBrandMentionMembers(text) {
+  const parts = text.split(SAFETY_BRAND_COORDINATOR_RE).map((part) => part.trim()).filter(Boolean);
+  return parts.length > 1 && parts.every((part) => SAFETY_BRAND_MENTION_ANCHORED_RE.test(part))
+    ? parts : [text];
+}
+
 function safetyProductScope(text) {
   const scopes = new Set(SAFETY_SPECIFIC_PRODUCT_SCOPES
     .filter(([, pattern]) => pattern.test(text))
     .map(([scope]) => scope));
   for (const match of text.matchAll(new RegExp(SAFETY_BRAND_MENTION_RE.source, 'g'))) {
-    scopes.add(`brand:${match[0].toLowerCase().replace(/\s+/g, ' ')}`);
+    for (const member of safetyBrandMentionMembers(match[0])) {
+      scopes.add(`brand:${member.toLowerCase().replace(/\s+/g, ' ')}`);
+    }
   }
   return scopes;
 }
