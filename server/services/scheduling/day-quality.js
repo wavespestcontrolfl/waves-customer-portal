@@ -1,6 +1,6 @@
 /** Planned route measurements. No writes, geocoding, traffic calls or invented
  * stop capacity. Gross calendar gaps are not automatically bookable time. */
-const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration, isCoVisitPair } = require('../route-reorder-window-fit');
+const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration, isCoVisitPair, startCoVisitChain, advanceCoVisit } = require('../route-reorder-window-fit');
 const { allocationKey, occupiedRows } = require('./visit-capacity');
 
 // Route-quality measures work still to be performed. stops-ahead keeps
@@ -38,10 +38,33 @@ function occupiedBlocks(stops) {
     block.work += workDuration(stop);
     blocks.set(key, block);
   });
-  return [...blocks.values()]
+  const grouped = [...blocks.values()]
     .map(block => ({ ...block, end: block.stops.length > 1 && block.stops[0].visit_id ? Math.max(block.end, block.start + block.work) : block.end }))
     .filter(block => Number.isFinite(block.start) && block.end > block.start)
     .sort((a, b) => a.start - b.start || String(a.ids[0]).localeCompare(String(b.ids[0])));
+  // Proven co-visit rows merge into one block whose on-site time is the
+  // shared chain arithmetic (startCoVisitChain / advanceCoVisit: the sum of
+  // the members' real estimates, floored by the longest window-derived
+  // duration), so a neighbour that overlaps only the pair's summed tail is
+  // still reported.
+  const merged = [];
+  for (const block of grouped) {
+    const single = block.stops.length === 1 && !block.stops[0].visit_id ? block.stops[0] : null;
+    const host = single && merged.find(other => other.chain && isCoVisitPair(effectiveWindowRange, other.stops[other.stops.length - 1], single));
+    if (host) {
+      host.ids.push(...block.ids);
+      host.stops.push(single);
+      host.chain = advanceCoVisit(host.chain, single);
+      host.end = Math.max(host.end, host.chain.clock);
+      continue;
+    }
+    if (single) {
+      const chain = startCoVisitChain(single);
+      block.chain = { ...chain, clock: block.start + chain.coMerged, arrivalMin: block.start };
+    }
+    merged.push(block);
+  }
+  return merged;
 }
 
 function doubleBookedPairs(stops) {
@@ -50,7 +73,6 @@ function doubleBookedPairs(stops) {
   for (let i = 0; i < blocks.length; i++) {
     for (let j = i + 1; j < blocks.length && blocks[j].start < blocks[i].end; j++) {
       const [a, b] = [blocks[i], blocks[j]];
-      if (a.stops.length === 1 && b.stops.length === 1 && isCoVisitPair(effectiveWindowRange, a.stops[0], b.stops[0])) continue;
       pairs.push({ ids: [...a.ids, ...b.ids], minutes: Math.min(a.end, b.end) - b.start });
     }
   }

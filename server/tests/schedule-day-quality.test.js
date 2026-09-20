@@ -58,6 +58,10 @@ describe('double-booking measurement (same technician, occupied time per the reb
     const coVisit = measureDayQuality(Model, [pest, row('lawn', 'cust-a', 10, { lat: 5, lng: 5 })]);
     expect(coVisit.doubleBookedVisits).toEqual([]);
     expect(coVisit.overlapMinutes).toBe(60);
+    // Real estimates add up (codex #4620 r4 P1): 45 + 40 in one 10:00–11:00 promise occupies until 11:25.
+    const additive = [row('pest', 'cust-a', 10, { lat: 5, lng: 5, estimated_duration_minutes: 45 }), row('lawn', 'cust-a', 10, { lat: 5, lng: 5, estimated_duration_minutes: 40 })];
+    expect(measureDayQuality(Model, [...additive, row('n', 'cust-n', 11)]).doubleBookedVisits).toEqual([{ ids: ['lawn', 'pest', 'n'], minutes: 25 }]);
+    expect(measureDayQuality(Model, [...additive, row('n', 'cust-n', 11, { window_start: '11:30', window_end: '12:30' })]).doubleBookedVisits).toEqual([]);
     // Second property: different pin (codex #4620 r1 P1 — a customer-id-only rule hid this).
     const rental = measureDayQuality(Model, [pest, row('lawn', 'cust-a', 10, { lat: 6, lng: 6, service_address_line1: '9 Other Rd' })]);
     expect(rental.doubleBookedVisits).toEqual([{ ids: ['lawn', 'pest'], minutes: 60 }]);
