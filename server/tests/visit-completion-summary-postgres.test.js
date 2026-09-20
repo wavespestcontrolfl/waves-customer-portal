@@ -2213,6 +2213,42 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('a combined-visit invoice whose Bill-To moved to a payer since scheduling is withdrawn, NOT settled prepaid for the homeowner, even though it is zero-due (Codex round-3 P1)', async () => {
+    // The wrapper's early zero-due settlement used to run BEFORE
+    // claimPacketInvoiceForSend's own locked ownership fence — a Bill-To
+    // move to a payer since scheduling would lose that race and the
+    // invoice settled 'prepaid' for the homeowner's allocation instead of
+    // being withdrawn to the payer.
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({
+      id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 120, credit_applied: 120,
+      subtotal: 120, line_items: '[]', visit_completion_packet_id: fixture.packetId,
+      // Visit-linked (a real scheduled_services row from the fixture, not
+      // fixture.visitId itself — that's the service_visits parent), zero
+      // due, still claimable: exactly the shape zeroDueVisitInvoice looks
+      // for. Without this the invoice never registers as zero-due at all
+      // and the test would pass vacuously regardless of the fix.
+      scheduled_service_id: fixture.serviceIds[0],
+    });
+    const [payer] = await mockPg('payers').insert({
+      display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true,
+    }).returning('id');
+    await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+    try {
+      const result = await require('../services/invoice').sendViaSMSAndEmail(invoiceId, {});
+
+      expect(result).toMatchObject({ ok: false, code: 'payer_billed' });
+      const row = await mockPg('invoices').where({ id: invoiceId }).first();
+      expect(row.status).not.toBe('prepaid');
+      expect(row.prepaid_by).toBeNull();
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
   test('a payer deactivation that follows a withdrawal returns the invoice to its queue and lifts the hold', async () => {
     const Invoice = require('../services/invoice');
     const Payer = require('../services/payer');

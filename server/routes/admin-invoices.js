@@ -1391,6 +1391,11 @@ router.post('/batch/send', requireAdmin, async (req, res, next) => {
     }
 
     const sent = [];
+    // A resolved zero-due settlement (the common pre-claim path) is a
+    // genuine no-send success — nothing was texted or emailed, so counting
+    // it as "sent" with both channels false reads as a mystery failure
+    // (Codex round-3 P2 #4131). Counted and reported separately.
+    const settled = [];
     const failed = [];
     const held = [];
 
@@ -1408,7 +1413,9 @@ router.post('/batch/send', requireAdmin, async (req, res, next) => {
         const row = await db('invoices').where({ id: invoiceId }).first('status', 'sent_at', 'sms_sent_at', 'email_sent_at');
         firstDeliveryOnly = isFirstDeliveryRow(row);
         const result = await InvoiceService.sendViaSMSAndEmail(invoiceId, { firstDeliveryOnly, operatorInitiated: true, actorTechnicianId: req.technicianId || null });
-        if (result.ok) {
+        if (result.ok && result.settled_zero_due) {
+          settled.push({ invoiceId, code: 'settled_zero_due' });
+        } else if (result.ok) {
           sent.push({
             invoiceId,
             channels: { sms: Boolean(result.sms?.ok), email: Boolean(result.email?.ok) },
@@ -1436,14 +1443,17 @@ router.post('/batch/send', requireAdmin, async (req, res, next) => {
         // hitting the same code is a real conflict — falls through to
         // failed below, matching /:id/send's non-first-delivery path.
         if (outcome?.type === 'noop') {
-          sent.push({
-            invoiceId,
-            channels: { sms: false, email: false },
-            already_delivered: outcome.already_delivered,
-            queued_delivery: outcome.queued_delivery,
-            in_progress: outcome.in_progress,
-            settled_zero_due: outcome.settled_zero_due,
-          });
+          if (outcome.settled_zero_due) {
+            settled.push({ invoiceId, code: 'settled_zero_due' });
+          } else {
+            sent.push({
+              invoiceId,
+              channels: { sms: false, email: false },
+              already_delivered: outcome.already_delivered,
+              queued_delivery: outcome.queued_delivery,
+              in_progress: outcome.in_progress,
+            });
+          }
           continue;
         }
         logger.error(`[admin-invoices:batch-send] ${invoiceId}: ${err.message}`);
@@ -1454,9 +1464,11 @@ router.post('/batch/send', requireAdmin, async (req, res, next) => {
     res.json({
       total: invoiceIds.length,
       sent_count: sent.length,
+      settled_count: settled.length,
       failed_count: failed.length,
       held_count: held.length,
       sent,
+      settled,
       failed,
       held,
     });

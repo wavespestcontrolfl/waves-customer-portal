@@ -1292,6 +1292,17 @@ async function zeroDueOpenVisitSendOutcome(row, invoiceId, database = db) {
   if (!(await zeroDueVisitInvoice(row, database))) return null;
   const settlement = await settleZeroDueVisitInvoice(invoiceId, database);
   if (settlement.settled) {
+    // A combined-visit (packet) invoice settled by THIS zero-balance
+    // transition has no payment webhook to trigger the packet's own
+    // review enrollment (the non-cash prepaid transition emits none) —
+    // the other no-webhook settlement rails (covered_by_credit) already
+    // call this; a zero-due packet invoice with a requested review needs
+    // the same call, or the review is silently never asked (Codex round-3
+    // P2 #4131). Best-effort — enrollPacketReviewAfterCredit swallows and
+    // logs/alerts its own failures; the settlement stands either way.
+    if (row?.visit_completion_packet_id) {
+      await enrollPacketReviewAfterCredit(invoiceId, row.visit_completion_packet_id);
+    }
     return { ok: true, settled_zero_due: true, sms: { ok: false, code: "settled_zero_due" }, email: { ok: false, code: "settled_zero_due" }, payUrl: null };
   }
   if (settlement.reason === "visit_never_ran") return terminalVisitZeroDueOutcome(invoiceId);
@@ -1556,6 +1567,15 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, {
   requireDue = false,
   firstDeliveryOnly = false,
   overridesReviewHold = false,
+  // Runs ONLY the locked ownership fence below (resolve + withdraw) and
+  // returns without ever claiming — the SAME fence every other caller of
+  // this function already runs, reused rather than duplicated (Codex
+  // round-3 P1 #4131): a combined-visit invoice's zero-due pre-claim
+  // settlement must not mark the homeowner's allocation paid before a
+  // Bill-To move to a payer is (re)checked live. Mutually exclusive with
+  // requireDue/allowClaimed — a worker/preclaimed caller always follows
+  // this fence with its own claim in the SAME call, never a separate one.
+  fenceOnly = false,
 } = {}) {
   // requireDue is the scheduled-send worker's claim: an automatic queue
   // send, never a first-delivery request, and never an operator override —
@@ -1566,6 +1586,9 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, {
   // can reach with them.
   if (requireDue && (firstDeliveryOnly || overridesReviewHold)) {
     throw new Error("claimPacketInvoiceForSend: requireDue is the queue worker's claim and cannot be a first delivery or override the review hold");
+  }
+  if (fenceOnly && (requireDue || allowClaimed)) {
+    throw new Error("claimPacketInvoiceForSend: fenceOnly cannot be combined with requireDue or allowClaimed");
   }
   assertFirstDeliveryNotAnOverride(firstDeliveryOnly, overridesReviewHold, "claimPacketInvoiceForSend");
   const Packets = require("./visit-completion-packets");
@@ -1583,6 +1606,7 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, {
       await trx("invoices").where({ id: invoiceId }).update({ send_claim_token: null });
       return { payerBilled: true, payerId };
     }
+    if (fenceOnly) return { payerBilled: false, claim: null };
     if (requireDue) {
       // The status transition carries the queue predicates: a reschedule
       // that committed between the due read and this claim leaves the row
@@ -3887,6 +3911,25 @@ const InvoiceService = {
     const accrualPre = await db("invoices").where({ id: invoiceId }).first("payer_statement_id", "visit_completion_packet_id", "payer_id", "status", "scheduled_service_id", "service_record_id", "total", "credit_applied");
     if (accrualPre?.payer_statement_id) {
       return { ok: false, error: "Invoice is billed on the payer’s monthly statement; not sent individually.", sms: { ok: false }, email: { ok: false } };
+    }
+    // A combined-visit (packet) invoice must have its Bill-To ownership
+    // re-confirmed live BEFORE any zero-due settlement below — otherwise a
+    // Bill-To move to a payer since scheduling could lose the race: the
+    // settlement marks the invoice 'prepaid' for the homeowner's
+    // allocation before claimPacketInvoiceForSend's own fence (further
+    // down) ever gets a chance to withdraw it to the payer (Codex round-3
+    // P1 #4131). fenceOnly reuses that EXACT same locked fence (not a
+    // second ownership path) purely to re-check live ownership; a
+    // still-self-pay row falls through unchanged. Scoped to !allowClaimed:
+    // the preclaimed (worker) path already ran this identical fence
+    // moments earlier in processScheduledSends' own due loop, immediately
+    // before this call.
+    if (!allowClaimed && accrualPre?.visit_completion_packet_id && !accrualPre.payer_id) {
+      const fence = await claimPacketInvoiceForSend(invoiceId, accrualPre.visit_completion_packet_id, { fenceOnly: true });
+      if (fence.payerBilled) {
+        return { ok: false, error: "Suppressed — the visit is now billed to a third-party payer", code: "payer_billed",
+          sms: { ok: false, code: "payer_billed" }, email: { ok: false, code: "payer_billed" } };
+      }
     }
     // Nothing due on a visit-linked invoice (a credit or prepaid coverage
     // reduced it to $0): never text a $0 pay link or arm follow-ups
@@ -6613,7 +6656,17 @@ const InvoiceService = {
         return { ...skip("followup_in_flight"), retryable: true };
       }
       await trx("customers").where({ id: invoice.customer_id }).forUpdate().first("id");
-      if (await require("./invoice-helpers").visitRefusesSettlement(trx, invoice.scheduled_service_id)) {
+      // Resolve the CANONICAL linked visit before this terminal check
+      // (Codex round-3 P1 #4131): invoice.scheduled_service_id alone is
+      // null for most post-completion invoices, which carry only
+      // service_record_id (migration 20260420000002) — reading it
+      // directly silently skipped the terminal-visit refusal for those
+      // rows, letting a service-record-only invoice on a cancelled/
+      // no-show visit settle to 'prepaid' instead of routing to the void +
+      // credit-restore cleanup. Resolved fresh inside this same
+      // transaction, before any state change below.
+      const canonicalScheduledServiceId = await linkedScheduledServiceId(invoice, trx);
+      if (await require("./invoice-helpers").visitRefusesSettlement(trx, canonicalScheduledServiceId)) {
         return skip("visit_never_ran");
       }
       const [settled] = await trx("invoices").where({ id }).update({

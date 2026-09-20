@@ -264,4 +264,37 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
     expect(row.scheduled_send_attempts).toBe(1); // unchanged — no attempt spent
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
+
+  test('a service-record-only invoice on a cancelled visit hits visit_never_ran (routed to the terminal path), never marked prepaid (Codex round-3 P1)', async () => {
+    // settleZeroBalance's terminal check used to pass invoice.scheduled_
+    // service_id DIRECTLY — null for a service-record-only invoice — so
+    // it silently skipped the terminal-visit refusal and settled the row
+    // to 'prepaid' instead of routing to the void + credit-restore cleanup.
+    // voidOpenInvoicesForCancelledService's own candidate query separately
+    // matches invoices.scheduled_service_id directly (a narrower, pre-
+    // existing gap out of this fix's scope) — a service-record-only row
+    // therefore cannot be safely auto-voided yet and is left queued for
+    // review instead. The assertion that matters HERE is the one this fix
+    // actually guarantees: the row is never silently settled to 'prepaid'.
+    await trx('scheduled_services').where({ id: visitId }).update({ status: 'cancelled' });
+    await trx('invoices').where({ id: invoiceId }).update({ scheduled_service_id: null });
+    const recordId = randomUUID();
+    await trx('service_records').insert({
+      id: recordId, customer_id: customerId, scheduled_service_id: visitId,
+      service_type: 'Pest Control', service_date: '2040-03-04', status: 'completed',
+    });
+    await trx('invoices').where({ id: invoiceId }).update({
+      service_record_id: recordId, status: 'scheduled',
+      scheduled_send_at: new Date(Date.now() - 60000), scheduled_send_attempts: 1,
+    });
+
+    const result = await Invoice.processScheduledSends();
+
+    expect(result).toEqual({ sent: 0, failed: 0, deferred: 0 });
+    const row = await read();
+    expect(row.status).not.toBe('prepaid');
+    expect(row.prepaid_by).toBeNull();
+    expect(row.scheduled_send_attempts).toBe(1); // unchanged — no attempt spent
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
 });

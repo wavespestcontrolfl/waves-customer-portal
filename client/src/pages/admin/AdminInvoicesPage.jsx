@@ -353,6 +353,20 @@ export function invoiceDepositCreditTotal(lineItems) {
 // caller reading only those flags would wrongly report "send failed" on a
 // pay link the customer is already getting or about to get. Same shape as
 // the existing covered-by-credit success. Exported for tests.
+// Batch /batch/send toast copy. sent_count + failed_count alone reads as
+// an unexplained shortfall when a row was held for review or settled
+// zero-due instead of sent (fourth audit gap #4131, round-3 P2) — those
+// two counts only exist on /batch/send, not /batch/send-receipts. Exported
+// for tests.
+export function batchSendToast(result, noun) {
+  return (
+    `Sent ${result.sent_count} of ${result.total} ${noun}${result.total === 1 ? "" : "s"}` +
+    `${result.settled_count ? ` (${result.settled_count} settled — nothing due)` : ""}` +
+    `${result.held_count ? ` (${result.held_count} held for review)` : ""}` +
+    `${result.failed_count ? ` (${result.failed_count} failed)` : ""}`
+  );
+}
+
 export function sendOutcomeMessage(res) {
   if (res?.covered_by_credit) return "fully covered by account credit, nothing to send";
   // Nothing was due (a credit or prepaid coverage zeroed the balance) — the
@@ -1506,14 +1520,7 @@ function InvoiceList({
         }),
       });
       const noun = receiptMode ? "receipt" : "invoice";
-      // held_count only exists on /batch/send (a parked row under a
-      // stale-claim review hold — sent_count + failed_count alone would
-      // look like an unexplained shortfall; fourth audit gap #4131).
-      showToast(
-        `Sent ${result.sent_count} of ${result.total} ${noun}${result.total === 1 ? "" : "s"}` +
-          `${result.held_count ? ` (${result.held_count} held for review)` : ""}` +
-          `${result.failed_count ? ` (${result.failed_count} failed)` : ""}`,
-      );
+      showToast(batchSendToast(result, noun));
       clearSelection();
       load();
       onRefresh();

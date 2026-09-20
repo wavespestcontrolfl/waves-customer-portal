@@ -3,6 +3,7 @@ import {
   ATTACHMENT_HELP_TEXT,
   ATTACHMENT_VISIBILITY_TEXT,
   attachmentTotalBytes,
+  batchSendToast,
   buildInvoiceListParams,
   canAddInvoiceAttachments,
   invoiceAttachmentLimitLabel,
@@ -315,6 +316,26 @@ describe("AdminInvoicesPage send outcome/error helpers", () => {
     );
     expect(sendErrorMessage({ code: "send_claim_lost" })).toBeNull();
     expect(sendErrorMessage(new Error("boom"))).toBeNull();
+  });
+
+  // Codex round-3 P2 #4131: settled_count only exists on /batch/send — a
+  // zero-due invoice settled instead of sent must show up distinctly, or
+  // sent_count + failed_count alone reads as an unexplained shortfall.
+  it("batchSendToast surfaces settled_count alongside held_count and failed_count", () => {
+    expect(
+      batchSendToast({ sent_count: 2, total: 3, settled_count: 1 }, "invoice"),
+    ).toBe("Sent 2 of 3 invoices (1 settled — nothing due)");
+    expect(
+      batchSendToast({ sent_count: 1, total: 1 }, "invoice"),
+    ).toBe("Sent 1 of 1 invoice");
+    expect(
+      batchSendToast(
+        { sent_count: 1, total: 4, settled_count: 1, held_count: 1, failed_count: 1 },
+        "invoice",
+      ),
+    ).toBe(
+      "Sent 1 of 4 invoices (1 settled — nothing due) (1 held for review) (1 failed)",
+    );
   });
 });
 

@@ -491,4 +491,28 @@ describe('POST /admin/invoices/batch/send — derives firstDeliveryOnly per invo
       expect(opts.firstDeliveryOnly).toBe(false);
     });
   });
+
+  // Codex round-3 P2 #4131: the RESOLVED zero-due settlement shape
+  // (result.ok: true, settled_zero_due: true — the common pre-claim path)
+  // used to fall into the generic result.ok branch, counted as "sent" with
+  // both channels false — the page then reports a send that never
+  // happened, with no channel to explain it.
+  test('a resolved zero-due settlement is counted separately from sent, never as a false send', async () => {
+    InvoiceService.sendViaSMSAndEmail.mockResolvedValueOnce({
+      ok: true, settled_zero_due: true,
+      sms: { ok: false, code: 'settled_zero_due' }, email: { ok: false, code: 'settled_zero_due' }, payUrl: null,
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/batch/send`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invoiceIds: [RESEND_ID] }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.sent_count).toBe(0);
+      expect(body.settled_count).toBe(1);
+      expect(body.sent).toEqual([]);
+      expect(body.settled).toEqual([{ invoiceId: RESEND_ID, code: 'settled_zero_due' }]);
+    });
+  });
 });

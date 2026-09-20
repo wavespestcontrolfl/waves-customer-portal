@@ -34,8 +34,12 @@ jest.mock('../services/invoice-email', () => ({
 jest.mock('../config/twilio-numbers', () => ({
   getOutboundNumber: jest.fn(() => '+19413180000'),
 }));
+jest.mock('../services/review-request', () => ({
+  enrollForPaidInvoice: jest.fn(async () => ({ enrolled: true, recorded: true })),
+}));
 
 const db = require('../models/db');
+const { enrollForPaidInvoice } = require('../services/review-request');
 const { isEnabled } = require('../config/feature-gates');
 const {
   isWithinSendWindowET,
@@ -755,6 +759,29 @@ describe('processScheduledSends send-window handling', () => {
 
       expect(result).toMatchObject({ ok: true, settled_zero_due: true });
       expect(result.settled_by_deposit).toBeUndefined();
+    });
+
+    test('a zero-due COMBINED-VISIT (packet) invoice with a requested review is enrolled — the non-cash prepaid transition has no paid webhook to trigger it otherwise (Codex round-3 P2)', async () => {
+      // The other no-webhook settlement rail (covered_by_credit) already
+      // calls enrollPacketReviewAfterCredit; a zero-due packet invoice
+      // settled here skipped it entirely — the worker never sends, and the
+      // non-cash prepaid transition emits no paid webhook to enroll the
+      // review any other way. Exercised via processScheduledSends' own
+      // pre-claim check (not sendViaSMSAndEmail's, which now runs the
+      // packet ownership fence first and needs a fuller fixture).
+      const staleRecovery = chain();
+      const packetZeroDueRow = zeroDueDueRow({ visit_completion_packet_id: 'pkt-1' });
+      const dueQuery = chain({ rows: [packetZeroDueRow] });
+      db.mockReturnValueOnce(staleRecovery).mockReturnValueOnce(dueQuery);
+      settleSpy.mockResolvedValue({ settled: true, invoice: { ...packetZeroDueRow, status: 'prepaid' } });
+
+      const result = await InvoiceService.processScheduledSends();
+
+      expect(result).toEqual({ sent: 0, failed: 0, deferred: 0 });
+      expect(enrollForPaidInvoice).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'inv-1', visit_completion_packet_id: 'pkt-1' }),
+        expect.objectContaining({ source: 'credit_covered' }),
+      );
     });
 
     test('a settlement refused right now consumes an attempt AS AN ORDINARY FAILURE, and the batch continues', async () => {
