@@ -1165,3 +1165,57 @@ test.each([
 ])('bare seem and appear treatment complements remain uncertain: %s', (text, uncertain) => {
   expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
 });
+
+test.each([
+  ["Let's have Talstar P applied to the exterior perimeter.", true],
+  ['Let’s have Talstar P applied to the exterior perimeter.', true],
+  ['Let us have Talstar P applied to the exterior perimeter.', true],
+  ['Please let us have Talstar P applied to the exterior perimeter.', true],
+  ['We let the technician have Talstar P applied to the exterior perimeter.', false],
+  ['Let us have lunch, then Talstar P was applied to the exterior perimeter.', false],
+])('hortative causatives retain instruction scope: %s', (text, instruction) => {
+  const findingVerb = /applied/g.exec(text);
+  expect(grammar.reportFindingIsInstruction(text, text.indexOf('Talstar P'),
+    text.indexOf('exterior perimeter'), findingVerb, text.length)).toBe(instruction);
+});
+
+test.each([
+  ['Purportedly, Talstar P was applied to the exterior perimeter.', true],
+  ['Talstar P was purportedly applied to the exterior perimeter.', true],
+  ['Talstar P was applied to the exterior perimeter.', false],
+])('purportedly remains a report uncertainty marker: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test('an unrelated purported statement stays outside bounded finding evidence', () => {
+  const text = 'The invoice was purportedly paid, but Talstar P was applied to the exterior perimeter.';
+  const findingEvidence = grammar.claimContext(text, text.indexOf('Talstar P'), text.length);
+  expect(findingEvidence).not.toMatch(/purportedly/i);
+  expect(grammar.reportFindingIsUncertain(findingEvidence)).toBe(false);
+});
+
+test.each([
+  ['On the condition that the gate was open, Talstar P was applied to the exterior perimeter.', true],
+  ['So long as the gate was open, Talstar P was applied to the exterior perimeter.', true],
+  ['Talstar P was applied to the exterior perimeter, so long as the gate was open.', true],
+  ['We kept the gate open for so long as the visit lasted, then applied Talstar P to the exterior perimeter.', false],
+  ['We documented the property condition, then applied Talstar P to the exterior perimeter.', false],
+  ['We applied Talstar P along the long exterior perimeter.', false],
+])('conditional variants remain bounded to a finite condition: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['Talstar P, not this morning, was applied to the exterior perimeter.', false, true],
+  ['Talstar P, not last night, was applied to the exterior perimeter.', false, true],
+  ['Talstar P, not this week, was applied to the exterior perimeter.', false, true],
+  ['Talstar P, not last Monday, was applied to the exterior perimeter.', false, true],
+  ['Talstar P, not bait, was applied to the exterior perimeter.', true, false],
+  ['The exterior perimeter, not the Monday room, was treated with Talstar P.', true, false],
+  ['The exterior perimeter, not the This Morning room, was treated with Talstar P.', true, false],
+])('calendar nominal contrasts retain treatment polarity: %s', (text, completed, denied) => {
+  const findingVerb = /\b(?:applied|treated)\b/g.exec(text);
+  expect(grammar.reportHasCompletedPredicate(text, findingVerb)).toBe(completed);
+  expect(grammar.reportClaimIsDenied(text, text, text.indexOf('Talstar P'),
+    text.indexOf('exterior perimeter'), findingVerb)).toBe(denied);
+});
