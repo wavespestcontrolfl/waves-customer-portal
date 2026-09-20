@@ -65,17 +65,29 @@ export default function MobilePaymentSheet({
     setSendingInvoice(true);
     setError(null);
     try {
+      // This tender fires right after MobileCheckoutSheet minted the
+      // invoice — a FIRST delivery by definition, same contract as the
+      // desktop create-and-send path (AdminInvoicesPage's handleCreate).
+      // No internal legacy request shape (AGENTS.md): every /:id/send
+      // caller states its intent explicitly now, never posts with no body.
       const r = await fetch(`${API_BASE}/admin/invoices/${invoiceId}/send`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
         },
+        body: JSON.stringify({ firstDelivery: true }),
       });
       if (!r.ok) {
         const d = await r.json().catch(() => ({}));
         throw new Error(d.error || 'Failed to send invoice');
       }
+      // A first delivery that finds the invoice already owned by another
+      // live delivery (the completion, a concurrent send) comes back
+      // ok:true with already_delivered/queued_delivery instead of a
+      // thrown error — same no-op-success shape the desktop create path
+      // reads via sendOutcomeMessage. Nothing left to do here but proceed
+      // exactly as if this tender's own SMS+email had just gone out.
       onInvoiceSent?.();
     } catch (e) {
       setError(e.message || 'Failed to send invoice');

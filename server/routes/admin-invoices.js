@@ -10,7 +10,7 @@ const { VALID_PAYMENT_METHODS, recordManualPayment, retireOpenPaymentIntentBefor
 const logger = require('../services/logger');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
-const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, visitRefusesSettlement } = require('../services/invoice-helpers');
+const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, visitRefusesSettlement, isStaleClaimReviewHold } = require('../services/invoice-helpers');
 const CustomerCredit = require('../services/customer-credit');
 const PaymentPlans = require('../services/payment-plans');
 const { generateInvoiceSummary, generateThankYouMessage } = require('../services/invoice-ai-summary');
@@ -943,6 +943,35 @@ function isFirstDeliveryRow(row) {
     && !row.sent_at && !row.sms_sent_at && !row.email_sent_at;
 }
 
+// One classifier shared by every first-delivery/held-outcome site (the
+// batch create's own send, the batch keyed-retry, /batch/send per-invoice,
+// and /:id/send) — Codex round-1 P2 (PR #4633): the no-op/held shape was
+// hand-built at each of the four call sites. A stale-claim review hold is
+// ALWAYS held, regardless of firstDeliveryOnly — none of these callers
+// ever sets overridesReviewHold, so a parked row refuses no matter what
+// the row's own stamps look like. An already_delivered/queued_pay_link
+// code is a no-op success ONLY for a genuine first delivery — the same
+// code on an explicit Resend is a real conflict the caller must still
+// treat as a failure (returns null).
+function firstDeliveryOutcome(err, firstDeliveryOnly) {
+  if (err?.code === 'stale_claim_review_hold') {
+    return {
+      type: 'held',
+      code: 'stale_claim_review_hold',
+      reason: 'Invoice is parked under a stale-claim review hold (delivery unverified) — not sent; use Resend to confirm and clear it',
+    };
+  }
+  if (firstDeliveryOnly && FIRST_DELIVERY_NOOP_CODES.has(err?.code)) {
+    return {
+      type: 'noop',
+      code: err.code,
+      already_delivered: err.code === 'already_delivered',
+      queued_delivery: err.code === 'queued_pay_link',
+    };
+  }
+  return null;
+}
+
 // POST / — create invoice manually
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
@@ -1162,6 +1191,18 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
           skipped.push(entry);
           return;
         }
+        // Round-1 Codex P2 (PR #4633): a keyed retry whose row processScheduledSends
+        // already parked sits at status 'scheduled' (the park clears
+        // scheduled_send_at, not the status), so it would otherwise fall
+        // through the draft-only branch below and never reach the
+        // stale-claim review hold handling — checked here, BEFORE that
+        // branch, so a parked row is always reported held.
+        if (isStaleClaimReviewHold(existing)) {
+          entry.reason = 'Invoice is parked under a stale-claim review hold (delivery unverified) — not sent; use Resend to confirm and clear it';
+          entry.sent = { sent: false, held: true, code: 'stale_claim_review_hold' };
+          skipped.push(entry);
+          return;
+        }
         // Finish an UNFINISHED immediate send: the first attempt may have
         // crashed between insert and delivery (or delivery failed),
         // leaving the row draft — a keyed retry must complete it, not
@@ -1170,29 +1211,30 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
         // reported, never doubled). Non-draft rows were delivered or
         // deliberately moved on — never re-text those.
         if (sendImmediately && existing.status === 'draft') {
-          // This retry's own row may already carry a delivery stamp (the
-          // first attempt crashed AFTER the provider accepted it) — only a
-          // genuinely undelivered row is a first delivery.
-          const firstDeliveryOnly = isFirstDeliveryRow(existing);
+          // Round-1 Codex P1 (PR #4633): a keyed retry of create-and-send
+          // is a first delivery BY DEFINITION — the batch/create call that
+          // minted this row has never delivered it under any other
+          // request. Deriving the flag from the row's own stamps (a
+          // provider-accept whose finalize crashed leaves sms_sent_at set)
+          // used to read the SAME row as an ordinary resend and re-text
+          // the customer a second time; unconditionally true lets the
+          // already-delivered guard (order-fixed above) catch it instead.
+          const firstDeliveryOnly = true;
           try {
             entry.sent = existing.payer_id
               ? await InvoiceService.sendViaSMSAndEmail(existing.id, { firstDeliveryOnly, operatorInitiated: true, actorTechnicianId: req.technicianId || null })
               : await InvoiceService.sendViaSMS(existing.id, { firstDeliveryOnly, operatorInitiated: true, actorTechnicianId: req.technicianId || null });
           } catch (sendErr) {
-            // A parked row (isStaleClaimReviewHold) is refused regardless of
-            // stamps — this route never sets overridesReviewHold, so the
-            // hold always holds here. Held, not a batch failure; an
-            // operator's own explicit Resend is the way off it.
-            if (sendErr?.code === 'stale_claim_review_hold') {
-              entry.reason = 'Invoice is parked under a stale-claim review hold (delivery unverified) — not sent; use Resend to confirm and clear it';
-              entry.sent = { sent: false, held: true, code: 'stale_claim_review_hold' };
+            const outcome = firstDeliveryOutcome(sendErr, firstDeliveryOnly);
+            if (outcome?.type === 'held') {
+              entry.reason = outcome.reason;
+              entry.sent = { sent: false, held: true, code: outcome.code };
               skipped.push(entry);
               return;
             }
-            if (firstDeliveryOnly && FIRST_DELIVERY_NOOP_CODES.has(sendErr?.code)) {
-              entry.sent = { sent: false, ok: true, code: sendErr.code,
-                already_delivered: sendErr.code === 'already_delivered',
-                queued_delivery: sendErr.code === 'queued_pay_link' };
+            if (outcome?.type === 'noop') {
+              entry.sent = { sent: false, ok: true, code: outcome.code,
+                already_delivered: outcome.already_delivered, queued_delivery: outcome.queued_delivery };
               skipped.push(entry);
               return;
             }
@@ -1214,7 +1256,7 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
         if (batchKey) {
           const existing = await db('invoices')
             .where({ customer_id: customerId, batch_key: batchKey })
-            .first('id', 'invoice_number', 'status', 'payer_id', 'updated_at', 'batch_fingerprint', 'sent_at', 'sms_sent_at', 'email_sent_at');
+            .first('id', 'invoice_number', 'status', 'payer_id', 'updated_at', 'batch_fingerprint', 'sent_at', 'sms_sent_at', 'email_sent_at', 'scheduled_send_at', 'scheduled_send_error');
           if (existing) {
             await settleKeyedDuplicate(existing,
               'This batch key already created an invoice for this customer (retry detected)');
@@ -1239,10 +1281,12 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
               ? await InvoiceService.sendViaSMSAndEmail(invoice.id, { firstDeliveryOnly: true, operatorInitiated: true, actorTechnicianId: req.technicianId || null })
               : await InvoiceService.sendViaSMS(invoice.id, { firstDeliveryOnly: true, operatorInitiated: true, actorTechnicianId: req.technicianId || null });
           } catch (sendErr) {
-            if (FIRST_DELIVERY_NOOP_CODES.has(sendErr?.code)) {
-              sendResult = { sent: false, ok: true, code: sendErr.code,
-                already_delivered: sendErr.code === 'already_delivered',
-                queued_delivery: sendErr.code === 'queued_pay_link' };
+            const outcome = firstDeliveryOutcome(sendErr, true);
+            if (outcome?.type === 'held') {
+              sendResult = { sent: false, held: true, code: outcome.code };
+            } else if (outcome?.type === 'noop') {
+              sendResult = { sent: false, ok: true, code: outcome.code,
+                already_delivered: outcome.already_delivered, queued_delivery: outcome.queued_delivery };
             } else {
               logger.error(`[admin-invoices:batch] send failed for ${invoice.id}: ${sendErr.message}`);
               sendResult = { sent: false, error: sendErr.message };
@@ -1275,7 +1319,7 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
           // stale claim, leave live sends alone.
           const winner = await db('invoices')
             .where({ customer_id: customerId, batch_key: batchKey })
-            .first('id', 'invoice_number', 'status', 'payer_id', 'updated_at', 'batch_fingerprint', 'sent_at', 'sms_sent_at', 'email_sent_at');
+            .first('id', 'invoice_number', 'status', 'payer_id', 'updated_at', 'batch_fingerprint', 'sent_at', 'sms_sent_at', 'email_sent_at', 'scheduled_send_at', 'scheduled_send_error');
           if (winner) {
             await settleKeyedDuplicate(winner,
               'This batch key already created an invoice for this customer (concurrent retry)');
@@ -1348,14 +1392,11 @@ router.post('/batch/send', requireAdmin, async (req, res, next) => {
           failed.push({ invoiceId, error });
         }
       } catch (err) {
-        // A parked row (isStaleClaimReviewHold) is refused regardless of
-        // stamps — this route never sets overridesReviewHold, so the hold
-        // always holds here (third audit P1 #4131: a row that also carries
-        // a delivery stamp used to slip through as an ordinary resend
-        // because operatorInitiated:true alone used to clear the hold).
-        // Held, not a batch failure or a send — nothing was attempted.
-        if (err?.code === 'stale_claim_review_hold') {
-          held.push({ invoiceId, code: 'stale_claim_review_hold', reason: err.message });
+        const outcome = firstDeliveryOutcome(err, firstDeliveryOnly);
+        // Held, not a batch failure or a send — nothing was attempted; an
+        // operator's own explicit Resend is the way off the hold.
+        if (outcome?.type === 'held') {
+          held.push({ invoiceId, code: outcome.code, reason: outcome.reason });
           continue;
         }
         // A first delivery finding the invoice already owned by another
@@ -1363,12 +1404,12 @@ router.post('/batch/send', requireAdmin, async (req, res, next) => {
         // treatment as /:id/send (round-6 P1 #4131). An explicit resend
         // hitting the same code is a real conflict — falls through to
         // failed below, matching /:id/send's non-first-delivery path.
-        if (firstDeliveryOnly && FIRST_DELIVERY_NOOP_CODES.has(err?.code)) {
+        if (outcome?.type === 'noop') {
           sent.push({
             invoiceId,
             channels: { sms: false, email: false },
-            already_delivered: err.code === 'already_delivered',
-            queued_delivery: err.code === 'queued_pay_link',
+            already_delivered: outcome.already_delivered,
+            queued_delivery: outcome.queued_delivery,
           });
           continue;
         }
@@ -1626,15 +1667,19 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       // (already_delivered), or queued for the send window (queued_pay_link
       // — a held text already carries this pay link and delivers then). An
       // explicit Resend never takes this branch — queued_pay_link there
-      // falls through as a real conflict below.
-      if (firstDeliveryOnly && FIRST_DELIVERY_NOOP_CODES.has(err?.code)) {
-        logger.info(`[admin-invoices] first delivery of invoice ${id} skipped (${err.code}): ${err.message}`);
+      // falls through as a real conflict below. A stale-claim review hold
+      // is NOT special-cased here (unlike the batch routes' "held"
+      // reporting) — this single-invoice route surfaces it as the ordinary
+      // refusal below, straight to the operator who made the request.
+      const outcome = firstDeliveryOutcome(err, firstDeliveryOnly);
+      if (outcome?.type === 'noop') {
+        logger.info(`[admin-invoices] first delivery of invoice ${id} skipped (${outcome.code}): ${err.message}`);
         return res.json({
           ok: true,
-          already_delivered: err.code === 'already_delivered',
-          queued_delivery: err.code === 'queued_pay_link',
-          sms: { ok: false, code: err.code },
-          email: { ok: false, code: err.code },
+          already_delivered: outcome.already_delivered,
+          queued_delivery: outcome.queued_delivery,
+          sms: { ok: false, code: outcome.code },
+          email: { ok: false, code: outcome.code },
         });
       }
       throw err;

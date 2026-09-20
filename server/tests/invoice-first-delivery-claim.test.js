@@ -124,6 +124,18 @@ describe('claimInvoiceForSend — stale-claim review hold (third audit P1: EXPLI
       .rejects.toMatchObject({ code: 'stale_claim_review_hold' });
   });
 
+  // Round-1 Codex P1 (PR #4633): a parked row can ALSO carry a delivery
+  // stamp from the same unverified attempt (the provider may have accepted
+  // the message before the crash that stranded the claim). The review hold
+  // must win over already-delivered — surfacing for operator review, not
+  // resolving itself as a benign "already sent" no-op that hides the
+  // unverified delivery.
+  test('a parked row that ALSO carries a delivery stamp surfaces the review hold, never already_delivered', async () => {
+    makeDb({ ...parkedRow(), sms_sent_at: new Date(), email_sent_at: new Date() });
+    await expect(claimInvoiceForSend(INVOICE_ID, { firstDeliveryOnly: true }))
+      .rejects.toMatchObject({ code: 'stale_claim_review_hold' });
+  });
+
   // The third audit P1: operatorInitiated must NEVER be read as an implicit
   // override — main routes pass it unconditionally true (it keeps its own,
   // unrelated meaning, the quiet-hours bypass), so a claim with neither

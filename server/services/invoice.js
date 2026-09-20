@@ -1179,11 +1179,20 @@ function assertFirstDeliveryNotAnOverride(firstDeliveryOnly, overridesReviewHold
 }
 
 function refuseFirstDeliveryHold(current, invoiceId, firstDeliveryOnly, overridesReviewHold) {
-  if (firstDeliveryOnly && alreadyDeliveredForFirstSend(current)) {
-    throw invoiceAlreadyDeliveredError(current);
-  }
+  // Round-1 Codex P1 (PR #4633): checked BEFORE already-delivered. A row
+  // can be BOTH parked (processScheduledSends recovered a stale 'sending'
+  // claim, delivery unverified) AND carrying a delivery stamp from that
+  // SAME unverified attempt (the provider may have accepted the message
+  // before the crash) — already-delivered would read that as a normal,
+  // benign no-op success and hide the fact that an operator still needs to
+  // confirm delivery. The review hold is the stronger, more cautious
+  // claim and must win: it always surfaces for review, never gets
+  // silently resolved as "already sent, nothing to do".
   if (isStaleClaimReviewHold(current) && !overridesReviewHold) {
     throw staleClaimReviewHoldError(invoiceId);
+  }
+  if (firstDeliveryOnly && alreadyDeliveredForFirstSend(current)) {
+    throw invoiceAlreadyDeliveredError(current);
   }
 }
 

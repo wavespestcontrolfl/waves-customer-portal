@@ -244,7 +244,7 @@ function qb(overrides = {}) {
   return q;
 }
 
-describe('POST /admin/invoices/batch — sendImmediately derives firstDeliveryOnly from the keyed-retry row (round-6 P1 #4131)', () => {
+describe('POST /admin/invoices/batch — sendImmediately\'s keyed retry is UNCONDITIONALLY a first delivery (round-1 Codex P1, PR #4633)', () => {
   const CUSTOMER = 'cccccccc-1111-4111-8111-111111111111';
 
   beforeEach(() => jest.clearAllMocks());
@@ -279,7 +279,15 @@ describe('POST /admin/invoices/batch — sendImmediately derives firstDeliveryOn
     });
   });
 
-  test('a keyed-retry row already carrying a delivery stamp is passed as firstDeliveryOnly: false', async () => {
+  // Round-1 Codex P1 (PR #4633): a keyed retry of create-and-send is a
+  // first delivery BY DEFINITION — this row has never been delivered
+  // under any OTHER request. Deriving the flag from the row's own stamps
+  // used to read a provider-accept-then-crashed row (sms_sent_at set,
+  // still draft) as an ordinary resend and re-text the pay link a second
+  // time; it is now unconditionally true regardless of stamps, and the
+  // already-delivered guard (order-fixed ahead of the review hold) is what
+  // catches a genuinely-delivered retry as a no-op instead.
+  test('a keyed-retry row already carrying a delivery stamp is STILL passed as firstDeliveryOnly: true', async () => {
     mockExisting({
       id: 'inv-2', invoice_number: 'WPC-2', status: 'draft', payer_id: null,
       updated_at: new Date(), batch_fingerprint: null,
@@ -289,7 +297,7 @@ describe('POST /admin/invoices/batch — sendImmediately derives firstDeliveryOn
     await withServer(async (baseUrl) => {
       await postBatch(baseUrl, 'retry-key-delivered');
       const [, opts] = InvoiceService.sendViaSMS.mock.calls[0];
-      expect(opts.firstDeliveryOnly).toBe(false);
+      expect(opts.firstDeliveryOnly).toBe(true);
     });
   });
 });

@@ -38,6 +38,7 @@ const express = require('express');
 const db = require('../models/db');
 const InvoiceService = require('../services/invoice');
 const SetupFeeAlerts = require('../services/setup-fee-alert-reconcile');
+const { STALE_SEND_PARK_ERROR } = require('../services/invoice-helpers');
 const router = require('../routes/admin-invoices');
 
 async function withServer(fn) {
@@ -508,6 +509,56 @@ describe('POST /batch idempotency (batchKey)', () => {
       const body = await response.json();
       expect(body.skipped_count).toBe(1);
       expect(body.skipped[0].sent).toBeUndefined();
+      expect(InvoiceService.sendViaSMS).not.toHaveBeenCalled();
+      expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+    });
+  });
+
+  // Round-1 Codex P1 (PR #4633): a keyed retry of create-and-send is a
+  // first delivery BY DEFINITION — deriving the flag from the row's own
+  // stamps let a provider-accept whose finalize crashed (sms_sent_at set,
+  // status still draft) read as an ordinary resend and re-text the pay
+  // link a second time.
+  test('a keyed retry against a draft row with sms_sent_at (provider accepted, finalize crashed) is an already_delivered no-op — no second provider call', async () => {
+    db.mockImplementation((table) => table === 'invoice_batch_keys' ? makeRegistryChain() : makeDupChain({
+      id: 'inv-existing', invoice_number: 'WPC-1', status: 'draft', payer_id: null,
+      sms_sent_at: new Date().toISOString(),
+    }));
+    const alreadyDeliveredErr = new Error('Invoice was already delivered — not sent again');
+    alreadyDeliveredErr.code = 'already_delivered';
+    InvoiceService.sendViaSMS.mockRejectedValue(alreadyDeliveredErr);
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/batch', {
+        customerIds: ['cust-1'], title: 'Quarterly Pest Control', lineItems,
+        sendImmediately: true, batchKey: 'b7f9c2d4-0000-4000-8000-000000000005',
+      });
+      const body = await response.json();
+      expect(body.skipped_count).toBe(1);
+      expect(body.skipped[0].sent).toMatchObject({ ok: true, already_delivered: true });
+      expect(InvoiceService.sendViaSMS).toHaveBeenCalledTimes(1);
+      expect(InvoiceService.sendViaSMS).toHaveBeenCalledWith('inv-existing', { firstDeliveryOnly: true, operatorInitiated: true, actorTechnicianId: 'tech-1' });
+    });
+  });
+
+  // Round-1 Codex P2 (PR #4633): a keyed retry whose row processScheduledSends
+  // already parked sits at status 'scheduled' (the park clears
+  // scheduled_send_at, not the status) — it must never fall through to the
+  // draft-only branch (which it can't reach) and silently skip with the
+  // generic "already created" reason; it must be reported held.
+  test('a keyed retry against an already-parked row (status scheduled) is reported held, not silently skipped', async () => {
+    db.mockImplementation((table) => table === 'invoice_batch_keys' ? makeRegistryChain() : makeDupChain({
+      id: 'inv-existing', invoice_number: 'WPC-1', status: 'scheduled', payer_id: null,
+      scheduled_send_at: null, scheduled_send_error: STALE_SEND_PARK_ERROR,
+    }));
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/batch', {
+        customerIds: ['cust-1'], title: 'Quarterly Pest Control', lineItems,
+        sendImmediately: true, batchKey: 'b7f9c2d4-0000-4000-8000-000000000006',
+      });
+      const body = await response.json();
+      expect(body.skipped_count).toBe(1);
+      expect(body.skipped[0].sent).toMatchObject({ held: true, code: 'stale_claim_review_hold' });
+      expect(body.skipped[0].reason).toMatch(/stale-claim review hold/i);
       expect(InvoiceService.sendViaSMS).not.toHaveBeenCalled();
       expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
     });
