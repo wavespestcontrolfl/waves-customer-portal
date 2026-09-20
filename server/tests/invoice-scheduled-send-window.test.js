@@ -784,6 +784,32 @@ describe('processScheduledSends send-window handling', () => {
       );
     });
 
+    test('a terminal-visit row the void sweep refuses to void is recorded as a failed refusal, never left due with nothing spent (Codex round-4 P1)', async () => {
+      // The sweep's own safety refusals (a live PaymentIntent, money in
+      // flight, an unverifiable Stripe lookup) must not leave a terminal
+      // row due with nothing spent — it would be re-selected every tick
+      // forever, a silent infinite loop. Recorded exactly like any other
+      // terminal settlement refusal instead: a capped attempt, counted
+      // failed rather than held.
+      isWithinSendWindowET.mockReturnValue(true);
+      const staleRecovery = chain();
+      const terminalRow = zeroDueDueRow({ scheduled_send_attempts: 1 });
+      const dueQuery = chain({ rows: [terminalRow] });
+      const failUpdate = chain();
+      db.mockReturnValueOnce(staleRecovery).mockReturnValueOnce(dueQuery).mockReturnValueOnce(failUpdate);
+      settleSpy.mockResolvedValue({ settled: false, reason: 'visit_never_ran', invoice: null });
+      const voidSpy = jest.spyOn(InvoiceService, 'voidOpenInvoicesForCancelledService').mockResolvedValue([]);
+
+      const result = await InvoiceService.processScheduledSends();
+
+      expect(voidSpy).toHaveBeenCalledWith('svc-1');
+      const updateArgs = failUpdate.update.mock.calls[0][0];
+      expect(updateArgs.scheduled_send_attempts).toBe('COALESCE(scheduled_send_attempts, 0) + 1');
+      expect(updateArgs.scheduled_send_error).toMatch(/terminal/i);
+      expect(result).toEqual({ sent: 0, failed: 1, deferred: 0 });
+      voidSpy.mockRestore();
+    });
+
     test('a settlement refused right now consumes an attempt AS AN ORDINARY FAILURE, and the batch continues', async () => {
       // Ruling (pre-push audit P1, #4131 slice 4): a settlement refusal is
       // a failure to settle, not a window hold — it rides the same

@@ -4664,9 +4664,18 @@ const InvoiceService = {
             const voided = scheduledServiceId
               ? await InvoiceService.voidOpenInvoicesForCancelledService(scheduledServiceId)
               : [];
-            held += 1;
-            if (!voided.includes(inv.id)) {
-              logger.warn(`[invoice] Scheduled send for ${inv.invoice_number} is zero-due on a terminal visit but could not be safely voided — left queued for review`);
+            if (voided.includes(inv.id)) {
+              held += 1;
+            } else {
+              // The sweep's own safety refusals (a live PaymentIntent,
+              // money in flight, an unverifiable Stripe lookup) left the
+              // row un-voided — it must not sit due with nothing spent
+              // (Codex round-4 P1 #4131): re-selected every tick forever
+              // otherwise. Recorded exactly like any other terminal
+              // settlement refusal — a capped attempt, surfacing as failed
+              // once the cap is hit — so an operator eventually sees it.
+              logger.warn(`[invoice] Scheduled send for ${inv.invoice_number} is zero-due on a terminal visit but could not be safely voided — recording it as a failed refusal instead of leaving it due`);
+              failed += await recordZeroDueSchedulingOutcome(zeroDue, inv);
             }
             continue;
           }
@@ -7910,7 +7919,20 @@ const InvoiceService = {
       if (refusedSendCleanup) {
         candidateQuery.where({ id: invoiceId, status: "sending", send_claim_token: refusedClaimToken });
       } else {
-        candidateQuery.where({ scheduled_service_id: scheduledServiceId })
+        // Widened (Codex round-4 P1 #4131, raised twice for this slice):
+        // most post-completion invoices carry only service_record_id, never
+        // scheduled_service_id directly (migration 20260420000002) — the
+        // inverse of linkedScheduledServiceId's own fallback. Matching
+        // scheduled_service_id alone left those rows permanently un-voidable
+        // by this sweep; done once here, not duplicated at each caller.
+        candidateQuery
+          .where((q) => {
+            q.where({ scheduled_service_id: scheduledServiceId })
+              .orWhereIn(
+                "service_record_id",
+                db("service_records").where({ scheduled_service_id: scheduledServiceId }).select("id"),
+              );
+          })
           .whereIn("status", CANCELLED_SERVICE_VOIDABLE_STATUSES);
       }
       const candidates = await candidateQuery
