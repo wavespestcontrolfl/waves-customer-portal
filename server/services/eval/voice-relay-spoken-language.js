@@ -141,6 +141,8 @@ function clauseIsEpistemicallyHedged(clause) { return EPISTEMIC_HEDGE_RE.test(cl
 
 module.exports = {
   CERTAINTY_IDIOM_RE, EPISTEMIC_HEDGE_RE, clauseIsNegated, clauseIsEpistemicallyHedged,
+  RIGHT_NOUN_PHRASE_SUBJECT_RE,
+  CLAUSE_BOUNDARY_TOKEN_RE,
   SUBJECT,
   REFUND_PAYMENT_ACTION_RE,
   CLAUSE_FINITE_PREDICATE_RE,
