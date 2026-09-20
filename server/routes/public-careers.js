@@ -248,11 +248,12 @@ router.post('/interview/:token/book', interviewLimiter, async (req, res) => {
     if (outcome.conflict) return res.status(409).json({ error: 'This link is no longer active.' });
     const { updated, matched } = outcome;
 
-    // Fire-and-forget: confirmation comms + owner bell (gate already on —
-    // this route 404s while dark, above).
+    // Fire-and-forget, in TWO INDEPENDENT blocks: a confirmation-comms
+    // failure must never suppress the owner bell (codex P2) — they were one
+    // sequential block before, so an sendStageComms throw skipped the
+    // triggerNotification call entirely.
     void (async () => {
       const { sendStageComms } = require('../services/recruiting-comms');
-      const { triggerNotification } = require('../services/notification-triggers');
       const RecruitingComms = require('../services/recruiting-comms');
       const commsHistory = Array.isArray(updated.comms_history) ? updated.comms_history : [];
       const priorSmsSent = commsHistory.some((e) => e && e.channel === 'sms' && e.outcome === 'sent');
@@ -261,13 +262,19 @@ router.post('/interview/:token/book', interviewLimiter, async (req, res) => {
         email: true,
         by: 'applicant',
       });
+    })().catch((err) => {
+      logger.error(`[careers] interview book confirmation comms failed: ${errorSummary(err)}`);
+    });
+
+    void (async () => {
+      const { triggerNotification } = require('../services/notification-triggers');
       await triggerNotification('job_interview_booked', {
         applicationId: updated.id,
         mode: updated.interview_mode,
         whenLabel: matched.label,
       });
     })().catch((err) => {
-      logger.error(`[careers] interview book comms failed: ${errorSummary(err)}`);
+      logger.error(`[careers] interview book notification failed: ${errorSummary(err)}`);
     });
 
     return res.json(await interviewViewPayload(updated));

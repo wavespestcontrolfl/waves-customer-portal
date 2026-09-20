@@ -128,7 +128,7 @@ function blockResult(lineType) {
 async function checkLineType(input, _policy, _contactState) {
   if (!isEnabled('proactiveLineTypeLookup')) return { ok: true };
   if (!input || input.channel !== 'sms') return { ok: true };
-  if (!['customer', 'lead'].includes(input.audience)) return { ok: true };
+  if (!['customer', 'lead', 'applicant'].includes(input.audience)) return { ok: true };
   const phone = input.to;
   if (!phone) return { ok: true };
 

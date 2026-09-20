@@ -29,6 +29,7 @@ const mockInterviewUrlFor = jest.fn((token) => (token ? `https://portal.wavespes
 const mockBodyKeepsInterviewLink = jest.fn((body, url) => body.includes('[interview link]') || (!!url && body.includes(url)));
 const mockSubstituteInterviewLinkPlaceholder = jest.fn((body, url) => body.split('[interview link]').join(url));
 const mockSendStageComms = jest.fn(async () => ({ sms: 'sent', email: 'sent' }));
+const mockErrorSummary = jest.fn((err) => (err && err.message) || 'error');
 
 jest.mock('../services/recruiting-comms', () => ({
   channelEligibility: (...args) => mockChannelEligibility(...args),
@@ -39,6 +40,7 @@ jest.mock('../services/recruiting-comms', () => ({
   bodyKeepsInterviewLink: (...args) => mockBodyKeepsInterviewLink(...args),
   substituteInterviewLinkPlaceholder: (...args) => mockSubstituteInterviewLinkPlaceholder(...args),
   sendStageComms: (...args) => mockSendStageComms(...args),
+  errorSummary: (...args) => mockErrorSummary(...args),
   INTERVIEW_LINK_PLACEHOLDER: '[interview link]',
 }));
 
@@ -296,6 +298,58 @@ describe('PATCH /:id/status', () => {
     expect(body.error).toMatch(/interview link/i);
     expect(mockDb.__rows()[0].status).toBe('reviewed'); // nothing committed
     expect(mockSendStageComms).not.toHaveBeenCalled();
+  });
+
+  test('a sendStageComms throw after the transition committed responds 200 with sent:failed for the requested channels, not a 500', async () => {
+    mockSendStageComms.mockRejectedValue(new Error('sendgrid down'));
+    mockDb.__setRows([appRow({ status: 'reviewed' })]);
+    const { status, body } = await patch('aaaaaaaa-0000-4000-8000-000000000001', {
+      status: 'interview', notify: { sms: true, email: true },
+    });
+    expect(status).toBe(200);
+    expect(body.sent).toEqual({ sms: 'failed', email: 'failed' });
+    // The transition itself still committed — a comms failure never rolls
+    // back or masks the status change.
+    expect(body.application.status).toBe('interview');
+    expect(mockDb.__rows()[0].status).toBe('interview');
+  });
+
+  test('sent:failed only covers channels actually requested; the other stays not_requested', async () => {
+    mockSendStageComms.mockRejectedValue(new Error('sendgrid down'));
+    mockDb.__setRows([appRow({ status: 'reviewed' })]);
+    const { body } = await patch('aaaaaaaa-0000-4000-8000-000000000001', {
+      status: 'interview', notify: { sms: true, email: false },
+    });
+    expect(body.sent).toEqual({ sms: 'failed', email: 'not_requested' });
+  });
+
+  test('the response re-reads the row after sending, so comms_history appended by the send is included', async () => {
+    mockSendStageComms.mockImplementation(async (app) => {
+      const row = mockDb.__rows().find((r) => r.id === app.id);
+      row.comms_history = [
+        ...(row.comms_history || []),
+        { at: new Date().toISOString(), channel: 'sms', outcome: 'sent' },
+      ];
+      return { sms: 'sent', email: 'sent' };
+    });
+    mockDb.__setRows([appRow({ status: 'reviewed' })]);
+    const { body } = await patch('aaaaaaaa-0000-4000-8000-000000000001', {
+      status: 'interview', notify: { sms: true, email: true },
+    });
+    expect(body.application.comms_history).toHaveLength(1);
+    expect(body.application.comms_history[0]).toMatchObject({ channel: 'sms', outcome: 'sent' });
+  });
+
+  test('a re-read failure after a successful send falls back to the pre-send committed row (not a 500)', async () => {
+    mockSendStageComms.mockResolvedValue({ sms: 'sent', email: 'sent' });
+    mockDb.__setRows([appRow({ status: 'reviewed' })]);
+    mockDb.mockImplementationOnce(() => { throw new Error('re-read boom'); });
+    const { status, body } = await patch('aaaaaaaa-0000-4000-8000-000000000001', {
+      status: 'interview', notify: { sms: true, email: true },
+    });
+    expect(status).toBe(200);
+    expect(body.application.status).toBe('interview');
+    expect(body.sent).toEqual({ sms: 'sent', email: 'sent' });
   });
 
   test('well-formed but unknown application id -> 404', async () => {

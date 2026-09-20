@@ -135,6 +135,56 @@ describe('RecruitingPage — stage change dialog', () => {
     expect(await screen.findByText('Text sent · Email sent')).toBeInTheDocument();
   });
 
+  it('shows a secondary Resend link button next to a booked interview time, wired to the resend flow', async () => {
+    const fetchMock = vi.fn((url, options = {}) => {
+      const method = options.method || 'GET';
+      if (url.includes('/admin/careers?status=')) {
+        return Promise.resolve(apiResponse({
+          applications: [{
+            id: 'app-1', role: 'technician', status: 'interview',
+            contact_snapshot: { name: 'Jordan Lee' }, ai_score: 80, ai_recommendation: 'strong',
+            created_at: '2026-09-10T12:00:00Z',
+          }],
+          counts: { interview: 1 },
+        }));
+      }
+      if (url.includes('/admin/careers/app-1/stage-preview')) {
+        return Promise.resolve(apiResponse(previewFixture()));
+      }
+      if (method === 'PATCH') {
+        return Promise.resolve(apiResponse({
+          application: detailFixture({ status: 'interview' }),
+          sent: { sms: 'sent', email: 'sent' },
+        }));
+      }
+      if (url.endsWith('/admin/careers/app-1')) {
+        return Promise.resolve(apiResponse({
+          application: detailFixture({
+            status: 'interview',
+            interview_mode: 'phone',
+            interview_at: '2026-09-22T20:30:00Z',
+            interview_booked_at: '2026-09-15T00:00:00Z',
+            interview_url: 'https://portal.wavespestcontrol.com/careers/interview/abc',
+          }),
+        }));
+      }
+      return Promise.resolve(apiResponse({}));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText('Jordan Lee'));
+
+    // The booked time itself still renders...
+    await screen.findByText(/Phone call/);
+    // ...next to a secondary Resend link button (not the primary Send/Resend
+    // link CTA, which only shows when there's no booking yet).
+    const resendButton = await screen.findByRole('button', { name: 'Resend link' });
+    fireEvent.click(resendButton);
+
+    await screen.findByRole('heading', { name: 'Resend interview link' });
+  });
+
   it('omits notify entirely when "Move without notifying" is checked', async () => {
     let patchedBody = null;
     const fetchMock = buildFetchMock({ onPatch: (body) => { patchedBody = body; } });

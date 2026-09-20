@@ -85,6 +85,33 @@ describe('CareersInterviewPage — open state', () => {
   });
 });
 
+describe('CareersInterviewPage — booking failure clears the selected slot', () => {
+  it('a non-409 failed book response clears the picked time before refreshing, disabling Confirm', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ error: 'That time is no longer available.' }, 400))
+      .mockResolvedValueOnce(jsonResponse(openPayload()));
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderPage();
+
+    expect(await screen.findByText(/Hi Jordan/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('radio', { name: /Phone call/i }));
+    const slotButton = screen.getByRole('button', { name: '4:30 PM' });
+    fireEvent.click(slotButton);
+    expect(slotButton).toHaveAttribute('aria-pressed', 'true');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm interview time' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    await screen.findByText(/no longer available/i);
+
+    // selectedSlot was cleared BEFORE the refresh — Confirm stays disabled
+    // rather than showing the now-vanished time as still picked.
+    expect(screen.getByRole('button', { name: 'Confirm interview time' })).toBeDisabled();
+  });
+});
+
 describe('CareersInterviewPage — inactive link', () => {
   it('renders the inactive-link state on a 404', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ error: 'Not found' }, 404)));

@@ -25,6 +25,11 @@ jest.mock('../services/messaging/validators/suppression', () => ({
 const mockSendOne = jest.fn(async () => ({ messageId: 'sg-1' }));
 jest.mock('../services/sendgrid-mail', () => ({ sendOne: (...args) => mockSendOne(...args) }));
 
+const mockActiveSuppressionFor = jest.fn(async () => null);
+jest.mock('../services/email-template-library', () => ({
+  activeSuppressionFor: (...args) => mockActiveSuppressionFor(...args),
+}));
+
 function makeDb() {
   const tables = {};
   const db = jest.fn((table) => {
@@ -90,6 +95,7 @@ beforeEach(() => {
   mockIsEnabled.mockReturnValue(true);
   mockLoadSuppressionState.mockResolvedValue({});
   mockSendOne.mockResolvedValue({ messageId: 'sg-1' });
+  mockActiveSuppressionFor.mockResolvedValue(null);
   mockDb.__tables.job_applications = [];
   mockDb.__tables.email_messages = [];
 });
@@ -319,5 +325,49 @@ describe('sendStageComms', () => {
     expect(result.email).toBe('failed');
     const row = mockDb.__tables.email_messages.find((r) => r.recipient_id === 'app-1');
     expect(row.status).toBe('failed');
+  });
+
+  test('email suppressed -> outcome blocked, code email_suppressed, sendOne never called, ledger row blocked', async () => {
+    mockActiveSuppressionFor.mockResolvedValue({ suppression_type: 'bounce', group_key: null });
+    const app = baseApp();
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+
+    const result = await RecruitingComms.sendStageComms(app, 'application_received', { sms: false, email: true });
+
+    expect(result.email).toBe('blocked');
+    expect(mockSendOne).not.toHaveBeenCalled();
+    expect(mockActiveSuppressionFor).toHaveBeenCalledWith(
+      expect.objectContaining({ send_stream: 'recruiting_operational', suppression_group_key: 'recruiting_operational' }),
+      'jane@example.com',
+      'recruiting_operational',
+    );
+    const row = mockDb.__tables.email_messages.find((r) => r.recipient_id === 'app-1');
+    expect(row.status).toBe('blocked');
+    const stored = mockDb.__tables.job_applications.find((r) => r.id === 'app-1');
+    expect(stored.comms_history[0]).toMatchObject({ channel: 'email', outcome: 'blocked', code: 'email_suppressed' });
+  });
+
+  test('email not suppressed -> sendOne is called and the message sends', async () => {
+    mockActiveSuppressionFor.mockResolvedValue(null);
+    const app = baseApp();
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+
+    const result = await RecruitingComms.sendStageComms(app, 'application_received', { sms: false, email: true });
+
+    expect(result.email).toBe('sent');
+    expect(mockSendOne).toHaveBeenCalledTimes(1);
+  });
+
+  test('sendCustomerMessage deliveryOutcome uncertain -> outcome uncertain (not failed)', async () => {
+    mockRenderSmsTemplate.mockResolvedValue('Hi Jane.');
+    mockSendCustomerMessage.mockResolvedValue({ sent: false, blocked: false, deliveryOutcome: 'uncertain' });
+    const app = baseApp();
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+
+    const result = await RecruitingComms.sendStageComms(app, 'application_received', { sms: true, email: false });
+
+    expect(result.sms).toBe('uncertain');
+    const stored = mockDb.__tables.job_applications.find((r) => r.id === 'app-1');
+    expect(stored.comms_history[0]).toMatchObject({ outcome: 'uncertain' });
   });
 });

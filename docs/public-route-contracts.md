@@ -270,6 +270,17 @@ the SPA `/recap/:token` "Your Visit, in Motion" recap player (token-gated; serve
 only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
 same noindex/no-referrer/no-store headers as `/report/:token`),
 `/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound;
+recruiting replies: after STOP/HELP/START handling and before the reaction
+/ customer paths, an inbound from a phone that (a) belongs to an OPEN
+job application (new/reviewed/interview/offer) AND (b) received a
+`job_*` recruiting text within 45 days is handled by
+`services/recruiting-inbound.js` — recorded on the application
+(`comms_history` + an `sms_log` row typed `job_applicant_reply`, the
+unified row retyped the same), raised ONLY as the admin-only
+`job_applicant_reply` bell, and answered with empty TwiML; it never
+reaches the tech-visible `sms_reply` bell, lead intake, the estimator or
+any customer automation, even when the phone also belongs to a customer
+(owner-only recruiting boundary, `utils/recruiting-thread-scope.js`);
 `GATE_SMS_SPAM_CLASSIFIER=shadow` enables a bounded solicitation screen for
 unknown-sender SMS; `true` enables enforcement at confidence >= 0.85.
 Unset or any other value disables screening.
@@ -2120,9 +2131,26 @@ ALWAYS present, booked or not, so "Change time" needs no second fetch.
 POST `/book` re-validates the client's chosen `start` against that SAME
 live offered set — the client's slot choice is never trusted — and
 writes `interview_mode`/`interview_at`/`interview_end_at`/
-`interview_booked_at` through an atomic `UPDATE … WHERE id=? AND
-status='interview' AND interview_token=?`; a 0-row result (a race with a
-withdraw or a concurrent booking) is a 409, never a silent overwrite.
+`interview_booked_at` inside ONE transaction that first takes the
+`pg_advisory_xact_lock(hashtext('recruiting_interview_book'))` booking
+lock, re-lists the offered slots THROUGH that transaction, and row-locks
+the application (`FOR UPDATE`) — two applicants who both saw a free slot
+are serialized, two taps on one application cannot overwrite each other,
+and the status_history entry is appended in SQL; the write is still
+conditional on `status='interview' AND interview_token=?`, a 0-row result
+(a race with a withdraw) is a 409, never a silent overwrite. Privacy
+headers (`noStore`: no-store + noindex + no-referrer) are mounted on the
+`/api/public/careers/interview` prefix in index.js AHEAD of the outer
+`jobApplications` careers gate and ahead of the global `/api` limiter, so
+every outcome — including a dark 404 from either gate — carries them; the
+SPA document `/careers/interview/<64-hex>` gets the same headers via
+`utils/sensitive-spa-headers.js`. Applicant threads are OWNER-ONLY in
+every shared reader: the invite carries this bearer link and dual-writes
+into the unified inbox, so `utils/recruiting-thread-scope.js` filters the
+whole applicant conversation (`message_type LIKE 'job_%'`) out of
+`/api/admin/communications/log`, the dashboard inbox + its reply lookup,
+and applicant rows (`audience='applicant'`) out of the compliance export
+for any non-admin staff session.
 A successful book fires (fire-and-forget) the `interview_confirmation`
 comms — SMS only with `sms_consent` or evidence the owner already texted
 this applicant by hand — and the `job_interview_booked` admin

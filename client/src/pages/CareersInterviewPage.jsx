@@ -36,7 +36,7 @@ const MUTED = COLORS.textCaption;
 
 const EYEBROW = {
   fontFamily: FONTS.ui,
-  fontSize: 12,
+  fontSize: 14,
   fontWeight: 700,
   letterSpacing: '0.06em',
   textTransform: 'uppercase',
@@ -56,14 +56,14 @@ const H1_STYLE = {
 const BODY_STYLE = {
   margin: 0,
   fontFamily: FONTS.body,
-  fontSize: 15,
+  fontSize: 16,
   lineHeight: 1.55,
   color: 'var(--text-subtle, #475569)',
 };
 
 const DAY_HEADER_STYLE = {
   fontFamily: FONTS.ui,
-  fontSize: 13,
+  fontSize: 14,
   fontWeight: 700,
   color: TEXT,
   margin: '0 0 8px',
@@ -254,6 +254,10 @@ export default function CareersInterviewPage() {
         return;
       }
       if (!res.ok) {
+        // The chosen slot is gone (someone else took it, or the window
+        // rolled) — clear it BEFORE refreshing so the vanished time never
+        // renders as still-picked with Confirm enabled (local audit P2).
+        setSelectedSlot(null);
         setBookError(body.error || 'That time is no longer available. Pick another time below.');
         refreshSlots();
         return;
@@ -292,7 +296,7 @@ export default function CareersInterviewPage() {
     return (
       <CustomerColumn style={{ position: 'relative', zIndex: 1 }}>
         <BrandCard padding={28}>
-          <div style={{ padding: '40px 20px', textAlign: 'center', color: MUTED, fontSize: 15 }}>
+          <div style={{ padding: '40px 20px', textAlign: 'center', color: MUTED, fontSize: 16 }}>
             Loading…
           </div>
         </BrandCard>

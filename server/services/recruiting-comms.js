@@ -20,6 +20,7 @@ const logger = require('./logger');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { loadSuppressionState } = require('./messaging/validators/suppression');
+const { activeSuppressionFor } = require('./email-template-library');
 const sendgrid = require('./sendgrid-mail');
 const { isEnabled } = require('../config/feature-gates');
 const { portalUrl } = require('../utils/portal-url');
@@ -38,6 +39,17 @@ const STAGE_KEYS = {
 };
 
 const INTERVIEW_LINK_PLACEHOLDER = '[interview link]';
+
+// Mirror the service.report_ready direct-send fallback's suppression
+// semantics (server/services/service-report/email-delivery.js) — this is
+// the same style of direct sendgrid.sendOne + own email_messages ledger row
+// that bypasses the templated send path, so it must honor the same
+// email_suppressions rows the templated path checks on its own.
+const RECRUITING_SUPPRESSION_GROUP_KEY = 'recruiting_operational';
+const RECRUITING_SUPPRESSION_TEMPLATE = {
+  send_stream: 'recruiting_operational',
+  suppression_group_key: 'recruiting_operational',
+};
 
 // ---------------------------------------------------------------- masking
 
@@ -270,6 +282,23 @@ async function sendRawEmail({ app, stage, to, subject, html, text }) {
     logger.warn(`[recruiting-comms] email_messages insert failed (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
   }
 
+  // Honor the suppression ledger BEFORE SendGrid — this direct-insert path
+  // (unlike the templated email-template-library senders) previously had no
+  // suppression check at all, so a bounced/unsubscribed applicant email
+  // would still be sent (codex P1).
+  const suppression = await activeSuppressionFor(RECRUITING_SUPPRESSION_TEMPLATE, to, RECRUITING_SUPPRESSION_GROUP_KEY);
+  if (suppression) {
+    if (messageRow) {
+      await db('email_messages').where({ id: messageRow.id, status: 'queued' }).update({
+        status: 'blocked',
+        error_message: `Suppressed: ${suppression.suppression_type}${suppression.group_key ? ` (${suppression.group_key})` : ''}`.slice(0, 500),
+        updated_at: new Date(),
+      }).catch(() => {});
+    }
+    logger.info(`[recruiting-comms] email blocked by suppression (application ${app.id}, stage ${stage})`);
+    return { outcome: 'blocked', code: 'email_suppressed' };
+  }
+
   try {
     const result = await sendgrid.sendOne({
       to,
@@ -437,7 +466,9 @@ async function sendStageComms(app, stage, opts = {}) {
           consentBasis: { status: 'transactional_allowed', source: 'job_application' },
           metadata: { original_message_type: `job_${stage}`, job_application_id: app.id },
         });
-        const outcome = sendRes.sent ? 'sent' : (sendRes.blocked ? 'blocked' : 'failed');
+        const outcome = sendRes.sent
+          ? 'sent'
+          : (sendRes.blocked ? 'blocked' : (sendRes.deliveryOutcome === 'uncertain' ? 'uncertain' : 'failed'));
         result.sms = outcome;
         entries.push(historyEntry({ stage, channel: 'sms', to: contact.phone, outcome, code: sendRes.code || null, body, by }));
       }

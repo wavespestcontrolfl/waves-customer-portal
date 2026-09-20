@@ -271,29 +271,48 @@ router.patch('/:id/status', async (req, res) => {
     const { row: updated, interviewApplicable, willSend } = txResult;
 
     let sent = { sms: 'not_requested', email: 'not_requested' };
+    // The status transition already committed above — a comms failure from
+    // here on must never turn into a 500 that makes the owner think the
+    // transition itself failed (codex P2). Report per-channel 'failed'
+    // instead and still return the committed application.
+    let responseRow = updated;
     if (interviewApplicable) {
       if (!willSend) {
         sent = { sms: 'disabled', email: 'disabled' };
       } else {
-        const finalInterviewUrl = RecruitingComms.interviewUrlFor(updated.interview_token);
-        const finalSmsBody = wantSms && smsBodyOverride
-          ? RecruitingComms.substituteInterviewLinkPlaceholder(smsBodyOverride, finalInterviewUrl)
-          : undefined;
-        const finalEmailBody = wantEmail && emailBodyOverride
-          ? RecruitingComms.substituteInterviewLinkPlaceholder(emailBodyOverride, finalInterviewUrl)
-          : undefined;
-        sent = await RecruitingComms.sendStageComms(updated, 'interview_invite', {
-          sms: wantSms,
-          email: wantEmail,
-          by: req.technicianId,
-          smsBody: finalSmsBody,
-          emailSubject: wantEmail && emailSubjectOverride ? emailSubjectOverride : undefined,
-          emailBody: finalEmailBody,
-        });
+        try {
+          const finalInterviewUrl = RecruitingComms.interviewUrlFor(updated.interview_token);
+          const finalSmsBody = wantSms && smsBodyOverride
+            ? RecruitingComms.substituteInterviewLinkPlaceholder(smsBodyOverride, finalInterviewUrl)
+            : undefined;
+          const finalEmailBody = wantEmail && emailBodyOverride
+            ? RecruitingComms.substituteInterviewLinkPlaceholder(emailBodyOverride, finalInterviewUrl)
+            : undefined;
+          sent = await RecruitingComms.sendStageComms(updated, 'interview_invite', {
+            sms: wantSms,
+            email: wantEmail,
+            by: req.technicianId,
+            smsBody: finalSmsBody,
+            emailSubject: wantEmail && emailSubjectOverride ? emailSubjectOverride : undefined,
+            emailBody: finalEmailBody,
+          });
+          // Re-read so the response carries the comms_history entries
+          // sendStageComms just appended; fall back to the committed
+          // pre-send row if the re-read itself fails.
+          try {
+            const fresh = await db('job_applications').where({ id: updated.id }).first();
+            if (fresh) responseRow = fresh;
+          } catch (reReadErr) {
+            logger.warn(`[admin-careers] post-send re-read failed: ${RecruitingComms.errorSummary(reReadErr)}`);
+          }
+        } catch (sendErr) {
+          logger.error(`[admin-careers] sendStageComms failed after committed transition (application ${req.params.id}): ${RecruitingComms.errorSummary(sendErr)}`);
+          sent = { sms: wantSms ? 'failed' : 'not_requested', email: wantEmail ? 'failed' : 'not_requested' };
+        }
       }
     }
 
-    res.json({ application: withoutToken(updated), sent });
+    res.json({ application: withoutToken(responseRow), sent });
   } catch (err) {
     logger.error(`[admin-careers] status update failed: ${RecruitingComms.errorSummary(err)}`);
     res.status(500).json({ error: 'Failed to update application' });

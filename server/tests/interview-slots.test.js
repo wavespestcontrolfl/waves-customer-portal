@@ -142,6 +142,21 @@ describe('RECRUITING_INTERVIEW_WINDOWS override', () => {
     process.env.RECRUITING_INTERVIEW_WINDOWS = JSON.stringify({ 2: [['11:00', '10:00']] }); // end before start
     expect(_internals.loadWindows()).toEqual(DEFAULT_WINDOWS);
   });
+
+  test('an out-of-range HH or MM (24:00, 16:60) also falls back to default', () => {
+    process.env.RECRUITING_INTERVIEW_WINDOWS = JSON.stringify({ 2: [['24:00', '16:00']] });
+    expect(_internals.loadWindows()).toEqual(DEFAULT_WINDOWS);
+
+    process.env.RECRUITING_INTERVIEW_WINDOWS = JSON.stringify({ 2: [['16:00', '16:60']] });
+    expect(_internals.loadWindows()).toEqual(DEFAULT_WINDOWS);
+  });
+
+  test('isValidHHMM accepts 00:00-23:59 and rejects out-of-range values', () => {
+    expect(_internals.isValidHHMM('00:00')).toBe(true);
+    expect(_internals.isValidHHMM('23:59')).toBe(true);
+    expect(_internals.isValidHHMM('24:00')).toBe(false);
+    expect(_internals.isValidHHMM('16:60')).toBe(false);
+  });
 });
 
 describe('lead time', () => {
@@ -187,6 +202,18 @@ describe('route-conflict exclusion with buffer', () => {
       scheduled_services: [
         { scheduled_date: TODAY, status: 'cancelled', window_start: '16:00:00', window_end: '18:00:00' },
         { scheduled_date: TODAY, status: 'completed', window_start: '16:00:00', window_end: '18:00:00' },
+      ],
+    });
+    const slots = await listInterviewSlots({ now: NOW });
+    expect(slots.filter((s) => s.date === TODAY)).toHaveLength(4);
+  });
+
+  test('skipped/no_show/rescheduled route rows also do not block (shared stops-ahead status set)', async () => {
+    reset({
+      scheduled_services: [
+        { scheduled_date: TODAY, status: 'skipped', window_start: '16:00:00', window_end: '18:00:00' },
+        { scheduled_date: TODAY, status: 'no_show', window_start: '16:00:00', window_end: '18:00:00' },
+        { scheduled_date: TODAY, status: 'rescheduled', window_start: '16:00:00', window_end: '18:00:00' },
       ],
     });
     const slots = await listInterviewSlots({ now: NOW });

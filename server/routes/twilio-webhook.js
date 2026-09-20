@@ -772,6 +772,29 @@ router.post('/sms', async (req, res) => {
         : `<Response><Message>We received your request to receive texts from Waves Pest Control. Our office will confirm your subscription shortly.</Message></Response>`);
     }
 
+    // ── Recruiting: an applicant replying to our interview invite /
+    // confirmation text. Owner-only boundary (utils/recruiting-thread-scope.js):
+    // the reply lands on the application + the admin-only bell and never
+    // reaches the tech-visible sms_reply bell or any customer automation
+    // below — even when this phone also belongs to a customer (Codex r1 P1
+    // on #4623). Placed AFTER STOP/HELP/START handling so compliance
+    // keywords are always honored first. Fails open to the ordinary path.
+    const recruitingReply = await require('../services/recruiting-inbound')
+      .matchApplicantReply(From)
+      .catch((e) => { logger.warn(`[recruiting-inbound] match failed: ${e.name || 'Error'}`); return null; });
+    if (recruitingReply) {
+      requireInboxMessage();
+      const landed = await require('../services/recruiting-inbound').recordApplicantReply({
+        applicationId: recruitingReply.applicationId,
+        from: From, to: To, body: Body, messageSid: MessageSid, mediaCount: inboundMedia.length,
+      });
+      // Retype the unified inbox row so the thread reads as recruiting for
+      // every shared-reader filter, not just the outbound side.
+      await updateByTwilioSid(MessageSid, { message_type: 'job_applicant_reply' }).catch(() => {});
+      if (landed) persisted = true;
+      return res.type('text/xml').send('<Response></Response>');
+    }
+
     if (smsReaction) {
       await db('sms_log').insert({
         customer_id: customer?.id || null,

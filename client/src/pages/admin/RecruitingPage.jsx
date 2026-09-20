@@ -150,6 +150,7 @@ const OUTCOME_LABEL = {
   failed: "failed",
   skipped: "skipped",
   disabled: "disabled",
+  uncertain: "uncertain — may have been delivered",
 };
 
 // "Text sent · Email sent" / "Text blocked" — joins only the channels that
@@ -782,9 +783,18 @@ export default function RecruitingPage() {
                       Interview
                     </div>
                     {detail.interview_booked_at ? (
-                      <div className="text-14 text-zinc-800">
-                        {detail.interview_mode === "in_person" ? "In person" : "Phone call"} ·{" "}
-                        {formatETDateTime(detail.interview_at)}
+                      <div className="flex items-center justify-between gap-3 flex-wrap">
+                        <div className="text-14 text-zinc-800">
+                          {detail.interview_mode === "in_person" ? "In person" : "Phone call"} ·{" "}
+                          {formatETDateTime(detail.interview_at)}
+                        </div>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => openStageDialog("interview", { resend: true })}
+                        >
+                          Resend link
+                        </Button>
                       </div>
                     ) : (
                       // A candidate moved to Interview "without notifying" has

@@ -18,11 +18,13 @@ jest.mock('../services/interview-slots', () => ({
 
 const mockSendStageComms = jest.fn(async () => ({ sms: 'not_requested', email: 'not_requested' }));
 const mockConfirmationSmsEligible = jest.fn(() => false);
+const mockErrorSummary = jest.fn((err) => (err && err.message) || 'error');
 jest.mock('../services/recruiting-comms', () => ({
   contactOf: (app) => (app && app.contact_snapshot) || {},
   firstNameOf: (name) => (String(name || '').trim().split(/\s+/)[0] || 'there'),
   sendStageComms: (...args) => mockSendStageComms(...args),
   confirmationSmsEligible: (...args) => mockConfirmationSmsEligible(...args),
+  errorSummary: (...args) => mockErrorSummary(...args),
 }));
 
 const mockTriggerNotification = jest.fn(async () => {});
@@ -322,6 +324,23 @@ describe('POST /interview/:token/book', () => {
       'interview_confirmation',
       expect.objectContaining({ email: true, by: 'applicant' }),
     );
+    expect(mockTriggerNotification).toHaveBeenCalledWith('job_interview_booked', expect.objectContaining({
+      applicationId: 'app-1', mode: 'phone', whenLabel: OFFERED.label,
+    }));
+  });
+
+  test('sendStageComms rejecting does not suppress the owner bell — triggerNotification still fires', async () => {
+    mockDb.__setRows([appRow()]);
+    mockListInterviewSlots.mockResolvedValue([OFFERED]);
+    mockSendStageComms.mockRejectedValue(new Error('sendgrid down'));
+    const res = await fetch(`${base}/api/public/careers/interview/${TOKEN}/book`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'phone', start: OFFERED.start }),
+    });
+    expect(res.status).toBe(200);
+
+    await Promise.resolve();
+    await new Promise((r) => setImmediate(r));
     expect(mockTriggerNotification).toHaveBeenCalledWith('job_interview_booked', expect.objectContaining({
       applicationId: 'app-1', mode: 'phone', whenLabel: OFFERED.label,
     }));

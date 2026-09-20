@@ -12,6 +12,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etParts, parseETDateTime, addETDays, formatETTime } = require('../utils/datetime-et');
+const { NOT_A_ROUTE_STOP_STATUSES } = require('./stops-ahead');
 
 const SLOT_MINUTES = 30;
 const LEAD_HOURS = 4;
@@ -29,11 +30,28 @@ const DEFAULT_WINDOWS = {
   7: [],
 };
 
-const NOT_ROUTE_STOP_STATUSES = ['cancelled', 'completed'];
+// Shares the repo's canonical "not really a route stop today" set
+// (server/services/stops-ahead.js) — cancelled/skipped/no_show/rescheduled —
+// plus 'completed': a visit already serviced is not a live stop the truck is
+// still driving to, but stops-ahead itself must keep completed stops IN the
+// route (they occupied a real slot today); interview scheduling has no such
+// need, so 'completed' is added on top here rather than in the shared set.
+const NOT_ROUTE_STOP_STATUSES = [...NOT_A_ROUTE_STOP_STATUSES, 'completed'];
 const INTERVIEW_BLOCKING_STATUSES = ['interview', 'offer'];
 
 function pad2(n) {
   return String(n).padStart(2, '0');
+}
+
+// Strict HH:MM — HH 00-23, MM 00-59. A shape-only regex (\d{2}:\d{2}) would
+// accept '24:00' or '16:60', which timeToMinutes then turns into a
+// nonsensical (or wrapped) minute count.
+function isValidHHMM(value) {
+  const m = /^(\d{2}):(\d{2})$/.exec(String(value));
+  if (!m) return false;
+  const hh = Number(m[1]);
+  const mm = Number(m[2]);
+  return hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59;
 }
 
 function isValidWindowsShape(parsed) {
@@ -43,7 +61,7 @@ function isValidWindowsShape(parsed) {
     if (!Array.isArray(windows)) return false;
     for (const w of windows) {
       if (!Array.isArray(w) || w.length !== 2) return false;
-      if (!/^\d{2}:\d{2}$/.test(w[0]) || !/^\d{2}:\d{2}$/.test(w[1])) return false;
+      if (!isValidHHMM(w[0]) || !isValidHHMM(w[1])) return false;
       if (timeToMinutes(w[0]) >= timeToMinutes(w[1])) return false;
     }
   }
@@ -199,5 +217,5 @@ module.exports = {
   listInterviewSlots,
   isOfferedSlot,
   formatSlotLabel: slotLabel,
-  _internals: { loadWindows, timeToMinutes, isoWeekdayOf, overlaps, hhmmFromDbTime, slotLabel },
+  _internals: { loadWindows, timeToMinutes, isoWeekdayOf, overlaps, hhmmFromDbTime, slotLabel, isValidHHMM },
 };

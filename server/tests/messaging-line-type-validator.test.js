@@ -60,11 +60,18 @@ describe('checkLineType — gating / scope', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  test('no-ops for non customer/lead audiences', async () => {
+  test('no-ops for non customer/lead/applicant audiences', async () => {
     wireDb(undefined);
     const res = await checkLineType({ ...SMS, audience: 'internal' });
     expect(res).toEqual({ ok: true });
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  test('a landline applicant number blocks with NON_MOBILE_SMS_RECIPIENT, same as a lead', async () => {
+    wireDb({ line_type: 'landline' });
+    const res = await checkLineType({ ...SMS, audience: 'applicant' });
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe('NON_MOBILE_SMS_RECIPIENT');
   });
 });
 
