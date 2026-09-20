@@ -156,6 +156,9 @@ async function listInterviewSlots({ now = new Date(), excludeApplicationId, conn
       .where('scheduled_date', dateStr)
       .whereNotIn('status', NOT_ROUTE_STOP_STATUSES)
       .whereNotNull('window_start')
+      // Same active-hold predicate as the canonical occupancy readers: an
+      // expired estimate-slot hold has released its window (Codex r6 P2).
+      .where((q) => { q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()'); })
       .select('id', 'customer_id', 'technician_id', 'scheduled_date', 'window_start', 'window_end',
         'estimated_duration_minutes', 'reservation_service_mix');
 

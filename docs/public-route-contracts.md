@@ -270,10 +270,12 @@ the SPA `/recap/:token` "Your Visit, in Motion" recap player (token-gated; serve
 only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
 same noindex/no-referrer/no-store headers as `/report/:token`),
 `/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound;
-recruiting replies (only while `GATE_RECRUITING_COMMS` is on — the gate
-is the kill switch for the whole lane, reply routing included; dark, no
-recruiting text is ever sent and no classification runs, so a lookup
-error can never stall the inbound pipeline): an inbound from a phone that
+recruiting replies (classification is NOT gated — `GATE_RECRUITING_COMMS`
+is the send / public-link kill switch only; applicants texted before it
+was turned off keep classifying from stored evidence for the window; a
+database with no recruiting tables at all (42P01) answers "not a
+recruiting reply", every other lookup error fails closed): an inbound
+from a phone that
 (a) belongs to an OPEN job application (new/reviewed/interview/offer)
 AND (b) has a `job_*` SMS `handoff`/`sent`/`uncertain` entry (the `handoff`
 entry is written BEFORE the provider call, stamped with the outbound
@@ -282,8 +284,10 @@ always precedes the text; the post-acceptance sms_log row is never the
 basis) in that application's
 `comms_history` within 45 days — the reply is tied to the application
 that received the text, never phone recency — AND (c) arrived on the
-number that text went out from, with NO newer customer-facing (non-`job_*`,
-non-internal) outbound text to that phone in sms_log after the handoff
+number that text went out from, with NO newer DELIVERED customer-facing
+(non-`job_*`, non-internal) outbound text to that phone FROM THAT SAME
+Waves line in sms_log after the effective handoff (queue time, replay
+attempt time, or finalized send time — whichever is latest)
 (that advisory read only ever hands a reply BACK to the customer path; a
 missing sms_log row leaves the durable evidence standing) — is classified by
 `services/recruiting-inbound.js` BEFORE the unified inbox persist — the

@@ -1130,6 +1130,7 @@ describe('recruiting_comms_deferred (PR #4623)', () => {
 
   test('withdrawn application / changed token / rebooked time -> ineligible; matching state -> eligible', async () => {
     const spy = jest.spyOn(gates, 'isEnabled').mockImplementation(() => true);
+    const recSpy = jest.spyOn(require('../services/recruiting-comms'), 'reconcileCommsHistoryEntryByOutcome').mockResolvedValue(undefined);
     db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'withdrawn', interview_token: 'a'.repeat(64) }));
     expect(await recheckDeferredReplay(ENTRY, meta)).toMatchObject({ eligible: false, reason: 'application-withdrawn' });
     db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'interview', interview_token: 'b'.repeat(64) }));
@@ -1142,6 +1143,7 @@ describe('recruiting_comms_deferred (PR #4623)', () => {
     expect(await recheckDeferredReplay(ENTRY, { ...meta, stage: 'interview_confirmation', interview_at: '2027-03-16T20:00:00.000Z', interview_mode: 'phone' })).toMatchObject({ eligible: true });
     db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'reviewed', interview_token: null }));
     expect(await recheckDeferredReplay(ENTRY, { ...meta, stage: 'application_received', interview_token: null })).toMatchObject({ eligible: true });
+    recSpy.mockRestore();
     spy.mockRestore();
   });
 

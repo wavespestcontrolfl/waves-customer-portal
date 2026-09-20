@@ -317,7 +317,22 @@ async function sendRawEmail({ app, stage, to, subject, html, text }) {
   // (unlike the templated email-template-library senders) previously had no
   // suppression check at all, so a bounced/unsubscribed applicant email
   // would still be sent (codex P1).
-  const suppression = await activeSuppressionFor(RECRUITING_SUPPRESSION_TEMPLATE, to, RECRUITING_SUPPRESSION_GROUP_KEY);
+  let suppression;
+  try {
+    suppression = await activeSuppressionFor(RECRUITING_SUPPRESSION_TEMPLATE, to, RECRUITING_SUPPRESSION_GROUP_KEY);
+  } catch (err) {
+    // Pre-provider failure: fail closed (no send) AND settle the ledger row
+    // we already own so it never sits 'queued' forever (Codex r6 P2).
+    if (messageRow) {
+      await db('email_messages').where({ id: messageRow.id, status: 'queued', send_attempt_token: sendAttemptToken }).update({
+        status: 'failed',
+        error_message: `suppression lookup failed: ${errorSummary(err)}`.slice(0, 500),
+        updated_at: new Date(),
+      }).catch(() => {});
+    }
+    logger.warn(`[recruiting-comms] suppression lookup failed (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
+    return { outcome: 'failed', code: 'suppression_lookup_failed' };
+  }
   if (suppression) {
     if (messageRow) {
       await db('email_messages').where({ id: messageRow.id, status: 'queued', send_attempt_token: sendAttemptToken }).update({
@@ -590,6 +605,19 @@ async function sendStageComms(app, stage, opts = {}) {
           ? 'sent'
           : (sendRes.blocked ? 'blocked' : (sendRes.deliveryOutcome === 'uncertain' ? 'uncertain' : 'failed'));
         let deferredUntil = null;
+        // A newer invite (immediate or queued) retires any invite still
+        // queued for this application — one stable token must never reach
+        // the applicant twice (Codex r6 P2).
+        if (stage === 'interview_invite' && (sendRes.sent || (sendRes.retryable && sendRes.nextAllowedAt))) {
+          try {
+            await db('sms_log')
+              .where({ status: 'scheduled', message_type: 'job_interview_invite' })
+              .whereRaw("metadata->>'job_application_id' = ?", [app.id])
+              .update({ status: 'cancelled', updated_at: new Date() });
+          } catch (err) {
+            logger.warn(`[recruiting-comms] retiring queued invites failed (application ${app.id}): ${errorSummary(err)}`);
+          }
+        }
         if (!sendRes.sent && sendRes.retryable && sendRes.nextAllowedAt) {
           // Held by the send window (8am–8pm ET): queue the text on the
           // scheduled-SMS rail the cron replays (services/scheduler.js) —

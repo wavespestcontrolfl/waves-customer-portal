@@ -383,7 +383,7 @@ async function sendCustomerMessageCore(input) {
     && sendInput.metadata.mediaUrls.length > 0
     && mediaUrlsAllowed(sendInput);
   if (sendInput.channel === 'sms' && typeof sendInput.body === 'string'
-    && ['customer', 'lead'].includes(sendInput.audience) && !sendHasMedia) {
+    && ['customer', 'lead', 'applicant'].includes(sendInput.audience) && !sendHasMedia) {
     sendInput.body = normalizeGsmPunctuation(stripSmsUrlScheme(sendInput.body));
   }
 

@@ -3287,8 +3287,9 @@ router.get('/scheduled', async (req, res, next) => {
   try {
     // Queued recruiting texts carry the bearer interview link — owner-only
     // (utils/recruiting-thread-scope.js), same as every other reader.
-    const scheduled = await hideRecruitingThreadsFromNonAdmin(db('sms_log')
-      .where({ status: 'scheduled' }), req, 'sms_log.message_type')
+    const scheduled = await db('sms_log')
+      .where({ status: 'scheduled' })
+      .modify((q) => hideRecruitingThreadsFromNonAdmin(q, req, 'sms_log.message_type'))
       .leftJoin('customers', 'sms_log.customer_id', 'customers.id')
       .select('sms_log.*', 'customers.first_name', 'customers.last_name')
       .orderBy('scheduled_for', 'asc');
@@ -3307,7 +3308,7 @@ router.get('/scheduled', async (req, res, next) => {
 router.delete('/scheduled/:id', async (req, res, next) => {
   try {
     // Peek (no delete yet) just to learn the thread key for the lock.
-    const peek = await db('sms_log')
+    const peek = await excludeUnresolvedSendReservations(db('sms_log'))
       .where({ id: req.params.id, status: 'scheduled' })
       .first('id', 'to_phone', 'message_type');
     if (!peek) return res.json({ success: true });

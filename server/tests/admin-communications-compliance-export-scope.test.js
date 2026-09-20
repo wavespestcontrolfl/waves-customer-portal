@@ -125,6 +125,7 @@ describe('GET /scheduled recruiting boundary', () => {
     const smsLogQuery = query({ result: [] });
     smsLogQuery.where = jest.fn((arg) => { if (typeof arg === 'function') arg.call(smsLogQuery); return smsLogQuery; });
     smsLogQuery.leftJoin = jest.fn(() => smsLogQuery);
+    smsLogQuery.modify = jest.fn((fn) => { fn(smsLogQuery); return smsLogQuery; });
     smsLogQuery.select = jest.fn(() => smsLogQuery);
     smsLogQuery.orderBy = jest.fn(async () => []);
     db.mockImplementation((table) => (table === 'sms_log' ? smsLogQuery : query({ result: [] })));

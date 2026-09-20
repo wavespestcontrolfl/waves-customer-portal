@@ -17,6 +17,7 @@ const state = { apps: [], existingReply: null, newerCustomerText: null, inserts:
 function builder(table) {
   const q = {};
   ['whereRaw', 'whereIn', 'where', 'whereNot', 'whereNotIn', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
+  q.modify = jest.fn((fn) => { fn(q); return q; });
   q.select = jest.fn(async () => (table === 'job_applications' ? state.apps : []));
   // sms_log: the "newer customer-facing text" probe uses whereNot(job_%); the
   // idempotency probe does not.
@@ -87,6 +88,9 @@ describe('matchApplicantReply', () => {
     expect(q.whereNot).toHaveBeenCalledWith('message_type', 'like', 'job_%');
     // scheduled / blocked / failed customer rows never count — delivery evidence only
     expect(q.whereIn).toHaveBeenCalledWith('status', ['sent', 'delivered']);
+    // ... and only texts from the SAME Waves line the recruiting text used
+    const fromPredicate = q.whereRaw.mock.calls.find((c) => /from_phone/.test(c[0]));
+    expect(fromPredicate[1]).toEqual([['19415550199', '9415550199']]);
   });
   test('a replayed text uses its ACTUAL send time: a customer text sent between queue and replay does not override', async () => {
     // queued at day -1 (overnight), replayed by the cron at 08:00 (day 0);
@@ -154,5 +158,14 @@ describe('recordApplicantReply', () => {
     expect(mockTrigger).not.toHaveBeenCalled();
     const logger = require('../services/logger');
     expect(logger.error.mock.calls.map((c) => c[0]).join('\n')).not.toMatch(/0142/);
+  });
+});
+
+describe('matchApplicantReply — unprovisioned recruiting schema', () => {
+  test('42P01 (no job_applications table) is a definite "not recruiting", other errors propagate', async () => {
+    mockDb.mockImplementationOnce(() => { throw Object.assign(new Error('relation "job_applications" does not exist'), { code: '42P01' }); });
+    await expect(matchApplicantReply('+19415550142', '+19415550199')).resolves.toBeNull();
+    mockDb.mockImplementationOnce(() => { throw Object.assign(new Error('timeout'), { code: '57014' }); });
+    await expect(matchApplicantReply('+19415550142', '+19415550199')).rejects.toBeTruthy();
   });
 });

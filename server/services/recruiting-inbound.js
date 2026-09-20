@@ -54,10 +54,19 @@ async function matchApplicantReply(fromPhone, toNumber) {
   // application whose latest handoff/sent/uncertain SMS entry is newest
   // within the window, never to phone recency (a later, untexted
   // application must not swallow a reply meant for an earlier one).
-  const apps = await db('job_applications')
-    .whereRaw(digitsExpr("contact_snapshot->>'phone'"), [variants])
-    .whereIn('status', OPEN_STATUSES)
-    .select('id', 'comms_history');
+  let apps;
+  try {
+    apps = await db('job_applications')
+      .whereRaw(digitsExpr("contact_snapshot->>'phone'"), [variants])
+      .whereIn('status', OPEN_STATUSES)
+      .select('id', 'comms_history');
+  } catch (err) {
+    // 42P01 = the recruiting tables are not provisioned in this database at
+    // all (a schema-subset test database) — there can be no applicants, so
+    // this is a definite "not a recruiting reply", not an outage.
+    if (err && err.code === '42P01') return null;
+    throw err;
+  }
   if (!apps.length) return null;
 
   const cutoff = Date.now() - RECENT_OUTBOUND_DAYS * 24 * 60 * 60 * 1000;
@@ -97,10 +106,15 @@ async function matchApplicantReply(fromPhone, toNumber) {
   // Only a text that actually went out (sent/delivered) can override —
   // a customer text merely SCHEDULED, blocked or failed after the handoff
   // is not something the applicant could be answering.
+  // ... and only a customer text that went out from the SAME Waves line the
+  // recruiting text used can override — a text from another line is a
+  // different thread the applicant is not answering here.
+  const fromVariants = best.fromNumber ? phoneMatchDigits(String(best.fromNumber)) : [];
   const newerCustomerText = await excludeUnresolvedSendReservations(db('sms_log'))
     .where({ direction: 'outbound' })
     .whereIn('status', ['sent', 'delivered'])
     .whereRaw(digitsExpr('to_phone'), [variants])
+    .modify((q) => { if (fromVariants.length) q.whereRaw(digitsExpr('from_phone'), [fromVariants]); })
     .whereNotIn('message_type', NON_CONVERSATIONAL_OUTBOUND)
     .whereNot('message_type', 'like', 'job_%')
     .where('created_at', '>', new Date(best.at))

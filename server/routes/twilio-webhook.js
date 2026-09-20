@@ -367,14 +367,14 @@ router.post('/sms', async (req, res) => {
     // row. A lookup failure fails CLOSED while nothing is persisted yet:
     // release the claim and 503 so Twilio redelivers. Handling of the reply
     // itself still happens further down, AFTER STOP/HELP/START.
-    // Part of the gated lane: with GATE_RECRUITING_COMMS off no recruiting
-    // text is ever sent, so there is nothing to classify — and a dark lane
-    // must never be able to 503 the whole inbound pipeline on a lookup error.
+    // NOT gated on GATE_RECRUITING_COMMS (Codex r6 P1): the gate is the
+    // send / public-link kill switch — applicants texted BEFORE it was turned
+    // off can still reply for the evidence window, and those replies must
+    // keep classifying from stored evidence. A database with no recruiting
+    // tables at all answers "not a recruiting reply" (see the matcher).
     let recruitingReply = null;
     try {
-      if (isEnabled('recruitingComms')) {
-        recruitingReply = await require('../services/recruiting-inbound').matchApplicantReply(From, To);
-      }
+      recruitingReply = await require('../services/recruiting-inbound').matchApplicantReply(From, To);
     } catch (e) {
       logger.error(`[recruiting-inbound] match failed (${e.name || 'Error'}${e.code ? ` ${e.code}` : ''}) — deferring inbound for retry`);
       if (claimOwned && !persisted) await releaseInboundWebhook(MessageSid);

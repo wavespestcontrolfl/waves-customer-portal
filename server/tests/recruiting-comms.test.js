@@ -45,6 +45,7 @@ function makeDb() {
     let whereCond = {};
     const builder = {
       where(cond) { whereCond = { ...whereCond, ...cond }; return builder; },
+      whereRaw() { return builder; },
       insert(row) {
         const inserted = { id: row.id || `id-${rows.length + 1}`, ...row };
         rows.push(inserted);
@@ -461,8 +462,8 @@ describe('sendStageComms channel isolation', () => {
     expect(result.email).toBe('failed');
     const stored = mockDb.__tables.job_applications.find((r) => r.id === 'app-1');
     expect(stored.comms_history.map((e) => [e.channel, e.outcome])).toEqual([['sms', 'sent'], ['email', 'failed']]);
-    expect(stored.comms_history[1].code).toMatch(/^threw:/);
-    expect(stored.comms_history[1].code).not.toMatch(/example\.com/);
+    // the suppression-lookup failure is settled inside sendRawEmail now (fail closed, ledger 'failed')
+    expect(stored.comms_history[1].code).toBe('suppression_lookup_failed');
   });
 });
 
@@ -560,5 +561,35 @@ describe('sendStageComms — pipeline throw after provider acceptance', () => {
     expect(result.sms).toBe('uncertain');
     stored = mockDb.__tables.job_applications.find((r) => r.id === 'app-1');
     expect(stored.comms_history[1]).toMatchObject({ outcome: 'uncertain' });
+  });
+});
+
+describe('sendStageComms — invite supersedes queued invites; suppression lookup failure settles the ledger', () => {
+  test('a new interview invite retires invites still queued for the same application', async () => {
+    mockRenderSmsTemplate.mockResolvedValue('Pick a time: https://x/careers/interview/a');
+    mockSendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, deliveryOutcome: 'accepted' });
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    mockDb.__tables.sms_log = [{ id: 'q1', status: 'scheduled', message_type: 'job_interview_invite', metadata: JSON.stringify({ job_application_id: 'app-1' }) }];
+    await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: true, email: false, by: 'tech-1' });
+    expect(mockDb.__tables.sms_log.find((r) => r.id === 'q1').status).toBe('cancelled');
+  });
+
+  test('a suppression lookup error fails closed and settles the owned ledger row as failed', async () => {
+    mockActiveSuppressionFor.mockRejectedValueOnce(Object.assign(new Error('boom'), { name: 'error', code: '57014' }));
+    const app = baseApp();
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    const result = await RecruitingComms.sendStageComms(app, 'application_received', { sms: false, email: true, by: 'system' });
+    expect(result.email).toBe('failed');
+    expect(mockSendOne).not.toHaveBeenCalled();
+    const ledger = mockDb.__tables.email_messages.find((r) => r.recipient_id === 'app-1');
+    expect(ledger.status).toBe('failed');
+  });
+});
+
+describe('outbound choke point normalizes applicant SMS', () => {
+  test('send-customer-message applies the text-only normalization to audience applicant', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/messaging/send-customer-message'), 'utf8');
+    expect(src).toMatch(/\['customer', 'lead', 'applicant'\]\.includes\(sendInput\.audience\) && !sendHasMedia/);
   });
 });
