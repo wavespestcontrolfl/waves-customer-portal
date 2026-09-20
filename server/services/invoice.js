@@ -1423,9 +1423,18 @@ async function zeroDueDirectSendOutcome(invoiceId, outcome) {
 // itself. One shared resolve-and-map step for sendViaSMSAndEmail's two
 // claim-acquisition sites (the packet ownership claim and the plain
 // claim), so neither duplicates the chokepoint call + mapping inline.
-async function zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed) {
+//
+// `retryOnceFn`, when given, is called instead of mapping a `not_zero_due`
+// outcome to a refusal (Codex round-6 P2 #4131): a concurrent credit
+// reversal or retotal can restore a positive balance between the claim's
+// own zero-due detection and this chokepoint's re-read — the invoice is
+// genuinely collectible again, not stuck. Bounded to the one retry the
+// caller's own `_zeroDueRetried` guard allows; omit it (or leave the
+// guard already tripped) to map `not_zero_due` like any other outcome.
+async function zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, retryOnceFn = null) {
   if (err?.code !== "zero_due_detected") return null;
   const outcome = await settleZeroDueBeforeSend(invoiceId, { fenceOwnership: !allowClaimed });
+  if (outcome.kind === "not_zero_due" && retryOnceFn) return retryOnceFn();
   return zeroDueWrapperOutcome(invoiceId, outcome);
 }
 
@@ -3366,7 +3375,12 @@ const InvoiceService = {
   /**
    * Send invoice via Twilio SMS — the unified service recap + invoice message.
    */
-  async sendViaSMS(invoiceId, { allowClaimed = false, claimToken = null, firstDeliveryOnly = false, overridesReviewHold = false, payUrlParams = null, operatorInitiated = false, actorTechnicianId = null, adoptsQueuedInvoiceSend = true } = {}) {
+  async sendViaSMS(invoiceId, { allowClaimed = false, claimToken = null, firstDeliveryOnly = false, overridesReviewHold = false, payUrlParams = null, operatorInitiated = false, actorTechnicianId = null, adoptsQueuedInvoiceSend = true,
+    // Internal-only: sends this same call once more after a not_zero_due
+    // chokepoint outcome (Codex round-6 P2 #4131) — a caller never sets
+    // this itself, so a real race can retry at most once, never loop.
+    _zeroDueRetried = false,
+  } = {}) {
     // Direct callers (batch sendImmediately, the AI-assistant send tool, the
     // from-service SMS-only path) bypass sendViaSMSAndEmail, which applies credit
     // before its own claim — so apply it here too, or those pay links bill the
@@ -3407,6 +3421,19 @@ const InvoiceService = {
       // detection itself escape as a throw.
       if (claimErr?.code === "zero_due_detected") {
         const outcome = await settleZeroDueBeforeSend(invoiceId, { fenceOwnership: !allowClaimed });
+        // A concurrent credit reversal / retotal restored a positive
+        // balance between the claim's own zero-due check and the
+        // chokepoint's re-read (Codex round-6 P2 #4131): the invoice is
+        // collectible again, not stuck — retry the whole claim+send once
+        // rather than refusing it as deposit_settlement_pending. A SECOND
+        // not_zero_due (vanishingly rare) is mapped normally, never a
+        // second retry.
+        if (outcome.kind === "not_zero_due" && !_zeroDueRetried) {
+          return this.sendViaSMS(invoiceId, {
+            allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, payUrlParams,
+            operatorInitiated, actorTechnicianId, adoptsQueuedInvoiceSend, _zeroDueRetried: true,
+          });
+        }
         return zeroDueDirectSendOutcome(invoiceId, outcome);
       }
       throw claimErr;
@@ -3953,8 +3980,16 @@ const InvoiceService = {
       // The staff user behind an operator send (attribution for the
       // invoice-issued closeout's audit row); null for automated sends.
       actorTechnicianId = null,
+      // Internal-only: retries this same call once more after a
+      // not_zero_due chokepoint outcome (Codex round-6 P2 #4131) — a real
+      // caller never sets this, so a race can retry at most once.
+      _zeroDueRetried = false,
     } = {},
   ) {
+    const retryOnce = () => this.sendViaSMSAndEmail(invoiceId, {
+      requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
+      emailRecipientOverride, payUrlParams, operatorInitiated, actorTechnicianId, _zeroDueRetried: true,
+    });
     // Phase 2: an accrued invoice (on a payer statement) is never delivered
     // individually. Refuse BEFORE claiming/applying credit so we don't flip its
     // status to 'sending'. (sendInvoiceEmail also fails closed; this is the early gate.)
@@ -3976,7 +4011,7 @@ const InvoiceService = {
       try {
         packetClaim = await claimPacketInvoiceForSend(invoiceId, accrualPre.visit_completion_packet_id, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold });
       } catch (err) {
-        const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed);
+        const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, _zeroDueRetried ? null : retryOnce);
         if (zeroDueResult) return zeroDueResult;
         // The scheduled-send worker already fenced and claimed this send; a
         // transient failure of the re-judge here left no provider request
@@ -4004,7 +4039,7 @@ const InvoiceService = {
     try {
       claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend: true });
     } catch (err) {
-      const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed);
+      const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, _zeroDueRetried ? null : retryOnce);
       if (zeroDueResult) return zeroDueResult;
       throw err;
     }
@@ -4096,6 +4131,21 @@ const InvoiceService = {
           // generic branch below if that ever changes (Codex round-5 #4131).
           return { ok: true, settled_zero_due: true,
             sms: { ok: false, code: "settled_zero_due" }, email: { ok: false, code: "settled_zero_due" },
+            payUrl: payUrl || null };
+        }
+        if (smsResult?.code === "deposit_settlement_pending") {
+          // Promote the SMS leg's pending code to the wrapper result
+          // (Codex round-6 P2 #4131): the nested preclaimed sendViaSMS
+          // call resolves this refusal on ITS OWN leg only — copying it
+          // into sms.code alone let it disappear at the top level (no
+          // promoted-code branch below recognizes it), so /:id/send fell
+          // through to a generic 400 instead of the 409 the RESOLVED
+          // pre-claim path already gives this exact code, and the batch
+          // routes counted it failed instead of held. Skip the email leg
+          // too — nothing is due to email either.
+          return { ok: false, code: "deposit_settlement_pending", error: smsResult.reason,
+            sms: { ok: false, code: "deposit_settlement_pending", deliveryOutcome: "not_sent" },
+            email: { ok: false, code: "deposit_settlement_pending" },
             payUrl: payUrl || null };
         }
         if (smsResult?.sent) {

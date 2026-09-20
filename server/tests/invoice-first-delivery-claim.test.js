@@ -57,7 +57,7 @@ const INVOICE_ID = 'aaaaaaaa-1111-4111-8111-111111111111';
 // after the FIRST `.first()` snapshot resolves — modeling another
 // worker's write landing in the window between the snapshot and the flip
 // (the ABA race the round-2 fix closes).
-function makeDb(invoiceRow, { mutateAfterFirstRead = null } = {}) {
+function makeDb(invoiceRow, { mutateAfterFirstRead = null, mutateAfterNthRead = null } = {}) {
   let row = { ...invoiceRow };
   let firstReadCount = 0;
   const updateSpy = jest.fn();
@@ -81,6 +81,10 @@ function makeDb(invoiceRow, { mutateAfterFirstRead = null } = {}) {
       firstReadCount += 1;
       const snapshot = { ...row };
       if (firstReadCount === 1 && mutateAfterFirstRead) row = { ...row, ...mutateAfterFirstRead };
+      // mutateAfterNthRead: { n, patch } — mutates after the Nth `.first()`
+      // read specifically (Codex round-6 P2 #4131), for races landing
+      // between two SPECIFIC reads rather than right after the first one.
+      if (mutateAfterNthRead && firstReadCount === mutateAfterNthRead.n) row = { ...row, ...mutateAfterNthRead.patch };
       return snapshot;
     });
     q.update = jest.fn((payload) => {
@@ -574,6 +578,30 @@ describe('sendViaSMS — resolving the zero-due chokepoint after catching zero_d
     expect(typeof result.reason).toBe('string');
   });
 
+  test('a not_zero_due outcome (a concurrent credit reversal / retotal restored a positive balance) retries the send ONCE and DELIVERS, rather than refusing a now-collectible invoice as deposit_settlement_pending (Codex round-6 P2 #4131)', async () => {
+    // Between the claim's own zero-due detection (read #2) and the
+    // chokepoint's fresh re-read (read #3), the balance is restored —
+    // exactly the race #4131 slice 4 round-6 raised: the invoice is
+    // collectible again, but the OLD fallthrough mapped kind:
+    // 'not_zero_due' the same as a business refusal. mockImplementationOnce
+    // lets THIS (outer) call run for real; the recursive retry it makes is
+    // intercepted by the very next queued mock value, proving the retry
+    // happened and that its own (delivered) result is what the caller sees.
+    makeDb(zeroDueRow(), { mutateAfterNthRead: { n: 2, patch: { credit_applied: 0 } } });
+    const deliveredResult = { sent: true, ok: true, payUrl: 'https://pay.example/x' };
+    const original = InvoiceService.sendViaSMS.bind(InvoiceService);
+    const spy = jest.spyOn(InvoiceService, 'sendViaSMS');
+    spy.mockImplementationOnce(original).mockResolvedValueOnce(deliveredResult);
+
+    const result = await InvoiceService.sendViaSMS(INVOICE_ID);
+
+    expect(result).toEqual(deliveredResult);
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(spy).toHaveBeenLastCalledWith(INVOICE_ID, expect.objectContaining({ _zeroDueRetried: true }));
+    expect(settleSpy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
   test('an unexpected throw from the chokepoint (a bug, a DB error) propagates out of sendViaSMS too — never silently reinterpreted', async () => {
     // Codex round-5 #4131: sendViaSMS's own catch calls settleZeroDueBeforeSend
     // to resolve a zero_due_detected — if THAT throws unexpectedly, it must
@@ -585,6 +613,32 @@ describe('sendViaSMS — resolving the zero-due chokepoint after catching zero_d
     settleSpy.mockRejectedValue(boom);
 
     await expect(InvoiceService.sendViaSMS(INVOICE_ID)).rejects.toBe(boom);
+  });
+
+  test('sendViaSMSAndEmail: a not_zero_due outcome (a concurrent credit reversal / retotal restored a positive balance) retries ONCE and DELIVERS, rather than refusing a now-collectible invoice (Codex round-6 P2 #4131)', async () => {
+    // Same seam as sendViaSMS's own round-6 test above, on the OTHER
+    // caller sendViaSMSAndEmail retries: the accrual pre-check (read #1),
+    // the claim's own zero-due snapshot (read #2, still zero-due — throws
+    // zero_due_detected), then the chokepoint's fresh re-read (read #3,
+    // mutated to no longer be zero-due) triggers retryOnce().
+    // mockImplementationOnce lets THIS (outer) call run for real; the
+    // recursive retry it makes is intercepted by the very next queued
+    // mock value, proving the retry happened and its own (delivered)
+    // result is what the caller sees. estimate-deposits is mocked at the
+    // top of this file, so no extra db read runs between #2 and #3.
+    makeDb(zeroDueRow(), { mutateAfterNthRead: { n: 2, patch: { credit_applied: 0 } } });
+    const deliveredResult = { ok: true, sms: { ok: true }, email: { ok: true }, payUrl: 'https://pay.example/x' };
+    const original = InvoiceService.sendViaSMSAndEmail.bind(InvoiceService);
+    const spy = jest.spyOn(InvoiceService, 'sendViaSMSAndEmail');
+    spy.mockImplementationOnce(original).mockResolvedValueOnce(deliveredResult);
+
+    const result = await InvoiceService.sendViaSMSAndEmail(INVOICE_ID, {});
+
+    expect(result).toEqual(deliveredResult);
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(spy).toHaveBeenLastCalledWith(INVOICE_ID, expect.objectContaining({ _zeroDueRetried: true }));
+    expect(settleSpy).not.toHaveBeenCalled();
+    spy.mockRestore();
   });
 
   test('a PRECLAIMED row rediscovering zero-due resolves through the chokepoint too — deposit_settlement_pending, since settleZeroBalance itself refuses a "sending" row', async () => {
