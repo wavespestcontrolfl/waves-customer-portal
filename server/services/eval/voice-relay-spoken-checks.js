@@ -1852,7 +1852,7 @@ const REPORT_NONCOMPLETION_ASSURANCE_GOVERNOR_RE = new RegExp(
   'i',
 );
 
-const REPORT_NONCOMPLETION_MODIFIER_RE = /\b(?:(?:almost|nearly)(?!\s+immediately\b)(?:\s+(?:has|have|had|was|were|get|got|been|did)){0,2}(?:\s+(?:\w+ly|already|also|just|now))*|(?:only\s+)?(?:partially|incompletely))\s*$/i;
+const REPORT_NONCOMPLETION_MODIFIER_RE = /\b(?:(?:almost|nearly)(?!\s+(?:immediately|instantly)\b)(?:\s+(?:has|have|had|was|were|get|got|been|did)){0,2}(?:\s+(?:\w+ly|already|also|just|now))*|(?:only\s+)?(?:partially|incompletely))\s*$/i;
 const REPORT_NONCOMPLETION_PREDICATE_MODIFIER_RE = /\b(?:barely|hardly|scarcely|halfway)\s*$/i;
 const REPORT_POSTVERB_NONCOMPLETION_MODIFIER_RE = /^\s+(?:only\s+)?(?:partially|incompletely)(?=\s*(?:[,.!?;]|$)|\s+(?:around|along|throughout|across|on|to|at|in|inside|within|outside(?:\s+of)?)\b)/i;
 const REPORT_NEGATED_DOUBT_RE = /\b(?:i|we|you|he|she|they|it|(?:(?:a|an|the|our|your|their)\s+)?(?:technician|tech|customer|client|homeowner|caller|crew|team))\s+(?:do|does|did)(?:\s+not|n['’]t)\s+doubt(?:\s+that)?\b/gi;

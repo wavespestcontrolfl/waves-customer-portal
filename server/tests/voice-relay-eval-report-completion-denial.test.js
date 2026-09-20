@@ -1123,3 +1123,19 @@ test('unrelated evidence absence does not hedge a completed treatment', () => {
   expect(grammar.reportClaimIsDenied(text, text, text.indexOf('Talstar P'),
     text.indexOf('exterior perimeter'), findingVerb)).toBe(false);
 });
+
+test.each([
+  ['We almost instantly applied Talstar P to the exterior perimeter.', true],
+  ['We nearly instantly applied Talstar P to the exterior perimeter.', true],
+  ['Talstar P was almost instantly applied to the exterior perimeter.', true],
+  ['We almost immediately applied Talstar P to the exterior perimeter.', true],
+  ['We almost applied Talstar P to the exterior perimeter.', false],
+  ['Talstar P was nearly applied to the exterior perimeter.', false],
+  ['Talstar P had nearly been applied to the exterior perimeter.', false],
+  ['We nearly finished applying Talstar P to the exterior perimeter.', false],
+  ['We almost instantly arrived, then applied Talstar P to the exterior perimeter.', true],
+  ['We nearly applied bait indoors, but Talstar P was applied to the exterior perimeter.', true],
+])('near timing differs from near treatment completion: %s', (text, completed) => {
+  const findingVerbs = [...text.matchAll(/\b(?:applied|applying)\b/g)];
+  expect(grammar.reportHasCompletedPredicate(text, findingVerbs.at(-1))).toBe(completed);
+});
