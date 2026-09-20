@@ -1152,6 +1152,19 @@ async function reconcileQueuedSendUnderClaim(invoiceId, previousStatus, claimTok
   return outcome.consumedRows;
 }
 
+// Shared by BOTH claimInvoiceForSend branches (fresh claim and the
+// allowClaimed preclaim callback) so the two guards below can never drift
+// apart between them (round-0 audit P1 #4131: the preclaim branch
+// originally lost both checks entirely).
+function refuseFirstDeliveryHold(current, invoiceId, firstDeliveryOnly, operatorInitiated) {
+  if (firstDeliveryOnly && alreadyDeliveredForFirstSend(current)) {
+    throw invoiceAlreadyDeliveredError(current);
+  }
+  if ((firstDeliveryOnly || !operatorInitiated) && isStaleClaimReviewHold(current)) {
+    throw staleClaimReviewHoldError(invoiceId);
+  }
+}
+
 async function claimInvoiceForSend(invoiceId, {
   allowClaimed = false,
   claimToken = null,
@@ -1167,6 +1180,12 @@ async function claimInvoiceForSend(invoiceId, {
   if (allowClaimed) {
     if (!claimToken || current.send_claim_token !== claimToken) throw sendClaimLostError();
     if (!SEND_FINALIZABLE_STATUSES.includes(current.status)) throw invoiceNotSendableError(current);
+    // Round-0 audit P1 (#4131): a preclaimed caller asking for a first
+    // delivery must not lose the already-delivered / stale-claim-review-
+    // hold guards the fresh-claim branch below already enforces — this
+    // row can reach here already fully delivered (a resumed worker
+    // preclaim racing a direct send) or still parked for operator review.
+    refuseFirstDeliveryHold(current, invoiceId, firstDeliveryOnly, operatorInitiated);
     // A preclaimed row (the scheduled-send worker flips 'scheduled' →
     // 'sending' itself, then calls back in with allowClaimed:true) still
     // needs the queued-obligation check: an earlier DIRECT send that held
@@ -1185,22 +1204,18 @@ async function claimInvoiceForSend(invoiceId, {
   // #4131) is refused atomically here, before the claimable-statuses check
   // below: a delivered row can sit at a claimable status (sent/viewed/
   // overdue) and a plain status check alone would let a first-delivery
-  // request re-claim it as if it were an intentional resend.
-  if (firstDeliveryOnly && alreadyDeliveredForFirstSend(current)) {
-    throw invoiceAlreadyDeliveredError(current);
-  }
+  // request re-claim it as if it were an intentional resend. The
+  // stale-claim review hold (same call, see refuseFirstDeliveryHold): an
+  // automatic claimant (no operatorInitiated) must honor the park
+  // processScheduledSends left for the operator, and a first-delivery
+  // request must NEVER be the way off this hold either, even when it
+  // carries operatorInitiated (an admin create/resume path still marks
+  // operatorInitiated:true so it keeps the ordinary quiet-hours-bypass
+  // treatment) — only a DELIBERATE Resend (operator-initiated AND not a
+  // first delivery) may reclaim a parked row.
+  refuseFirstDeliveryHold(current, invoiceId, firstDeliveryOnly, operatorInitiated);
   if (!SEND_CLAIMABLE_STATUSES.includes(current.status)) {
     throw invoiceNotSendableError(current);
-  }
-  // Stale-claim review hold: an automatic claimant (no operatorInitiated)
-  // must honor the park processScheduledSends left for the operator. A
-  // first-delivery request must NEVER be the way off this hold EITHER,
-  // even when it carries operatorInitiated (an admin create/resume path
-  // still marks operatorInitiated:true so it keeps the ordinary
-  // quiet-hours-bypass treatment) — only a DELIBERATE Resend (operator-
-  // initiated AND not a first delivery) may reclaim a parked row.
-  if ((firstDeliveryOnly || !operatorInitiated) && isStaleClaimReviewHold(current)) {
-    throw staleClaimReviewHoldError(invoiceId);
   }
 
   // A live deferred pay-link text (quiet-hours queue) already owns this

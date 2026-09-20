@@ -28,7 +28,8 @@ jest.mock('../services/estimate-deposits', () => ({
 
 const db = require('../models/db');
 const { STALE_SEND_PARK_ERROR } = require('../services/invoice-helpers');
-const { claimInvoiceForSend } = require('../services/invoice');
+const InvoiceService = require('../services/invoice');
+const { claimInvoiceForSend } = InvoiceService;
 
 const INVOICE_ID = 'aaaaaaaa-1111-4111-8111-111111111111';
 
@@ -158,5 +159,33 @@ describe('claimInvoiceForSend — stale-claim review hold', () => {
     });
     const firstDeliveryResult = await claimInvoiceForSend(INVOICE_ID, { firstDeliveryOnly: true, operatorInitiated: true });
     expect(firstDeliveryResult.claimed).toBe(true);
+  });
+});
+
+
+describe('sendViaSMS — allowClaimed branch forwards firstDeliveryOnly to the claim (round-0 audit P1)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  // Same shape claimInvoiceForSend's own already-delivered check reads:
+  // status 'sent' + sent_at, claimed under the caller's own preclaim token.
+  function deliveredRow() {
+    return {
+      id: INVOICE_ID, status: 'sent', sent_at: new Date(),
+      send_claim_token: 'tok', scheduled_send_at: null, scheduled_send_error: null,
+    };
+  }
+
+  test('a preclaimed sendViaSMS forwards firstDeliveryOnly to the claim — refused with already_delivered', async () => {
+    makeDb(deliveredRow());
+    await expect(InvoiceService.sendViaSMS(INVOICE_ID, {
+      allowClaimed: true, claimToken: 'tok', firstDeliveryOnly: true, operatorInitiated: true,
+    })).rejects.toMatchObject({ code: 'already_delivered' });
+  });
+
+  test('the SAME preclaimed call WITHOUT firstDeliveryOnly proceeds past the claim (fails later, not on already_delivered)', async () => {
+    makeDb(deliveredRow());
+    await expect(InvoiceService.sendViaSMS(INVOICE_ID, {
+      allowClaimed: true, claimToken: 'tok', operatorInitiated: true,
+    })).rejects.not.toMatchObject({ code: 'already_delivered' });
   });
 });
