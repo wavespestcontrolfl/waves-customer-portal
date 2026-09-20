@@ -247,3 +247,64 @@ test.each([
 ])('audience coverage accumulates across accepted refusals, like product coverage: %s', (text, question, expected) => {
   expect(policy.refusesSafetyGuarantee(text, question, -1)).toBe(expected);
 });
+
+test.each([
+  ['The bait is safe once dry. The treatment dries in twelve minutes. The technician will confirm timing.', false],
+  ['The bait is safe once dry. The treatment dries in eleven minutes. The technician will confirm timing.', false],
+  ['The bait is safe once dry. The treatment dries in ninety minutes. The technician will confirm timing.', false],
+  ['The bait is safe once dry. The treatment dries in half an hour. The technician will confirm timing.', false],
+  ['The bait is safe once dry. The treatment dries in a couple of hours. The technician will confirm timing.', false],
+  ['The bait is safe once dry. The treatment dries in an hour. The technician will confirm timing.', false],
+  ['The bait is safe once dry. The treatment dries in a hundred minutes. The technician will confirm timing.', false],
+  // "a few minutes" is a vague amount, not a definite quantity -- it never
+  // defeats the exemption.
+  ['The bait is safe once dry. The treatment dries in a few minutes. The technician will confirm timing.', true],
+  ['The bait is safe once dry. The technician will confirm timing.', true],
+])('every spelled-out definite drying interval defeats the once-dry exemption, not just the enumerated ones: %s', (text, expected) => {
+  expect(qualify(text)).toBe(expected);
+});
+
+test.each([
+  ['Yes. I cannot confirm whether the bait is safe for cats. I cannot confirm whether the spray is safe for dogs.',
+    'Is the bait safe for dogs and the spray safe for cats?', false],
+  ['Yes. I cannot confirm whether the bait is safe for dogs. I cannot confirm whether the spray is safe for cats.',
+    'Is the bait safe for dogs and the spray safe for cats?', true],
+])('a refusal must cover the pairing of product and audience, not each axis independently: %s', (text, question, expected) => {
+  expect(policy.refusesSafetyGuarantee(text, question, 0)).toBe(expected);
+});
+
+test.each([
+  ['Yes. I cannot confirm whether the bait is safe.', 'Is the bait or any other product safe?', false],
+  ['Yes. I cannot confirm whether the bait is safe. I cannot confirm whether any other product is safe.',
+    'Is the bait or any other product safe?', true],
+])('a generic product scope is a questioned member alongside a named product, not absorbed by it: %s', (text, question, expected) => {
+  expect(policy.refusesSafetyGuarantee(text, question, 0)).toBe(expected);
+});
+
+test.each([
+  ['Yes. I cannot confirm whether the bait is safe, except for dogs.', 'Is the bait safe for dogs?', false],
+  ['Yes. I cannot confirm whether the bait is safe, except for cats.', 'Is the bait safe for dogs?', true],
+  ['Yes. I cannot confirm whether the bait is safe.', 'Is the bait safe for dogs?', true],
+])('a comma-delimited restriction stays in the refusal\'s exempt span and is checked as an exclusion: %s', (text, question, expected) => {
+  expect(policy.refusesSafetyGuarantee(text, question, 0)).toBe(expected);
+});
+
+test.each([
+  ['Yes. I cannot confirm whether the bait is safe if swallowed.', 'Is the spray safe if swallowed? Is the bait safe?', false],
+  ['Yes. I cannot confirm whether the bait is safe if swallowed.', 'Is the spray safe if swallowed? Is the bait safe if swallowed?', true],
+])('circumstance evidence anchors to the selected latest question, not the first predicate in the text: %s', (text, question, expected) => {
+  expect(policy.refusesSafetyGuarantee(text, question, 0)).toBe(expected);
+});
+
+test.each([
+  ['The bait is safe once dry. The technician can confirm timing.', false],
+  ['The bait is safe once dry. The technician could confirm timing.', false],
+  ['The bait is safe once dry. The technician may confirm timing.', false],
+  ['The bait is safe once dry. The technician will confirm timing.', true],
+  ['The bait is safe once dry. The technician confirms timing.', true],
+  ['The bait is safe once dry. The technician is going to confirm timing.', true],
+  ['The bait is safe once dry. The technician will be confirming timing.', true],
+  ['The bait is safe once dry. The technician will let you know timing.', true],
+])('the timing witness requires an actual confirmation clause, not a bare capability: %s', (text, expected) => {
+  expect(qualify(text)).toBe(expected);
+});
