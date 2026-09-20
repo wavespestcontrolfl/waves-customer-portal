@@ -15982,7 +15982,10 @@ const CallRecordingProcessor = {
         if (scoreResult?.skipped && scoreResult.reason === 'ownership_lost') {
           return abandonToPeer('finalization after CSR scoring');
         }
-        csrScoreResult = { score: scoreResult?.score?.total_score, outcome: scoreResult?.score?.call_outcome };
+        // CSRCoach.scoreCall returns the score object itself (total_score,
+        // call_outcome, ...), not a wrapper — the old `.score.` read logged
+        // "undefined/15 (undefined)" on every call (2026-09-20 audit).
+        csrScoreResult = { score: scoreResult?.total_score, outcome: scoreResult?.call_outcome };
         logger.info(`[call-proc] CSR scored: ${csrScoreResult.score}/15 (${csrScoreResult.outcome})`);
       } catch (err) {
         logger.error(`[call-proc] CSR scoring failed (non-blocking): ${err.message}`);

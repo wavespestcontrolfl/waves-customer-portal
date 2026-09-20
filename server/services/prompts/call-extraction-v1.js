@@ -97,6 +97,7 @@ CALLER NAME:
 - Set name_full to the full name as spoken.
 - If only one name is stated, put it in first_name; leave last_name null.
 - The caller's name may be spoken by EITHER side: when the agent greets the caller by name ("Hey Taylor", "Hi Sam, it's Adam") and the caller does not correct it, that IS the caller's name — extract it.
+- The reverse is NOT true: a name the CALLER uses to greet or address the person who answered ("Hey Tom", "Hi Adam, it's me") is the agent's or technician's name, never the caller's. This holds even when the speaker labels look swapped or both opening lines carry the same label — a call that opens with a greeting addressed TO someone by name was placed BY the other party. If the caller's own name is never stated, leave first_name / last_name / name_full null with low name_confidence rather than naming the person they addressed.
 - Name evidence, strongest first: (1) a name the caller SPELLS, (2) the KNOWN CALLER name on file when the caller answers to it or the context matches, (3) the CALLER ID NAME when it matches the spoken name closely (transcription variants: "Smith" vs SMYTHE, "Coal" vs Cole), (4) the transcribed spoken form. A stronger source overrides a weaker transcription of the same name.
 - Do NOT invent a name from caller ID, address, email, or context when nothing on the call supports it — a caller-ID name alone, with no spoken name at all, stays out of first_name/last_name.
 - Set name_confidence: 0.9+ when clearly stated, 0.5-0.8 when spelled out ambiguously, <0.5 when only partially heard.
