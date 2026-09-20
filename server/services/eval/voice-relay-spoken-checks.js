@@ -12,6 +12,8 @@ const {
   QUESTION_LEAD_RE,
   CONVERSATIONAL_CONDITION_RE,
   latestInterrogativeSegment,
+  CLAUSE_BOUNDARY_TOKEN_RE,
+  RIGHT_NOUN_PHRASE_SUBJECT_RE,
   clauseBounds,
   clauseOf,
   SUBJECT,
@@ -1834,8 +1836,29 @@ function reportHasCompletedPredicate(affirmed, findingVerb) {
     && !clauseIsNegated(completionPrefix);
 }
 
+const REPORT_SHARED_LIST_CONDITION_RE = new RegExp(
+  `(?:^|[.!?;])\\s*(?:only\\s+)?(?:if|unless)\\b[^,]*,`
+    + `[^.!?;]*${REPORT_FINDING_VERB_RE.source}[^.!?;]*\\band\\s*$`,
+  'i',
+);
+
+// Inspect the predicate before the final shared coordinator. An independent
+// contrast ends an earlier condition, even when the last finding is concise;
+// a negated or uncertain shared predicate denies a concise trailing finding.
+function reportSharedListDenies(precedingText, findingVerb) {
+  const precedingSource = precedingText || '';
+  const precedingPredicateAt = Math.max(0, precedingSource.replace(/\band\s*$/i, '').trimEnd().length - 1);
+  const precedingClause = precedingSource.slice(clauseBounds(precedingSource, precedingPredicateAt)[0]);
+  if (REPORT_SHARED_LIST_CONDITION_RE.test(precedingClause)) return true;
+  const sharedFindingVerb = [...precedingClause.matchAll(new RegExp(REPORT_FINDING_VERB_RE.source, 'gi'))].pop();
+  if (findingVerb || !sharedFindingVerb || !/\band\s*$/i.test(precedingClause)) return false;
+  const sharedClaim = claimContext(precedingClause, sharedFindingVerb.index, precedingClause.length);
+  return clauseIsNegated(sharedClaim) || reportFindingIsUncertain(sharedClaim);
+}
+
 function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb, precedingText) {
-  if (/(?:\b(?:anything|everything|all|anywhere|everywhere)\s+but(?:\s+the)?|(?<!\bnothing\s+)(?<!\bno\s+products?\s+)\bexcept(?:\s+for)?(?:\s+the)?|(?<!\bnothing\s+)(?<!\bno\s+products?\s+)\bother\s+than)\s*$/i.test(precedingText)
+  if (reportSharedListDenies(precedingText, findingVerb)
+      || /(?:\b(?:anything|everything|all|anywhere|everywhere)\s+but(?:\s+the)?|(?<!\bnothing\s+)(?<!\bno\s+products?\s+)\bexcept(?:\s+for)?(?:\s+the)?|(?<!\bnothing\s+)(?<!\bno\s+products?\s+)\bother\s+than)\s*$/i.test(precedingText)
       || (!findingVerb && /\bor\s*$/i.test(precedingText))) return true;
   const affirmedWithoutFocus = affirmed.replace(/(?:\bnot|n['’]t)\s+(?:exclusively|solely)\b/gi,
     (focus) => ' '.repeat(focus.length))
@@ -1887,7 +1910,7 @@ function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb
 }
 
 // ── Single-treatment product/location relationships ─────────────────────
-// These frames classify a single bounded assertion and never infer ownership
+// These dimensions classify a single bounded assertion and never infer ownership
 // across coordinated products, locations or predicates. Consumers separately
 // reject uncertain, denied, requested, interrogative or hypothetical evidence.
 const REPORT_PRODUCT_OBJECT_VERB_RE = /^(?:apply|applying|applied|place|placed|placing|use|used|using|treat|treated|treating|spray|sprayed|spraying|put|putting|got|received)$/i;
@@ -2071,7 +2094,7 @@ function reportTreatmentTargetSpan(affirmed, subjectAt, subjectLength, locationA
     ? { start: relationshipStart + links[0].index + links[0][0].length, end: targetEnd } : null;
 }
 
-function reportHasCompletedFinding(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb) {
+function reportHasCompletedSingleFinding(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb) {
   if (subjectAt < 0 || locationAt < 0 || !findingVerb || !reportHasCompletedPredicate(affirmed, findingVerb)) return false;
   if (REPORT_CUSTODY_OBJECT_RE.test(affirmed.slice(subjectAt + subjectLength))) return false;
   const productFrame = findingVerb.index < subjectAt
@@ -2107,6 +2130,208 @@ function reportHasConciseFinding(affirmed, subjectAt, subjectLength, locationAt,
     && REPORT_CONCISE_COMPLETION_RE.test(qualifier);
 }
 
+// ── Coordinated treatment ownership ─────────────────────────────────────
+// Parse bounded nominal lists that share one treatment predicate. Normalize
+// only supported lists into the single-treatment dimensions above; independent
+// actions cannot lend a product or location. Reporting prefixes are bounded.
+const REPORT_LIST_SEPARATOR_RE = /,\s*(?:(?:and|as\s+well\s+as|plus)\b)?|\b(?:and|as\s+well\s+as|plus)\b/gi;
+const REPORT_LIST_LABEL_RE = /^\s*(?:(?:the|a|an|your|our|their)\s+)?[A-Z][A-Za-z0-9'’-]*(?:\s+[A-Z0-9][A-Za-z0-9'’-]*){0,2}\s*$/;
+const REPORT_LIST_INTRODUCTION_RE = new RegExp(`^\\s*(?:(?:${REPORT_COMPLETION_TIME}|according\\s+to\\s+the\\s+report)\\s*,\\s*)*`, 'i');
+const REPORT_LIST_QUALIFIER_RE = new RegExp(`,\\s*(?=(?:according\\s+to|as(?!\\s+well\\s+as\\b)|${REPORT_COMPLETION_TIME})\\b)|\\bwhich\\b|[.!?;]`, 'i');
+
+function reportTreatmentListEnd(text, start) {
+  const tail = text.slice(start);
+  const qualifier = REPORT_LIST_QUALIFIER_RE.exec(tail);
+  const boundary = [...tail.matchAll(new RegExp(CLAUSE_BOUNDARY_TOKEN_RE.source, 'gi'))]
+    .find((token) => !/^(?:and|or)$/i.test(token[0]));
+  return start + Math.min(boundary ? boundary.index : tail.length, qualifier ? qualifier.index : tail.length);
+}
+
+function reportNominalList(text, start, end, kind, terminal) {
+  if (end <= start) return null;
+  const field = text.slice(start, end);
+  const separators = [...field.matchAll(REPORT_LIST_SEPARATOR_RE)];
+  const boundaries = [0, ...separators.map((separator) => separator.index + separator[0].length)];
+  const items = [];
+  let parsedEnd = end;
+  let independentTail = false;
+  for (const [index, boundary] of boundaries.entries()) {
+    const finish = index < separators.length ? separators[index].index : field.length;
+    const item = field.slice(boundary, finish).replace(/\brespectively\b/gi, (marker) => ' '.repeat(marker.length)).trim();
+    if (!item) continue;
+    const value = kind === 'location' ? item
+      .replace(new RegExp(`^${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+`, 'i'), '')
+      .replace(new RegExp(`\\s+(?:${REPORT_TREATMENT_ADJUNCTS})$`, 'i'), '') : item;
+    const valid = kind === 'location' ? REPORT_ALTERNATIVE_LOCATION_FIRST_RE.test(value)
+      : (REPORT_ALTERNATIVE_PRODUCT_RE.test(value) || REPORT_LIST_LABEL_RE.test(value))
+        && !CLAUSE_FINITE_PREDICATE_RE.test(value) && !REPORT_FINDING_VERB_RE.test(value);
+    if (!valid) {
+      // A terminal nominal prefix ends before later prose; an invalid product
+      // field before a target cannot borrow that later action's location.
+      if (!terminal || !items.length) return null;
+      parsedEnd = start + separators[index - 1].index;
+      // Unknown nominal items and adjuncts cannot transfer a later marker.
+      // A quantity subject establishes a separate clause without enumerating
+      // its finite verbs (equal, weigh, reach, etc.).
+      independentTail = RIGHT_NOUN_PHRASE_SUBJECT_RE.test(item)
+        || new RegExp(`^(?:i|we|you|he|she|they|it)\\s+${CLAUSE_FINITE_PREDICATE_RE.source}`, 'i').test(item)
+        || new RegExp(`^(?:their|its|our|your|his|her)\\s+(?:amounts?|weights?|volumes?|quantities|totals?)\\s+(?:[a-z]+\\s+){1,3}(?:\\d|${NUMBER_WORD_EN_STRICT})\\b`, 'i').test(item);
+      break;
+    }
+    items.push({ start: start + boundary, end: start + finish, text: value });
+  }
+  return items.length ? { start, end: parsedEnd, tailEnd: end, independentTail, items } : null;
+}
+
+function reportFindingLists(affirmed, subjectAt, locationAt, findingVerb) {
+  if (!findingVerb || subjectAt < 0 || locationAt < 0) return null;
+  const verbEnd = findingVerb.index + findingVerb[0].length;
+  const introduction = REPORT_LIST_INTRODUCTION_RE.exec(affirmed)[0].length;
+  const passive = REPORT_COMPLETED_PASSIVE_RE.exec(affirmed.slice(0, findingVerb.index));
+  const searchable = affirmed.replace(REPORT_TARGET_TIME_RE, (time) => ' '.repeat(time.length));
+  let productStart; let productEnd; let locationStart; let locationEnd; let targetLink = null;
+  if (locationAt < subjectAt) {
+    const productLink = /\b(?:with|using)\s+/i.exec(affirmed.slice(verbEnd));
+    if (!productLink) return null;
+    productStart = verbEnd + productLink.index + productLink[0].length;
+    productEnd = reportTreatmentListEnd(affirmed, productStart);
+    locationStart = locationAt < findingVerb.index ? introduction : verbEnd;
+    locationEnd = locationAt < findingVerb.index ? passive && passive.index : verbEnd + productLink.index;
+    if (locationEnd === null) return null;
+  } else {
+    targetLink = REPORT_TREATMENT_LOCATION_LINK_RE.exec(searchable.slice(verbEnd, locationAt));
+    if (!targetLink) return null;
+    targetLink = { at: verbEnd + targetLink.index, text: targetLink[0] };
+    productStart = subjectAt < findingVerb.index ? introduction : verbEnd;
+    productEnd = subjectAt < findingVerb.index ? passive && passive.index : targetLink.at;
+    if (productEnd === null) return null;
+    const adjunct = /\b(?:by|with|using)\b/i.exec(affirmed.slice(productStart, productEnd));
+    if (adjunct) productEnd = productStart + adjunct.index;
+    locationStart = targetLink.at + targetLink.text.length;
+    locationEnd = reportTreatmentListEnd(affirmed, locationStart);
+  }
+  const products = reportNominalList(affirmed, productStart, productEnd, 'product', locationAt < subjectAt);
+  const locations = reportNominalList(affirmed, locationStart, locationEnd, 'location', locationAt > subjectAt);
+  return products && locations ? { products, locations, targetLink, end: Math.max(products.end, locations.end) } : null;
+}
+
+function reportRespectivelyPairsFinding(affirmed, subjectAt, locationAt, findingVerb) {
+  if (!findingVerb || !/\brespectively\b/i.test(affirmed)) return true;
+  const lists = reportFindingLists(affirmed, subjectAt, locationAt, findingVerb);
+  if (!lists) return false;
+  const marker = /\brespectively\b/i.exec(affirmed);
+  if (marker.index >= lists.end) {
+    const terminal = lists.targetLink ? lists.locations : lists.products;
+    return terminal.end === terminal.tailEnd || terminal.independentTail;
+  }
+  const productIndex = lists.products.items.findIndex((item) => subjectAt >= item.start && subjectAt < item.end);
+  const locationIndex = lists.locations.items.findIndex((item) => locationAt >= item.start && locationAt < item.end);
+  return productIndex >= 0 && productIndex === locationIndex && lists.products.items.length === lists.locations.items.length;
+}
+
+// Elided product-target pairs retain the one completed predicate of their
+// first pair: "P went around A and bait along B". Every later pair must name
+// its own product and direct target without introducing another action.
+function reportElidedFindingFrame(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb) {
+  if (!findingVerb) return null;
+  const verbEnd = findingVerb.index + findingVerb[0].length;
+  const searchable = affirmed.replace(REPORT_TARGET_TIME_RE, (time) => ' '.repeat(time.length));
+  const firstLink = REPORT_TREATMENT_LOCATION_LINK_RE.exec(searchable.slice(verbEnd));
+  if (!firstLink) return null;
+  const linkAt = verbEnd + firstLink.index;
+  const separators = [...affirmed.slice(linkAt + firstLink[0].length).matchAll(REPORT_LIST_SEPARATOR_RE)]
+    .map((separator) => ({ start: linkAt + firstLink[0].length + separator.index, end: linkAt + firstLink[0].length + separator.index + separator[0].length }));
+  if (!separators.length) return null;
+  const passive = REPORT_COMPLETED_PASSIVE_RE.exec(affirmed.slice(0, findingVerb.index));
+  const nounSubject = Boolean(passive) || /^went$/i.test(findingVerb[0]);
+  const productStart = nounSubject ? REPORT_LIST_INTRODUCTION_RE.exec(affirmed)[0].length : verbEnd;
+  const productEnd = nounSubject ? (passive ? passive.index : findingVerb.index) : linkAt;
+  const products = reportNominalList(affirmed, productStart, productEnd, 'product', false);
+  const locations = reportNominalList(affirmed, linkAt + firstLink[0].length, separators[0].start, 'location', false);
+  if (![products, locations].every((list) => list && list.items.length === 1)) return null;
+  const firstProduct = products.items[0]; const firstLocation = locations.items[0];
+  if (!reportHasCompletedSingleFinding(affirmed.slice(0, separators[0].start),
+    affirmed.indexOf(firstProduct.text, productStart), firstProduct.text.length,
+    affirmed.indexOf(firstLocation.text, locations.start), firstLocation.text.length, findingVerb)) return null;
+  for (const [index, separator] of separators.entries()) {
+    const end = index + 1 < separators.length ? separators[index + 1].start : reportTreatmentListEnd(affirmed, separator.end);
+    if (Math.min(subjectAt, locationAt) < separator.end || Math.max(subjectAt, locationAt) >= end) continue;
+    const link = REPORT_TREATMENT_LOCATION_LINK_RE.exec(affirmed.slice(separator.end, end));
+    if (!link) continue;
+    const pairLinkAt = separator.end + link.index;
+    const productList = reportNominalList(affirmed, separator.end, pairLinkAt, 'product', false);
+    const locationList = reportNominalList(affirmed, pairLinkAt + link[0].length, end, 'location', false);
+    if (![productList, locationList].every((list) => list && list.items.length === 1)) continue;
+    const replacement = ` ${productList.items[0].text} `;
+    const prefix = affirmed.slice(0, productStart) + replacement + affirmed.slice(productEnd, linkAt);
+    const normalized = `${prefix}${link[0]} ${locationList.items[0].text}`;
+    const verb = [findingVerb[0]];
+    verb.index = findingVerb.index + (productEnd <= findingVerb.index ? replacement.length - (productEnd - productStart) : 0);
+    return { text: normalized, subjectAt: normalized.indexOf(affirmed.slice(subjectAt, subjectAt + subjectLength), productStart),
+      locationAt: normalized.indexOf(affirmed.slice(locationAt, locationAt + locationLength), prefix.length), verb };
+  }
+  return null;
+}
+
+function reportHasCompletedFinding(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb) {
+  const lists = reportFindingLists(affirmed, subjectAt, locationAt, findingVerb);
+  if (!lists || (lists.products.items.length === 1 && lists.locations.items.length === 1)) {
+    if (reportHasCompletedSingleFinding(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb)) return true;
+    const elided = reportElidedFindingFrame(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb);
+    return Boolean(elided && reportHasCompletedSingleFinding(elided.text, elided.subjectAt, subjectLength, elided.locationAt, locationLength, elided.verb));
+  }
+  if (!reportRespectivelyPairsFinding(affirmed, subjectAt, locationAt, findingVerb)) return false;
+  const product = lists.products.items.find((item) => subjectAt >= item.start && subjectAt < item.end);
+  const location = lists.locations.items.find((item) => locationAt >= item.start && locationAt < item.end);
+  if (!product || !location) return false;
+  const locationText = lists.targetLink && !REPORT_ADVERBIAL_LOCATION_RE.test(location.text)
+    ? `${lists.targetLink.text} ${location.text}` : location.text;
+  const edits = [
+    { start: lists.products.start, end: lists.products.end, text: ` ${product.text} ` },
+    { start: lists.targetLink ? lists.targetLink.at : lists.locations.start, end: lists.locations.end, text: ` ${locationText} ` },
+  ];
+  const remap = (at) => at + edits.filter((edit) => edit.end <= at).reduce((delta, edit) => delta + edit.text.length - (edit.end - edit.start), 0);
+  let normalized = affirmed;
+  for (const edit of [...edits].sort((a, b) => b.start - a.start)) normalized = normalized.slice(0, edit.start) + edit.text + normalized.slice(edit.end);
+  normalized = normalized.replace(/\brespectively\b/gi, (marker) => ' '.repeat(marker.length));
+  const productAt = remap(lists.products.start) + edits[0].text.indexOf(affirmed.slice(subjectAt, subjectAt + subjectLength));
+  const targetAt = remap(edits[1].start) + edits[1].text.indexOf(affirmed.slice(locationAt, locationAt + locationLength));
+  const normalizedVerb = [findingVerb[0]];
+  normalizedVerb.index = remap(findingVerb.index);
+  return reportHasCompletedSingleFinding(normalized, productAt, subjectLength, targetAt, locationLength, normalizedVerb);
+}
+
+function reportClauseBounds(text, at) {
+  const ordinary = clauseBounds(text, at);
+  const start = Math.max(text.lastIndexOf('.', at - 1), text.lastIndexOf('!', at - 1), text.lastIndexOf('?', at - 1), text.lastIndexOf(';', at - 1)) + 1;
+  const stop = text.slice(at).search(/[.!?;]/);
+  const end = stop < 0 ? text.length : at + stop;
+  const sentence = text.slice(start, end);
+  for (const verb of sentence.matchAll(new RegExp(REPORT_FINDING_VERB_RE.source, 'gi'))) {
+    const verbEnd = verb.index + verb[0].length;
+    const productLink = /\b(?:with|using)\s+/i.exec(sentence.slice(verbEnd));
+    const targetLink = REPORT_TREATMENT_LOCATION_LINK_RE.exec(sentence.slice(verbEnd));
+    let subjectAt; let locationAt;
+    if (productLink && new RegExp(REPORT_ALTERNATIVE_LOCATION, 'i').test(sentence.slice(0, verbEnd + productLink.index))) {
+      subjectAt = verbEnd + productLink.index + productLink[0].length;
+      locationAt = new RegExp(REPORT_ALTERNATIVE_LOCATION, 'i').exec(sentence).index;
+    } else if (targetLink) {
+      const passive = REPORT_COMPLETED_PASSIVE_RE.exec(sentence.slice(0, verb.index));
+      subjectAt = passive ? REPORT_LIST_INTRODUCTION_RE.exec(sentence)[0].length : verbEnd;
+      locationAt = verbEnd + targetLink.index + targetLink[0].length;
+    } else continue;
+    const lists = reportFindingLists(sentence, subjectAt, locationAt, verb);
+    if (!lists || (lists.products.items.length === 1 && lists.locations.items.length === 1)) continue;
+    const marker = /\brespectively\b/i.exec(sentence);
+    const terminal = lists.targetLink ? lists.locations : lists.products;
+    if (lists.products.items.length === 1 && !(marker && (!terminal.independentTail || marker.index < lists.end))) continue;
+    const boundary = new RegExp(`^(?:${CLAUSE_BOUNDARY_TOKEN_RE.source})`, 'i').test(sentence.slice(lists.end));
+    const boundEnd = terminal.independentTail || (terminal.end === terminal.tailEnd && boundary) ? lists.end : sentence.length;
+    if (at >= start && at < start + boundEnd) return [start, start + boundEnd];
+  }
+  return ordinary;
+}
+
 const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_free_visit_promise, no_third_party_disclosure, only_language, capture_lead_input_asserts });
 
-module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, spokenDigits, assertedMatch, EPISTEMIC_REFUSAL_VERBS, EPISTEMIC_DENIAL_WORDS, clauseBounds, clauseOf, claimContext, clauseIsNegated, clauseIsEpistemicallyHedged, cueInSameClause, reportFindingIsUncertain, reportFindingIsInstruction, reportClaimIsDenied, reportHasCompletedPredicate, REPORT_COMPLETED_PASSIVE_RE, reportHasAlternativeLocation, reportVerbGovernsProduct, reportLocationIsTreatmentTarget, reportHasCompletedFinding, reportHasConciseFinding } };
+module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, spokenDigits, assertedMatch, EPISTEMIC_REFUSAL_VERBS, EPISTEMIC_DENIAL_WORDS, clauseBounds, clauseOf, claimContext, clauseIsNegated, clauseIsEpistemicallyHedged, cueInSameClause, reportFindingIsUncertain, reportFindingIsInstruction, reportClaimIsDenied, reportHasCompletedPredicate, REPORT_COMPLETED_PASSIVE_RE, reportHasAlternativeLocation, reportVerbGovernsProduct, reportLocationIsTreatmentTarget, reportHasCompletedFinding, reportHasConciseFinding, reportRespectivelyPairsFinding, reportClauseBounds } };
