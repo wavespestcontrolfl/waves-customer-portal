@@ -259,6 +259,7 @@ function buildEmailContent(app, stage, vars) {
       subject,
       html: wrapEmailHtml({ heading: subject, paragraphs: [intro, explain], buttonUrl: vars.interview_url, buttonLabel }),
       text: `${intro}\n\n${vars.interview_url}\n\n${explain}`,
+      buttonLabel,
     };
   }
 
@@ -282,6 +283,7 @@ function buildEmailContent(app, stage, vars) {
       subject,
       html: wrapEmailHtml({ heading: subject, paragraphs, buttonUrl: vars.interview_url, buttonLabel }),
       text: `${paragraphs.join('\n\n')}\n\n${vars.interview_url}`,
+      buttonLabel,
     };
   }
 
@@ -294,7 +296,9 @@ function buildEmailContent(app, stage, vars) {
 async function settleEmailRow(messageRow, sendAttemptToken, patch) {
   if (!messageRow) return;
   await db('email_messages')
-    .where({ id: messageRow.id, status: 'queued', send_attempt_token: sendAttemptToken })
+    .where({ id: messageRow.id, send_attempt_token: sendAttemptToken })
+    // 'sending' = this attempt claimed the provider boundary (claimEmailAttempt)
+    .whereIn('status', ['queued', 'sending'])
     .update({ updated_at: new Date(), ...patch })
     .catch(() => {});
 }
@@ -352,9 +356,9 @@ async function checkEmailPreProviderGates({ app, stage, to, templateKey, message
     return { outcome: 'blocked', code: 'email_suppressed' };
   }
 
-  // A concurrent resend that inserted its row after ours owns the delivery
-  // (Codex r14 P2): settle this row and send nothing.
-  if (messageRow && SUPERSEDABLE_STAGES.has(stage) && await newerEmailAttemptExists(app.id, templateKey, messageRow)) {
+  // A concurrent resend owns this delivery (Codex r14 P2 / r18 P2): settle
+  // this row and send nothing.
+  if (messageRow && SUPERSEDABLE_STAGES.has(stage) && await claimEmailAttempt(app.id, templateKey, messageRow, sendAttemptToken)) {
     await settleEmailRow(messageRow, sendAttemptToken, {
       status: 'failed', error_message: 'superseded: a newer attempt of this stage exists',
     });
@@ -559,6 +563,16 @@ const LIVE_ATTEMPT_OUTCOMES = ['pending', 'handoff', 'sent', 'uncertain', 'defer
 // supersession (deferred-replay-registry.js) covers the same set.
 const SUPERSEDABLE_STAGES = new Set(['interview_invite']);
 
+// Two resends whose provider handoffs fall within this window are ONE
+// intent (two admins clicking, a double click): the second must not reach
+// the provider after the first already crossed the boundary (Codex r18 P2).
+const RESEND_OVERLAP_WINDOW_MS = 2 * 60 * 1000;
+const CROSSED_OUTCOMES = ['handoff', 'sent', 'uncertain'];
+
+function normalizeCopy(text) {
+  return String(text || '').replace(/\r\n/g, '\n').trim();
+}
+
 // A live same-stage attempt appended AFTER this entry (array order = commit
 // order; appendCommsHistory is one atomic jsonb append per attempt).
 function newerAttemptExists(history, entryId, stage, channel) {
@@ -566,6 +580,21 @@ function newerAttemptExists(history, entryId, stage, channel) {
   const mine = list.findIndex((e) => e && e.id === entryId);
   if (mine < 0) return false;
   return list.slice(mine + 1).some((e) => e && e.channel === channel && e.stage === stage && LIVE_ATTEMPT_OUTCOMES.includes(e.outcome));
+}
+
+// A same-stage attempt appended BEFORE this entry that already crossed the
+// provider boundary inside the overlap window — the interleaving where the
+// earlier request stamped its handoff before this one's 'pending' append
+// landed, so the newer-attempt rule alone would let both send.
+function overlappingCrossedAttempt(history, entryId, stage, channel, nowMs) {
+  const list = Array.isArray(history) ? history : [];
+  const mine = list.findIndex((e) => e && e.id === entryId);
+  if (mine < 0) return false;
+  return list.slice(0, mine).some((e) => {
+    if (!e || e.channel !== channel || e.stage !== stage || !CROSSED_OUTCOMES.includes(e.outcome)) return false;
+    const crossedAt = Date.parse(e.handoff_at || e.replay_attempted_at || e.at || '');
+    return Number.isFinite(crossedAt) && nowMs - crossedAt < RESEND_OVERLAP_WINDOW_MS;
+  });
 }
 
 // pending → handoff at the provider boundary, under the application row
@@ -576,7 +605,9 @@ function newerAttemptExists(history, entryId, stage, channel) {
 async function stampSmsHandoff(applicationId, stage, entryId) {
   return db.transaction(async (trx) => {
     const row = await trx('job_applications').where({ id: applicationId }).forUpdate().first('comms_history');
-    if (SUPERSEDABLE_STAGES.has(stage) && newerAttemptExists(row && row.comms_history, entryId, stage, 'sms')) return true;
+    const history = row && row.comms_history;
+    if (SUPERSEDABLE_STAGES.has(stage)
+      && (newerAttemptExists(history, entryId, stage, 'sms') || overlappingCrossedAttempt(history, entryId, stage, 'sms', Date.now()))) return true;
     await reconcileCommsHistoryEntryByOutcome(applicationId, entryId, {
       pending: { outcome: 'handoff', handoff_at: new Date().toISOString() },
     }, trx);
@@ -585,21 +616,32 @@ async function stampSmsHandoff(applicationId, stage, entryId) {
 }
 
 // The email leg's ledger is email_messages (one row per attempt, inserted
-// before the provider call): a newer live row for the same application and
-// template means a concurrent resend already owns this delivery.
-async function newerEmailAttemptExists(applicationId, templateKey, messageRow) {
-  const newer = await db('email_messages')
-    .where({ recipient_type: 'job_application', recipient_id: applicationId, template_key: templateKey })
-    .whereNot('id', messageRow.id)
-    // 'uncertain' is live too: a newer attempt that timed out at SendGrid
-    // may already be in the applicant's inbox (Codex r15 P2).
-    .whereIn('status', ['queued', 'sent', 'uncertain'])
-    // Total order (Codex r17 P2): two attempts inserted in the same
-    // millisecond tie on queued_at, so the row id breaks the tie — exactly
-    // one of two concurrent attempts sees the other as newer.
-    .whereRaw('(queued_at > ? OR (queued_at = ? AND id > ?))', [messageRow.queued_at, messageRow.queued_at, messageRow.id])
-    .first('id');
-  return Boolean(newer);
+// before the provider call). Claiming the provider boundary for THIS row
+// happens under the application row lock (Codex r18 P2): the claim stamps
+// the row 'sending' and refuses when another attempt either is NEWER
+// (queued_at, id total order — Codex r17 P2) or is OLDER and already
+// crossed the boundary within the overlap window. Exactly one of two
+// overlapping resends reaches SendGrid, whichever order they interleave.
+// 'uncertain' is live too: a timed-out attempt may already be in the inbox
+// (Codex r15 P2). Returns true when THIS attempt must not send.
+async function claimEmailAttempt(applicationId, templateKey, messageRow, sendAttemptToken) {
+  return db.transaction(async (trx) => {
+    await trx('job_applications').where({ id: applicationId }).forUpdate().first('id');
+    const rival = await trx('email_messages')
+      .where({ recipient_type: 'job_application', recipient_id: applicationId, template_key: templateKey })
+      .whereNot('id', messageRow.id)
+      .whereIn('status', ['queued', 'sending', 'sent', 'uncertain'])
+      .whereRaw(
+        "((queued_at > ? OR (queued_at = ? AND id > ?)) OR (status IN ('sending', 'sent', 'uncertain') AND queued_at >= ?))",
+        [messageRow.queued_at, messageRow.queued_at, messageRow.id, new Date(new Date(messageRow.queued_at).getTime() - RESEND_OVERLAP_WINDOW_MS)],
+      )
+      .first('id');
+    if (rival) return true;
+    await trx('email_messages')
+      .where({ id: messageRow.id, status: 'queued', send_attempt_token: sendAttemptToken })
+      .update({ status: 'sending', updated_at: new Date() });
+    return false;
+  });
 }
 
 // -------------------------------------------------------- edited-body link
@@ -848,11 +890,19 @@ async function runEmailLeg(ctx) {
   const built = buildEmailContent(app, stage, vars);
   const subject = opts.emailSubject || built.subject;
   const text = opts.emailBody || built.text;
-  // The default html is only valid for the default copy: once the owner
-  // edited either half, re-wrap the plain text so html and text legs carry
-  // the same message.
-  const html = (opts.emailSubject || opts.emailBody)
-    ? wrapEmailHtml({ heading: subject, paragraphs: String(text).split(/\n{2,}/) })
+  // The default html is only valid for the default copy. The admin UI
+  // submits the previewed copy even when nothing was edited, so compare
+  // against the defaults rather than trusting presence (Codex r18 P2); once
+  // the owner really edited either half, re-wrap the plain text so html and
+  // text legs carry the same message — keeping the scheduling link as a
+  // real button, never only as escaped paragraph text.
+  const edited = normalizeCopy(subject) !== normalizeCopy(built.subject) || normalizeCopy(text) !== normalizeCopy(built.text);
+  const html = edited
+    ? wrapEmailHtml({
+      heading: subject,
+      paragraphs: String(text).split(/\n{2,}/),
+      ...(vars.interview_url ? { buttonUrl: vars.interview_url, buttonLabel: built.buttonLabel || 'Pick a time' } : {}),
+    })
     : built.html;
   let sendRes;
   try {

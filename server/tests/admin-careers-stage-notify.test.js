@@ -430,21 +430,32 @@ describe('GET /:id detail never exposes the raw token', () => {
   test('opening the detail acknowledges the applicant reply rows (sms_log + messages) as read', async () => {
     mockDb.__setRows([appRow({ status: 'interview' })]);
     const updates = [];
+    const chains = {};
     const origImpl = mockDb.getMockImplementation();
     mockDb.mockImplementation((table) => {
       if (table === 'sms_log' || table === 'messages') {
         const q = {};
         ['where', 'whereRaw', 'andWhere', 'orWhereNull'].forEach((m) => { q[m] = jest.fn(() => q); });
         q.update = jest.fn(async (payload) => { updates.push([table, payload]); return 1; });
+        chains[table] = q;
         return q;
       }
       return origImpl(table);
     });
+    const before = new Date();
     const res = await fetch(`${base}/api/admin/careers/aaaaaaaa-0000-4000-8000-000000000001`, { headers: { Authorization: 'Bearer admin' } });
     expect(res.status).toBe(200);
     await new Promise((r) => setTimeout(r, 10));
     mockDb.mockImplementation(origImpl);
     expect(updates.map(([t, p]) => [t, p.is_read])).toEqual([['sms_log', true], ['messages', true]]);
+    // Bounded to the loaded snapshot (Codex r18 P2): a reply committing after
+    // the detail row was read keeps its unread flag.
+    for (const table of ['sms_log', 'messages']) {
+      const cutoff = chains[table].where.mock.calls.find((c) => c[0] === 'created_at' && c[1] === '<=');
+      expect(cutoff).toBeTruthy();
+      expect(cutoff[2].getTime()).toBeGreaterThanOrEqual(before.getTime());
+      expect(cutoff[2].getTime()).toBeLessThanOrEqual(Date.now());
+    }
   });
 
   test('detail signs applicant attachments per ledger entry (reply_media)', async () => {

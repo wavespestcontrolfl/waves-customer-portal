@@ -103,6 +103,7 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     if (!UUID_RE.test(req.params.id)) return res.status(404).json({ error: 'Not found' });
+    const loadedAt = new Date(); // read-ack cutoff: only replies in THIS snapshot are acknowledged
     const row = await db('job_applications').where({ id: req.params.id }).first();
     if (!row) return res.status(404).json({ error: 'Not found' });
     // Applicant MMS: sign the stored media references for the owner so an
@@ -125,16 +126,21 @@ router.get('/:id', async (req, res) => {
     // unread flags on the applicant's reply rows in both message stores so
     // the shared unread counts do not stay lit for messages the owner has
     // now seen. Fire-and-forget after the response.
+    // Bounded to the snapshot the owner actually saw (Codex r18 P2): a
+    // reply that committed after the detail row was loaded is not in this
+    // response, so it keeps its unread flag for the next open.
     void (async () => {
       const readAt = new Date();
       await db('sms_log')
         .where({ direction: 'inbound', message_type: 'job_applicant_reply' })
         .whereRaw("metadata->>'job_application_id' = ?", [row.id])
+        .where('created_at', '<=', loadedAt)
         .andWhere(function unread() { this.where({ is_read: false }).orWhereNull('is_read'); })
         .update({ is_read: true });
       await db('messages')
         .where({ direction: 'inbound', message_type: 'job_applicant_reply' })
         .whereRaw("metadata->>'job_application_id' = ?", [row.id])
+        .where('created_at', '<=', loadedAt)
         .andWhere(function unread() { this.where({ is_read: false }).orWhereNull('is_read'); })
         .update({ is_read: true, read_at: readAt });
     })().catch((err) => {

@@ -767,6 +767,55 @@ describe('eligibility at the provider boundaries', () => {
     expect(other).toMatchObject({ id: 'other-attempt', outcome: 'pending' });
   });
 
+  test('SMS: an OLDER resend that crossed the boundary moments ago refuses this overlapping one, even though nothing newer exists (Codex r18 P2)', async () => {
+    mockRenderSmsTemplate.mockResolvedValue('Pick a time: https://x/careers/interview/a');
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    // the other admin's attempt stamped handoff 5 s ago, before this one's pending append landed
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [
+      { id: 'earlier', at: new Date(Date.now() - 6000).toISOString(), handoff_at: new Date(Date.now() - 5000).toISOString(), stage: 'interview_invite', channel: 'sms', outcome: 'handoff', body: 'x', by: 'tech-2' },
+    ] });
+    mockSendCustomerMessage.mockImplementation(async (input) => {
+      const check = await input.preSendCheck({ channel: 'sms' });
+      expect(check).toMatchObject({ ok: false, code: 'RECRUITING_SUPERSEDED' });
+      return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: check.code };
+    });
+    const result = await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: true, email: false, by: 'tech-1' });
+    expect(result.sms).toBe('blocked');
+  });
+
+  test('SMS: a deliberate resend well after the previous one crossed the boundary is NOT treated as overlapping', async () => {
+    mockRenderSmsTemplate.mockResolvedValue('Pick a time: https://x/careers/interview/a');
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [
+      { id: 'earlier', at: new Date(Date.now() - 20 * 60000).toISOString(), handoff_at: new Date(Date.now() - 20 * 60000).toISOString(), stage: 'interview_invite', channel: 'sms', outcome: 'sent', body: 'x', by: 'tech-2' },
+    ] });
+    mockSendCustomerMessage.mockImplementation(async (input) => {
+      await expect(input.preSendCheck({ channel: 'sms' })).resolves.toEqual({ ok: true });
+      return { sent: true, blocked: false, deliveryOutcome: 'accepted' };
+    });
+    const result = await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: true, email: false, by: 'tech-1' });
+    expect(result.sms).toBe('sent');
+  });
+
+  test('email: the previewed (unedited) copy submitted back keeps the built html with its button; edited copy is re-wrapped WITH the scheduling button (Codex r18 P2)', async () => {
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    mockDb.__tables.email_messages = [];
+    const built = RecruitingComms.buildEmailContent(app, 'interview_invite', RecruitingComms.buildVars(app, 'interview_invite'));
+    expect(built.html).toContain('href="');
+    mockSendOne.mockClear();
+    await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: false, email: true, by: 'tech-1', emailSubject: built.subject, emailBody: built.text });
+    expect(mockSendOne.mock.calls[0][0].html).toBe(built.html);
+
+    mockDb.__tables.email_messages = [];
+    mockSendOne.mockClear();
+    await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: false, email: true, by: 'tech-1', emailSubject: built.subject, emailBody: `${built.text}\n\nWe are excited to meet you.` });
+    const html = mockSendOne.mock.calls[0][0].html;
+    expect(html).not.toBe(built.html);
+    expect(html).toContain('We are excited to meet you.');
+    expect(html).toMatch(new RegExp(`href="[^"]*careers/interview/${'a'.repeat(64)}`));
+  });
+
   test('SMS: owner replies are distinct messages — a newer owner_reply never supersedes an in-flight one', async () => {
     const app = baseApp();
     mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
