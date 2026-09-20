@@ -840,5 +840,40 @@ describe('processScheduledSends send-window handling', () => {
 
       await expect(InvoiceService.processScheduledSends()).rejects.toMatchObject({ code: 'unexpected_db_error' });
     });
+
+    test('an unexpected error in the zero-due pre-check fails only that row and the batch continues', async () => {
+      // Round-0 audit P1 (f8f60207ec): the pre-claim zero-due check (BEFORE
+      // any claim is ever taken) now runs inside a per-row try/catch — an
+      // unexpected error (a DB fault, a bug in settleZeroBalance) must
+      // isolate ONLY the row it happened on: an attempt is spent
+      // best-effort so a persistent fault still meets the five-attempt
+      // cap, and the loop moves on to the invoices behind it instead of
+      // aborting (and thus delaying) the whole batch.
+      isWithinSendWindowET.mockReturnValue(true);
+      const dueRowB = { ...dueRow, id: 'inv-2', invoice_number: 'WPC-2026-1043' };
+      const staleRecovery = chain();
+      const dueQuery = chain({ rows: [zeroDueDueRow({ scheduled_send_attempts: 1 }), dueRowB] });
+      const failUpdate = chain();
+      const claimB = chain({ returning: [claimedRow({ id: 'inv-2', send_claim_token: 'claim-2' })] });
+      db
+        .mockReturnValueOnce(staleRecovery)
+        .mockReturnValueOnce(dueQuery)
+        .mockReturnValueOnce(failUpdate)
+        .mockReturnValueOnce(claimB);
+      const boom = new Error('connection terminated unexpectedly');
+      settleSpy.mockRejectedValueOnce(boom);
+      sendSpy.mockResolvedValue({ ok: true, sms: { ok: true }, email: { ok: true }, creditApplied: 0 });
+
+      const result = await InvoiceService.processScheduledSends();
+
+      // The batch RESOLVED — it never rejected over inv-1's failure.
+      expect(sendSpy).not.toHaveBeenCalledWith('inv-1', expect.anything());
+      // The second invoice, behind the failed one, still sent.
+      expect(sendSpy).toHaveBeenCalledWith('inv-2', expect.objectContaining({ allowClaimed: true, claimToken: 'claim-2' }));
+      const updateArgs = failUpdate.update.mock.calls[0][0];
+      expect(updateArgs.scheduled_send_attempts).toBe('COALESCE(scheduled_send_attempts, 0) + 1');
+      expect(updateArgs.scheduled_send_error).toMatch(/Zero-due check failed.*connection terminated unexpectedly/);
+      expect(result).toEqual({ sent: 1, failed: 1, deferred: 0 });
+    });
   });
 });
