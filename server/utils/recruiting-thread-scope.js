@@ -16,6 +16,9 @@
  */
 
 const RECRUITING_MESSAGE_TYPE_PREFIX = 'job_';
+// LIKE-escaped form: '_' is a single-character wildcard in LIKE, so the
+// prefix must be matched as a literal underscore.
+const RECRUITING_MESSAGE_TYPE_PREFIX_LIKE = 'job\\_';
 
 function isRecruitingMessageType(messageType) {
   return typeof messageType === 'string' && messageType.startsWith(RECRUITING_MESSAGE_TYPE_PREFIX);
@@ -38,7 +41,7 @@ function hideRecruitingThreadsFromNonAdmin(query, req, messageTypeColumn = 'mess
   if (req && req.techRole === 'admin') return query;
   return query.where(function recruitingMessageFilter() {
     this.whereNull(messageTypeColumn)
-      .orWhere(messageTypeColumn, 'not like', `${RECRUITING_MESSAGE_TYPE_PREFIX}%`);
+      .orWhere(messageTypeColumn, 'not like', `${RECRUITING_MESSAGE_TYPE_PREFIX_LIKE}%`);
   });
 }
 
@@ -77,7 +80,7 @@ async function isRecruitingPhone(phone, database = require('../models/db'), { ac
   if (ledger) return true;
   if (activeOnly) return false;
   const row = await excludeUnresolvedSendReservations(database('sms_log'))
-    .where('message_type', 'like', `${RECRUITING_MESSAGE_TYPE_PREFIX}%`)
+    .where('message_type', 'like', `${RECRUITING_MESSAGE_TYPE_PREFIX_LIKE}%`)
     .whereRaw(
       "(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g') = ANY (?::text[]) OR regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g') = ANY (?::text[]))",
       [variants, variants],

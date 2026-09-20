@@ -138,7 +138,7 @@ describe('GET /scheduled recruiting boundary', () => {
     db.mockImplementation((table) => (table === 'sms_log' ? smsLogQuery : query({ result: [] })));
     let res = await fetch(`${base}/api/admin/communications/scheduled`, { headers: { Authorization: 'Bearer tech' } });
     expect(res.status).toBe(200);
-    expect(smsLogQuery.orWhere).toHaveBeenCalledWith('sms_log.message_type', 'not like', 'job_%');
+    expect(smsLogQuery.orWhere).toHaveBeenCalledWith('sms_log.message_type', 'not like', 'job\\_%');
     smsLogQuery.orWhere.mockClear();
     res = await fetch(`${base}/api/admin/communications/scheduled`, { headers: { Authorization: 'Bearer admin' } });
     expect(res.status).toBe(200);

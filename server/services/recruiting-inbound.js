@@ -124,7 +124,7 @@ async function matchApplicantReply(fromPhone, toNumber) {
     .whereRaw(digitsExpr('to_phone'), [variants])
     .modify((q) => { if (fromVariants.length) q.whereRaw(digitsExpr('from_phone'), [fromVariants]); })
     .whereNotIn('message_type', NON_CONVERSATIONAL_OUTBOUND)
-    .whereNot('message_type', 'like', 'job_%')
+    .whereNot('message_type', 'like', 'job\\_%')
     .where('created_at', '>', new Date(best.at))
     .first('id');
   if (newerCustomerText) return null;

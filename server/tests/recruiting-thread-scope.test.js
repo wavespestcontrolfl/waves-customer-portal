@@ -42,13 +42,13 @@ describe('hideRecruitingThreadsFromNonAdmin (message-level)', () => {
     expect(hideRecruitingThreadsFromNonAdmin(q, { techRole: 'technician' })).toBe(q);
     expect(q.where).toHaveBeenCalledTimes(1);
     expect(inner.whereNull).toHaveBeenCalledWith('messages.message_type');
-    expect(inner.orWhere).toHaveBeenCalledWith('messages.message_type', 'not like', 'job_%');
+    expect(inner.orWhere).toHaveBeenCalledWith('messages.message_type', 'not like', 'job\\_%');
   });
 
   test('missing role is treated as non-admin; the column is passed through verbatim', () => {
     const { q, inner } = fakeQuery();
     hideRecruitingThreadsFromNonAdmin(q, undefined, 'm.message_type');
-    expect(inner.orWhere).toHaveBeenCalledWith('m.message_type', 'not like', 'job_%');
+    expect(inner.orWhere).toHaveBeenCalledWith('m.message_type', 'not like', 'job\\_%');
   });
 });
 

@@ -85,7 +85,7 @@ describe('matchApplicantReply', () => {
     await expect(matchApplicantReply('+19415550142', '+19415550199')).resolves.toBeNull();
     const q = mockDb.mock.results.find((r) => r.value && r.value.whereNot.mock.calls.length).value;
     expect(q.whereNotIn).toHaveBeenCalledWith('message_type', ['internal_alert', 'admin_alert', 'ai_assistant', 'ai_assistant_reply']);
-    expect(q.whereNot).toHaveBeenCalledWith('message_type', 'like', 'job_%');
+    expect(q.whereNot).toHaveBeenCalledWith('message_type', 'like', 'job\\_%');
     // scheduled / blocked / failed customer rows never count — delivery evidence only
     expect(q.whereIn).toHaveBeenCalledWith('status', ['sent', 'delivered']);
     // ... and only texts from the SAME Waves line the recruiting text used

@@ -23,7 +23,7 @@ test('a technician read scope excludes hidden recruiting rows; an admin scope do
   const calls = [];
   db.mockImplementation((table) => { const q = chain([]); calls.push([table, q]); return q; });
   await markInboundSmsRead({ messageIds: ['m-1'], adminUserId: 'tech-1', role: 'technician' }).catch(() => {});
-  const techScoped = calls.filter(([t]) => t === 'messages').some(([, q]) => q.orWhere.mock.calls.some((c) => c[0] === 'message_type' && c[1] === 'not like' && c[2] === 'job_%'));
+  const techScoped = calls.filter(([t]) => t === 'messages').some(([, q]) => q.orWhere.mock.calls.some((c) => c[0] === 'message_type' && c[1] === 'not like' && c[2] === 'job\\_%'));
   expect(techScoped).toBe(true);
   calls.length = 0;
   await markInboundSmsRead({ messageIds: ['m-1'], adminUserId: 'admin-1', role: 'admin' }).catch(() => {});
