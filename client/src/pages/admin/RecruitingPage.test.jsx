@@ -5,7 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import RecruitingPage from './RecruitingPage';
+import RecruitingPage, { inviteDelivered } from './RecruitingPage';
 
 function apiResponse(body) {
   return { ok: true, json: vi.fn(async () => body) };
@@ -233,5 +233,16 @@ describe('RecruitingPage — stage change dialog', () => {
     await waitFor(() => expect(patchedBody).not.toBeNull());
     expect(patchedBody.status).toBe('interview');
     expect(patchedBody).not.toHaveProperty('notify');
+  });
+});
+
+describe('inviteDelivered', () => {
+  it('is true only for a sent/uncertain/handoff interview_invite entry, never for a minted token alone', () => {
+    expect(inviteDelivered({ interview_url: 'https://x/y', comms_history: [] })).toBe(false);
+    expect(inviteDelivered({ comms_history: [{ stage: 'interview_invite', outcome: 'blocked' }] })).toBe(false);
+    expect(inviteDelivered({ comms_history: [{ stage: 'application_received', outcome: 'sent' }] })).toBe(false);
+    for (const outcome of ['sent', 'uncertain', 'handoff']) {
+      expect(inviteDelivered({ comms_history: [{ stage: 'interview_invite', outcome }] })).toBe(true);
+    }
   });
 });

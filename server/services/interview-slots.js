@@ -203,6 +203,33 @@ async function listInterviewSlots({ now = new Date(), excludeApplicationId, conn
  * The book route MUST re-validate an applicant-supplied start against this
  * — never trust the client's chosen slot.
  */
+/**
+ * The reciprocal check (Codex r3 P1): booked interviews as occupied
+ * intervals for ONE ET calendar date, in the shape the availability engine
+ * merges into its `occupied` set ({ start, end } as 'HH:MM' wall-clock,
+ * BUFFER_MINUTES either side). Customer slot building and the estimate
+ * confirm path read this so a visit is never offered or confirmed over the
+ * owner's interview.
+ */
+async function bookedInterviewWindowsForDate(dateStr, { conn = db } = {}) {
+  const dayStart = parseETDateTime(`${dateStr}T00:00`);
+  const dayEnd = addETDays(dayStart, 1);
+  const rows = await conn('job_applications')
+    .whereIn('status', INTERVIEW_BLOCKING_STATUSES)
+    .whereNotNull('interview_at')
+    .where('interview_at', '>=', dayStart)
+    .where('interview_at', '<', dayEnd)
+    .select('interview_at', 'interview_end_at');
+  return rows.map((r) => {
+    const startMs = new Date(r.interview_at).getTime() - BUFFER_MINUTES * 60 * 1000;
+    const endMs = (r.interview_end_at ? new Date(r.interview_end_at).getTime() : new Date(r.interview_at).getTime() + SLOT_MINUTES * 60 * 1000)
+      + BUFFER_MINUTES * 60 * 1000;
+    const sp = etParts(new Date(Math.max(startMs, dayStart.getTime())));
+    const ep = etParts(new Date(Math.min(endMs, dayEnd.getTime() - 60 * 1000)));
+    return { start: `${pad2(sp.hour)}:${pad2(sp.minute)}`, end: `${pad2(ep.hour)}:${pad2(ep.minute)}` };
+  });
+}
+
 async function isOfferedSlot(startIso, opts = {}) {
   const slots = await listInterviewSlots(opts);
   return slots.some((s) => s.start === startIso);
@@ -216,6 +243,7 @@ module.exports = {
   DEFAULT_WINDOWS,
   listInterviewSlots,
   isOfferedSlot,
+  bookedInterviewWindowsForDate,
   formatSlotLabel: slotLabel,
   _internals: { loadWindows, timeToMinutes, isoWeekdayOf, overlaps, hhmmFromDbTime, slotLabel, isValidHHMM },
 };

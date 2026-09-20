@@ -283,3 +283,24 @@ describe('isOfferedSlot', () => {
     await expect(isOfferedSlot('not-a-real-iso', { now: NOW })).resolves.toBe(false);
   });
 });
+
+describe('bookedInterviewWindowsForDate (reciprocal occupancy for customer scheduling)', () => {
+  test('returns HH:MM ET windows with the 15-minute buffer either side, bounded to the day', async () => {
+    const { bookedInterviewWindowsForDate } = require('../services/interview-slots');
+    const rows = [
+      { interview_at: '2027-03-16T20:00:00.000Z', interview_end_at: '2027-03-16T20:30:00.000Z' }, // 4:00–4:30 PM ET
+      { interview_at: '2027-03-16T04:05:00.000Z', interview_end_at: null }, // 12:05 AM ET, no end -> 30 min
+    ];
+    const q = {};
+    ['whereIn', 'whereNotNull', 'where'].forEach((m) => { q[m] = jest.fn(() => q); });
+    q.select = jest.fn(async () => rows);
+    const conn = jest.fn(() => q);
+    const windows = await bookedInterviewWindowsForDate('2027-03-16', { conn });
+    expect(conn).toHaveBeenCalledWith('job_applications');
+    expect(q.whereIn).toHaveBeenCalledWith('status', ['interview', 'offer']);
+    expect(windows).toEqual([
+      { start: '15:45', end: '16:45' },
+      { start: '00:00', end: '00:50' },
+    ]);
+  });
+});

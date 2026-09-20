@@ -160,20 +160,20 @@ const interviewLimiter = rateLimit({
   skip: () => process.env.NODE_ENV !== 'production',
 });
 
-async function interviewViewPayload(app) {
-  const contact = contactOf(app);
-  const slots = await listInterviewSlots({ excludeApplicationId: app.id });
+async function interviewViewPayload(application) {
+  const contact = contactOf(application);
+  const slots = await listInterviewSlots({ excludeApplicationId: application.id });
   return {
     first_name: firstNameOf(contact.name),
-    status: app.interview_booked_at ? 'booked' : 'open',
+    status: application.interview_booked_at ? 'booked' : 'open',
     mode_options: ['phone', 'in_person'],
     in_person_address: WAVES_ADDRESS_LINE,
     timezone: 'America/New_York',
-    booked: app.interview_booked_at ? {
-      mode: app.interview_mode,
-      start: app.interview_at ? new Date(app.interview_at).toISOString() : null,
-      end: app.interview_end_at ? new Date(app.interview_end_at).toISOString() : null,
-      label: app.interview_at ? formatSlotLabel(new Date(app.interview_at)) : null,
+    booked: application.interview_booked_at ? {
+      mode: application.interview_mode,
+      start: application.interview_at ? new Date(application.interview_at).toISOString() : null,
+      end: application.interview_end_at ? new Date(application.interview_end_at).toISOString() : null,
+      label: application.interview_at ? formatSlotLabel(new Date(application.interview_at)) : null,
     } : null,
     slots,
   };
@@ -181,9 +181,9 @@ async function interviewViewPayload(app) {
 
 router.get('/interview/:token', interviewLimiter, async (req, res) => {
   try {
-    const app = await db('job_applications').where({ interview_token: req.params.token }).first();
-    if (!app || app.status !== 'interview') return res.status(404).json({ error: 'Not found' });
-    return res.json(await interviewViewPayload(app));
+    const application = await db('job_applications').where({ interview_token: req.params.token }).first();
+    if (!application || application.status !== 'interview') return res.status(404).json({ error: 'Not found' });
+    return res.json(await interviewViewPayload(application));
   } catch (err) {
     logger.error(`[careers] interview GET failed: ${errorSummary(err)}`);
     return res.status(500).json({ error: 'Something went wrong.' });
@@ -200,23 +200,31 @@ router.post('/interview/:token/book', interviewLimiter, async (req, res) => {
 
       // Row lock: a concurrent book/withdraw for THIS application waits here
       // and then re-derives from the committed row, never from a stale read.
-      const app = await trx('job_applications')
+      const application = await trx('job_applications')
         .where({ interview_token: req.params.token })
         .forUpdate()
         .first();
-      if (!app || app.status !== 'interview') return { notFound: true };
+      if (!application || application.status !== 'interview') return { notFound: true };
 
       if (!['phone', 'in_person'].includes(mode)) {
         return { badRequest: 'Please pick a phone or in-person interview.' };
       }
 
+      // Idempotent retry (Codex r3 P2): the same {mode, start} as the
+      // current booking is answered with the current payload — no rewrite,
+      // no second confirmation, no second owner bell.
+      if (application.interview_booked_at && application.interview_mode === mode
+        && application.interview_at && new Date(application.interview_at).toISOString() === start) {
+        return { updated: application, unchanged: true };
+      }
+
       // Never trust the client's chosen slot — re-validate against the live
       // offered set under the lock (excluding this application's own hold).
-      const slots = await listInterviewSlots({ excludeApplicationId: app.id, conn: trx });
+      const slots = await listInterviewSlots({ excludeApplicationId: application.id, conn: trx });
       const matched = slots.find((s) => s.start === start);
       if (!matched) return { badRequest: 'That time is no longer available.' };
 
-      const wasBooked = Boolean(app.interview_booked_at);
+      const wasBooked = Boolean(application.interview_booked_at);
       const modeLabel = mode === 'in_person' ? 'in person' : 'phone';
       const historyEntry = {
         from: 'interview',
@@ -229,7 +237,7 @@ router.post('/interview/:token/book', interviewLimiter, async (req, res) => {
       // Conditional on status + token even under the row lock (defence in
       // depth); the history entry is appended in SQL so nothing is dropped.
       const updatedRows = await trx('job_applications')
-        .where({ id: app.id, status: 'interview', interview_token: req.params.token })
+        .where({ id: application.id, status: 'interview', interview_token: req.params.token })
         .update({
           interview_mode: mode,
           interview_at: matched.start,
@@ -246,6 +254,7 @@ router.post('/interview/:token/book', interviewLimiter, async (req, res) => {
     if (outcome.notFound) return res.status(404).json({ error: 'Not found' });
     if (outcome.badRequest) return res.status(400).json({ error: outcome.badRequest });
     if (outcome.conflict) return res.status(409).json({ error: 'This link is no longer active.' });
+    if (outcome.unchanged) return res.json(await interviewViewPayload(outcome.updated));
     const { updated, matched } = outcome;
 
     // Fire-and-forget, in TWO INDEPENDENT blocks: a confirmation-comms
@@ -286,8 +295,8 @@ router.post('/interview/:token/book', interviewLimiter, async (req, res) => {
 
 router.post('/interview/:token/withdraw', interviewLimiter, async (req, res) => {
   try {
-    const app = await db('job_applications').where({ interview_token: req.params.token }).first();
-    if (!app || app.status !== 'interview') return res.status(404).json({ error: 'Not found' });
+    const application = await db('job_applications').where({ interview_token: req.params.token }).first();
+    if (!application || application.status !== 'interview') return res.status(404).json({ error: 'Not found' });
 
     const historyEntry = {
       from: 'interview',
@@ -298,7 +307,7 @@ router.post('/interview/:token/withdraw', interviewLimiter, async (req, res) => 
     };
 
     const updatedRows = await db('job_applications')
-      .where({ id: app.id, status: 'interview', interview_token: req.params.token })
+      .where({ id: application.id, status: 'interview', interview_token: req.params.token })
       .update({
         status: 'withdrawn',
         status_history: db.raw("COALESCE(status_history, '[]'::jsonb) || ?::jsonb", [JSON.stringify([historyEntry])]),
@@ -310,7 +319,7 @@ router.post('/interview/:token/withdraw', interviewLimiter, async (req, res) => 
 
     void (async () => {
       const { triggerNotification } = require('../services/notification-triggers');
-      await triggerNotification('job_application_withdrawn', { applicationId: app.id });
+      await triggerNotification('job_application_withdrawn', { applicationId: application.id });
     })().catch((err) => {
       logger.error(`[careers] withdraw notification failed: ${errorSummary(err)}`);
     });

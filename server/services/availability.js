@@ -239,6 +239,16 @@ class AvailabilityEngine {
         start: this.timeToMin(s.window_start),
         end: this.timeToMin(s.window_end || this.addMinutes(s.window_start, s.estimated_duration_minutes || 60)),
       }));
+      // The owner's booked interviews (recruiting) occupy the calendar too —
+      // the reciprocal of the interview picker's route-stop check. Best-effort:
+      // a recruiting-table read error must not take customer scheduling down.
+      try {
+        for (const w of await require('./interview-slots').bookedInterviewWindowsForDate(dateStr)) {
+          occupied.push({ start: this.timeToMin(w.start), end: this.timeToMin(w.end) });
+        }
+      } catch (err) {
+        require('./logger').warn(`[availability] interview occupancy read failed for ${dateStr}: ${err.name || 'Error'}${err.code ? ` ${err.code}` : ''}`);
+      }
 
       // Only unlinked legacy bookings use the copied date/time. Once a visit
       // exists, its live status and window above are authoritative.
@@ -536,6 +546,16 @@ class AvailabilityEngine {
             start: this.timeToMin(s.window_start),
             end: this.timeToMin(s.window_end || this.addMinutes(s.window_start, s.estimated_duration_minutes || 60)),
           });
+        }
+        // Booked interviews block the confirm path exactly as they block the
+        // slot builder above (read through the same transaction; best-effort
+        // for the same reason).
+        try {
+          for (const w of await require('./interview-slots').bookedInterviewWindowsForDate(dateStr, { conn: trx })) {
+            occupied.push({ start: this.timeToMin(w.start), end: this.timeToMin(w.end) });
+          }
+        } catch (err) {
+          require('./logger').warn(`[availability] interview occupancy read failed for ${dateStr}: ${err.name || 'Error'}${err.code ? ` ${err.code}` : ''}`);
         }
         const selfBooked = await trx('self_booked_appointments')
           .where('service_zone_id', zone.id)

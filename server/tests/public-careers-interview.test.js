@@ -277,6 +277,27 @@ describe('POST /interview/:token/book', () => {
 
   const OFFERED = { start: '2027-03-16T20:00:00.000Z', end: '2027-03-16T20:30:00.000Z', date: '2027-03-16', label: 'Tue Mar 16, 4:00 PM' };
 
+  test('a retried identical booking is idempotent: no rewrite, no second confirmation, no second bell', async () => {
+    mockDb.__setRows([appRow({
+      interview_mode: 'phone', interview_at: OFFERED.start, interview_end_at: OFFERED.end,
+      interview_booked_at: '2027-03-01T15:00:00.000Z', status_history: [{ from: 'interview', to: 'interview', by: 'applicant' }],
+    })]);
+    mockListInterviewSlots.mockResolvedValue([OFFERED]);
+    mockSendStageComms.mockClear();
+    mockTriggerNotification.mockClear();
+    const res = await fetch(`${base}/api/public/careers/interview/${TOKEN}/book`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'phone', start: OFFERED.start }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe('booked');
+    expect(mockDb.__rows()[0].status_history).toHaveLength(1);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(mockSendStageComms).not.toHaveBeenCalled();
+    expect(mockTriggerNotification).not.toHaveBeenCalled();
+  });
+
   test('400 on an invalid mode', async () => {
     mockDb.__setRows([appRow()]);
     const res = await fetch(`${base}/api/public/careers/interview/${TOKEN}/book`, {

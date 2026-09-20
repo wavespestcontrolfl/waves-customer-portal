@@ -222,6 +222,12 @@ router.patch('/:id/status', async (req, res) => {
 
         const history = Array.isArray(row.status_history) ? row.status_history : [];
         const updatePayload = { updated_at: new Date() };
+        if (isResendOnly && note) {
+          // A note typed into the resend dialog is a same-status note — keep
+          // it (Codex r3 P2) rather than silently dropping it.
+          history.push({ from: row.status, to: row.status, note, by: req.technicianId, at: new Date().toISOString() });
+          updatePayload.status_history = JSON.stringify(history);
+        }
         if (!isResendOnly) {
           history.push({
             from: row.status,

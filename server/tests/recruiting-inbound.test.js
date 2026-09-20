@@ -13,12 +13,14 @@ jest.mock('../services/recruiting-comms', () => ({
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: (...a) => mockTrigger(...a) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const state = { apps: [], existingReply: null, inserts: [], insertFails: false };
+const state = { apps: [], existingReply: null, lastOutbound: null, inserts: [], insertFails: false };
 function builder(table) {
   const q = {};
-  ['whereRaw', 'whereIn', 'where', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
+  ['whereRaw', 'whereIn', 'where', 'whereNotIn', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
   q.select = jest.fn(async () => (table === 'job_applications' ? state.apps : []));
-  q.first = jest.fn(async () => (table === 'sms_log' ? state.existingReply : null));
+  // sms_log: the "last outbound to this phone" probe orders by created_at; the
+  // idempotency probe does not.
+  q.first = jest.fn(async () => (table === 'sms_log' ? (q.orderBy.mock.calls.length ? state.lastOutbound : state.existingReply) : null));
   q.insert = jest.fn(async (row) => {
     if (state.insertFails) throw Object.assign(new Error('insert into sms_log ... values (+19415550142 ...)'), { name: 'error', code: '23505' });
     state.inserts.push({ table, row });
@@ -37,6 +39,7 @@ const sentEntry = (daysAgo) => ({ at: new Date(NOW - daysAgo * 86400000).toISOSt
 
 beforeEach(() => {
   state.apps = [{ id: 'app-1', comms_history: [sentEntry(2)] }];
+  state.lastOutbound = { message_type: 'job_interview_invite', from_phone: '+19415550199' };
   state.inserts = [];
   state.insertFails = false;
   state.existingReply = null;
@@ -75,6 +78,23 @@ describe('matchApplicantReply', () => {
   test('uncertain deliveries count as a text the applicant may be answering', async () => {
     state.apps = [{ id: 'app-1', comms_history: [{ ...sentEntry(1), outcome: 'uncertain' }] }];
     await expect(matchApplicantReply('+19415550142')).resolves.toEqual({ applicationId: 'app-1' });
+  });
+  test('a newer customer-facing text (appointment reminder) means the reply is NOT a recruiting reply', async () => {
+    state.lastOutbound = { message_type: 'appointment_reminder', from_phone: '+19415550199' };
+    await expect(matchApplicantReply('+19415550142', '+19415550199')).resolves.toBeNull();
+  });
+  test('internal/AI outbound types are ignored when finding the last customer-facing text', async () => {
+    // the query itself excludes them; the mock returns the recruiting text as the last conversational one
+    await expect(matchApplicantReply('+19415550142', '+19415550199')).resolves.toEqual({ applicationId: 'app-1' });
+    const q = mockDb.mock.results.find((r) => r.value && r.value.whereNotIn.mock.calls.length).value;
+    expect(q.whereNotIn).toHaveBeenCalledWith('message_type', ['internal_alert', 'admin_alert', 'ai_assistant', 'ai_assistant_reply']);
+  });
+  test('a reply sent to a DIFFERENT Waves number than the recruiting text came from keeps the ordinary path', async () => {
+    await expect(matchApplicantReply('+19415550142', '+19415550100')).resolves.toBeNull();
+  });
+  test('no outbound history at all -> null', async () => {
+    state.lastOutbound = null;
+    await expect(matchApplicantReply('+19415550142', '+19415550199')).resolves.toBeNull();
   });
   test('unparseable phone -> null without any query', async () => {
     await expect(matchApplicantReply('nope')).resolves.toBeNull();

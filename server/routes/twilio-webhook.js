@@ -373,7 +373,7 @@ router.post('/sms', async (req, res) => {
     let recruitingReply = null;
     try {
       if (isEnabled('recruitingComms')) {
-        recruitingReply = await require('../services/recruiting-inbound').matchApplicantReply(From);
+        recruitingReply = await require('../services/recruiting-inbound').matchApplicantReply(From, To);
       }
     } catch (e) {
       logger.error(`[recruiting-inbound] match failed (${e.name || 'Error'}${e.code ? ` ${e.code}` : ''}) — deferring inbound for retry`);

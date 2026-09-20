@@ -292,6 +292,15 @@ describe('PATCH /:id/status', () => {
     expect(rows[0].status).toBe('interview'); // the committed transition stands
   });
 
+  test('resend WITH a note keeps the note as a same-status history entry', async () => {
+    mockDb.__setRows([appRow({ status: 'interview', interview_token: 'h'.repeat(64) })]);
+    const { status } = await patch('aaaaaaaa-0000-4000-8000-000000000001', { status: 'interview', resend: true, note: 'resent after voicemail', notify: { sms: true } });
+    expect(status).toBe(200);
+    const row = mockDb.__rows()[0];
+    expect(row.status_history).toHaveLength(1);
+    expect(row.status_history[0]).toMatchObject({ from: 'interview', to: 'interview', note: 'resent after voicemail' });
+  });
+
   test('same status + note (no resend) -> history entry appended, nothing sent', async () => {
     mockDb.__setRows([appRow({ status: 'interview', interview_token: 'c'.repeat(64) })]);
     const { status, body } = await patch('aaaaaaaa-0000-4000-8000-000000000001', { status: 'interview', note: 'left a voicemail' });

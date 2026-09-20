@@ -26,6 +26,7 @@
         "USE /api/pay/statement (inline function#cf970c43)",
         "USE /api/public/a2a (inline function#c621253a)",
         "USE /api/public/careers (inline function#91580da7)",
+        "USE /api/public/careers/interview (inline function#656a8908)",
         "USE /api/public/lawn-assessment (inline function#8e4982f2)",
         "USE /api/public/mcp (inline function#6af8a3db)",
         "USE /api/public/pest-forecast (inline function#a972e744)",
@@ -461,9 +462,13 @@
     {
       "router": "server/routes/public-careers.js",
       "mount": "/api/public/careers",
-      "reason": "Job-application intake — GATE_JOB_APPLICATIONS dark-404, IP + per-phone limiters, honeypot, Turnstile (the AGENTS.md careers contract)",
+      "reason": "Job-application intake — GATE_JOB_APPLICATIONS dark-404, IP + per-phone limiters, honeypot, Turnstile (the AGENTS.md careers contract); the /interview/:token family is the applicant's interview self-scheduling page by 64-hex bearer token — GATE_RECRUITING_COMMS dark-404 before the limiter (the USE entry is that gate + noStore), router.param format gate before any DB read, generic 404 for unknown/non-interview tokens, 30/10min per-IP limiter, atomic book/withdraw under the booking advisory lock (docs/public-route-contracts.md, PR #4623)",
       "routes": [
-        "POST /api/public/careers/apply"
+        "POST /api/public/careers/apply",
+        "USE /api/public/careers/interview (inline function#cbe61eba)",
+        "GET /api/public/careers/interview/:token",
+        "POST /api/public/careers/interview/:token/book",
+        "POST /api/public/careers/interview/:token/withdraw"
       ]
     },
     {

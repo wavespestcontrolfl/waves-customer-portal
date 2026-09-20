@@ -32,9 +32,37 @@ function digitsExpr(column) {
 /**
  * @returns {Promise<{ applicationId: string } | null>}
  */
-async function matchApplicantReply(fromPhone) {
+// Outbound types that are not customer-facing texts (mirrors the webhook's
+// hasOutboundHistory exclusion) — they never count as "what the phone last
+// received from us".
+const NON_CONVERSATIONAL_OUTBOUND = ['internal_alert', 'admin_alert', 'ai_assistant', 'ai_assistant_reply'];
+
+/**
+ * @param {string} fromPhone - the inbound sender
+ * @param {string} [toNumber] - the Waves number the text arrived on
+ * @returns {Promise<{ applicationId: string } | null>}
+ */
+async function matchApplicantReply(fromPhone, toNumber) {
   const variants = phoneMatchDigits(fromPhone);
   if (!variants.length) return null;
+
+  // Reply CONTEXT first (Codex r3 P1): the phone may also be a customer's.
+  // Only when the most recent customer-facing text we sent this phone was a
+  // recruiting text — and it arrived back on the number that text went out
+  // from — is this inbound an applicant reply. A newer appointment/billing
+  // text, or a text to a different Waves number, keeps the ordinary path.
+  const lastOutbound = await db('sms_log')
+    .where({ direction: 'outbound' })
+    .whereRaw(digitsExpr('to_phone'), [variants])
+    .whereNotIn('message_type', NON_CONVERSATIONAL_OUTBOUND)
+    .orderBy('created_at', 'desc')
+    .first('message_type', 'from_phone');
+  if (!lastOutbound || !/^job_/.test(String(lastOutbound.message_type || ''))) return null;
+  if (toNumber) {
+    const toDigits = phoneMatchDigits(String(toNumber));
+    const fromDigits = phoneMatchDigits(String(lastOutbound.from_phone || ''));
+    if (toDigits.length && fromDigits.length && !toDigits.some((d) => fromDigits.includes(d))) return null;
+  }
 
   // Every open application on this phone, with its send ledger — the reply
   // is tied to the application that actually RECEIVED a recruiting text
@@ -117,4 +145,4 @@ async function recordApplicantReply({ applicationId, from, to, body, messageSid,
   return { persisted: true, duplicate };
 }
 
-module.exports = { matchApplicantReply, recordApplicantReply, OPEN_STATUSES, RECENT_OUTBOUND_DAYS, REPLY_MESSAGE_TYPE };
+module.exports = { matchApplicantReply, recordApplicantReply, OPEN_STATUSES, RECENT_OUTBOUND_DAYS, REPLY_MESSAGE_TYPE, NON_CONVERSATIONAL_OUTBOUND };

@@ -144,6 +144,15 @@ const STAGE_LABEL = {
   interview_confirmation: "Interview confirmation",
 };
 
+// "Link sent" means a delivery attempt that may have reached the applicant
+// (sent / uncertain / an unreconciled handoff) — never just a minted token.
+export function inviteDelivered(app) {
+  const history = Array.isArray(app?.comms_history) ? app.comms_history : [];
+  return history.some(
+    (e) => e && e.stage === "interview_invite" && ["sent", "uncertain", "handoff"].includes(e.outcome),
+  );
+}
+
 const OUTCOME_LABEL = {
   stale: "not sent — the stage changed before the send",
   sent: "sent",
@@ -806,9 +815,11 @@ export default function RecruitingPage() {
                       // stage round-trip (local audit P1).
                       <div className="flex items-center justify-between gap-3 flex-wrap">
                         <span className="text-14 text-zinc-600">
-                          {detail.interview_url
+                          {inviteDelivered(detail)
                             ? "Link sent, waiting for the applicant to pick a time."
-                            : "No scheduling link sent yet."}
+                            : detail.interview_url
+                              ? "Link created but not delivered — resend it."
+                              : "No scheduling link sent yet."}
                         </span>
                         {detail.status === "interview" && (
                           <Button
