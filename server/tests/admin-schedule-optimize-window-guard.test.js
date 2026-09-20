@@ -578,6 +578,10 @@ describe('round-3 guards', () => {
   });
 
   test('the same live stop on a FUTURE date is not in progress and optimizes normally', async () => {
+    // Pin the clock to the day before DATE: "future" must not depend on the
+    // wall clock, which crossed DATE on 2026-09-20 and turned this red.
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+    jest.setSystemTime(new Date('2026-09-19T17:00:00Z')); // 13:00 ET, the day before
     stopsByDate[DATE] = chronologyDay().map((s) => (s.id === 'T1' ? { ...s, status: 'on_site' } : s));
     mockOptimizerOrder(['T2', 'T1', 'U']);
     const { status, body } = await optimizeRoute({ technicianId: 't1', date: DATE });
