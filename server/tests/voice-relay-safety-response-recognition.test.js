@@ -227,6 +227,27 @@ test.each([
   expect(recognizeSafetyResponse(text).guarantees).toEqual([]);
 });
 
+// A bare pronoun subject ("it/this/that/they/these/those") on the negated
+// pose/carry/present/create predicate is genuinely ambiguous outside this
+// one response -- "It does not pose a risk to your appointment." is as
+// likely as "It does not pose a risk to dogs." Still a candidate (the
+// policy layer's antecedent tracking decides whether it names a pesticide),
+// but flagged so that layer knows to check.
+test.each([
+  'It does not pose a risk to dogs.',
+  'This cannot pose any danger to pets.',
+  'They will not present a hazard to children.',
+])('a bare pronoun subject on the no-risk predicate is flagged for antecedent tracking: %s', (text) => {
+  const candidates = recognizeSafetyResponse(text).guarantees.filter(({ pattern }) => pattern === SAFETY_NO_RISK_RE);
+  expect(candidates.length).toBeGreaterThan(0);
+  for (const candidate of candidates) expect(candidate.requiresProductAntecedent).toBe(true);
+});
+
+test('control: a concrete product subject on the no-risk predicate is not flagged', () => {
+  const [claim] = recognizeSafetyResponse('The bait does not pose a risk to dogs.').guarantees;
+  expect(claim.requiresProductAntecedent).toBeUndefined();
+});
+
 test.each([
   'The bait poses a risk to dogs.',
   'The bait might pose a risk to dogs.',
@@ -253,6 +274,22 @@ test.each([
 
 test.each(['Your dog is safe around the park.', 'Your pets will be safe around the office.', 'Your dog is safe during the trip.'])(
   'ordinary audience safety does not establish pesticide exposure: %s', (text) => {
+    expect(recognizeSafetyResponse(text).guarantees).toEqual([]);
+  },
+);
+
+// A direct second-person subject makes the same product-scoped guarantee as
+// a named audience ("Your family is safe around the bait.") does already.
+test.each([
+  'You are completely safe around the spray.',
+  'You will be safe around the bait.',
+  'You all are safe around the granules.',
+])('second-person, product-scoped safety claims are recognized as guarantees: %s', (text) => {
+  expect(recognizeSafetyResponse(text).guarantees.length).toBeGreaterThan(0);
+});
+
+test.each(['You are safe.', 'You will be safe around the park.', 'You are safe during the trip.'])(
+  'a second-person claim with no pesticide exposure is not a guarantee: %s', (text) => {
     expect(recognizeSafetyResponse(text).guarantees).toEqual([]);
   },
 );
