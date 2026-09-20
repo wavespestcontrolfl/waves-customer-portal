@@ -2641,9 +2641,15 @@ function report_readback_confirms(value, record, { spoken }) {
       `^(?:or\\b|and\\s+(?=(?:${REPORT_ASSERTION_START}|${REPORT_VERBLESS_PRODUCT_LOCATION_START})))[^.!?;]*\\?`,
       'i',
     ).test(text.slice(clauseEnd).split(/,?\s*\b(?:but|however|though|yet|so|then)\b/i)[0]);
+    // Retraction checks bind to the product this match actually named, so a
+    // denial about another scenario alternative stays independent.
+    const matchedProduct = m[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const sharedLocation = reportSharedLocationContinuation(
-      text, scopeEnd, value.location, value.subject, clauseEnd, initialAssertion.text,
+      text, scopeEnd, value.location, matchedProduct, clauseEnd, initialAssertion.text,
     );
+    // A shared list extends the finding; every continuation check starts
+    // after it, exactly as it would after a plain clause.
+    const continuationAt = sharedLocation.text ? scopeEnd + sharedLocation.text.length : clauseEnd;
     const asrTagQuestion = /(?:,\s*(?:right|correct)|\b(?:wasn['’]t\s+it|isn['’]t\s+it|aren['’]t\s+they|didn['’]t\s+(?:we|they)))\s*$/i
       .test(text.slice(clauseStart, clauseEnd))
       || /(?:,\s*|\s+)(?:(?:is|was|has|had)\s+(?:that|this|it)(?:\s+(?:right|correct|true))?|(?:did|do)\s+(?:we|they)|(?:are|were)\s+(?:you|we|they)\s+(?:sure|certain)(?:\s+(?:about|of)\s+(?:it|this|that))?)\s*$/i
@@ -2662,9 +2668,9 @@ function report_readback_confirms(value, record, { spoken }) {
     // A confirmation question can follow as its own sentence or speech event;
     // drop the sentence boundary so the question itself is what gets read.
     const continuationQuestion = reportConfirmationQuestion(
-      text.slice(clauseEnd).replace(/^\s*[.!;]\s*/, ''), value.subject, value.location,
+      text.slice(continuationAt).replace(/^\s*[.!;]\s*/, ''), value.subject, value.location,
     );
-    if ((text[clauseEnd] === '?' && !independentFollowupQuestion)
+    if ((text[continuationAt] === '?' && !independentFollowupQuestion)
         || interrogative || coordinatedQuestion || sharedLocation.unconfirmed || asrTagQuestion
         || inlineQuestion || continuationQuestion) continue;
     const reportClause = text.slice(clauseStart, clauseEnd) + sharedLocation.text;
@@ -2674,7 +2680,7 @@ function report_readback_confirms(value, record, { spoken }) {
     // the correction attached to this finding's assertion, not an earlier one.
     const withoutApology = clause.replace(/,\s*(?:sorry|my\s+mistake|my\s+apologies)\s*$/i, '');
     if (reportTrailingDenialOrCorrection(reportRetractionClause(
-      withoutApology.slice(withoutApology.lastIndexOf(',') + 1), value.subject, value.location,
+      withoutApology.slice(withoutApology.lastIndexOf(',') + 1), matchedProduct, value.location,
     ))) continue;
     // A contrast excludes its following alternative, not the location
     // affirmed before it: "exterior rather than indoors" and "exterior,
@@ -2741,7 +2747,10 @@ function report_readback_confirms(value, record, { spoken }) {
           && reportRespectivelyPairsFinding(affirmed, subjectAt, locationAt, findingVerb)
           && (completedFinding || conciseFinding)
           && !reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb, text.slice(0, clauseStart))
-          && !reportHasLaterExplicitRetraction(text, clauseEnd, value.subject, value.location, affirmed)) {
+          && !reportHasLaterExplicitRetraction(
+            text, continuationAt, matchedProduct,
+            locationMatch[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), affirmed,
+          )) {
         return ['pass', `readback confirmed: "${clip(clause.trim(), 160)}"`];
       }
     }

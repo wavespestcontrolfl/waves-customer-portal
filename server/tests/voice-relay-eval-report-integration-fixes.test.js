@@ -110,3 +110,22 @@ test.each([
 ])('a timed denial after a dated shared list compares against the list date: %j', (spoken, status) => {
   expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
 });
+
+test.each([
+  [['Talstar P was applied to the exterior perimeter and garage.', 'Can you confirm that?'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter and garage. Can you confirm that?'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter and garage?'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter and garage.', 'Let me double-check the report.'], 'pass'],
+])('continuation checks start after a shared location list: %j', (spoken, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
+  [['Talstar P was applied to the exterior perimeter.', 'Bait was not applied to the exterior perimeter.'], 'pass'],
+  [['Talstar P was applied to the exterior perimeter.', 'Talstar P was not applied to the exterior perimeter.'], 'fail'],
+  [['Bait was applied to the exterior perimeter.', 'Bait was not applied to the exterior perimeter.'], 'fail'],
+  [['Bait was applied to the exterior perimeter.', 'It was not applied there.'], 'fail'],
+])('retractions bind to the product alternative the readback named: %j', (spoken, status) => {
+  const alternatives = { subject: 'Talstar P|bait', location: 'exterior perimeter' };
+  expect(checks.report_readback_confirms(alternatives, {}, { spoken })[0]).toBe(status);
+});
