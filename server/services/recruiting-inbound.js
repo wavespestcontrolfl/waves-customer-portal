@@ -183,7 +183,7 @@ async function recordApplicantReply({ applicationId, from, to, body, messageSid,
   if (!duplicate) {
     try {
       const { triggerNotification } = require('./notification-triggers');
-      await triggerNotification('job_applicant_reply', { applicationId });
+      await triggerNotification('job_applicant_reply', { applicationId, replyId: messageSid || entry.id });
     } catch (err) {
       logger.error(`[recruiting-inbound] bell failed (application ${applicationId}): ${errorSummary(err)}`);
     }

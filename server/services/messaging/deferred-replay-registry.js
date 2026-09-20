@@ -585,13 +585,15 @@ const REGISTRY = {
   // reconciled on send / terminal block so reply classification and the
   // owner's Messages list stay truthful.
   recruiting_comms_deferred: {
-    async recheck(meta) {
+    async recheck(meta, { conn = db, lock = false } = {}) {
       try {
         if (!require('../../config/feature-gates').isEnabled('recruitingComms')) {
           return { eligible: false, reason: 'recruiting-gate-off' };
         }
         if (!meta.job_application_id) return { eligible: false, reason: 'application-missing' };
-        const app = await db('job_applications').where({ id: meta.job_application_id })
+        let appQuery = conn('job_applications').where({ id: meta.job_application_id });
+        if (lock) appQuery = appQuery.forUpdate();
+        const app = await appQuery
           .first('id', 'status', 'interview_token', 'interview_at', 'interview_mode', 'comms_history');
         if (!app) return { eligible: false, reason: 'application-missing' };
         const status = String(app.status || '');
@@ -635,20 +637,25 @@ const REGISTRY = {
     // at those checks never leaves 'handoff' evidence, while an ambiguous
     // or timed-out provider result still does.
     async smsHandoff(meta, dispatch) {
-      // Re-validate eligibility at the provider boundary itself (local audit
-      // P1): the recheck ran earlier in the claim; the application can have
-      // closed / rebooked / been superseded in between.
-      const again = await REGISTRY.recruiting_comms_deferred.recheck(meta);
-      if (!again || again.eligible === false) {
-        return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'RECRUITING_STALE_AT_HANDOFF', reason: (again && again.reason) || 'ineligible' };
-      }
-      if (meta.job_application_id && meta.ledger_entry_id) {
-        const { reconcileCommsHistoryEntryByOutcome } = require('../recruiting-comms');
-        await reconcileCommsHistoryEntryByOutcome(meta.job_application_id, meta.ledger_entry_id, {
-          deferred: { outcome: 'handoff', replay_attempted_at: new Date().toISOString() },
-        });
-      }
-      return dispatch();
+      // The LOCKED handoff (Codex r12 P1): the application row is held FOR
+      // UPDATE from the eligibility read through the provider request, so an
+      // admin stage change or an applicant rebook cannot commit between the
+      // recheck and Twilio — it waits for this dispatch to finish and then
+      // re-derives from the committed row. Same posture as the visit-summary
+      // handoff (claimDispatchThroughHandoff).
+      return db.transaction(async (trx) => {
+        const again = await REGISTRY.recruiting_comms_deferred.recheck(meta, { conn: trx, lock: true });
+        if (!again || again.eligible === false) {
+          return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'RECRUITING_STALE_AT_HANDOFF', reason: (again && again.reason) || 'ineligible' };
+        }
+        if (meta.job_application_id && meta.ledger_entry_id) {
+          const { reconcileCommsHistoryEntryByOutcome } = require('../recruiting-comms');
+          await reconcileCommsHistoryEntryByOutcome(meta.job_application_id, meta.ledger_entry_id, {
+            deferred: { outcome: 'handoff', replay_attempted_at: new Date().toISOString() },
+          }, trx);
+        }
+        return dispatch(trx);
+      });
     },
     async finalize(meta) {
       if (!meta.job_application_id || !meta.ledger_entry_id) return { ok: true };

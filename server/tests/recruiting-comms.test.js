@@ -104,6 +104,7 @@ function makeDb() {
   });
   db.raw = jest.fn((sql, bindings) => ({ __raw: true, sql, bindings }));
   db.schema = { hasTable: jest.fn(async () => true) };
+  db.transaction = jest.fn(async (fn) => fn(db));
   db.__tables = tables;
   return db;
 }
@@ -534,6 +535,8 @@ describe('sendStageComms — send-window hold', () => {
     mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
     const result = await RecruitingComms.sendStageComms(app, 'application_received', { sms: true, email: false, by: 'system' });
     expect(result.sms).toBe('deferred');
+    // the queue row and the ledger transition commit in ONE transaction
+    expect(mockDb.transaction).toHaveBeenCalled();
     const queued = (mockDb.__tables.sms_log || []).find((r) => r.status === 'scheduled');
     expect(queued).toMatchObject({ customer_id: null, direction: 'outbound', message_type: 'job_application_received', to_phone: '9415550142', from_phone: '+19415550199' });
     expect(queued.scheduled_for.toISOString()).toBe('2027-03-17T12:00:00.000Z');
@@ -569,6 +572,10 @@ describe('sendStageComms — pipeline throw after provider acceptance', () => {
     mockSendCustomerMessage.mockRejectedValueOnce(new Error('boom'));
     result = await RecruitingComms.sendStageComms(app, 'application_received', { sms: true, email: false, by: 'system' });
     expect(result.sms).toBe('uncertain');
+    // a definite pre-provider failure (the pipeline's own not_sent outcome) is failed, never uncertain
+    mockSendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('contract'), { providerOutcome: { sent: false, deliveryOutcome: 'not_sent', code: 'CONTRACT_VIOLATION' } }));
+    result = await RecruitingComms.sendStageComms(app, 'application_received', { sms: true, email: false, by: 'system' });
+    expect(result.sms).toBe('failed');
     stored = mockDb.__tables.job_applications.find((r) => r.id === 'app-1');
     expect(stored.comms_history[1]).toMatchObject({ outcome: 'uncertain' });
   });

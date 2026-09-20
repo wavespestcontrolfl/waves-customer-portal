@@ -148,7 +148,7 @@ describe('recordApplicantReply', () => {
     expect(state.inserts[0].row).toMatchObject({ customer_id: null, direction: 'inbound', message_type: REPLY_MESSAGE_TYPE, twilio_sid: 'SM1' });
     // history append rides the SAME transaction handle
     expect(mockAppend).toHaveBeenCalledWith('app-1', [expect.objectContaining({ stage: 'applicant_reply', channel: 'sms', outcome: 'received', to: 'masked(0142)', body: 'Yes, Tuesday works', by: 'applicant' })], mockDb);
-    expect(mockTrigger).toHaveBeenCalledWith('job_applicant_reply', { applicationId: 'app-1' });
+    expect(mockTrigger).toHaveBeenCalledWith('job_applicant_reply', { applicationId: 'app-1', replyId: 'SM1' });
     expect(JSON.stringify(mockTrigger.mock.calls[0][1])).not.toMatch(/0142|Tuesday/);
   });
 

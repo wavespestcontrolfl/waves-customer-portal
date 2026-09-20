@@ -639,6 +639,11 @@ async function sendStageComms(app, stage, opts = {}) {
           const po = err && err.providerOutcome && typeof err.providerOutcome === 'object' ? err.providerOutcome : null;
           if (po && (po.sent === true || po.deliveryOutcome === 'accepted' || po.deliveryOutcome === 'sent')) {
             sendRes = { ...po, sent: true, blocked: false, code: po.code || `threw_after_accept:${errorSummary(err)}` };
+          } else if (po && po.deliveryOutcome === 'not_sent') {
+            // A definite pre-provider failure (the pipeline threw before
+            // Twilio and says so) is proof nothing was sent — never
+            // 'uncertain' (Codex r12 P1).
+            sendRes = { ...po, sent: false, blocked: Boolean(po.blocked), deliveryOutcome: 'not_sent', code: po.code || `threw_pre_provider:${errorSummary(err)}` };
           } else {
             sendRes = { ...(po || {}), sent: false, blocked: false, deliveryOutcome: 'uncertain', code: (po && po.code) || `threw:${errorSummary(err)}` };
           }
@@ -647,6 +652,7 @@ async function sendStageComms(app, stage, opts = {}) {
           ? 'sent'
           : (sendRes.blocked ? 'blocked' : (sendRes.deliveryOutcome === 'uncertain' ? 'uncertain' : 'failed'));
         let deferredUntil = null;
+        let deferredLedgerDone = false;
         // A newer invite retires any invite still queued for this application
         // — one stable token must never reach the applicant twice — but only
         // once the replacement EXISTS (sent, or its queue row persisted), so a
@@ -673,7 +679,11 @@ async function sendStageComms(app, stage, opts = {}) {
           // when the window opens (Codex r5 P1). The rail re-derives the
           // applicant policy from the metadata stamped here.
           try {
-            const inserted = await db('sms_log').insert({
+            // Queue row + the 'deferred' ledger transition commit TOGETHER
+            // (Codex r12 P1): a queued text must never leave a 'handoff'
+            // entry behind that the reply classifier would read as evidence.
+            const queuedInsert = await db.transaction(async (trx) => {
+            const inserted = await trx('sms_log').insert({
               customer_id: null,
               direction: 'outbound',
               from_phone: applicantFromNumber,
@@ -702,9 +712,16 @@ async function sendStageComms(app, stage, opts = {}) {
                 original_block_code: sendRes.code || null,
               }),
             }).returning('id');
-            const queuedRowId = Array.isArray(inserted) ? (inserted[0] && (inserted[0].id || inserted[0])) : null;
+            await finalizeCommsHistoryEntry(app.id, handoffEntry.id, {
+              outcome: 'deferred', code: sendRes.code || null, finalized_at: new Date().toISOString(),
+              scheduled_for: new Date(sendRes.nextAllowedAt).toISOString(),
+            }, trx);
+            return inserted;
+            });
+            const queuedRowId = Array.isArray(queuedInsert) ? (queuedInsert[0] && (queuedInsert[0].id || queuedInsert[0])) : null;
             outcome = 'deferred';
             deferredUntil = new Date(sendRes.nextAllowedAt).toISOString();
+            deferredLedgerDone = true;
             await retireQueuedInvites(queuedRowId);
           } catch (err) {
             logger.error(`[recruiting-comms] deferred queue insert failed (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
@@ -714,7 +731,7 @@ async function sendStageComms(app, stage, opts = {}) {
         // Reconcile the handoff entry in place; if this fails the entry stays
         // 'handoff', which the reply classifier still treats as a sent text.
         try {
-          await finalizeCommsHistoryEntry(app.id, handoffEntry.id, {
+          if (!deferredLedgerDone) await finalizeCommsHistoryEntry(app.id, handoffEntry.id, {
             outcome, code: sendRes.code || null, finalized_at: new Date().toISOString(),
             ...(deferredUntil ? { scheduled_for: deferredUntil } : {}),
           });

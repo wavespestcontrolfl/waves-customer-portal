@@ -1151,7 +1151,9 @@ describe('recruiting_comms_deferred (PR #4623)', () => {
     const gatesSpy = jest.spyOn(gates, 'isEnabled').mockImplementation(() => true);
     const { deferredSmsHandoff } = require('../services/messaging/deferred-replay-registry');
     const handoff = deferredSmsHandoff(ENTRY, meta);
-    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'withdrawn', interview_token: 'a'.repeat(64) }));
+    const lockChain = rowChain({ id: 'app-1', status: 'withdrawn', interview_token: 'a'.repeat(64) });
+    lockChain.forUpdate = jest.fn(() => lockChain);
+    db.transaction = jest.fn(async (fn) => fn(jest.fn(() => lockChain)));
     const dispatch = jest.fn(async () => ({ sent: true }));
     await expect(handoff(dispatch)).resolves.toMatchObject({ sent: false, blocked: true, code: 'RECRUITING_STALE_AT_HANDOFF' });
     expect(dispatch).not.toHaveBeenCalled();
@@ -1185,13 +1187,18 @@ describe('recruiting_comms_deferred (PR #4623)', () => {
     expect(spy).not.toHaveBeenCalled();
     const { deferredSmsHandoff } = require('../services/messaging/deferred-replay-registry');
     const handoff = deferredSmsHandoff(ENTRY, meta);
+    // the handoff runs in a transaction that holds the application row FOR UPDATE through dispatch
+    const lockChain = rowChain({ id: 'app-1', status: 'interview', interview_token: 'a'.repeat(64), comms_history: [] });
+    lockChain.forUpdate = jest.fn(() => lockChain);
+    const trx = jest.fn(() => lockChain);
+    db.transaction = jest.fn(async (fn) => fn(trx));
     const order = [];
     spy.mockImplementation(async () => { order.push('stamp'); });
     const dispatch = jest.fn(async () => { order.push('dispatch'); return { sent: true }; });
-    // the handoff re-validates at the boundary: a still-eligible interview application
-    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'interview', interview_token: 'a'.repeat(64), comms_history: [] }));
     await expect(handoff(dispatch)).resolves.toEqual({ sent: true });
-    expect(spy).toHaveBeenCalledWith('app-1', 'e-1', { deferred: expect.objectContaining({ outcome: 'handoff' }) });
+    expect(lockChain.forUpdate).toHaveBeenCalled();
+    expect(dispatch).toHaveBeenCalledWith(trx);
+    expect(spy).toHaveBeenCalledWith('app-1', 'e-1', { deferred: expect.objectContaining({ outcome: 'handoff' }) }, expect.anything());
     expect(order).toEqual(['stamp', 'dispatch']);
     spy.mockRestore(); gatesSpy.mockRestore();
   });
@@ -1208,7 +1215,8 @@ describe('recruiting_comms_deferred (PR #4623)', () => {
       handoff: expect.objectContaining({ outcome: 'uncertain', code: 'deferred_terminal_after_attempt' }),
     });
     // an entry already 'sent' or 'uncertain' has no transition — evidence retained
-    expect(Object.keys(rec.mock.calls[0][2])).toEqual(['deferred', 'handoff']);
+    const terminalCall = rec.mock.calls.find((c) => c[2] && c[2].handoff);
+    expect(Object.keys(terminalCall[2])).toEqual(['deferred', 'handoff']);
     fin.mockRestore(); rec.mockRestore();
   });
 });

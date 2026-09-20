@@ -915,7 +915,13 @@ function pushTagFor(triggerKey, payload = {}) {
     // notifications must not collapse into one push (same-tag replacement).
     return `waves-new_job_application-${payload.applicationId || 'unknown-application'}`;
   }
-  if (triggerKey === 'job_interview_booked' || triggerKey === 'job_application_withdrawn' || triggerKey === 'job_applicant_reply') {
+  if (triggerKey === 'job_applicant_reply') {
+    // Distinct per reply (Codex r12 P2): a second text before the first push
+    // is dismissed must alert again, not silently replace it (same-tag
+    // pushes are renotify:false in the service worker) — like sms_reply.
+    return `waves-job_applicant_reply-${payload.applicationId || 'unknown-application'}-${payload.replyId || Date.now()}`;
+  }
+  if (triggerKey === 'job_interview_booked' || triggerKey === 'job_application_withdrawn') {
     // Per-application tag, same reasoning as new_job_application above — a
     // rebooked time (a second job_interview_booked for the same applicant)
     // may legitimately replace its own earlier push.

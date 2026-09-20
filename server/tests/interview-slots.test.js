@@ -383,3 +383,13 @@ describe('occupancy.js mirrors the interview constants (no cross-require by desi
     expect(occupancy.INTERVIEW_BUFFER_MINUTES).toBe(slots.BUFFER_MINUTES);
   });
 });
+
+describe('the applicant\'s own booking stays selectable while editing', () => {
+  test('excludeApplicationId keeps the applicant\'s current slot offered (mode change at the same time)', async () => {
+    reset({ job_applications: [{ id: 'app-me', status: 'interview', interview_at: '2027-03-16T20:00:00.000Z', interview_end_at: '2027-03-16T20:30:00.000Z' }] });
+    const without = await listInterviewSlots({ now: NOW, excludeApplicationId: 'app-me' });
+    const withSelf = await listInterviewSlots({ now: NOW });
+    expect(without.map((s) => s.label)).toContain('Tue Mar 16, 4:00 PM');
+    expect(withSelf.map((s) => s.label)).not.toContain('Tue Mar 16, 4:00 PM');
+  });
+});

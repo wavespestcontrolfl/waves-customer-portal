@@ -2232,8 +2232,10 @@ services/scheduler.js under the applicant policy through the
 `recruiting_comms_deferred` deferred-replay registry entry — the recheck
 fails closed on the gate, a missing/closed application, a changed token
 or a rebooked time/mode (the ledger entry moves to `handoff` only in the
-locked provider handoff, after the fresh suppression/consent checks pass
-and after the eligibility recheck is run AGAIN at that boundary — a stale
+locked provider handoff — a transaction holding the application row FOR
+UPDATE from the eligibility read through the provider request — after the
+fresh suppression/consent checks pass and after the eligibility recheck is
+run AGAIN at that boundary — a stale
 application answers `RECRUITING_STALE_AT_HANDOFF` with no provider call;
 never at the claim-time recheck), and on a NEWER attempt of the same stage in the
 ledger (a resend supersedes a queued invite even after the worker claimed
