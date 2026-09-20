@@ -15,9 +15,11 @@
 // assertions are about durable STATE rather than a hand-counted call order.
 
 const QUEUE_ADOPTION_PENDING_KEY = 'invoice_send_adoption_pending';
+const QUEUE_ADOPTION_HANDOFF_KEY = 'invoice_send_adoption_handoff_token';
+const QUEUE_ADOPTION_HANDOFF_AT_KEY = 'invoice_send_adoption_handoff_at';
 const INVOICE_SEND_DEFERRED_ENTRY_POINT = 'invoice_send_deferred';
 
-function makeInvoicesTable(row) {
+function makeInvoicesTable(row, { onUpdate = null } = {}) {
   let state = { ...row };
   return {
     state: () => state,
@@ -34,6 +36,7 @@ function makeInvoicesTable(row) {
       q.whereRaw = jest.fn(() => q);
       q.forUpdate = jest.fn(() => q);
       q.update = jest.fn((payload) => {
+        if (onUpdate) onUpdate(payload);
         const matched = applyFilters([state]);
         for (const r of matched) {
           for (const [k, v] of Object.entries(payload)) {
@@ -68,26 +71,39 @@ function makeInvoicesTable(row) {
   };
 }
 
+// Interprets a raw metadata expression GENERICALLY rather than special-
+// casing exact SQL strings, so a production shape change (more keys, more
+// nesting) does not silently stop exercising the mock:
+//   - every `- 'key'` subtraction token, at any nesting depth, deletes that
+//     key (covers COALESCE(...)/plain-subtraction forms alike);
+//   - a trailing `jsonb_build_object(k1, v1, k2, v2, ...)` sets each key,
+//     pulling `?`/`?::text` placeholder values from bindings in order and
+//     literal `'text'`/`true`/`false` tokens as-is.
 function applyRawMetadataUpdate(row, rawValue) {
   const sql = rawValue.__sqlRaw;
-  row.metadata = row.metadata || {};
-  if (sql.includes("jsonb_build_object('cancelled_reason'")) {
-    row.metadata = {
-      ...row.metadata,
-      cancelled_reason: 'superseded_by_live_send',
-      cancelled_at: rawValue.__bindings[0],
-      [QUEUE_ADOPTION_PENDING_KEY]: true,
-    };
-  } else if (sql.startsWith('((metadata -')) {
-    const { cancelled_reason: _reason, cancelled_at: _at, [QUEUE_ADOPTION_PENDING_KEY]: _drop, ...rest } = row.metadata;
-    row.metadata = rest;
-  } else if (sql.includes('adoption_resolved_at')) {
-    const { [QUEUE_ADOPTION_PENDING_KEY]: _drop, ...rest } = row.metadata;
-    row.metadata = { ...rest, adoption_resolved_at: rawValue.__bindings[0] };
+  const bindings = rawValue.__bindings || [];
+  const meta = { ...(row.metadata || {}) };
+
+  for (const m of sql.matchAll(/-\s*'([^']+)'/g)) delete meta[m[1]];
+
+  const buildMatch = /jsonb_build_object\(([^)]*)\)/.exec(sql);
+  if (buildMatch) {
+    const parts = buildMatch[1].split(',').map((p) => p.trim());
+    let bindingIndex = 0;
+    for (let i = 0; i < parts.length; i += 2) {
+      const key = parts[i].replace(/^'|'$/g, '');
+      const valueToken = parts[i + 1];
+      if (valueToken === '?' || valueToken === '?::text') {
+        meta[key] = bindings[bindingIndex]; bindingIndex += 1;
+      } else if (valueToken === 'true') meta[key] = true;
+      else if (valueToken === 'false') meta[key] = false;
+      else meta[key] = valueToken.replace(/^'|'$/g, '');
+    }
   }
+  row.metadata = meta;
 }
 
-function makeSmsLogTable(initialRows, { failResolve = false, failRestore = false } = {}) {
+function makeSmsLogTable(initialRows, { failResolve = false, failRestore = false, failFence = false, onUpdate = null } = {}) {
   let rows = initialRows.map((r) => ({ ...r, metadata: { ...r.metadata } }));
   return {
     rows: () => rows,
@@ -147,6 +163,19 @@ function makeSmsLogTable(initialRows, { failResolve = false, failRestore = false
           // row stamped finalize_only, even if something upstream let the
           // claim through. Only the fixed SQL emits this clause at all.
           rawFilters.push((row) => (row.metadata || {}).finalize_only !== true);
+        } else if (sql.includes(QUEUE_ADOPTION_HANDOFF_KEY) && sql.includes('IS NULL OR')) {
+          // restoreConsumedQueuedSend's fence check: only a row never handed
+          // to a provider, or handed over by THIS episode's own token, may
+          // go back on the schedule.
+          const token = bindings && String(bindings[0]);
+          rawFilters.push((row) => {
+            const fence = (row.metadata || {})[QUEUE_ADOPTION_HANDOFF_KEY];
+            return fence == null || fence === token;
+          });
+        } else if (sql.includes(QUEUE_ADOPTION_HANDOFF_KEY)) {
+          // fenceAdoptedRowsBeforeHandoff's own guard: only stamp a row
+          // that isn't already fenced.
+          rawFilters.push((row) => (row.metadata || {})[QUEUE_ADOPTION_HANDOFF_KEY] == null);
         }
         return q;
       });
@@ -177,12 +206,23 @@ function makeSmsLogTable(initialRows, { failResolve = false, failRestore = false
         }
         // Simulates restoreConsumedQueuedSend's UPDATE failing (or
         // reporting 0 rows) when giving an adopted row back — distinguished
-        // from the resolve update above by its literal status:'scheduled'
-        // and the '((metadata -' strip-markers raw shape.
-        if (failRestore && payload.status === 'scheduled' && payload.metadata && payload.metadata.__sqlRaw
-          && payload.metadata.__sqlRaw.startsWith('((metadata -')) {
+        // from the resolve update above (which never sets `status`, only
+        // strips/adds metadata keys) by its literal status:'scheduled'.
+        // Deliberately NOT keyed to the exact subtraction-expression text —
+        // a nesting-depth change (more keys stripped) must not silently
+        // stop exercising this injection.
+        if (failRestore && payload.status === 'scheduled' && payload.metadata && payload.metadata.__sqlRaw) {
           throw new Error('sms_log restore update failed (injected)');
         }
+        // Simulates fenceAdoptedRowsBeforeHandoff's UPDATE failing before
+        // the provider is ever contacted — distinguished from both the
+        // resolve and restore updates above by carrying the handoff key
+        // itself and never setting `status`.
+        if (failFence && !payload.status && payload.metadata && payload.metadata.__sqlRaw
+          && payload.metadata.__sqlRaw.includes(QUEUE_ADOPTION_HANDOFF_KEY)) {
+          throw new Error('sms_log fence update failed (injected)');
+        }
+        if (onUpdate) onUpdate(payload);
         const targets = matched();
         q.__matched = targets;
         for (const row of targets) {
@@ -251,6 +291,8 @@ const db = require('../models/db');
 const { withInvoiceDepositSettlement } = require('../services/estimate-deposits');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { sendInvoiceEmail } = require('../services/invoice-email');
+const { autoApplyAccountCreditIfEnabled } = require('../services/customer-credit');
+const logger = require('../services/logger');
 const InvoiceService = require('../services/invoice');
 
 function customerQuery(customer) {
@@ -645,6 +687,198 @@ describe('invoice send claim adoption of a queued pay-link SMS', () => {
       expect(row.status).toBe('cancelled');
       expect(row.metadata.cancelled_reason).toBe('superseded_by_live_send');
       expect(row.metadata[QUEUE_ADOPTION_PENDING_KEY]).toBe(true);
+    });
+    test('a row fenced by an earlier episode is never re-scheduled by a later definite failure', async () => {
+      // 'sms-older-fence' is a row a PRIOR episode already adopted and
+      // fenced before its own provider handoff, then crashed before either
+      // restoring or resolving it (the QUEUE_ADOPTION_PENDING_KEY marker is
+      // exactly that unresolved-crash evidence). It is still re-adoptable
+      // (consumeQueuedInvoiceSend matches cancelled+pending rows too), but
+      // its OLD fence must survive being re-consumed: only that OLDER
+      // episode ever knew whether its own provider handoff delivered it.
+      // 'sms-own-fence' carries THIS new episode's own (predictable) token
+      // instead, to prove the SAME failure restores a row fenced by itself.
+      jest.spyOn(require('crypto'), 'randomUUID').mockReturnValueOnce('own-episode-token');
+      customer.phone = null;
+      smsLog = makeSmsLogTable([
+        {
+          id: 'sms-older-fence',
+          status: 'cancelled',
+          scheduled_for: ORIGINAL_SCHEDULED_FOR,
+          metadata: {
+            entry_point: INVOICE_SEND_DEFERRED_ENTRY_POINT,
+            invoice_id: 'inv-1',
+            cancelled_reason: 'superseded_by_live_send',
+            [QUEUE_ADOPTION_PENDING_KEY]: true,
+            [QUEUE_ADOPTION_HANDOFF_KEY]: 'older-token',
+            [QUEUE_ADOPTION_HANDOFF_AT_KEY]: '2026-09-11T11:00:00.000Z',
+          },
+        },
+        {
+          id: 'sms-own-fence',
+          status: 'cancelled',
+          scheduled_for: ORIGINAL_SCHEDULED_FOR,
+          metadata: {
+            entry_point: INVOICE_SEND_DEFERRED_ENTRY_POINT,
+            invoice_id: 'inv-1',
+            cancelled_reason: 'superseded_by_live_send',
+            [QUEUE_ADOPTION_PENDING_KEY]: true,
+            [QUEUE_ADOPTION_HANDOFF_KEY]: 'own-episode-token',
+            [QUEUE_ADOPTION_HANDOFF_AT_KEY]: '2026-09-11T11:05:00.000Z',
+          },
+        },
+      ]);
+      db.mockImplementation((table) => {
+        if (table === 'invoices') return invoices.query();
+        if (table === 'sms_log') return smsLog.query();
+        if (table === 'customers') return customerQuery(customer);
+        if (table === 'activity_log') return passthroughQuery();
+        throw new Error(`Unexpected table: ${table}`);
+      });
+
+      await expect(InvoiceService.sendViaSMS('inv-1')).rejects.toThrow('Customer has no phone number');
+
+      // The claim still gave back to 'draft' — a row an earlier episode
+      // fenced must never strand THIS send's claim.
+      expect(invoices.state()).toMatchObject({ status: 'draft', send_claim_token: null });
+      const olderFenced = smsLog.rows().find((r) => r.id === 'sms-older-fence');
+      expect(olderFenced.status).toBe('cancelled');
+      expect(olderFenced.metadata[QUEUE_ADOPTION_PENDING_KEY]).toBe(true);
+      expect(olderFenced.metadata[QUEUE_ADOPTION_HANDOFF_KEY]).toBe('older-token');
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('sms-older-fence'));
+      // The row fenced with THIS episode's own token IS restored — the same
+      // failure that could not touch the other episode's evidence.
+      const ownFenced = smsLog.rows().find((r) => r.id === 'sms-own-fence');
+      expect(ownFenced.status).toBe('scheduled');
+      expect(ownFenced.metadata[QUEUE_ADOPTION_HANDOFF_KEY]).toBeUndefined();
+      expect(ownFenced.metadata[QUEUE_ADOPTION_PENDING_KEY]).toBeUndefined();
+    });
+
+    test('a fence write failure aborts before the provider and restores the row', async () => {
+      smsLog = makeSmsLogTable(
+        [{
+          id: 'sms-queued-1',
+          status: 'scheduled',
+          scheduled_for: ORIGINAL_SCHEDULED_FOR,
+          metadata: { entry_point: INVOICE_SEND_DEFERRED_ENTRY_POINT, invoice_id: 'inv-1' },
+        }],
+        { failFence: true },
+      );
+      db.mockImplementation((table) => {
+        if (table === 'invoices') return invoices.query();
+        if (table === 'sms_log') return smsLog.query();
+        if (table === 'customers') return customerQuery(customer);
+        if (table === 'activity_log') return passthroughQuery();
+        throw new Error(`Unexpected table: ${table}`);
+      });
+
+      await expect(InvoiceService.sendViaSMS('inv-1')).rejects.toThrow('sms_log fence update failed (injected)');
+
+      // Pre-provider: the fence write throwing must never reach the provider.
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      // Never fenced, so it goes back exactly like any other pre-provider
+      // failure — same id, same schedule.
+      const row = smsLog.rows().find((r) => r.id === 'sms-queued-1');
+      expect(row.status).toBe('scheduled');
+      expect(row.scheduled_for).toEqual(ORIGINAL_SCHEDULED_FOR);
+      expect(row.metadata[QUEUE_ADOPTION_HANDOFF_KEY]).toBeUndefined();
+      expect(row.metadata[QUEUE_ADOPTION_PENDING_KEY]).toBeUndefined();
+      expect(invoices.state()).toMatchObject({ status: 'draft', send_claim_token: null });
+    });
+
+    test('a credit-covered send (sendViaSMSAndEmail) resolves the adopted rows before clearing the token', async () => {
+      const order = [];
+      invoices = makeInvoicesTable({
+        id: 'inv-1',
+        invoice_number: 'WPC-2026-2001',
+        status: 'draft',
+        customer_id: 'cust-1',
+        payer_id: null,
+        token: 'tok-1',
+        total: 100,
+        credit_applied: 0,
+        send_claim_token: null,
+      }, {
+        onUpdate: (payload) => { if (payload.send_claim_token === null) order.push('invoice_token_clear'); },
+      });
+      smsLog = makeSmsLogTable([{
+        id: 'sms-queued-1',
+        status: 'scheduled',
+        scheduled_for: ORIGINAL_SCHEDULED_FOR,
+        metadata: { entry_point: INVOICE_SEND_DEFERRED_ENTRY_POINT, invoice_id: 'inv-1' },
+      }], {
+        onUpdate: (payload) => {
+          if (payload.metadata && payload.metadata.__sqlRaw && payload.metadata.__sqlRaw.includes('adoption_resolved_at')) {
+            order.push('sms_resolve');
+          }
+        },
+      });
+      db.mockImplementation((table) => {
+        if (table === 'invoices') return invoices.query();
+        if (table === 'sms_log') return smsLog.query();
+        if (table === 'customers') return customerQuery(customer);
+        if (table === 'activity_log') return passthroughQuery();
+        throw new Error(`Unexpected table: ${table}`);
+      });
+      autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ fullyCovered: true, applied: 100 });
+
+      const result = await InvoiceService.sendViaSMSAndEmail('inv-1');
+
+      expect(result).toMatchObject({ ok: true, covered_by_credit: true });
+      // The resolve ran while the token still owned the row — BEFORE it was
+      // cleared, or the resolve's own ownership check would have silently
+      // no-op'd against an already-cleared claim.
+      expect(order).toEqual(['sms_resolve', 'invoice_token_clear']);
+      const row = smsLog.rows().find((r) => r.id === 'sms-queued-1');
+      expect(row.status).toBe('cancelled');
+      expect(row.metadata.cancelled_reason).toBe('superseded_by_live_send');
+      expect(row.metadata[QUEUE_ADOPTION_PENDING_KEY]).toBeUndefined();
+      expect(row.metadata.adoption_resolved_at).toEqual(expect.any(String));
+    });
+
+    test('a credit-covered send (direct sendViaSMS) resolves the adopted rows before clearing the token', async () => {
+      const order = [];
+      invoices = makeInvoicesTable({
+        id: 'inv-1',
+        invoice_number: 'WPC-2026-2001',
+        status: 'draft',
+        customer_id: 'cust-1',
+        payer_id: null,
+        token: 'tok-1',
+        total: 100,
+        credit_applied: 0,
+        send_claim_token: null,
+      }, {
+        onUpdate: (payload) => { if (payload.send_claim_token === null) order.push('invoice_token_clear'); },
+      });
+      smsLog = makeSmsLogTable([{
+        id: 'sms-queued-1',
+        status: 'scheduled',
+        scheduled_for: ORIGINAL_SCHEDULED_FOR,
+        metadata: { entry_point: INVOICE_SEND_DEFERRED_ENTRY_POINT, invoice_id: 'inv-1' },
+      }], {
+        onUpdate: (payload) => {
+          if (payload.metadata && payload.metadata.__sqlRaw && payload.metadata.__sqlRaw.includes('adoption_resolved_at')) {
+            order.push('sms_resolve');
+          }
+        },
+      });
+      db.mockImplementation((table) => {
+        if (table === 'invoices') return invoices.query();
+        if (table === 'sms_log') return smsLog.query();
+        if (table === 'customers') return customerQuery(customer);
+        if (table === 'activity_log') return passthroughQuery();
+        throw new Error(`Unexpected table: ${table}`);
+      });
+      autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ fullyCovered: true, applied: 100 });
+
+      const result = await InvoiceService.sendViaSMS('inv-1');
+
+      expect(result).toMatchObject({ sent: false, ok: true, covered_by_credit: true });
+      expect(order).toEqual(['sms_resolve', 'invoice_token_clear']);
+      const row = smsLog.rows().find((r) => r.id === 'sms-queued-1');
+      expect(row.status).toBe('cancelled');
+      expect(row.metadata.adoption_resolved_at).toEqual(expect.any(String));
     });
   });
 });
