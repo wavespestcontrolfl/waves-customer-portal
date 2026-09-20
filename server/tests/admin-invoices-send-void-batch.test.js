@@ -622,7 +622,7 @@ describe('POST /batch idempotency (batchKey)', () => {
     });
     InvoiceService.sendViaSMS.mockResolvedValue({
       sent: false, ok: false, code: 'deposit_settlement_pending',
-      error: 'Nothing is due on this invoice, but it could not be settled yet (invoice_delivery_in_flight) — not sent.',
+      reason: 'Nothing is due on this invoice, but it could not be settled yet (invoice_delivery_in_flight) — not sent.',
     });
 
     await withServer(async (baseUrl) => {
