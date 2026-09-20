@@ -189,3 +189,11 @@ describe('sendViaSMS — allowClaimed branch forwards firstDeliveryOnly to the c
     })).rejects.not.toMatchObject({ code: 'already_delivered' });
   });
 });
+
+describe('claimPacketInvoiceForSend — the queue worker due-claim is never a first delivery (round-0 audit P1)', () => {
+  test('requireDue together with firstDeliveryOnly is refused before any claim is attempted', async () => {
+    const { claimPacketInvoiceForSend } = require('../services/invoice');
+    await expect(claimPacketInvoiceForSend('inv-1', 'pkt-1', { requireDue: true, firstDeliveryOnly: true }))
+      .rejects.toThrow(/cannot be a first delivery/);
+  });
+});
