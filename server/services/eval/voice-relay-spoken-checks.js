@@ -2530,6 +2530,10 @@ function reportConfirmationQuestion(text, subject, location) {
   return confirmation.test(normalized);
 }
 
+// A discourse coordinator introduces a correction ("But", "However,", "No,");
+// continuation and later-retraction checks read the clause after it.
+const REPORT_DISCOURSE_PREFIX_SOURCE = '(?:(?:but|however|though|although|yet|still|and|so|then|anyway|no)\\b\\s*,?\\s*)*';
+
 function reportSharedLocationContinuation(
   text, clauseEnd, location, subject, assertionEnd, findingText, matchedLocation = location,
 ) {
@@ -2537,7 +2541,7 @@ function reportSharedLocationContinuation(
   // Reuse the splitter's actual boundaries so a retraction is not lost at
   // "though", "yet", or another coordinator the splitter already recognizes.
   // An immediately following sentence can explicitly retract the same finding.
-  const boundary = new RegExp(`^(?:${CLAUSE_BOUNDARY_TOKEN_RE.source})\\s*,?\\s*`, 'i').exec(remainder);
+  const boundary = new RegExp(`^(?:${CLAUSE_BOUNDARY_TOKEN_RE.source})\\s*,?\\s*${REPORT_DISCOURSE_PREFIX_SOURCE}`, 'i').exec(remainder);
   // Pronouns retract the last assertion. An earlier assertion can still be
   // retracted when the correction explicitly names its product.
   if (assertionEnd < clauseEnd && !(boundary && new RegExp(subject, 'i').test(
@@ -2584,7 +2588,7 @@ function reportSharedLocationContinuation(
   // a plain finding: the list clause is the pronoun's antecedent. Speech-event
   // boundaries are already joined into sentences by the runner.
   const afterList = end >= 0
-    ? new RegExp(`^(?:${CLAUSE_BOUNDARY_TOKEN_RE.source})\\s*,?\\s*`, 'i').exec(remainder.slice(end)) : null;
+    ? new RegExp(`^(?:${CLAUSE_BOUNDARY_TOKEN_RE.source})\\s*,?\\s*${REPORT_DISCOURSE_PREFIX_SOURCE}`, 'i').exec(remainder.slice(end)) : null;
   const retractedAfterList = Boolean(afterList) && retracts(remainder.slice(end + afterList[0].length), listFinding);
   return {
     text: remainder.slice(0, end >= 0 ? end : undefined),
@@ -2607,9 +2611,9 @@ function reportHasLaterExplicitRetraction(text, after, subject, location, findin
     if (!product.test(statement) || !place.test(statement)) return false;
     // A discourse coordinator ("But", "However,", "Though") introduces the
     // correction; the anchored denial checks read the clause after it.
-    const qualifier = reportRetractionClause(statement.replace(
-      /^\s*(?:(?:but|however|though|although|yet|still|and|so|then|anyway|no)\b\s*,?\s*)+/i, '',
-    ), subject, location);
+    const qualifier = reportRetractionClause(
+      statement.replace(new RegExp(`^\\s*${REPORT_DISCOURSE_PREFIX_SOURCE}`, 'i'), ''), subject, location,
+    );
     return reportTrailingDenialOrCorrection(qualifier) || REPORT_TRAILING_UNCERTAINTY_RE.test(qualifier)
       || reportTimedDenial(qualifier, findingText) || reportTrailingNoncompletion(qualifier);
   });
@@ -2619,8 +2623,10 @@ function report_readback_confirms(value, record, { spoken }) {
   const subjectRe = new RegExp(value.subject, 'gi');
   const locationRe = new RegExp(value.location, 'gi');
   // Speech-event boundaries must not hide an immediately following correction.
-  let text = spoken.map((utterance) => /[.!?;]\s*$/.test(utterance)
-    ? utterance : `${utterance}.`).join(' ');
+  // "8 a.m." would otherwise end the sentence at "a."; normalize clock
+  // abbreviations before any sentence or clause splitting.
+  let text = normalizeTimeAbbreviations(spoken.map((utterance) => /[.!?;]\s*$/.test(utterance)
+    ? utterance : `${utterance}.`).join(' '));
   // An elided passive contrast repeats this product only when the preceding
   // frame has one treatment predicate; a later named product owns its contrast.
   for (const product of [...reportContentMatches(text, subjectRe)].reverse()) {

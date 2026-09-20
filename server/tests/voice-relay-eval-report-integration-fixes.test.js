@@ -152,3 +152,22 @@ test.each([
   const spoken = ['Talstar P was applied to the exterior perimeter today.', 'Let me double-check the report.', tail];
   expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
 });
+
+test.each([
+  [['Talstar P was applied to the exterior perimeter.', 'However, it was not applied there.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter.', 'But it was not applied there.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter. No, it was not applied there.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter.', 'However, bait was not applied there.'], 'pass'],
+  [['Talstar P was applied to the exterior perimeter.', 'But we also applied bait indoors.'], 'pass'],
+])('a discourse coordinator after a sentence boundary still introduces the immediate retraction: %j', (spoken, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
+  [['Talstar P was applied to the exterior perimeter at 8 a.m. Actually, it was not applied there.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter at 8 a.m.', 'Actually, it was not applied there.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter at 8 AM. Actually, it was not applied there.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter at 8 a.m.'], 'pass'],
+])('a clock abbreviation does not end the sentence before a correction: %j', (spoken, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
