@@ -3694,6 +3694,7 @@ const InvoiceService = {
       || email.deliveryOutcome === "uncertain");
     let ownedDeliveryFinalized = false;
     let queueResolutionError = null;
+    let adoptedQueueUnrestored = false;
     if (ok) {
       // Settle the adopted rows BEFORE the finalize below clears
       // send_claim_token — both the resolve and the restore are token-scoped
@@ -3704,43 +3705,54 @@ const InvoiceService = {
         if (consumedQueuedSendRows.length) logger.warn(`[invoice] SMS outcome unverified for ${claim.invoice.invoice_number} — adopted queued text left pending for review`);
       } else if (consumedQueuedSendRows.length) {
         const queueRestored = await restoreSendClaim(invoiceId, previousStatus, false, consumedQueuedSendRows, db, claim.invoice.send_claim_token);
-        if (!queueRestored) logger.error(`[invoice] Could not give back the adopted queued pay-link text for ${claim.invoice.invoice_number} after an email-only delivery — a later resend re-adopts it`);
+        if (!queueRestored) {
+          // The customer's queued text is still cancelled (its pending
+          // marker keeps it re-adoptable) and nothing automatic will send
+          // it. Same posture as a post-delivery bookkeeping failure: keep
+          // the 'sending' claim instead of finalizing, so stale-claim
+          // recovery in processScheduledSends PARKS the invoice for operator
+          // review and the operator's resend re-adopts the row.
+          adoptedQueueUnrestored = true;
+          logger.error(`[invoice] Could not give back the adopted queued pay-link text for ${claim.invoice.invoice_number} after an email-only delivery — claim retained for review`);
+        }
       }
-      const finalized = await whereSendClaimOwned(
-        db("invoices").where({ id: invoiceId }).whereIn("status", SEND_FINALIZABLE_STATUSES),
-        claim.invoice.send_claim_token,
-      )
-        .update({
-          status: db.raw(
-            "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
-          ),
-          sent_at: new Date(),
-          scheduled_send_at: null,
-          scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(db),
-          scheduled_request_review: false,
-          scheduled_review_delay_minutes: null,
-          send_claim_token: null,
-          updated_at: new Date(),
-        });
-      ownedDeliveryFinalized = finalized !== 0;
-      // First send finalized on SMS and/or email — convert the originating lead.
-      // Covers the email-only case the inner sendViaSMS hook can't (it skips when
-      // allowClaimed). Resend-safe via the priorStatus gate.
-      if (ownedDeliveryFinalized) {
-        await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(claim.invoice.sent_at || claim.invoice.sms_sent_at) });
-      }
-      // Arm/re-arm follow-ups on ANY successful channel (Codex #3493 r5):
-      // the inner sendViaSMS hook only runs on SMS success, so an
-      // email-only delivery finalized here armed nothing — a fresh invoice
-      // got no dunning, and an unvoided one stayed under its
-      // 'invoice_voided' stop forever. Idempotent when the SMS leg already
-      // scheduled (existing rows are returned unchanged; the void-stop
-      // re-arm is conditional).
-      if (ownedDeliveryFinalized) {
-        try {
-          await require("./invoice-followups").scheduleForInvoice(invoiceId);
-        } catch (e) {
-          logger.error(`[invoice-followups] scheduleForInvoice failed (post-send finalize): ${e.message}`);
+      if (!adoptedQueueUnrestored) {
+        const finalized = await whereSendClaimOwned(
+          db("invoices").where({ id: invoiceId }).whereIn("status", SEND_FINALIZABLE_STATUSES),
+          claim.invoice.send_claim_token,
+        )
+          .update({
+            status: db.raw(
+              "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
+            ),
+            sent_at: new Date(),
+            scheduled_send_at: null,
+            scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(db),
+            scheduled_request_review: false,
+            scheduled_review_delay_minutes: null,
+            send_claim_token: null,
+            updated_at: new Date(),
+          });
+        ownedDeliveryFinalized = finalized !== 0;
+        // First send finalized on SMS and/or email — convert the originating lead.
+        // Covers the email-only case the inner sendViaSMS hook can't (it skips when
+        // allowClaimed). Resend-safe via the priorStatus gate.
+        if (ownedDeliveryFinalized) {
+          await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(claim.invoice.sent_at || claim.invoice.sms_sent_at) });
+        }
+        // Arm/re-arm follow-ups on ANY successful channel (Codex #3493 r5):
+        // the inner sendViaSMS hook only runs on SMS success, so an
+        // email-only delivery finalized here armed nothing — a fresh invoice
+        // got no dunning, and an unvoided one stayed under its
+        // 'invoice_voided' stop forever. Idempotent when the SMS leg already
+        // scheduled (existing rows are returned unchanged; the void-stop
+        // re-arm is conditional).
+        if (ownedDeliveryFinalized) {
+          try {
+            await require("./invoice-followups").scheduleForInvoice(invoiceId);
+          } catch (e) {
+            logger.error(`[invoice-followups] scheduleForInvoice failed (post-send finalize): ${e.message}`);
+          }
         }
       }
     } else if (terminalVisitRefused) {
@@ -3865,6 +3877,7 @@ const InvoiceService = {
     }
     return { ok, sms, email, payUrl, creditApplied: sendCreditResult?.applied || 0,
       ...(queueResolutionError ? { queueResolutionError } : {}),
+      ...(adoptedQueueUnrestored ? { code: "ADOPTED_QUEUE_RESTORE_FAILED", deliveryHeld: true } : {}),
       ...(terminalVisitRefused
         ? { code: "INVOICE_VISIT_TERMINAL" }
         : terminalVisitObserved
