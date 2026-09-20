@@ -385,19 +385,40 @@ async function checkEmailPreProviderGates({ app, stage, to, templateKey, message
 // through this transaction) and the provider request, so a dead invite or
 // an obsolete confirmation never leaves.
 async function sendEmailToProvider({ app, stage, to, subject, html, text, templateKey, messageRow, sendAttemptToken, beforeProvider }) {
-  return db.transaction(async (trx) => {
-    await trx('job_applications').where({ id: app.id }).forUpdate().first('id');
-    if (typeof beforeProvider === 'function' && (await beforeProvider(trx)) === false) {
-      await settleEmailRow(messageRow, sendAttemptToken, {
-        status: 'failed', error_message: 'stale: application changed before the provider handoff',
-      }, trx);
-      return { outcome: 'stale', code: 'recruiting_stale' };
+  // The provider's answer is captured OUTSIDE the transaction's fate (Codex
+  // r21 P2): once SendGrid accepted (or answered ambiguously), a failed
+  // ledger write or a rejected commit is bookkeeping — it must never turn
+  // the attempt into a definite 'failed' the admin would resend over.
+  let provider = null;
+  try {
+    const stale = await db.transaction(async (trx) => {
+      await trx('job_applications').where({ id: app.id }).forUpdate().first('id');
+      if (typeof beforeProvider === 'function' && (await beforeProvider(trx)) === false) {
+        await settleEmailRow(messageRow, sendAttemptToken, {
+          status: 'failed', error_message: 'stale: application changed before the provider handoff',
+        }, trx);
+        return { outcome: 'stale', code: 'recruiting_stale' };
+      }
+      provider = await dispatchEmailToProvider({ app, stage, to, subject, html, text, templateKey, messageRow, sendAttemptToken });
+      return null;
+    });
+    if (stale) return stale;
+  } catch (err) {
+    if (!provider) {
+      logger.error(`[recruiting-comms] email handoff transaction failed before the provider (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
+      return { outcome: 'failed', code: 'handoff_transaction_failed' };
     }
-    return dispatchEmailToProvider({ app, stage, to, subject, html, text, templateKey, messageRow, sendAttemptToken, trx });
-  });
+    logger.warn(`[recruiting-comms] email handoff commit failed after the provider answered (application ${app.id}, stage ${stage}, outcome ${provider.result.outcome}): ${errorSummary(err)}`);
+  }
+  // Settlement after the lock, best-effort: a failure here leaves the row
+  // 'sending' but never changes the outcome the applicant already got.
+  await settleEmailRow(messageRow, sendAttemptToken, provider.settle);
+  return provider.result;
 }
 
-async function dispatchEmailToProvider({ app, stage, to, subject, html, text, templateKey, messageRow, sendAttemptToken, trx }) {
+// The SendGrid request + outcome classification. Returns the leg result and
+// the ledger patch that records it — no ledger write of its own.
+async function dispatchEmailToProvider({ app, stage, to, subject, html, text, templateKey, messageRow, sendAttemptToken }) {
   try {
     const result = await sendgrid.sendOne({
       to,
@@ -416,12 +437,10 @@ async function dispatchEmailToProvider({ app, stage, to, subject, html, text, te
         ? { email_message_id: messageRow.id, send_attempt_token: sendAttemptToken }
         : { send_attempt_token: sendAttemptToken },
     });
-    await settleEmailRow(messageRow, sendAttemptToken, {
-      status: 'sent',
-      provider_message_id: result && result.messageId ? result.messageId : null,
-      sent_at: new Date(),
-    }, trx);
-    return { outcome: 'sent', code: null };
+    return {
+      result: { outcome: 'sent', code: null },
+      settle: { status: 'sent', provider_message_id: result && result.messageId ? result.messageId : null, sent_at: new Date() },
+    };
   } catch (err) {
     // A definite 4xx rejection (sendgrid.isDefiniteRejection — the same
     // canonical classification the other SendGrid callers use) really was
@@ -431,12 +450,11 @@ async function dispatchEmailToProvider({ app, stage, to, subject, html, text, te
     // not a euphemism for 'failed' (Codex P2).
     const definite = sendgrid.isDefiniteRejection(err);
     const status = definite ? 'failed' : 'uncertain';
-    await settleEmailRow(messageRow, sendAttemptToken, {
-      status,
-      error_message: String((err && err.message) || 'send failed').slice(0, 500),
-    }, trx);
     logger.warn(`[recruiting-comms] SendGrid send failed (application ${app.id}, stage ${stage}, status ${(err && err.status) || 'unknown'}, outcome ${status})`);
-    return { outcome: status, code: err && err.status ? `sendgrid_${err.status}` : 'send_failed' };
+    return {
+      result: { outcome: status, code: err && err.status ? `sendgrid_${err.status}` : 'send_failed' },
+      settle: { status, error_message: String((err && err.message) || 'send failed').slice(0, 500) },
+    };
   }
 }
 

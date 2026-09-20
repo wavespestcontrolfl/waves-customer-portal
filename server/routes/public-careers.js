@@ -28,7 +28,7 @@ const { noStore } = require('../middleware/no-store');
 const { createJobApplication } = require('../services/job-applications');
 const { listInterviewSlots, formatSlotLabel } = require('../services/interview-slots');
 const { acquireOccupancyLocks } = require('../services/scheduling/occupancy');
-const { etParts } = require('../utils/datetime-et');
+const { etParts, addETDays, etDateString } = require('../utils/datetime-et');
 const { contactOf, firstNameOf, errorSummary } = require('../services/recruiting-comms');
 const { WAVES_ADDRESS_LINE } = require('../constants/business');
 
@@ -235,8 +235,10 @@ router.post('/interview/:token/book', interviewLimiter, async (req, res) => {
       // late allocations can run past midnight), in the shared sorted order
       // (Codex r19 P2): a previous-day customer booking and this interview
       // can no longer each lock only their own date and commit over each other.
-      const prev = etParts(new Date(startMs - 24 * 60 * 60 * 1000));
-      const prevDateStr = `${prev.year}-${String(prev.month).padStart(2, '0')}-${String(prev.day).padStart(2, '0')}`;
+      // ET calendar arithmetic, never 24 elapsed hours (Codex r21 P2): across
+      // the spring transition a slot before 1 AM minus 24h lands two calendar
+      // days back and skips the date the slot builder actually reads.
+      const prevDateStr = etDateString(addETDays(new Date(startMs), -1));
       await acquireOccupancyLocks(trx, [prevDateStr, slotDateStr]);
 
       // Row lock: a concurrent book/withdraw for THIS application waits here

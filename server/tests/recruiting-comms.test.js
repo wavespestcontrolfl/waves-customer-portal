@@ -790,6 +790,31 @@ describe('eligibility at the provider boundaries', () => {
     expect(mockDb.__tables.email_messages[0]).toMatchObject({ status: 'failed', error_message: expect.stringMatching(/stale/) });
   });
 
+  test('email: SendGrid acceptance survives a failed ledger settlement / rejected commit — never reported as failed (Codex r21 P2)', async () => {
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    mockDb.__tables.email_messages = [];
+    mockSendOne.mockClear();
+    // the handoff transaction rejects at commit, after the provider answered
+    const realTx = mockDb.transaction;
+    let calls = 0;
+    mockDb.transaction = jest.fn(async (fn) => {
+      calls += 1;
+      const out = await fn(mockDb);
+      if (calls === 2 && mockSendOne.mock.calls.length) throw Object.assign(new Error('current transaction is aborted'), { code: '25P02' });
+      return out;
+    });
+    try {
+      const result = await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: false, email: true, by: 'tech-1' });
+      expect(mockSendOne).toHaveBeenCalledTimes(1);
+      expect(result.email).toBe('sent');
+      const entry = mockDb.__tables.job_applications.find((r) => r.id === 'app-1').comms_history.find((e) => e.channel === 'email');
+      expect(entry.outcome).toBe('sent');
+    } finally {
+      mockDb.transaction = realTx;
+    }
+  });
+
   test('SMS: the handoff is stamped BEFORE the eligibility read, which is the last await before the provider (Codex r14)', async () => {
     mockRenderSmsTemplate.mockResolvedValue('Pick a time: https://x/careers/interview/a');
     const app = baseApp({ interview_token: 'a'.repeat(64) });

@@ -522,16 +522,20 @@ export default function CareersInterviewPage() {
     return <InterviewLoadingState />;
   }
 
+  // A completed withdrawal is the applicant's own final action and outranks
+  // every other terminal state (Codex r21 P3): a booking request still
+  // settling when they withdrew comes back 404 and must not replace the
+  // confirmation with "link no longer active".
+  if (withdrawn) {
+    return <InterviewTerminalState kind="withdrawn" />;
+  }
+
   if (error === 'notfound') {
     return <InterviewTerminalState kind="notfound" />;
   }
 
   if (error === 'temporary' || !data) {
     return <InterviewTerminalState kind="temporary" onRetry={() => setLoadAttempt((a) => a + 1)} />;
-  }
-
-  if (withdrawn) {
-    return <InterviewTerminalState kind="withdrawn" />;
   }
 
   const goInactive = () => {
