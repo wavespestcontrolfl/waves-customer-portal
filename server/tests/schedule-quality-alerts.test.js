@@ -22,14 +22,16 @@ test('a double-booking is carded first, without a calibrated drive model, and ne
   // Staff saves commit through a clash by owner ruling (advisory only), so
   // the planned-board card is the only place a second customer in the same
   // slot becomes visible before the reminder text goes out.
-  const clash = { doubleBookedVisits: [{ ids: ['a', 'b'], minutes: 60 }], missingCoordinates: ['c'] };
+  // Two collisions, one of them a three-row block (combined booking + neighbour): counted per collision, not per row.
+  const clash = { doubleBookedVisits: [{ ids: ['a', 'b'], minutes: 60 }, { ids: ['m1', 'm2', 'n'], minutes: 25 }], missingCoordinates: ['c'] };
   const alerts = buildRouteQualityAlerts(day(clash), 'legacy');
   expect(alerts).toHaveLength(1);
   expect(alerts[0].payload.issues).toEqual([
-    expect.stringContaining("2 visits overlap another appointment's promised window"),
+    expect.stringContaining('2 double-bookings: two appointments promised at the same time'),
     expect.stringContaining('without a usable location'),
   ]);
-  expect(alerts[0].payload).toMatchObject({ doubleBookedVisits: 2 });
+  expect(alerts[0].payload).toMatchObject({ doubleBookings: 2 });
+  expect(alerts[0].payload.issues[0]).not.toMatch(/reminder/);
   expect(alerts[0].payload).not.toHaveProperty('departureMinutes');
   // day-quality already drops same-customer pairs; an empty list makes no card.
   expect(buildRouteQualityAlerts(day({ doubleBookedVisits: [] }), 'calibrated')).toEqual([]);
@@ -85,7 +87,7 @@ describe('queue capacity', () => {
   });
 
   test('a one-issue double-booking card outranks multi-issue routes under the cap (codex #4620 r1 P2)', () => {
-    const clash = ['2040-09-10:tech-zz', { techId: 'tech-zz', payload: { date: '2040-09-10', doubleBookedVisits: 2, issues: ['2 visits overlap'] } }];
+    const clash = ['2040-09-10:tech-zz', { techId: 'tech-zz', payload: { date: '2040-09-10', doubleBookings: 1, issues: ['1 double-booking'] } }];
     const capped = capRouteQualityCards(new Map([...techsOn('2040-09-10', 6), clash]));
     expect([...capped.keys()].sort()).toEqual(['2040-09-10:overflow', '2040-09-10:tech-00', '2040-09-10:tech-zz']);
   });

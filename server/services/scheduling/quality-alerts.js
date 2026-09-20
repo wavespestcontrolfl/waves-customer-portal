@@ -39,7 +39,7 @@ function cardPriority([, a], [, b]) {
   if (!a.techId !== !b.techId) return a.techId ? 1 : -1;
   // A double-booking outranks any number of location or duration notes: the
   // cap must never reduce it to an anonymous overflow line.
-  if (!a.payload.doubleBookedVisits !== !b.payload.doubleBookedVisits) return a.payload.doubleBookedVisits ? -1 : 1;
+  if (!a.payload.doubleBookings !== !b.payload.doubleBookings) return a.payload.doubleBookings ? -1 : 1;
   if (a.payload.issues.length !== b.payload.issues.length) return b.payload.issues.length - a.payload.issues.length;
   return String(a.techId).localeCompare(String(b.techId));
 }
@@ -70,12 +70,13 @@ function capRouteQualityCards(expected, limit = MAX_CARDS_PER_DATE) {
 function technicianRouteIssues(quality, driveModel) {
   const issues = [];
   // A double-booking is a fact about the promises, not a timing forecast:
-  // it needs no drive model and outranks every other exception on the card,
-  // because one of the two visits must be moved before the 72-hour reminder
-  // text goes out. "Appointment", not "customer": one customer's second
-  // property or unit in the same slot is a clash too.
-  const clashing = new Set((quality.doubleBookedVisits || []).flatMap(pair => pair.ids)).size;
-  if (clashing) issues.push(`${clashing} visit${clashing === 1 ? '' : 's'} overlap another appointment's promised window. Move one before the reminder text goes out.`);
+  // it needs no drive model and outranks every other exception on the card.
+  // Counted per collision (one pair of physical stops — a combined booking,
+  // visit group or co-visit is one stop), never per service row, and the
+  // advice is reminder-neutral: an edit inside 72 hours can create one after
+  // the reminder text has already gone out.
+  const doubleBookings = (quality.doubleBookedVisits || []).length;
+  if (doubleBookings) issues.push(`${doubleBookings} double-booking${doubleBookings === 1 ? '' : 's'}: two appointments promised at the same time. Move one of each pair.`);
   const missing = quality.missingCoordinates.length;
   if (missing) issues.push(`${missing} visit${missing === 1 ? '' : 's'} without a usable location. Verify the service address and map pin.`);
   const unknownDurations = quality.defaultDurations.length;
@@ -85,13 +86,13 @@ function technicianRouteIssues(quality, driveModel) {
   }
   const late = driveModel === 'calibrated' && !unknownDurations ? quality.modeledLateVisits?.length : 0;
   if (late) issues.push(`${late} visit${late === 1 ? '' : 's'} modeled after the promised arrival window. Review the running order and appointment commitments.`);
-  return { issues, late, clashing };
+  return { issues, late, doubleBookings };
 }
 
 function buildRouteQualityAlerts(day, driveModel) {
   const alerts = [];
   for (const quality of day.byTech) {
-    const { issues, late, clashing } = technicianRouteIssues(quality, driveModel);
+    const { issues, late, doubleBookings } = technicianRouteIssues(quality, driveModel);
     // The technician's name belongs on this admin-room card: the
     // dispatch:alert broadcast carries the bare row without the joined
     // tech_name, so without it two live route cards for the same day are
@@ -99,7 +100,7 @@ function buildRouteQualityAlerts(day, driveModel) {
     // still stores technician ids alone.
     if (issues.length) alerts.push({ techId: quality.technicianId, payload: {
       date: day.date, ...(quality.technician ? { techName: quality.technician } : {}),
-      issues, ...(clashing ? { doubleBookedVisits: clashing } : {}),
+      issues, ...(doubleBookings ? { doubleBookings } : {}),
       ...(late ? { departureMinutes: quality.assumptions.departureMinutes } : {}),
     } });
   }
