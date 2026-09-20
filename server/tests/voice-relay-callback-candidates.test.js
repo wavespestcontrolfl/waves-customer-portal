@@ -33,6 +33,14 @@ describe('callback commitment candidates', () => {
     ['We will check, and we’re going to review, then will call her.', 'coordinated', 'we', 'her'],
     ["We will check, and someone's scheduled to review, then will call her.", 'coordinated', 'someone', 'her'],
     ['We will check, and I’m going to review, then will call her.', 'coordinated', 'I', 'her'],
+    ['We will check, and of course we’re going to review, then will call her.', 'coordinated', 'we', 'her'],
+    ['We will call her next month.', 'direct', 'We', 'her'],
+    ['We will call her next weekend.', 'direct', 'We', 'her'],
+    ['We will call her next year.', 'direct', 'We', 'her'],
+    ['We will call her sometime tomorrow.', 'direct', 'We', 'her'],
+    ['We will call her later this week.', 'direct', 'We', 'her'],
+    ['We will call her back next month.', 'direct', 'We', 'her'],
+    ['We will wait, or call her.', 'bare-coordinated', 'We', 'her'],
     ['We will check, and will call her.', 'coordinated', 'We', 'her'],
     ['We will check, and call her.', 'bare-coordinated', 'We', 'her'],
     ['Sure. We will check; the office will review, then will call her.', 'coordinated', 'the office', 'her'],
@@ -108,7 +116,23 @@ describe('callback commitment candidates', () => {
     'She will hear from usual contacts.',
     'We will refuse to call her.',
     'We will avoid calling her.',
+    'We will wait while you review or call her.',
+    'We will call her a taxi.',
+    'We will call her the owner.',
+    'We will consider whether to call her.',
+    'We will avoid having to call her.',
   ])('does not create an account-holder commitment candidate: %s', (text) => {
     expect(recognizeCallbackCandidates(text, TARGETS)).toEqual([]);
+  });
+
+  test.each([
+    ['We will call José.', ['josé'], 'José'],
+    ['We will call Zoë.', ['zoë'], 'Zoë'],
+  ])('a recipient alias ending in a non-ASCII letter matches before end of input: %s', (text, aliasTargets, recipient) => {
+    const [candidate] = recognizeCallbackCandidates(text, aliasTargets);
+    expect(candidate).toBeDefined();
+    expect(candidate.kind).toBe('direct');
+    expect(candidate.recipient.text).toBe(recipient);
+    expect(text.slice(candidate.recipient.start, candidate.recipient.end)).toBe(recipient);
   });
 });
