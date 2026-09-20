@@ -1303,7 +1303,7 @@ describe('email_dictation_unambiguous (GATE_FIRST_TOUCH_AUTO_RELEASE)', () => {
   let n = 0;
   const nextEmail = () => `pat.lee@mx${++n}.example`;
   const fakeConn = ({ holds = null, mismatch = [] } = {}) => (table) => {
-    const rows = table === 'first_touch_holds' ? (holds || [{ call_log_id: 'call-1', held_email: fakeConn.current }]) : (table === 'triage_items' ? mismatch : []);
+    const rows = table === 'first_touch_holds' ? (holds || [{ call_log_id: 'call-1', held_email: fakeConn.current, customer_id: 'cust-1' }]) : (table === 'triage_items' ? mismatch : []);
     const chain = {
       whereIn: () => chain, where: () => chain, whereNot: () => chain, whereNull: () => chain, orWhereNot: () => chain,
       select: async () => rows,
@@ -1333,6 +1333,16 @@ describe('email_dictation_unambiguous (GATE_FIRST_TOUCH_AUTO_RELEASE)', () => {
   test('loader: no pending hold, or a hold aimed elsewhere → no evidence', async () => {
     expect(await run(fakeConn({ holds: [] }))).toEqual([]);
     expect(await run(fakeConn({ holds: [{ call_log_id: 'call-1', held_email: 'other@example.com' }] }))).toEqual([]);
+  });
+  test('loader: a hold that no longer belongs to the call\'s current customer (relinked call) → no evidence', async () => {
+    const conn = fakeConn({ holds: null });
+    const flags = [];
+    const email = nextEmail(); fakeConn.current = email;
+    const relinked = (table) => (table === 'first_touch_holds'
+      ? { whereIn: () => relinked(table), where: () => relinked(table), whereNot: () => relinked(table), whereNull: () => relinked(table), orWhereNot: () => relinked(table), select: async () => [{ call_log_id: 'call-1', held_email: email, customer_id: 'cust-OLD' }] }
+      : conn(table));
+    await loadUnambiguousEmailEvidence(relinked, [cardFor(email)], (id, key) => flags.push([id, key]), { now: NOW, dnsDeps: mx, suppressed: noSuppression, ownedByOther: notOwned, enabled: () => true });
+    expect(flags).toEqual([]);
   });
   test('loader: a live name_email_mismatch card keeps the read-back', async () => {
     expect(await run(fakeConn({ mismatch: [{ call_log_id: 'call-1' }] }))).toEqual([]);

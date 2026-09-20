@@ -190,9 +190,12 @@ function fencedHoldWrite(qb, claimStamp) {
 // every caller treats an unverifiable card state as fail-closed.
 async function emailReviewBlocksRelease(callLogId, dbh = db) {
   if (!callLogId) return null;
+  // A live name/email mismatch card is an unanswered identity question
+  // about this very address (codex #4622 r3 P1): it blocks the release
+  // exactly like a live read-back card, on every path through this guard.
   const live = await dbh('triage_items')
     .where({ call_log_id: callLogId })
-    .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
+    .whereIn('reason_code', [...EMAIL_REVIEW_REASON_CODES, 'name_email_mismatch'])
     .whereIn('status', ['open', 'in_progress'])
     .first('id');
   if (live) return 'email_review_live';
@@ -241,10 +244,25 @@ async function emailReviewBlocksRelease(callLogId, dbh = db) {
 // trade. Correction-driven sends (the fanout, an operator's explicit
 // address override) pass no id and deliberately bypass: a correction IS
 // the read-back.
-async function gateHoldForSend(holdId, claimStamp, dbh = db, targetEmailLc = null, reviewCallLogId = null) {
+async function gateHoldForSend(holdId, claimStamp, dbh = db, targetEmailLc = null, reviewCallLogId = null, ownershipCustomerId = null) {
   if (reviewCallLogId) {
     await dbh('first_touch_holds').where({ id: holdId }).forUpdate().first('id');
     if (await emailReviewBlocksRelease(reviewCallLogId, dbh)) return null;
+  }
+  // (7) Ownership under the shared per-address lock (codex #4622 r3 P1):
+  // every writer that ASSIGNS a customer email takes lockCustomerEmail,
+  // and this gate runs inside the transaction the release holds open
+  // across the provider call — so an assignment to another party either
+  // committed before this read (refused here) or queues behind it until
+  // the send has settled. Trigger-driven releases only; an explicit
+  // operator correction already answered ownership in the fanout.
+  if (ownershipCustomerId && targetEmailLc) {
+    try {
+      await require('../utils/customer-comms-lock').lockCustomerEmail(dbh, targetEmailLc);
+      if (await require('./email-bounce-recovery').correctedAddressOwnedByOther(targetEmailLc, ownershipCustomerId, dbh)) return null;
+    } catch (_e) {
+      return null; // fail closed: an unverifiable owner never gets a send
+    }
   }
   const stamp = new Date();
   const qb = dbh('first_touch_holds')
@@ -661,7 +679,13 @@ async function resumeHeldFirstTouch({
       if (hold.call_log_id) {
         try {
           callCreatedAt = (await dbh('call_log').where({ id: hold.call_log_id }).first('created_at'))?.created_at || null;
-        } catch (_e) { callCreatedAt = null; }
+        } catch (_e) {
+          // The source-call age is part of the shelf-life decision; an
+          // unreadable one is retryable, never a pass (codex #4622 r3 P1).
+          await settleHold(hold.id, { status: 'pending', last_error: 'call_age_unavailable' }, dbh, claimStamp);
+          result.skipped = result.skipped || 'call_age_unavailable';
+          continue;
+        }
       }
       if (firstTouchHoldIsStale(hold, { callCreatedAt })) {
         await settleHold(hold.id, { status: 'blocked', last_error: 'first_touch_stale' }, dbh, claimStamp);
@@ -1093,7 +1117,7 @@ async function resumeHeldFirstTouch({
               // (r48) — see gateHoldForSend. Passed only for a
               // trigger-driven release; an explicit correction bypasses.
               const gateStamp = await gateHoldForSend(
-                hold.id, claimStamp, trx, sendEmail, email ? null : hold.call_log_id,
+                hold.id, claimStamp, trx, sendEmail, email ? null : hold.call_log_id, email ? null : holdCustomerId,
               );
               if (!gateStamp) {
                 gateRefused = true;

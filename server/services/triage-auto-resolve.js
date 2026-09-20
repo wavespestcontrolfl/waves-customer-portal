@@ -1265,8 +1265,8 @@ async function loadUnambiguousEmailEvidence(conn, items, flag, {
     .where(function notDenied() {
       this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
     })
-    .select('call_log_id', 'held_email');
-  const heldByCall = new Map(holds.map((h) => [String(h.call_log_id), emailLc(h.held_email)]));
+    .select('call_log_id', 'held_email', 'customer_id');
+  const heldByCall = new Map(holds.map((h) => [String(h.call_log_id), { email: emailLc(h.held_email), customerId: String(h.customer_id || '') }]));
   // A LIVE name/email mismatch card is an unanswered identity question
   // about this very address, whatever the rolling flags say after a
   // force-reprocess (codex r1 P1); the ledger's own release guard only
@@ -1280,7 +1280,12 @@ async function loadUnambiguousEmailEvidence(conn, items, flag, {
   const isOwnedByOther = ownedByOther || require('./email-bounce-recovery').correctedAddressOwnedByOther;
   const eligible = [];
   for (const [itemId, { item, target }] of targets) {
-    if (heldByCall.get(String(item.call_log_id)) !== target) continue;
+    const held = heldByCall.get(String(item.call_log_id));
+    if (!held || held.email !== target) continue;
+    // The ledger row must still belong to the customer the call is linked
+    // to NOW (codex #4622 r3 P1): an operator relink moves the call, not
+    // the hold, and the release engine enrolls the HOLD's customer.
+    if (held.customerId !== String(item.call_customer_id)) continue;
     if (mismatchLive.has(String(item.call_log_id))) continue;
     // Fail closed on every external check: a suppressed address (a prior
     // hard bounce) stays open for the owner's correction instead of

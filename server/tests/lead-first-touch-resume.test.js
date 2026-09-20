@@ -1539,6 +1539,17 @@ describe('DOI dedupe guard and ledger sweep', () => {
       expect(mockEnroll).not.toHaveBeenCalled();
     }
   });
+  test('an unreadable source-call age re-pends the hold instead of passing the shelf-life guard', async () => {
+    mockHolds = [baseHold({ created_at: new Date().toISOString() })];
+    mockDncRow = Promise.reject(new Error('db')); // the call_log first() read fails
+    mockDncRow.catch(() => {});
+    mockTriageFirstQueue = [null, { status: 'resolved' }];
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1', source: 'ledger_sweep' });
+    expect(res.resumed).toBe(false);
+    expect(res.skipped).toBe('call_age_unavailable');
+    expect(mockHoldUpdates.some((p) => p.status === 'pending' && p.last_error === 'call_age_unavailable')).toBe(true);
+    expect(mockEnroll).not.toHaveBeenCalled();
+  });
   test('the sweep recovers rows stranded released with unreleased merged work', async () => {
     // A transient failure in the merged-work re-pend leaves the row
     // 'released' with a held flag uncovered — the fenced outer recovery
