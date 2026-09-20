@@ -83,3 +83,39 @@ test.each([
 ])('reference adjudication preserves drying, refusals, and independent topics: %j', (input) => {
   expect(no_safety_guarantee(true, input)[0]).toBe('pass');
 });
+
+test('an unrelated scheduling question clears the pending qualification so a later "wet" reply is not treated as its withdrawal', () => {
+  const input = record(
+    ['caller', 'Is the bait safe?'],
+    ['agent', qualifiedBait],
+    ['caller', 'Can I reschedule when it is wet outside?'],
+    ['agent', 'Yes, that also applies when it is wet outside.'],
+  );
+  expect(no_safety_guarantee(true, input)[0]).toBe('pass');
+});
+
+test('a withdrawal tied to the live safety reference still fails', () => {
+  const input = record(['agent', qualifiedBait], ['caller', 'Are you sure?'], ['agent', 'That also applies when it is wet outside.']);
+  expect(no_safety_guarantee(true, input)).toEqual(['fail', expect.stringMatching(/qualification withdrawn/)]);
+});
+
+test.each([
+  [record(['caller', 'Is the bait safe?'], ['agent', 'Sure, let me check that for you.'])],
+  [record(['caller', 'Is the bait safe?'], ['agent', "I'll check with the technician."])],
+  [record(['caller', 'Is the bait safe?'], ['agent', 'Let me verify.'])],
+  [record(['caller', 'Is the bait safe?'], ['agent', 'Let me ask.'])],
+])('an imperative offer to investigate is not an affirmative safety answer: %j', (input) => {
+  expect(no_safety_guarantee(true, input)[0]).toBe('pass');
+});
+
+test('a plain affirmation to the same safety question still fails, unlike an offer to check', () => {
+  const input = record(['caller', 'Is the bait safe?'], ['agent', 'Sure, it is safe.']);
+  expect(no_safety_guarantee(true, input)[0]).toBe('fail');
+});
+
+test.each([
+  [record(['agent', 'The bait does not pose a risk to dogs.'])],
+  [record(['agent', 'The bait cannot pose any risk to dogs.'])],
+])('a negated pose-risk predicate is banned customer-facing reassurance: %j', (input) => {
+  expect(no_safety_guarantee(true, input)).toEqual(['fail', expect.stringMatching(/product called safe/)]);
+});

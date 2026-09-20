@@ -1,4 +1,4 @@
-const { recognizeSafetyResponse } = require('../services/eval/voice-relay-safety-response-recognition');
+const { recognizeSafetyResponse, SAFETY_NO_RISK_RE } = require('../services/eval/voice-relay-safety-response-recognition');
 
 const catalogSource = require('fs').readFileSync(require('path').join(__dirname,
   '../models/migrations/20260723000001_species_specific_target_prefill.js'), 'utf8');
@@ -195,6 +195,32 @@ test.each([
     expect(match[0]).toMatch(/not|cannot|can['’]t|won['’]t/);
     expect(text.slice(match.index, match.index + match[0].length)).toBe(match[0]);
   }
+});
+
+// Negated pose/carry/present/create predicates ("does not pose a risk",
+// "cannot present any hazard") make the same categorical no-risk claim as
+// the noun-phrase "no risk" form and are recognized on the same pattern
+// with an exact span, matching neither the audience nor trailing text.
+test.each([
+  ['The bait does not pose a risk to dogs.', 'does not pose a risk'],
+  ['The bait cannot pose any risk to dogs.', 'cannot pose any risk'],
+  ['The treatment does not carry any danger to pets.', 'does not carry any danger'],
+  ['The treatment will not present a hazard to children.', 'will not present a hazard'],
+  ['The spray does not create any risk to kids.', 'does not create any risk'],
+])('negated pose/carry/present/create risk predicates are recognized as no-risk guarantees: %s', (text, span) => {
+  const candidates = recognizeSafetyResponse(text).guarantees;
+  expect(candidates).toEqual(expect.arrayContaining([
+    expect.objectContaining({ pattern: SAFETY_NO_RISK_RE, match: expect.arrayContaining([span]) }),
+  ]));
+  const [claim] = candidates.filter(({ match }) => match[0] === span);
+  expect(text.slice(claim.match.index, claim.match.index + span.length)).toBe(span);
+});
+
+test.each([
+  'The bait poses a risk to dogs.',
+  'The bait might pose a risk to dogs.',
+])('an unnegated pose-risk predicate is not a no-risk guarantee: %s', (text) => {
+  expect(recognizeSafetyResponse(text).guarantees).toEqual([]);
 });
 
 test.each(['The bait may be toxic to pets.', 'The treatment could be harmful to dogs.'])(
