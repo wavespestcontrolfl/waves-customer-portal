@@ -371,6 +371,19 @@ export function sendErrorMessage(err) {
   return null;
 }
 
+// A deliberate Resend that hits one of these codes was REFUSED: a queued
+// text (or the prior delivery) still owns the pay link and any review hold
+// stays in place. Worded as a block, never with the benign phrasing a
+// first-delivery no-op success uses — an operator clearing a hold must not
+// read a refusal as "fine, already queued". Exported for tests.
+export function resendConflictMessage(err) {
+  if (err?.code === "queued_pay_link") {
+    return "Invoice send blocked: a text carrying this pay link is already queued for the send window — check its delivery status before resending";
+  }
+  if (err?.code === "already_delivered") return "Invoice send blocked: this invoice was already delivered";
+  return null;
+}
+
 // Create-path send toast. /admin/invoices/:id/send returns per-channel
 // results ({ sms: { ok }, email: { ok, recipient } }) and 200 when EITHER
 // channel succeeded — a flat "created & sent" toast hides a half-failed
@@ -3458,7 +3471,7 @@ function SendInvoiceModal({
       });
       onSent(res);
     } catch (err) {
-      onError(`Invoice send failed: ${sendErrorMessage(err) || err.message}`);
+      onError(resendConflictMessage(err) || `Invoice send failed: ${err.message}`);
     } finally {
       sendingRef.current = false;
       setSending(false);

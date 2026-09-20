@@ -15,6 +15,7 @@ import {
   orderNoticeCandidates,
   persistedSendDisposition,
   sendErrorMessage,
+  resendConflictMessage,
   sendOutcomeMessage,
   validateAttachmentFiles,
 } from "./AdminInvoicesPage.jsx";
@@ -346,5 +347,16 @@ describe("AdminInvoicesPage ambiguous-send disposition", () => {
     expect(
       persistedSendDisposition({ status: "draft", sent_at: null, sms_sent_at: null }),
     ).toBe("unsent");
+  });
+});
+
+describe("resendConflictMessage", () => {
+  it("words a refused Resend as a block, distinct from the first-delivery no-op phrasing", () => {
+    const blocked = resendConflictMessage({ code: "queued_pay_link" });
+    expect(blocked).toMatch(/^Invoice send blocked:/);
+    expect(blocked).not.toBe(sendErrorMessage({ code: "queued_pay_link" }));
+    expect(resendConflictMessage({ code: "already_delivered" })).toMatch(/^Invoice send blocked:/);
+    expect(resendConflictMessage({ code: "send_claim_lost" })).toBeNull();
+    expect(resendConflictMessage(new Error("boom"))).toBeNull();
   });
 });
