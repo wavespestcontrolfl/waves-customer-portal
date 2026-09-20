@@ -83,6 +83,21 @@ function staleClaimReviewHoldError() {
   return e;
 }
 
+describe('POST /admin/invoices/:id/send — mutual exclusivity of intent (fourth audit gap #4131)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('{ firstDelivery: true, resend: true } is refused with 400 before ever calling the service', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await postSend(baseUrl, { firstDelivery: true, resend: true });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.code).toBe('conflicting_send_intent');
+      expect(body.error).toMatch(/cannot be both a first delivery and a deliberate Resend/i);
+      expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+    });
+  });
+});
+
 describe('POST /admin/invoices/:id/send — request-contract flags (third audit P1 #4131)', () => {
   beforeEach(() => {
     jest.clearAllMocks();

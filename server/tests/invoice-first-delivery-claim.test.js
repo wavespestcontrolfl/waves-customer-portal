@@ -153,6 +153,18 @@ describe('claimInvoiceForSend — stale-claim review hold (third audit P1: EXPLI
   });
 });
 
+describe('claimInvoiceForSend — mutual exclusivity of intent (fourth audit gap #4131)', () => {
+  test('firstDeliveryOnly && overridesReviewHold together is refused before any row is even read', async () => {
+    const { invoicesTable } = makeDb({
+      id: INVOICE_ID, status: 'scheduled', send_claim_token: null,
+      scheduled_send_at: new Date(), scheduled_send_error: null,
+    });
+    await expect(claimInvoiceForSend(INVOICE_ID, { firstDeliveryOnly: true, overridesReviewHold: true }))
+      .rejects.toThrow(/cannot be both a first delivery and a deliberate Resend/);
+    expect(invoicesTable.first).not.toHaveBeenCalled();
+  });
+});
+
 
 describe('sendViaSMS — allowClaimed branch forwards firstDeliveryOnly to the claim (round-0 audit P1)', () => {
   beforeEach(() => jest.clearAllMocks());

@@ -1564,6 +1564,16 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     // stays unconditionally true on every admin route, same as main.
     const firstDeliveryOnly = firstDelivery === true;
     const overridesReviewHold = resend === true;
+    // Fourth audit gap #4131: the two flags express opposite intents (never
+    // delivered vs. deliberately reclaiming a parked row) — a request
+    // naming both is a client bug, refused loudly rather than silently
+    // picking one.
+    if (firstDeliveryOnly && overridesReviewHold) {
+      return res.status(400).json({
+        error: 'A send request cannot be both a first delivery and a deliberate Resend — pass only one of firstDelivery or resend',
+        code: 'conflicting_send_intent',
+      });
+    }
     const overrideEmail = cleanEmail(invoiceRecipientEmail);
     const overrideName = cleanOptionalText(invoiceRecipientName);
     const shouldSaveBillingRecipient = saveBillingRecipient === true;

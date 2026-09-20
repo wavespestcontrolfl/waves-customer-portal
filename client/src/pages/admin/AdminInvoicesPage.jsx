@@ -1483,8 +1483,13 @@ function InvoiceList({
         }),
       });
       const noun = receiptMode ? "receipt" : "invoice";
+      // held_count only exists on /batch/send (a parked row under a
+      // stale-claim review hold — sent_count + failed_count alone would
+      // look like an unexplained shortfall; fourth audit gap #4131).
       showToast(
-        `Sent ${result.sent_count} of ${result.total} ${noun}${result.total === 1 ? "" : "s"}${result.failed_count ? ` (${result.failed_count} failed)` : ""}`,
+        `Sent ${result.sent_count} of ${result.total} ${noun}${result.total === 1 ? "" : "s"}` +
+          `${result.held_count ? ` (${result.held_count} held for review)` : ""}` +
+          `${result.failed_count ? ` (${result.failed_count} failed)` : ""}`,
       );
       clearSelection();
       load();
@@ -3417,17 +3422,17 @@ function SendInvoiceModal({
   // hold's override must be a caller's EXPLICIT statement, never inferred
   // from status/stamps) — parked wins first since a parked row can also
   // look draft/scheduled-undelivered:
-  //   - parked: processScheduledSends left this under a stale-claim review
-  //     hold (delivery unverified) — status still 'scheduled' but the due
-  //     time was cleared and an error note was left in its place. Only a
+  //   - parked: the SERVER's own stale-claim-review-hold predicate
+  //     (isStaleClaimReviewHold, computed into review_hold by the list/
+  //     detail serializers — fourth audit gap #4131: the client must never
+  //     re-guess this from scheduled_send_error's text; a scheduled row can
+  //     carry an unrelated error, e.g. a bad-phone provider rejection, with
+  //     scheduled_send_at still null and no park in effect). Only a
   //     deliberate Resend clears it.
   //   - firstDelivery: draft/scheduled, not parked, never delivered on any
   //     channel — { firstDelivery: true } must never carry override intent.
   //   - otherwise: an ordinary Resend.
-  const isParked =
-    invoice.status === "scheduled" &&
-    !invoice.scheduled_send_at &&
-    !!invoice.scheduled_send_error;
+  const isParked = invoice.review_hold === true;
   const isFirstDelivery =
     (invoice.status === "draft" || invoice.status === "scheduled") &&
     !isParked &&

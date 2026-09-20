@@ -1166,6 +1166,18 @@ async function reconcileQueuedSendUnderClaim(invoiceId, previousStatus, claimTok
 // caller that says so may claim a parked row, independent of
 // operatorInitiated (which keeps its own, unrelated meaning — the
 // send-window bypass) and of firstDeliveryOnly.
+// Mutual exclusivity of intent (fourth audit #4131): a request cannot be
+// BOTH a first delivery and a deliberate operator override of the review
+// hold — the two express opposite claims about the same row (never
+// delivered vs. deliberately reclaiming a parked one). Shared by
+// claimInvoiceForSend and claimPacketInvoiceForSend so both fail the same
+// way, before either ever opens a transaction or touches the row.
+function assertFirstDeliveryNotAnOverride(firstDeliveryOnly, overridesReviewHold, context) {
+  if (firstDeliveryOnly && overridesReviewHold) {
+    throw new Error(`${context}: a request cannot be both a first delivery and a deliberate Resend override of the review hold`);
+  }
+}
+
 function refuseFirstDeliveryHold(current, invoiceId, firstDeliveryOnly, overridesReviewHold) {
   if (firstDeliveryOnly && alreadyDeliveredForFirstSend(current)) {
     throw invoiceAlreadyDeliveredError(current);
@@ -1183,6 +1195,7 @@ async function claimInvoiceForSend(invoiceId, {
   adoptsQueuedInvoiceSend = false,
   database = db,
 } = {}) {
+  assertFirstDeliveryNotAnOverride(firstDeliveryOnly, overridesReviewHold, "claimInvoiceForSend");
   const current = await database("invoices").where({ id: invoiceId }).first();
   if (!current) throw invoiceNotSendableError(current);
   await require("./estimate-deposits").assertInvoiceDepositSettlementReady(database, current, { lock: false });
@@ -1272,6 +1285,7 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, {
   if (requireDue && (firstDeliveryOnly || overridesReviewHold)) {
     throw new Error("claimPacketInvoiceForSend: requireDue is the queue worker's claim and cannot be a first delivery or override the review hold");
   }
+  assertFirstDeliveryNotAnOverride(firstDeliveryOnly, overridesReviewHold, "claimPacketInvoiceForSend");
   const Packets = require("./visit-completion-packets");
   return db.transaction(async (trx) => {
     // The worker's claim keeps the scheduled queue's own predicates: due
@@ -4767,6 +4781,11 @@ const InvoiceService = {
       active_payment_plan: activePaymentPlan,
       annual_prepay,
       annual_prepay_term: annualPrepayTerm,
+      // Fourth audit gap #4131: the Send modal's "parked" state must read
+      // the SAME predicate claimInvoiceForSend enforces, not a client-side
+      // guess at the error text — isStaleClaimReviewHold is the one source
+      // of truth for both.
+      review_hold: isStaleClaimReviewHold(invoice),
     };
   },
 
@@ -4960,7 +4979,13 @@ const InvoiceService = {
       ),
     ).countDistinct("invoices.id as count");
 
-    return { invoices, total: parseInt(count, 10) };
+    // Fourth audit gap #4131: same review_hold field as getById, computed
+    // from the SAME predicate (isStaleClaimReviewHold) — one source of
+    // truth for the list AND detail rows the Send modal reads.
+    return {
+      invoices: invoices.map((invoice) => ({ ...invoice, review_hold: isStaleClaimReviewHold(invoice) })),
+      total: parseInt(count, 10),
+    };
   },
 
   async update(id, updates) {
