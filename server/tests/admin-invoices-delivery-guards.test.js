@@ -256,6 +256,26 @@ describe('POST /admin/invoices/:id/send — first delivery vs. explicit Resend a
     });
   });
 
+  test('a safety-refused terminal void (INVOICE_VISIT_TERMINAL_UNVOIDED) is held for review as a 409, never a generic 400 or a silent success (Codex round-6 audit P1 #4131)', async () => {
+    // The RESOLVED wrapper shape zeroDueWrapperOutcome now produces when
+    // the void sweep itself safety-refuses (a live PaymentIntent, money
+    // in flight, an unverifiable Stripe lookup) — distinct from the
+    // completed-void INVOICE_VISIT_TERMINAL case already covered above.
+    InvoiceService.sendViaSMSAndEmail.mockResolvedValue({
+      ok: false, code: 'INVOICE_VISIT_TERMINAL_UNVOIDED', voided: false,
+      error: 'Linked visit is terminal; delivery not attempted, but the invoice could not be safely voided yet — held for review',
+      sms: { ok: false, code: 'INVOICE_VISIT_TERMINAL_UNVOIDED', deliveryOutcome: 'not_sent' },
+      email: { ok: false, code: 'INVOICE_VISIT_TERMINAL_UNVOIDED', deliveryOutcome: 'not_sent' },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await postSend(baseUrl, {});
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body).toMatchObject({ ok: false, code: 'INVOICE_VISIT_TERMINAL_UNVOIDED' });
+      expect(body.error).toMatch(/held for review/);
+    });
+  });
+
   test('an explicit Resend that finds a queued pay-link text is a real conflict, not a no-op success', async () => {
     InvoiceService.sendViaSMSAndEmail.mockImplementation(async () => {
       const e = new Error('Invoice send already in progress — a text carrying this pay link is queued for the send window');

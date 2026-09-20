@@ -684,6 +684,27 @@ describe('POST /batch/send held vs. failed classification', () => {
     });
   });
 
+  test('a safety-refused terminal void (INVOICE_VISIT_TERMINAL_UNVOIDED) is filed held, never counted failed (Codex round-6 audit P1 #4131)', async () => {
+    db.mockImplementation(() => ({
+      where: function where() { return this; },
+      first: async () => ({ status: 'scheduled', sent_at: null, sms_sent_at: null, email_sent_at: null }),
+    }));
+    InvoiceService.sendViaSMSAndEmail.mockResolvedValue({
+      ok: false, code: 'INVOICE_VISIT_TERMINAL_UNVOIDED', voided: false,
+      error: 'Linked visit is terminal; delivery not attempted, but the invoice could not be safely voided yet — held for review',
+      sms: { ok: false, code: 'INVOICE_VISIT_TERMINAL_UNVOIDED' }, email: { ok: false, code: 'INVOICE_VISIT_TERMINAL_UNVOIDED' },
+    });
+
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/batch/send', { invoiceIds: ['inv-1'] });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.failed_count).toBe(0);
+      expect(body.held_count).toBe(1);
+      expect(body.held[0]).toMatchObject({ invoiceId: 'inv-1', code: 'INVOICE_VISIT_TERMINAL_UNVOIDED' });
+    });
+  });
+
   test('a genuine dual-channel failure (no recognized held code) still counts failed, unaffected by the held carve-out above', async () => {
     db.mockImplementation(() => ({
       where: function where() { return this; },

@@ -654,3 +654,72 @@ describe('sendViaSMS — resolving the zero-due chokepoint after catching zero_d
     expect(result).toMatchObject({ sent: false, ok: false, code: 'deposit_settlement_pending' });
   });
 });
+
+describe('zeroDueDirectSendOutcome / zeroDueWrapperOutcome — a safety-refused terminal void must not be reported handled (Codex round-6 audit P1 #4131)', () => {
+  let voidSpy;
+
+  beforeEach(() => {
+    voidSpy = jest.spyOn(InvoiceService, 'voidOpenInvoicesForCancelledService');
+  });
+
+  afterEach(() => voidSpy.mockRestore());
+
+  const terminalOutcome = { kind: 'terminal', reason: 'visit_never_ran', scheduledServiceId: 'svc-1' };
+
+  test('direct (sendViaSMS) shape: a safety-refused void reports a distinct code, logs a warning, and is never treated as handled', async () => {
+    // The sweep itself refused to void (a live PaymentIntent, money in
+    // flight, an unverifiable Stripe lookup) — voidOpenInvoicesForCancelledService
+    // returns a list that does NOT include this invoice.
+    voidSpy.mockResolvedValue([]);
+
+    const result = await InvoiceService._zeroDueDirectSendOutcome(INVOICE_ID, terminalOutcome);
+
+    expect(voidSpy).toHaveBeenCalledWith('svc-1');
+    expect(result).toMatchObject({
+      sent: false, ok: false, code: 'INVOICE_VISIT_TERMINAL_UNVOIDED', voided: false,
+      deliveryOutcome: 'not_sent', retryable: true,
+    });
+    expect(result.code).not.toBe('INVOICE_VISIT_TERMINAL');
+    expect(typeof result.reason).toBe('string');
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(INVOICE_ID));
+  });
+
+  test('wrapper (sendViaSMSAndEmail) shape: same fix — a distinct code on both legs, never reported handled', async () => {
+    voidSpy.mockResolvedValue([]);
+
+    const result = await InvoiceService._zeroDueWrapperOutcome(INVOICE_ID, terminalOutcome);
+
+    expect(voidSpy).toHaveBeenCalledWith('svc-1');
+    expect(result).toMatchObject({
+      ok: false, code: 'INVOICE_VISIT_TERMINAL_UNVOIDED', voided: false,
+      sms: { ok: false, code: 'INVOICE_VISIT_TERMINAL_UNVOIDED', deliveryOutcome: 'not_sent' },
+      email: { ok: false, code: 'INVOICE_VISIT_TERMINAL_UNVOIDED', deliveryOutcome: 'not_sent' },
+    });
+    expect(result.code).not.toBe('INVOICE_VISIT_TERMINAL');
+    expect(typeof result.error).toBe('string');
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(INVOICE_ID));
+  });
+
+  test('the successful-void shape is UNCHANGED when the sweep actually voids it (direct shape)', async () => {
+    voidSpy.mockResolvedValue([INVOICE_ID]);
+
+    const result = await InvoiceService._zeroDueDirectSendOutcome(INVOICE_ID, terminalOutcome);
+
+    expect(result).toEqual({
+      sent: false, ok: false, code: 'INVOICE_VISIT_TERMINAL', deliveryOutcome: 'not_sent',
+      reason: 'Linked visit is terminal; delivery not attempted',
+    });
+  });
+
+  test('the successful-void shape is UNCHANGED when the sweep actually voids it (wrapper shape)', async () => {
+    voidSpy.mockResolvedValue([INVOICE_ID]);
+
+    const result = await InvoiceService._zeroDueWrapperOutcome(INVOICE_ID, terminalOutcome);
+
+    expect(result).toEqual({
+      ok: false, code: 'INVOICE_VISIT_TERMINAL', error: 'Linked visit is terminal; delivery not attempted',
+      sms: { ok: false, code: 'INVOICE_VISIT_TERMINAL', deliveryOutcome: 'not_sent' },
+      email: { ok: false, code: 'INVOICE_VISIT_TERMINAL', deliveryOutcome: 'not_sent' },
+    });
+  });
+});

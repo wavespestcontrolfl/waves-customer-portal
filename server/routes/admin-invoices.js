@@ -978,6 +978,21 @@ function firstDeliveryOutcome(err, firstDeliveryOnly) {
       reason: err.message,
     };
   }
+  // Codex round-6 audit P1 (#4131 slice 4): a terminal-visit zero-due
+  // invoice the void sweep safety-refused to touch (a live PaymentIntent,
+  // money in flight, an unverifiable Stripe lookup) is distinct from a
+  // COMPLETED void (INVOICE_VISIT_TERMINAL, a genuine no-op success below)
+  // — this one is un-voided and must surface as held for an operator, not
+  // silently reported handled. Reachable only as a RESOLVED result (see
+  // resolvedSendOutcome) — zeroDueDirectSendOutcome/zeroDueWrapperOutcome
+  // never throw it.
+  if (err?.code === 'INVOICE_VISIT_TERMINAL_UNVOIDED') {
+    return {
+      type: 'held',
+      code: 'INVOICE_VISIT_TERMINAL_UNVOIDED',
+      reason: err.message,
+    };
+  }
   // NOTE: a thrown zero_due used to be recognized here too (a settlement
   // that ran INSIDE claimInvoiceForSend's own claim, reported as a noop
   // success). Codex round-5 audit #4131 slice 4 confirmed it dead: since
@@ -1788,9 +1803,11 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       }
       throw err;
     }
-    if (result.code === 'deposit_settlement_pending') {
-      // Nothing due (deposit-covered) but not settleable right now: a
-      // retryable conflict, never a $0 pay link (#4131 slice 4).
+    if (result.code === 'deposit_settlement_pending' || result.code === 'INVOICE_VISIT_TERMINAL_UNVOIDED') {
+      // Nothing due (deposit-covered) but not settleable right now, or a
+      // terminal-visit invoice the void sweep safety-refused to touch:
+      // both a retryable/held-for-review conflict, never a $0 pay link or
+      // a silent "handled" (#4131 slice 4, round-6 audit P1).
       return res.status(409).json(result);
     }
     if (!result.ok) {

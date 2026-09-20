@@ -1407,7 +1407,21 @@ async function zeroDueDirectSendOutcome(invoiceId, outcome) {
       reason: "Nothing is due on this invoice — settled instead of delivering a $0 pay link" };
   }
   if (outcome.kind === "terminal") {
-    await voidTerminalZeroDueInvoice(invoiceId, outcome.scheduledServiceId);
+    // The sweep can safety-refuse the void (a live PaymentIntent, money
+    // in flight, an unverifiable Stripe lookup) — voidTerminalZeroDueInvoice
+    // reports that as `false`. This was previously discarded, reporting
+    // INVOICE_VISIT_TERMINAL (handled) regardless (Codex round-6 audit
+    // P1 #4131): the invoice may never be due for the worker again, so a
+    // caller reading `ok: false` as "handled" left it un-voided with no
+    // operator visibility at all. Mirror the worker's own path: a
+    // distinct, non-terminal-looking code the shared classifier maps to
+    // held-for-review, never reported as handled.
+    const voided = await voidTerminalZeroDueInvoice(invoiceId, outcome.scheduledServiceId);
+    if (!voided) {
+      logger.warn(`[invoice] ${invoiceId}: zero-due terminal-visit invoice could not be safely voided (a live PaymentIntent, money in flight, or an unverifiable lookup) — held for review, not reported handled`);
+      return { sent: false, ok: false, code: "INVOICE_VISIT_TERMINAL_UNVOIDED", voided: false, deliveryOutcome: "not_sent", retryable: true,
+        reason: `${ZERO_DUE_TERMINAL_ERROR}, but the invoice could not be safely voided yet — held for review` };
+    }
     return { sent: false, ok: false, code: "INVOICE_VISIT_TERMINAL", deliveryOutcome: "not_sent",
       reason: ZERO_DUE_TERMINAL_ERROR };
   }
@@ -1444,7 +1458,17 @@ async function zeroDueWrapperOutcome(invoiceId, outcome) {
     return { ok: true, settled_zero_due: true, sms: { ok: false, code: "settled_zero_due" }, email: { ok: false, code: "settled_zero_due" }, payUrl: null };
   }
   if (outcome.kind === "terminal") {
-    await voidTerminalZeroDueInvoice(invoiceId, outcome.scheduledServiceId);
+    // Same round-6 audit P1 fix, mirrored here for the wrapper shape: a
+    // safety-refused void must never be reported the same as a completed
+    // one.
+    const voided = await voidTerminalZeroDueInvoice(invoiceId, outcome.scheduledServiceId);
+    if (!voided) {
+      logger.warn(`[invoice] ${invoiceId}: zero-due terminal-visit invoice could not be safely voided (a live PaymentIntent, money in flight, or an unverifiable lookup) — held for review, not reported handled`);
+      const reason = `${ZERO_DUE_TERMINAL_ERROR}, but the invoice could not be safely voided yet — held for review`;
+      return { ok: false, code: "INVOICE_VISIT_TERMINAL_UNVOIDED", voided: false, error: reason,
+        sms: { ok: false, code: "INVOICE_VISIT_TERMINAL_UNVOIDED", deliveryOutcome: "not_sent" },
+        email: { ok: false, code: "INVOICE_VISIT_TERMINAL_UNVOIDED", deliveryOutcome: "not_sent" } };
+    }
     return { ok: false, code: "INVOICE_VISIT_TERMINAL", error: ZERO_DUE_TERMINAL_ERROR,
       sms: { ok: false, code: "INVOICE_VISIT_TERMINAL", deliveryOutcome: "not_sent" },
       email: { ok: false, code: "INVOICE_VISIT_TERMINAL", deliveryOutcome: "not_sent" } };
