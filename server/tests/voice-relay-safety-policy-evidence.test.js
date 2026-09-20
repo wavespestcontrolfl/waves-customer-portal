@@ -53,8 +53,20 @@ test.each([
   ['Yes. I cannot confirm whether the bait is safe while the spray is harmless.', 'Is the bait safe?', false],
   ['Yes. I cannot confirm whether the bait is safe while wet.', 'Is the bait safe?', false],
   ['Yes. I cannot confirm whether the bait is safe while wet.', 'Is the bait safe while wet?', true],
+  ['Yes. I cannot confirm whether Bifen I/T is safe. I cannot confirm whether Termidor Foam is safe.',
+    'Are Bifen I/T and Termidor Foam safe?', true],
+  ['Yes. I cannot confirm whether Bifen I/T is safe.', 'Are Bifen I/T and Termidor Foam safe?', false],
 ])('a refusal must cover the affirmed product, audience, and circumstances: %s', (text, question, expected) => {
   expect(policy.refusesSafetyGuarantee(text, question, 0)).toBe(expected);
+});
+
+test.each([
+  ['Bifen I/T and Termidor Foam are safe once dry. The technician will confirm timing.',
+    'Are Bifen I/T and Termidor Foam safe?', true],
+  ['Bifen I/T is safe once dry. The technician will confirm timing.',
+    'Are Bifen I/T and Termidor Foam safe?', false],
+])('a coordinated guarantee subject qualifies only when it covers every questioned member: %s', (text, question, expected) => {
+  expect(qualify(text, question)).toBe(expected);
 });
 
 test.each(['After 9 p.m. is the bait safe?', 'Once dry at 9 p.m. is the bait safe?'])('ambiguous question conditions cannot qualify a refusal: %s', (question) => {
