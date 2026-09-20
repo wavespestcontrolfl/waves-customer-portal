@@ -1023,17 +1023,18 @@ async function resolveConsumedQueuedSend(invoiceId, claimToken, consumedRows, da
 // send is a success whatever happens to the queue bookkeeping: a failed
 // resolution must never surface as a failed send, or the caller records a
 // delivered SMS as not sent and can restore the adopted queued text on top
-// of it. Returns the bookkeeping error message, or null.
+// of it. Returns an outcome to spread onto the result: {} when settled,
+// { queueResolutionError } when the adopted rows stay pending.
 async function resolveAdoptedRowsAfterDelivery(invoiceId, claimToken, consumedRows, invoiceNumber) {
   try {
     const resolved = await resolveConsumedQueuedSend(invoiceId, claimToken, consumedRows);
-    if (resolved) return null;
+    if (resolved) return {};
     const message = "send claim no longer owned when resolving the adopted queued text";
     logger.error(`[invoice] Adopted queued text for ${invoiceNumber || invoiceId} stays pending after a delivered send — ${message}`);
-    return message;
+    return { queueResolutionError: message };
   } catch (e) {
     logger.error(`[invoice] Adopted queued text for ${invoiceNumber || invoiceId} stays pending after a delivered send — resolution failed: ${e.message}`);
-    return e.message;
+    return { queueResolutionError: e.message };
   }
 }
 
@@ -2951,7 +2952,7 @@ const InvoiceService = {
         // Resolve the adopted rows while the token still owns the row —
         // the resolution is token-scoped and would be a silent no-op after
         // the clear below.
-        await resolveAdoptedRowsAfterDelivery(invoiceId, invoice.send_claim_token, consumedQueuedSendRows, invoice.invoice_number);
+        const queueOutcome = await resolveAdoptedRowsAfterDelivery(invoiceId, invoice.send_claim_token, consumedQueuedSendRows, invoice.invoice_number);
         const cleared = await db("invoices")
           .where({ id: invoiceId, send_claim_token: invoice.send_claim_token })
           .update({ send_claim_token: null, updated_at: new Date() });
@@ -2961,7 +2962,7 @@ const InvoiceService = {
         // settled — nothing to send). Direct callers check `sent || ok`, so flag
         // ok:true; sent stays false because no SMS went out. No claim to restore —
         // the apply flipped the row to the terminal 'prepaid' state.
-        return { sent: false, ok: true, covered_by_credit: true, code: "covered_by_credit", reason: "Invoice covered by account credit — nothing to collect" };
+        return { sent: false, ok: true, covered_by_credit: true, code: "covered_by_credit", reason: "Invoice covered by account credit — nothing to collect", ...queueOutcome };
       }
     }
     // Reverse this seam's credit application if the SMS ultimately isn't delivered
@@ -3355,10 +3356,10 @@ const InvoiceService = {
         await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId });
       }
 
-      const queueResolutionError = await resolveAdoptedRowsAfterDelivery(invoiceId, invoice.send_claim_token, consumedQueuedSendRows, invoice.invoice_number);
+      const queueOutcome = await resolveAdoptedRowsAfterDelivery(invoiceId, invoice.send_claim_token, consumedQueuedSendRows, invoice.invoice_number);
       await releaseDirectSmsClaim();
 
-      return queueResolutionError ? { sent: true, payUrl, queueResolutionError } : { sent: true, payUrl };
+      return { sent: true, payUrl, ...queueOutcome };
     } catch (err) {
       err.deliveryOutcome ||= err.providerOutcome?.deliveryOutcome;
       if (smsDelivered) {
@@ -3419,9 +3420,9 @@ const InvoiceService = {
             logger.error(`[invoice] issued-invoice closeout failed (post-recovery) for ${invoice.invoice_number}: ${e.message}`);
           }
         }
-        const queueResolutionError = await resolveAdoptedRowsAfterDelivery(invoiceId, invoice.send_claim_token, consumedQueuedSendRows, invoice.invoice_number);
+        const queueOutcome = await resolveAdoptedRowsAfterDelivery(invoiceId, invoice.send_claim_token, consumedQueuedSendRows, invoice.invoice_number);
         await releaseDirectSmsClaim();
-        if (queueResolutionError) return { sent: true, payUrl, finalizeError: err.message, queueResolutionError };
+        if (queueOutcome.queueResolutionError) return { sent: true, payUrl, finalizeError: err.message, ...queueOutcome };
         return { sent: true, payUrl, finalizeError: err.message };
       }
       if (claimed && err.code === "INVOICE_VISIT_TERMINAL" && err.deliveryOutcome === "not_sent") {
@@ -3532,7 +3533,7 @@ const InvoiceService = {
       // Resolve the adopted rows while the token still owns the row — the
       // resolution is token-scoped and would be a silent no-op after the
       // clear below.
-      await resolveAdoptedRowsAfterDelivery(invoiceId, claim.invoice.send_claim_token, consumedQueuedSendRows, claim.invoice.invoice_number);
+      const queueOutcome = await resolveAdoptedRowsAfterDelivery(invoiceId, claim.invoice.send_claim_token, consumedQueuedSendRows, claim.invoice.invoice_number);
       const cleared = await db("invoices")
         .where({ id: invoiceId, send_claim_token: claim.invoice.send_claim_token })
         .update({ send_claim_token: null, updated_at: new Date() });
@@ -3547,6 +3548,7 @@ const InvoiceService = {
         sms: { ok: false, code: "covered_by_credit" },
         email: { ok: false, code: "covered_by_credit" },
         payUrl: null,
+        ...queueOutcome,
       };
     }
     const { previousStatus, claimed } = claim;
@@ -3749,14 +3751,14 @@ const InvoiceService = {
     const deliveryOutcomeUncertain = !ok && (sms.deliveryOutcome === "uncertain"
       || email.deliveryOutcome === "uncertain");
     let ownedDeliveryFinalized = false;
-    let queueResolutionError = null;
+    let queueOutcome = {};
     let adoptedQueueUnrestored = false;
     if (ok) {
       // Settle the adopted rows BEFORE the finalize below clears
       // send_claim_token — both the resolve and the restore are token-scoped
       // so they can never touch a queue row this claim episode didn't adopt.
       if (smsObligationDischarged) {
-        queueResolutionError = await resolveAdoptedRowsAfterDelivery(invoiceId, claim.invoice.send_claim_token, consumedQueuedSendRows, claim.invoice.invoice_number);
+        queueOutcome = await resolveAdoptedRowsAfterDelivery(invoiceId, claim.invoice.send_claim_token, consumedQueuedSendRows, claim.invoice.invoice_number);
       } else if (sms.deliveryOutcome === "uncertain") {
         if (consumedQueuedSendRows.length) logger.warn(`[invoice] SMS outcome unverified for ${claim.invoice.invoice_number} — adopted queued text left pending for review`);
       } else if (consumedQueuedSendRows.length) {
@@ -3842,7 +3844,7 @@ const InvoiceService = {
       let rowsToRestore = consumedQueuedSendRows;
       if (smsObligationDischarged && consumedQueuedSendRows.length) {
         rowsToRestore = [];
-        queueResolutionError = await resolveAdoptedRowsAfterDelivery(invoiceId, claim.invoice.send_claim_token, consumedQueuedSendRows, claim.invoice.invoice_number);
+        queueOutcome = await resolveAdoptedRowsAfterDelivery(invoiceId, claim.invoice.send_claim_token, consumedQueuedSendRows, claim.invoice.invoice_number);
       }
       const restored = await restoreSendClaim(
         invoiceId,
@@ -3852,6 +3854,13 @@ const InvoiceService = {
         db,
         claim.invoice.send_claim_token,
       );
+      // Adopted rows that could not be given back (restore failed, or the
+      // claim was no longer ours to restore under) leave the customer's
+      // text cancelled with only its pending marker. Report a hold instead
+      // of an ordinary failure so a preclaimed scheduled-send worker keeps
+      // its claim (stale-claim recovery parks it for review) rather than
+      // requeueing a second send over an unrestored text.
+      adoptedQueueUnrestored = !restored && rowsToRestore.length > 0;
       // No channel delivered — reverse the credit this seam auto-applied before
       // the send so we don't consume the customer's credit and edit-lock an
       // invoice whose pay link never went out. Reverse ONLY when WE own the claim:
@@ -3932,7 +3941,7 @@ const InvoiceService = {
       }
     }
     return { ok, sms, email, payUrl, creditApplied: sendCreditResult?.applied || 0,
-      ...(queueResolutionError ? { queueResolutionError } : {}),
+      ...queueOutcome,
       ...(adoptedQueueUnrestored ? { code: "ADOPTED_QUEUE_RESTORE_FAILED", deliveryHeld: true } : {}),
       ...(terminalVisitRefused
         ? { code: "INVOICE_VISIT_TERMINAL" }
@@ -4323,6 +4332,11 @@ const InvoiceService = {
       if (result.code === "INVOICE_VISIT_TERMINAL_OUTCOME_UNCERTAIN") {
         held += 1;
         logger.warn(`[invoice] Scheduled send for ${inv.invoice_number} found a terminal visit after an unverified channel outcome — claim retained for review`);
+        continue;
+      }
+      if (result.code === "ADOPTED_QUEUE_RESTORE_FAILED") {
+        held += 1;
+        logger.warn(`[invoice] Scheduled send for ${inv.invoice_number} could not give back the queued text it adopted — claim retained for review`);
         continue;
       }
       if (result.code === "INVOICE_DELIVERY_OUTCOME_UNCERTAIN") {
