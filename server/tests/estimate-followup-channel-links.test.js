@@ -158,7 +158,24 @@ describe('checkAll stage wiring — one tracked code per channel leg', () => {
     // ...and the email leg carries the email-tagged URL, never the sms one.
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
       payload: expect.objectContaining({ estimate_url: 'https://short.test/email' }),
+      // Delivery-guards slice (re-cut of #4569): every estimate email send
+      // carries the estimateId the chokepoint's annual-offer guard needs —
+      // no sender rechecks eligibility itself.
+      estimateId: 'est-1',
     }));
+  });
+
+  test('annual-offer delivery guard (delivery-guards slice, re-cut of #4569): a withheld email logs suppressed, never a silent success', async () => {
+    const logger = require('../services/logger');
+    EmailTemplates.sendTemplate.mockResolvedValueOnce({
+      sent: false, blocked: true, reason: 'annual_offer_withheld', providerAttempted: false,
+    });
+    enqueue('estimates', { rows: [unviewedEstimate()] });
+
+    await EstimateFollowUp.checkAll();
+
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ estimateId: 'est-1' }));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('annual_offer_withheld'));
   });
 
   test('SMS template missing → the email that still goes out is EMAIL-tagged (the sms code is never delivered)', async () => {

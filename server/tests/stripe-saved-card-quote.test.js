@@ -3,6 +3,49 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     jest.resetModules();
   });
 
+  test('a deposit hold refuses a saved-card charge before its durable claim or Stripe submission', async () => {
+    const invoice = {
+      id: 'inv-1', customer_id: 'cust-1', status: 'draft', total: '250.00',
+      credit_applied: '0.00', stripe_payment_intent_id: null,
+    };
+    const invoiceQuery = { where: jest.fn(), first: jest.fn(async () => invoice) };
+    invoiceQuery.where.mockReturnValue(invoiceQuery);
+    const db = jest.fn((table) => {
+      if (table === 'invoices') return invoiceQuery;
+      if (['stripe_invoice_charge_attempts', 'stripe_orphan_charges', 'payments'].includes(table)) {
+        const query = {};
+        query.where = () => query;
+        query.whereIn = () => query;
+        query.whereNull = () => query;
+        query.whereRaw = () => query;
+        query.orWhereColumn = () => query;
+        query.first = async () => null;
+        return query;
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    });
+    const guard = jest.fn().mockRejectedValue(Object.assign(new Error('A received deposit is awaiting invoice reconciliation'), {
+      code: 'DEPOSIT_RECONCILIATION_REQUIRED', statusCode: 409,
+    }));
+    const stripeClient = { paymentIntents: { create: jest.fn() } };
+    jest.doMock('../models/db', () => db);
+    jest.doMock('stripe', () => jest.fn(() => stripeClient));
+    jest.doMock('../config', () => ({}));
+    jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock' }));
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    jest.doMock('../services/estimate-deposits', () => ({ assertInvoiceDepositSettlementReady: guard }));
+    try {
+      const StripeService = require('../services/stripe');
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1'))
+        .rejects.toMatchObject({ code: 'DEPOSIT_RECONCILIATION_REQUIRED', statusCode: 409 });
+      expect(guard).toHaveBeenCalledWith(db, invoice, { lock: false });
+      expect(db.mock.calls.some(([table]) => table === 'payment_methods')).toBe(false);
+      expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    } finally {
+      jest.dontMock('../services/estimate-deposits');
+    }
+  });
+
   test('uses live funding and the shared surcharge math for the displayed total', async () => {
     const invoice = {
       id: 'inv-1', customer_id: 'cust-1', status: 'draft', total: '250.00', credit_applied: '0.00', payer_id: null,

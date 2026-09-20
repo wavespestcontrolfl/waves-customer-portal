@@ -8,9 +8,10 @@
  * we can attach PDFs without modifying the thin one-off email wrapper.
  */
 
+const { isDeepStrictEqual } = require('node:util');
 const logger = require('./logger');
 const db = require('../models/db');
-const { invoiceAmountDue } = require('./invoice-helpers');
+const { invoiceAmountDue, SEND_FINALIZABLE_STATUSES } = require('./invoice-helpers');
 const { buildInvoicePDFBuffer, buildReceiptPDFBuffer } = require('./pdf/invoice-pdf');
 const { loadInvoiceAnnualPrepay } = require('./invoice-prepay');
 const { wrapEmail, ctaButton, currency, formatDate, plainText, colors, stripeFooterLine } = require('./email-template');
@@ -111,6 +112,15 @@ function invoiceRecipientFor(customer, prefs, recipientOverride) {
 async function sendInvoiceEmail(invoiceId, options = {}) {
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { ok: false, error: 'Invoice not found' };
+  const claimToken = options.claimToken || null;
+  if ((invoice.send_claim_token || null) !== claimToken) {
+    return { ok: false, error: 'Invoice send claim changed; delivery not attempted', code: 'send_claim_lost' };
+  }
+  try {
+    await require('./estimate-deposits').assertInvoiceDepositSettlementReady(db, invoice, { lock: false });
+  } catch (err) {
+    return { ok: false, error: err.message, code: err.code };
+  }
   // Phase 2: an accrued invoice (attached to a payer statement) is NEVER sent
   // individually — it is delivered as one line on the consolidated monthly
   // statement. This is the email chokepoint; fail closed.
@@ -181,7 +191,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   // snapshot (shared with the project combined-send path), so the (async)
   // receipt and the pay page route to the same AP contact even if the payer row
   // is later edited/deactivated. Only runs on a successful send.
-  const persistPayerApIfNeeded = () => PayerService.freezeApEmail(invoice, recipient.email);
+  const persistPayerApIfNeeded = () => PayerService.freezeApEmail(invoice, recipient.email, db, { claimToken });
   // Provider ACCEPTED the message — stamp durable delivery evidence FIRST
   // (idempotent; the ambiguous-send UI reads it: a draft row carrying the
   // stamp is never offered an automatic resend), then run post-provider
@@ -191,11 +201,13 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   // would duplicate the delivered email).
   const markEmailDelivered = async () => {
     try {
-      await db('invoices')
-        .where({ id: invoice.id })
+      const updated = await db('invoices')
+        .where({ id: invoice.id, send_claim_token: claimToken })
         .update({ email_sent_at: new Date(), updated_at: new Date() });
+      if (updated === 0) return;
     } catch (err) {
       logger.warn(`[invoice-email] email_sent_at stamp failed for ${invoice.invoice_number}: ${err.message}`);
+      return;
     }
     try {
       await persistPayerApIfNeeded();
@@ -330,6 +342,72 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     '— Waves Pest Control',
   ]);
 
+  let boundaryRefusal = null;
+  const invoiceAtDispatch = async (dispatch) => {
+    let providerStarted = false;
+    let providerAccepted = false;
+    try {
+      const outcome = await require('./estimate-deposits').withInvoiceDepositSettlement(
+        invoice.id,
+        async (trx, current) => {
+          if ((current.send_claim_token || null) !== claimToken) {
+            return { ok: false, reason: 'Invoice send claim changed; delivery not attempted', code: 'send_claim_lost' };
+          }
+          if (!SEND_FINALIZABLE_STATUSES.includes(current.status)) {
+            return { ok: false, reason: `Invoice is no longer sendable (status: ${current.status || 'unknown'}); delivery not attempted`, code: 'invoice_not_sendable' };
+          }
+          if (claimToken) {
+            let scheduledServiceId = current.scheduled_service_id || null;
+            if (!scheduledServiceId && current.service_record_id) {
+              const record = await trx('service_records')
+                .where({ id: current.service_record_id })
+                .first('scheduled_service_id');
+              scheduledServiceId = record?.scheduled_service_id || null;
+            }
+            const terminalVisit = await require('./invoice-helpers')
+              .visitRefusesSettlement(trx, scheduledServiceId);
+            if (terminalVisit) {
+              boundaryRefusal = { code: 'INVOICE_VISIT_TERMINAL', reason: `Linked visit is ${terminalVisit}; delivery not attempted` };
+              return { ok: false, ...boundaryRefusal };
+            }
+          }
+          // Reconciliation can finish while the PDF or template renders,
+          // leaving no pending ledger balance. Compare the locked row after
+          // the ledger fence with the values used by BOTH the email and PDF.
+          if (invoiceAmountDue(current) <= 0
+            || invoiceAmountDue(current) !== amountDue
+            || !isDeepStrictEqual(current.line_items || [], invoice.line_items || [])) {
+            return { ok: false, reason: 'Invoice balance changed while preparing email; retry delivery' };
+          }
+          if (!effectiveOverride) {
+            const ownership = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, trx)();
+            if (ownership.ok !== true) return ownership;
+          }
+          providerStarted = true;
+          await dispatch();
+          providerAccepted = true;
+          return { ok: true };
+        },
+      );
+      return outcome || { ok: false, reason: 'Invoice could not be re-read before delivery' };
+    } catch (err) {
+      // The provider accepted the email before the read-only transaction's
+      // commit failed. Preserve the accepted outcome so no caller retries a
+      // message already delivered; the normal delivery stamp remains
+      // best-effort and idempotent.
+      if (providerAccepted) {
+        logger.error(`[invoice-email] Provider accepted invoice ${invoice.invoice_number} but deposit-settlement handoff could not close: ${err.message}`);
+        return { ok: true, settlementHandoffError: err.message };
+      }
+      // Once the request began, only the email library can classify the
+      // provider outcome (including a fast webhook proving delivery). Let its
+      // provider-error recovery run instead of reporting a pre-dispatch guard
+      // refusal and making the queued attempt immediately retryable.
+      if (providerStarted) throw err;
+      return { ok: false, reason: err.message, code: err.code };
+    }
+  };
+
   if (sendgrid.isConfigured()) {
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
@@ -368,12 +446,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
         // and an unconditional self-pay check would refuse every one of them.
         // What must not happen is the homeowner receiving a pay link for debt
         // that moved to AP while this send was being prepared.
-        withProviderHandoff: effectiveOverride ? undefined : async (dispatch) => {
-          const verdict = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, db)();
-          if (verdict.ok !== true) return verdict;
-          await dispatch();
-          return { ok: true };
-        },
+        withProviderHandoff: invoiceAtDispatch,
       });
       // A suppressed/blocked recipient (unsubscribed, on the suppression list)
       // resolves with sent:false — it was NOT delivered, so don't report ok:true.
@@ -381,8 +454,11 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
       // payer-completion send, where the homeowner SMS path is suppressed) would
       // otherwise mark a never-delivered invoice as sent.
       if (result?.sent === false) {
-        logger.warn(`[invoice-email] Template invoice email NOT delivered for ${invoice.invoice_number} (${result.reason || 'blocked/suppressed'})`);
-        return { ok: false, blocked: !!result.blocked, error: result.reason || 'Email suppressed', recipient: recipientPayload };
+        const refusal = boundaryRefusal || result;
+        logger.warn(`[invoice-email] Template invoice email NOT delivered for ${invoice.invoice_number} (${refusal.reason || 'blocked/suppressed'})`);
+        return { ok: false, blocked: !!result.blocked, error: refusal.reason || 'Email suppressed',
+          code: refusal.code, deliveryOutcome: boundaryRefusal ? 'not_sent' : result.deliveryOutcome,
+          recipient: recipientPayload };
       }
       await markEmailDelivered();
       logger.info(`[invoice-email] Template invoice email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
@@ -405,7 +481,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   if (!transporter) return { ok: false, error: 'Email not configured', recipient: recipientPayload };
 
   try {
-    await transporter.sendMail({
+    const verdict = await invoiceAtDispatch(() => transporter.sendMail({
       from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
       to: recipient.email,
       subject: `Invoice ${invoice.invoice_number} — ${currency(amountDue)}`,
@@ -416,7 +492,10 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
         content: pdfBuffer,
         contentType: 'application/pdf',
       }],
-    });
+    }));
+    if (verdict.ok !== true) return { ok: false, error: verdict.reason, code: verdict.code,
+      deliveryOutcome: verdict.code === 'INVOICE_VISIT_TERMINAL' ? 'not_sent' : undefined,
+      recipient: recipientPayload };
     await markEmailDelivered();
     logger.info(`[invoice-email] Invoice email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
     return { ok: true, recipient: recipientPayload, payUrl };

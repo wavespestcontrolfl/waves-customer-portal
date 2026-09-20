@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const { isDeepStrictEqual } = require("node:util");
 const db = require("../models/db");
 const logger = require("./logger");
 const TaxCalculator = require("./tax-calculator");
@@ -11,6 +12,10 @@ const { loadInvoiceAnnualPrepay, buildPrepayCoverageSummary } = require("./invoi
 const PhotoService = require("./photos");
 const config = require("../config");
 const { customerSafeServiceNotes } = require("./project-types");
+const {
+  SEND_CLAIMABLE_STATUSES,
+  SEND_FINALIZABLE_STATUSES,
+} = require("./invoice-helpers");
 
 // Customer-facing presign TTL: photo URLs mint per page-load, so the TTL must
 // cover page DWELL time, not link age (the customer-photo blank-render class).
@@ -67,15 +72,6 @@ async function withFreshServicePhotoUrls(photos) {
 // ══════════════════════════════════════════════════════════════
 // HELPERS
 // ══════════════════════════════════════════════════════════════
-const SEND_CLAIMABLE_STATUSES = [
-  "draft",
-  "scheduled",
-  "sent",
-  "viewed",
-  "overdue",
-];
-const SEND_FINALIZABLE_STATUSES = [...SEND_CLAIMABLE_STATUSES, "sending"];
-
 // Statuses the generic admin edit (InvoiceService.update) may rewrite.
 // sent/viewed/overdue joined draft/scheduled by owner ruling 2026-07-17
 // (edit a delivered invoice, then resend so the customer sees the new
@@ -822,6 +818,12 @@ const {
   formatCardLine,
 } = require("./invoice-helpers");
 
+function whereSendClaimOwned(query, claimToken) {
+  return claimToken
+    ? query.where({ send_claim_token: claimToken })
+    : query.whereNull("send_claim_token");
+}
+
 function invoiceNotSendableError(invoice) {
   if (!invoice) return new Error("Invoice not found");
   if (invoice.status === "sending")
@@ -837,14 +839,34 @@ function invoiceNotSendableError(invoice) {
   );
 }
 
-async function claimInvoiceForSend(invoiceId, { allowClaimed = false, database = db } = {}) {
+function sendClaimLostError() {
+  return Object.assign(
+    new Error("Invoice send claim changed; delivery not attempted"),
+    { code: "send_claim_lost" },
+  );
+}
+
+async function linkedScheduledServiceId(invoice, database = db) {
+  if (invoice?.scheduled_service_id) return invoice.scheduled_service_id;
+  if (!invoice?.service_record_id) return null;
+  const record = await database("service_records")
+    .where({ id: invoice.service_record_id })
+    .first("scheduled_service_id");
+  return record?.scheduled_service_id || null;
+}
+
+async function claimInvoiceForSend(invoiceId, {
+  allowClaimed = false,
+  claimToken = null,
+  database = db,
+} = {}) {
   const current = await database("invoices").where({ id: invoiceId }).first();
   if (!current) throw invoiceNotSendableError(current);
+  await require("./estimate-deposits").assertInvoiceDepositSettlementReady(database, current, { lock: false });
 
   if (allowClaimed) {
-    if (!SEND_FINALIZABLE_STATUSES.includes(current.status)) {
-      throw invoiceNotSendableError(current);
-    }
+    if (!claimToken || current.send_claim_token !== claimToken) throw sendClaimLostError();
+    if (!SEND_FINALIZABLE_STATUSES.includes(current.status)) throw invoiceNotSendableError(current);
     return { invoice: current, previousStatus: current.status, claimed: false };
   }
 
@@ -852,14 +874,16 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false, database =
     throw invoiceNotSendableError(current);
   }
 
+  const freshClaimToken = crypto.randomUUID();
   const [invoice] = await database("invoices")
     .where({ id: invoiceId, status: current.status })
-    .update({ status: "sending", updated_at: new Date() })
+    .update({ status: "sending", send_claim_token: freshClaimToken, updated_at: new Date() })
     .returning("*");
   if (!invoice) {
     const latest = await database("invoices").where({ id: invoiceId }).first();
     throw invoiceNotSendableError(latest);
   }
+  invoice.send_claim_token = freshClaimToken;
   return { invoice, previousStatus: current.status, claimed: true };
 }
 
@@ -869,7 +893,11 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false, database =
 // the send is claimed, so a payer assignment serializes behind the claim
 // instead of racing it. A payer means the debt now belongs to AP: the
 // invoice leaves the scheduled-send queue and the visit goes on billing hold.
-async function claimPacketInvoiceForSend(invoiceId, packetId, { allowClaimed = false, requireDue = false } = {}) {
+async function claimPacketInvoiceForSend(invoiceId, packetId, {
+  allowClaimed = false,
+  claimToken = null,
+  requireDue = false,
+} = {}) {
   const Packets = require("./visit-completion-packets");
   return db.transaction(async (trx) => {
     // The worker's claim keeps the scheduled queue's own predicates: due
@@ -882,19 +910,22 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, { allowClaimed = f
     }
     const { visit, billed, payerId } = await Packets.resolvePacketOwnershipLocked(packetId, trx);
     if (visit && payerId && await Packets.withdrawPacketInvoiceForPayer(trx, { packetId, invoiceId, visit, billed, payerId })) {
+      await trx("invoices").where({ id: invoiceId }).update({ send_claim_token: null });
       return { payerBilled: true, payerId };
     }
     if (requireDue) {
       // The status transition carries the queue predicates: a reschedule
       // that committed between the due read and this claim leaves the row
       // scheduled for later, and it must stay there.
+      const freshClaimToken = crypto.randomUUID();
       const [invoice] = await trx("invoices").where({ id: invoiceId, status: "scheduled" })
         .whereNotNull("scheduled_send_at").where("scheduled_send_at", "<=", new Date())
         .where((q) => q.whereNull("scheduled_send_attempts").orWhere("scheduled_send_attempts", "<", 5))
-        .update({ status: "sending", updated_at: new Date() }).returning("*");
+        .update({ status: "sending", send_claim_token: freshClaimToken, updated_at: new Date() }).returning("*");
+      if (invoice) invoice.send_claim_token = freshClaimToken;
       return { payerBilled: false, claim: invoice ? { invoice, previousStatus: "scheduled", claimed: true } : null };
     }
-    return { payerBilled: false, claim: await claimInvoiceForSend(invoiceId, { allowClaimed, database: trx }) };
+    return { payerBilled: false, claim: await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, database: trx }) };
   });
 }
 
@@ -959,16 +990,17 @@ async function enrollPacketReviewAfterCredit(invoiceId, packetId) {
   return result;
 }
 
-async function restoreSendClaim(invoiceId, previousStatus, claimed) {
-  if (!claimed || !previousStatus) return;
-  await db("invoices")
-    .where({ id: invoiceId, status: "sending" })
-    .update({ status: previousStatus, updated_at: new Date() })
-    .catch((err) =>
-      logger.warn(
-        `[invoice] Could not restore send claim for ${invoiceId}: ${err.message}`,
-      ),
-    );
+async function restoreSendClaim(invoiceId, previousStatus, claimed, database = db, claimToken = null) {
+  if (!claimed || !previousStatus || !claimToken) return false;
+  try {
+    const restored = await database("invoices")
+      .where({ id: invoiceId, status: "sending", send_claim_token: claimToken })
+      .update({ status: previousStatus, send_claim_token: null, updated_at: new Date() });
+    return restored !== 0;
+  } catch (err) {
+    logger.warn(`[invoice] Could not restore send claim for ${invoiceId}: ${err.message}`);
+    return false;
+  }
 }
 
 // Statuses an invoice can move FROM into 'sent' on its first delivery. A send
@@ -998,20 +1030,27 @@ async function convertLeadOnInvoiceSent({ invoiceId, customerId, priorStatus, pr
   }
 }
 
-async function annualPrepayInvoiceTableExists() {
-  if (!db.schema?.hasTable) return false;
-  return db.schema
-    .hasTable("annual_prepay_terms")
-    .catch(() => false);
+async function optionalInvoiceRead(database, read, fallback) {
+  try {
+    return database?.isTransaction && typeof database.transaction === "function"
+      ? await database.transaction(read)
+      : await read(database);
+  } catch {
+    return fallback;
+  }
 }
 
-async function loadAnnualPrepayTermForInvoice(invoiceId) {
+async function annualPrepayInvoiceTableExists(database = db) {
+  if (!database.schema?.hasTable) return false;
+  return optionalInvoiceRead(database, (conn) => conn.schema.hasTable("annual_prepay_terms"), false);
+}
+
+async function loadAnnualPrepayTermForInvoice(invoiceId, database = db) {
   if (!invoiceId) return null;
-  const exists = await annualPrepayInvoiceTableExists();
+  const exists = await annualPrepayInvoiceTableExists(database);
   if (!exists) return null;
-  const term = await db("annual_prepay_terms")
-    .where({ prepay_invoice_id: invoiceId })
-    .first();
+  const term = await optionalInvoiceRead(database, (conn) => conn("annual_prepay_terms")
+    .where({ prepay_invoice_id: invoiceId }).first(), null);
   if (!term) return null;
   return {
     id: term.id,
@@ -2312,8 +2351,8 @@ const InvoiceService = {
     // Same atomic discipline as the converter: credit line exists IFF the
     // ledger consumed exactly that amount in the same transaction; a
     // mismatch rolls back and one retry re-reads the fresh balance. Deposit
-    // machinery failures NEVER block visit invoicing — fall back to the
-    // plain create and alert for manual reconciliation.
+    // machinery failures leave invoicing on hold for manual reconciliation;
+    // an unknown deposit balance must never become a full-balance pay link.
     //
     // skipDepositCredit (Codex P1, PR #2897 fix round): callers whose
     // contract is an UNTOUCHED invoice for operator review — the backdated
@@ -2368,18 +2407,12 @@ const InvoiceService = {
     }
     if (sourceEstimateId) {
       const {
+        acquireEstimateDepositLedgerLock,
         pendingDepositCredit,
         consumeDepositCredit,
       } = require("./estimate-deposits");
+      let depositError;
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        let depositCredit = null;
-        try {
-          depositCredit = await pendingDepositCredit(sourceEstimateId);
-        } catch {
-          break; // ledger unreadable — invoice proceeds uncredited
-        }
-        const requested = depositCredit ? depositCredit.amount : 0;
-        if (!(requested > 0)) break;
         try {
           return await runMintTransaction(async (trx) => {
             // EVERY linked mint holds the shared advisory lock (Codex PR
@@ -2398,14 +2431,17 @@ const InvoiceService = {
             // that actually created the invoice.
             const adopted = await adoptUnderMintLock(trx);
             if (adopted) return adopted;
+            const createParams = await buildParams(trx);
+            await acquireEstimateDepositLedgerLock(trx, sourceEstimateId);
+            const depositCredit = await pendingDepositCredit(sourceEstimateId, trx);
             // Request the full unapplied balance; create() caps it against
             // its own post-discount, after-tax total (a pre-discount cap
             // here consumed ledger dollars the discounted invoice never
             // reflected) and reports the effective amount back.
             const created = await this.create({
-              ...(await buildParams(trx)),
+              ...createParams,
               database: trx,
-              depositCredit: { amount: requested, estimateId: sourceEstimateId },
+              depositCredit: depositCredit ? { amount: depositCredit.amount, estimateId: sourceEstimateId } : null,
             });
             await settleRetention(created, trx);
             const effective = Number(created?.applied_deposit_credit) || 0;
@@ -2425,6 +2461,7 @@ const InvoiceService = {
             return created;
           });
         } catch (err) {
+          depositError = err;
           // Stale-price/authorization refusals are terminal — retrying the
           // same stale params can't fix them (mirrors the shared mint
           // helper's contract).
@@ -2446,6 +2483,7 @@ const InvoiceService = {
           }
         }
       }
+      throw depositError;
     }
 
     if (replayFromScheduled) {
@@ -2485,24 +2523,32 @@ const InvoiceService = {
 
   /**
    * Get invoice by public token — for the /pay page.
-   * Also records view and updates status.
+   * Also records view and updates status unless this is a follow-up read.
    */
-  async getByToken(token) {
-    const invoice = await db("invoices").where({ token }).first();
+  async getByToken(token, { recordView = true, database = db } = {}) {
+    let invoice = await database("invoices").where({ token }).first();
     if (!invoice) return null;
     // NOTE: do NOT block payer_statement_id here — getByToken also backs the
     // PERMANENT receipt endpoints (receipt-v2), which must never 404 (AGENTS.md).
     // The accrued-invoice "statement-only" block lives in the PAY + invoice-PDF
     // routes instead (the collection surfaces), not this shared loader.
 
-    // Record view
-    const updates = { view_count: (invoice.view_count || 0) + 1 };
-    if (!invoice.viewed_at) updates.viewed_at = new Date();
-    if (invoice.status === "sent") updates.status = "viewed";
-    await db("invoices").where({ id: invoice.id }).update(updates);
+    // The pay page rereads after its deposit fence. That read must not count
+    // as another view. Keep the write conditional on the LIVE status: a
+    // settlement between the first SELECT and this UPDATE must stay prepaid.
+    const seenAt = new Date();
+    if (recordView) {
+      await database("invoices").where({ id: invoice.id }).update({
+        view_count: database.raw("COALESCE(view_count, 0) + 1"),
+        viewed_at: database.raw("COALESCE(viewed_at, ?)", [seenAt]),
+        status: database.raw("CASE WHEN status = 'sent' THEN 'viewed' ELSE status END"),
+      });
+      invoice = await database("invoices").where({ id: invoice.id }).first();
+      if (!invoice) return null;
+    }
 
     // Enrich with customer info
-    const customer = await db("customers")
+    const customer = await database("customers")
       .where({ id: invoice.customer_id })
       .select(
         "first_name",
@@ -2518,7 +2564,7 @@ const InvoiceService = {
         "property_type",
       )
       .first();
-    const annualPrepayTerm = await loadAnnualPrepayTermForInvoice(invoice.id);
+    const annualPrepayTerm = await loadAnnualPrepayTermForInvoice(invoice.id, database);
 
     const line_items =
       typeof invoice.line_items === "string"
@@ -2527,11 +2573,10 @@ const InvoiceService = {
 
     // Annual-prepay coverage callout (null for ordinary invoices). Built from
     // the parsed line items so setup-fee-waived detection sees the real text.
-    const annual_prepay = await loadInvoiceAnnualPrepay({ ...invoice, line_items });
+    const annual_prepay = await loadInvoiceAnnualPrepay({ ...invoice, line_items }, database);
 
     return {
       ...invoice,
-      ...updates,
       customer: require('./invoice-address').invoiceCustomerAddress(invoice, customer),
       annual_prepay,
       // Amount the customer actually pays = total − applied account credit. The
@@ -2556,7 +2601,7 @@ const InvoiceService = {
   /**
    * Send invoice via Twilio SMS — the unified service recap + invoice message.
    */
-  async sendViaSMS(invoiceId, { allowClaimed = false, payUrlParams = null, operatorInitiated = false, actorTechnicianId = null } = {}) {
+  async sendViaSMS(invoiceId, { allowClaimed = false, claimToken = null, payUrlParams = null, operatorInitiated = false, actorTechnicianId = null } = {}) {
     // Direct callers (batch sendImmediately, the AI-assistant send tool, the
     // from-service SMS-only path) bypass sendViaSMSAndEmail, which applies credit
     // before its own claim — so apply it here too, or those pay links bill the
@@ -2581,9 +2626,9 @@ const InvoiceService = {
       if (packetClaim?.payerBilled) {
         return { sent: false, reason: "Suppressed — the visit is now billed to a third-party payer", code: "payer_billed" };
       }
-      claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed });
+      claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken });
     } else {
-      claim = await claimInvoiceForSend(invoiceId, { allowClaimed });
+      claim = await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken });
     }
     const { invoice, previousStatus, claimed } = claim;
 
@@ -2598,6 +2643,10 @@ const InvoiceService = {
       const { autoApplyAccountCreditIfEnabled } = require("./customer-credit");
       smsCreditResult = await autoApplyAccountCreditIfEnabled(invoiceId);
       if (smsCreditResult?.fullyCovered) {
+        const cleared = await db("invoices")
+          .where({ id: invoiceId, send_claim_token: invoice.send_claim_token })
+          .update({ send_claim_token: null, updated_at: new Date() });
+        if (!cleared) throw sendClaimLostError();
         await enrollPacketReviewAfterCredit(invoiceId, pre?.visit_completion_packet_id);
         // Covered by credit IS success for the caller (the invoice is now 'prepaid',
         // settled — nothing to send). Direct callers check `sent || ok`, so flag
@@ -2623,7 +2672,7 @@ const InvoiceService = {
     // Third-party Bill-To: never text the homeowner a pay link for a
     // payer-billed invoice — the pay link + AR route to the payer (email).
     if (invoice.payer_id) {
-      await restoreSendClaim(invoiceId, previousStatus, claimed);
+      await restoreSendClaim(invoiceId, previousStatus, claimed, db, invoice.send_claim_token);
       return { sent: false, reason: "Suppressed — invoice billed to a third-party payer", code: "payer_billed" };
     }
 
@@ -2631,8 +2680,8 @@ const InvoiceService = {
       .where({ id: invoice.customer_id })
       .first();
     if (!customer?.phone) {
-      await restoreSendClaim(invoiceId, previousStatus, claimed);
-      await reverseSmsCreditOnFailure();
+      const restored = await restoreSendClaim(invoiceId, previousStatus, claimed, db, invoice.send_claim_token);
+      if (restored) await reverseSmsCreditOnFailure();
       throw new Error("Customer has no phone number");
     }
 
@@ -2780,8 +2829,8 @@ const InvoiceService = {
       logger.warn(
         `[invoice] invoice_sent template missing/disabled — skipping SMS for invoice ${invoiceId}`,
       );
-      await restoreSendClaim(invoiceId, previousStatus, claimed);
-      await reverseSmsCreditOnFailure();
+      const restored = await restoreSendClaim(invoiceId, previousStatus, claimed, db, invoice.send_claim_token);
+      if (restored) await reverseSmsCreditOnFailure();
       return {
         sent: false,
         reason: "template-missing",
@@ -2791,10 +2840,10 @@ const InvoiceService = {
 
     // Post-delivery finalize, extracted so the delivered-SMS recovery in the
     // catch below can retry it once after a transient DB failure.
-    const finalizeInvoiceAfterSms = () => db("invoices")
-      .where({ id: invoiceId })
-      .whereIn("status", SEND_FINALIZABLE_STATUSES)
-      .update({
+    const finalizeInvoiceAfterSms = () => whereSendClaimOwned(
+      db("invoices").where({ id: invoiceId }).whereIn("status", SEND_FINALIZABLE_STATUSES),
+      invoice.send_claim_token,
+    ).update({
         status: db.raw(
           "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
         ),
@@ -2806,6 +2855,25 @@ const InvoiceService = {
         scheduled_review_delay_minutes: null,
         updated_at: new Date(),
       });
+    // Keep a direct SMS's episode identity through post-delivery bookkeeping.
+    // A retry can finish that work when PostgreSQL committed the finalize but
+    // the acknowledgement was lost; a later explicit resend may supersede the
+    // token, in which case this episode's exact-token writes become no-ops.
+    // Nested SMS leaves release to the combined SMS+email finalizer.
+    const releaseDirectSmsClaim = async () => {
+      if (allowClaimed) return;
+      try {
+        await whereSendClaimOwned(
+          db("invoices").where({ id: invoiceId }),
+          invoice.send_claim_token,
+        ).update({ send_claim_token: null, updated_at: new Date() });
+      } catch (err) {
+        // The provider already accepted the SMS and terminal bookkeeping has
+        // run. A failed cleanup acknowledgement must not turn that delivery
+        // into a failed send or invite an automatic replay.
+        logger.error(`[invoice] SMS delivered for ${invoice.invoice_number} but send-claim cleanup failed: ${err.message}`);
+      }
+    };
     // Flips the moment the provider accepts the message. Everything after
     // that point is bookkeeping — its failure must never be reported as a
     // failed SEND (the UI reads a restored 'draft' as "provably unsent" and
@@ -2823,6 +2891,8 @@ const InvoiceService = {
       const {
         sendCustomerMessage,
       } = require("./messaging/send-customer-message");
+      const sendInvoice = await db("invoices").where({ id: invoiceId }).first();
+      await require("./estimate-deposits").assertInvoiceDepositSettlementReady(db, sendInvoice, { lock: false });
       const sendResult = await sendCustomerMessage({
         to: customer.phone,
         body,
@@ -2841,6 +2911,72 @@ const InvoiceService = {
         // applies. If ops disables the invoice template to halt broken
         // billing texts, this flow needs to stop too.
         metadata: { original_message_type: "invoice" },
+        // The canonical sender owns push-first / push+SMS / Twilio routing.
+        // Wrap that ONE provider dispatcher so the invoice row and estimate
+        // deposit ledger stay stable through whichever delivery leg it picks.
+        // The canonical message audit runs after this callback commits.
+        withProviderHandoff: async (dispatch) => {
+          let dispatchedOutcome = null;
+          let providerStarted = false;
+          try {
+            const outcome = await require("./estimate-deposits").withInvoiceDepositSettlement(
+              invoiceId,
+              async (trx, current) => {
+                if (current.send_claim_token !== invoice.send_claim_token
+                  || !SEND_FINALIZABLE_STATUSES.includes(current.status)) {
+                  return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+                    code: "send_claim_lost", error: "Invoice send claim changed; delivery not attempted",
+                    validator: "check_invoice_send_claim" };
+                }
+                const scheduledServiceId = await linkedScheduledServiceId(current, trx);
+                const terminalVisit = await require("./invoice-helpers")
+                  .visitRefusesSettlement(trx, scheduledServiceId);
+                if (terminalVisit) {
+                  return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+                    code: "INVOICE_VISIT_TERMINAL", error: `Linked visit is ${terminalVisit}; delivery not attempted`,
+                    validator: "check_invoice_visit_status" };
+                }
+                const ownership = await require("./invoice-helpers").selfPayAtDispatch(invoiceId, trx)();
+                if (ownership.ok !== true) {
+                  return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+                    code: ownership.code, error: ownership.reason, validator: "check_invoice_ownership_boundary" };
+                }
+                if (invoiceAmountDue(current) <= 0
+                  || invoiceAmountDue(current) !== invoiceAmountDue(sendInvoice)
+                  || !isDeepStrictEqual(parseInvoiceLineItems(current.line_items), parseInvoiceLineItems(sendInvoice.line_items))) {
+                  return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+                    code: "INVOICE_BALANCE_CHANGED", error: "Invoice balance changed while preparing delivery; retry send",
+                    validator: "check_invoice_deposit_settlement" };
+                }
+                providerStarted = true;
+                dispatchedOutcome = await dispatch();
+                return dispatchedOutcome;
+              },
+            );
+            return outcome || { sent: false, blocked: true, deliveryOutcome: "not_sent",
+              code: "INVOICE_UNREADABLE", error: "Invoice could not be re-read before delivery",
+              validator: "check_invoice_deposit_settlement" };
+          } catch (err) {
+            // A commit/connection error AFTER provider acceptance cannot be
+            // rewritten as a definite non-send: that would restore the send
+            // claim and offer an automatic retry of a message the customer
+            // already received. Preserve the provider's actual provenance;
+            // normal delivered bookkeeping below remains idempotent.
+            if (dispatchedOutcome
+              && (dispatchedOutcome.sent || dispatchedOutcome.deliveryOutcome !== "not_sent")) {
+              logger.error(`[invoice] Provider outcome known for ${invoiceId} but deposit-settlement handoff could not close: ${err.message}`);
+              return { ...dispatchedOutcome, settlementHandoffError: err.message };
+            }
+            if (providerStarted) {
+              return { sent: false, blocked: true, deliveryOutcome: "uncertain",
+                code: err.code || "INVOICE_PROVIDER_OUTCOME_UNCERTAIN", error: err.message,
+                retryable: false, validator: "check_invoice_deposit_settlement" };
+            }
+            return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+              code: err.code || "INVOICE_DEPOSIT_SETTLEMENT_FAILED", error: err.message,
+              retryable: err.retryable === true, validator: "check_invoice_deposit_settlement" };
+          }
+        },
       });
 
       if (!sendResult.sent) {
@@ -2850,10 +2986,10 @@ const InvoiceService = {
         // Don't mark the invoice as sent if the wrapper blocked us.
         // The follow-up cron + admin can retry once the underlying
         // condition (consent, opt-out, etc.) is resolved.
-        await reverseSmsCreditOnFailure();
         const err = new Error(`payment-link SMS blocked: ${sendResult.code}`);
         err.code = sendResult.code;
         err.reason = sendResult.reason;
+        err.deliveryOutcome = sendResult.deliveryOutcome;
         // Send-window deferral contract: a QUIET_HOURS_HOLD is "try again at
         // 8 AM", not a delivery failure — carry the hold metadata so
         // sendViaSMSAndEmail / processScheduledSends can reschedule instead
@@ -2869,7 +3005,8 @@ const InvoiceService = {
       }
 
       smsDelivered = true;
-      await finalizeInvoiceAfterSms();
+      const finalized = await finalizeInvoiceAfterSms();
+      if (!finalized) return { sent: true, payUrl, claimLost: true };
 
       // Kick off the per-invoice automated follow-up sequence (Day 0/3/7/14/30)
       try {
@@ -2909,8 +3046,11 @@ const InvoiceService = {
         await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId });
       }
 
+      await releaseDirectSmsClaim();
+
       return { sent: true, payUrl };
     } catch (err) {
+      err.deliveryOutcome ||= err.providerOutcome?.deliveryOutcome;
       if (smsDelivered) {
         // The customer HAS the pay-link text — this is a post-delivery
         // bookkeeping failure (invoice finalize, follow-up scheduling, lead
@@ -2926,7 +3066,8 @@ const InvoiceService = {
           `[invoice] SMS DELIVERED for ${invoice.invoice_number} but post-delivery bookkeeping failed: ${err.message} — retrying finalize`,
         );
         try {
-          await finalizeInvoiceAfterSms();
+          const finalized = await finalizeInvoiceAfterSms();
+          if (!finalized) return { sent: true, payUrl, claimLost: true, finalizeError: err.message };
         } catch (retryErr) {
           logger.error(
             `[invoice] finalize retry failed for ${invoice.invoice_number}: ${retryErr.message} — row left under its send claim; do NOT auto-resend`,
@@ -2968,13 +3109,40 @@ const InvoiceService = {
             logger.error(`[invoice] issued-invoice closeout failed (post-recovery) for ${invoice.invoice_number}: ${e.message}`);
           }
         }
+        await releaseDirectSmsClaim();
         return { sent: true, payUrl, finalizeError: err.message };
       }
-      await restoreSendClaim(invoiceId, previousStatus, claimed);
+      if (claimed && err.code === "INVOICE_VISIT_TERMINAL" && err.deliveryOutcome === "not_sent") {
+        const scheduledServiceId = await linkedScheduledServiceId(invoice);
+        const voided = scheduledServiceId
+          ? await InvoiceService.voidOpenInvoicesForCancelledService(scheduledServiceId, {
+              invoiceId,
+              refusedClaimToken: invoice.send_claim_token,
+            })
+          : [];
+        if (voided.includes(invoiceId)) {
+          logger.info(`[invoice] Voided ${invoice.invoice_number} after a definitive terminal-visit SMS refusal`);
+          throw err;
+        }
+        // Exact-token cleanup declined (replacement claim, money/PI fence,
+        // reactivated visit, or DB fault). Keep this episode parked for
+        // review; restoring it would make a definitely-refused cancelled-job
+        // send eligible for dunning or scheduler retries again.
+        logger.warn(`[invoice] Terminal-visit SMS refusal for ${invoice.invoice_number} could not be safely voided — claim retained for review`);
+        throw err;
+      }
+      if (err.deliveryOutcome === "uncertain") {
+        // The provider request started, but its result is unknown. Preserve
+        // this exact claim as the durable do-not-retry marker; restoring the
+        // prior status or credit could duplicate a delivered pay link.
+        logger.warn(`[invoice] SMS provider outcome is unverified for ${invoice.invoice_number} — claim retained for review`);
+        throw err;
+      }
+      const restored = await restoreSendClaim(invoiceId, previousStatus, claimed, db, invoice.send_claim_token);
       // Provider/Twilio error after we auto-applied credit above — the pay
       // link was never delivered, so return the credit rather than leave it
       // consumed + the invoice edit-locked.
-      await reverseSmsCreditOnFailure();
+      if (restored) await reverseSmsCreditOnFailure();
       logger.error(
         `[invoice] SMS failed for ${invoice.invoice_number}: ${err.message}`,
       );
@@ -2988,6 +3156,7 @@ const InvoiceService = {
       requestReview = null,
       reviewDelayMinutes = null,
       allowClaimed = false,
+      claimToken = null,
       emailRecipientOverride = null,
       payUrlParams = null,
       operatorInitiated = false,
@@ -3010,14 +3179,14 @@ const InvoiceService = {
     let packetClaim = null;
     if (accrualPre?.visit_completion_packet_id && !accrualPre.payer_id) {
       try {
-        packetClaim = await claimPacketInvoiceForSend(invoiceId, accrualPre.visit_completion_packet_id, { allowClaimed });
+        packetClaim = await claimPacketInvoiceForSend(invoiceId, accrualPre.visit_completion_packet_id, { allowClaimed, claimToken });
       } catch (err) {
         // The scheduled-send worker already fenced and claimed this send; a
         // transient failure of the re-judge here left no provider request
         // behind, so the invoice goes back to its queue slot instead of
         // sitting in 'sending' until stale-claim recovery strands it.
         if (!allowClaimed) throw err;
-        await restoreSendClaim(invoiceId, "scheduled", true);
+        await restoreSendClaim(invoiceId, "scheduled", true, db, claimToken);
         logger.warn(`[invoice] Bill-To re-judge failed for ${invoiceId} — send left queued: ${err.message}`);
         return { ok: false, error: `Bill-To check failed: ${err.message}`, code: "bill_to_fence_failed",
           sms: { ok: false, code: "bill_to_fence_failed" }, email: { ok: false, code: "bill_to_fence_failed" } };
@@ -3034,7 +3203,7 @@ const InvoiceService = {
     // never reverses it either, leaving an undelivered, edit-locked invoice with
     // credit_applied set. Claiming first means a lost race throws here before any
     // credit is drawn down — nothing to reverse.
-    const claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed });
+    const claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken });
     // Now that we own the claim, apply available account credit so the pay link the
     // customer receives bills amount due (total − applied credit), not the gross
     // total. Auto-apply otherwise only runs at dispatch completion, so invoices
@@ -3047,6 +3216,13 @@ const InvoiceService = {
     const { autoApplyAccountCreditIfEnabled } = require("./customer-credit");
     const sendCreditResult = await autoApplyAccountCreditIfEnabled(invoiceId);
     if (sendCreditResult?.fullyCovered) {
+      const cleared = await db("invoices")
+        .where({ id: invoiceId, send_claim_token: claim.invoice.send_claim_token })
+        .update({ send_claim_token: null, updated_at: new Date() });
+      if (!cleared) {
+        return { ok: false, code: "send_claim_lost", error: "Invoice send claim changed; delivery not attempted",
+          sms: { ok: false, code: "send_claim_lost" }, email: { ok: false, code: "send_claim_lost" } };
+      }
       await enrollPacketReviewAfterCredit(invoiceId, accrualPre?.visit_completion_packet_id);
       return {
         ok: true,
@@ -3086,6 +3262,7 @@ const InvoiceService = {
       try {
         const smsResult = await this.sendViaSMS(invoiceId, {
           allowClaimed: true,
+          claimToken: claim.invoice.send_claim_token,
           payUrlParams,
           operatorInitiated,
         });
@@ -3099,6 +3276,7 @@ const InvoiceService = {
       } catch (err) {
         sms.error = err.message;
         if (err.code) sms.code = err.code;
+        if (err.deliveryOutcome) sms.deliveryOutcome = err.deliveryOutcome;
         // Preserve the send-window hold so callers with a retry rail
         // (processScheduledSends) can move the due time to the window open
         // instead of treating the hold as a spent delivery attempt.
@@ -3119,6 +3297,7 @@ const InvoiceService = {
     // (allowClaimed) skip this — their whole send defers below instead.
     if (!allowClaimed
       && ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD", "APP_PROVIDER_RETRY"].includes(sms.code)
+      && sms.deliveryOutcome !== "uncertain"
       && sms.deferred
       && sms.nextAllowedAt
       && sms.heldBody
@@ -3192,7 +3371,16 @@ const InvoiceService = {
     const scheduledSmsHeld = allowClaimed
       && ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD", "APP_PROVIDER_RETRY"].includes(sms.code)
       && Boolean(sms.nextAllowedAt);
-    if (scheduledSmsHeld || sms.holdUnowned) {
+    const terminalSmsRefusal = sms.code === "INVOICE_VISIT_TERMINAL"
+      && sms.deliveryOutcome === "not_sent";
+    if (terminalSmsRefusal) {
+      // The locked SMS boundary proved the linked visit terminal before any
+      // provider request. Do not start a second channel for the same invalid
+      // invoice; the outer claim owner can now make one safe cleanup decision.
+      email.error = "Linked visit is terminal; email delivery not attempted";
+      email.code = "INVOICE_VISIT_TERMINAL";
+      email.deliveryOutcome = "not_sent";
+    } else if (scheduledSmsHeld || sms.holdUnowned) {
       email.error = sms.holdUnowned
         ? "Held SMS pay link could not be queued — whole send deferred so the claim stays retryable"
         : "Deferred with the held SMS leg — outside 8AM-8PM ET send window";
@@ -3202,9 +3390,12 @@ const InvoiceService = {
         const r = await sendInvoiceEmail(invoiceId, {
           recipientOverride: emailRecipientOverride,
           payUrlParams,
+          claimToken: claim.invoice.send_claim_token,
         });
         if (r?.ok) email.ok = true;
         else if (r?.error) email.error = r.error;
+        if (r?.code) email.code = r.code;
+        if (r?.deliveryOutcome) email.deliveryOutcome = r.deliveryOutcome;
         if (!payUrl && r?.payUrl) payUrl = r.payUrl;
         if (r?.recipient) email.recipient = r.recipient;
         if (r?.messageId) email.messageId = r.messageId;
@@ -3214,10 +3405,22 @@ const InvoiceService = {
     }
 
     const ok = sms.ok || email.ok;
+    const smsDefinitelyNotSent = (sms.deliveryOutcome === "not_sent" && sms.scheduled !== true)
+      || (claim.invoice?.payer_id && sms.code === "payer_billed");
+    const terminalVisitRefused = !ok
+      && smsDefinitelyNotSent
+      && email.code === "INVOICE_VISIT_TERMINAL"
+      && email.deliveryOutcome === "not_sent";
+    const terminalVisitObserved = !ok && (sms.code === "INVOICE_VISIT_TERMINAL"
+      || email.code === "INVOICE_VISIT_TERMINAL");
+    const deliveryOutcomeUncertain = !ok && (sms.deliveryOutcome === "uncertain"
+      || email.deliveryOutcome === "uncertain");
+    let ownedDeliveryFinalized = false;
     if (ok) {
-      await db("invoices")
-        .where({ id: invoiceId })
-        .whereIn("status", SEND_FINALIZABLE_STATUSES)
+      const finalized = await whereSendClaimOwned(
+        db("invoices").where({ id: invoiceId }).whereIn("status", SEND_FINALIZABLE_STATUSES),
+        claim.invoice.send_claim_token,
+      )
         .update({
           status: db.raw(
             "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
@@ -3227,12 +3430,16 @@ const InvoiceService = {
           scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(db),
           scheduled_request_review: false,
           scheduled_review_delay_minutes: null,
+          send_claim_token: null,
           updated_at: new Date(),
         });
+      ownedDeliveryFinalized = finalized !== 0;
       // First send finalized on SMS and/or email — convert the originating lead.
       // Covers the email-only case the inner sendViaSMS hook can't (it skips when
       // allowClaimed). Resend-safe via the priorStatus gate.
-      await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(claim.invoice.sent_at || claim.invoice.sms_sent_at) });
+      if (ownedDeliveryFinalized) {
+        await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(claim.invoice.sent_at || claim.invoice.sms_sent_at) });
+      }
       // Arm/re-arm follow-ups on ANY successful channel (Codex #3493 r5):
       // the inner sendViaSMS hook only runs on SMS success, so an
       // email-only delivery finalized here armed nothing — a fresh invoice
@@ -3240,13 +3447,45 @@ const InvoiceService = {
       // 'invoice_voided' stop forever. Idempotent when the SMS leg already
       // scheduled (existing rows are returned unchanged; the void-stop
       // re-arm is conditional).
-      try {
-        await require("./invoice-followups").scheduleForInvoice(invoiceId);
-      } catch (e) {
-        logger.error(`[invoice-followups] scheduleForInvoice failed (post-send finalize): ${e.message}`);
+      if (ownedDeliveryFinalized) {
+        try {
+          await require("./invoice-followups").scheduleForInvoice(invoiceId);
+        } catch (e) {
+          logger.error(`[invoice-followups] scheduleForInvoice failed (post-send finalize): ${e.message}`);
+        }
       }
+    } else if (terminalVisitRefused) {
+      if (claimed) {
+        const scheduledServiceId = await linkedScheduledServiceId(claim.invoice);
+        const voided = scheduledServiceId
+          ? await InvoiceService.voidOpenInvoicesForCancelledService(scheduledServiceId, {
+              invoiceId,
+              refusedClaimToken: claim.invoice.send_claim_token,
+            })
+          : [];
+        if (!voided.includes(invoiceId)) {
+          logger.warn(`[invoice] Terminal-visit combined refusal for ${claim.invoice.invoice_number} could not be safely voided — claim retained for review`);
+        }
+      }
+      // A pre-claimed scheduled send is owned by processScheduledSends; it
+      // performs the same exact-token terminal cleanup. Neither owner may
+      // restore/reverse here and turn a cancelled-job send retryable again.
+    } else if (terminalVisitObserved) {
+      // One channel proved the visit terminal, but the other channel's
+      // provider outcome is not a definite non-send. Preserve the claim as
+      // delivery-unverified evidence; neither restore nor destructive void is
+      // licensed until an operator resolves the ambiguous channel.
+      logger.warn(`[invoice] Terminal visit detected for ${claim.invoice.invoice_number} with an unverified sibling-channel outcome — claim retained for review`);
+    } else if (deliveryOutcomeUncertain) {
+      logger.warn(`[invoice] Delivery outcome is unverified for ${claim.invoice.invoice_number} — claim retained for review`);
     } else {
-      await restoreSendClaim(invoiceId, previousStatus, claimed);
+      const restored = await restoreSendClaim(
+        invoiceId,
+        previousStatus,
+        claimed,
+        db,
+        claim.invoice.send_claim_token,
+      );
       // No channel delivered — reverse the credit this seam auto-applied before
       // the send so we don't consume the customer's credit and edit-lock an
       // invoice whose pay link never went out. Reverse ONLY when WE own the claim:
@@ -3254,7 +3493,7 @@ const InvoiceService = {
       // no-op and the row is still 'sending', so reverseAppliedCredit would refuse
       // — the caller (processScheduledSends) restores 'scheduled' then reverses
       // creditApplied from the result.
-      if (!allowClaimed && sendCreditResult?.applied > 0) {
+      if (restored && !allowClaimed && sendCreditResult?.applied > 0) {
         try {
           const { reverseAppliedCredit } = require("./customer-credit");
           await reverseAppliedCredit({ invoiceId, amount: sendCreditResult.applied, createdBy: "system:send_failed" });
@@ -3268,7 +3507,7 @@ const InvoiceService = {
     // the open visit it bills, quietly. Best-effort after the send — the
     // customer already has the invoice either way.
     let issuedCloseout = null;
-    if (ok) {
+    if (ownedDeliveryFinalized) {
       const { closeOutVisitForIssuedInvoice } = require("./invoice-issued-closeout");
       issuedCloseout = await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId });
     }
@@ -3282,7 +3521,7 @@ const InvoiceService = {
     // suppresses the ask outright (its record froze requestReview: false, so
     // the paid webhook enrolls nothing later either); otherwise the fresh
     // read below sees whatever linkage now stands.
-    if (effectiveRequestReview && ok) {
+    if (effectiveRequestReview && ownedDeliveryFinalized) {
       try {
         const ReviewService = require("./review-request");
         if (issuedCloseout?.closed) {
@@ -3326,7 +3565,12 @@ const InvoiceService = {
         );
       }
     }
-    return { ok, sms, email, payUrl, creditApplied: sendCreditResult?.applied || 0 };
+    return { ok, sms, email, payUrl, creditApplied: sendCreditResult?.applied || 0,
+      ...(terminalVisitRefused
+        ? { code: "INVOICE_VISIT_TERMINAL" }
+        : terminalVisitObserved
+          ? { code: "INVOICE_VISIT_TERMINAL_OUTCOME_UNCERTAIN" }
+          : deliveryOutcomeUncertain ? { code: "INVOICE_DELIVERY_OUTCOME_UNCERTAIN" } : {}) };
   },
 
   async markDeliverySent(
@@ -3497,6 +3741,7 @@ const InvoiceService = {
         status: "scheduled",
         scheduled_send_at: null,
         scheduled_send_error: require("./invoice-helpers").STALE_SEND_PARK_ERROR,
+        send_claim_token: null,
         updated_at: new Date(),
       });
 
@@ -3521,6 +3766,8 @@ const InvoiceService = {
         // payer-billed invoice is delivered email-only by design.
         "payer_id",
         "customer_id",
+        "scheduled_service_id",
+        "service_record_id",
         // A combined-visit invoice re-resolves live Bill-To under held rows
         // before its queue claim.
         "visit_completion_packet_id",
@@ -3611,6 +3858,7 @@ const InvoiceService = {
           continue;
         }
       }
+      let claimed = null;
       // A combined-visit invoice re-resolves live Bill-To ownership under
       // held rows before its queue claim; a payer means the homeowner send is
       // withdrawn for good, not retried.
@@ -3629,10 +3877,10 @@ const InvoiceService = {
           continue;
         }
         if (!fenced.claim?.claimed) continue;
-      }
-      const [claimed] = inv.visit_completion_packet_id && !inv.payer_id
-        ? await db("invoices").where({ id: inv.id, status: "sending" }).select(["id", "scheduled_request_review", "scheduled_review_delay_minutes"])
-        : await db("invoices")
+        claimed = fenced.claim.invoice;
+      } else {
+        const freshClaimToken = crypto.randomUUID();
+        [claimed] = await db("invoices")
           .where({ id: inv.id, status: "scheduled" })
           .whereNotNull("scheduled_send_at")
           .where("scheduled_send_at", "<=", new Date())
@@ -3641,18 +3889,25 @@ const InvoiceService = {
               .whereNull("scheduled_send_attempts")
               .orWhere("scheduled_send_attempts", "<", 5),
           )
-          .update({ status: "sending", updated_at: new Date() })
+          .update({ status: "sending", send_claim_token: freshClaimToken, updated_at: new Date() })
           .returning([
             "id",
             "scheduled_request_review",
             "scheduled_review_delay_minutes",
+            "send_claim_token",
           ]);
+      }
       if (!claimed) continue;
+
+      const restoreClaimedInvoice = (payload) => db("invoices")
+        .where({ id: inv.id, status: "sending", send_claim_token: claimed.send_claim_token })
+        .update({ ...payload, send_claim_token: null });
 
       const result = await this.sendViaSMSAndEmail(claimed.id, {
         requestReview: Boolean(claimed.scheduled_request_review),
         reviewDelayMinutes: claimed.scheduled_review_delay_minutes,
         allowClaimed: true,
+        claimToken: claimed.send_claim_token,
       });
       if (result.ok) {
         sent += 1;
@@ -3664,7 +3919,31 @@ const InvoiceService = {
         continue;
       }
       if (result.code === "bill_to_fence_failed") {
-        // Already restored to its queue slot by the sender; no attempt spent.
+        await restoreClaimedInvoice({ status: "scheduled", updated_at: new Date() });
+        continue;
+      }
+      if (result.code === "INVOICE_VISIT_TERMINAL") {
+        const scheduledServiceId = await linkedScheduledServiceId(inv);
+        const voided = scheduledServiceId
+          ? await InvoiceService.voidOpenInvoicesForCancelledService(scheduledServiceId, {
+              invoiceId: inv.id,
+              refusedClaimToken: claimed.send_claim_token,
+            })
+          : [];
+        held += 1;
+        if (!voided.includes(inv.id)) {
+          logger.warn(`[invoice] Scheduled send for ${inv.invoice_number} hit a terminal visit but could not be safely voided — claim retained for review`);
+        }
+        continue;
+      }
+      if (result.code === "INVOICE_VISIT_TERMINAL_OUTCOME_UNCERTAIN") {
+        held += 1;
+        logger.warn(`[invoice] Scheduled send for ${inv.invoice_number} found a terminal visit after an unverified channel outcome — claim retained for review`);
+        continue;
+      }
+      if (result.code === "INVOICE_DELIVERY_OUTCOME_UNCERTAIN") {
+        held += 1;
+        logger.warn(`[invoice] Scheduled send for ${inv.invoice_number} has an unverified provider outcome — claim retained for review`);
         continue;
       }
 
@@ -3681,16 +3960,15 @@ const InvoiceService = {
       // overnight cron passes must not permanently fail the send.
       const smsHeld =
         ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD"].includes(result.sms?.code) && result.sms?.nextAllowedAt;
+      let restored = 0;
       if (smsHeld) {
         deferred += 1;
-        await db("invoices")
-          .where({ id: inv.id })
-          .update({
-            status: "scheduled",
-            scheduled_send_at: new Date(result.sms.nextAllowedAt),
-            scheduled_send_error: error,
-            updated_at: new Date(),
-          });
+        restored = await restoreClaimedInvoice({
+          status: "scheduled",
+          scheduled_send_at: new Date(result.sms.nextAllowedAt),
+          scheduled_send_error: error,
+          updated_at: new Date(),
+        });
       } else {
         failed += 1;
         // A temporary native failure consumes an attempt under this
@@ -3700,21 +3978,19 @@ const InvoiceService = {
           ? Math.max(60000, Number(result.sms.retryAfterMs) || 60000)
             * (2 ** Number(inv.scheduled_send_attempts || 0)) * (1 + Math.random() * 0.2)
           : null;
-        await db("invoices")
-          .where({ id: inv.id })
-          .update({
-            status: "scheduled",
-            scheduled_send_attempts: Number(inv.scheduled_send_attempts || 0) + 1,
-            ...(nativeRetryMs ? { scheduled_send_at: new Date(Date.now() + nativeRetryMs) } : {}),
-            scheduled_send_error: error,
-            updated_at: new Date(),
-          });
+        restored = await restoreClaimedInvoice({
+          status: "scheduled",
+          scheduled_send_attempts: Number(inv.scheduled_send_attempts || 0) + 1,
+          ...(nativeRetryMs ? { scheduled_send_at: new Date(Date.now() + nativeRetryMs) } : {}),
+          scheduled_send_error: error,
+          updated_at: new Date(),
+        });
       }
       // We pre-claimed this row, so sendViaSMSAndEmail couldn't reverse the credit
       // it auto-applied (the row was 'sending'). Now that it's back to 'scheduled'
       // and nothing was delivered, return that credit so it isn't stranded +
       // edit-locking the invoice until the next attempt.
-      if (result.creditApplied > 0) {
+      if (restored && result.creditApplied > 0) {
         try {
           const { reverseAppliedCredit } = require("./customer-credit");
           await reverseAppliedCredit({ invoiceId: inv.id, amount: result.creditApplied, createdBy: "system:scheduled_send_failed" });
@@ -4864,7 +5140,7 @@ const InvoiceService = {
       }
       const [updated] = await trx("invoices")
         .where({ id, status: current.status })
-        .update({ status: "void", updated_at: new Date() })
+        .update({ status: "void", send_claim_token: null, updated_at: new Date() })
         .returning("*");
       if (!updated) {
         throw new Error("Invoice status changed while voiding — re-check and retry");
@@ -5122,6 +5398,7 @@ const InvoiceService = {
         .where({ id, status: "void" })
         .update({
           status: "draft",
+          send_claim_token: null,
           // A draft can't stay tucked under the Archived filter.
           archived_at: null,
           // Verified-canceled above; a kept stamp would trip the edit
@@ -5436,13 +5713,19 @@ const InvoiceService = {
       if (totalCents !== creditCents) return skip("balance_due");
       await require("./stripe").assertNoInvoiceChargeReconciliationPending(id, trx);
       if ([invoice.payer_id, invoice.payer_statement_id, invoice.annual_prepay_term_id,
-        invoice.stripe_payment_intent_id, invoice.payment_recorded_at, invoice.status === "sending"].some(Boolean)) {
+        invoice.stripe_payment_intent_id, invoice.payment_recorded_at].some(Boolean)) {
         return skip("existing_payment_work");
       }
       const payment = await trx("payments").whereIn("status", ["paid", "processing"])
         .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [id]).first("id");
       const plan = await trx("payment_plans").where({ invoice_id: id, status: "active" }).first("id");
       if (payment || plan) return skip("existing_payment_work");
+      // Delivery owns the invoice row while its pay link is being handed to a
+      // provider. The deposit credit is already durable, so this is a retryable
+      // close gap after delivery resolves; it is not evidence of payment work.
+      if (invoice.status === "sending") {
+        return { ...skip("invoice_delivery_in_flight"), retryable: true };
+      }
       const sequence = await trx("invoice_followup_sequences").where({ invoice_id: id }).forUpdate()
         .first("id", "status", "touch_claimed_at");
       if (sequence?.status === "stopped") return skip("collection_stopped");
@@ -5789,7 +6072,7 @@ const InvoiceService = {
         voided += await conn("invoices")
           .where({ id: inv.id, status: inv.status })
           .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id").whereNull("payer_statement_id").where(function creditFree() { this.whereNull("credit_applied").orWhere("credit_applied", 0); })
-          .update({ status: "void", updated_at: new Date() });
+          .update({ status: "void", send_claim_token: null, updated_at: new Date() });
       } else {
         logger.error(`[invoice] FIX: revived prepay ${prepayInvoiceId}: switch-restored invoice ${inv.id} has money attached (${inv.status}) — refund/reconcile so the coverage is not collected twice`);
       }
@@ -5933,7 +6216,7 @@ const InvoiceService = {
         const sibVoided = await conn("invoices")
           .where({ id: sib.id, status: sib.status })
           .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id").whereNull("payer_statement_id").where(function creditFree() { this.whereNull("credit_applied").orWhere("credit_applied", 0); })
-          .update({ status: "void", updated_at: new Date() });
+          .update({ status: "void", send_claim_token: null, updated_at: new Date() });
         if (sibVoided === 1) {
           await conn("setup_fee_claims").where({ id: sc.id }).delete();
           logger.info(`[invoice] revived prepay ${prepayInvoiceId}: completion setup invoice ${sib.id} voided (its claim consumed) — the prepay's own setup line is live again`);
@@ -5992,7 +6275,7 @@ const InvoiceService = {
         voided += await conn("invoices")
           .where({ id: rb.id, status: rb.status })
           .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id").whereNull("payer_statement_id").where(function creditFree() { this.whereNull("credit_applied").orWhere("credit_applied", 0); })
-          .update({ status: "void", updated_at: new Date() });
+          .update({ status: "void", send_claim_token: null, updated_at: new Date() });
       } else {
         logger.error(`[invoice] FIX: replacement setup invoice ${rb.id} for reversed invoice ${sourceInvoiceId} has money attached (${rb.status}) — refund/reconcile so the setup is not collected twice`);
       }
@@ -6128,7 +6411,7 @@ const InvoiceService = {
           const sibVoided = await conn("invoices")
             .where({ id: sib.id, status: sib.status })
             .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id").whereNull("payer_statement_id").where(function creditFree() { this.whereNull("credit_applied").orWhere("credit_applied", 0); })
-            .update({ status: "void", updated_at: new Date() });
+            .update({ status: "void", send_claim_token: null, updated_at: new Date() });
           if (sibVoided === 1) {
             await conn("setup_fee_claims").where({ id: siblingClaim.id }).delete();
             logger.info(`[invoice] invoice ${invoiceRow.id} reinstated — sibling setup invoice ${sib.id} voided (claim consumed) so the fee is carried once`);
@@ -6684,13 +6967,22 @@ const InvoiceService = {
    *
    * Best-effort: logs and continues, never throws. Returns voided invoice ids.
    */
-  async voidOpenInvoicesForCancelledService(scheduledServiceId) {
+  async voidOpenInvoicesForCancelledService(
+    scheduledServiceId,
+    { invoiceId = null, refusedClaimToken = null } = {},
+  ) {
     const voided = [];
     if (!scheduledServiceId) return voided;
+    const refusedSendCleanup = Boolean(invoiceId && refusedClaimToken);
     try {
-      const candidates = await db("invoices")
-        .where({ scheduled_service_id: scheduledServiceId })
-        .whereIn("status", CANCELLED_SERVICE_VOIDABLE_STATUSES)
+      const candidateQuery = db("invoices");
+      if (refusedSendCleanup) {
+        candidateQuery.where({ id: invoiceId, status: "sending", send_claim_token: refusedClaimToken });
+      } else {
+        candidateQuery.where({ scheduled_service_id: scheduledServiceId })
+          .whereIn("status", CANCELLED_SERVICE_VOIDABLE_STATUSES);
+      }
+      const candidates = await candidateQuery
         .select("id", "invoice_number", "stripe_payment_intent_id", "payer_statement_id");
       if (candidates.length === 0) return voided;
       const StripeService = require("./stripe");
@@ -6698,6 +6990,18 @@ const InvoiceService = {
         try {
           // ── Stripe PI triage (pre-lock) ────────────────────────────────
           const triagedPiId = candidate.stripe_payment_intent_id || null;
+          // The refused-send cleanup runs after provider preparation. Never
+          // perform an external Stripe cancellation from that delayed path:
+          // a reactivated visit/replacement episode could have attached the
+          // PI after the refusal snapshot. Leave any PI-bearing row claimed
+          // for explicit money review. Normal cancellation keeps its existing
+          // triage below.
+          if (refusedSendCleanup && triagedPiId) {
+            logger.warn(
+              `[invoice] NOT auto-voiding ${candidate.invoice_number} after terminal delivery refusal — PaymentIntent ${triagedPiId} is attached; needs manual review`,
+            );
+            continue;
+          }
           if (triagedPiId) {
             let pi;
             try {
@@ -6763,7 +7067,32 @@ const InvoiceService = {
               .forUpdate()
               .first();
             if (!locked) return { skipped: "invoice no longer exists" };
-            if (!CANCELLED_SERVICE_VOIDABLE_STATUSES.includes(locked.status)) {
+            if (refusedSendCleanup) {
+              if (locked.status !== "sending" || locked.send_claim_token !== refusedClaimToken) {
+                return { skipped: "delivery claim changed; replacement episode retained", invoice: locked };
+              }
+              // A deferred invoice message may already own this delivery.
+              // Keep the invoice claimed while that message is queued,
+              // dispatching, or finalizing so terminal-refusal cleanup cannot
+              // erase its pay link or accepted-provider evidence.
+              const liveQueuedDelivery = await trx("sms_log")
+                .whereRaw("metadata->>'entry_point' IN ('invoice_send_deferred', 'invoice_followup_deferred', 'autopay_completion_decline_deferred', 'dispatch_completion_deferred')")
+                .whereRaw("metadata->>'invoice_id' = ?", [String(locked.id)])
+                .whereRaw("(status IN ('scheduled', 'sending') OR (status = 'sent' AND metadata->>'finalize_pending' = 'true'))")
+                .first("id");
+              if (liveQueuedDelivery) {
+                return { skipped: `queued delivery ${liveQueuedDelivery.id} is still live; needs delivery review`, invoice: locked };
+              }
+              const linkedVisitId = await linkedScheduledServiceId(locked, trx);
+              if (String(linkedVisitId || "") !== String(scheduledServiceId)) {
+                return { skipped: "linked visit changed after refusal", invoice: locked };
+              }
+              const terminalVisit = await require("./invoice-helpers")
+                .visitRefusesSettlement(trx, linkedVisitId);
+              if (!terminalVisit) {
+                return { skipped: "linked visit is no longer terminal", invoice: locked };
+              }
+            } else if (!CANCELLED_SERVICE_VOIDABLE_STATUSES.includes(locked.status)) {
               return { skipped: `status moved to ${locked.status}`, invoice: locked };
             }
             // A different/new PI attached after triage means a customer is
@@ -6787,9 +7116,11 @@ const InvoiceService = {
                 invoice: locked,
               };
             }
-            const [voidedInvoice] = await trx("invoices")
-              .where({ id: locked.id, status: locked.status })
-              .update({ status: "void", updated_at: new Date() })
+            const voidQuery = trx("invoices")
+              .where({ id: locked.id, status: locked.status });
+            if (refusedSendCleanup) voidQuery.where({ send_claim_token: refusedClaimToken });
+            const [voidedInvoice] = await voidQuery
+              .update({ status: "void", send_claim_token: null, updated_at: new Date() })
               .returning("*");
             if (!voidedInvoice) return { skipped: "concurrent status change", invoice: locked };
             // Same-transaction ledger restore, matching voidInvoice: a
@@ -6860,21 +7191,23 @@ const InvoiceService = {
       // spendable (Codex #3178 r7 P0). `finally` covers the no-invoice
       // early return too — a cancel with nothing to void still reverses.
       // Idempotent and never throws; the hourly sweep stays as recovery.
-      try {
-        const rev = await require('./inspection-credit').reverseInspectionCreditForBooking({
-          scheduledServiceId,
-          createdBy: 'system:inspection_credit_cancellation_void_hook',
-        });
-        // Surfaced for callers that COUNT reversals (the hourly sweep,
-        // which now routes through this seam — Codex #3178 r33 P2): a
-        // property on the returned array is additive and invisible to
-        // every array-consuming caller. Assigned in finally, so the
-        // no-invoice early return carries it too.
-        voided.inspectionCreditReversal = rev;
-      } catch (revErr) {
-        logger.error(
-          `[invoice] inspection credit reversal failed for cancelled service ${scheduledServiceId}: ${revErr.message}`,
-        );
+      if (!refusedSendCleanup || voided.includes(invoiceId)) {
+        try {
+          const rev = await require('./inspection-credit').reverseInspectionCreditForBooking({
+            scheduledServiceId,
+            createdBy: 'system:inspection_credit_cancellation_void_hook',
+          });
+          // Surfaced for callers that COUNT reversals (the hourly sweep,
+          // which now routes through this seam — Codex #3178 r33 P2): a
+          // property on the returned array is additive and invisible to
+          // every array-consuming caller. Assigned in finally, so the
+          // no-invoice early return carries it too.
+          voided.inspectionCreditReversal = rev;
+        } catch (revErr) {
+          logger.error(
+            `[invoice] inspection credit reversal failed for cancelled service ${scheduledServiceId}: ${revErr.message}`,
+          );
+        }
       }
     }
     return voided;
@@ -6982,9 +7315,6 @@ module.exports._invoiceHasNonBaseCharges = invoiceHasNonBaseCharges;
 module.exports._invoiceHasDepositCreditLine = invoiceHasDepositCreditLine;
 module.exports._parseInvoiceLineItems = parseInvoiceLineItems;
 module.exports.CANCELLED_SERVICE_VOIDABLE_STATUSES = CANCELLED_SERVICE_VOIDABLE_STATUSES;
-// The statuses sendViaSMS/claimInvoiceForSend will claim — the ONE
-// sendability authority (the collections pay-link anchor reads it).
-module.exports.SEND_CLAIMABLE_STATUSES = SEND_CLAIMABLE_STATUSES;
 module.exports._s3KeyFromStoredUrl = s3KeyFromStoredUrl;
 module.exports._withFreshServicePhotoUrls = withFreshServicePhotoUrls;
 module.exports.claimPacketInvoiceForSend = claimPacketInvoiceForSend;

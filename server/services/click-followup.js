@@ -303,7 +303,7 @@ async function runQueue(now = new Date()) {
         if (verdict.code === 'converted') {
           await recordOutcome(c, 'converted', { converted_at: new Date() });
           counts.converted++;
-        } else if (['estimate_terminal', 'suppressed', 'cadence_due'].includes(verdict.code)) {
+        } else if (['estimate_terminal', 'suppressed', 'cadence_due', 'annual_offer_withheld'].includes(verdict.code)) {
           await recordOutcome(c, 'dismissed');
           counts.dismissed++;
         } else {

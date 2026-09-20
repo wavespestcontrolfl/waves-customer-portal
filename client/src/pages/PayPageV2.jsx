@@ -1925,16 +1925,27 @@ export default function PayPageV2() {
     setLoading(true);
     setError(null);
     fetchWithNetworkRetry(`${API_BASE}/pay/${token}`, { signal: controller.signal })
-      .then((r) => {
+      .then(async (r) => {
         if (!r.ok) {
-          const loadError = new Error(r.status === 404 ? 'Invoice not found' : 'Failed to load');
+          const body = await r.json().catch(() => ({}));
+          const loadError = new Error(body.error || (r.status === 404 ? 'Invoice not found' : 'Failed to load'));
           loadError.status = r.status;
+          loadError.reconciliationRequired = r.status === 409 && body.reconciliationRequired === true;
           throw loadError;
         }
         return r.json();
       })
       .then((d) => { if (!controller.signal.aborted) { setData(d); setLoading(false); } })
-      .catch((e) => { if (!controller.signal.aborted) { setError({ message: e.message, status: e.status }); setLoading(false); } });
+      .catch((e) => {
+        if (!controller.signal.aborted) {
+          setError({
+            message: e.message,
+            status: e.status,
+            reconciliationRequired: e.reconciliationRequired === true,
+          });
+          setLoading(false);
+        }
+      });
     return () => controller.abort();
   }, [token, loadAttempt]);
 
@@ -2426,6 +2437,19 @@ export default function PayPageV2() {
               number inside the sentence, not a button pair. */}
           <PublicStateCard state="not-found" title="We couldn't find that invoice" contact="none">
             The link may have expired or been mistyped. Give us a call and we'll sort it out — <HelpPhoneLink tone="dark" inline />.
+          </PublicStateCard>
+        </CustomerColumn>
+      </WavesShell>
+    );
+  }
+
+  if (error?.status === 409 && error.reconciliationRequired) {
+    return (
+      <WavesShell variant="customer" topBar="solid">
+        <CustomerColumn>
+          <PublicStateCard state="error" title="Deposit received — payment paused" contact="none">
+            We’re applying your deposit to this invoice now. Payment is paused while we confirm the
+            updated balance, so please don’t submit another payment. Refresh this page in a moment.
           </PublicStateCard>
         </CustomerColumn>
       </WavesShell>

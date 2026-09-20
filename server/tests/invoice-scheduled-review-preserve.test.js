@@ -19,6 +19,9 @@ jest.mock('../services/logger', () => ({
 jest.mock('../services/invoice-email', () => ({
   sendInvoiceEmail: jest.fn(async () => ({ ok: true })),
 }));
+jest.mock('../services/estimate-deposits', () => ({
+  assertInvoiceDepositSettlementReady: jest.fn(async () => {}),
+}));
 jest.mock('../services/review-request', () => ({
   enrollPostService: jest.fn(async () => ({ id: 'rr-1' })),
 }));
@@ -44,6 +47,7 @@ function chain({ first, returning } = {}) {
   const q = {};
   q.where = jest.fn(() => q);
   q.whereIn = jest.fn(() => q);
+  q.whereNull = jest.fn(() => q);
   q.select = jest.fn(() => q);
   q.update = jest.fn(() => q);
   q.first = jest.fn(async () => first);
