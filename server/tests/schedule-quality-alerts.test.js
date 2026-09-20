@@ -26,7 +26,7 @@ test('a double-booking is carded first, without a calibrated drive model, and ne
   const alerts = buildRouteQualityAlerts(day(clash), 'legacy');
   expect(alerts).toHaveLength(1);
   expect(alerts[0].payload.issues).toEqual([
-    expect.stringContaining("2 visits overlap another customer's promised window"),
+    expect.stringContaining("2 visits overlap another appointment's promised window"),
     expect.stringContaining('without a usable location'),
   ]);
   expect(alerts[0].payload).toMatchObject({ doubleBookedVisits: 2 });

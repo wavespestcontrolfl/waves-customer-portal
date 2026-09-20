@@ -71,10 +71,11 @@ function technicianRouteIssues(quality, driveModel) {
   const issues = [];
   // A double-booking is a fact about the promises, not a timing forecast:
   // it needs no drive model and outranks every other exception on the card,
-  // because one of the two customers must be moved before the 72-hour
-  // reminder text goes out.
+  // because one of the two visits must be moved before the 72-hour reminder
+  // text goes out. "Appointment", not "customer": one customer's second
+  // property or unit in the same slot is a clash too.
   const clashing = new Set((quality.doubleBookedVisits || []).flatMap(pair => pair.ids)).size;
-  if (clashing) issues.push(`${clashing} visit${clashing === 1 ? '' : 's'} overlap another customer's promised window. Move one before the reminder text goes out.`);
+  if (clashing) issues.push(`${clashing} visit${clashing === 1 ? '' : 's'} overlap another appointment's promised window. Move one before the reminder text goes out.`);
   const missing = quality.missingCoordinates.length;
   if (missing) issues.push(`${missing} visit${missing === 1 ? '' : 's'} without a usable location. Verify the service address and map pin.`);
   const unknownDurations = quality.defaultDurations.length;
