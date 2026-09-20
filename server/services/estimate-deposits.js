@@ -463,6 +463,23 @@ async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars,
       capturedAt: new Date().toISOString(),
     },
     entryPoint: 'estimate_deposit_receipt',
+    // Round 8 P1 (SMS twin of deposit.receipt email's own withheldLinkPolicy
+    // 'rewrite'): the deposit is owed regardless of the annual offer's own
+    // state — a REFUSE (send-customer-message.js's guard default) would
+    // deny proof of payment. The seeded template body carries no link
+    // today, but it is a live, admin-editable sms_templates row (same
+    // trust boundary as the email body), so this guards the same way
+    // whether or not one is literally in the current text.
+    //
+    // Round 11 structural fix (P1): no explicit withheldLinkPolicy here any
+    // more — original_message_type: 'deposit_receipt' below is what
+    // send-customer-message.js's withheldLinkPolicyForSmsPurpose resolves
+    // 'rewrite' from (purpose payment_receipt for a customer, or this
+    // message_type for a lead, whose purpose is estimate_followup
+    // instead), the SAME label a scheduled retry/requeue of THIS receipt
+    // (scheduler.js's replayInput, forwarding sms_log.message_type)
+    // carries too — so a retry inherits the policy structurally instead of
+    // needing its own explicit override.
     metadata: { original_message_type: 'deposit_receipt' },
   });
   if (!result.sent) {
@@ -615,6 +632,19 @@ async function sendDepositReceiptEmail({ estimate, customer, prefs, amountDollar
       triggerEventId: `deposit_receipt:${paymentIntentId}`,
       idempotencyKey: `deposit_receipt:${paymentIntentId}`,
       categories: ['deposit_receipt'],
+      // Codex round 3 on #4608 (P1 PRRT_kwDOR3YQi86j8Ydp, over-blocking):
+      // the deposit is owed regardless of the annual offer's own state — a
+      // REFUSE (the annual-offer guard's non-receipt default) would deny
+      // the customer proof of payment. Same precedent as the pricing-
+      // authority CTA swap above (estimateUrl already falls back to the
+      // portal home under THAT gate): if the annual guard would refuse,
+      // swap its link for the portal home too and still send, rather than
+      // failing the whole receipt. Round 9 structural fix: this is no
+      // longer an explicit override here — 'deposit.receipt' is one of
+      // estimate-annual-guard.js's withheldLinkPolicyForTemplate keys, so
+      // sendOne (the true provider boundary) resolves 'rewrite' for it on
+      // its own, and does the same for a retry or bounce recovery of this
+      // SAME receipt, not only this fresh send.
       // SendGrid rejection bodies can echo the recipient address — keep them
       // out of the provider log (redaction below covers this catch).
       suppressProviderErrorLog: true,

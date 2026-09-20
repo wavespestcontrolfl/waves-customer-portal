@@ -670,3 +670,68 @@ describe('splitStreetLineUnitParts', () => {
     expect(splitStreetLineUnitParts('Apt 4, Sarasota')).toEqual({ street: 'Apt 4', unit: '', tail: 'Sarasota' });
   });
 });
+
+describe('parseRawAddress — conversational words that are also state codes', () => {
+  // Synthetic spoken raw_text in the call extractor's shape. "or" / "in"
+  // are English here, not Oregon / Indiana; reading them as a state marks
+  // the address out of the service area and vetoes every customer write
+  // for the call.
+  test('"or" mid-sentence is not Oregon', () => {
+    expect(parseRawAddress("1200 Harbor Lane. It's Palmetto, so, or it could be Ellenton, but it's 34221"))
+      .toMatchObject({ state: '', zip: '34221' });
+  });
+  test('"in" before a locality is not Indiana', () => {
+    expect(parseRawAddress("88 Cypress Court, Palmetto. It's in the Oak Grove section."))
+      .toMatchObject({ state: '' });
+    expect(parseRawAddress("5100 Heron, H-E-R-O-N, Park Court, and it's in Parrish, 34219"))
+      .toMatchObject({ state: '', zip: '34219' });
+  });
+  test('a code at the segment end or before a ZIP is still a state', () => {
+    expect(parseRawAddress('123 Main St, Portland, OR 97201')).toMatchObject({ state: 'OR', zip: '97201' });
+    expect(parseRawAddress('123 Main St, Groton, CT')).toMatchObject({ state: 'CT' });
+    expect(parseRawAddress('123 Main St, Sarasota FL 34236 United States')).toMatchObject({ state: 'FL', zip: '34236' });
+  });
+  test('a code that ends a comma segment survives trailing speech (codex r1 P1)', () => {
+    expect(parseRawAddress("123 Main St, Venice, CA, but I don't know the ZIP")).toMatchObject({ state: 'CA' });
+    expect(parseRawAddress("123 Main St, Venice, CA. I don't know the ZIP")).toMatchObject({ state: 'CA' });
+    expect(parseRawAddress("123 Main St, Venice, CA; but I don't know the ZIP")).toMatchObject({ state: 'CA' });
+  });
+  test('a code before a trailing country keeps the state (codex r3 P1)', () => {
+    expect(parseRawAddress('123 Main St, Portland, OR United States')).toMatchObject({ state: 'OR' });
+    expect(parseRawAddress('123 Main St, Portland, OR USA')).toMatchObject({ state: 'OR' });
+    expect(parseRawAddress('123 Main St, Sarasota, FL 34236 USA')).toMatchObject({ state: 'FL', zip: '34236' });
+  });
+  test('an unambiguous code before unpunctuated trailing speech keeps the state (codex r4 P1)', () => {
+    expect(parseRawAddress("123 Main St, Venice, CA but I don't know the ZIP")).toMatchObject({ state: 'CA' });
+    expect(parseRawAddress('123 Main St, Denver, CO and the ZIP is unknown')).toMatchObject({ state: 'CO' });
+  });
+  test('a filler code next to punctuation or a ZIP is still speech unless written as an abbreviation (codex r5 P1)', () => {
+    expect(parseRawAddress("123 Main St, Palmetto, and it's in, I think, Parrish, 34219")).toMatchObject({ state: '', zip: '34219' });
+    expect(parseRawAddress('123 Main St, Palmetto, I live in 34221')).toMatchObject({ state: '', zip: '34221' });
+    expect(parseRawAddress("It's OK, 123 Main St, Palmetto, 34221")).toMatchObject({ state: '' });
+    expect(parseRawAddress('123 Main St, Boise, ID')).toMatchObject({ state: 'ID' });
+    expect(parseRawAddress('123 Main St, Portland, or 97201')).toMatchObject({ state: 'OR', zip: '97201' });
+    expect(parseRawAddress('123 Main St, Tulsa, OK 74103')).toMatchObject({ state: 'OK', zip: '74103' });
+  });
+  test('a ZIP-less abbreviation that ends the address is still a state (codex r6 P1)', () => {
+    expect(parseRawAddress('123 Main St, Tulsa, OK')).toMatchObject({ state: 'OK' });
+    expect(parseRawAddress('123 Main St, Tulsa, OK.')).toMatchObject({ state: 'OK' });
+    expect(parseRawAddress('123 Main St, Boise, Id')).toMatchObject({ state: 'ID' });
+    expect(parseRawAddress('123 Main St, Tulsa OK 74103')).toMatchObject({ state: 'OK', zip: '74103' });
+    expect(normalizeLeadAddress({ raw: '123 Main St, Tulsa, OK' })).toMatchObject({ state: 'OK' });
+    expect(normalizeLeadAddress({ raw: '123 Main St, Boise, Id' })).toMatchObject({ state: 'ID' });
+    // …while a lowercase verb or a contraction before the word is still speech.
+    expect(parseRawAddress("123 Main St, Palmetto, it's in 34221")).toMatchObject({ state: '', zip: '34221' });
+  });
+  test('punctuation inside a multi-word state name still reads the state (codex r5 P1)', () => {
+    expect(parseRawAddress('123 Main St, Charlotte, North, Carolina 28202')).toMatchObject({ state: 'NC', zip: '28202' });
+  });
+  test('a dotted country suffix is stripped before the state check (codex r5 P1)', () => {
+    expect(parseRawAddress('123 Main St, Portland, OR U.S.A.')).toMatchObject({ state: 'OR' });
+    expect(parseRawAddress('123 Main St, Portland, OR U.S.')).toMatchObject({ state: 'OR' });
+  });
+  test('a full state name anywhere in the tail is still a state', () => {
+    expect(parseRawAddress('Louisville, Kentucky')).toMatchObject({ state: 'KY' });
+    expect(parseRawAddress("213 6th Avenue Southwest, Ruskin, Florida")).toMatchObject({ state: 'FL' });
+  });
+});

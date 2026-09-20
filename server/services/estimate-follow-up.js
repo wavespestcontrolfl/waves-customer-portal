@@ -527,6 +527,7 @@ async function sendDualChannel(est, { sms, email }) {
         recipientId: est.customer_id || null,
         triggerEventId: idempotencyKey,
         idempotencyKey,
+        estimateId: est.id,
         categories: ["estimate_followup", `estimate_followup_${email.stage}`],
         // SendGrid rejection bodies can echo the recipient address — keep
         // them out of the provider log; the catch below redacts too.

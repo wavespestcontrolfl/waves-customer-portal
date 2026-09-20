@@ -851,7 +851,7 @@ async function buildEstimateSendPreview(estimate) {
   };
 }
 
-async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey, attachments = [], proposalMode = false, versionId = null, expectedContentHash = null, reviewedProvider = null, onDispatch = null }) {
+async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey, attachments = [], proposalMode = false, versionId = null, expectedContentHash = null, reviewedProvider = null, onDispatch = null, estimateIds = null }) {
   const provider = sendgrid.isConfigured() ? 'sendgrid' : 'smtp';
   if (reviewedProvider && reviewedProvider !== provider) return { ok: false, error: 'The reviewed email provider changed. Review the message again before sending.' };
   if (reviewedProvider === 'smtp') {
@@ -873,6 +873,8 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
         categories: ['estimate_delivery'],
         attachments: Array.isArray(attachments) ? attachments : [],
         onQueued: onDispatch,
+        estimateId: estimate.id,
+        ...(estimateIds ? { estimateIds } : {}),
       });
       if (result.blocked) {
         return { ok: false, blocked: true, error: result.reason || 'Email suppressed', template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
@@ -917,6 +919,26 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
     content: Buffer.from(a.content, 'base64'),
     contentType: a.type || 'application/pdf',
   }));
+  // Pre-push audit P1: the SMTP fallback bypasses EmailTemplateLibrary.
+  // sendTemplate entirely, so the annual-offer guard never gets a chance to
+  // run on this path (reviewedProvider === 'smtp', or a fallback triggered
+  // by an eligible sendTemplate error) — compose it here, immediately
+  // before the provider handoff, on a fresh read of the anchor AND every
+  // grouped sibling this call carries. A blocked verdict maps to the same
+  // shape sendTemplate's own blocked branch returns above, so
+  // sendEstimateNowInner's existing not-ok handling (claim release, no
+  // delivery stamp) applies unchanged. A guard infrastructure error must be
+  // a definite failure here too — never a throw the caller's catch could
+  // read as an uncertain provider attempt.
+  try {
+    const { annualHandoffGuard } = require('../services/estimate-annual-guard');
+    const verdict = await annualHandoffGuard({ db, estimateIds: [estimate.id, ...(estimateIds || [])] })();
+    if (verdict.blocked) {
+      return { ok: false, blocked: true, error: 'annual_offer_withheld', providerAttempted: false, provider: 'smtp_fallback' };
+    }
+  } catch (err) {
+    return { ok: false, providerAttempted: false, error: err.message, provider: 'smtp_fallback' };
+  }
   onDispatch?.();
   await transporter.sendMail({
     from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
@@ -2449,6 +2471,11 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       options.claimState.anchorClaimed = true;
     }
   }
+  // Delivery-guards slice (re-cut of #4569): every provider call below
+  // represents the WHOLE claimed set — the anchor plus every sibling just
+  // claimed for publish — so a sibling withheld since its claim aborts the
+  // send rather than publishing the group around it.
+  const deliveryEstimateIds = [estimate.id, ...claimedGroupSiblings.map((s) => s.id)];
 
   // FINAL pre-delivery verdict re-read (codex P0, PR #3304): a linkage
   // invalidation can archive the row after this send claimed it — the
@@ -2658,6 +2685,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             purpose: 'estimate_followup',
             customerId: estimate.customer_id || undefined,
             estimateId: estimate.id,
+            estimateIds: deliveryEstimateIds,
             identityTrustLevel: estimate.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
             consentBasis: estimate.customer_id ? undefined : {
               status: 'transactional_allowed',
@@ -2763,6 +2791,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             expectedContentHash: options.reviewedMessages?.email?.contentHash || null,
             reviewedProvider: options.reviewedMessages?.email?.provider || null,
             onDispatch: () => { emailDispatchStarted = true; },
+            estimateIds: deliveryEstimateIds,
           });
           channels.email = result.ok
             ? { ok: true, providerAttempted: result.providerAttempted, providerAccepted: result.providerAccepted, provider: result.template || result.provider || 'email' }

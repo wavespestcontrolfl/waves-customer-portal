@@ -941,6 +941,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       })
       .map((u) => u.id);
     let bellWritten = false;
+    let replayedSmsBell = false;
     let bellSuppressed = false;
     // ONE routing decision per event (owner ruling 2026-08-28 — "some are
     // banners, some are bells"): the bell policy is evaluated ONCE per event,
@@ -984,6 +985,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
               ...(relayFailureCall ? { relayFailureCall, dedupeKey: `relay-failure:${relayFailureCall.callSid}` } : {}) }
           );
           if (created && !created.suppressed) bellWritten = true;
+          if (created?.deduped && triggerKey === 'sms_reply' && dedupeKey) replayedSmsBell = true;
           if (created?.suppressed) bellSuppressed = true;
         } catch (e) {
           logger.error(`[notification-triggers] bell write failed: ${e.message}`);
@@ -996,6 +998,9 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     };
     if (shouldContinue && bellSuppressed && !bellWritten) stats.suppressed = true;
     onBell?.(bellWritten); // durable bell result is available before badge lookup or push
+    // A concurrent SMS lease winner can reach this dispatcher before the first
+    // bell commits. Its canonical dedupe result also prevents a second push.
+    if (replayedSmsBell) return { ...stats, deduped: true };
     if (relayFailureCall && !bellWritten) return stats; // an unclaimed callback never dispatches a push
     // Every active admin turned BOTH channels off: that is deliberate
     // preference suppression, not a delivery failure — report it so
@@ -1098,11 +1103,12 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
               title: built.title,
               body: built.body,
               url: built.link || '/admin',
-              tag: pushTagFor(triggerKey, payload),
+              tag: triggerKey === 'sms_reply' && dedupeKey
+                ? `waves-sms_reply-${payload.twilioSid}` : pushTagFor(triggerKey, payload),
               priority: trigger.priority,
               vibrate: wantsSound ? PRIORITY_VIBRATE[trigger.priority] : [0],
               silent: !wantsSound,
-              renotify: triggerKey === 'sms_reply' || (triggerKey === 'new_lead' && Boolean(payload.twilioSid)),
+              renotify: (triggerKey === 'sms_reply' && !dedupeKey) || (triggerKey === 'new_lead' && Boolean(payload.twilioSid)),
               ...(badgeInfo ? { badge: badgeInfo.count, badgeAt: badgeInfo.at } : {}),
             };
           },

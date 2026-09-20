@@ -344,6 +344,13 @@ Inbound media uses stable account/message/index storage keys across retries.
 Stale contact-correction reservations require a saved unified inbox message
 before promotion; failed route cancellation cannot replay an unrecorded source.
 Provider retry/fallback remains governed by the configured Twilio policy.
+The shared SMS-alert delivery protocol uses a two-minute owned sender lease,
+confirmed to four hours only after actual bell/push delivery evidence and a
+durable legacy receipt. Committed bells keep immutable message keys so lost
+receipts can be repaired without dispatching again; repair preserves original
+delivery time. Deliberate suppression is terminal. Push-only retries reuse the
+message tag without renotification; provider acceptance followed by a crash
+before receipt persistence remains ambiguous and can repeat a provider handoff.
 
 `/api/webhooks/twilio/outbound-amd` +
 `/api/webhooks/twilio/outbound-dial-complete` (POST; machine-to-machine
@@ -586,7 +593,17 @@ before either provider path; both provider paths re-read the row and repeat
 the customer-viewable + call-side-hold check as the LAST step before the
 SendGrid/Twilio handoff, so a clarify hold or archive that lands during the
 PDF render withholds the packet with the same generic 404 and releases the
-SMS dedup claim so a later legitimate retap can send).
+SMS dedup claim so a later legitimate retap can send; every success or
+deduplicated response on either channel rechecks the annual guard
+(server/services/estimate-annual-guard.js) through one shared helper
+(withheldOr) before answering — the fresh-dispatch success, the in-process
+and cross-restart SMS dedup hits, the cross-process claim-loser's dedup
+hit, and the email per-day idempotency dedup all funnel through it, so a
+changed or never-delivered annual offer can never surface through a
+shortcut that skips the check — mapping a blocked verdict to the same
+generic 404, with the SMS dedup claim stamped/released exactly like the
+customer-viewable/call-side-hold case; no new request shape, no new
+payload).
 `/api/estimates/:token/bond` (PUT; customer bond-term switcher on the
 estimate page — same contract family as the service-preferences toggles.
 Token IS the auth: slug-or-64-hex format gate rejects malformed probes
