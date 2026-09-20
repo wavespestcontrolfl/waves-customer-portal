@@ -55,7 +55,17 @@ function makeDb() {
         if (resolved.comms_history && resolved.comms_history.__raw) {
           const { sql, bindings } = resolved.comms_history;
           const matches = rows.filter((r) => Object.entries(whereCond).every(([k, v]) => r[k] === v));
-          if (/jsonb_array_elements/.test(sql)) {
+          if (/e->>'outcome' = \?/.test(sql)) {
+            // Mirror reconcileCommsHistoryEntryByOutcome: (id, outcome, patch) triples.
+            for (const r of matches) {
+              r.comms_history = (r.comms_history || []).map((e) => {
+                for (let i = 0; i < bindings.length; i += 3) {
+                  if (e.id === bindings[i] && e.outcome === bindings[i + 1]) return { ...e, ...JSON.parse(bindings[i + 2]) };
+                }
+                return e;
+              });
+            }
+          } else if (/jsonb_array_elements/.test(sql)) {
             // Mirror finalizeCommsHistoryEntry: patch the entry with this id in place.
             const [entryId, patchJson] = bindings;
             const patch = JSON.parse(patchJson);
@@ -519,5 +529,18 @@ describe('sendStageComms — send-window hold', () => {
     expect(JSON.parse(queued.metadata)).toMatchObject({ audience: 'applicant', purpose: 'application_received', job_application_id: 'app-1', consent_basis: { status: 'transactional_allowed' } });
     const stored = mockDb.__tables.job_applications.find((r) => r.id === 'app-1');
     expect(stored.comms_history[0]).toMatchObject({ outcome: 'deferred', scheduled_for: '2027-03-17T12:00:00.000Z' });
+  });
+});
+
+describe('reconcileCommsHistoryEntryByOutcome', () => {
+  test('patches only the entry whose current outcome matches — never downgrades sent/uncertain evidence', async () => {
+    mockDb.__tables.job_applications.push({ id: 'app-9', comms_history: [
+      { id: 'a', outcome: 'deferred' }, { id: 'b', outcome: 'uncertain' }, { id: 'c', outcome: 'handoff' },
+    ] });
+    await RecruitingComms.reconcileCommsHistoryEntryByOutcome('app-9', 'a', { deferred: { outcome: 'blocked' }, handoff: { outcome: 'uncertain' } });
+    await RecruitingComms.reconcileCommsHistoryEntryByOutcome('app-9', 'b', { deferred: { outcome: 'blocked' }, handoff: { outcome: 'uncertain' } });
+    await RecruitingComms.reconcileCommsHistoryEntryByOutcome('app-9', 'c', { deferred: { outcome: 'blocked' }, handoff: { outcome: 'uncertain' } });
+    const row = mockDb.__tables.job_applications.find((r) => r.id === 'app-9');
+    expect(row.comms_history.map((e) => e.outcome)).toEqual(['blocked', 'uncertain', 'uncertain']);
   });
 });

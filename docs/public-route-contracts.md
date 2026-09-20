@@ -2194,7 +2194,10 @@ and the application's interview token/time, replayed by
 services/scheduler.js under the applicant policy through the
 `recruiting_comms_deferred` deferred-replay registry entry — the recheck
 fails closed on the gate, a missing/closed application, a changed token
-or a rebooked time; finalize/onTerminal reconcile the ledger entry) and
+or a rebooked time/mode; the recheck marks the queued entry `handoff`
+before dispatch, finalize marks it `sent`, and a terminal block never
+downgrades evidence — never-attempted `deferred` → `blocked`, attempted
+`handoff` → `uncertain`, `sent`/`uncertain` untouched) and
 the ledger entry reads `deferred` with its `scheduled_for` (a `deferred`
 entry is owner-only reply context like a sent one). Queued recruiting
 rows are hidden from non-admins in `GET /api/admin/communications/scheduled`

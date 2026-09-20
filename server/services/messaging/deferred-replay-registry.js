@@ -613,6 +613,15 @@ const REGISTRY = {
           // confirmation — the queued copy names the wrong one.
           if ((meta.interview_mode || null) !== (app.interview_mode || null)) return { eligible: false, reason: 'interview-mode-changed' };
         }
+        // An attempt is about to go out: move the queued entry to 'handoff'
+        // BEFORE dispatch so an ambiguous/timed-out provider result still
+        // leaves durable evidence that the applicant may hold the text.
+        if (meta.ledger_entry_id) {
+          const { reconcileCommsHistoryEntryByOutcome } = require('../recruiting-comms');
+          await reconcileCommsHistoryEntryByOutcome(meta.job_application_id, meta.ledger_entry_id, {
+            deferred: { outcome: 'handoff', replay_attempted_at: new Date().toISOString() },
+          });
+        }
         return { eligible: true };
       } catch (err) {
         return failClosed('recruiting-comms', meta.job_application_id, err);
@@ -629,11 +638,19 @@ const REGISTRY = {
     durableFinalize: true,
     async onTerminal(meta) {
       if (!meta.job_application_id || !meta.ledger_entry_id) return;
-      const { finalizeCommsHistoryEntry } = require('../recruiting-comms');
-      await finalizeCommsHistoryEntry(meta.job_application_id, meta.ledger_entry_id, {
-        outcome: 'blocked', code: 'deferred_terminal', finalized_at: new Date().toISOString(),
+      // Never downgrade evidence (local audit P0): a row that was never
+      // attempted ('deferred') is proven undelivered → 'blocked'; a row
+      // whose attempt ended ambiguous ('handoff' left by recheck) may have
+      // reached the applicant → 'uncertain', which the reply classifier
+      // keeps treating as owner-only context. 'sent'/'uncertain' are left
+      // as they are.
+      const { reconcileCommsHistoryEntryByOutcome } = require('../recruiting-comms');
+      const at = new Date().toISOString();
+      await reconcileCommsHistoryEntryByOutcome(meta.job_application_id, meta.ledger_entry_id, {
+        deferred: { outcome: 'blocked', code: 'deferred_terminal', finalized_at: at },
+        handoff: { outcome: 'uncertain', code: 'deferred_terminal_after_attempt', finalized_at: at },
       });
-      logger.info(`[deferred-replay] recruiting text for application ${meta.job_application_id} terminally blocked — ledger reconciled`);
+      logger.info(`[deferred-replay] recruiting text for application ${meta.job_application_id} terminal — ledger reconciled without downgrading delivery evidence`);
     },
   },
   voicemail_lead_sms_deferred: {

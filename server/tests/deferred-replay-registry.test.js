@@ -1152,13 +1152,29 @@ describe('recruiting_comms_deferred (PR #4623)', () => {
     spy.mockRestore();
   });
 
-  test('finalize reconciles the ledger entry to sent; terminal block reconciles it to blocked', async () => {
+  test('recheck marks the queued entry in flight (deferred -> handoff) BEFORE dispatch', async () => {
+    const gatesSpy = jest.spyOn(gates, 'isEnabled').mockImplementation(() => true);
     const comms = require('../services/recruiting-comms');
-    const spy = jest.spyOn(comms, 'finalizeCommsHistoryEntry').mockResolvedValue(undefined);
+    const spy = jest.spyOn(comms, 'reconcileCommsHistoryEntryByOutcome').mockResolvedValue(undefined);
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'reviewed', interview_token: null }));
+    expect(await recheckDeferredReplay(ENTRY, { ...meta, stage: 'application_received', interview_token: null })).toMatchObject({ eligible: true });
+    expect(spy).toHaveBeenCalledWith('app-1', 'e-1', { deferred: expect.objectContaining({ outcome: 'handoff' }) });
+    spy.mockRestore(); gatesSpy.mockRestore();
+  });
+
+  test('finalize -> sent; terminal never downgrades: deferred -> blocked, handoff (attempted, ambiguous) -> uncertain', async () => {
+    const comms = require('../services/recruiting-comms');
+    const fin = jest.spyOn(comms, 'finalizeCommsHistoryEntry').mockResolvedValue(undefined);
+    const rec = jest.spyOn(comms, 'reconcileCommsHistoryEntryByOutcome').mockResolvedValue(undefined);
     await finalizeDeferredReplay(ENTRY, meta);
-    expect(spy).toHaveBeenCalledWith('app-1', 'e-1', expect.objectContaining({ outcome: 'sent', sent_by: 'scheduled_sms_cron' }));
+    expect(fin).toHaveBeenCalledWith('app-1', 'e-1', expect.objectContaining({ outcome: 'sent', sent_by: 'scheduled_sms_cron' }));
     await onTerminalDeferredReplay(ENTRY, meta);
-    expect(spy).toHaveBeenCalledWith('app-1', 'e-1', expect.objectContaining({ outcome: 'blocked', code: 'deferred_terminal' }));
-    spy.mockRestore();
+    expect(rec).toHaveBeenCalledWith('app-1', 'e-1', {
+      deferred: expect.objectContaining({ outcome: 'blocked', code: 'deferred_terminal' }),
+      handoff: expect.objectContaining({ outcome: 'uncertain', code: 'deferred_terminal_after_attempt' }),
+    });
+    // an entry already 'sent' or 'uncertain' has no transition — evidence retained
+    expect(Object.keys(rec.mock.calls[0][2])).toEqual(['deferred', 'handoff']);
+    fin.mockRestore(); rec.mockRestore();
   });
 });

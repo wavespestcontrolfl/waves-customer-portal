@@ -455,6 +455,28 @@ async function finalizeCommsHistoryEntry(applicationId, entryId, patch, conn = d
     });
 }
 
+// Outcome-CONDITIONAL reconcile: patch the entry only when its current
+// outcome is one of the listed states — evidence is only ever moved
+// forward, never downgraded (a 'handoff'/'uncertain'/'sent' entry is proof
+// the applicant may hold the text and stays owner-only reply context).
+// `transitions` = { <currentOutcome>: patch, ... }. Constant SQL, bound
+// triples (id, outcome, patch).
+async function reconcileCommsHistoryEntryByOutcome(applicationId, entryId, transitions, conn = db) {
+  const entries = Object.entries(transitions || {});
+  if (!entries.length) return;
+  const cases = entries.map(() => "WHEN e->>'id' = ? AND e->>'outcome' = ? THEN e || ?::jsonb").join(' ');
+  const bindings = entries.flatMap(([outcome, patch]) => [entryId, outcome, JSON.stringify(patch)]);
+  await conn('job_applications')
+    .where({ id: applicationId })
+    .update({
+      comms_history: conn.raw(
+        `COALESCE((SELECT jsonb_agg(CASE ${cases} ELSE e END) FROM jsonb_array_elements(COALESCE(comms_history, '[]'::jsonb)) AS e), '[]'::jsonb)`,
+        bindings,
+      ),
+      updated_at: new Date(),
+    });
+}
+
 // -------------------------------------------------------- edited-body link
 
 function bodyKeepsInterviewLink(body, interviewUrl) {
