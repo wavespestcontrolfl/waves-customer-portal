@@ -87,7 +87,7 @@ function applyRawMetadataUpdate(row, rawValue) {
   }
 }
 
-function makeSmsLogTable(initialRows) {
+function makeSmsLogTable(initialRows, { failResolve = false } = {}) {
   let rows = initialRows.map((r) => ({ ...r, metadata: { ...r.metadata } }));
   return {
     rows: () => rows,
@@ -122,13 +122,31 @@ function makeSmsLogTable(initialRows) {
         } else if (sql.includes('finalize_pending')) {
           if (bindings) {
             const excludedEntryPoint = bindings[0];
+            // Only the FIXED SQL literal (ADOPTABLE_PAY_LINK_QUEUE_ROW_SQL,
+            // post 1b536dff1b) embeds FINALIZE_ONLY_ROW_SQL — checking for
+            // that substring (rather than hardcoding the new behavior)
+            // means a revert of the production string genuinely reverts
+            // this mock's semantics too, so the regression test can fail
+            // honestly against the old code.
+            const checksFinalizeOnly = sql.includes('finalize_only');
+            // The adopter's view: a still-scheduled row under a DIFFERENT
+            // entry point blocks (someone else's queue), and so does one
+            // under THIS invoice's own entry point when the stale-
+            // finalization sweep stamped it finalize_only — its text
+            // already reached the provider, only the bookkeeping is owed.
             rawFilters.push((row) => row.status === 'sending'
               || (row.status === 'sent' && (row.metadata || {}).finalize_pending === true)
-              || (row.status === 'scheduled' && (row.metadata || {}).entry_point !== excludedEntryPoint));
+              || (row.status === 'scheduled' && ((row.metadata || {}).entry_point !== excludedEntryPoint
+                || (checksFinalizeOnly && (row.metadata || {}).finalize_only === true))));
           } else {
             rawFilters.push((row) => row.status === 'scheduled' || row.status === 'sending'
               || (row.status === 'sent' && (row.metadata || {}).finalize_pending === true));
           }
+        } else if (sql.startsWith('NOT (') && sql.includes('finalize_only')) {
+          // consumeQueuedInvoiceSend's own defense-in-depth: never consume a
+          // row stamped finalize_only, even if something upstream let the
+          // claim through. Only the fixed SQL emits this clause at all.
+          rawFilters.push((row) => (row.metadata || {}).finalize_only !== true);
         }
         return q;
       });
@@ -149,6 +167,14 @@ function makeSmsLogTable(initialRows) {
         return q;
       });
       q.update = jest.fn((payload) => {
+        // Simulates resolveConsumedQueuedSend's UPDATE failing after
+        // provider acceptance — the row must stay exactly as consumeQueued-
+        // InvoiceSend left it (cancelled, pending) rather than silently
+        // "succeeding" here.
+        if (failResolve && payload.metadata && payload.metadata.__sqlRaw
+          && payload.metadata.__sqlRaw.includes('adoption_resolved_at')) {
+          throw new Error('sms_log resolve update failed (injected)');
+        }
         const targets = matched();
         q.__matched = targets;
         for (const row of targets) {
@@ -435,6 +461,91 @@ describe('invoice send claim adoption of a queued pay-link SMS', () => {
       expect(original.metadata.cancelled_reason).toBe('superseded_by_live_send');
       expect(original.metadata[QUEUE_ADOPTION_PENDING_KEY]).toBeUndefined();
       expect(original.metadata.adoption_resolved_at).toEqual(expect.any(String));
+    });
+  });
+
+  // Round-0 audit P1s (commit 1b536dff1b): a scheduled invoice_send_deferred
+  // row the stale-finalization sweep re-queued with finalize_only already
+  // reached the provider — it is delivered-but-unfinalized work, not an
+  // unsent text, so it blocks adoption like any other live queue and is
+  // never consumed. And once the provider has accepted (or credit settled
+  // the invoice), a failed queue-resolution UPDATE must never turn that
+  // delivered send into a reported failure — it is logged and surfaced as
+  // queueResolutionError on an otherwise-successful result instead.
+  describe('finalize-only rows and post-delivery resolution failures (commit 1b536dff1b)', () => {
+    test('a finalize-only scheduled row blocks adoption and is never consumed', async () => {
+      smsLog = makeSmsLogTable([{
+        id: 'sms-finalize-only-1',
+        status: 'scheduled',
+        scheduled_for: ORIGINAL_SCHEDULED_FOR,
+        metadata: {
+          entry_point: INVOICE_SEND_DEFERRED_ENTRY_POINT,
+          invoice_id: 'inv-1',
+          finalize_only: true,
+        },
+      }]);
+      db.mockImplementation((table) => {
+        if (table === 'invoices') return invoices.query();
+        if (table === 'sms_log') return smsLog.query();
+        if (table === 'customers') return customerQuery(customer);
+        if (table === 'activity_log') return passthroughQuery();
+        throw new Error(`Unexpected table: ${table}`);
+      });
+      // Explicit (not leftover from a prior test's mock state): if the
+      // refusal below did NOT happen, this would let the send go on to
+      // deliver — making a regression here fail loudly instead of
+      // coincidentally matching on stale sendCustomerMessage behavior.
+      sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => (
+        withProviderHandoff(async () => ({ sent: true, deliveryOutcome: 'accepted' }))
+      ));
+
+      await expect(InvoiceService.sendViaSMS('inv-1')).rejects.toMatchObject({ code: 'queued_pay_link' });
+
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      // Refused before ever claiming — the invoice never left 'draft', let
+      // alone got stranded under 'sending'.
+      expect(invoices.state()).toMatchObject({ status: 'draft', send_claim_token: null });
+      const row = smsLog.rows().find((r) => r.id === 'sms-finalize-only-1');
+      expect(row.status).toBe('scheduled');
+      expect(row.metadata.finalize_only).toBe(true);
+      expect(row.metadata.cancelled_reason).toBeUndefined();
+    });
+
+    test('a failed resolution after provider acceptance keeps the send successful', async () => {
+      smsLog = makeSmsLogTable(
+        [{
+          id: 'sms-queued-1',
+          status: 'scheduled',
+          scheduled_for: ORIGINAL_SCHEDULED_FOR,
+          metadata: { entry_point: INVOICE_SEND_DEFERRED_ENTRY_POINT, invoice_id: 'inv-1' },
+        }],
+        { failResolve: true },
+      );
+      db.mockImplementation((table) => {
+        if (table === 'invoices') return invoices.query();
+        if (table === 'sms_log') return smsLog.query();
+        if (table === 'customers') return customerQuery(customer);
+        if (table === 'activity_log') return passthroughQuery();
+        throw new Error(`Unexpected table: ${table}`);
+      });
+      sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => (
+        withProviderHandoff(async () => ({ sent: true, deliveryOutcome: 'accepted' }))
+      ));
+
+      const result = await InvoiceService.sendViaSMS('inv-1');
+
+      // The provider-accepted send is still reported as delivered — a
+      // bookkeeping failure on the adopted queue row must never read back
+      // as a failed SMS the caller could offer to resend.
+      expect(result).toMatchObject({ sent: true, queueResolutionError: expect.stringContaining('injected') });
+      expect(invoices.state()).toMatchObject({ status: 'sent', send_claim_token: null });
+      // The adopted row is left exactly as consumeQueuedInvoiceSend put it
+      // — cancelled, still pending — never restored to 'scheduled' on top
+      // of a text the provider already accepted.
+      const row = smsLog.rows().find((r) => r.id === 'sms-queued-1');
+      expect(row.status).toBe('cancelled');
+      expect(row.metadata.cancelled_reason).toBe('superseded_by_live_send');
+      expect(row.metadata[QUEUE_ADOPTION_PENDING_KEY]).toBe(true);
     });
   });
 });
