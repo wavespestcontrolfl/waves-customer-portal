@@ -27,6 +27,7 @@ jest.mock('../services/short-url', () => ({
 const mockPendingDepositCredit = jest.fn();
 const mockConsumeDepositCredit = jest.fn();
 jest.mock('../services/estimate-deposits', () => ({
+  acquireEstimateDepositLedgerLock: jest.fn().mockResolvedValue(undefined),
   pendingDepositCredit: (...args) => mockPendingDepositCredit(...args),
   consumeDepositCredit: (...args) => mockConsumeDepositCredit(...args),
 }));
@@ -394,17 +395,14 @@ describe('createFromService — estimate-deposit roll-forward', () => {
     expect(mockConsumeDepositCredit).toHaveBeenCalled();
   });
 
-  it('an allocation mismatch never blocks visit invoicing — falls back to an uncredited invoice and alerts', async () => {
-    const { getInsertedInvoice } = setupServiceDb();
+  it('an allocation mismatch holds invoicing and alerts instead of returning an uncredited invoice', async () => {
+    setupServiceDb();
     mockPendingDepositCredit.mockResolvedValue({ amount: 99 });
     mockConsumeDepositCredit.mockResolvedValue(0); // ledger flipped under us, twice
 
-    const inv = await InvoiceService.createFromService('sr-1', { amount: 250 });
-
-    expect(inv).toBeTruthy();
-    const row = getInsertedInvoice();
-    expect(JSON.parse(row.line_items).some((i) => i.category === 'deposit_credit')).toBe(false);
-    expect(row.total).toBe(250);
+    await expect(InvoiceService.createFromService('sr-1', { amount: 250 }))
+      .rejects.toThrow('deposit allocation mismatch');
+    expect(mockConsumeDepositCredit).toHaveBeenCalledTimes(2);
     expect(mockTriggerNotification).toHaveBeenCalledWith('estimate_deposit_reconcile_needed', { estimateId: 'est-1' });
   });
 });

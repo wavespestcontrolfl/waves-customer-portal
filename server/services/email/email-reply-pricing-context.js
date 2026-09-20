@@ -1,0 +1,46 @@
+const { recognizeEmailReplyPeriodPhrases } = require('./email-reply-period-phrases');
+
+const CONTEXT_WORDS = {
+  plan: ['plan', 'program', 'package'],
+  account: ['account', 'balance', 'payment', 'refund', 'credit', 'deposit', 'receipt', 'received', 'pay', 'due'],
+  account_event: ['posted', 'cleared', 'received', 'refunded', 'credited', 'pay'],
+  activity: ['reminder', 'reminders', 'update', 'updates', 'schedule', 'scheduling',
+    'appointment', 'appointments', 'service', 'services', 'treatment', 'treatments'],
+  adjustment: ['reduce', 'reduced', 'reduction', 'reductions', 'save', 'saves', 'saving', 'savings',
+    'discount', 'discounts', 'discounted', 'increase', 'increased', 'decrease', 'decreased'],
+  measurement: ['percent', 'percentage', 'mile', 'miles', 'kilometer', 'kilometers',
+    'kilometre', 'kilometres', 'foot', 'feet', 'inch', 'inches', 'yard', 'yards'],
+};
+const UNIT_KINDS = new Set(['unit', 'application', 'timing', 'forVisit', 'eachVisit', 'visits', 'visit']);
+const ROLES = new Map();
+for (const [role, words] of Object.entries(CONTEXT_WORDS)) {
+  for (const word of words) ROLES.set(word, [...(ROLES.get(word) ?? []), role]);
+}
+
+function recognizeClause(clause) {
+  const contextPhrases = clause.tokens.flatMap((token, start) => {
+    // The scanner folds a modifier into a composite unit token ("plan visit",
+    // "monthly service visit"); its supported words still carry context,
+    // reported with offsets into that token, like embedded periods.
+    if (UNIT_KINDS.has(token.kind)) {
+      return [...token.text.matchAll(/[a-z]+/gi)].flatMap((word) => {
+        const roles = ROLES.get(word[0].toLowerCase());
+        return roles ? [{ start, end: start + 1, text: word[0].toLowerCase(), token, roles: [...roles],
+          embedded: true, offsets: { start: word.index, end: word.index + word[0].length } }] : [];
+      });
+    }
+    const roles = token.kind === 'word' ? ROLES.get(token.text)
+      : token.kind === 'barrier' && token.text === '%' ? ['measurement'] : null;
+    return roles ? [{ start, end: start + 1, text: token.text, token, roles: [...roles] }] : [];
+  });
+  return { ...clause, contextPhrases };
+}
+
+// Context roles may overlap and never establish a price, account event or exemption.
+function recognizeEmailReplyPricingContext(text = '') {
+  const result = recognizeEmailReplyPeriodPhrases(text);
+  if (!result.ok) return result;
+  return { ...result, disposition: 'needs_review', clauses: result.clauses.map(recognizeClause) };
+}
+
+module.exports = { recognizeEmailReplyPricingContext };

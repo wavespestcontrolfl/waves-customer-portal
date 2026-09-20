@@ -23,6 +23,9 @@ jest.mock('../models/db', () => {
   return dbFn;
 });
 jest.mock('../services/invoice', () => ({ getByToken: jest.fn() }));
+jest.mock('../services/estimate-deposits', () => ({
+  withInvoiceDepositSettlement: jest.fn(async (_id, callback) => callback(require('../models/db'))),
+}));
 jest.mock('../services/invoice-attachments', () => ({ list: jest.fn(async () => []) }));
 jest.mock('../services/stripe', () => ({
   isAvailable: () => true,

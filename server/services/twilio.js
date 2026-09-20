@@ -596,6 +596,36 @@ const TwilioService = {
         || !!options.mediaUrl;
       if (!sendIsMms) body = normalizeGsmPunctuation(stripSmsUrlScheme(body));
 
+      // Round 8 P1: mirrors send-customer-message.js's own withheldLinkPolicy
+      // 'rewrite' (estimate-deposits.js's deposit receipt SMS, sent through
+      // that wrapper) for RAW/direct callers of sendSMS that bypass it
+      // entirely. Same placement rationale as that wrapper: before msgPayload
+      // is built below, before sms_log/conversations later write THIS body
+      // (on success), and before the guard's own content-derivation runs
+      // inside dispatch() further down — so a body opted into 'rewrite'
+      // never has its estimate link refused outright when whatever the
+      // message proves (a receipt) is owed regardless of the offer's state.
+      // Text-only: SMS has no html leg (rewriteWithheldEstimateLinks accepts
+      // html as undefined).
+      let withheldLinksRewritten;
+      if (options.withheldLinkPolicy === 'rewrite' && typeof body === 'string') {
+        try {
+          const { rewriteWithheldEstimateLinks } = require('./estimate-annual-guard');
+          const rewritten = await rewriteWithheldEstimateLinks({ db, text: body });
+          if (rewritten.rewrittenIds.length) {
+            body = rewritten.text;
+            withheldLinksRewritten = rewritten.rewrittenIds;
+            logger.warn(`[twilio] rewrote ${rewritten.rewrittenIds.length} withheld estimate link(s) to the portal home for ${maskPhone(to)} (messageType=${options.messageType || "n/a"})`);
+          }
+        } catch (err) {
+          // Fail OPEN to the unrewritten body — dispatch()'s own guard below
+          // still runs on whatever body reaches it and fails CLOSED on its
+          // own lookup error, so a rewrite-lookup hiccup degrades to
+          // "refused this one time", never to "sent the raw withheld link".
+          logger.warn(`[twilio] withheld-link rewrite failed for ${maskPhone(to)}: ${err.message}`);
+        }
+      }
+
       // Owner-SMS kill switch: when OWNER_SMS_DISABLED=true, suppress
       // every send addressed to one of the operator's known phones.
       // Push and bell still fire normally — only Twilio is silenced.
@@ -887,7 +917,102 @@ const TwilioService = {
       // during that preparation wrongly outranked the rejection.
       let message;
       let dispatchStarted = false;
-      const dispatch = async () => {
+      // Pre-push audit P2 (twilio.js:953, round 12): dispatch() takes an
+      // OPTIONAL trx — send-customer-message.js's own withSmsHandoff bridge
+      // (the sole path every withSmsHandoff caller in the repo funnels
+      // through) already holds a transaction from the caller's lock
+      // (lead-response-tools.js's withSmsConsentLock, reschedule-link-
+      // promises.js's, visit-completion-summary.js's, etc.) by the time it
+      // invokes this function — reading the guard through the plain root
+      // db instead requires a SECOND pool connection while the first is
+      // still held open, and under a small pool (DB_POOL_MAX=2 is an
+      // explicitly supported production config) concurrent handoffs can
+      // each hold one connection while waiting on another, starving the
+      // pool. Falls back to the plain db for the handoff-less path (a bare
+      // `await dispatch()`, no trx to reuse).
+      const dispatch = async (trx) => {
+        // Codex round 3 on #4608 (P1 PRRT_kwDOR3YQi86j8Ydm — structural
+        // move): the annual-offer guard must run at the TRUE provider
+        // boundary — dispatch() is invoked either from INSIDE a caller's
+        // locked withSmsHandoff (after its own suppression/consent/window
+        // rechecks, right below), or, for handoff-less callers, directly —
+        // either way this is the LAST await before messages.create(). A
+        // preSendCheck alone is not enough: it runs BEFORE a caller's own
+        // withSmsHandoff acquires its lock (lead-response-tools'
+        // send_lead_response is exactly that gap), so a state change
+        // between the check and the lock could still reach Twilio.
+        //
+        // Guarded BEFORE dispatchStarted flips true / deliveryOutcome
+        // becomes "uncertain": a blocked verdict must read as "never
+        // attempted", not a failed attempt, both to this method's own
+        // outer catch and to the withSmsHandoff catch below. Lazy-required:
+        // estimate-annual-guard.js's own chain (estimate-offer-version.js /
+        // feature-gates.js / estimate-termite-program-rows.js) does not
+        // require twilio.js back today, but a top-level require here would
+        // make this module's load order hostage to that chain's regardless.
+        const { annualHandoffGuard } = require('./estimate-annual-guard');
+        // A rewrite already stripped the withheld link's literal text out
+        // of `body` above — an explicit id surviving past that would still
+        // union into this check and refuse a body that no longer carries
+        // the link at all, defeating the rewrite entirely (mirrors the
+        // email mechanism's own sendEstimateIds = [] override).
+        // Pre-push audit P1: under the rewrite policy the explicit id never
+        // refuses — links are stripped instead — even when the body had none.
+        const explicitEstimateIds = (withheldLinksRewritten || options.withheldLinkPolicy === 'rewrite') ? [] : (Array.isArray(options.estimateIds) && options.estimateIds.length
+          ? options.estimateIds
+          : (options.estimateId ? [options.estimateId] : []));
+        // Pre-push audit P1 (round 13, twilio.js:964): a LOOKUP failure here
+        // (the guard's own DB read throwing — e.g. a transient Postgres
+        // error) is a pre-send infrastructure failure, never a provider
+        // outcome. Tagged the same shape as every other guard-failure
+        // sentinel in this codebase (annualOfferGuardFailed) so BOTH catch
+        // sites below — the withSmsHandoff catch and the outer no-handoff
+        // catch — can map it to a retryable, provider-NEVER-attempted
+        // refusal instead of letting it fall into the generic Twilio-error
+        // classification (formatTwilioSendError / isDefinitiveTwilioRejection),
+        // which treats an unrecognized error code as retryable:false and
+        // would permanently fail an unsent scheduled message over a purely
+        // transient DB blip.
+        let verdict;
+        try {
+          verdict = await annualHandoffGuard({
+            db: trx || db, estimateIds: explicitEstimateIds, texts: [body],
+          })();
+        } catch (guardErr) {
+          const err = new Error(`annual offer guard failed: ${guardErr.message}`);
+          err.code = 'ANNUAL_OFFER_GUARD_FAILED';
+          err.annualOfferGuardFailed = true;
+          err.retryable = true;
+          err.cause = guardErr;
+          throw err;
+        }
+        if (verdict.blocked) {
+          const err = new Error('annual_offer_withheld');
+          err.code = 'ANNUAL_OFFER_WITHHELD';
+          err.annualOfferWithheld = true;
+          throw err;
+        }
+        // Pre-push audit P1 (round 5): the guard above just awaited its own
+        // DB reads — real time the send-window boundary re-check (the
+        // caller's own preSendCheck, run once, earlier, before this
+        // handoff even started) never accounted for. Mirrors send-
+        // customer-message.js's own pattern for exactly this class of gap
+        // (push-channel-routing.js's post-attempt recheck): a caller
+        // wired through that pipeline exposes a synchronous, DB-free
+        // isStillValid() on its preSendCheck for precisely this — the
+        // LAST synchronous operation before the SDK request, so nothing
+        // async can follow it and reopen the race. A caller with no
+        // isStillValid (this legacy path bypasses sendCustomerMessage
+        // entirely for some direct callers) is unaffected — nothing to
+        // recheck without it.
+        if (typeof options.preSendCheck?.isStillValid === 'function'
+            && options.preSendCheck.isStillValid() !== true) {
+          const err = new Error('send window closed before the provider handoff');
+          err.code = 'QUIET_HOURS_HOLD';
+          err.sendWindowClosed = true;
+          err.retryable = true;
+          throw err;
+        }
         handoffAt = new Date();
         smsAttemptAt = handoffAt;
         dispatchStarted = true;
@@ -906,7 +1031,24 @@ const TwilioService = {
           verdict = await options.withSmsHandoff(dispatch);
         } catch (err) {
           if (!acceptedMessage && dispatchStarted) throw err;
-          if (!dispatchStarted) {
+          if (err && err.annualOfferWithheld) {
+            // Permanent, non-retryable refusal — never the generic
+            // "handoff check failed, retryable" shape below, which would
+            // tell a retry-on-boundary-failure caller to try again.
+            verdict = { ok: false, code: 'ANNUAL_OFFER_WITHHELD', reason: 'annual_offer_withheld', retryable: false };
+          } else if (err && err.annualOfferGuardFailed) {
+            // Pre-push audit P1 (round 13): the guard's own DB read threw —
+            // a pre-send infrastructure failure, not a definite refusal and
+            // not a provider outcome. Retryable, same as sendWindowClosed
+            // below, and never the generic Twilio-failure-alert/retry path.
+            verdict = { ok: false, code: err.code || 'ANNUAL_OFFER_GUARD_FAILED', reason: err.message, retryable: true };
+          } else if (err && err.sendWindowClosed) {
+            // Round 5 P1: the final isStillValid recheck (inside dispatch,
+            // above) closed after the guard's own DB reads — the SAME
+            // deferral contract as any other send-window hold (retryable,
+            // never treated as a definite failure).
+            verdict = { ok: false, code: err.code || 'QUIET_HOURS_HOLD', reason: err.message, retryable: true };
+          } else if (!dispatchStarted) {
             verdict = { ok: false, code: 'SMS_HANDOFF_CHECK_FAILED',
               reason: 'SMS handoff authority check failed', retryable: true };
           } else {
@@ -1031,8 +1173,46 @@ const TwilioService = {
         })
         .catch(() => {});
 
-      return { success: true, sid: message.sid, fromNumber, deliveryOutcome: "accepted" };
+      return { success: true, sid: message.sid, fromNumber, deliveryOutcome: "accepted", ...(withheldLinksRewritten ? { withheldLinksRewritten } : {}) };
     } catch (err) {
+      // No withSmsHandoff (a plain `await dispatch()` above): the guard's
+      // throw lands here directly. A permanent, non-retryable refusal —
+      // never the generic Twilio-failure-alert/retry path below, which
+      // would fire a false ops alert and misclassify this as an ambiguous
+      // provider failure for a request that was never attempted.
+      if (err && err.annualOfferWithheld) {
+        return {
+          success: false, sid: null, guardBlocked: true, preSendBlocked: true,
+          code: 'ANNUAL_OFFER_WITHHELD', error: 'annual_offer_withheld',
+          deliveryOutcome: 'not_sent',
+        };
+      }
+      // Round 5 P1: same no-handoff landing spot for the final isStillValid
+      // recheck's refusal — retryable (a window hold, not a definite
+      // failure), never the Twilio-failure-alert path below.
+      if (err && err.sendWindowClosed) {
+        return {
+          success: false, sid: null, preSendBlocked: true,
+          code: err.code || 'QUIET_HOURS_HOLD', error: err.message,
+          retryable: true, deliveryOutcome: 'not_sent',
+        };
+      }
+      // Pre-push audit P1 (round 13, twilio.js:964): no withSmsHandoff —
+      // the guard's own lookup failure (dispatch()'s wrapped throw) lands
+      // here directly. Without this, it would fall into the generic
+      // Twilio-failure classification below: formatTwilioSendError treats
+      // it as a provider error, and an unrecognized error code (e.g.
+      // PostgreSQL 57P01) defaults retryable:false there — permanently
+      // failing an unsent scheduled message over a transient DB read, not
+      // a real provider rejection. Same retryable/not-attempted shape as
+      // sendWindowClosed above; the SDK was never called.
+      if (err && err.annualOfferGuardFailed) {
+        return {
+          success: false, sid: null, preSendBlocked: true,
+          code: err.code || 'ANNUAL_OFFER_GUARD_FAILED', error: err.message,
+          retryable: true, deliveryOutcome: 'not_sent',
+        };
+      }
       if (deliveryOutcome === "uncertain" && isDefinitiveTwilioRejection(err)) {
         deliveryOutcome = "not_sent";
       }

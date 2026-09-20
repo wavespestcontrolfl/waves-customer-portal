@@ -541,6 +541,57 @@ describe('co-visit pair collapse', () => {
   });
 });
 
+// ── STALE-ORDER REBUILD: a numbered backbone that contradicts its own
+// windows (Mon 2026-09-21 in prod: route_order 2 at 13:00 ahead of
+// route_order 5 at 09:00, six unnumbered stops) used to be refused every
+// night, leaving the tech board led by the afternoon stop. ──
+describe('computeChronologicalRepair rebuilds a backbone that is out of window order', () => {
+  const timed = (id, hh, over = {}) => stop(id, { customer_id: `c_${id}`, window_start: `${hh}:00`, window_end: `${String(Number(hh) + 1).padStart(2, '0')}:00`, estimated_duration_minutes: null, lat: Number(hh), lng: 1, ...over });
+
+  test('the Monday shape comes back fully chronological and flagged as rebuilt', () => {
+    const stops = [
+      timed('t13', '13', { route_order: 2 }),
+      timed('t09', '09', { route_order: 5 }),
+      timed('t08', '08'), timed('t10', '10'), timed('t11', '11'), timed('t12', '12'), timed('t15', '15'), timed('t17', '17'),
+    ];
+    const repair = computeChronologicalRepair(RouteOptimizer, stops);
+    expect(repair).not.toBeNull();
+    expect(repair.rebuilt).toBe(true);
+    expect(repair.orderedStops.map((s) => s.id)).toEqual(['t08', 't09', 't10', 't11', 't12', 't13', 't15', 't17']);
+  });
+
+  test('a fully numbered but inverted day is rebuilt too (no unnumbered stop needed)', () => {
+    const stops = [timed('t13', '13', { route_order: 1 }), timed('t09', '09', { route_order: 2 }), timed('t11', '11', { route_order: 3 })];
+    const repair = computeChronologicalRepair(RouteOptimizer, stops);
+    expect(repair?.orderedStops.map((s) => s.id)).toEqual(['t09', 't11', 't13']);
+    expect(repair.rebuilt).toBe(true);
+  });
+
+  test('a rebuild keeps a co-visit pair adjacent and still refuses grouped, pinned or coordless days', () => {
+    const pair = [
+      timed('p_lawn', '10', { customer_id: 'cust_p', route_order: 4, lat: 3, lng: 3 }),
+      timed('z_08', '08', { route_order: 6 }),
+      timed('p_pest', '10', { customer_id: 'cust_p', lat: 3, lng: 3 }),
+      timed('q_10', '10', { customer_id: 'cust_q', lat: 7, lng: 7 }),
+    ];
+    const repair = computeChronologicalRepair(RouteOptimizer, pair);
+    const ids = repair.orderedStops.map((s) => s.id);
+    expect(ids[0]).toBe('z_08');
+    expect(Math.abs(ids.indexOf('p_lawn') - ids.indexOf('p_pest'))).toBe(1);
+    for (const veto of [{ visit_id: 'v1' }, { auto_dispatch_locked: true }, { lat: null }]) {
+      expect(computeChronologicalRepair(RouteOptimizer, [timed('t13', '13', { route_order: 1 }), timed('t09', '09', { route_order: 2, ...veto })])).toBeNull();
+    }
+  });
+
+  test('a chronological backbone keeps the insertion-only contract (feasible baseline ⇒ no repair, no rebuilt flag)', () => {
+    const fine = [timed('t09', '09', { route_order: 1 }), timed('t11', '11', { route_order: 2 }), timed('t13', '13')];
+    expect(computeChronologicalRepair(RouteOptimizer, fine)).toBeNull();
+    // Chronological ties are not "out of order".
+    const tie = [timed('a10', '10', { route_order: 1, lat: 5, lng: 5 }), timed('b10', '10', { route_order: 2, lat: 5, lng: 5 })];
+    expect(computeChronologicalRepair(RouteOptimizer, tie)).toBeNull();
+  });
+});
+
 // ── computeWindowFitOrder: same-start GROUP permutation must not split a
 // co-visit pair away from its sibling — separating them costs (or here,
 // genuinely BREAKS) the promise the merge exists to protect. FAKE_RO gives
