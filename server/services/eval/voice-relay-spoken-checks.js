@@ -2686,8 +2686,16 @@ function report_readback_confirms(value, record, { spoken }) {
       // start with a finding term and connect it to its location; a caller
       // question or a list of terms is not such a summary.
       const findingVerbs = [...affirmed.matchAll(new RegExp(REPORT_FINDING_VERB_RE.source, 'gi'))];
+      // A report frame ("the report will show that", ", as the report may
+      // show", ", which you can see in the report, assuming you have it")
+      // describes the report, not the treatment. Space-mask it, with its own
+      // adjuncts, so the finding's certainty check keeps its offsets and
+      // reads only the treatment clause; postposed treatment hedges stay.
+      const findingAffirmed = affirmed
+        .replace(REPORT_LEADING_FRAME_RE, (frame) => ' '.repeat(frame.length))
+        .replace(REPORT_TRAILING_FRAME_RE, (frame) => ' '.repeat(frame.length));
       const findingVerb = findingVerbs.find((candidate) => reportHasCompletedFinding(
-        affirmed, subjectAt, m[0].length, locationAt, locationMatch[0].length, candidate,
+        findingAffirmed, subjectAt, m[0].length, locationAt, locationMatch[0].length, candidate,
       ));
       const completedFinding = Boolean(findingVerb);
       const conciseFinding = reportHasConciseFinding(
@@ -2762,6 +2770,12 @@ function reportPatternMayConsumeText(source) {
   } while (remaining !== before);
   return !/^\|*$/.test(remaining);
 }
+
+// Report frames name the report, not the treatment. The leading frame is the
+// runner's existing evidence strip; the trailing frame carries its own
+// adjuncts (", assuming you have it") to the end of the sentence.
+const REPORT_LEADING_FRAME_RE = /^\s*(?:the report will show that|as you can see in the report,?)\s*/i;
+const REPORT_TRAILING_FRAME_RE = /,\s*(?:as\s+the\s+report\s+(?:will|may|might|should|would)\s+show|which\s+you\s+can\s+see\s+in\s+the\s+report)\b[^.!?;]*/gi;
 
 const SPOKEN_CHECK_RUNNERS = Object.freeze({
   report_readback_confirms,
