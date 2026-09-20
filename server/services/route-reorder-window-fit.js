@@ -393,9 +393,11 @@ function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop, {
 
 /** Repair the demonstrated null-position insertion defect. Keep the relative
  * order of every already-positioned stop, including ties. Only a fully timed,
- * ungrouped, unpinned route with a chronological backbone qualifies. A repair
- * must turn an infeasible baseline into a feasible route; no distance saving
- * is needed to correct that defect. The caller owns gates and fenced writes.
+ * ungrouped, unpinned route qualifies. With a chronological backbone a repair
+ * must turn an infeasible baseline into a feasible route; a backbone that is
+ * itself out of window order is rebuilt from the windows (see the rebuild
+ * note inside). No distance saving is needed to correct either defect. The
+ * caller owns gates and fenced writes.
  *
  * `visit_id` VETO (deliberate, not extended to the co-visit rule above):
  * a `service_visits` row is visit-groups.js's OWN mechanism for "N
@@ -423,11 +425,28 @@ function computeChronologicalRepair(RouteOptimizer, stops) {
       || !Number(stop.lat) || !Number(stop.lng) || !Number.isFinite(duration) || duration <= 0;
   })) return null;
   const ordered = currentOrder(stops);
-  const backbone = ordered.filter(stop => stop.route_order != null);
-  const additions = ordered.filter(stop => stop.route_order == null);
-  if (!backbone.length || !additions.length) return null;
-  if (backbone.some((stop, i) => i > 0 && effectiveWindowRange(stop).startMin < effectiveWindowRange(backbone[i - 1]).startMin)) return null;
+  let backbone = ordered.filter(stop => stop.route_order != null);
+  let additions = ordered.filter(stop => stop.route_order == null);
+  // STALE-ORDER REBUILD (prod, Mon 2026-09-21): stops that leave a day
+  // (moved, cancelled, rescheduled) take their numbers with them, and the
+  // survivors can end up numbered against the promised windows — e.g.
+  // route_order 2 at 13:00 ahead of route_order 5 at 09:00, six later
+  // arrivals unnumbered. Every reader sorts COALESCE(route_order, 999), so
+  // the technician's board leads with the afternoon stop, the lateness
+  // model reports the whole day late, and the chronology rule above refused
+  // to touch it night after night. A backbone that contradicts its own
+  // windows is not a running order worth preserving — the technician
+  // drives the windows — so rebuild the whole day from them instead.
+  // Either way the baseline must be infeasible: an order that still meets
+  // every promise — an operator's deliberate drag included — is left alone.
+  const rebuilt = backbone.some((stop, i) => i > 0
+    && effectiveWindowRange(stop).startMin < effectiveWindowRange(backbone[i - 1]).startMin);
+  if (!rebuilt && (!backbone.length || !additions.length)) return null;
   if (simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, ordered)) return null;
+  if (rebuilt) {
+    additions = ordered;
+    backbone = [];
+  }
   const candidate = [...backbone];
   for (const stop of additions) {
     const range = effectiveWindowRange(stop);
@@ -450,7 +469,7 @@ function computeChronologicalRepair(RouteOptimizer, stops) {
     candidate.splice(index === -1 ? candidate.length : index, 0, stop);
   }
   const simulation = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, candidate);
-  return simulation ? { orderedStops: candidate, simulation } : null;
+  return simulation ? { orderedStops: candidate, simulation, ...(rebuilt ? { rebuilt: true } : {}) } : null;
 }
 
 /** Simulate the complete route under the promised ARRIVAL windows. Work may
