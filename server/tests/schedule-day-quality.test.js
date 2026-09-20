@@ -35,7 +35,7 @@ test('stored work spans outrank shorter estimates and overlaps are measured with
   expect(result).toMatchObject({ serviceMinutes: 180, overlapMinutes: 30, grossGapMinutes: 0 });
 });
 
-describe('double-booking measurement (same technician, occupied time per the rebooker\'s own model)', () => {
+describe('double-booking measurement (plain rows only — owner scope 2026-09-20, PR #4620)', () => {
   // A real day-stops row: premise columns present, ungrouped, geocoded.
   const row = (id, customer, hour, over = {}) => ({ ...stop(hour, 0), id, customer_id: customer, technician_id: 'tech', scheduled_date: '2040-09-10',
     visit_id: null, service_address_line1: null, customer_address_line1: `${customer} St`, customer_address_line2: null,
@@ -48,9 +48,16 @@ describe('double-booking measurement (same technician, occupied time per the reb
     expect(clean.doubleBookedVisits).toEqual([]);
   });
 
-  test('a partial overlap counts the shared minutes, and an unknown customer is never waved on', () => {
-    const partial = measureDayQuality(Model, [row('a', 'cust-a', 10, { window_end: '12:00' }), row('b', null, 11)]);
-    expect(partial.doubleBookedVisits).toEqual([{ ids: ['a', 'b'], minutes: 60 }]);
+  test('occupancy is the rebooker\'s own span: stored end first, else start + estimate; partial overlaps count shared minutes', () => {
+    expect(measureDayQuality(Model, [row('a', 'cust-a', 10, { window_end: '12:00' }), row('b', 'cust-b', 11)]).doubleBookedVisits).toEqual([{ ids: ['a', 'b'], minutes: 60 }]);
+    expect(measureDayQuality(Model, [row('a', 'cust-a', 10, { window_end: null, estimated_duration_minutes: 90 }), row('b', 'cust-b', 11)]).doubleBookedVisits).toEqual([{ ids: ['a', 'b'], minutes: 30 }]);
+  });
+
+  test('an unknown customer is never waved on; a live hold (no customer + expiry) never cards; a stray expiry on a committed row still does', () => {
+    expect(measureDayQuality(Model, [row('a', 'cust-a', 10), row('b', null, 10)]).doubleBookedVisits).toEqual([{ ids: ['a', 'b'], minutes: 60 }]);
+    const expiry = new Date(Date.now() + 600000).toISOString();
+    expect(measureDayQuality(Model, [row('h1', null, 10, { reservation_expires_at: expiry }), row('h2', null, 10, { reservation_expires_at: expiry }), row('n', 'cust-n', 10)]).doubleBookedVisits).toEqual([]);
+    expect(measureDayQuality(Model, [row('c', 'cust-c', 10, { reservation_expires_at: expiry }), row('n', 'cust-n', 10)]).doubleBookedVisits).toEqual([{ ids: ['c', 'n'], minutes: 60 }]);
   });
 
   test('one customer\'s pest + lawn at one premise is one stop; the same customer at a second pin or unit is not', () => {
@@ -58,69 +65,20 @@ describe('double-booking measurement (same technician, occupied time per the reb
     const coVisit = measureDayQuality(Model, [pest, row('lawn', 'cust-a', 10, { lat: 5, lng: 5 })]);
     expect(coVisit.doubleBookedVisits).toEqual([]);
     expect(coVisit.overlapMinutes).toBe(60);
-    // Real estimates add up (codex #4620 r4 P1): 45 + 40 in one 10:00–11:00 promise occupies until 11:25.
-    const additive = [row('pest', 'cust-a', 10, { lat: 5, lng: 5, estimated_duration_minutes: 45 }), row('lawn', 'cust-a', 10, { lat: 5, lng: 5, estimated_duration_minutes: 40 })];
-    expect(measureDayQuality(Model, [...additive, row('n', 'cust-n', 11)]).doubleBookedVisits).toEqual([{ ids: ['lawn', 'pest', 'n'], minutes: 25 }]);
-    expect(measureDayQuality(Model, [...additive, row('n', 'cust-n', 11, { window_start: '11:30', window_end: '12:30' })]).doubleBookedVisits).toEqual([]);
-    // Second property: different pin (codex #4620 r1 P1 — a customer-id-only rule hid this).
-    const rental = measureDayQuality(Model, [pest, row('lawn', 'cust-a', 10, { lat: 6, lng: 6, service_address_line1: '9 Other Rd' })]);
-    expect(rental.doubleBookedVisits).toEqual([{ ids: ['lawn', 'pest'], minutes: 60 }]);
-    // Same parcel pin, different unit.
-    const unit = measureDayQuality(Model, [{ ...pest, service_address_line1: '1 Main St Apt 1' }, row('lawn', 'cust-a', 10, { lat: 5, lng: 5, service_address_line1: '1 Main St Apt 2' })]);
-    expect(unit.doubleBookedVisits).toEqual([{ ids: ['lawn', 'pest'], minutes: 60 }]);
+    expect(measureDayQuality(Model, [pest, row('lawn', 'cust-a', 10, { lat: 6, lng: 6, service_address_line1: '9 Other Rd' })]).doubleBookedVisits).toEqual([{ ids: ['lawn', 'pest'], minutes: 60 }]);
+    expect(measureDayQuality(Model, [{ ...pest, service_address_line1: '1 Main St Apt 1' }, row('lawn', 'cust-a', 10, { lat: 5, lng: 5, service_address_line1: '1 Main St Apt 2' })]).doubleBookedVisits).toEqual([{ ids: ['lawn', 'pest'], minutes: 60 }]);
   });
 
-  test('a service-visit group is one stop occupying the sum of its members (codex #4620 r2 P1)', () => {
-    const group = [row('pest', 'cust-a', 10, { visit_id: 'g', window_end: null }), row('lawn', 'cust-a', 10, { visit_id: 'g', window_end: null })];
-    // Members never pair with each other; the group runs 10:00–12:00, so an 11:00 neighbour collides with its summed tail.
-    expect(measureDayQuality(Model, group).doubleBookedVisits).toEqual([]);
-    expect(measureDayQuality(Model, [...group, row('n', 'cust-n', 11, { window_end: null })]).doubleBookedVisits)
-      .toEqual([{ ids: ['pest', 'lawn', 'n'], minutes: 60 }]);
-    expect(measureDayQuality(Model, [...group, row('n', 'cust-n', 12, { window_end: null })]).doubleBookedVisits).toEqual([]);
-    // A windowless sibling still adds its work to the group (codex #4620 r7 P1): 10:00–11:00 + 40 min runs to 11:40.
-    const withSibling = [group[0], row('extra', 'cust-a', 10, { visit_id: 'g', window_start: null, window_end: null, estimated_duration_minutes: 40 })];
-    expect(measureDayQuality(Model, [...withSibling, row('n', 'cust-n', 11, { window_start: '11:15', window_end: null })]).doubleBookedVisits)
-      .toEqual([{ ids: ['pest', 'extra', 'n'], minutes: 25 }]);
-    // An ungrouped windowless row has no slot to clash on.
-    expect(measureDayQuality(Model, [row('w', 'cust-w', 10, { window_start: null, window_end: null }), row('n', 'cust-n', 10)]).doubleBookedVisits).toEqual([]);
-    // A different group in the same slot is still a clash.
-    expect(measureDayQuality(Model, [...group, row('o', 'cust-o', 10, { visit_id: 'h', window_end: null })]).doubleBookedVisits)
-      .toEqual([{ ids: ['o', 'pest', 'lawn'], minutes: 60 }]);
-  });
-
-  test('a guessed duration never makes a definite double-booking; a shared start still does (codex #4620 r7 P2)', () => {
-    const unknown = row('u', 'cust-u', 10, { window_end: null, estimated_duration_minutes: null });
-    const later = measureDayQuality(Model, [unknown, row('n', 'cust-n', 10, { window_start: '10:45', window_end: '11:45' })]);
-    expect(later.doubleBookedVisits).toEqual([]);
-    expect(later.defaultDurations).toEqual(['u']);
-    expect(measureDayQuality(Model, [unknown, row('n', 'cust-n', 10)]).doubleBookedVisits).toEqual([{ ids: ['n', 'u'], minutes: 60 }]);
-    // A group's certain member still proves its own span (codex #4620 r8 P1): 10:00–12:00 + an unknown sibling vs 11:00.
-    const mixed = [row('k', 'cust-k', 10, { visit_id: 'm', window_end: '12:00' }), row('x', 'cust-k', 10, { visit_id: 'm', window_start: null, window_end: null, estimated_duration_minutes: null })];
-    expect(measureDayQuality(Model, [...mixed, row('n', 'cust-n', 11)]).doubleBookedVisits).toEqual([{ ids: ['k', 'x', 'n'], minutes: 60 }]);
-    expect(measureDayQuality(Model, [...mixed, row('n', 'cust-n', 12, { window_start: '12:30', window_end: '13:30' })]).doubleBookedVisits).toEqual([]);
-  });
-
-  test('live reservation holds never card; a committed visit without a customer still does (codex #4620 r8 P2)', () => {
-    const hold = (id) => row(id, null, 10, { reservation_expires_at: new Date(Date.now() + 600000).toISOString() });
-    expect(measureDayQuality(Model, [hold('h1'), hold('h2'), row('n', 'cust-n', 10)]).doubleBookedVisits).toEqual([]);
-    expect(measureDayQuality(Model, [row('c', null, 10), row('n', 'cust-n', 10)]).doubleBookedVisits).toEqual([{ ids: ['c', 'n'], minutes: 60 }]);
-  });
-
-  test('a version-2 combined booking occupies the sum of its members (codex #4620 r1 P1)', () => {
+  test('grouped rows and unknown durations are out of scope by design: never paired, never a false card', () => {
     const mix = { version: 2, allocatedServiceIds: ['m1', 'm2'] };
-    const members = [row('m1', 'cust-a', 10, { window_end: null, estimated_duration_minutes: 45, reservation_service_mix: mix }),
-      row('m2', 'cust-a', 10, { window_end: null, estimated_duration_minutes: 40, reservation_service_mix: mix })];
-    // Members never pair with each other; the 11:00 neighbour collides with the 11:25 allocation end.
-    const result = measureDayQuality(Model, [...members, row('n', 'cust-n', 11, { window_end: null })]);
-    expect(result.doubleBookedVisits).toEqual([{ ids: ['m1', 'm2', 'n'], minutes: 25 }]);
-    expect(measureDayQuality(Model, [...members, row('n', 'cust-n', 12, { window_end: null })]).doubleBookedVisits).toEqual([]);
-    // The allocation plus a same-premise ungrouped 30-minute service is one co-visit
-    // occupying 10:00–11:55 (codex #4620 r6 P1): no internal pair, an 11:30 neighbour collides.
-    const coVisit = [...members, row('s', 'cust-a', 10, { window_end: null, estimated_duration_minutes: 30 })];
-    expect(measureDayQuality(Model, coVisit).doubleBookedVisits).toEqual([]);
-    expect(measureDayQuality(Model, [...coVisit, row('n', 'cust-n', 11, { window_start: '11:30', window_end: null })]).doubleBookedVisits)
-      .toEqual([{ ids: ['m1', 'm2', 's', 'n'], minutes: 25 }]);
-    expect(measureDayQuality(Model, [...coVisit, row('n', 'cust-n', 12, { window_end: null })]).doubleBookedVisits).toEqual([]);
+    const allocation = [row('m1', 'cust-a', 10, { reservation_service_mix: mix }), row('m2', 'cust-a', 10, { reservation_service_mix: mix })];
+    const group = [row('g1', 'cust-g', 10, { visit_id: 'g' }), row('g2', 'cust-g', 10, { visit_id: 'g' })];
+    const unknown = row('u', 'cust-u', 10, { window_end: null, estimated_duration_minutes: null });
+    const result = measureDayQuality(Model, [...allocation, ...group, unknown, row('n', 'cust-n', 10)]);
+    expect(result.doubleBookedVisits).toEqual([]);
+    // The existing lines still cover those rows.
+    expect(result.uncertaintyReasons).toEqual(expect.arrayContaining(['grouped_work_requires_review', 'default_service_durations']));
+    expect(result.defaultDurations).toEqual(['u']);
   });
 });
 

@@ -1,7 +1,8 @@
 /** Planned route measurements. No writes, geocoding, traffic calls or invented
  * stop capacity. Gross calendar gaps are not automatically bookable time. */
-const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration, isCoVisitPair, startCoVisitChain, advanceCoVisit } = require('../route-reorder-window-fit');
+const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration, isCoVisitPair } = require('../route-reorder-window-fit');
 const { allocationKey, occupiedRows } = require('./visit-capacity');
+const { isHoldStop } = require('./travel-gap');
 
 // Route-quality measures work still to be performed. stops-ahead keeps
 // completed visits as route stops (position/total on the day of service),
@@ -14,92 +15,33 @@ const { parseHHMM } = require('./window-rules');
 // Two customers promised the same technician at the same time. Staff and
 // phone-reschedule saves commit through such a clash by owner ruling
 // (2026-08-25, advisory only), so the planned board is where it must show.
-// One physical stop is one block: the members of a service-visit group
-// (visit_id — arrival-route groupRouteStops: one stop, the SUM of its
-// members' work) or of a version-2 combined booking (visit-capacity
-// allocationKey, which occupiedRows already sums) are merged before any
-// comparison, and one customer's ungrouped pest + lawn rows that
-// isCoVisitPair proves are one stop (same window, pin and premise) never
-// pair. A customer's second property or unit in the same slot still does.
-// Everything else occupies COALESCE(window_end, start + estimate) — the
-// rebooker's own probe, so the card agrees with what let the save through.
-// An unknown customer on either side is never waved on.
-function occupiedBlocks(stops) {
-  const occupied = occupiedRows(stops);
-  const blocks = new Map();
-  stops.forEach((stop, index) => {
-    // A windowless row only counts as a member of a timed visit_id group
-    // (visit-groups keeps such siblings; arrival-route sums their work into
-    // the stop). On its own it has no slot to clash on.
-    const timed = parseHHMM(stop.window_start) != null;
-    if (!timed && !stop.visit_id) return;
-    // A live hold is not a promise: two customers may hold one slot at once
-    // and the first to graduate wins (slot-reservation.js). Expired holds
-    // are already filtered by the query, so any value here means live.
-    if (stop.reservation_expires_at) return;
-    const key = stop.visit_id || allocationKey(stop) || `row:${stop.id}`;
-    const block = blocks.get(key) || { key, ids: [], stops: [], start: Infinity, end: -Infinity, knownEnd: -Infinity, work: 0, visit: !!stop.visit_id, certain: true };
-    block.ids.push(stop.id);
-    block.stops.push(stop);
-    // No stored span and no estimate: occupiedRows invents 60 minutes, so
-    // that member's end is a guess (the unknown-duration card covers it);
-    // knownEnd keeps what the certain members prove on their own.
-    const certain = Number(stop.estimated_duration_minutes) > 0 || parseHHMM(stop.window_end) > parseHHMM(stop.window_start);
-    if (timed) {
-      block.start = Math.min(block.start, occupied[index].startMin);
-      block.end = Math.max(block.end, occupied[index].endMin);
-      if (certain) block.knownEnd = Math.max(block.knownEnd, occupied[index].endMin);
-    }
-    block.work += workDuration(stop);
-    block.certain = block.certain && certain;
-    blocks.set(key, block);
-  });
-  const grouped = [...blocks.values()]
-    .map(block => ({ ...block, end: block.visit && block.stops.length > 1 ? Math.max(block.end, block.start + block.work) : block.end }))
-    .map(block => ({ ...block, knownEnd: block.certain ? block.end : block.knownEnd }))
-    .filter(block => Number.isFinite(block.start) && block.end > block.start)
-    .sort((a, b) => a.start - b.start || String(a.ids[0]).localeCompare(String(b.ids[0])));
-  // Every ungrouped block (one row, or one version-2 allocation) carries a
-  // co-visit chain, and proven co-visit blocks merge: on-site time is the
-  // shared chain arithmetic (startCoVisitChain / advanceCoVisit: the sum of
-  // the members' real estimates, floored by the longest window-derived
-  // duration), so a neighbour that overlaps only the merged tail is still
-  // reported. visit_id groups keep arrival-route's own SUM above.
-  const merged = [];
-  for (const block of grouped) {
-    const chainable = block.stops.every(stop => !stop.visit_id);
-    const host = chainable && merged.find(other => other.chain && isCoVisitPair(effectiveWindowRange, other.stops[other.stops.length - 1], block.stops[0]));
-    const target = host || block;
-    if (chainable) {
-      for (const stop of block.stops) {
-        if (!target.chain) target.chain = { ...startCoVisitChain(stop), clock: block.start + startCoVisitChain(stop).coMerged, arrivalMin: block.start };
-        else target.chain = advanceCoVisit(target.chain, stop);
-      }
-      target.end = Math.max(target.end, target.chain.clock);
-    }
-    if (host) {
-      host.ids.push(...block.ids);
-      host.stops.push(...block.stops);
-      host.certain = host.certain && block.certain;
-      host.knownEnd = host.certain ? host.end : Math.max(host.knownEnd, block.knownEnd);
-      continue;
-    }
-    if (chainable && block.certain) block.knownEnd = block.end;
-    merged.push(block);
-  }
-  return merged;
-}
-
+//
+// SCOPE (owner decision 2026-09-20, PR #4620): the plain case only — two
+// ungrouped rows with a known duration, neither a live hold, occupying the
+// rebooker's own probe span (visit-capacity occupiedRows: COALESCE(
+// window_end, start + estimate)), so the card agrees with what let the
+// save through. Rows that are part of a service-visit group (visit_id) or
+// a version-2 combined booking (allocationKey) are NOT measured here: their
+// occupancy is the SUM of members plus co-visit chaining (arrival-route
+// groupRouteStops, route-reorder-window-fit), and this measurement does not
+// re-compose those models — such days stay under the existing grouped-work
+// review line. One customer's ungrouped pest + lawn rows that isCoVisitPair
+// proves are one stop never pair; a second property or unit still does. An
+// unknown customer on either side is never waved on.
 function doubleBookedPairs(stops) {
-  const blocks = occupiedBlocks(stops);
+  const plain = stops.filter(stop => parseHHMM(stop.window_start) != null
+    && !stop.visit_id && !allocationKey(stop) && !isHoldStop(stop)
+    && (Number(stop.estimated_duration_minutes) > 0 || parseHHMM(stop.window_end) > parseHHMM(stop.window_start)));
+  const blocks = occupiedRows(plain)
+    .map((row, index) => ({ stop: plain[index], start: row.startMin, end: row.endMin }))
+    .filter(block => block.start != null && block.end > block.start)
+    .sort((a, b) => a.start - b.start || String(a.stop.id).localeCompare(String(b.stop.id)));
   const pairs = [];
   for (let i = 0; i < blocks.length; i++) {
     for (let j = i + 1; j < blocks.length && blocks[j].start < blocks[i].end; j++) {
       const [a, b] = [blocks[i], blocks[j]];
-      // A guessed end proves nothing: past what the certain members
-      // establish, only a shared start is a definite clash.
-      if (b.start > a.start && !(b.start < a.knownEnd)) continue;
-      pairs.push({ ids: [...a.ids, ...b.ids], minutes: Math.min(a.end, b.end) - b.start });
+      if (isCoVisitPair(effectiveWindowRange, a.stop, b.stop)) continue;
+      pairs.push({ ids: [a.stop.id, b.stop.id], minutes: Math.min(a.end, b.end) - b.start });
     }
   }
   return pairs;

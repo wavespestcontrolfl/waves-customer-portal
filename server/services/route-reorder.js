@@ -952,11 +952,12 @@ async function runRouteReorder(opts = {}, conn = db) {
             'scheduled_services.route_order', 'scheduled_services.window_start',
             'scheduled_services.window_end', 'scheduled_services.visit_id',
             'scheduled_services.time_window',
-            // measureDayQuality's double-booking blocks key a version-2
-            // combined booking on its allocation (visit-capacity
-            // allocationKey needs the mix + the date), so the nightly
-            // ledger records the same occupancy the interactive reader does.
+            // measureDayQuality's double-booking pairs skip version-2
+            // combined bookings (visit-capacity allocationKey needs the mix
+            // + the date) and live holds, so the nightly ledger records the
+            // same pairs the interactive reader does.
             'scheduled_services.scheduled_date', 'scheduled_services.reservation_service_mix',
+            'scheduled_services.reservation_expires_at',
             'scheduled_services.estimated_duration_minutes',
             'scheduled_services.auto_dispatch_locked', 'scheduled_services.auto_dispatch_excluded',
             'scheduled_services.service_type',
