@@ -237,6 +237,25 @@ describe('POST /admin/invoices/:id/send — first delivery vs. explicit Resend a
     });
   });
 
+  // Pre-push audit P1: zeroDueOpenVisitSendOutcome's pre-claim settle is
+  // the COMMON zero-due path (checked before any claim is ever taken) —
+  // its success is a RESOLVED result, not a thrown error, so it must carry
+  // the SAME settled_zero_due field the throw-shaped under-claim path
+  // (tested above) reports, not a stale field name only that rarer path
+  // used to use.
+  test('the pre-claim settle (the common zero-due path, no claim ever taken) also reports settled_zero_due: true', async () => {
+    InvoiceService.sendViaSMSAndEmail.mockResolvedValue({
+      ok: true, settled_zero_due: true,
+      sms: { ok: false, code: 'settled_zero_due' }, email: { ok: false, code: 'settled_zero_due' }, payUrl: null,
+    });
+    await withServer(async (baseUrl) => {
+      const res = await postSend(baseUrl, {});
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toMatchObject({ ok: true, settled_zero_due: true });
+    });
+  });
+
   test('an explicit Resend that finds a queued pay-link text is a real conflict, not a no-op success', async () => {
     InvoiceService.sendViaSMSAndEmail.mockImplementation(async () => {
       const e = new Error('Invoice send already in progress — a text carrying this pay link is queued for the send window');

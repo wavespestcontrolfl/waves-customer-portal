@@ -737,6 +737,26 @@ describe('processScheduledSends send-window handling', () => {
       expect(db).toHaveBeenCalledTimes(2);
     });
 
+    // Pre-push audit P1: this pre-claim path used to name its success
+    // settled_by_deposit while the throw-shaped under-claim path (and
+    // firstDeliveryOutcome, and the client) all used settled_zero_due —
+    // and this pre-claim path is the COMMON case, so an admin using
+    // sendViaSMSAndEmail directly (POST /:id/send with no prior claim)
+    // would see the mismatched name.
+    test('sendViaSMSAndEmail\'s own pre-claim settle resolves settled_zero_due: true, not the old settled_by_deposit name', async () => {
+      const zeroDueAccrual = {
+        payer_statement_id: null, visit_completion_packet_id: null, payer_id: null,
+        status: 'draft', scheduled_service_id: 'svc-1', total: 100, credit_applied: 100,
+      };
+      db.mockReturnValueOnce(chain({ first: zeroDueAccrual }));
+      settleSpy.mockResolvedValue({ settled: true, invoice: { id: 'inv-1', status: 'prepaid' } });
+
+      const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {});
+
+      expect(result).toMatchObject({ ok: true, settled_zero_due: true });
+      expect(result.settled_by_deposit).toBeUndefined();
+    });
+
     test('a settlement refused right now consumes an attempt AS AN ORDINARY FAILURE, and the batch continues', async () => {
       // Ruling (pre-push audit P1, #4131 slice 4): a settlement refusal is
       // a failure to settle, not a window hold — it rides the same
@@ -761,7 +781,10 @@ describe('processScheduledSends send-window handling', () => {
       expect(sendSpy).not.toHaveBeenCalledWith('inv-1', expect.anything());
       expect(sendSpy).toHaveBeenCalledWith('inv-2', expect.objectContaining({ allowClaimed: true, claimToken: 'claim-2' }));
       const updateArgs = failUpdate.update.mock.calls[0][0];
-      expect(updateArgs.scheduled_send_attempts).toBe(2);
+      // Atomic SQL increment (pre-push audit P1) — computed server-side,
+      // not from this closure's stale in-memory count. db.raw is mocked
+      // to return its SQL text verbatim in this suite.
+      expect(updateArgs.scheduled_send_attempts).toBe('COALESCE(scheduled_send_attempts, 0) + 1');
       expect(updateArgs.scheduled_send_error).toMatch(/could not be settled yet/);
       expect(result).toEqual({ sent: 1, failed: 1, deferred: 0 });
     });
@@ -795,6 +818,27 @@ describe('processScheduledSends send-window handling', () => {
       const updateArgs = failUpdate.update.mock.calls[0][0];
       expect(updateArgs.status).toBe('scheduled');
       expect(updateArgs.scheduled_send_attempts).toBe(dueRow.scheduled_send_attempts + 1);
+    });
+
+    test('an UNEXPECTED error from the preclaimed zero-due re-check (not tagged deliveryNeverAttempted) propagates instead of retrying silently', async () => {
+      // Pre-push audit P1: refuseZeroDuePreclaimedInvoice only tags a
+      // RECOGNIZED outcome (zero_due / deposit_settlement_pending) —
+      // anything else (a bug, a DB error inside settleZeroBalance) reaches
+      // here unmarked and must hit the SAME "still propagates" contract as
+      // any other unexpected preclaimed-send throw.
+      isWithinSendWindowET.mockReturnValue(true);
+      const staleRecovery = chain();
+      const dueQuery = chain({ rows: [dueRow] });
+      const claim = chain({ returning: [claimedRow()] });
+      db
+        .mockReturnValueOnce(staleRecovery)
+        .mockReturnValueOnce(dueQuery)
+        .mockReturnValueOnce(claim);
+      sendSpy.mockImplementationOnce(async () => {
+        throw Object.assign(new Error('connection terminated unexpectedly'), { code: 'unexpected_db_error' });
+      });
+
+      await expect(InvoiceService.processScheduledSends()).rejects.toMatchObject({ code: 'unexpected_db_error' });
     });
   });
 });

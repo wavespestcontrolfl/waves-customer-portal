@@ -173,4 +173,40 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
     expect(again).toEqual({ sent: 0, failed: 0, deferred: 0 });
     expect((await read()).scheduled_send_attempts).toBe(5);
   });
+
+  test('two overlapping worker passes off the SAME stale in-memory snapshot end at attempts + 2, not a lost update', async () => {
+    // Pre-push audit P1: a JS-computed Number(inv.scheduled_send_attempts
+    // || 0) + 1 derives the new value from whichever snapshot the caller
+    // happened to read, so two overlapping passes that both captured the
+    // row BEFORE either commits its write would both compute the SAME
+    // incremented value and collapse to +1 total. The fix computes the
+    // increment in SQL against the row under its own update lock, so two
+    // real passes correctly serialize to +2 regardless of how stale each
+    // caller's own snapshot was.
+    await trx('invoices').where({ id: invoiceId }).update({
+      status: 'scheduled', scheduled_send_at: new Date(Date.now() - 60000), scheduled_send_attempts: 1,
+    });
+    const staleSnapshot = await read(); // captured ONCE — attempts: 1
+    const zeroDue = { ok: false, error: 'nothing due — retry shortly' };
+
+    await Invoice._recordZeroDueSchedulingOutcome(zeroDue, staleSnapshot);
+    await Invoice._recordZeroDueSchedulingOutcome(zeroDue, staleSnapshot);
+
+    expect((await read()).scheduled_send_attempts).toBe(3); // 1 + 2, never collapsed to 2
+  });
+
+  test('a row another pass already claimed (status sending) is left untouched', async () => {
+    const claimToken = randomUUID();
+    await trx('invoices').where({ id: invoiceId }).update({
+      status: 'sending', send_claim_token: claimToken,
+      scheduled_send_at: new Date(Date.now() - 60000), scheduled_send_attempts: 1,
+    });
+    const staleSnapshot = await read();
+
+    await Invoice._recordZeroDueSchedulingOutcome({ ok: false, error: 'nothing due — retry shortly' }, staleSnapshot);
+
+    expect(await read()).toMatchObject({
+      status: 'sending', send_claim_token: claimToken, scheduled_send_attempts: 1, scheduled_send_error: null,
+    });
+  });
 });

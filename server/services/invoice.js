@@ -1263,7 +1263,7 @@ async function zeroDueOpenVisitSendOutcome(row, invoiceId, database = db) {
   if (!zeroDueVisitInvoice(row)) return null;
   const settlement = await settleZeroDueVisitInvoice(invoiceId, database);
   if (settlement.settled) {
-    return { ok: true, settled_by_deposit: true, sms: { ok: false, code: "settled_by_deposit" }, email: { ok: false, code: "settled_by_deposit" }, payUrl: null };
+    return { ok: true, settled_zero_due: true, sms: { ok: false, code: "settled_zero_due" }, email: { ok: false, code: "settled_zero_due" }, payUrl: null };
   }
   const err = depositSettlementPendingError(invoiceId, settlement.reason);
   return { ok: false, code: err.code, error: err.message, sms: { ok: false, code: err.code }, email: { ok: false, code: err.code } };
@@ -1296,12 +1296,21 @@ async function throwForZeroDueVisitInvoice(invoiceId, fallbackRow, database = db
 // advance (a refusal), 0 when the row settled.
 async function recordZeroDueSchedulingOutcome(zeroDue, inv) {
   if (zeroDue.ok) return 0;
+  // Atomic SQL increment (pre-push audit P1, #4131 slice 4): the prior
+  // Number(inv.scheduled_send_attempts || 0) + 1 computed the new value
+  // from this closure's stale in-memory snapshot, so two overlapping
+  // worker passes over the same row both wrote the SAME incremented value
+  // (a lost update) instead of ending one attempt apart. COALESCE(...)+1
+  // is evaluated by PostgreSQL against the row under its own update lock,
+  // so two real passes correctly serialize to +2. The status='scheduled'
+  // + due predicates are unchanged: a row another pass already claimed
+  // (now 'sending') matches zero rows here and is left untouched.
   await db("invoices")
     .where({ id: inv.id, status: "scheduled" })
     .whereNotNull("scheduled_send_at")
     .where("scheduled_send_at", "<=", new Date())
     .update({
-      scheduled_send_attempts: Number(inv.scheduled_send_attempts || 0) + 1,
+      scheduled_send_attempts: db.raw("COALESCE(scheduled_send_attempts, 0) + 1"),
       scheduled_send_error: zeroDue.error,
       updated_at: new Date(),
     });
@@ -1345,7 +1354,17 @@ async function refuseZeroDuePreclaimedInvoice(invoiceId, current, database) {
   try {
     await throwForZeroDueVisitInvoice(invoiceId, current, database);
   } catch (refusalErr) {
-    refusalErr.deliveryNeverAttempted = true;
+    // Pre-push audit P1: only throwForZeroDueVisitInvoice's OWN recognized
+    // outcomes (zero_due — settled; deposit_settlement_pending — a
+    // recognized business refusal) are safe to reclassify downstream as an
+    // ordinary retryable failure. An unexpected error surfacing here (a bug
+    // or a DB failure inside settleZeroBalance) is NOT a verified
+    // pre-provider refusal and must keep its own identity — rethrown
+    // unmarked so the caller's catch propagates it instead of silently
+    // retrying it forever under a code it never actually reported.
+    if (refusalErr?.code === "zero_due" || refusalErr?.code === "deposit_settlement_pending") {
+      refusalErr.deliveryNeverAttempted = true;
+    }
     throw refusalErr;
   }
 }
@@ -8064,5 +8083,10 @@ module.exports._parseInvoiceLineItems = parseInvoiceLineItems;
 module.exports.CANCELLED_SERVICE_VOIDABLE_STATUSES = CANCELLED_SERVICE_VOIDABLE_STATUSES;
 module.exports._s3KeyFromStoredUrl = s3KeyFromStoredUrl;
 module.exports._withFreshServicePhotoUrls = withFreshServicePhotoUrls;
+// Test-only seam (#4131 slice 4): exercises the atomic attempt-increment
+// SQL directly, without going through a full processScheduledSends due-read
+// cycle — needed to model two overlapping worker passes off the SAME stale
+// in-memory snapshot (see invoice-scheduled-readiness-postgres.test.js).
+module.exports._recordZeroDueSchedulingOutcome = recordZeroDueSchedulingOutcome;
 module.exports.claimPacketInvoiceForSend = claimPacketInvoiceForSend;
 module.exports.claimInvoiceForSend = claimInvoiceForSend;

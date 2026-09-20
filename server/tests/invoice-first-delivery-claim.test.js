@@ -442,4 +442,27 @@ describe('claimInvoiceForSend — zero-due visit invoice guard (#4131 slice 4)',
 
     await expect(claimInvoiceForSend(INVOICE_ID)).rejects.toBe(boom);
   });
+
+  test('a PRECLAIMED row\'s UNEXPECTED settle failure is NOT marked deliveryNeverAttempted — only zero_due/deposit_settlement_pending are', async () => {
+    // Pre-push audit P1: tagging every caught error here reclassified a
+    // genuine bug/DB failure as an ordinary retryable send failure
+    // downstream — the caller (processScheduledSends) would then silently
+    // retry a crash forever instead of letting it propagate.
+    makeDb({
+      id: INVOICE_ID, status: 'sending', scheduled_service_id: 'svc-1',
+      total: 100, credit_applied: 100, send_claim_token: 'worker-tok',
+      scheduled_send_at: null, scheduled_send_error: null,
+    });
+    const boom = new Error('connection terminated unexpectedly');
+    settleSpy.mockRejectedValue(boom);
+
+    let caught = null;
+    try {
+      await claimInvoiceForSend(INVOICE_ID, { allowClaimed: true, claimToken: 'worker-tok' });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBe(boom);
+    expect(caught.deliveryNeverAttempted).toBeUndefined();
+  });
 });
