@@ -961,6 +961,16 @@ function firstDeliveryOutcome(err, firstDeliveryOnly) {
       reason: 'Invoice is parked under a stale-claim review hold (delivery unverified) — not sent; use Resend to confirm and clear it',
     };
   }
+  // Nothing due settled the invoice (now 'prepaid') instead of texting a $0
+  // pay link (#4131 slice 4) — a genuine success, not a delivery no-op, and
+  // NOT gated on firstDeliveryOnly: an explicit Resend can hit this exact
+  // race just as easily as a first delivery, and it is never a conflict
+  // either way. Pre-push audit P1: every caller of this classifier used to
+  // fall through to its generic failure handling for this code, reporting
+  // a successful settlement as a failed send.
+  if (err?.code === 'zero_due') {
+    return { type: 'noop', code: 'zero_due', settled_zero_due: true };
+  }
   if (firstDeliveryOnly && FIRST_DELIVERY_NOOP_CODES.has(err?.code)) {
     return {
       type: 'noop',
@@ -1239,7 +1249,7 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
             if (outcome?.type === 'noop') {
               entry.sent = { sent: false, ok: true, code: outcome.code,
                 already_delivered: outcome.already_delivered, queued_delivery: outcome.queued_delivery,
-                in_progress: outcome.in_progress };
+                in_progress: outcome.in_progress, settled_zero_due: outcome.settled_zero_due };
               skipped.push(entry);
               return;
             }
@@ -1292,7 +1302,7 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
             } else if (outcome?.type === 'noop') {
               sendResult = { sent: false, ok: true, code: outcome.code,
                 already_delivered: outcome.already_delivered, queued_delivery: outcome.queued_delivery,
-                in_progress: outcome.in_progress };
+                in_progress: outcome.in_progress, settled_zero_due: outcome.settled_zero_due };
             } else {
               logger.error(`[admin-invoices:batch] send failed for ${invoice.id}: ${sendErr.message}`);
               sendResult = { sent: false, error: sendErr.message };
@@ -1417,6 +1427,7 @@ router.post('/batch/send', requireAdmin, async (req, res, next) => {
             already_delivered: outcome.already_delivered,
             queued_delivery: outcome.queued_delivery,
             in_progress: outcome.in_progress,
+            settled_zero_due: outcome.settled_zero_due,
           });
           continue;
         }
@@ -1689,6 +1700,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
           already_delivered: outcome.already_delivered,
           queued_delivery: outcome.queued_delivery,
           in_progress: outcome.in_progress,
+          settled_zero_due: outcome.settled_zero_due,
           sms: { ok: false, code: outcome.code },
           email: { ok: false, code: outcome.code },
         });

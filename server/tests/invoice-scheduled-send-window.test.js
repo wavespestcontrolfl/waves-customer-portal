@@ -737,17 +737,21 @@ describe('processScheduledSends send-window handling', () => {
       expect(db).toHaveBeenCalledTimes(2);
     });
 
-    test('a settlement refused right now defers a few minutes WITHOUT spending an attempt, and the batch continues', async () => {
+    test('a settlement refused right now consumes an attempt AS AN ORDINARY FAILURE, and the batch continues', async () => {
+      // Ruling (pre-push audit P1, #4131 slice 4): a settlement refusal is
+      // a failure to settle, not a window hold — it rides the same
+      // five-attempt cap and terminal-failure reporting as any other send
+      // failure, or a permanently unsettleable invoice loops forever.
       isWithinSendWindowET.mockReturnValue(true);
       const dueRowB = { ...dueRow, id: 'inv-2', invoice_number: 'WPC-2026-1043' };
       const staleRecovery = chain();
-      const dueQuery = chain({ rows: [zeroDueDueRow(), dueRowB] });
-      const deferUpdate = chain();
+      const dueQuery = chain({ rows: [zeroDueDueRow({ scheduled_send_attempts: 1 }), dueRowB] });
+      const failUpdate = chain();
       const claimB = chain({ returning: [claimedRow({ id: 'inv-2', send_claim_token: 'claim-2' })] });
       db
         .mockReturnValueOnce(staleRecovery)
         .mockReturnValueOnce(dueQuery)
-        .mockReturnValueOnce(deferUpdate)
+        .mockReturnValueOnce(failUpdate)
         .mockReturnValueOnce(claimB);
       settleSpy.mockResolvedValue({ settled: false, reason: 'invoice_delivery_in_flight', invoice: null });
       sendSpy.mockResolvedValue({ ok: true, sms: { ok: true }, email: { ok: true }, creditApplied: 0 });
@@ -756,10 +760,9 @@ describe('processScheduledSends send-window handling', () => {
 
       expect(sendSpy).not.toHaveBeenCalledWith('inv-1', expect.anything());
       expect(sendSpy).toHaveBeenCalledWith('inv-2', expect.objectContaining({ allowClaimed: true, claimToken: 'claim-2' }));
-      const updateArgs = deferUpdate.update.mock.calls[0][0];
-      expect(updateArgs.scheduled_send_attempts).toBeUndefined();
-      expect(updateArgs.scheduled_send_at.getTime()).toBeGreaterThan(Date.now());
-      // Reported for batch visibility only — never spends an attempt (asserted above).
+      const updateArgs = failUpdate.update.mock.calls[0][0];
+      expect(updateArgs.scheduled_send_attempts).toBe(2);
+      expect(updateArgs.scheduled_send_error).toMatch(/could not be settled yet/);
       expect(result).toEqual({ sent: 1, failed: 1, deferred: 0 });
     });
 

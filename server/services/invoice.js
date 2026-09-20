@@ -1226,18 +1226,22 @@ function zeroDueVisitInvoice(row) {
   return invoiceAmountDue(row) === 0;
 }
 
-// Settle (prepaid, system:zero_balance) or report why not — never throws.
+// Settle (prepaid, system:zero_balance) or report the RECOGNIZED business
+// reason settleZeroBalance itself returned for not settling (in-flight
+// reconciliation, existing payment work, and similar — every `skip(...)`
+// reason that function's own code names). Deliberately does NOT catch: an
+// unexpected throw (a bug, a DB error, an assertion failure inside
+// settleZeroBalance) is not a recognized refusal and must propagate rather
+// than being silently reinterpreted as "nothing due, try again later" —
+// that swallowed a permanently unsettleable invoice into an infinite,
+// silent retry loop (pre-push audit P1, #4131 slice 4).
 async function settleZeroDueVisitInvoice(invoiceId, database = db) {
-  try {
-    const settlement = await InvoiceService.settleZeroBalance(invoiceId, database);
-    if (settlement?.settled) {
-      logger.info(`[invoice] ${invoiceId}: nothing due on the visit-linked invoice — settled instead of delivering a $0 pay link`);
-      return settlement;
-    }
-    return { settled: false, reason: settlement?.reason || "refused", invoice: settlement?.invoice || null };
-  } catch (err) {
-    return { settled: false, reason: err.message, invoice: null };
+  const settlement = await InvoiceService.settleZeroBalance(invoiceId, database);
+  if (settlement?.settled) {
+    logger.info(`[invoice] ${invoiceId}: nothing due on the visit-linked invoice — settled instead of delivering a $0 pay link`);
+    return settlement;
   }
+  return { settled: false, reason: settlement?.reason || "refused", invoice: settlement?.invoice || null };
 }
 
 function depositSettlementPendingError(invoiceId, reason) {
@@ -1278,25 +1282,26 @@ async function throwForZeroDueVisitInvoice(invoiceId, fallbackRow, database = db
 }
 
 // processScheduledSends' due loop calls zeroDueOpenVisitSendOutcome BEFORE
-// ever claiming — a settlement leaves the row already off the queue
-// (nothing further to do); a refusal-to-settle-yet moves the row a few
-// minutes out so it cannot starve later payable invoices behind it in the
-// same due page. Neither outcome touches scheduled_send_attempts — this is
-// the retry-fair path (#4131 slice 4). Returns 1 when the caller's
-// {failed} counter should advance (a refusal, for batch reporting only —
-// it spends no attempt), 0 when the row settled.
+// ever claiming. A settlement leaves the row already off the queue
+// (nothing further to do). A settlement REFUSAL is a failure to settle —
+// not a window hold like quiet-hours or a provider retry — so it consumes
+// an attempt and rides the SAME five-attempt cap and terminal-failure
+// reporting (scheduled_send_error) as an ordinary send failure below; a
+// permanently unsettleable invoice (a bug, stuck payment work) must
+// eventually stop being retried and surface, not loop forever unclaimed
+// and unreported (pre-push audit P1, #4131 slice 4). Mirrors the ordinary
+// failure branch's own predicate shape (still due, still scheduled) rather
+// than an inv.scheduled_send_at equality match — the due query never
+// selects that column. Returns 1 when the caller's {failed} counter should
+// advance (a refusal), 0 when the row settled.
 async function recordZeroDueSchedulingOutcome(zeroDue, inv) {
   if (zeroDue.ok) return 0;
-  // Mirrors the send-window defer's own predicate shape below (still due,
-  // still scheduled) rather than an inv.scheduled_send_at equality match —
-  // the due query never selects that column, and this is the same
-  // due-and-scheduled guard the claim itself carries.
   await db("invoices")
     .where({ id: inv.id, status: "scheduled" })
     .whereNotNull("scheduled_send_at")
     .where("scheduled_send_at", "<=", new Date())
     .update({
-      scheduled_send_at: new Date(Date.now() + 5 * 60 * 1000),
+      scheduled_send_attempts: Number(inv.scheduled_send_attempts || 0) + 1,
       scheduled_send_error: zeroDue.error,
       updated_at: new Date(),
     });

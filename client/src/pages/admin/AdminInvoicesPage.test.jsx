@@ -277,9 +277,14 @@ describe("AdminInvoicesPage create-path toast edge cases", () => {
 });
 
 describe("AdminInvoicesPage send outcome/error helpers", () => {
-  it("sendOutcomeMessage reads the four no-op-success flags a 200 response can carry", () => {
+  it("sendOutcomeMessage reads the five no-op-success flags a 200 response can carry", () => {
     expect(sendOutcomeMessage({ covered_by_credit: true })).toBe(
       "fully covered by account credit, nothing to send",
+    );
+    // #4131 slice 4: a zero-due visit invoice settled (now prepaid) rather
+    // than being delivered — same no-op-success shape as covered_by_credit.
+    expect(sendOutcomeMessage({ settled_zero_due: true })).toBe(
+      "nothing due — invoice marked prepaid, nothing to send",
     );
     expect(sendOutcomeMessage({ already_delivered: true })).toBe(
       "already delivered",

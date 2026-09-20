@@ -429,4 +429,17 @@ describe('claimInvoiceForSend — zero-due visit invoice guard (#4131 slice 4)',
     }
     expect(caught).toMatchObject({ code: 'zero_due', deliveryNeverAttempted: true });
   });
+
+  test('an unexpected throw from settleZeroBalance (a bug, a DB error) propagates — never silently reinterpreted as a retryable business refusal', async () => {
+    // Pre-push audit P1 (#4131 slice 4): a catch-all here previously turned
+    // ANY error from settleZeroBalance into deposit_settlement_pending,
+    // which would loop a permanently unsettleable invoice forever with no
+    // visible failure. Only settleZeroBalance's OWN returned {settled:
+    // false, reason} outcomes are recognized business refusals.
+    makeDb(zeroDueRow());
+    const boom = new Error('connection terminated unexpectedly');
+    settleSpy.mockRejectedValue(boom);
+
+    await expect(claimInvoiceForSend(INVOICE_ID)).rejects.toBe(boom);
+  });
 });

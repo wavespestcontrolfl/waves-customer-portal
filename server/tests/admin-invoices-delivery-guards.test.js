@@ -214,6 +214,29 @@ describe('POST /admin/invoices/:id/send — first delivery vs. explicit Resend a
     });
   });
 
+  // #4131 slice 4, pre-push audit P1: this used to fall through to the
+  // route's generic failure/conflict handling, reporting a SUCCESSFUL
+  // zero-balance settlement (the invoice is now prepaid) as a failed send.
+  // Unlike already_delivered/queued_pay_link, zero_due is never gated on
+  // firstDeliveryOnly — an explicit Resend can hit this exact race too, and
+  // it is never a conflict either way.
+  test.each([
+    ['a first delivery', { firstDelivery: true }],
+    ['an explicit Resend', { resend: true }],
+  ])('%s that settles a zero-due invoice is reported a 200 success, not a failure', async (_case, body) => {
+    InvoiceService.sendViaSMSAndEmail.mockImplementation(async () => {
+      const e = new Error('Cannot send a prepaid invoice');
+      e.code = 'zero_due';
+      throw e;
+    });
+    await withServer(async (baseUrl) => {
+      const res = await postSend(baseUrl, body);
+      expect(res.status).toBe(200);
+      const responseBody = await res.json();
+      expect(responseBody).toMatchObject({ ok: true, settled_zero_due: true });
+    });
+  });
+
   test('an explicit Resend that finds a queued pay-link text is a real conflict, not a no-op success', async () => {
     InvoiceService.sendViaSMSAndEmail.mockImplementation(async () => {
       const e = new Error('Invoice send already in progress — a text carrying this pay link is queued for the send window');

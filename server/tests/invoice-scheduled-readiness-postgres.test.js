@@ -127,7 +127,13 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
     }
   });
 
-  test('processScheduledSends defers a due zero-balance invoice it cannot settle yet WITHOUT spending an attempt', async () => {
+  test('processScheduledSends refuses a due zero-balance invoice it cannot settle yet AS AN ORDINARY FAILURE — spends an attempt, stamps the reason', async () => {
+    // Ruling (pre-push audit P1, #4131 slice 4): a settlement refusal is a
+    // failure to settle, not a window hold like quiet hours — it consumes
+    // an attempt and rides the existing five-attempt cap and
+    // terminal-failure reporting exactly like an ordinary send failure, or
+    // a permanently unsettleable invoice (stuck payment work, a bug) would
+    // loop the worker forever with no visible failure.
     await trx('invoices').where({ id: invoiceId }).update({
       status: 'scheduled', scheduled_send_at: new Date(Date.now() - 60000), scheduled_send_attempts: 1,
       payment_recorded_at: new Date(),
@@ -140,11 +146,31 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
       expect(sendSpy).not.toHaveBeenCalled();
       expect(result).toEqual({ sent: 0, failed: 1, deferred: 0 });
       const row = await read();
-      expect(row.status).toBe('scheduled');
-      expect(row.scheduled_send_attempts).toBe(1); // unchanged — no attempt spent
-      expect(new Date(row.scheduled_send_at).getTime()).toBeGreaterThan(before);
+      expect(row.status).toBe('scheduled'); // still due — no backoff, just like an ordinary failure
+      expect(row.scheduled_send_attempts).toBe(2); // an attempt WAS spent
+      expect(row.scheduled_send_error).toMatch(/could not be settled yet/);
+      expect(new Date(row.scheduled_send_at).getTime()).toBeLessThanOrEqual(before);
     } finally {
       sendSpy.mockRestore();
     }
+  });
+
+  test('the fifth consecutive unsettleable refusal exhausts the attempt cap and is reported failed with the reason', async () => {
+    await trx('invoices').where({ id: invoiceId }).update({
+      status: 'scheduled', scheduled_send_at: new Date(Date.now() - 60000), scheduled_send_attempts: 4,
+      payment_recorded_at: new Date(),
+    });
+
+    const result = await Invoice.processScheduledSends();
+
+    expect(result).toEqual({ sent: 0, failed: 1, deferred: 0 });
+    const row = await read();
+    expect(row.scheduled_send_attempts).toBe(5);
+    expect(row.scheduled_send_error).toMatch(/could not be settled yet/);
+
+    // The cap holds: a sixth pass no longer finds this row due at all.
+    const again = await Invoice.processScheduledSends();
+    expect(again).toEqual({ sent: 0, failed: 0, deferred: 0 });
+    expect((await read()).scheduled_send_attempts).toBe(5);
   });
 });

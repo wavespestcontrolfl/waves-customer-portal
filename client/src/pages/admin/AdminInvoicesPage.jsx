@@ -355,6 +355,10 @@ export function invoiceDepositCreditTotal(lineItems) {
 // the existing covered-by-credit success. Exported for tests.
 export function sendOutcomeMessage(res) {
   if (res?.covered_by_credit) return "fully covered by account credit, nothing to send";
+  // Nothing was due (a credit or prepaid coverage zeroed the balance) — the
+  // invoice settled as prepaid instead of texting a $0 pay link (#4131
+  // slice 4). Same no-op-success shape as covered_by_credit above.
+  if (res?.settled_zero_due) return "nothing due — invoice marked prepaid, nothing to send";
   if (res?.already_delivered) return "already delivered";
   if (res?.queued_delivery) return "queued for the send window";
   // A concurrent first-delivery request already won this exact race (pre-
