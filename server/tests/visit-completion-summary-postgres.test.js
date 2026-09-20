@@ -3866,8 +3866,9 @@ postgres('visit summary recipient recovery', () => {
 
   test('a transient Bill-To re-judge failure under the worker claim returns the send to its queue slot', async () => {
     const invoiceId = randomUUID();
+    const claimToken = randomUUID();
     await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
-      customer_id: fixture.customerId, status: 'sending', total: 120, visit_completion_packet_id: fixture.packetId,
+      customer_id: fixture.customerId, status: 'sending', send_claim_token: claimToken, total: 120, visit_completion_packet_id: fixture.packetId,
       scheduled_send_at: new Date(Date.now() - 60000) });
     const execute = mockPg.client.constructor.prototype._query;
     let interrupted = false;
@@ -3879,7 +3880,7 @@ postgres('visit summary recipient recovery', () => {
       return execute.call(this, connection, query);
     });
     try {
-      expect(await require('../services/invoice').sendViaSMSAndEmail(invoiceId, { allowClaimed: true })).toMatchObject({ ok: false, code: 'bill_to_fence_failed' });
+      expect(await require('../services/invoice').sendViaSMSAndEmail(invoiceId, { allowClaimed: true, claimToken })).toMatchObject({ ok: false, code: 'bill_to_fence_failed' });
       expect(interrupted).toBe(true);
       const invoice = await mockPg('invoices').where({ id: invoiceId }).first();
       expect(invoice.status).toBe('scheduled');

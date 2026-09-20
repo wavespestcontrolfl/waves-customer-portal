@@ -1,4 +1,3 @@
-const { lockSmsPhone } = require('../utils/customer-comms-lock');
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
@@ -191,6 +190,7 @@ router.post('/sms', async (req, res) => {
   // duplicate the row. Better to keep the (already-logged) message claimed.
   let persisted = false;
   let sourcePersistenceFailed = false;
+  let optOutPersistenceFailed = false;
   // Contact-correction queue slot + whether a branch actually ran it.
   // Declared out here so the route-level finally can release an un-run
   // reservation on EVERY exit path (round-15) — early returns, throws, and
@@ -360,11 +360,9 @@ router.post('/sms', async (req, res) => {
       else logger.warn(`[contact-correction] enqueue deferred to stale sweep for customer ${customer.id}, sms_log ${smsLogId || 'n/a'}`);
     };
 
-    // Dual-write to unified messages table. Awaited (fail-soft — the catch
-    // keeps the legacy sms_log path serving Virginia's inbox on error) so the
-    // message row exists BEFORE the sms_reply bell below is written: the
-    // thread-read bell cross-clear only clears bells for threads with no
-    // unread message, which needs message-before-bell ordering (hook P1).
+    // The unified inbox is required before acknowledging an accepted SMS.
+    // STOP suppression still runs below if this write fails; all other effects
+    // wait for a durable message so redelivery can safely resume processing.
     const inboundTouchpoint = await require('../services/conversations').recordTouchpoint({
       customerId: customer?.id,
       channel: 'sms',
@@ -384,6 +382,11 @@ router.post('/sms', async (req, res) => {
       messageType: quietReaction ? 'sms_reaction' : undefined,
       metadata: { location: numberConfig?.label, numberType: numberConfig?.type, ...(courtesyOnly ? { courtesyOnly: true } : {}) },
     }).catch(() => {});
+
+    sourcePersistenceFailed = !inboundTouchpoint?.message?.id;
+    const requireInboxMessage = () => {
+      if (sourcePersistenceFailed) throw new Error('Inbound SMS inbox persistence failed');
+    };
 
     // ── Resolve the sender relationship FIRST, before any screening or
     // opt-out handling (codex round 3 design fix, 2026-09-11 — see the PR's
@@ -447,7 +450,8 @@ router.post('/sms', async (req, res) => {
 
     // Save the inbox message before any classifier await: the durable SID
     // claim suppresses retries even if the process dies during a model call.
-    // A failed unified write bypasses screening and keeps the legacy path.
+    // On failure only STOP suppression may precede the retryable response.
+    if (optCommand.action !== 'opt_out') requireInboxMessage();
     let solicitation = null;
     let verdictMessage = null;
     try {
@@ -483,29 +487,20 @@ router.post('/sms', async (req, res) => {
 
     if (optCommand.action === 'opt_out') {
       const normalizedFrom = normalizeE164(From);
-      await recordSuppression({
+      optOutPersistenceFailed = true;
+      const optOut = await require('../services/messaging/inbound-optout').applyInboundOptout({
+        messageSid: MessageSid,
         phone: normalizedFrom || From,
+        customerId: customer?.id || null,
         reason: optCommand.reason,
         source: `twilio_webhook_${optCommand.detectionMethod}`,
         capturedBody: Body,
       });
-      // Recipient double opt-in: a pending third-party recipient who replies
-      // STOP is recorded as declined (no-op when no recipient row exists).
-      try {
-        await require('../services/recipient-optin').markRecipientOptin(normalizedFrom || From, 'declined');
-      } catch { /* never block the STOP path */ }
-      try {
-        if (customer) {
-          await db.transaction(async trx => {
-            await lockSmsPhone(trx, normalizedFrom || From);
-            await trx('notification_prefs')
-              .insert({ customer_id: customer.id, sms_enabled: false })
-              .onConflict('customer_id')
-              .merge({ sms_enabled: false });
-          });
-        }
-        logger.info(`[sms-optout] ${customer ? `Customer ${customer.id}` : `Unknown sender ${maskPhone(From)}`} opted out of SMS via ${optCommand.detectionMethod}`);
-      } catch (e) { logger.error(`[sms-optout] Failed to update prefs: ${e.message}`); }
+      optOutPersistenceFailed = false;
+      // Receipt + suppression + recipient decline + prefs commit atomically.
+      // A replay after START must not apply those consent effects again.
+      // Stop before logs, alerts, corrections, or a successful TwiML response.
+      requireInboxMessage();
 
       let optOutSmsLogId = null;
       try {
@@ -600,7 +595,9 @@ router.post('/sms', async (req, res) => {
       }
 
       return res.type('text/xml').send(
-        `<Response><Message>You've been unsubscribed from Waves Pest Control SMS. Reply START to re-subscribe.</Message></Response>`
+        optOut.applied
+          ? `<Response><Message>You've been unsubscribed from Waves Pest Control SMS. Reply START to re-subscribe.</Message></Response>`
+          : '<Response></Response>'
       );
     }
 
@@ -1508,7 +1505,7 @@ router.post('/sms', async (req, res) => {
     });
     // An unrecorded source is a webhook failure, never a successful
     // acknowledgment. Provider retry/fallback policy is configured in Twilio.
-    res.status(sourcePersistenceFailed ? 503 : 200).type('text/xml').send('<Response></Response>');
+    res.status(sourcePersistenceFailed || optOutPersistenceFailed ? 503 : 200).type('text/xml').send('<Response></Response>');
   } finally {
     // Release an un-run correction reservation on every exit path — a
     // branch that fired keeps its row (correctionFired is set
@@ -1970,24 +1967,8 @@ router.post('/status', async (req, res) => {
  * (throws { alreadyRead }), re-check right before the push leaves, and
  * retire the SID-scoped bell if the thread was read while it was written.
  */
-async function ringSmsReplyBell({ customer, From, MessageSid, message }) {
-  const { triggerNotification } = require('../services/notification-triggers');
-  const unifiedStillUnread = () => db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read')
-    .then((r) => r?.is_read !== true).catch(() => true); // fail open: unknown → still ring
-  if (!(await unifiedStillUnread())) throw Object.assign(new Error('thread already read'), { alreadyRead: true });
-  const stats = await triggerNotification('sms_reply', {
-    fromName: `${customer.first_name} ${customer.last_name}`,
-    fromPhone: From,
-    message,
-    threadId: customer.id,
-    twilioSid: MessageSid, // stored in metadata.payload — correlates THIS bell to THIS message
-  }, { beforePush: unifiedStillUnread });
-  try {
-    if (!(await unifiedStillUnread())) {
-      await require('../services/notification-service').markInboundSmsReadAdmin({ customerId: customer.id, twilioSid: MessageSid });
-    }
-  } catch (e) { logger.warn(`[notifications] sms_reply post-check failed: ${e.message}`); }
-  return stats;
+async function ringSmsReplyBell(args) {
+  return require('../services/sms-reply-alert-delivery').ringSmsReplyBell(args);
 }
 
 async function lastOutboundAskedQuestion(toPhone, ourNumber) {

@@ -53,6 +53,21 @@ describe('public billing-link load states', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
   });
 
+  it('shows deposit reconciliation as collection paused and mounts no payment controls', async () => {
+    const fetchMock = vi.fn(async () => response(409, {
+      error: 'A received deposit is awaiting invoice reconciliation',
+      reconciliationRequired: true,
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    renderAt('/pay/deadbeef', <PayPageV2 />);
+
+    expect(await screen.findByText('Deposit received — payment paused')).toBeInTheDocument();
+    expect(screen.getByText(/please don’t submit another payment/i)).toBeInTheDocument();
+    expect(screen.queryByText("We couldn't load that invoice")).not.toBeInTheDocument();
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('shows a retryable receipt outage instead of saying the receipt is missing', async () => {
     const fetchMock = vi.fn(async () => response(503));
     vi.stubGlobal('fetch', fetchMock);

@@ -71,7 +71,12 @@ item. Legacy and unrelated invoice rows may omit the ownership fields.
 `/invoice.pdf`, `/attachments/:id` — the invoice pay surface; router-wide
 60/min limiter + url-safe 20-64 token format gate with generic 404,
 mirroring pay-statement.js; legacy 25-32 char invoice tokens remain
-valid. OWNER RULING 2026-08-16, superseding the earlier "no sibling-
+valid. A received estimate deposit awaiting invoice reconciliation blocks
+the pay-page GET and new collection with HTTP 409 and
+`reconciliationRequired: true`. The deposit ledger is the hold authority;
+payer-billed invoices are exempt. Recording an already-settled PaymentIntent
+and permanent receipt access remain available. OWNER RULING 2026-08-16,
+superseding the earlier "no sibling-
 invoice data on this surface" P0: with GATE_PAY_INCLUDE_BALANCE on, the
 pay page ITEMIZES the customer's other open self-pay invoices — numbers,
 dates, amounts, an accepted forwarded-link disclosure — and the Pay
@@ -325,6 +330,28 @@ country codes), or an active
 503 with empty TwiML before either consumer runs; the owned SID claim is
 released before that response. Twilio's configured retry/fallback policy
 governs redelivery),
+Accepted inbound SMS also requires a saved unified inbox message before a
+successful acknowledgment or ordinary downstream processing. A missing message
+returns 503 and releases only this delivery's owned inbound claim. Eligible
+STOP requests still persist suppression, recipient decline, and preference
+updates before that error; non-idempotent logs and alerts wait for redelivery.
+Those STOP effects and a permanent MessageSid application receipt commit
+atomically under the canonical phone lock. A failed consent transaction also
+returns 503. A retry of an applied STOP saves the inbox and completes deferred
+handling without changing consent again or sending an unsubscribe confirmation;
+it cannot undo a newer START. Receipts must remain for the lifetime of retries.
+Inbound media uses stable account/message/index storage keys across retries.
+Stale contact-correction reservations require a saved unified inbox message
+before promotion; failed route cancellation cannot replay an unrecorded source.
+Provider retry/fallback remains governed by the configured Twilio policy.
+The shared SMS-alert delivery protocol uses a two-minute owned sender lease,
+confirmed to four hours only after actual bell/push delivery evidence and a
+durable legacy receipt. Committed bells keep immutable message keys so lost
+receipts can be repaired without dispatching again; repair preserves original
+delivery time. Deliberate suppression is terminal. Push-only retries reuse the
+message tag without renotification; provider acceptance followed by a crash
+before receipt persistence remains ambiguous and can repeat a provider handoff.
+
 `/api/webhooks/twilio/outbound-amd` +
 `/api/webhooks/twilio/outbound-dial-complete` (POST; machine-to-machine
 callbacks under the existing Twilio-signature-validated mount. The shared
@@ -566,7 +593,17 @@ before either provider path; both provider paths re-read the row and repeat
 the customer-viewable + call-side-hold check as the LAST step before the
 SendGrid/Twilio handoff, so a clarify hold or archive that lands during the
 PDF render withholds the packet with the same generic 404 and releases the
-SMS dedup claim so a later legitimate retap can send).
+SMS dedup claim so a later legitimate retap can send; every success or
+deduplicated response on either channel rechecks the annual guard
+(server/services/estimate-annual-guard.js) through one shared helper
+(withheldOr) before answering — the fresh-dispatch success, the in-process
+and cross-restart SMS dedup hits, the cross-process claim-loser's dedup
+hit, and the email per-day idempotency dedup all funnel through it, so a
+changed or never-delivered annual offer can never surface through a
+shortcut that skips the check — mapping a blocked verdict to the same
+generic 404, with the SMS dedup claim stamped/released exactly like the
+customer-viewable/call-side-hold case; no new request shape, no new
+payload).
 `/api/estimates/:token/bond` (PUT; customer bond-term switcher on the
 estimate page — same contract family as the service-preferences toggles.
 Token IS the auth: slug-or-64-hex format gate rejects malformed probes
@@ -1006,7 +1043,8 @@ limiter — the two heaviest public money-adjacent writes; select-tier/
 preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
 Authored commercial proposals expose reviewed four-decimal quantities and unit
 rates, explicit unit labels, cent-rounded line amounts, and the fixed
-`validThrough` date in their normalized proposal and document output. A fixed
+`validThrough` date in their normalized proposal and document output. Internal
+`estimate_data.proposalCosting` stays outside that public allowlist. A fixed
 price hold governs expiry even after resends and cannot be changed by the
 generic extension or auto-renew paths; these additions do not widen draft access.
 A delivered group anchor may remain navigable through its stored
@@ -2078,7 +2116,18 @@ call-side linkage verdict; `isEstimateAcceptActive` + an explicit
 PRESENCE (not `proposal.enabled`) — the same refusal applies to RESTORES
 and suppresses the add-back projection, because an itemization added after
 a removal is the authoritative billed quote — plus the last remaining
-recurring line, `tree_shrub` and every `commercial_*` key; a fail-CLOSED 409 when the
+recurring line, `tree_shrub`, every `commercial_*` key, and an annual-protection
+termite line (removal would erase its priced-program replay provenance).
+Quarterly termite remains removable; a pre-provenance restore recovers the
+sold program and station pricing knobs from the original opt-out baseline
+when present, while an annual sale or an unproven annual request remains
+blocked for customer restores. `/data` keeps such keys in `removedKeys` to
+suppress a duplicate add-service offer, but lists them in
+`restoreBlockedKeys` so the customer page omits their unusable add-back
+control. A server-initiated compensation for a preexisting staff-parked
+annual line may restore its captured annual terms after a failed send;
+customer restores remain refused;
+a fail-CLOSED 409 when the
 recompute cannot run; and a 400 refusal when the removal would turn a
 bundled-free one-time item into a charge (owner ruling — that one goes to
 the office; the before-state resolves through `result` OR the mapped raw

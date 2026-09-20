@@ -43,6 +43,7 @@ jest.mock('../services/messaging/send-customer-message', () => ({
 }));
 
 const db = require('../models/db');
+const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { repairFollowupCounters } = require('../services/estimate-follow-up')._private;
 const {
   extendEstimate,
@@ -280,6 +281,38 @@ describe('extendEstimate zero-comms opt-out (#3391 round 9 in-hook audit)', () =
     });
     expect(res.smsResult).toEqual({ sent: false, reason: 'silent' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('extendEstimate post-write SMS: annual-offer delivery guard (delivery-guards slice, re-cut of #4569)', () => {
+  it('passes estimateId to sendCustomerMessage, and a withheld verdict never reports the confirmation SMS as sent', async () => {
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    sendCustomerMessage.mockClear();
+    // Simulates what the real send-customer-message chokepoint does when
+    // annualHandoffGuard blocks — this suite mocks that chokepoint, so the
+    // guard itself is proven elsewhere (estimate-annual-guard.test.js,
+    // send-customer-message-predispatch.test.js); this pins the wiring.
+    sendCustomerMessage.mockResolvedValueOnce({
+      sent: false, blocked: true, code: 'ANNUAL_OFFER_WITHHELD', reason: 'annual_offer_withheld',
+    });
+    const getTemplateSpy = jest.spyOn(smsTemplatesRouter, 'getTemplate')
+      .mockResolvedValueOnce('Your estimate was extended: {{estimate_url}}');
+    try {
+      const res = await extendEstimate({
+        estimate: {
+          id: 'est-annual-1', status: 'viewed', archived_at: null,
+          expires_at: PAST, viewed_at: PAST, customer_phone: '+15550100999',
+          customer_id: 'cust-1', customer_email: null, estimate_data: {},
+        },
+        days: 7,
+        entryPoint: 'test',
+        workflow: 'test',
+      });
+      expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ estimateId: 'est-annual-1' }));
+      expect(res.smsResult.sent).toBe(false);
+    } finally {
+      getTemplateSpy.mockRestore();
+    }
   });
 });
 

@@ -335,6 +335,58 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
     expect(p.exemptReason).toBe('existing_plan_customer');
   });
 
+  // Prod incident 2026-09-18: a lawn member on per-application Auto Pay
+  // accepted a pest estimate and got a due-today pay-link invoice texted +
+  // emailed, because the plan-member exemption returned before the Auto Pay
+  // check and only `autopay_already_active` / `saved_method_consented` count
+  // as the hold-for-completion lane in the accept route.
+  describe('existing plan member on Auto Pay classifies into the completion-charge lane', () => {
+    it('reports autopay_already_active for a member (snapshot) already on Auto Pay', async () => {
+      mockDbFixtures.customers = { id: 'cust-1', autopay_enabled: true };
+      mockCustomerOnAutopay.mockResolvedValue(true);
+      const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: { isExistingCustomer: true } });
+      expect(p.required).toBe(false);
+      expect(p.exemptReason).toBe('autopay_already_active');
+    });
+
+    it('reports autopay_already_active for a member (LIVE rows) already on Auto Pay', async () => {
+      mockQualifyingRows.mockResolvedValue([{ id: 'svc' }]);
+      mockDbFixtures.customers = { id: 'cust-1', autopay_enabled: true };
+      mockCustomerOnAutopay.mockResolvedValue(true);
+      const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST });
+      expect(p.exemptReason).toBe('autopay_already_active');
+    });
+
+    it('keeps a payer-billed member OUT of the lane (completion never auto-charges payer invoices)', async () => {
+      mockResolveForInvoice.mockResolvedValue({ payerId: 'payer-1' });
+      mockDbFixtures.customers = { id: 'cust-1', autopay_enabled: true };
+      mockCustomerOnAutopay.mockResolvedValue(true);
+      const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: { isExistingCustomer: true }, scheduledServiceId: 'ss-9', useLinkedFallback: false });
+      expect(p.required).toBe(false);
+      expect(p.exemptReason).toBe('payer_billed');
+    });
+
+    it('keeps an autopay-PAUSED member on the payable path', async () => {
+      mockDbFixtures.customers = { id: 'cust-1', autopay_enabled: true, autopay_paused_until: '2099-01-01' };
+      mockIsPaused.mockReturnValue(true);
+      try {
+        const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: { isExistingCustomer: true } });
+        expect(p.exemptReason).toBe('autopay_paused');
+      } finally {
+        mockIsPaused.mockReturnValue(false);
+      }
+    });
+
+    it('still reports existing_plan_customer for a member NOT on Auto Pay, even with a consented saved card (no enrollment by a later accept)', async () => {
+      mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pmrow-7', stripe_payment_method_id: 'pm_7' });
+      const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: { isExistingCustomer: true } });
+      expect(p.required).toBe(false);
+      expect(p.exemptReason).toBe('existing_plan_customer');
+      expect(p.savedMethodRowId).toBeUndefined();
+      expect(mockFindConsentedChargeableCard).not.toHaveBeenCalled();
+    });
+  });
+
   it('keeps the card REQUIRED when the live plan check fails (fail toward protection)', async () => {
     mockQualifyingRows.mockRejectedValue(new Error('db down'));
     const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST });

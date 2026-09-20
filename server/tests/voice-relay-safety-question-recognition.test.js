@@ -12,7 +12,9 @@ test.each(catalogNames)('catalog product identity supplies question evidence: %s
 test.each([
   ['The treatment is safe for dogs, right?', 'positive', 'safe', 'dog'],
   ['Bora-Care is harmless to children, isn’t it?', 'positive', 'harmless', 'child'],
-  ['Example X is safe for cats, right?', 'positive', 'safe', 'cat'],
+  // A multi-letter formulation code: bare one-letter codes are no longer a
+  // product identity in the shared brand grammar (#4596).
+  ['Example XTS is safe for cats, right?', 'positive', 'safe', 'cat'],
   ['The treatment is not safe for dogs, right?', 'positive', 'not safe', 'dog'],
   ['The treatment is harmful to pets, right?', 'harm', 'harmful', 'pet'],
   ['The treatment is not harmful to pets, isn’t it?', 'harm', 'not harmful', 'pet'],
