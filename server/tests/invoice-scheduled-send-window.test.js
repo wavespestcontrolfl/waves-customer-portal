@@ -284,6 +284,46 @@ describe('processScheduledSends send-window handling', () => {
     expect(result).toEqual({ sent: 1, failed: 0, deferred: 1 });
   });
 
+  test('a send held after an unrestorable adopted text is neither restored nor requeued, and the batch continues', async () => {
+    // sendViaSMSAndEmail reports ADOPTED_QUEUE_RESTORE_FAILED (ok: false,
+    // deliveryHeld: true) when no channel delivered and the adopted queued
+    // text could not be given back — the worker must retain that exact
+    // claim for review (like an unverified outcome), never restore it to
+    // 'scheduled' (which would requeue a send over an unrestored text) nor
+    // let the hold abort the rest of the batch.
+    isWithinSendWindowET.mockReturnValue(true);
+    const dueRowB = { ...dueRow, id: 'inv-2', invoice_number: 'WPC-2026-1043' };
+    const staleRecovery = chain();
+    const dueQuery = chain({ rows: [dueRow, dueRowB] });
+    const claimA = chain({ returning: [claimedRow()] });
+    const claimB = chain({ returning: [claimedRow({ id: 'inv-2', send_claim_token: 'claim-2' })] });
+    db
+      .mockReturnValueOnce(staleRecovery)
+      .mockReturnValueOnce(dueQuery)
+      .mockReturnValueOnce(claimA)
+      .mockReturnValueOnce(claimB);
+    sendSpy
+      .mockResolvedValueOnce({
+        ok: false, code: 'ADOPTED_QUEUE_RESTORE_FAILED', deliveryHeld: true,
+        sms: { ok: false }, email: { ok: false }, creditApplied: 0,
+      })
+      .mockResolvedValueOnce({ ok: true, sms: { ok: true }, email: { ok: true }, creditApplied: 0 });
+
+    const result = await InvoiceService.processScheduledSends();
+
+    expect(sendSpy).toHaveBeenCalledWith('inv-1', expect.objectContaining({ allowClaimed: true, claimToken: 'claim-1' }));
+    expect(sendSpy).toHaveBeenCalledWith('inv-2', expect.objectContaining({ allowClaimed: true, claimToken: 'claim-2' }));
+    // The held invoice's claim flip is the ONLY 'invoices' write for it —
+    // no requeue/restore update follows. Only 4 db() calls total (stale
+    // recovery, due query, and one claim flip per invoice); a 5th
+    // (unqueued) call would throw and fail this test outright.
+    expect(db).toHaveBeenCalledTimes(4);
+    expect(claimA.update).toHaveBeenCalledTimes(1);
+    // The second invoice, behind the held one, still sent — held invoices
+    // are not counted in the {sent, failed, deferred} tuple this returns.
+    expect(result).toEqual({ sent: 1, failed: 0, deferred: 0 });
+  });
+
   test('a non-queue error from the preclaimed send still propagates', async () => {
     isWithinSendWindowET.mockReturnValue(true);
     const staleRecovery = chain();

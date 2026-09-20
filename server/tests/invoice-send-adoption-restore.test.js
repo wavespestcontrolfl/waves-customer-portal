@@ -880,5 +880,125 @@ describe('invoice send claim adoption of a queued pay-link SMS', () => {
       expect(row.status).toBe('cancelled');
       expect(row.metadata.adoption_resolved_at).toEqual(expect.any(String));
     });
+    test('an unrestorable adopted text after a total failure holds the preclaimed send instead of failing it', async () => {
+      // Preclaimed: processScheduledSends already flipped the invoice to
+      // 'sending' and hands sendViaSMSAndEmail the exact token — this
+      // exercises the NO-CHANNEL-DELIVERED branch (both legs fail), not
+      // the email-only-delivery branch the earlier restore-failure test
+      // above covers.
+      invoices.reset({
+        id: 'inv-1',
+        invoice_number: 'WPC-2026-2001',
+        status: 'sending',
+        customer_id: 'cust-1',
+        payer_id: null,
+        token: 'tok-1',
+        total: 100,
+        credit_applied: 0,
+        send_claim_token: 'claim-1',
+      });
+      smsLog = makeSmsLogTable(
+        [{
+          id: 'sms-queued-1',
+          status: 'scheduled',
+          scheduled_for: ORIGINAL_SCHEDULED_FOR,
+          metadata: { entry_point: INVOICE_SEND_DEFERRED_ENTRY_POINT, invoice_id: 'inv-1' },
+        }],
+        { failRestore: true },
+      );
+      db.mockImplementation((table) => {
+        if (table === 'invoices') return invoices.query();
+        if (table === 'sms_log') return smsLog.query();
+        if (table === 'customers') return customerQuery(customer);
+        if (table === 'activity_log') return passthroughQuery();
+        throw new Error(`Unexpected table: ${table}`);
+      });
+      sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => (
+        withProviderHandoff(async () => ({
+          sent: false, blocked: true, deliveryOutcome: 'not_sent',
+          code: 'PROVIDER_REJECTED', reason: 'number opted out',
+        }))
+      ));
+      sendInvoiceEmail.mockResolvedValueOnce({ ok: false, error: 'SMTP rejected' });
+
+      const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {
+        allowClaimed: true, claimToken: 'claim-1',
+      });
+
+      expect(result).toMatchObject({
+        ok: false, sms: { ok: false }, email: { ok: false },
+        code: 'ADOPTED_QUEUE_RESTORE_FAILED', deliveryHeld: true,
+      });
+      // Never touched — the queue-restore threw before restoreSendClaim
+      // could even consider moving the invoice row.
+      expect(invoices.state()).toMatchObject({ status: 'sending', send_claim_token: 'claim-1' });
+      const row = smsLog.rows().find((r) => r.id === 'sms-queued-1');
+      expect(row.status).toBe('cancelled');
+      expect(row.metadata.cancelled_reason).toBe('superseded_by_live_send');
+      expect(row.metadata[QUEUE_ADOPTION_PENDING_KEY]).toBe(true);
+    });
+
+    test('a credit-covered send surfaces a failed adopted-row resolution', async () => {
+      smsLog = makeSmsLogTable(
+        [{
+          id: 'sms-queued-1',
+          status: 'scheduled',
+          scheduled_for: ORIGINAL_SCHEDULED_FOR,
+          metadata: { entry_point: INVOICE_SEND_DEFERRED_ENTRY_POINT, invoice_id: 'inv-1' },
+        }],
+        { failResolve: true },
+      );
+      db.mockImplementation((table) => {
+        if (table === 'invoices') return invoices.query();
+        if (table === 'sms_log') return smsLog.query();
+        if (table === 'customers') return customerQuery(customer);
+        if (table === 'activity_log') return passthroughQuery();
+        throw new Error(`Unexpected table: ${table}`);
+      });
+      autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ fullyCovered: true, applied: 100 });
+
+      const wrapperResult = await InvoiceService.sendViaSMSAndEmail('inv-1');
+
+      expect(wrapperResult).toMatchObject({
+        ok: true, covered_by_credit: true, queueResolutionError: expect.stringContaining('injected'),
+      });
+
+      // Same guarantee through the direct sendViaSMS credit-covered branch
+      // — fresh invoice/queue state, same injected resolution failure.
+      invoices.reset({
+        id: 'inv-1',
+        invoice_number: 'WPC-2026-2001',
+        status: 'draft',
+        customer_id: 'cust-1',
+        payer_id: null,
+        token: 'tok-1',
+        total: 100,
+        credit_applied: 0,
+        send_claim_token: null,
+      });
+      smsLog = makeSmsLogTable(
+        [{
+          id: 'sms-queued-2',
+          status: 'scheduled',
+          scheduled_for: ORIGINAL_SCHEDULED_FOR,
+          metadata: { entry_point: INVOICE_SEND_DEFERRED_ENTRY_POINT, invoice_id: 'inv-1' },
+        }],
+        { failResolve: true },
+      );
+      db.mockImplementation((table) => {
+        if (table === 'invoices') return invoices.query();
+        if (table === 'sms_log') return smsLog.query();
+        if (table === 'customers') return customerQuery(customer);
+        if (table === 'activity_log') return passthroughQuery();
+        throw new Error(`Unexpected table: ${table}`);
+      });
+      autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ fullyCovered: true, applied: 100 });
+
+      const directResult = await InvoiceService.sendViaSMS('inv-1');
+
+      expect(directResult).toMatchObject({
+        sent: false, ok: true, covered_by_credit: true, queueResolutionError: expect.stringContaining('injected'),
+      });
+    });
   });
 });
