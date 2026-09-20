@@ -5,7 +5,7 @@ const logger = require("./logger");
 const TaxCalculator = require("./tax-calculator");
 const DiscountEngine = require("./discount-engine");
 const { percentageDiscountDollars } = require("./discount-stack");
-const { etDateString, addETDays } = require("../utils/datetime-et");
+const { etDateString, addETDays, etCalendarDayOf } = require("../utils/datetime-et");
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require("./short-url");
 const { publicPortalUrl } = require("../utils/portal-url");
 const { loadInvoiceAnnualPrepay, buildPrepayCoverageSummary } = require("./invoice-prepay");
@@ -2936,53 +2936,51 @@ const InvoiceService = {
       codePrefix: invoiceShortCodePrefix(invoice),
     });
 
-    const techName = invoice.tech_name || "Our team";
     const serviceType = invoice.service_type || invoice.title || "your service";
 
-    let formattedDate = "";
-    // Whether the invoice's service date is *today* in ET. The annual-prepay
-    // "Today's visit is the first of N" clause is gated on this: a resend from
-    // sent/viewed/overdue or a delayed/scheduled send can run on a day other
-    // than service_date, where a same-day claim would be false.
-    let serviceDateIsTodayET = false;
-    // Whether the service date is still in the future (ET). An invoice billed
-    // before its service has happened — the setup + first-application invoice
-    // auto-sent at estimate acceptance is the common case — must not use the
-    // generic "...completed on {service_date}" copy. Selects the pre-service
-    // variant below.
-    let serviceDateIsFutureET = false;
-    if (invoice.service_date) {
+    // Service-date framing, all on the ET calendar day. Knex returns DATE as a
+    // UTC-midnight Date; etCalendarDayOf reads that and a plain YYYY-MM-DD
+    // string as the same calendar day (etDateString would shift the Date to
+    // the previous ET day and wrongly drop the "today" clause). An unparseable
+    // value falls back to undated copy.
+    let serviceYmd = "";
+    try {
+      serviceYmd = invoice.service_date ? etCalendarDayOf(invoice.service_date) : "";
+    } catch {
+      serviceYmd = "";
+    }
+    const todayYmd = etDateString(new Date());
+    // The annual-prepay "Today's visit is the first of N" clause is gated on
+    // today: a resend from sent/viewed/overdue or a delayed/scheduled send can
+    // run on a day other than service_date, where a same-day claim would be false.
+    const serviceDateIsTodayET = serviceYmd === todayYmd;
+    // A service date still in the future — the setup + first-application
+    // invoice auto-sent at estimate acceptance is the common case — must not
+    // use the generic "...completed on {service_date}" copy. ISO YYYY-MM-DD
+    // compares lexicographically === chronologically.
+    const serviceDateIsFutureET = serviceYmd > todayYmd;
+    const formattedDate = serviceYmd
+      ? new Date(`${serviceYmd}T12:00:00`).toLocaleDateString("en-US", {
+        weekday: "long",
+        month: "long",
+        day: "numeric",
+        year: "numeric",
+        timeZone: "America/New_York",
+      })
+      : "";
+
+    // Pre-service copy: a future service date, or a linked visit that has not
+    // completed. An overdue or same-day appointment can still be open, so its
+    // completion state decides rather than its date; an unreadable status
+    // fails toward the pre-service copy.
+    let preServiceCopy = serviceDateIsFutureET;
+    if (!preServiceCopy && invoice.scheduled_service_id) {
       try {
-        // Knex returns DATE as a Date object (UTC midnight). Avoid the broken
-        // `date + 'T12:00:00'` string concat and always format in ET.
-        const d =
-          invoice.service_date instanceof Date
-            ? invoice.service_date
-            : new Date(invoice.service_date + "T12:00:00");
-        if (!isNaN(d.getTime())) {
-          formattedDate = d.toLocaleDateString("en-US", {
-            weekday: "long",
-            month: "long",
-            day: "numeric",
-            year: "numeric",
-            timeZone: "America/New_York",
-          });
-          // Compare date-only values, not the midnight Date through ET: Knex
-          // returns DATE as a Date at UTC midnight, which etDateString() would
-          // format as the previous ET calendar day and wrongly drop the clause
-          // on the real service date. The raw YYYY-MM-DD already is the calendar
-          // date (UTC-midnight Date → toISOString slice; string → leading slice).
-          const serviceYmd =
-            invoice.service_date instanceof Date
-              ? invoice.service_date.toISOString().slice(0, 10)
-              : String(invoice.service_date).slice(0, 10);
-          const todayYmd = etDateString(new Date());
-          serviceDateIsTodayET = serviceYmd === todayYmd;
-          // ISO YYYY-MM-DD compares lexicographically === chronologically.
-          serviceDateIsFutureET = serviceYmd > todayYmd;
-        }
-      } catch {
-        formattedDate = "";
+        const visit = await db("scheduled_services").where({ id: invoice.scheduled_service_id }).first("status");
+        preServiceCopy = visit?.status !== "completed";
+      } catch (err) {
+        logger.warn(`[invoice] Linked visit status lookup failed for ${invoiceId}: ${err.message}`);
+        preServiceCopy = true;
       }
     }
 
@@ -3017,6 +3015,7 @@ const InvoiceService = {
       // invoice_sent skips the variant too and the invoice stays retryable
       // (falls through to the null-body skip + restoreSendClaim path below).
       const invoiceSmsActive = await templates.isTemplateActive("invoice");
+      const firstName = customer.first_name || "";
       if (prepayActive && invoiceSmsActive) {
         // Coverage summary is built when a visit count is configured; a
         // display-only prepay flag (no count) still gets the prepay framing via
@@ -3029,7 +3028,7 @@ const InvoiceService = {
           ? ` Today's visit is the first of ${coverage.coverageCount}.`
           : "";
         body = await templates.getTemplate("invoice_sent_annual_prepay", {
-          first_name: customer.first_name || "",
+          first_name: firstName,
           coverage_summary: coverageSummary,
           first_visit_clause: firstVisitClause,
           pay_url: payUrl,
@@ -3038,15 +3037,15 @@ const InvoiceService = {
       // Upfront invoices — the setup + first-application invoice auto-sent at
       // estimate acceptance, or any invoice billed before its service date —
       // must not use the generic "...completed on {service_date}" copy, which
-      // asserts a not-yet-performed service AND prints a future date. A service
-      // date still in the future selects a pre-service variant with no completion
-      // claim and no date placeholder. Gated on the same base `invoice` kill
+      // asserts a not-yet-performed service AND prints a future date. A future
+      // service date or an uncompleted linked visit selects a pre-service
+      // variant with no completion claim and no date placeholder. Gated on the same base `invoice` kill
       // switch as the prepay variant (a disabled invoice_sent skips this too,
       // keeping the invoice retryable); a missing/disabled variant row falls
       // through to the standard copy below so the send is never blocked.
-      if (!body && serviceDateIsFutureET && invoiceSmsActive) {
+      if (!body && preServiceCopy && invoiceSmsActive) {
         body = await templates.getTemplate("invoice_sent_upfront", {
-          first_name: customer.first_name || "",
+          first_name: firstName,
           service_type: serviceType,
           pay_url: payUrl,
         }, tplOpts);
@@ -3056,7 +3055,7 @@ const InvoiceService = {
         // — fall back to the standard invoice_sent copy so a missing variant row
         // never blocks the send.
         body = await templates.getTemplate("invoice_sent", {
-          first_name: customer.first_name || "",
+          first_name: firstName,
           service_type: serviceType,
           service_date: formattedDate || "today",
           pay_url: payUrl,
