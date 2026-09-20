@@ -119,15 +119,16 @@ function checkRecruitingStageSupersession(meta, app, stage) {
   const status = String(app.status || '');
   if (status !== 'interview') return { eligible: false, reason: `application-${status}` };
   const history = Array.isArray(app.comms_history) ? app.comms_history : [];
-  const mine = history.find((e) => e && e.id === meta.ledger_entry_id);
-  const mineAt = mine ? Date.parse(mine.at || '') : NaN;
-  // 'pending' counts too (Codex r14 P2): an immediate resend sits at 'pending'
-  // while it runs the validators, and its own provider-boundary check only
-  // looks for attempts newer than ITSELF — so this claimed row must yield
-  // to it, or both would reach Twilio.
-  const newer = history.some((e) => e && e.id !== meta.ledger_entry_id && e.channel === 'sms' && e.stage === stage
-    && ['pending', 'handoff', 'sent', 'uncertain', 'deferred'].includes(e.outcome)
-    && Number.isFinite(mineAt) && Date.parse(e.at || '') > mineAt);
+  const mineIdx = history.findIndex((e) => e && e.id === meta.ledger_entry_id);
+  // Append position is the total order (Codex r23 P2): appendCommsHistory is
+  // one atomic jsonb append per attempt, so a resend appended in the same
+  // millisecond as this claim still sits AFTER it — a timestamp compare
+  // would miss it. 'pending' counts too (Codex r14 P2): an immediate resend
+  // sits at 'pending' while it runs the validators, and its own boundary
+  // check only looks for attempts newer than ITSELF — so this claimed row
+  // must yield to it, or both would reach Twilio.
+  const newer = mineIdx >= 0 && history.slice(mineIdx + 1).some((e) => e && e.channel === 'sms' && e.stage === stage
+    && ['pending', 'handoff', 'sent', 'uncertain', 'deferred'].includes(e.outcome));
   if (newer) return { eligible: false, reason: 'superseded-by-newer-attempt' };
   if (!meta.interview_token || app.interview_token !== meta.interview_token) {
     return { eligible: false, reason: 'interview-token-changed' };

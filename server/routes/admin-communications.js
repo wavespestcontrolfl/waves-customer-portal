@@ -469,9 +469,12 @@ router.post('/sms', async (req, res, next) => {
       if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
       if (media.length > 0) return res.status(400).json({ error: 'Attachments are not supported for applicant texts' });
       const RecruitingComms = require('../services/recruiting-comms');
-      const applicationId = await RecruitingComms.openApplicationIdForPhone(to);
+      // The line this reply goes out from decides which application's thread
+      // it belongs to (Codex r23 P2) — the same line the send will use.
+      const replyLine = fromNumber || await RecruitingComms.outboundNumberForApplicants();
+      const applicationId = await RecruitingComms.openApplicationIdForPhone(to, { fromNumber: replyLine });
       if (!applicationId) return res.status(409).json({ error: 'No open application for this applicant — text them from the recruiting queue' });
-      const reply = await RecruitingComms.sendOwnerReply({ applicationId, body: cleanBody, by: req.technicianId, fromNumber: fromNumber || undefined });
+      const reply = await RecruitingComms.sendOwnerReply({ applicationId, body: cleanBody, by: req.technicianId, fromNumber: replyLine });
       if (!['sent', 'uncertain', 'deferred'].includes(reply.outcome)) {
         return res.status(422).json({ error: `Applicant text ${reply.outcome}` });
       }

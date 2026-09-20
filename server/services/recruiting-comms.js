@@ -423,6 +423,12 @@ async function sendEmailToProvider({ app, stage, to, subject, html, text, templa
   } catch (err) {
     if (!provider) {
       logger.error(`[recruiting-comms] email handoff transaction failed before the provider (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
+      // The row was claimed ('sending') by claimEmailAttempt in its own
+      // committed transaction — settle it, or it reads as an in-flight rival
+      // to the next resend forever (Codex r23 P2).
+      await settleEmailRow(messageRow, sendAttemptToken, {
+        status: 'failed', error_message: `handoff failed before the provider: ${errorSummary(err)}`.slice(0, 500),
+      });
       return { outcome: 'failed', code: 'handoff_transaction_failed' };
     }
     logger.warn(`[recruiting-comms] email handoff commit failed after the provider answered (application ${app.id}, stage ${stage}, outcome ${provider.result.outcome}): ${errorSummary(err)}`);
@@ -1138,14 +1144,23 @@ async function sendOwnerReply({ applicationId, body, by, fromNumber }) {
 // The open application a shared-surface text to this phone belongs to
 // (most recently updated open one). Applicants are never customers, so
 // this is the only linkage a composer has.
-async function openApplicationIdForPhone(phone) {
+async function openApplicationIdForPhone(phone, { fromNumber = null } = {}) {
   const { phoneMatchDigits } = require('../utils/phone');
   const variants = phoneMatchDigits(String(phone || ''));
   if (!variants.length) return null;
   // The application that OWNS the recruiting evidence (Codex r10 P2): among
   // the open applications on this phone, the one with the newest SMS
   // attempt in its ledger — the same selection the reply classifier makes —
-  // never merely the most recently updated row.
+  // never merely the most recently updated row. Scoped to the line the reply
+  // will go out from (Codex r23 P2), exactly like matchApplicantReply scopes
+  // evidence to the line a reply arrived on: two applications texted from
+  // two Waves numbers are two threads.
+  const lineDigits = fromNumber ? phoneMatchDigits(String(fromNumber)) : [];
+  const onLine = (e) => {
+    if (!lineDigits.length || !e.from_number) return true; // unknown line: keep
+    const d = phoneMatchDigits(String(e.from_number));
+    return !d.length || lineDigits.some((x) => d.includes(x));
+  };
   const rows = await db('job_applications')
     .whereRaw("regexp_replace(COALESCE(contact_snapshot->>'phone', ''), '[^0-9]', '', 'g') = ANY (?::text[])", [variants])
     .whereIn('status', ['new', 'reviewed', 'interview', 'offer'])
@@ -1158,7 +1173,7 @@ async function openApplicationIdForPhone(phone) {
       // text that replayed LATER than a newer application's immediate text
       // is the newer evidence — Codex r14 P2).
       const at = effectiveSendMs(e);
-      if (!Number.isFinite(at)) continue;
+      if (!Number.isFinite(at) || !onLine(e)) continue;
       if (!best || at > best.at) best = { at, id: r.id };
     }
   }

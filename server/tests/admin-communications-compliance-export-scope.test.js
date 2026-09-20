@@ -41,6 +41,7 @@ const mockOpenAppId = jest.fn(async () => 'app-1');
 jest.mock('../services/recruiting-comms', () => ({
   sendOwnerReply: (...a) => mockSendOwnerReply(...a),
   openApplicationIdForPhone: (...a) => mockOpenAppId(...a),
+  outboundNumberForApplicants: async () => '+19415550199',
   errorSummary: (e) => (e && e.name) || 'Error',
 }));
 
@@ -164,7 +165,9 @@ describe('POST /sms composer recruiting boundary', () => {
     const res = await smsAs('admin');
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ success: true, recruiting: true, outcome: 'sent' });
-    expect(mockSendOwnerReply).toHaveBeenCalledWith(expect.objectContaining({ applicationId: 'app-1', body: 'See you Tuesday', by: 'admin-1' }));
+    expect(mockSendOwnerReply).toHaveBeenCalledWith(expect.objectContaining({ applicationId: 'app-1', body: 'See you Tuesday', by: 'admin-1', fromNumber: '+19415550199' }));
+    // the owning application is chosen on the line the reply goes out from (Codex r23 P2)
+    expect(mockOpenAppId).toHaveBeenLastCalledWith(expect.any(String), { fromNumber: '+19415550199' });
   });
 });
 

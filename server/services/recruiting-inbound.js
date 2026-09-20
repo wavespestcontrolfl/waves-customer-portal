@@ -180,15 +180,34 @@ async function recordApplicantReply({ applicationId, from, to, body, messageSid,
   });
 
   if (!duplicate) {
+    const replyId = messageSid || entry.id;
     try {
       const { triggerNotification } = require('./notification-triggers');
-      await triggerNotification('job_applicant_reply', { applicationId, replyId: messageSid || entry.id });
+      await triggerNotification('job_applicant_reply', { applicationId, replyId });
     } catch (err) {
       logger.error(`[recruiting-inbound] bell failed (application ${applicationId}): ${errorSummary(err)}`);
     }
+    await retireBellIfAlreadyRead({ applicationId, replyId, messageSid });
   }
 
   return { persisted: true, duplicate };
+}
+
+// Post-write unread check (Codex r23 P2, the ordinary SMS bell pattern): the
+// reply row commits BEFORE its bell is created, so an owner who opened
+// Recruiting in that gap read the reply — and the read-ack's snapshot cutoff
+// predates the bell. Retire that one bell when its reply is already read.
+async function retireBellIfAlreadyRead({ applicationId, replyId, messageSid }) {
+  if (!messageSid) return;
+  try {
+    const row = await excludeUnresolvedSendReservations(db('sms_log'))
+      .where({ twilio_sid: messageSid, message_type: REPLY_MESSAGE_TYPE })
+      .first('is_read');
+    if (!row || row.is_read !== true) return;
+    await require('./notification-service').markApplicantRepliesReadAdmin({ applicationId, replyId, before: new Date() });
+  } catch (err) {
+    logger.warn(`[recruiting-inbound] post-write bell reconcile failed (application ${applicationId}): ${errorSummary(err)}`);
+  }
 }
 
 // ---- blast-radius bound for the fail-closed path ---------------------------

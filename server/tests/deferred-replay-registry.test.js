@@ -1143,6 +1143,13 @@ describe('recruiting_comms_deferred (PR #4623)', () => {
     expect(await recheckDeferredReplay(ENTRY, { ...meta, stage: 'interview_confirmation', interview_at: '2027-03-16T20:00:00.000Z', interview_mode: 'phone' })).toMatchObject({ eligible: true });
     db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'reviewed', interview_token: null }));
     expect(await recheckDeferredReplay(ENTRY, { ...meta, stage: 'application_received', interview_token: null })).toMatchObject({ eligible: true });
+    // Append position is the total order (Codex r23 P2): a resend appended in
+    // the SAME millisecond as the claimed entry still supersedes it.
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'interview', interview_token: 'a'.repeat(64), comms_history: [
+      { id: meta.ledger_entry_id, at: '2027-03-16T02:00:00.000Z', stage: 'interview_invite', channel: 'sms', outcome: 'deferred' },
+      { id: 'resend', at: '2027-03-16T02:00:00.000Z', stage: 'interview_invite', channel: 'sms', outcome: 'pending' },
+    ] }));
+    expect(await recheckDeferredReplay(ENTRY, meta)).toMatchObject({ eligible: false, reason: 'superseded-by-newer-attempt' });
     // A queued receipt yields once the owner moved on (Codex r17 P2): the
     // application advanced past review, or a later-stage / owner text is live.
     db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'interview', interview_token: 'a'.repeat(64) }));

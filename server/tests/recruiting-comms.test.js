@@ -802,6 +802,38 @@ describe('eligibility at the provider boundaries', () => {
     expect(mockDb.__tables.email_messages[0]).toMatchObject({ status: 'failed', error_message: expect.stringMatching(/stale/) });
   });
 
+  test('email: a handoff transaction failing BEFORE the provider settles the claimed (sending) row as failed (Codex r23 P2)', async () => {
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    mockDb.__tables.email_messages = [];
+    mockSendOne.mockClear();
+    const realTx = mockDb.transaction;
+    let calls = 0;
+    mockDb.transaction = jest.fn(async (fn) => {
+      calls += 1;
+      if (calls === 2) throw Object.assign(new Error('could not obtain lock'), { code: '55P03' }); // the handoff transaction
+      return fn(mockDb);
+    });
+    try {
+      const result = await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: false, email: true, by: 'tech-1' });
+      expect(result.email).toBe('failed');
+      expect(mockSendOne).not.toHaveBeenCalled();
+      expect(mockDb.__tables.email_messages[0]).toMatchObject({ status: 'failed', error_message: expect.stringMatching(/handoff failed before the provider/) });
+    } finally {
+      mockDb.transaction = realTx;
+    }
+  });
+
+  test('openApplicationIdForPhone scopes evidence to the sending line (Codex r23 P2)', async () => {
+    mockDb.__tables.job_applications.push(
+      { id: 'app-A', status: 'interview', contact_snapshot: { phone: '9415550142' }, comms_history: [{ id: 'a1', at: new Date(Date.now() - 7200000).toISOString(), handoff_at: new Date(Date.now() - 7200000).toISOString(), stage: 'interview_invite', channel: 'sms', outcome: 'sent', from_number: '+19415550199' }] },
+      { id: 'app-B', status: 'new', contact_snapshot: { phone: '9415550142' }, comms_history: [{ id: 'b1', at: new Date(Date.now() - 600000).toISOString(), handoff_at: new Date(Date.now() - 600000).toISOString(), stage: 'application_received', channel: 'sms', outcome: 'sent', from_number: '+19415550777' }] },
+    );
+    await expect(RecruitingComms.openApplicationIdForPhone('9415550142')).resolves.toBe('app-B');                                  // no line: newest evidence overall
+    await expect(RecruitingComms.openApplicationIdForPhone('9415550142', { fromNumber: '+19415550199' })).resolves.toBe('app-A'); // line A's thread
+    await expect(RecruitingComms.openApplicationIdForPhone('9415550142', { fromNumber: '+19415550777' })).resolves.toBe('app-B');
+  });
+
   test('email: a suppression that lands after the pre-provider gate is caught under the address lock right before SendGrid (Codex r22 P1)', async () => {
     const app = baseApp({ interview_token: 'a'.repeat(64) });
     mockDb.__tables.job_applications.push({ ...app, comms_history: [] });

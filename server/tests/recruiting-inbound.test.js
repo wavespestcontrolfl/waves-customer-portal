@@ -11,9 +11,11 @@ jest.mock('../services/recruiting-comms', () => ({
   errorSummary: (e) => (e && e.name) || 'Error',
 }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: (...a) => mockTrigger(...a) }));
+const mockBellRetire = jest.fn(async () => 1);
+jest.mock('../services/notification-service', () => ({ markApplicantRepliesReadAdmin: (...a) => mockBellRetire(...a) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const state = { apps: [], existingReply: null, newerCustomerText: null, inserts: [], insertFails: false };
+const state = { apps: [], existingReply: null, newerCustomerText: null, inserts: [], insertFails: false, readState: null };
 function builder(table) {
   const q = {};
   ['whereRaw', 'whereIn', 'where', 'whereNot', 'whereNotIn', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
@@ -22,7 +24,11 @@ function builder(table) {
   // sms_log: the "newer customer-facing text" probe carries the NOT LIKE
   // job_% type predicate; the idempotency probe does not.
   q.__isCustomerTextProbe = () => q.whereRaw.mock.calls.some((c) => /NOT LIKE 'job/.test(c[0]));
-  q.first = jest.fn(async () => (table === 'sms_log' ? (q.__isCustomerTextProbe() ? state.newerCustomerText : state.existingReply) : null));
+  q.first = jest.fn(async (...cols) => {
+    if (table !== 'sms_log') return null;
+    if (cols.includes('is_read')) return state.readState; // the post-write unread check
+    return q.__isCustomerTextProbe() ? state.newerCustomerText : state.existingReply;
+  });
   q.insert = jest.fn(async (row) => {
     if (state.insertFails) throw Object.assign(new Error('insert into sms_log ... values (+19415550142 ...)'), { name: 'error', code: '23505' });
     state.inserts.push({ table, row });
@@ -45,6 +51,9 @@ beforeEach(() => {
   state.inserts = [];
   state.insertFails = false;
   state.existingReply = null;
+  state.readState = null;
+  mockBellRetire.mockClear();
+  mockDb.transaction.mockClear();
   mockAppend.mockClear();
   mockTrigger.mockClear();
   mockDb.mockClear();
@@ -172,6 +181,17 @@ describe('matchApplicantReply', () => {
 
 describe('recordApplicantReply', () => {
   const args = { applicationId: 'app-1', from: '+19415550142', to: '+19415550199', body: 'Yes, Tuesday works', messageSid: 'SM1', mediaCount: 0 };
+
+  test('a reply the owner read in the gap between commit and bell creation retires that one bell (Codex r23 P2)', async () => {
+    state.readState = { is_read: true };
+    await recordApplicantReply({ applicationId: 'app-1', from: '+19415550142', to: '+19415550199', body: 'Yes', messageSid: 'SM-read' });
+    expect(mockTrigger).toHaveBeenCalledTimes(1);
+    expect(mockBellRetire).toHaveBeenCalledWith(expect.objectContaining({ applicationId: 'app-1', replyId: 'SM-read' }));
+    state.readState = { is_read: false };
+    mockBellRetire.mockClear();
+    await recordApplicantReply({ applicationId: 'app-1', from: '+19415550142', to: '+19415550199', body: 'Yes', messageSid: 'SM-unread' });
+    expect(mockBellRetire).not.toHaveBeenCalled();
+  });
 
   test('writes the sms_log row + history in one transaction, then rings the admin-only bell (no PII)', async () => {
     await expect(recordApplicantReply(args)).resolves.toEqual({ persisted: true, duplicate: false });

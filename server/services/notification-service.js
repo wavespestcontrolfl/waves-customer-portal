@@ -539,17 +539,20 @@ const NotificationService = {
 
   // Applicant-reply bells for one application, once the owner has opened
   // it in Recruiting (PR #4623 r20): read up to the snapshot they saw.
-  async markApplicantRepliesReadAdmin({ applicationId, before = new Date(), role } = {}) {
+  // `replyId` narrows the clear to ONE reply's bell (the post-write check in
+  // recruiting-inbound.js retires a bell whose reply was already read).
+  async markApplicantRepliesReadAdmin({ applicationId, replyId = null, before = new Date(), role } = {}) {
     if (!applicationId) return 0;
-    return scopeAdminFeedToRole(
+    let q = scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin', category: 'job_application' }),
       role,
     )
       .whereRaw("COALESCE(metadata->>'triggerKey', '') = 'job_applicant_reply'")
       .whereRaw("metadata->'payload'->>'applicationId' = ?", [String(applicationId)])
       .whereNull('read_at')
-      .where('created_at', '<=', before)
-      .update({ read_at: new Date() });
+      .where('created_at', '<=', before);
+    if (replyId) q = q.whereRaw("metadata->'payload'->>'replyId' = ?", [String(replyId)]);
+    return q.update({ read_at: new Date() });
   },
 
   // Retire superseded call alerts without crossing triggers: voicemail
