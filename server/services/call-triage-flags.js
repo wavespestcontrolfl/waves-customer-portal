@@ -1033,12 +1033,62 @@ function confirmedStartOnTheHour(confirmedStartAt) {
 // the advisory `address_recovered` read-back card. Do not re-add a
 // routing-side demotion here.
 
+// On-file address satisfaction (2026-09-20 call-agent audit, finding 1). A
+// call from a customer we actively serve, whose record already carries a
+// Google-verified address, and who stated NO address on this call — the V2
+// extraction AND the merged V1 record agree, the same restatement rules the
+// fail-open V1 conflict check applies — has nothing address-shaped to
+// review: the tech is going where the tech always goes. In the 14 days to
+// 2026-09-20, 67 BLOCKING address cards were filed on exactly this shape
+// (every existing-customer scheduling call, even a plain cancellation), and
+// the auto-resolver later closed them because "the customer record now has
+// a service address on file". The four recoverable address flags are removed
+// from BOTH the routing verdict and the card set, and recorded on the verdict
+// (onFileAddressSatisfiedFlags) so ai_validation.routing keeps the audit
+// trail. Never out_of_service_area — a hard block. Confirmed bookings are
+// deliberately NOT touched here: they keep the gated fail-open contract in
+// canAutoRoute, including its advisory read-back card.
+function onFileAddressSatisfaction(flags, extraction, opts = {}) {
+  const list = Array.isArray(flags) ? flags : [];
+  const none = { flags: list, satisfied: [] };
+  const known = opts.knownCustomer;
+  if (!known || !known.hasAddress) return none;
+  if (statesNewAddress(extraction, known)) return none;
+  const rec = opts.canonicalRecord;
+  if (rec && statesNewAddress({ property: { service_address: {
+    street_line_1: rec.address_line1,
+    street_line_2: rec.address_line2,
+    city: rec.city,
+    state: rec.state,
+    postal_code: rec.zip,
+  } } }, known)) return none;
+  const satisfied = list.filter((f) => FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f));
+  if (!satisfied.length) return none;
+  return { flags: list.filter((f) => !FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f)), satisfied };
+}
+
 function canAutoRoute(extraction, opts = {}) {
+  const out = {};
+  const result = canAutoRouteDecision(extraction, opts, out);
+  if (out.onFileAddressSatisfiedFlags?.length) result.onFileAddressSatisfiedFlags = out.onFileAddressSatisfiedFlags;
+  return result;
+}
+
+function canAutoRouteDecision(extraction, opts = {}, out = {}) {
   if (!extraction) return { allowed: false, reason: 'no_extraction' };
 
   const modelFlags = suppressAddressFlagsForAV(suppressUnsupportedModelFlags(extraction.triage_flags, extraction), opts.addressValidation);
   const deterministicFlags = computeDeterministicTriageFlags(extraction, opts);
-  const finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
+  const mergedFlags = mergeTriageFlags(modelFlags, deterministicFlags);
+  // Unconfirmed calls only — a confirmed booking keeps the fail-open
+  // contract below (see onFileAddressSatisfaction).
+  const bookingConfirmedWithStart = extraction.scheduling?.status === 'confirmed'
+    && !!extraction.scheduling?.confirmed_start_at;
+  const onFile = bookingConfirmedWithStart
+    ? { flags: mergedFlags, satisfied: [] }
+    : onFileAddressSatisfaction(mergedFlags, extraction, opts);
+  out.onFileAddressSatisfiedFlags = onFile.satisfied;
+  const finalFlags = onFile.flags;
   // Allowlist, not blocklist (owner ruling 2026-07-31): only flags in
   // BLOCKING_TRIAGE_FLAGS may hold the appointment. Flags outside every
   // known set (new prompt vocabulary, model drift, hallucinated names) are
@@ -1737,6 +1787,7 @@ module.exports = {
   detectRentalSignal,
   streetCompareKey,
   canAutoRoute,
+  onFileAddressSatisfaction,
   SMS_ONLY_FLAGS,
   ADVISORY_TRIAGE_FLAGS,
   BLOCKING_TRIAGE_FLAGS,
