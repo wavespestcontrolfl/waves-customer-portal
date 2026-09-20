@@ -7,7 +7,7 @@ const {
   lexicalSourceSpans, splitSourceSpans, localCandidateEvidence,
 } = require('./voice-relay-source-evidence');
 
-const SAFETY_STRONG_ADJECTIVES = Object.freeze(['safe', 'harmless', 'non-toxic', 'nontoxic', 'pet-friendly', 'pet friendly', 'pet-safe', 'pet safe', 'family-safe', 'family safe']);
+const SAFETY_STRONG_ADJECTIVES = Object.freeze(['safe', 'harmless', 'non-toxic', 'nontoxic', 'pet-friendly', 'pet friendly', 'pet-safe', 'pet safe', 'family-safe', 'family safe', 'child-safe', 'child safe', 'kid-safe', 'kid safe', 'kid-friendly', 'child-friendly', 'children-safe']);
 
 const SAFETY_FILLER_ADJECTIVES = Object.freeze(['fine', 'ok', 'okay', 'alright']);
 
@@ -23,7 +23,7 @@ const SAFETY_SUBJECT_DETERMINER_WORDS = Object.freeze(['this', 'that', 'the', 'o
 
 const SAFETY_SUBJECT_DETERMINER = `(?:${SAFETY_SUBJECT_DETERMINER_WORDS.join('|')})`;
 
-const SAFETY_SUBJECT_MODIFIER = '(?:ants?|roach(?:es)?|termites?|bait stations?|baits?|gels?|sprays?|granules?|products?|treatments?|chemicals?|stuff|materials?|applications?|pesticides?|insecticides?|herbicides?|rodenticides?|termiticides?|larvicides?|adulticides?|miticides?|poisons?|repellents?|fumigants?|lawns?|yards?|treated areas?|treated surfaces?)';
+const SAFETY_SUBJECT_MODIFIER = '(?:ants?|roach(?:es)?|termites?|bait stations?|baits?|gels?|sprays?|granules?|products?|treatments?|chemicals?|stuff|materials?|applications?|pesticides?|insecticides?|herbicides?|rodenticides?|termiticides?|larvicides?|adulticides?|miticides?|poisons?|repellents?|fumigants?|lawns?|yards?|rooms?|treated areas?|treated surfaces?|treated rooms?)';
 
 const SAFETY_SUBJECT = `(?:${SAFETY_SUBJECT_DETERMINER}(?:\\s+${SAFETY_SUBJECT_MODIFIER}){0,3}|${SAFETY_SUBJECT_MODIFIER}(?:\\s+${SAFETY_SUBJECT_MODIFIER}){0,2})`;
 
@@ -76,9 +76,11 @@ const SAFETY_KNOWN_PRODUCT_NAME = `(?:${[...SAFETY_KNOWN_PRODUCT_NAMES]
 
 const SAFETY_BRAND_SUBJECT = `\\b(?:${SAFETY_KNOWN_PRODUCT_NAME}|(?!${SAFETY_SUBJECT_DETERMINER_CAPITALIZED}\\b)[A-Z][a-z]+\\s+${SAFETY_BRAND_FORMULATION})\\b`;
 
-const SAFETY_PRODUCT_RELATIVE = '(?:\\s+(?:(?:(?:that|which)\\s+)?(?:we|they|you|the technician)\\s+(?:(?:have|had|has|just|already|recently)\\s+)*(?:use|used|apply|applied|spray|sprayed|put down)|(?:that|which)\\s+(?:is|are|was|were|has been|have been|had been)\\s+(?:(?:just|already|recently)\\s+)*(?:used|applied|sprayed|put down)|(?:(?:just|already|recently)\\s+)*(?:used|applied|sprayed|put down)))?';
+const SAFETY_PRODUCT_RELATIVE = '(?:\\s+(?:(?:(?:that|which)\\s+)?(?:we|they|you|(?:your|our|my|the)\\s+tech(?:nician)?)\\s+(?:(?:have|had|has|just|already|recently)\\s+)*(?:use|used|apply|applied|spray|sprayed|put down)|(?:that|which)\\s+(?:is|are|was|were|has been|have been|had been)\\s+(?:(?:just|already|recently)\\s+)*(?:used|applied|sprayed|put down)|(?:(?:just|already|recently)\\s+)*(?:used|applied|sprayed|put down)))?';
 
-const SAFETY_SUBJECT_VERB = `${SAFETY_PRODUCT_RELATIVE}(?:[\\x27\\u2019](?:s|re)|\\s+(?:is|are|was|were|will be|would be|should be))`;
+// Apostrophe-optional, mirroring the negation grammar's cant/wont handling:
+// ASR transcripts frequently drop the apostrophe (its/theyre/thats).
+const SAFETY_SUBJECT_VERB = `${SAFETY_PRODUCT_RELATIVE}(?:[\\x27\\u2019]?(?:s|re)|\\s+(?:is|are|was|were|will be|would be|should be))`;
 
 const SAFETY_INTENSIFIER = '(?:(?:completely|totally|perfectly|entirely|absolutely|fully|100%|very|quite|pretty|always|actually|also|generally|usually|typically)\\s+)?';
 
@@ -112,7 +114,7 @@ const SAFETY_AUDIENCE_PRODUCT_RELATION = `\\s+(?:around|with|near)\\s+(?:${SAFET
 
 const SAFETY_HARM_VERB = '(?:hurt|harm|bother|affect|poison)';
 
-const SAFETY_NO_HARM_PREDICATE = `(?:won[\\x27\\u2019]?t|will (?:not|never)|cannot|can[\\x27\\u2019]?t|can (?:not|never)|does not|doesn[\\x27\\u2019]?t|do not|don[\\x27\\u2019]?t)\\s+${SAFETY_HARM_VERB}`;
+const SAFETY_NO_HARM_PREDICATE = `(?:won[\\x27\\u2019]?t|will (?:not|never)|cannot|can[\\x27\\u2019]?t|can (?:not|never)|would(?:n[\\x27\\u2019]?t| (?:not|never))|could(?:n[\\x27\\u2019]?t| (?:not|never))|does not|doesn[\\x27\\u2019]?t|do not|don[\\x27\\u2019]?t)\\s+${SAFETY_HARM_VERB}`;
 
 const SAFETY_HARM_TARGET = `(?:him|her|them|(?:the\\s+)?${SAFETY_AUDIENCE_MEMBER})`;
 
@@ -214,11 +216,16 @@ const SAFETY_REFUSED_HARM_RE = new RegExp(
   'gi',
 );
 
-const SAFETY_LEAD_COMPLETION = '(?:safe|fine|ok(?:ay)?|harmless|no problem|totally|completely|perfectly)';
+const SAFETY_LEAD_COMPLETION = '(?:safe|fine|ok(?:ay)?|harmless|no problem)';
+
+// An intensifier alone is not a completion: "It's totally unsafe" must not
+// match here just because "totally" is present — the intensifier must
+// modify an actual positive completion word, never a HARM_WORD.
+const SAFETY_LEAD_INTENSIFIER = '(?:totally|completely|perfectly)\\s+';
 
 const SAFETY_AFFIRMATIVE_LEAD_RE = new RegExp(
   '^\\s*(?:(?:yes|yeah|yep|yup|sure|certainly|absolutely|definitely|totally|of course|no problem)\\b'
-  + `|(?:it is|it['’]s)\\s+${SAFETY_LEAD_COMPLETION}\\b`
+  + `|(?:it is|it['’]s)\\s+(?:${SAFETY_LEAD_INTENSIFIER})?${SAFETY_LEAD_COMPLETION}\\b`
   + `|(?:it is|it['’]s|they are|they['’]re)\\s*,?\\s*(?:yes)?[.!\\s]*$`
   + `|(?:it|they)(?:\\s+will|['’]ll)\\s+be[.!\\s]*$)`,
   'i',
@@ -228,7 +235,10 @@ const SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE = /^\s*(?:absolutely|certainly|definite
 
 const SAFETY_NEGATIVE_LEAD_RE = /^\s*(?:no(?!\s+(?:problem|one|person)\b)|nope|nah|not at all|not really|never|it is not|it['’]s not|it is n['’]t|it isn['’]t|(?:it|they)\s+(?:is not|are not|isn['’]t|aren['’]t|cannot|can not|can['’]t|will not|won['’]t|do(?:es)? not|do(?:es)?n['’]t))\b/i;
 
-const SAFETY_INDEPENDENT_ANSWER_SPLIT_RE = /[.!?;]+(?=\s|$)|,\s*(?:but|however)\s+(?=(?:yes|yeah|yep|yup|sure|certainly|absolutely|definitely|totally|of course|no problem|no|nope|nah|correct|right|exactly)\b)/i;
+// A self-correction ("Yes, actually no.") is an independent correction
+// separator, not a coordinator: the corrected clause after it carries the
+// final polarity, so it must split out like "but"/"however" already do.
+const SAFETY_INDEPENDENT_ANSWER_SPLIT_RE = /[.!?;]+(?=\s|$)|,\s*(?:but|however|actually|wait|no wait|sorry|i mean)\s+(?=(?:yes|yeah|yep|yup|sure|certainly|absolutely|definitely|totally|of course|no problem|no|nope|nah|correct|right|exactly)\b)/i;
 
 const SAFETY_REFUSED_CLAIM_RE = new RegExp(`\\b(?:${SAFETY_ADJECTIVE}|safety|${vocabAlt(NO_RISK_PHRASES)}|(?:no|zero|any)\\s+(?:risk|danger|harm)|hurt|harm|bother|affect|poison)\\b`, 'i');
 
@@ -259,7 +269,7 @@ function recognizeSafetyResponse(text) {
         evidence: localCandidateEvidence(text, 'safety-proposition', span.index, span.end),
       })));
   const answers = splitSourceSpans(text, SAFETY_INDEPENDENT_ANSWER_SPLIT_RE).map((clause) => {
-    const prefix = /^\s*(?:but|however|actually)\b\s*,?\s*/i.exec(clause.text);
+    const prefix = /^\s*(?:but|however|actually|no wait|wait|sorry|i mean)\b\s*,?\s*/i.exec(clause.text);
     const index = clause.index + (prefix?.[0].length ?? 0);
     const answer = text.slice(index, clause.end);
     return {

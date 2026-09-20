@@ -269,3 +269,101 @@ test.each(['p.m.', 'p. m.', 'a.m.', 'A. M.'])(
     expect(answer.evidence.adjacentConnectives[0].relation).toBe('unresolved');
   },
 );
+
+// --- Round-1 findings ---------------------------------------------------
+
+test.each(['The treatment is child-safe.', 'The treatment is kid-safe.', 'The bait is kid-friendly.', 'The treatment is child-friendly.'])(
+  'child/kid safety adjectives establish a product guarantee: %s', (text) => {
+    expect(recognizeSafetyResponse(text).guarantees.length).toBeGreaterThan(0);
+  },
+);
+
+test('a bare kid-safe adjective without a product/pronoun subject stays a control', () => {
+  expect(recognizeSafetyResponse('The playground is kid-safe.').guarantees).toEqual([]);
+});
+
+test.each([
+  ['Yes, actually no.', false],
+  ['No, actually yes.', true],
+])('a self-correction after "actually" reports the corrected final polarity: %s', (text, finalAffirmative) => {
+  const answers = recognizeSafetyResponse(text).answers.filter((answer) => answer.text.trim());
+  expect(answers.length).toBeGreaterThanOrEqual(2);
+  const last = answers.at(-1);
+  expect(last.affirmative).toBe(finalAffirmative);
+  expect(last.negative).toBe(!finalAffirmative);
+  expect(text.slice(last.index, last.end)).toBe(last.text);
+});
+
+test.each([
+  ['Yes, wait no.', 'no'],
+  ['Yes, sorry no.', 'no'],
+])('additional correction markers split consistently with "actually": %s', (text, corrected) => {
+  const answers = recognizeSafetyResponse(text).answers.filter((answer) => answer.text.trim());
+  const last = answers.at(-1);
+  expect(last.text).toBe(corrected);
+  expect(text.slice(last.index, last.end)).toBe(corrected);
+});
+
+test.each(['Its safe.', 'Theyre harmless.', 'Thats safe.'])(
+  'apostrophe-less ASR copulas retain the exact source span: %s', (text) => {
+    const candidates = recognizeSafetyResponse(text).guarantees;
+    expect(candidates.length).toBeGreaterThan(0);
+    for (const { match } of candidates) expect(text.slice(match.index, match.index + match[0].length)).toBe(match[0]);
+  },
+);
+
+test("It's safe. still recognized after accepting apostrophe-less copulas", () => {
+  expect(recognizeSafetyResponse("It's safe.").guarantees.length).toBeGreaterThan(0);
+});
+
+test('"They were fine" is not misread as an apostrophe-less contraction', () => {
+  expect(recognizeSafetyResponse('They were fine.').guarantees).toEqual([]);
+});
+
+test.each(["It's totally unsafe.", 'It is completely harmful.', "It's perfectly dangerous."])(
+  'an intensifier directly preceding a HARM_WORD is not an affirmative completion: %s', (text) => {
+    expect(recognizeSafetyResponse(text).answers[0]).toMatchObject({ affirmative: false });
+  },
+);
+
+test.each(["It's totally safe.", 'It is completely harmless.', "It's perfectly fine."])(
+  'an intensifier modifying an actual positive completion remains affirmative: %s', (text) => {
+    expect(recognizeSafetyResponse(text).answers[0]).toMatchObject({ affirmative: true });
+  },
+);
+
+test('"Yes, it is safe." remains unaffected by the intensifier-completion narrowing', () => {
+  expect(recognizeSafetyResponse('Yes, it is safe.').answers[0]).toMatchObject({ affirmative: true });
+});
+
+test.each([
+  "The bait couldn't harm your dog.",
+  "The treatment wouldn't affect children.",
+  'The bait couldnt harm your dog.',
+  'The treatment wouldnt affect children.',
+])('could not / would not (with or without apostrophe) retain their no-harm predicate: %s', (text) => {
+  const candidates = recognizeSafetyResponse(text).guarantees;
+  expect(candidates.length).toBeGreaterThan(0);
+  for (const { match } of candidates) {
+    expect(match[0]).toMatch(/could|would/i);
+    expect(text.slice(match.index, match.index + match[0].length)).toBe(match[0]);
+  }
+});
+
+test.each(['The treated room is safe once dry.', 'The room is safe once dry.'])(
+  'the bounded subject vocabulary recognizes rooms: %s', (text) => {
+    expect(recognizeSafetyResponse(text).guarantees.length).toBeGreaterThan(0);
+  },
+);
+
+test.each([
+  'The product your technician used is safe.',
+  'The treatment our technician applied is harmless.',
+  'The bait my technician used is safe.',
+  'The product the tech used is safe.',
+  'The product the technician used is safe.',
+])('the product-relative clause accepts any technician possessive: %s', (text) => {
+  const candidates = recognizeSafetyResponse(text).guarantees;
+  expect(candidates.length).toBeGreaterThan(0);
+  for (const { match } of candidates) expect(text.slice(match.index, match.index + match[0].length)).toBe(match[0]);
+});
