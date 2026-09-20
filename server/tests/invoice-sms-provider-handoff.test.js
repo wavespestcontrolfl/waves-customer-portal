@@ -47,6 +47,7 @@ jest.mock('../services/lead-estimate-link', () => ({ convertLeadFromEvent: jest.
 jest.mock('../services/invoice-issued-closeout', () => ({ closeOutVisitForIssuedInvoice: jest.fn(async () => null) }));
 
 const db = require('../models/db');
+const { evaluateWhereRaw } = require('./helpers/sql-predicate');
 const { withInvoiceDepositSettlement } = require('../services/estimate-deposits');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const InvoiceService = require('../services/invoice');
@@ -228,13 +229,24 @@ describe('invoice SMS provider handoff', () => {
       const q = {};
       q.where = jest.fn((criteria) => { filters.push(criteria); return q; });
       q.whereIn = jest.fn((key, values) => { filters.push({ [key]: values }); return q; });
+      // Round-2 Codex P1 (PR #4633): the claim's atomic flip now carries the
+      // first-delivery/review-hold guards as REAL predicates on the UPDATE
+      // itself (.whereNull/.whereRaw), not just the pre-claim snapshot —
+      // this direct (non-allowClaimed) sendViaSMS call always runs that
+      // flip, so this state machine needs both to actually evaluate.
+      q.whereNull = jest.fn((col) => { filters.push((s) => s[col] == null); return q; });
+      q.whereRaw = jest.fn((sql, bindings) => { filters.push((s) => evaluateWhereRaw(sql, bindings, s)); return q; });
       // The queue-adoption reconcile locks the row it just claimed
       // (`.forUpdate()`) before consuming any queued pay-link text — a
       // no-op here since this state machine has no real transaction.
       q.forUpdate = jest.fn(() => q);
-      const matches = () => filters.every((criteria) => Object.entries(criteria).every(([key, value]) => (
-        Array.isArray(value) ? value.includes(state[key]) : state[key] === value
-      )));
+      const matches = () => filters.every((criteria) => (
+        typeof criteria === 'function'
+          ? criteria(state)
+          : Object.entries(criteria).every(([key, value]) => (
+            Array.isArray(value) ? value.includes(state[key]) : state[key] === value
+          ))
+      ));
       q.first = jest.fn(async () => (matches() ? { ...state } : undefined));
       q.update = jest.fn((payload) => {
         count = matches() ? 1 : 0;

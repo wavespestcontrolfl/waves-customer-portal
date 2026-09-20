@@ -26,14 +26,21 @@ function makeInvoicesTable(row, { onUpdate = null } = {}) {
     reset: (next) => { state = { ...next }; },
     query() {
       const filters = {};
+      // Round-2 Codex P1 (PR #4633): the claim's atomic flip now carries
+      // the first-delivery/review-hold guards as REAL predicates
+      // (.whereNull/.whereRaw) on the UPDATE — several tests here call
+      // sendViaSMS(AndEmail) without allowClaimed, which always runs that
+      // flip, so both must actually filter instead of no-op-chaining.
+      const predicates = [];
       const q = {};
       const applyFilters = (rows) => rows.filter((r) => (
         Object.entries(filters).every(([k, v]) => r[k] === v)
+        && predicates.every((p) => p(r))
       ));
       q.where = jest.fn((crit) => { Object.assign(filters, crit); return q; });
       q.whereIn = jest.fn(() => q);
-      q.whereNull = jest.fn(() => q);
-      q.whereRaw = jest.fn(() => q);
+      q.whereNull = jest.fn((col) => { predicates.push((r) => r[col] == null); return q; });
+      q.whereRaw = jest.fn((sql, bindings) => { predicates.push((r) => evaluateWhereRaw(sql, bindings, r)); return q; });
       q.forUpdate = jest.fn(() => q);
       q.update = jest.fn((payload) => {
         if (onUpdate) onUpdate(payload);
@@ -288,6 +295,7 @@ jest.mock('../services/invoice-issued-closeout', () => ({ closeOutVisitForIssued
 jest.mock('../services/invoice-email', () => ({ sendInvoiceEmail: jest.fn() }));
 
 const db = require('../models/db');
+const { evaluateWhereRaw } = require('./helpers/sql-predicate');
 const { withInvoiceDepositSettlement } = require('../services/estimate-deposits');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { sendInvoiceEmail } = require('../services/invoice-email');

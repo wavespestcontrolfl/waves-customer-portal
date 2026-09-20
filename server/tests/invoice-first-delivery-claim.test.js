@@ -30,6 +30,7 @@ const db = require('../models/db');
 const { STALE_SEND_PARK_ERROR } = require('../services/invoice-helpers');
 const InvoiceService = require('../services/invoice');
 const { claimInvoiceForSend } = InvoiceService;
+const { evaluateWhereRaw } = require('./helpers/sql-predicate');
 
 const INVOICE_ID = 'aaaaaaaa-1111-4111-8111-111111111111';
 
@@ -38,23 +39,63 @@ const INVOICE_ID = 'aaaaaaaa-1111-4111-8111-111111111111';
 // to a subsequent read); 'sms_log' (the pay-link queue lookup) always
 // reports no live row — every scenario here turns on the invoices row
 // alone.
-function makeDb(invoiceRow) {
+//
+// Round-2 Codex P1 (PR #4633): the claim's atomic flip now carries the
+// first-delivery/review-hold guards as REAL predicates
+// (.whereNull(...)/.whereRaw(...)) on the UPDATE, not just the snapshot
+// checked earlier — so a lost flip (another worker's write lands between
+// the read and this claim's own UPDATE) must be reachable here. Each
+// `db('invoices')` call now returns a FRESH query object (matching real
+// knex — a new builder per call) that accumulates its own where-family
+// predicates and evaluates them against the CURRENT shared row only when
+// `.update()` runs; a non-matching update leaves the row untouched and
+// `.returning()` resolves empty, exactly like a real lost UPDATE...WHERE.
+// `mutateAfterFirstRead` optionally mutates the shared row once, right
+// after the FIRST `.first()` snapshot resolves — modeling another
+// worker's write landing in the window between the snapshot and the flip
+// (the ABA race the round-2 fix closes).
+function makeDb(invoiceRow, { mutateAfterFirstRead = null } = {}) {
   let row = { ...invoiceRow };
-  const invoicesTable = {};
-  for (const m of ['where', 'whereRaw', 'whereNotNull', 'forUpdate']) invoicesTable[m] = jest.fn(() => invoicesTable);
-  invoicesTable.first = jest.fn(async () => ({ ...row }));
-  invoicesTable.update = jest.fn((payload) => {
-    row = { ...row, ...payload };
-    return invoicesTable;
-  });
-  invoicesTable.returning = jest.fn(async () => [{ ...row }]);
+  let firstReadCount = 0;
+  const updateSpy = jest.fn();
+  const firstSpy = jest.fn();
+
+  function makeInvoicesQuery() {
+    const predicates = [];
+    const q = {};
+    q.where = jest.fn((criteria) => {
+      if (criteria && typeof criteria === 'object') {
+        predicates.push((r) => Object.entries(criteria).every(([k, v]) => r[k] === v));
+      }
+      return q;
+    });
+    q.whereNull = jest.fn((col) => { predicates.push((r) => r[col] == null); return q; });
+    q.whereNotNull = jest.fn((col) => { predicates.push((r) => r[col] != null); return q; });
+    q.whereRaw = jest.fn((sql, bindings) => { predicates.push((r) => evaluateWhereRaw(sql, bindings, r)); return q; });
+    q.forUpdate = jest.fn(() => q);
+    q.first = jest.fn(async () => {
+      firstSpy();
+      firstReadCount += 1;
+      const snapshot = { ...row };
+      if (firstReadCount === 1 && mutateAfterFirstRead) row = { ...row, ...mutateAfterFirstRead };
+      return snapshot;
+    });
+    q.update = jest.fn((payload) => {
+      updateSpy(payload);
+      q.__matched = predicates.every((p) => p(row));
+      if (q.__matched) row = { ...row, ...payload };
+      return q;
+    });
+    q.returning = jest.fn(async () => (q.__matched ? [{ ...row }] : []));
+    return q;
+  }
 
   const smsLogTable = {};
   smsLogTable.whereRaw = jest.fn(() => smsLogTable);
   smsLogTable.first = jest.fn(async () => null);
 
-  db.mockImplementation((table) => (table === 'invoices' ? invoicesTable : smsLogTable));
-  return { invoicesTable, currentRow: () => row };
+  db.mockImplementation((table) => (table === 'invoices' ? makeInvoicesQuery() : smsLogTable));
+  return { invoicesTable: { update: updateSpy, first: firstSpy }, currentRow: () => row };
 }
 
 describe('claimInvoiceForSend — first-delivery already-delivered refusal', () => {
@@ -162,6 +203,63 @@ describe('claimInvoiceForSend — stale-claim review hold (third audit P1: EXPLI
     });
     const firstDeliveryResult = await claimInvoiceForSend(INVOICE_ID, { firstDeliveryOnly: true });
     expect(firstDeliveryResult.claimed).toBe(true);
+  });
+});
+
+describe('claimInvoiceForSend — ABA race between the snapshot and the atomic flip (round-2 Codex P1, PR #4633)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  function undeliveredScheduledRow() {
+    return {
+      id: INVOICE_ID, status: 'scheduled', send_claim_token: null,
+      scheduled_send_at: new Date(), scheduled_send_error: null,
+      sent_at: null, sms_sent_at: null, email_sent_at: null,
+    };
+  }
+
+  // The snapshot read sees a clean, undelivered row and passes both guards
+  // — but another worker's write (an uncertain-outcome claim, then
+  // stale-claim recovery parking it) lands before this claim's own UPDATE.
+  // The park takes priority: a first delivery must surface the review
+  // hold, never a benign already_delivered no-op that hides it.
+  test('the row is parked AND stamped between the read and the flip — rejects with the review hold, not already_delivered', async () => {
+    const { invoicesTable } = makeDb(undeliveredScheduledRow(), {
+      mutateAfterFirstRead: {
+        sms_sent_at: new Date(),
+        scheduled_send_at: null,
+        scheduled_send_error: `${STALE_SEND_PARK_ERROR}: recovered mid-claim`,
+      },
+    });
+    await expect(claimInvoiceForSend(INVOICE_ID, { firstDeliveryOnly: true }))
+      .rejects.toMatchObject({ code: 'stale_claim_review_hold' });
+    // The flip's own UPDATE ran (and lost) — it never actually flips a row
+    // whose predicates it can't satisfy.
+    expect(invoicesTable.update).toHaveBeenCalledTimes(1);
+  });
+
+  // Same race, but the row picks up ONLY the delivery stamp (no park) —
+  // the already-delivered guard is what the latest row trips.
+  test('the row is ONLY stamped between the read and the flip — rejects with already_delivered', async () => {
+    makeDb(undeliveredScheduledRow(), {
+      mutateAfterFirstRead: { sms_sent_at: new Date() },
+    });
+    await expect(claimInvoiceForSend(INVOICE_ID, { firstDeliveryOnly: true }))
+      .rejects.toMatchObject({ code: 'already_delivered' });
+  });
+
+  // Same race, but the claim is a deliberate operator Resend authorized to
+  // clear the hold — the park lands mid-claim with NO delivery stamp, and
+  // overridesReviewHold means the flip's predicates never exclude it.
+  test('the row is parked (no stamp) between the read and the flip, but overridesReviewHold: true — still claims', async () => {
+    makeDb(undeliveredScheduledRow(), {
+      mutateAfterFirstRead: {
+        scheduled_send_at: null,
+        scheduled_send_error: STALE_SEND_PARK_ERROR,
+      },
+    });
+    const result = await claimInvoiceForSend(INVOICE_ID, { overridesReviewHold: true });
+    expect(result.claimed).toBe(true);
+    expect(result.invoice.status).toBe('sending');
   });
 });
 
