@@ -47,6 +47,11 @@ function makeDb() {
     const builder = {
       where(cond) { whereCond = { ...whereCond, ...cond }; return builder; },
       whereRaw() { return builder; },
+      whereIn(col, arr) { rows.__inFilter = (r) => arr.includes(r[col]); return builder; },
+      select() {
+        const inFilter = rows.__inFilter; delete rows.__inFilter;
+        return Promise.resolve(rows.filter((r) => Object.entries(whereCond).every(([k, v]) => r[k] === v) && (!inFilter || inFilter(r))));
+      },
       insert(row) {
         const inserted = { id: row.id || `id-${rows.length + 1}`, ...row };
         rows.push(inserted);
@@ -679,5 +684,26 @@ describe('eligibility at the provider boundaries', () => {
     expect(mockSendOne).not.toHaveBeenCalled();
     const ledger = mockDb.__tables.email_messages.find((r) => r.recipient_id === 'app-1');
     expect(ledger.status).toBe('failed');
+  });
+});
+
+describe('owner reply — boundary guard and evidence-owning application', () => {
+  test('sendOwnerReply passes a stillEligible guard that re-reads the application status', async () => {
+    mockSendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, deliveryOutcome: 'accepted' });
+    const app = baseApp({ status: 'interview' });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    await RecruitingComms.sendOwnerReply({ applicationId: 'app-1', body: 'ok', by: 'tech-1' });
+    const input = mockSendCustomerMessage.mock.calls[0][0];
+    expect(typeof input.preSendCheck).toBe('function');
+    mockDb.__tables.job_applications.find((r) => r.id === 'app-1').status = 'rejected';
+    await expect(input.preSendCheck()).resolves.toMatchObject({ ok: false, code: 'RECRUITING_STALE' });
+  });
+
+  test('openApplicationIdForPhone picks the open application whose ledger owns the newest SMS attempt, not the newest row', async () => {
+    mockDb.__tables.job_applications.push(
+      { ...baseApp(), id: 'app-old', status: 'interview', updated_at: '2027-03-10T00:00:00.000Z', comms_history: [{ channel: 'sms', outcome: 'sent', at: '2027-03-10T12:00:00.000Z' }] },
+      { ...baseApp(), id: 'app-new', status: 'new', updated_at: '2027-03-15T00:00:00.000Z', comms_history: [] },
+    );
+    await expect(RecruitingComms.openApplicationIdForPhone('+19415550142')).resolves.toBe('app-old');
   });
 });

@@ -179,7 +179,12 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
   await clearBacklogResetMarkers({ scope, ids, convs });
 
   // 2. The read itself (+ legacy mirror by twilio_sid).
-  const q = () => db('messages').where({ channel: 'sms', direction: 'inbound' })
+  // A technician's read scope never touches hidden recruiting rows (PR
+  // #4623): the display query hides them, so the write must too, or a
+  // technician opening the customer part of a shared thread would clear the
+  // owner's unread applicant reply.
+  const { hideRecruitingThreadsFromNonAdmin } = require('../utils/recruiting-thread-scope');
+  const q = () => hideRecruitingThreadsFromNonAdmin(db('messages').where({ channel: 'sms', direction: 'inbound' }), { techRole: role }, 'message_type')
     .andWhere(function unreadOnly() { this.where({ is_read: false }).orWhereNull('is_read'); })
     .andWhere(scope);
   // Reconcile every requested inbound SID, including already-read rows:

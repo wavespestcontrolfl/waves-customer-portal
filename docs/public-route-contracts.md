@@ -2206,7 +2206,13 @@ rejected/withdrawn/hired application — the classifier would not protect
 the reply), never a 'manual' customer text; a non-admin is refused (403)
 on both, and `POST /schedule-sms` refuses a recruiting phone for everyone
 (403 non-admin, 409 admin) — applicant texts are never queued as manual
-customer texts. Reply evidence is scoped to the line the reply arrived on
+customer texts. The owner reply carries the same provider-boundary
+eligibility guard as every recruiting send and lands on the open
+application whose ledger owns the newest SMS attempt. A technician's
+read-marking scope (`markInboundSmsRead`) excludes hidden recruiting rows
+exactly as the display query does. A standalone compliance command (STOP /
+START / HELP) bypasses recruiting classification entirely, so a
+recruiting-store outage can never delay a suppression write. Reply evidence is scoped to the line the reply arrived on
 before the newest entry is chosen (two recruiting lines = two threads).
 Every applicant send re-checks eligibility at the ACTUAL provider
 boundary (a `preSendCheck` inside the SMS pipeline; a `beforeProvider`

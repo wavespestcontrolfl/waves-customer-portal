@@ -789,8 +789,15 @@ async function sendOwnerReply({ applicationId, body, by, fromNumber }) {
   if (!['new', 'reviewed', 'interview', 'offer'].includes(String(app.status || ''))) {
     return { outcome: 'closed', applicationId };
   }
+  // Provider-boundary guard, same as every other recruiting send (Codex r10
+  // P1): the application must still be open when Twilio is actually called.
+  const stillEligible = async () => {
+    const now = await db('job_applications').where({ id: applicationId }).first('status');
+    return Boolean(now && ['new', 'reviewed', 'interview', 'offer'].includes(String(now.status || '')));
+  };
   const result = await sendStageComms(app, 'owner_reply', {
     sms: true, email: false, by: by || 'system', smsBody: text, fromNumber: fromNumber || undefined, entryPoint: 'recruiting_owner_reply',
+    stillEligible,
   });
   return { outcome: result.sms, applicationId };
 }
@@ -802,12 +809,25 @@ async function openApplicationIdForPhone(phone) {
   const { phoneMatchDigits } = require('../utils/phone');
   const variants = phoneMatchDigits(String(phone || ''));
   if (!variants.length) return null;
-  const row = await db('job_applications')
+  // The application that OWNS the recruiting evidence (Codex r10 P2): among
+  // the open applications on this phone, the one with the newest SMS
+  // attempt in its ledger — the same selection the reply classifier makes —
+  // never merely the most recently updated row.
+  const rows = await db('job_applications')
     .whereRaw("regexp_replace(COALESCE(contact_snapshot->>'phone', ''), '[^0-9]', '', 'g') = ANY (?::text[])", [variants])
     .whereIn('status', ['new', 'reviewed', 'interview', 'offer'])
-    .orderBy('updated_at', 'desc')
-    .first('id');
-  return row ? row.id : null;
+    .select('id', 'comms_history', 'updated_at');
+  let best = null;
+  for (const r of rows) {
+    const history = Array.isArray(r.comms_history) ? r.comms_history : [];
+    for (const e of history) {
+      if (!e || e.channel !== 'sms' || !['handoff', 'sent', 'uncertain', 'deferred'].includes(e.outcome)) continue;
+      const at = Date.parse(e.at || '');
+      if (!Number.isFinite(at)) continue;
+      if (!best || at > best.at) best = { at, id: r.id };
+    }
+  }
+  return best ? best.id : null;
 }
 
 module.exports = {

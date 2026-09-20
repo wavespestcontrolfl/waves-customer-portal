@@ -167,6 +167,8 @@ async function findLatestInbound({ conversationId, outboundCreatedAt }) {
     })
     .where('created_at', '<=', outboundCreatedAt || new Date())
     .where('created_at', '>=', since)
+    // Recruiting rows (job_*, PR #4623) never pair with a customer reply.
+    .where((q) => { q.whereNull('message_type').orWhere('message_type', 'not like', 'job\\_%'); })
     .orderBy('created_at', 'desc')
     .first();
 }
@@ -214,6 +216,8 @@ async function buildContextSnapshot({ conversation, inbound, outbound, customerI
   const messages = await db('messages')
     .where({ conversation_id: outbound.conversation_id })
     .where('created_at', '<=', before)
+    // ...and never enter the context snapshot either.
+    .where((q) => { q.whereNull('message_type').orWhere('message_type', 'not like', 'job\\_%'); })
     .orderBy('created_at', 'desc')
     .limit(CONTEXT_MESSAGE_LIMIT);
 

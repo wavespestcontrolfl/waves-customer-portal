@@ -8,3 +8,9 @@ test('recruiting texts (job_*) are never captured as customer-response training 
     expect(shouldCaptureReply({ ...base, messageType: t })).toBe(false);
   }
 });
+
+test('inbound selection and the context snapshot both exclude recruiting rows (source guard)', () => {
+  const src = require('fs').readFileSync(require.resolve('../services/reply-training-capture'), 'utf8');
+  const occurrences = (src.match(/orWhere\('message_type', 'not like', 'job\\\\_%'\)/g) || []).length;
+  expect(occurrences).toBeGreaterThanOrEqual(2);
+});
