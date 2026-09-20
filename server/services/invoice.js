@@ -1252,18 +1252,30 @@ async function claimInvoiceForSend(invoiceId, {
   if (queuedBefore) throw queuedPayLinkError(queuedBefore);
 
   const freshClaimToken = crypto.randomUUID();
-  const [invoice] = await database("invoices")
-    .where({ id: invoiceId, status: current.status })
+  // The two guards above evaluated a snapshot. The flip below carries them
+  // as predicates too, so a same-status ABA transition between the read and
+  // the flip (another worker claims, reaches an uncertain outcome, and
+  // stale-claim recovery parks the row back to 'scheduled' with a delivery
+  // stamp) cannot pass a first delivery or an unauthorized reclaim through.
+  const claimFlip = database("invoices").where({ id: invoiceId, status: current.status });
+  if (firstDeliveryOnly) {
+    claimFlip.whereNull("sent_at").whereNull("sms_sent_at").whereNull("email_sent_at");
+  }
+  if (!overridesReviewHold) {
+    claimFlip.whereRaw(
+      "NOT (status = 'scheduled' AND scheduled_send_at IS NULL AND scheduled_send_error LIKE ?)",
+      [`${require("./invoice-helpers").STALE_SEND_PARK_ERROR}%`],
+    );
+  }
+  const [invoice] = await claimFlip
     .update({ status: "sending", send_claim_token: freshClaimToken, updated_at: new Date() })
     .returning("*");
   if (!invoice) {
     const latest = await database("invoices").where({ id: invoiceId }).first();
-    // The row moved between the read and the flip: a first delivery that
-    // lost to a concurrent claim/finalize reports delivered, not a generic
-    // "not sendable" (round-6 P1 #4131).
-    if (firstDeliveryOnly && alreadyDeliveredForFirstSend(latest)) {
-      throw invoiceAlreadyDeliveredError(latest);
-    }
+    // The row moved between the read and the flip: report the guard the
+    // latest row trips (review hold first, then delivered for a first
+    // delivery) rather than a generic "not sendable" (round-6 P1 #4131).
+    refuseFirstDeliveryHold(latest, invoiceId, firstDeliveryOnly, overridesReviewHold);
     throw invoiceNotSendableError(latest);
   }
   invoice.send_claim_token = freshClaimToken;
