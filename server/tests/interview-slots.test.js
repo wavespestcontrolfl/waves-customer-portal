@@ -344,3 +344,19 @@ describe('bookedInterviewWindowsForDate (reciprocal occupancy for customer sched
     ]);
   });
 });
+
+describe('bookedInterviewWindowsForDate — ET day boundary (Codex r5 P2)', () => {
+  test('a next-day early-morning interview never bleeds into the previous ET date', async () => {
+    const { bookedInterviewWindowsForDate } = require('../services/interview-slots');
+    const q = {};
+    ['whereIn', 'whereNotNull'].forEach((m) => { q[m] = jest.fn(() => q); });
+    const bounds = [];
+    q.where = jest.fn((col, op, val) => { bounds.push([op, val instanceof Date ? val.toISOString() : val]); return q; });
+    q.select = jest.fn(async () => []);
+    const conn = jest.fn(() => q);
+    await bookedInterviewWindowsForDate('2027-03-16', { conn });
+    // 2027-03-16 (EDT) spans 04:00Z on the 16th to 04:00Z on the 17th — the
+    // upper bound is the NEXT ET MIDNIGHT, never noon UTC of the next day.
+    expect(bounds).toEqual([['>=', '2027-03-16T04:00:00.000Z'], ['<', '2027-03-17T04:00:00.000Z']]);
+  });
+});

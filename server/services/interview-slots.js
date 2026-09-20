@@ -236,7 +236,9 @@ async function listInterviewSlots({ now = new Date(), excludeApplicationId, conn
  */
 async function bookedInterviewWindowsForDate(dateStr, { conn = db } = {}) {
   const dayStart = parseETDateTime(`${dateStr}T00:00`);
-  const dayEnd = addETDays(dayStart, 1);
+  // Next ET calendar date at ITS midnight (addETDays alone lands at noon UTC).
+  const np = etParts(addETDays(dayStart, 1));
+  const dayEnd = parseETDateTime(`${np.year}-${String(np.month).padStart(2, '0')}-${String(np.day).padStart(2, '0')}T00:00`);
   const rows = await conn('job_applications')
     .whereIn('status', INTERVIEW_BLOCKING_STATUSES)
     .whereNotNull('interview_at')

@@ -501,3 +501,20 @@ describe('sendStageComms pre-handoff evidence', () => {
     expect(stored.comms_history.map((e) => [e.outcome, e.code])).toEqual([['failed', 'evidence_write_failed']]);
   });
 });
+
+describe('sendStageComms — send-window hold', () => {
+  test('a retryable QUIET_HOURS/send-window hold queues the text on the scheduled-SMS rail as an applicant send', async () => {
+    mockRenderSmsTemplate.mockResolvedValue('Hi Jane, thanks for applying.');
+    mockSendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, retryable: true, deferred: true, nextAllowedAt: '2027-03-17T12:00:00.000Z', code: 'SEND_WINDOW_CLOSED' });
+    const app = baseApp();
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    const result = await RecruitingComms.sendStageComms(app, 'application_received', { sms: true, email: false, by: 'system' });
+    expect(result.sms).toBe('deferred');
+    const queued = (mockDb.__tables.sms_log || []).find((r) => r.status === 'scheduled');
+    expect(queued).toMatchObject({ customer_id: null, direction: 'outbound', message_type: 'job_application_received', to_phone: '9415550142' });
+    expect(queued.scheduled_for.toISOString()).toBe('2027-03-17T12:00:00.000Z');
+    expect(JSON.parse(queued.metadata)).toMatchObject({ audience: 'applicant', purpose: 'application_received', job_application_id: 'app-1', consent_basis: { status: 'transactional_allowed' } });
+    const stored = mockDb.__tables.job_applications.find((r) => r.id === 'app-1');
+    expect(stored.comms_history[0]).toMatchObject({ outcome: 'deferred', scheduled_for: '2027-03-17T12:00:00.000Z' });
+  });
+});

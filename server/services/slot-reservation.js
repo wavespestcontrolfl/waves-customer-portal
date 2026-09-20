@@ -1087,8 +1087,8 @@ async function reserveSlot({
         // and this idempotent retry keeps its designed no-409 behavior when
         // the window is still genuinely free.
         const refreshClash = useCapacity ? [] : await findConflictingVisits({
-        includeInterviews: true,
           db: trx,
+        includeInterviews: true,
           date,
           windowStart,
           windowEnd,
@@ -1229,8 +1229,8 @@ async function reserveSlot({
       // probe. This estimate's stale holds were refreshed or deleted
       // above, inside this txn, so no self-exclusion is needed.
       const committedClash = useCapacity ? [] : await findConflictingVisits({
-        includeInterviews: true,
         db: trx,
+        includeInterviews: true,
         date,
         windowStart,
         windowEnd,
@@ -1665,8 +1665,8 @@ async function commitReservation({
         : null);
     if (!useCapacity && scheduledDate && windowStart && probeWindowEnd) {
       const committedClash = await findConflictingVisits({
-        includeInterviews: true,
         db: client,
+        includeInterviews: true,
         date: scheduledDate,
         windowStart,
         windowEnd: probeWindowEnd,
@@ -1900,8 +1900,8 @@ async function releaseExpiredReservations() {
             we = `${String(Math.floor(end / 60)).padStart(2, '0')}:${String(end % 60).padStart(2, '0')}:00`;
           }
           const clash = await findConflictingVisits({
-        includeInterviews: true,
             db: trx,
+        includeInterviews: true,
             date: dateStr,
             windowStart: ws,
             windowEnd: we,
@@ -2232,8 +2232,8 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
     // The rung-1 date lock acquired above is the same lock reserveSlot's
     // refresh branch holds before probing.
     const clash = rowUnderCapacity ? [] : await findConflictingVisits({
-        includeInterviews: true,
       db: trx,
+        includeInterviews: true,
       date: scheduledDate,
       windowStart,
       windowEnd,

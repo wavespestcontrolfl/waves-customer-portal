@@ -598,8 +598,8 @@ class AvailabilityEngine {
       // order) — the rebooker takes neither the zone nor the day-cap lock,
       // so that date lock is the only rung shared with it.
       const occupancyClash = await findConflictingVisits({
-        includeInterviews: true,
         db: trx,
+        includeInterviews: true,
         date: dateStr,
         windowStart: startTime,
         windowEnd: endTime,

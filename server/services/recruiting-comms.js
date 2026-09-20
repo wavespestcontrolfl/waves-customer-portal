@@ -545,14 +545,50 @@ async function sendStageComms(app, stage, opts = {}) {
           logger.error(`[recruiting-comms] sms leg threw (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
           sendRes = { sent: false, blocked: false, deliveryOutcome: 'not_sent', code: `threw:${errorSummary(err)}` };
         }
-        const outcome = sendRes.sent
+        let outcome = sendRes.sent
           ? 'sent'
           : (sendRes.blocked ? 'blocked' : (sendRes.deliveryOutcome === 'uncertain' ? 'uncertain' : 'failed'));
+        let deferredUntil = null;
+        if (!sendRes.sent && sendRes.retryable && sendRes.nextAllowedAt) {
+          // Held by the send window (8am–8pm ET): queue the text on the
+          // scheduled-SMS rail the cron replays (services/scheduler.js) —
+          // an applicant who applies or books overnight still gets the text
+          // when the window opens (Codex r5 P1). The rail re-derives the
+          // applicant policy from the metadata stamped here.
+          try {
+            await db('sms_log').insert({
+              customer_id: null,
+              direction: 'outbound',
+              from_phone: outboundNumberForApplicants(),
+              to_phone: contact.phone,
+              message_body: body,
+              status: 'scheduled',
+              scheduled_for: new Date(sendRes.nextAllowedAt),
+              message_type: `job_${stage}`,
+              metadata: JSON.stringify({
+                entry_point: 'recruiting_comms_deferred',
+                audience: 'applicant',
+                purpose: stage,
+                job_application_id: app.id,
+                original_message_type: `job_${stage}`,
+                consent_basis: { status: 'transactional_allowed', source: 'job_application' },
+                original_block_code: sendRes.code || null,
+              }),
+            });
+            outcome = 'deferred';
+            deferredUntil = new Date(sendRes.nextAllowedAt).toISOString();
+          } catch (err) {
+            logger.error(`[recruiting-comms] deferred queue insert failed (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
+          }
+        }
         result.sms = outcome;
         // Reconcile the handoff entry in place; if this fails the entry stays
         // 'handoff', which the reply classifier still treats as a sent text.
         try {
-          await finalizeCommsHistoryEntry(app.id, handoffEntry.id, { outcome, code: sendRes.code || null, finalized_at: new Date().toISOString() });
+          await finalizeCommsHistoryEntry(app.id, handoffEntry.id, {
+            outcome, code: sendRes.code || null, finalized_at: new Date().toISOString(),
+            ...(deferredUntil ? { scheduled_for: deferredUntil } : {}),
+          });
         } catch (err) {
           logger.error(`[recruiting-comms] handoff reconcile failed (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
         }

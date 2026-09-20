@@ -565,7 +565,9 @@ async function withInterviewConflicts(visits, { db, date, windowStart, windowEnd
 async function bookedInterviewConflictRows(db, dateStr, startMin, endMin) {
   if (!db || typeof db.raw !== 'function') return [];
   const dayStart = parseETDateTime(`${dateStr}T00:00`);
-  const dayEnd = addETDays(dayStart, 1);
+  // Next ET calendar date at ITS midnight (addETDays alone lands at noon UTC).
+  const np = etParts(addETDays(dayStart, 1));
+  const dayEnd = parseETDateTime(`${np.year}-${String(np.month).padStart(2, '0')}-${String(np.day).padStart(2, '0')}T00:00`);
   const statusList = INTERVIEW_BLOCKING_STATUSES.map(() => '?').join(', ');
   const res = await db.raw(
     `SELECT id, interview_at, interview_end_at FROM job_applications

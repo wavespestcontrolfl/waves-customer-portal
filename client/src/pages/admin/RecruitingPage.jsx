@@ -154,6 +154,7 @@ export function inviteDelivered(app) {
 }
 
 const OUTCOME_LABEL = {
+  deferred: "held for the 8 AM–8 PM ET window — sends automatically",
   stale: "not sent — the stage changed before the send",
   sent: "sent",
   blocked: "blocked",

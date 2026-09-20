@@ -31,6 +31,9 @@ function purposeForScheduledMessageType(messageType, { hasCustomer = true } = {}
   // for customer-linked rows; lead rows have no customerId so they replay
   // under the transactional-grade conversational policy with the forwarded
   // consent basis — payment_receipt would hard-require a customerId.
+  // Recruiting texts held by the send window replay under their own
+  // applicant purpose (audience 'applicant' rides claimMeta.audience).
+  if (type.startsWith('job_')) return type.slice('job_'.length);
   if (type === 'visit_summary') return 'service_completion';
   if (type === 'deposit_receipt') return hasCustomer ? 'payment_receipt' : 'conversational';
   // Deferred completion texts (service_complete*, service_report_v1*) replay
@@ -3825,7 +3828,7 @@ function initScheduledJobs() {
             to: toPhone,
             body: msg.message_body,
             channel: 'sms',
-            audience: msg.customer_id ? 'customer' : 'lead',
+            audience: claimMeta.audience === 'applicant' ? 'applicant' : (msg.customer_id ? 'customer' : 'lead'),
             purpose,
             customerId: msg.customer_id || undefined,
             identityTrustLevel: msg.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',

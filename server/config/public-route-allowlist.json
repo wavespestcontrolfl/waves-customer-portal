@@ -25,7 +25,7 @@
         "USE /api/ops/digest (inline function#4a372dfc)",
         "USE /api/pay/statement (inline function#cf970c43)",
         "USE /api/public/a2a (inline function#c621253a)",
-        "USE /api/public/careers (inline function#91580da7)",
+        "USE /api/public/careers (inline function#1ef2d7c2)",
         "USE /api/public/careers/interview (inline function#656a8908)",
         "USE /api/public/lawn-assessment (inline function#8e4982f2)",
         "USE /api/public/mcp (inline function#6af8a3db)",

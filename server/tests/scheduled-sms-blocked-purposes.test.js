@@ -33,3 +33,12 @@ describe('schedule-sms marketing-grade block (consent split)', () => {
     expect(schedulerSource).toContain("legacyEntry.includes('guide')");
   });
 });
+
+describe('purposeForScheduledMessageType — recruiting (PR #4623)', () => {
+  test('job_* rows replay under their own applicant purpose', () => {
+    const { purposeForScheduledMessageType } = require('../services/scheduler');
+    expect(purposeForScheduledMessageType('job_application_received', { hasCustomer: false })).toBe('application_received');
+    expect(purposeForScheduledMessageType('job_interview_invite', { hasCustomer: false })).toBe('interview_invite');
+    expect(purposeForScheduledMessageType('job_interview_confirmation', { hasCustomer: true })).toBe('interview_confirmation');
+  });
+});

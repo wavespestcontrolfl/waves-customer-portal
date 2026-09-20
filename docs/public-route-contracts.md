@@ -2130,9 +2130,10 @@ fire-and-forget-only comms contract as security-critical.)
 `/api/public/careers/interview/:token` (GET; `/interview/:token/book` and
 `/interview/:token/withdraw`, both POST — the interview self-scheduling
 funnel a `job_interview_invite` text/email sends the applicant, gated
-`GATE_RECRUITING_COMMS` (404 for the WHOLE `/interview/*` family before
-even the limiter runs, layered under the existing `jobApplications` prefix
-gate in index.js, which stays independent). `interview_token` is 64
+`GATE_RECRUITING_COMMS` ALONE (404 for the WHOLE `/interview/*` family
+before even the limiter runs). The `jobApplications` INTAKE gate in
+index.js carves `/interview/*` out: closing intake stops new applications
+without killing the bearer links applicants already hold. `interview_token` is 64
 lowercase hex chars, minted once (first move to `interview`, never
 rotated in this PR) and format-gated via `router.param` before any
 database read — malformed, unknown, and non-`interview`-status tokens all
@@ -2186,7 +2187,12 @@ applicant rows (`audience='applicant'`) out of the compliance export, and
 refuses (403) a non-admin `POST /api/admin/communications/ai-draft` for a
 phone that has ever been party to a recruiting text
 (`isRecruitingPhone`) before any history for that phone is loaded.
-A successful book fires (fire-and-forget) the `interview_confirmation`
+Applicant texts obey the 8am–8pm ET send window; a held send is queued
+on the scheduled-SMS rail (`sms_log` status `scheduled`, metadata
+`audience:'applicant'` + `purpose` + `consent_basis`, replayed by
+services/scheduler.js under the applicant policy) and the ledger entry
+reads `deferred` with its `scheduled_for`. A successful book fires
+(fire-and-forget) the `interview_confirmation`
 comms — SMS only with `sms_consent` or evidence the owner already texted
 this applicant by hand — and the `job_interview_booked` admin
 bell/push. POST `/withdraw` is the same atomic-update shape targeting

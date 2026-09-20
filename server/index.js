@@ -316,6 +316,11 @@ app.use('/api/public/careers/interview', require('./middleware/no-store').noStor
 // Careers funnel: same unobservable-when-dark contract — 404 while
 // GATE_JOB_APPLICATIONS is off, even for a limiter-exhausted IP.
 app.use('/api/public/careers', (req, res, next) => {
+  // Issued interview links stay live when INTAKE closes: /interview/* is
+  // governed by GATE_RECRUITING_COMMS alone (next mount), so turning
+  // GATE_JOB_APPLICATIONS off stops new applications without killing the
+  // bearer links applicants already hold (Codex r5 P0).
+  if (req.path.startsWith('/interview')) return next();
   if (!require('./config/feature-gates').isEnabled('jobApplications')) {
     return res.status(404).json({ error: 'Not found' });
   }

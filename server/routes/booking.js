@@ -2625,8 +2625,8 @@ async function createSelfBooking(payload = {}) {
       // lock. No exclusions: this path moves no existing row (the
       // double-submit replay returned above before any conflict check).
       const globalClash = await findConflictingVisits({
-        includeInterviews: true,
         db: trx,
+        includeInterviews: true,
         date: slotDateStr,
         windowStart: slot_start,
         windowEnd: endTime,
@@ -3835,8 +3835,8 @@ async function createSelfBooking(payload = {}) {
             // A row the guard cannot window (missing date/window) returns no
             // conflicts — same fail-open the guard's own input contract keeps.
             const clashes = await findConflictingVisits({
-        includeInterviews: true,
               db: trx,
+        includeInterviews: true,
               date: rowDate,
               windowStart: row.window_start,
               windowEnd: row.window_end,
