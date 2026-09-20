@@ -13,6 +13,7 @@ jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.raw = jest.fn((sql) => sql);
   fn.fn = { now: jest.fn(() => 'now()') };
+  fn.transaction = jest.fn(async (callback) => callback(fn));
   return fn;
 });
 jest.mock('../services/logger', () => ({
@@ -46,7 +47,7 @@ const WINDOW_OPEN = new Date('2026-08-07T12:00:00.000Z'); // 8:00 AM ET
 
 function chain({ rows, returning, first, updateCount = 1 } = {}) {
   const q = {};
-  for (const m of ['where', 'whereIn', 'whereNotNull', 'whereNull', 'whereRaw', 'orWhere', 'orderBy', 'limit', 'update', 'insert']) {
+  for (const m of ['where', 'whereIn', 'whereNotNull', 'whereNull', 'whereRaw', 'orWhere', 'orderBy', 'limit', 'forUpdate', 'update', 'insert']) {
     q[m] = jest.fn(() => q);
   }
   q.select = jest.fn(async () => rows || []);
@@ -56,6 +57,34 @@ function chain({ rows, returning, first, updateCount = 1 } = {}) {
   // its affected-row count, anything else the row set.
   q.then = (resolve) => Promise.resolve(q.update.mock.calls.length ? updateCount : (rows || [])).then(resolve);
   return q;
+}
+
+// The queue-adoption reconcile (reconcileQueuedSendUnderClaim) runs on
+// every claim with adoptsQueuedInvoiceSend: true — every fresh claim, and
+// every allowClaimed one sendViaSMSAndEmail takes — right after the claim
+// itself (the status flip for a fresh claim; the current-row read for an
+// allowClaimed one). With no queued invoice_send_deferred row in these
+// fixtures, it touches sms_log twice (its own live-queue check, then the
+// strict re-check after consuming) and takes one 'invoices' row-lock in
+// between (the adoption transaction's owned-row check) — always in this
+// order, always resolving to "nothing queued, nothing to consume". Spread
+// this directly after the claim in every test below that now exercises
+// the real claimInvoiceForSend/sendViaSMSAndEmail path.
+const adoptionNoOp = () => [
+  chain({ first: undefined }), // reconcileQueuedSendUnderClaim's own live-queue check
+  chain({ first: { id: 'inv-1' } }), // adoption transaction: owned-row check
+  chain({ returning: [] }), // consumeQueuedInvoiceSend: nothing to consume
+  chain({ first: undefined }), // strict re-check after consuming
+];
+// A FRESH (non-preclaimed) claim additionally runs queuedPayLinkText as a
+// pre-claim courtesy check, BEFORE the status flip.
+const preClaimQueueCheck = () => chain({ first: undefined });
+// Queues each chain in order via mockReturnValueOnce — flattens any nested
+// arrays (e.g. the spread of adoptionNoOp()) so callers can mix single
+// chains and helper arrays freely.
+function queueMocks(mockFn, chains) {
+  for (const c of chains.flat()) mockFn.mockReturnValueOnce(c);
+  return mockFn;
 }
 
 const dueRow = {
@@ -285,9 +314,12 @@ describe('processScheduledSends send-window handling', () => {
         scheduled_request_review: false,
         scheduled_review_delay_minutes: null,
       };
-      db
-        .mockReturnValueOnce(chain({ first: { payer_statement_id: null } })) // accrual pre-check
-        .mockReturnValueOnce(chain({ first: sendingInvoice })); // claimInvoiceForSend read
+      queueMocks(db, [
+        chain({ first: { payer_statement_id: null } }), // accrual pre-check
+        chain({ first: sendingInvoice }), // claimInvoiceForSend read
+        adoptionNoOp(),
+        chain({ first: { id: 'inv-1' } }), // restoreSendClaim's owned-row check
+      ]);
 
       const result = await InvoiceService.sendViaSMSAndEmail('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
 
@@ -310,9 +342,13 @@ describe('processScheduledSends send-window handling', () => {
     const smsSpy = jest.spyOn(InvoiceService, 'sendViaSMS').mockRejectedValue(terminal);
     const voidSpy = jest.spyOn(InvoiceService, 'voidOpenInvoicesForCancelledService').mockResolvedValue(['inv-1']);
     const draftInvoice = { ...dueRow, status: 'draft' };
-    db.mockReturnValueOnce(chain({ first: { payer_statement_id: null } }))
-      .mockReturnValueOnce(chain({ first: draftInvoice }))
-      .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending', scheduled_service_id: 'svc-1' }] }));
+    queueMocks(db, [
+      chain({ first: { payer_statement_id: null } }),
+      chain({ first: draftInvoice }),
+      preClaimQueueCheck(),
+      chain({ returning: [{ ...draftInvoice, status: 'sending', scheduled_service_id: 'svc-1' }] }),
+      adoptionNoOp(),
+    ]);
     try {
       const result = await InvoiceService.sendViaSMSAndEmail('inv-1');
 
@@ -337,15 +373,19 @@ describe('processScheduledSends send-window handling', () => {
       code: 'INVOICE_VISIT_TERMINAL', deliveryOutcome: 'not_sent' });
     const voidSpy = jest.spyOn(InvoiceService, 'voidOpenInvoicesForCancelledService');
     const draftInvoice = { ...dueRow, status: 'draft' };
-    db.mockReturnValueOnce(chain({ first: { payer_statement_id: null } }))
-      .mockReturnValueOnce(chain({ first: draftInvoice }))
-      .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending', scheduled_service_id: 'svc-1' }] }));
+    queueMocks(db, [
+      chain({ first: { payer_statement_id: null } }),
+      chain({ first: draftInvoice }),
+      preClaimQueueCheck(),
+      chain({ returning: [{ ...draftInvoice, status: 'sending', scheduled_service_id: 'svc-1' }] }),
+      adoptionNoOp(),
+    ]);
     try {
       const result = await InvoiceService.sendViaSMSAndEmail('inv-1');
 
       expect(result).toMatchObject({ ok: false, code: 'INVOICE_VISIT_TERMINAL_OUTCOME_UNCERTAIN' });
       expect(voidSpy).not.toHaveBeenCalled();
-      expect(db).toHaveBeenCalledTimes(3);
+      expect(db).toHaveBeenCalledTimes(8);
     } finally {
       smsSpy.mockRestore();
       voidSpy.mockRestore();
@@ -362,14 +402,18 @@ describe('processScheduledSends send-window handling', () => {
     const smsSpy = jest.spyOn(InvoiceService, 'sendViaSMS').mockRejectedValue(uncertain);
     sendInvoiceEmail.mockResolvedValueOnce({ ok: false, error: 'SMTP rejected', deliveryOutcome: 'not_sent' });
     const draftInvoice = { ...dueRow, status: 'draft' };
-    db.mockReturnValueOnce(chain({ first: { payer_statement_id: null } }))
-      .mockReturnValueOnce(chain({ first: draftInvoice }))
-      .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending' }] }));
+    queueMocks(db, [
+      chain({ first: { payer_statement_id: null } }),
+      chain({ first: draftInvoice }),
+      preClaimQueueCheck(),
+      chain({ returning: [{ ...draftInvoice, status: 'sending' }] }),
+      adoptionNoOp(),
+    ]);
     try {
       await expect(InvoiceService.sendViaSMSAndEmail('inv-1')).resolves.toMatchObject({
         ok: false, code: 'INVOICE_DELIVERY_OUTCOME_UNCERTAIN',
       });
-      expect(db).toHaveBeenCalledTimes(3);
+      expect(db).toHaveBeenCalledTimes(8);
     } finally {
       smsSpy.mockRestore();
     }
@@ -387,17 +431,21 @@ describe('processScheduledSends send-window handling', () => {
       code: 'INVOICE_VISIT_TERMINAL', deliveryOutcome: 'not_sent' });
     const voidSpy = jest.spyOn(InvoiceService, 'voidOpenInvoicesForCancelledService');
     const draftInvoice = { ...dueRow, status: 'draft' };
-    db.mockReturnValueOnce(chain({ first: { payer_statement_id: null } }))
-      .mockReturnValueOnce(chain({ first: draftInvoice }))
-      .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending', scheduled_service_id: 'svc-1' }] }))
-      .mockReturnValueOnce(chain({ first: { id: 'queued-sms-1' } }));
+    queueMocks(db, [
+      chain({ first: { payer_statement_id: null } }),
+      chain({ first: draftInvoice }),
+      preClaimQueueCheck(),
+      chain({ returning: [{ ...draftInvoice, status: 'sending', scheduled_service_id: 'svc-1' }] }),
+      adoptionNoOp(),
+      chain({ first: { id: 'queued-sms-1' } }),
+    ]);
     try {
       const result = await InvoiceService.sendViaSMSAndEmail('inv-1');
 
       expect(result).toMatchObject({ ok: false, code: 'INVOICE_VISIT_TERMINAL_OUTCOME_UNCERTAIN',
         sms: { scheduled: true } });
       expect(voidSpy).not.toHaveBeenCalled();
-      expect(db).toHaveBeenCalledTimes(4);
+      expect(db).toHaveBeenCalledTimes(9);
     } finally {
       smsSpy.mockRestore();
       voidSpy.mockRestore();
@@ -425,14 +473,17 @@ describe('processScheduledSends send-window handling', () => {
         scheduled_review_delay_minutes: null,
       };
       const requeueInsert = chain();
-      db
-        .mockReturnValueOnce(chain({ first: { payer_statement_id: null } })) // accrual pre-check
-        .mockReturnValueOnce(chain({ first: draftInvoice })) // claim read
-        .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending' }] })) // claim update
-        .mockReturnValueOnce(chain({ first: undefined })) // requeue idempotency check (no prior row)
-        .mockReturnValueOnce(requeueInsert) // held-SMS scheduled-rail insert
-        .mockReturnValueOnce(chain()) // finalize update
-        .mockReturnValueOnce(chain({ first: null })); // lead-conversion read (permissive)
+      queueMocks(db, [
+        chain({ first: { payer_statement_id: null } }), // accrual pre-check
+        chain({ first: draftInvoice }), // claim read
+        preClaimQueueCheck(),
+        chain({ returning: [{ ...draftInvoice, status: 'sending' }] }), // claim update
+        adoptionNoOp(),
+        chain({ first: undefined }), // requeue idempotency check (no prior row)
+        requeueInsert, // held-SMS scheduled-rail insert
+        chain(), // finalize update
+        chain({ first: null }), // lead-conversion read (permissive)
+      ]);
 
       const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {});
 
@@ -476,13 +527,16 @@ describe('processScheduledSends send-window handling', () => {
       failingInsert.insert = jest.fn(() => { throw new Error('sms_log insert failed'); });
       const restoreChain = chain();
       restoreChain.catch = jest.fn(() => Promise.resolve());
-      db
-        .mockReturnValueOnce(chain({ first: { payer_statement_id: null } })) // accrual pre-check
-        .mockReturnValueOnce(chain({ first: draftInvoice })) // claim read
-        .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending' }] })) // claim update
-        .mockReturnValueOnce(chain({ first: undefined })) // requeue idempotency check (no prior row)
-        .mockReturnValueOnce(failingInsert) // held-SMS scheduled-rail insert THROWS
-        .mockReturnValue(restoreChain); // restoreSendClaim + anything after
+      queueMocks(db, [
+        chain({ first: { payer_statement_id: null } }), // accrual pre-check
+        chain({ first: draftInvoice }), // claim read
+        preClaimQueueCheck(),
+        chain({ returning: [{ ...draftInvoice, status: 'sending' }] }), // claim update
+        adoptionNoOp(),
+        chain({ first: undefined }), // requeue idempotency check (no prior row)
+        failingInsert, // held-SMS scheduled-rail insert THROWS
+      ]);
+      db.mockReturnValue(restoreChain); // restoreSendClaim + anything after
 
       const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {});
 
