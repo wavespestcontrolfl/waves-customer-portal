@@ -68,3 +68,10 @@ test('an ordinary customer message still replies through sendCustomerMessage', a
   expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
   expect(mockSendOwnerReply).not.toHaveBeenCalled();
 });
+
+test('a reply on a CLOSED application is refused (422) and sends nothing', async () => {
+  mockSendOwnerReply.mockResolvedValueOnce({ outcome: 'closed', applicationId: 'app-1' });
+  const res = await reply('admin', 'job_applicant_reply');
+  expect(res.status).toBe(422);
+  expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+});

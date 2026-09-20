@@ -745,6 +745,12 @@ async function sendOwnerReply({ applicationId, body, by, fromNumber }) {
   if (!applicationId || !text) return { outcome: 'skipped', applicationId: applicationId || null };
   const app = await db('job_applications').where({ id: applicationId }).first();
   if (!app) return { outcome: 'skipped', applicationId };
+  // Same eligibility the reply classifier applies (recruiting-inbound.js
+  // OPEN_STATUSES): a text to a rejected/withdrawn/hired applicant would
+  // invite a reply the classifier no longer protects (local audit P0).
+  if (!['new', 'reviewed', 'interview', 'offer'].includes(String(app.status || ''))) {
+    return { outcome: 'closed', applicationId };
+  }
   const result = await sendStageComms(app, 'owner_reply', {
     sms: true, email: false, by: by || 'system', smsBody: text, fromNumber: fromNumber || undefined, entryPoint: 'recruiting_owner_reply',
   });

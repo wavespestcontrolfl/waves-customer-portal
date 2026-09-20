@@ -608,3 +608,12 @@ describe('owner reply on the recruiting rail', () => {
     expect(stored.comms_history[0]).toMatchObject({ stage: 'owner_reply', outcome: 'sent', from_number: '+19415550777', by: 'tech-1' });
   });
 });
+
+describe('owner reply eligibility', () => {
+  test('a closed application (rejected/withdrawn/hired) refuses the owner reply — outcome closed, nothing sent', async () => {
+    mockDb.__tables.job_applications.push({ ...baseApp(), id: 'app-2', status: 'rejected', comms_history: [] });
+    const res = await RecruitingComms.sendOwnerReply({ applicationId: 'app-2', body: 'hello', by: 'tech-1' });
+    expect(res.outcome).toBe('closed');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+});

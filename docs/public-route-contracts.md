@@ -2197,8 +2197,11 @@ OWNER texting an applicant from a shared surface — the dashboard inbox
 reply on a `job_applicant_reply` row, or the Communications composer to
 a recruiting phone — rides the recruiting rail (`sendOwnerReply`: purpose
 `applicant_reply`, message_type `job_owner_reply`, sent from the line the
-applicant texted, handoff evidence on the application), never a 'manual'
-customer text; a non-admin is refused (403) on both.
+applicant texted, handoff evidence on the application; refused with outcome `closed` for a
+rejected/withdrawn/hired application — the classifier would not protect
+the reply), never a 'manual' customer text; a non-admin is refused (403)
+on both. Reply evidence is scoped to the line the reply arrived on
+before the newest entry is chosen (two recruiting lines = two threads).
 Applicant texts obey the 8am–8pm ET send window; a held send is queued
 on the scheduled-SMS rail (`sms_log` status `scheduled`, metadata
 `audience:'applicant'` + `purpose` + `consent_basis` + the ledger entry id

@@ -113,6 +113,14 @@ describe('matchApplicantReply', () => {
     state.apps = [{ id: 'app-1', comms_history: [{ ...sentEntry(0.1), outcome: 'deferred' }] }];
     await expect(matchApplicantReply('+19415550142', '+19415550199')).resolves.toEqual({ applicationId: 'app-1' });
   });
+  test('two recruiting lines: a reply to line A matches A\'s evidence even when a newer owner reply went out from line B', async () => {
+    state.apps = [{ id: 'app-1', comms_history: [
+      { ...sentEntry(2), from_number: '+19415550199' },                              // invite from A
+      { ...sentEntry(1), stage: 'owner_reply', from_number: '+19415550777' },        // newer owner reply from B
+    ] }];
+    await expect(matchApplicantReply('+19415550142', '+19415550199')).resolves.toEqual({ applicationId: 'app-1' });
+    await expect(matchApplicantReply('+19415550142', '+19415550777')).resolves.toEqual({ applicationId: 'app-1' });
+  });
   test('a reply sent to a DIFFERENT Waves number than the recruiting text went out from keeps the ordinary path', async () => {
     await expect(matchApplicantReply('+19415550142', '+19415550100')).resolves.toBeNull();
   });

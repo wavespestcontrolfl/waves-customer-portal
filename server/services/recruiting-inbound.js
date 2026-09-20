@@ -70,11 +70,21 @@ async function matchApplicantReply(fromPhone, toNumber) {
   if (!apps.length) return null;
 
   const cutoff = Date.now() - RECENT_OUTBOUND_DAYS * 24 * 60 * 60 * 1000;
+  // Evidence is scoped to the line the reply arrived on (local audit P0):
+  // an invite from line A and a newer owner reply from line B are two
+  // threads — a reply to A must match A's evidence, not lose to B's.
+  const toDigits = toNumber ? phoneMatchDigits(String(toNumber)) : [];
+  const onInboundLine = (entry) => {
+    if (!toDigits.length || !entry.from_number) return true; // unknown line: keep
+    const fromDigits = phoneMatchDigits(String(entry.from_number));
+    return !fromDigits.length || toDigits.some((d) => fromDigits.includes(d));
+  };
   let best = null;
   for (const app of apps) {
     const history = Array.isArray(app.comms_history) ? app.comms_history : [];
     for (const entry of history) {
       if (!entry || entry.channel !== 'sms' || !['handoff', 'sent', 'uncertain', 'deferred'].includes(entry.outcome)) continue;
+      if (!onInboundLine(entry)) continue;
       // Effective handoff instant: a text held overnight and replayed by the
       // cron went out at finalized_at, not when it was queued — the newer-
       // customer-text comparison below must use the moment the applicant
@@ -92,17 +102,11 @@ async function matchApplicantReply(fromPhone, toNumber) {
   }
   if (!best) return null;
 
-  // Reply CONTEXT: the phone may also be a customer's. Only a text that came
-  // back on the number the recruiting text went out from counts, and a NEWER
-  // customer-facing text (appointment, billing, ...) sent after our handoff
-  // hands the reply back to the ordinary customer path. The sms_log read is
+  // Reply CONTEXT: the phone may also be a customer's. A NEWER customer-facing
+  // text (appointment, billing, ...) sent from this same line after our
+  // handoff hands the reply back to the ordinary customer path. The sms_log read is
   // advisory — when it is missing (logging is best-effort) the durable
   // evidence above stands and the reply stays owner-only.
-  if (toNumber && best.fromNumber) {
-    const toDigits = phoneMatchDigits(String(toNumber));
-    const fromDigits = phoneMatchDigits(String(best.fromNumber));
-    if (toDigits.length && fromDigits.length && !toDigits.some((d) => fromDigits.includes(d))) return null;
-  }
   // Only a text that actually went out (sent/delivered) can override —
   // a customer text merely SCHEDULED, blocked or failed after the handoff
   // is not something the applicant could be answering.
