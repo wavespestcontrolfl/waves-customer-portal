@@ -19,7 +19,12 @@ const {
 } = require('./voice-relay-safety-response-recognition');
 const { recognizeSafetyQuestion, SAFETY_NON_PREFIX } = require('./voice-relay-safety-question-recognition');
 
-const SAFETY_AUDIENCE_SCOPE_RE = new RegExp(`\\b(?:for|around|with)\\s+(${SAFETY_AUDIENCE})\\b`, 'gi');
+// A restriction connector ("except for dogs", "not for dogs") names an
+// EXCLUDED audience, not a positive scope -- without this exclusion the
+// same "for AUDIENCE" text would double as a claimed scope narrower than
+// the refusal actually states, on top of being read by
+// SAFETY_AUDIENCE_EXCLUSION_RE as the exclusion it really is.
+const SAFETY_AUDIENCE_SCOPE_RE = new RegExp(`(?<!\\b(?:except|excluding|unless|other\\s+than|apart\\s+from|not)\\s)\\b(?:for|around|with)\\s+(${SAFETY_AUDIENCE})\\b`, 'gi');
 
 const SAFETY_HARM_AUDIENCE_SCOPE_RE = new RegExp(`\\b(?:hurt|harm|bother|affect|poison)\\s+(${SAFETY_AUDIENCE})\\b`, 'gi');
 
@@ -131,19 +136,18 @@ function safetyProductScope(text, options = {}) {
 }
 
 // Question evidence already crops fronted ASR conditions at their actual
-// auxiliary. Otherwise attach scope to the first local lexical predicate.
+// auxiliary and is anchored to whichever question recognizeSafetyQuestion
+// actually selected -- the LATEST interrogative span, not necessarily the
+// first predicate in the text ("Is the spray safe if swallowed? Is the
+// bait safe?" selects the unconditional bait question). Only fall back to
+// the first local lexical predicate when no question is recognized at all,
+// as for a declarative refusal clause.
 function safetyScopeEvidence(text) {
+  const question = recognizeSafetyQuestion(text);
+  const candidate = question.positive || question.harm;
+  if (candidate) return candidate.evidence;
   const predicate = SAFETY_REFUSED_CLAIM_RE.exec(text);
-  if (!predicate) return null;
-  const evidence = localCandidateEvidence(text, 'scope', predicate.index, predicate.index + predicate[0].length);
-  const question = recognizeSafetyQuestion(evidence.sentence.text);
-  const selected = question.positive || question.harm;
-  // Re-recognize against the complete source to retain exact offsets only
-  // when its selected question belongs to this same source sentence.
-  const original = recognizeSafetyQuestion(text);
-  const candidate = original.positive || original.harm;
-  return selected && candidate?.evidence.sentence.index === evidence.sentence.index
-    ? candidate.evidence : evidence;
+  return predicate ? localCandidateEvidence(text, 'scope', predicate.index, predicate.index + predicate[0].length) : null;
 }
 
 // A while connective stays unresolved unless its entire body is a reduced
@@ -257,16 +261,36 @@ const SAFETY_ONCE_DRY_PREDICATE_RE = new RegExp(`(?:^|(?:[\\x27\\u2019](?:s|re)|
 
 const SAFETY_STAFF_ROLE = '(?:technician|tech|team member|member of (?:our|the) team)';
 
+// A capability ("can confirm", "could confirm", "may confirm") only states
+// that the technician is ABLE to confirm timing, not that they actually
+// will; only an actual confirmation clause -- a future/progressive
+// "will"/"is going to" form, a bare present-tense "confirms", or the
+// equivalent "will let you know" -- satisfies the exemption.
+const TECHNICIAN_DRY_TIMING_VERB_RE_SOURCE = '(?:will|is going to)\\s+(?:be\\s+)?(?:confirm(?:ing)?|verify(?:ing)?|check(?:ing)?)'
+  + '|(?:confirms|verifies|checks)|will\\s+let\\s+you\\s+know';
 const TECHNICIAN_DRY_TIMING_RE = new RegExp(
-  `\\b(?:the |your |our |a )?${SAFETY_STAFF_ROLE}\\b[^.!?;]{0,30}?\\b(?:(?:will|can|is going to)\\s+(?:confirm|verify|check)|(?:confirms|verifies|checks))\\b[^.!?;]{0,30}?\\b(?:timing|drying(?: time)?|re-?entry(?: time| timing)?|when\\b[^.!?;]{0,16}\\bdry)\\b`,
+  `\\b(?:the |your |our |a )?${SAFETY_STAFF_ROLE}\\b[^.!?;]{0,30}?\\b(?:${TECHNICIAN_DRY_TIMING_VERB_RE_SOURCE})\\b[^.!?;]{0,30}?\\b(?:timing|drying(?: time)?|re-?entry(?: time| timing)?|when\\b[^.!?;]{0,16}\\bdry)\\b`,
   'gi',
 );
 const TECHNICIAN_EXPLICIT_DRY_TIMING_RE = /\b(?:drying(?: time)?|re-?entry(?: time| timing)?|when\b[^.!?;]{0,16}\bdry)\s*$/i;
+// A bounded English number-word grammar for interval figures: every
+// spelled-out quantity from "one" through "ninety-nine", plus "hundred" --
+// local rather than reused from voice-relay-spoken-checks.js's
+// NUMBER_WORD_EN_STRICT, which that module does not export. Only definite
+// quantities count as prohibited fixed figures: "half an hour", "a couple
+// of hours", and a bare "an hour" name one exactly the same as a number
+// word does, but a vague amount ("a few minutes") never defeats the
+// exemption.
+const SAFETY_INTERVAL_ONES_WORD = 'one|two|three|four|five|six|seven|eight|nine';
+const SAFETY_INTERVAL_TEEN_WORD = 'ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen';
+const SAFETY_INTERVAL_TENS_WORD = 'twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety';
+const SAFETY_INTERVAL_NUMBER_WORD = `(?:${SAFETY_INTERVAL_TENS_WORD})(?:-(?:${SAFETY_INTERVAL_ONES_WORD}))?|${SAFETY_INTERVAL_TEEN_WORD}|${SAFETY_INTERVAL_ONES_WORD}|hundred`;
+const SAFETY_INTERVAL_QUANTITY_RE_SOURCE = `(?:(?:an?\\s+)?(?:\\d+(?:\\.\\d+)?|${SAFETY_INTERVAL_NUMBER_WORD})\\s*(?:minutes?|mins?|hours?|hrs?)|half\\s+an?\\s+hour|a\\s+couple\\s+of\\s+hours?|an?\\s+hour)`;
 // A named fixed interval ("dries in 30 minutes", "safe after two hours",
-// "re-enter in 4 hours") is a banned specific figure even when it rides
-// alongside the sanctioned "safe once dry" idiom; it must defeat the
-// exemption rather than hide behind it.
-const SAFETY_FIXED_DRYING_FIGURE_RE = /\b(?:dr(?:y|ies|ying)|re-?enter(?:s|ing)?|re-?entry|safe|ready)\b[^.!?;]{0,30}?\b(?:in|after|within)\s+(?:about\s+)?(?:\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty|forty(?:-five)?|fifty|sixty)\s*(?:minutes?|mins?|hours?|hrs?)\b/i;
+// "re-enter in 4 hours", "safe within half an hour") is a banned specific
+// figure even when it rides alongside the sanctioned "safe once dry"
+// idiom; it must defeat the exemption rather than hide behind it.
+const SAFETY_FIXED_DRYING_FIGURE_RE = new RegExp(`\\b(?:dr(?:y|ies|ying)|re-?enter(?:s|ing)?|re-?entry|safe|ready)\\b[^.!?;]{0,30}?\\b(?:in|after|within)\\s+(?:about\\s+)?${SAFETY_INTERVAL_QUANTITY_RE_SOURCE}`, 'i');
 const TECHNICIAN_VISIT_TIMING_RE = /\b(?:appointment|arrival|schedule|scheduling)\s+(?:time|timing)\b|\btiming\s+(?:for|of)\s+(?:(?:the|your|our)\s+)?(?:appointment|arrival|schedule)\b/i;
 const SAFETY_COORDINATED_DRYING_WITHDRAWAL_RE = /^\s*,?\s*(?:and|or|but)\s+(?:even\s+)?(?:before\s+(?:it|they)\s+(?:dr(?:y|ies)|(?:is|are)\s+dry)|(?:while|when)\s+(?:(?:it|they)\s+(?:is|are)\s+)?wet)\b(?=\s*(?:[.!?;,]|$))/i;
 
@@ -428,11 +452,19 @@ function safetyOnceDryQualifies(text, claim, questionText = null, antecedentText
 
 const SAFETY_CLAUSE_CONTINUATION_RE = new RegExp(`^\\s*(?:that\\b|it['’]s\\b|it is\\b|that['’]s\\b|that is\\b|${SAFETY_ADJECTIVE}\\b|${HARM_ADJECTIVE}\\b)`, 'i');
 
-const safetyClauseContinues = (before, after, boundary) => SAFETY_CLAUSE_CONTINUATION_RE.test(after)
-  && (/^\s*(?:that|whether)?\s*$/i.test(before)
-    || ((!/^,$/.test(boundary)
-      || !/^[\s]*(?:it|that|this|they)(?:['’](?:s|re)|\s+(?:is|are|was|were))\b/i.test(after))
-      && new RegExp(`\\b(?:${SAFETY_ADJECTIVE}|${HARM_ADJECTIVE}|risk|danger|harm)\\b`, 'i').test(before)));
+// A restriction immediately after the comma ("safe, except for dogs") still
+// belongs to the refusal that introduced it -- it has to survive into the
+// exempt span so the audience/product exclusion checks (safetyAudienceExcluded,
+// safetyProductExcludedFromRefusal) ever see it, rather than being cut off by
+// the ordinary end-of-clause comma below.
+const SAFETY_REFUSAL_RESTRICTION_RE = /^\s*(?:except(?:\s+for)?|other\s+than|apart\s+from|but\s+not|unless)\b/i;
+
+const safetyClauseContinues = (before, after, boundary) => (/^,$/.test(boundary) && SAFETY_REFUSAL_RESTRICTION_RE.test(after))
+  || (SAFETY_CLAUSE_CONTINUATION_RE.test(after)
+    && (/^\s*(?:that|whether)?\s*$/i.test(before)
+      || ((!/^,$/.test(boundary)
+        || !/^[\s]*(?:it|that|this|they)(?:['’](?:s|re)|\s+(?:is|are|was|were))\b/i.test(after))
+        && new RegExp(`\\b(?:${SAFETY_ADJECTIVE}|${HARM_ADJECTIVE}|risk|danger|harm)\\b`, 'i').test(before))));
 
 const SAFETY_DRYING_CONDITION_WITHDRAWAL_RE = /\b(?:even\s+)?(?:before\s+(?:(?:it|they)\s+(?:dr(?:y|ies)|(?:is|are)\s+dry)|drying)|(?:if|while|when)\s+(?:(?:it|they)\s+(?:is|are)\s+|still\s+)?wet)\b/i;
 const SAFETY_REFERENTIAL_DRYING_WITHDRAWAL_RE = /\b(?:that|this|it)\s+(?:also\s+)?(?:applies|holds|is true)\s+(?:even\s+)?(?:before\s+(?:(?:it|they)\s+(?:dr(?:y|ies)|(?:is|are)\s+dry)|drying)|(?:if|while|when)\s+(?:(?:it|they)\s+(?:is|are)\s+|still\s+)?wet)\b/i;
@@ -506,10 +538,13 @@ function safetyAudienceExcluded(claimText, detailText) {
 function safetyProductCovers(claimText, questionText, options = {}) {
   const questionedProducts = safetyProductScope(questionText, options);
   const claimedProducts = safetyProductScope(claimText, options);
-  // A generic product scope covers the whole class, not an absent subject.
-  // A named subset cannot qualify an assurance about that broader class.
-  if (!questionedProducts.size && SAFETY_GENERIC_PRODUCT_RE.test(questionText)
-    && claimedProducts.size) return false;
+  // A generic product scope ("any other product") covers the whole class
+  // and stands alongside any named product the question also names ("the
+  // bait or any other product") -- it is never satisfied merely because
+  // that named subset happens to be nonempty, so this checks claimText's
+  // own genericness rather than gating on questionedProducts being empty.
+  if (claimedProducts.size && SAFETY_GENERIC_PRODUCT_RE.test(questionText)
+    && !SAFETY_GENERIC_PRODUCT_RE.test(claimText)) return false;
   return !questionedProducts.size || !claimedProducts.size
     || [...questionedProducts].every((product) => claimedProducts.has(product));
 }
@@ -579,6 +614,40 @@ function safetyCircumstancesCollectivelyCovered(questionText, refusals) {
   return questionedCircumstances.every((circumstance) => coveredCircumstances.has(circumstance));
 }
 
+// A coordinator can join two complete propositions ("the bait safe for
+// dogs and the spray safe for cats") instead of one shared subject ("the
+// bait and spray safe") or a plain audience list ("safe for dogs and
+// cats"); only when EVERY resulting piece names its own product AND its
+// own audience does the split represent genuinely paired propositions --
+// a shared subject or an audience list always leaves at least one piece
+// bare on one axis and stays a single proposition, exactly as before.
+const SAFETY_PROPOSITION_COORDINATOR_RE = /\s+(?:and|or)\s+/i;
+
+function safetyScopedPropositions(text, options = {}) {
+  const pieces = text.split(SAFETY_PROPOSITION_COORDINATOR_RE);
+  return pieces.length > 1
+    && pieces.every((piece) => safetyProductScope(piece, options).size && safetyAudienceScopes(piece).size)
+    ? pieces : [text];
+}
+
+// Aggregating audience scopes and product scopes separately (as the checks
+// below this still do, for the ordinary single-proposition case) loses
+// which refusal answered which questioned pairing: "I cannot confirm the
+// bait is safe for cats. I cannot confirm the spray is safe for dogs."
+// would otherwise look like it covers "bait for dogs and spray for cats"
+// simply because the union of products and the union of audiences each
+// happen to match. Only a genuinely multi-proposition question (see
+// safetyScopedPropositions) needs this: each such proposition must have
+// its OWN refusal whose product and audience both cover it -- a single
+// undifferentiated proposition keeps relying on the join-based checks,
+// which already allow several refusals to jointly cover one product's
+// compound audience.
+function safetyProductAudiencePairsCovered(questionText, refusals, options = {}) {
+  const propositions = safetyScopedPropositions(questionText, options);
+  return propositions.length === 1 || propositions.every((proposition) => refusals.some((refusal) =>
+    safetyProductCovers(refusal, proposition, options) && safetyAudienceCovers(refusal, proposition)));
+}
+
 function refusesSafetyGuarantee(text, questionText, afterIndex = -1, options = {}) {
   const affirmativeHarmRe = safetyRefusedAffirmativeHarmRe(options);
   const refusals = safetyExemptSpans(text).flatMap(([start, end]) => {
@@ -607,7 +676,8 @@ function refusesSafetyGuarantee(text, questionText, afterIndex = -1, options = {
   });
   if (!refusals.length
     || !safetyCircumstancesCollectivelyCovered(questionText, refusals)
-    || !safetyAudienceCovers(refusals.join(' '), questionText)) return false;
+    || !safetyAudienceCovers(refusals.join(' '), questionText)
+    || !safetyProductAudiencePairsCovered(questionText, refusals, options)) return false;
   // An unscoped refusal ("I cannot confirm whether it is safe") resolves to
   // the question's own product only when it is the SOLE refusal -- its
   // pronoun then has one unambiguous antecedent. Once another refusal in

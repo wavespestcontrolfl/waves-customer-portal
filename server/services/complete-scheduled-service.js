@@ -15,6 +15,37 @@ const CompletionAttempts = require('../services/completion-attempts');
 // attribution are derived from before the row lock; any of them moving under
 // the lock refuses the closeout (GitHub r11 P2 #4127).
 const ISSUED_CLOSEOUT_IDENTITY_FIELDS = ['service_type', 'service_catalog_id', 'service_id', 'technician_id'];
+
+// The messaging layer returns provider outcomes and also attaches the same
+// shape to thrown post-dispatch errors. Keep one classifier so every
+// completion pay-link sender treats an unknown outcome as "may have sent".
+function deliveryUnverifiedProviderOutcome(value) {
+  const outcome = value?.providerOutcome || value;
+  return outcome?.deliveryOutcome === 'uncertain' ? outcome : null;
+}
+
+function throwIfDeliveryUnverified(result) {
+  const providerOutcome = deliveryUnverifiedProviderOutcome(result);
+  if (!providerOutcome) return result;
+  const err = new Error(providerOutcome.reason || providerOutcome.error || providerOutcome.code || 'Provider delivery outcome is unknown');
+  err.code = providerOutcome.code;
+  err.providerOutcome = providerOutcome;
+  throw err;
+}
+
+const { COMPLETION_SMS_DEFINITE_REJECTION_PREFIX } = CompletionAttempts;
+
+function completionSmsDefiniteRejectionError(message, markerAt) {
+  return new Error(`${COMPLETION_SMS_DEFINITE_REJECTION_PREFIX}${markerAt || 'missing'}] ${message || 'Completion SMS provider failure'}`);
+}
+
+function definiteRejectionMarkerFromAttemptError(error) {
+  const value = String(error || '');
+  if (!value.startsWith(COMPLETION_SMS_DEFINITE_REJECTION_PREFIX)) return null;
+  const end = value.indexOf(']', COMPLETION_SMS_DEFINITE_REJECTION_PREFIX.length);
+  return end === -1 ? null : value.slice(COMPLETION_SMS_DEFINITE_REJECTION_PREFIX.length, end);
+}
+
 const PropertyZones = require('../services/property-zones');
 const TermiteStations = require('../services/termite-stations');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -11044,13 +11075,40 @@ async function completeScheduledService(completionInput, packetContext = null) {
       && completionSmsAttemptedAt
       && Date.now() - completionSmsAttemptedAt < 10 * 60 * 1000
       && !resumingReleasedCompletion;
+    // A provider rejection is known NOT delivered. If both status writes
+    // failed, the pre-provider uncertainty marker remains, but the attempt's
+    // release error durably carries the exact marker it rejected. Repair only
+    // that matching marker on resume (including a stale-running reclaim); a
+    // later/unknown handoff has a different marker and remains fenced.
+    const resumedDefiniteRejectionMarker = resumingCommittedCompletion
+      ? definiteRejectionMarkerFromAttemptError(completionAttempt?.error)
+      : null;
+    const completionSmsMarkerWasDefinitelyRejected = !!recordStructuredNotes.completionSmsDeliveryUnverifiedAt
+      && resumedDefiniteRejectionMarker === recordStructuredNotes.completionSmsDeliveryUnverifiedAt;
+    if (completionSmsMarkerWasDefinitelyRejected) {
+      try {
+        await mergeRecordNotesKeys(record.id, { completionSmsDeliveryUnverifiedAt: null });
+        recordStructuredNotes.completionSmsDeliveryUnverifiedAt = null;
+        record.structured_notes = { ...parseJsonObject(record.structured_notes), completionSmsDeliveryUnverifiedAt: null };
+      } catch (clearErr) {
+        // Re-release the same marker-bound proof. A generic error here would
+        // erase the only durable fact that the provider rejected this exact
+        // attempt and make the next resume treat it as possibly delivered.
+        throw completionSmsDefiniteRejectionError(clearErr.message, resumedDefiniteRejectionMarker);
+      }
+    }
     const completionSmsAlreadyHandled = !!recordStructuredNotes.sentSmsBody
       || recordStructuredNotes.completionSmsStatus === 'sent'
       // 'deferred' = a send-window hold requeued the text on the
       // scheduled-SMS rail; that queued row owns the obligation, so a
       // re-completion must not send a second copy.
       || recordStructuredNotes.completionSmsStatus === 'deferred'
-      || completionSmsSendingFresh;
+      // An uncertain provider handoff may have delivered. Its existing
+      // 'failed' closeout status surfaces office review; this durable marker
+      // distinguishes it from a definite failure and prevents a released
+      // side-effects resume from replaying the text.
+      || (!!recordStructuredNotes.completionSmsDeliveryUnverifiedAt && !completionSmsMarkerWasDefinitelyRejected)
+      || (completionSmsSendingFresh && !completionSmsMarkerWasDefinitelyRejected);
     // The pest-recap path (services/pest-recap.js) writes its own
     // service_records row and claims recap_sms_sent_at when it texts the
     // customer. That recap text and this completion SMS are two wordings of
@@ -11960,6 +12018,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // never the whole snapshot.
           const smsNotesDelta = {
             completionSmsStatus: 'sending',
+            // Persist the uncertainty fence before calling the provider.
+            // Every definitive outcome below clears it in the same durable
+            // notes write; if later bookkeeping throws, a side-effects
+            // resume still cannot replay a message that may have gone out.
+            completionSmsDeliveryUnverifiedAt: new Date().toISOString(),
             completionSmsType: sentSmsType,
             completionSmsBody: sentSmsBody,
             completionSmsTruncated: completionSmsWasTruncated,
@@ -12018,8 +12081,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // Block-scoped inside this try; the accepted-error catch reads it
             // from the snapshot for the invoice bookkeeping.
             invoiceLinkAllowed: allowCompletionInvoiceLink,
+            deliveryUnverifiedAt: smsNotesDelta.completionSmsDeliveryUnverifiedAt,
           };
-          let smsResult = await sendCustomerMessage(sendInput);
+          let smsResult = throwIfDeliveryUnverified(await sendCustomerMessage(sendInput));
           if (smsResult.channel === 'push') {
             sentSmsChannel = 'push';
             completionSmsAcceptedSnapshot.channel = 'push';
@@ -12031,10 +12095,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             delete fallbackMetadata.allowMediaUrls;
             fallbackMetadata.mms_fallback_reason = smsResult.reason || smsResult.code || 'provider_failure';
             completionSmsAcceptedSnapshot.channel = 'sms';
-            smsResult = await sendCustomerMessage({
+            smsResult = throwIfDeliveryUnverified(await sendCustomerMessage({
               ...sendInput,
               metadata: fallbackMetadata,
-            });
+            }));
             sentSmsChannel = 'sms';
             mmsFallbackToSms = true;
             smsNotesDelta.completionSmsMmsFallbackAt = new Date().toISOString();
@@ -12068,6 +12132,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
               const deferredDelta = {
                 completionSmsStatus: 'deferred',
                 completionSmsDeferredTo: smsResult.nextAllowedAt,
+                // The pre-send uncertainty marker is cleared atomically with
+                // the queue insertion: the queued row now owns delivery and
+                // the 'deferred' status is the duplicate guard. Left in
+                // place, a terminal failure of the queued replay (status →
+                // failed only) would keep the marker and block every later
+                // completion retry despite a definite non-delivery.
+                completionSmsDeliveryUnverifiedAt: null,
               };
               // The balance clause never rides a frozen replay body (codex
               // P2, round 2): the send-window PREcheck at the line's compute
@@ -12164,6 +12235,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             };
             Object.assign(smsNotesDelta, {
               completionSmsStatus: policyBlocked ? 'blocked' : 'failed',
+              completionSmsDeliveryUnverifiedAt: null,
               completionSmsError: holdEnqueueFailed
                 ? `send-window requeue failed: ${completionHoldQueueError.message || completionHoldQueueError}`
                 : (smsResult.reason || smsResult.code || 'SMS send failed'),
@@ -12212,14 +12284,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 });
               }
               if (resumable) {
-                return exitForCompletionSmsResume(holdEnqueueFailed
-                  ? completionHoldQueueError
-                  : new Error(smsResult.reason || smsResult.code || 'Completion SMS provider failure'));
+                return exitForCompletionSmsResume(completionSmsDefiniteRejectionError(
+                  holdEnqueueFailed
+                    ? (completionHoldQueueError.message || String(completionHoldQueueError))
+                    : (smsResult.reason || smsResult.code || 'Completion SMS provider failure'),
+                  completionSmsAcceptedSnapshot?.deliveryUnverifiedAt,
+                ));
               }
             }
           } else {
             Object.assign(smsNotesDelta, {
               completionSmsStatus: 'sent',
+              completionSmsDeliveryUnverifiedAt: null,
               sentSmsBody,
               sentSmsAt: new Date().toISOString(),
               sentSmsType,
@@ -12291,11 +12367,30 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // resume would send it again — GitHub Codex r2/r3/r4 P1s). No
         // failure bell, no release-for-resume, and the bundled review is
         // marked exactly as the success path would have.
+        const unverifiedOutcome = deliveryUnverifiedProviderOutcome(e);
         const providerAccepted = completionSmsProviderAccepted || e.providerOutcome?.sent === true;
-        if (providerAccepted) {
+        if (unverifiedOutcome) {
+          // The provider request started, but its result is unknown — the
+          // text may have reached the customer. Preserve the durable
+          // 'delivery unverified' marker (written before the send above)
+          // instead of clearing it: a 'failed' closeout status surfaces
+          // office review, and the marker itself is what stops a released
+          // side-effects resume from replaying the possibly-delivered text.
+          const unverifiedDelta = {
+            completionSmsStatus: 'failed',
+            completionSmsError: e.message || 'provider delivery outcome is unknown',
+            completionSmsDeliveryUnverifiedAt: new Date().toISOString(),
+          };
+          const unverifiedNotes = { ...parseJsonObject(record.structured_notes), ...unverifiedDelta };
+          await mergeRecordNotesKeys(record.id, unverifiedDelta)
+            .catch((updateErr) => logger.error(`Completion SMS unverified-state update failed: ${updateErr.message}`));
+          record.structured_notes = unverifiedNotes;
+          logger.error(`[dispatch] Completion SMS delivery unverified for service_record ${record.id} — send claim held for review: ${e.message}`);
+        } else if (providerAccepted) {
           const snap = completionSmsAcceptedSnapshot || {};
           const acceptedDelta = {
             completionSmsStatus: 'sent',
+            completionSmsDeliveryUnverifiedAt: null,
             ...(snap.body ? { sentSmsBody: snap.body } : {}),
             sentSmsAt: new Date().toISOString(),
             ...(snap.type ? { sentSmsType: snap.type } : {}),
@@ -12345,6 +12440,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             || completionSmsRejectedOutcome;
           const failedDelta = {
             completionSmsStatus: 'failed',
+            completionSmsDeliveryUnverifiedAt: null,
             completionSmsError: (rejected ? rejected.error : null) || e.message || 'SMS send failed',
             completionSmsFailedAt: new Date().toISOString(),
           };
@@ -12378,7 +12474,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             });
           }
           if (resumable) {
-            return exitForCompletionSmsResume(new Error(rejected.error || 'Completion SMS provider failure'));
+            return exitForCompletionSmsResume(completionSmsDefiniteRejectionError(
+              rejected.error || 'Completion SMS provider failure',
+              completionSmsAcceptedSnapshot?.deliveryUnverifiedAt,
+            ));
           }
         }
       }
@@ -12881,6 +12980,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
 
 module.exports = {
   completeScheduledService,
+  deliveryUnverifiedProviderOutcome,
+  throwIfDeliveryUnverified,
+  completionSmsDefiniteRejectionError,
+  definiteRejectionMarkerFromAttemptError,
   COMPLETION_ACCESS_CODE_RE,
   serviceReportEmailEligible,
   lawnAssessmentCompletionBlockPayload,

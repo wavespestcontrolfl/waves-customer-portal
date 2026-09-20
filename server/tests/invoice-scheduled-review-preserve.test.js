@@ -9,6 +9,7 @@ jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.raw = jest.fn((sql) => sql);
   fn.fn = { now: jest.fn(() => 'now()') };
+  fn.transaction = jest.fn(async (callback) => callback(fn));
   return fn;
 });
 jest.mock('../services/logger', () => ({
@@ -48,6 +49,8 @@ function chain({ first, returning } = {}) {
   q.where = jest.fn(() => q);
   q.whereIn = jest.fn(() => q);
   q.whereNull = jest.fn(() => q);
+  q.whereRaw = jest.fn(() => q);
+  q.forUpdate = jest.fn(() => q);
   q.select = jest.fn(() => q);
   q.update = jest.fn(() => q);
   q.first = jest.fn(async () => first);
@@ -69,29 +72,41 @@ function scheduledInvoice(overrides = {}) {
   };
 }
 
-// Mocks the db() call sequence inside sendViaSMSAndEmail:
-//   1. payer_statement_id accrual pre-check   2. claimInvoiceForSend read
-//   3. claim update→returning   4. success-path update
-//   5. (review block, AFTER the invoice-issued closeout) invoice read
-// Every `invoices` read from call 4 on answers with the post-delivery row
-// the review block reads back; other tables get a permissive chain.
+// Mocks the db() call sequence inside sendViaSMSAndEmail, table-aware (a
+// blind positional sequence would misfeed an 'invoices' response to the
+// queue-adoption reconcile's 'sms_log' lookups, or vice versa):
+//   invoices #1 payer_statement_id accrual pre-check
+//   invoices #2 claimInvoiceForSend's current-row read
+//   sms_log  (queuedPayLinkText pre-claim check — none live/adoptable)
+//   invoices #3 claim update→returning ('sending')
+//   sms_log  (reconcileQueuedSendUnderClaim's own live-queue check — none)
+//   invoices #4 the adoption transaction's owned-row check (forUpdate)
+//   sms_log  (consumeQueuedInvoiceSend — nothing to consume)
+//   sms_log  (the strict re-check after consuming — still none)
+//   invoices #5 success-path update
+//   invoices #6 (review block, AFTER the invoice-issued closeout) read
+// Every `sms_log` call answers "nothing queued"; every `invoices` call from
+// #5 on answers with the post-delivery row the review block reads back.
 function mockSendSequence(invoice, reviewRead = {}) {
-  db
-    .mockReturnValueOnce(chain({ first: invoice }))
-    .mockReturnValueOnce(chain({ first: invoice }))
-    .mockReturnValueOnce(chain({ returning: [{ ...invoice, status: 'sending' }] }))
-    .mockImplementation((table) => (table === 'invoices'
-      ? chain({
-        first: {
-          customer_id: invoice.customer_id,
-          service_record_id: invoice.service_record_id,
-          // What the review block reads back AFTER delivery: an unpaid
-          // completion invoice is 'sent' at this point.
-          status: 'sent',
-          ...reviewRead,
-        },
-      })
-      : chain()));
+  let invoiceCall = 0;
+  db.mockImplementation((table) => {
+    if (table === 'sms_log') return chain({ first: undefined, returning: [] });
+    if (table !== 'invoices') return chain();
+    invoiceCall += 1;
+    if (invoiceCall === 1 || invoiceCall === 2) return chain({ first: invoice });
+    if (invoiceCall === 3) return chain({ returning: [{ ...invoice, status: 'sending' }] });
+    if (invoiceCall === 4) return chain({ first: { id: invoice.id } });
+    return chain({
+      first: {
+        customer_id: invoice.customer_id,
+        service_record_id: invoice.service_record_id,
+        // What the review block reads back AFTER delivery: an unpaid
+        // completion invoice is 'sent' at this point.
+        status: 'sent',
+        ...reviewRead,
+      },
+    });
+  });
 }
 
 describe('InvoiceService.sendViaSMSAndEmail scheduled-review fallback', () => {

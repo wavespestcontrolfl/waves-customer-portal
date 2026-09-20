@@ -3,9 +3,9 @@ const { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: grammar } = 
 // Each classifier receives bounded evidence selected by its consumer. Passing
 // completion alone does not confirm a product, target, date or report readback.
 
-test('report grammar has no runner or value-rule registration', () => {
-  expect(SPOKEN_CHECK_RUNNERS).not.toHaveProperty('report_readback_confirms');
-  expect(SPOKEN_CHECK_VALUE_RULES).not.toHaveProperty('report_readback_confirms');
+test('report grammar has runner and value-rule registration', () => {
+  expect(SPOKEN_CHECK_RUNNERS).toHaveProperty('report_readback_confirms');
+  expect(SPOKEN_CHECK_VALUE_RULES).toHaveProperty('report_readback_confirms');
 });
 
 test.each([
