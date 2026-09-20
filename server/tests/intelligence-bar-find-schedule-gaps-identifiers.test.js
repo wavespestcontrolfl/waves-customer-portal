@@ -30,7 +30,7 @@ test('planned stops and late visits lose their appointment identifiers; everythi
   expect(tech).toEqual({
     technicianId: 't1', technician: 'Tech One', scheduledVisits: 2, remainingServiceBudgetMinutes: 40,
     plannedStopCount: 2, missingCoordinateCount: 1, defaultDurationCount: 2, modeledLateVisits: [{ lateMinutes: 15, arrivalMin: 700 }],
-    doubleBookedVisitCount: 3,
+    doubleBookingCount: 2,
     candidateAnalysis: { candidateId: 'a9', routeFits: [{ windowStart: '13:00', windowEnd: '15:00' }] },
   });
   expect(JSON.stringify(result)).not.toMatch(/"a1"|"a2"|"a3"|"v1"|"v2"/);
@@ -41,5 +41,5 @@ test('error results and null late-visit fields pass through unchanged', async ()
   getScheduleQualityMeasurements.mockResolvedValue({ error: 'Use a valid date range of at most 31 days.' });
   expect(await executeScheduleTool('find_schedule_gaps', { date: 'nope' })).toEqual({ error: 'Use a valid date range of at most 31 days.' });
   getScheduleQualityMeasurements.mockResolvedValue({ days: [{ date: '2026-09-09', byTech: [{ technicianId: 't1', plannedStops: [], modeledLateVisits: null }] }] });
-  expect((await executeScheduleTool('find_schedule_gaps', { date: '2026-09-09' })).days[0].byTech[0]).toEqual({ technicianId: 't1', plannedStopCount: 0, missingCoordinateCount: null, defaultDurationCount: null, doubleBookedVisitCount: null, modeledLateVisits: null });
+  expect((await executeScheduleTool('find_schedule_gaps', { date: '2026-09-09' })).days[0].byTech[0]).toEqual({ technicianId: 't1', plannedStopCount: 0, missingCoordinateCount: null, defaultDurationCount: null, doubleBookingCount: null, modeledLateVisits: null });
 });

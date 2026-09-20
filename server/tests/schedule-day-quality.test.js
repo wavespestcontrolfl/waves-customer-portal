@@ -90,6 +90,13 @@ describe('double-booking measurement (same technician, occupied time per the reb
     const result = measureDayQuality(Model, [...members, row('n', 'cust-n', 11, { window_end: null })]);
     expect(result.doubleBookedVisits).toEqual([{ ids: ['m1', 'm2', 'n'], minutes: 25 }]);
     expect(measureDayQuality(Model, [...members, row('n', 'cust-n', 12, { window_end: null })]).doubleBookedVisits).toEqual([]);
+    // The allocation plus a same-premise ungrouped 30-minute service is one co-visit
+    // occupying 10:00–11:55 (codex #4620 r6 P1): no internal pair, an 11:30 neighbour collides.
+    const coVisit = [...members, row('s', 'cust-a', 10, { window_end: null, estimated_duration_minutes: 30 })];
+    expect(measureDayQuality(Model, coVisit).doubleBookedVisits).toEqual([]);
+    expect(measureDayQuality(Model, [...coVisit, row('n', 'cust-n', 11, { window_start: '11:30', window_end: null })]).doubleBookedVisits)
+      .toEqual([{ ids: ['m1', 'm2', 's', 'n'], minutes: 25 }]);
+    expect(measureDayQuality(Model, [...coVisit, row('n', 'cust-n', 12, { window_end: null })]).doubleBookedVisits).toEqual([]);
   });
 });
 

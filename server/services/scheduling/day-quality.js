@@ -42,25 +42,28 @@ function occupiedBlocks(stops) {
     .map(block => ({ ...block, end: block.stops.length > 1 && block.stops[0].visit_id ? Math.max(block.end, block.start + block.work) : block.end }))
     .filter(block => Number.isFinite(block.start) && block.end > block.start)
     .sort((a, b) => a.start - b.start || String(a.ids[0]).localeCompare(String(b.ids[0])));
-  // Proven co-visit rows merge into one block whose on-site time is the
+  // Every ungrouped block (one row, or one version-2 allocation) carries a
+  // co-visit chain, and proven co-visit blocks merge: on-site time is the
   // shared chain arithmetic (startCoVisitChain / advanceCoVisit: the sum of
   // the members' real estimates, floored by the longest window-derived
-  // duration), so a neighbour that overlaps only the pair's summed tail is
-  // still reported.
+  // duration), so a neighbour that overlaps only the merged tail is still
+  // reported. visit_id groups keep arrival-route's own SUM above.
   const merged = [];
   for (const block of grouped) {
-    const single = block.stops.length === 1 && !block.stops[0].visit_id ? block.stops[0] : null;
-    const host = single && merged.find(other => other.chain && isCoVisitPair(effectiveWindowRange, other.stops[other.stops.length - 1], single));
+    const chainable = block.stops.every(stop => !stop.visit_id);
+    const host = chainable && merged.find(other => other.chain && isCoVisitPair(effectiveWindowRange, other.stops[other.stops.length - 1], block.stops[0]));
+    const target = host || block;
+    if (chainable) {
+      for (const stop of block.stops) {
+        if (!target.chain) target.chain = { ...startCoVisitChain(stop), clock: block.start + startCoVisitChain(stop).coMerged, arrivalMin: block.start };
+        else target.chain = advanceCoVisit(target.chain, stop);
+      }
+      target.end = Math.max(target.end, target.chain.clock);
+    }
     if (host) {
       host.ids.push(...block.ids);
-      host.stops.push(single);
-      host.chain = advanceCoVisit(host.chain, single);
-      host.end = Math.max(host.end, host.chain.clock);
+      host.stops.push(...block.stops);
       continue;
-    }
-    if (single) {
-      const chain = startCoVisitChain(single);
-      block.chain = { ...chain, clock: block.start + chain.coMerged, arrivalMin: block.start };
     }
     merged.push(block);
   }
