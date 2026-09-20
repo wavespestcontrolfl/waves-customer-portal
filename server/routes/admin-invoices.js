@@ -993,6 +993,17 @@ function firstDeliveryOutcome(err, firstDeliveryOnly) {
       reason: err.message,
     };
   }
+  // Codex round-7 audit P1 (#4131 slice 4): the single _zeroDueRetried
+  // retry exhausted (the balance changed again while resolving the send)
+  // — genuinely retryable, held for review the same as
+  // deposit_settlement_pending, never reported as a plain failure.
+  if (err?.code === 'balance_changed_retry') {
+    return {
+      type: 'held',
+      code: 'balance_changed_retry',
+      reason: err.message,
+    };
+  }
   // NOTE: a thrown zero_due used to be recognized here too (a settlement
   // that ran INSIDE claimInvoiceForSend's own claim, reported as a noop
   // success). Codex round-5 audit #4131 slice 4 confirmed it dead: since
@@ -1803,11 +1814,14 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       }
       throw err;
     }
-    if (result.code === 'deposit_settlement_pending' || result.code === 'INVOICE_VISIT_TERMINAL_UNVOIDED') {
-      // Nothing due (deposit-covered) but not settleable right now, or a
-      // terminal-visit invoice the void sweep safety-refused to touch:
-      // both a retryable/held-for-review conflict, never a $0 pay link or
-      // a silent "handled" (#4131 slice 4, round-6 audit P1).
+    if (result.code === 'deposit_settlement_pending' || result.code === 'INVOICE_VISIT_TERMINAL_UNVOIDED'
+      || result.code === 'balance_changed_retry') {
+      // Nothing due (deposit-covered) but not settleable right now; a
+      // terminal-visit invoice the void sweep safety-refused to touch; or
+      // an exhausted zero-due retry (the balance changed again while
+      // resolving the send): all a retryable/held-for-review conflict,
+      // never a $0 pay link or a silent "handled" (#4131 slice 4, round-6
+      // and round-7 audit P1s).
       return res.status(409).json(result);
     }
     if (!result.ok) {

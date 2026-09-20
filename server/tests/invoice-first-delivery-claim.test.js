@@ -57,7 +57,7 @@ const INVOICE_ID = 'aaaaaaaa-1111-4111-8111-111111111111';
 // after the FIRST `.first()` snapshot resolves — modeling another
 // worker's write landing in the window between the snapshot and the flip
 // (the ABA race the round-2 fix closes).
-function makeDb(invoiceRow, { mutateAfterFirstRead = null, mutateAfterNthRead = null } = {}) {
+function makeDb(invoiceRow, { mutateAfterFirstRead = null, mutateAfterNthRead = null, patchAfterRead = null } = {}) {
   let row = { ...invoiceRow };
   let firstReadCount = 0;
   const updateSpy = jest.fn();
@@ -85,6 +85,15 @@ function makeDb(invoiceRow, { mutateAfterFirstRead = null, mutateAfterNthRead = 
       // read specifically (Codex round-6 P2 #4131), for races landing
       // between two SPECIFIC reads rather than right after the first one.
       if (mutateAfterNthRead && firstReadCount === mutateAfterNthRead.n) row = { ...row, ...mutateAfterNthRead.patch };
+      // patchAfterRead(n): general escape hatch (Codex round-7 audit P1
+      // #4131) for a race toggling back and forth across MORE than one
+      // read (two consecutive zero-due/not-zero-due flips) — called with
+      // the read count just served; return a patch object to merge, or
+      // null/undefined for no change.
+      if (patchAfterRead) {
+        const patch = patchAfterRead(firstReadCount);
+        if (patch) row = { ...row, ...patch };
+      }
       return snapshot;
     });
     q.update = jest.fn((payload) => {
@@ -602,6 +611,36 @@ describe('sendViaSMS — resolving the zero-due chokepoint after catching zero_d
     spy.mockRestore();
   });
 
+  test('TWO CONSECUTIVE not_zero_due flips (the retry\'s own re-claim finds zero-due again, then not-zero-due again) reports balance_changed_retry — never the pending/nothing-due wording, never "(undefined)" (Codex round-7 audit P1 #4131)', async () => {
+    // read #2 (the claim's own snapshot) is zero-due — throws
+    // zero_due_detected. read #3 (the chokepoint's fresh re-read) is NOT
+    // zero-due — the retry fires. read #5 (the RETRY's own claim
+    // snapshot) is zero-due AGAIN — throws zero_due_detected a second
+    // time. read #6 (the chokepoint's second fresh re-read) is NOT
+    // zero-due again — _zeroDueRetried is already true, so this time it
+    // falls through to zeroDueDirectSendOutcome with kind: 'not_zero_due'
+    // — the exact descriptor that has no `reason` field of its own.
+    makeDb(zeroDueRow(), {
+      patchAfterRead: (n) => {
+        if (n === 2) return { credit_applied: 0 };
+        if (n === 3) return { credit_applied: 100 };
+        if (n === 5) return { credit_applied: 0 };
+        return null;
+      },
+    });
+
+    const result = await InvoiceService.sendViaSMS(INVOICE_ID);
+
+    expect(result).toMatchObject({
+      sent: false, ok: false, code: 'balance_changed_retry', deliveryOutcome: 'not_sent', retryable: true,
+    });
+    expect(result.code).not.toBe('deposit_settlement_pending');
+    expect(typeof result.reason).toBe('string');
+    expect(result.reason).not.toMatch(/undefined/);
+    expect(result.reason).not.toMatch(/nothing is due/i);
+    expect(settleSpy).not.toHaveBeenCalled();
+  });
+
   test('an unexpected throw from the chokepoint (a bug, a DB error) propagates out of sendViaSMS too — never silently reinterpreted', async () => {
     // Codex round-5 #4131: sendViaSMS's own catch calls settleZeroDueBeforeSend
     // to resolve a zero_due_detected — if THAT throws unexpectedly, it must
@@ -641,17 +680,28 @@ describe('sendViaSMS — resolving the zero-due chokepoint after catching zero_d
     spy.mockRestore();
   });
 
-  test('a PRECLAIMED row rediscovering zero-due resolves through the chokepoint too — deposit_settlement_pending, since settleZeroBalance itself refuses a "sending" row', async () => {
+  test('a PRECLAIMED row rediscovering zero-due resolves through the chokepoint too — balance_changed_retry, since the chokepoint\'s own fresh read always sees the preclaimer\'s "sending" status as not-claimable', async () => {
+    // A preclaimed row's status is 'sending' for the whole span of this
+    // check — never a SEND_CLAIMABLE_STATUSES member — so
+    // settleZeroDueBeforeSend's fresh re-read here can never actually
+    // reach settleZeroBalance; it always resolves not_zero_due. The one
+    // bounded retry hits the exact same wall a second time (still
+    // 'sending'), so this always lands on the round-7 audit P1 fix's
+    // honest retryable refusal — never settleZeroBalance's own business
+    // refusal, and never the stale deposit_settlement_pending/"(undefined)"
+    // wording either.
     makeDb({
       id: INVOICE_ID, status: 'sending', scheduled_service_id: 'svc-1',
       total: 100, credit_applied: 100, send_claim_token: 'worker-tok',
       scheduled_send_at: null, scheduled_send_error: null,
     });
-    settleSpy.mockResolvedValue({ settled: false, reason: 'invoice_delivery_in_flight', invoice: null });
 
     const result = await InvoiceService.sendViaSMS(INVOICE_ID, { allowClaimed: true, claimToken: 'worker-tok' });
 
-    expect(result).toMatchObject({ sent: false, ok: false, code: 'deposit_settlement_pending' });
+    expect(result).toMatchObject({ sent: false, ok: false, code: 'balance_changed_retry', retryable: true });
+    expect(typeof result.reason).toBe('string');
+    expect(result.reason).not.toMatch(/undefined/);
+    expect(settleSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -721,5 +771,32 @@ describe('zeroDueDirectSendOutcome / zeroDueWrapperOutcome — a safety-refused 
       sms: { ok: false, code: 'INVOICE_VISIT_TERMINAL', deliveryOutcome: 'not_sent' },
       email: { ok: false, code: 'INVOICE_VISIT_TERMINAL', deliveryOutcome: 'not_sent' },
     });
+  });
+});
+
+describe('zeroDueDirectSendOutcome / zeroDueWrapperOutcome — an exhausted not_zero_due retry is an honest retryable refusal, never "nothing is due" (Codex round-7 audit P1 #4131)', () => {
+  const exhaustedOutcome = { kind: 'not_zero_due' };
+
+  test('direct (sendViaSMS) shape: balance_changed_retry, a defined reason, never "(undefined)", never deposit_settlement_pending', async () => {
+    const result = await InvoiceService._zeroDueDirectSendOutcome(INVOICE_ID, exhaustedOutcome);
+
+    expect(result).toEqual({
+      sent: false, ok: false, code: 'balance_changed_retry', deliveryOutcome: 'not_sent', retryable: true,
+      reason: 'The balance changed while sending; try again',
+    });
+    expect(result.reason).not.toMatch(/undefined/);
+    expect(result.code).not.toBe('deposit_settlement_pending');
+  });
+
+  test('wrapper (sendViaSMSAndEmail) shape: same fix — balance_changed_retry on both legs, a defined error, never "(undefined)"', async () => {
+    const result = await InvoiceService._zeroDueWrapperOutcome(INVOICE_ID, exhaustedOutcome);
+
+    expect(result).toEqual({
+      ok: false, code: 'balance_changed_retry', error: 'The balance changed while sending; try again',
+      sms: { ok: false, code: 'balance_changed_retry', deliveryOutcome: 'not_sent' },
+      email: { ok: false, code: 'balance_changed_retry', deliveryOutcome: 'not_sent' },
+    });
+    expect(result.error).not.toMatch(/undefined/);
+    expect(result.code).not.toBe('deposit_settlement_pending');
   });
 });

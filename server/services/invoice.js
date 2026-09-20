@@ -1428,6 +1428,18 @@ async function zeroDueDirectSendOutcome(invoiceId, outcome) {
   if (outcome.code === "payer_billed") {
     return { sent: false, ok: false, code: "payer_billed", reason: "Suppressed — the visit is now billed to a third-party payer" };
   }
+  if (outcome.kind === "not_zero_due") {
+    // The one _zeroDueRetried retry (see the call sites above) is
+    // exhausted, or this call had no retry rail to begin with — the
+    // balance changed WHILE this send was being resolved, genuinely
+    // retryable, but NOT a recognized settlement refusal. The old
+    // fallthrough below reused deposit_settlement_pending's "nothing is
+    // due" wording for this too — false (the invoice IS collectible
+    // again) and, with no `outcome.reason` on this descriptor, it
+    // literally rendered "(undefined)" (Codex round-7 audit P1 #4131).
+    return { sent: false, ok: false, code: "balance_changed_retry", deliveryOutcome: "not_sent", retryable: true,
+      reason: "The balance changed while sending; try again" };
+  }
   return { sent: false, ok: false, code: "deposit_settlement_pending", deliveryOutcome: "not_sent", retryable: true,
     reason: zeroDueRefusalReasonText(outcome) };
 }
@@ -1476,6 +1488,15 @@ async function zeroDueWrapperOutcome(invoiceId, outcome) {
   if (outcome.code === "payer_billed") {
     return { ok: false, error: "Suppressed — the visit is now billed to a third-party payer", code: "payer_billed",
       sms: { ok: false, code: "payer_billed" }, email: { ok: false, code: "payer_billed" } };
+  }
+  if (outcome.kind === "not_zero_due") {
+    // Same round-7 audit P1 fix, mirrored here for the wrapper shape: an
+    // exhausted retry must report an honest, retryable not-sent outcome —
+    // never the pending/nothing-due wording, and never "(undefined)".
+    const reason = "The balance changed while sending; try again";
+    return { ok: false, code: "balance_changed_retry", error: reason,
+      sms: { ok: false, code: "balance_changed_retry", deliveryOutcome: "not_sent" },
+      email: { ok: false, code: "balance_changed_retry", deliveryOutcome: "not_sent" } };
   }
   const err = depositSettlementPendingError(invoiceId, outcome.reason);
   return { ok: false, code: err.code, error: err.message, sms: { ok: false, code: err.code }, email: { ok: false, code: err.code } };

@@ -276,6 +276,28 @@ describe('POST /admin/invoices/:id/send — first delivery vs. explicit Resend a
     });
   });
 
+  test('an exhausted zero-due retry (balance_changed_retry) is held for review as a 409 with an honest reason, never "nothing is due" (Codex round-7 audit P1 #4131)', async () => {
+    // The RESOLVED wrapper shape zeroDueWrapperOutcome now produces when
+    // the single _zeroDueRetried retry is exhausted — the balance
+    // changed again while resolving the send. Distinct from
+    // deposit_settlement_pending: never the "nothing is due" wording,
+    // since the invoice IS collectible.
+    InvoiceService.sendViaSMSAndEmail.mockResolvedValue({
+      ok: false, code: 'balance_changed_retry',
+      error: 'The balance changed while sending; try again',
+      sms: { ok: false, code: 'balance_changed_retry', deliveryOutcome: 'not_sent' },
+      email: { ok: false, code: 'balance_changed_retry', deliveryOutcome: 'not_sent' },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await postSend(baseUrl, {});
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body).toMatchObject({ ok: false, code: 'balance_changed_retry' });
+      expect(body.error).toMatch(/balance changed/);
+      expect(body.error).not.toMatch(/nothing is due/i);
+    });
+  });
+
   test('an explicit Resend that finds a queued pay-link text is a real conflict, not a no-op success', async () => {
     InvoiceService.sendViaSMSAndEmail.mockImplementation(async () => {
       const e = new Error('Invoice send already in progress — a text carrying this pay link is queued for the send window');
