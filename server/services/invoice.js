@@ -1376,13 +1376,19 @@ async function refuseZeroDuePreclaimedInvoice(invoiceId, current, database) {
 // (the attempt cap, the due predicate) only has to be made once.
 async function claimDueScheduledInvoiceForSend(database, invoiceId) {
   const claimToken = crypto.randomUUID();
+  // Full row (pre-push audit P1, #4131 slice 4): claimPacketInvoiceForSend's
+  // requireDue branch used to return "*" as claim.invoice before sharing
+  // this helper, and downstream consumers of a packet claim read fields
+  // (customer_id, token, invoice_number, payer_id, scheduled_service_id)
+  // this narrower column list silently dropped. Costs nothing to widen —
+  // the worker loop below still only reads the four fields it needs.
   const [claimed] = await database("invoices")
     .where({ id: invoiceId, status: "scheduled" })
     .whereNotNull("scheduled_send_at")
     .where("scheduled_send_at", "<=", new Date())
     .where((q) => q.whereNull("scheduled_send_attempts").orWhere("scheduled_send_attempts", "<", 5))
     .update({ status: "sending", updated_at: new Date(), send_claim_token: claimToken })
-    .returning(["id", "scheduled_request_review", "scheduled_review_delay_minutes", "send_claim_token"]);
+    .returning("*");
   return claimed || null;
 }
 

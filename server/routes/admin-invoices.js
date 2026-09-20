@@ -961,6 +961,21 @@ function firstDeliveryOutcome(err, firstDeliveryOnly) {
       reason: 'Invoice is parked under a stale-claim review hold (delivery unverified) — not sent; use Resend to confirm and clear it',
     };
   }
+  // Pre-push audit P1 (#4131 slice 4): the claim-path race re-check
+  // (throwForZeroDueVisitInvoice / reverifyClaimedVisitInvoice) throws this
+  // exact code the RESOLVED pre-claim path (zeroDueOpenVisitSendOutcome)
+  // already reports as a friendly, retryable 409 — without this branch the
+  // thrown path fell through to the generic failure handling below (a 500
+  // on /:id/send) for the SAME underlying condition. NOT gated on
+  // firstDeliveryOnly, same reasoning as zero_due above: an explicit
+  // Resend can hit this exact race too.
+  if (err?.code === 'deposit_settlement_pending') {
+    return {
+      type: 'held',
+      code: 'deposit_settlement_pending',
+      reason: err.message,
+    };
+  }
   // Nothing due settled the invoice (now 'prepaid') instead of texting a $0
   // pay link (#4131 slice 4) — a genuine success, not a delivery no-op, and
   // NOT gated on firstDeliveryOnly: an explicit Resend can hit this exact
@@ -1703,6 +1718,16 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
           settled_zero_due: outcome.settled_zero_due,
           sms: { ok: false, code: outcome.code },
           email: { ok: false, code: outcome.code },
+        });
+      }
+      // Pre-push audit P1 (#4131 slice 4): converges the THROWN claim-path
+      // race re-check onto the SAME 409 shape the RESOLVED pre-claim path
+      // below already returns for this code — an operator must see one
+      // consistent retryable conflict regardless of which check caught it.
+      if (outcome?.code === 'deposit_settlement_pending') {
+        return res.status(409).json({
+          ok: false, code: outcome.code, error: outcome.reason,
+          sms: { ok: false, code: outcome.code }, email: { ok: false, code: outcome.code },
         });
       }
       throw err;

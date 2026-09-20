@@ -2188,6 +2188,31 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('a successful requireDue claim returns the FULL invoice row, not just the four worker fields (pre-push audit P1)', async () => {
+    const invoiceId = randomUUID();
+    const token = randomUUID();
+    const invoiceNumber = `FIX-${invoiceId.slice(0, 8)}`;
+    await mockPg('invoices').insert({ id: invoiceId, token, invoice_number: invoiceNumber,
+      customer_id: fixture.customerId, status: 'scheduled', total: 120, visit_completion_packet_id: fixture.packetId,
+      scheduled_send_at: new Date(Date.now() - 60000) });
+    try {
+      const result = await require('../services/invoice').claimPacketInvoiceForSend(invoiceId, fixture.packetId, { requireDue: true });
+      expect(result.payerBilled).toBe(false);
+      expect(result.claim.claimed).toBe(true);
+      // claimDueScheduledInvoiceForSend used to .returning() only four
+      // columns (id, scheduled_request_review, scheduled_review_delay_
+      // minutes, send_claim_token) — downstream consumers reading
+      // customer_id, token, invoice_number, or payer_id off a packet
+      // claim's invoice got undefined instead of the real value.
+      expect(result.claim.invoice).toMatchObject({
+        id: invoiceId, customer_id: fixture.customerId, token,
+        invoice_number: invoiceNumber, payer_id: null, status: 'sending',
+      });
+    } finally {
+      await mockPg('invoices').where({ id: invoiceId }).del();
+    }
+  });
+
   test('a payer deactivation that follows a withdrawal returns the invoice to its queue and lifts the hold', async () => {
     const Invoice = require('../services/invoice');
     const Payer = require('../services/payer');

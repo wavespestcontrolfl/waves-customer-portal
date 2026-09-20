@@ -256,6 +256,28 @@ describe('POST /admin/invoices/:id/send — first delivery vs. explicit Resend a
     });
   });
 
+  // Pre-push audit P1: the claim-path race re-check (throwForZero
+  // DueVisitInvoice / reverifyClaimedVisitInvoice) throws this exact code
+  // for the SAME underlying condition zeroDueOpenVisitSendOutcome's
+  // RESOLVED pre-claim path already reports as a friendly 409 above — the
+  // thrown path used to fall through to the generic failure handling
+  // (a bare 500), leaving the operator with two different responses for
+  // one condition depending on which check happened to catch it.
+  test('the thrown deposit_settlement_pending race path converges on the SAME 409 shape as the resolved pre-claim path', async () => {
+    InvoiceService.sendViaSMSAndEmail.mockImplementation(async () => {
+      const e = new Error('Nothing is due on this invoice, but it could not be settled yet (existing_payment_work) — not sent.');
+      e.code = 'deposit_settlement_pending';
+      throw e;
+    });
+    await withServer(async (baseUrl) => {
+      const res = await postSend(baseUrl, {});
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body).toMatchObject({ ok: false, code: 'deposit_settlement_pending' });
+      expect(body.error).toMatch(/could not be settled yet/);
+    });
+  });
+
   test('an explicit Resend that finds a queued pay-link text is a real conflict, not a no-op success', async () => {
     InvoiceService.sendViaSMSAndEmail.mockImplementation(async () => {
       const e = new Error('Invoice send already in progress — a text carrying this pay link is queued for the send window');
