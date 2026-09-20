@@ -2530,7 +2530,9 @@ function reportConfirmationQuestion(text, subject, location) {
   return confirmation.test(normalized);
 }
 
-function reportSharedLocationContinuation(text, clauseEnd, location, subject, assertionEnd, findingText) {
+function reportSharedLocationContinuation(
+  text, clauseEnd, location, subject, assertionEnd, findingText, matchedLocation = location,
+) {
   const remainder = text.slice(clauseEnd);
   // Reuse the splitter's actual boundaries so a retraction is not lost at
   // "though", "yet", or another coordinator the splitter already recognizes.
@@ -2544,7 +2546,7 @@ function reportSharedLocationContinuation(text, clauseEnd, location, subject, as
   // One retraction predicate for every continuation shape. A list carries its
   // own date, so a timed denial compares against the finding plus the list.
   const retracts = (source, finding = findingText) => {
-    const qualifier = reportRetractionClause(source, subject, location);
+    const qualifier = reportRetractionClause(source, subject, matchedLocation);
     return REPORT_TRAILING_UNCERTAINTY_RE.test(qualifier) || reportTrailingDenialOrCorrection(qualifier)
       || reportTimedDenial(qualifier, finding) || reportTrailingNoncompletion(qualifier);
   };
@@ -2644,8 +2646,11 @@ function report_readback_confirms(value, record, { spoken }) {
     // Retraction checks bind to the product this match actually named, so a
     // denial about another scenario alternative stays independent.
     const matchedProduct = m[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const firstLocation = reportContentMatches(text.slice(clauseStart, clauseEnd), locationRe).next().value;
+    const matchedLocation = firstLocation
+      ? firstLocation[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : value.location;
     const sharedLocation = reportSharedLocationContinuation(
-      text, scopeEnd, value.location, matchedProduct, clauseEnd, initialAssertion.text,
+      text, scopeEnd, value.location, matchedProduct, clauseEnd, initialAssertion.text, matchedLocation,
     );
     // A shared list extends the finding; every continuation check starts
     // after it, exactly as it would after a plain clause.
@@ -2655,7 +2660,6 @@ function report_readback_confirms(value, record, { spoken }) {
       || /(?:,\s*|\s+)(?:(?:is|was|has|had)\s+(?:that|this|it)(?:\s+(?:right|correct|true))?|(?:did|do)\s+(?:we|they)|(?:are|were)\s+(?:you|we|they)\s+(?:sure|certain)(?:\s+(?:about|of)\s+(?:it|this|that))?)\s*$/i
         .test(text.slice(clauseStart, clauseEnd));
     const independentFollowupQuestion = FOLLOWUP_QUESTION_RE.test(text.slice(m.index + m[0].length, clauseEnd));
-    const firstLocation = reportContentMatches(text.slice(clauseStart, clauseEnd), locationRe).next().value;
     const locationEnd = firstLocation ? clauseStart + firstLocation.index + firstLocation[0].length : 0;
     // A scenario may match only "exterior" and leave the location's noun
     // before the comma. It still belongs to the finding, not the question.
@@ -2680,7 +2684,7 @@ function report_readback_confirms(value, record, { spoken }) {
     // the correction attached to this finding's assertion, not an earlier one.
     const withoutApology = clause.replace(/,\s*(?:sorry|my\s+mistake|my\s+apologies)\s*$/i, '');
     if (reportTrailingDenialOrCorrection(reportRetractionClause(
-      withoutApology.slice(withoutApology.lastIndexOf(',') + 1), matchedProduct, value.location,
+      withoutApology.slice(withoutApology.lastIndexOf(',') + 1), matchedProduct, matchedLocation,
     ))) continue;
     // A contrast excludes its following alternative, not the location
     // affirmed before it: "exterior rather than indoors" and "exterior,

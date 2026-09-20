@@ -129,3 +129,14 @@ test.each([
   const alternatives = { subject: 'Talstar P|bait', location: 'exterior perimeter' };
   expect(checks.report_readback_confirms(alternatives, {}, { spoken })[0]).toBe(status);
 });
+
+test.each([
+  [['Talstar P was applied to the exterior perimeter.', 'Talstar P was not applied to the garage.'], 'pass'],
+  [['Talstar P was applied to the exterior perimeter.', 'It was not applied to the garage.'], 'pass'],
+  [['Talstar P was applied to the exterior perimeter.', 'Talstar P was not applied to the exterior perimeter.'], 'fail'],
+  [['Talstar P was applied to the garage.', 'It was not applied there.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter and garage.', 'It was not applied there.'], 'fail'],
+])('retractions bind to the location alternative the readback named: %j', (spoken, status) => {
+  const alternatives = { subject: 'talstar p', location: 'exterior perimeter|garage' };
+  expect(checks.report_readback_confirms(alternatives, {}, { spoken })[0]).toBe(status);
+});
