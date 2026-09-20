@@ -1,757 +1,280 @@
 /**
- * Zone-Based Availability Engine
- *
- * Only shows slots when a tech is already working in the customer's zone.
- * Finds 1-hour gaps between existing jobs with buffer enforcement.
+ * Recognize callback commitment candidates, without deciding whether consent,
+ * a refusal or a hedge makes them permissible. All spans are half-open UTF-16
+ * offsets into the supplied spoken string, including an inherited actor that
+ * can precede the candidate source. No transcript, tool or policy dependencies.
  */
-const { NOT_A_ROUTE_STOP_STATUSES } = require('./stops-ahead');
-const db = require('../models/db');
-const { lockCustomerComms } = require('../utils/customer-comms-lock');
-const logger = require('./logger');
-const { sendCustomerMessage } = require('./messaging/send-customer-message');
-const { etParts, etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
-const { generateConfirmationCode } = require('../utils/slot-offer-token');
-const { findConflictingVisits, acquireOccupancyLock, listOccupiedWindows } = require('./scheduling/occupancy');
-const { travelGapEnabled, violatesTravelGap } = require('./scheduling/travel-gap');
 
-function bookingError(message, code, statusCode = 409) {
-  return Object.assign(new Error(message), { code, statusCode, isOperational: true });
-}
+const TEAM_PROMISERS = Object.freeze(['I', 'we', 'the office', 'our office', 'the team', 'our team', 'a member of our team', 'a team member', 'a Waves team member', 'someone', 'someone from the office', 'someone from our office', 'somebody', 'one of us', 'a technician', 'the technician', 'our technician', 'our tech', 'the tech', 'a tech', 'dispatch', 'customer service', 'waves']);
+const WEEKDAYS = 'monday|tuesday|wednesday|thursday|friday|saturday|sunday|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo';
+// Shared actor/action vocabulary; sibling timing and consent checks use the
+// same contact nouns rather than independently expanding the grammar.
+const CALLBACK_VERB = '(?:call|phone|ring|reach(?: out to)?|contact|get in touch with|follow up with|get back to|speak (?:with|to)|talk (?:to|with)|text|email)';
+const CALLBACK_VERB_ING = '(?:calling|phoning|ringing|reaching(?: out to)?|contacting|getting in touch with|following up with|getting back to|speaking (?:with|to)|talking (?:to|with)|texting|emailing)';
+const CALLBACK_LIGHT_VERB = '(?:give|send|place|make|shoot|drop|leave|return)';
+const CALLBACK_CONTACT_NOUN = '(?:(?:(?:phone|telephone|quick|courtesy|follow[ -]?up)\\s+)?call|call\\s*back|callback|ring|buzz|voicemail|(?:(?:text|voice)\\s+)?message|text|email|note|line)';
+const CALLBACK_PROMISER = `(?:${TEAM_PROMISERS.join('|')})`;
+// "scheduled" can carry a short timing phrase before its infinitive ("is
+// scheduled tomorrow to call her", "are scheduled at 3 PM to call her");
+// bounding the gap to a few tokens keeps it from crossing into an
+// unrelated clause.
+const CALLBACK_SCHEDULING_TIMING_GAP = '(?:[a-z0-9:]+\\s+){0,3}';
+const CALLBACK_MODAL = `(?:[\\x27\\u2019]ll|[\\x27\\u2019](?:re|s) going to|[\\x27\\u2019](?:re|s) scheduled ${CALLBACK_SCHEDULING_TIMING_GAP}to|[\\x27\\u2019]m going to|[\\x27\\u2019]m scheduled ${CALLBACK_SCHEDULING_TIMING_GAP}to| promise(?:s|d)? to| will| can| could| am going to| are going to| is going to| am scheduled ${CALLBACK_SCHEDULING_TIMING_GAP}to| are scheduled ${CALLBACK_SCHEDULING_TIMING_GAP}to| is scheduled ${CALLBACK_SCHEDULING_TIMING_GAP}to)`;
+const CALLBACK_COORDINATED_MODAL = '(?:will|can|could|promise(?:s|d)? to|(?:am|are|is) going to|(?:am|are|is) scheduled to)';
+const CALLBACK_GOVERNING_MODAL = '(?:is|are|was|were|will|would|can|could|do|does|did|has|have|had|should|shall|may|might|must|cannot|can[\\x27\\u2019]t|could not|couldn[\\x27\\u2019]t|will not|won[\\x27\\u2019]t)';
+// A leading pronoun, determiner, or possessive marks where an actor's noun
+// phrase can actually start; a bare temporal or conditional adverbial
+// ("tomorrow", "if necessary") never does. Requiring the generic (non-
+// promiser) subject branch to start on one of these — instead of allowing
+// any word — keeps the coordinated-actor capture from swallowing whatever
+// adverbial precedes it, without enumerating every possible adverb.
+const CALLBACK_ACTOR_HEAD = '(?:you|he|she|it|they|one|who|my|our|your|his|their|the|an?|this|that|these|those|some|another)';
+// A coordinator can be followed by a short adverbial or discourse aside
+// ("tomorrow", "of course", "if necessary") with no punctuation of its own
+// before the real subject. Each skipped word is barred from itself being a
+// promiser or an actor-head word, so the filler can never consume the
+// subject it is supposed to be clearing out of the way; bounding it to two
+// words keeps "and of course we're going to review" and "and tomorrow
+// we'll review" both resolving to actor "we".
+const CALLBACK_COORDINATED_FILLER = `(?:(?!\\b(?:${CALLBACK_ACTOR_HEAD}|${CALLBACK_PROMISER})\\b)[a-z][\\w\\x27\\u2019.-]*\\s+){0,2}`;
+const CALLBACK_COORDINATED_SUBJECT_RE = new RegExp(
+  `(?:^|[,;:]|\\b(?:and|or|but|so|then)\\b)\\s*(?:(?:and|or|but|so|then)\\b\\s*)*${CALLBACK_COORDINATED_FILLER}(?<subject>${CALLBACK_PROMISER}|${CALLBACK_ACTOR_HEAD}(?:\\s+[a-z][\\w\\x27\\u2019.-]*){0,3})(?:\\s+${CALLBACK_GOVERNING_MODAL}|${CALLBACK_MODAL})\\b`,
+  'gi',
+);
+// A bridge like "check, or call her" reuses the sentence's opening promiser,
+// but an intervening subject with its own bare verb that directly abuts the
+// coordinator (no punctuation break) governs the coordinated action instead:
+// "while you review or call her" means "you review or [you] call her", not
+// a Waves promise. "she agrees, and email him" stays bridgeable because the
+// comma separates the aside from the resumed main-clause coordination.
+// Verb agreement, not just a subject word, decides whether the intervening
+// clause actually governs the coordinated action: "you review or call her"
+// reads as "you review or [you] call her" because "you" can also govern the
+// following base-form contact verb, but singular "she" cannot — "she
+// reviews and call her" can only mean "[we] call her", so an -s finite verb
+// after a third-person-singular subject does not count as a bridge. A
+// plural/second-person subject keeps matching on any final word since its
+// base-form verb never carries that -s.
+const CALLBACK_SUBORDINATE_BRIDGE = `\\b(?:you|they|one|who)\\b\\s+(?:(?!(?:and|or|but|so|then)\\b)[a-z]+\\s+){0,3}(?!(?:and|or|but|so|then)\\b)[a-z]+\\s*\\b(?:and|or|but|so|then)\\b|\\b(?:she|he|it)\\b\\s+(?:(?!(?:and|or|but|so|then)\\b)[a-z]+\\s+){0,3}(?!(?:and|or|but|so|then)\\b)[a-z]+(?<!s)\\s*\\b(?:and|or|but|so|then)\\b`;
+// Two branches, deliberately not one: a BASE verb may sit up to three filler
+// words after the modal ("will go ahead and call her"), while an -ING verb
+// counts only through "be". The future progressive ("will be calling her")
+// promises what "will call" does; "will avoid calling her" and "will
+// consider calling her" commit to nothing. Filler cannot consume "you", so
+// "we will ask you to call her" keeps the caller as the callback actor.
+const CALLBACK_ADVERB = '(?:\\w+ly\\s+)?';
+const CALLBACK_ACTOR_SHIFT = '(?:ask|help|remind|tell|have|get|let|allow|make)';
+const CALLBACK_ACTION_FILLER_WORD = `(?!(?:${CALLBACK_ACTOR_SHIFT}|refuse|decline|consider|avoid|decide|think|debate|plan|wonder|discuss|you|me|us|him|her|them|your|my|our|his|their)\\b)\\w+`;
+const CALLBACK_ACTION_LEAD = `(?:(?:not\\s+)?(?:go ahead and|make sure to|be sure to)\\s+|(?:${CALLBACK_ACTION_FILLER_WORD}\\s+){0,3}?)`;
+// "whether/if to call" and "not to call" are deliberation or refusal, not a
+// commitment, whatever verb governs them ("debate whether to call",
+// "plan whether to call", "try not to call") — a structural guard on the
+// infinitive shape catches every governing verb at once, rather than
+// enumerating them.
+// A finite embedded question ("see if they call her", "check whether they
+// call her") is the same deliberation as the infinitive shape above, just
+// with its own subject and a finite verb instead of "to" + the base verb —
+// Waves only promises to observe or check, not to make the call itself.
+const CALLBACK_ACTION_DELIBERATION_GUARD = `(?!(?:[a-z]+\\s+){0,3}(?:whether|if)\\s+to\\s+${CALLBACK_VERB}\\b)(?!(?:[a-z]+\\s+){0,3}not\\s+to\\s+${CALLBACK_VERB}\\b)(?!(?:[a-z]+\\s+){0,3}(?:whether|if)\\s+(?!to\\b)[a-z]+\\s+${CALLBACK_VERB}\\b)`;
+const CALLBACK_VERB_PERFECT = '(?:called|phoned|rung|reached(?: out to)?|contacted|got(?:ten)? in touch with|followed up with|got(?:ten)? back to|spoken (?:with|to)|talked (?:to|with)|texted|emailed)';
+const CALLBACK_ACTION = `(?:${CALLBACK_ACTION_DELIBERATION_GUARD}${CALLBACK_ACTION_LEAD}${CALLBACK_VERB}|${CALLBACK_ADVERB}have\\s+${CALLBACK_ADVERB}${CALLBACK_VERB_PERFECT}|${CALLBACK_ADVERB}be\\s+${CALLBACK_ADVERB}${CALLBACK_VERB_ING})`;
+// Delegating the call is promising it: "have the office call her", "make
+// sure the office calls her", "tell the technician to call your mother".
+// Two delegation shapes, not one: after the same Waves promiser/modal that
+// governs a direct promise, an INFINITIVE after have/get/ask/tell/let/arrange
+// ("I'll ask the office to call her") takes the same base-verb ACTION a
+// modal does, while a FINITE clause after make sure/see that/set it up so/
+// pass this along so needs the delegate as its own subject taking a
+// 3rd-person verb ("I'll make sure the office CALLS her", not "...call
+// her") — its own ACTION table below. Caller advice such as "You can ask
+// the office to call her" has no Waves promiser/modal and is not a promise.
+const CALLBACK_DELEGATE = `(?:${TEAM_PROMISERS.filter((actor) => !/^(?:I|we)$/i.test(actor)).join('|')})`;
+const CALLBACK_DELEGATION_INFINITIVE = `(?:(?:have|get|ask) ${CALLBACK_DELEGATE}(?: to)?|tell ${CALLBACK_DELEGATE} (?:know )?to|let ${CALLBACK_DELEGATE}|arrange for ${CALLBACK_DELEGATE} to)`;
+const CALLBACK_DELEGATION_FINITE = `(?:(?:make sure(?: that)?|see (?:to it )?that) ${CALLBACK_DELEGATE}|set it up so ${CALLBACK_DELEGATE}|pass (?:this|it) (?:along|on) so ${CALLBACK_DELEGATE})`;
+// The FINITE (3rd-person indicative) form of the same verbs, for the FINITE
+// delegation shapes above.
+const CALLBACK_VERB_FINITE = '(?:calls?|phones?|rings?|reach(?:es)?(?: out to)?|contacts?|gets? in touch with|follows? up with|gets? back to|speaks? (?:with|to)|talks? (?:to|with)|texts?|emails?)';
+const CALLBACK_ACTION_FINITE = `(?:(?:${CALLBACK_ACTION_FILLER_WORD}\\s+){0,2}?${CALLBACK_VERB_FINITE}|${CALLBACK_ADVERB}(?:is|are)\\s+${CALLBACK_ADVERB}${CALLBACK_VERB_ING})`;
+// The same promise made INDIRECTLY, with the contact as a noun instead of
+// a verb: "give her a call", "send her a text", "place a call to your
+// mother", "shoot Ruth a message". The light verb takes the same modal,
+// negation, filler and future-progressive grammar the direct verb does
+// (CALLBACK_ACTION's two branches, mirrored here), so "we can't give her a
+// call" and "we will not send her a text" stay refusals exactly as "we
+// can't call her" already does; the recipient sits either between the
+// verb and the noun or after a trailing "to". CALLBACK_LIGHT_VERB and
+// CALLBACK_CONTACT_NOUN themselves are declared above.
+const CALLBACK_LIGHT_VERB_ING = '(?:giving|sending|placing|making|shooting|dropping|leaving|returning)';
+const CALLBACK_LIGHT_VERB_FINITE = '(?:gives?|sends?|places?|makes?|shoots?|drops?|leaves?|returns?)';
+const CALLBACK_LIGHT_ACTION = `(?:(?:${CALLBACK_ACTION_FILLER_WORD}\\s+){0,2}?${CALLBACK_LIGHT_VERB}|${CALLBACK_ADVERB}be\\s+${CALLBACK_ADVERB}${CALLBACK_LIGHT_VERB_ING})`;
+const CALLBACK_LIGHT_ACTION_FINITE = `(?:(?:${CALLBACK_ACTION_FILLER_WORD}\\s+){0,2}?${CALLBACK_LIGHT_VERB_FINITE}|${CALLBACK_ADVERB}(?:is|are)\\s+${CALLBACK_ADVERB}${CALLBACK_LIGHT_VERB_ING})`;
+// What follows the promise grammar: the direct verb and its recipient
+// ("call her"), or the light verb with the recipient before the contact noun
+// ("give her a call") or after it ("place a call to her").
+const CALLBACK_RECIPIENT_CHANNEL = '(?:cell(?:ular)? phone|mobile(?: phone)?|phone(?: number)?|number)';
+const CALLBACK_TIMING_ADVERB = '(?:soon|shortly|immediately|promptly|right away|as soon as possible|at once)';
+// "sometime"/"later" stand alone or head an ordinary timing phrase
+// ("sometime tomorrow", "later this week"); folding the bare "later" case
+// into this alternative avoids listing it twice.
+const CALLBACK_TIMING_PHRASE = '(?:sometime|later)(?:\\s+(?:today|tomorrow|this\\s+week))?';
+// A bare "\w+ly" alternative also matches possessive nouns that merely end
+// in "-ly" ("her family", "her ally"), which are not adverbs at all; a
+// bounded list of the actual trailing adverbs keeps those nouns from being
+// swallowed as if they ended the recipient phrase.
+const CALLBACK_TRAILING_ADVERB = '(?:shortly|quickly|directly|immediately|promptly|personally|briefly)';
+const CALLBACK_TRAILING_MODIFIER = `(?:${CALLBACK_TRAILING_ADVERB}|again|back|now|then|too|instead|anyway|today|tomorrow|tonight|${CALLBACK_TIMING_PHRASE}|${CALLBACK_TIMING_ADVERB}|${WEEKDAYS}|next\\s+(?:week|weekend|month|year|${WEEKDAYS}))`;
+const CALLBACK_CONCESSION = '(?:even\\s+(?:if|though)|whether|(?:regardless|irrespective)(?:\\s+of)?)';
+// "around"/"within" join the other simple timing prepositions already
+// accepted here ("in an hour", "at noon", "by 5", "before/after lunch")
+// so an ordinary prepositional timing phrase can follow the recipient.
+const CALLBACK_TRAILING_LINK = `(?:and|or|but|so|in|at|on|by|from|before|after|around|within|if|unless|when|once|provided|because|to|about|regarding|with|without|for|as|${CALLBACK_CONCESSION})`;
+// A complete person/actor phrase can end before punctuation, a clause link,
+// or an adverbial modifier. A following bare noun remains part of a possessive
+// phrase ("her landlord", "the technician's supplier") and is not accepted.
+const CALLBACK_PHRASE_END = `(?=\\s*(?:[.!?,;:—–]|$|${CALLBACK_TRAILING_MODIFIER}\\b|${CALLBACK_TRAILING_LINK}\\b|(?:the|an?|this|that|these|those|some)\\b))`;
+// \b only recognizes ASCII letters/digits/underscore as "word" characters, so
+// it finds no boundary right after a non-ASCII letter ("José", "Zoë") that
+// ends a sentence or precedes punctuation. These Unicode property lookarounds
+// replace it wherever a configured recipient alias can end a match; every
+// regex that embeds one needs the 'u' flag.
+const CALLBACK_UNICODE_WORD_START = '(?<![\\p{L}\\p{N}_])';
+const CALLBACK_UNICODE_WORD_END = '(?![\\p{L}\\p{N}_])';
+// "call her a taxi" / "call her this nickname" / "call her that name" is a
+// benefactive or naming use ("get her a taxi", "refer to her as the
+// owner"), not a contact commitment, for any determiner the phrase-end
+// below also recognizes ("this/that/these/those/some") plus the other
+// ordinary object-complement determiners. A determiner directly after the
+// recipient blocks the whole direct-verb match rather than merely ending
+// the recipient span early. A preposition-led timing phrase ("within an
+// hour", "in an hour") is unaffected: the word right after the recipient
+// there is the preposition, not a determiner.
+// A determiner-led TIMING phrase ("this afternoon", "some time tomorrow")
+// is not an object complement even though it shares the same
+// determiner-then-word shape as "this nickname" / "that name" / "some
+// fool"; excluding the bounded timing nouns from the word right after the
+// determiner keeps those ordinary callback times from being rejected.
+const CALLBACK_OBJECT_COMPLEMENT_TIMING_NOUN = `(?:afternoon|morning|evening|weekend|week|month|year|time|day|${WEEKDAYS}|minute|hour|moment)`;
+const CALLBACK_OBJECT_COMPLEMENT = `(?!\\s+(?:an?|the|this|that|these|those|some|any|another|my|our|your|his|their)\\s+(?!${CALLBACK_OBJECT_COMPLEMENT_TIMING_NOUN}\\b)[a-z])`;
+const callbackTarget = (targets, action, lightAction) => `(?:${action}\\s+(?:${targets})(?:[\\x27\\u2019]s\\s+${CALLBACK_RECIPIENT_CHANNEL}|\\s+${CALLBACK_RECIPIENT_CHANNEL})?${CALLBACK_UNICODE_WORD_END}${CALLBACK_OBJECT_COMPLEMENT}${CALLBACK_PHRASE_END}|${lightAction}\\s+(?:(?:${targets})(?:[\\x27\\u2019]s)?\\s+(?:an?\\s+)?${CALLBACK_CONTACT_NOUN}\\b${CALLBACK_PHRASE_END}|an?\\s+${CALLBACK_CONTACT_NOUN}\\s+(?:to|for)\\s+(?:${targets})${CALLBACK_UNICODE_WORD_END}${CALLBACK_PHRASE_END}))`;
+const CALLBACK_RECIPIENT_ACTION = `(?:be\\s+(?:called|phoned|rung|contacted|texted|emailed|reached(?: out to)?|followed up with)\\s+by|(?:get|receive)\\s+an?\\s+${CALLBACK_CONTACT_NOUN}\\s+from|hear from)`;
+// The same promise as a noun instead of a verb: "is scheduled for a call
+// with her", "is booked for a phone call with the office". Used both as a
+// direct promiser-first form and, mirroring CALLBACK_RECIPIENT_ACTION
+// above, as a recipient-first passive ("she is booked for a call with the
+// office").
+const CALLBACK_SCHEDULED_CALL_NOUN = `(?:is|are|was|am)\\s+(?:scheduled|booked|set\\s+up)\\s+for\\s+(?:an?\\s+)?${CALLBACK_CONTACT_NOUN}\\s+with`;
+// Whom every scenario's account holder can be called without naming her: a
+// pronoun, or the role the caller is asking about. The fixture's `targets`
+// add the names and relationships this scenario's account holder goes by
+// ("Ruth", "your mother", "Ms. Marsh") — a promise to call the CALLER
+// ("we'll call you back") is not one of them, and passes.
+const ACCOUNT_HOLDER_TARGETS = Object.freeze(['her', 'him', 'them', 'the (?:account holder|customer|owner|homeowner|resident)']);
 
-// ---- global self-booking day cap (shared by EVERY writer) -----------------
-//
-// max_self_books_per_day is GLOBAL by calendar date, but the writers'
-// narrower locks (customer/tech/zone) don't serialize two confirms in
-// DIFFERENT zones — both could observe a cap-1 count and insert, exceeding
-// the cap. These two primitives centralize the fix: one date-scoped advisory
-// lock + one global count, required by BOTH self_booked_appointments writers
-// (routes/booking.js createSelfBooking and confirmBooking below) so neither
-// can bypass the other. Lock-ordering contract: every writer takes its
-// narrower locks FIRST (createSelfBooking: customer → tech → zone;
-// confirmBooking: zone) and this date lock LAST — same relative order
-// everywhere, so concurrent confirms can never deadlock.
-const SELF_BOOKING_DAY_CAP_LOCK_NS = 'self-booking-day-cap';
-
-async function acquireSelfBookingDayCapLock(trx, dateStr) {
-  await trx.raw(
-    'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-    [SELF_BOOKING_DAY_CAP_LOCK_NS, String(dateStr)],
+/**
+ * Candidate kinds describe grammar only. actor.waves identifies the actor
+ * governing a coordinated modal, including a non-Waves subject; the consumer
+ * chooses whether that actor and the surrounding claim violate its policy.
+ * recipient is the actual matched alias, not every configured target.
+ */
+function recognizeCallbackCandidates(text, valueTargets) {
+  const targets = [...valueTargets, ...ACCOUNT_HOLDER_TARGETS].join('|');
+  const recipientTargets = `(?:she|he|they|${targets})`;
+  const contact = callbackTarget(targets, CALLBACK_ACTION, CALLBACK_LIGHT_ACTION);
+  const contactFinite = callbackTarget(targets, CALLBACK_ACTION_FINITE, CALLBACK_LIGHT_ACTION_FINITE);
+  const promisedContact = `(?:${contact}|${CALLBACK_DELEGATION_INFINITIVE}\\s+${contact}|${CALLBACK_DELEGATION_FINITE}\\s+${contactFinite})`;
+  const bareContact = callbackTarget(
+    targets, `${CALLBACK_ADVERB}${CALLBACK_VERB}`, `${CALLBACK_ADVERB}${CALLBACK_LIGHT_VERB}`,
   );
-}
-
-// A self_booked_appointments row is the booking's ORIGINAL slot copy; the
-// linked scheduled_services row (self_booking_id) is the LIVE visit. The
-// public reschedule path syncs the copy when the visit moves, but admin
-// moves don't — a visit moved off its booked day left the copy holding a
-// phantom max_self_books_per_day slot on the old date and NO slot on the new
-// one (2026-08-14 field find: a re-service moved-and-completed days earlier
-// still counted against its original day). So the day a self-booking
-// occupies for the cap is its EFFECTIVE date: the linked live visit's
-// scheduled_date while that visit is active; nothing once every linked
-// visit went inactive (same released set the voice-row counter uses); the
-// copy's own date only when no live row was ever linked (legacy bookings,
-// pre-visit-creation). Both counters — the offer builder's fullDays sweep
-// (routes/booking.js) and the commit gate below — key on this one
-// expression so offer and commit stay in lockstep. Bindings = the inactive
-// statuses (SELF_BOOKING_INACTIVE_STATUSES), in order.
-const SELF_BOOKING_INACTIVE_STATUSES = ['cancelled', 'rescheduled', 'skipped'];
-const SELF_BOOKING_EFFECTIVE_DATE_SQL = `(CASE WHEN EXISTS (
-    SELECT 1 FROM scheduled_services AS linked_visit
-     WHERE linked_visit.self_booking_id = self_booked_appointments.id
-  ) THEN (
-    SELECT live_visit.scheduled_date FROM scheduled_services AS live_visit
-     WHERE live_visit.self_booking_id = self_booked_appointments.id
-       AND live_visit.status NOT IN (?, ?, ?)
-     ORDER BY live_visit.scheduled_date ASC
-     LIMIT 1
-  ) ELSE self_booked_appointments.date END)`;
-
-// Same non-cancelled predicate the availability builder counts full days
-// with. excludeSelfBookingId: a same-day reschedule replaces its own row —
-// counting the row being moved would reject the move on a full day even
-// though the final count is unchanged.
-async function countActiveSelfBookingsForDay(trx, dateStr, { excludeSelfBookingId = null } = {}) {
-  const row = await trx('self_booked_appointments')
-    .whereRaw(`${SELF_BOOKING_EFFECTIVE_DATE_SQL} = ?::date`, [...SELF_BOOKING_INACTIVE_STATUSES, String(dateStr)])
-    .whereNot('status', 'cancelled')
-    .modify((q) => {
-      if (excludeSelfBookingId) q.whereNot('id', excludeSelfBookingId);
-    })
-    .count('* as count')
-    .first();
-  // ⭐ THE VOICE AGENT IS A SELF-BOOKING PRODUCER TOO, AND IT WRITES NO ROW
-  // HERE. Its bookings land straight in `scheduled_services` (the outbound-
-  // review pending lifecycle), so a cap that counted only
-  // `self_booked_appointments` let each voice call re-read the same day as
-  // having room: the cap was checked and never consumed, and the availability
-  // builder kept offering a day that was already full. Counted on the OTHER
-  // table and scoped to the voice source_action, so a portal booking — which
-  // writes both rows — is still counted exactly once.
-  const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('./call-booking-source-actions');
-  const voiceRow = await trx('scheduled_services')
-    .where({ scheduled_date: String(dateStr), source_action: VOICE_AGENT_BOOKING_SOURCE_ACTION })
-    // 'skipped' is a REJECTION — the office declining an AI request — and a
-    // rejected request must give its capacity back, exactly as a cancellation
-    // does. Same inactive set the activation helper and the dedupe use.
-    .whereNotIn('status', ['cancelled', 'rescheduled', 'skipped'])
-    .count('* as count')
-    .first();
-  return parseInt(row?.count || 0, 10) + parseInt(voiceRow?.count || 0, 10);
-}
-
-class AvailabilityEngine {
-
-  // opts.customerId: the booking's customer when no estimate links it (AI
-  // assistant check_availability with the session customer) — gives the
-  // travel-gap mirror the same pin confirmBooking measures with.
-  async getAvailableSlots(city, estimateId, opts = {}) {
-    // 1. Resolve city → zone
-    const zone = await this.resolveZone(city);
-    if (!zone) return { zone: null, days: [], message: `No service zone found for ${city}` };
-
-    // 2. Get config
-    const config = await db('booking_config').first() || {
-      advance_days_min: 1, advance_days_max: 14,
-      day_start: '08:00', day_end: '17:00',
-      lunch_start: '12:00', lunch_end: '13:00',
-      slot_duration_minutes: 60, buffer_minutes: 15,
-      max_self_books_per_day: 3,
+  const barePromisedContact = `(?:${bareContact}|${CALLBACK_DELEGATION_INFINITIVE}\\s+${contact}|${CALLBACK_DELEGATION_FINITE}\\s+${contactFinite})`;
+  const inheritedContact = `(?:and|or|but|so|then)\\s+${CALLBACK_COORDINATED_MODAL}\\s+${promisedContact}`;
+  const shiftedRecipient = '(?:you|me|us|him|her|them|(?:your|my|our|his|their)\\s+[a-z][\\w\\x27\\u2019-]*)';
+  const inheritedBareContact = `${CALLBACK_UNICODE_WORD_START}(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+(?:(?![.!?;]|\\b${CALLBACK_ACTOR_SHIFT}\\s+${shiftedRecipient}\\b|${CALLBACK_COORDINATED_SUBJECT_RE.source}|${CALLBACK_SUBORDINATE_BRIDGE}).){1,120}?\\b(?:and|or|but|so|then)\\s+${barePromisedContact}`;
+  const wavesActor = `(?:${CALLBACK_PROMISER}|me|us)\\b(?![\\x27\\u2019]s\\b)${CALLBACK_PHRASE_END}`;
+  const recipientFirst = `${recipientTargets}${CALLBACK_MODAL}\\s+${CALLBACK_ADVERB}${CALLBACK_RECIPIENT_ACTION}\\s+${wavesActor}`;
+  const scheduledCallDirect = `${CALLBACK_PROMISER}\\s+${CALLBACK_SCHEDULED_CALL_NOUN}\\s+(?:${targets})${CALLBACK_UNICODE_WORD_END}${CALLBACK_PHRASE_END}`;
+  const scheduledCallPassive = `${recipientTargets}\\s+${CALLBACK_SCHEDULED_CALL_NOUN}\\s+${wavesActor}`;
+  const re = new RegExp(
+    // \b only recognizes ASCII word characters, so it finds no boundary
+    // before a recipient-first alias that begins with a non-ASCII letter
+    // ("Élodie will receive a call..."); the same Unicode-safe lookbehind
+    // used for the end boundary elsewhere covers the start too.
+    `${CALLBACK_UNICODE_WORD_START}(?:(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+${promisedContact}|${inheritedContact}|${recipientFirst}|${scheduledCallDirect}|${scheduledCallPassive})`,
+    'giu',
+  );
+  // Scan inherited actions independently: the first contact can be consent
+  // gated while a later bare action still reuses its subject and modal.
+  const inheritedEnd = new RegExp(`${inheritedBareContact}$`, 'iu');
+  const inheritedMatches = [...text.matchAll(new RegExp(barePromisedContact, 'giu'))]
+    .map((contactMatch) => inheritedEnd.exec(text.slice(0, contactMatch.index + contactMatch[0].length)))
+    .filter(Boolean);
+  const matches = [
+    ...[...text.matchAll(re)].map((match) => ({ match, bare: false })),
+    ...inheritedMatches.map((match) => ({ match, bare: true })),
+  ];
+  const seenCandidates = new Set();
+  return matches.map(({ match, bare }) => {
+    const start = match.index;
+    const end = start + match[0].length;
+    const inherited = /^(?:and|or|but|so|then)\b/i.test(match[0]);
+    const recipientMatches = [...match[0].matchAll(new RegExp(
+      `${CALLBACK_UNICODE_WORD_START}(?:she|he|they|${targets})${CALLBACK_UNICODE_WORD_END}`, 'giu',
+    ))];
+    const recipientMatch = recipientMatches[recipientMatches.length - 1];
+    const recipient = recipientMatch ? {
+      text: recipientMatch[0],
+      start: start + recipientMatch.index,
+      end: start + recipientMatch.index + recipientMatch[0].length,
+    } : null;
+    const recipientFirst = new RegExp(`^${recipientTargets}(?:${CALLBACK_MODAL}|\\s+${CALLBACK_SCHEDULED_CALL_NOUN})`, 'i').test(match[0]);
+    // Direct and bare coordinated sources contain their governing actor.
+    // Modal-only coordinated sources resolve the last subject in the sentence,
+    // keeping its actual offset even when a comma separates it from the action.
+    const actorPattern = recipientFirst
+      ? new RegExp(`(?<subject>${CALLBACK_PROMISER}|me|us)${CALLBACK_PHRASE_END}$`, 'di')
+      : new RegExp(`^(?<subject>${CALLBACK_PROMISER})(?:${CALLBACK_MODAL}|\\s+${CALLBACK_SCHEDULED_CALL_NOUN})`, 'di');
+    // A semicolon joins clauses closely enough to keep sharing a governing
+    // actor ("We will check; then will call her."), unlike a period, "!" or
+    // "?", which do start a fresh sentence — so it is not a boundary here.
+    const sentenceStart = Math.max(text.lastIndexOf('.', start - 1), text.lastIndexOf('!', start - 1),
+      text.lastIndexOf('?', start - 1)) + 1;
+    const subjects = inherited
+      ? [...text.slice(sentenceStart, start).matchAll(new RegExp(CALLBACK_COORDINATED_SUBJECT_RE.source, 'gdi'))]
+      : [];
+    const actorMatch = inherited ? subjects[subjects.length - 1] : actorPattern.exec(match[0]);
+    const actorOffset = inherited ? sentenceStart : start;
+    const actorIndices = actorMatch?.indices.groups.subject;
+    const actorText = actorMatch?.groups.subject || '';
+    const actor = {
+      text: actorText,
+      start: actorIndices ? actorOffset + actorIndices[0] : null,
+      end: actorIndices ? actorOffset + actorIndices[1] : null,
+      waves: !inherited || new RegExp(`^${CALLBACK_PROMISER}$`, 'i').test(actorText),
     };
-
-    const slotDuration = config.slot_duration_minutes || 60;
-    const buffer = config.buffer_minutes || 15;
-    const lunchStart = this.timeToMin(config.lunch_start || '12:00');
-    const lunchEnd = this.timeToMin(config.lunch_end || '13:00');
-    const dayStart = this.timeToMin(config.day_start || '08:00');
-    const dayEnd = this.timeToMin(config.day_end || '17:00');
-
-    const days = [];
-    const today = new Date();
-
-    // Owner blackout days apply to this legacy engine too — it feeds the
-    // lead-response availability tool, which quotes days to customers.
-    const { getBlackoutDates } = require('./scheduling/blackout-dates');
-    const blackout = await getBlackoutDates(
-      etDateString(addETDays(today, config.advance_days_min)),
-      etDateString(addETDays(today, config.advance_days_max)),
-    );
-
-    // Travel-gap mirror (GATE_SLOT_TRAVEL_GAP): confirmBooking's commit probe
-    // runs the tech-blind, coordinate-aware findConflictingVisits `travel`
-    // predicate over EVERY stop that day, while this builder's occupied set
-    // is zone-scoped and buffer-only — an out-of-zone stop adjacent to a
-    // quoted slot would make the commit reject the exact option just
-    // offered (offer/commit dead end). Gate on: one range read of every
-    // occupying row with guarded coords + the same pin the commit measures
-    // with (customers.latitude/longitude via opts.customerId, else the
-    // estimate's customer; neither → buffer-only, never a skipped check;
-    // lead-response quotes have no customer row and no booking tool). Gate off:
-    // no extra statements. Soft-degrade like /book's mirror: a failed read
-    // serves unfiltered and the commit gate keeps correctness.
-    let travelMirror = null;
-    if (travelGapEnabled()) {
-      try {
-        const rows = await listOccupiedWindows({
-          dateFrom: etDateString(addETDays(today, config.advance_days_min)),
-          dateTo: etDateString(addETDays(today, config.advance_days_max)),
-          withCoords: true,
-        });
-        const byDate = new Map();
-        for (const row of rows) {
-          if (!byDate.has(row.date)) byDate.set(row.date, []);
-          byDate.get(row.date).push(row);
-        }
-        let pin = { lat: null, lng: null };
-        let pinCustomerId = opts.customerId || null;
-        if (!pinCustomerId && estimateId) {
-          const est = await db('estimates').where('id', estimateId).first('customer_id');
-          pinCustomerId = est?.customer_id || null;
-        }
-        if (pinCustomerId) {
-          const cust = await db('customers').where('id', pinCustomerId).first('latitude', 'longitude');
-          pin = { lat: cust?.latitude ?? null, lng: cust?.longitude ?? null };
-        }
-        travelMirror = { byDate, pin };
-      } catch (mirrorErr) {
-        logger.warn(`[availability] travel-gap mirror unavailable — serving unfiltered slots: ${mirrorErr.message}`);
-        travelMirror = null;
-      }
-    }
-
-    for (let i = config.advance_days_min; i <= config.advance_days_max; i++) {
-      // ET calendar math — toISOString() reads the UTC date (already tomorrow
-      // between 8 PM and midnight ET) and getDay() reads the UTC weekday, so
-      // the offered day and the ET labels below would diverge in that window.
-      const date = addETDays(today, i); // anchored at noon UTC on the ET calendar day
-
-      // Closed days (one-off blackouts + weekly days off) come from the shared
-      // helper — no hardcoded Sunday skip, so reopening a day in Settings
-      // reopens this surface too.
-      const dateStr = etDateString(date);
-      if (blackout.has(dateStr)) continue;
-
-      // Find techs working in this zone on this day
-      const techBlocks = await db('tech_schedule_blocks')
-        .where('service_zone_id', zone.id)
-        .where('date', dateStr)
-        .where('block_type', 'available');
-
-      // Also check if any scheduled_services exist in this zone for the day
-      const zoneCities = zone.cities || [];
-      // Case-insensitive city match: customer city casing is free-text — an
-      // exact-case IN misses zone rows (the estimate generator lowercases
-      // both sides; match it).
-      const zoneCitiesLower = zoneCities.map((city) => String(city || '').toLowerCase());
-      const scheduledInZone = await db('scheduled_services')
-        .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-        .where('scheduled_services.scheduled_date', dateStr)
-        .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
-        .whereNotNull('scheduled_services.window_start')
-        .where((q) => {
-          q.whereNull('scheduled_services.reservation_expires_at')
-            .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-        })
-        .modify((q) => {
-          // Empty city list matches nothing — same as knex's empty whereIn.
-          if (!zoneCitiesLower.length) return q.whereRaw('1 = 0');
-          return q.whereRaw(
-            `LOWER(customers.city) IN (${zoneCitiesLower.map(() => '?').join(', ')})`,
-            zoneCitiesLower,
-          );
-        })
-        .select('scheduled_services.*');
-
-      // If no tech blocks AND no existing services in zone, skip this day
-      if (techBlocks.length === 0 && scheduledInZone.length === 0) continue;
-
-      // Day-cap filter: max_self_books_per_day is GLOBAL by calendar date
-      // (the shared helper confirmBooking enforces under the day-cap lock).
-      // Counting only this zone's bookings here let the engine keep OFFERING
-      // a day that another zone had already filled — every confirm on those
-      // offers then failed with SLOT_TAKEN. Same count, same predicate, so
-      // the builder never offers a day the confirm path would reject on cap.
-      const existingBookingsCount = await countActiveSelfBookingsForDay(db, dateStr);
-
-      if (existingBookingsCount >= (config.max_self_books_per_day || 3)) continue;
-
-      // Build occupied slots from scheduled_services
-      const occupied = scheduledInZone.map(s => ({
-        start: this.timeToMin(s.window_start),
-        end: this.timeToMin(s.window_end || this.addMinutes(s.window_start, s.estimated_duration_minutes || 60)),
-      }));
-      // The owner's booked interviews (recruiting) occupy the calendar too —
-      // the reciprocal of the interview picker's route-stop check (the
-      // confirm path gets them from the shared findConflictingVisits probe).
-      // Best-effort: a recruiting read error must not take slot building down.
-      try {
-        for (const w of await require('./interview-slots').bookedInterviewWindowsForDate(dateStr)) {
-          occupied.push({ start: this.timeToMin(w.start), end: this.timeToMin(w.end) });
-        }
-      } catch (err) {
-        require('./logger').warn(`[availability] interview occupancy read failed for ${dateStr}: ${err.name || 'Error'}${err.code ? ` ${err.code}` : ''}`);
-      }
-
-      // Only unlinked legacy bookings use the copied date/time. Once a visit
-      // exists, its live status and window above are authoritative.
-      const selfBooked = await db('self_booked_appointments')
-        .where('service_zone_id', zone.id)
-        .where('date', dateStr)
-        .whereNot('status', 'cancelled')
-        .whereNotExists(function linkedVisit() {
-          this.select('id').from('scheduled_services')
-            .whereColumn('scheduled_services.self_booking_id', 'self_booked_appointments.id');
-        });
-      selfBooked.forEach(b => {
-        occupied.push({ start: this.timeToMin(b.start_time), end: this.timeToMin(b.end_time) });
-      });
-
-      // Add lunch block
-      occupied.push({ start: lunchStart, end: lunchEnd });
-
-      // Sort occupied by start time
-      occupied.sort((a, b) => a.start - b.start);
-
-      // Find gaps. Travel-gap mirror (see above): drop what the commit probe
-      // would 409 — BEFORE findGaps' four-slot cap, so a dense day's later
-      // valid gap is not hidden behind four rejected ones (r4 P2).
-      const slots = this.findGaps(occupied, dayStart, dayEnd, slotDuration, buffer, travelMirror
-        ? (g) => !violatesTravelGap(
-          { startMin: g.start, endMin: g.end, ...travelMirror.pin },
-          travelMirror.byDate.get(dateStr) || [],
-        )
-        : null);
-
-      if (slots.length > 0) {
-        days.push({
-          date: dateStr,
-          dayOfWeek: date.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' }),
-          dayNum: date.getUTCDate(),
-          month: date.toLocaleDateString('en-US', { month: 'short', timeZone: 'America/New_York' }),
-          fullDate: date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' }),
-          slots: slots.map(s => ({
-            start: this.minToTime12(s.start),
-            end: this.minToTime12(s.end),
-            startTime24: this.minToTime24(s.start),
-            endTime24: this.minToTime24(s.end),
-          })),
-          zone: zone.zone_name,
-        });
-      }
-    }
-
-    return { zone: zone.zone_name, days };
-  }
-
-  // accept(slot) → false drops a candidate before the four-per-day cap; the
-  // gap then advances an hour at a time so a long zone-local hole still
-  // yields its first ACCEPTED hour (an out-of-zone stop can reject 9:00 while
-  // 12:00 in the same hole is fine — r5 P2).
-  findGaps(occupied, dayStart, dayEnd, slotDuration, buffer, accept = null) {
-    const slots = [];
-    const offer = (gapStart, gapEnd) => {
-      for (let start = gapStart; gapEnd - start >= slotDuration; start += 60) {
-        const slot = { start, end: start + slotDuration };
-        if (!accept || accept(slot)) { slots.push(slot); return; }
-        if (!accept) return;
-      }
+    return {
+      kind: bare ? 'bare-coordinated' : inherited ? 'coordinated' : recipientFirst ? 'recipient-first' : 'direct',
+      source: { text: match[0], start, end },
+      actor,
+      recipient,
     };
-    let cursor = dayStart;
-
-    // Round minutes-since-midnight UP to the next clean hour. Customer-
-    // facing slot starts like 1:15 / 2:45 felt like "we're squeezing you
-    // into a travel gap" — the operator wants every quoted time to land
-    // on the hour (1:00, 2:00). The buffer still applies but the slot
-    // only starts at the next :00 after buffer.
-    const roundUpToHour = (min) => Math.ceil(min / 60) * 60;
-
-    for (const block of occupied) {
-      const gapStart = roundUpToHour(cursor + buffer);
-      const gapEnd = block.start - buffer;
-
-      offer(gapStart, gapEnd);
-      cursor = Math.max(cursor, block.end);
-    }
-
-    // Gap after the last occupied block — same clean-hour rule.
-    offer(roundUpToHour(cursor + buffer), dayEnd);
-
-    return slots.slice(0, 4); // max 4 slots per day
-  }
-
-  async resolveZone(city) {
-    const zones = await db('service_zones');
-    for (const zone of zones) {
-      const cities = zone.cities || [];
-      if (cities.some(c => c.toLowerCase() === (city || '').toLowerCase())) {
-        return zone;
-      }
-    }
-    return null;
-  }
-
-  // options.excludeServiceId / options.excludeSelfBookingId: skip a specific
-  // existing appointment in the occupancy re-check — used by the onboarding
-  // reschedule, which books the replacement BEFORE cancelling the original
-  // (so a refused slot leaves the customer's original appointment intact)
-  // and must not collide with the row it is about to cancel.
-  async confirmBooking(estimateId, customerId, date, startTime, customerNotes, options = {}) {
-    // Resolve estimate
-    const estimate = estimateId ? await db('estimates').where('id', estimateId).first() : null;
-    const customer = await db('customers').where('id', customerId).first();
-    if (!customer) throw new Error('Customer not found');
-
-    const zone = await this.resolveZone(customer.city);
-    const config = await db('booking_config').first();
-    const slotDuration = config?.slot_duration_minutes || 60;
-    const maxPerDay = config?.max_self_books_per_day || 3;
-
-    const endTime = this.addMinutes(startTime, slotDuration);
-
-    // The slot list was computed in getAvailableSlots minutes earlier —
-    // nothing else stops a stale (or hand-crafted) confirm. Reject
-    // impossible dates before touching the calendar.
-    const dateStr = String(date || '').split('T')[0];
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-      throw bookingError('Invalid booking date', 'INVALID_DATE', 400);
-    }
-    const todayStr = etDateString();
-    if (dateStr < todayStr) {
-      throw bookingError('That date has already passed — please pick another day', 'INVALID_DATE', 400);
-    }
-    // Owner closed-day re-check at COMMIT — covers one-off blackouts AND
-    // weekly days off (the old hardcoded Sunday reject lived here; the shared
-    // helper now decides, so reopening a day in Settings reopens this path).
-    // The quoted option may predate the closure (AI book_appointment confirms
-    // options quoted earlier).
-    {
-      const { isBlackoutDate } = require('./scheduling/blackout-dates');
-      if (await isBlackoutDate(dateStr)) {
-        throw bookingError('That day is no longer available — please pick another day', 'INVALID_DATE', 409);
-      }
-    }
-    const startMin = this.timeToMin(startTime);
-    const endMin = this.timeToMin(endTime);
-    if (dateStr === todayStr) {
-      const nowEt = etParts(new Date());
-      if (startMin <= nowEt.hour * 60 + nowEt.minute) {
-        throw bookingError('That time has already passed today — please pick another slot', 'SLOT_TAKEN');
-      }
-    }
-
-    // Shared CSPRNG generator (utils/slot-offer-token.js) — this row is served
-    // by the same public /booking/status/:code as the /book confirm path, so a
-    // guessable four-char code here would undercut the ≈50-bit codes there.
-    const confCode = generateConfirmationCode();
-    const serviceType = estimate?.services?.[0] || estimate?.service_type || 'General Pest Control';
-    const zoneCities = zone?.cities || [];
-
-    // Two customers browsing the same zone see the same slots and can both
-    // confirm one — the window is the whole slot-picker session, not
-    // milliseconds. Serialize confirms per zone+day with an advisory lock
-    // and re-validate occupancy inside it; both inserts ride the same
-    // transaction so a partial failure can't leave a booking without its
-    // dispatch row. options.trx lets a caller make the booking atomic with
-    // its own writes (onboarding reschedule books + cancels in one txn) —
-    // side effects are then deferred to the returned notify() so nothing
-    // customer-visible fires before the outer transaction commits.
-    // Baseline for the rung-6 revalidation inside the transaction (r32).
-    const preFenceAvailCustomer = customer;
-    const runBookingWork = async (work) => (options.trx ? work(options.trx) : db.transaction(work));
-    const { booking, scheduled } = await runBookingWork(async (trx) => {
-      // RUNG 1 — date-wide occupancy lock, FIRST and UNCONDITIONAL (see the
-      // ORDERING CONTRACT in scheduling/occupancy.js). This confirm inserts a
-      // scheduled_services row that the GLOBAL tech-blind checks (rebooker
-      // single + series) count, and those checks read committed rows only:
-      // without this lock our uncommitted insert is invisible to them and
-      // both sides commit an overlap. It is taken on the ZONE-RESOLVED branch
-      // too — that branch validates against a zone-scoped occupied set, so it
-      // is precisely the writer whose insert a global checker would miss. The
-      // zone-null branch below additionally relies on it to guard its own
-      // findConflictingVisits call. Hoisted above the zone + day-cap locks so
-      // every writer in the family acquires the shared rungs in one order.
-      await acquireOccupancyLock(trx, dateStr);
-      // slot-reserve namespace + zone-key shape match routes/booking.js
-      // exactly, so confirms through onboarding/AI and the public
-      // /api/booking/confirm serialize against each other for the same
-      // zone+day (different namespaces would let both pass their overlap
-      // checks under READ COMMITTED).
-      await trx.raw(
-        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-        ['slot-reserve', `zone:${zone?.id || 'unknown'}:${dateStr}`],
-      );
-
-      // Global day cap — the shared lock + count every
-      // self_booked_appointments writer takes (see the helpers above). The
-      // zone lock only serializes same-zone writers; the cap is global by
-      // date, so a per-zone count here let cross-zone confirms (this engine
-      // vs the public /book confirm) exceed max_self_books_per_day. Lock
-      // order stays fixed — date → zone → day-cap, the same relative order
-      // as createSelfBooking's date → customer → tech → zone → day-cap — so
-      // concurrent confirms across both writers can never deadlock.
-      await acquireSelfBookingDayCapLock(trx, dateStr);
-      // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): the
-      // scheduled_services insert below serializes against a concurrent
-      // merge-undo of this customer — after the scheduling rungs, before
-      // any row lock. Then revalidate (r32, mirroring /book): zone and the
-      // booking's comms assumptions were derived from the PRE-fence
-      // customer — if the undo won the wait and cleared an inherited
-      // address/contact, retry against live state instead of committing a
-      // visit whose dispatch/reminders resolve against the cleared row.
-      await lockCustomerComms(trx, customerId);
-      // The travel-gap probe's pin, read BEHIND the fence: a background
-      // geocode can fill customers.latitude/longitude between the pre-fence
-      // read and the lock, and the coordinates are deliberately outside the
-      // freshness fingerprint (r5 P2).
-      let bookingPin = { lat: customer.latitude ?? null, lng: customer.longitude ?? null };
-      {
-        const AVAIL_FINGERPRINT_COLS = [
-          'address_line1', 'address_line2', 'city', 'state', 'zip', 'phone',
-          ...[1, 2, 3].flatMap((n) => {
-            const pfx = n === 1 ? 'service_contact' : `service_contact${n}`;
-            return [`${pfx}_name`, `${pfx}_phone`, `${pfx}_email`, `${pfx}_role`];
-          }),
-        ];
-        const fp = (r) => AVAIL_FINGERPRINT_COLS.map((c) => r?.[c] || '').join('|');
-        const freshAvailCustomer = await trx('customers')
-          .where({ id: customerId }).first(...AVAIL_FINGERPRINT_COLS, 'latitude', 'longitude');
-        if (!freshAvailCustomer || fp(freshAvailCustomer) !== fp(preFenceAvailCustomer)) {
-          throw bookingError('Your account details just changed — please refresh and book again.', 'CUSTOMER_CHANGED_RETRY');
-        }
-        bookingPin = { lat: freshAvailCustomer.latitude ?? null, lng: freshAvailCustomer.longitude ?? null };
-        // Estimate linkage revalidates under the fence too (r36): a
-        // journaled estimate a merge-undo just returned no longer belongs
-        // to this customer — the self-booking row would link the restored
-        // loser's estimate to a kept-customer visit.
-        if (estimateId) {
-          const freshAvailEstimate = await trx('estimates')
-            .where({ id: estimateId }).first('id', 'customer_id');
-          if (!freshAvailEstimate
-            || (freshAvailEstimate.customer_id && String(freshAvailEstimate.customer_id) !== String(customerId))) {
-            throw bookingError('That quote was just updated — please refresh and book again.', 'CUSTOMER_CHANGED_RETRY');
-          }
-        }
-      }
-      const dayCount = await countActiveSelfBookingsForDay(trx, dateStr, {
-        excludeSelfBookingId: options.excludeSelfBookingId || null,
-      });
-      if (dayCount >= maxPerDay) {
-        throw bookingError('That day just filled up — please pick another day', 'SLOT_TAKEN');
-      }
-
-      // Rows the tech-blind probe below must ignore — the onboarding
-      // reschedule books the replacement BEFORE cancelling the original, so
-      // it must not collide with the row(s) it is about to cancel. Resolved
-      // for BOTH branches: the zone-resolved fast path excludes the same
-      // rows via its own options.exclude* modifiers.
-      const occupancyExcludes = [];
-      if (options.excludeServiceId) occupancyExcludes.push(options.excludeServiceId);
-      if (options.excludeSelfBookingId) {
-        // The onboarding reschedule identifies the row it is replacing by
-        // its self-booking id — exclude that booking's dispatch row too.
-        const replacedRow = await trx('scheduled_services')
-          .where({ self_booking_id: options.excludeSelfBookingId })
-          .first('id');
-        if (replacedRow?.id) occupancyExcludes.push(replacedRow.id);
-      }
-
-      if (zone) {
-        // Mirror getAvailableSlots' occupied set: zone services + live
-        // self-bookings. Any overlap means the slot was taken since the
-        // customer loaded the picker.
-        const occupied = [];
-        const scheduledInZone = await trx('scheduled_services')
-          .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-          .where('scheduled_services.scheduled_date', dateStr)
-          .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
-          .whereNotNull('scheduled_services.window_start')
-          .where((q) => {
-            q.whereNull('scheduled_services.reservation_expires_at')
-              .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-          })
-          .modify((q) => {
-            // Case-insensitive city match — same reasoning as the slot
-            // builder above; empty list matches nothing like an empty whereIn.
-            const lowered = zoneCities.map((city) => String(city || '').toLowerCase());
-            if (!lowered.length) return q.whereRaw('1 = 0');
-            return q.whereRaw(
-              `LOWER(customers.city) IN (${lowered.map(() => '?').join(', ')})`,
-              lowered,
-            );
-          })
-          .modify((q) => {
-            if (options.excludeServiceId) q.whereNot('scheduled_services.id', options.excludeServiceId);
-          })
-          .select('scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.estimated_duration_minutes');
-        for (const s of scheduledInZone) {
-          occupied.push({
-            start: this.timeToMin(s.window_start),
-            end: this.timeToMin(s.window_end || this.addMinutes(s.window_start, s.estimated_duration_minutes || 60)),
-          });
-        }
-        const selfBooked = await trx('self_booked_appointments')
-          .where('service_zone_id', zone.id)
-          .where('date', dateStr)
-          .whereNot('status', 'cancelled')
-          .whereNotExists(function linkedVisit() {
-            this.select('id').from('scheduled_services')
-              .whereColumn('scheduled_services.self_booking_id', 'self_booked_appointments.id');
-          })
-          .modify((q) => {
-            if (options.excludeSelfBookingId) q.whereNot('id', options.excludeSelfBookingId);
-          });
-        for (const b of selfBooked) {
-          occupied.push({ start: this.timeToMin(b.start_time), end: this.timeToMin(b.end_time) });
-        }
-        // Live estimate-slot holds (customer_id NULL, tech-keyed, no zone)
-        // occupy real route time even though they don't match the zone
-        // predicates above — count them so a self-booking can't land on a
-        // held slot.
-        const liveHolds = await trx('scheduled_services')
-          .where('scheduled_date', dateStr)
-          .whereNull('customer_id')
-          .whereRaw('reservation_expires_at > NOW()')
-          .select('window_start', 'window_end');
-        for (const h of liveHolds) {
-          occupied.push({
-            start: this.timeToMin(h.window_start || '09:00'),
-            end: this.timeToMin(h.window_end || (h.window_start ? this.addMinutes(h.window_start, 60) : '10:00')),
-          });
-        }
-        if (occupied.some((b) => b.start < endMin && b.end > startMin)) {
-          throw bookingError('That time slot was just taken — please pick another', 'SLOT_TAKEN');
-        }
-      }
-
-      // Shared tech-blind occupancy probe, BOTH branches (ORDERING CONTRACT:
-      // every rung-1 holder runs the global predicate under the date lock
-      // before committing — the lock only serializes writers; it cannot
-      // widen what a check sees). For the zone-NULL branch this is the only
-      // window validation there is (AI-assistant book tool, onboarding
-      // reschedule). For the zone-RESOLVED branch the occupied-set check
-      // above remains the fast path, but it is zone-scoped: an overlapping
-      // visit whose customer city is outside this zone's list — or a
-      // tech-assigned row from the estimate lane — never enters `occupied`,
-      // and with one active tech any overlap is a real clash. Status set
-      // matches the zone path (non-cancelled occupies); live holds count,
-      // expired ones don't. The date-wide occupancy lock this runs under
-      // was taken at the TOP of the transaction (rung 1 of the global
-      // order) — the rebooker takes neither the zone nor the day-cap lock,
-      // so that date lock is the only rung shared with it.
-      const occupancyClash = await findConflictingVisits({
-        includeInterviews: true,
-        db: trx,
-        date: dateStr,
-        windowStart: startTime,
-        windowEnd: endTime,
-        excludeServiceIds: occupancyExcludes,
-        // Travel gap (GATE_SLOT_TRAVEL_GAP): the customer's pin from the
-        // fenced re-read; the zone engine's offers are city-only, so this
-        // is the only drive check.
-        travel: bookingPin,
-      });
-      if (occupancyClash.length) {
-        throw bookingError('That time slot was just taken — please pick another', 'SLOT_TAKEN');
-      }
-
-      // Create self_booked_appointment
-      const [bookingRow] = await trx('self_booked_appointments').insert({
-        customer_id: customerId,
-        estimate_id: estimateId || null,
-        service_zone_id: zone?.id || null,
-        date: dateStr,
-        start_time: startTime,
-        end_time: endTime,
-        duration_minutes: slotDuration,
-        customer_notes: customerNotes || null,
-        confirmation_code: confCode,
-      }).returning('*');
-
-      // Create scheduled_service so it shows on the dispatch board
-      const [scheduledRow] = await trx('scheduled_services').insert({
-        customer_id: customerId,
-        // Sole-active-property anchor for the visit-group stamp below —
-        // see customer-properties.soleActivePropertyId (GH codex r3).
-        property_id: await require('./customer-properties').soleActivePropertyId(customerId, trx),
-        scheduled_date: dateStr,
-        window_start: startTime,
-        window_end: endTime,
-        service_type: serviceType,
-        status: 'confirmed',
-        customer_confirmed: true,
-        confirmed_at: new Date(),
-        notes: customerNotes ? `Self-booked. Notes: ${customerNotes}` : 'Self-booked via portal',
-        source: 'self_booked',
-        self_booking_id: bookingRow.id,
-        zone: zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null,
-      }).returning('*');
-
-      // Visit groups (visit-group-scope.md §2): stamp at scheduling.
-      // Gate-checked + best-effort + self-refusing (no property_id here ⇒
-      // inert until linkage stamps it; explicit so every booking path
-      // answers the stamping audit).
-      await require('./visit-groups').maybeGroupRow(scheduledRow.id, { database: trx, createdBy: 'seeder' });
-
-      // Inspection credit: this is a REAL customer booking (AI assistant /
-      // confirmed call path), so record durable evidence in-transaction —
-      // the hourly sweep mints from it (Codex #3178 r6 P0).
-      await require('./inspection-credit').markBookingForInspectionCredit(trx, {
-        customerId,
-        scheduledServiceId: scheduledRow.id,
-        source: 'availability_confirm',
-      });
-
-      return { booking: bookingRow, scheduled: scheduledRow };
+  })
+    // A coordinated commitment can satisfy both the primary expression and
+    // the independent inherited-action scan ("We will check and call her."),
+    // producing identical direct and bare-coordinated candidates for the
+    // same commitment. Direct candidates are built first (see `matches`
+    // above), so keeping the first occurrence per (span, actor, recipient)
+    // keeps the direct kind and drops its bare-coordinated duplicate.
+    .filter((candidate) => {
+      const key = `${candidate.source.start}|${candidate.source.end}|${candidate.actor.text}|${candidate.recipient ? candidate.recipient.text : ''}`;
+      if (seenCandidates.has(key)) return false;
+      seenCandidates.add(key);
+      return true;
     });
-
-    // Inspection credit: fast redemption post-commit, same as the other
-    // booking surfaces (Codex #3178 r27 P2) — a pay link or Charge Now
-    // before the hourly sweep must see the credit already in the balance.
-    // Best-effort; the sweep remains the durable guarantee.
-    try {
-      await require('./inspection-credit').redeemInspectionCreditForBooking({
-        customerId,
-        scheduledServiceId: scheduled.id,
-        createdBy: 'system:inspection_credit_availability_confirm',
-      });
-    } catch (creditErr) {
-      logger.warn(`[availability] inspection credit fast redemption deferred to sweep: ${creditErr.message}`);
-    }
-
-    // Dispatch-v2 reads scheduled_services directly; no legacy dispatch sync.
-
-    const notify = async () => {
-    try {
-      const AppointmentReminders = require('./appointment-reminders');
-      // Confirms through the shared appointment_confirmation flow
-      // (prefs/channel-aware, email fallback, reschedule link) — the bespoke
-      // self_booking_confirmation template was retired 2026-07-06.
-      await AppointmentReminders.registerAppointment(
-        scheduled.id,
-        customerId,
-        `${dateStr}T${startTime || '08:00'}`,
-        serviceType,
-        'booking_new',
-        { sendConfirmation: true },
-      );
-    } catch (err) {
-      logger.error(`[availability] Appointment reminder registration failed for ${scheduled.id}: ${err.message}`);
-    }
-
-    // Customer confirmation is handled by registerAppointment above.
-    try {
-      const TwilioService = require('./twilio');
-      const dateLabel = new Date(dateStr + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' });
-      // Adam notification
-      if (process.env.ADAM_PHONE) {
-        await TwilioService.sendSMS(process.env.ADAM_PHONE,
-          `New self-booked appointment:\n${customer.first_name} ${customer.last_name}\n${serviceType}\n${dateLabel} ${this.minToTime12(this.timeToMin(startTime))}\n${customer.city}\nCode: ${confCode}`,
-          { messageType: 'internal_alert' }
-        );
-      }
-    } catch (err) {
-      logger.error(`Booking SMS failed: ${err.message}`);
-    }
-    };
-
-    if (options.trx) {
-      // Caller commits the outer transaction first, then runs notify() —
-      // reminders/SMS must not fire for a booking that could roll back.
-      return { booking, confirmationCode: confCode, notify };
-    }
-    await notify();
-    return { booking, confirmationCode: confCode };
-  }
-
-  // Time helpers
-  timeToMin(t) {
-    if (!t) return 540; // default 9:00
-    const [h, m] = t.split(':').map(Number);
-    return h * 60 + (m || 0);
-  }
-
-  minToTime12(min) {
-    const h = Math.floor(min / 60);
-    const m = min % 60;
-    const ampm = h >= 12 ? 'PM' : 'AM';
-    return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${ampm}`;
-  }
-
-  minToTime24(min) {
-    const h = Math.floor(min / 60);
-    const m = min % 60;
-    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
-  }
-
-  addMinutes(time, mins) {
-    const total = this.timeToMin(time) + mins;
-    return this.minToTime24(total);
-  }
 }
 
-module.exports = new AvailabilityEngine();
-// Shared global day-cap primitives — required by routes/booking.js's
-// createSelfBooking (lazily, so the route ↔ service load order can't cycle).
-module.exports.acquireSelfBookingDayCapLock = acquireSelfBookingDayCapLock;
-module.exports.countActiveSelfBookingsForDay = countActiveSelfBookingsForDay;
-module.exports.SELF_BOOKING_EFFECTIVE_DATE_SQL = SELF_BOOKING_EFFECTIVE_DATE_SQL;
-module.exports.SELF_BOOKING_INACTIVE_STATUSES = SELF_BOOKING_INACTIVE_STATUSES;
+module.exports = {
+  TEAM_PROMISERS,
+  CALLBACK_CONTACT_NOUN,
+  CALLBACK_TIMING_ADVERB,
+  ACCOUNT_HOLDER_TARGETS,
+  recognizeCallbackCandidates,
+};

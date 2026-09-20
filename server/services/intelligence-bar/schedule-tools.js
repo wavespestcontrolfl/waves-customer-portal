@@ -1721,9 +1721,12 @@ async function swapTechAssignments(input, actionContext = {}) {
 function withoutStopIdentifiers(result) {
   if (!Array.isArray(result?.days)) return result;
   const count = list => (Array.isArray(list) ? list.length : null);
-  return { ...result, days: result.days.map(day => ({ ...day, byTech: (day.byTech || []).map(({ plannedStops, modeledLateVisits, missingCoordinates, defaultDurations, ...tech }) => ({
+  return { ...result, days: result.days.map(day => ({ ...day, byTech: (day.byTech || []).map(({ plannedStops, modeledLateVisits, missingCoordinates, defaultDurations, doubleBookedVisits, ...tech }) => ({
     ...tech,
     plannedStopCount: count(plannedStops),
+    // Each pair lists other customers' appointment ids: keep only how many
+    // collisions there are (the count the alert card shows).
+    doubleBookingCount: Array.isArray(doubleBookedVisits) ? doubleBookedVisits.length : null,
     missingCoordinateCount: count(missingCoordinates),
     defaultDurationCount: count(defaultDurations),
     modeledLateVisits: Array.isArray(modeledLateVisits) ? modeledLateVisits.map(({ id, visitId, ...late }) => late) : modeledLateVisits,
