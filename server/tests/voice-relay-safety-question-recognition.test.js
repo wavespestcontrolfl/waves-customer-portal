@@ -9,6 +9,19 @@ test.each(catalogNames)('catalog product identity supplies question evidence: %s
   expect(recognizeSafetyQuestion(`Is ${name} safe?`).positive).not.toBeNull();
 });
 
+const productCatalogNames = require('../fixtures/voice-relay-eval/product-catalog-names.json');
+const abbreviatedCatalogName = productCatalogNames.find((name) => name.includes('50 lb. Bag'));
+
+test('a catalog name with an internal abbreviation period still yields question evidence', () => {
+  expect(abbreviatedCatalogName).toBe(
+    'LESCO 24-0-10 75% PolyPlus OPTI45 Spar-TECH 10% Cl MOP Turfgrass Granular Fertilizer 50 lb. Bag',
+  );
+  const question = recognizeSafetyQuestion(`Is ${abbreviatedCatalogName} safe?`);
+  expect(question.positive).not.toBeNull();
+  expect(question.positive.evidence).toBeNull();
+  expect(question.positive.crossesSentenceBoundary).toBe(true);
+});
+
 test.each([
   ['The treatment is safe for dogs, right?', 'positive', 'safe', 'dog'],
   ['Bora-Care is harmless to children, isn’t it?', 'positive', 'harmless', 'child'],
@@ -235,4 +248,58 @@ test('an unpunctuated leading condition ends at the actual question auxiliary', 
   const evidence = recognizeSafetyQuestion(text).positive.evidence;
   expect(evidence).toMatchObject({ text: 'is the bait safe', index: text.indexOf('is the bait') });
   expect(evidence.conditions[0]).toMatchObject({ text: 'If it is dry', position: 'before', end: text.indexOf(' is the bait') });
+});
+
+test.each([
+  ['Regarding the bait. Is the credit safe?', true],
+  ['Regarding the bait. Is it safe?', false],
+])('a pronoun subject requires its own leading word boundary, not a bare tail match: %s', (text, expectNull) => {
+  const positive = recognizeSafetyQuestion(text).positive;
+  if (expectNull) expect(positive).toBeNull();
+  else expect(positive).not.toBeNull();
+});
+
+test.each([
+  'Is it dangerous to reschedule?',
+  'Would it be harmful to cancel?',
+])('the scheduling exception also applies to harm predicates: %s', (text) => {
+  expect(recognizeSafetyQuestion(text).harm).toBeNull();
+});
+
+test('a harm question outside the scheduling exception still yields a candidate', () => {
+  expect(recognizeSafetyQuestion('Is it dangerous to use?').harm).not.toBeNull();
+});
+
+test.each([
+  ["If the bait isn't dry, is the spray safe?", false],
+  ["If the bait is dry, isn't the spray safe?", true],
+])('negatedAuxiliary reflects the actual question auxiliary, not a leading condition: %s', (text, negatedAuxiliary) => {
+  expect(recognizeSafetyQuestion(text).positive).toMatchObject({ negatedAuxiliary });
+});
+
+test('options.productNames recognizes a live product not in the static catalog', () => {
+  expect(recognizeSafetyQuestion('Is EcoGuard Wonder safe?', { productNames: ['EcoGuard Wonder'] }).positive).not.toBeNull();
+});
+
+test('a live product name is not recognized without options.productNames', () => {
+  expect(recognizeSafetyQuestion('Is EcoGuard Wonder safe?').positive).toBeNull();
+});
+
+test('static catalog names are unaffected by options.productNames', () => {
+  expect(recognizeSafetyQuestion('Is the bait safe?', { productNames: ['EcoGuard Wonder'] }).positive).not.toBeNull();
+});
+
+test.each([
+  'Can you please confirm whether the bait is safe?',
+  'Would you please check whether the bait is safe?',
+  'Can you please let me know whether the bait is safe?',
+])('the polite modifier is accepted on every indirect-question verb: %s', (text) => {
+  expect(recognizeSafetyQuestion(text).positive).not.toBeNull();
+});
+
+test.each([
+  'Can you confirm whether the bait is safe?',
+  'Would you check whether the bait is safe?',
+])('the polite modifier remains optional: %s', (text) => {
+  expect(recognizeSafetyQuestion(text).positive).not.toBeNull();
 });
