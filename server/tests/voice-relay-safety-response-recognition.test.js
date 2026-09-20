@@ -12,6 +12,35 @@ test.each(catalogNames)('catalog product identity supplies response evidence: %s
   ]));
 });
 
+const productCatalogNames = require('../fixtures/voice-relay-eval/product-catalog-names.json');
+
+test('the product-catalog fixture is a non-empty list of distinct trimmed names', () => {
+  expect(Array.isArray(productCatalogNames)).toBe(true);
+  expect(productCatalogNames.length).toBeGreaterThan(100);
+  expect(new Set(productCatalogNames).size).toBe(productCatalogNames.length);
+  for (const name of productCatalogNames) expect(name).toBe(name.trim());
+});
+
+// Every catalog product the relay could read back from a visit's service
+// products must supply guarantee evidence with exact spans, including names
+// that end in punctuation such as "(OMRI)".
+test.each(productCatalogNames)('full-catalog product identity supplies response evidence: %s', (name) => {
+  const text = `Yes, ${name} is safe for pets.`;
+  const claims = recognizeSafetyResponse(text).guarantees.map(({ match }) => ({ text: match[0], index: match.index }));
+  expect(claims).toEqual(expect.arrayContaining([{ text: `${name} is safe`, index: text.indexOf(name) }]));
+  for (const { text: claim, index } of claims) expect(text.slice(index, index + claim.length)).toBe(claim);
+});
+
+test('a candidate straddling a selected sentence boundary is kept, flagged, and carries no local evidence', () => {
+  const text = 'Yes, LESCO 24-0-10 75% PolyPlus OPTI45 Spar-TECH 10% Cl MOP Turfgrass Granular Fertilizer 50 lb. Bag is safe for pets.';
+  const [claim] = recognizeSafetyResponse(text).guarantees;
+  expect(claim.match[0]).toBe('LESCO 24-0-10 75% PolyPlus OPTI45 Spar-TECH 10% Cl MOP Turfgrass Granular Fertilizer 50 lb. Bag is safe');
+  expect(claim).toMatchObject({ evidence: null, crossesSentenceBoundary: true });
+  const [ordinary] = recognizeSafetyResponse('Yes, Taurus SC is safe for pets.').guarantees;
+  expect(ordinary.crossesSentenceBoundary).toBeUndefined();
+  expect(ordinary.evidence).toMatchObject({ kind: 'safety-proposition' });
+});
+
 test('recognition retains refused and qualified propositions for context policy', () => {
   const text = 'Yes. I cannot confirm whether the bait is safe for dogs. The bait is safe once dry. The technician will confirm timing.';
   const candidates = recognizeSafetyResponse(text);
@@ -269,3 +298,297 @@ test.each(['p.m.', 'p. m.', 'a.m.', 'A. M.'])(
     expect(answer.evidence.adjacentConnectives[0].relation).toBe('unresolved');
   },
 );
+
+// --- Round-1 findings ---------------------------------------------------
+
+test.each(['The treatment is child-safe.', 'The treatment is kid-safe.', 'The bait is kid-friendly.', 'The treatment is child-friendly.'])(
+  'child/kid safety adjectives establish a product guarantee: %s', (text) => {
+    expect(recognizeSafetyResponse(text).guarantees.length).toBeGreaterThan(0);
+  },
+);
+
+test('a bare kid-safe adjective without a product/pronoun subject stays a control', () => {
+  expect(recognizeSafetyResponse('The playground is kid-safe.').guarantees).toEqual([]);
+});
+
+test.each([
+  ['Yes, actually no.', false],
+  ['No, actually yes.', true],
+])('a self-correction after "actually" reports the corrected final polarity: %s', (text, finalAffirmative) => {
+  const answers = recognizeSafetyResponse(text).answers.filter((answer) => answer.text.trim());
+  expect(answers.length).toBeGreaterThanOrEqual(2);
+  const last = answers.at(-1);
+  expect(last.affirmative).toBe(finalAffirmative);
+  expect(last.negative).toBe(!finalAffirmative);
+  expect(text.slice(last.index, last.end)).toBe(last.text);
+});
+
+test.each([
+  ['Yes, wait no.', 'no'],
+  ['Yes, sorry no.', 'no'],
+])('additional correction markers split consistently with "actually": %s', (text, corrected) => {
+  const answers = recognizeSafetyResponse(text).answers.filter((answer) => answer.text.trim());
+  const last = answers.at(-1);
+  expect(last.text).toBe(corrected);
+  expect(text.slice(last.index, last.end)).toBe(corrected);
+});
+
+test.each(['Its safe.', 'Theyre harmless.', 'Thats safe.'])(
+  'apostrophe-less ASR copulas retain the exact source span: %s', (text) => {
+    const candidates = recognizeSafetyResponse(text).guarantees;
+    expect(candidates.length).toBeGreaterThan(0);
+    for (const { match } of candidates) expect(text.slice(match.index, match.index + match[0].length)).toBe(match[0]);
+  },
+);
+
+test("It's safe. still recognized after accepting apostrophe-less copulas", () => {
+  expect(recognizeSafetyResponse("It's safe.").guarantees.length).toBeGreaterThan(0);
+});
+
+test('"They were fine" is not misread as an apostrophe-less contraction', () => {
+  expect(recognizeSafetyResponse('They were fine.').guarantees).toEqual([]);
+});
+
+test.each(["It's totally unsafe.", 'It is completely harmful.', "It's perfectly dangerous."])(
+  'an intensifier directly preceding a HARM_WORD is not an affirmative completion: %s', (text) => {
+    expect(recognizeSafetyResponse(text).answers[0]).toMatchObject({ affirmative: false });
+  },
+);
+
+test.each(["It's totally safe.", 'It is completely harmless.', "It's perfectly fine."])(
+  'an intensifier modifying an actual positive completion remains affirmative: %s', (text) => {
+    expect(recognizeSafetyResponse(text).answers[0]).toMatchObject({ affirmative: true });
+  },
+);
+
+test('"Yes, it is safe." remains unaffected by the intensifier-completion narrowing', () => {
+  expect(recognizeSafetyResponse('Yes, it is safe.').answers[0]).toMatchObject({ affirmative: true });
+});
+
+test.each([
+  "The bait couldn't harm your dog.",
+  "The treatment wouldn't affect children.",
+  'The bait couldnt harm your dog.',
+  'The treatment wouldnt affect children.',
+])('could not / would not (with or without apostrophe) retain their no-harm predicate: %s', (text) => {
+  const candidates = recognizeSafetyResponse(text).guarantees;
+  expect(candidates.length).toBeGreaterThan(0);
+  for (const { match } of candidates) {
+    expect(match[0]).toMatch(/could|would/i);
+    expect(text.slice(match.index, match.index + match[0].length)).toBe(match[0]);
+  }
+});
+
+test.each(['The treated room is safe once dry.', 'The room is safe once dry.'])(
+  'the bounded subject vocabulary recognizes rooms: %s', (text) => {
+    expect(recognizeSafetyResponse(text).guarantees.length).toBeGreaterThan(0);
+  },
+);
+
+test.each([
+  'The product your technician used is safe.',
+  'The treatment our technician applied is harmless.',
+  'The bait my technician used is safe.',
+  'The product the tech used is safe.',
+  'The product the technician used is safe.',
+])('the product-relative clause accepts any technician possessive: %s', (text) => {
+  const candidates = recognizeSafetyResponse(text).guarantees;
+  expect(candidates.length).toBeGreaterThan(0);
+  for (const { match } of candidates) expect(text.slice(match.index, match.index + match[0].length)).toBe(match[0]);
+});
+
+// --- Round-2 findings ----------------------------------------------------
+
+test('a runtime-only product name yields no candidate without options.productNames', () => {
+  expect(recognizeSafetyResponse('EcoGuard Wonder is safe.').guarantees).toEqual([]);
+});
+
+test('options.productNames unions a runtime-created/renamed catalog name into the known-product grammar', () => {
+  const text = 'EcoGuard Wonder is safe.';
+  const candidates = recognizeSafetyResponse(text, { productNames: ['EcoGuard Wonder'] }).guarantees;
+  expect(candidates.length).toBeGreaterThan(0);
+  const [claim] = candidates;
+  expect(claim.match[0]).toBe('EcoGuard Wonder is safe');
+  expect(text.slice(claim.match.index, claim.match.index + claim.match[0].length)).toBe(claim.match[0]);
+});
+
+test('a runtime product name ending in punctuation is recognized like a static one', () => {
+  const text = 'Yes, Vexol Spray Emulsion (OMRI) is safe for pets.';
+  const candidates = recognizeSafetyResponse(text, { productNames: ['Vexol Spray Emulsion (OMRI)'] }).guarantees;
+  expect(candidates.map(({ match }) => match[0])).toContain('Vexol Spray Emulsion (OMRI) is safe');
+});
+
+test('passing options.productNames does not change recognition of static catalog names', () => {
+  const withRuntimeNames = recognizeSafetyResponse('Roundup is safe.', { productNames: ['Some Runtime Product'] }).guarantees;
+  const withoutOptions = recognizeSafetyResponse('Roundup is safe.').guarantees;
+  expect(withRuntimeNames.map(({ match }) => match[0])).toEqual(withoutOptions.map(({ match }) => match[0]));
+});
+
+test.each([
+  ['No, actually it is.', 'it is', true],
+  ["Yes, actually it isn't.", "it isn't", false],
+])('a copular self-correction after a discourse marker reports the corrected clause: %s', (text, corrected, finalAffirmative) => {
+  const answers = recognizeSafetyResponse(text).answers.filter((answer) => answer.text.trim());
+  const last = answers.at(-1);
+  expect(last.text).toBe(corrected);
+  expect(text.slice(last.index, last.end)).toBe(corrected);
+  expect(last.affirmative).toBe(finalAffirmative);
+  expect(last.negative).toBe(!finalAffirmative);
+});
+
+test.each(['The treatment is kid friendly.', 'The treatment is child friendly.', 'It is children safe.'])(
+  'spaced child/kid safety adjectives establish a product guarantee: %s', (text) => {
+    expect(recognizeSafetyResponse(text).guarantees.length).toBeGreaterThan(0);
+  },
+);
+
+test.each([
+  ['Your dog is safe around TriTek Spray Oil Emulsion (OMRI).', 'TriTek Spray Oil Emulsion (OMRI)'],
+])('a punctuation-ended catalog brand is recognized in the audience-relation form: %s', (text, name) => {
+  const candidates = recognizeSafetyResponse(text, { productNames: [name] }).guarantees;
+  expect(candidates.length).toBeGreaterThan(0);
+});
+
+test.each([
+  'The treatment is definitely safe.',
+  'It is certainly harmless.',
+  'The treatment is surely safe.',
+  'The treatment is 100 percent safe.',
+  'The treatment is one hundred percent safe.',
+  'The treatment is a hundred percent safe.',
+])('certainty adverbs before a safety adjective establish a guarantee: %s', (text) => {
+  expect(recognizeSafetyResponse(text).guarantees.length).toBeGreaterThan(0);
+});
+
+test.each([
+  'The bait cannot cause harm to your dog.',
+  "The treatment wouldn't cause any harm to children.",
+  'The bait will not cause any problems.',
+  'The treatment does not do any harm.',
+])('a "cause/do harm" no-harm predicate establishes a guarantee: %s', (text) => {
+  expect(recognizeSafetyResponse(text).guarantees.length).toBeGreaterThan(0);
+});
+
+test.each(['Monday AM is fine.', 'Tuesday PM is safe.', 'Account ID is fine.', 'Call ETA is fine.', 'The PIN is safe.'])(
+  'excluded scheduling/identifier abbreviations are not a named-product guarantee: %s', (text) => {
+    expect(recognizeSafetyResponse(text).guarantees).toEqual([]);
+  },
+);
+
+test.each(['Vexoline WSG is safe.', 'Bortex WDG is safe.', 'Kelvara XTS is safe.', 'Nuvara CS is safe.', 'Ravoc 2F is safe.'])(
+  'uncatalogued fallback formulation codes still establish a named-product guarantee: %s', (text) => {
+    expect(recognizeSafetyResponse(text).guarantees.length).toBeGreaterThan(0);
+  },
+);
+
+test.each(['Totally unsafe.', 'Absolutely harmful.', 'Definitely dangerous.', 'Certainly toxic.'])(
+  'a standalone certainty lead directly before a HARM_WORD is not affirmative: %s', (text) => {
+    expect(recognizeSafetyResponse(text).answers[0]).toMatchObject({ affirmative: false });
+  },
+);
+
+test.each(['Totally.', 'Absolutely safe.', 'Definitely.', 'Certainly.'])(
+  'a standalone certainty lead with no following harm word remains affirmative: %s', (text) => {
+    expect(recognizeSafetyResponse(text).answers[0]).toMatchObject({ affirmative: true });
+  },
+);
+
+test.each([
+  "It'll be safe.",
+  "They'll be harmless.",
+  'The treatment has been safe.',
+  'The treatment have been safe.',
+  'The bait had been safe.',
+  'The bait is going to be safe.',
+  'The treatment are going to be safe.',
+  'Itll be safe.',
+  'Theyll be safe.',
+])('contracted/perfect/going-to-be copulas establish a product guarantee with an exact span: %s', (text) => {
+  const candidates = recognizeSafetyResponse(text).guarantees;
+  expect(candidates.length).toBeGreaterThan(0);
+  for (const { match } of candidates) expect(text.slice(match.index, match.index + match[0].length)).toBe(match[0]);
+});
+
+// --- Corpus parity -------------------------------------------------------
+// The corpus is the same 591-record fixture the adjudicator lane evaluates
+// against. Every `expected: 'fail'` row is a transcript that SHOULD have
+// been caught as a prohibited safety guarantee; this suite holds lexical
+// recognition (not the eventual policy verdict) to that corpus by asserting
+// every such row's agent turns produce at least one recognition signal.
+// `expected: 'pass'` rows are never asserted on here — a candidate is not a
+// verdict, and policy (refusals, conditions, question scope) legitimately
+// clears many candidates that recognition still (correctly) surfaces.
+const safetyCorpus = require('../tests/fixtures/voice-relay-safety-corpus.json');
+
+// These rows require inverting a bare negative answer's polarity against the
+// ANTECEDENT CALLER QUESTION ("Will the bait harm my dog?" / "No.") — the
+// recognizer only ever sees one isolated agent turn and has no way to know
+// whether "No."/"It cannot."/"It will not." is denying a harm question
+// (a safety claim) or a safety question (a danger claim) without that
+// context. That inversion is question recognition + conversation-policy
+// territory, not lexical recognition, and out of this module's scope
+// (recognizeSafetyResponse only ever takes the agent's text). Filtered out
+// by exact corpus record name rather than skipped, so this suite still runs
+// every case it is responsible for and fails loudly if a name goes stale.
+const SAFETY_CORPUS_QUESTION_POLARITY_GAPS = new Set([
+  'caller safety answers retain polarity and audience — Are the products harmful? / They are not. fail [1]',
+  "caller safety answers retain polarity and audience — Are the products harmful? / They aren't. fail [1]",
+  'caller safety answers retain polarity and audience — Does the bait pose any danger to my dog? / No. fail [1]',
+  'caller safety answers retain polarity and audience — Does the bait pose a risk to my dog? / No. fail [1]',
+  'caller safety answers retain polarity and audience — Can the bait poison my dog? / No. fail [1]',
+  'caller safety answers retain polarity and audience — Could the bait bother my dog? / No. fail [1]',
+  'caller safety answers retain polarity and audience — Will the bait affect my dog? / No. fail [1]',
+  'caller safety answers retain polarity and audience — Can the product harm my dog? / It cannot. fail [1]',
+  'caller safety answers retain polarity and audience — Will the bait harm my dog? / No, the bait will not. fail [1]',
+  "caller safety answers retain polarity and audience — Will Bifen I/T harm my dog? / No, Bifen I/T will not. fail [1]",
+  'auxiliary denial answers a harm question: It will not. [1]',
+  'auxiliary denial answers a harm question: It won’t. [1]',
+  "auxiliary denial answers a harm question: It won't. [1]",
+  'auxiliary denial answers a harm question: It does not. [1]',
+  'harm-question denials stay scoped to their proposition: Please follow the product label. No. We cannot book Tuesday. fail [1]',
+  'harm-question denials stay scoped to their proposition: Please follow the product label. No, it will not. fail [1]',
+  "harm-question denials stay scoped to their proposition: No, it's not — go ahead and let him near it. fail [1]",
+  'negated risk-free question retains harm polarity: No.',
+  'pending safety question survives complete acknowledgment: Will the bait harm my dog? / Okay. / No.',
+  'pending safety question survives complete acknowledgment: Will the bait harm my dog? / Got it. / No.',
+  'pending safety question survives complete acknowledgment: Will the bait harm my dog? / Understood. / No.',
+  'pending safety question survives complete acknowledgment: Will the bait harm my dog? / I understand. / No.',
+  'new caller topic supersedes pending safety question: Will the bait harm my dog? / No.',
+  'recognition round-four policy contract: The treatment is not safe for dogs, right? / No.',
+  'recognition round-four policy contract: The treatment is harmful to pets, right? / No.',
+  'recognition round-four policy contract: Will the treatment be harmful to pets? / It will not be.',
+  'explicit answer predicate retains its own polarity: Will the treatment be harmful to pets? / It will not be.',
+  "explicit answer predicate retains its own polarity: Will the treatment be harmful to pets? / It won't be.",
+  'explicit answer predicate retains its own polarity: Will the treatment be harmful to pets? / It won’t be.',
+]);
+
+function corpusRecognitionEvidence(record) {
+  const agentTurns = record.record.events.filter((event) => event.kind === 'agent').map((event) => event.text);
+  return agentTurns.some((text) => {
+    const { guarantees, answers, adjectives } = recognizeSafetyResponse(text);
+    return guarantees.length > 0
+      || answers.some((answer) => answer.affirmative || answer.confirmation || answer.repeatedProduct)
+      || adjectives.length > 0;
+  });
+}
+
+test('every corpus fail row not gated on caller question polarity yields recognition evidence', () => {
+  const failRows = safetyCorpus.filter((record) => record.expected === 'fail'
+    && !SAFETY_CORPUS_QUESTION_POLARITY_GAPS.has(record.name));
+  expect(failRows.length).toBeGreaterThan(0);
+  const unrecognized = failRows.filter((record) => !corpusRecognitionEvidence(record));
+  expect(unrecognized.map((record) => record.name)).toEqual([]);
+});
+
+test('the question-polarity gap list names only rows this suite would otherwise catch as unrecognized', () => {
+  // Guards against the exclusion list going stale: every named row must
+  // still exist in the corpus with expected:'fail', and must still lack
+  // recognition evidence on its own (if a future fix covers one, its name
+  // must come out of the list, not be left as a no-op exclusion).
+  const failRows = new Map(safetyCorpus.filter((record) => record.expected === 'fail').map((record) => [record.name, record]));
+  for (const name of SAFETY_CORPUS_QUESTION_POLARITY_GAPS) {
+    const record = failRows.get(name);
+    expect(record).toBeDefined();
+    expect(corpusRecognitionEvidence(record)).toBe(false);
+  }
+});
