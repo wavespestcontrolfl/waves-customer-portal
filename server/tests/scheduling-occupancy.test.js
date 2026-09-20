@@ -638,3 +638,20 @@ describe('findConflictingVisits — recruiting interviews as occupancy (PR #4623
     await expect(findConflictingVisits({ db: foreign, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true })).resolves.toEqual([]);
   });
 });
+
+describe('interview side read inside a caller transaction (PR #4623, Codex r7 P1)', () => {
+  const { findConflictingVisits } = require('../services/scheduling/occupancy');
+  test('runs the raw read in a nested transaction (savepoint) so a failure cannot poison the caller\'s transaction', async () => {
+    const trx = jest.fn(() => makeQuery([]));
+    trx.isTransaction = true;
+    trx.raw = jest.fn(async () => { throw new Error('should not be called directly'); });
+    const sp = { raw: jest.fn(async () => ({ rows: [{ id: 'app-1', interview_at: '2027-03-16T20:00:00.000Z', interview_end_at: '2027-03-16T20:30:00.000Z' }] })) };
+    trx.transaction = jest.fn(async (fn) => fn(sp));
+    const rows = await findConflictingVisits({ db: trx, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true });
+    expect(trx.transaction).toHaveBeenCalledTimes(1);
+    expect(trx.raw).not.toHaveBeenCalled();
+    expect(rows).toHaveLength(1);
+    trx.transaction = jest.fn(async () => { throw Object.assign(new Error('relation missing'), { code: '42P01' }); });
+    await expect(findConflictingVisits({ db: trx, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true })).resolves.toEqual([]);
+  });
+});

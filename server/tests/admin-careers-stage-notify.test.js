@@ -411,6 +411,26 @@ describe('PATCH /:id/status', () => {
 });
 
 describe('GET /:id detail never exposes the raw token', () => {
+  test('opening the detail acknowledges the applicant reply rows (sms_log + messages) as read', async () => {
+    mockDb.__setRows([appRow({ status: 'interview' })]);
+    const updates = [];
+    const origImpl = mockDb.getMockImplementation();
+    mockDb.mockImplementation((table) => {
+      if (table === 'sms_log' || table === 'messages') {
+        const q = {};
+        ['where', 'whereRaw', 'andWhere', 'orWhereNull'].forEach((m) => { q[m] = jest.fn(() => q); });
+        q.update = jest.fn(async (payload) => { updates.push([table, payload]); return 1; });
+        return q;
+      }
+      return origImpl(table);
+    });
+    const res = await fetch(`${base}/api/admin/careers/aaaaaaaa-0000-4000-8000-000000000001`, { headers: { Authorization: 'Bearer admin' } });
+    expect(res.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 10));
+    mockDb.mockImplementation(origImpl);
+    expect(updates.map(([t, p]) => [t, p.is_read])).toEqual([['sms_log', true], ['messages', true]]);
+  });
+
   test('detail carries interview_url, not interview_token', async () => {
     mockDb.__setRows([appRow({ interview_token: 'd'.repeat(64), status: 'interview' })]);
     const res = await fetch(`${base}/api/admin/careers/aaaaaaaa-0000-4000-8000-000000000001`);

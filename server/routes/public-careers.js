@@ -198,6 +198,14 @@ router.post('/interview/:token/book', interviewLimiter, async (req, res) => {
     const mode = req.body && req.body.mode;
     const start = req.body && req.body.start;
 
+    // Token eligibility BEFORE any body validation (Codex r7 P0): an unknown
+    // or inactive token answers the generic 404 regardless of body shape.
+    // Non-authoritative — the locked re-read inside the transaction decides.
+    const eligible = await db('job_applications')
+      .where({ interview_token: req.params.token })
+      .first('id', 'status');
+    if (!eligible || eligible.status !== 'interview') return res.status(404).json({ error: 'Not found' });
+
     // The slot's ET calendar date keys the shared occupancy lock; a start
     // that is not a parseable instant can never be an offered slot.
     const startMs = Date.parse(String(start || ''));

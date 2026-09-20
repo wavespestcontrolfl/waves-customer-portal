@@ -3308,12 +3308,16 @@ router.get('/scheduled', async (req, res, next) => {
 router.delete('/scheduled/:id', async (req, res, next) => {
   try {
     // Peek (no delete yet) just to learn the thread key for the lock.
-    const peek = await excludeUnresolvedSendReservations(db('sms_log'))
+    const peek = await db('sms_log')
       .where({ id: req.params.id, status: 'scheduled' })
-      .first('id', 'to_phone', 'message_type');
+      .first('id', 'to_phone');
     if (!peek) return res.json({ success: true });
-    if (req.techRole !== 'admin' && isRecruitingMessageType(peek.message_type)) {
-      return res.status(403).json({ error: 'Admin access required' });
+    if (req.techRole !== 'admin') {
+      // Queued recruiting texts are owner-only (utils/recruiting-thread-scope.js).
+      const typed = await excludeUnresolvedSendReservations(db('sms_log')).where({ id: peek.id }).first('message_type');
+      if (typed && isRecruitingMessageType(typed.message_type)) {
+        return res.status(403).json({ error: 'Admin access required' });
+      }
     }
     const threadLast10 = normalizePhoneLast10(peek.to_phone);
 

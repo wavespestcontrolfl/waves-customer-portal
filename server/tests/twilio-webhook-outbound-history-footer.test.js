@@ -57,6 +57,9 @@ function mockDb(table) {
 }
 mockDb.raw = jest.fn((sql, bindings) => ({ rows: [], sql, bindings }));
 mockDb.transaction = async (fn) => fn(mockDb);
+// Recruiting reply classification is exercised in recruiting-inbound.test.js; these
+// doubles cannot run it (no job_applications table shape), so stub it inert.
+jest.mock('../services/recruiting-inbound', () => ({ matchApplicantReply: jest.fn(async () => null), recordApplicantReply: jest.fn(async () => ({ persisted: true, duplicate: false })) }));
 jest.mock('../models/db', () => mockDb);
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((gate) => gate === 'webhooks'),

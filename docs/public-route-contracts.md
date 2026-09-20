@@ -2161,8 +2161,10 @@ merges the same windows into its occupied set. Staff/automation readers
 in yet: full coverage needs interviews represented as calendar rows
 (owner decision, PR 2). An identical `{mode, start}`
 retry of the current booking is answered with the current payload and no
-side effects. POST `/book` re-validates the client's chosen `start` against that SAME
-live offered set — the client's slot choice is never trusted — and
+side effects. POST `/book` establishes token eligibility (a non-authoritative read;
+unknown/inactive ⇒ generic 404) BEFORE any body validation, so an invalid
+token's response never depends on body shape; then re-validates the
+client's chosen `start` against that SAME live offered set — the client's slot choice is never trusted — and
 writes `interview_mode`/`interview_at`/`interview_end_at`/
 `interview_booked_at` inside ONE transaction that first takes the SHARED
 date-wide occupancy lock (`acquireOccupancyLock`, scheduling/occupancy.js
@@ -2198,7 +2200,9 @@ and the application's interview token/time, replayed by
 services/scheduler.js under the applicant policy through the
 `recruiting_comms_deferred` deferred-replay registry entry — the recheck
 fails closed on the gate, a missing/closed application, a changed token
-or a rebooked time/mode; the recheck marks the queued entry `handoff`
+or a rebooked time/mode, and on a NEWER attempt of the same stage in the
+ledger (a resend supersedes a queued invite even after the worker claimed
+it); the recheck marks the queued entry `handoff`
 before dispatch, finalize marks it `sent`, and a terminal block never
 downgrades evidence — never-attempted `deferred` → `blocked`, attempted
 `handoff` → `uncertain`, `sent`/`uncertain` untouched) and

@@ -592,7 +592,7 @@ const REGISTRY = {
         }
         if (!meta.job_application_id) return { eligible: false, reason: 'application-missing' };
         const app = await db('job_applications').where({ id: meta.job_application_id })
-          .first('id', 'status', 'interview_token', 'interview_at', 'interview_mode');
+          .first('id', 'status', 'interview_token', 'interview_at', 'interview_mode', 'comms_history');
         if (!app) return { eligible: false, reason: 'application-missing' };
         const status = String(app.status || '');
         if (!['new', 'reviewed', 'interview', 'offer'].includes(status)) {
@@ -601,6 +601,17 @@ const REGISTRY = {
         const stage = String(meta.stage || '');
         if (stage === 'interview_invite' || stage === 'interview_confirmation') {
           if (status !== 'interview') return { eligible: false, reason: `application-${status}` };
+          // Supersession through the replay rail itself (Codex r7 P2): a
+          // NEWER attempt of the same stage in the ledger (the owner resent,
+          // immediately or queued) retires this one even if the worker has
+          // already claimed the row.
+          const history = Array.isArray(app.comms_history) ? app.comms_history : [];
+          const mine = history.find((e) => e && e.id === meta.ledger_entry_id);
+          const mineAt = mine ? Date.parse(mine.at || '') : NaN;
+          const newer = history.some((e) => e && e.id !== meta.ledger_entry_id && e.channel === 'sms' && e.stage === stage
+            && ['handoff', 'sent', 'uncertain', 'deferred'].includes(e.outcome)
+            && Number.isFinite(mineAt) && Date.parse(e.at || '') > mineAt);
+          if (newer) return { eligible: false, reason: 'superseded-by-newer-attempt' };
           if (!meta.interview_token || app.interview_token !== meta.interview_token) {
             return { eligible: false, reason: 'interview-token-changed' };
           }

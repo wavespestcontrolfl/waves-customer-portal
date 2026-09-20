@@ -37,6 +37,7 @@ jest.mock('../services/logger', () => mockLogger);
 
 // job_applications-only fake db, keyed on interview_token / id / status.
 let onFirstReadOnce = null;
+const onNthFirstAfterHooks = {};
 // Counter-based hooks, keyed by which .first() call (1-based) they should
 // run BEFORE — unlike onFirstReadOnce (which fires AFTER the snapshot, to
 // simulate a race with the row-lock read itself), these mutate the row
@@ -68,7 +69,15 @@ const mockDb = jest.fn((table) => {
       if (onFirstReadOnce) {
         const fn = onFirstReadOnce;
         onFirstReadOnce = null;
+  for (const k of Object.keys(onNthFirstAfterHooks)) delete onNthFirstAfterHooks[k];
         fn();
+      }
+      // Post-snapshot hook on the Nth read (same race semantics as
+      // onFirstReadOnce, for routes that read more than once).
+      const postHook = onNthFirstAfterHooks[firstCallCount];
+      if (postHook) {
+        delete onNthFirstAfterHooks[firstCallCount];
+        postHook();
       }
       return Promise.resolve(snapshot);
     },
@@ -108,6 +117,7 @@ mockDb.__rows = () => dbRows;
 mockDb.__setRows = (rows) => { dbRows = rows; };
 mockDb.__onFirstReadOnce = (fn) => { onFirstReadOnce = fn; };
 mockDb.__onNthFirst = (n, fn) => { onNthFirstHooks[n] = fn; };
+mockDb.__onNthFirstAfter = (n, fn) => { onNthFirstAfterHooks[n] = fn; };
 mockDb.schema = { hasTable: jest.fn(async () => true) };
 // The book route runs inside one transaction: the trx is the same mock, and
 // every raw call is recorded so the test can prove the advisory lock is
@@ -316,6 +326,16 @@ describe('POST /interview/:token/book', () => {
     expect(mockTriggerNotification).not.toHaveBeenCalled();
   });
 
+  test('unknown token + unparseable body -> generic 404 (eligibility before body validation)', async () => {
+    mockDb.__setRows([]);
+    const res = await fetch(`${base}/api/public/careers/interview/${TOKEN}/book`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'phone', start: 'not-a-time' }),
+    });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'Not found' });
+  });
+
   test('400 on an invalid mode', async () => {
     mockDb.__setRows([appRow()]);
     const res = await fetch(`${base}/api/public/careers/interview/${TOKEN}/book`, {
@@ -392,7 +412,7 @@ describe('POST /interview/:token/book', () => {
     // proceeds normally on it); call #2 is the confirmation block's
     // post-commit re-read — mutate the row to 'withdrawn' right before it,
     // simulating a withdraw request that completed in between.
-    mockDb.__onNthFirst(2, () => {
+    mockDb.__onNthFirst(3, () => {
       const row = mockDb.__rows()[0];
       row.status = 'withdrawn';
       row.status_history = [...row.status_history, { from: 'interview', to: 'withdrawn', by: 'applicant' }];
@@ -424,7 +444,7 @@ describe('POST /interview/:token/book', () => {
   test('409 when the atomic update matches 0 rows (status changed between read and write)', async () => {
     mockDb.__setRows([appRow()]);
     mockListInterviewSlots.mockResolvedValue([OFFERED]);
-    mockDb.__onFirstReadOnce(() => { mockDb.__rows()[0].status = 'withdrawn'; });
+    mockDb.__onNthFirstAfter(2, () => { mockDb.__rows()[0].status = 'withdrawn'; });
     const res = await fetch(`${base}/api/public/careers/interview/${TOKEN}/book`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ mode: 'phone', start: OFFERED.start }),

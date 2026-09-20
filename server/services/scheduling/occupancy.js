@@ -569,11 +569,16 @@ async function bookedInterviewConflictRows(db, dateStr, startMin, endMin) {
   const np = etParts(addETDays(dayStart, 1));
   const dayEnd = parseETDateTime(`${np.year}-${String(np.month).padStart(2, '0')}-${String(np.day).padStart(2, '0')}T00:00`);
   const statusList = INTERVIEW_BLOCKING_STATUSES.map(() => '?').join(', ');
-  const res = await db.raw(
-    `SELECT id, interview_at, interview_end_at FROM job_applications
-      WHERE status IN (${statusList}) AND interview_at IS NOT NULL AND interview_at >= ? AND interview_at < ?`,
-    [...INTERVIEW_BLOCKING_STATUSES, dayStart, dayEnd],
-  );
+  const sql = `SELECT id, interview_at, interview_end_at FROM job_applications
+      WHERE status IN (${statusList}) AND interview_at IS NOT NULL AND interview_at >= ? AND interview_at < ?`;
+  const bindings = [...INTERVIEW_BLOCKING_STATUSES, dayStart, dayEnd];
+  // Inside a caller's transaction this optional read runs in a SAVEPOINT
+  // (knex nests a transaction as one): a failure rolls back only the
+  // savepoint, so the caller's transaction stays usable for its own
+  // insert/update instead of dying with 25P02 (Codex r7 P1).
+  const res = (db.isTransaction && typeof db.transaction === 'function')
+    ? await db.transaction((sp) => sp.raw(sql, bindings))
+    : await db.raw(sql, bindings);
   const rows = Array.isArray(res) ? res : (res && Array.isArray(res.rows) ? res.rows : []);
   const out = [];
   for (const r of rows) {

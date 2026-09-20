@@ -106,6 +106,25 @@ router.get('/:id', async (req, res) => {
     const row = await db('job_applications').where({ id: req.params.id }).first();
     if (!row) return res.status(404).json({ error: 'Not found' });
     res.json({ application: withoutToken(row) });
+    // Opening the application IS reading its replies (Codex r7 P2): clear the
+    // unread flags on the applicant's reply rows in both message stores so
+    // the shared unread counts do not stay lit for messages the owner has
+    // now seen. Fire-and-forget after the response.
+    void (async () => {
+      const readAt = new Date();
+      await db('sms_log')
+        .where({ direction: 'inbound', message_type: 'job_applicant_reply' })
+        .whereRaw("metadata->>'job_application_id' = ?", [row.id])
+        .andWhere(function unread() { this.where({ is_read: false }).orWhereNull('is_read'); })
+        .update({ is_read: true });
+      await db('messages')
+        .where({ direction: 'inbound', message_type: 'job_applicant_reply' })
+        .whereRaw("metadata->>'job_application_id' = ?", [row.id])
+        .andWhere(function unread() { this.where({ is_read: false }).orWhereNull('is_read'); })
+        .update({ is_read: true, read_at: readAt });
+    })().catch((err) => {
+      logger.warn(`[admin-careers] reply read-ack failed (application ${req.params.id}): ${RecruitingComms.errorSummary(err)}`);
+    });
   } catch (err) {
     logger.error(`[admin-careers] detail failed: ${err.message}`);
     res.status(500).json({ error: 'Failed to load application' });

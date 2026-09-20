@@ -1147,6 +1147,17 @@ describe('recruiting_comms_deferred (PR #4623)', () => {
     spy.mockRestore();
   });
 
+  test('a newer attempt of the same stage in the ledger supersedes this queued invite (even if already claimed)', async () => {
+    const spy = jest.spyOn(gates, 'isEnabled').mockImplementation(() => true);
+    const history = [
+      { id: 'e-1', channel: 'sms', stage: 'interview_invite', outcome: 'deferred', at: '2027-03-16T03:00:00.000Z' },
+      { id: 'e-2', channel: 'sms', stage: 'interview_invite', outcome: 'sent', at: '2027-03-16T14:00:00.000Z' },
+    ];
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'interview', interview_token: 'a'.repeat(64), comms_history: history }));
+    expect(await recheckDeferredReplay(ENTRY, meta)).toMatchObject({ eligible: false, reason: 'superseded-by-newer-attempt' });
+    spy.mockRestore();
+  });
+
   test('a database error fails CLOSED', async () => {
     const spy = jest.spyOn(gates, 'isEnabled').mockImplementation(() => true);
     db.mockReturnValueOnce({ where: () => { throw Object.assign(new Error('boom'), { code: '57014' }); } });
