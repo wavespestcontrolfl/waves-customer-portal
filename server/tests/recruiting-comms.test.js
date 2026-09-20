@@ -116,6 +116,14 @@ const RecruitingComms = require('../services/recruiting-comms');
 const { lintComms } = require('../services/comms-lint');
 const migration = require('../models/migrations/20260920000001_job_applications_interview_comms');
 
+// Drives a send input's locked handoff the way the pipeline does: the
+// caller's transaction wraps the pipeline callback, which stamps the durable
+// pre-provider transition (onProviderStart) and then reaches the provider.
+const boundary = (input) => input.withSmsHandoff(async (trx, onProviderStart) => {
+  await onProviderStart();
+  return { ok: true };
+});
+
 function baseApp(overrides = {}) {
   return {
     id: 'app-1',
@@ -500,7 +508,7 @@ describe('sendStageComms pre-handoff evidence', () => {
     mockSendCustomerMessage.mockImplementation(async (input) => {
       const outcomes = () => mockDb.__tables.job_applications.find((r) => r.id === 'app-1').comms_history.map((e) => e.outcome);
       seenBeforeProvider = outcomes();
-      await input.preSendCheck({ channel: 'sms' }); // the pipeline runs this right before Twilio
+      await boundary(input); // the pipeline runs this right before Twilio
       seenAtProvider = outcomes();
       return { sent: true, blocked: false, deliveryOutcome: 'accepted' };
     });
@@ -652,6 +660,33 @@ describe('sendStageComms — invite supersedes queued invites; suppression looku
     expect(mockSendOne).not.toHaveBeenCalled();
   });
 
+  test('deferred: an invite queued by an OVERLAPPING attempt moments ago owns the send — this attempt yields (blocked, no second queue row) (Codex r19 P2)', async () => {
+    mockRenderSmsTemplate.mockResolvedValue('Pick a time: https://x/careers/interview/a');
+    mockSendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, deferred: true, nextAllowedAt: '2027-03-17T12:00:00.000Z', code: 'SEND_WINDOW_CLOSED' });
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    mockDb.__tables.sms_log = [{ id: 'rival', status: 'scheduled', message_type: 'job_interview_invite', created_at: new Date(Date.now() - 3000), metadata: JSON.stringify({ job_application_id: 'app-1', ledger_entry_id: 'rival-entry' }) }];
+    const result = await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: true, email: false, by: 'tech-1' });
+    expect(result.sms).toBe('blocked');
+    expect(mockDb.__tables.sms_log.filter((r) => r.status === 'scheduled').map((r) => r.id)).toEqual(['rival']);
+    const mine = mockDb.__tables.job_applications.find((r) => r.id === 'app-1').comms_history[0];
+    expect(mine).toMatchObject({ outcome: 'blocked', code: 'superseded_by_queued_invite' });
+  });
+
+  test('deferred: an OLDER queued invite (outside the overlap window) is retired in favour of this one, and its ledger entry settles blocked', async () => {
+    mockRenderSmsTemplate.mockResolvedValue('Pick a time: https://x/careers/interview/a');
+    mockSendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, deferred: true, nextAllowedAt: '2027-03-17T12:00:00.000Z', code: 'SEND_WINDOW_CLOSED' });
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [{ id: 'old-entry', at: new Date(Date.now() - 3600000).toISOString(), stage: 'interview_invite', channel: 'sms', outcome: 'deferred' }] });
+    mockDb.__tables.sms_log = [{ id: 'old', status: 'scheduled', message_type: 'job_interview_invite', created_at: new Date(Date.now() - 3600000), metadata: JSON.stringify({ job_application_id: 'app-1', ledger_entry_id: 'old-entry' }) }];
+    const result = await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: true, email: false, by: 'tech-1' });
+    expect(result.sms).toBe('deferred');
+    expect(mockDb.__tables.sms_log.find((r) => r.id === 'old').status).toBe('cancelled');
+    expect(mockDb.__tables.sms_log.filter((r) => r.status === 'scheduled')).toHaveLength(1);
+    const history = mockDb.__tables.job_applications.find((r) => r.id === 'app-1').comms_history;
+    expect(history.find((e) => e.id === 'old-entry')).toMatchObject({ outcome: 'blocked', code: 'superseded_by_newer_queue' });
+  });
+
   test('a sent interview invite retires invites still queued for the same application', async () => {
     mockRenderSmsTemplate.mockResolvedValue('Pick a time: https://x/careers/interview/a');
     mockSendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, deliveryOutcome: 'accepted' });
@@ -716,8 +751,8 @@ describe('eligibility at the provider boundaries', () => {
     const stillEligible = jest.fn(async () => { calls += 1; return calls <= 2; });
     const result = await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: true, email: true, by: 'tech-1', stillEligible });
     const smsInput = mockSendCustomerMessage.mock.calls[0][0];
-    expect(typeof smsInput.preSendCheck).toBe('function');
-    await expect(smsInput.preSendCheck()).resolves.toMatchObject({ ok: false, code: 'RECRUITING_STALE' });
+    expect(typeof smsInput.withSmsHandoff).toBe('function');
+    await expect(boundary(smsInput)).resolves.toMatchObject({ ok: false, code: 'RECRUITING_STALE' });
     expect(result.sms).toBe('sent');
     expect(result.email).toBe('stale');
     expect(mockSendOne).not.toHaveBeenCalled();
@@ -733,13 +768,17 @@ describe('eligibility at the provider boundaries', () => {
     const seenByEligibility = [];
     const stillEligible = jest.fn(async () => { seenByEligibility.push(outcomes()); return true; });
     mockSendCustomerMessage.mockImplementation(async (input) => {
-      await expect(input.preSendCheck({ channel: 'sms' })).resolves.toEqual({ ok: true });
+      await expect(boundary(input)).resolves.toEqual({ ok: true });
       return { sent: true, blocked: false, deliveryOutcome: 'accepted' };
     });
     const result = await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: true, email: false, by: 'tech-1', stillEligible });
     expect(result.sms).toBe('sent');
-    // leg check (pending), then the boundary check AFTER the stamp (handoff)
-    expect(seenByEligibility).toEqual([[], ['handoff']]);
+    // leg check (nothing written yet), then the boundary check under the row
+    // lock — the stamp follows the pipeline's rechecks (onProviderStart), all
+    // inside the same lock, so the read sees 'pending' and nothing can change
+    // before Twilio (Codex r19 P1).
+    expect(seenByEligibility).toEqual([[], ['pending']]);
+    expect(stillEligible.mock.calls[1][0]).toBe(mockDb); // read through the held transaction
     const entry = mockDb.__tables.job_applications.find((r) => r.id === 'app-1').comms_history[0];
     expect(entry.outcome).toBe('sent');
     expect(typeof entry.handoff_at).toBe('string');
@@ -753,7 +792,7 @@ describe('eligibility at the provider boundaries', () => {
     mockSendCustomerMessage.mockImplementation(async (input) => {
       // the other admin's attempt lands in the ledger while this one is inside the validators
       row().comms_history.push({ id: 'other-attempt', at: new Date().toISOString(), stage: 'interview_invite', channel: 'sms', outcome: 'pending', body: 'x', by: 'tech-2' });
-      const check = await input.preSendCheck({ channel: 'sms' });
+      const check = await boundary(input);
       expect(check).toMatchObject({ ok: false, code: 'RECRUITING_SUPERSEDED' });
       return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: check.code };
     });
@@ -775,7 +814,7 @@ describe('eligibility at the provider boundaries', () => {
       { id: 'earlier', at: new Date(Date.now() - 6000).toISOString(), handoff_at: new Date(Date.now() - 5000).toISOString(), stage: 'interview_invite', channel: 'sms', outcome: 'handoff', body: 'x', by: 'tech-2' },
     ] });
     mockSendCustomerMessage.mockImplementation(async (input) => {
-      const check = await input.preSendCheck({ channel: 'sms' });
+      const check = await boundary(input);
       expect(check).toMatchObject({ ok: false, code: 'RECRUITING_SUPERSEDED' });
       return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: check.code };
     });
@@ -790,7 +829,7 @@ describe('eligibility at the provider boundaries', () => {
       { id: 'earlier', at: new Date(Date.now() - 20 * 60000).toISOString(), handoff_at: new Date(Date.now() - 20 * 60000).toISOString(), stage: 'interview_invite', channel: 'sms', outcome: 'sent', body: 'x', by: 'tech-2' },
     ] });
     mockSendCustomerMessage.mockImplementation(async (input) => {
-      await expect(input.preSendCheck({ channel: 'sms' })).resolves.toEqual({ ok: true });
+      await expect(boundary(input)).resolves.toEqual({ ok: true });
       return { sent: true, blocked: false, deliveryOutcome: 'accepted' };
     });
     const result = await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: true, email: false, by: 'tech-1' });
@@ -822,7 +861,7 @@ describe('eligibility at the provider boundaries', () => {
     const row = () => mockDb.__tables.job_applications.find((r) => r.id === 'app-1');
     mockSendCustomerMessage.mockImplementation(async (input) => {
       row().comms_history.push({ id: 'second-reply', at: new Date().toISOString(), stage: 'owner_reply', channel: 'sms', outcome: 'pending', body: 'and one more thing', by: 'tech-1' });
-      await expect(input.preSendCheck({ channel: 'sms' })).resolves.toEqual({ ok: true });
+      await expect(boundary(input)).resolves.toEqual({ ok: true });
       return { sent: true, blocked: false, deliveryOutcome: 'accepted' };
     });
     const result = await RecruitingComms.sendStageComms(app, 'owner_reply', { sms: true, email: false, by: 'tech-1', smsBody: 'See you Tuesday' });
@@ -856,9 +895,9 @@ describe('owner reply — boundary guard and evidence-owning application', () =>
     mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
     await RecruitingComms.sendOwnerReply({ applicationId: 'app-1', body: 'ok', by: 'tech-1' });
     const input = mockSendCustomerMessage.mock.calls[0][0];
-    expect(typeof input.preSendCheck).toBe('function');
+    expect(typeof input.withSmsHandoff).toBe('function');
     mockDb.__tables.job_applications.find((r) => r.id === 'app-1').status = 'rejected';
-    await expect(input.preSendCheck()).resolves.toMatchObject({ ok: false, code: 'RECRUITING_STALE' });
+    await expect(boundary(input)).resolves.toMatchObject({ ok: false, code: 'RECRUITING_STALE' });
   });
 
   test('openApplicationIdForPhone picks the open application whose ledger owns the newest SMS attempt, not the newest row', async () => {

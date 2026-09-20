@@ -111,6 +111,44 @@ afterEach(() => {
 });
 
 describe('RecruitingPage — stage change dialog', () => {
+  it('a stage PATCH still in flight when the detail switches applicants is discarded — it never replaces the new detail (Codex r19 P2)', async () => {
+    let releasePatch;
+    const slowPatch = new Promise((resolve) => { releasePatch = resolve; });
+    const base = buildFetchMock();
+    const fetchMock = vi.fn((url, options = {}) => {
+      const method = options.method || 'GET';
+      if (url.includes('/admin/careers?status=')) {
+        return Promise.resolve(apiResponse({
+          applications: [
+            { id: 'app-1', role: 'technician', status: 'new', contact_snapshot: { name: 'Jordan Lee' }, ai_score: 80, ai_recommendation: 'strong', created_at: '2026-09-10T12:00:00Z' },
+            { id: 'app-2', role: 'technician', status: 'new', contact_snapshot: { name: 'Casey Kim' }, ai_score: 70, ai_recommendation: 'maybe', created_at: '2026-09-11T12:00:00Z' },
+          ],
+          counts: { new: 2 },
+        }));
+      }
+      if (url.endsWith('/admin/careers/app-1/status') && method === 'PATCH') return slowPatch;
+      if (url.endsWith('/admin/careers/app-2')) {
+        return Promise.resolve(apiResponse({ application: detailFixture({ id: 'app-2', contact_snapshot: { name: 'Casey Kim', phone: '9415559876', email: 'casey@example.com' } }) }));
+      }
+      return base(url, options);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    await openInterviewStageDialog();
+    fireEvent.click(screen.getByRole('button', { name: /^Confirm/ }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([u, o]) => String(u).endsWith('/admin/careers/app-1/status') && o?.method === 'PATCH')).toBe(true));
+    // the detail switches to applicant B while A's PATCH is still pending
+    fireEvent.click(screen.getAllByText('Casey Kim')[0]);
+    await screen.findByText(/Casey Kim — /); // B's detail title
+    // A's response finally lands
+    releasePatch(apiResponse({ application: detailFixture({ status: 'interview' }), sent: { sms: 'sent', email: 'sent' } }));
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    // B is still the open detail; A's detail/send result never rendered over it
+    expect(screen.getByText(/Casey Kim — /)).toBeInTheDocument();
+    expect(screen.queryByText(/Jordan Lee — /)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Text sent/)).not.toBeInTheDocument();
+  });
+
   it('closes and clears the stage dialog when the detail switches to another applicant while it is open', async () => {
     const base = buildFetchMock();
     const fetchMock = vi.fn((url, options = {}) => {

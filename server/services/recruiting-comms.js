@@ -597,21 +597,32 @@ function overlappingCrossedAttempt(history, entryId, stage, channel, nowMs) {
   });
 }
 
-// pending → handoff at the provider boundary, under the application row
-// lock: two concurrent immediate resends both append a 'pending' entry, and
-// whichever reaches the boundary while a newer attempt already exists is
-// refused before Twilio (Codex r14 P2) — the newer one delivers. Returns
-// true when THIS attempt is superseded (nothing stamped).
-async function stampSmsHandoff(applicationId, stage, entryId) {
-  return db.transaction(async (trx) => {
-    const row = await trx('job_applications').where({ id: applicationId }).forUpdate().first('comms_history');
+// The immediate path's LOCKED provider handoff (Codex r19 P1) — the same
+// posture as the deferred replay's smsHandoff: the application row is held
+// FOR UPDATE from the supersession + eligibility reads through the provider
+// request, so a withdraw/reject/rebook cannot commit between them and
+// Twilio — it waits and then re-derives from the committed row. Inside the
+// lock: (1) supersession — a NEWER same-stage attempt, or an OLDER one that
+// already crossed the boundary inside the overlap window (Codex r14/r18
+// P2), refuses this one; (2) the caller's eligibility read, through this
+// same transaction; (3) the pipeline's own fresh rechecks, then the
+// pending → handoff stamp right before the SDK request (onProviderStart).
+function lockedRecruitingHandoff({ app, stage, handoffEntry, legEligible }) {
+  return (handoff) => db.transaction(async (trx) => {
+    const row = await trx('job_applications').where({ id: app.id }).forUpdate().first('comms_history');
     const history = row && row.comms_history;
     if (SUPERSEDABLE_STAGES.has(stage)
-      && (newerAttemptExists(history, entryId, stage, 'sms') || overlappingCrossedAttempt(history, entryId, stage, 'sms', Date.now()))) return true;
-    await reconcileCommsHistoryEntryByOutcome(applicationId, entryId, {
-      pending: { outcome: 'handoff', handoff_at: new Date().toISOString() },
-    }, trx);
-    return false;
+      && (newerAttemptExists(history, handoffEntry.id, stage, 'sms') || overlappingCrossedAttempt(history, handoffEntry.id, stage, 'sms', Date.now()))) {
+      return { ok: false, code: 'RECRUITING_SUPERSEDED', reason: 'a newer attempt of this stage exists', retryable: false };
+    }
+    if (!(await legEligible(trx))) {
+      return { ok: false, code: 'RECRUITING_STALE', reason: 'application changed before the provider handoff', retryable: false };
+    }
+    return handoff(trx, async () => {
+      await reconcileCommsHistoryEntryByOutcome(app.id, handoffEntry.id, {
+        pending: { outcome: 'handoff', handoff_at: new Date().toISOString() },
+      }, trx);
+    });
   });
 }
 
@@ -691,17 +702,65 @@ function classifySmsOutcome(sendRes) {
 // replacement never strands the applicant with no invite at all (Codex r8
 // P2). The replay rail's own supersession (a newer ledger attempt) covers
 // rows the worker already claimed.
-async function retireQueuedInterviewInvites(app, stage, exceptRowId) {
+// Queued invites for this application, oldest first — read through `conn`
+// (the caller's transaction) so the decision and the writes are one unit.
+async function queuedInterviewInvites(app, conn) {
+  return conn('sms_log')
+    .where({ status: 'scheduled', message_type: 'job_interview_invite' })
+    .whereRaw("metadata->>'job_application_id' = ?", [app.id])
+    .select('id', 'metadata', 'created_at');
+}
+
+// Cancel a queued invite row AND settle its ledger entry (deferred →
+// blocked): a cancelled row is never replayed, so its entry would otherwise
+// keep promising an automatic send.
+async function retireQueuedInviteRow(app, row, code, conn) {
+  await conn('sms_log').where({ id: row.id, status: 'scheduled' }).update({ status: 'cancelled', updated_at: new Date() });
+  let meta = row.metadata;
+  if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+  if (meta && meta.ledger_entry_id) {
+    await reconcileCommsHistoryEntryByOutcome(app.id, meta.ledger_entry_id, {
+      deferred: { outcome: 'blocked', code, finalized_at: new Date().toISOString() },
+    }, conn);
+  }
+}
+
+// An invite that just went out retires every invite still queued for the
+// application (one stable token must never reach the applicant twice) —
+// under the application row lock so it cannot interleave with a concurrent
+// queue decision (Codex r19 P2).
+async function retireQueuedInterviewInvites(app, stage) {
   if (stage !== 'interview_invite') return;
   try {
-    await db('sms_log')
-      .where({ status: 'scheduled', message_type: 'job_interview_invite' })
-      .whereRaw("metadata->>'job_application_id' = ?", [app.id])
-      .modify((q) => { if (exceptRowId) q.whereNot('id', exceptRowId); })
-      .update({ status: 'cancelled', updated_at: new Date() });
+    await db.transaction(async (trx) => {
+      await trx('job_applications').where({ id: app.id }).forUpdate().first('id');
+      for (const row of await queuedInterviewInvites(app, trx)) {
+        await retireQueuedInviteRow(app, row, 'superseded_by_sent_invite', trx);
+      }
+    });
   } catch (err) {
     logger.warn(`[recruiting-comms] retiring queued invites failed (application ${app.id}): ${errorSummary(err)}`);
   }
+}
+
+// The queue decision for an invite held by the send window, made under the
+// application row lock (Codex r19 P2): a queued invite created inside the
+// overlap window is the SAME intent (two admins clicking) and this attempt
+// yields to it (its ledger entry settles blocked); older queued invites are
+// returned so the caller retires them AFTER its own queue row persisted
+// (never strands the applicant — Codex r8 P2). Returns { superseded } or
+// { rivals }.
+async function queuedInviteRivals(app, stage, handoffEntry, trx) {
+  if (stage !== 'interview_invite') return { rivals: [] };
+  const rivals = await queuedInterviewInvites(app, trx);
+  const now = Date.now();
+  const overlapping = rivals.some((r) => now - Date.parse(r.created_at || '') < RESEND_OVERLAP_WINDOW_MS);
+  if (!overlapping) return { rivals };
+  await reconcileCommsHistoryEntryByOutcome(app.id, handoffEntry.id, {
+    pending: { outcome: 'blocked', code: 'superseded_by_queued_invite', finalized_at: new Date().toISOString() },
+    handoff: { outcome: 'blocked', code: 'superseded_by_queued_invite', finalized_at: new Date().toISOString() },
+  }, trx);
+  return { superseded: true, rivals: [] };
 }
 
 // Held by the send window (8am–8pm ET): queue the text on the scheduled-SMS
@@ -715,8 +774,11 @@ async function queueDeferredSms({ app, stage, contact, body, applicantFromNumber
     // Queue row + the 'deferred' ledger transition commit TOGETHER (Codex
     // r12 P1): a queued text must never leave a 'handoff' entry behind that
     // the reply classifier would read as evidence.
-    const queuedInsert = await db.transaction(async (trx) => {
-      const inserted = await trx('sms_log').insert({
+    const queued = await db.transaction(async (trx) => {
+      await trx('job_applications').where({ id: app.id }).forUpdate().first('id');
+      const { superseded, rivals } = await queuedInviteRivals(app, stage, handoffEntry, trx);
+      if (superseded) return 'superseded';
+      await trx('sms_log').insert({
         customer_id: null,
         direction: 'outbound',
         from_phone: applicantFromNumber,
@@ -749,14 +811,14 @@ async function queueDeferredSms({ app, stage, contact, body, applicantFromNumber
         outcome: 'deferred', code: sendRes.code || null, finalized_at: new Date().toISOString(),
         scheduled_for: new Date(sendRes.nextAllowedAt).toISOString(),
       }, trx);
-      return inserted;
+      // Only once the replacement EXISTS (same transaction, after the insert).
+      for (const row of rivals) await retireQueuedInviteRow(app, row, 'superseded_by_newer_queue', trx);
+      return 'deferred';
     });
-    const queuedRowId = Array.isArray(queuedInsert) ? (queuedInsert[0] && (queuedInsert[0].id || queuedInsert[0])) : null;
-    await retireQueuedInterviewInvites(app, stage, queuedRowId);
-    return true;
+    return queued;
   } catch (err) {
     logger.error(`[recruiting-comms] deferred queue insert failed (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
-    return false;
+    return null;
   }
 }
 
@@ -775,26 +837,11 @@ async function runSmsDelivery({ app, stage, opts, contact, applicantFromNumber, 
       entryPoint: opts.entryPoint || 'recruiting_comms',
       identityTrustLevel: 'phone_provided_unverified',
       consentBasis: { status: 'transactional_allowed', source: 'job_application' },
-      // Authoritative eligibility at the ACTUAL provider boundary (Codex r9
-      // P2): the pipeline runs this right before Twilio, after every validator.
-      // Provider boundary (runs right before Twilio, after every validator):
-      // stamp pending → handoff (durable delivery evidence), then the
-      // caller's authoritative eligibility check when one is supplied.
-      // Order matters (Codex r14 P2): the handoff stamp — under the
-      // application row lock, refusing when a NEWER attempt of this
-      // stage already sits in the ledger (two admins resending at once)
-      // — comes first, and the caller's eligibility read is the LAST
-      // await before Twilio, so nothing can change between it and the
-      // provider request.
-      preSendCheck: async () => {
-        if (await stampSmsHandoff(app.id, stage, handoffEntry.id)) {
-          return { ok: false, code: 'RECRUITING_SUPERSEDED', reason: 'a newer attempt of this stage exists' };
-        }
-        if (!(await legEligible())) {
-          return { ok: false, code: 'RECRUITING_STALE', reason: 'application changed before the provider handoff' };
-        }
-        return { ok: true };
-      },
+      // Locked provider handoff (Codex r19 P1): supersession + the caller's
+      // authoritative eligibility read, the pipeline's fresh rechecks and
+      // the pending → handoff stamp all run with the application row held
+      // through the Twilio request — see lockedRecruitingHandoff.
+      withSmsHandoff: lockedRecruitingHandoff({ app, stage, handoffEntry, legEligible }),
       ...(opts.by && opts.by !== 'system' && opts.by !== 'applicant' ? { operatorInitiated: true } : {}),
       metadata: { original_message_type: `job_${stage}`, job_application_id: app.id, ...(opts.by && opts.by !== 'system' && opts.by !== 'applicant' ? { adminUserId: opts.by } : {}), ...(applicantFromNumber ? { fromNumber: applicantFromNumber } : {}) },
     });
@@ -806,7 +853,7 @@ async function runSmsDelivery({ app, stage, opts, contact, applicantFromNumber, 
   }
 
   let outcome = classifySmsOutcome(sendRes);
-  if (sendRes.sent) await retireQueuedInterviewInvites(app, stage, null);
+  if (sendRes.sent) await retireQueuedInterviewInvites(app, stage);
 
   let deferredLedgerDone = false;
   // Queue ONLY a text proven not sent (a validator hold such as the send
@@ -814,8 +861,13 @@ async function runSmsDelivery({ app, stage, opts, contact, applicantFromNumber, 
   // when the pipeline marks it retryable: the applicant may already hold it,
   // so it keeps its handoff evidence and is never replayed (Codex r15 P1).
   if (!sendRes.sent && sendRes.deliveryOutcome === 'not_sent' && sendRes.retryable && sendRes.nextAllowedAt) {
-    deferredLedgerDone = await queueDeferredSms({ app, stage, contact, body, applicantFromNumber, handoffEntry, sendRes });
-    if (deferredLedgerDone) outcome = 'deferred';
+    const queued = await queueDeferredSms({ app, stage, contact, body, applicantFromNumber, handoffEntry, sendRes });
+    // 'deferred' = queued (ledger settled in the same transaction);
+    // 'superseded' = an overlapping queued invite already owns the send
+    // (ledger settled as blocked in that transaction); null = queue failed.
+    if (queued) deferredLedgerDone = true;
+    if (queued === 'deferred') outcome = 'deferred';
+    if (queued === 'superseded') outcome = 'blocked';
   }
 
   // Reconcile the handoff entry in place; if this fails the entry stays
@@ -954,9 +1006,12 @@ async function sendStageComms(app, stage, opts = {}) {
   // (Codex r8 P2): the caller's check re-reads the application so a stage
   // change during the (long) SMS leg can never let the email leg deliver an
   // invite whose link already 404s.
-  const legEligible = async () => {
+  // `conn` — the locked transaction at the provider boundary, so the
+  // eligibility read never needs a second pool connection while the first
+  // is held (DB_POOL_MAX=2 is a supported production config).
+  const legEligible = async (conn) => {
     if (typeof opts.stillEligible !== 'function') return true;
-    try { return (await opts.stillEligible()) !== false; } catch { return false; }
+    try { return (await opts.stillEligible(conn)) !== false; } catch { return false; }
   };
 
   const ctx = { app, stage, opts, by, contact, vars, entries, legEligible };
@@ -996,8 +1051,8 @@ async function sendOwnerReply({ applicationId, body, by, fromNumber }) {
   }
   // Provider-boundary guard, same as every other recruiting send (Codex r10
   // P1): the application must still be open when Twilio is actually called.
-  const stillEligible = async () => {
-    const now = await db('job_applications').where({ id: applicationId }).first('status');
+  const stillEligible = async (conn = db) => {
+    const now = await conn('job_applications').where({ id: applicationId }).first('status');
     return Boolean(now && ['new', 'reviewed', 'interview', 'offer'].includes(String(now.status || '')));
   };
   const result = await sendStageComms(app, 'owner_reply', {

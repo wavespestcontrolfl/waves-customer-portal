@@ -338,9 +338,11 @@ async function sendCustomerMessageCore(input) {
       && input.entryPoint === 'reschedule-link-promise'
       && input.metadata?.original_message_type === 'reschedule_link_promise'
       && Boolean(input.metadata?.followThroughCommitmentId))
-    // Deferred recruiting texts stamp their ledger entry at the provider
-    // boundary (deferred-replay-registry recruiting_comms_deferred).
-    || (input.audience === 'applicant' && input.entryPoint === 'scheduled_sms_cron'
+    // Recruiting texts hold the application row through the provider
+    // request: the deferred replay (deferred-replay-registry
+    // recruiting_comms_deferred) and the immediate sends (recruiting-comms.js
+    // lockedRecruitingHandoff — Codex #4623 r19 P1) alike.
+    || (input.audience === 'applicant'
       && /^job_/.test(String(input.metadata?.original_message_type || '')));
   if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is not allowed for this message' };

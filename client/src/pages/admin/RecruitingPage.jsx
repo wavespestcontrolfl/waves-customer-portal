@@ -488,6 +488,7 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated) {
   // openDetail — closing the dialog (or reopening it for a different
   // stage) must not let a slow response land on the wrong stage.
   const previewSeq = useRef(0);
+  const submitSeq = useRef(0);
 
   const openStageDialog = useCallback(
     async (status, { resend = false } = {}) => {
@@ -547,10 +548,16 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated) {
           email_body: emailBody,
         };
       }
-      const data = await adminFetch(`/admin/careers/${detail.id}/status`, {
+      // The submission is bound to THIS applicant (Codex r19 P2): if the
+      // detail switches while the PATCH is in flight, the response must not
+      // replace the new applicant's detail or record the old send result.
+      const submittedFor = detail.id;
+      const seq = ++submitSeq.current;
+      const data = await adminFetch(`/admin/careers/${submittedFor}/status`, {
         method: "PATCH",
         body: JSON.stringify(body),
       });
+      if (seq !== submitSeq.current) return;
       onApplicationUpdated(data.application);
       setSendResult(data.sent || null);
       setNote("");
@@ -568,6 +575,7 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated) {
   // or be confirmed against, applicant B (Codex r15 P1).
   const resetForNewApplicant = useCallback(() => {
     previewSeq.current += 1;
+    submitSeq.current += 1; // any in-flight stage PATCH now belongs to the previous applicant
     setStageDialog(null);
     setPreview(null);
     setPreviewLoading(false);

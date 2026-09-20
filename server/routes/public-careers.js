@@ -27,7 +27,7 @@ const { ipFallbackKey } = require('../middleware/rate-limit-key');
 const { noStore } = require('../middleware/no-store');
 const { createJobApplication } = require('../services/job-applications');
 const { listInterviewSlots, formatSlotLabel } = require('../services/interview-slots');
-const { acquireOccupancyLock } = require('../services/scheduling/occupancy');
+const { acquireOccupancyLocks } = require('../services/scheduling/occupancy');
 const { etParts } = require('../utils/datetime-et');
 const { contactOf, firstNameOf, errorSummary } = require('../services/recruiting-comms');
 const { WAVES_ADDRESS_LINE } = require('../constants/business');
@@ -227,7 +227,13 @@ router.post('/interview/:token/book', interviewLimiter, async (req, res) => {
     const slotDateStr = `${sp.year}-${String(sp.month).padStart(2, '0')}-${String(sp.day).padStart(2, '0')}`;
 
     const outcome = await db.transaction(async (trx) => {
-      await acquireOccupancyLock(trx, slotDateStr);
+      // Both ET dates the slot builder reads (this one and the previous, whose
+      // late allocations can run past midnight), in the shared sorted order
+      // (Codex r19 P2): a previous-day customer booking and this interview
+      // can no longer each lock only their own date and commit over each other.
+      const prev = etParts(new Date(startMs - 24 * 60 * 60 * 1000));
+      const prevDateStr = `${prev.year}-${String(prev.month).padStart(2, '0')}-${String(prev.day).padStart(2, '0')}`;
+      await acquireOccupancyLocks(trx, [prevDateStr, slotDateStr]);
 
       // Row lock: a concurrent book/withdraw for THIS application waits here
       // and then re-derives from the committed row, never from a stale read.
@@ -303,8 +309,8 @@ router.post('/interview/:token/book', interviewLimiter, async (req, res) => {
       // EACH channel (Codex r8 P1): a rebook or withdraw landing while the
       // SMS leg is in flight must not let the email leg send an obsolete
       // time or mode.
-      const stillEligible = async () => {
-        const current = await db('job_applications').where({ id: updated.id }).first();
+      const stillEligible = async (conn = db) => {
+        const current = await conn('job_applications').where({ id: updated.id }).first();
         return Boolean(current
           && current.status === 'interview'
           && current.interview_token === updated.interview_token

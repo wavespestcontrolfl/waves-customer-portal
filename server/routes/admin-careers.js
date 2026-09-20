@@ -389,8 +389,8 @@ async function deliverStageComms(applicationId, technicianId, updated, plan) {
     const finalEmailBody = plan.wantEmail && plan.emailBodyOverride
       ? RecruitingComms.substituteInterviewLinkPlaceholder(plan.emailBodyOverride, finalInterviewUrl)
       : undefined;
-    const stillEligible = async () => {
-      const now = await db('job_applications').where({ id: updated.id }).first('status', 'interview_token');
+    const stillEligible = async (conn = db) => {
+      const now = await conn('job_applications').where({ id: updated.id }).first('status', 'interview_token');
       return Boolean(now && now.status === 'interview' && now.interview_token === updated.interview_token);
     };
 
