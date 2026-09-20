@@ -1139,3 +1139,29 @@ test.each([
   const findingVerbs = [...text.matchAll(/\b(?:applied|applying)\b/g)];
   expect(grammar.reportHasCompletedPredicate(text, findingVerbs.at(-1))).toBe(completed);
 });
+
+test.each([
+  ['We were permitted to have Talstar P applied to the exterior perimeter.', false],
+  ['They permitted us to have Talstar P applied to the exterior perimeter.', false],
+  ['The customer permits the technician to have Talstar P applied to the exterior perimeter.', false],
+  ['We received approval to have Talstar P applied to the exterior perimeter.', false],
+  ['We got approval to have Talstar P applied to the exterior perimeter.', false],
+  ['We had Talstar P applied to the exterior perimeter.', true],
+  ['We were permitted access, then had Talstar P applied to the exterior perimeter.', true],
+  ['We permitted bait indoors, but Talstar P was applied to the exterior perimeter.', true],
+])('permission and approval governors do not establish completion: %s', (text, completed) => {
+  const findingVerbs = [...text.matchAll(/applied/g)];
+  expect(grammar.reportHasCompletedPredicate(text, findingVerbs.at(-1))).toBe(completed);
+});
+
+test.each([
+  ['Talstar P seems applied to the exterior perimeter.', true],
+  ['Talstar P appeared applied to the exterior perimeter.', true],
+  ['Talstar P seems already applied to the exterior perimeter.', true],
+  ['Talstar P seems to have been applied to the exterior perimeter.', true],
+  ['Talstar P was applied to the exterior perimeter.', false],
+  ['The technician seemed tired, then Talstar P was applied to the exterior perimeter.', false],
+  ['Talstar P appeared on the invoice after being applied to the exterior perimeter.', false],
+])('bare seem and appear treatment complements remain uncertain: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
