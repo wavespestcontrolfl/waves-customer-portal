@@ -1354,6 +1354,9 @@ async function recordZeroDueSchedulingOutcome(zeroDue, inv) {
     });
   if (!updated) {
     logger.warn(`[invoice] Zero-due refusal for ${inv.id} matched no row — already claimed by another pass, rescheduled, or already at the attempt cap`);
+    // Not a refusal by THIS pass (another pass claimed or rescheduled the
+    // row, or it is already at the cap): nothing was spent, count nothing.
+    return 0;
   }
   return 1;
 }
@@ -3325,6 +3328,12 @@ const InvoiceService = {
       // RESOLVE a structured, unambiguous success instead.
       if (claimErr?.code === "zero_due") {
         return { sent: false, ok: true, code: "zero_due", settled_zero_due: true, reason: claimErr.message };
+      }
+      // Same seam, other verdict: settlement refused for now. Verified
+      // pre-provider, so it is a definite not-sent, retryable outcome — not
+      // the ambiguous failure a thrown error would read as downstream.
+      if (claimErr?.code === "deposit_settlement_pending") {
+        return { sent: false, ok: false, code: "deposit_settlement_pending", deliveryOutcome: "not_sent", retryable: true, reason: claimErr.message };
       }
       throw claimErr;
     }
