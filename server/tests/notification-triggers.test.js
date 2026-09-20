@@ -282,6 +282,27 @@ describe('triggerNotification bell outcome', () => {
     ));
   });
 
+  test('a keyed SMS replay reuses its committed bell and does not push again', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'committed-bell', deduped: true });
+    expect(await triggerNotification('sms_reply', { twilioSid: 'SM-synthetic-replay' },
+      { dedupeKey: 'sms-reply:SM-synthetic-replay' })).toMatchObject({ bellWritten: true, deduped: true, push: null });
+    expect(require('../services/push-notifications').sendToAdminUsers).not.toHaveBeenCalled();
+  });
+
+  test('push-only SMS recovery retains its message tag and avoids renotification', async () => {
+    db.mockImplementation(table => tableMock(table === 'technicians' ? [{ id: 'admin-1' }]
+      : [{ admin_user_id: 'admin-1', bell_enabled: false, push_enabled: true }]));
+    const PushService = require('../services/push-notifications');
+    const payload = { twilioSid: 'SM-synthetic-push-only' };
+    await triggerNotification('sms_reply', payload, { dedupeKey: 'sms-reply:SM-synthetic-push-only' });
+    await triggerNotification('sms_reply', payload, { dedupeKey: 'sms-reply:SM-synthetic-push-only' });
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(2);
+    for (const [, build] of PushService.sendToAdminUsers.mock.calls) {
+      expect(build('admin-1')).toMatchObject({ tag: 'waves-sms_reply-SM-synthetic-push-only', renotify: false });
+    }
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
   test('reports bellWritten false when the notification insert fails', async () => {
     // NotificationService.create catches insert errors and returns null —
     // callers deciding whether an alert was delivered must see the truth.

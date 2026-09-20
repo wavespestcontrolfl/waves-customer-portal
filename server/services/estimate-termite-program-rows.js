@@ -10,6 +10,19 @@ function authoritativeMappedTermiteEnvelope(estimateData) {
   return tmBait && typeof tmBait === 'object' ? tmBait : null;
 }
 
+// Published website quotes may persist only engineResult.lineItems. The
+// mapped result wins when both shapes are present, as it does for replay.
+function pricedTermiteProgram(estimateData) {
+  const mapped = authoritativeMappedTermiteEnvelope(estimateData);
+  if (mapped) return String(mapped.plan || '').toLowerCase();
+  const result = estimateData?.result && typeof estimateData.result === 'object'
+    ? estimateData.result : estimateData;
+  const raw = [result?.lineItems, estimateData?.engineResult?.lineItems]
+    .flatMap((list) => (Array.isArray(list) ? list : []))
+    .find((li) => String(li?.service || '').toLowerCase() === 'termite_bait');
+  return String(raw?.plan || '').toLowerCase();
+}
+
 function selectedTermiteAnnualPlanRows(estimateData) {
   const isPlan = (v) => String(v || '').toLowerCase() === 'annual_protection';
   const result = estimateData?.result && typeof estimateData.result === 'object'
@@ -27,4 +40,4 @@ function selectedTermiteAnnualPlanRows(estimateData) {
   return [...rawLines, ...setupItems];
 }
 
-module.exports = { authoritativeMappedTermiteEnvelope, selectedTermiteAnnualPlanRows };
+module.exports = { authoritativeMappedTermiteEnvelope, pricedTermiteProgram, selectedTermiteAnnualPlanRows };

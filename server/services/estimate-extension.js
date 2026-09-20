@@ -534,6 +534,7 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
           recipientId: estimate.customer_id || null,
           triggerEventId: `estimate_extended:${estimate.id}:${newExpiry.toISOString()}`,
           idempotencyKey: `estimate_extended:${estimate.id}:${newExpiry.toISOString()}`,
+          estimateId: estimate.id,
           categories: ['estimate_extended'],
           // Provider rejection bodies can echo the recipient address — keep
           // them out of the provider log (mirrors estimate-follow-up.js).

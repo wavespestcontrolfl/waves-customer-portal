@@ -1160,7 +1160,25 @@ async function dispatchRun(run, automation, executionPayload) {
       suppressionGroupKey: automation.suppression_group_key || undefined,
       // Fires immediately before the provider call — the dispatch boundary.
       onQueued: () => { prepDispatched = true; },
+      // Delivery-guards slice (re-cut of #4569): an estimate-triggered
+      // automation run (auto-renew's estimate.auto_renewed, expiring
+      // reminders, etc.) shares the same chokepoint every other estimate
+      // sender routes through — this executor is generic across entity
+      // types, so only an 'estimate' run carries its id through.
+      ...(run.entity_type === 'estimate' && run.entity_id ? { estimateId: run.entity_id } : {}),
     });
+    // Pre-push audit P1: a pre-dispatch abort (result.aborted — the annual
+    // guard's own row lookup threw, or any other onQueued-style abort) is
+    // NOT sent and NOT a deliberate block; finalizeSentRun only
+    // distinguishes those two, so it would otherwise record a delivered
+    // 'sent' run for a request that never reached the provider. Throw so it
+    // retries through the SAME thrown-error path (scheduleRetry /
+    // finalizeFailedRun below) as a genuine provider failure.
+    if (result.aborted) {
+      throw Object.assign(new Error(result.error || result.reason || 'email send aborted before dispatch'), {
+        code: result.guardError ? 'ANNUAL_OFFER_GUARD_FAILED' : 'SEND_ABORTED_BEFORE_DISPATCH',
+      });
+    }
     const { status, updated } = await finalizeSentRun(run, result);
     await settlePrepAfterSend(run, prepClaim, status);
     return { updated };

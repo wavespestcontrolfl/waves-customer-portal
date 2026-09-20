@@ -1,3 +1,7 @@
+// Shared by claim, finalization, and provider-boundary checks.
+const SEND_CLAIMABLE_STATUSES = ['draft', 'scheduled', 'sent', 'viewed', 'overdue'];
+const SEND_FINALIZABLE_STATUSES = [...SEND_CLAIMABLE_STATUSES, 'sending'];
+
 /**
  * Pure invoice helpers — no DB, no Stripe SDK, no Twilio.
  *
@@ -234,6 +238,8 @@ function formatCardLine(brand, last4) {
 }
 
 module.exports = {
+  SEND_CLAIMABLE_STATUSES,
+  SEND_FINALIZABLE_STATUSES,
   INVOICE_UPDATE_ALLOWED_FIELDS,
   STALE_SEND_PARK_ERROR,
   preserveWithdrawalStamp,

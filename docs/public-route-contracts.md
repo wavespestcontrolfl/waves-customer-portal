@@ -344,6 +344,13 @@ Inbound media uses stable account/message/index storage keys across retries.
 Stale contact-correction reservations require a saved unified inbox message
 before promotion; failed route cancellation cannot replay an unrecorded source.
 Provider retry/fallback remains governed by the configured Twilio policy.
+The shared SMS-alert delivery protocol uses a two-minute owned sender lease,
+confirmed to four hours only after actual bell/push delivery evidence and a
+durable legacy receipt. Committed bells keep immutable message keys so lost
+receipts can be repaired without dispatching again; repair preserves original
+delivery time. Deliberate suppression is terminal. Push-only retries reuse the
+message tag without renotification; provider acceptance followed by a crash
+before receipt persistence remains ambiguous and can repeat a provider handoff.
 
 `/api/webhooks/twilio/outbound-amd` +
 `/api/webhooks/twilio/outbound-dial-complete` (POST; machine-to-machine
@@ -586,7 +593,17 @@ before either provider path; both provider paths re-read the row and repeat
 the customer-viewable + call-side-hold check as the LAST step before the
 SendGrid/Twilio handoff, so a clarify hold or archive that lands during the
 PDF render withholds the packet with the same generic 404 and releases the
-SMS dedup claim so a later legitimate retap can send).
+SMS dedup claim so a later legitimate retap can send; every success or
+deduplicated response on either channel rechecks the annual guard
+(server/services/estimate-annual-guard.js) through one shared helper
+(withheldOr) before answering — the fresh-dispatch success, the in-process
+and cross-restart SMS dedup hits, the cross-process claim-loser's dedup
+hit, and the email per-day idempotency dedup all funnel through it, so a
+changed or never-delivered annual offer can never surface through a
+shortcut that skips the check — mapping a blocked verdict to the same
+generic 404, with the SMS dedup claim stamped/released exactly like the
+customer-viewable/call-side-hold case; no new request shape, no new
+payload).
 `/api/estimates/:token/bond` (PUT; customer bond-term switcher on the
 estimate page — same contract family as the service-preferences toggles.
 Token IS the auth: slug-or-64-hex format gate rejects malformed probes
@@ -2099,7 +2116,18 @@ call-side linkage verdict; `isEstimateAcceptActive` + an explicit
 PRESENCE (not `proposal.enabled`) — the same refusal applies to RESTORES
 and suppresses the add-back projection, because an itemization added after
 a removal is the authoritative billed quote — plus the last remaining
-recurring line, `tree_shrub` and every `commercial_*` key; a fail-CLOSED 409 when the
+recurring line, `tree_shrub`, every `commercial_*` key, and an annual-protection
+termite line (removal would erase its priced-program replay provenance).
+Quarterly termite remains removable; a pre-provenance restore recovers the
+sold program and station pricing knobs from the original opt-out baseline
+when present, while an annual sale or an unproven annual request remains
+blocked for customer restores. `/data` keeps such keys in `removedKeys` to
+suppress a duplicate add-service offer, but lists them in
+`restoreBlockedKeys` so the customer page omits their unusable add-back
+control. A server-initiated compensation for a preexisting staff-parked
+annual line may restore its captured annual terms after a failed send;
+customer restores remain refused;
+a fail-CLOSED 409 when the
 recompute cannot run; and a 400 refusal when the removal would turn a
 bundled-free one-time item into a charge (owner ruling — that one goes to
 the office; the before-state resolves through `result` OR the mapped raw

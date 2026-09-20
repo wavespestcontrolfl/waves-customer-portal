@@ -15202,9 +15202,12 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
 
     // Provenance the prune would erase (the pest curve stamp above all) —
     // captured BEFORE the inputs change, re-planted on restore.
-    const provenance = included === false
+    let provenance = included === false
       ? OptOut.captureServiceOptOutProvenance(parsedData, serviceKey)
       : ((optOutState?.events || []).filter((e) => e.serviceKey === serviceKey && e.included === false).pop()?.provenance || null);
+    if (mode === 'restore' && serviceKey === 'termite_bait') {
+      provenance = OptOut.termiteRestoreProvenance(parsedData, provenance);
+    }
     const restoreInputs = mode === 'restore'
       ? OptOut.readRemovedInputs(
         (optOutState?.events || []).filter((e) => e.serviceKey === serviceKey && e.included === false).pop(),
@@ -15219,7 +15222,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     }
 
     const applied = OptOut.applyServiceOptOutToEstimateData(parsedData, {
-      serviceKey, included, removedInputs: restoreInputs, provenance,
+      serviceKey, included, removedInputs: restoreInputs, provenance, actor,
     });
     if (!applied.ok) return { status: 400, body: ({ error: applied.reason }) };
 
@@ -15279,6 +15282,8 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
     const reprice = await serverRecomputeFromEstimateData(parsedData, {
       replaySavedPricingKnobs: true,
+      termitePricingKnobsForRestore: mode === 'restore' && serviceKey === 'termite_bait'
+        ? provenance?.termitePricingKnobs : null,
       priorQualifyingServices: priors,
       // computeMembershipContext persists a snapshot even for a linked NEW
       // customer (isExistingCustomer: false) — snapshot presence alone must not
@@ -24921,6 +24926,18 @@ router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, r
 // estimate:service:phone → epoch ms. See the dedup comment at the SMS branch.
 const serviceDetailsSmsClaims = new Map();
 const SERVICE_DETAILS_SMS_DEDUP_MS = 10 * 60 * 1000;
+// Pre-push audit P1 (b49be57b12 round 4): the concurrent-loser poll loop
+// below (3 attempts * 1.5s = 4.5s) is the whole window a genuinely
+// concurrent request needs to observe a withheld winner's durable stamp.
+// A claim row past this age is provably not concurrent with the request
+// that stamped it — comfortable margin over 4.5s — so a withheld claim
+// becomes reclaimable here, distinct from (and far shorter than) the
+// crash-recovery staleness window below. Without this, a withheld claim
+// row was only ever reclaimable after the FULL 10-minute crash-recovery
+// window, so a legitimate retap minutes later — after a fresh delivery
+// makes the offer eligible again — found the claim still held and could
+// never send.
+const WITHHELD_SMS_CLAIM_RECLAIM_SECONDS = 6;
 
 router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (req, res, next) => {
   try {
@@ -24952,6 +24969,35 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
         return res.status(404).json({ error: 'Estimate not found' });
       }
     }
+
+    // Structural fix (round 9, P0 "server/routes/estimate-public.js:25207"
+    // — the 5th finding on this route across 8 local-audit rounds; every
+    // prior round closed one MORE success/dedup site that skipped the
+    // recheck, and the claim-poll timeout site — a loser whose winner is
+    // still in flight has no recorded outcome and no sms_log row yet, so
+    // its poll times out and answers 502 while a fresh request for the
+    // SAME withheld estimate answers 404 — was the one no per-site patch
+    // could close, because it depends on ANOTHER request's timing. Moved
+    // here instead: this is now the VERY NEXT gate after the existing
+    // customer-viewable/call-side-hold/pricing-authority checks above,
+    // BEFORE channel/service validation, BEFORE contact resolution, and
+    // BEFORE any claim acquisition, dedup, or polling on either channel.
+    // A loser no longer depends on the winner's recorded outcome (or on
+    // ever reaching the claim machinery at all) to answer 404 for a
+    // withheld estimate — its OWN fresh read already decides that here,
+    // before either branch below even starts. The success-site withheldOr
+    // calls further down stay: the offer can still change DURING the
+    // send/dedup window between this read and the actual response, and
+    // the durable claim-outcome column stays useful for a genuinely
+    // in-flight concurrent winner that later resolves. This early gate is
+    // what closes the oracle for every remaining branch, including "the
+    // winner has no outcome yet".
+    const withheldOr = async (onEligible, onBlocked = () => res.status(404).json({ error: 'Estimate not found' })) => {
+      const { annualHandoffGuard } = require('../services/estimate-annual-guard');
+      const verdict = await annualHandoffGuard({ db, estimateIds: [estimate.id] })();
+      return verdict.blocked ? onBlocked() : onEligible();
+    };
+    return await withheldOr(async () => {
     const serviceKey = String(req.body?.service || '');
     const channel = String(req.body?.channel || '');
     if (!['email', 'sms'].includes(channel)) {
@@ -25011,6 +25057,10 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           // but a retap shouldn't stack identical emails.
           idempotencyKey: `estimate_service_details:${estimate.id}:${serviceKey}:${etDateString()}`,
           categories: ['estimate_service_details'],
+          // Codex round 1 on #4608 (P1): content derivation would catch the
+          // estimate_url in the payload anyway, but the explicit id is
+          // cheaper (no regex/DB round trip through the rendered body).
+          estimateId: estimate.id,
           attachments: [{
             filename: `Waves_${serviceTitle.replace(/[^A-Za-z0-9]+/g, '_')}_Details.pdf`,
             content: buffer.toString('base64'),
@@ -25027,9 +25077,23 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
         logger.error(`[estimate-public] service-details email failed for estimate ${estimate.id}: ${reason}`);
         return res.status(502).json({ ok: false, error: 'Email could not be sent right now.' });
       }
-      if (result.blocked) return res.status(409).json({ ok: false, error: 'Email is unavailable for this address — text yourself the link instead.' });
+      if (result.blocked) {
+        // Codex round 1 audit (P0, AGENTS.md public-route rule): a
+        // suppression block is address-level (recipient unsubscribed/
+        // bounced) and safe to surface as 409 — it says nothing about the
+        // estimate's own state. An annual-offer withhold is row-level, like
+        // the customer-viewable/call-side-hold check above, and must be
+        // indistinguishable from an unknown token — the same generic 404.
+        if (result.reason === 'annual_offer_withheld') return res.status(404).json({ error: 'Estimate not found' });
+        return res.status(409).json({ ok: false, error: 'Email is unavailable for this address — text yourself the link instead.' });
+      }
       if (!result.sent) return res.status(502).json({ ok: false, error: 'Email could not be sent right now.' });
-      return res.json({ ok: true, channel: 'email' });
+      // Structural fix (round 6): EVERY success path here — a fresh
+      // dispatch and sendTemplate's own same-day idempotency dedup alike —
+      // answers through withheldOr, so a same-day repeat for a NOW-withheld
+      // estimate can never answer 200 from a shortcut a fresh request would
+      // answer 404 for.
+      return await withheldOr(() => res.json({ ok: true, channel: 'email' }));
     }
 
     if (!contact.customerPhone) return res.status(400).json({ error: 'No phone on this estimate' });
@@ -25046,21 +25110,46 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // covers restarts, best-effort: its failure never blocks the send.
     const tenDigits = String(contact.customerPhone).replace(/\D/g, '').slice(-10);
     const dedupKey = `${estimate.id}:${serviceKey}:${tenDigits}`;
+    const claimKey = dedupKey;
+    // Codex round 3 on #4608 (P0): stamps the claim row's outcome durably so
+    // a concurrent loser's poll can read the SAME refusal — best-effort,
+    // never blocks the actual response to THIS request. Defined here, ahead
+    // of every site that can now call it (round 6: both the cross-restart
+    // dedup AND the cross-process loser-poll dedup route their own withheld
+    // verdict through this same stamp).
+    const markClaimWithheld = async () => {
+      try {
+        await db('sms_send_claims').where({ claim_key: claimKey }).update({ outcome: 'withheld' });
+      } catch (e) { logger.warn(`[estimate-public] service-details SMS claim outcome write failed: ${e.message}`); }
+    };
     const priorClaim = serviceDetailsSmsClaims.get(dedupKey);
     if (priorClaim?.promise) {
       // A send for this exact packet is in flight — share ITS outcome rather
-      // than declaring success for a text that may still fail.
+      // than declaring success for a text that may still fail. Codex round 2
+      // on #4608 (P0): this shares the SAME resolved value the winner below
+      // maps to a generic 404 for a withheld row — mirror that mapping here
+      // too (AGENTS.md public-route rule), or the loser of the race would
+      // answer a distinguishable 502 for what the winner calls 404,
+      // revealing a live-but-ineligible row through request timing alone.
       const shared = await priorClaim.promise.catch(() => null);
-      if (shared?.success) return res.json({ ok: true, channel: 'sms', deduped: true });
+      // Structural fix (round 6): `shared` is the WINNER's own sendPromise
+      // resolution, which (below) already routes through withheldOr itself
+      // — but recheck here too rather than relying on that alone, so this
+      // response site is unconditionally covered on its own, the same as
+      // every other one on this route.
+      if (shared?.success) return await withheldOr(() => res.json({ ok: true, channel: 'sms', deduped: true }));
+      if (shared?.withheld || shared?.code === 'ANNUAL_OFFER_WITHHELD') return res.status(404).json({ error: 'Estimate not found' });
       return res.status(502).json({ ok: false, error: 'Text could not be sent right now.' });
     }
     if (priorClaim?.sentAt && Date.now() - priorClaim.sentAt < SERVICE_DETAILS_SMS_DEDUP_MS) {
-      return res.json({ ok: true, channel: 'sms', deduped: true });
+      // Pre-push audit P0 (round 5 / structural fix round 6): this dedup hit
+      // answers success from a send that may have happened before a later
+      // withhold — recheck the annual verdict fresh before reporting it.
+      return await withheldOr(() => res.json({ ok: true, channel: 'sms', deduped: true }));
     }
     // Cross-process gate: a SLIDING unique claim (atomic stale-takeover
     // upsert — no bucket edges) covers rolling-deploy overlap and any future
     // multi-replica config, where the Map only covers one process.
-    const claimKey = dedupKey;
     const recentPacketSend = async () => db('sms_log')
       .where({ direction: 'outbound', message_type: 'estimate_service_details' })
       .whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [tenDigits])
@@ -25071,12 +25160,23 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       // Claim acquired = fresh insert OR takeover of a claim older than the
       // window (a crashed winner never blocks forever). Claim-infra failure
       // fails OPEN to sending — dedup is protection, not a send gate.
+      //
+      // Pre-push audit P1 (b49be57b12 round 4): a SECOND, much shorter
+      // takeover path for a claim the winner stamped 'withheld' — that
+      // outcome is durable on purpose (so a concurrent loser can read it,
+      // above/below) but must not hold the claim_key for the full crash-
+      // recovery window, or a legitimate retap after a real delivery makes
+      // the offer eligible again could never send. `outcome = NULL` on
+      // takeover so a subsequent read (this send's own, or a later crash-
+      // recovery cycle) never sees the stale marker.
       let claimAcquired = true;
       try {
         const claim = await db.raw(
           `INSERT INTO sms_send_claims (claim_key) VALUES (?)
-           ON CONFLICT (claim_key) DO UPDATE SET created_at = NOW()
+           ON CONFLICT (claim_key) DO UPDATE SET created_at = NOW(), outcome = NULL
            WHERE sms_send_claims.created_at < NOW() - interval '10 minutes'
+              OR (sms_send_claims.outcome = 'withheld'
+                  AND sms_send_claims.created_at < NOW() - interval '${WITHHELD_SMS_CLAIM_RECLAIM_SECONDS} seconds')
            RETURNING id`,
           [claimKey],
         );
@@ -25087,13 +25187,39 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
         // winner's sms_log row) earns a deduped success — a still-in-flight
         // or failed winner must NOT be reported as sent, so poll briefly and
         // otherwise return a retryable failure.
+        //
+        // Codex round 3 on #4608 (P0 PRRT_kwDOR3YQi86j8Ydq): a withheld
+        // winner never reaches Twilio, so it never writes an sms_log row —
+        // recentPacketSend() alone can never distinguish "withheld" from
+        // "still working on it", and this loser fell all the way through to
+        // the generic claimHeldElsewhere 502 while the winner itself answers
+        // a generic 404 for the SAME row — an existence-oracle leak (a
+        // concurrent pair of requests could tell a withheld estimate apart
+        // from an unknown one purely by which status code came back). Also
+        // poll the claim row's own `outcome` column, which the winner stamps
+        // durably (below) BEFORE it releases — a loser that sees it answers
+        // the identical 404 the winner would.
         for (let attempt = 0; attempt < 3; attempt += 1) {
           await new Promise((resolve) => { setTimeout(resolve, 1500); });
           try {
             if (tenDigits.length === 10 && await recentPacketSend()) {
-              return { success: true, deduped: true };
+              // Structural fix (round 6, P0 "estimate-public.js:25174"):
+              // this loser found DURABLE proof of a real send — but that
+              // send may have happened before a later withhold, exactly
+              // like the winner's own cross-restart dedup site. Recheck
+              // through the SAME helper (onEligible/onBlocked return plain
+              // values here — this closure is not allowed to write `res`
+              // itself, the outer code does that once, below).
+              return await withheldOr(
+                () => ({ success: true, deduped: true }),
+                async () => { await markClaimWithheld(); return { success: false, withheld: true }; },
+              );
             }
           } catch (e) { logger.warn(`[estimate-public] service-details SMS dedup poll skipped: ${e.message}`); }
+          try {
+            const claimRow = await db('sms_send_claims').where({ claim_key: claimKey }).first('outcome');
+            if (claimRow?.outcome === 'withheld') return { success: false, withheld: true };
+          } catch (e) { logger.warn(`[estimate-public] service-details SMS claim outcome poll skipped: ${e.message}`); }
         }
         return { success: false, claimHeldElsewhere: true };
       }
@@ -25102,13 +25228,22 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       // query failure never blocks the send.
       try {
         if (tenDigits.length === 10 && await recentPacketSend()) {
-          return { success: true, deduped: true };
+          // Pre-push audit P0 (round 5 / structural fix round 6): this
+          // dedup hit answers success from a PRIOR send — recheck through
+          // the same helper as every other dedup site on this route.
+          return await withheldOr(
+            () => ({ success: true, deduped: true }),
+            async () => { await markClaimWithheld(); return { success: false, withheld: true }; },
+          );
         }
       } catch (e) { logger.warn(`[estimate-public] service-details SMS dedup check skipped: ${e.message}`); }
       // Last read before the handoff — inside the claim, so a withheld send
       // releases it below and a later legitimate retap can send.
-      if (!(await stillOnCustomerSurface())) return { success: false, withheld: true };
-      return TwilioService.sendSMS(
+      if (!(await stillOnCustomerSurface())) {
+        await markClaimWithheld();
+        return { success: false, withheld: true };
+      }
+      const smsSendResult = await TwilioService.sendSMS(
         contact.customerPhone,
         `Waves Pest Control: here's the full ${serviceTitle} details packet you requested — how visits work, products, labels & safety sheets: ${pdfUrl}`,
         {
@@ -25122,18 +25257,42 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           // through the canonical validator anyway (this legacy path
           // bypasses sendCustomerMessage) so any future change to that
           // classification automatically applies here too.
-          preSendCheck: () => {
+          //
+          // Codex round 1 on #4608 (P1): this path bypasses sendCustomerMessage
+          // entirely, so the chokepoint guard never gets a chance to run —
+          // composed in here instead, window check first (unchanged shape/
+          // priority), then the annual-offer guard on THIS estimate. A
+          // blocked verdict returns the same not-ok shape checkSendWindow
+          // does, so TwilioService.sendSMS withholds the send exactly like a
+          // window hold — no Twilio call — and the existing claim-release
+          // path above (a rejected sendPromise) runs unchanged. A guard
+          // infra error is caught by TwilioService's own preSendCheck
+          // wrapper and fails closed the same way (see services/twilio.js
+          // runPreSendCheck).
+          preSendCheck: async () => {
             const { checkSendWindow } = require('../services/messaging/validators/send-window');
-            return checkSendWindow({
+            const windowVerdict = checkSendWindow({
               channel: 'sms',
               audience: 'customer',
               purpose: 'conversational',
               conversationalContext: true,
               to: contact.customerPhone,
             }, null, null);
+            if (!windowVerdict.ok) return windowVerdict;
+            const { annualHandoffGuard } = require('../services/estimate-annual-guard');
+            const verdict = await annualHandoffGuard({ db, estimateIds: [estimate.id] })();
+            if (verdict.blocked) {
+              return { ok: false, code: 'ANNUAL_OFFER_WITHHELD', reason: 'annual_offer_withheld', retryable: false };
+            }
+            return { ok: true };
           },
         },
       );
+      // Codex round 3 on #4608 (P0): the SAME durable stamp for the OTHER
+      // withheld path — the composed preSendCheck's annual-offer block,
+      // resolved above as a coded refusal rather than a throw.
+      if (smsSendResult?.code === 'ANNUAL_OFFER_WITHHELD') await markClaimWithheld();
+      return smsSendResult;
     })();
     serviceDetailsSmsClaims.set(dedupKey, { promise: sendPromise });
     const releaseClaims = () => {
@@ -25153,30 +25312,69 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       throw err;
     }
     if (!smsResult?.success) {
+      const withheld = smsResult?.withheld || smsResult?.code === 'ANNUAL_OFFER_WITHHELD';
       // Never release a claim we never held — deleting the WINNER's live
       // claim would reopen the duplicate window it is guarding.
-      if (smsResult?.claimHeldElsewhere) serviceDetailsSmsClaims.delete(dedupKey);
-      else releaseClaims();
-      if (smsResult?.withheld) return res.status(404).json({ error: 'Estimate not found' });
+      if (smsResult?.claimHeldElsewhere) {
+        serviceDetailsSmsClaims.delete(dedupKey);
+      } else if (withheld) {
+        // Codex round 3 on #4608 (P0 PRRT_kwDOR3YQi86j8Ydq): keep the DB
+        // claim row (its outcome is already stamped 'withheld' inside
+        // sendPromise, above) so a concurrent loser's poll can still read
+        // it — deleting it immediately, the way an ordinary failure does,
+        // could erase the marker before a loser polling on a 1.5s cadence
+        // ever sees it, reopening the exact leak this closes. Only the
+        // in-process Map entry clears; the DB row becomes reclaimable on its
+        // own (round 4 P1) once WITHHELD_SMS_CLAIM_RECLAIM_SECONDS has
+        // passed — a retap moments later still re-checks eligibility fresh
+        // rather than being stuck behind the crash-recovery window.
+        serviceDetailsSmsClaims.delete(dedupKey);
+      } else {
+        releaseClaims();
+      }
+      if (withheld) return res.status(404).json({ error: 'Estimate not found' });
       return res.status(502).json({ ok: false, error: 'Text could not be sent right now.' });
     }
-    // Confirmed success only: start the dedup window and prune stale entries
-    // (Map here; expired claim rows fire-and-forget — one row per send, so a
-    // daily horizon keeps the table trivial).
-    const sentAt = Date.now();
-    serviceDetailsSmsClaims.set(dedupKey, { sentAt });
-    if (serviceDetailsSmsClaims.size > 500) {
-      for (const [key, claim] of serviceDetailsSmsClaims) {
-        if (claim.sentAt && sentAt - claim.sentAt >= SERVICE_DETAILS_SMS_DEDUP_MS) {
-          serviceDetailsSmsClaims.delete(key);
+    // Structural fix (round 6): the LAST response site on this route —
+    // covers a fresh dispatch AND both sendPromise-internal dedup sites
+    // uniformly (they already rechecked once, at their own site; this is
+    // the same defense-in-depth every other response on this route now
+    // gets). A blocked verdict here skips the success bookkeeping below
+    // entirely — never marks the in-process dedup window, never answers
+    // 200 for a response this same call is about to call withheld.
+    return await withheldOr(() => {
+      // Confirmed success only: start the dedup window and prune stale
+      // entries (Map here; expired claim rows fire-and-forget — one row per
+      // send, so a daily horizon keeps the table trivial).
+      const sentAt = Date.now();
+      serviceDetailsSmsClaims.set(dedupKey, { sentAt });
+      if (serviceDetailsSmsClaims.size > 500) {
+        for (const [key, claim] of serviceDetailsSmsClaims) {
+          if (claim.sentAt && sentAt - claim.sentAt >= SERVICE_DETAILS_SMS_DEDUP_MS) {
+            serviceDetailsSmsClaims.delete(key);
+          }
         }
       }
-    }
-    void db('sms_send_claims')
-      .where('created_at', '<', db.raw("NOW() - interval '1 day'"))
-      .del()
-      .catch(() => {});
-    return res.json({ ok: true, channel: 'sms', ...(smsResult.deduped ? { deduped: true } : {}) });
+      void db('sms_send_claims')
+        .where('created_at', '<', db.raw("NOW() - interval '1 day'"))
+        .del()
+        .catch(() => {});
+      return res.json({ ok: true, channel: 'sms', ...(smsResult.deduped ? { deduped: true } : {}) });
+    }, async () => {
+      // Pre-push audit P1 (round 7): the offer changed between the send
+      // (or dedup hit) and THIS final response — declining to report the
+      // success this call was about to report must not leave the claim
+      // pending. Same cleanup every other withheld branch on this route
+      // uses: stamp the durable outcome (a concurrent poller reads the
+      // SAME refusal) and clear the in-process Map entry — never
+      // releaseClaims()'s DB delete here, for the same reason the other
+      // withheld branches keep the row: a concurrent loser mid-poll must
+      // still be able to read it before it expires on its own.
+      await markClaimWithheld();
+      serviceDetailsSmsClaims.delete(dedupKey);
+      return res.status(404).json({ error: 'Estimate not found' });
+    });
+    });
   } catch (err) { next(err); }
 });
 
@@ -25826,6 +26024,7 @@ async function composeEstimateDataPayload(estimate, {
         const {
           currentlyOptedOutKeys, serviceOptOutLabel, serviceOptOutBlockedByProposal,
           serviceOptOutTierSelectionActive, serviceOptOutAddableKeys, staffOfferedKeys,
+          serviceOptOutRestoreBlockedKeys,
         } = require('../services/estimate-service-opt-out');
         const projected = parseEstimateDataSafe(estimate);
         // Staff-parked offers (lead-service send) belong to the add lane: with
@@ -25839,6 +26038,8 @@ async function composeEstimateDataPayload(estimate, {
         const staffOffersAllowed = serviceAddGateOn() && !addStampBlockedByMembership;
         const removedKeys = currentlyOptedOutKeys(projected)
           .filter((k) => staffOffersAllowed || !staffParked.includes(k));
+        const restoreBlockedKeys = serviceOptOutRestoreBlockedKeys(projected)
+          .filter((key) => removedKeys.includes(key));
         // Priced adds (GATE_ESTIMATE_SERVICE_ADD): same resolver as the PUT,
         // live accept-active rows only, never a staff draft preview.
         const addableKeys = serviceAddGateOn() && !adminDraftPreview && !addStampBlockedByMembership
@@ -25866,6 +26067,7 @@ async function composeEstimateDataPayload(estimate, {
             removedKeys,
             removedLabels: removedKeys.map((key) => serviceOptOutLabel(key)),
             ...(restoreBlocked ? { restoreBlocked: true } : {}),
+            ...(restoreBlockedKeys.length ? { restoreBlockedKeys } : {}),
             ...(staffOffered.length ? { staffOfferedKeys: staffOffered } : {}),
             ...(addableKeys.length && !restoreBlocked
               ? { addable: addableKeys.map((key) => ({ key, label: serviceOptOutLabel(key) })) }
@@ -26405,6 +26607,8 @@ async function handleEstimateAsk(req, res, next) {
 }
 
 module.exports = router;
+// Codex round 2 on #4608: exported so estimate-annual-guard.js's content-derivation regex tests can assert exact parity against the canonical token format gate, instead of a hand-copied literal that could silently drift from it.
+module.exports.ESTIMATE_TOKEN_RE = ESTIMATE_TOKEN_RE;
 module.exports.refuseFrozenRestartMutation = refuseFrozenRestartMutation;
 module.exports.acceptVisitEstimatedPrice = acceptVisitEstimatedPrice;
 module.exports.selectTierCeiling = selectTierCeiling;
