@@ -87,7 +87,7 @@ function applyRawMetadataUpdate(row, rawValue) {
   }
 }
 
-function makeSmsLogTable(initialRows, { failResolve = false } = {}) {
+function makeSmsLogTable(initialRows, { failResolve = false, failRestore = false } = {}) {
   let rows = initialRows.map((r) => ({ ...r, metadata: { ...r.metadata } }));
   return {
     rows: () => rows,
@@ -174,6 +174,14 @@ function makeSmsLogTable(initialRows, { failResolve = false } = {}) {
         if (failResolve && payload.metadata && payload.metadata.__sqlRaw
           && payload.metadata.__sqlRaw.includes('adoption_resolved_at')) {
           throw new Error('sms_log resolve update failed (injected)');
+        }
+        // Simulates restoreConsumedQueuedSend's UPDATE failing (or
+        // reporting 0 rows) when giving an adopted row back — distinguished
+        // from the resolve update above by its literal status:'scheduled'
+        // and the '((metadata -' strip-markers raw shape.
+        if (failRestore && payload.status === 'scheduled' && payload.metadata && payload.metadata.__sqlRaw
+          && payload.metadata.__sqlRaw.startsWith('((metadata -')) {
+          throw new Error('sms_log restore update failed (injected)');
         }
         const targets = matched();
         q.__matched = targets;
@@ -581,6 +589,58 @@ describe('invoice send claim adoption of a queued pay-link SMS', () => {
         ok: true, sms: { ok: true }, queueResolutionError: expect.stringContaining('injected'),
       });
       expect(invoices.state()).toMatchObject({ status: 'sent', send_claim_token: null });
+      const row = smsLog.rows().find((r) => r.id === 'sms-queued-1');
+      expect(row.status).toBe('cancelled');
+      expect(row.metadata.cancelled_reason).toBe('superseded_by_live_send');
+      expect(row.metadata[QUEUE_ADOPTION_PENDING_KEY]).toBe(true);
+    });
+    test('a failed restore after an email-only delivery retains the claim for review', async () => {
+      // Same shape as 'email-only delivery gives back the adopted queued
+      // SMS' — SMS leg definitely fails, email leg delivers — but the
+      // restore of the adopted queued row itself now fails. Finalizing
+      // here would clear the claim and lose the only automatic recovery
+      // path for the customer's cancelled text; the wrapper must instead
+      // hold the claim exactly like a post-delivery bookkeeping failure.
+      smsLog = makeSmsLogTable(
+        [{
+          id: 'sms-queued-1',
+          status: 'scheduled',
+          scheduled_for: ORIGINAL_SCHEDULED_FOR,
+          metadata: { entry_point: INVOICE_SEND_DEFERRED_ENTRY_POINT, invoice_id: 'inv-1' },
+        }],
+        { failRestore: true },
+      );
+      db.mockImplementation((table) => {
+        if (table === 'invoices') return invoices.query();
+        if (table === 'sms_log') return smsLog.query();
+        if (table === 'customers') return customerQuery(customer);
+        if (table === 'activity_log') return passthroughQuery();
+        throw new Error(`Unexpected table: ${table}`);
+      });
+      sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => (
+        withProviderHandoff(async () => ({
+          sent: false, blocked: true, deliveryOutcome: 'not_sent',
+          code: 'PROVIDER_REJECTED', reason: 'number opted out',
+        }))
+      ));
+      sendInvoiceEmail.mockResolvedValueOnce({ ok: true });
+
+      const result = await InvoiceService.sendViaSMSAndEmail('inv-1');
+
+      expect(result).toMatchObject({
+        ok: true, sms: { ok: false }, email: { ok: true },
+        code: 'ADOPTED_QUEUE_RESTORE_FAILED', deliveryHeld: true,
+      });
+      // NOT finalized — the claim is retained exactly as a post-delivery
+      // bookkeeping failure would leave it, so stale-claim recovery parks
+      // it for operator review instead of silently losing the text.
+      const finalState = invoices.state();
+      expect(finalState.status).toBe('sending');
+      expect(finalState.send_claim_token).toEqual(expect.any(String));
+      expect(finalState.sent_at).toBeUndefined();
+      // The adopted row is left exactly as consumeQueuedInvoiceSend put it
+      // — cancelled, still pending — so the operator's resend can re-adopt
+      // it through the normal chokepoint.
       const row = smsLog.rows().find((r) => r.id === 'sms-queued-1');
       expect(row.status).toBe('cancelled');
       expect(row.metadata.cancelled_reason).toBe('superseded_by_live_send');
