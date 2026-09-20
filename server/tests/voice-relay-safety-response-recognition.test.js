@@ -509,6 +509,89 @@ test.each([
   for (const { match } of candidates) expect(text.slice(match.index, match.index + match[0].length)).toBe(match[0]);
 });
 
+// --- Round-3 findings -----------------------------------------------------
+
+test.each([
+  'Definitely very unsafe.',
+  'Absolutely completely harmful.',
+  'Of course it is unsafe.',
+])('a HARM_WORD anywhere in the remainder after a certainty lead is not affirmative: %s', (text) => {
+  expect(recognizeSafetyResponse(text).answers[0]).toMatchObject({ affirmative: false });
+});
+
+test.each([
+  'Definitely.',
+  'Definitely safe.',
+  'Of course it is safe.',
+  'Absolutely, completely safe.',
+])('a certainty lead with a positive (or no) completion remains affirmative: %s', (text) => {
+  expect(recognizeSafetyResponse(text).answers[0]).toMatchObject({ affirmative: true });
+});
+
+test.each([
+  ['Yes, actually, no.', false],
+  ['No, actually, yes.', true],
+])('a punctuated self-correction after a discourse marker still reports the corrected final polarity: %s', (text, finalAffirmative) => {
+  const answers = recognizeSafetyResponse(text).answers.filter((answer) => answer.text.trim());
+  expect(answers.length).toBeGreaterThanOrEqual(2);
+  const last = answers.at(-1);
+  expect(last.affirmative).toBe(finalAffirmative);
+  expect(last.negative).toBe(!finalAffirmative);
+  expect(text.slice(last.index, last.end)).toBe(last.text);
+});
+
+test.each([
+  "It's been safe.",
+  'The treatment has always been safe.',
+  'The treatment will definitely be safe.',
+])('contracted-perfect and adverb-bridged copulas establish a product guarantee with an exact span: %s', (text) => {
+  const candidates = recognizeSafetyResponse(text).guarantees;
+  expect(candidates.length).toBeGreaterThan(0);
+  for (const { match } of candidates) expect(text.slice(match.index, match.index + match[0].length)).toBe(match[0]);
+});
+
+test.each([
+  'The treatment will not be safe.',
+  'The bait has never been safe.',
+])('a negation in the copula-adverb slot keeps the auxiliary from ever reaching be/been: %s', (text) => {
+  expect(recognizeSafetyResponse(text).guarantees).toEqual([]);
+});
+
+test.each([
+  'Safe for your child.',
+  'Your kid is safe around the bait.',
+  'Safe for puppies.',
+])('singular child/kid and plural puppies establish an audience guarantee: %s', (text) => {
+  expect(recognizeSafetyResponse(text).guarantees.length).toBeGreaterThan(0);
+});
+
+test("a runtime product name beginning with punctuation is recognized like any other identity", () => {
+  const text = '#1 EcoGuard Wonder is safe.';
+  const candidates = recognizeSafetyResponse(text, { productNames: ['#1 EcoGuard Wonder'] }).guarantees;
+  expect(candidates.map(({ match }) => match[0])).toContain('#1 EcoGuard Wonder is safe');
+});
+
+test('an ordinary name is still not mistaken for a punctuation-led identity', () => {
+  expect(recognizeSafetyResponse('Charles is safe.').guarantees).toEqual([]);
+});
+
+test.each([
+  'Taurus SC is.',
+  'Bifen I/T is.',
+  'The treatment is.',
+])('a genuine named-product or generic-subject repeated answer reports repeatedProduct: %s', (text) => {
+  const answers = recognizeSafetyResponse(text).answers.filter((answer) => answer.text.trim());
+  expect(answers[0]).toMatchObject({ repeatedProduct: true });
+});
+
+test.each([
+  'blue sky is.',
+  'service day is.',
+])('an ordinary title-case clause is not mistaken for a repeated-product answer: %s', (text) => {
+  const answers = recognizeSafetyResponse(text).answers.filter((answer) => answer.text.trim());
+  expect(answers[0]).toMatchObject({ repeatedProduct: false });
+});
+
 // --- Corpus parity -------------------------------------------------------
 // The corpus is the same 591-record fixture the adjudicator lane evaluates
 // against. Every `expected: 'fail'` row is a transcript that SHOULD have
