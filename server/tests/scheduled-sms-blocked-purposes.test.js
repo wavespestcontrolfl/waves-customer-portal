@@ -40,5 +40,6 @@ describe('purposeForScheduledMessageType — recruiting (PR #4623)', () => {
     expect(purposeForScheduledMessageType('job_application_received', { hasCustomer: false })).toBe('application_received');
     expect(purposeForScheduledMessageType('job_interview_invite', { hasCustomer: false })).toBe('interview_invite');
     expect(purposeForScheduledMessageType('job_interview_confirmation', { hasCustomer: true })).toBe('interview_confirmation');
+    expect(purposeForScheduledMessageType('job_owner_reply', { hasCustomer: false })).toBe('applicant_reply');
   });
 });

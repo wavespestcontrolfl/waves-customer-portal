@@ -33,6 +33,7 @@ function purposeForScheduledMessageType(messageType, { hasCustomer = true } = {}
   // consent basis — payment_receipt would hard-require a customerId.
   // Recruiting texts held by the send window replay under their own
   // applicant purpose (audience 'applicant' rides claimMeta.audience).
+  if (type === 'job_owner_reply') return 'applicant_reply';
   if (type.startsWith('job_')) return type.slice('job_'.length);
   if (type === 'visit_summary') return 'service_completion';
   if (type === 'deposit_receipt') return hasCustomer ? 'payment_receipt' : 'conversational';
