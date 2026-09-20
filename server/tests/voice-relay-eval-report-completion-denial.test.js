@@ -1219,3 +1219,58 @@ test.each([
   expect(grammar.reportClaimIsDenied(text, text, text.indexOf('Talstar P'),
     text.indexOf('exterior perimeter'), findingVerb)).toBe(denied);
 });
+
+test.each([
+  ['We arranged to have Talstar P applied to the exterior perimeter.', false],
+  ['We arrange to have Talstar P applied to the exterior perimeter.', false],
+  ['The customer arranges for us to have Talstar P applied to the exterior perimeter.', false],
+  ['We are arranging to have Talstar P applied to the exterior perimeter.', false],
+  ['We had Talstar P applied to the exterior perimeter.', true],
+  ['We arranged access, then had Talstar P applied to the exterior perimeter.', true],
+  ['We arranged to have bait applied indoors, but Talstar P was applied to the exterior perimeter.', true],
+])('arranged causatives do not establish completion: %s', (text, completed) => {
+  const findingVerbs = [...text.matchAll(/applied/g)];
+  expect(grammar.reportHasCompletedPredicate(text, findingVerbs.at(-1))).toBe(completed);
+});
+
+test.each([
+  ['We applied Talstar P anywhere but the exterior perimeter.', 'location', true],
+  ['We applied Talstar P everywhere but exterior perimeter.', 'location', true],
+  ['We applied anything but Talstar P to the exterior perimeter.', 'subject', true],
+  ['We applied Talstar P everywhere, including the exterior perimeter.', '', false],
+  ['We applied Talstar P anywhere but the garage, including the exterior perimeter.', '', false],
+  ['Anything but ordinary, Talstar P was applied to the exterior perimeter.', 'subject', false],
+  ['We applied Talstar P all but perfectly to the exterior perimeter.', 'location', false],
+])('spatial but-exclusions retain selected finding scope: %s', (text, precedingOwner, denied) => {
+  const subjectAt = text.indexOf('Talstar P');
+  const locationAt = text.indexOf('exterior perimeter');
+  const precedingAt = precedingOwner === 'subject' ? subjectAt : locationAt;
+  const precedingText = precedingOwner ? text.slice(0, precedingAt) : '';
+  expect(grammar.reportClaimIsDenied(text, text, subjectAt, locationAt,
+    /applied/g.exec(text), precedingText)).toBe(denied);
+});
+
+test.each([
+  ["The technician'd have applied Talstar P to the exterior perimeter.", true],
+  ['The technician’d already have applied Talstar P to the exterior perimeter.', true],
+  ["Talstar P'd have been applied to the exterior perimeter.", true],
+  ['EcoVia WSG’d have been applied to the exterior perimeter.', true],
+  ["The technician'd applied Talstar P to the exterior perimeter.", false],
+  ["Talstar P'd been applied to the exterior perimeter.", false],
+  ['The technician had applied Talstar P to the exterior perimeter.', false],
+])('noun-subject would-have contractions remain uncertain: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test('noun-subject had contraction retains completed perfect meaning without have', () => {
+  const text = "Talstar P'd been applied to the exterior perimeter.";
+  expect(grammar.reportHasCompletedPredicate(text, /applied/g.exec(text))).toBe(true);
+  expect(grammar.reportFindingIsUncertain(text)).toBe(false);
+});
+
+test('an unrelated noun-subject modal stays outside bounded finding evidence', () => {
+  const text = "The invoice'd have been paid, but Talstar P was applied to the exterior perimeter.";
+  const findingEvidence = grammar.claimContext(text, text.indexOf('Talstar P'), text.length);
+  expect(findingEvidence).not.toMatch(/invoice/i);
+  expect(grammar.reportFindingIsUncertain(findingEvidence)).toBe(false);
+});
