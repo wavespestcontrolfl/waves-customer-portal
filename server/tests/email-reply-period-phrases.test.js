@@ -39,10 +39,31 @@ describe('inactive supplemental period phrases', () => {
   );
 
   test.each(['a month ago', 'a year ago', 'a mo ago', 'a yr ago',
+    'a month or two ago', 'a year and a half ago', 'each month or so ago', 'a calendar month ago',
     'every yearbook', 'monthly-related', 'annualized-policy', 'the month',
     'a, month', 'each @ month', 'for the; year', 'each monthlies'])(
     'leaves temporal or unsupported syntax unresolved: %s', (text) => {
       expect(periods(text)).toEqual([]);
+    },
+  );
+
+  test.each(['every calendar month', 'per calendar year', 'a calendar month'])(
+    'accepts a calendar qualifier inside a supplemental period: %s', (text) => {
+      expect(periods(text).map((phrase) => [phrase.text, phrase.period]))
+        .toEqual([[text, /month/.test(text) ? 'month' : 'year']]);
+    },
+  );
+  test('skips a cadence fragment behind a lexical hyphen inside a visit token', () => {
+    expect(recognize('The non-monthly visit plan costs $98').clauses[0].periodPhrases).toEqual([]);
+  });
+
+  test.each(['$98/monthly visit', 'The $98/annual visit plan'])(
+    'scans punctuation-prefixed embedded periods: %s', (text) => {
+      const clause = recognize(text).clauses[0];
+      const phrase = clause.periodPhrases.find((candidate) => candidate.embedded);
+      expect(phrase).toBeDefined();
+      expect(phrase.tokens[0].text.slice(phrase.offsets.start, phrase.offsets.end)).toBe(phrase.text);
+      expect(['month', 'year']).toContain(phrase.period);
     },
   );
 
