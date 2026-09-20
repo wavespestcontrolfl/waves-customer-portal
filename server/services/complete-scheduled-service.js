@@ -12132,6 +12132,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
               const deferredDelta = {
                 completionSmsStatus: 'deferred',
                 completionSmsDeferredTo: smsResult.nextAllowedAt,
+                // The pre-send uncertainty marker is cleared atomically with
+                // the queue insertion: the queued row now owns delivery and
+                // the 'deferred' status is the duplicate guard. Left in
+                // place, a terminal failure of the queued replay (status →
+                // failed only) would keep the marker and block every later
+                // completion retry despite a definite non-delivery.
+                completionSmsDeliveryUnverifiedAt: null,
               };
               // The balance clause never rides a frozen replay body (codex
               // P2, round 2): the send-window PREcheck at the line's compute
