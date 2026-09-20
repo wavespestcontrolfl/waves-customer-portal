@@ -789,6 +789,32 @@ describe('processScheduledSends send-window handling', () => {
       expect(result).toEqual({ sent: 1, failed: 1, deferred: 0 });
     });
 
+    test('a refusal whose capped UPDATE matches zero rows (another pass already claimed/rescheduled it, or the cap) is not double-counted in failed (Codex round-2 P1)', async () => {
+      // Companion to the test above: THAT one's update matches (default
+      // updateCount: 1) and correctly counts 1. This one's update matches
+      // NOTHING — another pass already moved the row (now 'sending'),
+      // rescheduled it, or it is already at the attempt cap — so THIS pass
+      // performed no refusal of its own and must not report one.
+      isWithinSendWindowET.mockReturnValue(true);
+      const dueRowB = { ...dueRow, id: 'inv-2', invoice_number: 'WPC-2026-1043' };
+      const staleRecovery = chain();
+      const dueQuery = chain({ rows: [zeroDueDueRow({ scheduled_send_attempts: 1 }), dueRowB] });
+      const noOpUpdate = chain({ updateCount: 0 });
+      const claimB = chain({ returning: [claimedRow({ id: 'inv-2', send_claim_token: 'claim-2' })] });
+      db
+        .mockReturnValueOnce(staleRecovery)
+        .mockReturnValueOnce(dueQuery)
+        .mockReturnValueOnce(noOpUpdate)
+        .mockReturnValueOnce(claimB);
+      settleSpy.mockResolvedValue({ settled: false, reason: 'invoice_delivery_in_flight', invoice: null });
+      sendSpy.mockResolvedValue({ ok: true, sms: { ok: true }, email: { ok: true }, creditApplied: 0 });
+
+      const result = await InvoiceService.processScheduledSends();
+
+      expect(sendSpy).toHaveBeenCalledWith('inv-2', expect.objectContaining({ allowClaimed: true, claimToken: 'claim-2' }));
+      expect(result).toEqual({ sent: 1, failed: 0, deferred: 0 });
+    });
+
     test('a race-window zero-due refusal surfacing through a PRECLAIMED send is treated as an ordinary retryable failure, not a crash', async () => {
       // Models the rare race the pre-claim check above cannot close: the
       // retotal lands strictly between that read and claimDueScheduledInvoiceForSend's

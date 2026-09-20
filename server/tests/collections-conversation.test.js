@@ -1657,6 +1657,40 @@ describe('prb-r18', () => {
     expect(db).not.toHaveBeenCalledWith('collections_contact_ledger');
   });
 
+  test('a deposit_settlement_pending race under the send claim resolves a definite not-sent — never "texted", never a delivery_unknown stamp (Codex round-2 P1)', async () => {
+    // Same seam, other verdict (mirrors the zero_due test above): sendViaSMS
+    // now RESOLVES { sent: false, ok: false, code: 'deposit_settlement_pending',
+    // deliveryOutcome: 'not_sent', retryable: true } instead of throwing —
+    // before this fix it threw, landing in the catch block that stamps
+    // delivery_unknown and says the outcome "may or may not have gone
+    // through". A resolved, definite not-sent falls through to the ordinary
+    // provider-reported-non-delivery branch instead: clean copy, a safe
+    // retry latch, and no exception-shaped ambiguity.
+    process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const { convo } = makeConvo();
+    await verifyAndDisclose(convo);
+    convo._turns.push({ role: 'caller', text: 'yes please text it', at: Date.now() });
+    InvoiceService.sendViaSMS.mockResolvedValueOnce({
+      sent: false, ok: false, code: 'deposit_settlement_pending', deliveryOutcome: 'not_sent', retryable: true,
+      reason: 'Nothing is due on this invoice, but it could not be settled yet',
+    });
+
+    const out = await convo._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' });
+
+    expect(out).not.toMatch(/texted/i);
+    expect(out).not.toMatch(/may or may not/i);
+    expect(convo.payLinkSent).toBe(false); // provider-reported non-delivery — retry is safe
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'ledger-sms-1' }),
+      expect.objectContaining({ code: 'deposit_settlement_pending' }),
+    );
+    // The old (pre-fix) throw path stamped delivery_unknown on the ledger
+    // via a raw db() update in the catch block — a resolved result must
+    // never reach that catch at all.
+    expect(db).not.toHaveBeenCalledWith('collections_contact_ledger');
+  });
+
   test('the pay-link latch closes BEFORE the provider await — a concurrent attempt cannot double-send', async () => {
     process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
     process.env.GATE_COLLECTIONS_POLICY = 'true';

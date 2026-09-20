@@ -480,4 +480,19 @@ describe('claimInvoiceForSend — zero-due visit invoice guard (#4131 slice 4)',
     expect(result).toMatchObject({ sent: false, ok: true, code: 'zero_due', settled_zero_due: true });
     expect(typeof result.reason).toBe('string');
   });
+
+  test('sendViaSMS resolves a definite not-sent, retryable result when the under-claim race is refused as deposit_settlement_pending (Codex round-2 P1)', async () => {
+    // Same seam, other verdict: settlement refused for now (not settled,
+    // not a bug) is verified pre-provider — a definite not-sent, retryable
+    // outcome, not the ambiguous failure a thrown error reads as downstream.
+    makeDb(zeroDueRow());
+    settleSpy.mockResolvedValue({ settled: false, reason: 'invoice_delivery_in_flight', invoice: null });
+
+    const result = await InvoiceService.sendViaSMS(INVOICE_ID);
+
+    expect(result).toMatchObject({
+      sent: false, ok: false, code: 'deposit_settlement_pending', deliveryOutcome: 'not_sent', retryable: true,
+    });
+    expect(typeof result.reason).toBe('string');
+  });
 });
