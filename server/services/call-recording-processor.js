@@ -5980,6 +5980,19 @@ function applyRecurringIntentDefault(extracted, transcription, bookableServiceNa
 // endpoint changed. Gemini's response_mime_type='application/json'
 // forces structured output so we rarely have to strip markdown fences,
 // but we still guard-parse for the "text-only refusal" edge case.
+// Call direction for both extraction prompts (codex #4618 r1): a greeting
+// names the OTHER party, and who that is follows from who dialed — never
+// from speaker labels, which diarization can swap.
+function buildCallDirectionBlock(callDirection) {
+  if (callDirection === 'outbound') {
+    return '\nCALL DIRECTION: OUTBOUND — Waves staff placed this call; the person who answered is the customer/prospect. A name our staff uses to greet them ("Hi Mary, it\'s Adam") is the customer\'s name.\n';
+  }
+  if (callDirection === 'inbound') {
+    return '\nCALL DIRECTION: INBOUND — the caller dialed our office; the person who answered is Waves staff. A name the caller uses to greet them ("Hey Tom") is a staff name, never the caller\'s.\n';
+  }
+  return '';
+}
+
 async function extractCallData(transcription, callerPhone, opts = {}) {
   if (!process.env.GEMINI_API_KEY) {
     throw new Error('GEMINI_API_KEY not configured');
@@ -6007,6 +6020,7 @@ async function extractCallData(transcription, callerPhone, opts = {}) {
       }${knownCaller.name ? ` (${knownCaller.name})` : ''}. They are already in our system — treat coordination of an existing/scheduled visit, "are you coming today?", arrival check-ins, complaints about work already done, reschedules, and billing/invoice questions as NOT a new lead (is_lead=false). Only treat a brand-new service request they haven't bought yet as a lead.\n`
     : '';
   const priorCallBlock = buildPriorCallBlock(opts.priorCall);
+  const callDirectionBlock = buildCallDirectionBlock(opts.callDirection);
 
   const prompt = `Analyze this phone call transcript for Waves Pest Control (pest control + lawn care, SW Florida). Waves is an established company with many existing customers, so not every call is a new sales lead — some are existing customers coordinating service, complaints, or billing.
 
@@ -6014,7 +6028,7 @@ Waves only schedules pest control, lawn care, mosquito, termite, rodent, bed bug
 
 Caller phone: ${callerPhone || 'unknown'}
 Call date in Eastern Time: ${callDateET}
-${knownCallerBlock}${priorCallBlock}
+${callDirectionBlock}${knownCallerBlock}${priorCallBlock}
 Transcript:
 ${transcription}
 
@@ -6065,6 +6079,7 @@ IMPORTANT — secondary_contact (a SECOND person who is a party to the service):
 - ARRANGER CALLS HAVE A SECONDARY CONTACT BY DEFAULT: a caller who identifies as a realtor/agent, lender or title/closing coordinator, property manager, or landlord is arranging service for someone else — real-estate/WDO-inspection calls almost always name the buyer (and often the seller/occupant providing access). If such a caller named anyone with a name or contact detail and you are about to return null, re-scan the transcript — you likely missed the party.
 - RELAYED DETAILS BELONG TO THE OTHER PERSON: a phone/email the caller dictates FOR another person ("the buyer is Joseph — his email is ...", "her phone number is ...") goes on secondary_contact, NEVER into the top-level email/phone, even though the caller is the one speaking it.
 - The CALLER's own identity always goes in the top-level first_name/last_name/phone/email fields. secondary_contact is ONLY the other person — never duplicate the caller into it, and never put the other person's phone/email into the caller's fields.
+- first_name/last_name are the caller's OWN name. A name used to greet or address the OTHER party ("Hey Tom", "Hi Mary, it's Adam") belongs to that other party: on an inbound call the person who answered is Waves staff, so the caller's "Hey Tom" names staff, never the caller; on an outbound call Waves staff placed, the person our staff greets by name IS the customer. Take who-is-staff from CALL DIRECTION, not from speaker labels, which can be swapped. When the caller's own name is never stated, leave first_name/last_name null.
 - role describes the secondary person's relationship to the transaction (the BUYER a realtor is booking for is home_buyer, not real_estate_agent; a loan officer named as a party is lender).
 - wants_notifications: true ONLY when the caller explicitly directs that this person receive notifications, confirmations, updates, the report, or the invoice ("send notifications to the buyer and myself", "text my tenant when you're on the way"). A person merely mentioned — or explicitly excluded ("you don't have to involve Matt") — gets wants_notifications false.
 - When several other people are mentioned, extract the one the caller designates for contact/notifications; if none is designated, the one most central to the service (the property's buyer/occupant beats a bystander).
@@ -7723,7 +7738,7 @@ const CallRecordingProcessor = {
     let extracted;
     try {
       const extractStartedAt = Date.now();
-      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at, knownCaller, bookableServiceNames, priorCall });
+      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at, knownCaller, bookableServiceNames, priorCall, callDirection: isOutboundCall(call) ? 'outbound' : 'inbound' });
       stageTimings.extraction_v1_ms = Date.now() - extractStartedAt;
     } catch (err) {
       logger.error(`[call-proc] AI extraction failed: ${err.message}`);
@@ -7777,6 +7792,9 @@ const CallRecordingProcessor = {
           knownCaller,
           callerIdName: callerIdNameForPrompt(call),
           priorCall,
+          // Who is staff and who is the customer follows from who dialed —
+          // the prompt's greeting rule needs it (codex #4618 r1 P1).
+          callDirection: isOutboundCall(call) ? 'outbound' : 'inbound',
         });
         // Address validation runs in shadow on every valid extraction (no-ops
         // instantly when ADDRESS_VALIDATION_ENABLED is off), so the verdict is
@@ -15982,7 +16000,10 @@ const CallRecordingProcessor = {
         if (scoreResult?.skipped && scoreResult.reason === 'ownership_lost') {
           return abandonToPeer('finalization after CSR scoring');
         }
-        csrScoreResult = { score: scoreResult?.score?.total_score, outcome: scoreResult?.score?.call_outcome };
+        // CSRCoach.scoreCall returns the score object itself (total_score,
+        // call_outcome, ...), not a wrapper — the old `.score.` read logged
+        // "undefined/15 (undefined)" on every call (2026-09-20 audit).
+        csrScoreResult = { score: scoreResult?.total_score, outcome: scoreResult?.call_outcome };
         logger.info(`[call-proc] CSR scored: ${csrScoreResult.score}/15 (${csrScoreResult.outcome})`);
       } catch (err) {
         logger.error(`[call-proc] CSR scoring failed (non-blocking): ${err.message}`);
