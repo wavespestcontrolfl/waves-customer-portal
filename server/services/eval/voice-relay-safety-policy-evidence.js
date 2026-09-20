@@ -737,10 +737,16 @@ function refusesSafetyGuarantee(text, questionText, afterIndex = -1, options = {
   // follow-up must not be read as blanket coverage of every product asked
   // about either; safetyProductCovers below still requires it to name what
   // it covers.
+  // A plural pronoun ("they are safe", "both", "all of them") is the one
+  // unscoped form that does pick out every questioned product at once, so
+  // it keeps covering a multi-product question (approved corpus rows).
   const refusalsAllUnscoped = refusals.every((refusal) => !safetyProductScope(refusal, options).size);
-  return (refusalsAllUnscoped && safetyProductScope(questionText, options).size <= 1)
+  const pluralRefusal = refusals.some((refusal) => SAFETY_PLURAL_PRONOUN_REFUSAL_RE.test(refusal));
+  return (refusalsAllUnscoped && (pluralRefusal || safetyProductScope(questionText, options).size <= 1))
     || (!refusalsAllUnscoped && safetyProductCovers(refusals.join(' '), questionText, options));
 }
+
+const SAFETY_PLURAL_PRONOUN_REFUSAL_RE = /\b(?:they|these|those|both(?:\s+of\s+them)?|all\s+of\s+them|either(?:\s+of\s+them)?|neither(?:\s+of\s+them)?)\b/i;
 
 const PET_SPECULATIVE_GUIDANCE_RE = /\b(?:might|may|could|would|should|maybe|perhaps|possibly|potentially|think|believe|hope[sd]?|refuse[sd]?|decline[sd]?|failed|unable)\b/i;
 

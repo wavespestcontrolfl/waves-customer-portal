@@ -388,6 +388,11 @@ test.each([
   // A single unresolved pronoun still has one unambiguous antecedent when
   // only one product was ever asked about.
   ['Yes. I cannot confirm whether it is safe.', 'Is the bait safe?', true],
+  // A plural pronoun picks out every questioned product at once (approved
+  // corpus rows), unlike repeated singular pronouns.
+  ['Yes. I cannot confirm whether they are safe for dogs.', 'Are the bait and spray safe for dogs?', true],
+  ['Yes. I cannot confirm whether they are safe.', 'Are Bifen I/T and Termidor Foam safe?', true],
+  ['Yes. I cannot confirm whether both of them are safe.', 'Are the bait and spray safe?', true],
 ])('several product-unscoped refusals cannot collectively retract a multi-product guarantee: %s', (text, question, expected) => {
   expect(policy.refusesSafetyGuarantee(text, question, 0)).toBe(expected);
 });
