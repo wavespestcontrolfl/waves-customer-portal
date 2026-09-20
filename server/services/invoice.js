@@ -4531,9 +4531,22 @@ const InvoiceService = {
       // invoice is actually zero-due (#4131 slice 4 retry fairness). A
       // refusal-to-settle-yet moves the row a few minutes out so it cannot
       // starve later payable invoices behind it in the same due page.
-      const zeroDue = await zeroDueOpenVisitSendOutcome(inv, inv.id);
-      if (zeroDue) {
-        failed += await recordZeroDueSchedulingOutcome(zeroDue, inv);
+      try {
+        const zeroDue = await zeroDueOpenVisitSendOutcome(inv, inv.id);
+        if (zeroDue) {
+          failed += await recordZeroDueSchedulingOutcome(zeroDue, inv);
+          continue;
+        }
+      } catch (zeroDueErr) {
+        // Isolate the row, never the batch: an unexpected error inside the
+        // settlement check (a DB fault, a bug in settleZeroBalance) is
+        // reported against THIS invoice — spending an attempt best-effort
+        // so a persistent fault still meets the cap — and the loop moves on
+        // to the invoices behind it. Nothing was claimed or sent here.
+        logger.error(`[invoice] Zero-due check failed for scheduled send ${inv.invoice_number}: ${zeroDueErr.message}`);
+        failed += 1;
+        await recordZeroDueSchedulingOutcome({ ok: false, error: `Zero-due check failed: ${zeroDueErr.message}` }, inv)
+          .catch((e) => logger.warn(`[invoice] Could not record the zero-due check failure for ${inv.id}: ${e.message}`));
         continue;
       }
       if (isEnabled("smsSendWindow") && !isWithinSendWindowET()) {
