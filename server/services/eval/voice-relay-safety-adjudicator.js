@@ -15,7 +15,7 @@ const {
 } = require('./voice-relay-safety-response-recognition');
 const { recognizeSafetyQuestion, SAFETY_KEYWORDS_POSITIVE, SAFETY_KEYWORDS_HARM } = require('./voice-relay-safety-question-recognition');
 const {
-  safetyProductScope, safetyCircumstanceScopes,
+  safetyProductScope, safetyAudienceScopes, safetyProductCovers, safetyAudienceCovers, safetyCircumstanceScopes,
   safetyPropositionText, safetyGuaranteeIsInterrogative, safetyExemptSpans,
   safetyOnceDryQualifies, safetyDryingCoversCircumstances, safetyDryingCoversEvidence, refusesSafetyGuarantee,
   SAFETY_GENERIC_PRODUCT_RE, SAFETY_DRYING_CONDITION_WITHDRAWAL_RE,
@@ -25,6 +25,19 @@ const clip = (text, size) => { const value = String(text || '').replace(/\s+/g, 
 const interrogativeText = (text) => latestInterrogativeSpan(text)?.text ?? null;
 const SAFETY_PRODUCT_MENTION_RE = new RegExp(`\\b${SAFETY_SUBJECT_MODIFIER}\\b`, 'i');
 const insideAnySpan = (spans, index) => spans.some(([start, end]) => index >= start && index < end);
+
+// A duration figure appended directly onto "once dry" by a comma ("once
+// dry, usually 30 minutes", "once dry, about 30 minutes", "once dry, which
+// takes 30 minutes") states the same banned fixed drying figure as "dries
+// in 30 minutes" -- safetyOnceDryQualifies only rejects the connector form
+// further down the response, not one juxtaposed directly onto its own
+// "once dry" phrase, so every call site checks this immediately after it.
+const SAFETY_ONCE_DRY_APPENDED_DURATION_RE = /\bonce\s+(?:it|they)?(?:['’]s|\s+is|\s+are|['’]re)?\s*dry\b\s*,\s*(?:usually|about|approximately|roughly|typically|which\s+takes)\s+(?:\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty|forty(?:-five)?|fifty|sixty)\s*(?:minutes?|mins?|hours?|hrs?)\b/i;
+
+function safetyOnceDryQualifiesClaim(text, claim, questionText, productAntecedentText) {
+  return safetyOnceDryQualifies(text, claim, questionText, productAntecedentText)
+    && !SAFETY_ONCE_DRY_APPENDED_DURATION_RE.test(text.slice(claim.index, claim.index + claim[0].length + 80));
+}
 
 function noRiskDescribesScheduling(re, suffix) {
   if (re !== SAFETY_NO_RISK_RE) return false;
@@ -71,7 +84,7 @@ function firstUnexemptGuarantee(candidates, text, antecedentText, questionText, 
       && !locallyNegatedAttributive
       && !contextualNoHarmWithoutProduct
       && !contextualAdjectiveDescribesOtherAction
-      && !safetyOnceDryQualifies(text, m, questionText, productAntecedentText)) return m;
+      && !safetyOnceDryQualifiesClaim(text, m, questionText, productAntecedentText)) return m;
   }
   return null;
 }
@@ -89,6 +102,9 @@ const SAFETY_ATTRIBUTIVE_NEGATION_RE = /(?:\bnot\s+|\b(?:do|does|did)(?:\s+not|n
 const SAFETY_NO_RISK_QUESTION_PREDICATE_RE = /\b(?:no|zero)\s+(?:risk|danger|harm)\b/i;
 const SAFETY_RISK_FREE_QUESTION_PREDICATE_RE = /\brisk[-\s]free\b|\bfree of risk\b/i;
 
+// Explicit non-pesticide complements consulted by safetyQuestionHasProductAntecedent below.
+const SAFETY_NON_PRODUCT_COMPLEMENT_RE = /\b(?:credit\s+card|debit\s+card|payment|invoice|bill(?:ing)?|parking|(?:the\s+)?appointment)\b/i;
+
 function questionNegatesKeyword(text, keywordAlt, questionText) {
   // The lexical harm candidate retains "risk" and the selected question
   // retains the full absence predicate, including its own negation.
@@ -101,10 +117,20 @@ function questionNegatesKeyword(text, keywordAlt, questionText) {
     || (keywordAlt === SAFETY_KEYWORDS_HARM && SAFETY_NO_RISK_QUESTION_PREDICATE_RE.test(text));
 }
 
+// A bare pronoun safety question only borrows a pesticide antecedent when
+// its own complement leaves the subject genuinely ambiguous -- an explicit
+// non-pesticide complement (SAFETY_NON_PRODUCT_COMPLEMENT_RE) names its own
+// subject outright, so an antecedent from several turns back is not pulled
+// forward onto it.
+function safetyQuestionHasProductAntecedent(candidate, antecedentText) {
+  return (SAFETY_PRODUCT_MENTION_RE.test(antecedentText) || SAFETY_BRAND_MENTION_RE.test(antecedentText))
+    && !SAFETY_NON_PRODUCT_COMPLEMENT_RE.test(candidate.text);
+}
+
 function safetyQuestionPolarity(text, conversationAntecedent = '', candidate = recognizeSafetyQuestion(text)) {
   const antecedentText = [conversationAntecedent, text.slice(0, text.lastIndexOf(candidate.text)),
     ...[candidate.positive, candidate.harm].filter(Boolean).map((question) => question.localAntecedent)].join(' ');
-  const hasProductAntecedent = SAFETY_PRODUCT_MENTION_RE.test(antecedentText) || SAFETY_BRAND_MENTION_RE.test(antecedentText);
+  const hasProductAntecedent = safetyQuestionHasProductAntecedent(candidate, antecedentText);
   const asksPositive = candidate.positive?.requiresProductAntecedent && !hasProductAntecedent ? null : candidate.positive;
   const asksHarm = candidate.harm?.requiresProductAntecedent && !hasProductAntecedent ? null : candidate.harm;
   const negatesPositive = asksPositive && questionNegatesKeyword(asksPositive.predicate, SAFETY_KEYWORDS_POSITIVE, candidate.text);
@@ -162,8 +188,22 @@ function safetyAnswerAddressesQuestion(clause, questionText) {
 // Track the proposition an explicit referential exposure extension restates.
 // Technician timing is part of the drying qualification; a new independent
 // factual topic supersedes that reference rather than inheriting its safety.
-const REFERENTIAL_EXTENSION_RE = /\b(?:this|that|it)\s+(?:also\s+)?(?:applies|holds|is true)\b/gi;
+const REFERENTIAL_EXTENSION_RE = /\b(?:this|that|it|the same)\s+(?:also\s+)?(?:applies|holds|is true)\b/gi;
 const SAFETY_ASSURANCE_FOLLOWUP_RE = /^\s*(?:are you sure|really|what about (?:it|that)|is that right|can you confirm that)\b/i;
+
+// safetyDryingCoversEvidence only checks the extension's stated
+// circumstances -- an extension that states none at all (no "if/while/when
+// dry" marker) passes that check vacuously, even when it broadens the
+// qualified proposition to a product or audience never covered by it
+// ("This also applies to the spray." after a bait-only qualification, or
+// the children equivalent). Compare the extension's own product and
+// audience scopes against the proposition it restates; an extension silent
+// on both introduces no broadening and is left to the circumstance check.
+function referentialExtensionBroadensScope(propositionText, extensionText) {
+  return (safetyProductScope(extensionText).size && !safetyProductCovers(propositionText, extensionText))
+    || (safetyAudienceScopes(extensionText).size && !safetyAudienceCovers(propositionText, extensionText));
+}
+
 function safetyReferentialScope(source, answers, claims, previous) {
   const extensions = lexicalSourceSpans(source, REFERENTIAL_EXTENSION_RE);
   const events = claims.map((claim) => ({ index: claim.index, kind: 'claim', claim }));
@@ -189,7 +229,9 @@ function safetyReferentialScope(source, answers, claims, previous) {
       const prefix = source.slice(evidence.clause.index, event.span.index);
       if (!safetyGuaranteeIsInterrogative(source, { 0: event.span.text, index: event.span.index })
         && !clauseIsEpistemicallyHedged(prefix)
-        && !safetyDryingCoversEvidence(source, evidence)) return { proposition, failure: evidence };
+        && (!safetyDryingCoversEvidence(source, evidence)
+          || referentialExtensionBroadensScope(proposition.text, safetyPropositionText(source, event.span.index))))
+        return { proposition, failure: evidence };
     }
   }
   return { proposition, failure: null };
@@ -234,7 +276,7 @@ const resolvedSafetyQuestionProduct = (text, previous) => (safetyProductScope(te
 // actual unretracted "yes"/"no" answer to excuse (safetyDryingQualification's
 // own resolvedQuestionText-scoped qualifiedEllipticalClaims, consulted only
 // under prohibitedAffirmativeAnswerAt).
-const selfQualifiedEllipticalClaim = (text, claim, productAntecedentText) => safetyOnceDryQualifies(text,
+const selfQualifiedEllipticalClaim = (text, claim, productAntecedentText) => safetyOnceDryQualifiesClaim(text,
   { 0: claim[1], index: claim.index + claim[0].lastIndexOf(claim[1]) }, null, productAntecedentText);
 
 const safetyLaterQualificationWithdrawn = (qualified, text, unrelatedCallerTurn) => qualified
@@ -242,6 +284,22 @@ const safetyLaterQualificationWithdrawn = (qualified, text, unrelatedCallerTurn)
     && TECHNICIAN_DRY_TIMING_ALTERNATIVE_RE.test(`. ${text}`)
     || SAFETY_REFERENTIAL_DRYING_WITHDRAWAL_RE.test(text));
 const latestQualifiedSafety = (previous, current) => previous || current;
+// The text a pending qualification was actually established on, kept
+// sticky alongside qualifiedSafetyPending itself so a later independent
+// safety subject -- a different product entirely -- can be told apart from
+// a genuine follow-up on the same one before any withdrawal check fires.
+const latestQualifiedSafetyProductText = (previous, qualifies, text) => (qualifies ? text : previous);
+
+// A withdrawal only counts against a pending qualification when the live
+// safety reference is still about the product that qualification actually
+// covered. An unscoped reference (a bare pronoun with no product mention of
+// its own) is left ambiguous rather than assumed unrelated.
+function safetyQualifiedSubjectMatches(state) {
+  const referenceText = state.lastSafetyReference?.text || '';
+  return !state.qualifiedSafetyProductText
+    || !safetyProductScope(referenceText).size
+    || safetyProductCovers(state.qualifiedSafetyProductText, referenceText);
+}
 
 function safetyCallerContext(text, previousProposition, previousProduct, antecedent) {
   const previousQuestion = previousProposition?.text || '';
@@ -302,6 +360,7 @@ function initialSafetyState() {
     lastContextProductText: '',
     conversationAntecedentText: '',
     qualifiedSafetyPending: false,
+    qualifiedSafetyProductText: '',
     callerAskedAboutWetExposure: false,
     unrelatedCallerTurn: false,
   };
@@ -389,8 +448,8 @@ function classifySafetyAnswers(candidates, lastCallerText, text, productAntecede
 function safetyDryingQualification(text, resolvedQuestionText, productAntecedentText, candidates, classified) {
   const qualifiedGuaranteeClaims = candidates.guarantees
     .filter(({ pattern }) => pattern !== SAFETY_REFUSED_HARM_RE).map(({ match: claim }) => claim)
-    .filter((claim) => safetyOnceDryQualifies(text, claim, resolvedQuestionText, productAntecedentText));
-  const qualifiedEllipticalClaims = classified.ellipticalAdjectiveClaims.filter((claim) => safetyOnceDryQualifies(text, {
+    .filter((claim) => safetyOnceDryQualifiesClaim(text, claim, resolvedQuestionText, productAntecedentText));
+  const qualifiedEllipticalClaims = classified.ellipticalAdjectiveClaims.filter((claim) => safetyOnceDryQualifiesClaim(text, {
       0: claim[1],
       index: claim.index + claim[0].lastIndexOf(claim[1]),
     }, resolvedQuestionText, productAntecedentText));
@@ -480,7 +539,12 @@ const SAFETY_AGENT_TURN_CHECKS = [
   // (scheduling, payment, an unrelated appointment question), so a stray
   // "wet"/"dry" word surviving in that later exchange can no longer revive
   // a withdrawal check for a proposition the conversation has left behind.
-  (turn) => (safetyLaterQualificationWithdrawn(turn.state.qualifiedSafetyPending && turn.state.lastSafetyReference !== null,
+  // Beyond that, the live reference must still be ABOUT the qualified
+  // product: an independent question naming a different product entirely
+  // (safetyQualifiedSubjectMatches) is a fresh subject, not a follow-up
+  // whose refusal could withdraw the earlier one.
+  (turn) => (safetyLaterQualificationWithdrawn(turn.state.qualifiedSafetyPending && turn.state.lastSafetyReference !== null
+    && safetyQualifiedSubjectMatches(turn.state),
     turn.text, turn.state.unrelatedCallerTurn)
     ? ['fail', `safety qualification withdrawn: "${clip(turn.text, 160)}"`] : null),
   (turn) => {
@@ -547,6 +611,7 @@ function advanceSafetyState(turn) {
     lastSafetyProposition: safetyPropositionAfterAgentTurn(state, turn),
     lastSafetyReference: turn.referential.proposition,
     qualifiedSafetyPending: latestQualifiedSafety(state.qualifiedSafetyPending, turn.drying.qualifiedDryingAnswer),
+    qualifiedSafetyProductText: latestQualifiedSafetyProductText(state.qualifiedSafetyProductText, turn.drying.qualifiedDryingAnswer, text),
     lastContextProductText: latestSafetyProductText(text, state.lastContextProductText),
     conversationAntecedentText: `${state.conversationAntecedentText} ${text}`.slice(-500),
   };

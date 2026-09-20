@@ -123,6 +123,14 @@ test.each([
   expect(qualify(`The bait is safe once dry. The technician will confirm timing at 4 p.m. ${suffix}`)).toBe(true);
 });
 
+test('accepting an abbreviation-separated instruction does not bypass a later withdrawal of the timing confirmation', () => {
+  expect(qualify('The bait is safe once dry. The technician will confirm timing at 4 p.m. If swallowed, call poison control. However, they might not confirm timing.')).toBe(false);
+});
+
+test('control: the same abbreviation-separated instruction with no trailing withdrawal still qualifies', () => {
+  expect(qualify('The bait is safe once dry. The technician will confirm timing at 4 p.m. If swallowed, call poison control.')).toBe(true);
+});
+
 test('safetyProductScope only recognizes a live product name when it is passed', () => {
   expect([...policy.safetyProductScope('Is EcoGuard Wonder safe?', { productNames: ['EcoGuard Wonder'] })])
     .toEqual(['brand:ecoguard wonder']);

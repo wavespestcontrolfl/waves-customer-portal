@@ -216,6 +216,14 @@ const SAFETY_NO_HARM_PREDICATE = `${SAFETY_NEGATIVE_MODAL_SOURCE}\\s+(?:${SAFETY
 const SAFETY_POSE_RISK_VERB = '(?:pose|carry|present|create)';
 const SAFETY_NO_POSE_RISK_PREDICATE_SOURCE = `${SAFETY_NEGATIVE_MODAL_SOURCE}\\s+(?:${SAFETY_NO_HARM_CERTAINTY_ADVERB}\\s+)?${SAFETY_POSE_RISK_VERB}\\s+(?:a|any)\\s+(?:risk|danger|hazard)`;
 
+// The predicate alone has no subject of its own ("does not pose a risk"
+// fits after "the bait" and equally after "rescheduling" or "the
+// weather"), so it must not match a sentence whose subject was never a
+// pesticide. A pronoun subject is left for the policy layer's antecedent
+// tracking to resolve (it may or may not point at a product); a concrete
+// subject must itself be pesticide vocabulary.
+const SAFETY_NO_POSE_RISK_SUBJECT_SOURCE = `(?:${SAFETY_SUBJECT_WITH_PRODUCT}|it|this|that|they|these|those)`;
+
 const SAFETY_HARM_TARGET = `(?:him|her|them|(?:the\\s+)?${SAFETY_AUDIENCE_MEMBER})`;
 
 const SAFETY_CONTEXTUAL_NO_HARM_RE = new RegExp(
@@ -234,7 +242,7 @@ const SAFETY_POST_DRY_GUARANTEE_RE = new RegExp(
 
 const SAFETY_ADJECTIVE_NEGATION = `(?<!anything but )(?<!\\b(?:not|(?:is|are)n[\\x27\\u2019]t|(?:is|are) not|never|no longer)\\s+${SAFETY_INTENSIFIER})`;
 
-const SAFETY_NO_RISK_RE = new RegExp(`\\b(?:no|zero)\\s+(?:risk|danger|harm)\\b|${vocabAlt(NO_RISK_PHRASES)}|\\b(?:there|it)(?:\\s+(?:is|was)\\s+(?:not|never)|\\s+(?:isn|wasn)['’]t)\\s+(?:any|a)\\s+(?:risk|danger|harm)\\b|\\b${SAFETY_NO_POSE_RISK_PREDICATE_SOURCE}\\b`, 'gi');
+const SAFETY_NO_RISK_RE = new RegExp(`\\b(?:no|zero)\\s+(?:risk|danger|harm)\\b|${vocabAlt(NO_RISK_PHRASES)}|\\b(?:there|it)(?:\\s+(?:is|was)\\s+(?:not|never)|\\s+(?:isn|wasn)['’]t)\\s+(?:any|a)\\s+(?:risk|danger|harm)\\b|(?<=\\b${SAFETY_NO_POSE_RISK_SUBJECT_SOURCE}\\s+)${SAFETY_NO_POSE_RISK_PREDICATE_SOURCE}\\b`, 'gi');
 
 const SAFETY_ATTRIBUTIVE_GUARANTEE_RE = new RegExp(
   `\\b${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}(?:\\s+(?:and|or)\\s+[a-z]+(?:-[a-z]+)?){0,2}\\s+${SAFETY_SUBJECT_MODIFIER}\\b`,

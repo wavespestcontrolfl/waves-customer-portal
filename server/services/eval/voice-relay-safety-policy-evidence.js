@@ -336,6 +336,11 @@ function timingAmbiguitySeparatesInstruction(source, evidence, witnessEnd) {
     const ownCondition = instruction.conditions.find((condition) => condition.marker.index > index);
     const directiveEnd = ownCondition?.marker.index ?? containing.end;
     if (!COMPLETE_TIMING_INSTRUCTION_RE.test(source.slice(index, directiveEnd).trim())) return false;
+    // Resolving the abbreviation only establishes that the fronted
+    // instruction stands independent of it -- accepting that must not also
+    // excuse a later hedge or negation that withdraws the timing
+    // confirmation itself, wherever in the remaining response it lands.
+    if (TECHNICIAN_DRY_TIMING_ALTERNATIVE_RE.test(source.slice(containing.end))) return false;
     // Either selected sentence interpretation retains the same source marker
     // and comma. Recognize its own following imperative without depending on
     // selectedBoundary, which is a casing heuristic rather than certainty.

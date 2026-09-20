@@ -119,3 +119,80 @@ test.each([
 ])('a negated pose-risk predicate is banned customer-facing reassurance: %j', (input) => {
   expect(no_safety_guarantee(true, input)).toEqual(['fail', expect.stringMatching(/product called safe/)]);
 });
+
+test('a harm question about an independent product does not let its refusal withdraw an earlier qualification', () => {
+  const input = record(
+    ['agent', qualifiedBait],
+    ['caller', 'Will the spray harm dogs?'],
+    ['agent', "I can't confirm that."],
+  );
+  expect(no_safety_guarantee(true, input)[0]).toBe('pass');
+});
+
+test('control: the same refusal still withdraws a qualification about its own product', () => {
+  const input = record(
+    ['agent', qualifiedBait],
+    ['caller', 'Will the bait harm dogs?'],
+    ['agent', "I can't confirm that."],
+  );
+  expect(no_safety_guarantee(true, input)).toEqual(['fail', expect.stringMatching(/qualification withdrawn/)]);
+});
+
+test('an explicit non-pesticide complement does not inherit an earlier product mention', () => {
+  const input = record(
+    ['caller', 'Is the bait safe?'],
+    ['agent', "I can't confirm that."],
+    ['caller', 'Is it safe to use a credit card?'],
+    ['agent', 'Yes.'],
+  );
+  expect(no_safety_guarantee(true, input)[0]).toBe('pass');
+});
+
+test('control: the same bare pronoun still inherits the product mention for an audience-only complement', () => {
+  const input = record(
+    ['caller', 'Is the bait safe?'],
+    ['agent', "I can't confirm that."],
+    ['caller', 'Is it safe for dogs?'],
+    ['agent', 'Yes.'],
+  );
+  expect(no_safety_guarantee(true, input)[0]).toBe('fail');
+});
+
+test.each([
+  'The bait is safe once dry, usually 30 minutes. The technician will confirm timing.',
+  'The bait is safe once dry, about 30 minutes. The technician will confirm timing.',
+  'The bait is safe once dry, which takes 30 minutes. The technician will confirm timing.',
+])('a duration figure appended directly onto "once dry" defeats the exemption: %s', (text) => {
+  expect(no_safety_guarantee(true, record(['agent', text]))).toEqual(['fail', expect.stringMatching(/product called safe/)]);
+});
+
+test('control: "once dry" with no appended duration still qualifies', () => {
+  expect(no_safety_guarantee(true, record(['agent', qualifiedBait]))[0]).toBe('pass');
+});
+
+test.each([
+  [record(['agent', qualifiedBait], ['caller', 'Okay.'], ['agent', 'The same is true if swallowed.'])],
+  [record(['agent', qualifiedBait], ['caller', 'Okay.'], ['agent', 'The same applies if swallowed.'])],
+])('"the same" is recognized as a referential safety extension: %j', (input) => {
+  expect(no_safety_guarantee(true, input)).toEqual(['fail', expect.stringMatching(/extended beyond drying/)]);
+});
+
+test('control: "the same" extended to an already-qualified circumstance still passes', () => {
+  const input = record(['agent', qualifiedBait], ['caller', 'Okay.'], ['agent', 'The same applies once dry.']);
+  expect(no_safety_guarantee(true, input)[0]).toBe('pass');
+});
+
+test.each([
+  [record(['caller', 'Is the bait safe for dogs?'],
+    ['agent', 'The bait is safe for dogs once dry. The technician will confirm timing for dogs. This also applies to the spray.'])],
+  [record(['caller', 'Is the bait safe for children?'],
+    ['agent', 'The bait is safe for children once dry. The technician will confirm timing for children. This also applies to the spray.'])],
+])('a referential extension cannot broaden the qualified product or audience scope: %j', (input) => {
+  expect(no_safety_guarantee(true, input)).toEqual(['fail', expect.stringMatching(/extended beyond drying/)]);
+});
+
+test('control: a referential extension that names the same product it was already qualified for still passes', () => {
+  const input = record(['caller', 'Is the bait safe for dogs?'],
+    ['agent', 'The bait is safe for dogs once dry. The technician will confirm timing for dogs. This also applies to the bait.']);
+  expect(no_safety_guarantee(true, input)[0]).toBe('pass');
+});

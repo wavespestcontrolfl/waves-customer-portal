@@ -216,6 +216,17 @@ test.each([
   expect(text.slice(claim.match.index, claim.match.index + span.length)).toBe(span);
 });
 
+// The negated pose/carry/present/create predicate has no subject of its
+// own; it must not fire for an ordinary non-pesticide sentence that merely
+// happens to share the "does not pose a risk" wording, only for one whose
+// subject is itself pesticide vocabulary.
+test.each([
+  'Rescheduling does not pose a risk to your appointment.',
+  'The weather does not pose a risk to our schedule.',
+])('a negated pose-risk predicate with no product subject is not recognized: %s', (text) => {
+  expect(recognizeSafetyResponse(text).guarantees).toEqual([]);
+});
+
 test.each([
   'The bait poses a risk to dogs.',
   'The bait might pose a risk to dogs.',
