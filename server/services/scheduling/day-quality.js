@@ -1,6 +1,7 @@
 /** Planned route measurements. No writes, geocoding, traffic calls or invented
  * stop capacity. Gross calendar gaps are not automatically bookable time. */
-const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration } = require('../route-reorder-window-fit');
+const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration, isCoVisitPair } = require('../route-reorder-window-fit');
+const { allocationKey, occupiedRows } = require('./visit-capacity');
 
 // Route-quality measures work still to be performed. stops-ahead keeps
 // completed visits as route stops (position/total on the day of service),
@@ -13,20 +14,27 @@ const { parseHHMM } = require('./window-rules');
 // Two customers promised the same technician at the same time. Staff and
 // phone-reschedule saves commit through such a clash by owner ruling
 // (2026-08-25, advisory only), so the planned board is where it must show.
-// One customer's pest + lawn pair in one slot is a single physical stop, not
-// a double-booking (the co-visit rule in route-reorder-window-fit.js). An
-// unknown customer on either side is treated as a clash, never waved on.
+// Occupied time is the rebooker's own model (visit-capacity occupiedRows:
+// a version-2 combined booking occupies the SUM of its members, anything
+// else COALESCE(window_end, start + estimate)), so the card agrees with the
+// probe that let the save through. Not a clash: the members of one combined
+// booking, and one customer's pest + lawn rows that isCoVisitPair proves are
+// one physical stop (same window, pin and premise, ungrouped) — a customer's
+// second property or unit in the same slot still is one. An unknown
+// customer on either side is never waved on.
 function doubleBookedPairs(stops) {
-  const blocks = stops.filter(stop => parseHHMM(stop.window_start) != null)
-    .map(stop => ({ id: stop.id, customer: stop.customer_id ?? null,
-      start: parseHHMM(stop.window_start), end: parseHHMM(stop.window_start) + workDuration(stop) }))
-    .sort((a, b) => a.start - b.start || String(a.id).localeCompare(String(b.id)));
+  const timed = stops.filter(stop => parseHHMM(stop.window_start) != null);
+  const blocks = occupiedRows(timed)
+    .map((row, index) => ({ stop: timed[index], key: allocationKey(timed[index]), start: row.startMin, end: row.endMin }))
+    .filter(block => block.start != null && block.end > block.start)
+    .sort((a, b) => a.start - b.start || String(a.stop.id).localeCompare(String(b.stop.id)));
   const pairs = [];
   for (let i = 0; i < blocks.length; i++) {
     for (let j = i + 1; j < blocks.length && blocks[j].start < blocks[i].end; j++) {
       const [a, b] = [blocks[i], blocks[j]];
-      if (a.customer != null && a.customer === b.customer) continue;
-      pairs.push({ ids: [a.id, b.id], minutes: Math.min(a.end, b.end) - b.start });
+      if (a.key && a.key === b.key) continue;
+      if (isCoVisitPair(effectiveWindowRange, a.stop, b.stop)) continue;
+      pairs.push({ ids: [a.stop.id, b.stop.id], minutes: Math.min(a.end, b.end) - b.start });
     }
   }
   return pairs;
@@ -131,7 +139,7 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
     const date = etDateString(addETDays(parseETDateTime(`${from}T12:00`), index));
     const stops = await dayStopsQuery(conn, { dateStr: date, excludeStatuses: QUALITY_EXCLUDED_STATUSES,
       select: ['scheduled_services.id', 'scheduled_services.technician_id', 'scheduled_services.route_order',
-        'scheduled_services.customer_id',
+        'scheduled_services.customer_id', 'scheduled_services.scheduled_date', 'scheduled_services.reservation_service_mix',
         'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
         'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
         {

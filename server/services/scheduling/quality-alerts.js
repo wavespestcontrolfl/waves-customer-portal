@@ -37,6 +37,9 @@ const cardKey = (date, techId, overflow) => `${date}:${overflow ? 'overflow' : (
 // so a repeated check keeps the same cards open.
 function cardPriority([, a], [, b]) {
   if (!a.techId !== !b.techId) return a.techId ? 1 : -1;
+  // A double-booking outranks any number of location or duration notes: the
+  // cap must never reduce it to an anonymous overflow line.
+  if (!a.payload.doubleBookedVisits !== !b.payload.doubleBookedVisits) return a.payload.doubleBookedVisits ? -1 : 1;
   if (a.payload.issues.length !== b.payload.issues.length) return b.payload.issues.length - a.payload.issues.length;
   return String(a.techId).localeCompare(String(b.techId));
 }
@@ -81,13 +84,13 @@ function technicianRouteIssues(quality, driveModel) {
   }
   const late = driveModel === 'calibrated' && !unknownDurations ? quality.modeledLateVisits?.length : 0;
   if (late) issues.push(`${late} visit${late === 1 ? '' : 's'} modeled after the promised arrival window. Review the running order and appointment commitments.`);
-  return { issues, late };
+  return { issues, late, clashing };
 }
 
 function buildRouteQualityAlerts(day, driveModel) {
   const alerts = [];
   for (const quality of day.byTech) {
-    const { issues, late } = technicianRouteIssues(quality, driveModel);
+    const { issues, late, clashing } = technicianRouteIssues(quality, driveModel);
     // The technician's name belongs on this admin-room card: the
     // dispatch:alert broadcast carries the bare row without the joined
     // tech_name, so without it two live route cards for the same day are
@@ -95,7 +98,8 @@ function buildRouteQualityAlerts(day, driveModel) {
     // still stores technician ids alone.
     if (issues.length) alerts.push({ techId: quality.technicianId, payload: {
       date: day.date, ...(quality.technician ? { techName: quality.technician } : {}),
-      issues, ...(late ? { departureMinutes: quality.assumptions.departureMinutes } : {}),
+      issues, ...(clashing ? { doubleBookedVisits: clashing } : {}),
+      ...(late ? { departureMinutes: quality.assumptions.departureMinutes } : {}),
     } });
   }
   const dayIssues = [];

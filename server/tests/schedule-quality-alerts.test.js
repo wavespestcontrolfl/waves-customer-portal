@@ -29,6 +29,7 @@ test('a double-booking is carded first, without a calibrated drive model, and ne
     expect.stringContaining("2 visits overlap another customer's promised window"),
     expect.stringContaining('without a usable location'),
   ]);
+  expect(alerts[0].payload).toMatchObject({ doubleBookedVisits: 2 });
   expect(alerts[0].payload).not.toHaveProperty('departureMinutes');
   // day-quality already drops same-customer pairs; an empty list makes no card.
   expect(buildRouteQualityAlerts(day({ doubleBookedVisits: [] }), 'calibrated')).toEqual([]);
@@ -81,6 +82,12 @@ describe('queue capacity', () => {
     // would collide with the day card it sits beside.
     expect(capped.get('2040-09-10:overflow')).toEqual({ techId: null, payload: { date: '2040-09-10', overflow: true,
       issues: [expect.stringContaining('8 more routes on 2040-09-10')] } });
+  });
+
+  test('a one-issue double-booking card outranks multi-issue routes under the cap (codex #4620 r1 P2)', () => {
+    const clash = ['2040-09-10:tech-zz', { techId: 'tech-zz', payload: { date: '2040-09-10', doubleBookedVisits: 2, issues: ['2 visits overlap'] } }];
+    const capped = capRouteQualityCards(new Map([...techsOn('2040-09-10', 6), clash]));
+    expect([...capped.keys()].sort()).toEqual(['2040-09-10:overflow', '2040-09-10:tech-00', '2040-09-10:tech-zz']);
   });
 
   test('the cap is per date, so a one-date check and a six-date check agree', () => {

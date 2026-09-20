@@ -35,21 +35,49 @@ test('stored work spans outrank shorter estimates and overlaps are measured with
   expect(result).toMatchObject({ serviceMinutes: 180, overlapMinutes: 30, grossGapMinutes: 0 });
 });
 
-test('two customers in one promised slot are a double-booking; one customer\'s pest + lawn pair is not', () => {
-  const pair = (id, customer, hour, over = {}) => ({ ...stop(hour, 0), id, customer_id: customer, ...over });
-  // Different customers, same 10:00 slot (the shape staff advisory saves commit).
-  const clash = measureDayQuality(Model, [pair('a', 'cust-a', 10), pair('b', 'cust-b', 10), pair('c', 'cust-c', 12)]);
-  expect(clash.doubleBookedVisits).toEqual([{ ids: ['a', 'b'], minutes: 60 }]);
-  // The same customer twice in one slot is one physical stop.
-  const coVisit = measureDayQuality(Model, [pair('pest', 'cust-a', 10), pair('lawn', 'cust-a', 10)]);
-  expect(coVisit.doubleBookedVisits).toEqual([]);
-  expect(coVisit.overlapMinutes).toBe(60);
-  // A partial overlap counts the shared minutes; an unknown customer is never waved on.
-  const partial = measureDayQuality(Model, [pair('a', 'cust-a', 10, { window_end: '12:00' }), pair('b', null, 11)]);
-  expect(partial.doubleBookedVisits).toEqual([{ ids: ['a', 'b'], minutes: 60 }]);
-  // Back-to-back is not an overlap; untimed rows have no slot to clash on.
-  const clean = measureDayQuality(Model, [pair('a', 'cust-a', 10), pair('b', 'cust-b', 11), { ...pair('u', 'cust-u', 8), window_start: null }]);
-  expect(clean.doubleBookedVisits).toEqual([]);
+describe('double-booking measurement (same technician, occupied time per the rebooker\'s own model)', () => {
+  // A real day-stops row: premise columns present, ungrouped, geocoded.
+  const row = (id, customer, hour, over = {}) => ({ ...stop(hour, 0), id, customer_id: customer, technician_id: 'tech', scheduled_date: '2040-09-10',
+    visit_id: null, service_address_line1: null, customer_address_line1: `${customer} St`, customer_address_line2: null,
+    customer_city: 'Bradenton', customer_state: 'FL', customer_zip: '34205', window_end: `${String(hour + 1).padStart(2, '0')}:00`, ...over });
+
+  test('two customers in one slot are a pair; back-to-back, untimed and a third customer later are not', () => {
+    const clash = measureDayQuality(Model, [row('a', 'cust-a', 10), row('b', 'cust-b', 10), row('c', 'cust-c', 12)]);
+    expect(clash.doubleBookedVisits).toEqual([{ ids: ['a', 'b'], minutes: 60 }]);
+    const clean = measureDayQuality(Model, [row('a', 'cust-a', 10), row('b', 'cust-b', 11), { ...row('u', 'cust-u', 8), window_start: null, window_end: null }]);
+    expect(clean.doubleBookedVisits).toEqual([]);
+  });
+
+  test('a partial overlap counts the shared minutes, and an unknown customer is never waved on', () => {
+    const partial = measureDayQuality(Model, [row('a', 'cust-a', 10, { window_end: '12:00' }), row('b', null, 11)]);
+    expect(partial.doubleBookedVisits).toEqual([{ ids: ['a', 'b'], minutes: 60 }]);
+  });
+
+  test('one customer\'s pest + lawn at one premise is one stop; the same customer at a second pin or unit is not', () => {
+    const pest = row('pest', 'cust-a', 10, { lat: 5, lng: 5 });
+    const coVisit = measureDayQuality(Model, [pest, row('lawn', 'cust-a', 10, { lat: 5, lng: 5 })]);
+    expect(coVisit.doubleBookedVisits).toEqual([]);
+    expect(coVisit.overlapMinutes).toBe(60);
+    // Second property: different pin (codex #4620 r1 P1 — a customer-id-only rule hid this).
+    const rental = measureDayQuality(Model, [pest, row('lawn', 'cust-a', 10, { lat: 6, lng: 6, service_address_line1: '9 Other Rd' })]);
+    expect(rental.doubleBookedVisits).toEqual([{ ids: ['lawn', 'pest'], minutes: 60 }]);
+    // Same parcel pin, different unit.
+    const unit = measureDayQuality(Model, [{ ...pest, service_address_line1: '1 Main St Apt 1' }, row('lawn', 'cust-a', 10, { lat: 5, lng: 5, service_address_line1: '1 Main St Apt 2' })]);
+    expect(unit.doubleBookedVisits).toEqual([{ ids: ['lawn', 'pest'], minutes: 60 }]);
+    // A grouped (visit_id) row is arrival-route's SUM contract, never merged here.
+    const grouped = measureDayQuality(Model, [{ ...pest, visit_id: 'g' }, row('lawn', 'cust-a', 10, { lat: 5, lng: 5, visit_id: 'g' })]);
+    expect(grouped.doubleBookedVisits).toEqual([{ ids: ['lawn', 'pest'], minutes: 60 }]);
+  });
+
+  test('a version-2 combined booking occupies the sum of its members (codex #4620 r1 P1)', () => {
+    const mix = { version: 2, allocatedServiceIds: ['m1', 'm2'] };
+    const members = [row('m1', 'cust-a', 10, { window_end: null, estimated_duration_minutes: 45, reservation_service_mix: mix }),
+      row('m2', 'cust-a', 10, { window_end: null, estimated_duration_minutes: 40, reservation_service_mix: mix })];
+    // Members never pair with each other; the 11:00 neighbour collides with the 11:25 allocation end.
+    const result = measureDayQuality(Model, [...members, row('n', 'cust-n', 11, { window_end: null })]);
+    expect(result.doubleBookedVisits).toEqual([{ ids: ['m1', 'n'], minutes: 25 }, { ids: ['m2', 'n'], minutes: 25 }]);
+    expect(measureDayQuality(Model, [...members, row('n', 'cust-n', 12, { window_end: null })]).doubleBookedVisits).toEqual([]);
+  });
 });
 
 test('unknown duration, grouped work, and a day already underway remain uncertified', () => {
