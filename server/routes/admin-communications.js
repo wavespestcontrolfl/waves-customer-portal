@@ -3161,6 +3161,15 @@ router.post('/schedule-sms', async (req, res, next) => {
     if (!to || !cleanBody || !scheduledFor) {
       return res.status(400).json({ error: 'to, body, scheduledFor required' });
     }
+    // Recruiting boundary (Codex r7 P0): a scheduled 'manual' text to an
+    // applicant would later hand their reply to the customer pipeline —
+    // applicant texts are not scheduled from here at all (owner sends now
+    // from the recruiting queue / reply box; the send window queues them
+    // itself), and a non-admin is refused outright.
+    if (await isRecruitingPhone(to)) {
+      if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+      return res.status(409).json({ error: 'Applicant texts are not scheduled here — send now from the recruiting queue or the reply box' });
+    }
     if (messageType && BLOCKED_SCHEDULED_PURPOSES.has(purposeForScheduledMessageType(messageType))) {
       return res.status(400).json({ error: 'marketing/retention sends are not allowed on this endpoint' });
     }

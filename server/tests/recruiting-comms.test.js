@@ -597,7 +597,7 @@ describe('outbound choke point normalizes applicant SMS', () => {
 describe('owner reply on the recruiting rail', () => {
   test('sendOwnerReply sends job_owner_reply under purpose applicant_reply from the reply line, with handoff evidence', async () => {
     mockSendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, deliveryOutcome: 'accepted' });
-    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    const app = baseApp({ interview_token: 'a'.repeat(64), status: 'interview' });
     mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
     const res = await RecruitingComms.sendOwnerReply({ applicationId: 'app-1', body: 'See you Tuesday!', by: 'tech-1', fromNumber: '+19415550777' });
     expect(res.outcome).toBe('sent');

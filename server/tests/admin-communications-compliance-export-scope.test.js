@@ -167,3 +167,20 @@ describe('POST /sms composer recruiting boundary', () => {
     expect(mockSendOwnerReply).toHaveBeenCalledWith(expect.objectContaining({ applicationId: 'app-1', body: 'See you Tuesday', by: 'admin-1' }));
   });
 });
+
+describe('POST /schedule-sms recruiting boundary', () => {
+  async function scheduleAs(role) {
+    return fetch(`${base}/api/admin/communications/schedule-sms`, {
+      method: 'POST', headers: { Authorization: `Bearer ${role}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: '+19415550142', body: 'Reminder', scheduledFor: '2099-01-05T15:00:00.000Z' }),
+    });
+  }
+  test('technician: 403; admin: 409 (applicant texts are never scheduled as manual customer texts)', async () => {
+    mockIsRecruitingPhone.mockResolvedValueOnce(true);
+    expect((await scheduleAs('tech')).status).toBe(403);
+    mockIsRecruitingPhone.mockResolvedValueOnce(true);
+    const res = await scheduleAs('admin');
+    expect(res.status).toBe(409);
+    expect(db).not.toHaveBeenCalledWith('sms_log');
+  });
+});

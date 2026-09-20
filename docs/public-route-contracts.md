@@ -2200,7 +2200,9 @@ a recruiting phone — rides the recruiting rail (`sendOwnerReply`: purpose
 applicant texted, handoff evidence on the application; refused with outcome `closed` for a
 rejected/withdrawn/hired application — the classifier would not protect
 the reply), never a 'manual' customer text; a non-admin is refused (403)
-on both. Reply evidence is scoped to the line the reply arrived on
+on both, and `POST /schedule-sms` refuses a recruiting phone for everyone
+(403 non-admin, 409 admin) — applicant texts are never queued as manual
+customer texts. Reply evidence is scoped to the line the reply arrived on
 before the newest entry is chosen (two recruiting lines = two threads).
 Applicant texts obey the 8am–8pm ET send window; a held send is queued
 on the scheduled-SMS rail (`sms_log` status `scheduled`, metadata
