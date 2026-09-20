@@ -265,6 +265,7 @@ async function isOfferedSlot(startIso, opts = {}) {
 
 module.exports = {
   SLOT_MINUTES,
+  INTERVIEW_BLOCKING_STATUSES,
   LEAD_HOURS,
   HORIZON_DAYS,
   BUFFER_MINUTES,

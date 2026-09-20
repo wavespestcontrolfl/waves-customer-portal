@@ -365,7 +365,8 @@ describe('occupancy.js mirrors the interview constants (no cross-require by desi
   test('INTERVIEW_BLOCKING_STATUSES / SLOT_MINUTES / BUFFER_MINUTES stay in lockstep', () => {
     const slots = require('../services/interview-slots');
     const occupancy = require('../services/scheduling/occupancy');
-    expect(occupancy.INTERVIEW_BLOCKING_STATUSES).toEqual(slots.INTERVIEW_BLOCKING_STATUSES || ['interview', 'offer']);
+    expect(slots.INTERVIEW_BLOCKING_STATUSES).toEqual(['interview', 'offer']);
+    expect(occupancy.INTERVIEW_BLOCKING_STATUSES).toEqual(slots.INTERVIEW_BLOCKING_STATUSES);
     expect(occupancy.INTERVIEW_SLOT_MINUTES).toBe(slots.SLOT_MINUTES);
     expect(occupancy.INTERVIEW_BUFFER_MINUTES).toBe(slots.BUFFER_MINUTES);
   });
