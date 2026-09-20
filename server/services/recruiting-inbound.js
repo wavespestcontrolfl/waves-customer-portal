@@ -66,7 +66,13 @@ async function matchApplicantReply(fromPhone, toNumber) {
     const history = Array.isArray(app.comms_history) ? app.comms_history : [];
     for (const entry of history) {
       if (!entry || entry.channel !== 'sms' || !['handoff', 'sent', 'uncertain', 'deferred'].includes(entry.outcome)) continue;
-      const at = Date.parse(entry.at || '');
+      // Effective handoff instant: a text held overnight and replayed by the
+      // cron went out at finalized_at, not when it was queued — the newer-
+      // customer-text comparison below must use the moment the applicant
+      // could actually have received it (local audit P0).
+      const queuedAt = Date.parse(entry.at || '');
+      const sentAt = ['sent', 'uncertain'].includes(entry.outcome) ? Date.parse(entry.finalized_at || '') : NaN;
+      const at = Number.isFinite(sentAt) ? Math.max(sentAt, Number.isFinite(queuedAt) ? queuedAt : sentAt) : queuedAt;
       if (!Number.isFinite(at) || at < cutoff) continue;
       if (!best || at > best.at) best = { at, applicationId: app.id, fromNumber: entry.from_number || null };
     }

@@ -592,7 +592,7 @@ const REGISTRY = {
         }
         if (!meta.job_application_id) return { eligible: false, reason: 'application-missing' };
         const app = await db('job_applications').where({ id: meta.job_application_id })
-          .first('id', 'status', 'interview_token', 'interview_at');
+          .first('id', 'status', 'interview_token', 'interview_at', 'interview_mode');
         if (!app) return { eligible: false, reason: 'application-missing' };
         const status = String(app.status || '');
         if (!['new', 'reviewed', 'interview', 'offer'].includes(status)) {
@@ -609,6 +609,9 @@ const REGISTRY = {
           const pinned = meta.interview_at ? new Date(meta.interview_at).toISOString() : null;
           const current = app.interview_at ? new Date(app.interview_at).toISOString() : null;
           if (!pinned || pinned !== current) return { eligible: false, reason: 'interview-rebooked' };
+          // Same time, different mode (phone ↔ in person) is a different
+          // confirmation — the queued copy names the wrong one.
+          if ((meta.interview_mode || null) !== (app.interview_mode || null)) return { eligible: false, reason: 'interview-mode-changed' };
         }
         return { eligible: true };
       } catch (err) {

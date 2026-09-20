@@ -579,6 +579,7 @@ async function sendStageComms(app, stage, opts = {}) {
                 ledger_entry_id: handoffEntry.id,
                 interview_token: app.interview_token || null,
                 interview_at: app.interview_at ? new Date(app.interview_at).toISOString() : null,
+                interview_mode: app.interview_mode || null,
                 original_message_type: `job_${stage}`,
                 consent_basis: { status: 'transactional_allowed', source: 'job_application' },
                 original_block_code: sendRes.code || null,

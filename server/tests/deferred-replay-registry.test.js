@@ -1136,8 +1136,10 @@ describe('recruiting_comms_deferred (PR #4623)', () => {
     expect(await recheckDeferredReplay(ENTRY, meta)).toMatchObject({ eligible: false, reason: 'interview-token-changed' });
     db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'interview', interview_token: 'a'.repeat(64), interview_at: '2027-03-16T20:00:00.000Z' }));
     expect(await recheckDeferredReplay(ENTRY, { ...meta, stage: 'interview_confirmation', interview_at: '2027-03-16T21:00:00.000Z' })).toMatchObject({ eligible: false, reason: 'interview-rebooked' });
-    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'interview', interview_token: 'a'.repeat(64), interview_at: '2027-03-16T20:00:00.000Z' }));
-    expect(await recheckDeferredReplay(ENTRY, { ...meta, stage: 'interview_confirmation', interview_at: '2027-03-16T20:00:00.000Z' })).toMatchObject({ eligible: true });
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'interview', interview_token: 'a'.repeat(64), interview_at: '2027-03-16T20:00:00.000Z', interview_mode: 'in_person' }));
+    expect(await recheckDeferredReplay(ENTRY, { ...meta, stage: 'interview_confirmation', interview_at: '2027-03-16T20:00:00.000Z', interview_mode: 'phone' })).toMatchObject({ eligible: false, reason: 'interview-mode-changed' });
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'interview', interview_token: 'a'.repeat(64), interview_at: '2027-03-16T20:00:00.000Z', interview_mode: 'phone' }));
+    expect(await recheckDeferredReplay(ENTRY, { ...meta, stage: 'interview_confirmation', interview_at: '2027-03-16T20:00:00.000Z', interview_mode: 'phone' })).toMatchObject({ eligible: true });
     db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'reviewed', interview_token: null }));
     expect(await recheckDeferredReplay(ENTRY, { ...meta, stage: 'application_received', interview_token: null })).toMatchObject({ eligible: true });
     spy.mockRestore();

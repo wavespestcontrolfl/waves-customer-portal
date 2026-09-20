@@ -88,6 +88,16 @@ describe('matchApplicantReply', () => {
     // scheduled / blocked / failed customer rows never count — delivery evidence only
     expect(q.whereIn).toHaveBeenCalledWith('status', ['sent', 'delivered']);
   });
+  test('a replayed text uses its ACTUAL send time: a customer text sent between queue and replay does not override', async () => {
+    // queued at day -1 (overnight), replayed by the cron at 08:00 (day 0);
+    // the customer text at day -0.5 is OLDER than the real handoff.
+    state.apps = [{ id: 'app-1', comms_history: [{ ...sentEntry(1), outcome: 'sent', finalized_at: new Date(NOW - 3600000).toISOString() }] }];
+    state.newerCustomerText = null; // the route's created_at > handoff predicate would not match the -0.5d text
+    await expect(matchApplicantReply('+19415550142', '+19415550199')).resolves.toEqual({ applicationId: 'app-1' });
+    const q = mockDb.mock.results.find((r) => r.value && r.value.whereNot.mock.calls.length).value;
+    const bound = q.where.mock.calls.find((c) => c[0] === 'created_at')[2];
+    expect(Math.abs(bound.getTime() - (NOW - 3600000))).toBeLessThan(1000);
+  });
   test('a queued (deferred) recruiting text is owner-only context for a reply too', async () => {
     state.apps = [{ id: 'app-1', comms_history: [{ ...sentEntry(0.1), outcome: 'deferred' }] }];
     await expect(matchApplicantReply('+19415550142', '+19415550199')).resolves.toEqual({ applicationId: 'app-1' });
