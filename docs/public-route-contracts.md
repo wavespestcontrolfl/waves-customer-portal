@@ -275,7 +275,9 @@ is the kill switch for the whole lane, reply routing included; dark, no
 recruiting text is ever sent and no classification runs, so a lookup
 error can never stall the inbound pipeline): an inbound from a phone that
 (a) belongs to an OPEN job application (new/reviewed/interview/offer)
-AND (b) has a `job_*` SMS `sent`/`uncertain` entry in that application's
+AND (b) has a `job_*` SMS `handoff`/`sent`/`uncertain` entry (the `handoff`
+entry is written BEFORE the provider call and reconciled in place after —
+evidence always precedes the text) in that application's
 `comms_history` within 45 days — the reply is tied to the application
 that received the text, never phone recency — is classified by
 `services/recruiting-inbound.js` BEFORE the unified inbox persist — the

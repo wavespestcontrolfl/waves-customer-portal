@@ -68,6 +68,10 @@ describe('matchApplicantReply', () => {
     ];
     await expect(matchApplicantReply('+19415550142')).resolves.toEqual({ applicationId: 'app-A' });
   });
+  test('an unreconciled handoff entry (crash mid-send) still classifies as a text', async () => {
+    state.apps = [{ id: 'app-1', comms_history: [{ ...sentEntry(1), outcome: 'handoff' }] }];
+    await expect(matchApplicantReply('+19415550142')).resolves.toEqual({ applicationId: 'app-1' });
+  });
   test('uncertain deliveries count as a text the applicant may be answering', async () => {
     state.apps = [{ id: 'app-1', comms_history: [{ ...sentEntry(1), outcome: 'uncertain' }] }];
     await expect(matchApplicantReply('+19415550142')).resolves.toEqual({ applicationId: 'app-1' });

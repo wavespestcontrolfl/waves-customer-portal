@@ -386,6 +386,7 @@ async function channelEligibility(app) {
 
 function historyEntry({ stage, channel, to, outcome, code, body, by }) {
   return {
+    id: crypto.randomUUID(),
     at: new Date().toISOString(),
     stage,
     channel,
@@ -403,6 +404,21 @@ async function appendCommsHistory(applicationId, entries, conn = db) {
     .where({ id: applicationId })
     .update({
       comms_history: db.raw("COALESCE(comms_history, '[]'::jsonb) || ?::jsonb", [JSON.stringify(entries)]),
+      updated_at: new Date(),
+    });
+}
+
+// Patch ONE existing comms_history entry in place (by its id) — used to
+// reconcile a pre-handoff 'handoff' entry with the provider outcome. Constant
+// SQL, parameterized bindings only.
+async function finalizeCommsHistoryEntry(applicationId, entryId, patch, conn = db) {
+  await conn('job_applications')
+    .where({ id: applicationId })
+    .update({
+      comms_history: conn.raw(
+        "COALESCE((SELECT jsonb_agg(CASE WHEN e->>'id' = ? THEN e || ?::jsonb ELSE e END) FROM jsonb_array_elements(COALESCE(comms_history, '[]'::jsonb)) AS e), '[]'::jsonb)",
+        [entryId, JSON.stringify(patch)],
+      ),
       updated_at: new Date(),
     });
 }
@@ -468,6 +484,20 @@ async function sendStageComms(app, stage, opts = {}) {
         result.sms = 'skipped';
         entries.push(historyEntry({ stage, channel: 'sms', to: contact.phone, outcome: 'skipped', code: 'template_disabled', body: '', by }));
       } else {
+        // Classification evidence BEFORE the provider handoff (local audit
+        // P0): recruiting-inbound.js ties an applicant's reply to the
+        // application through this ledger, so the entry must exist — durably
+        // — before the text can possibly be answered. A failed evidence write
+        // refuses the send (fail closed) rather than texting untracked.
+        const handoffEntry = historyEntry({ stage, channel: 'sms', to: contact.phone, outcome: 'handoff', code: null, body, by });
+        try {
+          await appendCommsHistory(app.id, [handoffEntry]);
+        } catch (err) {
+          logger.error(`[recruiting-comms] pre-handoff evidence write failed (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
+          result.sms = 'failed';
+          entries.push(historyEntry({ stage, channel: 'sms', to: contact.phone, outcome: 'failed', code: 'evidence_write_failed', body, by }));
+          return await finishStage();
+        }
         let sendRes;
         try {
           sendRes = await sendCustomerMessage({
@@ -491,11 +521,20 @@ async function sendStageComms(app, stage, opts = {}) {
           ? 'sent'
           : (sendRes.blocked ? 'blocked' : (sendRes.deliveryOutcome === 'uncertain' ? 'uncertain' : 'failed'));
         result.sms = outcome;
-        entries.push(historyEntry({ stage, channel: 'sms', to: contact.phone, outcome, code: sendRes.code || null, body, by }));
+        // Reconcile the handoff entry in place; if this fails the entry stays
+        // 'handoff', which the reply classifier still treats as a sent text.
+        try {
+          await finalizeCommsHistoryEntry(app.id, handoffEntry.id, { outcome, code: sendRes.code || null, finalized_at: new Date().toISOString() });
+        } catch (err) {
+          logger.error(`[recruiting-comms] handoff reconcile failed (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
+        }
       }
     }
   }
 
+  return finishStage();
+
+  async function finishStage() {
   if (wantEmail) {
     if (!contact.email) {
       result.email = 'skipped';
@@ -534,9 +573,11 @@ async function sendStageComms(app, stage, opts = {}) {
     }
   }
   return result;
+  }
 }
 
 module.exports = {
+  finalizeCommsHistoryEntry,
   errorSummary,
   STAGE_KEYS,
   INTERVIEW_LINK_PLACEHOLDER,

@@ -38,7 +38,7 @@ async function matchApplicantReply(fromPhone) {
 
   // Every open application on this phone, with its send ledger — the reply
   // is tied to the application that actually RECEIVED a recruiting text
-  // (latest SMS 'sent'/'uncertain' entry within the window), never to
+  // (latest SMS 'handoff'/'sent'/'uncertain' entry within the window), never to
   // phone recency alone (a later, untexted application B must not swallow
   // a reply meant for A — Codex r2 P2).
   const apps = await db('job_applications')
@@ -52,7 +52,9 @@ async function matchApplicantReply(fromPhone) {
   for (const app of apps) {
     const history = Array.isArray(app.comms_history) ? app.comms_history : [];
     for (const entry of history) {
-      if (!entry || entry.channel !== 'sms' || !['sent', 'uncertain'].includes(entry.outcome)) continue;
+      // 'handoff' = evidence written before the provider call whose outcome was
+      // never reconciled (crash mid-send): classify conservatively as a text.
+      if (!entry || entry.channel !== 'sms' || !['handoff', 'sent', 'uncertain'].includes(entry.outcome)) continue;
       const at = Date.parse(entry.at || '');
       if (!Number.isFinite(at) || at < cutoff) continue;
       if (!best || at > best.at) best = { at, applicationId: app.id };

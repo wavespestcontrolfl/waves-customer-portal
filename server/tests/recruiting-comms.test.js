@@ -46,12 +46,21 @@ function makeDb() {
       update(payload) {
         const resolved = { ...payload };
         if (resolved.comms_history && resolved.comms_history.__raw) {
-          // Mirror the real COALESCE(...) || jsonb append the raw call does.
-          const [, bindings] = [resolved.comms_history.sql, resolved.comms_history.bindings];
-          const appended = JSON.parse(bindings[0]);
+          const { sql, bindings } = resolved.comms_history;
           const matches = rows.filter((r) => Object.entries(whereCond).every(([k, v]) => r[k] === v));
-          for (const r of matches) {
-            r.comms_history = [...(r.comms_history || []), ...appended];
+          if (/jsonb_array_elements/.test(sql)) {
+            // Mirror finalizeCommsHistoryEntry: patch the entry with this id in place.
+            const [entryId, patchJson] = bindings;
+            const patch = JSON.parse(patchJson);
+            for (const r of matches) {
+              r.comms_history = (r.comms_history || []).map((e) => (e.id === entryId ? { ...e, ...patch } : e));
+            }
+          } else {
+            // Mirror the real COALESCE(...) || jsonb append the raw call does.
+            const appended = JSON.parse(bindings[0]);
+            for (const r of matches) {
+              r.comms_history = [...(r.comms_history || []), ...appended];
+            }
           }
           delete resolved.comms_history;
         }
@@ -395,5 +404,50 @@ describe('sendStageComms channel isolation', () => {
     expect(stored.comms_history.map((e) => [e.channel, e.outcome])).toEqual([['sms', 'sent'], ['email', 'failed']]);
     expect(stored.comms_history[1].code).toMatch(/^threw:/);
     expect(stored.comms_history[1].code).not.toMatch(/example\.com/);
+  });
+});
+
+describe('sendStageComms pre-handoff evidence', () => {
+  test('the SMS ledger entry exists BEFORE sendCustomerMessage is called, and is reconciled in place afterwards', async () => {
+    mockRenderSmsTemplate.mockResolvedValue('Hi Jane.');
+    const app = baseApp();
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    let seenAtHandoff = null;
+    mockSendCustomerMessage.mockImplementation(async () => {
+      seenAtHandoff = mockDb.__tables.job_applications.find((r) => r.id === 'app-1').comms_history.map((e) => e.outcome);
+      return { sent: true, blocked: false, deliveryOutcome: 'accepted' };
+    });
+    const result = await RecruitingComms.sendStageComms(app, 'application_received', { sms: true, email: false, by: 'system' });
+    expect(result.sms).toBe('sent');
+    expect(seenAtHandoff).toEqual(['handoff']);
+    const stored = mockDb.__tables.job_applications.find((r) => r.id === 'app-1');
+    expect(stored.comms_history).toHaveLength(1); // reconciled in place, not appended twice
+    expect(stored.comms_history[0]).toMatchObject({ channel: 'sms', outcome: 'sent', finalized_at: expect.any(String) });
+  });
+
+  test('a failed evidence write REFUSES the send (fail closed) and records evidence_write_failed', async () => {
+    mockRenderSmsTemplate.mockResolvedValue('Hi Jane.');
+    const app = baseApp();
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    const original = mockDb.getMockImplementation();
+    let updates = 0;
+    mockDb.mockImplementation((table) => {
+      const api = original(table);
+      if (table === 'job_applications') {
+        const origUpdate = api.update;
+        api.update = (payload) => {
+          updates += 1;
+          if (updates === 1) { const p = Promise.reject(Object.assign(new Error('write boom'), { name: 'error', code: '57014' })); p.catch(() => {}); return p; }
+          return origUpdate(payload);
+        };
+      }
+      return api;
+    });
+    const result = await RecruitingComms.sendStageComms(app, 'application_received', { sms: true, email: false, by: 'system' });
+    mockDb.mockImplementation(original);
+    expect(result.sms).toBe('failed');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    const stored = mockDb.__tables.job_applications.find((r) => r.id === 'app-1');
+    expect(stored.comms_history.map((e) => [e.outcome, e.code])).toEqual([['failed', 'evidence_write_failed']]);
   });
 });
