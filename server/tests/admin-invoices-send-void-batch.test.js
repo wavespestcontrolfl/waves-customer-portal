@@ -643,7 +643,7 @@ describe('POST /batch idempotency (batchKey)', () => {
       id: 'inv-existing', invoice_number: 'WPC-1', status: 'draft', payer_id: null,
     }));
     InvoiceService.sendViaSMS.mockResolvedValue({
-      sent: false, ok: false, code: 'deposit_settlement_pending', error: 'not sent yet',
+      sent: false, ok: false, code: 'deposit_settlement_pending', reason: 'not sent yet',
     });
 
     await withServer(async (baseUrl) => {

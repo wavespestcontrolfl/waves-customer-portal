@@ -1014,7 +1014,9 @@ function firstDeliveryOutcome(err, firstDeliveryOnly) {
 // codes this recognizes are never gated on it), so it is always false.
 function resolvedSendOutcome(result) {
   if (!result || result.ok) return null;
-  return firstDeliveryOutcome({ code: result.code, message: result.error }, false);
+  // Direct sendViaSMS shapes carry their explanation as `reason`; the wrapper's
+  // as `error`. Read both so the held reason survives into the batch response.
+  return firstDeliveryOutcome({ code: result.code, message: result.error ?? result.reason }, false);
 }
 
 // POST / — create invoice manually
