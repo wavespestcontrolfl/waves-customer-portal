@@ -1291,3 +1291,31 @@ test.each([
   const findingVerbs = [...text.matchAll(/applied/g)];
   expect(grammar.reportHasCompletedPredicate(text, findingVerbs.at(-1))).toBe(completed);
 });
+
+test.each([
+  ['Talstar P was falsely marked as applied to the exterior perimeter.', true],
+  ['Talstar P was incorrectly labeled as applied to the exterior perimeter.', true],
+  ['Talstar P was mistakenly labelled as applied to the exterior perimeter.', true],
+  ['Talstar P was erroneously logged as applied to the exterior perimeter.', true],
+  ['Talstar P was accurately marked as applied to the exterior perimeter.', false],
+  ['Talstar P was marked as applied to the exterior perimeter.', false],
+  ['Talstar P was falsely marked as safe, then applied to the exterior perimeter.', false],
+  ['The invoice was falsely logged as paid, but Talstar P was applied to the exterior perimeter.', false],
+])('false treatment status differs from an ordinary label: %s', (text, uncertain) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(uncertain);
+});
+
+test.each([
+  ['Talstar P was applied without fail to the exterior perimeter.', false],
+  ['Talstar P was applied without failure to the exterior perimeter.', false],
+  ['Talstar P was applied without exception to the exterior perimeter.', false],
+  ['Talstar P was applied without an exception to the exterior perimeter.', false],
+  ['Talstar P was applied without hesitation to the exterior perimeter.', false],
+  ['Talstar P was not applied without hesitation to the exterior perimeter.', true],
+  ['We left without applying Talstar P to the exterior perimeter.', true],
+  ['We treated the exterior perimeter without Talstar P.', true],
+])('benign without idioms preserve treatment polarity: %s', (text, denied) => {
+  const findingVerb = /\b(?:applied|applying|treated)\b/g.exec(text);
+  expect(grammar.reportClaimIsDenied(text, text, text.indexOf('Talstar P'),
+    text.indexOf('exterior perimeter'), findingVerb)).toBe(denied);
+});
