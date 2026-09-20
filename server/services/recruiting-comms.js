@@ -63,6 +63,17 @@ function errorSummary(err) {
   return err.code ? `${name} ${err.code}` : name;
 }
 
+// Applicant texts carry no customer location, so services/twilio.js sends
+// them from the default outbound line — mirror that choice here for the
+// ledger (services/twilio.js getFromNumber → TWILIO_NUMBERS.getOutboundNumber).
+function outboundNumberForApplicants() {
+  try {
+    return require('../config/twilio-numbers').getOutboundNumber() || null;
+  } catch {
+    return null;
+  }
+}
+
 function maskPhone(phone) {
   const digits = String(phone || '').replace(/\D/g, '').replace(/^1(\d{10})$/, '$1');
   if (digits.length !== 10) return '***';
@@ -490,6 +501,10 @@ async function sendStageComms(app, stage, opts = {}) {
         // — before the text can possibly be answered. A failed evidence write
         // refuses the send (fail closed) rather than texting untracked.
         const handoffEntry = historyEntry({ stage, channel: 'sms', to: contact.phone, outcome: 'handoff', code: null, body, by });
+        // The number the text goes out from — durable routing evidence the
+        // reply classifier compares the inbound `To` against, so it never
+        // depends on the post-acceptance (best-effort) sms_log row.
+        handoffEntry.from_number = outboundNumberForApplicants();
         try {
           await appendCommsHistory(app.id, [handoffEntry]);
         } catch (err) {
@@ -577,6 +592,7 @@ async function sendStageComms(app, stage, opts = {}) {
 }
 
 module.exports = {
+  outboundNumberForApplicants,
   finalizeCommsHistoryEntry,
   errorSummary,
   STAGE_KEYS,

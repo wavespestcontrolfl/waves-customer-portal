@@ -275,15 +275,17 @@ is the kill switch for the whole lane, reply routing included; dark, no
 recruiting text is ever sent and no classification runs, so a lookup
 error can never stall the inbound pipeline): an inbound from a phone that
 (a) belongs to an OPEN job application (new/reviewed/interview/offer)
-AND (b) whose LAST customer-facing outbound text (sms_log, excluding
-internal/AI types) was a `job_*` recruiting text that went out from the
-number this reply arrived on — a newer appointment/billing text, or a
-reply to a different Waves number, keeps the ordinary customer path — AND
-(c) has a `job_*` SMS `handoff`/`sent`/`uncertain` entry (the `handoff`
-entry is written BEFORE the provider call and reconciled in place after —
-evidence always precedes the text) in that application's
+AND (b) has a `job_*` SMS `handoff`/`sent`/`uncertain` entry (the `handoff`
+entry is written BEFORE the provider call, stamped with the outbound
+`from_number`, and reconciled in place after — DURABLE evidence that
+always precedes the text; the post-acceptance sms_log row is never the
+basis) in that application's
 `comms_history` within 45 days — the reply is tied to the application
-that received the text, never phone recency — is classified by
+that received the text, never phone recency — AND (c) arrived on the
+number that text went out from, with NO newer customer-facing (non-`job_*`,
+non-internal) outbound text to that phone in sms_log after the handoff
+(that advisory read only ever hands a reply BACK to the customer path; a
+missing sms_log row leaves the durable evidence standing) — is classified by
 `services/recruiting-inbound.js` BEFORE the unified inbox persist — the
 inbox row is born typed `job_applicant_reply` (a classification lookup
 failure releases the claim and answers 503 with nothing persisted) — and

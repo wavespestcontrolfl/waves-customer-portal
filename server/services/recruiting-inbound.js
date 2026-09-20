@@ -46,29 +46,13 @@ async function matchApplicantReply(fromPhone, toNumber) {
   const variants = phoneMatchDigits(fromPhone);
   if (!variants.length) return null;
 
-  // Reply CONTEXT first (Codex r3 P1): the phone may also be a customer's.
-  // Only when the most recent customer-facing text we sent this phone was a
-  // recruiting text — and it arrived back on the number that text went out
-  // from — is this inbound an applicant reply. A newer appointment/billing
-  // text, or a text to a different Waves number, keeps the ordinary path.
-  const lastOutbound = await db('sms_log')
-    .where({ direction: 'outbound' })
-    .whereRaw(digitsExpr('to_phone'), [variants])
-    .whereNotIn('message_type', NON_CONVERSATIONAL_OUTBOUND)
-    .orderBy('created_at', 'desc')
-    .first('message_type', 'from_phone');
-  if (!lastOutbound || !/^job_/.test(String(lastOutbound.message_type || ''))) return null;
-  if (toNumber) {
-    const toDigits = phoneMatchDigits(String(toNumber));
-    const fromDigits = phoneMatchDigits(String(lastOutbound.from_phone || ''));
-    if (toDigits.length && fromDigits.length && !toDigits.some((d) => fromDigits.includes(d))) return null;
-  }
-
-  // Every open application on this phone, with its send ledger — the reply
-  // is tied to the application that actually RECEIVED a recruiting text
-  // (latest SMS 'handoff'/'sent'/'uncertain' entry within the window), never to
-  // phone recency alone (a later, untexted application B must not swallow
-  // a reply meant for A — Codex r2 P2).
+  // DURABLE evidence first (local audit P0): the pre-handoff comms_history
+  // entry (written before the provider call, stamped with the outbound
+  // number) — never the post-acceptance, best-effort sms_log row. Every open
+  // application on this phone, with its ledger; the reply is tied to the
+  // application whose latest handoff/sent/uncertain SMS entry is newest
+  // within the window, never to phone recency (a later, untexted
+  // application must not swallow a reply meant for an earlier one).
   const apps = await db('job_applications')
     .whereRaw(digitsExpr("contact_snapshot->>'phone'"), [variants])
     .whereIn('status', OPEN_STATUSES)
@@ -80,15 +64,35 @@ async function matchApplicantReply(fromPhone, toNumber) {
   for (const app of apps) {
     const history = Array.isArray(app.comms_history) ? app.comms_history : [];
     for (const entry of history) {
-      // 'handoff' = evidence written before the provider call whose outcome was
-      // never reconciled (crash mid-send): classify conservatively as a text.
       if (!entry || entry.channel !== 'sms' || !['handoff', 'sent', 'uncertain'].includes(entry.outcome)) continue;
       const at = Date.parse(entry.at || '');
       if (!Number.isFinite(at) || at < cutoff) continue;
-      if (!best || at > best.at) best = { at, applicationId: app.id };
+      if (!best || at > best.at) best = { at, applicationId: app.id, fromNumber: entry.from_number || null };
     }
   }
-  return best ? { applicationId: best.applicationId } : null;
+  if (!best) return null;
+
+  // Reply CONTEXT: the phone may also be a customer's. Only a text that came
+  // back on the number the recruiting text went out from counts, and a NEWER
+  // customer-facing text (appointment, billing, ...) sent after our handoff
+  // hands the reply back to the ordinary customer path. The sms_log read is
+  // advisory — when it is missing (logging is best-effort) the durable
+  // evidence above stands and the reply stays owner-only.
+  if (toNumber && best.fromNumber) {
+    const toDigits = phoneMatchDigits(String(toNumber));
+    const fromDigits = phoneMatchDigits(String(best.fromNumber));
+    if (toDigits.length && fromDigits.length && !toDigits.some((d) => fromDigits.includes(d))) return null;
+  }
+  const newerCustomerText = await db('sms_log')
+    .where({ direction: 'outbound' })
+    .whereRaw(digitsExpr('to_phone'), [variants])
+    .whereNotIn('message_type', NON_CONVERSATIONAL_OUTBOUND)
+    .whereNot('message_type', 'like', 'job_%')
+    .where('created_at', '>', new Date(best.at))
+    .first('id');
+  if (newerCustomerText) return null;
+
+  return { applicationId: best.applicationId };
 }
 
 /**

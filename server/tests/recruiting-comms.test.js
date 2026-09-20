@@ -420,6 +420,8 @@ describe('sendStageComms pre-handoff evidence', () => {
     const result = await RecruitingComms.sendStageComms(app, 'application_received', { sms: true, email: false, by: 'system' });
     expect(result.sms).toBe('sent');
     expect(seenAtHandoff).toEqual(['handoff']);
+    // durable routing evidence rides the handoff entry
+    expect(mockDb.__tables.job_applications.find((r) => r.id === 'app-1').comms_history[0]).toHaveProperty('from_number');
     const stored = mockDb.__tables.job_applications.find((r) => r.id === 'app-1');
     expect(stored.comms_history).toHaveLength(1); // reconciled in place, not appended twice
     expect(stored.comms_history[0]).toMatchObject({ channel: 'sms', outcome: 'sent', finalized_at: expect.any(String) });
