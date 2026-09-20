@@ -111,12 +111,119 @@ function asmBlockFor(groupId) {
   return { group_id: Number(groupId) };
 }
 
+// Codex round 3 on #4608 (P1 PRRT_kwDOR3YQi86j8Ydm/Ydn — structural move):
+// the annual-offer guard now lives HERE, the true provider boundary,
+// immediately before the actual SendGrid request — not in any higher-level
+// handoff (sendTemplate, the provider retry sweep, bounce recovery, a raw
+// caller) that could sit above it and be bypassed. estimateIds is an
+// explicit addition; the guard's own content derivation over html/text is
+// the authoritative source either way, and runs no query at all when
+// neither is present.
+//
+// A blocked verdict throws a DISTINCT, non-retryable refusal (never an
+// HTTP request attempted) so every caller — sendTemplate, the retry sweep,
+// bounce recovery, or anything calling sendOne directly — can tell "the
+// offer was withheld" apart from a real provider failure: check
+// err.annualOfferWithheld (permanent, do not retry the same content) or
+// err.annualOfferGuardFailed (the guard's own lookup broke — transient,
+// treat like any other pre-send infra failure, never as sent).
+//
+// Lazy-required: estimate-annual-guard.js pulls in estimate-offer-version.js
+// / feature-gates.js / estimate-termite-program-rows.js, none of which
+// require sendgrid-mail.js back today, but a top-level require here would
+// make this module's own load order hostage to that chain's — same
+// precedent as every other guard install site in this slice.
+async function runAnnualOfferGuard({ estimateIds, html, text }) {
+  const { annualHandoffGuard } = require('./estimate-annual-guard');
+  const db = require('../models/db');
+  let verdict;
+  try {
+    verdict = await annualHandoffGuard({
+      db,
+      estimateIds: Array.isArray(estimateIds) ? estimateIds : (estimateIds ? [estimateIds] : []),
+      texts: [html, text],
+    })();
+  } catch (err) {
+    const guardErr = new Error(`annual offer guard failed: ${err.message}`);
+    guardErr.code = 'ANNUAL_OFFER_GUARD_FAILED';
+    guardErr.annualOfferGuardFailed = true;
+    guardErr.cause = err;
+    throw guardErr;
+  }
+  if (verdict.blocked) {
+    const err = new Error('annual_offer_withheld');
+    err.code = 'ANNUAL_OFFER_WITHHELD';
+    err.annualOfferWithheld = true;
+    err.retryable = false;
+    throw err;
+  }
+}
+
+// Round 9 structural fix (P1): `templateKey` resolves the rewrite-vs-refuse
+// policy at THIS provider boundary via estimate-annual-guard.js's
+// withheldLinkPolicyForTemplate — the one place every path that reaches
+// sendOne (a fresh sendTemplate call, the automatic retry sweep, or bounce
+// recovery) shares, so a retried/bounce-recovered receipt whose stored
+// content still carries a withheld link gets the SAME rewrite a fresh send
+// would, not a permanent refusal just because that caller had no explicit
+// opinion of its own. `withheldLinkPolicy` is an explicit override for a
+// caller that already knows better than the template-keyed default.
+// Returns the (possibly rewritten) content to send, the (possibly stripped)
+// explicit estimate ids, and withheldLinksRewritten only when a rewrite
+// actually fired.
+// Pre-push audit P1 (d9b71d84bb round 10): rewriteWithheldEstimateLinks does
+// its own DB reads (resolving long tokens and short codes to rows) — a
+// failure there (DB unavailable, etc.) is a pre-dispatch guard-infrastructure
+// failure exactly like a runAnnualOfferGuard lookup failure, not a provider
+// error. Tagged with the SAME annualOfferGuardFailed shape here, at the
+// point of the throw, so every caller (sendOne's own try/catch below,
+// sendTemplate, the retry sweep, bounce recovery) maps it to the same
+// definite pre-dispatch abort without needing to know this rewrite step
+// exists.
+async function resolveWithheldLinkRewrite({ html, text, estimateIds, templateKey, withheldLinkPolicy }) {
+  const { withheldLinkPolicyForTemplate, rewriteWithheldEstimateLinks } = require('./estimate-annual-guard');
+  const resolvedPolicy = withheldLinkPolicy || withheldLinkPolicyForTemplate(templateKey);
+  if (resolvedPolicy !== 'rewrite') return { sendHtml: html, sendText: text, sendEstimateIds: estimateIds };
+
+  const db = require('../models/db');
+  let rewritten;
+  try {
+    rewritten = await rewriteWithheldEstimateLinks({ db, html, text });
+  } catch (err) {
+    const guardErr = new Error(`annual offer guard failed: ${err.message}`);
+    guardErr.code = 'ANNUAL_OFFER_GUARD_FAILED';
+    guardErr.annualOfferGuardFailed = true;
+    guardErr.cause = err;
+    throw guardErr;
+  }
+  if (!rewritten.rewrittenIds.length) return { sendHtml: html, sendText: text, sendEstimateIds: estimateIds };
+
+  logger.warn(`[sendgrid] rewrote ${rewritten.rewrittenIds.length} withheld estimate link(s) to the portal home for template "${templateKey || 'unknown'}"`);
+  return {
+    sendHtml: rewritten.html,
+    sendText: rewritten.text,
+    // The withheld link(s) are gone from the content being sent — forcing
+    // the original explicit id(s) through would make the guard below
+    // refuse anyway (it unions explicit ids with content derivation),
+    // defeating the whole point of the rewrite.
+    sendEstimateIds: [],
+    withheldLinksRewritten: rewritten.rewrittenIds,
+  };
+}
+
 /**
  * Send one email. Used for test sends and one-off transactional. Returns
- * { messageId } where messageId is read from the X-Message-Id response header.
+ * { messageId } where messageId is read from the X-Message-Id response header
+ * (plus withheldLinksRewritten: [ids] when the rewrite policy above fired).
  */
-async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments, customArgs, suppressErrorLog, disableTracking = false }) {
+async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments, customArgs, suppressErrorLog, disableTracking = false, estimateIds, templateKey, withheldLinkPolicy }) {
   if (!to || !subject) throw new Error('sendOne: to + subject required');
+
+  const { sendHtml, sendText, sendEstimateIds, withheldLinksRewritten } = await resolveWithheldLinkRewrite({
+    html, text, estimateIds, templateKey, withheldLinkPolicy,
+  });
+
+  await runAnnualOfferGuard({ estimateIds: sendEstimateIds, html: sendHtml, text: sendText });
 
   const payload = {
     personalizations: [{
@@ -131,8 +238,8 @@ async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, 
     reply_to: { email: replyTo || 'contact@wavespestcontrol.com' },
     subject,
     content: [
-      ...(text ? [{ type: 'text/plain', value: text }] : []),
-      ...(html ? [{ type: 'text/html', value: html }] : []),
+      ...(sendText ? [{ type: 'text/plain', value: sendText }] : []),
+      ...(sendHtml ? [{ type: 'text/html', value: sendHtml }] : []),
     ],
     categories: categories || undefined,
     asm: asmBlockFor(asmGroupId),
@@ -169,7 +276,13 @@ async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, 
     err.body = text;
     throw err;
   }
-  return { messageId: res.headers.get('x-message-id') || null };
+  const messageId = res.headers.get('x-message-id') || null;
+  // html/text ride along ONLY when a rewrite fired, so a caller that keeps
+  // its own durable snapshot (email-template-library.js, the retry sweep,
+  // bounce recovery) can persist the exact bytes actually sent — without
+  // this, a caller's stored row would keep showing the withheld link even
+  // though the customer received the rewritten portal-home CTA.
+  return withheldLinksRewritten ? { messageId, withheldLinksRewritten, html: sendHtml, text: sendText } : { messageId };
 }
 
 // A SendGrid "blocked" event adds the recipient to the provider's Blocks
@@ -363,9 +476,17 @@ function isDefiniteRejection(err) {
   return DEFINITE_REJECTION_STATUSES.has(Number(err?.status));
 }
 
+// A sendOne guard refusal has no HTTP status (no request was ever made) —
+// isDefiniteRejection alone would call it ambiguous. Callers that branch on
+// "was this a real, non-retryable refusal" should check this first.
+function isAnnualOfferWithheld(err) {
+  return !!err?.annualOfferWithheld;
+}
+
 module.exports = {
   isConfigured,
   isDefiniteRejection,
+  isAnnualOfferWithheld,
   sendOne,
   clearBlockedAddress,
   sendBatch,

@@ -62,6 +62,16 @@ const WINDOW_SPAN = 15;
 // apply. Default is ZERO — every OTHER unwrapped site fails.
 const ALLOWLIST = [
   {
+    file: 'services/sms-reply-alert-delivery.js',
+    snippet: "const prior = await db('sms_log')",
+    reason: "inbound-only (direction: 'inbound', from_phone = the unknown sender) repeat-receipt check — a send reservation is always Waves' own outbound row and can never match an inbound sender's from_phone.",
+  },
+  {
+    file: 'services/sms-reply-alert-delivery.js',
+    snippet: "const row = await db('sms_log').where({ direction: 'inbound', twilio_sid: MessageSid }).first('metadata')",
+    reason: "single-row inbound lookup keyed by the inbound MessageSid (direction: 'inbound') — a send reservation is always an outbound row, so it structurally cannot match.",
+  },
+  {
     file: 'services/scheduled-sms-delivery.js',
     snippet: "const row = await db('sms_log').where({ direction: 'outbound' })",
     reason: 'status-scoped to queued / sent / delivered, which excludes sending, so an unresolved reservation structurally cannot match; it is also keyed to one scheduled row by scheduled_sms_log_id.',

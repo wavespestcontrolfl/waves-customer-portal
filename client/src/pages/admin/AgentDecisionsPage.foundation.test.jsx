@@ -20,6 +20,7 @@ it('preserves the decision correction payload from the shared review fields', as
   });
   render(<MemoryRouter><AgentDecisionsPage /></MemoryRouter>);
   const actions = await screen.findByLabelText('Corrected actions');
+  await waitFor(() => expect(actions).toHaveValue('call_customer'));
   fireEvent.change(actions, { target: { value: 'call_customer, schedule_visit\n send_estimate' } });
   fireEvent.change(screen.getByLabelText('Review reason'), { target: { value: 'Fixture correction' } });
   const correctButton = screen.getByRole('button', { name: 'Correct', exact: true });

@@ -382,6 +382,16 @@ async function promoteStaleReservations(knex) {
         await cancelContactCorrectionJob(job.id, 'stale_no_context', { knex });
         continue;
       }
+      // A reservation is ordering/context evidence, not a saved inbox source.
+      // A failed inbox write may outlive the route's best-effort cancellation;
+      // never replay that body into customer data without its durable message.
+      const inboxSource = job.message_sid
+        ? await knex('messages').where({ twilio_sid: job.message_sid, channel: 'sms', direction: 'inbound' }).first('id')
+        : null;
+      if (!inboxSource) {
+        await cancelContactCorrectionJob(job.id, 'stale_no_inbox_source', { knex });
+        continue;
+      }
       const smsLog = job.message_sid
         ? await knex('sms_log')
           .where({ twilio_sid: job.message_sid, direction: 'inbound' })

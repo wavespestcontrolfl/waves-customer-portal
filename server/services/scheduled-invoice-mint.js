@@ -23,9 +23,9 @@ const logger = require('./logger');
 // Same discipline as createFromService: request the full unapplied balance,
 // let create() cap it against the after-tax total, consume exactly the
 // effective amount in the SAME transaction; a mismatch throws (the mint rolls
-// back), one retry re-reads the fresh balance, and a second failure falls back
-// to an UNCREDITED mint + reconcile alert — deposit machinery failures never
-// block door collection. The advisory lock serializes the two mint callers
+// back), one retry re-reads the fresh balance, and a second failure holds the
+// mint for reconciliation rather than publishing an unknown full balance.
+// The advisory lock serializes the two mint callers
 // (this helper's callers and Charge-now) so a double-tap can't race a visit
 // into two open invoices; the in-lock re-check returns the first request's
 // invoice to the replay.
@@ -176,11 +176,13 @@ async function mintScheduledServiceInvoiceWithDeposit({
   svc, buildCreateParams, assertEligibleInTrx = null, allowPriceMovement = false,
 }) {
   const InvoiceService = require('../services/invoice');
-  const { pendingDepositCredit, consumeDepositCredit } = require('../services/estimate-deposits');
+  const {
+    acquireEstimateDepositLedgerLock, pendingDepositCredit, consumeDepositCredit,
+  } = require('../services/estimate-deposits');
   const sourceEstimateId = svc.source_estimate_id || null;
   let lastErr = null;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const withDeposit = attempt < 2 && !!sourceEstimateId;
+  for (let attempt = 0; attempt < (sourceEstimateId ? 2 : 1); attempt += 1) {
+    const withDeposit = !!sourceEstimateId;
     try {
       return await db.transaction(async (trx) => {
         // The shared lock chain (advisory → customer key-share → caller
@@ -192,11 +194,19 @@ async function mintScheduledServiceInvoiceWithDeposit({
         const lockedSvc = await acquireScheduledMintLockChain(trx, {
           scheduledServiceId: svc.id,
           assertEligibleInTrx,
-          visitColumns: ['id', 'estimated_price', 'primary_line_price'],
+          visitColumns: ['id', 'customer_id', 'source_estimate_id', 'estimated_price', 'primary_line_price'],
         });
         if (!lockedSvc) {
           const e = new Error('Scheduled service not found');
           e.status = 404;
+          throw e;
+        }
+        if (String(lockedSvc.customer_id) !== String(svc.customer_id)
+          || String(lockedSvc.source_estimate_id || '') !== String(sourceEstimateId || '')) {
+          const e = new Error('Scheduled service billing owner or estimate changed while minting');
+          e.status = 409;
+          e.statusCode = 409;
+          e.code = 'SCHEDULED_BILLING_SOURCE_MOVED';
           throw e;
         }
         const replayed = await findAdoptableScheduledInvoice(trx, svc.id);
@@ -211,6 +221,7 @@ async function mintScheduledServiceInvoiceWithDeposit({
             || priceMovedBetween(svc, lockedSvc, 'primary_line_price'))) {
           throw scheduledPriceMovedError(lockedSvc);
         }
+        if (sourceEstimateId) await acquireEstimateDepositLedgerLock(trx, sourceEstimateId);
         const depositCredit = withDeposit
           ? await pendingDepositCredit(sourceEstimateId, trx)
           : null;
@@ -248,10 +259,15 @@ async function mintScheduledServiceInvoiceWithDeposit({
         } catch (notifyErr) {
           logger.error(`[schedule] failed to raise deposit reconcile alert: ${notifyErr.message}`);
         }
+        const held = new Error('Invoice mint held until the estimate deposit is reconciled');
+        held.code = 'DEPOSIT_RECONCILIATION_REQUIRED';
+        held.status = 409;
+        held.statusCode = 409;
+        throw held;
       }
     }
   }
-  throw lastErr; // defensive — the uncredited final attempt returns or rethrows above
+  throw lastErr; // defensive — every attempt returns or rethrows above
 }
 
 module.exports = {
