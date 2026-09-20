@@ -1156,11 +1156,21 @@ async function reconcileQueuedSendUnderClaim(invoiceId, previousStatus, claimTok
 // allowClaimed preclaim callback) so the two guards below can never drift
 // apart between them (round-0 audit P1 #4131: the preclaim branch
 // originally lost both checks entirely).
-function refuseFirstDeliveryHold(current, invoiceId, firstDeliveryOnly, operatorInitiated) {
+//
+// Third audit P1 (#4131): the hold used to be inferred from
+// operatorInitiated/firstDeliveryOnly instead of a caller stating its
+// intent outright — a batch/automated caller that happened to carry
+// operatorInitiated:true (or a firstDeliveryOnly row whose stamps looked
+// like a resend) could silently clear a parked row it never asked to
+// override. overridesReviewHold is now the ONE explicit switch: only a
+// caller that says so may claim a parked row, independent of
+// operatorInitiated (which keeps its own, unrelated meaning — the
+// send-window bypass) and of firstDeliveryOnly.
+function refuseFirstDeliveryHold(current, invoiceId, firstDeliveryOnly, overridesReviewHold) {
   if (firstDeliveryOnly && alreadyDeliveredForFirstSend(current)) {
     throw invoiceAlreadyDeliveredError(current);
   }
-  if ((firstDeliveryOnly || !operatorInitiated) && isStaleClaimReviewHold(current)) {
+  if (isStaleClaimReviewHold(current) && !overridesReviewHold) {
     throw staleClaimReviewHoldError(invoiceId);
   }
 }
@@ -1169,8 +1179,8 @@ async function claimInvoiceForSend(invoiceId, {
   allowClaimed = false,
   claimToken = null,
   firstDeliveryOnly = false,
+  overridesReviewHold = false,
   adoptsQueuedInvoiceSend = false,
-  operatorInitiated = false,
   database = db,
 } = {}) {
   const current = await database("invoices").where({ id: invoiceId }).first();
@@ -1185,7 +1195,7 @@ async function claimInvoiceForSend(invoiceId, {
     // hold guards the fresh-claim branch below already enforces — this
     // row can reach here already fully delivered (a resumed worker
     // preclaim racing a direct send) or still parked for operator review.
-    refuseFirstDeliveryHold(current, invoiceId, firstDeliveryOnly, operatorInitiated);
+    refuseFirstDeliveryHold(current, invoiceId, firstDeliveryOnly, overridesReviewHold);
     // A preclaimed row (the scheduled-send worker flips 'scheduled' →
     // 'sending' itself, then calls back in with allowClaimed:true) still
     // needs the queued-obligation check: an earlier DIRECT send that held
@@ -1205,15 +1215,10 @@ async function claimInvoiceForSend(invoiceId, {
   // below: a delivered row can sit at a claimable status (sent/viewed/
   // overdue) and a plain status check alone would let a first-delivery
   // request re-claim it as if it were an intentional resend. The
-  // stale-claim review hold (same call, see refuseFirstDeliveryHold): an
-  // automatic claimant (no operatorInitiated) must honor the park
-  // processScheduledSends left for the operator, and a first-delivery
-  // request must NEVER be the way off this hold either, even when it
-  // carries operatorInitiated (an admin create/resume path still marks
-  // operatorInitiated:true so it keeps the ordinary quiet-hours-bypass
-  // treatment) — only a DELIBERATE Resend (operator-initiated AND not a
-  // first delivery) may reclaim a parked row.
-  refuseFirstDeliveryHold(current, invoiceId, firstDeliveryOnly, operatorInitiated);
+  // stale-claim review hold (same call, see refuseFirstDeliveryHold) is
+  // gated on ONE explicit switch — overridesReviewHold — never inferred
+  // from operatorInitiated or firstDeliveryOnly (third audit P1 #4131).
+  refuseFirstDeliveryHold(current, invoiceId, firstDeliveryOnly, overridesReviewHold);
   if (!SEND_CLAIMABLE_STATUSES.includes(current.status)) {
     throw invoiceNotSendableError(current);
   }
@@ -1255,16 +1260,17 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, {
   claimToken = null,
   requireDue = false,
   firstDeliveryOnly = false,
-  operatorInitiated = false,
+  overridesReviewHold = false,
 } = {}) {
   // requireDue is the scheduled-send worker's claim: an automatic queue
-  // send, never a first-delivery request. Its due predicate (scheduled_send_at
-  // <= now) is also why a parked row (scheduled_send_at NULL) can never be
-  // claimed here, so the review hold holds by construction. Keep the two
-  // flags mutually exclusive rather than threading the first-delivery
-  // guards into a branch no caller can reach with them.
-  if (requireDue && firstDeliveryOnly) {
-    throw new Error("claimPacketInvoiceForSend: requireDue is the queue worker's claim and cannot be a first delivery");
+  // send, never a first-delivery request, and never an operator override —
+  // its due predicate (scheduled_send_at <= now) is also why a parked row
+  // (scheduled_send_at NULL) can never be claimed here, so the review hold
+  // holds by construction. Keep the flags mutually exclusive rather than
+  // threading the first-delivery/override guards into a branch no caller
+  // can reach with them.
+  if (requireDue && (firstDeliveryOnly || overridesReviewHold)) {
+    throw new Error("claimPacketInvoiceForSend: requireDue is the queue worker's claim and cannot be a first delivery or override the review hold");
   }
   const Packets = require("./visit-completion-packets");
   return db.transaction(async (trx) => {
@@ -1293,7 +1299,7 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, {
       if (invoice) invoice.send_claim_token = freshClaimToken;
       return { payerBilled: false, claim: invoice ? { invoice, previousStatus: "scheduled", claimed: true } : null };
     }
-    return { payerBilled: false, claim: await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, operatorInitiated, database: trx }) };
+    return { payerBilled: false, claim: await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, database: trx }) };
   });
 }
 
@@ -2987,7 +2993,7 @@ const InvoiceService = {
   /**
    * Send invoice via Twilio SMS — the unified service recap + invoice message.
    */
-  async sendViaSMS(invoiceId, { allowClaimed = false, claimToken = null, firstDeliveryOnly = false, payUrlParams = null, operatorInitiated = false, actorTechnicianId = null, adoptsQueuedInvoiceSend = true } = {}) {
+  async sendViaSMS(invoiceId, { allowClaimed = false, claimToken = null, firstDeliveryOnly = false, overridesReviewHold = false, payUrlParams = null, operatorInitiated = false, actorTechnicianId = null, adoptsQueuedInvoiceSend = true } = {}) {
     // Direct callers (batch sendImmediately, the AI-assistant send tool, the
     // from-service SMS-only path) bypass sendViaSMSAndEmail, which applies credit
     // before its own claim — so apply it here too, or those pay links bill the
@@ -3008,13 +3014,13 @@ const InvoiceService = {
     if (!allowClaimed) {
       pre = await db("invoices").where({ id: invoiceId }).first("visit_completion_packet_id", "payer_id");
       const packetClaim = pre?.visit_completion_packet_id && !pre.payer_id
-        ? await claimPacketInvoiceForSend(invoiceId, pre.visit_completion_packet_id, { firstDeliveryOnly, operatorInitiated }) : null;
+        ? await claimPacketInvoiceForSend(invoiceId, pre.visit_completion_packet_id, { firstDeliveryOnly, overridesReviewHold }) : null;
       if (packetClaim?.payerBilled) {
         return { sent: false, reason: "Suppressed — the visit is now billed to a third-party payer", code: "payer_billed" };
       }
-      claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, adoptsQueuedInvoiceSend, operatorInitiated });
+      claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend });
     } else {
-      claim = await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, adoptsQueuedInvoiceSend, firstDeliveryOnly, operatorInitiated });
+      claim = await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, adoptsQueuedInvoiceSend, firstDeliveryOnly, overridesReviewHold });
     }
     const { invoice, previousStatus, claimed, consumedQueuedSendRows = [] } = claim;
 
@@ -3551,6 +3557,7 @@ const InvoiceService = {
       allowClaimed = false,
       claimToken = null,
       firstDeliveryOnly = false,
+      overridesReviewHold = false,
       emailRecipientOverride = null,
       payUrlParams = null,
       operatorInitiated = false,
@@ -3573,7 +3580,7 @@ const InvoiceService = {
     let packetClaim = null;
     if (accrualPre?.visit_completion_packet_id && !accrualPre.payer_id) {
       try {
-        packetClaim = await claimPacketInvoiceForSend(invoiceId, accrualPre.visit_completion_packet_id, { allowClaimed, claimToken, firstDeliveryOnly, operatorInitiated });
+        packetClaim = await claimPacketInvoiceForSend(invoiceId, accrualPre.visit_completion_packet_id, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold });
       } catch (err) {
         // The scheduled-send worker already fenced and claimed this send; a
         // transient failure of the re-judge here left no provider request
@@ -3597,7 +3604,7 @@ const InvoiceService = {
     // never reverses it either, leaving an undelivered, edit-locked invoice with
     // credit_applied set. Claiming first means a lost race throws here before any
     // credit is drawn down — nothing to reverse.
-    const claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, adoptsQueuedInvoiceSend: true, operatorInitiated });
+    const claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend: true });
     const consumedQueuedSendRows = claim.consumedQueuedSendRows || [];
     // Now that we own the claim, apply available account credit so the pay link the
     // customer receives bills amount due (total − applied credit), not the gross

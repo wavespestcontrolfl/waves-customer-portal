@@ -3413,14 +3413,27 @@ function SendInvoiceModal({
     !sending &&
     (sendWithServerRecipients || emailChannel || !!smsPhone) &&
     overrideValid;
-  // A draft/scheduled invoice has never been delivered — this dialog's own
-  // "Send invoice" vs "Resend invoice" title distinction below IS the
-  // first-delivery / explicit-resend distinction; reused here so the two
-  // can never drift apart. A first delivery must state so on the request
-  // (never operator resend intent) so a delivered-elsewhere row is refused,
-  // not silently re-texted.
+  // Three states, derived from the row alone (third audit P1 #4131: the
+  // hold's override must be a caller's EXPLICIT statement, never inferred
+  // from status/stamps) — parked wins first since a parked row can also
+  // look draft/scheduled-undelivered:
+  //   - parked: processScheduledSends left this under a stale-claim review
+  //     hold (delivery unverified) — status still 'scheduled' but the due
+  //     time was cleared and an error note was left in its place. Only a
+  //     deliberate Resend clears it.
+  //   - firstDelivery: draft/scheduled, not parked, never delivered on any
+  //     channel — { firstDelivery: true } must never carry override intent.
+  //   - otherwise: an ordinary Resend.
+  const isParked =
+    invoice.status === "scheduled" &&
+    !invoice.scheduled_send_at &&
+    !!invoice.scheduled_send_error;
   const isFirstDelivery =
-    invoice.status === "draft" || invoice.status === "scheduled";
+    (invoice.status === "draft" || invoice.status === "scheduled") &&
+    !isParked &&
+    !invoice.sent_at &&
+    !invoice.sms_sent_at &&
+    !invoice.email_sent_at;
   const send = async () => {
     if (sendingRef.current) return;
     if (!canSend) return;
@@ -3428,7 +3441,7 @@ function SendInvoiceModal({
     setActionError("");
     setSending(true);
     try {
-      const body = isFirstDelivery ? { firstDelivery: true } : {};
+      const body = isFirstDelivery ? { firstDelivery: true } : { resend: true };
       if (useOverride) {
         body.invoiceRecipientEmail = overrideEmail;
         body.invoiceRecipientName = recipientName.trim() || undefined;
@@ -3454,7 +3467,11 @@ function SendInvoiceModal({
     <Dialog open={true} onClose={sending ? undefined : onClose} layer={400}>
       <DialogBody className="space-y-4 text-ui-body text-zinc-900">
         <DialogTitle>
-          {isFirstDelivery ? "Send invoice" : "Resend invoice"}
+          {isFirstDelivery
+            ? "Send invoice"
+            : isParked
+              ? "Resend invoice — delivery unverified"
+              : "Resend invoice"}
         </DialogTitle>
         {actionError && <ActionFeedback error>{actionError}</ActionFeedback>}
         <div

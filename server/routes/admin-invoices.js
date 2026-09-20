@@ -1179,6 +1179,16 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
               ? await InvoiceService.sendViaSMSAndEmail(existing.id, { firstDeliveryOnly, operatorInitiated: true, actorTechnicianId: req.technicianId || null })
               : await InvoiceService.sendViaSMS(existing.id, { firstDeliveryOnly, operatorInitiated: true, actorTechnicianId: req.technicianId || null });
           } catch (sendErr) {
+            // A parked row (isStaleClaimReviewHold) is refused regardless of
+            // stamps — this route never sets overridesReviewHold, so the
+            // hold always holds here. Held, not a batch failure; an
+            // operator's own explicit Resend is the way off it.
+            if (sendErr?.code === 'stale_claim_review_hold') {
+              entry.reason = 'Invoice is parked under a stale-claim review hold (delivery unverified) — not sent; use Resend to confirm and clear it';
+              entry.sent = { sent: false, held: true, code: 'stale_claim_review_hold' };
+              skipped.push(entry);
+              return;
+            }
             if (firstDeliveryOnly && FIRST_DELIVERY_NOOP_CODES.has(sendErr?.code)) {
               entry.sent = { sent: false, ok: true, code: sendErr.code,
                 already_delivered: sendErr.code === 'already_delivered',
@@ -1307,6 +1317,7 @@ router.post('/batch/send', requireAdmin, async (req, res, next) => {
 
     const sent = [];
     const failed = [];
+    const held = [];
 
     for (const invoiceId of invoiceIds) {
       // Computed per invoice: this route sends existing rows, not fresh
@@ -1337,6 +1348,16 @@ router.post('/batch/send', requireAdmin, async (req, res, next) => {
           failed.push({ invoiceId, error });
         }
       } catch (err) {
+        // A parked row (isStaleClaimReviewHold) is refused regardless of
+        // stamps — this route never sets overridesReviewHold, so the hold
+        // always holds here (third audit P1 #4131: a row that also carries
+        // a delivery stamp used to slip through as an ordinary resend
+        // because operatorInitiated:true alone used to clear the hold).
+        // Held, not a batch failure or a send — nothing was attempted.
+        if (err?.code === 'stale_claim_review_hold') {
+          held.push({ invoiceId, code: 'stale_claim_review_hold', reason: err.message });
+          continue;
+        }
         // A first delivery finding the invoice already owned by another
         // live delivery is a no-op success, not a batch failure — same
         // treatment as /:id/send (round-6 P1 #4131). An explicit resend
@@ -1360,8 +1381,10 @@ router.post('/batch/send', requireAdmin, async (req, res, next) => {
       total: invoiceIds.length,
       sent_count: sent.length,
       failed_count: failed.length,
+      held_count: held.length,
       sent,
       failed,
+      held,
     });
   } catch (err) { next(err); }
 });
@@ -1523,21 +1546,24 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       invoiceRecipientName,
       saveBillingRecipient,
       firstDelivery,
+      resend,
     } = req.body || {};
     const reviewDelayMinutes = parseReviewDelayMinutes(req.body || {});
-    // A caller can request a FIRST delivery (round-6 P1 #4131): a linked
-    // invoice the completion (or a concurrent send) already claimed and
-    // delivered between the caller's own pre-check and this request must
-    // not be re-claimed as an intentional resend. operatorInitiated keeps
-    // its ordinary meaning here (an authenticated admin action — every
-    // call on this route IS one, so it stays unconditionally true, same as
-    // main) and is NOT what gates the stale-claim review hold anymore:
-    // claimInvoiceForSend refuses that hold whenever firstDeliveryOnly is
-    // true OR operatorInitiated is false, so a first delivery can never be
-    // the way off a parked row even though it still carries
-    // operatorInitiated:true for the window-bypass and other operator
-    // treatment that flag already controlled on main.
+    // The client states its intent explicitly (third audit P1 #4131 — an
+    // inferred override let a caller that merely LOOKED like a resend
+    // clear a parked row it never asked to override): { firstDelivery:
+    // true } is a FIRST delivery — a linked invoice the completion (or a
+    // concurrent send) already claimed and delivered between the caller's
+    // own pre-check and this request must not be re-claimed as an
+    // intentional resend, and it may never clear the stale-claim review
+    // hold either. { resend: true } is a DELIBERATE operator Resend — the
+    // one and only way to clear that hold. Neither flag (legacy callers)
+    // is an ordinary send: ok to claim a normal row, but still not
+    // authorized to override a parked one. operatorInitiated keeps its own
+    // unrelated meaning (the quiet-hours send-window bypass, etc.) and
+    // stays unconditionally true on every admin route, same as main.
     const firstDeliveryOnly = firstDelivery === true;
+    const overridesReviewHold = resend === true;
     const overrideEmail = cleanEmail(invoiceRecipientEmail);
     const overrideName = cleanOptionalText(invoiceRecipientName);
     const shouldSaveBillingRecipient = saveBillingRecipient === true;
@@ -1580,6 +1606,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
         reviewDelayMinutes,
         emailRecipientOverride,
         firstDeliveryOnly,
+        overridesReviewHold,
         operatorInitiated: true,
         actorTechnicianId: req.technicianId || null,
       });

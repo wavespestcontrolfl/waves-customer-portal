@@ -3,20 +3,25 @@
  * request contract (slice 3, #4131), plus the two batch first-delivery send
  * paths (POST /batch's sendImmediately, POST /batch/send).
  *
- * Round-6 P1: the route hardcoded `operatorInitiated: true` for EVERY
- * /:id/send call, including a first delivery, and claimInvoiceForSend's
- * stale-claim review hold was gated on operatorInitiated alone — so a first
- * delivery could silently reclaim (and potentially duplicate) an
- * unknown-outcome parked send. The fix keeps operatorInitiated's ordinary
- * meaning (an authenticated admin action — every admin route call IS one,
- * so it stays unconditionally true everywhere, exactly like main) and moves
- * the hold's gate onto BOTH flags: claimInvoiceForSend refuses the hold
- * whenever `firstDeliveryOnly || !operatorInitiated` — so only a
- * DELIBERATE Resend (operatorInitiated AND not a first delivery) may
- * reclaim a parked row. Contract: `{ firstDelivery: true }` ⇒
- * `firstDeliveryOnly: true, operatorInitiated: true` (hold NOT
- * overridable, quiet-hours bypass KEPT); omitted ⇒ explicit Resend,
- * `firstDeliveryOnly: false, operatorInitiated: true` (hold overridable).
+ * Third audit P1: the review-hold override was INFERRED from
+ * operatorInitiated + stamp/status-derived firstDeliveryOnly instead of a
+ * caller stating it outright — a batch/automated caller carrying
+ * operatorInitiated:true (unconditional on every admin route) could clear a
+ * parked row it never asked to override. Fix: a new explicit claim option,
+ * `overridesReviewHold` (default false). The hold gate is now
+ * `isStaleClaimReviewHold(current) && !overridesReviewHold` — independent
+ * of operatorInitiated (which keeps ONLY its original, unrelated meaning:
+ * the quiet-hours send-window bypass) and of firstDeliveryOnly.
+ *
+ * Route contract for POST /:id/send: `{ firstDelivery: true }` ⇒
+ * firstDeliveryOnly true, overridesReviewHold false (never the way off the
+ * hold); `{ resend: true }` ⇒ firstDeliveryOnly false, overridesReviewHold
+ * true (a deliberate operator Resend — the ONE way off); neither (legacy
+ * callers) ⇒ both false (an ordinary send, hold still not overridable).
+ * operatorInitiated: true on every admin route call, unconditionally, same
+ * as main. The batch routes NEVER set overridesReviewHold — a parked row is
+ * refused there regardless of stamps, reported held (code
+ * stale_claim_review_hold), not sent and not a batch failure.
  *
  * These tests mock InvoiceService to model exactly one precondition — the
  * invoice is currently parked under a stale-claim review hold — and assert
@@ -70,68 +75,93 @@ const postSend = (baseUrl, body) => fetch(`${baseUrl}/admin/invoices/${INVOICE}/
 
 // The stale-claim review hold's exact refusal — same code/shape
 // claimInvoiceForSend throws when isStaleClaimReviewHold(current) is true
-// and (firstDeliveryOnly || !operatorInitiated).
+// and !overridesReviewHold — independent of operatorInitiated and of
+// firstDeliveryOnly (third audit P1 #4131).
 function staleClaimReviewHoldError() {
   const e = new Error('Invoice is not sendable — parked under a stale-claim review hold (delivery unverified); an operator must review and resend');
   e.code = 'stale_claim_review_hold';
   return e;
 }
 
-describe('POST /admin/invoices/:id/send — first delivery vs. explicit Resend (round-6 P1 #4131)', () => {
+describe('POST /admin/invoices/:id/send — request-contract flags (third audit P1 #4131)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    InvoiceService.sendViaSMSAndEmail.mockResolvedValue({ ok: true, sms: { ok: true }, email: { ok: true } });
+  });
+
+  test('{ firstDelivery: true } passes firstDeliveryOnly: true, overridesReviewHold: false', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await postSend(baseUrl, { firstDelivery: true });
+      expect(res.status).toBe(200);
+      const [, opts] = InvoiceService.sendViaSMSAndEmail.mock.calls[0];
+      expect(opts.firstDeliveryOnly).toBe(true);
+      expect(opts.overridesReviewHold).toBe(false);
+      // operatorInitiated keeps its own, unrelated meaning (the
+      // quiet-hours bypass) and is unconditionally true on this route.
+      expect(opts.operatorInitiated).toBe(true);
+    });
+  });
+
+  test('{ resend: true } passes firstDeliveryOnly: false, overridesReviewHold: true', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await postSend(baseUrl, { resend: true });
+      expect(res.status).toBe(200);
+      const [, opts] = InvoiceService.sendViaSMSAndEmail.mock.calls[0];
+      expect(opts.firstDeliveryOnly).toBe(false);
+      expect(opts.overridesReviewHold).toBe(true);
+      expect(opts.operatorInitiated).toBe(true);
+    });
+  });
+
+  test('neither flag (legacy caller) passes both false — an ordinary send, hold still not overridable', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await postSend(baseUrl, {});
+      expect(res.status).toBe(200);
+      const [, opts] = InvoiceService.sendViaSMSAndEmail.mock.calls[0];
+      expect(opts.firstDeliveryOnly).toBe(false);
+      expect(opts.overridesReviewHold).toBe(false);
+      expect(opts.operatorInitiated).toBe(true);
+    });
+  });
+});
+
+describe('POST /admin/invoices/:id/send — first delivery vs. explicit Resend against a parked row (third audit P1 #4131)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     // Models exactly one precondition: this invoice is currently parked
-    // under a stale-claim review hold. Only a caller that is BOTH
-    // operatorInitiated AND not a first delivery (a deliberate Resend) may
-    // claim it — mirrors claimInvoiceForSend's own gate exactly.
+    // under a stale-claim review hold. Only overridesReviewHold — the ONE
+    // explicit switch — may clear it; operatorInitiated (unconditionally
+    // true on this route) must have no effect on the outcome.
     InvoiceService.sendViaSMSAndEmail.mockImplementation(async (_id, opts) => {
-      if (opts.firstDeliveryOnly || !opts.operatorInitiated) throw staleClaimReviewHoldError();
+      if (!opts.overridesReviewHold) throw staleClaimReviewHoldError();
       return { ok: true, sms: { ok: true }, email: { ok: true } };
     });
   });
 
-  test('a first-delivery request (firstDelivery: true) does NOT bypass the hold — refused even though operatorInitiated is true', async () => {
+  test('a first-delivery request (firstDelivery: true) does NOT bypass the hold', async () => {
     await withServer(async (baseUrl) => {
       const res = await postSend(baseUrl, { firstDelivery: true });
       expect(res.status).toBe(400);
       const body = await res.json();
       expect(body.error).toMatch(/stale-claim review hold/i);
-      const [, opts] = InvoiceService.sendViaSMSAndEmail.mock.calls[0];
-      expect(opts.firstDeliveryOnly).toBe(true);
-      // operatorInitiated keeps its ordinary meaning (an authenticated
-      // admin action) and is unconditionally true on this route — the
-      // hold's refusal comes from firstDeliveryOnly alone.
-      expect(opts.operatorInitiated).toBe(true);
     });
   });
 
-  test('an explicit Resend (no firstDelivery flag) clears the hold — the intended way off it', async () => {
+  test('a LEGACY send (neither flag) does NOT bypass the hold either', async () => {
     await withServer(async (baseUrl) => {
       const res = await postSend(baseUrl, {});
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toMatch(/stale-claim review hold/i);
+    });
+  });
+
+  test('an explicit Resend ({ resend: true }) clears the hold — the ONE way off it', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await postSend(baseUrl, { resend: true });
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.ok).toBe(true);
-      const [, opts] = InvoiceService.sendViaSMSAndEmail.mock.calls[0];
-      expect(opts.firstDeliveryOnly).toBe(false);
-      expect(opts.operatorInitiated).toBe(true);
-    });
-  });
-
-  // The round-6 fix must NOT reintroduce the quiet-hours side effect: a
-  // first delivery on a row that is NOT parked still carries
-  // operatorInitiated:true all the way to the messaging layer, same as
-  // main today (checkSendWindow bypasses the window whenever
-  // operatorInitiated===true — see tests/messaging-send-window.test.js
-  // "explicit operatorInitiated marker passes shared entry points at
-  // night", unchanged by this slice).
-  test('a first delivery that is NOT parked still carries operatorInitiated: true (quiet-hours bypass preserved)', async () => {
-    InvoiceService.sendViaSMSAndEmail.mockImplementation(async () => ({ ok: true, sms: { ok: true }, email: { ok: true } }));
-    await withServer(async (baseUrl) => {
-      const res = await postSend(baseUrl, { firstDelivery: true });
-      expect(res.status).toBe(200);
-      const [, opts] = InvoiceService.sendViaSMSAndEmail.mock.calls[0];
-      expect(opts.firstDeliveryOnly).toBe(true);
-      expect(opts.operatorInitiated).toBe(true);
     });
   });
 
@@ -252,6 +282,7 @@ describe('POST /admin/invoices/batch — sendImmediately derives firstDeliveryOn
 describe('POST /admin/invoices/batch/send — derives firstDeliveryOnly per invoice from its own row (round-6 P1 #4131)', () => {
   const FIRST_DELIVERY_ID = 'dddddddd-1111-4111-8111-111111111111';
   const RESEND_ID = 'eeeeeeee-1111-4111-8111-111111111111';
+  const PARKED_ID = 'ffffffff-1111-4111-8111-111111111111';
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -263,11 +294,26 @@ describe('POST /admin/invoices/batch/send — derives firstDeliveryOnly per invo
           if (this._id === FIRST_DELIVERY_ID) {
             return { status: 'draft', sent_at: null, sms_sent_at: null, email_sent_at: null };
           }
+          if (this._id === PARKED_ID) {
+            // The audit's exact scenario: a parked row that ALSO carries a
+            // delivery stamp — isFirstDeliveryRow correctly derives false
+            // (it's not a first delivery), but the row is still parked
+            // under a stale-claim review hold, and this route never sets
+            // overridesReviewHold. It must be held, never sent.
+            return { status: 'scheduled', sent_at: null, sms_sent_at: new Date(), email_sent_at: null };
+          }
           return { status: 'sent', sent_at: new Date(), sms_sent_at: new Date(), email_sent_at: null };
         }),
       };
     });
-    InvoiceService.sendViaSMSAndEmail.mockResolvedValue({ ok: true, sms: { ok: true }, email: { ok: true } });
+    InvoiceService.sendViaSMSAndEmail.mockImplementation(async (invoiceId) => {
+      if (invoiceId === PARKED_ID) {
+        const e = new Error('Invoice is not sendable — parked under a stale-claim review hold (delivery unverified); an operator must review and resend');
+        e.code = 'stale_claim_review_hold';
+        throw e;
+      }
+      return { ok: true, sms: { ok: true }, email: { ok: true } };
+    });
   });
 
   test('a never-delivered invoice in the batch is sent with firstDeliveryOnly: true; an already-sent one with false', async () => {
@@ -286,6 +332,34 @@ describe('POST /admin/invoices/batch/send — derives firstDeliveryOnly per invo
       // regardless of which invoice it is — unchanged from main.
       expect(firstDeliveryCall[1].operatorInitiated).toBe(true);
       expect(resendCall[1].operatorInitiated).toBe(true);
+      // Neither invoice's claim is authorized to override the review hold —
+      // this route never sets it (falsy by omission, same as the default).
+      expect(firstDeliveryCall[1].overridesReviewHold).not.toBe(true);
+      expect(resendCall[1].overridesReviewHold).not.toBe(true);
+    });
+  });
+
+  // The audit's exact scenario: a parked row that ALSO carries sms_sent_at
+  // used to slip through as an ordinary resend (operatorInitiated:true
+  // alone used to clear the hold). It must now be reported held, not sent.
+  test('a parked row that also carries sms_sent_at is reported held with stale_claim_review_hold — not sent', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/batch/send`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invoiceIds: [PARKED_ID] }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.sent_count).toBe(0);
+      expect(body.failed_count).toBe(0);
+      expect(body.held_count).toBe(1);
+      expect(body.sent).toEqual([]);
+      expect(body.failed).toEqual([]);
+      expect(body.held).toMatchObject([{ invoiceId: PARKED_ID, code: 'stale_claim_review_hold' }]);
+      const [, opts] = InvoiceService.sendViaSMSAndEmail.mock.calls[0];
+      // Derived correctly from the row's own stamps (not a first delivery)
+      // — the hold refusal is independent of that value entirely.
+      expect(opts.firstDeliveryOnly).toBe(false);
     });
   });
 });

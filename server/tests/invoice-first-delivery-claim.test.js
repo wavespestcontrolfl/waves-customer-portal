@@ -101,7 +101,7 @@ describe('claimInvoiceForSend — first-delivery already-delivered refusal', () 
   });
 });
 
-describe('claimInvoiceForSend — stale-claim review hold', () => {
+describe('claimInvoiceForSend — stale-claim review hold (third audit P1: EXPLICIT overridesReviewHold, never inferred)', () => {
   beforeEach(() => jest.clearAllMocks());
 
   function parkedRow() {
@@ -111,38 +111,29 @@ describe('claimInvoiceForSend — stale-claim review hold', () => {
     };
   }
 
-  test('an automatic claimant (no operatorInitiated, no firstDeliveryOnly) is refused — the park holds', async () => {
-    const { invoicesTable } = makeDb(parkedRow());
-    await expect(claimInvoiceForSend(INVOICE_ID, {}))
-      .rejects.toMatchObject({ code: 'stale_claim_review_hold' });
-    expect(invoicesTable.update).not.toHaveBeenCalled();
+  test('a parked row with overridesReviewHold: true is claimable — the one explicit way off the hold', async () => {
+    makeDb(parkedRow());
+    const result = await claimInvoiceForSend(INVOICE_ID, { overridesReviewHold: true });
+    expect(result.claimed).toBe(true);
+    expect(result.invoice.status).toBe('sending');
   });
 
-  test('a first-delivery claim (firstDeliveryOnly) is refused even with NO operatorInitiated', async () => {
+  test('a parked row with firstDeliveryOnly: true is refused — a first delivery may never override the hold', async () => {
     makeDb(parkedRow());
     await expect(claimInvoiceForSend(INVOICE_ID, { firstDeliveryOnly: true }))
       .rejects.toMatchObject({ code: 'stale_claim_review_hold' });
   });
 
-  // The round-6 P1 regression: main routes now pass operatorInitiated:true
-  // unconditionally (it keeps its ordinary meaning — an authenticated admin
-  // action, e.g. the quiet-hours bypass), so a first delivery reaches this
-  // gate WITH operatorInitiated:true. It must still be refused — the hold
-  // is never overridable by firstDeliveryOnly alone, regardless of
-  // operatorInitiated.
-  test('a first-delivery claim is refused even WITH operatorInitiated: true — never the way off the hold', async () => {
-    makeDb(parkedRow());
-    await expect(claimInvoiceForSend(INVOICE_ID, { firstDeliveryOnly: true, operatorInitiated: true }))
+  // The third audit P1: operatorInitiated must NEVER be read as an implicit
+  // override — main routes pass it unconditionally true (it keeps its own,
+  // unrelated meaning, the quiet-hours bypass), so a claim with neither
+  // explicit flag set still reaches this gate carrying operatorInitiated:
+  // true. It must still be refused.
+  test('a claim with neither flag is refused even WITH operatorInitiated: true — operatorInitiated is not an override', async () => {
+    const { invoicesTable } = makeDb(parkedRow());
+    await expect(claimInvoiceForSend(INVOICE_ID, { operatorInitiated: true }))
       .rejects.toMatchObject({ code: 'stale_claim_review_hold' });
-  });
-
-  test('a deliberate operator Resend (operatorInitiated: true, firstDeliveryOnly: false) clears the hold and claims the row', async () => {
-    const result = await (async () => {
-      makeDb(parkedRow());
-      return claimInvoiceForSend(INVOICE_ID, { operatorInitiated: true, firstDeliveryOnly: false });
-    })();
-    expect(result.claimed).toBe(true);
-    expect(result.invoice.status).toBe('sending');
+    expect(invoicesTable.update).not.toHaveBeenCalled();
   });
 
   test('a row NOT parked (ordinary scheduled_send_error) is unaffected regardless of either flag', async () => {
@@ -157,7 +148,7 @@ describe('claimInvoiceForSend — stale-claim review hold', () => {
       id: INVOICE_ID, status: 'scheduled', send_claim_token: null,
       scheduled_send_at: new Date(), scheduled_send_error: null,
     });
-    const firstDeliveryResult = await claimInvoiceForSend(INVOICE_ID, { firstDeliveryOnly: true, operatorInitiated: true });
+    const firstDeliveryResult = await claimInvoiceForSend(INVOICE_ID, { firstDeliveryOnly: true });
     expect(firstDeliveryResult.claimed).toBe(true);
   });
 });
@@ -190,10 +181,16 @@ describe('sendViaSMS — allowClaimed branch forwards firstDeliveryOnly to the c
   });
 });
 
-describe('claimPacketInvoiceForSend — the queue worker due-claim is never a first delivery (round-0 audit P1)', () => {
+describe('claimPacketInvoiceForSend — the queue worker due-claim is never a first delivery or an override (round-0 + third audit P1)', () => {
   test('requireDue together with firstDeliveryOnly is refused before any claim is attempted', async () => {
     const { claimPacketInvoiceForSend } = require('../services/invoice');
     await expect(claimPacketInvoiceForSend('inv-1', 'pkt-1', { requireDue: true, firstDeliveryOnly: true }))
       .rejects.toThrow(/cannot be a first delivery/);
+  });
+
+  test('requireDue together with overridesReviewHold is ALSO refused — the queue worker never overrides the hold', async () => {
+    const { claimPacketInvoiceForSend } = require('../services/invoice');
+    await expect(claimPacketInvoiceForSend('inv-1', 'pkt-1', { requireDue: true, overridesReviewHold: true }))
+      .rejects.toThrow(/cannot be a first delivery or override the review hold/);
   });
 });
