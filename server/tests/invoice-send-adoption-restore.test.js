@@ -547,5 +547,44 @@ describe('invoice send claim adoption of a queued pay-link SMS', () => {
       expect(row.metadata.cancelled_reason).toBe('superseded_by_live_send');
       expect(row.metadata[QUEUE_ADOPTION_PENDING_KEY]).toBe(true);
     });
+    test('a failed resolution after a delivered SMS keeps the combined send successful', async () => {
+      // Same injection as the sendViaSMS case, but through the WRAPPER:
+      // sendViaSMSAndEmail owns the claim and its own post-delivery
+      // resolution call must go through the same guarded helper — a
+      // resolution failure here must not reject the combined send (which
+      // would strand the invoice mid-delivery and invite a duplicate
+      // resend) once the SMS leg has actually delivered.
+      smsLog = makeSmsLogTable(
+        [{
+          id: 'sms-queued-1',
+          status: 'scheduled',
+          scheduled_for: ORIGINAL_SCHEDULED_FOR,
+          metadata: { entry_point: INVOICE_SEND_DEFERRED_ENTRY_POINT, invoice_id: 'inv-1' },
+        }],
+        { failResolve: true },
+      );
+      db.mockImplementation((table) => {
+        if (table === 'invoices') return invoices.query();
+        if (table === 'sms_log') return smsLog.query();
+        if (table === 'customers') return customerQuery(customer);
+        if (table === 'activity_log') return passthroughQuery();
+        throw new Error(`Unexpected table: ${table}`);
+      });
+      sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => (
+        withProviderHandoff(async () => ({ sent: true, deliveryOutcome: 'accepted' }))
+      ));
+      sendInvoiceEmail.mockResolvedValueOnce({ ok: true });
+
+      const result = await InvoiceService.sendViaSMSAndEmail('inv-1');
+
+      expect(result).toMatchObject({
+        ok: true, sms: { ok: true }, queueResolutionError: expect.stringContaining('injected'),
+      });
+      expect(invoices.state()).toMatchObject({ status: 'sent', send_claim_token: null });
+      const row = smsLog.rows().find((r) => r.id === 'sms-queued-1');
+      expect(row.status).toBe('cancelled');
+      expect(row.metadata.cancelled_reason).toBe('superseded_by_live_send');
+      expect(row.metadata[QUEUE_ADOPTION_PENDING_KEY]).toBe(true);
+    });
   });
 });
