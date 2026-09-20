@@ -26,6 +26,7 @@ const sendgrid = require('./sendgrid-mail');
 const { isEnabled } = require('../config/feature-gates');
 const { portalUrl } = require('../utils/portal-url');
 const { formatETTime } = require('../utils/datetime-et');
+const { effectiveSendMs } = require('../utils/recruiting-thread-scope');
 const { WAVES_ADDRESS_LINE, WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
@@ -287,43 +288,44 @@ function buildEmailContent(app, stage, vars) {
   return { subject: '', html: '', text: '' };
 }
 
-async function sendRawEmail({ app, stage, to, subject, html, text, beforeProvider }) {
-  const templateKey = `job_${stage}`;
-  let messageRow = null;
-  // Fresh per send attempt and echoed in SendGrid custom_args, so a
-  // complaint/unsubscribe/bounce webhook that lands before the post-send
-  // provider_message_id update can still correlate the event to THIS row
-  // (the tracked-email handoff email-template-library.js uses — Codex r2 P1).
-  const sendAttemptToken = crypto.randomUUID();
-  try {
-    const rows = await db('email_messages').insert({
-      provider: 'sendgrid',
-      send_attempt_token: sendAttemptToken,
-      template_key: templateKey,
-      recipient_type: 'job_application',
-      recipient_id: app.id,
-      recipient_email_snapshot: to,
-      from_name_snapshot: FROM_NAME,
-      from_email_snapshot: FROM_EMAIL,
-      reply_to_snapshot: CONTACT_EMAIL,
-      subject_snapshot: subject,
-      html_snapshot: html,
-      text_snapshot: text,
-      categories: JSON.stringify([templateKey]),
-      status: 'queued',
-      queued_at: new Date(),
-      updated_at: new Date(),
-    }).returning('*');
-    messageRow = rows && rows[0];
-  } catch (err) {
-    // Fail closed (Codex P1): the ledger row is what a bounce/complaint/
-    // unsubscribe webhook and the reply classifier correlate a later event
-    // back to. A send with no row to correlate against is untracked evidence
-    // — refuse the send rather than let SendGrid dispatch it blind.
-    logger.error(`[recruiting-comms] email_messages insert failed (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
-    return { outcome: 'failed', code: 'ledger_write_failed' };
-  }
+// Settle the ledger row this send attempt owns — the shared tail of every
+// pre-provider gate and the provider call itself. A no-op when the insert
+// never produced a row (there is nothing to settle).
+async function settleEmailRow(messageRow, sendAttemptToken, patch) {
+  if (!messageRow) return;
+  await db('email_messages')
+    .where({ id: messageRow.id, status: 'queued', send_attempt_token: sendAttemptToken })
+    .update({ updated_at: new Date(), ...patch })
+    .catch(() => {});
+}
 
+async function insertEmailLedgerRow({ app, to, subject, html, text, templateKey, sendAttemptToken }) {
+  const rows = await db('email_messages').insert({
+    provider: 'sendgrid',
+    send_attempt_token: sendAttemptToken,
+    template_key: templateKey,
+    recipient_type: 'job_application',
+    recipient_id: app.id,
+    recipient_email_snapshot: to,
+    from_name_snapshot: FROM_NAME,
+    from_email_snapshot: FROM_EMAIL,
+    reply_to_snapshot: CONTACT_EMAIL,
+    subject_snapshot: subject,
+    html_snapshot: html,
+    text_snapshot: text,
+    categories: JSON.stringify([templateKey]),
+    status: 'queued',
+    queued_at: new Date(),
+    updated_at: new Date(),
+  }).returning('*');
+  return rows && rows[0];
+}
+
+// Everything that can refuse the send BEFORE SendGrid is ever called:
+// suppression, supersession by a newer concurrent attempt, and the caller's
+// own eligibility recheck. Returns an { outcome, code } to return early, or
+// null to proceed to the provider.
+async function checkEmailPreProviderGates({ app, stage, to, templateKey, messageRow, sendAttemptToken, beforeProvider }) {
   // Honor the suppression ledger BEFORE SendGrid — this direct-insert path
   // (unlike the templated email-template-library senders) previously had no
   // suppression check at all, so a bounced/unsubscribed applicant email
@@ -334,39 +336,45 @@ async function sendRawEmail({ app, stage, to, subject, html, text, beforeProvide
   } catch (err) {
     // Pre-provider failure: fail closed (no send) AND settle the ledger row
     // we already own so it never sits 'queued' forever (Codex r6 P2).
-    if (messageRow) {
-      await db('email_messages').where({ id: messageRow.id, status: 'queued', send_attempt_token: sendAttemptToken }).update({
-        status: 'failed',
-        error_message: `suppression lookup failed: ${errorSummary(err)}`.slice(0, 500),
-        updated_at: new Date(),
-      }).catch(() => {});
-    }
+    await settleEmailRow(messageRow, sendAttemptToken, {
+      status: 'failed',
+      error_message: `suppression lookup failed: ${errorSummary(err)}`.slice(0, 500),
+    });
     logger.warn(`[recruiting-comms] suppression lookup failed (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
     return { outcome: 'failed', code: 'suppression_lookup_failed' };
   }
   if (suppression) {
-    if (messageRow) {
-      await db('email_messages').where({ id: messageRow.id, status: 'queued', send_attempt_token: sendAttemptToken }).update({
-        status: 'blocked',
-        error_message: `Suppressed: ${suppression.suppression_type}${suppression.group_key ? ` (${suppression.group_key})` : ''}`.slice(0, 500),
-        updated_at: new Date(),
-      }).catch(() => {});
-    }
+    await settleEmailRow(messageRow, sendAttemptToken, {
+      status: 'blocked',
+      error_message: `Suppressed: ${suppression.suppression_type}${suppression.group_key ? ` (${suppression.group_key})` : ''}`.slice(0, 500),
+    });
     logger.info(`[recruiting-comms] email blocked by suppression (application ${app.id}, stage ${stage})`);
     return { outcome: 'blocked', code: 'email_suppressed' };
   }
 
+  // A concurrent resend that inserted its row after ours owns the delivery
+  // (Codex r14 P2): settle this row and send nothing.
+  if (messageRow && SUPERSEDABLE_STAGES.has(stage) && await newerEmailAttemptExists(app.id, templateKey, messageRow)) {
+    await settleEmailRow(messageRow, sendAttemptToken, {
+      status: 'failed', error_message: 'superseded: a newer attempt of this stage exists',
+    });
+    return { outcome: 'stale', code: 'recruiting_superseded' };
+  }
   // Eligibility immediately before SendGrid (Codex r9 P2): the ledger insert
   // and suppression lookup above are awaits during which the application can
   // change; a stale one settles its ledger row and sends nothing.
   if (typeof beforeProvider === 'function' && (await beforeProvider()) === false) {
-    if (messageRow) {
-      await db('email_messages').where({ id: messageRow.id, status: 'queued', send_attempt_token: sendAttemptToken }).update({
-        status: 'failed', error_message: 'stale: application changed before the provider handoff', updated_at: new Date(),
-      }).catch(() => {});
-    }
+    await settleEmailRow(messageRow, sendAttemptToken, {
+      status: 'failed', error_message: 'stale: application changed before the provider handoff',
+    });
     return { outcome: 'stale', code: 'recruiting_stale' };
   }
+  return null;
+}
+
+// The provider call itself + outcome classification. Only reached once every
+// pre-provider gate has cleared.
+async function sendEmailToProvider({ app, stage, to, subject, html, text, templateKey, messageRow, sendAttemptToken }) {
   try {
     const result = await sendgrid.sendOne({
       to,
@@ -385,14 +393,11 @@ async function sendRawEmail({ app, stage, to, subject, html, text, beforeProvide
         ? { email_message_id: messageRow.id, send_attempt_token: sendAttemptToken }
         : { send_attempt_token: sendAttemptToken },
     });
-    if (messageRow) {
-      await db('email_messages').where({ id: messageRow.id, status: 'queued', send_attempt_token: sendAttemptToken }).update({
-        status: 'sent',
-        provider_message_id: result && result.messageId ? result.messageId : null,
-        sent_at: new Date(),
-        updated_at: new Date(),
-      }).catch(() => {});
-    }
+    await settleEmailRow(messageRow, sendAttemptToken, {
+      status: 'sent',
+      provider_message_id: result && result.messageId ? result.messageId : null,
+      sent_at: new Date(),
+    });
     return { outcome: 'sent', code: null };
   } catch (err) {
     // A definite 4xx rejection (sendgrid.isDefiniteRejection — the same
@@ -403,16 +408,38 @@ async function sendRawEmail({ app, stage, to, subject, html, text, beforeProvide
     // not a euphemism for 'failed' (Codex P2).
     const definite = sendgrid.isDefiniteRejection(err);
     const status = definite ? 'failed' : 'uncertain';
-    if (messageRow) {
-      await db('email_messages').where({ id: messageRow.id, status: 'queued', send_attempt_token: sendAttemptToken }).update({
-        status,
-        error_message: String((err && err.message) || 'send failed').slice(0, 500),
-        updated_at: new Date(),
-      }).catch(() => {});
-    }
+    await settleEmailRow(messageRow, sendAttemptToken, {
+      status,
+      error_message: String((err && err.message) || 'send failed').slice(0, 500),
+    });
     logger.warn(`[recruiting-comms] SendGrid send failed (application ${app.id}, stage ${stage}, status ${(err && err.status) || 'unknown'}, outcome ${status})`);
     return { outcome: status, code: err && err.status ? `sendgrid_${err.status}` : 'send_failed' };
   }
+}
+
+async function sendRawEmail({ app, stage, to, subject, html, text, beforeProvider }) {
+  const templateKey = `job_${stage}`;
+  // Fresh per send attempt and echoed in SendGrid custom_args, so a
+  // complaint/unsubscribe/bounce webhook that lands before the post-send
+  // provider_message_id update can still correlate the event to THIS row
+  // (the tracked-email handoff email-template-library.js uses — Codex r2 P1).
+  const sendAttemptToken = crypto.randomUUID();
+  let messageRow;
+  try {
+    messageRow = await insertEmailLedgerRow({ app, to, subject, html, text, templateKey, sendAttemptToken });
+  } catch (err) {
+    // Fail closed (Codex P1): the ledger row is what a bounce/complaint/
+    // unsubscribe webhook and the reply classifier correlate a later event
+    // back to. A send with no row to correlate against is untracked evidence
+    // — refuse the send rather than let SendGrid dispatch it blind.
+    logger.error(`[recruiting-comms] email_messages insert failed (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
+    return { outcome: 'failed', code: 'ledger_write_failed' };
+  }
+
+  const gated = await checkEmailPreProviderGates({ app, stage, to, templateKey, messageRow, sendAttemptToken, beforeProvider });
+  if (gated) return gated;
+
+  return sendEmailToProvider({ app, stage, to, subject, html, text, templateKey, messageRow, sendAttemptToken });
 }
 
 // The interview_confirmation SMS is applicant-triggered (fire-and-forget off
@@ -514,6 +541,52 @@ async function reconcileCommsHistoryEntryByOutcome(applicationId, entryId, trans
     });
 }
 
+// Attempts of a stage that are still live — anything not settled as a
+// definite non-send. Used for supersession only.
+const LIVE_ATTEMPT_OUTCOMES = ['pending', 'handoff', 'sent', 'uncertain', 'deferred'];
+// Stages where a second concurrent attempt is a DUPLICATE of the first
+// (same stable link) rather than a distinct message: the replay rail's
+// supersession (deferred-replay-registry.js) covers the same set.
+const SUPERSEDABLE_STAGES = new Set(['interview_invite']);
+
+// A live same-stage attempt appended AFTER this entry (array order = commit
+// order; appendCommsHistory is one atomic jsonb append per attempt).
+function newerAttemptExists(history, entryId, stage, channel) {
+  const list = Array.isArray(history) ? history : [];
+  const mine = list.findIndex((e) => e && e.id === entryId);
+  if (mine < 0) return false;
+  return list.slice(mine + 1).some((e) => e && e.channel === channel && e.stage === stage && LIVE_ATTEMPT_OUTCOMES.includes(e.outcome));
+}
+
+// pending → handoff at the provider boundary, under the application row
+// lock: two concurrent immediate resends both append a 'pending' entry, and
+// whichever reaches the boundary while a newer attempt already exists is
+// refused before Twilio (Codex r14 P2) — the newer one delivers. Returns
+// true when THIS attempt is superseded (nothing stamped).
+async function stampSmsHandoff(applicationId, stage, entryId) {
+  return db.transaction(async (trx) => {
+    const row = await trx('job_applications').where({ id: applicationId }).forUpdate().first('comms_history');
+    if (SUPERSEDABLE_STAGES.has(stage) && newerAttemptExists(row && row.comms_history, entryId, stage, 'sms')) return true;
+    await reconcileCommsHistoryEntryByOutcome(applicationId, entryId, {
+      pending: { outcome: 'handoff', handoff_at: new Date().toISOString() },
+    }, trx);
+    return false;
+  });
+}
+
+// The email leg's ledger is email_messages (one row per attempt, inserted
+// before the provider call): a newer live row for the same application and
+// template means a concurrent resend already owns this delivery.
+async function newerEmailAttemptExists(applicationId, templateKey, messageRow) {
+  const newer = await db('email_messages')
+    .where({ recipient_type: 'job_application', recipient_id: applicationId, template_key: templateKey })
+    .whereNot('id', messageRow.id)
+    .whereIn('status', ['queued', 'sent'])
+    .whereRaw('queued_at > ?', [messageRow.queued_at])
+    .first('id');
+  return Boolean(newer);
+}
+
 // -------------------------------------------------------- edited-body link
 
 function bodyKeepsInterviewLink(body, interviewUrl) {
@@ -528,6 +601,253 @@ function substituteInterviewLinkPlaceholder(body, interviewUrl) {
 }
 
 // ----------------------------------------------------------------- sending
+
+// The pipeline can throw AFTER provider acceptance (e.g. audit persistence)
+// and attaches err.providerOutcome — keep that evidence; a throw with no
+// provider outcome is 'uncertain', never 'failed', because the applicant may
+// already hold the text and a reply must stay owner-only (local audit P0). A
+// definite pre-provider failure (the pipeline threw before Twilio and says
+// so) is proof nothing was sent — never 'uncertain' (Codex r12 P1).
+function classifySmsThrow(err) {
+  const po = err && err.providerOutcome && typeof err.providerOutcome === 'object' ? err.providerOutcome : null;
+  if (po && (po.sent === true || po.deliveryOutcome === 'accepted' || po.deliveryOutcome === 'sent')) {
+    return { ...po, sent: true, blocked: false, code: po.code || `threw_after_accept:${errorSummary(err)}` };
+  }
+  if (po && po.deliveryOutcome === 'not_sent') {
+    return { ...po, sent: false, blocked: Boolean(po.blocked), deliveryOutcome: 'not_sent', code: po.code || `threw_pre_provider:${errorSummary(err)}` };
+  }
+  return { ...(po || {}), sent: false, blocked: false, deliveryOutcome: 'uncertain', code: (po && po.code) || `threw:${errorSummary(err)}` };
+}
+
+// sendCustomerMessage's result (or classifySmsThrow's synthesized stand-in)
+// into one of the leg's outcome strings.
+function classifySmsOutcome(sendRes) {
+  if (sendRes.sent) return 'sent';
+  if (sendRes.blocked) return 'blocked';
+  if (sendRes.deliveryOutcome === 'uncertain') return 'uncertain';
+  return 'failed';
+}
+
+// A newer invite retires any invite still queued for this application — one
+// stable token must never reach the applicant twice — but only once the
+// replacement EXISTS (sent, or its queue row persisted), so a failed
+// replacement never strands the applicant with no invite at all (Codex r8
+// P2). The replay rail's own supersession (a newer ledger attempt) covers
+// rows the worker already claimed.
+async function retireQueuedInterviewInvites(app, stage, exceptRowId) {
+  if (stage !== 'interview_invite') return;
+  try {
+    await db('sms_log')
+      .where({ status: 'scheduled', message_type: 'job_interview_invite' })
+      .whereRaw("metadata->>'job_application_id' = ?", [app.id])
+      .modify((q) => { if (exceptRowId) q.whereNot('id', exceptRowId); })
+      .update({ status: 'cancelled', updated_at: new Date() });
+  } catch (err) {
+    logger.warn(`[recruiting-comms] retiring queued invites failed (application ${app.id}): ${errorSummary(err)}`);
+  }
+}
+
+// Held by the send window (8am–8pm ET): queue the text on the scheduled-SMS
+// rail the cron replays (services/scheduler.js) — an applicant who applies or
+// books overnight still gets the text when the window opens (Codex r5 P1).
+// The rail re-derives the applicant policy from the metadata stamped here.
+// Returns true when the queue row + ledger transition committed (the caller
+// treats the leg outcome as 'deferred' only then).
+async function queueDeferredSms({ app, stage, contact, body, applicantFromNumber, handoffEntry, sendRes }) {
+  try {
+    // Queue row + the 'deferred' ledger transition commit TOGETHER (Codex
+    // r12 P1): a queued text must never leave a 'handoff' entry behind that
+    // the reply classifier would read as evidence.
+    const queuedInsert = await db.transaction(async (trx) => {
+      const inserted = await trx('sms_log').insert({
+        customer_id: null,
+        direction: 'outbound',
+        from_phone: applicantFromNumber,
+        to_phone: contact.phone,
+        message_body: body,
+        status: 'scheduled',
+        scheduled_for: new Date(sendRes.nextAllowedAt),
+        message_type: `job_${stage}`,
+        metadata: JSON.stringify({
+          entry_point: 'recruiting_comms_deferred',
+          audience: 'applicant',
+          purpose: stage,
+          job_application_id: app.id,
+          stage,
+          // Replay contract (messaging/deferred-replay-registry.js
+          // recruiting_comms_deferred): the ledger entry the cron reconciles
+          // on send, and the application version the recheck pins so a
+          // withdrawn/rebooked applicant never gets an obsolete invite or
+          // confirmation.
+          ledger_entry_id: handoffEntry.id,
+          interview_token: app.interview_token || null,
+          interview_at: app.interview_at ? new Date(app.interview_at).toISOString() : null,
+          interview_mode: app.interview_mode || null,
+          original_message_type: `job_${stage}`,
+          consent_basis: { status: 'transactional_allowed', source: 'job_application' },
+          original_block_code: sendRes.code || null,
+        }),
+      }).returning('id');
+      await finalizeCommsHistoryEntry(app.id, handoffEntry.id, {
+        outcome: 'deferred', code: sendRes.code || null, finalized_at: new Date().toISOString(),
+        scheduled_for: new Date(sendRes.nextAllowedAt).toISOString(),
+      }, trx);
+      return inserted;
+    });
+    const queuedRowId = Array.isArray(queuedInsert) ? (queuedInsert[0] && (queuedInsert[0].id || queuedInsert[0])) : null;
+    await retireQueuedInterviewInvites(app, stage, queuedRowId);
+    return true;
+  } catch (err) {
+    logger.error(`[recruiting-comms] deferred queue insert failed (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
+    return false;
+  }
+}
+
+// The provider call + outcome classification + downstream ledger effects,
+// once the pre-handoff evidence row already exists. Returns the sms leg's
+// final outcome string.
+async function runSmsDelivery({ app, stage, opts, contact, applicantFromNumber, body, handoffEntry, legEligible }) {
+  let sendRes;
+  try {
+    sendRes = await sendCustomerMessage({
+      to: contact.phone,
+      body,
+      channel: 'sms',
+      audience: 'applicant',
+      purpose: STAGE_PURPOSE[stage] || stage,
+      entryPoint: opts.entryPoint || 'recruiting_comms',
+      identityTrustLevel: 'phone_provided_unverified',
+      consentBasis: { status: 'transactional_allowed', source: 'job_application' },
+      // Authoritative eligibility at the ACTUAL provider boundary (Codex r9
+      // P2): the pipeline runs this right before Twilio, after every validator.
+      // Provider boundary (runs right before Twilio, after every validator):
+      // stamp pending → handoff (durable delivery evidence), then the
+      // caller's authoritative eligibility check when one is supplied.
+      // Order matters (Codex r14 P2): the handoff stamp — under the
+      // application row lock, refusing when a NEWER attempt of this
+      // stage already sits in the ledger (two admins resending at once)
+      // — comes first, and the caller's eligibility read is the LAST
+      // await before Twilio, so nothing can change between it and the
+      // provider request.
+      preSendCheck: async () => {
+        if (await stampSmsHandoff(app.id, stage, handoffEntry.id)) {
+          return { ok: false, code: 'RECRUITING_SUPERSEDED', reason: 'a newer attempt of this stage exists' };
+        }
+        if (!(await legEligible())) {
+          return { ok: false, code: 'RECRUITING_STALE', reason: 'application changed before the provider handoff' };
+        }
+        return { ok: true };
+      },
+      ...(opts.by && opts.by !== 'system' && opts.by !== 'applicant' ? { operatorInitiated: true } : {}),
+      metadata: { original_message_type: `job_${stage}`, job_application_id: app.id, ...(opts.by && opts.by !== 'system' && opts.by !== 'applicant' ? { adminUserId: opts.by } : {}), ...(applicantFromNumber ? { fromNumber: applicantFromNumber } : {}) },
+    });
+  } catch (err) {
+    // Channel isolation: a throw here must not lose the email leg's outcome
+    // (or vice versa) — record it as a failed attempt.
+    logger.error(`[recruiting-comms] sms leg threw (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
+    sendRes = classifySmsThrow(err);
+  }
+
+  let outcome = classifySmsOutcome(sendRes);
+  if (sendRes.sent) await retireQueuedInterviewInvites(app, stage, null);
+
+  let deferredLedgerDone = false;
+  if (!sendRes.sent && sendRes.retryable && sendRes.nextAllowedAt) {
+    deferredLedgerDone = await queueDeferredSms({ app, stage, contact, body, applicantFromNumber, handoffEntry, sendRes });
+    if (deferredLedgerDone) outcome = 'deferred';
+  }
+
+  // Reconcile the handoff entry in place; if this fails the entry stays
+  // 'handoff', which the reply classifier still treats as a sent text.
+  try {
+    if (!deferredLedgerDone) {
+      await finalizeCommsHistoryEntry(app.id, handoffEntry.id, {
+        outcome, code: sendRes.code || null, finalized_at: new Date().toISOString(),
+      });
+    }
+  } catch (err) {
+    logger.error(`[recruiting-comms] handoff reconcile failed (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
+  }
+  return outcome;
+}
+
+// The full SMS lifecycle for one stage: eligibility, template render, the
+// pre-handoff evidence write (fail-closed — recruiting-inbound.js ties an
+// applicant's reply to the application through this ledger, so the entry
+// must exist durably before the text can possibly be answered), then the
+// provider delivery. Returns the leg's final outcome string; any ledger
+// entries it can't write inline (the no-body skip, the evidence-write
+// failure) are pushed onto ctx.entries for the caller's batch append.
+async function runSmsLeg(ctx) {
+  const { app, stage, opts, by, contact, vars, entries, legEligible } = ctx;
+  if (!(await legEligible())) return 'stale';
+  if (!contact.phone) return 'skipped';
+
+  let body = opts.smsBody;
+  if (!body) {
+    const rendered = await renderStageSmsBody(app, stage, vars);
+    body = rendered.body;
+  }
+  if (!body) {
+    entries.push(historyEntry({ stage, channel: 'sms', to: contact.phone, outcome: 'skipped', code: 'template_disabled', body: '', by }));
+    return 'skipped';
+  }
+
+  // Written as 'pending' (NOT delivery evidence) before the pipeline; moved
+  // to 'handoff' inside the pipeline's preSendCheck — right before Twilio,
+  // after suppression/consent/line-type — so a customer reply arriving
+  // during those validators is never diverted by a send that then gets
+  // blocked (Codex r13 P2).
+  const handoffEntry = historyEntry({ stage, channel: 'sms', to: contact.phone, outcome: 'pending', code: null, body, by });
+  // The number the text goes out from — durable routing evidence the reply
+  // classifier compares the inbound `To` against, so it never depends on the
+  // post-acceptance (best-effort) sms_log row. A reply goes back out on the
+  // line the applicant texted (opts.fromNumber); automated stages use the
+  // resolved applicant line.
+  const applicantFromNumber = opts.fromNumber || await outboundNumberForApplicants();
+  handoffEntry.from_number = applicantFromNumber;
+  try {
+    await appendCommsHistory(app.id, [handoffEntry]);
+  } catch (err) {
+    logger.error(`[recruiting-comms] pre-handoff evidence write failed (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
+    entries.push(historyEntry({ stage, channel: 'sms', to: contact.phone, outcome: 'failed', code: 'evidence_write_failed', body, by }));
+    return 'failed';
+  }
+
+  return runSmsDelivery({ app, stage, opts, contact, applicantFromNumber, body, handoffEntry, legEligible });
+}
+
+// The full email lifecycle for one stage: eligibility, admin-override copy
+// (re-wrapped into html when either half was edited), then sendRawEmail.
+// Returns the leg's final outcome string and pushes its history entry onto
+// ctx.entries for the caller's batch append.
+async function runEmailLeg(ctx) {
+  const { app, stage, opts, by, contact, vars, entries, legEligible } = ctx;
+  if (!(await legEligible())) return 'stale';
+  if (!contact.email) return 'skipped';
+
+  const built = buildEmailContent(app, stage, vars);
+  const subject = opts.emailSubject || built.subject;
+  const text = opts.emailBody || built.text;
+  // The default html is only valid for the default copy: once the owner
+  // edited either half, re-wrap the plain text so html and text legs carry
+  // the same message.
+  const html = (opts.emailSubject || opts.emailBody)
+    ? wrapEmailHtml({ heading: subject, paragraphs: String(text).split(/\n{2,}/) })
+    : built.html;
+  let sendRes;
+  try {
+    sendRes = await sendRawEmail({ app, stage, to: contact.email, subject, html, text, beforeProvider: legEligible });
+  } catch (err) {
+    logger.error(`[recruiting-comms] email leg threw (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
+    sendRes = { outcome: 'failed', code: `threw:${errorSummary(err)}` };
+  }
+  entries.push(historyEntry({
+    stage, channel: 'email', to: contact.email, outcome: sendRes.outcome, code: sendRes.code,
+    body: `${subject}\n\n${text}`, by,
+  }));
+  return sendRes.outcome;
+}
 
 /**
  * @param {object} app - job_applications row (fresh: must already carry
@@ -570,222 +890,10 @@ async function sendStageComms(app, stage, opts = {}) {
     try { return (await opts.stillEligible()) !== false; } catch { return false; }
   };
 
-  if (wantSms) {
-    if (!(await legEligible())) {
-      result.sms = 'stale';
-    } else if (!contact.phone) {
-      result.sms = 'skipped';
-    } else {
-      let body = opts.smsBody;
-      if (!body) {
-        const rendered = await renderStageSmsBody(app, stage, vars);
-        body = rendered.body;
-      }
-      if (!body) {
-        result.sms = 'skipped';
-        entries.push(historyEntry({ stage, channel: 'sms', to: contact.phone, outcome: 'skipped', code: 'template_disabled', body: '', by }));
-      } else {
-        // Classification evidence BEFORE the provider handoff (local audit
-        // P0): recruiting-inbound.js ties an applicant's reply to the
-        // application through this ledger, so the entry must exist — durably
-        // — before the text can possibly be answered. A failed evidence write
-        // refuses the send (fail closed) rather than texting untracked.
-        // Written as 'pending' (NOT delivery evidence) before the pipeline;
-        // moved to 'handoff' inside the pipeline's preSendCheck — right before
-        // Twilio, after suppression/consent/line-type — so a customer reply
-        // arriving during those validators is never diverted by a send that
-        // then gets blocked (Codex r13 P2).
-        const handoffEntry = historyEntry({ stage, channel: 'sms', to: contact.phone, outcome: 'pending', code: null, body, by });
-        // The number the text goes out from — durable routing evidence the
-        // reply classifier compares the inbound `To` against, so it never
-        // depends on the post-acceptance (best-effort) sms_log row.
-        // A reply goes back out on the line the applicant texted (opts.fromNumber);
-        // automated stages use the resolved applicant line.
-        const applicantFromNumber = opts.fromNumber || await outboundNumberForApplicants();
-        handoffEntry.from_number = applicantFromNumber;
-        try {
-          await appendCommsHistory(app.id, [handoffEntry]);
-        } catch (err) {
-          logger.error(`[recruiting-comms] pre-handoff evidence write failed (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
-          result.sms = 'failed';
-          entries.push(historyEntry({ stage, channel: 'sms', to: contact.phone, outcome: 'failed', code: 'evidence_write_failed', body, by }));
-          return await finishStage();
-        }
-        let sendRes;
-        try {
-          sendRes = await sendCustomerMessage({
-          to: contact.phone,
-          body,
-          channel: 'sms',
-          audience: 'applicant',
-          purpose: STAGE_PURPOSE[stage] || stage,
-          entryPoint: opts.entryPoint || 'recruiting_comms',
-          identityTrustLevel: 'phone_provided_unverified',
-          consentBasis: { status: 'transactional_allowed', source: 'job_application' },
-          // Authoritative eligibility at the ACTUAL provider boundary (Codex r9
-          // P2): the pipeline runs this right before Twilio, after every validator.
-          // Provider boundary (runs right before Twilio, after every validator):
-          // stamp pending → handoff (durable delivery evidence), then the
-          // caller's authoritative eligibility check when one is supplied.
-          preSendCheck: async () => {
-            if (!(await legEligible())) {
-              return { ok: false, code: 'RECRUITING_STALE', reason: 'application changed before the provider handoff' };
-            }
-            await reconcileCommsHistoryEntryByOutcome(app.id, handoffEntry.id, {
-              pending: { outcome: 'handoff', handoff_at: new Date().toISOString() },
-            });
-            return { ok: true };
-          },
-          ...(opts.by && opts.by !== 'system' && opts.by !== 'applicant' ? { operatorInitiated: true } : {}),
-          metadata: { original_message_type: `job_${stage}`, job_application_id: app.id, ...(opts.by && opts.by !== 'system' && opts.by !== 'applicant' ? { adminUserId: opts.by } : {}), ...(applicantFromNumber ? { fromNumber: applicantFromNumber } : {}) },
-          });
-        } catch (err) {
-          // Channel isolation: a throw here must not lose the email leg's
-          // outcome (or vice versa) — record it as a failed attempt.
-          logger.error(`[recruiting-comms] sms leg threw (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
-          // The pipeline can throw AFTER provider acceptance (e.g. audit
-          // persistence) and attaches err.providerOutcome — keep that
-          // evidence; a throw with no provider outcome is 'uncertain', never
-          // 'failed', because the applicant may already hold the text and a
-          // reply must stay owner-only (local audit P0).
-          const po = err && err.providerOutcome && typeof err.providerOutcome === 'object' ? err.providerOutcome : null;
-          if (po && (po.sent === true || po.deliveryOutcome === 'accepted' || po.deliveryOutcome === 'sent')) {
-            sendRes = { ...po, sent: true, blocked: false, code: po.code || `threw_after_accept:${errorSummary(err)}` };
-          } else if (po && po.deliveryOutcome === 'not_sent') {
-            // A definite pre-provider failure (the pipeline threw before
-            // Twilio and says so) is proof nothing was sent — never
-            // 'uncertain' (Codex r12 P1).
-            sendRes = { ...po, sent: false, blocked: Boolean(po.blocked), deliveryOutcome: 'not_sent', code: po.code || `threw_pre_provider:${errorSummary(err)}` };
-          } else {
-            sendRes = { ...(po || {}), sent: false, blocked: false, deliveryOutcome: 'uncertain', code: (po && po.code) || `threw:${errorSummary(err)}` };
-          }
-        }
-        let outcome = sendRes.sent
-          ? 'sent'
-          : (sendRes.blocked ? 'blocked' : (sendRes.deliveryOutcome === 'uncertain' ? 'uncertain' : 'failed'));
-        let deferredUntil = null;
-        let deferredLedgerDone = false;
-        // A newer invite retires any invite still queued for this application
-        // — one stable token must never reach the applicant twice — but only
-        // once the replacement EXISTS (sent, or its queue row persisted), so a
-        // failed replacement never strands the applicant with no invite at
-        // all (Codex r8 P2). The replay rail's own supersession (a newer
-        // ledger attempt) covers rows the worker already claimed.
-        const retireQueuedInvites = async (exceptRowId) => {
-          if (stage !== 'interview_invite') return;
-          try {
-            await db('sms_log')
-              .where({ status: 'scheduled', message_type: 'job_interview_invite' })
-              .whereRaw("metadata->>'job_application_id' = ?", [app.id])
-              .modify((q) => { if (exceptRowId) q.whereNot('id', exceptRowId); })
-              .update({ status: 'cancelled', updated_at: new Date() });
-          } catch (err) {
-            logger.warn(`[recruiting-comms] retiring queued invites failed (application ${app.id}): ${errorSummary(err)}`);
-          }
-        };
-        if (sendRes.sent) await retireQueuedInvites(null);
-        if (!sendRes.sent && sendRes.retryable && sendRes.nextAllowedAt) {
-          // Held by the send window (8am–8pm ET): queue the text on the
-          // scheduled-SMS rail the cron replays (services/scheduler.js) —
-          // an applicant who applies or books overnight still gets the text
-          // when the window opens (Codex r5 P1). The rail re-derives the
-          // applicant policy from the metadata stamped here.
-          try {
-            // Queue row + the 'deferred' ledger transition commit TOGETHER
-            // (Codex r12 P1): a queued text must never leave a 'handoff'
-            // entry behind that the reply classifier would read as evidence.
-            const queuedInsert = await db.transaction(async (trx) => {
-            const inserted = await trx('sms_log').insert({
-              customer_id: null,
-              direction: 'outbound',
-              from_phone: applicantFromNumber,
-              to_phone: contact.phone,
-              message_body: body,
-              status: 'scheduled',
-              scheduled_for: new Date(sendRes.nextAllowedAt),
-              message_type: `job_${stage}`,
-              metadata: JSON.stringify({
-                entry_point: 'recruiting_comms_deferred',
-                audience: 'applicant',
-                purpose: stage,
-                job_application_id: app.id,
-                stage,
-                // Replay contract (messaging/deferred-replay-registry.js
-                // recruiting_comms_deferred): the ledger entry the cron
-                // reconciles on send, and the application version the
-                // recheck pins so a withdrawn/rebooked applicant never gets
-                // an obsolete invite or confirmation.
-                ledger_entry_id: handoffEntry.id,
-                interview_token: app.interview_token || null,
-                interview_at: app.interview_at ? new Date(app.interview_at).toISOString() : null,
-                interview_mode: app.interview_mode || null,
-                original_message_type: `job_${stage}`,
-                consent_basis: { status: 'transactional_allowed', source: 'job_application' },
-                original_block_code: sendRes.code || null,
-              }),
-            }).returning('id');
-            await finalizeCommsHistoryEntry(app.id, handoffEntry.id, {
-              outcome: 'deferred', code: sendRes.code || null, finalized_at: new Date().toISOString(),
-              scheduled_for: new Date(sendRes.nextAllowedAt).toISOString(),
-            }, trx);
-            return inserted;
-            });
-            const queuedRowId = Array.isArray(queuedInsert) ? (queuedInsert[0] && (queuedInsert[0].id || queuedInsert[0])) : null;
-            outcome = 'deferred';
-            deferredUntil = new Date(sendRes.nextAllowedAt).toISOString();
-            deferredLedgerDone = true;
-            await retireQueuedInvites(queuedRowId);
-          } catch (err) {
-            logger.error(`[recruiting-comms] deferred queue insert failed (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
-          }
-        }
-        result.sms = outcome;
-        // Reconcile the handoff entry in place; if this fails the entry stays
-        // 'handoff', which the reply classifier still treats as a sent text.
-        try {
-          if (!deferredLedgerDone) await finalizeCommsHistoryEntry(app.id, handoffEntry.id, {
-            outcome, code: sendRes.code || null, finalized_at: new Date().toISOString(),
-            ...(deferredUntil ? { scheduled_for: deferredUntil } : {}),
-          });
-        } catch (err) {
-          logger.error(`[recruiting-comms] handoff reconcile failed (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
-        }
-      }
-    }
-  }
+  const ctx = { app, stage, opts, by, contact, vars, entries, legEligible };
 
-  return finishStage();
-
-  async function finishStage() {
-  if (wantEmail) {
-    if (!(await legEligible())) {
-      result.email = 'stale';
-    } else if (!contact.email) {
-      result.email = 'skipped';
-    } else {
-      const built = buildEmailContent(app, stage, vars);
-      const subject = opts.emailSubject || built.subject;
-      const text = opts.emailBody || built.text;
-      // The default html is only valid for the default copy: once the owner
-      // edited either half, re-wrap the plain text so html and text legs
-      // carry the same message.
-      const html = (opts.emailSubject || opts.emailBody)
-        ? wrapEmailHtml({ heading: subject, paragraphs: String(text).split(/\n{2,}/) })
-        : built.html;
-      let sendRes;
-      try {
-        sendRes = await sendRawEmail({ app, stage, to: contact.email, subject, html, text, beforeProvider: legEligible });
-      } catch (err) {
-        logger.error(`[recruiting-comms] email leg threw (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
-        sendRes = { outcome: 'failed', code: `threw:${errorSummary(err)}` };
-      }
-      result.email = sendRes.outcome;
-      entries.push(historyEntry({
-        stage, channel: 'email', to: contact.email, outcome: sendRes.outcome, code: sendRes.code,
-        body: `${subject}\n\n${text}`, by,
-      }));
-    }
-  }
+  if (wantSms) result.sms = await runSmsLeg(ctx);
+  if (wantEmail) result.email = await runEmailLeg(ctx);
 
   // Always persist whatever completed — a history write failure is logged,
   // never allowed to mask an outcome the caller already has.
@@ -797,7 +905,6 @@ async function sendStageComms(app, stage, opts = {}) {
     }
   }
   return result;
-  }
 }
 
 /**
@@ -850,8 +957,10 @@ async function openApplicationIdForPhone(phone) {
   for (const r of rows) {
     const history = Array.isArray(r.comms_history) ? r.comms_history : [];
     for (const e of history) {
-      if (!e || e.channel !== 'sms' || !['handoff', 'sent', 'uncertain'].includes(e.outcome)) continue;
-      const at = Date.parse(e.at || '');
+      // Same effective send time the reply classifier ranks by (a deferred
+      // text that replayed LATER than a newer application's immediate text
+      // is the newer evidence — Codex r14 P2).
+      const at = effectiveSendMs(e);
       if (!Number.isFinite(at)) continue;
       if (!best || at > best.at) best = { at, id: r.id };
     }

@@ -22,6 +22,7 @@ const logger = require('./logger');
 const { phoneMatchDigits } = require('../utils/phone');
 const { appendCommsHistory, maskPhone, errorSummary } = require('./recruiting-comms');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+const { effectiveSendMs } = require('../utils/recruiting-thread-scope');
 
 const OPEN_STATUSES = ['new', 'reviewed', 'interview', 'offer'];
 const RECENT_OUTBOUND_DAYS = 45;
@@ -38,6 +39,59 @@ function digitsExpr(column) {
 // hasOutboundHistory exclusion) — they never count as "what the phone last
 // received from us".
 const NON_CONVERSATIONAL_OUTBOUND = ['internal_alert', 'admin_alert', 'ai_assistant', 'ai_assistant_reply'];
+// Customer-facing outbound predicate. sms_log.message_type is NULLABLE: a
+// legacy/direct-insert customer text carries no type, and a plain NOT IN /
+// NOT LIKE is UNKNOWN for NULL and would drop exactly that row (Codex r14
+// P1) — so the untyped row is customer context, and only the explicit
+// internal and job_* types are excluded. Constant SQL, bound list.
+const CUSTOMER_FACING_TYPE_SQL = `COALESCE(message_type, '') NOT IN (${NON_CONVERSATIONAL_OUTBOUND.map(() => '?').join(', ')}) AND COALESCE(message_type, '') NOT LIKE 'job\\_%'`;
+
+// The newest SMS the applicant could actually hold, across every open
+// application on this phone. Evidence is scoped to the line the reply
+// arrived on (local audit P0): an invite from line A and a newer owner
+// reply from line B are two threads — a reply to A must match A's
+// evidence, not lose to B's. Ranked by effectiveSendMs (never phone
+// recency: a later, untexted application must not swallow a reply meant
+// for an earlier one).
+function newestSmsEvidence(apps, toNumber, cutoffMs) {
+  const toDigits = toNumber ? phoneMatchDigits(String(toNumber)) : [];
+  const onInboundLine = (entry) => {
+    if (!toDigits.length || !entry.from_number) return true; // unknown line: keep
+    const fromDigits = phoneMatchDigits(String(entry.from_number));
+    return !fromDigits.length || toDigits.some((d) => fromDigits.includes(d));
+  };
+  let best = null;
+  for (const app of apps) {
+    const history = Array.isArray(app.comms_history) ? app.comms_history : [];
+    for (const entry of history) {
+      // 'deferred' / 'pending' are NOT delivery evidence (effectiveSendMs
+      // returns NaN): a queued text has definitely not reached the applicant.
+      const at = effectiveSendMs(entry);
+      if (!Number.isFinite(at) || at < cutoffMs || !onInboundLine(entry)) continue;
+      if (!best || at > best.at) best = { at, applicationId: app.id, fromNumber: entry.from_number || null };
+    }
+  }
+  return best;
+}
+
+// Reply CONTEXT: the phone may also be a customer's. A NEWER customer-facing
+// text (appointment, billing, ...) that actually went out (sent/delivered —
+// never merely scheduled, blocked or failed) from the SAME Waves line after
+// our handoff hands the reply back to the ordinary customer path. The
+// sms_log read is advisory — when it is missing (logging is best-effort)
+// the durable evidence stands and the reply stays owner-only.
+async function newerCustomerTextExists(variants, best) {
+  const fromVariants = best.fromNumber ? phoneMatchDigits(String(best.fromNumber)) : [];
+  const row = await excludeUnresolvedSendReservations(db('sms_log'))
+    .where({ direction: 'outbound' })
+    .whereIn('status', ['sent', 'delivered'])
+    .whereRaw(digitsExpr('to_phone'), [variants])
+    .modify((q) => { if (fromVariants.length) q.whereRaw(digitsExpr('from_phone'), [fromVariants]); })
+    .whereRaw(CUSTOMER_FACING_TYPE_SQL, NON_CONVERSATIONAL_OUTBOUND)
+    .where('created_at', '>', new Date(best.at))
+    .first('id');
+  return Boolean(row);
+}
 
 /**
  * @param {string} fromPhone - the inbound sender
@@ -71,64 +125,9 @@ async function matchApplicantReply(fromPhone, toNumber) {
   if (!apps.length) return null;
 
   const cutoff = Date.now() - RECENT_OUTBOUND_DAYS * 24 * 60 * 60 * 1000;
-  // Evidence is scoped to the line the reply arrived on (local audit P0):
-  // an invite from line A and a newer owner reply from line B are two
-  // threads — a reply to A must match A's evidence, not lose to B's.
-  const toDigits = toNumber ? phoneMatchDigits(String(toNumber)) : [];
-  const onInboundLine = (entry) => {
-    if (!toDigits.length || !entry.from_number) return true; // unknown line: keep
-    const fromDigits = phoneMatchDigits(String(entry.from_number));
-    return !fromDigits.length || toDigits.some((d) => fromDigits.includes(d));
-  };
-  let best = null;
-  for (const app of apps) {
-    const history = Array.isArray(app.comms_history) ? app.comms_history : [];
-    for (const entry of history) {
-      // 'deferred' is NOT delivery evidence: a queued text has definitely not
-      // reached the applicant (the replay rail moves it to 'handoff' right
-      // before Twilio) — counting it would divert a customer's reply.
-      if (!entry || entry.channel !== 'sms' || !['handoff', 'sent', 'uncertain'].includes(entry.outcome)) continue;
-      if (!onInboundLine(entry)) continue;
-      // Effective handoff instant: a text held overnight and replayed by the
-      // cron went out at finalized_at, not when it was queued — the newer-
-      // customer-text comparison below must use the moment the applicant
-      // could actually have received it (local audit P0).
-      // ... and a replay attempt in flight (or one that never finalized after
-      // a crash) went out at replay_attempted_at, stamped by the registry's
-      // recheck before dispatch.
-      const stamps = [entry.at, entry.replay_attempted_at, ['sent', 'uncertain'].includes(entry.outcome) ? entry.finalized_at : null]
-        .map((v) => Date.parse(v || ''))
-        .filter((ms) => Number.isFinite(ms));
-      const at = stamps.length ? Math.max(...stamps) : NaN;
-      if (!Number.isFinite(at) || at < cutoff) continue;
-      if (!best || at > best.at) best = { at, applicationId: app.id, fromNumber: entry.from_number || null };
-    }
-  }
+  const best = newestSmsEvidence(apps, toNumber, cutoff);
   if (!best) return null;
-
-  // Reply CONTEXT: the phone may also be a customer's. A NEWER customer-facing
-  // text (appointment, billing, ...) sent from this same line after our
-  // handoff hands the reply back to the ordinary customer path. The sms_log read is
-  // advisory — when it is missing (logging is best-effort) the durable
-  // evidence above stands and the reply stays owner-only.
-  // Only a text that actually went out (sent/delivered) can override —
-  // a customer text merely SCHEDULED, blocked or failed after the handoff
-  // is not something the applicant could be answering.
-  // ... and only a customer text that went out from the SAME Waves line the
-  // recruiting text used can override — a text from another line is a
-  // different thread the applicant is not answering here.
-  const fromVariants = best.fromNumber ? phoneMatchDigits(String(best.fromNumber)) : [];
-  const newerCustomerText = await excludeUnresolvedSendReservations(db('sms_log'))
-    .where({ direction: 'outbound' })
-    .whereIn('status', ['sent', 'delivered'])
-    .whereRaw(digitsExpr('to_phone'), [variants])
-    .modify((q) => { if (fromVariants.length) q.whereRaw(digitsExpr('from_phone'), [fromVariants]); })
-    .whereNotIn('message_type', NON_CONVERSATIONAL_OUTBOUND)
-    .whereNot('message_type', 'like', 'job\\_%')
-    .where('created_at', '>', new Date(best.at))
-    .first('id');
-  if (newerCustomerText) return null;
-
+  if (await newerCustomerTextExists(variants, best)) return null;
   return { applicationId: best.applicationId };
 }
 

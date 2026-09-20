@@ -193,113 +193,221 @@ router.get('/:id/stage-preview', async (req, res) => {
   }
 });
 
+// --- PATCH /:id/status — request validation phase -------------------------
+// Normalizes and validates the request body into a plan the transition and
+// delivery phases can consume without re-deriving anything. Pure (no DB).
+function buildStatusPatchPlan(req) {
+  const status = req.body && req.body.status;
+  if (!STATUSES.includes(status)) {
+    return { error: { code: 400, body: { error: 'Unknown status' } } };
+  }
+
+  const note = typeof req.body.note === 'string'
+    ? req.body.note.trim().slice(0, MAX_NOTE_CHARS)
+    : '';
+  const resend = req.body.resend === true;
+  const notify = req.body.notify && typeof req.body.notify === 'object' && !Array.isArray(req.body.notify)
+    ? req.body.notify
+    : null;
+
+  const smsBodyOverride = notify && typeof notify.sms_body === 'string'
+    ? stripControlChars(notify.sms_body).slice(0, MAX_SMS_BODY_CHARS)
+    : null;
+  const emailSubjectOverride = notify && typeof notify.email_subject === 'string'
+    ? stripControlChars(notify.email_subject).slice(0, MAX_EMAIL_SUBJECT_CHARS)
+    : null;
+  const emailBodyOverride = notify && typeof notify.email_body === 'string'
+    ? stripControlChars(notify.email_body).slice(0, MAX_EMAIL_BODY_CHARS)
+    : null;
+  const wantSms = Boolean(notify && notify.sms === true);
+  const wantEmail = Boolean(notify && notify.email === true);
+
+  return {
+    plan: {
+      status, note, resend, notify,
+      smsBodyOverride, emailSubjectOverride, emailBodyOverride,
+      wantSms, wantEmail,
+    },
+  };
+}
+
+// Edited bodies must keep either the real link (if a token already exists)
+// or the placeholder the preview rendered — checked against the CURRENT row,
+// before any mint, so a caller can never smuggle a link-free message through
+// by racing the mint.
+function assertNotifyBodiesKeepInterviewLink(row, plan) {
+  const existingInterviewUrl = row.interview_token ? RecruitingComms.interviewUrlFor(row.interview_token) : null;
+  if (plan.wantSms && plan.smsBodyOverride && !RecruitingComms.bodyKeepsInterviewLink(plan.smsBodyOverride, existingInterviewUrl)) {
+    throw new NotifyValidationError('Message must keep the interview link.');
+  }
+  if (plan.wantEmail && plan.emailBodyOverride && !RecruitingComms.bodyKeepsInterviewLink(plan.emailBodyOverride, existingInterviewUrl)) {
+    throw new NotifyValidationError('Message must keep the interview link.');
+  }
+}
+
+// Classifies the request against the CURRENT (locked) row: what kind of
+// transition this is, and whether it is eligible to send comms at all. Pure
+// decision-making, no writes — kept apart from the payload it produces so
+// applyStatusTransition itself is just "look up row, classify, build
+// payload, write" instead of one function doing all four.
+function classifyStatusTransition(row, plan) {
+  const { status, note, resend } = plan;
+  const statusChanged = row.status !== status;
+  const isResendOnly = !statusChanged && resend && status === 'interview' && row.status === 'interview';
+  const isNoOp = !statusChanged && !note && !isResendOnly;
+  const interviewApplicable = status === 'interview' && Boolean(plan.notify) && (statusChanged || isResendOnly);
+  const willSend = interviewApplicable && isEnabled('recruitingComms');
+  return { isResendOnly, isNoOp, interviewApplicable, willSend };
+}
+
+// Builds the row update payload for a classified transition: the
+// status_history append (same-status resend note, or a real transition),
+// the status write itself, the slot-blocking-stage clear, and the lazy
+// token mint. A real phase — everything the DB row needs to become the new
+// state — not a relocated branch.
+function buildStatusUpdatePayload(row, plan, { isResendOnly, willSend, technicianId }) {
+  const { status, note } = plan;
+  const history = Array.isArray(row.status_history) ? row.status_history : [];
+  const updatePayload = { updated_at: new Date() };
+
+  if (isResendOnly && note) {
+    // A note typed into the resend dialog is a same-status note — keep it
+    // (Codex r3 P2) rather than silently dropping it.
+    history.push({ from: row.status, to: row.status, note, by: technicianId, at: new Date().toISOString() });
+    updatePayload.status_history = JSON.stringify(history);
+  }
+  if (!isResendOnly) {
+    history.push({
+      from: row.status,
+      to: status,
+      note: note || null,
+      by: technicianId,
+      at: new Date().toISOString(),
+    });
+    updatePayload.status = status;
+    updatePayload.status_history = JSON.stringify(history);
+    // Entering a slot-blocking stage (interview OR offer — both hold a slot
+    // in interview-slots.js) from a non-blocking one (rejected, withdrawn,
+    // new, ...): the old booking's slot was released to other applicants the
+    // moment the row left interview/offer, so it must not come back
+    // silently — clear it and let the applicant re-pick through the link
+    // under the booking lock (local audit).
+    if (['interview', 'offer'].includes(status) && !['interview', 'offer'].includes(row.status)) {
+      updatePayload.interview_mode = null;
+      updatePayload.interview_at = null;
+      updatePayload.interview_end_at = null;
+      updatePayload.interview_booked_at = null;
+    }
+  }
+
+  if (willSend && !row.interview_token) {
+    updatePayload.interview_token = crypto.randomBytes(32).toString('hex');
+    updatePayload.interview_token_created_at = new Date();
+  }
+
+  return updatePayload;
+}
+
+// --- PATCH /:id/status — transition phase (runs inside the row-lock tx) ---
+// Row lock inside one transaction: concurrent transitions must not both
+// derive from the same snapshot and silently drop a history entry, and a
+// token mint must land atomically with the status write it belongs to.
+async function applyStatusTransition(trx, applicationId, technicianId, plan) {
+  const row = await trx('job_applications')
+    .where({ id: applicationId })
+    .forUpdate()
+    .first();
+  if (!row) return null;
+
+  const { isResendOnly, isNoOp, interviewApplicable, willSend } = classifyStatusTransition(row, plan);
+  if (isNoOp) return { row, interviewApplicable: false };
+
+  if (willSend) assertNotifyBodiesKeepInterviewLink(row, plan);
+
+  const updatePayload = buildStatusUpdatePayload(row, plan, { isResendOnly, willSend, technicianId });
+  const [next] = await trx('job_applications')
+    .where({ id: applicationId })
+    .update(updatePayload)
+    .returning('*');
+
+  return { row: next, interviewApplicable, willSend };
+}
+
+// --- PATCH /:id/status — post-commit delivery phase ------------------------
+// Best-effort by design: the status transition already committed in
+// applyStatusTransition — a comms failure from here on must never turn into
+// a 500 that makes the owner think the transition itself failed (codex P2).
+// Report per-channel 'failed' instead and still return the committed row.
+async function reReadApplicationOrKeep(applicationId, fallbackRow, logLabel) {
+  try {
+    const fresh = await db('job_applications').where({ id: applicationId }).first();
+    return fresh || fallbackRow;
+  } catch (err) {
+    if (logLabel) logger.warn(`[admin-careers] ${logLabel} failed: ${RecruitingComms.errorSummary(err)}`);
+    return fallbackRow;
+  }
+}
+
+async function deliverStageComms(applicationId, technicianId, updated, plan) {
+  try {
+    // Final authority check at the provider handoff (Codex r2 P2): if
+    // another admin moved this application out of Interview (or the token
+    // changed) between our commit and this send, the invite's link would
+    // 404 the moment it arrived — send nothing.
+    const current = await db('job_applications').where({ id: updated.id }).first('status', 'interview_token');
+    if (!current || current.status !== 'interview' || current.interview_token !== updated.interview_token) {
+      throw Object.assign(new Error('stage changed before send'), { name: 'StaleStageError', code: 'stale_stage' });
+    }
+
+    const finalInterviewUrl = RecruitingComms.interviewUrlFor(updated.interview_token);
+    const finalSmsBody = plan.wantSms && plan.smsBodyOverride
+      ? RecruitingComms.substituteInterviewLinkPlaceholder(plan.smsBodyOverride, finalInterviewUrl)
+      : undefined;
+    const finalEmailBody = plan.wantEmail && plan.emailBodyOverride
+      ? RecruitingComms.substituteInterviewLinkPlaceholder(plan.emailBodyOverride, finalInterviewUrl)
+      : undefined;
+    const stillEligible = async () => {
+      const now = await db('job_applications').where({ id: updated.id }).first('status', 'interview_token');
+      return Boolean(now && now.status === 'interview' && now.interview_token === updated.interview_token);
+    };
+
+    const sent = await RecruitingComms.sendStageComms(updated, 'interview_invite', {
+      sms: plan.wantSms,
+      email: plan.wantEmail,
+      by: technicianId,
+      stillEligible,
+      smsBody: finalSmsBody,
+      emailSubject: plan.wantEmail && plan.emailSubjectOverride ? plan.emailSubjectOverride : undefined,
+      emailBody: finalEmailBody,
+    });
+    // Re-read so the response carries the comms_history entries
+    // sendStageComms just appended; fall back to the committed pre-send row
+    // if the re-read itself fails.
+    const responseRow = await reReadApplicationOrKeep(updated.id, updated, 'post-send re-read');
+    return { sent, responseRow };
+  } catch (sendErr) {
+    if (sendErr && sendErr.code === 'stale_stage') {
+      logger.info(`[admin-careers] interview invite skipped — stage changed before send (application ${applicationId})`);
+      const sent = { sms: plan.wantSms ? 'stale' : 'not_requested', email: plan.wantEmail ? 'stale' : 'not_requested' };
+      const responseRow = await reReadApplicationOrKeep(updated.id, updated, null);
+      return { sent, responseRow };
+    }
+    logger.error(`[admin-careers] sendStageComms failed after committed transition (application ${applicationId}): ${RecruitingComms.errorSummary(sendErr)}`);
+    const sent = { sms: plan.wantSms ? 'failed' : 'not_requested', email: plan.wantEmail ? 'failed' : 'not_requested' };
+    return { sent, responseRow: updated };
+  }
+}
+
 router.patch('/:id/status', async (req, res) => {
   try {
     if (!UUID_RE.test(req.params.id)) return res.status(404).json({ error: 'Not found' });
-    const status = req.body && req.body.status;
-    if (!STATUSES.includes(status)) {
-      return res.status(400).json({ error: 'Unknown status' });
-    }
-    const note = typeof req.body.note === 'string'
-      ? req.body.note.trim().slice(0, MAX_NOTE_CHARS)
-      : '';
-    const resend = req.body.resend === true;
-    const notify = req.body.notify && typeof req.body.notify === 'object' && !Array.isArray(req.body.notify)
-      ? req.body.notify
-      : null;
 
-    const smsBodyOverride = notify && typeof notify.sms_body === 'string'
-      ? stripControlChars(notify.sms_body).slice(0, MAX_SMS_BODY_CHARS)
-      : null;
-    const emailSubjectOverride = notify && typeof notify.email_subject === 'string'
-      ? stripControlChars(notify.email_subject).slice(0, MAX_EMAIL_SUBJECT_CHARS)
-      : null;
-    const emailBodyOverride = notify && typeof notify.email_body === 'string'
-      ? stripControlChars(notify.email_body).slice(0, MAX_EMAIL_BODY_CHARS)
-      : null;
-    const wantSms = Boolean(notify && notify.sms === true);
-    const wantEmail = Boolean(notify && notify.email === true);
+    const { plan, error } = buildStatusPatchPlan(req);
+    if (error) return res.status(error.code).json(error.body);
 
     let txResult;
     try {
-      // Row lock inside one transaction: concurrent transitions must not both
-      // derive from the same snapshot and silently drop a history entry, and
-      // a token mint must land atomically with the status write it belongs to.
-      txResult = await db.transaction(async (trx) => {
-        const row = await trx('job_applications')
-          .where({ id: req.params.id })
-          .forUpdate()
-          .first();
-        if (!row) return null;
-
-        const statusChanged = row.status !== status;
-        const isResendOnly = !statusChanged && resend && status === 'interview' && row.status === 'interview';
-        const isNoOp = !statusChanged && !note && !isResendOnly;
-        if (isNoOp) return { row, interviewApplicable: false };
-
-        const interviewApplicable = status === 'interview' && Boolean(notify) && (statusChanged || isResendOnly);
-        const willSend = interviewApplicable && isEnabled('recruitingComms');
-
-        if (willSend) {
-          // Edited bodies must keep either the real link (if a token already
-          // exists) or the placeholder the preview rendered — checked against
-          // the CURRENT row, before any mint, so a caller can never smuggle a
-          // link-free message through by racing the mint.
-          const existingInterviewUrl = row.interview_token ? RecruitingComms.interviewUrlFor(row.interview_token) : null;
-          if (wantSms && smsBodyOverride && !RecruitingComms.bodyKeepsInterviewLink(smsBodyOverride, existingInterviewUrl)) {
-            throw new NotifyValidationError('Message must keep the interview link.');
-          }
-          if (wantEmail && emailBodyOverride && !RecruitingComms.bodyKeepsInterviewLink(emailBodyOverride, existingInterviewUrl)) {
-            throw new NotifyValidationError('Message must keep the interview link.');
-          }
-        }
-
-        const history = Array.isArray(row.status_history) ? row.status_history : [];
-        const updatePayload = { updated_at: new Date() };
-        if (isResendOnly && note) {
-          // A note typed into the resend dialog is a same-status note — keep
-          // it (Codex r3 P2) rather than silently dropping it.
-          history.push({ from: row.status, to: row.status, note, by: req.technicianId, at: new Date().toISOString() });
-          updatePayload.status_history = JSON.stringify(history);
-        }
-        if (!isResendOnly) {
-          history.push({
-            from: row.status,
-            to: status,
-            note: note || null,
-            by: req.technicianId,
-            at: new Date().toISOString(),
-          });
-          updatePayload.status = status;
-          updatePayload.status_history = JSON.stringify(history);
-          // Entering a slot-blocking stage (interview OR offer — both hold
-          // a slot in interview-slots.js) from a non-blocking one (rejected,
-          // withdrawn, new, ...): the old booking's slot was released to
-          // other applicants the moment the row left interview/offer, so it
-          // must not come back silently — clear it and let the applicant
-          // re-pick through the link under the booking lock (local audit).
-          if (['interview', 'offer'].includes(status) && !['interview', 'offer'].includes(row.status)) {
-            updatePayload.interview_mode = null;
-            updatePayload.interview_at = null;
-            updatePayload.interview_end_at = null;
-            updatePayload.interview_booked_at = null;
-          }
-        }
-
-        let mintedToken = null;
-        if (willSend && !row.interview_token) {
-          mintedToken = crypto.randomBytes(32).toString('hex');
-          updatePayload.interview_token = mintedToken;
-          updatePayload.interview_token_created_at = new Date();
-        }
-
-        const [next] = await trx('job_applications')
-          .where({ id: req.params.id })
-          .update(updatePayload)
-          .returning('*');
-
-        return { row: next, interviewApplicable, willSend };
-      });
+      txResult = await db.transaction((trx) => applyStatusTransition(trx, req.params.id, req.technicianId, plan));
     } catch (err) {
       if (err instanceof NotifyValidationError) {
         return res.status(400).json({ error: 'Message must keep the interview link.' });
@@ -310,70 +418,15 @@ router.patch('/:id/status', async (req, res) => {
     if (!txResult) return res.status(404).json({ error: 'Not found' });
     const { row: updated, interviewApplicable, willSend } = txResult;
 
-    let sent = { sms: 'not_requested', email: 'not_requested' };
-    // The status transition already committed above — a comms failure from
-    // here on must never turn into a 500 that makes the owner think the
-    // transition itself failed (codex P2). Report per-channel 'failed'
-    // instead and still return the committed application.
-    let responseRow = updated;
-    if (interviewApplicable) {
-      if (!willSend) {
-        sent = { sms: wantSms ? 'disabled' : 'not_requested', email: wantEmail ? 'disabled' : 'not_requested' };
-      } else {
-        try {
-          // Final authority check at the provider handoff (Codex r2 P2): if
-          // another admin moved this application out of Interview (or the
-          // token changed) between our commit and this send, the invite's
-          // link would 404 the moment it arrived — send nothing.
-          const current = await db('job_applications').where({ id: updated.id }).first('status', 'interview_token');
-          if (!current || current.status !== 'interview' || current.interview_token !== updated.interview_token) {
-            throw Object.assign(new Error('stage changed before send'), { name: 'StaleStageError', code: 'stale_stage' });
-          }
-          const finalInterviewUrl = RecruitingComms.interviewUrlFor(updated.interview_token);
-          const finalSmsBody = wantSms && smsBodyOverride
-            ? RecruitingComms.substituteInterviewLinkPlaceholder(smsBodyOverride, finalInterviewUrl)
-            : undefined;
-          const finalEmailBody = wantEmail && emailBodyOverride
-            ? RecruitingComms.substituteInterviewLinkPlaceholder(emailBodyOverride, finalInterviewUrl)
-            : undefined;
-          const stillEligible = async () => {
-            const now = await db('job_applications').where({ id: updated.id }).first('status', 'interview_token');
-            return Boolean(now && now.status === 'interview' && now.interview_token === updated.interview_token);
-          };
-          sent = await RecruitingComms.sendStageComms(updated, 'interview_invite', {
-            sms: wantSms,
-            email: wantEmail,
-            by: req.technicianId,
-            stillEligible,
-            smsBody: finalSmsBody,
-            emailSubject: wantEmail && emailSubjectOverride ? emailSubjectOverride : undefined,
-            emailBody: finalEmailBody,
-          });
-          // Re-read so the response carries the comms_history entries
-          // sendStageComms just appended; fall back to the committed
-          // pre-send row if the re-read itself fails.
-          try {
-            const fresh = await db('job_applications').where({ id: updated.id }).first();
-            if (fresh) responseRow = fresh;
-          } catch (reReadErr) {
-            logger.warn(`[admin-careers] post-send re-read failed: ${RecruitingComms.errorSummary(reReadErr)}`);
-          }
-        } catch (sendErr) {
-          if (sendErr && sendErr.code === 'stale_stage') {
-            logger.info(`[admin-careers] interview invite skipped — stage changed before send (application ${req.params.id})`);
-            sent = { sms: wantSms ? 'stale' : 'not_requested', email: wantEmail ? 'stale' : 'not_requested' };
-            try {
-              const fresh = await db('job_applications').where({ id: updated.id }).first();
-              if (fresh) responseRow = fresh;
-            } catch { /* keep the committed row */ }
-            return res.json({ application: withoutToken(responseRow), sent });
-          }
-          logger.error(`[admin-careers] sendStageComms failed after committed transition (application ${req.params.id}): ${RecruitingComms.errorSummary(sendErr)}`);
-          sent = { sms: wantSms ? 'failed' : 'not_requested', email: wantEmail ? 'failed' : 'not_requested' };
-        }
-      }
+    if (!interviewApplicable) {
+      return res.json({ application: withoutToken(updated), sent: { sms: 'not_requested', email: 'not_requested' } });
+    }
+    if (!willSend) {
+      const sent = { sms: plan.wantSms ? 'disabled' : 'not_requested', email: plan.wantEmail ? 'disabled' : 'not_requested' };
+      return res.json({ application: withoutToken(updated), sent });
     }
 
+    const { sent, responseRow } = await deliverStageComms(req.params.id, req.technicianId, updated, plan);
     res.json({ application: withoutToken(responseRow), sent });
   } catch (err) {
     logger.error(`[admin-careers] status update failed: ${RecruitingComms.errorSummary(err)}`);

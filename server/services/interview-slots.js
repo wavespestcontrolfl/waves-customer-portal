@@ -125,6 +125,18 @@ function minutesToETMs(dateStr, min) {
   return parseETDateTime(`${dateStr}T${pad2(hh)}:${pad2(mm)}`).getTime();
 }
 
+function etDateStr(date) {
+  const p = etParts(date);
+  return `${p.year}-${pad2(p.month)}-${pad2(p.day)}`;
+}
+
+// scheduled_date is a DATE column: a 'YYYY-MM-DD' string from a test
+// fixture, a local-midnight Date from the pg driver.
+function scheduledDateStr(value) {
+  if (value instanceof Date) return `${value.getFullYear()}-${pad2(value.getMonth() + 1)}-${pad2(value.getDate())}`;
+  return String(value || '').slice(0, 10);
+}
+
 function slotLabel(startDate) {
   const weekday = startDate.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' });
   const monthDay = startDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' });
@@ -166,8 +178,13 @@ async function listInterviewSlots({ now = new Date(), excludeApplicationId, conn
     if (!dayWindows.length) continue;
 
 
+    // This ET day AND the previous one (Codex r14 P2): occupiedRows lets a
+    // combined allocation's endMin run past midnight, so a late previous-day
+    // allocation must still shadow an early-morning window on this day. The
+    // intervals are absolute instants, so no clipping is needed.
+    const prevDateStr = etDateStr(addETDays(dayAnchor, -1));
     const routeRows = await conn('scheduled_services')
-      .where('scheduled_date', dateStr)
+      .whereIn('scheduled_date', [prevDateStr, dateStr])
       .whereNotIn('status', NOT_ROUTE_STOP_STATUSES)
       .whereNotNull('window_start')
       // Same active-hold predicate as the canonical occupancy readers: an
@@ -185,10 +202,12 @@ async function listInterviewSlots({ now = new Date(), excludeApplicationId, conn
     // its own window — the parallel per-row start/end math this replaced
     // under-counted a combined allocation whose members extend past this
     // row's own window_end (Codex P1).
-    const routeIntervals = occupiedRows(routeRows).map((r) => ({
-      startMs: minutesToETMs(dateStr, r.startMin),
-      endMs: minutesToETMs(dateStr, r.endMin),
-    }));
+    const routeIntervals = [prevDateStr, dateStr].flatMap((d) => (
+      occupiedRows(routeRows.filter((r) => scheduledDateStr(r.scheduled_date) === d)).map((r) => ({
+        startMs: minutesToETMs(d, r.startMin),
+        endMs: minutesToETMs(d, r.endMin),
+      }))
+    ));
 
     // Buffer each other applicant's interview the same BUFFER_MINUTES both
     // sides as route stops (Codex P2) — an interview immediately adjacent to

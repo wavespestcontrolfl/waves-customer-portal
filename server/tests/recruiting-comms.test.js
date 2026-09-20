@@ -60,6 +60,7 @@ function makeDb() {
         return p;
       },
       whereNot(col, val) { excludeIds.push(val); return builder; },
+      forUpdate() { return builder; },
       modify(fn) { fn(builder); return builder; },
       update(payload) {
         const resolved = { ...payload };
@@ -98,7 +99,7 @@ function makeDb() {
         promise.catch = (fn) => Promise.resolve(matches.length).catch(fn);
         return promise;
       },
-      first: () => Promise.resolve(rows.find((r) => Object.entries(whereCond).every(([k, v]) => r[k] === v))),
+      first: () => Promise.resolve(rows.find((r) => Object.entries(whereCond).every(([k, v]) => r[k] === v) && !excludeIds.includes(r.id))),
     };
     return builder;
   });
@@ -695,6 +696,79 @@ describe('eligibility at the provider boundaries', () => {
     expect(mockSendOne).not.toHaveBeenCalled();
     const ledger = mockDb.__tables.email_messages.find((r) => r.recipient_id === 'app-1');
     expect(ledger.status).toBe('failed');
+  });
+
+  test('SMS: the handoff is stamped BEFORE the eligibility read, which is the last await before the provider (Codex r14)', async () => {
+    mockRenderSmsTemplate.mockResolvedValue('Pick a time: https://x/careers/interview/a');
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    const outcomes = () => mockDb.__tables.job_applications.find((r) => r.id === 'app-1').comms_history.map((e) => e.outcome);
+    const seenByEligibility = [];
+    const stillEligible = jest.fn(async () => { seenByEligibility.push(outcomes()); return true; });
+    mockSendCustomerMessage.mockImplementation(async (input) => {
+      await expect(input.preSendCheck({ channel: 'sms' })).resolves.toEqual({ ok: true });
+      return { sent: true, blocked: false, deliveryOutcome: 'accepted' };
+    });
+    const result = await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: true, email: false, by: 'tech-1', stillEligible });
+    expect(result.sms).toBe('sent');
+    // leg check (pending), then the boundary check AFTER the stamp (handoff)
+    expect(seenByEligibility).toEqual([[], ['handoff']]);
+    const entry = mockDb.__tables.job_applications.find((r) => r.id === 'app-1').comms_history[0];
+    expect(entry.outcome).toBe('sent');
+    expect(typeof entry.handoff_at).toBe('string');
+  });
+
+  test('SMS: a concurrent resend that appended a NEWER interview_invite attempt supersedes this one at the boundary — one text, not two', async () => {
+    mockRenderSmsTemplate.mockResolvedValue('Pick a time: https://x/careers/interview/a');
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    const row = () => mockDb.__tables.job_applications.find((r) => r.id === 'app-1');
+    mockSendCustomerMessage.mockImplementation(async (input) => {
+      // the other admin's attempt lands in the ledger while this one is inside the validators
+      row().comms_history.push({ id: 'other-attempt', at: new Date().toISOString(), stage: 'interview_invite', channel: 'sms', outcome: 'pending', body: 'x', by: 'tech-2' });
+      const check = await input.preSendCheck({ channel: 'sms' });
+      expect(check).toMatchObject({ ok: false, code: 'RECRUITING_SUPERSEDED' });
+      return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: check.code };
+    });
+    const result = await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: true, email: false, by: 'tech-1' });
+    expect(result.sms).toBe('blocked');
+    const [mine, other] = row().comms_history;
+    // never stamped handoff (no delivery evidence), settled as blocked
+    expect(mine).toMatchObject({ outcome: 'blocked', code: 'RECRUITING_SUPERSEDED' });
+    expect(mine.handoff_at).toBeUndefined();
+    // the newer attempt is untouched — it delivers
+    expect(other).toMatchObject({ id: 'other-attempt', outcome: 'pending' });
+  });
+
+  test('SMS: owner replies are distinct messages — a newer owner_reply never supersedes an in-flight one', async () => {
+    const app = baseApp();
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    const row = () => mockDb.__tables.job_applications.find((r) => r.id === 'app-1');
+    mockSendCustomerMessage.mockImplementation(async (input) => {
+      row().comms_history.push({ id: 'second-reply', at: new Date().toISOString(), stage: 'owner_reply', channel: 'sms', outcome: 'pending', body: 'and one more thing', by: 'tech-1' });
+      await expect(input.preSendCheck({ channel: 'sms' })).resolves.toEqual({ ok: true });
+      return { sent: true, blocked: false, deliveryOutcome: 'accepted' };
+    });
+    const result = await RecruitingComms.sendStageComms(app, 'owner_reply', { sms: true, email: false, by: 'tech-1', smsBody: 'See you Tuesday' });
+    expect(result.sms).toBe('sent');
+  });
+
+  test('email: a newer live email_messages row for the same application + template supersedes this attempt before SendGrid', async () => {
+    mockRenderSmsTemplate.mockResolvedValue('Pick a time: https://x/careers/interview/a');
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    mockDb.__tables.email_messages = [];
+    mockActiveSuppressionFor.mockImplementationOnce(async () => {
+      // the other admin's attempt inserts its row while this one is in the suppression lookup
+      mockDb.__tables.email_messages.push({ id: 'newer-attempt', recipient_type: 'job_application', recipient_id: 'app-1', template_key: 'job_interview_invite', status: 'queued', queued_at: new Date(Date.now() + 1000) });
+      return null;
+    });
+    const result = await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: false, email: true, by: 'tech-1' });
+    expect(result.email).toBe('stale');
+    expect(mockSendOne).not.toHaveBeenCalled();
+    const mine = mockDb.__tables.email_messages.find((r) => r.id !== 'newer-attempt');
+    expect(mine).toMatchObject({ status: 'failed', error_message: 'superseded: a newer attempt of this stage exists' });
+    expect(mockDb.__tables.email_messages.find((r) => r.id === 'newer-attempt').status).toBe('queued');
   });
 });
 

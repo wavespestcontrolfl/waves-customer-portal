@@ -85,6 +85,67 @@ const failClosed = (label, id, err) => {
   return { eligible: false, reason: 'recheck-failed', retryable: true };
 };
 
+// recruiting_comms_deferred#recheck's three phases (each returns a
+// { eligible: false, reason } refusal, or null to continue). Split out so
+// the eligibility read (with its optional row lock), the ledger-history
+// supersession check, and the booking-version check each carry a single
+// named responsibility instead of one function doing all three.
+
+// Application eligibility: loads the application (FOR UPDATE when `lock` is
+// set — smsHandoff's locked re-check holds the row from here through the
+// provider request) and confirms it is missing or in a status this stage
+// can still act on.
+async function checkRecruitingApplicationEligibility(meta, conn, lock) {
+  if (!meta.job_application_id) return { refusal: { eligible: false, reason: 'application-missing' } };
+  let appQuery = conn('job_applications').where({ id: meta.job_application_id });
+  if (lock) appQuery = appQuery.forUpdate();
+  const app = await appQuery
+    .first('id', 'status', 'interview_token', 'interview_at', 'interview_mode', 'comms_history');
+  if (!app) return { refusal: { eligible: false, reason: 'application-missing' } };
+  const status = String(app.status || '');
+  if (!['new', 'reviewed', 'interview', 'offer'].includes(status)) {
+    return { refusal: { eligible: false, reason: `application-${status || 'unknown'}` } };
+  }
+  return { app };
+}
+
+// Stage supersession: for the interview stages only, the application must
+// still be at 'interview', and this queued attempt must not have been
+// superseded by a newer attempt of the same stage in the ledger (Codex r7
+// P2) or by a token that changed since this row was queued.
+function checkRecruitingStageSupersession(meta, app, stage) {
+  if (stage !== 'interview_invite' && stage !== 'interview_confirmation') return null;
+  const status = String(app.status || '');
+  if (status !== 'interview') return { eligible: false, reason: `application-${status}` };
+  const history = Array.isArray(app.comms_history) ? app.comms_history : [];
+  const mine = history.find((e) => e && e.id === meta.ledger_entry_id);
+  const mineAt = mine ? Date.parse(mine.at || '') : NaN;
+  // 'pending' counts too (Codex r14 P2): an immediate resend sits at 'pending'
+  // while it runs the validators, and its own provider-boundary check only
+  // looks for attempts newer than ITSELF — so this claimed row must yield
+  // to it, or both would reach Twilio.
+  const newer = history.some((e) => e && e.id !== meta.ledger_entry_id && e.channel === 'sms' && e.stage === stage
+    && ['pending', 'handoff', 'sent', 'uncertain', 'deferred'].includes(e.outcome)
+    && Number.isFinite(mineAt) && Date.parse(e.at || '') > mineAt);
+  if (newer) return { eligible: false, reason: 'superseded-by-newer-attempt' };
+  if (!meta.interview_token || app.interview_token !== meta.interview_token) {
+    return { eligible: false, reason: 'interview-token-changed' };
+  }
+  return null;
+}
+
+// Booking version: interview_confirmation only — the queued copy names a
+// specific pinned time and mode, so a rebook to a different time, or the
+// same time under a different mode (phone ↔ in person), makes it stale.
+function checkRecruitingBookingVersion(meta, app, stage) {
+  if (stage !== 'interview_confirmation') return null;
+  const pinned = meta.interview_at ? new Date(meta.interview_at).toISOString() : null;
+  const current = app.interview_at ? new Date(app.interview_at).toISOString() : null;
+  if (!pinned || pinned !== current) return { eligible: false, reason: 'interview-rebooked' };
+  if ((meta.interview_mode || null) !== (app.interview_mode || null)) return { eligible: false, reason: 'interview-mode-changed' };
+  return null;
+}
+
 const REGISTRY = {
   lawn_assessment_notification_deferred: {
     async recheck(meta) {
@@ -590,42 +651,16 @@ const REGISTRY = {
         if (!require('../../config/feature-gates').isEnabled('recruitingComms')) {
           return { eligible: false, reason: 'recruiting-gate-off' };
         }
-        if (!meta.job_application_id) return { eligible: false, reason: 'application-missing' };
-        let appQuery = conn('job_applications').where({ id: meta.job_application_id });
-        if (lock) appQuery = appQuery.forUpdate();
-        const app = await appQuery
-          .first('id', 'status', 'interview_token', 'interview_at', 'interview_mode', 'comms_history');
-        if (!app) return { eligible: false, reason: 'application-missing' };
-        const status = String(app.status || '');
-        if (!['new', 'reviewed', 'interview', 'offer'].includes(status)) {
-          return { eligible: false, reason: `application-${status || 'unknown'}` };
-        }
+        const { app, refusal } = await checkRecruitingApplicationEligibility(meta, conn, lock);
+        if (refusal) return refusal;
+
         const stage = String(meta.stage || '');
-        if (stage === 'interview_invite' || stage === 'interview_confirmation') {
-          if (status !== 'interview') return { eligible: false, reason: `application-${status}` };
-          // Supersession through the replay rail itself (Codex r7 P2): a
-          // NEWER attempt of the same stage in the ledger (the owner resent,
-          // immediately or queued) retires this one even if the worker has
-          // already claimed the row.
-          const history = Array.isArray(app.comms_history) ? app.comms_history : [];
-          const mine = history.find((e) => e && e.id === meta.ledger_entry_id);
-          const mineAt = mine ? Date.parse(mine.at || '') : NaN;
-          const newer = history.some((e) => e && e.id !== meta.ledger_entry_id && e.channel === 'sms' && e.stage === stage
-            && ['handoff', 'sent', 'uncertain', 'deferred'].includes(e.outcome)
-            && Number.isFinite(mineAt) && Date.parse(e.at || '') > mineAt);
-          if (newer) return { eligible: false, reason: 'superseded-by-newer-attempt' };
-          if (!meta.interview_token || app.interview_token !== meta.interview_token) {
-            return { eligible: false, reason: 'interview-token-changed' };
-          }
-        }
-        if (stage === 'interview_confirmation') {
-          const pinned = meta.interview_at ? new Date(meta.interview_at).toISOString() : null;
-          const current = app.interview_at ? new Date(app.interview_at).toISOString() : null;
-          if (!pinned || pinned !== current) return { eligible: false, reason: 'interview-rebooked' };
-          // Same time, different mode (phone ↔ in person) is a different
-          // confirmation — the queued copy names the wrong one.
-          if ((meta.interview_mode || null) !== (app.interview_mode || null)) return { eligible: false, reason: 'interview-mode-changed' };
-        }
+        const supersessionRefusal = checkRecruitingStageSupersession(meta, app, stage);
+        if (supersessionRefusal) return supersessionRefusal;
+
+        const bookingRefusal = checkRecruitingBookingVersion(meta, app, stage);
+        if (bookingRefusal) return bookingRefusal;
+
         return { eligible: true };
       } catch (err) {
         return failClosed('recruiting-comms', meta.job_application_id, err);

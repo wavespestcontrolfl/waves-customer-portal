@@ -207,6 +207,24 @@ describe('route-conflict exclusion with buffer', () => {
     expect(today).toEqual(['Tue Mar 16, 5:30 PM']);
   });
 
+  test('a previous-day allocation running past midnight blocks an early-morning window on the next day (Codex #4623 r14)', async () => {
+    // Tue 11:30pm ET stop with a 90-minute duration and no window_end runs
+    // to 1:00am Wed; a Wed 00:30-02:00 window loses 00:30 and 01:00 (buffer
+    // 15 min either side) and keeps 01:30.
+    process.env.RECRUITING_INTERVIEW_WINDOWS = JSON.stringify({ 3: [['00:30', '02:00']] });
+    reset({
+      scheduled_services: [{
+        scheduled_date: TODAY, status: 'confirmed',
+        window_start: '23:30:00', window_end: null, estimated_duration_minutes: 90,
+      }],
+    });
+    const slots = await listInterviewSlots({ now: NOW });
+    expect(slots.filter((s) => s.date === WED).map((s) => s.label)).toEqual(['Wed Mar 17, 1:30 AM']);
+    // the read covers the previous ET day as well as the day being built
+    const readDates = mockDb.mock.calls.length; // sanity: the table was read
+    expect(readDates).toBeGreaterThan(0);
+  });
+
   test('cancelled/completed route stops do not block', async () => {
     reset({
       scheduled_services: [

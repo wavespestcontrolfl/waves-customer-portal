@@ -89,4 +89,31 @@ async function isRecruitingPhone(phone, database = require('../models/db'), { ac
   return Boolean(row);
 }
 
-module.exports = { RECRUITING_MESSAGE_TYPE_PREFIX, OPEN_APPLICATION_STATUSES, isRecruitingMessageType, hideRecruitingThreadsFromNonAdmin, isRecruitingPhone };
+// comms_history SMS outcomes that are DELIVERY evidence — the applicant may
+// hold the text. 'pending' (before the provider boundary) and 'deferred'
+// (queued, not sent) are not.
+const SMS_EVIDENCE_OUTCOMES = ['handoff', 'sent', 'uncertain'];
+
+/**
+ * The instant an SMS ledger entry actually went (or may have gone) out —
+ * the ONE calculation every reader ranks recruiting evidence by (the reply
+ * classifier and the composer's owning-application pick must agree, Codex
+ * r14 P2). NaN for anything that is not delivery evidence.
+ *   at                  — ledger creation (the 'pending' write)
+ *   handoff_at          — stamped at the provider boundary (immediate path)
+ *   replay_attempted_at — stamped by the replay rail right before Twilio
+ *   finalized_at        — settlement time, once settled as sent/uncertain
+ */
+function effectiveSendMs(entry) {
+  if (!entry || entry.channel !== 'sms' || !SMS_EVIDENCE_OUTCOMES.includes(entry.outcome)) return NaN;
+  const settledAt = entry.outcome === 'handoff' ? null : entry.finalized_at;
+  const stamps = [entry.at, entry.handoff_at, entry.replay_attempted_at, settledAt]
+    .map((v) => Date.parse(v || ''))
+    .filter((ms) => Number.isFinite(ms));
+  return stamps.length ? Math.max(...stamps) : NaN;
+}
+
+module.exports = {
+  RECRUITING_MESSAGE_TYPE_PREFIX, OPEN_APPLICATION_STATUSES, SMS_EVIDENCE_OUTCOMES,
+  isRecruitingMessageType, hideRecruitingThreadsFromNonAdmin, isRecruitingPhone, effectiveSendMs,
+};

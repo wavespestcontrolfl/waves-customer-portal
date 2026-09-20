@@ -19,9 +19,10 @@ function builder(table) {
   ['whereRaw', 'whereIn', 'where', 'whereNot', 'whereNotIn', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
   q.modify = jest.fn((fn) => { fn(q); return q; });
   q.select = jest.fn(async () => (table === 'job_applications' ? state.apps : []));
-  // sms_log: the "newer customer-facing text" probe uses whereNot(job_%); the
-  // idempotency probe does not.
-  q.first = jest.fn(async () => (table === 'sms_log' ? (q.whereNot.mock.calls.length ? state.newerCustomerText : state.existingReply) : null));
+  // sms_log: the "newer customer-facing text" probe carries the NOT LIKE
+  // job_% type predicate; the idempotency probe does not.
+  q.__isCustomerTextProbe = () => q.whereRaw.mock.calls.some((c) => /NOT LIKE 'job/.test(c[0]));
+  q.first = jest.fn(async () => (table === 'sms_log' ? (q.__isCustomerTextProbe() ? state.newerCustomerText : state.existingReply) : null));
   q.insert = jest.fn(async (row) => {
     if (state.insertFails) throw Object.assign(new Error('insert into sms_log ... values (+19415550142 ...)'), { name: 'error', code: '23505' });
     state.inserts.push({ table, row });
@@ -48,6 +49,8 @@ beforeEach(() => {
   mockTrigger.mockClear();
   mockDb.mockClear();
 });
+
+const customerTextProbe = () => mockDb.mock.results.find((r) => r.value && r.value.__isCustomerTextProbe && r.value.__isCustomerTextProbe()).value;
 
 describe('matchApplicantReply', () => {
   test('matches the open application that received a recruiting text', async () => {
@@ -83,9 +86,13 @@ describe('matchApplicantReply', () => {
   test('a NEWER DELIVERED customer-facing text after the handoff hands the reply back to the customer path', async () => {
     state.newerCustomerText = { id: 'sms-newer' };
     await expect(matchApplicantReply('+19415550142', '+19415550199')).resolves.toBeNull();
-    const q = mockDb.mock.results.find((r) => r.value && r.value.whereNot.mock.calls.length).value;
-    expect(q.whereNotIn).toHaveBeenCalledWith('message_type', ['internal_alert', 'admin_alert', 'ai_assistant', 'ai_assistant_reply']);
-    expect(q.whereNot).toHaveBeenCalledWith('message_type', 'like', 'job\\_%');
+    const q = customerTextProbe();
+    // NULL-typed rows (legacy/direct-insert customer texts) ARE customer
+    // context (Codex r14 P1): the predicate coalesces before excluding the
+    // explicit internal types and job_* rows.
+    const typePredicate = q.whereRaw.mock.calls.find((c) => /NOT LIKE 'job/.test(c[0]));
+    expect(typePredicate[0]).toBe("COALESCE(message_type, '') NOT IN (?, ?, ?, ?) AND COALESCE(message_type, '') NOT LIKE 'job\\_%'");
+    expect(typePredicate[1]).toEqual(['internal_alert', 'admin_alert', 'ai_assistant', 'ai_assistant_reply']);
     // scheduled / blocked / failed customer rows never count — delivery evidence only
     expect(q.whereIn).toHaveBeenCalledWith('status', ['sent', 'delivered']);
     // ... and only texts from the SAME Waves line the recruiting text used
@@ -98,16 +105,29 @@ describe('matchApplicantReply', () => {
     state.apps = [{ id: 'app-1', comms_history: [{ ...sentEntry(1), outcome: 'sent', finalized_at: new Date(NOW - 3600000).toISOString() }] }];
     state.newerCustomerText = null; // the route's created_at > handoff predicate would not match the -0.5d text
     await expect(matchApplicantReply('+19415550142', '+19415550199')).resolves.toEqual({ applicationId: 'app-1' });
-    const q = mockDb.mock.results.find((r) => r.value && r.value.whereNot.mock.calls.length).value;
+    const q = customerTextProbe();
     const bound = q.where.mock.calls.find((c) => c[0] === 'created_at')[2];
     expect(Math.abs(bound.getTime() - (NOW - 3600000))).toBeLessThan(1000);
   });
   test('an in-flight replay (handoff with replay_attempted_at) uses the attempt time, so a customer text sent between enqueue and replay does not override', async () => {
     state.apps = [{ id: 'app-1', comms_history: [{ ...sentEntry(1), outcome: 'handoff', replay_attempted_at: new Date(NOW - 1800000).toISOString() }] }];
     await expect(matchApplicantReply('+19415550142', '+19415550199')).resolves.toEqual({ applicationId: 'app-1' });
-    const q = mockDb.mock.results.find((r) => r.value && r.value.whereNot.mock.calls.length).value;
+    const q = customerTextProbe();
     const bound = q.where.mock.calls.find((c) => c[0] === 'created_at')[2];
     expect(Math.abs(bound.getTime() - (NOW - 1800000))).toBeLessThan(1000);
+  });
+  test('an immediate send ranks by handoff_at, not the earlier pending write: a customer text between the two does not override', async () => {
+    // pending written at -2h, stamped handoff at -30m; a customer text at
+    // -1h is OLDER than the real handoff (Codex r14 P1).
+    state.apps = [{ id: 'app-1', comms_history: [{ ...sentEntry(2 / 24), outcome: 'handoff', handoff_at: new Date(NOW - 1800000).toISOString() }] }];
+    await expect(matchApplicantReply('+19415550142', '+19415550199')).resolves.toEqual({ applicationId: 'app-1' });
+    const q = customerTextProbe();
+    const bound = q.where.mock.calls.find((c) => c[0] === 'created_at')[2];
+    expect(Math.abs(bound.getTime() - (NOW - 1800000))).toBeLessThan(1000);
+  });
+  test('a pending entry (before the provider boundary) is NOT delivery evidence', async () => {
+    state.apps = [{ id: 'app-1', comms_history: [{ ...sentEntry(0.1), outcome: 'pending' }] }];
+    await expect(matchApplicantReply('+19415550142', '+19415550199')).resolves.toBeNull();
   });
   test('a queued (deferred) recruiting text is NOT delivery evidence — a reply from that phone stays on the customer path', async () => {
     state.apps = [{ id: 'app-1', comms_history: [{ ...sentEntry(0.1), outcome: 'deferred' }] }];
