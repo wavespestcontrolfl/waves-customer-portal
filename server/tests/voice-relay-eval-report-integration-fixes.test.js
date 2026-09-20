@@ -68,3 +68,14 @@ test.each([
 ])('nominal contrast runner integration: %s / %s', (text, subject, status) => {
   expect(checks.report_readback_confirms({ ...report, subject }, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+test.each([
+  [['Talstar P was applied to the exterior perimeter and garage.', 'I take that back.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter and garage. I take that back.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter and garage.', 'Actually, that was wrong.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter and garage.', 'Bait was applied indoors.'], 'pass'],
+  [['Talstar P was applied to the exterior perimeter and garage.', 'Let me double-check the report.'], 'pass'],
+  [['Talstar P was applied to the exterior perimeter and garage.'], 'pass'],
+])('a retraction right after a shared location list retracts the list finding: %j', (spoken, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});

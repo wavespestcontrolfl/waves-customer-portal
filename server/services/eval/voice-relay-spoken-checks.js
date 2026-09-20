@@ -2541,13 +2541,12 @@ function reportSharedLocationContinuation(text, clauseEnd, location, subject, as
   if (assertionEnd < clauseEnd && !(boundary && new RegExp(subject, 'i').test(
     clauseOf(remainder.slice(boundary[0].length), 0),
   ))) return { text: '', unconfirmed: false };
-  if (boundary) {
-    const qualifier = reportRetractionClause(remainder.slice(boundary[0].length), subject, location);
-    if (REPORT_TRAILING_UNCERTAINTY_RE.test(qualifier) || reportTrailingDenialOrCorrection(qualifier)
-        || reportTimedDenial(qualifier, findingText) || reportTrailingNoncompletion(qualifier)) {
-      return { text: '', unconfirmed: true };
-    }
-  }
+  const retracts = (source) => {
+    const qualifier = reportRetractionClause(source, subject, location);
+    return REPORT_TRAILING_UNCERTAINTY_RE.test(qualifier) || reportTrailingDenialOrCorrection(qualifier)
+      || reportTimedDenial(qualifier, findingText) || reportTrailingNoncompletion(qualifier);
+  };
+  if (boundary && retracts(remainder.slice(boundary[0].length))) return { text: '', unconfirmed: true };
   // A shared list can be followed by a separate denial. Keep the location
   // matcher in the list clause so it cannot consume a repeated target there.
   const locationContinuation = /^and\b/i.test(remainder)
@@ -2576,9 +2575,15 @@ function reportSharedLocationContinuation(text, clauseEnd, location, subject, as
     return { text: '', unconfirmed: false };
   }
   const end = remainder.search(/[.!?;]/);
+  // The sentence after a completed list retracts it the same way it retracts
+  // a plain finding: the list clause is the pronoun's antecedent. Speech-event
+  // boundaries are already joined into sentences by the runner.
+  const afterList = end >= 0
+    ? new RegExp(`^(?:${CLAUSE_BOUNDARY_TOKEN_RE.source})\\s*,?\\s*`, 'i').exec(remainder.slice(end)) : null;
+  const retractedAfterList = Boolean(afterList) && retracts(remainder.slice(end + afterList[0].length));
   return {
     text: remainder.slice(0, end >= 0 ? end : undefined),
-    unconfirmed: (end >= 0 && remainder[end] === '?') || unconfirmed,
+    unconfirmed: (end >= 0 && remainder[end] === '?') || unconfirmed || retractedAfterList,
   };
 }
 
