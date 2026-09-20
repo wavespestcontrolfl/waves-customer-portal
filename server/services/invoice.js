@@ -2695,7 +2695,6 @@ const InvoiceService = {
       codePrefix: invoiceShortCodePrefix(invoice),
     });
 
-    const techName = invoice.tech_name || "Our team";
     const serviceType = invoice.service_type || invoice.title || "your service";
 
     // Service-date framing, all on the ET calendar day. Knex returns DATE as a
@@ -2735,12 +2734,13 @@ const InvoiceService = {
     // fails toward the pre-service copy.
     let preServiceCopy = serviceDateIsFutureET;
     if (!preServiceCopy && invoice.scheduled_service_id) {
-      const visit = await db("scheduled_services").where({ id: invoice.scheduled_service_id }).first("status")
-        .catch((err) => {
-          logger.warn(`[invoice] Linked visit status lookup failed for ${invoiceId}: ${err.message}`);
-          return null;
-        });
-      preServiceCopy = visit?.status !== "completed";
+      try {
+        const visit = await db("scheduled_services").where({ id: invoice.scheduled_service_id }).first("status");
+        preServiceCopy = visit?.status !== "completed";
+      } catch (err) {
+        logger.warn(`[invoice] Linked visit status lookup failed for ${invoiceId}: ${err.message}`);
+        preServiceCopy = true;
+      }
     }
 
     // Annual-prepay invoices use a dedicated, coverage-aware template — the
