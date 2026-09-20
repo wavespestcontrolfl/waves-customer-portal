@@ -30,3 +30,14 @@ test('a technician read scope excludes hidden recruiting rows; an admin scope do
   const adminScoped = calls.filter(([t]) => t === 'messages').some(([, q]) => q.orWhere.mock.calls.some((c) => c[0] === 'message_type'));
   expect(adminScoped).toBe(false);
 });
+
+test('countUnreadInboundSms fails closed: no role → recruiting rows excluded; admin role → counted', async () => {
+  const { countUnreadInboundSms } = require('../services/inbound-sms-read');
+  const calls = [];
+  db.mockImplementation((table) => { const q = chain([]); q.count = jest.fn(() => q); q.groupBy = jest.fn(() => q); q.whereNotExists = jest.fn((fn) => { fn.call(q, q); return q; }); q.from = jest.fn(() => q); calls.push([table, q]); return q; });
+  await countUnreadInboundSms({}).catch(() => {});
+  expect(calls.filter(([t]) => t === 'messages').some(([, q]) => q.orWhere.mock.calls.some((c) => c[0] === 'messages.message_type'))).toBe(true);
+  calls.length = 0;
+  await countUnreadInboundSms({ role: 'admin' }).catch(() => {});
+  expect(calls.filter(([t]) => t === 'messages').some(([, q]) => q.orWhere.mock.calls.some((c) => c[0] === 'messages.message_type'))).toBe(false);
+});

@@ -271,7 +271,9 @@ async function clearCustomerThreadCrossBells({ ids, convs, now, role }) {
 // Count that same identity across every conversation. Internal
 // admin-phone traffic is excluded exactly as the inbox log excludes it
 // (`excludePhones` = the router's ADMIN_PHONES).
-async function countUnreadInboundSms({ excludePhones = [], customerId = null, role = 'admin' } = {}) {
+// role defaults to NON-admin (fail closed): a caller that does not say who is
+// asking never sees recruiting rows counted.
+async function countUnreadInboundSms({ excludePhones = [], customerId = null, role = null } = {}) {
   const { hideRecruitingThreadsFromNonAdmin } = require('../utils/recruiting-thread-scope');
   // Same role-aware recruiting exclusion as the display query (PR #4623):
   // a badge must never count a message its reader cannot open.
