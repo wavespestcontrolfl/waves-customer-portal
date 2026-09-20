@@ -14,27 +14,44 @@ const { parseHHMM } = require('./window-rules');
 // Two customers promised the same technician at the same time. Staff and
 // phone-reschedule saves commit through such a clash by owner ruling
 // (2026-08-25, advisory only), so the planned board is where it must show.
-// Occupied time is the rebooker's own model (visit-capacity occupiedRows:
-// a version-2 combined booking occupies the SUM of its members, anything
-// else COALESCE(window_end, start + estimate)), so the card agrees with the
-// probe that let the save through. Not a clash: the members of one combined
-// booking, and one customer's pest + lawn rows that isCoVisitPair proves are
-// one physical stop (same window, pin and premise, ungrouped) — a customer's
-// second property or unit in the same slot still is one. An unknown
-// customer on either side is never waved on.
-function doubleBookedPairs(stops) {
+// One physical stop is one block: the members of a service-visit group
+// (visit_id — arrival-route groupRouteStops: one stop, the SUM of its
+// members' work) or of a version-2 combined booking (visit-capacity
+// allocationKey, which occupiedRows already sums) are merged before any
+// comparison, and one customer's ungrouped pest + lawn rows that
+// isCoVisitPair proves are one stop (same window, pin and premise) never
+// pair. A customer's second property or unit in the same slot still does.
+// Everything else occupies COALESCE(window_end, start + estimate) — the
+// rebooker's own probe, so the card agrees with what let the save through.
+// An unknown customer on either side is never waved on.
+function occupiedBlocks(stops) {
   const timed = stops.filter(stop => parseHHMM(stop.window_start) != null);
-  const blocks = occupiedRows(timed)
-    .map((row, index) => ({ stop: timed[index], key: allocationKey(timed[index]), start: row.startMin, end: row.endMin }))
-    .filter(block => block.start != null && block.end > block.start)
-    .sort((a, b) => a.start - b.start || String(a.stop.id).localeCompare(String(b.stop.id)));
+  const occupied = occupiedRows(timed);
+  const blocks = new Map();
+  timed.forEach((stop, index) => {
+    const key = stop.visit_id || allocationKey(stop) || `row:${stop.id}`;
+    const block = blocks.get(key) || { key, ids: [], stops: [], start: Infinity, end: -Infinity, work: 0 };
+    block.ids.push(stop.id);
+    block.stops.push(stop);
+    block.start = Math.min(block.start, occupied[index].startMin);
+    block.end = Math.max(block.end, occupied[index].endMin);
+    block.work += workDuration(stop);
+    blocks.set(key, block);
+  });
+  return [...blocks.values()]
+    .map(block => ({ ...block, end: block.stops.length > 1 && block.stops[0].visit_id ? Math.max(block.end, block.start + block.work) : block.end }))
+    .filter(block => Number.isFinite(block.start) && block.end > block.start)
+    .sort((a, b) => a.start - b.start || String(a.ids[0]).localeCompare(String(b.ids[0])));
+}
+
+function doubleBookedPairs(stops) {
+  const blocks = occupiedBlocks(stops);
   const pairs = [];
   for (let i = 0; i < blocks.length; i++) {
     for (let j = i + 1; j < blocks.length && blocks[j].start < blocks[i].end; j++) {
       const [a, b] = [blocks[i], blocks[j]];
-      if (a.key && a.key === b.key) continue;
-      if (isCoVisitPair(effectiveWindowRange, a.stop, b.stop)) continue;
-      pairs.push({ ids: [a.stop.id, b.stop.id], minutes: Math.min(a.end, b.end) - b.start });
+      if (a.stops.length === 1 && b.stops.length === 1 && isCoVisitPair(effectiveWindowRange, a.stops[0], b.stops[0])) continue;
+      pairs.push({ ids: [...a.ids, ...b.ids], minutes: Math.min(a.end, b.end) - b.start });
     }
   }
   return pairs;

@@ -64,9 +64,18 @@ describe('double-booking measurement (same technician, occupied time per the reb
     // Same parcel pin, different unit.
     const unit = measureDayQuality(Model, [{ ...pest, service_address_line1: '1 Main St Apt 1' }, row('lawn', 'cust-a', 10, { lat: 5, lng: 5, service_address_line1: '1 Main St Apt 2' })]);
     expect(unit.doubleBookedVisits).toEqual([{ ids: ['lawn', 'pest'], minutes: 60 }]);
-    // A grouped (visit_id) row is arrival-route's SUM contract, never merged here.
-    const grouped = measureDayQuality(Model, [{ ...pest, visit_id: 'g' }, row('lawn', 'cust-a', 10, { lat: 5, lng: 5, visit_id: 'g' })]);
-    expect(grouped.doubleBookedVisits).toEqual([{ ids: ['lawn', 'pest'], minutes: 60 }]);
+  });
+
+  test('a service-visit group is one stop occupying the sum of its members (codex #4620 r2 P1)', () => {
+    const group = [row('pest', 'cust-a', 10, { visit_id: 'g', window_end: null }), row('lawn', 'cust-a', 10, { visit_id: 'g', window_end: null })];
+    // Members never pair with each other; the group runs 10:00–12:00, so an 11:00 neighbour collides with its summed tail.
+    expect(measureDayQuality(Model, group).doubleBookedVisits).toEqual([]);
+    expect(measureDayQuality(Model, [...group, row('n', 'cust-n', 11, { window_end: null })]).doubleBookedVisits)
+      .toEqual([{ ids: ['pest', 'lawn', 'n'], minutes: 60 }]);
+    expect(measureDayQuality(Model, [...group, row('n', 'cust-n', 12, { window_end: null })]).doubleBookedVisits).toEqual([]);
+    // A different group in the same slot is still a clash.
+    expect(measureDayQuality(Model, [...group, row('o', 'cust-o', 10, { visit_id: 'h', window_end: null })]).doubleBookedVisits)
+      .toEqual([{ ids: ['o', 'pest', 'lawn'], minutes: 60 }]);
   });
 
   test('a version-2 combined booking occupies the sum of its members (codex #4620 r1 P1)', () => {
@@ -75,7 +84,7 @@ describe('double-booking measurement (same technician, occupied time per the reb
       row('m2', 'cust-a', 10, { window_end: null, estimated_duration_minutes: 40, reservation_service_mix: mix })];
     // Members never pair with each other; the 11:00 neighbour collides with the 11:25 allocation end.
     const result = measureDayQuality(Model, [...members, row('n', 'cust-n', 11, { window_end: null })]);
-    expect(result.doubleBookedVisits).toEqual([{ ids: ['m1', 'n'], minutes: 25 }, { ids: ['m2', 'n'], minutes: 25 }]);
+    expect(result.doubleBookedVisits).toEqual([{ ids: ['m1', 'm2', 'n'], minutes: 25 }]);
     expect(measureDayQuality(Model, [...members, row('n', 'cust-n', 12, { window_end: null })]).doubleBookedVisits).toEqual([]);
   });
 });
