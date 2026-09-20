@@ -33,22 +33,30 @@ function occupiedBlocks(stops) {
     // the stop). On its own it has no slot to clash on.
     const timed = parseHHMM(stop.window_start) != null;
     if (!timed && !stop.visit_id) return;
+    // A live hold is not a promise: two customers may hold one slot at once
+    // and the first to graduate wins (slot-reservation.js). Expired holds
+    // are already filtered by the query, so any value here means live.
+    if (stop.reservation_expires_at) return;
     const key = stop.visit_id || allocationKey(stop) || `row:${stop.id}`;
-    const block = blocks.get(key) || { key, ids: [], stops: [], start: Infinity, end: -Infinity, work: 0, visit: !!stop.visit_id, certain: true };
+    const block = blocks.get(key) || { key, ids: [], stops: [], start: Infinity, end: -Infinity, knownEnd: -Infinity, work: 0, visit: !!stop.visit_id, certain: true };
     block.ids.push(stop.id);
     block.stops.push(stop);
+    // No stored span and no estimate: occupiedRows invents 60 minutes, so
+    // that member's end is a guess (the unknown-duration card covers it);
+    // knownEnd keeps what the certain members prove on their own.
+    const certain = Number(stop.estimated_duration_minutes) > 0 || parseHHMM(stop.window_end) > parseHHMM(stop.window_start);
     if (timed) {
       block.start = Math.min(block.start, occupied[index].startMin);
       block.end = Math.max(block.end, occupied[index].endMin);
+      if (certain) block.knownEnd = Math.max(block.knownEnd, occupied[index].endMin);
     }
     block.work += workDuration(stop);
-    // No stored span and no estimate: occupiedRows invents 60 minutes, so
-    // this block's end is a guess (the unknown-duration card already covers it).
-    if (!(Number(stop.estimated_duration_minutes) > 0) && !(parseHHMM(stop.window_end) > parseHHMM(stop.window_start))) block.certain = false;
+    block.certain = block.certain && certain;
     blocks.set(key, block);
   });
   const grouped = [...blocks.values()]
     .map(block => ({ ...block, end: block.visit && block.stops.length > 1 ? Math.max(block.end, block.start + block.work) : block.end }))
+    .map(block => ({ ...block, knownEnd: block.certain ? block.end : block.knownEnd }))
     .filter(block => Number.isFinite(block.start) && block.end > block.start)
     .sort((a, b) => a.start - b.start || String(a.ids[0]).localeCompare(String(b.ids[0])));
   // Every ungrouped block (one row, or one version-2 allocation) carries a
@@ -73,8 +81,10 @@ function occupiedBlocks(stops) {
       host.ids.push(...block.ids);
       host.stops.push(...block.stops);
       host.certain = host.certain && block.certain;
+      host.knownEnd = host.certain ? host.end : Math.max(host.knownEnd, block.knownEnd);
       continue;
     }
+    if (chainable && block.certain) block.knownEnd = block.end;
     merged.push(block);
   }
   return merged;
@@ -86,8 +96,9 @@ function doubleBookedPairs(stops) {
   for (let i = 0; i < blocks.length; i++) {
     for (let j = i + 1; j < blocks.length && blocks[j].start < blocks[i].end; j++) {
       const [a, b] = [blocks[i], blocks[j]];
-      // A guessed end proves nothing; only a shared start is a definite clash then.
-      if (!a.certain && b.start > a.start) continue;
+      // A guessed end proves nothing: past what the certain members
+      // establish, only a shared start is a definite clash.
+      if (b.start > a.start && !(b.start < a.knownEnd)) continue;
       pairs.push({ ids: [...a.ids, ...b.ids], minutes: Math.min(a.end, b.end) - b.start });
     }
   }

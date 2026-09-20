@@ -94,6 +94,16 @@ describe('double-booking measurement (same technician, occupied time per the reb
     expect(later.doubleBookedVisits).toEqual([]);
     expect(later.defaultDurations).toEqual(['u']);
     expect(measureDayQuality(Model, [unknown, row('n', 'cust-n', 10)]).doubleBookedVisits).toEqual([{ ids: ['n', 'u'], minutes: 60 }]);
+    // A group's certain member still proves its own span (codex #4620 r8 P1): 10:00–12:00 + an unknown sibling vs 11:00.
+    const mixed = [row('k', 'cust-k', 10, { visit_id: 'm', window_end: '12:00' }), row('x', 'cust-k', 10, { visit_id: 'm', window_start: null, window_end: null, estimated_duration_minutes: null })];
+    expect(measureDayQuality(Model, [...mixed, row('n', 'cust-n', 11)]).doubleBookedVisits).toEqual([{ ids: ['k', 'x', 'n'], minutes: 60 }]);
+    expect(measureDayQuality(Model, [...mixed, row('n', 'cust-n', 12, { window_start: '12:30', window_end: '13:30' })]).doubleBookedVisits).toEqual([]);
+  });
+
+  test('live reservation holds never card; a committed visit without a customer still does (codex #4620 r8 P2)', () => {
+    const hold = (id) => row(id, null, 10, { reservation_expires_at: new Date(Date.now() + 600000).toISOString() });
+    expect(measureDayQuality(Model, [hold('h1'), hold('h2'), row('n', 'cust-n', 10)]).doubleBookedVisits).toEqual([]);
+    expect(measureDayQuality(Model, [row('c', null, 10), row('n', 'cust-n', 10)]).doubleBookedVisits).toEqual([{ ids: ['c', 'n'], minutes: 60 }]);
   });
 
   test('a version-2 combined booking occupies the sum of its members (codex #4620 r1 P1)', () => {
