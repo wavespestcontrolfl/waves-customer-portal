@@ -793,14 +793,24 @@ router.post('/sms', async (req, res) => {
     }
     if (recruitingReply) {
       requireInboxMessage();
-      const landed = await require('../services/recruiting-inbound').recordApplicantReply({
-        applicationId: recruitingReply.applicationId,
-        from: From, to: To, body: Body, messageSid: MessageSid, mediaCount: inboundMedia.length,
-      });
+      try {
+        // sms_log row + comms_history entry commit together, idempotent on
+        // the SID — a retry after a partial failure cannot double-record.
+        await require('../services/recruiting-inbound').recordApplicantReply({
+          applicationId: recruitingReply.applicationId,
+          from: From, to: To, body: Body, messageSid: MessageSid, mediaCount: inboundMedia.length,
+        });
+      } catch (e) {
+        // Fail closed: nothing non-idempotent committed — release the claim
+        // and 503 so Twilio redelivers (same posture as the match failure).
+        logger.error(`[recruiting-inbound] persistence failed (${e.name || 'Error'}${e.code ? ` ${e.code}` : ''}) — deferring inbound for retry`);
+        if (claimOwned && !persisted) await releaseInboundWebhook(MessageSid);
+        return res.status(503).type('text/xml').send('<Response></Response>');
+      }
+      persisted = true;
       // Retype the unified inbox row so the thread reads as recruiting for
       // every shared-reader filter, not just the outbound side.
       await updateByTwilioSid(MessageSid, { message_type: 'job_applicant_reply' }).catch(() => {});
-      if (landed) persisted = true;
       return res.type('text/xml').send('<Response></Response>');
     }
 

@@ -38,4 +38,24 @@ function hideRecruitingThreadsFromNonAdmin(query, req, conversationIdColumn = 'c
   });
 }
 
-module.exports = { RECRUITING_MESSAGE_TYPE_PREFIX, isRecruitingMessageType, hideRecruitingThreadsFromNonAdmin };
+/**
+ * Has this phone ever been party to a recruiting text (either direction)?
+ * For readers that key on a caller-supplied phone rather than a joined
+ * conversation (the AI draft composer): a non-admin must be refused before
+ * any history for that phone is loaded.
+ */
+async function isRecruitingPhone(phone, database = require('../models/db')) {
+  const { phoneMatchDigits } = require('./phone');
+  const variants = phoneMatchDigits(String(phone || ''));
+  if (!variants.length) return false;
+  const row = await database('sms_log')
+    .where('message_type', 'like', `${RECRUITING_MESSAGE_TYPE_PREFIX}%`)
+    .whereRaw(
+      "(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g') = ANY (?::text[]) OR regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g') = ANY (?::text[]))",
+      [variants, variants],
+    )
+    .first('id');
+  return Boolean(row);
+}
+
+module.exports = { RECRUITING_MESSAGE_TYPE_PREFIX, isRecruitingMessageType, hideRecruitingThreadsFromNonAdmin, isRecruitingPhone };

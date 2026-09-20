@@ -55,13 +55,32 @@ async function matchApplicantReply(fromPhone) {
 }
 
 /**
- * Persists the reply on the application and rings the admin-only bell.
- * Returns true when the sms_log row landed (the caller's persistence flag).
+ * Persists the reply on the application — sms_log row + comms_history entry
+ * in ONE transaction, idempotent on the Twilio SID — then rings the
+ * admin-only bell. Throws when the persistence transaction fails so the
+ * webhook can defer the delivery for a Twilio retry (fail closed); the bell
+ * is best-effort after the commit.
+ *
+ * @returns {Promise<{ persisted: boolean, duplicate: boolean }>}
  */
 async function recordApplicantReply({ applicationId, from, to, body, messageSid, mediaCount = 0 }) {
-  let persisted = false;
-  try {
-    await db('sms_log').insert({
+  const entry = {
+    at: new Date().toISOString(),
+    stage: 'applicant_reply',
+    channel: 'sms',
+    to: maskPhone(from),
+    outcome: 'received',
+    code: null,
+    body: body || (mediaCount ? `${mediaCount} photo${mediaCount === 1 ? '' : 's'}` : ''),
+    by: 'applicant',
+  };
+
+  const duplicate = await db.transaction(async (trx) => {
+    const existing = messageSid
+      ? await trx('sms_log').where({ twilio_sid: messageSid, message_type: REPLY_MESSAGE_TYPE }).first('id')
+      : null;
+    if (existing) return true;
+    await trx('sms_log').insert({
       customer_id: null,
       direction: 'inbound',
       from_phone: from,
@@ -73,34 +92,20 @@ async function recordApplicantReply({ applicationId, from, to, body, messageSid,
       is_read: false,
       metadata: JSON.stringify({ job_application_id: applicationId, media_count: mediaCount }),
     });
-    persisted = true;
-  } catch (err) {
-    logger.error(`[recruiting-inbound] sms_log insert failed (application ${applicationId}): ${errorSummary(err)}`);
+    await appendCommsHistory(applicationId, [entry], trx);
+    return false;
+  });
+
+  if (!duplicate) {
+    try {
+      const { triggerNotification } = require('./notification-triggers');
+      await triggerNotification('job_applicant_reply', { applicationId });
+    } catch (err) {
+      logger.error(`[recruiting-inbound] bell failed (application ${applicationId}): ${errorSummary(err)}`);
+    }
   }
 
-  try {
-    await appendCommsHistory(applicationId, [{
-      at: new Date().toISOString(),
-      stage: 'applicant_reply',
-      channel: 'sms',
-      to: maskPhone(from),
-      outcome: 'received',
-      code: null,
-      body: body || (mediaCount ? `${mediaCount} photo${mediaCount === 1 ? '' : 's'}` : ''),
-      by: 'applicant',
-    }]);
-  } catch (err) {
-    logger.error(`[recruiting-inbound] comms_history append failed (application ${applicationId}): ${errorSummary(err)}`);
-  }
-
-  try {
-    const { triggerNotification } = require('./notification-triggers');
-    await triggerNotification('job_applicant_reply', { applicationId });
-  } catch (err) {
-    logger.error(`[recruiting-inbound] bell failed (application ${applicationId}): ${errorSummary(err)}`);
-  }
-
-  return persisted;
+  return { persisted: true, duplicate };
 }
 
 module.exports = { matchApplicantReply, recordApplicantReply, OPEN_STATUSES, RECENT_OUTBOUND_DAYS, REPLY_MESSAGE_TYPE };

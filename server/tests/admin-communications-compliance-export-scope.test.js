@@ -31,6 +31,11 @@ jest.mock('../services/sms-media', () => ({
 }));
 jest.mock('../services/twilio-failure-alerts', () => ({ alertTwilioFailure: jest.fn(() => Promise.resolve()) }));
 jest.mock('../services/conversations', () => ({ recordTouchpoint: jest.fn(() => Promise.resolve()) }));
+const mockIsRecruitingPhone = jest.fn(async () => false);
+jest.mock('../utils/recruiting-thread-scope', () => {
+  const real = jest.requireActual('../utils/recruiting-thread-scope');
+  return { ...real, isRecruitingPhone: (...a) => mockIsRecruitingPhone(...a) };
+});
 
 const express = require('express');
 const db = require('../models/db');
@@ -89,4 +94,28 @@ test('admin export is unfiltered', async () => {
   const res = await exportAs('admin');
   expect(res.status).toBe(200);
   expect(auditQuery.whereNot).not.toHaveBeenCalledWith({ audience: 'applicant' });
+});
+
+describe('POST /ai-draft recruiting boundary', () => {
+  async function draftAs(role) {
+    return fetch(`${base}/api/admin/communications/ai-draft`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${role}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ customerPhone: '+19415550142', lastMessage: 'hi' }),
+    });
+  }
+
+  test('technician is refused (403) for an applicant phone BEFORE any history is read', async () => {
+    mockIsRecruitingPhone.mockResolvedValueOnce(true);
+    db.mockClear();
+    const res = await draftAs('tech');
+    expect(res.status).toBe(403);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('admin is never refused by the recruiting boundary', async () => {
+    mockIsRecruitingPhone.mockResolvedValueOnce(true);
+    const res = await draftAs('admin');
+    expect(res.status).not.toBe(403);
+  });
 });

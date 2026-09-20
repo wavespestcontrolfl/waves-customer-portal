@@ -6,7 +6,7 @@ const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
-const { hideRecruitingThreadsFromNonAdmin } = require('../utils/recruiting-thread-scope');
+const { hideRecruitingThreadsFromNonAdmin, isRecruitingPhone } = require('../utils/recruiting-thread-scope');
 const { resolveLocation } = require('../config/locations');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
@@ -1935,6 +1935,13 @@ router.post('/ai-draft', async (req, res, next) => {
   try {
     const { customerPhone, lastMessage } = req.body;
     if (!customerPhone) return res.status(400).json({ error: 'customerPhone required' });
+
+    // Recruiting boundary (utils/recruiting-thread-scope.js): applicant
+    // history carries the bearer interview link and is owner-only — refuse a
+    // non-admin BEFORE any history for this phone is loaded into a prompt.
+    if (req.techRole !== 'admin' && await isRecruitingPhone(customerPhone)) {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
 
     // Look up customer context
     const cleanPhone = customerPhone.replace(/\D/g, '').slice(-10);

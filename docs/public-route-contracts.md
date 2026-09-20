@@ -2149,8 +2149,10 @@ every shared reader: the invite carries this bearer link and dual-writes
 into the unified inbox, so `utils/recruiting-thread-scope.js` filters the
 whole applicant conversation (`message_type LIKE 'job_%'`) out of
 `/api/admin/communications/log`, the dashboard inbox + its reply lookup,
-and applicant rows (`audience='applicant'`) out of the compliance export
-for any non-admin staff session.
+applicant rows (`audience='applicant'`) out of the compliance export, and
+refuses (403) a non-admin `POST /api/admin/communications/ai-draft` for a
+phone that has ever been party to a recruiting text
+(`isRecruitingPhone`) before any history for that phone is loaded.
 A successful book fires (fire-and-forget) the `interview_confirmation`
 comms — SMS only with `sms_consent` or evidence the owner already texted
 this applicant by hand — and the `job_interview_booked` admin

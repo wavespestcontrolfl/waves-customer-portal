@@ -384,9 +384,9 @@ function historyEntry({ stage, channel, to, outcome, code, body, by }) {
   };
 }
 
-async function appendCommsHistory(applicationId, entries) {
+async function appendCommsHistory(applicationId, entries, conn = db) {
   if (!entries || !entries.length) return;
-  await db('job_applications')
+  await conn('job_applications')
     .where({ id: applicationId })
     .update({
       comms_history: db.raw("COALESCE(comms_history, '[]'::jsonb) || ?::jsonb", [JSON.stringify(entries)]),
@@ -455,7 +455,9 @@ async function sendStageComms(app, stage, opts = {}) {
         result.sms = 'skipped';
         entries.push(historyEntry({ stage, channel: 'sms', to: contact.phone, outcome: 'skipped', code: 'template_disabled', body: '', by }));
       } else {
-        const sendRes = await sendCustomerMessage({
+        let sendRes;
+        try {
+          sendRes = await sendCustomerMessage({
           to: contact.phone,
           body,
           channel: 'sms',
@@ -465,7 +467,13 @@ async function sendStageComms(app, stage, opts = {}) {
           identityTrustLevel: 'phone_provided_unverified',
           consentBasis: { status: 'transactional_allowed', source: 'job_application' },
           metadata: { original_message_type: `job_${stage}`, job_application_id: app.id },
-        });
+          });
+        } catch (err) {
+          // Channel isolation: a throw here must not lose the email leg's
+          // outcome (or vice versa) — record it as a failed attempt.
+          logger.error(`[recruiting-comms] sms leg threw (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
+          sendRes = { sent: false, blocked: false, deliveryOutcome: 'not_sent', code: `threw:${errorSummary(err)}` };
+        }
         const outcome = sendRes.sent
           ? 'sent'
           : (sendRes.blocked ? 'blocked' : (sendRes.deliveryOutcome === 'uncertain' ? 'uncertain' : 'failed'));
@@ -488,7 +496,13 @@ async function sendStageComms(app, stage, opts = {}) {
       const html = (opts.emailSubject || opts.emailBody)
         ? wrapEmailHtml({ heading: subject, paragraphs: String(text).split(/\n{2,}/) })
         : built.html;
-      const sendRes = await sendRawEmail({ app, stage, to: contact.email, subject, html, text });
+      let sendRes;
+      try {
+        sendRes = await sendRawEmail({ app, stage, to: contact.email, subject, html, text });
+      } catch (err) {
+        logger.error(`[recruiting-comms] email leg threw (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
+        sendRes = { outcome: 'failed', code: `threw:${errorSummary(err)}` };
+      }
       result.email = sendRes.outcome;
       entries.push(historyEntry({
         stage, channel: 'email', to: contact.email, outcome: sendRes.outcome, code: sendRes.code,
@@ -497,7 +511,15 @@ async function sendStageComms(app, stage, opts = {}) {
     }
   }
 
-  if (entries.length) await appendCommsHistory(app.id, entries);
+  // Always persist whatever completed — a history write failure is logged,
+  // never allowed to mask an outcome the caller already has.
+  if (entries.length) {
+    try {
+      await appendCommsHistory(app.id, entries);
+    } catch (err) {
+      logger.error(`[recruiting-comms] comms_history append failed (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
+    }
+  }
   return result;
 }
 

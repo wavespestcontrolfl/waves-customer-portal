@@ -8,6 +8,7 @@
 const {
   hideRecruitingThreadsFromNonAdmin,
   isRecruitingMessageType,
+  isRecruitingPhone,
   RECRUITING_MESSAGE_TYPE_PREFIX,
 } = require('../utils/recruiting-thread-scope');
 
@@ -64,5 +65,34 @@ describe('hideRecruitingThreadsFromNonAdmin', () => {
     const { q, probe } = fakeQuery();
     hideRecruitingThreadsFromNonAdmin(q, { techRole: 'technician' }, 'c.id');
     expect(probe.whereRaw).toHaveBeenCalledWith('recruiting_probe.conversation_id = c.id');
+  });
+});
+
+describe('isRecruitingPhone', () => {
+  function fakeDatabase(row) {
+    const q = {};
+    ['where', 'whereRaw'].forEach((m) => { q[m] = jest.fn(() => q); });
+    q.first = jest.fn(async () => row);
+    const database = jest.fn(() => q);
+    database.q = q;
+    return database;
+  }
+
+  test('true when any job_* sms_log row involves the phone (either direction)', async () => {
+    const database = fakeDatabase({ id: 'x' });
+    await expect(isRecruitingPhone('(941) 555-0142', database)).resolves.toBe(true);
+    expect(database).toHaveBeenCalledWith('sms_log');
+    expect(database.q.where).toHaveBeenCalledWith('message_type', 'like', 'job_%');
+    const [sql, bindings] = database.q.whereRaw.mock.calls[0];
+    expect(sql).toMatch(/to_phone/);
+    expect(sql).toMatch(/from_phone/);
+    expect(bindings).toEqual([['19415550142', '9415550142'], ['19415550142', '9415550142']]);
+  });
+
+  test('false with no such row, and false without a query for an unparseable phone', async () => {
+    await expect(isRecruitingPhone('+19415550142', fakeDatabase(null))).resolves.toBe(false);
+    const database = fakeDatabase({ id: 'x' });
+    await expect(isRecruitingPhone('nope', database)).resolves.toBe(false);
+    expect(database).not.toHaveBeenCalled();
   });
 });

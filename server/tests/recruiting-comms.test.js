@@ -371,3 +371,25 @@ describe('sendStageComms', () => {
     expect(stored.comms_history[0]).toMatchObject({ outcome: 'uncertain' });
   });
 });
+
+describe('sendStageComms channel isolation', () => {
+  test('an email-leg throw (suppression lookup) keeps the SMS outcome and still appends both entries', async () => {
+    mockRenderSmsTemplate.mockResolvedValue('Hi Jane, pick a time: https://portal.example/careers/interview/x');
+    mockSendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, deliveryOutcome: 'accepted' });
+    mockActiveSuppressionFor.mockRejectedValueOnce(Object.assign(
+      new Error('select * from email_suppressions where email = jane@example.com'),
+      { name: 'error', code: '57014' },
+    ));
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+
+    const result = await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: true, email: true, by: 'tech-1' });
+
+    expect(result.sms).toBe('sent');
+    expect(result.email).toBe('failed');
+    const stored = mockDb.__tables.job_applications.find((r) => r.id === 'app-1');
+    expect(stored.comms_history.map((e) => [e.channel, e.outcome])).toEqual([['sms', 'sent'], ['email', 'failed']]);
+    expect(stored.comms_history[1].code).toMatch(/^threw:/);
+    expect(stored.comms_history[1].code).not.toMatch(/example\.com/);
+  });
+});

@@ -13,11 +13,17 @@ jest.mock('../services/recruiting-comms', () => ({
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: (...a) => mockTrigger(...a) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const state = { app: null, texted: null, inserts: [], insertFails: false };
+const state = { app: null, texted: null, existingReply: null, inserts: [], insertFails: false };
 function builder(table) {
   const q = {};
   ['whereRaw', 'whereIn', 'where', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
-  q.first = jest.fn(async () => (table === 'job_applications' ? state.app : state.texted));
+  q.first = jest.fn(async () => {
+    if (table === 'job_applications') return state.app;
+    // sms_log: the idempotency probe (where({twilio_sid, message_type})) vs the recent-outbound probe
+    const whereArg = q.where.mock.calls[0] && q.where.mock.calls[0][0];
+    if (whereArg && typeof whereArg === 'object' && whereArg.twilio_sid) return state.existingReply;
+    return state.texted;
+  });
   q.insert = jest.fn(async (row) => {
     if (state.insertFails) throw Object.assign(new Error('insert into sms_log ... values (+19415550142 ...)'), { name: 'error', code: '23505' });
     state.inserts.push({ table, row });
@@ -26,6 +32,7 @@ function builder(table) {
 }
 const mockDb = jest.fn((table) => builder(table));
 mockDb.raw = jest.fn((sql) => ({ sql }));
+mockDb.transaction = jest.fn(async (fn) => fn(mockDb));
 jest.mock('../models/db', () => mockDb);
 
 const { matchApplicantReply, recordApplicantReply, REPLY_MESSAGE_TYPE } = require('../services/recruiting-inbound');
@@ -35,6 +42,7 @@ beforeEach(() => {
   state.texted = { id: 'sms-1' };
   state.inserts = [];
   state.insertFails = false;
+  state.existingReply = null;
   mockAppend.mockClear();
   mockTrigger.mockClear();
   mockDb.mockClear();
@@ -62,22 +70,30 @@ describe('matchApplicantReply', () => {
 describe('recordApplicantReply', () => {
   const args = { applicationId: 'app-1', from: '+19415550142', to: '+19415550199', body: 'Yes, Tuesday works', messageSid: 'SM1', mediaCount: 0 };
 
-  test('writes a job_applicant_reply sms_log row with no customer, appends history, rings the admin-only bell', async () => {
-    await expect(recordApplicantReply(args)).resolves.toBe(true);
+  test('writes the sms_log row + history in one transaction, then rings the admin-only bell (no PII)', async () => {
+    await expect(recordApplicantReply(args)).resolves.toEqual({ persisted: true, duplicate: false });
+    expect(mockDb.transaction).toHaveBeenCalledTimes(1);
     expect(state.inserts).toHaveLength(1);
     expect(state.inserts[0].row).toMatchObject({ customer_id: null, direction: 'inbound', message_type: REPLY_MESSAGE_TYPE, twilio_sid: 'SM1' });
-    expect(mockAppend).toHaveBeenCalledWith('app-1', [expect.objectContaining({ stage: 'applicant_reply', channel: 'sms', outcome: 'received', to: 'masked(0142)', body: 'Yes, Tuesday works', by: 'applicant' })]);
+    // history append rides the SAME transaction handle
+    expect(mockAppend).toHaveBeenCalledWith('app-1', [expect.objectContaining({ stage: 'applicant_reply', channel: 'sms', outcome: 'received', to: 'masked(0142)', body: 'Yes, Tuesday works', by: 'applicant' })], mockDb);
     expect(mockTrigger).toHaveBeenCalledWith('job_applicant_reply', { applicationId: 'app-1' });
-    // No PII in the bell payload.
     expect(JSON.stringify(mockTrigger.mock.calls[0][1])).not.toMatch(/0142|Tuesday/);
   });
 
-  test('sms_log failure -> still appends + rings, reports not persisted, logs no PII', async () => {
+  test('a redelivered SID is a no-op: nothing inserted, no second bell', async () => {
+    state.existingReply = { id: 'sms-existing' };
+    await expect(recordApplicantReply(args)).resolves.toEqual({ persisted: true, duplicate: true });
+    expect(state.inserts).toHaveLength(0);
+    expect(mockAppend).not.toHaveBeenCalled();
+    expect(mockTrigger).not.toHaveBeenCalled();
+  });
+
+  test('persistence failure THROWS (caller fails closed), rings nothing, and never logs the phone', async () => {
     state.insertFails = true;
+    await expect(recordApplicantReply(args)).rejects.toBeTruthy();
+    expect(mockTrigger).not.toHaveBeenCalled();
     const logger = require('../services/logger');
-    await expect(recordApplicantReply(args)).resolves.toBe(false);
-    expect(mockAppend).toHaveBeenCalled();
-    expect(mockTrigger).toHaveBeenCalled();
     expect(logger.error.mock.calls.map((c) => c[0]).join('\n')).not.toMatch(/0142/);
   });
 });
