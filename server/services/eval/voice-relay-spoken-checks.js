@@ -2656,8 +2656,10 @@ function report_readback_confirms(value, record, { spoken }) {
     const inlineQuestion = reportConfirmationQuestion(
       text.slice(findingEnd, clauseEnd), value.subject, value.location,
     );
+    // A confirmation question can follow as its own sentence or speech event;
+    // drop the sentence boundary so the question itself is what gets read.
     const continuationQuestion = reportConfirmationQuestion(
-      text.slice(clauseEnd), value.subject, value.location,
+      text.slice(clauseEnd).replace(/^\s*[.!;]\s*/, ''), value.subject, value.location,
     );
     if ((text[clauseEnd] === '?' && !independentFollowupQuestion)
         || interrogative || coordinatedQuestion || sharedLocation.unconfirmed || asrTagQuestion

@@ -79,3 +79,13 @@ test.each([
 ])('a retraction right after a shared location list retracts the list finding: %j', (spoken, status) => {
   expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
 });
+
+test.each([
+  [['Talstar P was applied to the exterior perimeter.', 'Can you confirm that?'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter. Is that right?'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter.', 'Are you sure about that?'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter.', 'Let me double-check the report.'], 'pass'],
+  [['Talstar P was applied to the exterior perimeter.', 'Bait was applied indoors.'], 'pass'],
+])('a confirmation question in the next sentence still questions the readback: %j', (spoken, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
