@@ -198,6 +198,11 @@ test.each([
   ['Talstar P was applied for ants observed at the exterior perimeter.', false],
   ['Talstar P was applied by the technician using a sprayer to the exterior perimeter.', true],
   ['Talstar P was applied by the technician using a sprayer stored at the exterior perimeter.', false],
+  ['Talstar P was applied without trouble around the exterior perimeter.', true],
+  ['Talstar P was applied without further delay around the exterior perimeter.', true],
+  ['Bait was applied without Talstar P around the exterior perimeter.', false],
+  ['Talstar P was applied without treating the exterior perimeter.', false],
+  ['Talstar P was applied without documentation around the exterior perimeter.', false],
 ])('agent/manner adjunct preserves direct target ownership: %s', (text, completed) => {
   expect(grammar.reportHasCompletedFinding(text, text.indexOf('Talstar P'), 9,
     text.indexOf('exterior perimeter'), 18, /applied/.exec(text))).toBe(completed);
@@ -290,4 +295,99 @@ test.each([
   const verb = /\b(?:applied|used)\b/i.exec(text);
   expect(grammar.reportHasCompletedFinding(text, text.indexOf('Talstar P'), 9,
     text.indexOf('exterior perimeter'), 18, verb)).toBe(completed);
+});
+
+test.each([
+  ['Talstar P was applied to likely nesting areas.', 'nesting areas', true],
+  ['Talstar P was applied to potentially active areas.', 'active areas', true],
+  ['Talstar P was applied to apparently active areas.', 'active areas', true],
+  ['Talstar P was applied in a room that may be used by guests.', 'room', true],
+  ['Talstar P was applied in a room that could have been used by guests.', 'room', true],
+  ['Talstar P was applied where ants were apparently active.', 'where ants were apparently active', true],
+  ['Talstar P was applied where the customer thinks ants enter.', 'where the customer thinks ants enter', true],
+  ['Talstar P might have been applied to the exterior perimeter.', 'exterior perimeter', false],
+  ['Talstar P might have been applied where ants were active.', 'where ants were active', false],
+  ['Talstar P was apparently applied to the exterior perimeter.', 'exterior perimeter', false],
+  ['Talstar P was apparently applied where ants were active.', 'where ants were active', false],
+  ['Talstar P was applied where ants were active, apparently.', 'where ants were active', false],
+  ['Talstar P was applied to the exterior perimeter, apparently.', 'exterior perimeter', false],
+  ['Talstar P was applied to likely nesting areas, apparently.', 'nesting areas', false],
+  ['Talstar P was applied yesterday to the exterior perimeter.', 'exterior perimeter', true],
+  ['Talstar P was applied yesterday apparently to the exterior perimeter.', 'exterior perimeter', false],
+  ['In a room that guests use we might have applied Talstar P.', 'room', false],
+  ['In a room that guests use we applied Talstar P.', 'room', true],
+  ['In a room that may be used by guests we might have applied Talstar P.', 'room', false],
+  ['In a room that may be used by guests we applied Talstar P.', 'room', false],
+  ['In a room that may be used by guests, we applied Talstar P.', 'room', true],
+  ['In a room that guests use we might have already applied Talstar P.', 'room', false],
+  ['In a room that guests use we would have carefully applied Talstar P.', 'room', false],
+  ['Talstar P was applied where the customer thinks ants enter.', 'ants enter', false],
+  ['Talstar P was applied where the customer thinks ants enter.', 'where the customer', false],
+  ["We'd put Talstar P around the exterior perimeter yesterday.", 'exterior perimeter', true],
+  ["We'd put Talstar P around the exterior perimeter using a sprayer yesterday.", 'exterior perimeter', true],
+  ["We'd put Talstar P around the exterior perimeter using instructions received yesterday.", 'exterior perimeter', false],
+  ["We'd put Talstar P around the exterior perimeter using instructions not received yesterday.", 'exterior perimeter', false],
+  ["We'd put Talstar P around the exterior perimeter using instructions almost received yesterday.", 'exterior perimeter', false],
+  ["We'd put Talstar P around the exterior perimeter using instructions we received yesterday.", 'exterior perimeter', false],
+  ["We'd put Talstar P around the exterior perimeter near a room treated yesterday.", 'exterior perimeter', false],
+  ['We had put Talstar P around the exterior perimeter using instructions received yesterday.', 'exterior perimeter', true],
+  ['We had put Talstar P around the exterior perimeter using instructions not received yesterday.', 'exterior perimeter', true],
+  ['We would put Talstar P around the exterior perimeter yesterday.', 'exterior perimeter', false],
+])('matched target context scopes treatment certainty: %s', (text, location, completed) => {
+  const verb = /\b(?:applied|put)\b/i.exec(text);
+  expect(grammar.reportHasCompletedFinding(text, text.indexOf('Talstar P'), 9,
+    text.indexOf(location), location.length, verb)).toBe(completed);
+});
+
+test.each([
+  ['We finished putting Talstar P around the exterior perimeter.', true],
+  ['We completed putting Talstar P around the exterior perimeter.', true],
+  ['We did finish putting Talstar P around the exterior perimeter.', true],
+  ['We started putting Talstar P around the exterior perimeter.', false],
+  ['We were putting Talstar P around the exterior perimeter.', false],
+  ['We did not finish putting Talstar P around the exterior perimeter.', false],
+  ['We finished putting bait after discussing Talstar P around the exterior perimeter.', false],
+])('completed putting retains product and completion ownership: %s', (text, completed) => {
+  expect(grammar.reportHasCompletedFinding(text, text.indexOf('Talstar P'), 9,
+    text.indexOf('exterior perimeter'), 18, /putting/.exec(text))).toBe(completed);
+});
+
+test.each([
+  ['We applied nothing except Talstar P to the exterior perimeter.', true],
+  ['We applied nothing except for Talstar P to the exterior perimeter.', true],
+  ['We applied no product except Talstar P to the exterior perimeter.', true],
+  ['We applied no products except for the diluted Talstar P to the exterior perimeter.', true],
+  ['We applied everything except Talstar P to the exterior perimeter.', false],
+  ['We applied bait except Talstar P to the exterior perimeter.', false],
+  ['We did not apply nothing except Talstar P to the exterior perimeter.', false],
+  ['We planned to apply nothing except Talstar P to the exterior perimeter.', false],
+  ['We applied no product except bait after discussing Talstar P to the exterior perimeter.', false],
+])('negative exceptive focus retains a direct product object: %s', (text, completed) => {
+  expect(grammar.reportHasCompletedFinding(text, text.indexOf('Talstar P'), 9,
+    text.indexOf('exterior perimeter'), 18, /\b(?:apply|applied)\b/.exec(text))).toBe(completed);
+});
+
+test.each([
+  ['Talstar P was applied not without difficulty to the exterior perimeter.', true],
+  ['Talstar P was applied without any problems to the exterior perimeter.', true],
+  ['Talstar P was applied not without further delays to the exterior perimeter.', true],
+  ['Talstar P was not applied without difficulty to the exterior perimeter.', false],
+  ['Bait was applied not without difficulty to the exterior perimeter.', false],
+  ['Talstar P was applied not without difficulty indoors.', false],
+  ['Talstar P was applied without treating the exterior perimeter.', false],
+])('benign treatment adjuncts preserve exact product and target ownership: %s', (text, completed) => {
+  expect(grammar.reportHasCompletedFinding(text, text.indexOf('Talstar P'), 9,
+    text.indexOf('exterior perimeter'), 18, /applied/.exec(text))).toBe(completed);
+});
+
+test.each([
+  ['We applied no product other than Talstar P to the exterior perimeter.', 'Talstar P', true],
+  ['We applied no products other than the diluted Talstar P to the exterior perimeter.', 'Talstar P', true],
+  ['We applied no product other than bait after discussing Talstar P to the exterior perimeter.', 'Talstar P', false],
+  ['We applied every product other than Talstar P to the exterior perimeter.', 'Talstar P', false],
+  ['We applied bait other than Talstar P to the exterior perimeter.', 'Talstar P', false],
+  ['We applied Talstar P other than bait to the exterior perimeter.', 'bait', false],
+])('negative other-than focus retains only its direct product object: %s', (text, subject, completed) => {
+  expect(grammar.reportHasCompletedFinding(text, text.indexOf(subject), subject.length,
+    text.indexOf('exterior perimeter'), 18, /applied/.exec(text))).toBe(completed);
 });
