@@ -236,8 +236,45 @@ describe('route-conflict exclusion with buffer', () => {
   });
 });
 
+describe('v2 combined-allocation route conflicts use the canonical occupiedRows sum', () => {
+  test('a v2 allocation whose members SUM past their own window_end blocks a later slot a per-row check would miss', async () => {
+    // Two combined-allocation members sharing one start (4:00pm) and each
+    // with only a 10-minute own window_end (4:10pm) — a per-row parallel
+    // start/end check (the P1 this replaced) would only ever block through
+    // ~4:25pm (10min + 15min buffer) and let the 4:30 slot through. The
+    // canonical occupiedRows sum occupies the SUM of both members (20min)
+    // from the shared start -> real occupied span 4:00-4:20pm, and the 4:30
+    // slot's buffer reaches back to 4:15pm, which still falls inside it.
+    const mix = { version: 2, allocatedServiceIds: ['row-a', 'row-b'] };
+    reset({
+      scheduled_services: [
+        {
+          id: 'row-a', customer_id: 'cust-1', technician_id: 'tech-1', scheduled_date: TODAY,
+          status: 'confirmed', window_start: '16:00:00', window_end: '16:10:00',
+          estimated_duration_minutes: null, reservation_service_mix: mix,
+        },
+        {
+          id: 'row-b', customer_id: 'cust-1', technician_id: 'tech-1', scheduled_date: TODAY,
+          status: 'confirmed', window_start: '16:00:00', window_end: '16:10:00',
+          estimated_duration_minutes: null, reservation_service_mix: mix,
+        },
+      ],
+    });
+    const slots = await listInterviewSlots({ now: NOW });
+    const today = slots.filter((s) => s.date === TODAY).map((s) => s.label);
+    expect(today).not.toContain('Tue Mar 16, 4:00 PM');
+    expect(today).not.toContain('Tue Mar 16, 4:30 PM');
+    expect(today).toEqual(['Tue Mar 16, 5:00 PM', 'Tue Mar 16, 5:30 PM']);
+  });
+});
+
 describe('other-applicant conflict exclusion', () => {
-  test('another interview/offer application with an overlapping interview_at blocks the slot', async () => {
+  test('a 4:00-4:30 booking removes the 4:30 slot too (BUFFER_MINUTES either side, same as route stops)', async () => {
+    // interview_at 20:00 UTC / interview_end_at 20:30 UTC = 4:00-4:30pm ET.
+    // Buffered +/-15min either side -> 3:45pm-4:45pm occupied. The 4:00 slot
+    // overlaps outright; the 4:30 slot (4:30-5:00) now also overlaps the
+    // buffered interval (4:30 < 4:45) where an unbuffered check would have
+    // let it through (Codex P2) — only 5:00/5:30 clear the buffer.
     reset({
       job_applications: [{
         id: 'other-app', status: 'interview',
@@ -247,7 +284,10 @@ describe('other-applicant conflict exclusion', () => {
     const slots = await listInterviewSlots({ now: NOW });
     const today = slots.filter((s) => s.date === TODAY).map((s) => s.label);
     expect(today).not.toContain('Tue Mar 16, 4:00 PM');
-    expect(today).toHaveLength(3);
+    expect(today).not.toContain('Tue Mar 16, 4:30 PM');
+    // The next offered slot on the 30-minute grid after the 4:45pm buffer
+    // boundary is 5:00pm — it and 5:30pm are unaffected.
+    expect(today).toEqual(['Tue Mar 16, 5:00 PM', 'Tue Mar 16, 5:30 PM']);
   });
 
   test('a rejected/withdrawn application interview_at does not block (not in interview/offer)', async () => {

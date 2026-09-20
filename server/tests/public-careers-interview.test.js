@@ -37,6 +37,15 @@ jest.mock('../services/logger', () => mockLogger);
 
 // job_applications-only fake db, keyed on interview_token / id / status.
 let onFirstReadOnce = null;
+// Counter-based hooks, keyed by which .first() call (1-based) they should
+// run BEFORE — unlike onFirstReadOnce (which fires AFTER the snapshot, to
+// simulate a race with the row-lock read itself), these mutate the row
+// before it is read, so a specific LATER .first() call (e.g. the book
+// route's post-commit confirmation re-read) sees the mutated state. The
+// book route's calls in order: #1 the row-lock read inside the txn, #2 the
+// confirmation block's post-commit re-read.
+let firstCallCount = 0;
+const onNthFirstHooks = {};
 const mockDb = jest.fn((table) => {
   if (table !== 'job_applications') throw new Error(`unexpected table in test: ${table}`);
   let whereCond = {};
@@ -44,6 +53,12 @@ const mockDb = jest.fn((table) => {
     where(cond) { whereCond = { ...whereCond, ...cond }; return builder; },
     forUpdate() { return builder; },
     first() {
+      firstCallCount += 1;
+      const preHook = onNthFirstHooks[firstCallCount];
+      if (preHook) {
+        delete onNthFirstHooks[firstCallCount];
+        preHook();
+      }
       const row = mockDb.__rows().find((r) => Object.entries(whereCond).every(([k, v]) => r[k] === v));
       // Snapshot BEFORE running the hook — the hook mutates the same
       // underlying row object in place to simulate a race with a later
@@ -92,6 +107,7 @@ let dbRows = [];
 mockDb.__rows = () => dbRows;
 mockDb.__setRows = (rows) => { dbRows = rows; };
 mockDb.__onFirstReadOnce = (fn) => { onFirstReadOnce = fn; };
+mockDb.__onNthFirst = (n, fn) => { onNthFirstHooks[n] = fn; };
 mockDb.schema = { hasTable: jest.fn(async () => true) };
 // The book route runs inside one transaction: the trx is the same mock, and
 // every raw call is recorded so the test can prove the advisory lock is
@@ -155,6 +171,8 @@ beforeEach(() => {
   mockTriggerNotification.mockResolvedValue(undefined);
   mockDb.__setRows([]);
   onFirstReadOnce = null;
+  firstCallCount = 0;
+  for (const k of Object.keys(onNthFirstHooks)) delete onNthFirstHooks[k];
 });
 
 describe('dark gate', () => {
@@ -362,6 +380,42 @@ describe('POST /interview/:token/book', () => {
 
     await Promise.resolve();
     await new Promise((r) => setImmediate(r));
+    expect(mockTriggerNotification).toHaveBeenCalledWith('job_interview_booked', expect.objectContaining({
+      applicationId: 'app-1', mode: 'phone', whenLabel: OFFERED.label,
+    }));
+  });
+
+  test('a withdraw racing in right after the commit skips the confirmation send — the owner bell still fires (Codex P2)', async () => {
+    mockDb.__setRows([appRow()]);
+    mockListInterviewSlots.mockResolvedValue([OFFERED]);
+    // .first() call #1 is the row-lock read inside the txn (booking
+    // proceeds normally on it); call #2 is the confirmation block's
+    // post-commit re-read — mutate the row to 'withdrawn' right before it,
+    // simulating a withdraw request that completed in between.
+    mockDb.__onNthFirst(2, () => {
+      const row = mockDb.__rows()[0];
+      row.status = 'withdrawn';
+      row.status_history = [...row.status_history, { from: 'interview', to: 'withdrawn', by: 'applicant' }];
+    });
+    const res = await fetch(`${base}/api/public/careers/interview/${TOKEN}/book`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'phone', start: OFFERED.start }),
+    });
+    // The HTTP response reflects what THIS request committed — the race is
+    // with a second, concurrent request.
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe('booked');
+
+    await Promise.resolve();
+    await new Promise((r) => setImmediate(r));
+
+    expect(mockSendStageComms).not.toHaveBeenCalled();
+    expect(mockLogger.info).toHaveBeenCalledWith(expect.stringContaining('app-1'));
+    // No PII (name/phone/email) in the skip log.
+    expect(mockLogger.info.mock.calls.flat().join(' ')).not.toEqual(expect.stringContaining(PII_EMAIL));
+    // The owner bell block is independent — it already fired before the
+    // confirmation block's re-read runs.
     expect(mockTriggerNotification).toHaveBeenCalledWith('job_interview_booked', expect.objectContaining({
       applicationId: 'app-1', mode: 'phone', whenLabel: OFFERED.label,
     }));

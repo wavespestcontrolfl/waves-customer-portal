@@ -20,6 +20,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { phoneMatchDigits } = require('../utils/phone');
 const { appendCommsHistory, maskPhone, errorSummary } = require('./recruiting-comms');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 const OPEN_STATUSES = ['new', 'reviewed', 'interview', 'offer'];
 const RECENT_OUTBOUND_DAYS = 45;
@@ -83,7 +84,7 @@ async function matchApplicantReply(fromPhone, toNumber) {
     const fromDigits = phoneMatchDigits(String(best.fromNumber));
     if (toDigits.length && fromDigits.length && !toDigits.some((d) => fromDigits.includes(d))) return null;
   }
-  const newerCustomerText = await db('sms_log')
+  const newerCustomerText = await excludeUnresolvedSendReservations(db('sms_log'))
     .where({ direction: 'outbound' })
     .whereRaw(digitsExpr('to_phone'), [variants])
     .whereNotIn('message_type', NON_CONVERSATIONAL_OUTBOUND)
@@ -118,7 +119,7 @@ async function recordApplicantReply({ applicationId, from, to, body, messageSid,
 
   const duplicate = await db.transaction(async (trx) => {
     const existing = messageSid
-      ? await trx('sms_log').where({ twilio_sid: messageSid, message_type: REPLY_MESSAGE_TYPE }).first('id')
+      ? await excludeUnresolvedSendReservations(trx('sms_log')).where({ twilio_sid: messageSid, message_type: REPLY_MESSAGE_TYPE }).first('id')
       : null;
     if (existing) return true;
     await trx('sms_log').insert({

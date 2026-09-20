@@ -274,6 +274,22 @@ router.post('/interview/:token/book', interviewLimiter, async (req, res) => {
     // sequential block before, so an sendStageComms throw skipped the
     // triggerNotification call entirely.
     void (async () => {
+      // Re-read past the commit and require the row still matches exactly
+      // what we just wrote (Codex P2): a withdraw (or a second book) racing
+      // in immediately after this transaction commits must not send a
+      // confirmation for a booking the applicant no longer holds. The owner
+      // bell block below is intentionally independent of this check.
+      const current = await db('job_applications').where({ id: updated.id }).first();
+      const sameInstant = (a, b) => Boolean(a) && Boolean(b) && new Date(a).getTime() === new Date(b).getTime();
+      const stillCurrent = current
+        && current.status === 'interview'
+        && current.interview_token === updated.interview_token
+        && sameInstant(current.interview_booked_at, updated.interview_booked_at)
+        && sameInstant(current.interview_at, updated.interview_at);
+      if (!stillCurrent) {
+        logger.info(`[careers] interview confirmation skipped — application ${updated.id} no longer matches the committed booking`);
+        return;
+      }
       const { sendStageComms } = require('../services/recruiting-comms');
       const RecruitingComms = require('../services/recruiting-comms');
       const commsHistory = Array.isArray(updated.comms_history) ? updated.comms_history : [];

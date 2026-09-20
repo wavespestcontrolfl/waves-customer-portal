@@ -13,22 +13,14 @@ const {
 } = require('../utils/recruiting-thread-scope');
 
 function fakeQuery() {
-  const calls = [];
-  const probe = {
-    select: jest.fn(() => probe),
-    from: jest.fn(() => probe),
-    whereRaw: jest.fn(() => probe),
-    where: jest.fn(() => probe),
-  };
-  const q = {
-    whereNotExists: jest.fn((fn) => { calls.push('whereNotExists'); fn.call(probe); return q; }),
-  };
-  return { q, probe, calls };
+  const inner = { whereNull: jest.fn(() => inner), orWhere: jest.fn(() => inner) };
+  const q = { where: jest.fn((fn) => { fn.call(inner); return q; }) };
+  return { q, inner };
 }
 
 describe('isRecruitingMessageType', () => {
-  test('matches the three recruiting stages and nothing else', () => {
-    for (const t of ['job_application_received', 'job_interview_invite', 'job_interview_confirmation']) {
+  test('matches the recruiting stages and the applicant reply type, nothing else', () => {
+    for (const t of ['job_application_received', 'job_interview_invite', 'job_interview_confirmation', 'job_applicant_reply']) {
       expect(isRecruitingMessageType(t)).toBe(true);
     }
     for (const t of ['manual', 'appointment_reminder', 'ai_assistant', null, undefined, 42]) {
@@ -38,40 +30,32 @@ describe('isRecruitingMessageType', () => {
   });
 });
 
-describe('hideRecruitingThreadsFromNonAdmin', () => {
+describe('hideRecruitingThreadsFromNonAdmin (message-level)', () => {
   test('admin: query returned untouched', () => {
-    const { q, calls } = fakeQuery();
+    const { q } = fakeQuery();
     expect(hideRecruitingThreadsFromNonAdmin(q, { techRole: 'admin' })).toBe(q);
-    expect(calls).toEqual([]);
+    expect(q.where).not.toHaveBeenCalled();
   });
 
-  test('technician: whole conversation excluded when ANY message in it is recruiting', () => {
-    const { q, probe, calls } = fakeQuery();
+  test('technician: only job_* messages are excluded — the rest of a shared customer thread stays visible', () => {
+    const { q, inner } = fakeQuery();
     expect(hideRecruitingThreadsFromNonAdmin(q, { techRole: 'technician' })).toBe(q);
-    expect(calls).toEqual(['whereNotExists']);
-    expect(probe.from).toHaveBeenCalledWith('messages as recruiting_probe');
-    expect(probe.whereRaw).toHaveBeenCalledWith('recruiting_probe.conversation_id = conversations.id');
-    expect(probe.where).toHaveBeenCalledWith('recruiting_probe.message_type', 'like', 'job_%');
+    expect(q.where).toHaveBeenCalledTimes(1);
+    expect(inner.whereNull).toHaveBeenCalledWith('messages.message_type');
+    expect(inner.orWhere).toHaveBeenCalledWith('messages.message_type', 'not like', 'job_%');
   });
 
-  test('missing role (never authenticated as admin) is treated as non-admin', () => {
-    const { calls, q } = fakeQuery();
-    hideRecruitingThreadsFromNonAdmin(q, {});
-    hideRecruitingThreadsFromNonAdmin(q, undefined);
-    expect(calls).toEqual(['whereNotExists', 'whereNotExists']);
-  });
-
-  test('custom conversation column is a constant, passed through verbatim', () => {
-    const { q, probe } = fakeQuery();
-    hideRecruitingThreadsFromNonAdmin(q, { techRole: 'technician' }, 'c.id');
-    expect(probe.whereRaw).toHaveBeenCalledWith('recruiting_probe.conversation_id = c.id');
+  test('missing role is treated as non-admin; the column is passed through verbatim', () => {
+    const { q, inner } = fakeQuery();
+    hideRecruitingThreadsFromNonAdmin(q, undefined, 'm.message_type');
+    expect(inner.orWhere).toHaveBeenCalledWith('m.message_type', 'not like', 'job_%');
   });
 });
 
 describe('isRecruitingPhone', () => {
   function fakeDatabase(row) {
     const q = {};
-    ['where', 'whereRaw'].forEach((m) => { q[m] = jest.fn(() => q); });
+    ['where', 'whereRaw', 'whereNot', 'whereNotIn', 'andWhere', 'whereNull', 'orWhere', 'orWhereNull', 'modify'].forEach((m) => { q[m] = jest.fn(() => q); });
     q.first = jest.fn(async () => row);
     const database = jest.fn(() => q);
     database.q = q;
@@ -83,7 +67,8 @@ describe('isRecruitingPhone', () => {
     await expect(isRecruitingPhone('(941) 555-0142', database)).resolves.toBe(true);
     expect(database).toHaveBeenCalledWith('sms_log');
     expect(database.q.where).toHaveBeenCalledWith('message_type', 'like', 'job_%');
-    const [sql, bindings] = database.q.whereRaw.mock.calls[0];
+    // the first whereRaw is the shared unresolved-reservation filter; the phone predicate follows
+    const [sql, bindings] = database.q.whereRaw.mock.calls.find((c) => /to_phone/.test(c[0]));
     expect(sql).toMatch(/to_phone/);
     expect(sql).toMatch(/from_phone/);
     expect(bindings).toEqual([['19415550142', '9415550142'], ['19415550142', '9415550142']]);

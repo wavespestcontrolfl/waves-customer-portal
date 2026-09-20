@@ -33,7 +33,7 @@ router.get('/inbox', async (req, res, next) => {
     // carry an unread badge for a message they cannot open.
     const unreadCount = await hideRecruitingThreadsFromNonAdmin(db('messages')
       .where({ channel: 'sms', direction: 'inbound' })
-      .andWhere(function () { this.where({ is_read: false }).orWhereNull('is_read'); }), req, 'messages.conversation_id')
+      .andWhere(function () { this.where({ is_read: false }).orWhereNull('is_read'); }), req)
       .count('* as count')
       .first();
 

@@ -248,7 +248,14 @@ export default function CareersInterviewPage() {
         body: JSON.stringify({ mode, start: selectedSlot.start }),
       });
       const body = await res.json().catch(() => ({}));
-      if (res.status === 409) {
+      // 409 = the link itself is dead (token/status mismatch under the row
+      // lock). 404 = the application left the Interview stage entirely
+      // (withdrawn, advanced, etc. — route.param already 404s a malformed
+      // token before any handler runs, so a 404 here is always the same
+      // "not this stage any more" case). Both are the same inactive-link
+      // terminal state to the applicant (Codex P2); any other non-OK status
+      // is an ordinary slot conflict, handled below.
+      if (res.status === 409 || res.status === 404) {
         setData(null);
         setError('notfound');
         return;

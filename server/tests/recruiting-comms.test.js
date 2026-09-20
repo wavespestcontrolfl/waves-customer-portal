@@ -23,7 +23,13 @@ jest.mock('../services/messaging/validators/suppression', () => ({
 }));
 
 const mockSendOne = jest.fn(async () => ({ messageId: 'sg-1' }));
-jest.mock('../services/sendgrid-mail', () => ({ sendOne: (...args) => mockSendOne(...args) }));
+// Real DEFINITE_REJECTION_STATUSES semantics (sendgrid-mail.js) — a definite
+// 4xx rejection is the only class that keeps a send 'failed'; everything
+// else (no status, or a status outside this set) is ambiguous.
+jest.mock('../services/sendgrid-mail', () => ({
+  sendOne: (...args) => mockSendOne(...args),
+  isDefiniteRejection: (err) => new Set([400, 401, 403, 404, 405, 413, 415, 422, 429]).has(Number(err && err.status)),
+}));
 
 const mockActiveSuppressionFor = jest.fn(async () => null);
 jest.mock('../services/email-template-library', () => ({
@@ -329,7 +335,7 @@ describe('sendStageComms', () => {
     expect(row.recipient_type).toBe('job_application');
   });
 
-  test('email send failure -> outcome failed, email_messages row marked failed', async () => {
+  test('email send failure (definite 4xx) -> outcome failed, email_messages row marked failed', async () => {
     mockSendOne.mockRejectedValue(Object.assign(new Error('bad request'), { status: 400 }));
     const app = baseApp();
     mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
@@ -338,6 +344,48 @@ describe('sendStageComms', () => {
     expect(result.email).toBe('failed');
     const row = mockDb.__tables.email_messages.find((r) => r.recipient_id === 'app-1');
     expect(row.status).toBe('failed');
+  });
+
+  test('email send failure (5xx, ambiguous) -> outcome uncertain, ledger status uncertain (Codex P2)', async () => {
+    mockSendOne.mockRejectedValue(Object.assign(new Error('service unavailable'), { status: 503 }));
+    const app = baseApp();
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+
+    const result = await RecruitingComms.sendStageComms(app, 'application_received', { sms: false, email: true });
+    expect(result.email).toBe('uncertain');
+    const row = mockDb.__tables.email_messages.find((r) => r.recipient_id === 'app-1');
+    expect(row.status).toBe('uncertain');
+    const stored = mockDb.__tables.job_applications.find((r) => r.id === 'app-1');
+    expect(stored.comms_history[0]).toMatchObject({ channel: 'email', outcome: 'uncertain' });
+  });
+
+  test('email send failure (network error, no status at all) -> outcome uncertain, not failed', async () => {
+    mockSendOne.mockRejectedValue(new Error('ECONNRESET'));
+    const app = baseApp();
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+
+    const result = await RecruitingComms.sendStageComms(app, 'application_received', { sms: false, email: true });
+    expect(result.email).toBe('uncertain');
+    const row = mockDb.__tables.email_messages.find((r) => r.recipient_id === 'app-1');
+    expect(row.status).toBe('uncertain');
+  });
+
+  test('email_messages ledger insert failure refuses the send (Codex P1) — no sendOne call, no untracked send', async () => {
+    const app = baseApp();
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    // Override just the FIRST db() call (the email_messages insert) to throw
+    // synchronously, as a real Knex insert failure would.
+    mockDb.mockImplementationOnce((table) => {
+      if (table !== 'email_messages') throw new Error(`unexpected table ${table} before the ledger insert`);
+      return { insert: () => { throw new Error('insert boom'); } };
+    });
+
+    const result = await RecruitingComms.sendStageComms(app, 'application_received', { sms: false, email: true });
+
+    expect(result.email).toBe('failed');
+    expect(mockSendOne).not.toHaveBeenCalled();
+    const stored = mockDb.__tables.job_applications.find((r) => r.id === 'app-1');
+    expect(stored.comms_history[0]).toMatchObject({ channel: 'email', outcome: 'failed', code: 'ledger_write_failed' });
   });
 
   test('email suppressed -> outcome blocked, code email_suppressed, sendOne never called, ledger row blocked', async () => {

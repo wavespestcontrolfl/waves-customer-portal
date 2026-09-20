@@ -297,7 +297,12 @@ async function sendRawEmail({ app, stage, to, subject, html, text }) {
     }).returning('*');
     messageRow = rows && rows[0];
   } catch (err) {
-    logger.warn(`[recruiting-comms] email_messages insert failed (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
+    // Fail closed (Codex P1): the ledger row is what a bounce/complaint/
+    // unsubscribe webhook and the reply classifier correlate a later event
+    // back to. A send with no row to correlate against is untracked evidence
+    // — refuse the send rather than let SendGrid dispatch it blind.
+    logger.error(`[recruiting-comms] email_messages insert failed (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
+    return { outcome: 'failed', code: 'ledger_write_failed' };
   }
 
   // Honor the suppression ledger BEFORE SendGrid — this direct-insert path
@@ -345,15 +350,23 @@ async function sendRawEmail({ app, stage, to, subject, html, text }) {
     }
     return { outcome: 'sent', code: null };
   } catch (err) {
+    // A definite 4xx rejection (sendgrid.isDefiniteRejection — the same
+    // canonical classification the other SendGrid callers use) really was
+    // never accepted: 'failed'. A network error or 5xx/timeout (no status,
+    // or ambiguous) may have gone out before the response — the ledger
+    // status column has no CHECK constraint, so 'uncertain' is a real value,
+    // not a euphemism for 'failed' (Codex P2).
+    const definite = sendgrid.isDefiniteRejection(err);
+    const status = definite ? 'failed' : 'uncertain';
     if (messageRow) {
       await db('email_messages').where({ id: messageRow.id, status: 'queued', send_attempt_token: sendAttemptToken }).update({
-        status: 'failed',
+        status,
         error_message: String((err && err.message) || 'send failed').slice(0, 500),
         updated_at: new Date(),
       }).catch(() => {});
     }
-    logger.warn(`[recruiting-comms] SendGrid send failed (application ${app.id}, stage ${stage}, status ${(err && err.status) || 'unknown'})`);
-    return { outcome: 'failed', code: err && err.status ? `sendgrid_${err.status}` : 'send_failed' };
+    logger.warn(`[recruiting-comms] SendGrid send failed (application ${app.id}, stage ${stage}, status ${(err && err.status) || 'unknown'}, outcome ${status})`);
+    return { outcome: status, code: err && err.status ? `sendgrid_${err.status}` : 'send_failed' };
   }
 }
 

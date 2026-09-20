@@ -40,6 +40,17 @@ const defaultDb = require('../../models/db');
 const { guardedCoordSelects } = require('./day-stops');
 const { travelGapEnabled, travelGapConflicts } = require('./travel-gap');
 const { occupiedRows } = require('./visit-capacity');
+const logger = require('../logger');
+const { etParts, parseETDateTime, addETDays } = require('../../utils/datetime-et');
+// Recruiting interview occupancy constants — mirrored from
+// services/interview-slots.js (INTERVIEW_BLOCKING_STATUSES / SLOT_MINUTES /
+// BUFFER_MINUTES) rather than required: interview-slots.js reads this
+// module's occupiedRows, and a top-level require in both directions would
+// leave one side's destructured import undefined. interview-slots.test.js
+// pins these values against its own.
+const INTERVIEW_BLOCKING_STATUSES = ['interview', 'offer'];
+const INTERVIEW_SLOT_MINUTES = 30;
+const INTERVIEW_BUFFER_MINUTES = 15;
 
 const DEFAULT_DURATION_MINUTES = 60;
 
@@ -443,7 +454,7 @@ async function findConflictingVisits({
   excludeCustomerId = null,
   excludeStatuses = DEFAULT_EXCLUDE_STATUSES,
   includeHolds = true,
-  includeInterviews = true,
+  includeInterviews = false,
   travel,
   arrivalWindow,
 } = {}) {
@@ -461,11 +472,13 @@ async function findConflictingVisits({
         conn: db, ...arrivalWindow, date: String(date).split('T')[0],
         windowStart, windowEnd, excludeServiceIds: excludeIds,
       });
-      return fit.feasible ? [] : [{
+      // Interviews merge into this branch too (Codex r4 P2): an admin move
+      // whose window overlaps a booked interview gets the conflict row.
+      return withInterviewConflicts(fit.feasible ? [] : [{
         ...fit.target, id: arrivalWindow.serviceId,
         window_start: windowStart, window_end: windowEnd,
         conflict_reason: fit.reason, warning: fit.warning,
-      }];
+      }], { db, date, windowStart, windowEnd, includeInterviews });
     }
   }
 
@@ -519,39 +532,74 @@ async function findConflictingVisits({
 
 // ---- recruiting interviews as occupancy ------------------------------------
 // The owner's booked interviews (job_applications.interview_at, PR #4623)
-// occupy the calendar like a visit. They are appended here — the ONE
-// conflict reader every customer and staff booking path consults — as
-// synthetic rows (`conflict_reason: 'interview'`, id `interview:<appId>`,
-// no customer, window = interview ±15 min) so no caller needs a second
-// probe. Best-effort: a recruiting read error is logged and yields no
-// interview rows — it must never take customer scheduling down.
-// `includeInterviews: false` opts a caller out (none do today).
+// occupy the calendar like a visit. Customer booking writers opt in with
+// `includeInterviews: true` (availability confirm, routes/booking.js,
+// slot-reservation.js) and receive them as synthetic conflict rows
+// (`conflict_reason: 'interview'`, id `interview:<appId>`, no customer,
+// window = interview ±15 min). OPT-IN, not default: the read is one extra
+// raw statement on the caller's connection, and the staff/automation
+// callers of this reader (rebooker, rain-out, renewals, admin schedule, ...)
+// stay byte-identical until interviews are represented as calendar rows
+// themselves (owner decision pending — see the PR). Best-effort: a read
+// error yields no interview rows and never takes scheduling down.
 async function withInterviewConflicts(visits, { db, date, windowStart, windowEnd, includeInterviews }) {
-  if (includeInterviews === false) return visits;
-  let windows = [];
+  if (includeInterviews !== true) return visits;
+  const dateStr = String(date).split('T')[0];
+  let interviews = [];
   try {
-    windows = await require('../interview-slots').bookedInterviewWindowsForDate(String(date).split('T')[0], { conn: db });
+    interviews = await bookedInterviewConflictRows(db, dateStr, timeToMinutes(windowStart), timeToMinutes(windowEnd));
   } catch (err) {
-    require('../logger').warn(`[occupancy] interview occupancy read failed for ${String(date).split('T')[0]}: ${err.name || 'Error'}${err.code ? ` ${err.code}` : ''}`);
+    // A real database error (pg code) is worth a warning; a TypeError from a
+    // caller whose connection cannot run raw SQL is not an incident.
+    const line = `[occupancy] interview occupancy read skipped for ${dateStr}: ${err && err.name ? err.name : 'Error'}${err && err.code ? ` ${err.code}` : ''}`;
+    if (err && err.code) logger.warn(line); else logger.debug(line);
     return visits;
   }
-  const startMin = timeToMinutes(windowStart);
-  const endMin = timeToMinutes(windowEnd);
-  const interviews = windows
-    .filter((w) => windowsOverlap(startMin, endMin, timeToMinutes(w.start), timeToMinutes(w.end)))
-    .map((w) => ({
-      id: `interview:${w.applicationId || 'unknown'}`,
+  return interviews.length ? [...visits, ...interviews] : visits;
+}
+
+// One constant-SQL raw read (parameterized), deliberately NOT a query-builder
+// chain on the caller's connection: this is an ancillary read and must never
+// take a place in the caller's builder sequence. Returns synthetic conflict
+// rows for interviews overlapping [startMin, endMin) on the ET date.
+async function bookedInterviewConflictRows(db, dateStr, startMin, endMin) {
+  if (!db || typeof db.raw !== 'function') return [];
+  const dayStart = parseETDateTime(`${dateStr}T00:00`);
+  const dayEnd = addETDays(dayStart, 1);
+  const statusList = INTERVIEW_BLOCKING_STATUSES.map(() => '?').join(', ');
+  const res = await db.raw(
+    `SELECT id, interview_at, interview_end_at FROM job_applications
+      WHERE status IN (${statusList}) AND interview_at IS NOT NULL AND interview_at >= ? AND interview_at < ?`,
+    [...INTERVIEW_BLOCKING_STATUSES, dayStart, dayEnd],
+  );
+  const rows = Array.isArray(res) ? res : (res && Array.isArray(res.rows) ? res.rows : []);
+  const out = [];
+  for (const r of rows) {
+    // Only well-formed interview rows count (a test double or a foreign raw
+    // result must never manufacture a conflict).
+    if (!r || !r.id || !Number.isFinite(new Date(r.interview_at).getTime())) continue;
+    const s = new Date(r.interview_at).getTime() - INTERVIEW_BUFFER_MINUTES * 60 * 1000;
+    const e = (r.interview_end_at ? new Date(r.interview_end_at).getTime() : new Date(r.interview_at).getTime() + INTERVIEW_SLOT_MINUTES * 60 * 1000)
+      + INTERVIEW_BUFFER_MINUTES * 60 * 1000;
+    const sp = etParts(new Date(Math.max(s, dayStart.getTime())));
+    const ep = etParts(new Date(Math.min(e, dayEnd.getTime() - 60 * 1000)));
+    const wStart = `${String(sp.hour).padStart(2, '0')}:${String(sp.minute).padStart(2, '0')}`;
+    const wEnd = `${String(ep.hour).padStart(2, '0')}:${String(ep.minute).padStart(2, '0')}`;
+    if (!windowsOverlap(startMin, endMin, timeToMinutes(wStart), timeToMinutes(wEnd))) continue;
+    out.push({
+      id: `interview:${r.id}`,
       customer_id: null,
       status: 'interview',
       service_type: 'Interview',
-      scheduled_date: String(date).split('T')[0],
-      window_start: w.start,
-      window_end: w.end,
-      estimated_duration_minutes: Math.max(0, timeToMinutes(w.end) - timeToMinutes(w.start)),
+      scheduled_date: dateStr,
+      window_start: wStart,
+      window_end: wEnd,
+      estimated_duration_minutes: Math.max(0, timeToMinutes(wEnd) - timeToMinutes(wStart)),
       reservation_expires_at: null,
       conflict_reason: 'interview',
-    }));
-  return interviews.length ? [...visits, ...interviews] : visits;
+    });
+  }
+  return out;
 }
 
 /**
@@ -709,9 +757,11 @@ function windowsOverlap(aStartMin, aEndMin, bStartMin, bEndMin) {
 }
 
 module.exports = {
+  INTERVIEW_BLOCKING_STATUSES, INTERVIEW_SLOT_MINUTES, INTERVIEW_BUFFER_MINUTES,
   findConflictingVisits,
   listOccupiedWindows,
   windowsOverlap,
+  occupiedRows,
   acquireOccupancyLock,
   acquireOccupancyLocks,
   tryAcquireOccupancyLock,

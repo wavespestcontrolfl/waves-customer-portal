@@ -2145,11 +2145,16 @@ time, 30-minute slots, 15-minute buffer against the owner's own route
 stops, and against every other applicant's booked interview) and are
 ALWAYS present, booked or not, so "Change time" needs no second fetch.
 Booked interviews are ALSO occupancy for customer scheduling: the shared
-conflict reader `findConflictingVisits` (scheduling/occupancy.js — every
-customer and staff booking path) appends them as synthetic conflict rows
-(`conflict_reason:'interview'`, interview ±15 minutes, `interview`/`offer`
-rows, best-effort), and the availability slot builder merges the same
-windows into its occupied set. An identical `{mode, start}`
+conflict reader `findConflictingVisits` (scheduling/occupancy.js) appends
+them as synthetic conflict rows (`conflict_reason:'interview'`, interview
+±15 minutes, `interview`/`offer` rows, best-effort raw side read) for the
+callers that opt in with `includeInterviews:true` — the customer booking
+writers: the availability confirm probe, `routes/booking.js`, and every
+`slot-reservation.js` commit path — and the availability slot builder
+merges the same windows into its occupied set. Staff/automation readers
+(rebooker, rain-out, renewals, admin schedule, capacity mode) do not opt
+in yet: full coverage needs interviews represented as calendar rows
+(owner decision, PR 2). An identical `{mode, start}`
 retry of the current booking is answered with the current payload and no
 side effects. POST `/book` re-validates the client's chosen `start` against that SAME
 live offered set — the client's slot choice is never trusted — and
@@ -2171,9 +2176,12 @@ every outcome — including a dark 404 from either gate — carries them; the
 SPA document `/careers/interview/<64-hex>` gets the same headers via
 `utils/sensitive-spa-headers.js`. Applicant threads are OWNER-ONLY in
 every shared reader: the invite carries this bearer link and dual-writes
-into the unified inbox, so `utils/recruiting-thread-scope.js` filters the
-whole applicant conversation (`message_type LIKE 'job_%'`) out of
-`/api/admin/communications/log`, the dashboard inbox + its reply lookup,
+into the unified inbox, so `utils/recruiting-thread-scope.js` filters every
+recruiting MESSAGE (`message_type LIKE 'job_%'` — the invite/confirmation
+and the applicant's reply, which the webhook types `job_applicant_reply` at
+birth) out of `/api/admin/communications/log`, the dashboard inbox + its
+unread count + reply lookup — message-level, so a customer's own texts in
+a thread shared with an applicant stay visible —
 applicant rows (`audience='applicant'`) out of the compliance export, and
 refuses (403) a non-admin `POST /api/admin/communications/ai-draft` for a
 phone that has ever been party to a recruiting text

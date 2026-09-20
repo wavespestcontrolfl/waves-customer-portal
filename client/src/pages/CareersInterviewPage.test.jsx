@@ -112,6 +112,31 @@ describe('CareersInterviewPage — booking failure clears the selected slot', ()
   });
 });
 
+describe('CareersInterviewPage — book returns 404 (application left the Interview stage)', () => {
+  it('a 404 from /book is treated as the same inactive-link terminal state as a 409, not a slot conflict', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ error: 'Not found' }, 404));
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderPage();
+
+    expect(await screen.findByText(/Hi Jordan/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('radio', { name: /Phone call/i }));
+    fireEvent.click(screen.getByRole('button', { name: '4:30 PM' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm interview time' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    // Same terminal state a 409 gets — not the "pick another time" slot-
+    // conflict banner, since the application isn't in the Interview stage
+    // any more (withdrawn/advanced), not merely racing on one slot.
+    expect(await screen.findByText(/This interview link is no longer active/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Confirm interview time' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/no longer available/i)).not.toBeInTheDocument();
+  });
+});
+
 describe('CareersInterviewPage — inactive link', () => {
   it('renders the inactive-link state on a 404', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ error: 'Not found' }, 404)));

@@ -13,6 +13,12 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etParts, parseETDateTime, addETDays, formatETTime } = require('../utils/datetime-et');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('./stops-ahead');
+// Import the canonical span helper from its defining module, NOT from
+// ./scheduling/occupancy — occupancy.js requires THIS module at its top
+// level (for INTERVIEW_BLOCKING_STATUSES etc.), so requiring occupancy.js
+// here would be a require cycle: whichever of the two loads first would see
+// the other's module.exports as its still-empty in-progress stub.
+const { occupiedRows } = require('./scheduling/visit-capacity');
 
 const SLOT_MINUTES = 30;
 const LEAD_HOURS = 4;
@@ -107,6 +113,18 @@ function hhmmFromDbTime(value) {
   return m ? `${m[1]}:${m[2]}` : null;
 }
 
+// occupiedRows() returns startMin/endMin as ET minutes-of-day (a v2 combined
+// allocation's endMin can run past the row's own window_end, even past
+// midnight for an edge-of-day case) — this turns one back into a real
+// instant on `dateStr`. Date.UTC (inside parseETDateTime) rolls an
+// hour >= 24 into the next day on its own, so no explicit day-rollover
+// handling is needed here.
+function minutesToETMs(dateStr, min) {
+  const hh = Math.floor(min / 60);
+  const mm = min % 60;
+  return parseETDateTime(`${dateStr}T${pad2(hh)}:${pad2(mm)}`).getTime();
+}
+
 function slotLabel(startDate) {
   const weekday = startDate.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' });
   const monthDay = startDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' });
@@ -133,12 +151,13 @@ async function listInterviewSlots({ now = new Date(), excludeApplicationId, conn
     const dayWindows = windows[iso] || [];
     if (!dayWindows.length) continue;
 
-     
+
     const routeRows = await conn('scheduled_services')
       .where('scheduled_date', dateStr)
       .whereNotIn('status', NOT_ROUTE_STOP_STATUSES)
       .whereNotNull('window_start')
-      .select('window_start', 'window_end', 'estimated_duration_minutes');
+      .select('id', 'customer_id', 'technician_id', 'scheduled_date', 'window_start', 'window_end',
+        'estimated_duration_minutes', 'reservation_service_mix');
 
      
     const appRows = await conn('job_applications')
@@ -149,22 +168,26 @@ async function listInterviewSlots({ now = new Date(), excludeApplicationId, conn
       })
       .select('id', 'interview_at', 'interview_end_at');
 
-    const routeIntervals = routeRows.map((r) => {
-      const startHHMM = hhmmFromDbTime(r.window_start);
-      const startMs = parseETDateTime(`${dateStr}T${startHHMM}`).getTime();
-      const endHHMM = hhmmFromDbTime(r.window_end);
-      const endMs = endHHMM
-        ? parseETDateTime(`${dateStr}T${endHHMM}`).getTime()
-        : startMs + (Number(r.estimated_duration_minutes) > 0 ? Number(r.estimated_duration_minutes) : 60) * 60000;
-      return { startMs, endMs };
-    });
+    // Canonical occupancy math (server/services/scheduling/occupancy.js
+    // occupiedRows): a version-2 combined service allocation occupies the SUM
+    // of its members' durations from its earliest member's start, not just
+    // its own window — the parallel per-row start/end math this replaced
+    // under-counted a combined allocation whose members extend past this
+    // row's own window_end (Codex P1).
+    const routeIntervals = occupiedRows(routeRows).map((r) => ({
+      startMs: minutesToETMs(dateStr, r.startMin),
+      endMs: minutesToETMs(dateStr, r.endMin),
+    }));
 
+    // Buffer each other applicant's interview the same BUFFER_MINUTES both
+    // sides as route stops (Codex P2) — an interview immediately adjacent to
+    // another still needs travel/setup room between them.
     const appIntervals = appRows.map((a) => {
-      const startMs = new Date(a.interview_at).getTime();
-      const endMs = a.interview_end_at
+      const rawStartMs = new Date(a.interview_at).getTime();
+      const rawEndMs = a.interview_end_at
         ? new Date(a.interview_end_at).getTime()
-        : startMs + SLOT_MINUTES * 60000;
-      return { startMs, endMs };
+        : rawStartMs + SLOT_MINUTES * 60000;
+      return { startMs: rawStartMs - BUFFER_MINUTES * 60000, endMs: rawEndMs + BUFFER_MINUTES * 60000 };
     });
 
     for (const [startHHMM, endHHMM] of dayWindows) {

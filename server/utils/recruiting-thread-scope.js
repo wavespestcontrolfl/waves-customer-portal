@@ -22,19 +22,23 @@ function isRecruitingMessageType(messageType) {
 }
 
 /**
- * @param {import('knex').Knex.QueryBuilder} query - a query already joined
- *   to `conversations` (or selecting from it) so the column below resolves
+ * Message-level exclusion (Codex r4 P1): every recruiting message — the
+ * outbound invite/confirmation (`job_*`) and the applicant's reply (born
+ * `job_applicant_reply` in the webhook) — is hidden from a non-admin, while
+ * the rest of the conversation stays visible. Hiding the WHOLE conversation
+ * was wrong: when an applicant is also a customer the recruiting rows land
+ * in that customer's thread, and a thread-level filter took every service,
+ * billing and scheduling text with them.
+ *
+ * @param {import('knex').Knex.QueryBuilder} query - a query over `messages`
  * @param {object} req - the authenticated staff request (req.techRole)
- * @param {string} [conversationIdColumn] - constant column reference, never
- *   user input (it lands in whereRaw)
+ * @param {string} [messageTypeColumn] - constant column reference
  */
-function hideRecruitingThreadsFromNonAdmin(query, req, conversationIdColumn = 'conversations.id') {
+function hideRecruitingThreadsFromNonAdmin(query, req, messageTypeColumn = 'messages.message_type') {
   if (req && req.techRole === 'admin') return query;
-  return query.whereNotExists(function recruitingThreadProbe() {
-    this.select(1)
-      .from('messages as recruiting_probe')
-      .whereRaw(`recruiting_probe.conversation_id = ${conversationIdColumn}`)
-      .where('recruiting_probe.message_type', 'like', `${RECRUITING_MESSAGE_TYPE_PREFIX}%`);
+  return query.where(function recruitingMessageFilter() {
+    this.whereNull(messageTypeColumn)
+      .orWhere(messageTypeColumn, 'not like', `${RECRUITING_MESSAGE_TYPE_PREFIX}%`);
   });
 }
 
@@ -46,9 +50,10 @@ function hideRecruitingThreadsFromNonAdmin(query, req, conversationIdColumn = 'c
  */
 async function isRecruitingPhone(phone, database = require('../models/db')) {
   const { phoneMatchDigits } = require('./phone');
+  const { excludeUnresolvedSendReservations } = require('../services/messaging/review-ask-reservation');
   const variants = phoneMatchDigits(String(phone || ''));
   if (!variants.length) return false;
-  const row = await database('sms_log')
+  const row = await excludeUnresolvedSendReservations(database('sms_log'))
     .where('message_type', 'like', `${RECRUITING_MESSAGE_TYPE_PREFIX}%`)
     .whereRaw(
       "(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g') = ANY (?::text[]) OR regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g') = ANY (?::text[]))",

@@ -7,10 +7,7 @@
  * windowless-rows-are-inert convention.
  */
 jest.mock('../models/db', () => jest.fn());
-const mockInterviewWindows = jest.fn(async () => []);
-jest.mock('../services/interview-slots', () => ({
-  bookedInterviewWindowsForDate: (...a) => mockInterviewWindows(...a),
-}));
+
 
 const db = require('../models/db');
 const {
@@ -603,29 +600,41 @@ describe('ORDERING CONTRACT — rung 1 is first at every writer', () => {
 describe('findConflictingVisits — recruiting interviews as occupancy (PR #4623)', () => {
   const { findConflictingVisits } = require('../services/scheduling/occupancy');
 
-  beforeEach(() => { mockInterviewWindows.mockReset(); mockInterviewWindows.mockResolvedValue([]); });
+  function dbWithInterviews(rows) {
+    const conn = jest.fn(() => makeQuery([]));
+    conn.raw = jest.fn(async () => ({ rows }));
+    return conn;
+  }
 
-  test('an overlapping booked interview is returned as a synthetic conflict row', async () => {
-    db.mockImplementation(() => makeQuery([]));
-    mockInterviewWindows.mockResolvedValue([{ start: '15:45', end: '16:45', applicationId: 'app-1' }]);
-    const rows = await findConflictingVisits({ db, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00' });
-    expect(mockInterviewWindows).toHaveBeenCalledWith('2027-03-16', { conn: db });
+  test('an overlapping booked interview is returned as a synthetic conflict row (raw side read, never the builder chain)', async () => {
+    const conn = dbWithInterviews([{ id: 'app-1', interview_at: '2027-03-16T20:00:00.000Z', interview_end_at: '2027-03-16T20:30:00.000Z' }]);
+    const rows = await findConflictingVisits({ db: conn, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true });
+    expect(conn.raw).toHaveBeenCalledTimes(1);
+    expect(conn.raw.mock.calls[0][0]).toMatch(/FROM job_applications/);
+    expect(conn.raw.mock.calls[0][1].slice(0, 2)).toEqual(['interview', 'offer']);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ id: 'interview:app-1', customer_id: null, status: 'interview', conflict_reason: 'interview', window_start: '15:45', window_end: '16:45' });
+    // the builder chain was used exactly once — for scheduled_services
+    expect(conn).toHaveBeenCalledTimes(1);
   });
 
   test('a non-overlapping interview does not conflict; includeInterviews:false skips the read', async () => {
-    db.mockImplementation(() => makeQuery([]));
-    mockInterviewWindows.mockResolvedValue([{ start: '08:00', end: '09:00', applicationId: 'app-1' }]);
-    expect(await findConflictingVisits({ db, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00' })).toEqual([]);
-    mockInterviewWindows.mockClear();
-    await findConflictingVisits({ db, date: '2027-03-16', windowStart: '08:30', windowEnd: '09:30', includeInterviews: false });
-    expect(mockInterviewWindows).not.toHaveBeenCalled();
+    const conn = dbWithInterviews([{ id: 'app-1', interview_at: '2027-03-16T13:00:00.000Z', interview_end_at: '2027-03-16T13:30:00.000Z' }]);
+    expect(await findConflictingVisits({ db: conn, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true })).toEqual([]);
+    conn.raw.mockClear();
+    // default (no opt-in) never issues the side read — staff/automation callers stay byte-identical
+    await findConflictingVisits({ db: conn, date: '2027-03-16', windowStart: '08:30', windowEnd: '09:30' });
+    expect(conn.raw).not.toHaveBeenCalled();
   });
 
-  test('a recruiting read error is best-effort: visits still returned, no throw', async () => {
-    db.mockImplementation(() => makeQuery([]));
-    mockInterviewWindows.mockRejectedValue(Object.assign(new Error('relation job_applications does not exist'), { code: '42P01' }));
-    await expect(findConflictingVisits({ db, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00' })).resolves.toEqual([]);
+  test('a connection without raw (test doubles) or a read error is best-effort: visits still returned, no throw', async () => {
+    const noRaw = jest.fn(() => makeQuery([]));
+    await expect(findConflictingVisits({ db: noRaw, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true })).resolves.toEqual([]);
+    const failing = dbWithInterviews([]);
+    failing.raw = jest.fn(async () => { throw Object.assign(new Error('relation job_applications does not exist'), { code: '42P01' }); });
+    await expect(findConflictingVisits({ db: failing, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true })).resolves.toEqual([]);
+    // a foreign raw result (e.g. a lock probe double) never manufactures a conflict
+    const foreign = dbWithInterviews([{ locked: true }]);
+    await expect(findConflictingVisits({ db: foreign, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true })).resolves.toEqual([]);
   });
 });
