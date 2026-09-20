@@ -577,6 +577,62 @@ const REGISTRY = {
     },
   },
 
+  // Applicant texts held by the send window (services/recruiting-comms.js).
+  // Fail closed on every recheck: the lane's kill switch, and the
+  // application version the queue row pinned — an applicant who withdrew,
+  // was moved, or re-picked overnight never receives an obsolete invite or
+  // confirmation. The ledger entry written before the original handoff is
+  // reconciled on send / terminal block so reply classification and the
+  // owner's Messages list stay truthful.
+  recruiting_comms_deferred: {
+    async recheck(meta) {
+      try {
+        if (!require('../../config/feature-gates').isEnabled('recruitingComms')) {
+          return { eligible: false, reason: 'recruiting-gate-off' };
+        }
+        if (!meta.job_application_id) return { eligible: false, reason: 'application-missing' };
+        const app = await db('job_applications').where({ id: meta.job_application_id })
+          .first('id', 'status', 'interview_token', 'interview_at');
+        if (!app) return { eligible: false, reason: 'application-missing' };
+        const status = String(app.status || '');
+        if (!['new', 'reviewed', 'interview', 'offer'].includes(status)) {
+          return { eligible: false, reason: `application-${status || 'unknown'}` };
+        }
+        const stage = String(meta.stage || '');
+        if (stage === 'interview_invite' || stage === 'interview_confirmation') {
+          if (status !== 'interview') return { eligible: false, reason: `application-${status}` };
+          if (!meta.interview_token || app.interview_token !== meta.interview_token) {
+            return { eligible: false, reason: 'interview-token-changed' };
+          }
+        }
+        if (stage === 'interview_confirmation') {
+          const pinned = meta.interview_at ? new Date(meta.interview_at).toISOString() : null;
+          const current = app.interview_at ? new Date(app.interview_at).toISOString() : null;
+          if (!pinned || pinned !== current) return { eligible: false, reason: 'interview-rebooked' };
+        }
+        return { eligible: true };
+      } catch (err) {
+        return failClosed('recruiting-comms', meta.job_application_id, err);
+      }
+    },
+    async finalize(meta) {
+      if (!meta.job_application_id || !meta.ledger_entry_id) return { ok: true };
+      const { finalizeCommsHistoryEntry } = require('../recruiting-comms');
+      await finalizeCommsHistoryEntry(meta.job_application_id, meta.ledger_entry_id, {
+        outcome: 'sent', code: null, finalized_at: new Date().toISOString(), sent_by: 'scheduled_sms_cron',
+      });
+      return { ok: true };
+    },
+    durableFinalize: true,
+    async onTerminal(meta) {
+      if (!meta.job_application_id || !meta.ledger_entry_id) return;
+      const { finalizeCommsHistoryEntry } = require('../recruiting-comms');
+      await finalizeCommsHistoryEntry(meta.job_application_id, meta.ledger_entry_id, {
+        outcome: 'blocked', code: 'deferred_terminal', finalized_at: new Date().toISOString(),
+      });
+      logger.info(`[deferred-replay] recruiting text for application ${meta.job_application_id} terminally blocked — ledger reconciled`);
+    },
+  },
   voicemail_lead_sms_deferred: {
     async recheck(meta) {
       // The quote link is a speed play for a fresh voicemail — a lead

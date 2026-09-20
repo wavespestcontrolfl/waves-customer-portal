@@ -570,6 +570,15 @@ async function sendStageComms(app, stage, opts = {}) {
                 audience: 'applicant',
                 purpose: stage,
                 job_application_id: app.id,
+                stage,
+                // Replay contract (messaging/deferred-replay-registry.js
+                // recruiting_comms_deferred): the ledger entry the cron
+                // reconciles on send, and the application version the
+                // recheck pins so a withdrawn/rebooked applicant never gets
+                // an obsolete invite or confirmation.
+                ledger_entry_id: handoffEntry.id,
+                interview_token: app.interview_token || null,
+                interview_at: app.interview_at ? new Date(app.interview_at).toISOString() : null,
                 original_message_type: `job_${stage}`,
                 consent_basis: { status: 'transactional_allowed', source: 'job_application' },
                 original_block_code: sendRes.code || null,

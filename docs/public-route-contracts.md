@@ -2189,9 +2189,16 @@ phone that has ever been party to a recruiting text
 (`isRecruitingPhone`) before any history for that phone is loaded.
 Applicant texts obey the 8am–8pm ET send window; a held send is queued
 on the scheduled-SMS rail (`sms_log` status `scheduled`, metadata
-`audience:'applicant'` + `purpose` + `consent_basis`, replayed by
-services/scheduler.js under the applicant policy) and the ledger entry
-reads `deferred` with its `scheduled_for`. A successful book fires
+`audience:'applicant'` + `purpose` + `consent_basis` + the ledger entry id
+and the application's interview token/time, replayed by
+services/scheduler.js under the applicant policy through the
+`recruiting_comms_deferred` deferred-replay registry entry — the recheck
+fails closed on the gate, a missing/closed application, a changed token
+or a rebooked time; finalize/onTerminal reconcile the ledger entry) and
+the ledger entry reads `deferred` with its `scheduled_for` (a `deferred`
+entry is owner-only reply context like a sent one). Queued recruiting
+rows are hidden from non-admins in `GET /api/admin/communications/scheduled`
+and refused (403) on `DELETE`. A successful book fires
 (fire-and-forget) the `interview_confirmation`
 comms — SMS only with `sms_consent` or evidence the owner already texted
 this applicant by hand — and the `job_interview_booked` admin

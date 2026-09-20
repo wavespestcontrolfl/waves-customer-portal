@@ -43,7 +43,7 @@ const communicationsRouter = require('../routes/admin-communications');
 
 function query({ result = [] } = {}) {
   const q = {};
-  ['where', 'whereNot', 'whereNull', 'whereRaw', 'whereIn', 'orderBy', 'limit', 'select', 'leftJoin', 'first']
+  ['where', 'whereNot', 'whereNull', 'orWhere', 'whereRaw', 'whereIn', 'orderBy', 'limit', 'select', 'leftJoin', 'first']
     .forEach((m) => { q[m] = jest.fn(() => q); });
   q.select = jest.fn(async () => result);
   q.first = jest.fn(async () => result[0] || null);
@@ -117,5 +117,23 @@ describe('POST /ai-draft recruiting boundary', () => {
     mockIsRecruitingPhone.mockResolvedValueOnce(true);
     const res = await draftAs('admin');
     expect(res.status).not.toBe(403);
+  });
+});
+
+describe('GET /scheduled recruiting boundary', () => {
+  test('technician: queued recruiting texts are filtered (message-level predicate); admin: unfiltered', async () => {
+    const smsLogQuery = query({ result: [] });
+    smsLogQuery.where = jest.fn((arg) => { if (typeof arg === 'function') arg.call(smsLogQuery); return smsLogQuery; });
+    smsLogQuery.leftJoin = jest.fn(() => smsLogQuery);
+    smsLogQuery.select = jest.fn(() => smsLogQuery);
+    smsLogQuery.orderBy = jest.fn(async () => []);
+    db.mockImplementation((table) => (table === 'sms_log' ? smsLogQuery : query({ result: [] })));
+    let res = await fetch(`${base}/api/admin/communications/scheduled`, { headers: { Authorization: 'Bearer tech' } });
+    expect(res.status).toBe(200);
+    expect(smsLogQuery.orWhere).toHaveBeenCalledWith('sms_log.message_type', 'not like', 'job_%');
+    smsLogQuery.orWhere.mockClear();
+    res = await fetch(`${base}/api/admin/communications/scheduled`, { headers: { Authorization: 'Bearer admin' } });
+    expect(res.status).toBe(200);
+    expect(smsLogQuery.orWhere).not.toHaveBeenCalled();
   });
 });

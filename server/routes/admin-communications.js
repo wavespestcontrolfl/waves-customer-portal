@@ -6,7 +6,7 @@ const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
-const { hideRecruitingThreadsFromNonAdmin, isRecruitingPhone } = require('../utils/recruiting-thread-scope');
+const { hideRecruitingThreadsFromNonAdmin, isRecruitingPhone, isRecruitingMessageType } = require('../utils/recruiting-thread-scope');
 const { resolveLocation } = require('../config/locations');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
@@ -3285,8 +3285,10 @@ router.post('/schedule-sms', async (req, res, next) => {
 // GET /api/admin/communications/scheduled — list scheduled messages
 router.get('/scheduled', async (req, res, next) => {
   try {
-    const scheduled = await db('sms_log')
-      .where({ status: 'scheduled' })
+    // Queued recruiting texts carry the bearer interview link — owner-only
+    // (utils/recruiting-thread-scope.js), same as every other reader.
+    const scheduled = await hideRecruitingThreadsFromNonAdmin(db('sms_log')
+      .where({ status: 'scheduled' }), req, 'sms_log.message_type')
       .leftJoin('customers', 'sms_log.customer_id', 'customers.id')
       .select('sms_log.*', 'customers.first_name', 'customers.last_name')
       .orderBy('scheduled_for', 'asc');
@@ -3307,8 +3309,11 @@ router.delete('/scheduled/:id', async (req, res, next) => {
     // Peek (no delete yet) just to learn the thread key for the lock.
     const peek = await db('sms_log')
       .where({ id: req.params.id, status: 'scheduled' })
-      .first('id', 'to_phone');
+      .first('id', 'to_phone', 'message_type');
     if (!peek) return res.json({ success: true });
+    if (req.techRole !== 'admin' && isRecruitingMessageType(peek.message_type)) {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
     const threadLast10 = normalizePhoneLast10(peek.to_phone);
 
     // Lock the thread BEFORE deleting, and resolve the decisions before the

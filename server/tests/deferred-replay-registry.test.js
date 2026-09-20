@@ -1109,3 +1109,54 @@ describe('invoice_followup_deferred × collections policy', () => {
     expect(requiresDurableFinalize('invoice_followup_deferred')).toBe(true);
   });
 });
+
+describe('recruiting_comms_deferred (PR #4623)', () => {
+  const { recheckDeferredReplay, finalizeDeferredReplay, onTerminalDeferredReplay } = require('../services/messaging/deferred-replay-registry');
+  const db = require('../models/db');
+  const gates = require('../config/feature-gates');
+  const meta = { job_application_id: 'app-1', stage: 'interview_invite', interview_token: 'a'.repeat(64), interview_at: null, ledger_entry_id: 'e-1' };
+  const ENTRY = 'recruiting_comms_deferred';
+
+  function rowChain(row) {
+    const q = { where: jest.fn(() => q), first: jest.fn(async () => row) };
+    return q;
+  }
+
+  test('gate off -> ineligible (kill switch honored on replay)', async () => {
+    const spy = jest.spyOn(gates, 'isEnabled').mockImplementation(() => false);
+    expect(await recheckDeferredReplay(ENTRY, meta)).toMatchObject({ eligible: false, reason: 'recruiting-gate-off' });
+    spy.mockRestore();
+  });
+
+  test('withdrawn application / changed token / rebooked time -> ineligible; matching state -> eligible', async () => {
+    const spy = jest.spyOn(gates, 'isEnabled').mockImplementation(() => true);
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'withdrawn', interview_token: 'a'.repeat(64) }));
+    expect(await recheckDeferredReplay(ENTRY, meta)).toMatchObject({ eligible: false, reason: 'application-withdrawn' });
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'interview', interview_token: 'b'.repeat(64) }));
+    expect(await recheckDeferredReplay(ENTRY, meta)).toMatchObject({ eligible: false, reason: 'interview-token-changed' });
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'interview', interview_token: 'a'.repeat(64), interview_at: '2027-03-16T20:00:00.000Z' }));
+    expect(await recheckDeferredReplay(ENTRY, { ...meta, stage: 'interview_confirmation', interview_at: '2027-03-16T21:00:00.000Z' })).toMatchObject({ eligible: false, reason: 'interview-rebooked' });
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'interview', interview_token: 'a'.repeat(64), interview_at: '2027-03-16T20:00:00.000Z' }));
+    expect(await recheckDeferredReplay(ENTRY, { ...meta, stage: 'interview_confirmation', interview_at: '2027-03-16T20:00:00.000Z' })).toMatchObject({ eligible: true });
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'reviewed', interview_token: null }));
+    expect(await recheckDeferredReplay(ENTRY, { ...meta, stage: 'application_received', interview_token: null })).toMatchObject({ eligible: true });
+    spy.mockRestore();
+  });
+
+  test('a database error fails CLOSED', async () => {
+    const spy = jest.spyOn(gates, 'isEnabled').mockImplementation(() => true);
+    db.mockReturnValueOnce({ where: () => { throw Object.assign(new Error('boom'), { code: '57014' }); } });
+    expect(await recheckDeferredReplay(ENTRY, meta)).toMatchObject({ eligible: false });
+    spy.mockRestore();
+  });
+
+  test('finalize reconciles the ledger entry to sent; terminal block reconciles it to blocked', async () => {
+    const comms = require('../services/recruiting-comms');
+    const spy = jest.spyOn(comms, 'finalizeCommsHistoryEntry').mockResolvedValue(undefined);
+    await finalizeDeferredReplay(ENTRY, meta);
+    expect(spy).toHaveBeenCalledWith('app-1', 'e-1', expect.objectContaining({ outcome: 'sent', sent_by: 'scheduled_sms_cron' }));
+    await onTerminalDeferredReplay(ENTRY, meta);
+    expect(spy).toHaveBeenCalledWith('app-1', 'e-1', expect.objectContaining({ outcome: 'blocked', code: 'deferred_terminal' }));
+    spy.mockRestore();
+  });
+});

@@ -65,7 +65,7 @@ async function matchApplicantReply(fromPhone, toNumber) {
   for (const app of apps) {
     const history = Array.isArray(app.comms_history) ? app.comms_history : [];
     for (const entry of history) {
-      if (!entry || entry.channel !== 'sms' || !['handoff', 'sent', 'uncertain'].includes(entry.outcome)) continue;
+      if (!entry || entry.channel !== 'sms' || !['handoff', 'sent', 'uncertain', 'deferred'].includes(entry.outcome)) continue;
       const at = Date.parse(entry.at || '');
       if (!Number.isFinite(at) || at < cutoff) continue;
       if (!best || at > best.at) best = { at, applicationId: app.id, fromNumber: entry.from_number || null };
@@ -84,8 +84,12 @@ async function matchApplicantReply(fromPhone, toNumber) {
     const fromDigits = phoneMatchDigits(String(best.fromNumber));
     if (toDigits.length && fromDigits.length && !toDigits.some((d) => fromDigits.includes(d))) return null;
   }
+  // Only a text that actually went out (sent/delivered) can override —
+  // a customer text merely SCHEDULED, blocked or failed after the handoff
+  // is not something the applicant could be answering.
   const newerCustomerText = await excludeUnresolvedSendReservations(db('sms_log'))
     .where({ direction: 'outbound' })
+    .whereIn('status', ['sent', 'delivered'])
     .whereRaw(digitsExpr('to_phone'), [variants])
     .whereNotIn('message_type', NON_CONVERSATIONAL_OUTBOUND)
     .whereNot('message_type', 'like', 'job_%')
