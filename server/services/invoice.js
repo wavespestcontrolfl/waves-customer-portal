@@ -1375,8 +1375,18 @@ async function settleZeroDueBeforeSend(invoiceId, { fenceOwnership = false, row 
     // A combined-visit (packet) invoice settled here has no payment
     // webhook to trigger the packet's own review enrollment (the non-cash
     // prepaid transition emits none) — the other no-webhook settlement
-    // rails (covered_by_credit) already call this.
-    if (row.visit_completion_packet_id) await enrollPacketReviewAfterCredit(invoiceId, row.visit_completion_packet_id);
+    // rails (covered_by_credit) already call this. Best-effort, same as
+    // those other sites (Codex round-5 audit non-P1 #4131 slice 4): this
+    // runs AFTER the settlement above already committed — an enrollment
+    // error must never surface as a failure of the settlement itself,
+    // or the worker would count a genuinely settled invoice as failed.
+    if (row.visit_completion_packet_id) {
+      try {
+        await enrollPacketReviewAfterCredit(invoiceId, row.visit_completion_packet_id);
+      } catch (enrollErr) {
+        logger.error(`[invoice] ${invoiceId}: review enrollment after zero-due settlement threw — settlement stands: ${enrollErr.message}`);
+      }
+    }
     return { kind: "settled", invoice: settlement.invoice };
   }
   if (settlement.reason === "visit_never_ran") {

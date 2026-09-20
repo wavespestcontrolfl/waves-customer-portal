@@ -214,29 +214,6 @@ describe('POST /admin/invoices/:id/send — first delivery vs. explicit Resend a
     });
   });
 
-  // #4131 slice 4, pre-push audit P1: this used to fall through to the
-  // route's generic failure/conflict handling, reporting a SUCCESSFUL
-  // zero-balance settlement (the invoice is now prepaid) as a failed send.
-  // Unlike already_delivered/queued_pay_link, zero_due is never gated on
-  // firstDeliveryOnly — an explicit Resend can hit this exact race too, and
-  // it is never a conflict either way.
-  test.each([
-    ['a first delivery', { firstDelivery: true }],
-    ['an explicit Resend', { resend: true }],
-  ])('%s that settles a zero-due invoice is reported a 200 success, not a failure', async (_case, body) => {
-    InvoiceService.sendViaSMSAndEmail.mockImplementation(async () => {
-      const e = new Error('Cannot send a prepaid invoice');
-      e.code = 'zero_due';
-      throw e;
-    });
-    await withServer(async (baseUrl) => {
-      const res = await postSend(baseUrl, body);
-      expect(res.status).toBe(200);
-      const responseBody = await res.json();
-      expect(responseBody).toMatchObject({ ok: true, settled_zero_due: true });
-    });
-  });
-
   // Pre-push audit P1: zeroDueOpenVisitSendOutcome's pre-claim settle is
   // the COMMON zero-due path (checked before any claim is ever taken) —
   // its success is a RESOLVED result, not a thrown error, so it must carry
@@ -257,12 +234,13 @@ describe('POST /admin/invoices/:id/send — first delivery vs. explicit Resend a
   });
 
   // Pre-push audit P1: the claim-path race re-check (throwForZero
-  // DueVisitInvoice / reverifyClaimedVisitInvoice) throws this exact code
-  // for the SAME underlying condition zeroDueOpenVisitSendOutcome's
-  // RESOLVED pre-claim path already reports as a friendly 409 above — the
-  // thrown path used to fall through to the generic failure handling
-  // (a bare 500), leaving the operator with two different responses for
-  // one condition depending on which check happened to catch it.
+  // DueVisitInvoice / reverifyClaimedVisitInvoice) used to throw this
+  // exact code, and this test's mock still models that shape — kept as
+  // defensive coverage of the catch block's own 409-mapping wiring even
+  // though no live caller throws it any more (Codex round-5 audit #4131
+  // slice 4: sendViaSMSAndEmail now always RESOLVES this refusal instead;
+  // see resolvedSendOutcome, which routes the SAME classifier branch this
+  // exercises).
   test('the thrown deposit_settlement_pending race path converges on the SAME 409 shape as the resolved pre-claim path', async () => {
     InvoiceService.sendViaSMSAndEmail.mockImplementation(async () => {
       const e = new Error('Nothing is due on this invoice, but it could not be settled yet (existing_payment_work) — not sent.');

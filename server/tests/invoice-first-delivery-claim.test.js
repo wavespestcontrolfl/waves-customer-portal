@@ -25,8 +25,11 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/estimate-deposits', () => ({
   assertInvoiceDepositSettlementReady: jest.fn(async () => undefined),
 }));
+jest.mock('../services/review-request', () => ({ enrollForPaidInvoice: jest.fn() }));
 
 const db = require('../models/db');
+const logger = require('../services/logger');
+const { enrollForPaidInvoice } = require('../services/review-request');
 const { STALE_SEND_PARK_ERROR } = require('../services/invoice-helpers');
 const InvoiceService = require('../services/invoice');
 const { claimInvoiceForSend } = InvoiceService;
@@ -484,6 +487,28 @@ describe('settleZeroDueBeforeSend — THE zero-due chokepoint (#4131 slice 4 rou
 
     expect(outcome).toEqual({ kind: 'not_zero_due' });
     expect(settleSpy).not.toHaveBeenCalled();
+  });
+
+  test('settled: a review-enrollment failure after the settlement already committed is best-effort — outcome is still settled (Codex round-5 audit non-P1 #4131 slice 4)', async () => {
+    // enrollPacketReviewAfterCredit already guards its OWN awaited calls,
+    // but settleZeroDueBeforeSend used to await it with no catch of its
+    // own — a throw reaching past every one of the callee's internal
+    // guards (forced here via a poisoned getter, since the callee is
+    // otherwise fully defensive) would have rejected settleZeroDueBeforeSend
+    // AFTER settleZeroBalance had already committed, so the worker would
+    // count a genuinely settled invoice as failed.
+    makeDb(zeroDueRow({ visit_completion_packet_id: 'pkt-1' }));
+    settleSpy.mockResolvedValue({ settled: true, invoice: { ...zeroDueRow(), status: 'prepaid' } });
+    enrollForPaidInvoice.mockResolvedValue({
+      get enrolled() { throw new Error('poisoned enrollment result'); },
+      recorded: false,
+    });
+
+    const outcome = await InvoiceService._settleZeroDueBeforeSend(INVOICE_ID);
+
+    expect(outcome.kind).toBe('settled');
+    expect(settleSpy).toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining(INVOICE_ID));
   });
 
   test('an unexpected throw from settleZeroBalance (a bug, a DB error) propagates — never silently reinterpreted as a retryable business refusal', async () => {
