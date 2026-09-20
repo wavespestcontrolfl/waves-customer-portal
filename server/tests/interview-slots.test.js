@@ -360,3 +360,13 @@ describe('bookedInterviewWindowsForDate — ET day boundary (Codex r5 P2)', () =
     expect(bounds).toEqual([['>=', '2027-03-16T04:00:00.000Z'], ['<', '2027-03-17T04:00:00.000Z']]);
   });
 });
+
+describe('occupancy.js mirrors the interview constants (no cross-require by design)', () => {
+  test('INTERVIEW_BLOCKING_STATUSES / SLOT_MINUTES / BUFFER_MINUTES stay in lockstep', () => {
+    const slots = require('../services/interview-slots');
+    const occupancy = require('../services/scheduling/occupancy');
+    expect(occupancy.INTERVIEW_BLOCKING_STATUSES).toEqual(slots.INTERVIEW_BLOCKING_STATUSES || ['interview', 'offer']);
+    expect(occupancy.INTERVIEW_SLOT_MINUTES).toBe(slots.SLOT_MINUTES);
+    expect(occupancy.INTERVIEW_BUFFER_MINUTES).toBe(slots.BUFFER_MINUTES);
+  });
+});
