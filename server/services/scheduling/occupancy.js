@@ -542,6 +542,13 @@ async function findConflictingVisits({
 // stay byte-identical until interviews are represented as calendar rows
 // themselves (owner decision pending — see the PR). Best-effort: a read
 // error yields no interview rows and never takes scheduling down.
+// Interview conflicts ALONE, for a caller whose visit check runs elsewhere
+// (capacity mode: verifyArrivalCapacity reads only scheduled_services, so a
+// booked interview must still be probed — Codex #4623 r15 P1).
+async function findInterviewConflicts({ db, date, windowStart, windowEnd }) {
+  return withInterviewConflicts([], { db, date, windowStart, windowEnd, includeInterviews: true });
+}
+
 async function withInterviewConflicts(visits, { db, date, windowStart, windowEnd, includeInterviews }) {
   if (includeInterviews !== true) return visits;
   const dateStr = String(date).split('T')[0];
@@ -777,6 +784,7 @@ function windowsOverlap(aStartMin, aEndMin, bStartMin, bEndMin) {
 module.exports = {
   INTERVIEW_BLOCKING_STATUSES, INTERVIEW_SLOT_MINUTES, INTERVIEW_BUFFER_MINUTES,
   findConflictingVisits,
+  findInterviewConflicts,
   listOccupiedWindows,
   windowsOverlap,
   occupiedRows,

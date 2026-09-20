@@ -729,6 +729,8 @@ async function loadTriageInner({ phone, triggerBody, triggerSmsLogId, deadline =
         // The persisted trigger is supplied separately to the classifier.
         // Exclude its identity before paging; equal-text older SMS still count.
         .modify((query) => { if (triggerSmsLogId) query.whereNot('id', triggerSmsLogId); })
+        // Recruiting threads (job_*) never ground the estimator (codex #4623 r15).
+        .whereRaw("COALESCE(message_type, '') NOT LIKE 'job\\_%'")
         .whereRaw(`created_at >= NOW() - INTERVAL '${THREAD_WINDOW_HOURS} hours'`)
         .orderBy('created_at', 'desc')
         .limit(THREAD_FETCH_LIMIT))

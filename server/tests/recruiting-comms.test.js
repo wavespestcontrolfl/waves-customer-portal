@@ -533,9 +533,24 @@ describe('sendStageComms pre-handoff evidence', () => {
 });
 
 describe('sendStageComms — send-window hold', () => {
+  test('an UNCERTAIN provider outcome is never queued for replay even when the pipeline marks it retryable: the handoff evidence stays', async () => {
+    mockRenderSmsTemplate.mockResolvedValue('Hi Jane, thanks for applying.');
+    // Twilio timeout after the boundary: ambiguous, yet retryable + nextAllowedAt
+    mockSendCustomerMessage.mockResolvedValue({ sent: false, blocked: false, deliveryOutcome: 'uncertain', retryable: true, nextAllowedAt: '2027-03-17T12:00:00.000Z', code: 'PROVIDER_TIMEOUT' });
+    const app = baseApp();
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    mockDb.__tables.sms_log = [];
+    const result = await RecruitingComms.sendStageComms(app, 'application_received', { sms: true, email: false, by: 'system' });
+    expect(result.sms).toBe('uncertain');
+    expect(mockDb.__tables.sms_log.filter((r) => r.status === 'scheduled')).toHaveLength(0);
+    const entry = mockDb.__tables.job_applications.find((r) => r.id === 'app-1').comms_history[0];
+    expect(entry).toMatchObject({ outcome: 'uncertain', code: 'PROVIDER_TIMEOUT' });
+    expect(entry.scheduled_for).toBeUndefined();
+  });
+
   test('a retryable QUIET_HOURS/send-window hold queues the text on the scheduled-SMS rail as an applicant send', async () => {
     mockRenderSmsTemplate.mockResolvedValue('Hi Jane, thanks for applying.');
-    mockSendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, retryable: true, deferred: true, nextAllowedAt: '2027-03-17T12:00:00.000Z', code: 'SEND_WINDOW_CLOSED' });
+    mockSendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, deferred: true, nextAllowedAt: '2027-03-17T12:00:00.000Z', code: 'SEND_WINDOW_CLOSED' });
     const app = baseApp();
     mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
     const result = await RecruitingComms.sendStageComms(app, 'application_received', { sms: true, email: false, by: 'system' });
@@ -589,7 +604,7 @@ describe('sendStageComms — pipeline throw after provider acceptance', () => {
 describe('sendStageComms — invite supersedes queued invites; suppression lookup failure settles the ledger', () => {
   test('a held invite retires the older queued invite only AFTER its own queue row persisted (never strands the applicant)', async () => {
     mockRenderSmsTemplate.mockResolvedValue('Pick a time: https://x/careers/interview/a');
-    mockSendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, retryable: true, deferred: true, nextAllowedAt: '2027-03-17T12:00:00.000Z', code: 'SEND_WINDOW_CLOSED' });
+    mockSendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, deferred: true, nextAllowedAt: '2027-03-17T12:00:00.000Z', code: 'SEND_WINDOW_CLOSED' });
     const app = baseApp({ interview_token: 'a'.repeat(64) });
     mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
     mockDb.__tables.sms_log = [{ id: 'q1', status: 'scheduled', message_type: 'job_interview_invite', metadata: JSON.stringify({ job_application_id: 'app-1' }) }];
@@ -760,7 +775,8 @@ describe('eligibility at the provider boundaries', () => {
     mockDb.__tables.email_messages = [];
     mockActiveSuppressionFor.mockImplementationOnce(async () => {
       // the other admin's attempt inserts its row while this one is in the suppression lookup
-      mockDb.__tables.email_messages.push({ id: 'newer-attempt', recipient_type: 'job_application', recipient_id: 'app-1', template_key: 'job_interview_invite', status: 'queued', queued_at: new Date(Date.now() + 1000) });
+      // settled 'uncertain' (SendGrid timeout) — the applicant may already hold it, so it still supersedes (Codex r15 P2)
+      mockDb.__tables.email_messages.push({ id: 'newer-attempt', recipient_type: 'job_application', recipient_id: 'app-1', template_key: 'job_interview_invite', status: 'uncertain', queued_at: new Date(Date.now() + 1000) });
       return null;
     });
     const result = await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: false, email: true, by: 'tech-1' });
@@ -768,7 +784,7 @@ describe('eligibility at the provider boundaries', () => {
     expect(mockSendOne).not.toHaveBeenCalled();
     const mine = mockDb.__tables.email_messages.find((r) => r.id !== 'newer-attempt');
     expect(mine).toMatchObject({ status: 'failed', error_message: 'superseded: a newer attempt of this stage exists' });
-    expect(mockDb.__tables.email_messages.find((r) => r.id === 'newer-attempt').status).toBe('queued');
+    expect(mockDb.__tables.email_messages.find((r) => r.id === 'newer-attempt').status).toBe('uncertain');
   });
 });
 

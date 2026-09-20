@@ -562,8 +562,25 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated) {
     }
   };
 
+  // Switching applicants (a notification deep-link while a dialog is open)
+  // must close and fully invalidate the nested workflow — a preview, edited
+  // bodies or a send result built for applicant A must never render over,
+  // or be confirmed against, applicant B (Codex r15 P1).
   const resetForNewApplicant = useCallback(() => {
+    previewSeq.current += 1;
+    setStageDialog(null);
+    setPreview(null);
+    setPreviewLoading(false);
+    setPreviewError(null);
     setNote("");
+    setSmsChecked(false);
+    setEmailChecked(false);
+    setSmsBody("");
+    setEmailSubject("");
+    setEmailBody("");
+    setMoveWithoutNotifying(false);
+    setSendResult(null);
+    setStageError(null);
   }, []);
 
   const title = stageDialog

@@ -581,7 +581,9 @@ async function newerEmailAttemptExists(applicationId, templateKey, messageRow) {
   const newer = await db('email_messages')
     .where({ recipient_type: 'job_application', recipient_id: applicationId, template_key: templateKey })
     .whereNot('id', messageRow.id)
-    .whereIn('status', ['queued', 'sent'])
+    // 'uncertain' is live too: a newer attempt that timed out at SendGrid
+    // may already be in the applicant's inbox (Codex r15 P2).
+    .whereIn('status', ['queued', 'sent', 'uncertain'])
     .whereRaw('queued_at > ?', [messageRow.queued_at])
     .first('id');
   return Boolean(newer);
@@ -752,7 +754,11 @@ async function runSmsDelivery({ app, stage, opts, contact, applicantFromNumber, 
   if (sendRes.sent) await retireQueuedInterviewInvites(app, stage, null);
 
   let deferredLedgerDone = false;
-  if (!sendRes.sent && sendRes.retryable && sendRes.nextAllowedAt) {
+  // Queue ONLY a text proven not sent (a validator hold such as the send
+  // window). A provider timeout / 5xx after the boundary is 'uncertain' even
+  // when the pipeline marks it retryable: the applicant may already hold it,
+  // so it keeps its handoff evidence and is never replayed (Codex r15 P1).
+  if (!sendRes.sent && sendRes.deliveryOutcome === 'not_sent' && sendRes.retryable && sendRes.nextAllowedAt) {
     deferredLedgerDone = await queueDeferredSms({ app, stage, contact, body, applicantFromNumber, handoffEntry, sendRes });
     if (deferredLedgerDone) outcome = 'deferred';
   }

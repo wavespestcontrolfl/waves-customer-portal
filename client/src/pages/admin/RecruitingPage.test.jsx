@@ -111,6 +111,34 @@ afterEach(() => {
 });
 
 describe('RecruitingPage — stage change dialog', () => {
+  it('closes and clears the stage dialog when the detail switches to another applicant while it is open', async () => {
+    const base = buildFetchMock();
+    const fetchMock = vi.fn((url, options = {}) => {
+      if (url.includes('/admin/careers?status=')) {
+        return Promise.resolve(apiResponse({
+          applications: [
+            { id: 'app-1', role: 'technician', status: 'new', contact_snapshot: { name: 'Jordan Lee' }, ai_score: 80, ai_recommendation: 'strong', created_at: '2026-09-10T12:00:00Z' },
+            { id: 'app-2', role: 'technician', status: 'new', contact_snapshot: { name: 'Casey Kim' }, ai_score: 70, ai_recommendation: 'maybe', created_at: '2026-09-11T12:00:00Z' },
+          ],
+          counts: { new: 2 },
+        }));
+      }
+      if (url.endsWith('/admin/careers/app-2')) {
+        return Promise.resolve(apiResponse({ application: detailFixture({ id: 'app-2', contact_snapshot: { name: 'Casey Kim', phone: '9415559876', email: 'casey@example.com' } }) }));
+      }
+      return base(url, options);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    await openInterviewStageDialog();
+    // applicant A's edited body is in the form
+    fireEvent.change(screen.getByLabelText(/Text \(941\)/), { target: { value: 'Hi Jordan, custom [interview link]' } });
+    // the detail switches to applicant B (same path a bell deep-link takes) while the dialog is up
+    fireEvent.click(screen.getAllByText('Casey Kim')[0]);
+    await waitFor(() => expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/admin/careers/app-2'))).toBe(true));
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Move to Interview' })).not.toBeInTheDocument());
+    expect(screen.queryByDisplayValue('Hi Jordan, custom [interview link]')).not.toBeInTheDocument();
+  });
+
   it('fetches the stage preview on click and PATCHes with notify for the checked channels', async () => {
     let patchedBody = null;
     const fetchMock = buildFetchMock({ onPatch: (body) => { patchedBody = body; } });

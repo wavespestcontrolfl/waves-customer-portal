@@ -41,7 +41,7 @@ const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 // scheduling/occupancy.js for why both write paths here take it first, and
 // why each also runs the tech-blind global probe (findConflictingVisits)
 // under it before committing.
-const { acquireOccupancyLock, findConflictingVisits } = require('./scheduling/occupancy');
+const { acquireOccupancyLock, findConflictingVisits, findInterviewConflicts } = require('./scheduling/occupancy');
 const { capacityEnabled, placementFitsShift } = require('./scheduling/policy');
 const { lockTechDays } = require('./scheduling/tech-day-lock');
 const { capacityError, prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder } = require('./scheduling/arrival-route');
@@ -1086,9 +1086,14 @@ async function reserveSlot({
         // visits only — hold-vs-hold semantics stay with the narrow checks,
         // and this idempotent retry keeps its designed no-409 behavior when
         // the window is still genuinely free.
-        const refreshClash = useCapacity ? [] : await findConflictingVisits({
+        // Capacity mode verifies visits through verifyArrivalCapacity
+        // (scheduled_services only) — booked interviews are probed on
+        // their own so a hold is never refreshed over one (Codex #4623 r15).
+        const refreshClash = useCapacity
+          ? await findInterviewConflicts({ db: trx, date, windowStart, windowEnd })
+          : await findConflictingVisits({
           db: trx,
-        includeInterviews: true,
+          includeInterviews: true,
           date,
           windowStart,
           windowEnd,
@@ -1228,7 +1233,12 @@ async function reserveSlot({
       // whichever GRADUATES second is stopped by commitReservation's own
       // probe. This estimate's stale holds were refreshed or deleted
       // above, inside this txn, so no self-exclusion is needed.
-      const committedClash = useCapacity ? [] : await findConflictingVisits({
+      // Capacity mode: the visit check is verifyArrivalCapacity's, but a
+      // booked interview is not a scheduled_services row — probe it here
+      // regardless (Codex #4623 r15 P1).
+      const committedClash = useCapacity
+        ? await findInterviewConflicts({ db: trx, date, windowStart, windowEnd })
+        : await findConflictingVisits({
         db: trx,
         includeInterviews: true,
         date,
@@ -1663,8 +1673,8 @@ async function commitReservation({
           ? Number(row.estimated_duration_minutes)
           : DEFAULT_DURATION_MINUTES)
         : null);
-    if (!useCapacity && scheduledDate && windowStart && probeWindowEnd) {
-      const committedClash = await findConflictingVisits({
+    if (scheduledDate && windowStart && probeWindowEnd) {
+      const committedClash = useCapacity ? [] : await findConflictingVisits({
         db: client,
         includeInterviews: true,
         date: scheduledDate,
@@ -1675,7 +1685,13 @@ async function commitReservation({
         // Travel gap: the pin reserveSlot stamped on the hold row.
         travel: { lat: row.lat ?? null, lng: row.lng ?? null },
       });
-      if (committedClash.length) {
+      // Capacity mode keeps its own visit check (verifyArrivalCapacity,
+      // scheduled_services only) — a booked interview is probed on its own
+      // so a hold never graduates over one (Codex #4623 r15 P1).
+      const interviewClash = useCapacity
+        ? await findInterviewConflicts({ db: client, date: scheduledDate, windowStart, windowEnd: probeWindowEnd })
+        : [];
+      if (committedClash.length || interviewClash.length) {
         const err = new Error('slot no longer available');
         err.code = 'SLOT_UNAVAILABLE';
         err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id || 'unassigned'}`;

@@ -618,6 +618,16 @@ describe('findConflictingVisits — recruiting interviews as occupancy (PR #4623
     expect(conn).toHaveBeenCalledTimes(1);
   });
 
+  test('findInterviewConflicts probes interviews ALONE — the capacity-mode caller whose visit check lives elsewhere (Codex r15 P1)', async () => {
+    const { findInterviewConflicts } = require('../services/scheduling/occupancy');
+    const conn = dbWithInterviews([{ id: 'app-1', interview_at: '2027-03-16T20:00:00.000Z', interview_end_at: '2027-03-16T20:30:00.000Z' }]);
+    const rows = await findInterviewConflicts({ db: conn, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00' });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: 'interview:app-1', conflict_reason: 'interview' });
+    // no scheduled_services read at all
+    expect(conn).not.toHaveBeenCalled();
+  });
+
   test('a non-overlapping interview does not conflict; includeInterviews:false skips the read', async () => {
     const conn = dbWithInterviews([{ id: 'app-1', interview_at: '2027-03-16T13:00:00.000Z', interview_end_at: '2027-03-16T13:30:00.000Z' }]);
     expect(await findConflictingVisits({ db: conn, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true })).toEqual([]);
