@@ -65,6 +65,9 @@ describe('double-booking measurement (plain rows only — owner scope 2026-09-20
     const coVisit = measureDayQuality(Model, [pest, row('lawn', 'cust-a', 10, { lat: 5, lng: 5 })]);
     expect(coVisit.doubleBookedVisits).toEqual([]);
     expect(coVisit.overlapMinutes).toBe(60);
+    // Against a third customer the pair is ONE collision (codex #4620 r10 P2).
+    expect(measureDayQuality(Model, [pest, row('lawn', 'cust-a', 10, { lat: 5, lng: 5 }), row('n', 'cust-n', 10)]).doubleBookedVisits)
+      .toEqual([{ ids: ['lawn', 'pest', 'n'], minutes: 60 }]);
     expect(measureDayQuality(Model, [pest, row('lawn', 'cust-a', 10, { lat: 6, lng: 6, service_address_line1: '9 Other Rd' })]).doubleBookedVisits).toEqual([{ ids: ['lawn', 'pest'], minutes: 60 }]);
     expect(measureDayQuality(Model, [{ ...pest, service_address_line1: '1 Main St Apt 1' }, row('lawn', 'cust-a', 10, { lat: 5, lng: 5, service_address_line1: '1 Main St Apt 2' })]).doubleBookedVisits).toEqual([{ ids: ['lawn', 'pest'], minutes: 60 }]);
   });
@@ -79,6 +82,11 @@ describe('double-booking measurement (plain rows only — owner scope 2026-09-20
     // The existing lines still cover those rows.
     expect(result.uncertaintyReasons).toEqual(expect.arrayContaining(['grouped_work_requires_review', 'default_service_durations']));
     expect(result.defaultDurations).toEqual(['u']);
+    // An allocation-only day carries the grouped-work line on its own (codex #4620 r10 P1), and is still simulated.
+    const allocationOnly = measureDayQuality(Model, [...allocation, row('n', 'cust-n', 10)]);
+    expect(allocationOnly.doubleBookedVisits).toEqual([]);
+    expect(allocationOnly.uncertaintyReasons).toContain('grouped_work_requires_review');
+    expect(allocationOnly.modeledDriveMinutes).not.toBeNull();
   });
 });
 

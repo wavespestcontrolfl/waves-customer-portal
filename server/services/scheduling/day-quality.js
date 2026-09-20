@@ -32,16 +32,27 @@ function doubleBookedPairs(stops) {
   const plain = stops.filter(stop => parseHHMM(stop.window_start) != null
     && !stop.visit_id && !allocationKey(stop) && !isHoldStop(stop)
     && (Number(stop.estimated_duration_minutes) > 0 || parseHHMM(stop.window_end) > parseHHMM(stop.window_start)));
-  const blocks = occupiedRows(plain)
+  const rows = occupiedRows(plain)
     .map((row, index) => ({ stop: plain[index], start: row.startMin, end: row.endMin }))
-    .filter(block => block.start != null && block.end > block.start)
+    .filter(row => row.start != null && row.end > row.start)
     .sort((a, b) => a.start - b.start || String(a.stop.id).localeCompare(String(b.stop.id)));
+  // A proven co-visit is ONE physical appointment: collapse it so a clash
+  // with a third customer is one collision, not one per member. Its span is
+  // the union of the members' probe spans (the summed tail is out of scope).
+  const blocks = [];
+  for (const row of rows) {
+    const host = blocks.find(block => isCoVisitPair(effectiveWindowRange, block.stops[block.stops.length - 1], row.stop));
+    if (host) {
+      host.ids.push(row.stop.id);
+      host.stops.push(row.stop);
+      host.end = Math.max(host.end, row.end);
+    } else blocks.push({ ids: [row.stop.id], stops: [row.stop], start: row.start, end: row.end });
+  }
   const pairs = [];
   for (let i = 0; i < blocks.length; i++) {
     for (let j = i + 1; j < blocks.length && blocks[j].start < blocks[i].end; j++) {
       const [a, b] = [blocks[i], blocks[j]];
-      if (isCoVisitPair(effectiveWindowRange, a.stop, b.stop)) continue;
-      pairs.push({ ids: [a.stop.id, b.stop.id], minutes: Math.min(a.end, b.end) - b.start });
+      pairs.push({ ids: [...a.ids, ...b.ids], minutes: Math.min(a.end, b.end) - b.start });
     }
   }
   return pairs;
@@ -70,12 +81,15 @@ function measureDayQuality(RouteOptimizer, stops, {
   const defaultDurations = stops.filter(stop => !(Number(stop.estimated_duration_minutes) > 0)
     && !(parseHHMM(stop.window_end) > parseHHMM(stop.window_start) && parseHHMM(stop.window_start) != null)).map(stop => stop.id);
   const grouped = stops.some(stop => stop.visit_id);
+  // A version-2 combined booking is excluded from double-booking pairs (see
+  // doubleBookedPairs), so its day carries the grouped-work review line too.
+  const combined = stops.some(stop => allocationKey(stop));
   const configured = [departureMinutes, targetReturnMinutes, breakMinutes].every(Number.isFinite)
     && targetReturnMinutes > departureMinutes && breakMinutes >= 0;
   const unknown = Object.entries({
     missing_coordinates: missingCoordinates.length > 0,
     default_service_durations: defaultDurations.length > 0,
-    grouped_work_requires_review: grouped,
+    grouped_work_requires_review: grouped || combined,
     actual_progress_required: !future,
     workday_or_break_allowance_unset: !configured,
   }).filter(([, present]) => present).map(([reason]) => reason);
