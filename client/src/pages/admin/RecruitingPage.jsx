@@ -788,13 +788,15 @@ export default function RecruitingPage() {
                           {detail.interview_mode === "in_person" ? "In person" : "Phone call"} ·{" "}
                           {formatETDateTime(detail.interview_at)}
                         </div>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => openStageDialog("interview", { resend: true })}
-                        >
-                          Resend link
-                        </Button>
+                        {detail.status === "interview" && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => openStageDialog("interview", { resend: true })}
+                          >
+                            Resend link
+                          </Button>
+                        )}
                       </div>
                     ) : (
                       // A candidate moved to Interview "without notifying" has
@@ -807,13 +809,15 @@ export default function RecruitingPage() {
                             ? "Link sent, waiting for the applicant to pick a time."
                             : "No scheduling link sent yet."}
                         </span>
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          onClick={() => openStageDialog("interview", { resend: true })}
-                        >
-                          {detail.interview_url ? "Resend link" : "Send link"}
-                        </Button>
+                        {detail.status === "interview" && (
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => openStageDialog("interview", { resend: true })}
+                          >
+                            {detail.interview_url ? "Resend link" : "Send link"}
+                          </Button>
+                        )}
                       </div>
                     )}
                   </div>

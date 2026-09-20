@@ -185,6 +185,41 @@ describe('RecruitingPage — stage change dialog', () => {
     await screen.findByRole('heading', { name: 'Resend interview link' });
   });
 
+  it('hides every Resend/Send link action once the candidate has left the Interview stage', async () => {
+    const fetchMock = vi.fn((url) => {
+      if (url.includes('/admin/careers?status=')) {
+        return Promise.resolve(apiResponse({
+          applications: [{
+            id: 'app-1', role: 'technician', status: 'offer',
+            contact_snapshot: { name: 'Jordan Lee' }, ai_score: 80, ai_recommendation: 'strong',
+            created_at: '2026-09-10T12:00:00Z',
+          }],
+          counts: { offer: 1 },
+        }));
+      }
+      if (url.endsWith('/admin/careers/app-1')) {
+        return Promise.resolve(apiResponse({
+          application: detailFixture({
+            status: 'offer',
+            interview_mode: 'phone',
+            interview_at: '2026-09-22T20:30:00Z',
+            interview_booked_at: '2026-09-15T00:00:00Z',
+            interview_url: 'https://portal.wavespestcontrol.com/careers/interview/abc',
+          }),
+        }));
+      }
+      return Promise.resolve(apiResponse({}));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText('Jordan Lee'));
+
+    await screen.findByText(/Phone call/);
+    expect(screen.queryByRole('button', { name: 'Resend link' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Send link' })).toBeNull();
+  });
+
   it('omits notify entirely when "Move without notifying" is checked', async () => {
     let patchedBody = null;
     const fetchMock = buildFetchMock({ onPatch: (body) => { patchedBody = body; } });

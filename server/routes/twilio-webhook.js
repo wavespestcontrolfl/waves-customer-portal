@@ -779,9 +779,18 @@ router.post('/sms', async (req, res) => {
     // below — even when this phone also belongs to a customer (Codex r1 P1
     // on #4623). Placed AFTER STOP/HELP/START handling so compliance
     // keywords are always honored first. Fails open to the ordinary path.
-    const recruitingReply = await require('../services/recruiting-inbound')
-      .matchApplicantReply(From)
-      .catch((e) => { logger.warn(`[recruiting-inbound] match failed: ${e.name || 'Error'}`); return null; });
+    let recruitingReply = null;
+    try {
+      recruitingReply = await require('../services/recruiting-inbound').matchApplicantReply(From);
+    } catch (e) {
+      // Fail CLOSED (Codex r1 P0): a lookup error must not let an applicant's
+      // reply fall through to customer automation and the tech-visible bell.
+      // Defer through the webhook's retry path — release the claim so the
+      // retry reprocesses, and answer 503 so Twilio redelivers.
+      logger.error(`[recruiting-inbound] match failed (${e.name || 'Error'}${e.code ? ` ${e.code}` : ''}) — deferring inbound for retry`);
+      if (claimOwned && !persisted) await releaseInboundWebhook(MessageSid);
+      return res.status(503).type('text/xml').send('<Response></Response>');
+    }
     if (recruitingReply) {
       requireInboxMessage();
       const landed = await require('../services/recruiting-inbound').recordApplicantReply({
