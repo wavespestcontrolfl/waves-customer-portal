@@ -25,21 +25,30 @@ const { parseHHMM } = require('./window-rules');
 // rebooker's own probe, so the card agrees with what let the save through.
 // An unknown customer on either side is never waved on.
 function occupiedBlocks(stops) {
-  const timed = stops.filter(stop => parseHHMM(stop.window_start) != null);
-  const occupied = occupiedRows(timed);
+  const occupied = occupiedRows(stops);
   const blocks = new Map();
-  timed.forEach((stop, index) => {
+  stops.forEach((stop, index) => {
+    // A windowless row only counts as a member of a timed visit_id group
+    // (visit-groups keeps such siblings; arrival-route sums their work into
+    // the stop). On its own it has no slot to clash on.
+    const timed = parseHHMM(stop.window_start) != null;
+    if (!timed && !stop.visit_id) return;
     const key = stop.visit_id || allocationKey(stop) || `row:${stop.id}`;
-    const block = blocks.get(key) || { key, ids: [], stops: [], start: Infinity, end: -Infinity, work: 0 };
+    const block = blocks.get(key) || { key, ids: [], stops: [], start: Infinity, end: -Infinity, work: 0, visit: !!stop.visit_id, certain: true };
     block.ids.push(stop.id);
     block.stops.push(stop);
-    block.start = Math.min(block.start, occupied[index].startMin);
-    block.end = Math.max(block.end, occupied[index].endMin);
+    if (timed) {
+      block.start = Math.min(block.start, occupied[index].startMin);
+      block.end = Math.max(block.end, occupied[index].endMin);
+    }
     block.work += workDuration(stop);
+    // No stored span and no estimate: occupiedRows invents 60 minutes, so
+    // this block's end is a guess (the unknown-duration card already covers it).
+    if (!(Number(stop.estimated_duration_minutes) > 0) && !(parseHHMM(stop.window_end) > parseHHMM(stop.window_start))) block.certain = false;
     blocks.set(key, block);
   });
   const grouped = [...blocks.values()]
-    .map(block => ({ ...block, end: block.stops.length > 1 && block.stops[0].visit_id ? Math.max(block.end, block.start + block.work) : block.end }))
+    .map(block => ({ ...block, end: block.visit && block.stops.length > 1 ? Math.max(block.end, block.start + block.work) : block.end }))
     .filter(block => Number.isFinite(block.start) && block.end > block.start)
     .sort((a, b) => a.start - b.start || String(a.ids[0]).localeCompare(String(b.ids[0])));
   // Every ungrouped block (one row, or one version-2 allocation) carries a
@@ -63,6 +72,7 @@ function occupiedBlocks(stops) {
     if (host) {
       host.ids.push(...block.ids);
       host.stops.push(...block.stops);
+      host.certain = host.certain && block.certain;
       continue;
     }
     merged.push(block);
@@ -76,6 +86,8 @@ function doubleBookedPairs(stops) {
   for (let i = 0; i < blocks.length; i++) {
     for (let j = i + 1; j < blocks.length && blocks[j].start < blocks[i].end; j++) {
       const [a, b] = [blocks[i], blocks[j]];
+      // A guessed end proves nothing; only a shared start is a definite clash then.
+      if (!a.certain && b.start > a.start) continue;
       pairs.push({ ids: [...a.ids, ...b.ids], minutes: Math.min(a.end, b.end) - b.start });
     }
   }

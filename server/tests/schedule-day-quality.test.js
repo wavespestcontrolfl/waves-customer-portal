@@ -77,9 +77,23 @@ describe('double-booking measurement (same technician, occupied time per the reb
     expect(measureDayQuality(Model, [...group, row('n', 'cust-n', 11, { window_end: null })]).doubleBookedVisits)
       .toEqual([{ ids: ['pest', 'lawn', 'n'], minutes: 60 }]);
     expect(measureDayQuality(Model, [...group, row('n', 'cust-n', 12, { window_end: null })]).doubleBookedVisits).toEqual([]);
+    // A windowless sibling still adds its work to the group (codex #4620 r7 P1): 10:00–11:00 + 40 min runs to 11:40.
+    const withSibling = [group[0], row('extra', 'cust-a', 10, { visit_id: 'g', window_start: null, window_end: null, estimated_duration_minutes: 40 })];
+    expect(measureDayQuality(Model, [...withSibling, row('n', 'cust-n', 11, { window_start: '11:15', window_end: null })]).doubleBookedVisits)
+      .toEqual([{ ids: ['pest', 'extra', 'n'], minutes: 25 }]);
+    // An ungrouped windowless row has no slot to clash on.
+    expect(measureDayQuality(Model, [row('w', 'cust-w', 10, { window_start: null, window_end: null }), row('n', 'cust-n', 10)]).doubleBookedVisits).toEqual([]);
     // A different group in the same slot is still a clash.
     expect(measureDayQuality(Model, [...group, row('o', 'cust-o', 10, { visit_id: 'h', window_end: null })]).doubleBookedVisits)
       .toEqual([{ ids: ['o', 'pest', 'lawn'], minutes: 60 }]);
+  });
+
+  test('a guessed duration never makes a definite double-booking; a shared start still does (codex #4620 r7 P2)', () => {
+    const unknown = row('u', 'cust-u', 10, { window_end: null, estimated_duration_minutes: null });
+    const later = measureDayQuality(Model, [unknown, row('n', 'cust-n', 10, { window_start: '10:45', window_end: '11:45' })]);
+    expect(later.doubleBookedVisits).toEqual([]);
+    expect(later.defaultDurations).toEqual(['u']);
+    expect(measureDayQuality(Model, [unknown, row('n', 'cust-n', 10)]).doubleBookedVisits).toEqual([{ ids: ['n', 'u'], minutes: 60 }]);
   });
 
   test('a version-2 combined booking occupies the sum of its members (codex #4620 r1 P1)', () => {
