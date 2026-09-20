@@ -143,6 +143,20 @@ async function listInterviewSlots({ now = new Date(), excludeApplicationId, conn
   const leadCutoffMs = now.getTime() + LEAD_HOURS * 60 * 60 * 1000;
   const slots = [];
 
+  // One read for the whole horizon (Codex r9 P2): every active interview
+  // from a day before now to the end of the horizon, filtered per date below.
+  const horizonStart = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const horizonEnd = addETDays(now, HORIZON_DAYS + 1);
+  const allAppRows = await conn('job_applications')
+    .whereIn('status', INTERVIEW_BLOCKING_STATUSES)
+    .whereNotNull('interview_at')
+    .where('interview_at', '>=', horizonStart)
+    .where('interview_at', '<', horizonEnd)
+    .modify((q) => {
+      if (excludeApplicationId) q.whereNot('id', excludeApplicationId);
+    })
+    .select('id', 'interview_at', 'interview_end_at');
+
   for (let dayOffset = 0; dayOffset < HORIZON_DAYS; dayOffset++) {
     const dayAnchor = addETDays(now, dayOffset);
     const dp = etParts(dayAnchor);
@@ -163,13 +177,7 @@ async function listInterviewSlots({ now = new Date(), excludeApplicationId, conn
         'estimated_duration_minutes', 'reservation_service_mix');
 
      
-    const appRows = await conn('job_applications')
-      .whereIn('status', INTERVIEW_BLOCKING_STATUSES)
-      .whereNotNull('interview_at')
-      .modify((q) => {
-        if (excludeApplicationId) q.whereNot('id', excludeApplicationId);
-      })
-      .select('id', 'interview_at', 'interview_end_at');
+    const appRows = allAppRows;
 
     // Canonical occupancy math (server/services/scheduling/occupancy.js
     // occupiedRows): a version-2 combined service allocation occupies the SUM

@@ -137,7 +137,7 @@ async function matchApplicantReply(fromPhone, toNumber) {
  *
  * @returns {Promise<{ persisted: boolean, duplicate: boolean }>}
  */
-async function recordApplicantReply({ applicationId, from, to, body, messageSid, mediaCount = 0 }) {
+async function recordApplicantReply({ applicationId, from, to, body, messageSid, mediaCount = 0, media = [], unifiedMessageId = null }) {
   const entry = {
     at: new Date().toISOString(),
     stage: 'applicant_reply',
@@ -147,6 +147,11 @@ async function recordApplicantReply({ applicationId, from, to, body, messageSid,
     code: null,
     body: body || (mediaCount ? `${mediaCount} photo${mediaCount === 1 ? '' : 's'}` : ''),
     by: 'applicant',
+    // Attachments: stored media references (never a public URL) and the
+    // unified message id, so the recruiting detail can sign them for the
+    // owner (Codex r9 P2).
+    ...(Array.isArray(media) && media.length ? { media: media.map((m) => ({ key: m.key || null, url: m.key ? null : (m.url || null), contentType: m.contentType || null })) } : {}),
+    ...(unifiedMessageId ? { unified_message_id: unifiedMessageId } : {}),
   };
 
   const duplicate = await db.transaction(async (trx) => {

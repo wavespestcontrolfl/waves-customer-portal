@@ -56,7 +56,8 @@ describe('isRecruitingPhone', () => {
   function fakeDatabase({ ledgerRow = null, smsRow = null } = {}) {
     const make = (row) => {
       const q = {};
-      ['where', 'whereRaw', 'whereNot', 'whereNotIn', 'andWhere', 'whereNull', 'orWhere', 'orWhereNull', 'modify'].forEach((m) => { q[m] = jest.fn(() => q); });
+      ['where', 'whereIn', 'whereRaw', 'whereNot', 'whereNotIn', 'andWhere', 'whereNull', 'orWhere', 'orWhereNull'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.modify = jest.fn((fn) => { fn(q); return q; });
       q.first = jest.fn(async () => row);
       return q;
     };
@@ -74,7 +75,17 @@ describe('isRecruitingPhone', () => {
     const [sql, bindings] = database.qs.job_applications.whereRaw.mock.calls[0];
     expect(sql).toMatch(/contact_snapshot->>'phone'/);
     expect(bindings).toEqual([['19415550142', '9415550142']]);
-    expect(database.qs.job_applications.whereRaw.mock.calls[1][0]).toMatch(/jsonb_path_exists/);
+    expect(database.qs.job_applications.whereRaw.mock.calls[1][0]).toMatch(/jsonb_array_elements/);
+  });
+
+  test('activeOnly (composer / scheduled sends): only an OPEN application counts and the sms_log fallback is skipped', async () => {
+    const database = fakeDatabase({ ledgerRow: null, smsRow: { id: 'x' } });
+    await expect(isRecruitingPhone('+19415550142', database, { activeOnly: true })).resolves.toBe(false);
+    expect(database.qs.job_applications.whereIn).toHaveBeenCalledWith('status', ['new', 'reviewed', 'interview', 'offer']);
+    expect(database).not.toHaveBeenCalledWith('sms_log');
+    // the ledger predicate is plain SQL — no jsonpath '?' that knex would read as a binding
+    const sqls = database.qs.job_applications.whereRaw.mock.calls.map((c) => c[0]);
+    expect(sqls.some((q) => /jsonb_array_elements/.test(q) && !/\?/.test(q))).toBe(true);
   });
 
   test('falls back to a job_* sms_log row (either direction); false with neither; no query for an unparseable phone', async () => {

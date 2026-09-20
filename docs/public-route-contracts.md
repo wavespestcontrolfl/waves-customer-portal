@@ -2193,7 +2193,10 @@ applicant rows (`audience='applicant'`) out of the compliance export, and
 refuses (403) a non-admin `POST /api/admin/communications/ai-draft` for a
 phone that has ever been party to a recruiting text
 (`isRecruitingPhone` — durable applicant-ledger evidence first, the
-provider log second) before any history for that phone is loaded. An
+provider log second) before any history for that phone is loaded; the
+composer and `/schedule-sms` use `activeOnly` (an OPEN application with
+ledger evidence), so a former applicant who is also a customer receives
+ordinary service texts again once their application closes. An
 OWNER texting an applicant from a shared surface — the dashboard inbox
 reply on a `job_applicant_reply` row, or the Communications composer to
 a recruiting phone — rides the recruiting rail (`sendOwnerReply`: purpose
@@ -2205,7 +2208,10 @@ on both, and `POST /schedule-sms` refuses a recruiting phone for everyone
 (403 non-admin, 409 admin) — applicant texts are never queued as manual
 customer texts. Reply evidence is scoped to the line the reply arrived on
 before the newest entry is chosen (two recruiting lines = two threads).
-Applicant texts obey the 8am–8pm ET send window; a held send is queued
+Every applicant send re-checks eligibility at the ACTUAL provider
+boundary (a `preSendCheck` inside the SMS pipeline; a `beforeProvider`
+check immediately before SendGrid — a stale one settles its ledger row
+`failed` and sends nothing). Applicant texts obey the 8am–8pm ET send window; a held send is queued
 on the scheduled-SMS rail (`sms_log` status `scheduled`, metadata
 `audience:'applicant'` + `purpose` + `consent_basis` + the ledger entry id
 and the application's interview token/time, replayed by

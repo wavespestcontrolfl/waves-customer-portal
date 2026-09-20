@@ -660,3 +660,24 @@ describe('owner reply eligibility', () => {
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 });
+
+describe('eligibility at the provider boundaries', () => {
+  test('SMS: a preSendCheck is passed to the pipeline; email: beforeProvider stales the email at the SendGrid boundary and settles the ledger', async () => {
+    mockRenderSmsTemplate.mockResolvedValue('Pick a time: https://x/careers/interview/a');
+    mockSendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, deliveryOutcome: 'accepted' });
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    const answers = [true, true, false]; // sms leg check, sms preSendCheck (not invoked by the mock), email leg check → still true; the boundary check returns false
+    let calls = 0;
+    const stillEligible = jest.fn(async () => { calls += 1; return calls <= 2; });
+    const result = await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: true, email: true, by: 'tech-1', stillEligible });
+    const smsInput = mockSendCustomerMessage.mock.calls[0][0];
+    expect(typeof smsInput.preSendCheck).toBe('function');
+    await expect(smsInput.preSendCheck()).resolves.toMatchObject({ ok: false, code: 'RECRUITING_STALE' });
+    expect(result.sms).toBe('sent');
+    expect(result.email).toBe('stale');
+    expect(mockSendOne).not.toHaveBeenCalled();
+    const ledger = mockDb.__tables.email_messages.find((r) => r.recipient_id === 'app-1');
+    expect(ledger.status).toBe('failed');
+  });
+});

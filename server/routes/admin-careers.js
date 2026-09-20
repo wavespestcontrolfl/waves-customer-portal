@@ -105,7 +105,22 @@ router.get('/:id', async (req, res) => {
     if (!UUID_RE.test(req.params.id)) return res.status(404).json({ error: 'Not found' });
     const row = await db('job_applications').where({ id: req.params.id }).first();
     if (!row) return res.status(404).json({ error: 'Not found' });
-    res.json({ application: withoutToken(row) });
+    // Applicant MMS: sign the stored media references for the owner so an
+    // attachment can be opened from Recruiting (Codex r9 P2). Best-effort.
+    let replyMedia = {};
+    try {
+      const { signMediaForClient } = require('../services/sms-media');
+      const history = Array.isArray(row.comms_history) ? row.comms_history : [];
+      for (const entry of history) {
+        if (entry && entry.id && Array.isArray(entry.media) && entry.media.length) {
+          replyMedia[entry.id] = await signMediaForClient(entry.media);
+        }
+      }
+    } catch (err) {
+      logger.warn(`[admin-careers] reply media signing failed (application ${req.params.id}): ${RecruitingComms.errorSummary(err)}`);
+      replyMedia = {};
+    }
+    res.json({ application: withoutToken(row), reply_media: replyMedia });
     // Opening the application IS reading its replies (Codex r7 P2): clear the
     // unread flags on the applicant's reply rows in both message stores so
     // the shared unread counts do not stay lit for messages the owner has

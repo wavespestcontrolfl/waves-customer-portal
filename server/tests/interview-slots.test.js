@@ -14,7 +14,17 @@ const mockDb = jest.fn((table) => {
   let filtered = rows.slice();
   let selectedCols = null;
   const builder = {
-    where(col, val) {
+    where(col, opOrVal, maybeVal) {
+      // three-arg range form (col, op, val) used by the horizon read
+      if (maybeVal !== undefined && typeof opOrVal === 'string' && ['>=', '<', '>', '<='].includes(opOrVal)) {
+        const bound = new Date(maybeVal).getTime();
+        filtered = filtered.filter((r) => {
+          const v = new Date(r[col]).getTime();
+          return opOrVal === '>=' ? v >= bound : opOrVal === '<' ? v < bound : opOrVal === '>' ? v > bound : v <= bound;
+        });
+        return builder;
+      }
+      const val = opOrVal;
       if (typeof col === 'object' && col !== null) {
         filtered = filtered.filter((r) => Object.entries(col).every(([k, v]) => r[k] === v));
       } else {

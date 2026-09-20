@@ -450,7 +450,7 @@ router.post('/sms', async (req, res, next) => {
     // (Codex r7 P0): owner-only, typed job_owner_reply, handoff evidence on
     // the application — never a 'manual' customer text that would hand the
     // applicant's next reply to the customer pipeline.
-    if (await isRecruitingPhone(to)) {
+    if (await isRecruitingPhone(to, undefined, { activeOnly: true })) {
       if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
       if (media.length > 0) return res.status(400).json({ error: 'Attachments are not supported for applicant texts' });
       const RecruitingComms = require('../services/recruiting-comms');
@@ -3174,7 +3174,7 @@ router.post('/schedule-sms', async (req, res, next) => {
     // applicant texts are not scheduled from here at all (owner sends now
     // from the recruiting queue / reply box; the send window queues them
     // itself), and a non-admin is refused outright.
-    if (await isRecruitingPhone(to)) {
+    if (await isRecruitingPhone(to, undefined, { activeOnly: true })) {
       if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
       return res.status(409).json({ error: 'Applicant texts are not scheduled here — send now from the recruiting queue or the reply box' });
     }

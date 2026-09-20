@@ -48,22 +48,34 @@ function hideRecruitingThreadsFromNonAdmin(query, req, messageTypeColumn = 'mess
  * conversation (the AI draft composer): a non-admin must be refused before
  * any history for that phone is loaded.
  */
-async function isRecruitingPhone(phone, database = require('../models/db')) {
+const OPEN_APPLICATION_STATUSES = ['new', 'reviewed', 'interview', 'offer'];
+// Ledger evidence: an SMS attempt on the application (written BEFORE any
+// provider call). Plain EXISTS — a jsonpath filter would carry a literal
+// '?' that knex reads as a binding placeholder.
+const SMS_LEDGER_EVIDENCE_SQL = "EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(comms_history, '[]'::jsonb)) AS e "
+  + "WHERE e->>'channel' = 'sms' AND e->>'outcome' IN ('handoff', 'sent', 'uncertain', 'deferred'))";
+
+/**
+ * Is this phone recruiting context?
+ *   activeOnly:false (default — history readers such as the AI draft): any
+ *     application on the phone with SMS ledger evidence, or any job_* sms_log
+ *     row (either direction).
+ *   activeOnly:true (composer / scheduled sends): an OPEN application with
+ *     ledger evidence — a former applicant who is also a customer gets
+ *     ordinary service texts again once their application closes.
+ */
+async function isRecruitingPhone(phone, database = require('../models/db'), { activeOnly = false } = {}) {
   const { phoneMatchDigits } = require('./phone');
   const { excludeUnresolvedSendReservations } = require('../services/messaging/review-ask-reservation');
   const variants = phoneMatchDigits(String(phone || ''));
   if (!variants.length) return false;
-  // DURABLE evidence first (local audit P0): an application on this phone
-  // whose ledger holds an SMS attempt (handoff/sent/uncertain/deferred) —
-  // written BEFORE any provider call — makes the phone recruiting context
-  // even when the best-effort sms_log row never landed.
   const ledger = await database('job_applications')
     .whereRaw("regexp_replace(COALESCE(contact_snapshot->>'phone', ''), '[^0-9]', '', 'g') = ANY (?::text[])", [variants])
-    .whereRaw(`jsonb_path_exists(COALESCE(comms_history, '[]'::jsonb), '$[*] ? (@.channel == "sms" && (@.outcome == "handoff" || @.outcome == "sent" || @.outcome == "uncertain" || @.outcome == "deferred"))')`)
+    .modify((q) => { if (activeOnly) q.whereIn('status', OPEN_APPLICATION_STATUSES); })
+    .whereRaw(SMS_LEDGER_EVIDENCE_SQL)
     .first('id');
   if (ledger) return true;
-  // Provider-log evidence second (covers inbound-only history, e.g. an
-  // applicant reply that arrived before any outbound).
+  if (activeOnly) return false;
   const row = await excludeUnresolvedSendReservations(database('sms_log'))
     .where('message_type', 'like', `${RECRUITING_MESSAGE_TYPE_PREFIX}%`)
     .whereRaw(
@@ -74,4 +86,4 @@ async function isRecruitingPhone(phone, database = require('../models/db')) {
   return Boolean(row);
 }
 
-module.exports = { RECRUITING_MESSAGE_TYPE_PREFIX, isRecruitingMessageType, hideRecruitingThreadsFromNonAdmin, isRecruitingPhone };
+module.exports = { RECRUITING_MESSAGE_TYPE_PREFIX, OPEN_APPLICATION_STATUSES, isRecruitingMessageType, hideRecruitingThreadsFromNonAdmin, isRecruitingPhone };

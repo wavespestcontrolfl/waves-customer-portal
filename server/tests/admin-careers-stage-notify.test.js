@@ -431,6 +431,17 @@ describe('GET /:id detail never exposes the raw token', () => {
     expect(updates.map(([t, p]) => [t, p.is_read])).toEqual([['sms_log', true], ['messages', true]]);
   });
 
+  test('detail signs applicant attachments per ledger entry (reply_media)', async () => {
+    const smsMedia = require('../services/sms-media');
+    const spy = jest.spyOn(smsMedia, 'signMediaForClient').mockResolvedValue([{ key: 'k', url: 'https://signed/x', contentType: 'image/jpeg' }]);
+    mockDb.__setRows([appRow({ status: 'interview', comms_history: [{ id: 'e-7', channel: 'sms', stage: 'applicant_reply', outcome: 'received', media: [{ key: 'k', contentType: 'image/jpeg' }] }] })]);
+    const res = await fetch(`${base}/api/admin/careers/aaaaaaaa-0000-4000-8000-000000000001`, { headers: { Authorization: 'Bearer admin' } });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.reply_media).toEqual({ 'e-7': [{ key: 'k', url: 'https://signed/x', contentType: 'image/jpeg' }] });
+    spy.mockRestore();
+  });
+
   test('detail carries interview_url, not interview_token', async () => {
     mockDb.__setRows([appRow({ interview_token: 'd'.repeat(64), status: 'interview' })]);
     const res = await fetch(`${base}/api/admin/careers/aaaaaaaa-0000-4000-8000-000000000001`);

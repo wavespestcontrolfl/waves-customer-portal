@@ -809,6 +809,7 @@ router.post('/sms', async (req, res) => {
         await require('../services/recruiting-inbound').recordApplicantReply({
           applicationId: recruitingReply.applicationId,
           from: From, to: To, body: Body, messageSid: MessageSid, mediaCount: inboundMedia.length,
+          media: inboundMedia, unifiedMessageId: inboundTouchpoint?.message?.id || null,
         });
       } catch (e) {
         // Fail closed: the typed inbox row is already hidden from shared

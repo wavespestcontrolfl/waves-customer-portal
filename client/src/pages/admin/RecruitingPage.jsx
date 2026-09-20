@@ -196,7 +196,7 @@ function RecommendationBadge({ recommendation }) {
 }
 
 // comms_history is append-only, newest last — reverse for display.
-function MessagesList({ history }) {
+function MessagesList({ history, replyMedia }) {
   const [openKey, setOpenKey] = useState(null);
   if (!history?.length) return null;
   const items = [...history].reverse();
@@ -226,6 +226,19 @@ function MessagesList({ history }) {
                   </button>
                 )}
               </div>
+              {Array.isArray(replyMedia?.[entry.id]) && replyMedia[entry.id].length > 0 && (
+                <div className="mt-1 flex flex-wrap gap-2">
+                  {replyMedia[entry.id].map((m, j) => (
+                    m.url ? (
+                      <a key={j} className="text-14 underline text-zinc-700" href={m.url} target="_blank" rel="noopener noreferrer">
+                        Attachment {j + 1}
+                      </a>
+                    ) : (
+                      <span key={j} className="text-14 text-zinc-500">Attachment {j + 1} (unavailable)</span>
+                    )
+                  ))}
+                </div>
+              )}
               {open && entry.body && (
                 <div className="mt-1.5 text-14 text-zinc-800 whitespace-pre-wrap">
                   {entry.body}
@@ -407,6 +420,7 @@ export default function RecruitingPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [detail, setDetail] = useState(null);
+  const [replyMedia, setReplyMedia] = useState({});
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -454,6 +468,7 @@ export default function RecruitingPage() {
       const data = await adminFetch(`/admin/careers/${id}`);
       if (seq !== detailSeq.current) return; // superseded or dialog closed
       setDetail(data.application);
+      setReplyMedia(data.reply_media || {});
       setNote("");
     } catch (err) {
       if (seq === detailSeq.current) setError(err.message);
@@ -836,7 +851,7 @@ export default function RecruitingPage() {
                   </div>
                 )}
 
-              <MessagesList history={detail.comms_history} />
+              <MessagesList history={detail.comms_history} replyMedia={replyMedia} />
             </DialogBody>
             <DialogFooter>
               <div className="flex flex-wrap gap-1.5">

@@ -287,7 +287,7 @@ function buildEmailContent(app, stage, vars) {
   return { subject: '', html: '', text: '' };
 }
 
-async function sendRawEmail({ app, stage, to, subject, html, text }) {
+async function sendRawEmail({ app, stage, to, subject, html, text, beforeProvider }) {
   const templateKey = `job_${stage}`;
   let messageRow = null;
   // Fresh per send attempt and echoed in SendGrid custom_args, so a
@@ -356,6 +356,17 @@ async function sendRawEmail({ app, stage, to, subject, html, text }) {
     return { outcome: 'blocked', code: 'email_suppressed' };
   }
 
+  // Eligibility immediately before SendGrid (Codex r9 P2): the ledger insert
+  // and suppression lookup above are awaits during which the application can
+  // change; a stale one settles its ledger row and sends nothing.
+  if (typeof beforeProvider === 'function' && (await beforeProvider()) === false) {
+    if (messageRow) {
+      await db('email_messages').where({ id: messageRow.id, status: 'queued', send_attempt_token: sendAttemptToken }).update({
+        status: 'failed', error_message: 'stale: application changed before the provider handoff', updated_at: new Date(),
+      }).catch(() => {});
+    }
+    return { outcome: 'stale', code: 'recruiting_stale' };
+  }
   try {
     const result = await sendgrid.sendOne({
       to,
@@ -606,6 +617,13 @@ async function sendStageComms(app, stage, opts = {}) {
           entryPoint: opts.entryPoint || 'recruiting_comms',
           identityTrustLevel: 'phone_provided_unverified',
           consentBasis: { status: 'transactional_allowed', source: 'job_application' },
+          // Authoritative eligibility at the ACTUAL provider boundary (Codex r9
+          // P2): the pipeline runs this right before Twilio, after every validator.
+          ...(typeof opts.stillEligible === 'function' ? {
+            preSendCheck: async () => ((await legEligible())
+              ? { ok: true }
+              : { ok: false, code: 'RECRUITING_STALE', reason: 'application changed before the provider handoff' }),
+          } : {}),
           ...(opts.by && opts.by !== 'system' && opts.by !== 'applicant' ? { operatorInitiated: true } : {}),
           metadata: { original_message_type: `job_${stage}`, job_application_id: app.id, ...(opts.by && opts.by !== 'system' && opts.by !== 'applicant' ? { adminUserId: opts.by } : {}), ...(applicantFromNumber ? { fromNumber: applicantFromNumber } : {}) },
           });
@@ -727,7 +745,7 @@ async function sendStageComms(app, stage, opts = {}) {
         : built.html;
       let sendRes;
       try {
-        sendRes = await sendRawEmail({ app, stage, to: contact.email, subject, html, text });
+        sendRes = await sendRawEmail({ app, stage, to: contact.email, subject, html, text, beforeProvider: legEligible });
       } catch (err) {
         logger.error(`[recruiting-comms] email leg threw (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
         sendRes = { outcome: 'failed', code: `threw:${errorSummary(err)}` };

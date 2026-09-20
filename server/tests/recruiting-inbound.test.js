@@ -152,6 +152,14 @@ describe('recordApplicantReply', () => {
     expect(JSON.stringify(mockTrigger.mock.calls[0][1])).not.toMatch(/0142|Tuesday/);
   });
 
+  test('attachments ride the ledger as stored references (key, never a public URL) with the unified message id', async () => {
+    await recordApplicantReply({ ...args, body: '', mediaCount: 1, media: [{ key: 'sms/in/abc.jpg', url: 'https://twilio.example/x', contentType: 'image/jpeg' }], unifiedMessageId: 'msg-9' });
+    const entry = mockAppend.mock.calls[0][1][0];
+    expect(entry.media).toEqual([{ key: 'sms/in/abc.jpg', url: null, contentType: 'image/jpeg' }]);
+    expect(entry.unified_message_id).toBe('msg-9');
+    expect(entry.body).toBe('1 photo');
+  });
+
   test('a redelivered SID is a no-op: nothing inserted, no second bell', async () => {
     state.existingReply = { id: 'sms-existing' };
     await expect(recordApplicantReply(args)).resolves.toEqual({ persisted: true, duplicate: true });
