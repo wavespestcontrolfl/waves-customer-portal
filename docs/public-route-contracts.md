@@ -281,7 +281,8 @@ snapshot available at all); every other phone continues on the ordinary
 path so a recruiting-store hiccup never stalls the inbound pipeline): an inbound
 from a phone that
 (a) belongs to an OPEN job application (new/reviewed/interview/offer)
-AND (b) has a `job_*` SMS `handoff`/`sent`/`uncertain` entry (the `handoff`
+AND (b) has a `job_*` SMS `handoff`/`sent`/`uncertain` entry — a queued `deferred`
+entry is NOT evidence (nothing reached the applicant) — (the `handoff`
 entry is written BEFORE the provider call, stamped with the outbound
 `from_number`, and reconciled in place after — DURABLE evidence that
 always precedes the text; the post-acceptance sms_log row is never the
@@ -2216,7 +2217,9 @@ application whose ledger owns the newest SMS attempt. A technician's
 read-marking scope (`markInboundSmsRead`) excludes hidden recruiting rows
 exactly as the display query does. A standalone compliance command (STOP /
 START / HELP) bypasses recruiting classification entirely, so a
-recruiting-store outage can never delay a suppression write. Reply evidence is scoped to the line the reply arrived on
+recruiting-store outage can never delay a suppression write; the recruiting
+ledger still counts as compliance ELIGIBILITY evidence (an applicant's STOP
+is honored even when the provider-log writes failed), failing open. Reply evidence is scoped to the line the reply arrived on
 before the newest entry is chosen (two recruiting lines = two threads).
 Every applicant send re-checks eligibility at the ACTUAL provider
 boundary (a `preSendCheck` inside the SMS pipeline; a `beforeProvider`

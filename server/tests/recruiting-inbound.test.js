@@ -109,9 +109,9 @@ describe('matchApplicantReply', () => {
     const bound = q.where.mock.calls.find((c) => c[0] === 'created_at')[2];
     expect(Math.abs(bound.getTime() - (NOW - 1800000))).toBeLessThan(1000);
   });
-  test('a queued (deferred) recruiting text is owner-only context for a reply too', async () => {
+  test('a queued (deferred) recruiting text is NOT delivery evidence — a reply from that phone stays on the customer path', async () => {
     state.apps = [{ id: 'app-1', comms_history: [{ ...sentEntry(0.1), outcome: 'deferred' }] }];
-    await expect(matchApplicantReply('+19415550142', '+19415550199')).resolves.toEqual({ applicationId: 'app-1' });
+    await expect(matchApplicantReply('+19415550142', '+19415550199')).resolves.toBeNull();
   });
   test('two recruiting lines: a reply to line A matches A\'s evidence even when a newer owner reply went out from line B', async () => {
     state.apps = [{ id: 'app-1', comms_history: [
@@ -155,6 +155,7 @@ describe('recordApplicantReply', () => {
   test('attachments ride the ledger as stored references (key, never a public URL) with the unified message id', async () => {
     await recordApplicantReply({ ...args, body: '', mediaCount: 1, media: [{ key: 'sms/in/abc.jpg', url: 'https://twilio.example/x', contentType: 'image/jpeg' }], unifiedMessageId: 'msg-9' });
     const entry = mockAppend.mock.calls[0][1][0];
+    expect(entry.id).toMatch(/^[0-9a-f-]{36}$/);
     expect(entry.media).toEqual([{ key: 'sms/in/abc.jpg', url: null, contentType: 'image/jpeg' }]);
     expect(entry.unified_message_id).toBe('msg-9');
     expect(entry.body).toBe('1 photo');

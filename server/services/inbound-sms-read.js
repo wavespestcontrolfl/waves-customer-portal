@@ -271,12 +271,15 @@ async function clearCustomerThreadCrossBells({ ids, convs, now, role }) {
 // Count that same identity across every conversation. Internal
 // admin-phone traffic is excluded exactly as the inbox log excludes it
 // (`excludePhones` = the router's ADMIN_PHONES).
-async function countUnreadInboundSms({ excludePhones = [], customerId = null } = {}) {
-  let q = db('messages')
+async function countUnreadInboundSms({ excludePhones = [], customerId = null, role = 'admin' } = {}) {
+  const { hideRecruitingThreadsFromNonAdmin } = require('../utils/recruiting-thread-scope');
+  // Same role-aware recruiting exclusion as the display query (PR #4623):
+  // a badge must never count a message its reader cannot open.
+  let q = hideRecruitingThreadsFromNonAdmin(db('messages')
     .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
     .leftJoin('customers', 'conversations.customer_id', 'customers.id')
     .where('messages.channel', 'sms')
-    .where('messages.direction', 'inbound')
+    .where('messages.direction', 'inbound'), { techRole: role })
     .andWhere(function unread() { this.where({ 'messages.is_read': false }).orWhereNull('messages.is_read'); });
   if (customerId) q = q.where('conversations.customer_id', customerId);
   // A blocked number's existing thread must not keep the badge lit: "Mark

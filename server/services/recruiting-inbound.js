@@ -16,6 +16,7 @@
  * Anything else falls through to the normal inbound handling.
  */
 
+const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { phoneMatchDigits } = require('../utils/phone');
@@ -83,7 +84,10 @@ async function matchApplicantReply(fromPhone, toNumber) {
   for (const app of apps) {
     const history = Array.isArray(app.comms_history) ? app.comms_history : [];
     for (const entry of history) {
-      if (!entry || entry.channel !== 'sms' || !['handoff', 'sent', 'uncertain', 'deferred'].includes(entry.outcome)) continue;
+      // 'deferred' is NOT delivery evidence: a queued text has definitely not
+      // reached the applicant (the replay rail moves it to 'handoff' right
+      // before Twilio) — counting it would divert a customer's reply.
+      if (!entry || entry.channel !== 'sms' || !['handoff', 'sent', 'uncertain'].includes(entry.outcome)) continue;
       if (!onInboundLine(entry)) continue;
       // Effective handoff instant: a text held overnight and replayed by the
       // cron went out at finalized_at, not when it was queued — the newer-
@@ -139,6 +143,7 @@ async function matchApplicantReply(fromPhone, toNumber) {
  */
 async function recordApplicantReply({ applicationId, from, to, body, messageSid, mediaCount = 0, media = [], unifiedMessageId = null }) {
   const entry = {
+    id: crypto.randomUUID(),
     at: new Date().toISOString(),
     stage: 'applicant_reply',
     channel: 'sms',

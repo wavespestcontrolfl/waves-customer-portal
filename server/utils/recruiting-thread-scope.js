@@ -53,7 +53,7 @@ const OPEN_APPLICATION_STATUSES = ['new', 'reviewed', 'interview', 'offer'];
 // provider call). Plain EXISTS — a jsonpath filter would carry a literal
 // '?' that knex reads as a binding placeholder.
 const SMS_LEDGER_EVIDENCE_SQL = "EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(comms_history, '[]'::jsonb)) AS e "
-  + "WHERE e->>'channel' = 'sms' AND e->>'outcome' IN ('handoff', 'sent', 'uncertain', 'deferred'))";
+  + "WHERE e->>'channel' = 'sms' AND e->>'outcome' IN ('handoff', 'sent', 'uncertain'))";
 
 /**
  * Is this phone recruiting context?

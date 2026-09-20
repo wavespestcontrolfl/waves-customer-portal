@@ -463,10 +463,24 @@ router.post('/sms', async (req, res) => {
     // line, a known caller record, or genuine outbound history), OR a
     // lookup that failed and fails OPEN so a real STOP is never silently
     // refused.
+    // The recruiting ledger is durable proof Waves texted this phone even
+    // when the best-effort sms_log / unified writes both failed (Codex r11
+    // P1): an applicant's STOP must be honored. Consulted for eligibility
+    // ONLY — never routes the command through the recruiting reply flow.
+    // Fails OPEN (eligible) on a lookup error, like the other evidence.
+    let recruitingLedgerEvidence = false;
+    let recruitingLedgerLookupFailed = false;
+    try {
+      recruitingLedgerEvidence = await require('../utils/recruiting-thread-scope').isRecruitingPhone(From);
+    } catch (e) {
+      recruitingLedgerLookupFailed = true;
+    }
     const complianceEligible = isAiNumber
       || Boolean(knownCallerLookupFailed || knownCallerRecord)
       || outboundHistoryMatch
-      || outboundHistoryLookupFailed;
+      || outboundHistoryLookupFailed
+      || recruitingLedgerEvidence
+      || recruitingLedgerLookupFailed;
 
     // ── STOP / UNSUBSCRIBE / HELP / START keyword handling ──
     // Consent runs BEFORE the classifier, and ONLY for eligible senders, on

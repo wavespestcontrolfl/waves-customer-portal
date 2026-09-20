@@ -367,7 +367,9 @@ describe('bookedInterviewWindowsForDate — ET day boundary (Codex r5 P2)', () =
     await bookedInterviewWindowsForDate('2027-03-16', { conn });
     // 2027-03-16 (EDT) spans 04:00Z on the 16th to 04:00Z on the 17th — the
     // upper bound is the NEXT ET MIDNIGHT, never noon UTC of the next day.
-    expect(bounds).toEqual([['>=', '2027-03-16T04:00:00.000Z'], ['<', '2027-03-17T04:00:00.000Z']]);
+    // ...widened by (slot + buffer) before and buffer after so a near-midnight
+    // interview still blocks the adjacent day's edge (windows are clipped).
+    expect(bounds).toEqual([['>=', '2027-03-16T03:15:00.000Z'], ['<', '2027-03-17T04:15:00.000Z']]);
   });
 });
 

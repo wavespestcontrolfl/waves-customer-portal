@@ -253,10 +253,17 @@ async function bookedInterviewWindowsForDate(dateStr, { conn = db } = {}) {
   const rows = await conn('job_applications')
     .whereIn('status', INTERVIEW_BLOCKING_STATUSES)
     .whereNotNull('interview_at')
-    .where('interview_at', '>=', dayStart)
-    .where('interview_at', '<', dayEnd)
+    // Bounds widened by the buffer on both sides so a near-midnight interview
+    // still blocks the adjacent day's edge (windows are clipped below).
+    .where('interview_at', '>=', new Date(dayStart.getTime() - (SLOT_MINUTES + BUFFER_MINUTES) * 60 * 1000))
+    .where('interview_at', '<', new Date(dayEnd.getTime() + BUFFER_MINUTES * 60 * 1000))
     .select('id', 'interview_at', 'interview_end_at');
-  return rows.map((r) => {
+  return rows.filter((r) => {
+    const startMs = new Date(r.interview_at).getTime() - BUFFER_MINUTES * 60 * 1000;
+    const endMs = (r.interview_end_at ? new Date(r.interview_end_at).getTime() : new Date(r.interview_at).getTime() + SLOT_MINUTES * 60 * 1000)
+      + BUFFER_MINUTES * 60 * 1000;
+    return endMs > dayStart.getTime() && startMs < dayEnd.getTime();
+  }).map((r) => {
     const startMs = new Date(r.interview_at).getTime() - BUFFER_MINUTES * 60 * 1000;
     const endMs = (r.interview_end_at ? new Date(r.interview_end_at).getTime() : new Date(r.interview_at).getTime() + SLOT_MINUTES * 60 * 1000)
       + BUFFER_MINUTES * 60 * 1000;

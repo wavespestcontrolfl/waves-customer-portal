@@ -821,7 +821,7 @@ async function openApplicationIdForPhone(phone) {
   for (const r of rows) {
     const history = Array.isArray(r.comms_history) ? r.comms_history : [];
     for (const e of history) {
-      if (!e || e.channel !== 'sms' || !['handoff', 'sent', 'uncertain', 'deferred'].includes(e.outcome)) continue;
+      if (!e || e.channel !== 'sms' || !['handoff', 'sent', 'uncertain'].includes(e.outcome)) continue;
       const at = Date.parse(e.at || '');
       if (!Number.isFinite(at)) continue;
       if (!best || at > best.at) best = { at, id: r.id };

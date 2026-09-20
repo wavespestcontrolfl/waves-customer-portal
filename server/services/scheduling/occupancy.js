@@ -571,7 +571,13 @@ async function bookedInterviewConflictRows(db, dateStr, startMin, endMin) {
   const statusList = INTERVIEW_BLOCKING_STATUSES.map(() => '?').join(', ');
   const sql = `SELECT id, interview_at, interview_end_at FROM job_applications
       WHERE status IN (${statusList}) AND interview_at IS NOT NULL AND interview_at >= ? AND interview_at < ?`;
-  const bindings = [...INTERVIEW_BLOCKING_STATUSES, dayStart, dayEnd];
+  // Bounds widened by the buffer on both sides (Codex r11 P2): an interview
+  // just past midnight blocks the previous day's last minutes through its
+  // buffer, and one ending near midnight reaches into the next day. The
+  // computed windows are clipped to the day below.
+  const readFrom = new Date(dayStart.getTime() - (INTERVIEW_SLOT_MINUTES + INTERVIEW_BUFFER_MINUTES) * 60 * 1000);
+  const readTo = new Date(dayEnd.getTime() + INTERVIEW_BUFFER_MINUTES * 60 * 1000);
+  const bindings = [...INTERVIEW_BLOCKING_STATUSES, readFrom, readTo];
   // Inside a caller's transaction this optional read runs in a SAVEPOINT
   // (knex nests a transaction as one): a failure rolls back only the
   // savepoint, so the caller's transaction stays usable for its own
@@ -588,6 +594,8 @@ async function bookedInterviewConflictRows(db, dateStr, startMin, endMin) {
     const s = new Date(r.interview_at).getTime() - INTERVIEW_BUFFER_MINUTES * 60 * 1000;
     const e = (r.interview_end_at ? new Date(r.interview_end_at).getTime() : new Date(r.interview_at).getTime() + INTERVIEW_SLOT_MINUTES * 60 * 1000)
       + INTERVIEW_BUFFER_MINUTES * 60 * 1000;
+    // Clip to this day; a buffered interval that never touches the day is skipped.
+    if (e <= dayStart.getTime() || s >= dayEnd.getTime()) continue;
     const sp = etParts(new Date(Math.max(s, dayStart.getTime())));
     const ep = etParts(new Date(Math.min(e, dayEnd.getTime() - 60 * 1000)));
     const wStart = `${String(sp.hour).padStart(2, '0')}:${String(sp.minute).padStart(2, '0')}`;

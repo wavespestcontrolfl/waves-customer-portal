@@ -655,3 +655,18 @@ describe('interview side read inside a caller transaction (PR #4623, Codex r7 P1
     await expect(findConflictingVisits({ db: trx, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true })).resolves.toEqual([]);
   });
 });
+
+describe('interview read bounds straddle midnight by the buffer (PR #4623, Codex r11 P2)', () => {
+  const { findConflictingVisits, INTERVIEW_SLOT_MINUTES, INTERVIEW_BUFFER_MINUTES } = require('../services/scheduling/occupancy');
+  test('a 00:05 ET interview next day blocks the previous day through 23:50; the read bounds are widened accordingly', async () => {
+    const conn = jest.fn(() => makeQuery([]));
+    conn.raw = jest.fn(async () => ({ rows: [{ id: 'app-1', interview_at: '2027-03-17T04:05:00.000Z', interview_end_at: '2027-03-17T04:35:00.000Z' }] }));
+    const rows = await findConflictingVisits({ db: conn, date: '2027-03-16', windowStart: '23:00', windowEnd: '23:59', includeInterviews: true });
+    const [, bindings] = conn.raw.mock.calls[0];
+    const from = bindings[bindings.length - 2]; const to = bindings[bindings.length - 1];
+    expect(from.toISOString()).toBe(new Date(new Date('2027-03-16T04:00:00.000Z').getTime() - (INTERVIEW_SLOT_MINUTES + INTERVIEW_BUFFER_MINUTES) * 60000).toISOString());
+    expect(to.toISOString()).toBe(new Date(new Date('2027-03-17T04:00:00.000Z').getTime() + INTERVIEW_BUFFER_MINUTES * 60000).toISOString());
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ window_start: '23:50', window_end: '23:59' });
+  });
+});
