@@ -1262,8 +1262,11 @@ async function claimInvoiceForSend(invoiceId, {
     claimFlip.whereNull("sent_at").whereNull("sms_sent_at").whereNull("email_sent_at");
   }
   if (!overridesReviewHold) {
+    // COALESCE keeps the predicate NULL-safe: a scheduled row with no error
+    // at all would otherwise make the LIKE, and so the whole NOT, evaluate
+    // to NULL and never match the flip.
     claimFlip.whereRaw(
-      "NOT (status = 'scheduled' AND scheduled_send_at IS NULL AND scheduled_send_error LIKE ?)",
+      "NOT (status = 'scheduled' AND scheduled_send_at IS NULL AND COALESCE(scheduled_send_error, '') LIKE ?)",
       [`${require("./invoice-helpers").STALE_SEND_PARK_ERROR}%`],
     );
   }
