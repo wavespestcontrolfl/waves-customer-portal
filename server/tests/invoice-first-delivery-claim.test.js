@@ -338,7 +338,7 @@ describe('claimPacketInvoiceForSend — the queue worker due-claim is never a fi
 // InvoiceService.settleZeroBalance is a full-transaction method with its own
 // extensive coverage elsewhere; these tests mock it directly so a failure
 // here always points at the RE-CHECK wiring, not settleZeroBalance itself.
-describe('claimInvoiceForSend — zero-due visit invoice guard (#4131 slice 4)', () => {
+describe('claimInvoiceForSend — zero-due DETECTION only (#4131 slice 4 round-5)', () => {
   let settleSpy;
 
   beforeEach(() => {
@@ -357,23 +357,17 @@ describe('claimInvoiceForSend — zero-due visit invoice guard (#4131 slice 4)',
     };
   }
 
-  test('a zero-due visit invoice is settled and refused BEFORE the claim ever flips the row', async () => {
+  test('a zero-due visit invoice throws zero_due_detected BEFORE the claim ever flips the row — never settles itself', async () => {
+    // Codex round-5 #4131: settleZeroBalance is invoked from exactly ONE
+    // place now (settleZeroDueBeforeSend) — a claim path only detects.
     const { invoicesTable, currentRow } = makeDb(zeroDueRow());
-    settleSpy.mockResolvedValue({ settled: true, invoice: { ...zeroDueRow(), status: 'prepaid' } });
 
-    await expect(claimInvoiceForSend(INVOICE_ID)).rejects.toMatchObject({ code: 'zero_due' });
+    await expect(claimInvoiceForSend(INVOICE_ID)).rejects.toMatchObject({ code: 'zero_due_detected' });
 
-    expect(settleSpy).toHaveBeenCalledWith(INVOICE_ID, expect.anything());
+    expect(settleSpy).not.toHaveBeenCalled();
     // Never flipped to 'sending' — the guard runs BEFORE the claim update.
     expect(invoicesTable.update).not.toHaveBeenCalled();
     expect(currentRow().status).toBe('draft');
-  });
-
-  test('a zero-due visit invoice that cannot settle right now is refused as retryable, not a $0 claim', async () => {
-    makeDb(zeroDueRow());
-    settleSpy.mockResolvedValue({ settled: false, reason: 'invoice_delivery_in_flight', invoice: null });
-
-    await expect(claimInvoiceForSend(INVOICE_ID)).rejects.toMatchObject({ code: 'deposit_settlement_pending' });
   });
 
   test('a total that is exactly covered by credit, but NOT visit-linked, claims normally (guard is visit-linked only)', async () => {
@@ -385,7 +379,7 @@ describe('claimInvoiceForSend — zero-due visit invoice guard (#4131 slice 4)',
     expect(settleSpy).not.toHaveBeenCalled();
   });
 
-  test('a retotal to zero landing between the pre-claim read and the flip is caught by the post-claim re-check and restores the row', async () => {
+  test('a retotal to zero landing between the pre-claim read and the flip is caught by the post-claim re-check, restores the row, and throws zero_due_detected — never settles itself', async () => {
     // The pre-claim read sees a normal $100-due invoice (no scheduled_service_id
     // yet visible to the guard because total/credit don't net to zero); the
     // retotal actually lands in the window the ABA mutation models, changing
@@ -396,30 +390,28 @@ describe('claimInvoiceForSend — zero-due visit invoice guard (#4131 slice 4)',
         send_claim_token: null, scheduled_send_at: null, scheduled_send_error: null },
       { mutateAfterFirstRead: { scheduled_service_id: 'svc-1', credit_applied: 100 } },
     );
-    settleSpy.mockResolvedValue({ settled: true, invoice: { id: INVOICE_ID, status: 'prepaid' } });
 
-    await expect(claimInvoiceForSend(INVOICE_ID)).rejects.toMatchObject({ code: 'zero_due' });
+    await expect(claimInvoiceForSend(INVOICE_ID)).rejects.toMatchObject({ code: 'zero_due_detected' });
 
-    expect(settleSpy).toHaveBeenCalledWith(INVOICE_ID, expect.anything());
+    expect(settleSpy).not.toHaveBeenCalled();
     // The claim was taken (the flip DID match, on the pre-mutation predicate)
     // and then given all the way back — never left sitting on 'sending'.
     expect(currentRow().status).toBe('draft');
     expect(currentRow().send_claim_token).toBeNull();
   });
 
-  test('a PRECLAIMED row (the scheduled-send worker\'s own claim) rediscovering zero-due marks the throw deliveryNeverAttempted', async () => {
+  test('a PRECLAIMED row (the scheduled-send worker\'s own claim) rediscovering zero-due throws zero_due_detected marked deliveryNeverAttempted — never settles itself, never touches the row', async () => {
     // processScheduledSends preclaims (flips scheduled -> sending) BEFORE
     // calling back in with allowClaimed: true; this models the rare race
     // where the retotal lands in between. The allowClaimed branch never
     // touches the invoice row itself, so the caller's own retry handling —
     // not this claim — must decide what happens next; the flag is how it
     // knows this is safe to treat as an ordinary (retryable) send failure.
-    makeDb({
+    const { invoicesTable } = makeDb({
       id: INVOICE_ID, status: 'sending', scheduled_service_id: 'svc-1',
       total: 100, credit_applied: 100, send_claim_token: 'worker-tok',
       scheduled_send_at: null, scheduled_send_error: null,
     });
-    settleSpy.mockResolvedValue({ settled: true, invoice: { id: INVOICE_ID, status: 'prepaid' } });
 
     let caught = null;
     try {
@@ -427,7 +419,71 @@ describe('claimInvoiceForSend — zero-due visit invoice guard (#4131 slice 4)',
     } catch (err) {
       caught = err;
     }
-    expect(caught).toMatchObject({ code: 'zero_due', deliveryNeverAttempted: true });
+    expect(caught).toMatchObject({ code: 'zero_due_detected', deliveryNeverAttempted: true });
+    expect(settleSpy).not.toHaveBeenCalled();
+    expect(invoicesTable.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('settleZeroDueBeforeSend — THE zero-due chokepoint (#4131 slice 4 round-5)', () => {
+  let settleSpy;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    settleSpy = jest.spyOn(InvoiceService, 'settleZeroBalance');
+  });
+
+  afterEach(() => settleSpy.mockRestore());
+
+  function zeroDueRow(overrides = {}) {
+    return {
+      id: INVOICE_ID, status: 'draft', scheduled_service_id: 'svc-1',
+      total: 100, credit_applied: 100, send_claim_token: null,
+      scheduled_send_at: null, scheduled_send_error: null,
+      visit_completion_packet_id: null, payer_id: null,
+      ...overrides,
+    };
+  }
+
+  test('settled: calls settleZeroBalance through the top-level db and returns the settled descriptor', async () => {
+    makeDb(zeroDueRow());
+    settleSpy.mockResolvedValue({ settled: true, invoice: { ...zeroDueRow(), status: 'prepaid' } });
+
+    const outcome = await InvoiceService._settleZeroDueBeforeSend(INVOICE_ID);
+
+    expect(settleSpy).toHaveBeenCalledWith(INVOICE_ID, expect.anything());
+    expect(outcome.kind).toBe('settled');
+  });
+
+  test('refused: a business refusal from settleZeroBalance maps to a retryable refused descriptor', async () => {
+    makeDb(zeroDueRow());
+    settleSpy.mockResolvedValue({ settled: false, reason: 'invoice_delivery_in_flight', invoice: null });
+
+    const outcome = await InvoiceService._settleZeroDueBeforeSend(INVOICE_ID);
+
+    expect(outcome).toMatchObject({ kind: 'refused', code: 'deposit_settlement_pending', reason: 'invoice_delivery_in_flight' });
+  });
+
+  test('terminal: visit_never_ran is preserved as its own kind — never collapsed into deposit_settlement_pending', async () => {
+    // Codex round-5 P1 #4131: the throw-shaped claim path used to lose the
+    // terminal distinction entirely, always reporting a generic retryable
+    // refusal for visit_never_ran instead of routing to the void cleanup.
+    makeDb(zeroDueRow());
+    settleSpy.mockResolvedValue({ settled: false, reason: 'visit_never_ran', invoice: null });
+
+    const outcome = await InvoiceService._settleZeroDueBeforeSend(INVOICE_ID);
+
+    expect(outcome.kind).toBe('terminal');
+    expect(outcome.code).not.toBe('deposit_settlement_pending');
+  });
+
+  test('not_zero_due: a row that is not actually zero-due never calls settleZeroBalance', async () => {
+    makeDb(zeroDueRow({ total: 100, credit_applied: 0 }));
+
+    const outcome = await InvoiceService._settleZeroDueBeforeSend(INVOICE_ID);
+
+    expect(outcome).toEqual({ kind: 'not_zero_due' });
+    expect(settleSpy).not.toHaveBeenCalled();
   });
 
   test('an unexpected throw from settleZeroBalance (a bug, a DB error) propagates — never silently reinterpreted as a retryable business refusal', async () => {
@@ -440,31 +496,28 @@ describe('claimInvoiceForSend — zero-due visit invoice guard (#4131 slice 4)',
     const boom = new Error('connection terminated unexpectedly');
     settleSpy.mockRejectedValue(boom);
 
-    await expect(claimInvoiceForSend(INVOICE_ID)).rejects.toBe(boom);
+    await expect(InvoiceService._settleZeroDueBeforeSend(INVOICE_ID)).rejects.toBe(boom);
+  });
+});
+
+describe('sendViaSMS — resolving the zero-due chokepoint after catching zero_due_detected (#4131 slice 4)', () => {
+  let settleSpy;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    settleSpy = jest.spyOn(InvoiceService, 'settleZeroBalance');
   });
 
-  test('a PRECLAIMED row\'s UNEXPECTED settle failure is NOT marked deliveryNeverAttempted — only zero_due/deposit_settlement_pending are', async () => {
-    // Pre-push audit P1: tagging every caught error here reclassified a
-    // genuine bug/DB failure as an ordinary retryable send failure
-    // downstream — the caller (processScheduledSends) would then silently
-    // retry a crash forever instead of letting it propagate.
-    makeDb({
-      id: INVOICE_ID, status: 'sending', scheduled_service_id: 'svc-1',
-      total: 100, credit_applied: 100, send_claim_token: 'worker-tok',
+  afterEach(() => settleSpy.mockRestore());
+
+  function zeroDueRow(overrides = {}) {
+    return {
+      id: INVOICE_ID, status: 'draft', scheduled_service_id: 'svc-1',
+      total: 100, credit_applied: 100, send_claim_token: null,
       scheduled_send_at: null, scheduled_send_error: null,
-    });
-    const boom = new Error('connection terminated unexpectedly');
-    settleSpy.mockRejectedValue(boom);
-
-    let caught = null;
-    try {
-      await claimInvoiceForSend(INVOICE_ID, { allowClaimed: true, claimToken: 'worker-tok' });
-    } catch (err) {
-      caught = err;
-    }
-    expect(caught).toBe(boom);
-    expect(caught.deliveryNeverAttempted).toBeUndefined();
-  });
+      ...overrides,
+    };
+  }
 
   test('sendViaSMS resolves a structured, non-throwing success when the under-claim race settles the invoice zero-due (Codex round-1 P1)', async () => {
     // Ruling: mirrors the covered_by_credit precedent — direct callers
@@ -494,5 +547,31 @@ describe('claimInvoiceForSend — zero-due visit invoice guard (#4131 slice 4)',
       sent: false, ok: false, code: 'deposit_settlement_pending', deliveryOutcome: 'not_sent', retryable: true,
     });
     expect(typeof result.reason).toBe('string');
+  });
+
+  test('an unexpected throw from the chokepoint (a bug, a DB error) propagates out of sendViaSMS too — never silently reinterpreted', async () => {
+    // Codex round-5 #4131: sendViaSMS's own catch calls settleZeroDueBeforeSend
+    // to resolve a zero_due_detected — if THAT throws unexpectedly, it must
+    // keep propagating, exactly like claimInvoiceForSend's caller never
+    // reinterpreting an unexpected settleZeroBalance failure as a business
+    // refusal.
+    makeDb(zeroDueRow());
+    const boom = new Error('connection terminated unexpectedly');
+    settleSpy.mockRejectedValue(boom);
+
+    await expect(InvoiceService.sendViaSMS(INVOICE_ID)).rejects.toBe(boom);
+  });
+
+  test('a PRECLAIMED row rediscovering zero-due resolves through the chokepoint too — deposit_settlement_pending, since settleZeroBalance itself refuses a "sending" row', async () => {
+    makeDb({
+      id: INVOICE_ID, status: 'sending', scheduled_service_id: 'svc-1',
+      total: 100, credit_applied: 100, send_claim_token: 'worker-tok',
+      scheduled_send_at: null, scheduled_send_error: null,
+    });
+    settleSpy.mockResolvedValue({ settled: false, reason: 'invoice_delivery_in_flight', invoice: null });
+
+    const result = await InvoiceService.sendViaSMS(INVOICE_ID, { allowClaimed: true, claimToken: 'worker-tok' });
+
+    expect(result).toMatchObject({ sent: false, ok: false, code: 'deposit_settlement_pending' });
   });
 });

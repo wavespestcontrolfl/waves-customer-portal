@@ -69,9 +69,24 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
   afterEach(async () => { await trx.rollback(); mockConnection = database; });
   afterAll(async () => { await database.destroy(); });
 
-  test('a zero-due visit invoice is settled instead of claimed — the row never passes through sending', async () => {
-    await expect(Invoice.claimInvoiceForSend(invoiceId)).rejects.toMatchObject({ code: 'zero_due' });
+  test('claimInvoiceForSend only DETECTS zero-due — throws zero_due_detected, never settles, never touches the row (#4131 slice 4 round-5)', async () => {
+    // The chokepoint ruling: a claim path never settles itself any more
+    // (settleZeroDueBeforeSend is the ONE place that does) — this proves
+    // the low-level detector's own contract directly, independent of any
+    // wrapper mapping it.
+    await expect(Invoice.claimInvoiceForSend(invoiceId)).rejects.toMatchObject({ code: 'zero_due_detected' });
 
+    expect(await read()).toMatchObject({ status: 'draft', send_claim_token: null });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a zero-due visit invoice is settled instead of claimed — the row never passes through sending', async () => {
+    // Through the real public entry point (sendViaSMS), not the raw
+    // detector: proves the chokepoint's settle-and-resolve outcome end to
+    // end against a real settleZeroBalance.
+    const result = await Invoice.sendViaSMS(invoiceId);
+
+    expect(result).toMatchObject({ sent: false, ok: true, code: 'zero_due', settled_zero_due: true });
     expect(await read()).toMatchObject({
       status: 'prepaid', prepaid_by: 'system:zero_balance', send_claim_token: null,
     });
@@ -84,8 +99,9 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
     // must not force it to 'prepaid' out from under that.
     await trx('invoices').where({ id: invoiceId }).update({ payment_recorded_at: new Date() });
 
-    await expect(Invoice.claimInvoiceForSend(invoiceId)).rejects.toMatchObject({ code: 'deposit_settlement_pending' });
+    const result = await Invoice.sendViaSMS(invoiceId);
 
+    expect(result).toMatchObject({ sent: false, ok: false, code: 'deposit_settlement_pending', deliveryOutcome: 'not_sent', retryable: true });
     expect(await read()).toMatchObject({ status: 'draft', send_claim_token: null });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
@@ -106,7 +122,7 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
     } catch (err) {
       caught = err;
     }
-    expect(caught).toMatchObject({ code: 'deposit_settlement_pending', deliveryNeverAttempted: true });
+    expect(caught).toMatchObject({ code: 'zero_due_detected', deliveryNeverAttempted: true });
     // This branch never touches the invoice row itself — the row is
     // exactly where the worker's own preclaim left it.
     expect(await read()).toMatchObject({ status: 'sending', send_claim_token: claimToken });
@@ -131,13 +147,17 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
     }
   });
 
-  test('processScheduledSends refuses a due zero-balance invoice it cannot settle yet AS AN ORDINARY FAILURE — spends an attempt, stamps the reason', async () => {
+  test('processScheduledSends refuses a due zero-balance invoice it cannot settle yet AS AN ORDINARY FAILURE — spends an attempt, stamps the reason, and moves scheduled_send_at forward (Codex round-5 P2 #4131)', async () => {
     // Ruling (pre-push audit P1, #4131 slice 4): a settlement refusal is a
     // failure to settle, not a window hold like quiet hours — it consumes
     // an attempt and rides the existing five-attempt cap and
     // terminal-failure reporting exactly like an ordinary send failure, or
     // a permanently unsettleable invoice (stuck payment work, a bug) would
-    // loop the worker forever with no visible failure.
+    // loop the worker forever with no visible failure. Codex round-5 P2:
+    // recordZeroDueSchedulingOutcome now ALSO moves scheduled_send_at
+    // forward like every other retry rail — a persistently-refused row
+    // must not hold the 25-row due page against payable invoices behind
+    // it on every single tick.
     await trx('invoices').where({ id: invoiceId }).update({
       status: 'scheduled', scheduled_send_at: new Date(Date.now() - 60000), scheduled_send_attempts: 1,
       payment_recorded_at: new Date(),
@@ -150,10 +170,13 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
       expect(sendSpy).not.toHaveBeenCalled();
       expect(result).toEqual({ sent: 0, failed: 1, deferred: 0 });
       const row = await read();
-      expect(row.status).toBe('scheduled'); // still due — no backoff, just like an ordinary failure
+      expect(row.status).toBe('scheduled'); // still due later — not held indefinitely, not voided
       expect(row.scheduled_send_attempts).toBe(2); // an attempt WAS spent
       expect(row.scheduled_send_error).toMatch(/could not be settled yet/);
-      expect(new Date(row.scheduled_send_at).getTime()).toBeLessThanOrEqual(before);
+      // Moved forward, not left immediately due — this is the fix: a
+      // refused row no longer re-wins every due-page selection ahead of
+      // genuinely payable invoices.
+      expect(new Date(row.scheduled_send_at).getTime()).toBeGreaterThan(before);
     } finally {
       sendSpy.mockRestore();
     }
@@ -178,25 +201,32 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
     expect((await read()).scheduled_send_attempts).toBe(5);
   });
 
-  test('two overlapping worker passes off the SAME stale in-memory snapshot end at attempts + 2, not a lost update', async () => {
-    // Pre-push audit P1: a JS-computed Number(inv.scheduled_send_attempts
-    // || 0) + 1 derives the new value from whichever snapshot the caller
-    // happened to read, so two overlapping passes that both captured the
-    // row BEFORE either commits its write would both compute the SAME
-    // incremented value and collapse to +1 total. The fix computes the
-    // increment in SQL against the row under its own update lock, so two
-    // real passes correctly serialize to +2 regardless of how stale each
-    // caller's own snapshot was.
+  test('a second overlapping pass off the SAME stale in-memory snapshot finds nothing due once the first moved scheduled_send_at forward — exactly one attempt spent, not a lost update or a double-spend (Codex round-5 P2 #4131)', async () => {
+    // Pre-push audit P1 (still true): a JS-computed
+    // Number(inv.scheduled_send_attempts || 0) + 1 derives the new value
+    // from whichever snapshot the caller happened to read — the fix
+    // computes the increment in SQL against the row under its own update
+    // lock, not the caller's memory. Codex round-5 P2 layers the
+    // scheduled_send_at bump on the SAME update: once the first pass
+    // commits, the row has already left the due window (the update
+    // predicate reads the COMMITTED row, never the caller's stale
+    // snapshot), so a second pass racing that same stale snapshot matches
+    // nothing — one attempt spent total, never collapsed to a lost update
+    // AND never double-spent by a real overlapping pass either.
     await trx('invoices').where({ id: invoiceId }).update({
       status: 'scheduled', scheduled_send_at: new Date(Date.now() - 60000), scheduled_send_attempts: 1,
     });
     const staleSnapshot = await read(); // captured ONCE — attempts: 1
-    const zeroDue = { ok: false, error: 'nothing due — retry shortly' };
+    const zeroDue = 'nothing due — retry shortly';
 
-    await Invoice._recordZeroDueSchedulingOutcome(zeroDue, staleSnapshot);
-    await Invoice._recordZeroDueSchedulingOutcome(zeroDue, staleSnapshot);
+    const firstUpdated = await Invoice._recordZeroDueSchedulingOutcome(zeroDue, staleSnapshot);
+    const secondUpdated = await Invoice._recordZeroDueSchedulingOutcome(zeroDue, staleSnapshot);
 
-    expect((await read()).scheduled_send_attempts).toBe(3); // 1 + 2, never collapsed to 2
+    expect(firstUpdated).toBe(1);
+    expect(secondUpdated).toBe(0); // no row matched — already moved out of the due window
+    const row = await read();
+    expect(row.scheduled_send_attempts).toBe(2); // exactly one attempt spent
+    expect(new Date(row.scheduled_send_at).getTime()).toBeGreaterThan(Date.now());
   });
 
   test('a row another pass already claimed (status sending) is left untouched', async () => {
@@ -207,7 +237,7 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
     });
     const staleSnapshot = await read();
 
-    await Invoice._recordZeroDueSchedulingOutcome({ ok: false, error: 'nothing due — retry shortly' }, staleSnapshot);
+    await Invoice._recordZeroDueSchedulingOutcome('nothing due — retry shortly', staleSnapshot);
 
     expect(await read()).toMatchObject({
       status: 'sending', send_claim_token: claimToken, scheduled_send_attempts: 1, scheduled_send_error: null,
@@ -225,7 +255,7 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
       status: 'scheduled', scheduled_send_at: new Date(Date.now() - 60000), scheduled_send_attempts: 4,
     });
     const staleSnapshot = await read(); // captured ONCE — attempts: 4
-    const zeroDue = { ok: false, error: 'nothing due — retry shortly' };
+    const zeroDue = 'nothing due — retry shortly';
 
     await Invoice._recordZeroDueSchedulingOutcome(zeroDue, staleSnapshot);
     await Invoice._recordZeroDueSchedulingOutcome(zeroDue, staleSnapshot);
@@ -245,8 +275,9 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
     });
     await trx('invoices').where({ id: invoiceId }).update({ service_record_id: recordId });
 
-    await expect(Invoice.claimInvoiceForSend(invoiceId)).rejects.toMatchObject({ code: 'zero_due' });
+    const result = await Invoice.sendViaSMS(invoiceId);
 
+    expect(result).toMatchObject({ sent: false, ok: true, code: 'zero_due', settled_zero_due: true });
     expect(await read()).toMatchObject({ status: 'prepaid', prepaid_by: 'system:zero_balance', send_claim_token: null });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
@@ -266,6 +297,27 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
     // cleanup ran instead of the generic settlement-refusal path.
     expect(row.status).toBe('void');
     expect(row.scheduled_send_attempts).toBe(1); // unchanged — no attempt spent
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a DIRECT sendViaSMS on a cancelled (never-ran) visit reaches the void path too — the terminal verdict survives the throw-shaped claim path (Codex round-5 P1 #4131 finding 4)', async () => {
+    // Before this round, only the worker's own settleZeroDueBeforeSend
+    // call (processScheduledSends' due loop) preserved visit_never_ran as
+    // a distinct outcome — a direct caller of sendViaSMS (the AI-assistant
+    // send tool, collections-conversation.js, batch sendImmediately) hit
+    // claimInvoiceForSend's throw-shaped detection instead, which used to
+    // collapse straight into a generic retryable deposit_settlement_pending
+    // with no void. zeroDueDirectSendOutcome now maps a 'terminal' outcome
+    // from the SAME chokepoint to INVOICE_VISIT_TERMINAL and calls the
+    // void cleanup itself.
+    await trx('scheduled_services').where({ id: visitId }).update({ status: 'cancelled' });
+    // total/credit_applied stay 150/150 from beforeEach — genuinely zero-due.
+
+    const result = await Invoice.sendViaSMS(invoiceId);
+
+    expect(result).toMatchObject({ sent: false, ok: false, code: 'INVOICE_VISIT_TERMINAL', deliveryOutcome: 'not_sent' });
+    const row = await read();
+    expect(row.status).toBe('void');
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 

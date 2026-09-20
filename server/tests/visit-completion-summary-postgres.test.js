@@ -2249,6 +2249,77 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('the scheduled-send WORKER fences packet ownership before settling too — a Bill-To move to a payer wins over the due-loop\'s own settlement, never prepaid for the homeowner (Codex round-5 P1 #4131 finding 1)', async () => {
+    // Round-3 already fixed sendViaSMSAndEmail's own claim path (the test
+    // above). This is the OTHER call site the same finding named: the
+    // scheduled-send worker's due loop calls settleZeroDueBeforeSend
+    // directly (never through claimPacketInvoiceForSend's normal claim at
+    // all) — before this round it ran with no ownership fence of its own,
+    // so a Bill-To move to a payer between scheduling and the worker's
+    // tick lost this exact race. settleZeroDueBeforeSend now runs the SAME
+    // locked fence (claimPacketInvoiceForSend fenceOnly) before it ever
+    // calls settleZeroBalance, regardless of which caller reached it.
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({
+      id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'scheduled', total: 120, credit_applied: 120,
+      subtotal: 120, line_items: '[]', visit_completion_packet_id: fixture.packetId,
+      scheduled_service_id: fixture.serviceIds[0], scheduled_send_at: new Date(Date.now() - 60000),
+    });
+    const [payer] = await mockPg('payers').insert({
+      display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true,
+    }).returning('id');
+    await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+    try {
+      const result = await require('../services/invoice').processScheduledSends();
+
+      expect(result).toEqual({ sent: 0, failed: 0, deferred: 0 });
+      const row = await mockPg('invoices').where({ id: invoiceId }).first();
+      expect(row.status).not.toBe('prepaid');
+      expect(row.prepaid_by).toBeNull();
+      expect(row.scheduled_send_error).toBe(`payer_billed:${payer.id}:hold`);
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
+  test('a zero-due SELF-PAY packet invoice settled via sendViaSMS is COMMITTED prepaid — surviving the packet claim\'s own transaction rollback (Codex round-5 P1 #4131 finding 2)', async () => {
+    // Before this round, a zero-due settlement for a packet invoice ran
+    // INSIDE claimPacketInvoiceForSend's own db.transaction() (the same
+    // transaction the packet ownership claim runs in) — the claim's own
+    // later throw (the zero-due "success sentinel" trick) then rolled
+    // that transaction, and the settlement inside it, back, while the
+    // caller still reported ok:true / settled_zero_due to whoever called
+    // sendViaSMS. settleZeroDueBeforeSend now calls settleZeroBalance
+    // through the top-level db ONLY, never a caller's own transaction — a
+    // packet-linked invoice's own doomed claim attempt (which still
+    // throws and rolls back, exactly as before) can no longer take a
+    // real settlement down with it. Proven with a real re-read AFTER the
+    // call returns, against a real Postgres transaction boundary — a
+    // mocked db can't fake a genuine commit vs. rollback.
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({
+      id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 120, credit_applied: 120,
+      subtotal: 120, line_items: '[]', visit_completion_packet_id: fixture.packetId,
+      scheduled_service_id: fixture.serviceIds[0],
+    });
+    try {
+      const result = await require('../services/invoice').sendViaSMS(invoiceId);
+
+      expect(result).toMatchObject({ sent: false, ok: true, code: 'zero_due', settled_zero_due: true });
+      // Re-read AFTER sendViaSMS has fully returned — the commit, not an
+      // in-memory result, is what this finding is about.
+      const row = await mockPg('invoices').where({ id: invoiceId }).first();
+      expect(row.status).toBe('prepaid');
+      expect(row.prepaid_by).toBe('system:zero_balance');
+    } finally {
+      await mockPg('invoices').where({ id: invoiceId }).del();
+    }
+  });
+
   test('a payer deactivation that follows a withdrawal returns the invoice to its queue and lifts the hold', async () => {
     const Invoice = require('../services/invoice');
     const Payer = require('../services/payer');

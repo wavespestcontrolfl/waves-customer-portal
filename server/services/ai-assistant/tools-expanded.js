@@ -258,7 +258,12 @@ async function executeExpandedTool(toolName, input, contextCustomerId, context =
       // its audit row name the staff member who confirmed the write, not
       // the system (GitHub r4 P2 #4127).
       const sendResult = await InvoiceService.sendViaSMS(invoiceId, { operatorInitiated: true, actorTechnicianId });
-      const sent = !!(sendResult?.sent || sendResult?.ok);
+      // sent reflects ACTUAL delivery only — never `|| sendResult?.ok`
+      // (Codex round-5 P1 #4131): a zero-due settlement (or account
+      // credit covering the balance) resolves { sent: false, ok: true },
+      // a genuine good outcome but NOT a text the customer received; the
+      // assistant must never tell them a link went out for either.
+      const sent = !!sendResult?.sent;
       const invoice = await db('invoices').where('id', invoiceId).first();
 
       return {
@@ -272,7 +277,7 @@ async function executeExpandedTool(toolName, input, contextCustomerId, context =
         // never tells the customer a link went out (Codex round-1 P1
         // #4131), distinct from an ordinary successful text.
         ...(sendResult?.settled_zero_due && { settledZeroDue: true }),
-        ...(!sent && { error: sendResult?.code || sendResult?.reason || sendResult?.email?.error || 'send_failed' }),
+        ...(!sent && !sendResult?.ok && { error: sendResult?.code || sendResult?.reason || sendResult?.email?.error || 'send_failed' }),
       };
     }
 

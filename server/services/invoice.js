@@ -1235,6 +1235,55 @@ async function zeroDueVisitInvoice(row, database = db) {
   return !!scheduledServiceId;
 }
 
+// Lightweight, side-effect-free zero-due DETECTION for a claim path to
+// throw — carries no settlement of its own. Every claim-path detection
+// point below (the fresh-claim pre-flip check, the post-claim re-check,
+// the preclaimed under-claim re-check) throws exactly this and nothing
+// more: settleZeroBalance is invoked from exactly ONE place —
+// settleZeroDueBeforeSend, further down — never from inside a claim's own
+// transaction (Codex round-5 #4131: four separate call sites each used to
+// settle a zero-due invoice their own way; one settled INSIDE a packet
+// claim's own transaction, whose later throw then rolled that very
+// settlement back while still reporting success to the caller).
+function zeroDueDetectedError(invoiceId) {
+  const e = new Error(`Invoice ${invoiceId} appears zero-due — resolve via settleZeroDueBeforeSend before reporting an outcome`);
+  e.code = "zero_due_detected";
+  return e;
+}
+
+// True when a retotal to $0 landed between the pre-claim read and the
+// flip (or between a preclaim and this re-check). claimedFromStatus
+// reconstructs the row's status as of the read this claim is based on
+// (the preclaimed branch's `current` already reads 'sending' — its own
+// claim — so the caller passes 'scheduled' to recreate the check that
+// would have run had the flip happened here instead).
+async function zeroDueUnderClaim(claimedRow, claimedFromStatus, database = db) {
+  return zeroDueVisitInvoice({ ...claimedRow, status: claimedFromStatus }, database);
+}
+
+// Restores the claim, THEN throws the lightweight detection error above —
+// never settles here.
+async function reverifyClaimedVisitInvoice(invoiceId, invoice, previousStatus, database = db) {
+  if (!(await zeroDueUnderClaim(invoice, previousStatus, database))) return;
+  await restoreSendClaim(invoiceId, previousStatus, true, [], database, invoice.send_claim_token);
+  throw zeroDueDetectedError(invoiceId);
+}
+
+// Same re-check for a row claimInvoiceForSend's allowClaimed branch never
+// owns (the caller — processScheduledSends — took this exact claim itself;
+// see the comment on that branch). This whole `if (allowClaimed)` branch
+// never touches the invoice row itself, so detection alone throws, marked
+// deliveryNeverAttempted (verified pre-provider): the rare race where this
+// throw reaches processScheduledSends' own catch with no chokepoint call
+// in between is treated like an ordinary retryable send failure, never an
+// unrecoverable crash.
+async function refuseZeroDuePreclaimedInvoice(invoiceId, current, database) {
+  if (!(await zeroDueUnderClaim(current, "scheduled", database))) return;
+  const err = zeroDueDetectedError(invoiceId);
+  err.deliveryNeverAttempted = true;
+  throw err;
+}
+
 // Settle (prepaid, system:zero_balance) or report the RECOGNIZED business
 // reason settleZeroBalance itself returned for not settling (in-flight
 // reconciliation, existing payment work, and similar — every `skip(...)`
@@ -1260,99 +1309,148 @@ function depositSettlementPendingError(invoiceId, reason) {
   return e;
 }
 
-// Codex round-1 P1 (#4131 slice 4): settleZeroBalance's own "visit_never_ran"
-// skip means the linked visit is TERMINAL, not merely unsettleable right
-// now — reclassifying it as deposit_settlement_pending burned the worker's
-// five-attempt cap on a row that can never settle, and never reached the
-// established INVOICE_VISIT_TERMINAL cleanup (voidOpenInvoicesForCancelledService
-// + credit restore) every other terminal-visit path already shares. Same
-// code/shape sendViaSMSAndEmail's deep provider-dispatch check produces
-// (see the withInvoiceDepositSettlement callback above), so every existing
-// consumer of that code (processScheduledSends' result.code branch) treats
-// this identically without new wiring.
-function terminalVisitZeroDueOutcome(invoiceId) {
-  logger.warn(`[invoice] ${invoiceId}: nothing due, but its linked visit never ran — routed to the terminal-visit cleanup instead of a retryable settlement refusal`);
-  const error = "Linked visit is terminal; delivery not attempted";
-  return {
-    ok: false, code: "INVOICE_VISIT_TERMINAL", error,
-    sms: { ok: false, code: "INVOICE_VISIT_TERMINAL", deliveryOutcome: "not_sent" },
-    email: { ok: false, code: "INVOICE_VISIT_TERMINAL", deliveryOutcome: "not_sent" },
-  };
+// Voids (+ restores credit) via the established sweep — every zero-due
+// 'terminal' outcome below shares this ONE cleanup. Returns whether THIS
+// invoice was actually voided: the sweep can safety-refuse (a live
+// PaymentIntent, money in flight, an unverifiable Stripe lookup), in
+// which case a caller with a retry rail (the worker) must not leave the
+// row due with nothing spent.
+async function voidTerminalZeroDueInvoice(invoiceId, scheduledServiceId) {
+  const voided = scheduledServiceId
+    ? await InvoiceService.voidOpenInvoicesForCancelledService(scheduledServiceId)
+    : [];
+  return voided.includes(invoiceId);
 }
 
-// The wrapper's result-shaped outcome (sendViaSMSAndEmail / the scheduled
-// worker return objects, not throws, for "nothing to deliver"); null when
-// the ordinary send should proceed. Read BEFORE any claim is taken — a
-// pure win/lose settle attempt spends nothing (no claim, no attempt) either
-// way, which is what makes this the retry-fair path (see
-// processScheduledSends' due loop). The claim flip itself carries the same
-// guard (throwForZeroDueVisitInvoice) for the race between this read and
-// the claim.
-async function zeroDueOpenVisitSendOutcome(row, invoiceId, database = db) {
-  if (!(await zeroDueVisitInvoice(row, database))) return null;
-  const settlement = await settleZeroDueVisitInvoice(invoiceId, database);
-  if (settlement.settled) {
-    // A combined-visit (packet) invoice settled by THIS zero-balance
-    // transition has no payment webhook to trigger the packet's own
-    // review enrollment (the non-cash prepaid transition emits none) —
-    // the other no-webhook settlement rails (covered_by_credit) already
-    // call this; a zero-due packet invoice with a requested review needs
-    // the same call, or the review is silently never asked (Codex round-3
-    // P2 #4131). Best-effort — enrollPacketReviewAfterCredit swallows and
-    // logs/alerts its own failures; the settlement stands either way.
-    if (row?.visit_completion_packet_id) {
-      await enrollPacketReviewAfterCredit(invoiceId, row.visit_completion_packet_id);
+const ZERO_DUE_TERMINAL_ERROR = "Linked visit is terminal; delivery not attempted";
+
+function zeroDueRefusalReasonText(outcome) {
+  return outcome.kind === "terminal"
+    ? ZERO_DUE_TERMINAL_ERROR
+    : `Nothing is due on this invoice, but it could not be settled yet (${outcome.reason}) — not sent. Retry shortly; the visit's completion (or the next scheduled pass) settles it too.`;
+}
+
+// THE single place InvoiceService.settleZeroBalance is invoked on any send
+// path (Codex round-5 #4131 — rounds 1 through 4 each fixed a different
+// leak at a different call site on this same seam: packet ownership
+// fenced AFTER settlement, a settlement committed inside a packet claim's
+// own transaction then rolled back by that claim's later throw while
+// still reporting success, a terminal verdict collapsed into a generic
+// retryable refusal, an assistant tool reading a settled outcome as a
+// delivered send). Every claim-path detector above only throws; this is
+// the only function that actually calls settleZeroBalance, and it always
+// does so through the top-level `db` — NEVER a caller's own transaction
+// (a packet claim's `trx` included) — so a settlement this function
+// commits can never be undone by anything the caller does afterward.
+//
+// Packet ownership is fenced FIRST, before settleZeroBalance ever runs: a
+// live payer withdrawal always wins over a zero-due settlement that would
+// otherwise mark the homeowner's allocation paid. Reuses
+// claimPacketInvoiceForSend's own locked fence (fenceOnly) rather than a
+// second ownership path.
+//
+// Returns one descriptor:
+//   { kind: 'not_zero_due' }
+//   { kind: 'settled', invoice }
+//   { kind: 'refused', code: 'payer_billed' | 'deposit_settlement_pending', reason }
+//   { kind: 'terminal', reason: 'visit_never_ran', scheduledServiceId }
+async function settleZeroDueBeforeSend(invoiceId, { fenceOwnership = false, row = null } = {}) {
+  // `row` lets a caller that already holds the invoice in memory (the
+  // worker's due loop, reusing its own due-query SELECT) skip a redundant
+  // read — this keeps the whole check a pure, no-extra-query read unless
+  // the invoice is actually zero-due, exactly like every caller before
+  // this chokepoint existed. A caller with only an invoiceId (a claim
+  // path's zero_due_detected catch) reads fresh.
+  row = row || await db("invoices").where({ id: invoiceId }).first();
+  if (!(await zeroDueVisitInvoice(row, db))) return { kind: "not_zero_due" };
+  if (fenceOwnership && row.visit_completion_packet_id && !row.payer_id) {
+    const fence = await claimPacketInvoiceForSend(invoiceId, row.visit_completion_packet_id, { fenceOnly: true });
+    if (fence.payerBilled) {
+      logger.info(`[invoice] ${invoiceId}: zero-due settlement skipped — the visit is now billed to payer ${fence.payerId}`);
+      return { kind: "refused", code: "payer_billed", reason: `withdrawn to payer ${fence.payerId}` };
     }
+  }
+  const settlement = await settleZeroDueVisitInvoice(invoiceId, db);
+  if (settlement.settled) {
+    // A combined-visit (packet) invoice settled here has no payment
+    // webhook to trigger the packet's own review enrollment (the non-cash
+    // prepaid transition emits none) — the other no-webhook settlement
+    // rails (covered_by_credit) already call this.
+    if (row.visit_completion_packet_id) await enrollPacketReviewAfterCredit(invoiceId, row.visit_completion_packet_id);
+    return { kind: "settled", invoice: settlement.invoice };
+  }
+  if (settlement.reason === "visit_never_ran") {
+    logger.warn(`[invoice] ${invoiceId}: nothing due, but its linked visit never ran — routed to the terminal-visit cleanup instead of a retryable settlement refusal`);
+    const scheduledServiceId = await linkedScheduledServiceId(row, db);
+    return { kind: "terminal", reason: settlement.reason, scheduledServiceId };
+  }
+  logger.warn(`[invoice] ${invoiceId}: nothing due on the visit-linked invoice but zero-balance settlement was refused (${settlement.reason}) — send refused`);
+  return { kind: "refused", code: "deposit_settlement_pending", reason: settlement.reason };
+}
+
+// Direct-SMS result shape (sendViaSMS / the AI-assistant tool / batch
+// sendImmediately): { sent: false, ok, code, ... } — sent is ALWAYS false
+// here; every one of these outcomes means nothing was ever delivered.
+async function zeroDueDirectSendOutcome(invoiceId, outcome) {
+  if (outcome.kind === "settled") {
+    return { sent: false, ok: true, code: "zero_due", settled_zero_due: true,
+      reason: "Nothing is due on this invoice — settled instead of delivering a $0 pay link" };
+  }
+  if (outcome.kind === "terminal") {
+    await voidTerminalZeroDueInvoice(invoiceId, outcome.scheduledServiceId);
+    return { sent: false, ok: false, code: "INVOICE_VISIT_TERMINAL", deliveryOutcome: "not_sent",
+      reason: ZERO_DUE_TERMINAL_ERROR };
+  }
+  if (outcome.code === "payer_billed") {
+    return { sent: false, ok: false, code: "payer_billed", reason: "Suppressed — the visit is now billed to a third-party payer" };
+  }
+  return { sent: false, ok: false, code: "deposit_settlement_pending", deliveryOutcome: "not_sent", retryable: true,
+    reason: zeroDueRefusalReasonText(outcome) };
+}
+
+// Wrapper-shaped outcome when `err` is a zero-due detection (see
+// zeroDueDetectedError), or null when the caller must handle/rethrow it
+// itself. One shared resolve-and-map step for sendViaSMSAndEmail's two
+// claim-acquisition sites (the packet ownership claim and the plain
+// claim), so neither duplicates the chokepoint call + mapping inline.
+async function zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed) {
+  if (err?.code !== "zero_due_detected") return null;
+  const outcome = await settleZeroDueBeforeSend(invoiceId, { fenceOwnership: !allowClaimed });
+  return zeroDueWrapperOutcome(invoiceId, outcome);
+}
+
+// Wrapper result shape (sendViaSMSAndEmail): { ok, sms, email, payUrl }.
+async function zeroDueWrapperOutcome(invoiceId, outcome) {
+  if (outcome.kind === "settled") {
     return { ok: true, settled_zero_due: true, sms: { ok: false, code: "settled_zero_due" }, email: { ok: false, code: "settled_zero_due" }, payUrl: null };
   }
-  if (settlement.reason === "visit_never_ran") return terminalVisitZeroDueOutcome(invoiceId);
-  const err = depositSettlementPendingError(invoiceId, settlement.reason);
+  if (outcome.kind === "terminal") {
+    await voidTerminalZeroDueInvoice(invoiceId, outcome.scheduledServiceId);
+    return { ok: false, code: "INVOICE_VISIT_TERMINAL", error: ZERO_DUE_TERMINAL_ERROR,
+      sms: { ok: false, code: "INVOICE_VISIT_TERMINAL", deliveryOutcome: "not_sent" },
+      email: { ok: false, code: "INVOICE_VISIT_TERMINAL", deliveryOutcome: "not_sent" } };
+  }
+  if (outcome.code === "payer_billed") {
+    return { ok: false, error: "Suppressed — the visit is now billed to a third-party payer", code: "payer_billed",
+      sms: { ok: false, code: "payer_billed" }, email: { ok: false, code: "payer_billed" } };
+  }
+  const err = depositSettlementPendingError(invoiceId, outcome.reason);
   return { ok: false, code: err.code, error: err.message, sms: { ok: false, code: err.code }, email: { ok: false, code: err.code } };
 }
 
-// Throw-shaped sibling of zeroDueOpenVisitSendOutcome for claimInvoiceForSend's
-// own pre-flip and post-claim re-checks, which throw rather than return.
-async function throwForZeroDueVisitInvoice(invoiceId, fallbackRow, database = db) {
-  const settlement = await settleZeroDueVisitInvoice(invoiceId, database);
-  if (settlement.settled) {
-    const err = invoiceNotSendableError(settlement.invoice || { ...fallbackRow, status: "prepaid" });
-    err.code = "zero_due";
-    throw err;
-  }
-  throw depositSettlementPendingError(invoiceId, settlement.reason);
-}
-
-// processScheduledSends' due loop calls zeroDueOpenVisitSendOutcome BEFORE
-// ever claiming. A settlement leaves the row already off the queue
-// (nothing further to do). A settlement REFUSAL is a failure to settle —
-// not a window hold like quiet-hours or a provider retry — so it consumes
-// an attempt and rides the SAME five-attempt cap and terminal-failure
-// reporting (scheduled_send_error) as an ordinary send failure below; a
-// permanently unsettleable invoice (a bug, stuck payment work) must
-// eventually stop being retried and surface, not loop forever unclaimed
-// and unreported (pre-push audit P1, #4131 slice 4). Mirrors the ordinary
-// failure branch's own predicate shape (still due, still scheduled) rather
-// than an inv.scheduled_send_at equality match — the due query never
-// selects that column. Returns 1 when the caller's {failed} counter should
-// advance (a refusal), 0 when the row settled.
-async function recordZeroDueSchedulingOutcome(zeroDue, inv) {
-  if (zeroDue.ok) return 0;
-  // Atomic SQL increment (pre-push audit P1, #4131 slice 4): the prior
-  // Number(inv.scheduled_send_attempts || 0) + 1 computed the new value
-  // from this closure's stale in-memory snapshot, so two overlapping
-  // worker passes over the same row both wrote the SAME incremented value
-  // (a lost update) instead of ending one attempt apart. COALESCE(...)+1
-  // is evaluated by PostgreSQL against the row under its own update lock,
-  // so two real passes correctly serialize to +2. The status='scheduled'
-  // + due predicates are unchanged: a row another pass already claimed
-  // (now 'sending') matches zero rows here and is left untouched. The
-  // attempt-cap predicate (Codex round-1 P1) is carried on THIS update
-  // too, not just the due-query read above it: without it, several
-  // overlapping passes on the same temporarily-blocked row could each
-  // still match (the read that gated entry into this function is already
-  // stale by the time this write runs) and push attempts past 5 — the
-  // cap is only real when it is evaluated under the same row lock as the
-  // increment itself.
+// processScheduledSends' due loop calls settleZeroDueBeforeSend BEFORE
+// ever claiming. A settlement (or a payer withdrawal) leaves the row
+// already off the queue (nothing further to do). A settlement REFUSAL is
+// a failure to settle — not a window hold like quiet-hours or a provider
+// retry — so it consumes an attempt and rides the SAME five-attempt cap
+// and terminal-failure reporting (scheduled_send_error) as an ordinary
+// send failure below; a permanently unsettleable invoice (a bug, stuck
+// payment work) must eventually stop being retried and surface, not loop
+// forever unclaimed and unreported. Moves scheduled_send_at forward like
+// every other retry rail (Codex round-5 P2 #4131): leaving it due
+// immediately let a persistently-refused row hold the 25-row due page
+// against genuinely payable invoices behind it, every single tick.
+async function recordZeroDueSchedulingOutcome(reasonText, inv) {
   const updated = await db("invoices")
     .where({ id: inv.id, status: "scheduled" })
     .whereNotNull("scheduled_send_at")
@@ -1360,67 +1458,15 @@ async function recordZeroDueSchedulingOutcome(zeroDue, inv) {
     .where((q) => q.whereNull("scheduled_send_attempts").orWhere("scheduled_send_attempts", "<", 5))
     .update({
       scheduled_send_attempts: db.raw("COALESCE(scheduled_send_attempts, 0) + 1"),
-      scheduled_send_error: zeroDue.error,
+      scheduled_send_at: new Date(Date.now() + 5 * 60 * 1000),
+      scheduled_send_error: reasonText,
       updated_at: new Date(),
     });
   if (!updated) {
     logger.warn(`[invoice] Zero-due refusal for ${inv.id} matched no row — already claimed by another pass, rescheduled, or already at the attempt cap`);
-    // Not a refusal by THIS pass (another pass claimed or rescheduled the
-    // row, or it is already at the cap): nothing was spent, count nothing.
     return 0;
   }
   return 1;
-}
-
-// Re-check needed UNDER an already-taken claim: the status flip compares
-// status only, so a retotal to $0 between the pre-claim read and the flip
-// slips past it. claimedFromStatus reconstructs the row's status as of the
-// read this claim is based on (the preclaimed branch's `current` already
-// reads 'sending' — its own claim — so the caller passes 'scheduled' to
-// recreate the check that would have run had the flip happened here
-// instead). Returns a refusal descriptor, or null when the claim stands.
-async function visitInvoiceRefusalUnderClaim(claimedRow, claimedFromStatus, database = db) {
-  if (await zeroDueVisitInvoice({ ...claimedRow, status: claimedFromStatus }, database)) return { kind: "zero_due" };
-  return null;
-}
-
-// Restores the claim, THEN throws — settleZeroBalance itself refuses to
-// settle a 'sending' row (delivery in flight), so the claim must be given
-// back before the settle attempt underneath throwForZeroDueVisitInvoice can
-// succeed.
-async function reverifyClaimedVisitInvoice(invoiceId, invoice, previousStatus, database = db) {
-  const underClaim = await visitInvoiceRefusalUnderClaim(invoice, previousStatus, database);
-  if (!underClaim) return;
-  await restoreSendClaim(invoiceId, previousStatus, true, [], database, invoice.send_claim_token);
-  await throwForZeroDueVisitInvoice(invoiceId, invoice, database);
-}
-
-// Same re-check for a row claimInvoiceForSend's allowClaimed branch never
-// owns (the caller — processScheduledSends — took this exact claim itself;
-// see the comment on that branch). A throw here is marked
-// deliveryNeverAttempted (verified pre-provider: settleZeroBalance itself
-// refuses to touch a 'sending' row, so this can only report the refusal,
-// never settle it) — the caller's own retry handling then treats it like
-// an ordinary send failure instead of an unrecoverable crash.
-async function refuseZeroDuePreclaimedInvoice(invoiceId, current, database) {
-  const underClaim = await visitInvoiceRefusalUnderClaim(current, "scheduled", database);
-  if (!underClaim) return;
-  try {
-    await throwForZeroDueVisitInvoice(invoiceId, current, database);
-  } catch (refusalErr) {
-    // Pre-push audit P1: only throwForZeroDueVisitInvoice's OWN recognized
-    // outcomes (zero_due — settled; deposit_settlement_pending — a
-    // recognized business refusal) are safe to reclassify downstream as an
-    // ordinary retryable failure. An unexpected error surfacing here (a bug
-    // or a DB failure inside settleZeroBalance) is NOT a verified
-    // pre-provider refusal and must keep its own identity — rethrown
-    // unmarked so the caller's catch propagates it instead of silently
-    // retrying it forever under a code it never actually reported.
-    if (refusalErr?.code === "zero_due" || refusalErr?.code === "deposit_settlement_pending") {
-      refusalErr.deliveryNeverAttempted = true;
-    }
-    throw refusalErr;
-  }
 }
 
 // The scheduled-send worker's due-claim: the ONE place the queue predicates
@@ -1469,9 +1515,9 @@ async function claimInvoiceForSend(invoiceId, {
     // preclaim racing a direct send) or still parked for operator review.
     refuseFirstDeliveryHold(current, invoiceId, firstDeliveryOnly, overridesReviewHold);
     // Zero-due re-check for a PRECLAIMED row (#4131 slice 4):
-    // processScheduledSends' own zeroDueOpenVisitSendOutcome check runs
-    // BEFORE it ever claims, so this only fires on the rare race where a
-    // retotal to $0 lands between that read and this claim.
+    // processScheduledSends' own settleZeroDueBeforeSend check runs BEFORE
+    // it ever claims, so this only fires on the rare race where a retotal
+    // to $0 lands between that read and this claim.
     await refuseZeroDuePreclaimedInvoice(invoiceId, current, database);
     // A preclaimed row (the scheduled-send worker flips 'scheduled' →
     // 'sending' itself, then calls back in with allowClaimed:true) still
@@ -1500,11 +1546,11 @@ async function claimInvoiceForSend(invoiceId, {
     throw invoiceNotSendableError(current);
   }
 
-  // Nothing due on a visit-linked invoice: settle it and refuse the claim
-  // (the completion/worker read the resulting code as report-only), or
-  // refuse with a retryable code when settlement is not possible right
-  // now. Never hand out a claim that would text a $0 pay link.
-  if (await zeroDueVisitInvoice(current, database)) await throwForZeroDueVisitInvoice(invoiceId, current, database);
+  // Nothing due on a visit-linked invoice: detect it here (never settle —
+  // settleZeroDueBeforeSend is the ONE place that ever does) and refuse
+  // the claim so the caller resolves the real outcome through the
+  // chokepoint. Never hand out a claim that would text a $0 pay link.
+  if (await zeroDueVisitInvoice(current, database)) throw zeroDueDetectedError(invoiceId);
 
   // A live deferred pay-link text (quiet-hours queue) already owns this
   // invoice's delivery — refuse before claiming, unless this send is
@@ -3341,23 +3387,17 @@ const InvoiceService = {
         claim = await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, adoptsQueuedInvoiceSend, firstDeliveryOnly, overridesReviewHold });
       }
     } catch (claimErr) {
-      // Codex round-1 P1 (#4131 slice 4): the claim's own under-claim
-      // re-check (throwForZeroDueVisitInvoice) throws zero_due AFTER
-      // successfully settling the invoice as prepaid — a genuine success,
-      // not a failure. Direct callers of sendViaSMS (collections-
-      // conversation.js, the AI-assistant send tool, batch sendImmediately,
-      // the from-service SMS path) treat ANY thrown error as an ambiguous
-      // delivery outcome (stamp delivery_unknown, close the retry latch) —
-      // mirrors the covered_by_credit precedent below: catch it here and
-      // RESOLVE a structured, unambiguous success instead.
-      if (claimErr?.code === "zero_due") {
-        return { sent: false, ok: true, code: "zero_due", settled_zero_due: true, reason: claimErr.message };
-      }
-      // Same seam, other verdict: settlement refused for now. Verified
-      // pre-provider, so it is a definite not-sent, retryable outcome — not
-      // the ambiguous failure a thrown error would read as downstream.
-      if (claimErr?.code === "deposit_settlement_pending") {
-        return { sent: false, ok: false, code: "deposit_settlement_pending", deliveryOutcome: "not_sent", retryable: true, reason: claimErr.message };
+      // Codex round-5 #4131: a claim path detecting zero-due never settles
+      // itself (see zeroDueDetectedError) — direct callers of sendViaSMS
+      // (collections-conversation.js, the AI-assistant send tool, batch
+      // sendImmediately, the from-service SMS path) treat ANY thrown error
+      // as an ambiguous delivery outcome (stamp delivery_unknown, close the
+      // retry latch), so the ONE chokepoint is resolved here and mapped to
+      // a structured, unambiguous result instead of ever letting the
+      // detection itself escape as a throw.
+      if (claimErr?.code === "zero_due_detected") {
+        const outcome = await settleZeroDueBeforeSend(invoiceId, { fenceOwnership: !allowClaimed });
+        return zeroDueDirectSendOutcome(invoiceId, outcome);
       }
       throw claimErr;
     }
@@ -3908,51 +3948,26 @@ const InvoiceService = {
     // Phase 2: an accrued invoice (on a payer statement) is never delivered
     // individually. Refuse BEFORE claiming/applying credit so we don't flip its
     // status to 'sending'. (sendInvoiceEmail also fails closed; this is the early gate.)
-    const accrualPre = await db("invoices").where({ id: invoiceId }).first("payer_statement_id", "visit_completion_packet_id", "payer_id", "status", "scheduled_service_id", "service_record_id", "total", "credit_applied");
+    const accrualPre = await db("invoices").where({ id: invoiceId }).first("payer_statement_id", "visit_completion_packet_id", "payer_id");
     if (accrualPre?.payer_statement_id) {
       return { ok: false, error: "Invoice is billed on the payer’s monthly statement; not sent individually.", sms: { ok: false }, email: { ok: false } };
     }
-    // A combined-visit (packet) invoice must have its Bill-To ownership
-    // re-confirmed live BEFORE any zero-due settlement below — otherwise a
-    // Bill-To move to a payer since scheduling could lose the race: the
-    // settlement marks the invoice 'prepaid' for the homeowner's
-    // allocation before claimPacketInvoiceForSend's own fence (further
-    // down) ever gets a chance to withdraw it to the payer (Codex round-3
-    // P1 #4131). fenceOnly reuses that EXACT same locked fence (not a
-    // second ownership path) purely to re-check live ownership; a
-    // still-self-pay row falls through unchanged. Scoped to !allowClaimed:
-    // the preclaimed (worker) path already ran this identical fence
-    // moments earlier in processScheduledSends' own due loop, immediately
-    // before this call.
-    if (!allowClaimed && accrualPre?.visit_completion_packet_id && !accrualPre.payer_id) {
-      const fence = await claimPacketInvoiceForSend(invoiceId, accrualPre.visit_completion_packet_id, { fenceOnly: true });
-      if (fence.payerBilled) {
-        return { ok: false, error: "Suppressed — the visit is now billed to a third-party payer", code: "payer_billed",
-          sms: { ok: false, code: "payer_billed" }, email: { ok: false, code: "payer_billed" } };
-      }
-    }
-    // Nothing due on a visit-linked invoice (a credit or prepaid coverage
-    // reduced it to $0): never text a $0 pay link or arm follow-ups
-    // (#4131 slice 4). Settle it through the zero-balance transition
-    // instead; when that is refused right now, refuse the send (retryable)
-    // rather than deliver. claimInvoiceForSend applies the same guard for
-    // every other claimant (and the race against this pre-check); this
-    // early read only gives THIS wrapper its result shape without ever
-    // taking a claim. A no-op when this call is itself preclaimed
-    // (accrualPre.status already reads 'sending' by then, which
-    // zeroDueVisitInvoice excludes) — the worker's own pre-claim check in
-    // processScheduledSends already ran before it ever got here.
-    const zeroDue = await zeroDueOpenVisitSendOutcome(accrualPre, invoiceId);
-    if (zeroDue) return zeroDue;
     // A combined-visit invoice minted self-pay claims its send under held
     // customer and billed-member rows with a live Bill-To recheck (see
     // claimPacketInvoiceForSend); a payer assigned since scheduling owns the
-    // debt, so the homeowner never receives the pay link.
+    // debt, so the homeowner never receives the pay link. Either claim path
+    // below can throw zero_due_detected (Codex round-5 #4131) — the ONE
+    // chokepoint, settleZeroDueBeforeSend, resolves what actually happened
+    // (it runs the SAME packet ownership fence first on its own, so a live
+    // payer withdrawal still always wins over a zero-due settlement) and
+    // this wrapper maps its descriptor to its own result shape.
     let packetClaim = null;
     if (accrualPre?.visit_completion_packet_id && !accrualPre.payer_id) {
       try {
         packetClaim = await claimPacketInvoiceForSend(invoiceId, accrualPre.visit_completion_packet_id, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold });
       } catch (err) {
+        const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed);
+        if (zeroDueResult) return zeroDueResult;
         // The scheduled-send worker already fenced and claimed this send; a
         // transient failure of the re-judge here left no provider request
         // behind, so the invoice goes back to its queue slot instead of
@@ -3975,7 +3990,14 @@ const InvoiceService = {
     // never reverses it either, leaving an undelivered, edit-locked invoice with
     // credit_applied set. Claiming first means a lost race throws here before any
     // credit is drawn down — nothing to reverse.
-    const claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend: true });
+    let claim;
+    try {
+      claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend: true });
+    } catch (err) {
+      const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed);
+      if (zeroDueResult) return zeroDueResult;
+      throw err;
+    }
     const consumedQueuedSendRows = claim.consumedQueuedSendRows || [];
     // Now that we own the claim, apply available account credit so the pay link the
     // customer receives bills amount due (total − applied credit), not the gross
@@ -4056,12 +4078,12 @@ const InvoiceService = {
         if (smsResult?.payUrl) payUrl = smsResult.payUrl;
         if (smsResult?.settled_zero_due) {
           // Defensive mirror of the covered_by_credit shape above:
-          // settleZeroBalance's own 'sending' guard means the nested
-          // preclaimed sendViaSMS call cannot currently reach this outcome
-          // (it can only ever report deposit_settlement_pending there),
-          // but a resolved, non-throwing success must never be read as an
-          // ordinary SMS failure by the generic branch below if that ever
-          // changes (Codex round-1 P1 #4131).
+          // settleZeroDueBeforeSend's own 'sending' guard (inside
+          // settleZeroBalance) means the nested preclaimed sendViaSMS call
+          // cannot currently reach this outcome (it can only ever report
+          // deposit_settlement_pending there), but a resolved, non-throwing
+          // success must never be read as an ordinary SMS failure by the
+          // generic branch below if that ever changes (Codex round-5 #4131).
           return { ok: true, settled_zero_due: true,
             sms: { ok: false, code: "settled_zero_due" }, email: { ok: false, code: "settled_zero_due" },
             payUrl: payUrl || null };
@@ -4071,6 +4093,13 @@ const InvoiceService = {
         } else {
           sms.error = smsResult?.reason || smsResult?.code || "SMS not sent";
           if (smsResult?.code) sms.code = smsResult.code;
+          // The zero-due chokepoint's terminal/refused shapes carry
+          // deliveryOutcome on a RESOLVED result (not just a thrown one) —
+          // the deep provider-dispatch INVOICE_VISIT_TERMINAL check further
+          // down keys on sms.deliveryOutcome === 'not_sent' to route this
+          // exact code to its own void + credit-restore cleanup (Codex
+          // round-5 #4131).
+          if (smsResult?.deliveryOutcome) sms.deliveryOutcome = smsResult.deliveryOutcome;
         }
       } catch (err) {
         sms.error = err.message;
@@ -4652,36 +4681,44 @@ const InvoiceService = {
       // refusal-to-settle-yet moves the row a few minutes out so it cannot
       // starve later payable invoices behind it in the same due page.
       try {
-        const zeroDue = await zeroDueOpenVisitSendOutcome(inv, inv.id);
-        if (zeroDue) {
-          // Codex round-1 P1 (#4131 slice 4): a terminal (never-ran) linked
-          // visit is not a retryable settlement refusal — route it to the
-          // SAME void + credit-restore cleanup the post-claim
-          // INVOICE_VISIT_TERMINAL branch below already runs, instead of
-          // burning an attempt on a row that can never settle.
-          if (zeroDue.code === "INVOICE_VISIT_TERMINAL") {
-            const scheduledServiceId = await linkedScheduledServiceId(inv);
-            const voided = scheduledServiceId
-              ? await InvoiceService.voidOpenInvoicesForCancelledService(scheduledServiceId)
-              : [];
-            if (voided.includes(inv.id)) {
-              held += 1;
-            } else {
-              // The sweep's own safety refusals (a live PaymentIntent,
-              // money in flight, an unverifiable Stripe lookup) left the
-              // row un-voided — it must not sit due with nothing spent
-              // (Codex round-4 P1 #4131): re-selected every tick forever
-              // otherwise. Recorded exactly like any other terminal
-              // settlement refusal — a capped attempt, surfacing as failed
-              // once the cap is hit — so an operator eventually sees it.
-              logger.warn(`[invoice] Scheduled send for ${inv.invoice_number} is zero-due on a terminal visit but could not be safely voided — recording it as a failed refusal instead of leaving it due`);
-              failed += await recordZeroDueSchedulingOutcome(zeroDue, inv);
-            }
-            continue;
+        // Codex round-5 #4131: settleZeroDueBeforeSend is the ONE
+        // chokepoint — it runs the packet ownership fence first on its
+        // own (fenceOwnership: true), so a live payer withdrawal is
+        // reported here as an ordinary 'refused' payer_billed rather than
+        // this loop needing a second, separate fence of its own.
+        const outcome = await settleZeroDueBeforeSend(inv.id, { fenceOwnership: true, row: inv });
+        if (outcome.kind === "settled") continue;
+        if (outcome.kind === "terminal") {
+          // A terminal (never-ran) linked visit is not a retryable
+          // settlement refusal — route it to the void + credit-restore
+          // cleanup instead of burning an attempt on a row that can never
+          // settle.
+          const voided = await voidTerminalZeroDueInvoice(inv.id, outcome.scheduledServiceId);
+          if (voided) {
+            held += 1;
+          } else {
+            // The sweep's own safety refusals (a live PaymentIntent,
+            // money in flight, an unverifiable Stripe lookup) left the
+            // row un-voided — it must not sit due with nothing spent
+            // (Codex round-4 P1 #4131): re-selected every tick forever
+            // otherwise. Recorded exactly like any other terminal
+            // settlement refusal — a capped attempt, surfacing as failed
+            // once the cap is hit — so an operator eventually sees it.
+            logger.warn(`[invoice] Scheduled send for ${inv.invoice_number} is zero-due on a terminal visit but could not be safely voided — recording it as a failed refusal instead of leaving it due`);
+            failed += await recordZeroDueSchedulingOutcome(zeroDueRefusalReasonText(outcome), inv);
           }
-          failed += await recordZeroDueSchedulingOutcome(zeroDue, inv);
           continue;
         }
+        if (outcome.kind === "refused") {
+          if (outcome.code === "payer_billed") {
+            held += 1;
+            logger.info(`[invoice] Scheduled send for ${inv.invoice_number} withdrawn — the zero-due visit is now billed to a payer`);
+            continue;
+          }
+          failed += await recordZeroDueSchedulingOutcome(zeroDueRefusalReasonText(outcome), inv);
+          continue;
+        }
+        // not_zero_due: fall through to the normal send flow below.
       } catch (zeroDueErr) {
         // Isolate the row, never the batch: an unexpected error inside the
         // settlement check (a DB fault, a bug in settleZeroBalance) is
@@ -4690,7 +4727,7 @@ const InvoiceService = {
         // to the invoices behind it. Nothing was claimed or sent here.
         logger.error(`[invoice] Zero-due check failed for scheduled send ${inv.invoice_number}: ${zeroDueErr.message}`);
         failed += 1;
-        await recordZeroDueSchedulingOutcome({ ok: false, error: `Zero-due check failed: ${zeroDueErr.message}` }, inv)
+        await recordZeroDueSchedulingOutcome(`Zero-due check failed: ${zeroDueErr.message}`, inv)
           .catch((e) => logger.warn(`[invoice] Could not record the zero-due check failure for ${inv.id}: ${e.message}`));
         continue;
       }
@@ -8275,5 +8312,11 @@ module.exports._withFreshServicePhotoUrls = withFreshServicePhotoUrls;
 // cycle — needed to model two overlapping worker passes off the SAME stale
 // in-memory snapshot (see invoice-scheduled-readiness-postgres.test.js).
 module.exports._recordZeroDueSchedulingOutcome = recordZeroDueSchedulingOutcome;
+// Test-only seams (#4131 slice 4 round-5): the ONE zero-due chokepoint and
+// its two result-shape mappers, exercised directly rather than only
+// end-to-end through claimInvoiceForSend/sendViaSMS/sendViaSMSAndEmail.
+module.exports._settleZeroDueBeforeSend = settleZeroDueBeforeSend;
+module.exports._zeroDueDirectSendOutcome = zeroDueDirectSendOutcome;
+module.exports._zeroDueWrapperOutcome = zeroDueWrapperOutcome;
 module.exports.claimPacketInvoiceForSend = claimPacketInvoiceForSend;
 module.exports.claimInvoiceForSend = claimInvoiceForSend;

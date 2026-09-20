@@ -37,6 +37,16 @@ jest.mock('../config/twilio-numbers', () => ({
 jest.mock('../services/review-request', () => ({
   enrollForPaidInvoice: jest.fn(async () => ({ enrolled: true, recorded: true })),
 }));
+// #4131 slice 4 round-5: settleZeroDueBeforeSend's own packet fence
+// (fenceOnly) calls resolvePacketOwnershipLocked inside a db.transaction —
+// mocked at the module boundary so a packet-linked fixture doesn't have to
+// stage the fence's several locked reads through the generic db queue.
+// Default: no live visit / no payer, so fenceOnly resolves payerBilled:
+// false without a withdrawal — tests that need a withdrawal override this.
+jest.mock('../services/visit-completion-packets', () => ({
+  resolvePacketOwnershipLocked: jest.fn(async () => ({ visit: null, payerId: null, billed: [] })),
+  withdrawPacketInvoiceForPayer: jest.fn(async () => false),
+}));
 
 const db = require('../models/db');
 const { enrollForPaidInvoice } = require('../services/review-request');
@@ -748,11 +758,22 @@ describe('processScheduledSends send-window handling', () => {
     // sendViaSMSAndEmail directly (POST /:id/send with no prior claim)
     // would see the mismatched name.
     test('sendViaSMSAndEmail\'s own pre-claim settle resolves settled_zero_due: true, not the old settled_by_deposit name', async () => {
+      // #4131 slice 4 round-5: sendViaSMSAndEmail no longer settles inline
+      // via an early fenceOnly check — it claims (claimInvoiceForSend),
+      // which only DETECTS zero-due and throws zero_due_detected, then this
+      // wrapper resolves the actual outcome through the ONE chokepoint,
+      // settleZeroDueBeforeSend. Four reads: the accrual pre-check, the
+      // claim's own snapshot, the deposit-readiness estimate lookup
+      // (invoice.js's own claim path — the row carries scheduled_service_id
+      // so it always runs), then the chokepoint's fresh re-read.
       const zeroDueAccrual = {
         payer_statement_id: null, visit_completion_packet_id: null, payer_id: null,
-        status: 'draft', scheduled_service_id: 'svc-1', total: 100, credit_applied: 100,
       };
-      db.mockReturnValueOnce(chain({ first: zeroDueAccrual }));
+      const zeroDueInvoiceRow = zeroDueDueRow({ status: 'draft', line_items: null, notes: null });
+      db.mockReturnValueOnce(chain({ first: zeroDueAccrual }))
+        .mockReturnValueOnce(chain({ first: zeroDueInvoiceRow }))
+        .mockReturnValueOnce(chain({ first: { source_estimate_id: null, customer_id: zeroDueInvoiceRow.customer_id } }))
+        .mockReturnValueOnce(chain({ first: zeroDueInvoiceRow }));
       settleSpy.mockResolvedValue({ settled: true, invoice: { id: 'inv-1', status: 'prepaid' } });
 
       const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {});
