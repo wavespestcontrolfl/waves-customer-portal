@@ -1274,3 +1274,20 @@ test('an unrelated noun-subject modal stays outside bounded finding evidence', (
   expect(findingEvidence).not.toMatch(/invoice/i);
   expect(grammar.reportFindingIsUncertain(findingEvidence)).toBe(false);
 });
+
+test.each([
+  ['We refrained from having Talstar P applied to the exterior perimeter.', false],
+  ['We refrain from getting Talstar P applied to the exterior perimeter.', false],
+  ['We are refraining from having Talstar P applied to the exterior perimeter.', false],
+  ['We deferred having Talstar P applied to the exterior perimeter.', false],
+  ['We defer getting Talstar P applied to the exterior perimeter.', false],
+  ['We are deferring having Talstar P applied to the exterior perimeter.', false],
+  ['We had Talstar P applied to the exterior perimeter.', true],
+  ['We got Talstar P applied to the exterior perimeter.', true],
+  ['We deferred the inspection, then had Talstar P applied to the exterior perimeter.', true],
+  ['We refrained from comment, then got Talstar P applied to the exterior perimeter.', true],
+  ['We deferred having bait applied indoors, but Talstar P was applied to the exterior perimeter.', true],
+])('refrained and deferred causatives do not establish completion: %s', (text, completed) => {
+  const findingVerbs = [...text.matchAll(/applied/g)];
+  expect(grammar.reportHasCompletedPredicate(text, findingVerbs.at(-1))).toBe(completed);
+});
