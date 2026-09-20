@@ -87,6 +87,11 @@ describe('double-booking measurement (plain rows only — owner scope 2026-09-20
     expect(allocationOnly.doubleBookedVisits).toEqual([]);
     expect(allocationOnly.uncertaintyReasons).toContain('grouped_work_requires_review');
     expect(allocationOnly.modeledDriveMinutes).not.toBeNull();
+    // A live hold on a combined estimate is not grouped work yet (codex #4620 r11 P2).
+    const expiry = new Date(Date.now() + 600000).toISOString();
+    const heldMix = { version: 2, allocatedServiceIds: ['h1', 'h2'] };
+    const held = measureDayQuality(Model, [row('h1', null, 10, { reservation_service_mix: heldMix, reservation_expires_at: expiry }), row('h2', null, 10, { reservation_service_mix: heldMix, reservation_expires_at: expiry })]);
+    expect(held.uncertaintyReasons).not.toContain('grouped_work_requires_review');
   });
 });
 

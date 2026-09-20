@@ -83,7 +83,8 @@ function measureDayQuality(RouteOptimizer, stops, {
   const grouped = stops.some(stop => stop.visit_id);
   // A version-2 combined booking is excluded from double-booking pairs (see
   // doubleBookedPairs), so its day carries the grouped-work review line too.
-  const combined = stops.some(stop => allocationKey(stop));
+  // A live hold on a combined estimate is not yet a customer stop.
+  const combined = stops.some(stop => allocationKey(stop) && !isHoldStop(stop));
   const configured = [departureMinutes, targetReturnMinutes, breakMinutes].every(Number.isFinite)
     && targetReturnMinutes > departureMinutes && breakMinutes >= 0;
   const unknown = Object.entries({
