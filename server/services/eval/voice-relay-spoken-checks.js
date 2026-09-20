@@ -2541,10 +2541,12 @@ function reportSharedLocationContinuation(text, clauseEnd, location, subject, as
   if (assertionEnd < clauseEnd && !(boundary && new RegExp(subject, 'i').test(
     clauseOf(remainder.slice(boundary[0].length), 0),
   ))) return { text: '', unconfirmed: false };
-  const retracts = (source) => {
+  // One retraction predicate for every continuation shape. A list carries its
+  // own date, so a timed denial compares against the finding plus the list.
+  const retracts = (source, finding = findingText) => {
     const qualifier = reportRetractionClause(source, subject, location);
     return REPORT_TRAILING_UNCERTAINTY_RE.test(qualifier) || reportTrailingDenialOrCorrection(qualifier)
-      || reportTimedDenial(qualifier, findingText) || reportTrailingNoncompletion(qualifier);
+      || reportTimedDenial(qualifier, finding) || reportTrailingNoncompletion(qualifier);
   };
   if (boundary && retracts(remainder.slice(boundary[0].length))) return { text: '', unconfirmed: true };
   // A shared list can be followed by a separate denial. Keep the location
@@ -2563,27 +2565,25 @@ function reportSharedLocationContinuation(text, clauseEnd, location, subject, as
   if (!locationTail) return { text: '', unconfirmed: false };
   const qualifier = remainder.slice(locationTail[0].length).trim()
     .replace(/^(?:perimeter|area|wall|walls|zone|edge)\b\s*/i, '');
+  const end = remainder.search(/[.!?;]/);
+  const listFinding = `${findingText}${remainder.slice(0, end >= 0 ? end : undefined)}`;
   // A completion time can sit between the list and a coordinated denial
   // ("and garage today, but it was not applied there"); step over it first.
-  const scopedQualifier = reportRetractionClause(qualifier
+  const unconfirmed = retracts(qualifier
     .replace(new RegExp(`^${REPORT_COMPLETION_TIME}\\b\\s*`, 'i'), '')
-    .replace(new RegExp(`^[,—–]\\s*(?:(?:${CLAUSE_BOUNDARY_TOKEN_RE.source})\\s*,?\\s*)?`, 'i'), ''), subject, location);
-  const unconfirmed = REPORT_TRAILING_UNCERTAINTY_RE.test(scopedQualifier)
-    || reportTrailingDenialOrCorrection(scopedQualifier)
-    || reportTrailingNoncompletion(scopedQualifier);
+    .replace(new RegExp(`^[,—–]\\s*(?:(?:${CLAUSE_BOUNDARY_TOKEN_RE.source})\\s*,?\\s*)?`, 'i'), ''), listFinding);
   // A shared list ends the location noun or adds an adjunct (a completion
   // time included), not a new predicate.
   if (!new RegExp(`^(?:$|[.!?;]|(?:,\\s*)?(?:and|or|before|after|with|as|according|which|(?:only\\s+)?if|unless)\\b|${REPORT_COMPLETION_TIME}\\b)`, 'i').test(qualifier)
       && !unconfirmed) {
     return { text: '', unconfirmed: false };
   }
-  const end = remainder.search(/[.!?;]/);
   // The sentence after a completed list retracts it the same way it retracts
   // a plain finding: the list clause is the pronoun's antecedent. Speech-event
   // boundaries are already joined into sentences by the runner.
   const afterList = end >= 0
     ? new RegExp(`^(?:${CLAUSE_BOUNDARY_TOKEN_RE.source})\\s*,?\\s*`, 'i').exec(remainder.slice(end)) : null;
-  const retractedAfterList = Boolean(afterList) && retracts(remainder.slice(end + afterList[0].length));
+  const retractedAfterList = Boolean(afterList) && retracts(remainder.slice(end + afterList[0].length), listFinding);
   return {
     text: remainder.slice(0, end >= 0 ? end : undefined),
     unconfirmed: (end >= 0 && remainder[end] === '?') || unconfirmed || retractedAfterList,

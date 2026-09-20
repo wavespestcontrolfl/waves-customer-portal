@@ -101,3 +101,12 @@ test.each([
 ])('a dated shared location list still sees a following retraction: %j', (spoken, status) => {
   expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
 });
+
+test.each([
+  [['Talstar P was applied to the exterior perimeter and garage today, but it was not applied there today.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter and garage today.', 'It was not applied there today.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter and garage today, but it was not applied there yesterday.'], 'pass'],
+  [['Talstar P was applied to the exterior perimeter and garage today.', 'It was not applied there yesterday.'], 'pass'],
+])('a timed denial after a dated shared list compares against the list date: %j', (spoken, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
