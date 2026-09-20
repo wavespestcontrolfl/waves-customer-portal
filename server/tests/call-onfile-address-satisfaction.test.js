@@ -31,6 +31,10 @@ describe('onFileAddressSatisfaction', () => {
     expect(r.flags).toEqual(['out_of_service_area']);
     expect(r.satisfied).toEqual(['missing_service_address']);
   });
+  test('an INCOMPLETE on-file address (street, no ZIP) keeps every flag (codex r3 P2)', () => {
+    const partial = { hasAddress: true, addressLine1: '100 Example Street', addressCity: 'Parrish', addressZip: null };
+    expect(onFileAddressSatisfaction(ADDRESS_FLAGS, unconfirmed([]), { knownCustomer: partial }).satisfied).toEqual([]);
+  });
   test('a new caller (no on-file address) keeps every flag', () => {
     expect(onFileAddressSatisfaction(ADDRESS_FLAGS, unconfirmed([]), {}).satisfied).toEqual([]);
     expect(onFileAddressSatisfaction(ADDRESS_FLAGS, unconfirmed([]), { knownCustomer: { hasAddress: false } }).satisfied).toEqual([]);

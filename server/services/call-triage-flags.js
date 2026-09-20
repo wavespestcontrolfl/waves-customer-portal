@@ -1052,7 +1052,10 @@ function onFileAddressSatisfaction(flags, extraction, opts = {}) {
   const list = Array.isArray(flags) ? flags : [];
   const none = { flags: list, satisfied: [] };
   const known = opts.knownCustomer;
-  if (!known || !known.hasAddress) return none;
+  // A COMPLETE on-file address: street AND ZIP, the same evidence the
+  // auto-resolver's address_moot rule demands — hasAddress alone is derived
+  // from address_line1 (codex r3 P2).
+  if (!known || !known.hasAddress || !String(known.addressLine1 || '').trim() || !String(known.addressZip || '').trim()) return none;
   if (statesNewAddress(extraction, known)) return none;
   const rec = opts.canonicalRecord;
   if (rec && statesNewAddress({ property: { service_address: {
