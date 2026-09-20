@@ -2605,7 +2605,11 @@ function reportHasLaterExplicitRetraction(text, after, subject, location, findin
     // A distant pronoun has no reliable antecedent. Require both named facts;
     // immediate anaphoric corrections are handled by the continuation check.
     if (!product.test(statement) || !place.test(statement)) return false;
-    const qualifier = reportRetractionClause(statement, subject, location);
+    // A discourse coordinator ("But", "However,", "Though") introduces the
+    // correction; the anchored denial checks read the clause after it.
+    const qualifier = reportRetractionClause(statement.replace(
+      /^\s*(?:(?:but|however|though|although|yet|still|and|so|then|anyway|no)\b\s*,?\s*)+/i, '',
+    ), subject, location);
     return reportTrailingDenialOrCorrection(qualifier) || REPORT_TRAILING_UNCERTAINTY_RE.test(qualifier)
       || reportTimedDenial(qualifier, findingText) || reportTrailingNoncompletion(qualifier);
   });

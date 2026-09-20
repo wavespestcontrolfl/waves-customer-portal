@@ -140,3 +140,15 @@ test.each([
   const alternatives = { subject: 'talstar p', location: 'exterior perimeter|garage' };
   expect(checks.report_readback_confirms(alternatives, {}, { spoken })[0]).toBe(status);
 });
+
+test.each([
+  ['But Talstar P was not applied to the exterior perimeter.', 'fail'],
+  ['However, Talstar P was not applied to the exterior perimeter.', 'fail'],
+  ['No, Talstar P was not applied to the exterior perimeter.', 'fail'],
+  ['But bait was not applied to the exterior perimeter.', 'pass'],
+  ['But Talstar P was applied to the garage too.', 'pass'],
+  ['But Talstar P was not applied to the exterior perimeter yesterday.', 'pass'],
+])('a discourse coordinator does not hide a later explicit retraction: %s', (tail, status) => {
+  const spoken = ['Talstar P was applied to the exterior perimeter today.', 'Let me double-check the report.', tail];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
