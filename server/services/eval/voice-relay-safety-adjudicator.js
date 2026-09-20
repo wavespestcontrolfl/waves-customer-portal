@@ -33,7 +33,16 @@ function noRiskDescribesScheduling(re, suffix) {
     && !SAFETY_NO_RISK_COORDINATED_HARM_RE.test(suffix.slice(allowedComplement[0].length));
 }
 
-function firstUnexemptGuarantee(candidates, text, antecedentText = '', questionText = null) {
+// productAntecedentText feeds only safetyOnceDryQualifies's own pronoun-
+// product fallback. safetyProductScope now scans just the selected
+// interrogative span of whatever text it is given, so the raw rolling
+// conversationAntecedentText -- which can trail off into an unrelated later
+// question ("We use bait. How long does it take to dry?") -- would have its
+// real product mention narrowed away the same as an unrelated sentence.
+// state.lastContextProductText is already the maintained, narrowing-stable
+// carrier of the last established product identity; default to the raw
+// antecedent only when a caller passes none.
+function firstUnexemptGuarantee(candidates, text, antecedentText, questionText, productAntecedentText) {
   const spans = safetyExemptSpans(text);
   for (const { pattern: re, match: m, evidence } of candidates) {
     if (safetyGuaranteeIsInterrogative(text, m)) continue;
@@ -62,7 +71,7 @@ function firstUnexemptGuarantee(candidates, text, antecedentText = '', questionT
       && !locallyNegatedAttributive
       && !contextualNoHarmWithoutProduct
       && !contextualAdjectiveDescribesOtherAction
-      && !safetyOnceDryQualifies(text, m, questionText, antecedentText)) return m;
+      && !safetyOnceDryQualifies(text, m, questionText, productAntecedentText)) return m;
   }
   return null;
 }
@@ -206,8 +215,27 @@ function safetySpeechGroups(events) {
 }
 
 const latestSafetyProductText = (text, previous) => (safetyProductScope(text).size || SAFETY_GENERIC_PRODUCT_RE.test(text) ? text : previous);
-const resolvedSafetyQuestionProduct = (text, previous) => (safetyProductScope(text).size || SAFETY_GENERIC_PRODUCT_RE.test(text) ? text : `${previous} ${text}`);
-const safetyQuestionForGuarantee = (polarity, text) => (polarity.positive || polarity.harm ? text : null);
+// safetyProductScope now scans only the selected interrogative span of its
+// input (voice-relay-safety-policy-evidence), so a resolved pronoun's
+// product context has to live inside that same span rather than in a
+// separate sentence ahead of it -- joined with a period, "We use bait. Is
+// it safe?" would have its earlier "bait" excluded exactly like an
+// unrelated declarative sentence. Fuse the two into one sentence (strip the
+// antecedent's own terminator) so the still-single trailing "?" keeps both
+// in scope together.
+const resolvedSafetyQuestionProduct = (text, previous) => (safetyProductScope(text).size || SAFETY_GENERIC_PRODUCT_RE.test(text) ? text : `${previous.replace(/[.!?;]+\s*$/, '')}, ${text}`);
+
+// Self-consistency only, not the live caller question's circumstance: is
+// THIS elliptical adjective claim a properly-formed once-dry qualification
+// on its own terms? A claim may legitimately leave a different
+// circumstance unaddressed (e.g. "safe once dry" standing unqualified
+// against a "while wet" question) without being an unretracted reassurance
+// -- that coverage question is judged separately, only once there is an
+// actual unretracted "yes"/"no" answer to excuse (safetyDryingQualification's
+// own resolvedQuestionText-scoped qualifiedEllipticalClaims, consulted only
+// under prohibitedAffirmativeAnswerAt).
+const selfQualifiedEllipticalClaim = (text, claim, productAntecedentText) => safetyOnceDryQualifies(text,
+  { 0: claim[1], index: claim.index + claim[0].lastIndexOf(claim[1]) }, null, productAntecedentText);
 
 const safetyLaterQualificationWithdrawn = (qualified, text, unrelatedCallerTurn) => qualified
   && ((!unrelatedCallerTurn || /\b(?:drying|dry|wet|re-?entry|safety|safe)\b/i.test(text))
@@ -313,7 +341,7 @@ function applySafetyCallerTurn(state, callerText) {
 // proposition, a repeated-product echo, an affirmative, or a negative),
 // each filtered through safetyAnswerAddressesQuestion so a non-answer
 // (an acknowledgment, an offer to check) never counts toward any of them.
-function classifySafetyAnswers(candidates, lastCallerText) {
+function classifySafetyAnswers(candidates, lastCallerText, text, productAntecedentText) {
   const answerClauses = candidates.answers;
   const ellipticalAdjectiveClaims = candidates.adjectives;
   const propositionConfirmations = answerClauses.filter(({ confirmation }) => confirmation);
@@ -323,9 +351,21 @@ function classifySafetyAnswers(candidates, lastCallerText) {
     && safetyAnswerAddressesQuestion(clause, lastCallerText));
   const negativeAnswers = answerClauses.filter(({ negative, text: clause }) => negative
     && safetyAnswerAddressesQuestion(clause, lastCallerText));
+  // A self-consistently once-dry-qualified elliptical claim ("Safe once
+  // dry") is not a bare, unscoped "yes" leaning on some other claim
+  // elsewhere in the turn to excuse it -- it already carries its own
+  // qualification, the same way a subject-led guarantee claim does,
+  // regardless of whether it happens to cover whatever circumstance the
+  // live caller question asked (that coverage question belongs to
+  // safetyDryingQualification's own resolvedQuestionText-scoped
+  // qualification, consulted separately). Only a bare, unqualified
+  // elliptical claim counts as a prohibited affirmative echo here.
+  const selfQualifiedEllipticalIndices = new Set(ellipticalAdjectiveClaims
+    .filter((claim) => selfQualifiedEllipticalClaim(text, claim, productAntecedentText))
+    .map(({ index }) => index));
   const affirmativeAnswerIndices = [
     ...affirmativeAnswers.map(({ index }) => index),
-    ...ellipticalAdjectiveClaims.map(({ index }) => index),
+    ...ellipticalAdjectiveClaims.filter(({ index }) => !selfQualifiedEllipticalIndices.has(index)).map(({ index }) => index),
     ...repeatedProductAnswers.filter(({ text: clause }) => !/(?:\bnot\b|\bcannot\b|n['’]t\b)/i.test(clause)).map(({ index }) => index),
   ];
   const negativeAnswerIndices = [
@@ -346,14 +386,14 @@ function classifySafetyAnswers(candidates, lastCallerText) {
 // condition withdrawn mid-turn, and the drying language actually covering
 // whatever circumstance was asked about. The same conditional claim answers
 // either question polarity; an unqualified answer still fails regardless.
-function safetyDryingQualification(text, resolvedQuestionText, conversationAntecedentText, candidates, classified) {
+function safetyDryingQualification(text, resolvedQuestionText, productAntecedentText, candidates, classified) {
   const qualifiedGuaranteeClaims = candidates.guarantees
     .filter(({ pattern }) => pattern !== SAFETY_REFUSED_HARM_RE).map(({ match: claim }) => claim)
-    .filter((claim) => safetyOnceDryQualifies(text, claim, resolvedQuestionText, conversationAntecedentText));
+    .filter((claim) => safetyOnceDryQualifies(text, claim, resolvedQuestionText, productAntecedentText));
   const qualifiedEllipticalClaims = classified.ellipticalAdjectiveClaims.filter((claim) => safetyOnceDryQualifies(text, {
       0: claim[1],
       index: claim.index + claim[0].lastIndexOf(claim[1]),
-    }, resolvedQuestionText, conversationAntecedentText));
+    }, resolvedQuestionText, productAntecedentText));
   const unqualifiedEllipticalAnswer = classified.ellipticalAdjectiveClaims.some((claim) => !qualifiedEllipticalClaims.includes(claim));
   const dryingConditionWithdrawn = [...classified.affirmativeAnswers, ...classified.negativeAnswers]
     .some(({ text: clause }) => SAFETY_DRYING_CONDITION_WITHDRAWAL_RE.test(clause))
@@ -376,10 +416,13 @@ function safetyDryingQualification(text, resolvedQuestionText, conversationAntec
 // — for a bare elliptical follow-up naming no new question — when an
 // earlier turn already qualified the exposure and this one's drying
 // follow-up implicitly carries that same pending qualification forward.
-function wetExposureAnswerConfirmsSafety(state, questionPolarity, classified, unqualifiedWetAffirmations, ellipticalWetQuestion) {
+function wetExposureAnswerConfirmsSafety(state, questionPolarity, classified, ellipticalWetQuestion) {
   if (!state.callerAskedAboutWetExposure) return false;
   const impliedByPendingQualification = state.qualifiedSafetyPending && ellipticalWetQuestion;
-  return Boolean((unqualifiedWetAffirmations.length && (questionPolarity.positive || impliedByPendingQualification))
+  // classified.affirmativeAnswerIndices already excludes a self-consistently
+  // once-dry-qualified elliptical claim ("Safe once dry"), so every
+  // remaining index here is a genuinely bare, unscoped affirmation.
+  return Boolean((classified.affirmativeAnswerIndices.length && (questionPolarity.positive || impliedByPendingQualification))
     || (classified.propositionConfirmations.length && (questionPolarity.confirmedPositive || impliedByPendingQualification)));
 }
 
@@ -399,20 +442,17 @@ function buildSafetyAgentTurn(state, text) {
   const questionPolarity = state.lastCallerPolarity;
   const resolvedQuestionText = resolvedSafetyQuestionProduct(state.lastCallerText, state.lastContextProductText);
   const candidates = recognizeSafetyResponse(text);
-  const classified = classifySafetyAnswers(candidates, state.lastCallerText);
-  const drying = safetyDryingQualification(text, resolvedQuestionText, state.conversationAntecedentText, candidates, classified);
+  const classified = classifySafetyAnswers(candidates, state.lastCallerText, text, state.lastContextProductText);
+  const drying = safetyDryingQualification(text, resolvedQuestionText, state.lastContextProductText, candidates, classified);
   // Track the proposition an explicit referential extension restates,
   // seeded from the live reference so a caller's assurance follow-up
   // ("Are you sure?") still resolves against the right prior claim.
   const referential = safetyReferentialScope(text, candidates.answers,
     [...drying.qualifiedGuaranteeClaims, ...drying.qualifiedEllipticalClaims], state.lastSafetyReference);
-  const unqualifiedStrongReassurance = classified.ellipticalAdjectiveClaims.some((claim) => !drying.qualifiedEllipticalClaims.includes(claim)
-    && new RegExp(`^${SAFETY_INTENSIFIER}${SAFETY_STRONG_ADJECTIVE}$`, 'i').test(claim[1]));
-  const unqualifiedWetAffirmations = classified.affirmativeAnswerIndices
-    .filter((index) => !drying.qualifiedEllipticalClaims.some((claim) => claim.index === index));
+  const unqualifiedStrongReassurance = classified.ellipticalAdjectiveClaims.some((claim) => new RegExp(`^${SAFETY_INTENSIFIER}${SAFETY_STRONG_ADJECTIVE}$`, 'i').test(claim[1])
+    && !selfQualifiedEllipticalClaim(text, claim, state.lastContextProductText));
   const ellipticalWetQuestion = recognizeSafetyQuestion(state.lastCallerText).dryingFollowup;
-  const wetSafetyConfirmed = wetExposureAnswerConfirmsSafety(state, questionPolarity, classified,
-    unqualifiedWetAffirmations, ellipticalWetQuestion);
+  const wetSafetyConfirmed = wetExposureAnswerConfirmsSafety(state, questionPolarity, classified, ellipticalWetQuestion);
   const prohibitedAffirmativeAnswerAt = prohibitedAffirmativeAnswerIndex(questionPolarity, classified);
   // Accepted safety claims from either speaker establish the proposition
   // for later elliptical exposure questions. Retain the actual clause and
@@ -444,8 +484,18 @@ const SAFETY_AGENT_TURN_CHECKS = [
     turn.text, turn.state.unrelatedCallerTurn)
     ? ['fail', `safety qualification withdrawn: "${clip(turn.text, 160)}"`] : null),
   (turn) => {
+    // No live caller question threaded through here: this scan is this
+    // turn's own self-consistency check (a properly-formed, unwithdrawn
+    // once-dry qualification, technician timing actually confirmed, and so
+    // on), not "does it cover whatever circumstance the caller asked about"
+    // -- a claim that simply leaves a different circumstance unaddressed
+    // (a "while wet" question answered only with "safe once dry") is not
+    // itself an unexempt guarantee. That coverage question is judged where
+    // it belongs, once there is an actual unretracted answer to excuse:
+    // drying.qualifiedDryingAnswer under prohibitedAffirmativeAnswerAt
+    // below, via safetyDryingQualification's own resolvedQuestionText.
     const match = firstUnexemptGuarantee(turn.candidates.guarantees, turn.text, turn.state.conversationAntecedentText,
-      safetyQuestionForGuarantee(turn.questionPolarity, turn.resolvedQuestionText));
+      null, turn.state.lastContextProductText);
     return match ? ['fail', `product called safe: "${clip(match[0], 160)}"`] : null;
   },
   (turn) => (turn.state.callerAskedAboutWetExposure && turn.questionPolarity.harm && turn.classified.negativeAnswerIndices.length

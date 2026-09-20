@@ -122,3 +122,69 @@ test.each([
 ])('a complete bounded instruction still owns its fronted condition: %s', (suffix) => {
   expect(qualify(`The bait is safe once dry. The technician will confirm timing at 4 p.m. ${suffix}`)).toBe(true);
 });
+
+test('safetyProductScope only recognizes a live product name when it is passed', () => {
+  expect([...policy.safetyProductScope('Is EcoGuard Wonder safe?', { productNames: ['EcoGuard Wonder'] })])
+    .toEqual(['brand:ecoguard wonder']);
+  expect([...policy.safetyProductScope('Is EcoGuard Wonder safe?')]).toEqual([]);
+});
+
+test('a refusal about an unrelated static product does not cover a live-only product question', () => {
+  const refusal = 'I cannot confirm whether Talstar P is safe.';
+  const question = 'Is EcoGuard Wonder safe?';
+  expect(policy.refusesSafetyGuarantee(refusal, question, -1, { productNames: ['EcoGuard Wonder'] })).toBe(false);
+  // Without the option, behavior is unchanged: the runtime-only brand has an
+  // empty scope, so any refusal appears to cover it.
+  expect(policy.refusesSafetyGuarantee(refusal, question, -1)).toBe(true);
+});
+
+test.each([
+  ['Is it safe for puppies?', ['dog']],
+  ['Is it safe for kittens?', ['cat']],
+])('the audience mapper aligns plural nouns with their singular scope: %s', (text, expected) => {
+  expect([...policy.safetyAudienceScopes(text)]).toEqual(expected);
+});
+
+test.each([
+  ['Yes. The bait is safe once dry. The technician will confirm timing.', 'Is the bait safe if swallowed?', false],
+  ['Yes. The bait is safe once dry. The technician will confirm timing.', 'Is the bait safe while wet?', false],
+  ['Yes. The bait is safe once dry. The technician will confirm timing.', 'Is the bait safe?', true],
+])('once-dry qualification requires the drying claim to cover the question\'s own circumstances: %s / %s', (text, question, expected) => {
+  expect(qualify(text, question)).toBe(expected);
+});
+
+test('safetyProductScope narrows to the selected question span, not the whole caller utterance', () => {
+  expect([...policy.safetyProductScope('The spray is scheduled tomorrow. Is the bait safe?')]).toEqual(['bait']);
+});
+
+test('an unrelated product mention outside the selected question does not contaminate scope', () => {
+  const question = 'The spray is scheduled tomorrow. Is the bait safe?';
+  expect(policy.refusesSafetyGuarantee('I cannot confirm whether the bait is safe.', question, -1)).toBe(true);
+  expect(qualify('The bait is safe once dry. The technician will confirm timing.', question)).toBe(true);
+  // A genuinely coordinated two-product question is unaffected: both still
+  // have to be covered.
+  expect(policy.refusesSafetyGuarantee('I cannot confirm whether the bait is safe.', 'Is the bait or the spray safe?', -1)).toBe(false);
+});
+
+test('a coordinated auxiliary-led question is classified as interrogative using sentence bounds', () => {
+  const text = 'Is the bait safe and the spray harmful?';
+  const claim = recognizeSafetyResponse(text).guarantees[0].match;
+  expect(claim[0]).toBe('safe and the spray');
+  expect(policy.safetyGuaranteeIsInterrogative(text, claim)).toBe(true);
+});
+
+test.each([
+  ['Yes. I cannot confirm whether the bait will harm dogs.', 'Is the bait safe?', false],
+  ['Yes. I cannot confirm whether the bait is safe or harmful.', 'Is the bait safe?', false],
+  ['Yes. I cannot confirm whether the bait is safe or not harmful.', 'Is the bait safe?', true],
+])('a refused harm claim only counts against retraction on its own polarity: %s', (text, question, expected) => {
+  expect(policy.refusesSafetyGuarantee(text, question, -1)).toBe(expected);
+});
+
+test.each([
+  'The bait is safe once dry. The treatment dries in 30 minutes. The technician will confirm timing.',
+  'The bait is safe once dry. It is safe after two hours. The technician will confirm timing.',
+  'The bait is safe once dry. You may re-enter in 4 hours. The technician will confirm timing.',
+])('a fixed drying or re-entry figure defeats the once-dry exemption: %s', (text) => {
+  expect(qualify(text)).toBe(false);
+});
