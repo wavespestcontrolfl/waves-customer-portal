@@ -619,4 +619,10 @@ module.exports = {
   SAFETY_SUBJECT_WITH_PRODUCT, SAFETY_SUBJECT_VERB, SAFETY_BRAND_SUBJECT,
   SAFETY_BRAND_IDENTITY_RE, SAFETY_AUDIENCE_SUBJECT, SAFETY_AUDIENCE_PRODUCT_RELATION,
   SAFETY_AUDIENCE_MENTION_RE, safetyNamesProduct,
+  // Test hook: the dynamic identity cache's bound, asserted directly rather
+  // than through a wall-clock benchmark that depends on host speed.
+  dynamicIdentityFor,
+  dynamicProductIdentityCacheStats: () => ({
+    size: DYNAMIC_PRODUCT_IDENTITY_CACHE.size, limit: DYNAMIC_PRODUCT_IDENTITY_CACHE_LIMIT,
+  }),
 };
