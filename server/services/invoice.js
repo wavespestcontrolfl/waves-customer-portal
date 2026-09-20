@@ -15,6 +15,8 @@ const { customerSafeServiceNotes } = require("./project-types");
 const {
   SEND_CLAIMABLE_STATUSES,
   SEND_FINALIZABLE_STATUSES,
+  isStaleClaimReviewHold,
+  staleClaimReviewHoldError,
 } = require("./invoice-helpers");
 
 // Customer-facing presign TTL: photo URLs mint per page-load, so the TTL must
@@ -839,6 +841,32 @@ function invoiceNotSendableError(invoice) {
   );
 }
 
+// A first delivery that finds the row already delivered (round-6 P1
+// #4131): the office create's immediate send is a FIRST delivery, never a
+// resend — the completion (or another concurrent send) may have claimed and
+// texted the invoice between the caller's own pre-check and this claim.
+// Refused atomically instead of being treated as an intentional resend.
+function invoiceAlreadyDeliveredError(invoice) {
+  const e = new Error(`Invoice ${invoice?.invoice_number || invoice?.id || ""} was already delivered (status: ${invoice?.status || "unknown"}) — not sent again`);
+  e.code = "already_delivered";
+  return e;
+}
+
+// 'sending' is NOT delivered here — a live claim is reported as the
+// in-progress conflict instead, and the caller re-reads the row afterwards.
+// email_sent_at/sms_sent_at are each channel's own durable stamp, written
+// the moment its provider ACCEPTS the message — before any bookkeeping that
+// could throw and leave status looking claimable again (a failed finalize
+// restoring 'draft', say). Checked here rather than relying solely on each
+// caller's own pre-claim guard — this is the ONE chokepoint every
+// firstDeliveryOnly claimant shares.
+const DELIVERED_FOR_FIRST_SEND_STATUSES = ["sent", "viewed", "overdue", "paid", "prepaid"];
+function alreadyDeliveredForFirstSend(invoice) {
+  return !!invoice
+    && (!!invoice.sent_at || !!invoice.sms_sent_at || !!invoice.email_sent_at
+      || DELIVERED_FOR_FIRST_SEND_STATUSES.includes(invoice.status));
+}
+
 function sendClaimLostError() {
   return Object.assign(
     new Error("Invoice send claim changed; delivery not attempted"),
@@ -1127,7 +1155,9 @@ async function reconcileQueuedSendUnderClaim(invoiceId, previousStatus, claimTok
 async function claimInvoiceForSend(invoiceId, {
   allowClaimed = false,
   claimToken = null,
+  firstDeliveryOnly = false,
   adoptsQueuedInvoiceSend = false,
+  operatorInitiated = false,
   database = db,
 } = {}) {
   const current = await database("invoices").where({ id: invoiceId }).first();
@@ -1151,8 +1181,26 @@ async function claimInvoiceForSend(invoiceId, {
     return { invoice: current, previousStatus: current.status, claimed: false, consumedQueuedSendRows };
   }
 
+  // A first delivery that finds the row already delivered (round-6 P1
+  // #4131) is refused atomically here, before the claimable-statuses check
+  // below: a delivered row can sit at a claimable status (sent/viewed/
+  // overdue) and a plain status check alone would let a first-delivery
+  // request re-claim it as if it were an intentional resend.
+  if (firstDeliveryOnly && alreadyDeliveredForFirstSend(current)) {
+    throw invoiceAlreadyDeliveredError(current);
+  }
   if (!SEND_CLAIMABLE_STATUSES.includes(current.status)) {
     throw invoiceNotSendableError(current);
+  }
+  // Stale-claim review hold: an automatic claimant (no operatorInitiated)
+  // must honor the park processScheduledSends left for the operator. A
+  // first-delivery request must NEVER be the way off this hold EITHER,
+  // even when it carries operatorInitiated (an admin create/resume path
+  // still marks operatorInitiated:true so it keeps the ordinary
+  // quiet-hours-bypass treatment) — only a DELIBERATE Resend (operator-
+  // initiated AND not a first delivery) may reclaim a parked row.
+  if ((firstDeliveryOnly || !operatorInitiated) && isStaleClaimReviewHold(current)) {
+    throw staleClaimReviewHoldError(invoiceId);
   }
 
   // A live deferred pay-link text (quiet-hours queue) already owns this
@@ -1168,6 +1216,12 @@ async function claimInvoiceForSend(invoiceId, {
     .returning("*");
   if (!invoice) {
     const latest = await database("invoices").where({ id: invoiceId }).first();
+    // The row moved between the read and the flip: a first delivery that
+    // lost to a concurrent claim/finalize reports delivered, not a generic
+    // "not sendable" (round-6 P1 #4131).
+    if (firstDeliveryOnly && alreadyDeliveredForFirstSend(latest)) {
+      throw invoiceAlreadyDeliveredError(latest);
+    }
     throw invoiceNotSendableError(latest);
   }
   invoice.send_claim_token = freshClaimToken;
@@ -1185,6 +1239,8 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, {
   allowClaimed = false,
   claimToken = null,
   requireDue = false,
+  firstDeliveryOnly = false,
+  operatorInitiated = false,
 } = {}) {
   const Packets = require("./visit-completion-packets");
   return db.transaction(async (trx) => {
@@ -1213,7 +1269,7 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, {
       if (invoice) invoice.send_claim_token = freshClaimToken;
       return { payerBilled: false, claim: invoice ? { invoice, previousStatus: "scheduled", claimed: true } : null };
     }
-    return { payerBilled: false, claim: await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, database: trx }) };
+    return { payerBilled: false, claim: await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, operatorInitiated, database: trx }) };
   });
 }
 
@@ -2907,7 +2963,7 @@ const InvoiceService = {
   /**
    * Send invoice via Twilio SMS — the unified service recap + invoice message.
    */
-  async sendViaSMS(invoiceId, { allowClaimed = false, claimToken = null, payUrlParams = null, operatorInitiated = false, actorTechnicianId = null, adoptsQueuedInvoiceSend = true } = {}) {
+  async sendViaSMS(invoiceId, { allowClaimed = false, claimToken = null, firstDeliveryOnly = false, payUrlParams = null, operatorInitiated = false, actorTechnicianId = null, adoptsQueuedInvoiceSend = true } = {}) {
     // Direct callers (batch sendImmediately, the AI-assistant send tool, the
     // from-service SMS-only path) bypass sendViaSMSAndEmail, which applies credit
     // before its own claim — so apply it here too, or those pay links bill the
@@ -2928,13 +2984,13 @@ const InvoiceService = {
     if (!allowClaimed) {
       pre = await db("invoices").where({ id: invoiceId }).first("visit_completion_packet_id", "payer_id");
       const packetClaim = pre?.visit_completion_packet_id && !pre.payer_id
-        ? await claimPacketInvoiceForSend(invoiceId, pre.visit_completion_packet_id) : null;
+        ? await claimPacketInvoiceForSend(invoiceId, pre.visit_completion_packet_id, { firstDeliveryOnly, operatorInitiated }) : null;
       if (packetClaim?.payerBilled) {
         return { sent: false, reason: "Suppressed — the visit is now billed to a third-party payer", code: "payer_billed" };
       }
-      claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, adoptsQueuedInvoiceSend });
+      claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, adoptsQueuedInvoiceSend, operatorInitiated });
     } else {
-      claim = await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, adoptsQueuedInvoiceSend });
+      claim = await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, adoptsQueuedInvoiceSend, operatorInitiated });
     }
     const { invoice, previousStatus, claimed, consumedQueuedSendRows = [] } = claim;
 
@@ -3470,6 +3526,7 @@ const InvoiceService = {
       reviewDelayMinutes = null,
       allowClaimed = false,
       claimToken = null,
+      firstDeliveryOnly = false,
       emailRecipientOverride = null,
       payUrlParams = null,
       operatorInitiated = false,
@@ -3492,7 +3549,7 @@ const InvoiceService = {
     let packetClaim = null;
     if (accrualPre?.visit_completion_packet_id && !accrualPre.payer_id) {
       try {
-        packetClaim = await claimPacketInvoiceForSend(invoiceId, accrualPre.visit_completion_packet_id, { allowClaimed, claimToken });
+        packetClaim = await claimPacketInvoiceForSend(invoiceId, accrualPre.visit_completion_packet_id, { allowClaimed, claimToken, firstDeliveryOnly, operatorInitiated });
       } catch (err) {
         // The scheduled-send worker already fenced and claimed this send; a
         // transient failure of the re-judge here left no provider request
@@ -3516,7 +3573,7 @@ const InvoiceService = {
     // never reverses it either, leaving an undelivered, edit-locked invoice with
     // credit_applied set. Claiming first means a lost race throws here before any
     // credit is drawn down — nothing to reverse.
-    const claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, adoptsQueuedInvoiceSend: true });
+    const claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, adoptsQueuedInvoiceSend: true, operatorInitiated });
     const consumedQueuedSendRows = claim.consumedQueuedSendRows || [];
     // Now that we own the claim, apply available account credit so the pay link the
     // customer receives bills amount due (total − applied credit), not the gross
@@ -7716,3 +7773,4 @@ module.exports.CANCELLED_SERVICE_VOIDABLE_STATUSES = CANCELLED_SERVICE_VOIDABLE_
 module.exports._s3KeyFromStoredUrl = s3KeyFromStoredUrl;
 module.exports._withFreshServicePhotoUrls = withFreshServicePhotoUrls;
 module.exports.claimPacketInvoiceForSend = claimPacketInvoiceForSend;
+module.exports.claimInvoiceForSend = claimInvoiceForSend;

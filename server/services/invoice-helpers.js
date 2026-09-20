@@ -146,6 +146,27 @@ function preserveWithdrawalStamp(database) {
 
 const STALE_SEND_PARK_ERROR = 'Recovered from stale sending claim — delivery unverified; check whether the customer received it, then resend or re-schedule manually';
 
+// The stale-claim review hold, read back from the park above: a row parked
+// there is `scheduled` with a NULL scheduled_send_at (out of the due query)
+// and this exact text in scheduled_send_error. Matched by prefix off the ONE
+// constant above (never a second re-typed string) so the write and the read
+// can't drift apart. An automatic claimant (no operatorInitiated) must
+// honor this hold; only a deliberate operator Resend is the way off it —
+// gated in claimInvoiceForSend.
+function isStaleClaimReviewHold(invoice) {
+  return !!invoice
+    && invoice.status === 'scheduled'
+    && invoice.scheduled_send_at == null
+    && typeof invoice.scheduled_send_error === 'string'
+    && invoice.scheduled_send_error.startsWith(STALE_SEND_PARK_ERROR);
+}
+
+function staleClaimReviewHoldError(invoiceId) {
+  const e = new Error(`Invoice ${invoiceId} is not sendable — parked under a stale-claim review hold (delivery unverified); an operator must review and resend`);
+  e.code = 'stale_claim_review_hold';
+  return e;
+}
+
 function invoiceWithdrawnFromCustomer(invoice) {
   return !!invoice
     && typeof invoice === 'object'
@@ -242,6 +263,8 @@ module.exports = {
   SEND_FINALIZABLE_STATUSES,
   INVOICE_UPDATE_ALLOWED_FIELDS,
   STALE_SEND_PARK_ERROR,
+  isStaleClaimReviewHold,
+  staleClaimReviewHoldError,
   preserveWithdrawalStamp,
   selfPayAtDispatch,
   INVOICE_UNCOLLECTIBLE_STATUSES,

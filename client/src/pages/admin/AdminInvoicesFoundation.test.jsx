@@ -113,6 +113,22 @@ describe("Invoice foundation workflow preservation", () => {
     ]);
   });
 
+  // Round-6 P1 (#4131): a draft/scheduled invoice has never been delivered
+  // — this dialog's own "Send invoice" title (vs. "Resend invoice" above)
+  // IS the first-delivery / explicit-resend distinction, and the request
+  // body must say so: firstDelivery: true, never operator resend intent.
+  it("a first (never-delivered) send states firstDelivery: true on the request", async () => {
+    rows = [{ ...invoice, status: "draft" }];
+    await openPage(); await expand();
+    const dialog = await dialogFrom("Send", "Send invoice");
+    await dialog.findByText("billing@example.invalid");
+    const key = `POST /api/admin/invoices/${invoice.id}/send`;
+    overrides.set(key, () => response({ ok: true, sms: { ok: true }, email: { ok: true } }));
+    fireEvent.click(dialog.getByRole("button", { name: /Send/, exact: false }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(requests.find(request => request.key === key).body).toEqual({ firstDelivery: true });
+  });
+
   it("retains an offline-payment draft and its receipt choice after a failed request", async () => {
     await openPage(); await expand();
     const dialog = await dialogFrom("Add payment", "Add payment");

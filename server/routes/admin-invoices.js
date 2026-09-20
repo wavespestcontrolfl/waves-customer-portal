@@ -926,6 +926,23 @@ router.delete('/:id/attachments/:attachmentId', requireAdmin, async (req, res, n
   } catch (err) { next(err); }
 });
 
+// A FIRST delivery finding either of these codes reports a no-op success
+// instead of a conflict (round-6 P1 #4131) — shared by every first-delivery
+// send path below (create + immediate send, the batch keyed-retry send,
+// /batch/send, and /:id/send).
+const FIRST_DELIVERY_NOOP_CODES = new Set(['already_delivered', 'queued_pay_link']);
+
+// An invoice row (status + delivery stamps) is a first delivery exactly
+// when it has never been delivered: still draft/scheduled, and no channel
+// has ever accepted it (sent_at/sms_sent_at/email_sent_at). Shared by every
+// batch/create send path so "first delivery" means the same thing
+// everywhere claimInvoiceForSend's alreadyDeliveredForFirstSend checks it.
+function isFirstDeliveryRow(row) {
+  return !!row
+    && ['draft', 'scheduled'].includes(row.status)
+    && !row.sent_at && !row.sms_sent_at && !row.email_sent_at;
+}
+
 // POST / — create invoice manually
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
@@ -1153,11 +1170,22 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
         // reported, never doubled). Non-draft rows were delivered or
         // deliberately moved on — never re-text those.
         if (sendImmediately && existing.status === 'draft') {
+          // This retry's own row may already carry a delivery stamp (the
+          // first attempt crashed AFTER the provider accepted it) — only a
+          // genuinely undelivered row is a first delivery.
+          const firstDeliveryOnly = isFirstDeliveryRow(existing);
           try {
             entry.sent = existing.payer_id
-              ? await InvoiceService.sendViaSMSAndEmail(existing.id, { operatorInitiated: true, actorTechnicianId: req.technicianId || null })
-              : await InvoiceService.sendViaSMS(existing.id, { operatorInitiated: true, actorTechnicianId: req.technicianId || null });
+              ? await InvoiceService.sendViaSMSAndEmail(existing.id, { firstDeliveryOnly, operatorInitiated: true, actorTechnicianId: req.technicianId || null })
+              : await InvoiceService.sendViaSMS(existing.id, { firstDeliveryOnly, operatorInitiated: true, actorTechnicianId: req.technicianId || null });
           } catch (sendErr) {
+            if (firstDeliveryOnly && FIRST_DELIVERY_NOOP_CODES.has(sendErr?.code)) {
+              entry.sent = { sent: false, ok: true, code: sendErr.code,
+                already_delivered: sendErr.code === 'already_delivered',
+                queued_delivery: sendErr.code === 'queued_pay_link' };
+              skipped.push(entry);
+              return;
+            }
             logger.error(`[admin-invoices:batch] retry send failed for ${existing.id}: ${sendErr.message}`);
             entry.sent = { sent: false, error: sendErr.message };
           }
@@ -1176,7 +1204,7 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
         if (batchKey) {
           const existing = await db('invoices')
             .where({ customer_id: customerId, batch_key: batchKey })
-            .first('id', 'invoice_number', 'status', 'payer_id', 'updated_at', 'batch_fingerprint');
+            .first('id', 'invoice_number', 'status', 'payer_id', 'updated_at', 'batch_fingerprint', 'sent_at', 'sms_sent_at', 'email_sent_at');
           if (existing) {
             await settleKeyedDuplicate(existing,
               'This batch key already created an invoice for this customer (retry detected)');
@@ -1195,13 +1223,20 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
             // the homeowner SMS (sendViaSMS short-circuits to payer_billed and
             // never finalizes). Route it through the email-capable path so the
             // payer AP inbox receives it and the invoice is finalized; self-pay
-            // invoices keep the existing SMS-only immediate send.
+            // invoices keep the existing SMS-only immediate send. Freshly
+            // created here — always a first delivery.
             sendResult = invoice.payer_id
-              ? await InvoiceService.sendViaSMSAndEmail(invoice.id, { operatorInitiated: true, actorTechnicianId: req.technicianId || null })
-              : await InvoiceService.sendViaSMS(invoice.id, { operatorInitiated: true, actorTechnicianId: req.technicianId || null });
+              ? await InvoiceService.sendViaSMSAndEmail(invoice.id, { firstDeliveryOnly: true, operatorInitiated: true, actorTechnicianId: req.technicianId || null })
+              : await InvoiceService.sendViaSMS(invoice.id, { firstDeliveryOnly: true, operatorInitiated: true, actorTechnicianId: req.technicianId || null });
           } catch (sendErr) {
-            logger.error(`[admin-invoices:batch] send failed for ${invoice.id}: ${sendErr.message}`);
-            sendResult = { sent: false, error: sendErr.message };
+            if (FIRST_DELIVERY_NOOP_CODES.has(sendErr?.code)) {
+              sendResult = { sent: false, ok: true, code: sendErr.code,
+                already_delivered: sendErr.code === 'already_delivered',
+                queued_delivery: sendErr.code === 'queued_pay_link' };
+            } else {
+              logger.error(`[admin-invoices:batch] send failed for ${invoice.id}: ${sendErr.message}`);
+              sendResult = { sent: false, error: sendErr.message };
+            }
           }
         }
         created.push({
@@ -1230,7 +1265,7 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
           // stale claim, leave live sends alone.
           const winner = await db('invoices')
             .where({ customer_id: customerId, batch_key: batchKey })
-            .first('id', 'invoice_number', 'status', 'payer_id', 'updated_at', 'batch_fingerprint');
+            .first('id', 'invoice_number', 'status', 'payer_id', 'updated_at', 'batch_fingerprint', 'sent_at', 'sms_sent_at', 'email_sent_at');
           if (winner) {
             await settleKeyedDuplicate(winner,
               'This batch key already created an invoice for this customer (concurrent retry)');
@@ -1274,12 +1309,25 @@ router.post('/batch/send', requireAdmin, async (req, res, next) => {
     const failed = [];
 
     for (const invoiceId of invoiceIds) {
+      // Computed per invoice: this route sends existing rows, not fresh
+      // creates, so whether THIS is a first delivery depends on the row's
+      // own status/delivery stamps, not a blanket assumption. Declared
+      // outside the try so the catch below can gate its no-op-success
+      // handling on the SAME value (a genuine conflict on a
+      // non-first-delivery send must still fail the batch entry) — a
+      // lookup failure leaves it false, so its own error falls through to
+      // the ordinary failed-entry handling below, never a false no-op.
+      let firstDeliveryOnly = false;
       try {
-        const result = await InvoiceService.sendViaSMSAndEmail(invoiceId, { operatorInitiated: true, actorTechnicianId: req.technicianId || null });
+        const row = await db('invoices').where({ id: invoiceId }).first('status', 'sent_at', 'sms_sent_at', 'email_sent_at');
+        firstDeliveryOnly = isFirstDeliveryRow(row);
+        const result = await InvoiceService.sendViaSMSAndEmail(invoiceId, { firstDeliveryOnly, operatorInitiated: true, actorTechnicianId: req.technicianId || null });
         if (result.ok) {
           sent.push({
             invoiceId,
             channels: { sms: Boolean(result.sms?.ok), email: Boolean(result.email?.ok) },
+            already_delivered: Boolean(result.already_delivered),
+            queued_delivery: Boolean(result.queued_delivery),
           });
         } else {
           const error = [result.sms?.error && `sms: ${result.sms.error}`, result.email?.error && `email: ${result.email.error}`]
@@ -1289,6 +1337,20 @@ router.post('/batch/send', requireAdmin, async (req, res, next) => {
           failed.push({ invoiceId, error });
         }
       } catch (err) {
+        // A first delivery finding the invoice already owned by another
+        // live delivery is a no-op success, not a batch failure — same
+        // treatment as /:id/send (round-6 P1 #4131). An explicit resend
+        // hitting the same code is a real conflict — falls through to
+        // failed below, matching /:id/send's non-first-delivery path.
+        if (firstDeliveryOnly && FIRST_DELIVERY_NOOP_CODES.has(err?.code)) {
+          sent.push({
+            invoiceId,
+            channels: { sms: false, email: false },
+            already_delivered: err.code === 'already_delivered',
+            queued_delivery: err.code === 'queued_pay_link',
+          });
+          continue;
+        }
         logger.error(`[admin-invoices:batch-send] ${invoiceId}: ${err.message}`);
         failed.push({ invoiceId, error: err.message });
       }
@@ -1460,8 +1522,22 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       invoiceRecipientEmail,
       invoiceRecipientName,
       saveBillingRecipient,
+      firstDelivery,
     } = req.body || {};
     const reviewDelayMinutes = parseReviewDelayMinutes(req.body || {});
+    // A caller can request a FIRST delivery (round-6 P1 #4131): a linked
+    // invoice the completion (or a concurrent send) already claimed and
+    // delivered between the caller's own pre-check and this request must
+    // not be re-claimed as an intentional resend. operatorInitiated keeps
+    // its ordinary meaning here (an authenticated admin action — every
+    // call on this route IS one, so it stays unconditionally true, same as
+    // main) and is NOT what gates the stale-claim review hold anymore:
+    // claimInvoiceForSend refuses that hold whenever firstDeliveryOnly is
+    // true OR operatorInitiated is false, so a first delivery can never be
+    // the way off a parked row even though it still carries
+    // operatorInitiated:true for the window-bypass and other operator
+    // treatment that flag already controlled on main.
+    const firstDeliveryOnly = firstDelivery === true;
     const overrideEmail = cleanEmail(invoiceRecipientEmail);
     const overrideName = cleanOptionalText(invoiceRecipientName);
     const shouldSaveBillingRecipient = saveBillingRecipient === true;
@@ -1497,13 +1573,35 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       }
     }
 
-    const result = await InvoiceService.sendViaSMSAndEmail(id, {
-      requestReview,
-      reviewDelayMinutes,
-      emailRecipientOverride,
-      operatorInitiated: true,
-      actorTechnicianId: req.technicianId || null,
-    });
+    let result;
+    try {
+      result = await InvoiceService.sendViaSMSAndEmail(id, {
+        requestReview,
+        reviewDelayMinutes,
+        emailRecipientOverride,
+        firstDeliveryOnly,
+        operatorInitiated: true,
+        actorTechnicianId: req.technicianId || null,
+      });
+    } catch (err) {
+      // A FIRST delivery finding the invoice already owned by another live
+      // delivery is a no-op success in both shapes: delivered
+      // (already_delivered), or queued for the send window (queued_pay_link
+      // — a held text already carries this pay link and delivers then). An
+      // explicit Resend never takes this branch — queued_pay_link there
+      // falls through as a real conflict below.
+      if (firstDeliveryOnly && FIRST_DELIVERY_NOOP_CODES.has(err?.code)) {
+        logger.info(`[admin-invoices] first delivery of invoice ${id} skipped (${err.code}): ${err.message}`);
+        return res.json({
+          ok: true,
+          already_delivered: err.code === 'already_delivered',
+          queued_delivery: err.code === 'queued_pay_link',
+          sms: { ok: false, code: err.code },
+          email: { ok: false, code: err.code },
+        });
+      }
+      throw err;
+    }
     if (!result.ok) {
       // Both channels failed. adminFetch toasts `body.error` — without a
       // top-level error the operator sees a bare "HTTP 400" instead of the
@@ -1517,7 +1615,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     res.json(result);
   } catch (err) {
     if (/already paid|paid invoice|voided|processing|already in progress|not sendable/i.test(err.message)) {
-      return res.status(/processing|already in progress/i.test(err.message) ? 409 : 400).json({ error: err.message });
+      return res.status(/processing|already in progress/i.test(err.message) ? 409 : 400).json({ error: err.message, code: err.code });
     }
     next(err);
   }

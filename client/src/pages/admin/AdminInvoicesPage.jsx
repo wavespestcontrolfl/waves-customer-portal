@@ -117,15 +117,18 @@ async function adminFetch(path, options = {}) {
   });
   if (!r.ok) {
     let message = `HTTP ${r.status}`;
+    let code = null;
     try {
       const data = await r.clone().json();
       message = data.error || data.message || message;
+      code = data.code || null;
     } catch {
       const text = await r.text().catch(() => "");
       if (text) message = text;
     }
     const err = new Error(message);
     err.status = r.status;
+    if (code) err.code = code;
     throw err;
   }
   return r.json();
@@ -343,17 +346,42 @@ export function invoiceDepositCreditTotal(lineItems) {
     .reduce((sum, li) => sum + Math.abs(Number(li.amount) || 0), 0);
 }
 
+// A first-delivery request (firstDelivery: true) whose claim finds the
+// invoice already owned by another live delivery — the completion, or a
+// concurrent send — is a no-op SUCCESS, not a failure: sms.ok/email.ok are
+// both false by construction (nothing was sent on THIS request), so a
+// caller reading only those flags would wrongly report "send failed" on a
+// pay link the customer is already getting or about to get. Same shape as
+// the existing covered-by-credit success. Exported for tests.
+export function sendOutcomeMessage(res) {
+  if (res?.covered_by_credit) return "fully covered by account credit, nothing to send";
+  if (res?.already_delivered) return "already delivered";
+  if (res?.queued_delivery) return "queued for the send window";
+  return null;
+}
+
+// A thrown send error's code, when present, describes the outcome more
+// precisely than its raw message (queued_pay_link's message is written for
+// an operator re-reading it later, not a toast). Reached only by an
+// explicit Resend — a first delivery gets these as a 200 (sendOutcomeMessage
+// above), never a thrown error. Exported for tests.
+export function sendErrorMessage(err) {
+  if (err?.code === "queued_pay_link") return "queued for the send window";
+  if (err?.code === "already_delivered") return "already delivered";
+  return null;
+}
+
 // Create-path send toast. /admin/invoices/:id/send returns per-channel
 // results ({ sms: { ok }, email: { ok, recipient } }) and 200 when EITHER
 // channel succeeded — a flat "created & sent" toast hides a half-failed
 // send (SendInvoiceModal already reads the channels; the create path must
 // too). Exported for tests.
 export function invoiceCreatedSendToast(invoiceNumber, res) {
-  // Account credit fully covered the invoice at send time: sendViaSMSAndEmail
-  // returns ok:true with covered_by_credit and BOTH channels not-ok — that is
-  // a success (the invoice is prepaid, nothing to deliver), not a failed send.
-  if (res?.covered_by_credit) {
-    return `Invoice created: ${invoiceNumber} — fully covered by account credit, nothing to send`;
+  // A no-op success (covered by credit, already delivered, or queued for
+  // the send window) is reported as such, not read as a failed send.
+  const outcome = sendOutcomeMessage(res);
+  if (outcome) {
+    return `Invoice created: ${invoiceNumber} — ${outcome}`;
   }
   const sent = [
     res?.sms?.ok && "SMS",
@@ -2562,18 +2590,23 @@ function InvoiceList({
           onClose={() => setSendModalInvoice(null)}
           onSent={(res) => {
             setSendModalInvoice(null);
-            const channels = [
-              res?.sms?.ok && "SMS",
-              res?.email?.ok &&
-                (res.email.recipient?.email
-                  ? `email to ${res.email.recipient.email}`
-                  : "email"),
-            ].filter(Boolean);
-            showToast(
-              channels.length
-                ? `Invoice sent (${channels.join(" + ")})`
-                : "Invoice send failed",
-            );
+            const outcome = sendOutcomeMessage(res);
+            if (outcome) {
+              showToast(`Invoice ${outcome}`);
+            } else {
+              const channels = [
+                res?.sms?.ok && "SMS",
+                res?.email?.ok &&
+                  (res.email.recipient?.email
+                    ? `email to ${res.email.recipient.email}`
+                    : "email"),
+              ].filter(Boolean);
+              showToast(
+                channels.length
+                  ? `Invoice sent (${channels.join(" + ")})`
+                  : "Invoice send failed",
+              );
+            }
             load();
             onRefresh();
           }}
@@ -3380,6 +3413,14 @@ function SendInvoiceModal({
     !sending &&
     (sendWithServerRecipients || emailChannel || !!smsPhone) &&
     overrideValid;
+  // A draft/scheduled invoice has never been delivered — this dialog's own
+  // "Send invoice" vs "Resend invoice" title distinction below IS the
+  // first-delivery / explicit-resend distinction; reused here so the two
+  // can never drift apart. A first delivery must state so on the request
+  // (never operator resend intent) so a delivered-elsewhere row is refused,
+  // not silently re-texted.
+  const isFirstDelivery =
+    invoice.status === "draft" || invoice.status === "scheduled";
   const send = async () => {
     if (sendingRef.current) return;
     if (!canSend) return;
@@ -3387,7 +3428,7 @@ function SendInvoiceModal({
     setActionError("");
     setSending(true);
     try {
-      const body = {};
+      const body = isFirstDelivery ? { firstDelivery: true } : {};
       if (useOverride) {
         body.invoiceRecipientEmail = overrideEmail;
         body.invoiceRecipientName = recipientName.trim() || undefined;
@@ -3399,7 +3440,7 @@ function SendInvoiceModal({
       });
       onSent(res);
     } catch (err) {
-      onError(`Invoice send failed: ${err.message}`);
+      onError(`Invoice send failed: ${sendErrorMessage(err) || err.message}`);
     } finally {
       sendingRef.current = false;
       setSending(false);
@@ -3413,9 +3454,7 @@ function SendInvoiceModal({
     <Dialog open={true} onClose={sending ? undefined : onClose} layer={400}>
       <DialogBody className="space-y-4 text-ui-body text-zinc-900">
         <DialogTitle>
-          {invoice.status === "draft" || invoice.status === "scheduled"
-            ? "Send invoice"
-            : "Resend invoice"}
+          {isFirstDelivery ? "Send invoice" : "Resend invoice"}
         </DialogTitle>
         {actionError && <ActionFeedback error>{actionError}</ActionFeedback>}
         <div
@@ -5971,6 +6010,11 @@ function CreateInvoice({
           sendRes = await adminFetch(`/admin/invoices/${invoice.id}/send`, {
             method: "POST",
             body: JSON.stringify({
+              // A brand-new invoice's immediate send is always a FIRST
+              // delivery, never an intentional resend — the claim refuses
+              // atomically (already_delivered / queued_pay_link) instead of
+              // re-texting a pay link the completion may already own.
+              firstDelivery: true,
               requestReview,
               reviewDelayMinutes: reviewDelay,
               reviewTiming,
@@ -5979,6 +6023,14 @@ function CreateInvoice({
             }),
           });
         } catch (sendErr) {
+          const outcome = sendErrorMessage(sendErr);
+          if (outcome) {
+            showToast(`Invoice created: ${invoice.invoice_number} — ${outcome}`);
+            onCreated();
+            savingRef.current = false;
+            setSaving(false);
+            return;
+          }
           // The POST /admin/invoices above already persisted the row — a
           // failed send is a POST-create problem. Never leave the builder
           // open with the same form (the outer catch used to, and the next
@@ -6234,11 +6286,24 @@ function CreateInvoice({
     try {
       const res = await adminFetch(`/admin/invoices/${pInv.id}/send`, {
         method: "POST",
-        body: JSON.stringify(retryReviewBody()),
+        body: JSON.stringify({
+          // The schedule request never delivered this invoice — recovering
+          // with Send now is still a FIRST delivery, not a resend.
+          firstDelivery: true,
+          ...retryReviewBody(),
+        }),
       });
       showToast(invoiceCreatedSendToast(pInv.invoice_number, res));
       onCreated();
     } catch (err) {
+      const outcome = sendErrorMessage(err);
+      if (outcome) {
+        showToast(`Invoice ${pInv.invoice_number} — ${outcome}`);
+        onCreated();
+        savingRef.current = false;
+        setSaving(false);
+        return;
+      }
       // A rejected request does not prove the send FAILED: the server may
       // have delivered and committed 'sent' before the response was lost.
       // Same ambiguous-send check as the initial create path — keep the
