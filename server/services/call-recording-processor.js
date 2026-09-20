@@ -16338,6 +16338,11 @@ const CallRecordingProcessor = {
           reason: routingResult.reason || null,
           flags: finalFlags,
           appointment_blocking_flags: routingResult.appointmentBlockingFlags || [],
+          // Address flags the on-file address satisfied (codex r1 P2): the
+          // persisted verdict is the audit trail for a card that never filed.
+          ...(routingResult.onFileAddressSatisfiedFlags?.length
+            ? { on_file_address_satisfied_flags: routingResult.onFileAddressSatisfiedFlags }
+            : {}),
         } : null,
         address_validation_status: v2AddressValidation?.status || null,
         errors: v2Result.errors || null,
