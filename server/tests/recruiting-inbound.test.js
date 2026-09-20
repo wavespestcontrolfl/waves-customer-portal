@@ -13,17 +13,12 @@ jest.mock('../services/recruiting-comms', () => ({
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: (...a) => mockTrigger(...a) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const state = { app: null, texted: null, existingReply: null, inserts: [], insertFails: false };
+const state = { apps: [], existingReply: null, inserts: [], insertFails: false };
 function builder(table) {
   const q = {};
   ['whereRaw', 'whereIn', 'where', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
-  q.first = jest.fn(async () => {
-    if (table === 'job_applications') return state.app;
-    // sms_log: the idempotency probe (where({twilio_sid, message_type})) vs the recent-outbound probe
-    const whereArg = q.where.mock.calls[0] && q.where.mock.calls[0][0];
-    if (whereArg && typeof whereArg === 'object' && whereArg.twilio_sid) return state.existingReply;
-    return state.texted;
-  });
+  q.select = jest.fn(async () => (table === 'job_applications' ? state.apps : []));
+  q.first = jest.fn(async () => (table === 'sms_log' ? state.existingReply : null));
   q.insert = jest.fn(async (row) => {
     if (state.insertFails) throw Object.assign(new Error('insert into sms_log ... values (+19415550142 ...)'), { name: 'error', code: '23505' });
     state.inserts.push({ table, row });
@@ -37,9 +32,11 @@ jest.mock('../models/db', () => mockDb);
 
 const { matchApplicantReply, recordApplicantReply, REPLY_MESSAGE_TYPE } = require('../services/recruiting-inbound');
 
+const NOW = Date.now();
+const sentEntry = (daysAgo) => ({ at: new Date(NOW - daysAgo * 86400000).toISOString(), stage: 'interview_invite', channel: 'sms', outcome: 'sent' });
+
 beforeEach(() => {
-  state.app = { id: 'app-1' };
-  state.texted = { id: 'sms-1' };
+  state.apps = [{ id: 'app-1', comms_history: [sentEntry(2)] }];
   state.inserts = [];
   state.insertFails = false;
   state.existingReply = null;
@@ -49,17 +46,31 @@ beforeEach(() => {
 });
 
 describe('matchApplicantReply', () => {
-  test('matches an open application that we recently texted', async () => {
+  test('matches the open application that received a recruiting text', async () => {
     await expect(matchApplicantReply('+19415550142')).resolves.toEqual({ applicationId: 'app-1' });
   });
-  test('no open application -> null (no sms_log lookup)', async () => {
-    state.app = null;
+  test('no open application -> null', async () => {
+    state.apps = [];
     await expect(matchApplicantReply('+19415550142')).resolves.toBeNull();
-    expect(mockDb).toHaveBeenCalledTimes(1);
   });
-  test('application exists but we never texted it a job_* message -> null (ordinary inbound path)', async () => {
-    state.texted = null;
+  test('open application that was never texted (no sms sent entry) -> null (ordinary inbound path)', async () => {
+    state.apps = [{ id: 'app-1', comms_history: [{ channel: 'email', outcome: 'sent', at: new Date(NOW).toISOString() }] }];
     await expect(matchApplicantReply('+19415550142')).resolves.toBeNull();
+  });
+  test('a text older than the window does not count', async () => {
+    state.apps = [{ id: 'app-1', comms_history: [sentEntry(60)] }];
+    await expect(matchApplicantReply('+19415550142')).resolves.toBeNull();
+  });
+  test('two open applications on one phone: the reply goes to the one that RECEIVED the text, not the newest', async () => {
+    state.apps = [
+      { id: 'app-A', comms_history: [sentEntry(3)] },
+      { id: 'app-B', comms_history: [] }, // submitted later, never texted
+    ];
+    await expect(matchApplicantReply('+19415550142')).resolves.toEqual({ applicationId: 'app-A' });
+  });
+  test('uncertain deliveries count as a text the applicant may be answering', async () => {
+    state.apps = [{ id: 'app-1', comms_history: [{ ...sentEntry(1), outcome: 'uncertain' }] }];
+    await expect(matchApplicantReply('+19415550142')).resolves.toEqual({ applicationId: 'app-1' });
   });
   test('unparseable phone -> null without any query', async () => {
     await expect(matchApplicantReply('nope')).resolves.toBeNull();

@@ -281,6 +281,14 @@ router.patch('/:id/status', async (req, res) => {
         sent = { sms: 'disabled', email: 'disabled' };
       } else {
         try {
+          // Final authority check at the provider handoff (Codex r2 P2): if
+          // another admin moved this application out of Interview (or the
+          // token changed) between our commit and this send, the invite's
+          // link would 404 the moment it arrived — send nothing.
+          const current = await db('job_applications').where({ id: updated.id }).first('status', 'interview_token');
+          if (!current || current.status !== 'interview' || current.interview_token !== updated.interview_token) {
+            throw Object.assign(new Error('stage changed before send'), { name: 'StaleStageError', code: 'stale_stage' });
+          }
           const finalInterviewUrl = RecruitingComms.interviewUrlFor(updated.interview_token);
           const finalSmsBody = wantSms && smsBodyOverride
             ? RecruitingComms.substituteInterviewLinkPlaceholder(smsBodyOverride, finalInterviewUrl)
@@ -306,6 +314,15 @@ router.patch('/:id/status', async (req, res) => {
             logger.warn(`[admin-careers] post-send re-read failed: ${RecruitingComms.errorSummary(reReadErr)}`);
           }
         } catch (sendErr) {
+          if (sendErr && sendErr.code === 'stale_stage') {
+            logger.info(`[admin-careers] interview invite skipped — stage changed before send (application ${req.params.id})`);
+            sent = { sms: wantSms ? 'stale' : 'not_requested', email: wantEmail ? 'stale' : 'not_requested' };
+            try {
+              const fresh = await db('job_applications').where({ id: updated.id }).first();
+              if (fresh) responseRow = fresh;
+            } catch { /* keep the committed row */ }
+            return res.json({ application: withoutToken(responseRow), sent });
+          }
           logger.error(`[admin-careers] sendStageComms failed after committed transition (application ${req.params.id}): ${RecruitingComms.errorSummary(sendErr)}`);
           sent = { sms: wantSms ? 'failed' : 'not_requested', email: wantEmail ? 'failed' : 'not_requested' };
         }

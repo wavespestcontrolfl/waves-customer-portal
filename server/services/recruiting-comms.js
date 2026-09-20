@@ -15,6 +15,7 @@
  * admin-careers.js and public-careers.js only wire HTTP shape.
  */
 
+const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { renderSmsTemplate } = require('./sms-template-renderer');
@@ -259,9 +260,15 @@ function buildEmailContent(app, stage, vars) {
 async function sendRawEmail({ app, stage, to, subject, html, text }) {
   const templateKey = `job_${stage}`;
   let messageRow = null;
+  // Fresh per send attempt and echoed in SendGrid custom_args, so a
+  // complaint/unsubscribe/bounce webhook that lands before the post-send
+  // provider_message_id update can still correlate the event to THIS row
+  // (the tracked-email handoff email-template-library.js uses — Codex r2 P1).
+  const sendAttemptToken = crypto.randomUUID();
   try {
     const rows = await db('email_messages').insert({
       provider: 'sendgrid',
+      send_attempt_token: sendAttemptToken,
       template_key: templateKey,
       recipient_type: 'job_application',
       recipient_id: app.id,
@@ -289,7 +296,7 @@ async function sendRawEmail({ app, stage, to, subject, html, text }) {
   const suppression = await activeSuppressionFor(RECRUITING_SUPPRESSION_TEMPLATE, to, RECRUITING_SUPPRESSION_GROUP_KEY);
   if (suppression) {
     if (messageRow) {
-      await db('email_messages').where({ id: messageRow.id, status: 'queued' }).update({
+      await db('email_messages').where({ id: messageRow.id, status: 'queued', send_attempt_token: sendAttemptToken }).update({
         status: 'blocked',
         error_message: `Suppressed: ${suppression.suppression_type}${suppression.group_key ? ` (${suppression.group_key})` : ''}`.slice(0, 500),
         updated_at: new Date(),
@@ -310,9 +317,15 @@ async function sendRawEmail({ app, stage, to, subject, html, text }) {
       text,
       categories: [templateKey],
       suppressErrorLog: true,
+      // The body carries the bearer interview link — never let SendGrid
+      // rewrite it through its click-tracking redirect (Codex r2 P2).
+      disableTracking: true,
+      customArgs: messageRow
+        ? { email_message_id: messageRow.id, send_attempt_token: sendAttemptToken }
+        : { send_attempt_token: sendAttemptToken },
     });
     if (messageRow) {
-      await db('email_messages').where({ id: messageRow.id, status: 'queued' }).update({
+      await db('email_messages').where({ id: messageRow.id, status: 'queued', send_attempt_token: sendAttemptToken }).update({
         status: 'sent',
         provider_message_id: result && result.messageId ? result.messageId : null,
         sent_at: new Date(),
@@ -322,7 +335,7 @@ async function sendRawEmail({ app, stage, to, subject, html, text }) {
     return { outcome: 'sent', code: null };
   } catch (err) {
     if (messageRow) {
-      await db('email_messages').where({ id: messageRow.id, status: 'queued' }).update({
+      await db('email_messages').where({ id: messageRow.id, status: 'queued', send_attempt_token: sendAttemptToken }).update({
         status: 'failed',
         error_message: String((err && err.message) || 'send failed').slice(0, 500),
         updated_at: new Date(),

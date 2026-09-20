@@ -270,9 +270,14 @@ the SPA `/recap/:token` "Your Visit, in Motion" recap player (token-gated; serve
 only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
 same noindex/no-referrer/no-store headers as `/report/:token`),
 `/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound;
-recruiting replies: an inbound from a phone that (a) belongs to an OPEN
-job application (new/reviewed/interview/offer) AND (b) received a
-`job_*` recruiting text within 45 days is classified by
+recruiting replies (only while `GATE_RECRUITING_COMMS` is on — the gate
+is the kill switch for the whole lane, reply routing included; dark, no
+recruiting text is ever sent and no classification runs, so a lookup
+error can never stall the inbound pipeline): an inbound from a phone that
+(a) belongs to an OPEN job application (new/reviewed/interview/offer)
+AND (b) has a `job_*` SMS `sent`/`uncertain` entry in that application's
+`comms_history` within 45 days — the reply is tied to the application
+that received the text, never phone recency — is classified by
 `services/recruiting-inbound.js` BEFORE the unified inbox persist — the
 inbox row is born typed `job_applicant_reply` (a classification lookup
 failure releases the claim and answers 503 with nothing persisted) — and

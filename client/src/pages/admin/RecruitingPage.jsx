@@ -145,6 +145,7 @@ const STAGE_LABEL = {
 };
 
 const OUTCOME_LABEL = {
+  stale: "not sent — the stage changed before the send",
   sent: "sent",
   blocked: "blocked",
   failed: "failed",

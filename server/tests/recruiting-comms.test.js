@@ -311,6 +311,10 @@ describe('sendStageComms', () => {
 
     expect(result.email).toBe('sent');
     expect(mockSendOne).toHaveBeenCalledWith(expect.objectContaining({ to: 'jane@example.com', subject: 'We received your application' }));
+    // Tracked handoff + no click tracking on a body that carries a bearer link.
+    const sendArgs = mockSendOne.mock.calls[0][0];
+    expect(sendArgs.disableTracking).toBe(true);
+    expect(sendArgs.customArgs).toMatchObject({ send_attempt_token: expect.stringMatching(/^[0-9a-f-]{36}$/) });
     const row = mockDb.__tables.email_messages.find((r) => r.recipient_id === 'app-1');
     expect(row.status).toBe('sent');
     expect(row.recipient_type).toBe('job_application');

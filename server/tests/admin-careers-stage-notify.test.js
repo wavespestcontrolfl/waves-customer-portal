@@ -265,6 +265,33 @@ describe('PATCH /:id/status', () => {
     expect(mockDb.__rows()[0].interview_booked_at).toBe('2027-03-01T15:00:00.000Z');
   });
 
+  test('stage moved out of Interview between commit and send -> nothing sent, sent:{stale}', async () => {
+    mockDb.__setRows([appRow({ status: 'reviewed' })]);
+    // Simulate another admin rejecting the candidate right after our commit:
+    // the post-commit authority re-read sees 'rejected'.
+    const rows = mockDb.__rows();
+    const originalTableApi = mockDb.getMockImplementation();
+    let firstReadDone = false;
+    mockDb.mockImplementation((table) => {
+      const api = originalTableApi(table);
+      if (table === 'job_applications') {
+        const origFirst = api.first;
+        api.first = async (...cols) => {
+          const r = await origFirst.call(api, ...cols);
+          if (r && cols.includes('interview_token') && !firstReadDone) { firstReadDone = true; return { ...r, status: 'rejected' }; }
+          return r;
+        };
+      }
+      return api;
+    });
+    const { status, body } = await patch('aaaaaaaa-0000-4000-8000-000000000001', { status: 'interview', notify: { sms: true, email: true } });
+    mockDb.mockImplementation(originalTableApi);
+    expect(status).toBe(200);
+    expect(body.sent).toEqual({ sms: 'stale', email: 'stale' });
+    expect(mockSendStageComms).not.toHaveBeenCalled();
+    expect(rows[0].status).toBe('interview'); // the committed transition stands
+  });
+
   test('same status + note (no resend) -> history entry appended, nothing sent', async () => {
     mockDb.__setRows([appRow({ status: 'interview', interview_token: 'c'.repeat(64) })]);
     const { status, body } = await patch('aaaaaaaa-0000-4000-8000-000000000001', { status: 'interview', note: 'left a voicemail' });
@@ -343,7 +370,15 @@ describe('PATCH /:id/status', () => {
   test('a re-read failure after a successful send falls back to the pre-send committed row (not a 500)', async () => {
     mockSendStageComms.mockResolvedValue({ sms: 'sent', email: 'sent' });
     mockDb.__setRows([appRow({ status: 'reviewed' })]);
-    mockDb.mockImplementationOnce(() => { throw new Error('re-read boom'); });
+    // The route now reads the row twice outside the transaction: the pre-send
+    // authority check (must succeed) and the post-send re-read (this one fails).
+    const origImpl = mockDb.getMockImplementation();
+    let outsideTrxReads = 0;
+    mockDb.mockImplementation((table) => {
+      outsideTrxReads += 1;
+      if (outsideTrxReads === 2) { mockDb.mockImplementation(origImpl); throw new Error('re-read boom'); }
+      return origImpl(table);
+    });
     const { status, body } = await patch('aaaaaaaa-0000-4000-8000-000000000001', {
       status: 'interview', notify: { sms: true, email: true },
     });
