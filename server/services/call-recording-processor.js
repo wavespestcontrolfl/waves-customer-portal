@@ -8587,6 +8587,10 @@ const CallRecordingProcessor = {
           const knownCustomerForFailOpen = failOpenKnownCustomer(knownCaller);
           let routingResult = canAutoRoute(v2Extraction, {
             contactPhone, addressValidation,
+            // The merged canonical record: on-file address satisfaction must
+            // see a V1-only address the same way the fail-open conflict check
+            // does, and the unit ask the same way the merge point does.
+            canonicalRecord: extracted,
             failOpen: failOpenBooking, callerAni: contactPhone, knownCustomer: knownCustomerForFailOpen,
             agentCommitFailOpen: isEnabled('callAgentCommitBooking') && !isOutboundCall(call),
             // Grounds the agent-commitment evidence quote against the labeled
@@ -8623,7 +8627,14 @@ const CallRecordingProcessor = {
           // Strip model address flags too when AV accepted/corrected — otherwise
           // a stale model out_of_service_area would hard-veto a verified address.
           const modelFlags = suppressAddressFlagsForAV(v2Extraction.triage_flags, addressValidation);
-          const finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
+          // Address flags the routing verdict found satisfied by the linked
+          // customer's on-file address file no card either — the verdict
+          // (persisted in ai_validation.routing) is the audit trail.
+          const onFileSatisfied = routingResult.onFileAddressSatisfiedFlags || [];
+          const finalFlags = mergeTriageFlags(modelFlags, deterministicFlags).filter((f) => !onFileSatisfied.includes(f));
+          if (onFileSatisfied.length) {
+            logger.info(`[call-proc] Address flags satisfied by the on-file address for ${maskSid(callSid)}: ${onFileSatisfied.join(', ')} (no card)`);
+          }
           // Implied consent (GATE_CALL_INBOUND_IMPLIED_CONSENT): an inbound
           // caller who booked has implied consent for the transactional
           // confirmation SMS (established business relationship; they called
@@ -8761,9 +8772,18 @@ const CallRecordingProcessor = {
             // of letting the Needs Review row explain only the advisory note and
             // hide why the call was actually held. (Advisory flags get their own
             // rows from the advisory loop above.)
+            // A call that made NO scheduling ask (scheduling.status 'none' —
+            // a quote request, a service question, a cancellation) and holds
+            // on nothing else is not held at all: "not_confirmed" names the
+            // absence of a booking, not owed work. Filing it as a BLOCKING
+            // card left 26 such cards open with nothing to do (2026-09-20
+            // audit). A requested / tentative time that never got confirmed
+            // is still owed follow-through and keeps its card.
+            const noSchedulingAsk = routingResult.reason === 'not_confirmed'
+              && ['none', '', null, undefined].includes(routingResult.schedulingStatus);
             const blockingReasons = (routingResult.appointmentBlockingFlags && routingResult.appointmentBlockingFlags.length)
               ? routingResult.appointmentBlockingFlags
-              : [routingResult.reason || 'routing_rejected'];
+              : (noSchedulingAsk ? [] : [routingResult.reason || 'routing_rejected']);
             const triageReasons = blockingReasons;
             // A held scheduling CHANGE (cancel / reschedule / coordination on
             // an existing visit) is owed work. The card files below, but
@@ -16293,6 +16313,7 @@ const CallRecordingProcessor = {
         routingResult = canAutoRoute(v2ExtractionForAudit, {
           contactPhone,
           addressValidation: v2AddressValidation,
+          canonicalRecord: extracted,
           // Keep the audit/shadow decision consistent with the enforce path.
           failOpen: isEnabled('callFailOpenBooking') && !isOutboundCall(call),
           callerAni: contactPhone,
@@ -16302,6 +16323,10 @@ const CallRecordingProcessor = {
           transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'),
           callStartedAt: call.created_at,
         });
+        // Same on-file satisfaction the live merge point applies to its card set.
+        if (routingResult?.onFileAddressSatisfiedFlags?.length) {
+          finalFlags = finalFlags.filter((f) => !routingResult.onFileAddressSatisfiedFlags.includes(f));
+        }
         // Mirror the enforce path's V1 address-conflict demotion — the saved
         // shadow decision must hold exactly where enforce would hold, or
         // rollout metrics overstate safe fail-open bookings.
@@ -16334,6 +16359,11 @@ const CallRecordingProcessor = {
           reason: routingResult.reason || null,
           flags: finalFlags,
           appointment_blocking_flags: routingResult.appointmentBlockingFlags || [],
+          // Address flags the on-file address satisfied (codex r1 P2): the
+          // persisted verdict is the audit trail for a card that never filed.
+          ...(routingResult.onFileAddressSatisfiedFlags?.length
+            ? { on_file_address_satisfied_flags: routingResult.onFileAddressSatisfiedFlags }
+            : {}),
         } : null,
         address_validation_status: v2AddressValidation?.status || null,
         errors: v2Result.errors || null,
