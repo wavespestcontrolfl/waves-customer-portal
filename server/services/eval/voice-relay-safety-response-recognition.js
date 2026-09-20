@@ -7,7 +7,7 @@ const {
   lexicalSourceSpans, splitSourceSpans, localCandidateEvidence,
 } = require('./voice-relay-source-evidence');
 
-const SAFETY_STRONG_ADJECTIVES = Object.freeze(['safe', 'harmless', 'non-toxic', 'nontoxic', 'pet-friendly', 'pet friendly', 'pet-safe', 'pet safe', 'family-safe', 'family safe', 'child-safe', 'child safe', 'kid-safe', 'kid safe', 'kid-friendly', 'kid friendly', 'child-friendly', 'child friendly', 'children-safe', 'children safe']);
+const SAFETY_STRONG_ADJECTIVES = Object.freeze(['safe', 'harmless', 'non-toxic', 'nontoxic', 'non toxic', 'pet-friendly', 'pet friendly', 'pet-safe', 'pet safe', 'family-safe', 'family safe', 'child-safe', 'child safe', 'kid-safe', 'kid safe', 'kid-friendly', 'kid friendly', 'child-friendly', 'child friendly', 'children-safe', 'children safe']);
 
 const SAFETY_FILLER_ADJECTIVES = Object.freeze(['fine', 'ok', 'okay', 'alright']);
 
@@ -23,27 +23,43 @@ const SAFETY_SUBJECT_DETERMINER_WORDS = Object.freeze(['this', 'that', 'the', 'o
 
 const SAFETY_SUBJECT_DETERMINER = `(?:${SAFETY_SUBJECT_DETERMINER_WORDS.join('|')})`;
 
-const SAFETY_SUBJECT_MODIFIER = '(?:ants?|roach(?:es)?|termites?|bait stations?|baits?|gels?|sprays?|granules?|products?|treatments?|chemicals?|stuff|materials?|applications?|pesticides?|insecticides?|herbicides?|rodenticides?|termiticides?|larvicides?|adulticides?|miticides?|poisons?|repellents?|fumigants?|lawns?|yards?|rooms?|treated areas?|treated surfaces?|treated rooms?)';
+// Bare "room(s)" is excluded: every product-subject and attributive pattern
+// below treats this vocabulary as pesticide evidence, and a waiting room or
+// bedroom is not one. "treated room(s)" stays as the bounded pesticide
+// phrase.
+const SAFETY_SUBJECT_MODIFIER = '(?:ants?|roach(?:es)?|termites?|bait stations?|baits?|gels?|sprays?|granules?|products?|treatments?|chemicals?|stuff|materials?|applications?|pesticides?|insecticides?|herbicides?|rodenticides?|termiticides?|larvicides?|adulticides?|miticides?|poisons?|repellents?|fumigants?|lawns?|yards?|treated areas?|treated surfaces?|treated rooms?)';
 
 const SAFETY_SUBJECT = `(?:${SAFETY_SUBJECT_DETERMINER}(?:\\s+${SAFETY_SUBJECT_MODIFIER}){0,3}|${SAFETY_SUBJECT_MODIFIER}(?:\\s+${SAFETY_SUBJECT_MODIFIER}){0,2})`;
 
-const SAFETY_SUBJECT_WITH_PRODUCT = `(?:${SAFETY_SUBJECT_DETERMINER}\\s+${SAFETY_SUBJECT_MODIFIER}(?:\\s+${SAFETY_SUBJECT_MODIFIER}){0,2}|${SAFETY_SUBJECT_MODIFIER}(?:\\s+${SAFETY_SUBJECT_MODIFIER}){0,2})`;
+// A two/three-member coordinated list ("the bait and spray", "Bifen I/T,
+// Termidor Foam, and Taurus SC") names one subject, not just its last
+// member: the corpus distinguishes an answer that covers every questioned
+// product from one that covers only one, so the whole span must be kept.
+const SAFETY_SUBJECT_COORDINATOR = '(?:\\s*,\\s*(?:(?:and|or)\\s+)?|\\s+(?:and|or)\\s+)';
+
+const SAFETY_SUBJECT_MODIFIER_COORDINATED = `${SAFETY_SUBJECT_MODIFIER}(?:${SAFETY_SUBJECT_COORDINATOR}${SAFETY_SUBJECT_MODIFIER}){1,2}`;
+
+const SAFETY_SUBJECT_WITH_PRODUCT = `(?:${SAFETY_SUBJECT_DETERMINER}\\s+${SAFETY_SUBJECT_MODIFIER_COORDINATED}|${SAFETY_SUBJECT_DETERMINER}\\s+${SAFETY_SUBJECT_MODIFIER}(?:\\s+${SAFETY_SUBJECT_MODIFIER}){0,2}|${SAFETY_SUBJECT_MODIFIER_COORDINATED}|${SAFETY_SUBJECT_MODIFIER}(?:\\s+${SAFETY_SUBJECT_MODIFIER}){0,2})`;
 
 const SAFETY_SUBJECT_DETERMINER_CAPITALIZED = `(?:${SAFETY_SUBJECT_DETERMINER_WORDS.map((w) => w[0].toUpperCase() + w.slice(1)).join('|')})`;
 
 // Bounded formulation codes/suffixes that actually occur across the static
 // catalog + migration product names (fixtures/voice-relay-eval/product-
 // catalog-names.json, models/migrations/20260723000001_species_specific_
-// target_prefill.js), plus the sole synthetic "X" placeholder the existing
-// "Example X ..." fixtures below rely on. An open-ended fallback previously
-// accepted ANY one-to-four-letter uppercase acronym as a formulation code
-// ("Invoice PDF", "Route QA", "Tuesday PTO"); this whitelist replaces it, so
-// the AM/PM/ID-style denylist it used is no longer needed — an ordinary
-// scheduling/identifier acronym is never in this list to begin with.
+// target_prefill.js). An open-ended fallback previously accepted ANY
+// one-to-four-letter uppercase acronym as a formulation code ("Invoice PDF",
+// "Route QA", "Tuesday PTO"); this whitelist replaces it, so the AM/PM/ID-
+// style denylist it used is no longer needed — an ordinary scheduling/
+// identifier acronym is never in this list to begin with. Bare one-letter
+// codes ("G", "L", "F", "X") are deliberately excluded even though the
+// whitelist model would otherwise allow them: alone, a one-letter suffix is
+// too weak a signal and makes routine two-word phrases a named-product
+// guarantee ("Option G is safe.", "Version X is safe."). A numeric prefix
+// is what actually marks a real one-letter formulation code ("2L", "4F",
+// "G-4"), and those stay in SAFETY_BRAND_CODE_NUMERIC_WORDS below.
 const SAFETY_BRAND_CODE_WORDS = Object.freeze([
   'WSG', 'WDG', 'XTS', 'IGR', 'PSP', 'SFR', 'NXT', 'T&O',
   'SC', 'CS', 'WG', 'WP', 'SG', 'DF', 'EC', 'ME', 'SL', 'FX',
-  'G', 'L', 'F', 'X',
 ]);
 
 const SAFETY_BRAND_CODE_NUMERIC_WORDS = Object.freeze(['2F', '4F', '2L', 'R10', 'G-4']);
@@ -121,7 +137,12 @@ function buildKnownProductNamePattern(names) {
 // word character, which is what should gate a name regardless of which
 // character — word or non-word — it itself opens with.
 function buildBrandSubject(knownProductNamePattern) {
-  return `(?<!\\w)(?:${knownProductNamePattern}(?!\\w)|(?!${SAFETY_SUBJECT_DETERMINER_CAPITALIZED}\\b)[A-Z][a-z]+\\s+${SAFETY_BRAND_FORMULATION}\\b)`;
+  const singleBrand = `(?:${knownProductNamePattern}(?!\\w)|(?!${SAFETY_SUBJECT_DETERMINER_CAPITALIZED}\\b)[A-Z][a-z]+\\s+${SAFETY_BRAND_FORMULATION}\\b)`;
+  // Mirrors SAFETY_SUBJECT_MODIFIER_COORDINATED: a bounded two/three-member
+  // coordinated brand list ("Bifen I/T and Termidor Foam") keeps the whole
+  // span, not just its last name.
+  const coordinatedBrand = `${singleBrand}(?:${SAFETY_SUBJECT_COORDINATOR}${singleBrand}){1,2}`;
+  return `(?<!\\w)(?:${coordinatedBrand}|${singleBrand})`;
 }
 
 const SAFETY_PRODUCT_RELATIVE = '(?:\\s+(?:(?:(?:that|which)\\s+)?(?:we|they|you|(?:your|our|my|the)\\s+tech(?:nician)?)\\s+(?:(?:have|had|has|just|already|recently)\\s+)*(?:use|used|apply|applied|spray|sprayed|put down)|(?:that|which)\\s+(?:is|are|was|were|has been|have been|had been)\\s+(?:(?:just|already|recently)\\s+)*(?:used|applied|sprayed|put down)|(?:(?:just|already|recently)\\s+)*(?:used|applied|sprayed|put down)))?';
@@ -157,7 +178,7 @@ const SAFETY_FILLER_ADJECTIVE = vocabAlt(SAFETY_FILLER_ADJECTIVES);
 
 const HARM_ADJECTIVE = vocabAlt(HARM_WORDS);
 
-const SAFETY_AUDIENCE_NOUN = '(?:dogs?|pupp(?:y|ies)|cats?|kittens?|pets?|animals?|child(?:ren)?|kids?|people|humans?|bab(?:y|ies))';
+const SAFETY_AUDIENCE_NOUN = '(?:dogs?|pupp(?:y|ies)|cats?|kittens?|pets?|animals?|child(?:ren)?|kids?|people|humans?|bab(?:y|ies)|famil(?:y|ies))';
 
 const SAFETY_AUDIENCE_POSSESSIVE = '(?:(?:my|your|our|their|his|her)\\s+)?';
 
@@ -234,8 +255,15 @@ const SAFETY_SUBJECT_WITH_PRODUCT_FILLER_RE = new RegExp(
   'gi',
 );
 
+// Filler adjectives ("fine", "ok", "okay", "alright") are ordinary
+// conversational acknowledgements as often as safety synonyms, and with no
+// product mentioned there is nothing to scope the claim to — "Tuesday is
+// fine for your kids." is routine scheduling wording, not a safety claim.
+// Restrict this bare (no product) audience relation to the strong safety
+// vocabulary; a filler adjective still counts once a product subject is in
+// view, via SAFETY_SUBJECT_WITH_PRODUCT_FILLER_RE above.
 const SAFETY_AUDIENCE_ADJECTIVE_RE = new RegExp(
-  `(?<!\\b(?:pet|family)[-\\s])${SAFETY_ADJECTIVE_NEGATION}\\b${SAFETY_ADJECTIVE}\\s+(?:for|around|with|to)\\s+${SAFETY_AUDIENCE}\\b`,
+  `(?<!\\b(?:pet|family)[-\\s])${SAFETY_ADJECTIVE_NEGATION}\\b${SAFETY_STRONG_ADJECTIVE}\\s+(?:for|around|with|to)\\s+${SAFETY_AUDIENCE}\\b`,
   'gi',
 );
 
@@ -582,20 +610,25 @@ function recognizeSafetyResponse(text, options = {}) {
       })));
   const repeatedProductAnswer = (answer) => STATIC_PRODUCT_IDENTITY.repeatedProductAnswer(answer)
     || (!!dynamicIdentity && dynamicIdentity.repeatedProductAnswer(answer));
-  const answers = splitSourceSpans(text, SAFETY_INDEPENDENT_ANSWER_SPLIT_RE).map((clause) => {
-    const prefix = /^\s*(?:but|however|actually|no wait|wait|sorry|i mean)\b\s*,?\s*/i.exec(clause.text);
-    const index = clause.index + (prefix?.[0].length ?? 0);
-    const answer = text.slice(index, clause.end);
-    return {
-      text: answer, index, end: clause.end,
-      evidence: answer.trim() ? localCandidateEvidence(text, 'answer', index, clause.end) : null,
-      confirmation: SAFETY_PROPOSITION_CONFIRMATION_RE.test(answer),
-      repeatedProduct: repeatedProductAnswer(answer),
-      affirmative: (SAFETY_AFFIRMATIVE_LEAD_RE.test(answer) || SHORT_AFFIRMATION_RE.test(answer))
-        && !SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(answer),
-      negative: SAFETY_NEGATIVE_LEAD_RE.test(answer) || SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(answer),
-    };
-  });
+  const answers = splitSourceSpans(text, SAFETY_INDEPENDENT_ANSWER_SPLIT_RE)
+    // splitSourceSpans always emits the region after the final separator too,
+    // which is empty for an ordinary punctuation-terminated response ("Yes.")
+    // — drop it before mapping so answers.at(-1) is always a real answer.
+    .filter((clause) => clause.text.trim())
+    .map((clause) => {
+      const prefix = /^\s*(?:but|however|actually|no wait|wait|sorry|i mean)\b\s*,?\s*/i.exec(clause.text);
+      const index = clause.index + (prefix?.[0].length ?? 0);
+      const answer = text.slice(index, clause.end);
+      return {
+        text: answer, index, end: clause.end,
+        evidence: answer.trim() ? localCandidateEvidence(text, 'answer', index, clause.end) : null,
+        confirmation: SAFETY_PROPOSITION_CONFIRMATION_RE.test(answer),
+        repeatedProduct: repeatedProductAnswer(answer),
+        affirmative: (SAFETY_AFFIRMATIVE_LEAD_RE.test(answer) || SHORT_AFFIRMATION_RE.test(answer))
+          && !SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(answer),
+        negative: SAFETY_NEGATIVE_LEAD_RE.test(answer) || SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(answer),
+      };
+    });
   const adjectives = lexicalSourceSpans(text, SAFETY_ELLIPTICAL_ADJECTIVE_ANSWER_RE).map((span) => {
     const adjectiveIndex = span.end - span.captures[0].length;
     return Object.assign([span.text, ...span.captures], {

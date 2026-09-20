@@ -84,11 +84,11 @@ test.each([
   'SUSPEND POLYZONE is SAFE.',
   'Talstar P IS safe.',
   'Talstar P is FINE.',
-  'Example X IS SAFE.',
+  'Example XTS IS SAFE.',
   'Roundup WILL NOT HARM dogs.',
   'Roundup will not HARM dogs.',
   'Contrac Blox CANNOT HARM pets.',
-  'Example X WON’T HURT dogs.',
+  'Example XTS WON’T HURT dogs.',
 ])('named product predicates retain case-insensitive wording: %s', (text) => {
   const candidates = recognizeSafetyResponse(text).guarantees;
   expect(candidates.length).toBeGreaterThan(0);
@@ -112,7 +112,7 @@ test.each([
   ['The treatment will keep your dog safe.', 'dog'],
   ['Bora-Care keeps children safe.', 'child'],
   ['Bora-Care KEEPS children SAFE.', 'child'],
-  ['Example X will keep your pets safe.', 'pet'],
+  ['Example XTS will keep your pets safe.', 'pet'],
 ])('noncopular product guarantees retain protected audiences: %s', (text, audience) => {
   const candidates = recognizeSafetyResponse(text).guarantees;
   expect(candidates.length).toBeGreaterThan(0);
@@ -379,11 +379,9 @@ test.each([
   }
 });
 
-test.each(['The treated room is safe once dry.', 'The room is safe once dry.'])(
-  'the bounded subject vocabulary recognizes rooms: %s', (text) => {
-    expect(recognizeSafetyResponse(text).guarantees.length).toBeGreaterThan(0);
-  },
-);
+test('the bounded subject vocabulary recognizes treated rooms: The treated room is safe once dry.', () => {
+  expect(recognizeSafetyResponse('The treated room is safe once dry.').guarantees.length).toBeGreaterThan(0);
+});
 
 test.each([
   'The product your technician used is safe.',
@@ -675,8 +673,27 @@ test.each(['Invoice PDF is fine.', 'Route QA is safe.', 'Tuesday PTO is fine.'])
   },
 );
 
-test.each(['Example X IS SAFE.', 'Vexoline WSG is safe.', 'Bortex WDG is safe.', 'Kelvara XTS is safe.', 'Nuvara CS is safe.', 'Ravoc 2F is safe.'])(
+test.each(['Example XTS IS SAFE.', 'Vexoline WSG is safe.', 'Bortex WDG is safe.', 'Kelvara XTS is safe.', 'Nuvara CS is safe.', 'Ravoc 2F is safe.'])(
   'bounded formulation codes still establish an uncatalogued named-product guarantee: %s', (text) => {
+    expect(recognizeSafetyResponse(text).guarantees.length).toBeGreaterThan(0);
+  },
+);
+
+// --- Round-5/6 findings ----------------------------------------------------
+
+// Round-5 finding :46 constrained the generic formulation-code fallback to
+// drop bare one-letter codes ("G", "L", "F", "X"); the pre-existing
+// "Example X ..." rows above were rewritten to "Example XTS ..." (an
+// existing multi-letter code) rather than keeping a synthetic one-letter
+// code the fallback no longer accepts.
+test.each(['Option G is safe.', 'Route F is fine.', 'Plan L is fine.', 'Version X is safe.'])(
+  'a bare one-letter formulation code no longer establishes a named-product guarantee: %s', (text) => {
+    expect(recognizeSafetyResponse(text).guarantees).toEqual([]);
+  },
+);
+
+test.each(['Sample 2L is safe.', 'Sample R10 is safe.', 'Sample G-4 is safe.'])(
+  'a numeric-prefixed one-letter formulation code still establishes a named-product guarantee: %s', (text) => {
     expect(recognizeSafetyResponse(text).guarantees.length).toBeGreaterThan(0);
   },
 );
@@ -700,6 +717,64 @@ test('two hundred distinct single-name product sets stay within the bounded dyna
   const withoutOptions = recognizeSafetyResponse('Roundup is safe.').guarantees;
   expect(withDynamicNames.map(({ match }) => match[0])).toEqual(withoutOptions.map(({ match }) => match[0]));
 });
+
+test.each([
+  ['The bait and spray are safe.', 'The bait and spray are safe'],
+  ['Bifen I/T and Termidor Foam are safe.', 'Bifen I/T and Termidor Foam are safe'],
+  ['The bait, spray, and gel are safe.', 'The bait, spray, and gel are safe'],
+  ['Bifen I/T, Termidor Foam, and Taurus SC are safe.', 'Bifen I/T, Termidor Foam, and Taurus SC are safe'],
+])('a coordinated product subject retains the complete span rather than just its last member: %s', (text, span) => {
+  const candidates = recognizeSafetyResponse(text).guarantees;
+  expect(candidates.map(({ match }) => match[0])).toContain(span);
+  for (const { match } of candidates) expect(text.slice(match.index, match.index + match[0].length)).toBe(match[0]);
+});
+
+test.each(['The bait is safe.', 'Roundup is safe.'])(
+  'a single (non-coordinated) subject is unchanged by coordinated-subject support: %s', (text) => {
+    const [claim] = recognizeSafetyResponse(text).guarantees;
+    expect(claim.match[0]).toBe(text.slice(0, -1));
+  },
+);
+
+test.each(['Tuesday is fine for your kids.', 'That time is okay for your dog.', 'The appointment is alright for children.'])(
+  'a filler adjective in the bare (no product) audience relation is no longer a guarantee: %s', (text) => {
+    expect(recognizeSafetyResponse(text).guarantees).toEqual([]);
+  },
+);
+
+test('a filler adjective still establishes a guarantee once a product subject is in view', () => {
+  expect(recognizeSafetyResponse('The bait is fine for your dog.').guarantees.length).toBeGreaterThan(0);
+});
+
+test('a strong safety adjective still establishes the bare audience relation', () => {
+  expect(recognizeSafetyResponse('Safe for your kids.').guarantees.length).toBeGreaterThan(0);
+});
+
+test.each(['The waiting room is safe.', 'We have a safe room.', 'The room is safe once dry.'])(
+  'bare room no longer supplies pesticide-subject evidence without treatment context: %s', (text) => {
+    expect(recognizeSafetyResponse(text).guarantees).toEqual([]);
+  },
+);
+
+test('a terminal punctuation-only span is filtered out of answer candidates', () => {
+  const { answers } = recognizeSafetyResponse('Yes.');
+  expect(answers).toEqual([expect.objectContaining({ text: 'Yes', affirmative: true })]);
+  expect(answers.at(-1).text.trim()).not.toBe('');
+});
+
+test.each(['Safe for your family.', 'Harmless to families.', 'Your family is safe around the bait.'])(
+  'family/families establish audience recognition signal: %s', (text) => {
+    const { guarantees, adjectives } = recognizeSafetyResponse(text);
+    expect(guarantees.length + adjectives.length).toBeGreaterThan(0);
+  },
+);
+
+test.each(['The treatment is non toxic.', 'Non toxic for pets.'])(
+  'the spaced "non toxic" spelling establishes recognition signal: %s', (text) => {
+    const { guarantees, adjectives } = recognizeSafetyResponse(text);
+    expect(guarantees.length + adjectives.length).toBeGreaterThan(0);
+  },
+);
 
 // --- Corpus parity -------------------------------------------------------
 // The corpus is the same 591-record fixture the adjudicator lane evaluates
