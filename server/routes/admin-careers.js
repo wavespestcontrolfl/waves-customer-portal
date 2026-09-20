@@ -318,7 +318,7 @@ router.patch('/:id/status', async (req, res) => {
     let responseRow = updated;
     if (interviewApplicable) {
       if (!willSend) {
-        sent = { sms: 'disabled', email: 'disabled' };
+        sent = { sms: wantSms ? 'disabled' : 'not_requested', email: wantEmail ? 'disabled' : 'not_requested' };
       } else {
         try {
           // Final authority check at the provider handoff (Codex r2 P2): if

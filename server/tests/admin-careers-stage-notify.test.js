@@ -316,6 +316,10 @@ describe('PATCH /:id/status', () => {
     const { status, body } = await patch('aaaaaaaa-0000-4000-8000-000000000001', { status: 'interview', notify: { sms: true, email: true } });
     expect(status).toBe(200);
     expect(body.sent).toEqual({ sms: 'disabled', email: 'disabled' });
+    // only the requested channel reads 'disabled'
+    mockDb.__setRows([appRow({ status: 'reviewed' })]);
+    const only = await patch('aaaaaaaa-0000-4000-8000-000000000001', { status: 'interview', notify: { sms: true } });
+    expect(only.body.sent).toEqual({ sms: 'disabled', email: 'not_requested' });
     expect(mockSendStageComms).not.toHaveBeenCalled();
     // Transition still happened.
     expect(mockDb.__rows()[0].status).toBe('interview');
