@@ -357,6 +357,10 @@ export function sendOutcomeMessage(res) {
   if (res?.covered_by_credit) return "fully covered by account credit, nothing to send";
   if (res?.already_delivered) return "already delivered";
   if (res?.queued_delivery) return "queued for the send window";
+  // A concurrent first-delivery request already won this exact race (pre-
+  // push audit P1 #4633) — the pay link IS on its way, just not from this
+  // request. A no-op success, never a failure.
+  if (res?.in_progress) return "already being delivered";
   return null;
 }
 
@@ -368,6 +372,7 @@ export function sendOutcomeMessage(res) {
 export function sendErrorMessage(err) {
   if (err?.code === "queued_pay_link") return "queued for the send window";
   if (err?.code === "already_delivered") return "already delivered";
+  if (err?.code === "delivery_in_progress") return "already being delivered";
   return null;
 }
 
@@ -381,6 +386,7 @@ export function resendConflictMessage(err) {
     return "Invoice send blocked: a text carrying this pay link is already queued for the send window — check its delivery status before resending";
   }
   if (err?.code === "already_delivered") return "Invoice send blocked: this invoice was already delivered";
+  if (err?.code === "delivery_in_progress") return "Invoice send blocked: a delivery is already in progress";
   return null;
 }
 

@@ -852,6 +852,19 @@ function invoiceAlreadyDeliveredError(invoice) {
   return e;
 }
 
+// Pre-push audit P1 (PR #4633): two first-delivery claims racing the SAME
+// atomic flip — the loser's re-read sees the row still 'sending' under the
+// WINNER's claim token, neither delivered nor parked. That is a legitimate
+// supersession, not a generic failure: the caller's own request was never
+// attempted because a concurrent, equally-valid first delivery beat it to
+// the claim. Reported distinctly so the UI never shows "failed to send" for
+// a send that is, in fact, already in progress under someone else's claim.
+function firstDeliveryInProgressError(invoice) {
+  const e = new Error(`Invoice ${invoice?.invoice_number || invoice?.id || ""} is already being delivered by another request — not sent again`);
+  e.code = "delivery_in_progress";
+  return e;
+}
+
 // 'sending' is NOT delivered here — a live claim is reported as the
 // in-progress conflict instead, and the caller re-reads the row afterwards.
 // email_sent_at/sms_sent_at are each channel's own durable stamp, written
@@ -1279,6 +1292,13 @@ async function claimInvoiceForSend(invoiceId, {
     // latest row trips (review hold first, then delivered for a first
     // delivery) rather than a generic "not sendable" (round-6 P1 #4131).
     refuseFirstDeliveryHold(latest, invoiceId, firstDeliveryOnly, overridesReviewHold);
+    // Pre-push audit P1 (PR #4633): neither guard above tripped, but the
+    // row is 'sending' under SOME claim token — a concurrent first
+    // delivery won this exact race. Distinct from "not sendable": the
+    // customer's pay link IS on its way, just not from this request.
+    if (firstDeliveryOnly && latest?.status === "sending" && latest.send_claim_token) {
+      throw firstDeliveryInProgressError(latest);
+    }
     throw invoiceNotSendableError(latest);
   }
   invoice.send_claim_token = freshClaimToken;

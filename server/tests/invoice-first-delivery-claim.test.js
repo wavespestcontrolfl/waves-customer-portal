@@ -247,6 +247,21 @@ describe('claimInvoiceForSend — ABA race between the snapshot and the atomic f
       .rejects.toMatchObject({ code: 'already_delivered' });
   });
 
+  // Pre-push audit P1 (PR #4633): two first-delivery claims race the SAME
+  // flip. The loser's UPDATE...WHERE status = 'scheduled' matches nothing
+  // (the winner already flipped status to 'sending') — the latest row is
+  // neither parked nor stamped, so neither existing guard fires. This must
+  // read as a legitimate supersession (the customer's pay link IS on its
+  // way, from the WINNER's claim), never a generic "not sendable" that the
+  // UI would show as "Failed to send invoice".
+  test('a concurrent claim wins the flip race — rejects with delivery_in_progress, not the generic not-sendable error', async () => {
+    makeDb(undeliveredScheduledRow(), {
+      mutateAfterFirstRead: { status: 'sending', send_claim_token: 'winner-token-123' },
+    });
+    await expect(claimInvoiceForSend(INVOICE_ID, { firstDeliveryOnly: true }))
+      .rejects.toMatchObject({ code: 'delivery_in_progress' });
+  });
+
   // Same race, but the claim is a deliberate operator Resend authorized to
   // clear the hold — the park lands mid-claim with NO delivery stamp, and
   // overridesReviewHold means the flip's predicates never exclude it.

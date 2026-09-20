@@ -83,11 +83,13 @@ export default function MobilePaymentSheet({
         throw new Error(d.error || 'Failed to send invoice');
       }
       // A first delivery that finds the invoice already owned by another
-      // live delivery (the completion, a concurrent send) comes back
-      // ok:true with already_delivered/queued_delivery instead of a
-      // thrown error — same no-op-success shape the desktop create path
-      // reads via sendOutcomeMessage. Nothing left to do here but proceed
-      // exactly as if this tender's own SMS+email had just gone out.
+      // live delivery (the completion, a concurrent send, or — pre-push
+      // audit P1 #4633 — another first-delivery request that won this
+      // exact claim race) comes back ok:true with already_delivered/
+      // queued_delivery/in_progress instead of a thrown error — same
+      // no-op-success shape the desktop create path reads via
+      // sendOutcomeMessage. Nothing left to do here but proceed exactly as
+      // if this tender's own SMS+email had just gone out.
       onInvoiceSent?.();
     } catch (e) {
       setError(e.message || 'Failed to send invoice');

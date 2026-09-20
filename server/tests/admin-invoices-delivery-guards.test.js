@@ -231,6 +231,48 @@ describe('POST /admin/invoices/:id/send — first delivery vs. explicit Resend a
       expect(body.queued_delivery).toBeUndefined();
     });
   });
+
+  // Pre-push audit P1 (PR #4633): a concurrent first-delivery claim already
+  // won this exact race — the customer's pay link IS on its way, from the
+  // OTHER request. A no-op success, never "Failed to send invoice".
+  test('a first delivery that finds a concurrent claim already delivering is a no-op success, not a failure', async () => {
+    InvoiceService.sendViaSMSAndEmail.mockImplementation(async (_id, opts) => {
+      if (opts.firstDeliveryOnly) {
+        const e = new Error('Invoice is already being delivered by another request — not sent again');
+        e.code = 'delivery_in_progress';
+        throw e;
+      }
+      return { ok: true, sms: { ok: true }, email: { ok: true } };
+    });
+    await withServer(async (baseUrl) => {
+      const res = await postSend(baseUrl, { firstDelivery: true });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toMatchObject({ ok: true, in_progress: true });
+    });
+  });
+
+  // The SAME code on an explicit Resend is a real conflict — the operator
+  // asked to clear a hold or re-send, and a live concurrent claim means
+  // that request cannot proceed right now; it must NOT read as a no-op
+  // success (resendConflictMessage's "blocked" wording, not the benign
+  // first-delivery phrasing).
+  test('an explicit Resend that finds a concurrent claim in progress is a real conflict, not a no-op success', async () => {
+    InvoiceService.sendViaSMSAndEmail.mockImplementation(async () => {
+      const e = new Error('Invoice is already being delivered by another request — not sent again');
+      e.code = 'delivery_in_progress';
+      throw e;
+    });
+    await withServer(async (baseUrl) => {
+      const res = await postSend(baseUrl, { resend: true });
+      // Retryable — the concurrent claim may finish any moment.
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.code).toBe('delivery_in_progress');
+      expect(body.ok).toBeUndefined();
+      expect(body.in_progress).toBeUndefined();
+    });
+  });
 });
 
 // ── Batch first-delivery routes ─────────────────────────────────────────

@@ -930,7 +930,7 @@ router.delete('/:id/attachments/:attachmentId', requireAdmin, async (req, res, n
 // instead of a conflict (round-6 P1 #4131) — shared by every first-delivery
 // send path below (create + immediate send, the batch keyed-retry send,
 // /batch/send, and /:id/send).
-const FIRST_DELIVERY_NOOP_CODES = new Set(['already_delivered', 'queued_pay_link']);
+const FIRST_DELIVERY_NOOP_CODES = new Set(['already_delivered', 'queued_pay_link', 'delivery_in_progress']);
 
 // An invoice row (status + delivery stamps) is a first delivery exactly
 // when it has never been delivered: still draft/scheduled, and no channel
@@ -967,6 +967,10 @@ function firstDeliveryOutcome(err, firstDeliveryOnly) {
       code: err.code,
       already_delivered: err.code === 'already_delivered',
       queued_delivery: err.code === 'queued_pay_link',
+      // Pre-push audit P1 (PR #4633): a concurrent first-delivery claim
+      // already won this exact race — the customer's pay link is on its
+      // way, just not from this request. A no-op success, never a failure.
+      in_progress: err.code === 'delivery_in_progress',
     };
   }
   return null;
@@ -1234,7 +1238,8 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
             }
             if (outcome?.type === 'noop') {
               entry.sent = { sent: false, ok: true, code: outcome.code,
-                already_delivered: outcome.already_delivered, queued_delivery: outcome.queued_delivery };
+                already_delivered: outcome.already_delivered, queued_delivery: outcome.queued_delivery,
+                in_progress: outcome.in_progress };
               skipped.push(entry);
               return;
             }
@@ -1286,7 +1291,8 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
               sendResult = { sent: false, held: true, code: outcome.code };
             } else if (outcome?.type === 'noop') {
               sendResult = { sent: false, ok: true, code: outcome.code,
-                already_delivered: outcome.already_delivered, queued_delivery: outcome.queued_delivery };
+                already_delivered: outcome.already_delivered, queued_delivery: outcome.queued_delivery,
+                in_progress: outcome.in_progress };
             } else {
               logger.error(`[admin-invoices:batch] send failed for ${invoice.id}: ${sendErr.message}`);
               sendResult = { sent: false, error: sendErr.message };
@@ -1410,6 +1416,7 @@ router.post('/batch/send', requireAdmin, async (req, res, next) => {
             channels: { sms: false, email: false },
             already_delivered: outcome.already_delivered,
             queued_delivery: outcome.queued_delivery,
+            in_progress: outcome.in_progress,
           });
           continue;
         }
@@ -1663,14 +1670,17 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       });
     } catch (err) {
       // A FIRST delivery finding the invoice already owned by another live
-      // delivery is a no-op success in both shapes: delivered
-      // (already_delivered), or queued for the send window (queued_pay_link
-      // — a held text already carries this pay link and delivers then). An
-      // explicit Resend never takes this branch — queued_pay_link there
-      // falls through as a real conflict below. A stale-claim review hold
-      // is NOT special-cased here (unlike the batch routes' "held"
-      // reporting) — this single-invoice route surfaces it as the ordinary
-      // refusal below, straight to the operator who made the request.
+      // delivery is a no-op success in every shape: delivered
+      // (already_delivered), queued for the send window (queued_pay_link —
+      // a held text already carries this pay link and delivers then), or
+      // currently being delivered by a concurrent first-delivery request
+      // that won this exact race (delivery_in_progress, pre-push audit P1
+      // #4633). An explicit Resend never takes this branch — every one of
+      // these codes there falls through as a real conflict below. A
+      // stale-claim review hold is NOT special-cased here (unlike the
+      // batch routes' "held" reporting) — this single-invoice route
+      // surfaces it as the ordinary refusal below, straight to the
+      // operator who made the request.
       const outcome = firstDeliveryOutcome(err, firstDeliveryOnly);
       if (outcome?.type === 'noop') {
         logger.info(`[admin-invoices] first delivery of invoice ${id} skipped (${outcome.code}): ${err.message}`);
@@ -1678,6 +1688,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
           ok: true,
           already_delivered: outcome.already_delivered,
           queued_delivery: outcome.queued_delivery,
+          in_progress: outcome.in_progress,
           sms: { ok: false, code: outcome.code },
           email: { ok: false, code: outcome.code },
         });
@@ -1696,6 +1707,13 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     }
     res.json(result);
   } catch (err) {
+    // Pre-push audit P1 (PR #4633): a concurrent claim already owns
+    // delivery — retryable (the other request may finish any moment), same
+    // 409 treatment as "already in progress" below, but its own message
+    // doesn't match that regex.
+    if (err?.code === 'delivery_in_progress') {
+      return res.status(409).json({ error: err.message, code: err.code });
+    }
     if (/already paid|paid invoice|voided|processing|already in progress|not sendable/i.test(err.message)) {
       return res.status(/processing|already in progress/i.test(err.message) ? 409 : 400).json({ error: err.message, code: err.code });
     }

@@ -277,7 +277,7 @@ describe("AdminInvoicesPage create-path toast edge cases", () => {
 });
 
 describe("AdminInvoicesPage send outcome/error helpers", () => {
-  it("sendOutcomeMessage reads the three no-op-success flags a 200 response can carry", () => {
+  it("sendOutcomeMessage reads the four no-op-success flags a 200 response can carry", () => {
     expect(sendOutcomeMessage({ covered_by_credit: true })).toBe(
       "fully covered by account credit, nothing to send",
     );
@@ -286,6 +286,11 @@ describe("AdminInvoicesPage send outcome/error helpers", () => {
     );
     expect(sendOutcomeMessage({ queued_delivery: true })).toBe(
       "queued for the send window",
+    );
+    // Pre-push audit P1 (PR #4633): a concurrent first-delivery claim
+    // already won the race — a no-op success, never a failure.
+    expect(sendOutcomeMessage({ in_progress: true })).toBe(
+      "already being delivered",
     );
     expect(sendOutcomeMessage({ ok: true, sms: { ok: true } })).toBeNull();
     expect(sendOutcomeMessage(null)).toBeNull();
@@ -299,6 +304,9 @@ describe("AdminInvoicesPage send outcome/error helpers", () => {
     );
     expect(sendErrorMessage({ code: "already_delivered" })).toBe(
       "already delivered",
+    );
+    expect(sendErrorMessage({ code: "delivery_in_progress" })).toBe(
+      "already being delivered",
     );
     expect(sendErrorMessage({ code: "send_claim_lost" })).toBeNull();
     expect(sendErrorMessage(new Error("boom"))).toBeNull();
@@ -356,6 +364,11 @@ describe("resendConflictMessage", () => {
     expect(blocked).toMatch(/^Invoice send blocked:/);
     expect(blocked).not.toBe(sendErrorMessage({ code: "queued_pay_link" }));
     expect(resendConflictMessage({ code: "already_delivered" })).toMatch(/^Invoice send blocked:/);
+    // Pre-push audit P1 (PR #4633): a concurrent claim in progress is a
+    // real conflict for a deliberate Resend, not the first-delivery no-op.
+    expect(resendConflictMessage({ code: "delivery_in_progress" })).toBe(
+      "Invoice send blocked: a delivery is already in progress",
+    );
     expect(resendConflictMessage({ code: "send_claim_lost" })).toBeNull();
     expect(resendConflictMessage(new Error("boom"))).toBeNull();
   });
