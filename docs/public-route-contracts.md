@@ -270,13 +270,16 @@ the SPA `/recap/:token` "Your Visit, in Motion" recap player (token-gated; serve
 only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
 same noindex/no-referrer/no-store headers as `/report/:token`),
 `/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound;
-recruiting replies: after STOP/HELP/START handling and before the reaction
-/ customer paths, an inbound from a phone that (a) belongs to an OPEN
+recruiting replies: an inbound from a phone that (a) belongs to an OPEN
 job application (new/reviewed/interview/offer) AND (b) received a
-`job_*` recruiting text within 45 days is handled by
-`services/recruiting-inbound.js` — recorded on the application
-(`comms_history` + an `sms_log` row typed `job_applicant_reply`, the
-unified row retyped the same), raised ONLY as the admin-only
+`job_*` recruiting text within 45 days is classified by
+`services/recruiting-inbound.js` BEFORE the unified inbox persist — the
+inbox row is born typed `job_applicant_reply` (a classification lookup
+failure releases the claim and answers 503 with nothing persisted) — and
+then, after STOP/HELP/START handling and before the reaction / customer
+paths, recorded on the application (`comms_history` + an `sms_log` row
+typed `job_applicant_reply`, one transaction, idempotent on the SID; a
+persistence failure also releases + 503s), raised ONLY as the admin-only
 `job_applicant_reply` bell, and answered with empty TwiML; it never
 reaches the tech-visible `sms_reply` bell, lead intake, the estimator or
 any customer automation, even when the phone also belongs to a customer

@@ -360,6 +360,22 @@ router.post('/sms', async (req, res) => {
       else logger.warn(`[contact-correction] enqueue deferred to stale sweep for customer ${customer.id}, sms_log ${smsLogId || 'n/a'}`);
     };
 
+    // Recruiting classification BEFORE the inbox persist (Codex #4623 P0):
+    // the unified row must be born typed `job_applicant_reply` so no shared
+    // reader ever sees an applicant's reply untyped — not even when they
+    // texted a different Waves number whose thread holds no outbound job_*
+    // row. A lookup failure fails CLOSED while nothing is persisted yet:
+    // release the claim and 503 so Twilio redelivers. Handling of the reply
+    // itself still happens further down, AFTER STOP/HELP/START.
+    let recruitingReply = null;
+    try {
+      recruitingReply = await require('../services/recruiting-inbound').matchApplicantReply(From);
+    } catch (e) {
+      logger.error(`[recruiting-inbound] match failed (${e.name || 'Error'}${e.code ? ` ${e.code}` : ''}) — deferring inbound for retry`);
+      if (claimOwned && !persisted) await releaseInboundWebhook(MessageSid);
+      return res.status(503).type('text/xml').send('<Response></Response>');
+    }
+
     // The unified inbox is required before acknowledging an accepted SMS.
     // STOP suppression still runs below if this write fails; all other effects
     // wait for a durable message so redelivery can safely resume processing.
@@ -379,8 +395,8 @@ router.post('/sms', async (req, res) => {
       isRead: quietReaction || courtesyOnly,
       // Loud reactions are typed as ordinary inbound so the unanswered digest
       // and completion guard count them (codex r3).
-      messageType: quietReaction ? 'sms_reaction' : undefined,
-      metadata: { location: numberConfig?.label, numberType: numberConfig?.type, ...(courtesyOnly ? { courtesyOnly: true } : {}) },
+      messageType: recruitingReply ? 'job_applicant_reply' : (quietReaction ? 'sms_reaction' : undefined),
+      metadata: { location: numberConfig?.label, numberType: numberConfig?.type, ...(courtesyOnly ? { courtesyOnly: true } : {}), ...(recruitingReply ? { job_application_id: recruitingReply.applicationId } : {}) },
     }).catch(() => {});
 
     sourcePersistenceFailed = !inboundTouchpoint?.message?.id;
@@ -773,24 +789,13 @@ router.post('/sms', async (req, res) => {
     }
 
     // ── Recruiting: an applicant replying to our interview invite /
-    // confirmation text. Owner-only boundary (utils/recruiting-thread-scope.js):
-    // the reply lands on the application + the admin-only bell and never
-    // reaches the tech-visible sms_reply bell or any customer automation
-    // below — even when this phone also belongs to a customer (Codex r1 P1
-    // on #4623). Placed AFTER STOP/HELP/START handling so compliance
-    // keywords are always honored first. Fails open to the ordinary path.
-    let recruitingReply = null;
-    try {
-      recruitingReply = await require('../services/recruiting-inbound').matchApplicantReply(From);
-    } catch (e) {
-      // Fail CLOSED (Codex r1 P0): a lookup error must not let an applicant's
-      // reply fall through to customer automation and the tech-visible bell.
-      // Defer through the webhook's retry path — release the claim so the
-      // retry reprocesses, and answer 503 so Twilio redelivers.
-      logger.error(`[recruiting-inbound] match failed (${e.name || 'Error'}${e.code ? ` ${e.code}` : ''}) — deferring inbound for retry`);
-      if (claimOwned && !persisted) await releaseInboundWebhook(MessageSid);
-      return res.status(503).type('text/xml').send('<Response></Response>');
-    }
+    // confirmation text (classified above, before the inbox persist).
+    // Owner-only boundary (utils/recruiting-thread-scope.js): the reply
+    // lands on the application + the admin-only bell and never reaches the
+    // tech-visible sms_reply bell or any customer automation below — even
+    // when this phone also belongs to a customer (Codex r1 P1 on #4623).
+    // Placed AFTER STOP/HELP/START handling so compliance keywords are
+    // always honored first.
     if (recruitingReply) {
       requireInboxMessage();
       try {
@@ -801,16 +806,13 @@ router.post('/sms', async (req, res) => {
           from: From, to: To, body: Body, messageSid: MessageSid, mediaCount: inboundMedia.length,
         });
       } catch (e) {
-        // Fail closed: nothing non-idempotent committed — release the claim
-        // and 503 so Twilio redelivers (same posture as the match failure).
+        // Fail closed: the typed inbox row is already hidden from shared
+        // readers; release the claim and 503 so Twilio redelivers the rest.
         logger.error(`[recruiting-inbound] persistence failed (${e.name || 'Error'}${e.code ? ` ${e.code}` : ''}) — deferring inbound for retry`);
         if (claimOwned && !persisted) await releaseInboundWebhook(MessageSid);
         return res.status(503).type('text/xml').send('<Response></Response>');
       }
       persisted = true;
-      // Retype the unified inbox row so the thread reads as recruiting for
-      // every shared-reader filter, not just the outbound side.
-      await updateByTwilioSid(MessageSid, { message_type: 'job_applicant_reply' }).catch(() => {});
       return res.type('text/xml').send('<Response></Response>');
     }
 
