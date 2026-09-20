@@ -308,3 +308,76 @@ test.each([
 ])('the timing witness requires an actual confirmation clause, not a bare capability: %s', (text, expected) => {
   expect(qualify(text)).toBe(expected);
 });
+
+test.each([
+  ['The bait is safe once dry. The treatment dries in twenty one minutes. The technician will confirm timing.', false],
+  ['The bait is safe once dry. The treatment dries in one hundred minutes. The technician will confirm timing.', false],
+  ['The bait is safe once dry. The treatment dries in two hundred and forty minutes. The technician will confirm timing.', false],
+  ['The bait is safe once dry. The technician will confirm timing.', true],
+])('a spaced compound interval number defeats the once-dry exemption the same as a hyphenated or bare one: %s', (text, expected) => {
+  expect(qualify(text)).toBe(expected);
+});
+
+test.each([
+  ['The bait is safe once dry. The drying time is 30 minutes. The technician will confirm timing.', false],
+  ['The bait is safe once dry. The treatment takes 30 minutes to dry. The technician will confirm timing.', false],
+  ['The bait is safe once dry. Drying takes about an hour. The technician will confirm timing.', false],
+  ['The bait is safe once dry. It needs 30 minutes to dry. The technician will confirm timing.', false],
+  // A quantity attached to an unrelated wait, not tied to drying by "to
+  // dry", never defeats the exemption.
+  ['The bait is safe once dry. It needs 30 minutes to confirm timing. The technician will confirm timing.', true],
+])('a fixed interval stated as a drying-time statement defeats the once-dry exemption: %s', (text, expected) => {
+  expect(qualify(text)).toBe(expected);
+});
+
+test.each([
+  ['I cannot confirm whether the bait is safe for dogs and children. I cannot confirm whether the spray is safe for cats.',
+    'Is the bait safe for dogs and children and the spray safe for cats?', true],
+  ['I cannot confirm whether the bait is safe for cats. I cannot confirm whether the spray is safe for dogs and children.',
+    'Is the bait safe for dogs and children and the spray safe for cats?', false],
+])('a multi-audience proposition still pairs against its own product, not the whole question: %s', (text, question, expected) => {
+  expect(policy.refusesSafetyGuarantee(text, question, 0)).toBe(expected);
+});
+
+test.each([
+  ['Yes. I cannot confirm whether the bait is safe, other than for dogs.', 'Is the bait safe for dogs?', false],
+  ['Yes. I cannot confirm whether the bait is safe, other than for cats.', 'Is the bait safe for dogs?', true],
+])('every restriction connector SAFETY_REFUSAL_RESTRICTION_RE retains is read as an audience exclusion: %s', (text, question, expected) => {
+  expect(policy.refusesSafetyGuarantee(text, question, 0)).toBe(expected);
+});
+
+test.each([
+  ['Yes. I cannot confirm whether it is safe. I cannot confirm whether it is harmless.', 'Are the bait and spray safe?', false],
+  // A single unresolved pronoun still has one unambiguous antecedent when
+  // only one product was ever asked about.
+  ['Yes. I cannot confirm whether it is safe.', 'Is the bait safe?', true],
+])('several product-unscoped refusals cannot collectively retract a multi-product guarantee: %s', (text, question, expected) => {
+  expect(policy.refusesSafetyGuarantee(text, question, 0)).toBe(expected);
+});
+
+test.each([
+  ['Yes. I cannot confirm whether the bait causes harm to dogs.', 'Is the bait safe for dogs?', false],
+  ['Yes. I cannot confirm whether the bait will cause harm to dogs.', 'Is the bait safe for dogs?', false],
+  ['Yes. I cannot confirm whether the bait causes any damage to dogs.', 'Is the bait safe for dogs?', false],
+  ['Yes. I cannot confirm whether the bait will harm dogs.', 'Is the bait safe for dogs?', false],
+])('a refused cause-harm claim counts as an affirmative harm claim alongside the direct harm verbs: %s', (text, question, expected) => {
+  expect(policy.refusesSafetyGuarantee(text, question, -1)).toBe(expected);
+});
+
+test.each([
+  ['Yes. I cannot confirm whether the spray is safe.', 'Are the materials safe?', false],
+  ['Yes. I cannot confirm whether the spray is safe.', 'Are the applications safe?', false],
+  ['Yes. I cannot confirm whether the spray is safe.', 'Are the products safe?', false],
+])('generic scope vocabulary stays aligned with SAFETY_SUBJECT_MODIFIER: %s', (text, question, expected) => {
+  expect(policy.refusesSafetyGuarantee(text, question, -1)).toBe(expected);
+});
+
+test.each([
+  ['The bait is safe once dry. The technician will confirm timing except when busy.', false],
+  ['The bait is safe once dry. The technician will confirm timing unless it rains.', false],
+  ['The bait is safe once dry. The technician will confirm timing if possible.', false],
+  ['The bait is safe once dry. The technician will confirm timing when convenient.', false],
+  ['The bait is safe once dry. The technician will confirm timing.', true],
+])('an exception-qualified technician confirmation is not the required unconditional one: %s', (text, expected) => {
+  expect(qualify(text)).toBe(expected);
+});
