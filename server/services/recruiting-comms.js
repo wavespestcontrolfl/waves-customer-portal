@@ -41,6 +41,15 @@ const INTERVIEW_LINK_PLACEHOLDER = '[interview link]';
 
 // ---------------------------------------------------------------- masking
 
+// Log-safe error summary: Knex query errors interpolate their bindings into
+// err.message (recipient email, message body, the bearer interview URL), so
+// anything that may have thrown from a query logs only its class + code.
+function errorSummary(err) {
+  if (!err) return 'unknown';
+  const name = err.name || 'Error';
+  return err.code ? `${name} ${err.code}` : name;
+}
+
 function maskPhone(phone) {
   const digits = String(phone || '').replace(/\D/g, '').replace(/^1(\d{10})$/, '$1');
   if (digits.length !== 10) return '***';
@@ -258,7 +267,7 @@ async function sendRawEmail({ app, stage, to, subject, html, text }) {
     }).returning('*');
     messageRow = rows && rows[0];
   } catch (err) {
-    logger.warn(`[recruiting-comms] email_messages insert failed (application ${app.id}, stage ${stage}): ${err.message}`);
+    logger.warn(`[recruiting-comms] email_messages insert failed (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
   }
 
   try {
@@ -322,7 +331,7 @@ async function channelEligibility(app) {
       // Preview is informational only — a lookup hiccup must not crash the
       // stage-preview endpoint. The real send still runs the authoritative
       // suppression check inside sendCustomerMessage.
-      logger.warn(`[recruiting-comms] suppression lookup failed for preview (application ${app.id}): ${err.message}`);
+      logger.warn(`[recruiting-comms] suppression lookup failed for preview (application ${app.id}): ${errorSummary(err)}`);
     }
   }
   const email = contact.email
@@ -462,6 +471,7 @@ async function sendStageComms(app, stage, opts = {}) {
 }
 
 module.exports = {
+  errorSummary,
   STAGE_KEYS,
   INTERVIEW_LINK_PLACEHOLDER,
   maskPhone,

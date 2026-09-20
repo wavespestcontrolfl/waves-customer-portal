@@ -27,7 +27,7 @@ const { ipFallbackKey } = require('../middleware/rate-limit-key');
 const { noStore } = require('../middleware/no-store');
 const { createJobApplication } = require('../services/job-applications');
 const { listInterviewSlots, formatSlotLabel } = require('../services/interview-slots');
-const { contactOf, firstNameOf } = require('../services/recruiting-comms');
+const { contactOf, firstNameOf, errorSummary } = require('../services/recruiting-comms');
 const { WAVES_ADDRESS_LINE } = require('../constants/business');
 
 const TOKEN_RE = /^[0-9a-f]{64}$/;
@@ -109,7 +109,7 @@ router.post('/apply', applyIpLimiter, applyPhoneLimiter, async (req, res) => {
           by: 'system',
         });
       })().catch((err) => {
-        logger.error(`[careers] application_received comms failed: ${err.message}`);
+        logger.error(`[careers] application_received comms failed: ${errorSummary(err)}`);
       });
     }
 
@@ -185,7 +185,7 @@ router.get('/interview/:token', interviewLimiter, async (req, res) => {
     if (!app || app.status !== 'interview') return res.status(404).json({ error: 'Not found' });
     return res.json(await interviewViewPayload(app));
   } catch (err) {
-    logger.error(`[careers] interview GET failed: ${err.message}`);
+    logger.error(`[careers] interview GET failed: ${errorSummary(err)}`);
     return res.status(500).json({ error: 'Something went wrong.' });
   }
 });
@@ -267,12 +267,12 @@ router.post('/interview/:token/book', interviewLimiter, async (req, res) => {
         whenLabel: matched.label,
       });
     })().catch((err) => {
-      logger.error(`[careers] interview book comms failed: ${err.message}`);
+      logger.error(`[careers] interview book comms failed: ${errorSummary(err)}`);
     });
 
     return res.json(await interviewViewPayload(updated));
   } catch (err) {
-    logger.error(`[careers] interview book failed: ${err.message}`);
+    logger.error(`[careers] interview book failed: ${errorSummary(err)}`);
     return res.status(500).json({ error: 'Something went wrong.' });
   }
 });
@@ -305,12 +305,12 @@ router.post('/interview/:token/withdraw', interviewLimiter, async (req, res) => 
       const { triggerNotification } = require('../services/notification-triggers');
       await triggerNotification('job_application_withdrawn', { applicationId: app.id });
     })().catch((err) => {
-      logger.error(`[careers] withdraw notification failed: ${err.message}`);
+      logger.error(`[careers] withdraw notification failed: ${errorSummary(err)}`);
     });
 
     return res.json({ ok: true });
   } catch (err) {
-    logger.error(`[careers] interview withdraw failed: ${err.message}`);
+    logger.error(`[careers] interview withdraw failed: ${errorSummary(err)}`);
     return res.status(500).json({ error: 'Something went wrong.' });
   }
 });

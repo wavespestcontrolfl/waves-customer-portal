@@ -154,7 +154,7 @@ router.get('/:id/stage-preview', async (req, res) => {
       interview_url: hasToken ? RecruitingComms.interviewUrlFor(row.interview_token) : null,
     });
   } catch (err) {
-    logger.error(`[admin-careers] stage-preview failed: ${err.message}`);
+    logger.error(`[admin-careers] stage-preview failed: ${RecruitingComms.errorSummary(err)}`);
     res.status(500).json({ error: 'Failed to load preview' });
   }
 });
@@ -232,6 +232,17 @@ router.patch('/:id/status', async (req, res) => {
           });
           updatePayload.status = status;
           updatePayload.status_history = JSON.stringify(history);
+          // Re-entering Interview from a non-blocking stage (rejected,
+          // withdrawn, new, ...): the old booking's slot was released to
+          // other applicants the moment the row left interview/offer, so it
+          // must not come back silently — clear it and let the applicant
+          // re-pick through the link under the booking lock (local audit).
+          if (status === 'interview' && !['interview', 'offer'].includes(row.status)) {
+            updatePayload.interview_mode = null;
+            updatePayload.interview_at = null;
+            updatePayload.interview_end_at = null;
+            updatePayload.interview_booked_at = null;
+          }
         }
 
         let mintedToken = null;
@@ -283,7 +294,7 @@ router.patch('/:id/status', async (req, res) => {
 
     res.json({ application: withoutToken(updated), sent });
   } catch (err) {
-    logger.error(`[admin-careers] status update failed: ${err.message}`);
+    logger.error(`[admin-careers] status update failed: ${RecruitingComms.errorSummary(err)}`);
     res.status(500).json({ error: 'Failed to update application' });
   }
 });

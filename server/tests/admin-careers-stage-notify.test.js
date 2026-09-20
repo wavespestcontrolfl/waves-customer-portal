@@ -226,6 +226,32 @@ describe('PATCH /:id/status', () => {
     );
   });
 
+  test('re-entering interview from a non-blocking stage clears the stale booking (slot was released)', async () => {
+    mockDb.__setRows([appRow({
+      status: 'rejected', interview_token: 'e'.repeat(64), interview_mode: 'phone',
+      interview_at: '2027-03-16T20:00:00.000Z', interview_end_at: '2027-03-16T20:30:00.000Z',
+      interview_booked_at: '2027-03-01T15:00:00.000Z',
+    })]);
+    const { status } = await patch('aaaaaaaa-0000-4000-8000-000000000001', { status: 'interview' });
+    expect(status).toBe(200);
+    const row = mockDb.__rows()[0];
+    expect(row.status).toBe('interview');
+    expect(row.interview_booked_at).toBeNull();
+    expect(row.interview_at).toBeNull();
+    expect(row.interview_mode).toBeNull();
+    expect(row.interview_token).toBe('e'.repeat(64)); // the link itself is kept
+  });
+
+  test('offer -> interview keeps the booking (offer still blocks the slot)', async () => {
+    mockDb.__setRows([appRow({
+      status: 'offer', interview_token: 'f'.repeat(64), interview_mode: 'phone',
+      interview_at: '2027-03-16T20:00:00.000Z', interview_booked_at: '2027-03-01T15:00:00.000Z',
+    })]);
+    const { status } = await patch('aaaaaaaa-0000-4000-8000-000000000001', { status: 'interview' });
+    expect(status).toBe(200);
+    expect(mockDb.__rows()[0].interview_booked_at).toBe('2027-03-01T15:00:00.000Z');
+  });
+
   test('same status + note (no resend) -> history entry appended, nothing sent', async () => {
     mockDb.__setRows([appRow({ status: 'interview', interview_token: 'c'.repeat(64) })]);
     const { status, body } = await patch('aaaaaaaa-0000-4000-8000-000000000001', { status: 'interview', note: 'left a voicemail' });
