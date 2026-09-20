@@ -267,6 +267,11 @@ async function executeExpandedTool(toolName, input, contextCustomerId, context =
         amount: parseFloat(invoice.total),
         payUrl: sendResult?.payUrl,
         status: invoice.status,
+        // Nothing was texted (the invoice settled to zero-due under the
+        // send claim, now 'prepaid') — an explicit signal so the assistant
+        // never tells the customer a link went out (Codex round-1 P1
+        // #4131), distinct from an ordinary successful text.
+        ...(sendResult?.settled_zero_due && { settledZeroDue: true }),
         ...(!sent && { error: sendResult?.code || sendResult?.reason || sendResult?.email?.error || 'send_failed' }),
       };
     }

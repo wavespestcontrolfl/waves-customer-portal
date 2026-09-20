@@ -209,4 +209,59 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
       status: 'sending', send_claim_token: claimToken, scheduled_send_attempts: 1, scheduled_send_error: null,
     });
   });
+
+  test('the attempt cap holds under concurrency: two stale-snapshot passes from attempts 4 end at exactly 5, not 6 (Codex round-1 P1)', async () => {
+    // Without the cap predicate on THIS update's own WHERE, both passes
+    // read the row before either committed (the stale snapshot models
+    // that), and both would match — pushing a temporarily-blocked invoice
+    // past the five-attempt cap. The predicate is evaluated under the same
+    // row lock as the increment, so the SECOND pass's UPDATE (issued after
+    // the first commits) sees attempts already at 5 and matches nothing.
+    await trx('invoices').where({ id: invoiceId }).update({
+      status: 'scheduled', scheduled_send_at: new Date(Date.now() - 60000), scheduled_send_attempts: 4,
+    });
+    const staleSnapshot = await read(); // captured ONCE — attempts: 4
+    const zeroDue = { ok: false, error: 'nothing due — retry shortly' };
+
+    await Invoice._recordZeroDueSchedulingOutcome(zeroDue, staleSnapshot);
+    await Invoice._recordZeroDueSchedulingOutcome(zeroDue, staleSnapshot);
+
+    expect((await read()).scheduled_send_attempts).toBe(5); // capped, not 6
+  });
+
+  test('an invoice linked only by service_record_id (no scheduled_service_id) is settled zero-due, never claimed (Codex round-1 P1)', async () => {
+    // Most post-completion invoices carry only service_record_id
+    // (migration 20260420000002) — scheduled_service_id alone silently
+    // excluded them from this guard.
+    await trx('invoices').where({ id: invoiceId }).update({ scheduled_service_id: null });
+    const recordId = randomUUID();
+    await trx('service_records').insert({
+      id: recordId, customer_id: customerId, scheduled_service_id: visitId,
+      service_type: 'Pest Control', service_date: '2040-03-04', status: 'completed',
+    });
+    await trx('invoices').where({ id: invoiceId }).update({ service_record_id: recordId });
+
+    await expect(Invoice.claimInvoiceForSend(invoiceId)).rejects.toMatchObject({ code: 'zero_due' });
+
+    expect(await read()).toMatchObject({ status: 'prepaid', prepaid_by: 'system:zero_balance', send_claim_token: null });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a zero-due invoice on a cancelled (never-ran) visit is voided through the terminal-visit branch, not retried as a settlement refusal (Codex round-1 P1)', async () => {
+    await trx('scheduled_services').where({ id: visitId }).update({ status: 'cancelled' });
+    // total/credit_applied stay 150/150 from beforeEach — genuinely zero-due.
+    await trx('invoices').where({ id: invoiceId }).update({
+      status: 'scheduled', scheduled_send_at: new Date(Date.now() - 60000), scheduled_send_attempts: 1,
+    });
+
+    const result = await Invoice.processScheduledSends();
+
+    expect(result).toEqual({ sent: 0, failed: 0, deferred: 0 });
+    const row = await read();
+    // Voided, not left scheduled with a spent attempt — the terminal-visit
+    // cleanup ran instead of the generic settlement-refusal path.
+    expect(row.status).toBe('void');
+    expect(row.scheduled_send_attempts).toBe(1); // unchanged — no attempt spent
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
 });

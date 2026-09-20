@@ -1627,6 +1627,36 @@ describe('prb-r18', () => {
     expect(unsure).toMatch(/do NOT say the account is settled/);
   });
 
+  test('a zero-due settlement under the send claim is reported honestly — never "the payment link was texted", never a delivery_unknown stamp (Codex round-1 P1)', async () => {
+    // Ruling (#4131 slice 4): sendViaSMS now RESOLVES { sent: false, ok:
+    // true, code: 'zero_due', settled_zero_due: true } instead of throwing
+    // — before this fix, that resolved shape's ok:true fell into the
+    // generic sent||ok success branch, wrongly telling the customer a
+    // payment link was texted when nothing was sent.
+    process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const { convo } = makeConvo();
+    await verifyAndDisclose(convo);
+    convo._turns.push({ role: 'caller', text: 'yes please text it', at: Date.now() });
+    InvoiceService.sendViaSMS.mockResolvedValueOnce({
+      sent: false, ok: true, code: 'zero_due', settled_zero_due: true, reason: 'Nothing is due on this invoice',
+    });
+
+    const out = await convo._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' });
+
+    expect(out).not.toMatch(/texted/i);
+    expect(out).toMatch(/nothing was due/i);
+    expect(convo.payLinkSent).toBe(false); // latch re-opened — no contact was made
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'ledger-sms-1' }),
+      expect.objectContaining({ code: 'zero_due', never_contacted: true }),
+    );
+    // The old (pre-fix) throw path stamped delivery_unknown on the ledger
+    // via a raw db() update in the catch block — a resolved success must
+    // never reach that catch at all.
+    expect(db).not.toHaveBeenCalledWith('collections_contact_ledger');
+  });
+
   test('the pay-link latch closes BEFORE the provider await — a concurrent attempt cannot double-send', async () => {
     process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
     process.env.GATE_COLLECTIONS_POLICY = 'true';

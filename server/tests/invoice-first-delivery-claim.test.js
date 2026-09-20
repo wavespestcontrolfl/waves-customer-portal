@@ -465,4 +465,19 @@ describe('claimInvoiceForSend — zero-due visit invoice guard (#4131 slice 4)',
     expect(caught).toBe(boom);
     expect(caught.deliveryNeverAttempted).toBeUndefined();
   });
+
+  test('sendViaSMS resolves a structured, non-throwing success when the under-claim race settles the invoice zero-due (Codex round-1 P1)', async () => {
+    // Ruling: mirrors the covered_by_credit precedent — direct callers
+    // (collections-conversation.js, the AI-assistant send tool, batch
+    // sendImmediately, the from-service SMS path) treat ANY thrown error
+    // from sendViaSMS as an ambiguous delivery outcome; a genuine
+    // settlement success must never reach them as a throw.
+    makeDb(zeroDueRow());
+    settleSpy.mockResolvedValue({ settled: true, invoice: { ...zeroDueRow(), status: 'prepaid' } });
+
+    const result = await InvoiceService.sendViaSMS(INVOICE_ID);
+
+    expect(result).toMatchObject({ sent: false, ok: true, code: 'zero_due', settled_zero_due: true });
+    expect(typeof result.reason).toBe('string');
+  });
 });
