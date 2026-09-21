@@ -341,8 +341,38 @@ describe('saveLookup — vacant-parcel TTL (write side)', () => {
   });
 });
 
+// Vacant roll + bare-land vision zeros with a LISTING size filling the
+// dimensions: detectUnassessedVacantParcel no longer fires, but the roll /
+// tiles catching up is still the only fix — same short TTL.
+function listedVacantRecord() {
+  return vacantRecord({ squareFootage: 2400, propertyType: 'Single Family', _fieldEvidence: { squareFootage: { sourceType: 'listing' } } });
+}
+const BARE_DIRT_AI = { confidenceScore: 68, estimatedTurfSf: 0, imperviousSurfacePercent: 0, imperviosSurfacePercent: 0 };
+
+describe('saveLookup — vacant-roll bare-land imagery shares the short TTL (write side)', () => {
+  function daysUntil(expiresAt) {
+    return (new Date(expiresAt).getTime() - Date.now()) / (24 * 60 * 60 * 1000);
+  }
+
+  it('caches a listed-size vacant-roll record with bare-land zeros for ~21 days', async () => {
+    const writes = [];
+    mockDbHandler = () => fakeTable({ writes });
+    await saveLookup('100 Main St', { propertyRecord: listedVacantRecord(), aiAnalysis: BARE_DIRT_AI, satellite: { lat: 27.58, lng: -82.42 }, meta: { lookupMs: 1000 } });
+    expect(daysUntil(writes[0].expires_at)).toBeGreaterThan(20);
+    expect(daysUntil(writes[0].expires_at)).toBeLessThan(22);
+  });
+
+  it('keeps the full TTL when the imagery already shows a lawn', async () => {
+    const writes = [];
+    mockDbHandler = () => fakeTable({ writes });
+    const lawn = { ...BARE_DIRT_AI, estimatedTurfSf: 3200, imperviousSurfacePercent: 35, imperviosSurfacePercent: 35 };
+    await saveLookup('100 Main St', { propertyRecord: listedVacantRecord(), aiAnalysis: lawn, satellite: { lat: 27.58, lng: -82.42 }, meta: { lookupMs: 1000 } });
+    expect(daysUntil(writes[0].expires_at)).toBeGreaterThan(179);
+  });
+});
+
 describe('getCachedLookup — vacant-parcel TTL (read side)', () => {
-  function cachedRow({ record, savedDaysAgo }) {
+  function cachedRow({ record, savedDaysAgo, aiAnalysis = null }) {
     const savedAt = savedDaysAgo == null
       ? null
       : new Date(Date.now() - savedDaysAgo * 24 * 60 * 60 * 1000);
@@ -355,8 +385,16 @@ describe('getCachedLookup — vacant-parcel TTL (read side)', () => {
       lng: -82.42,
       data_saved_at: savedAt,
       verified_overrides: {},
+      ai_analysis: aiAnalysis,
     };
   }
+
+  it('treats a listed-size vacant-roll row with bare-land zeros older than the short TTL as a miss', async () => {
+    mockDbHandler = () => fakeTable({ row: cachedRow({ record: listedVacantRecord(), savedDaysAgo: 30, aiAnalysis: BARE_DIRT_AI }) });
+    expect(await getCachedLookup('100 Main St')).toBeNull();
+    mockDbHandler = () => fakeTable({ row: cachedRow({ record: listedVacantRecord(), savedDaysAgo: 3, aiAnalysis: BARE_DIRT_AI }) });
+    expect(await getCachedLookup('100 Main St')).toBeTruthy();
+  });
 
   it('treats a vacant-parcel row older than the short TTL as a miss despite its stored expiry', async () => {
     mockDbHandler = () => fakeTable({ row: cachedRow({ record: vacantRecord(), savedDaysAgo: 30 }) });

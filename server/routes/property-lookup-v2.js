@@ -4804,6 +4804,16 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     treeShrubDensity,
     mosquitoPressure,
     measuredTurfSf: p.measuredTurfSf,
+    // Unobservable-imagery profiles (vacant-roll bare land / stale tiles):
+    // the confirmed outdoor entry that clears needsTurfManualConfirmation
+    // must also be what MOSQUITO prices on — otherwise the calculator
+    // rebuilds treatable area from lot − footprint − hardscape, the exact
+    // default geometry the gate exists to block (Codex r3 P1 #4639).
+    // Confirmed turf plus the operator-entered bed area (the vision bed
+    // reading was discarded with the rest).
+    ...(p.turfObservation === 'unobservable' && measurementValue(p.measuredTurfSf, p.lawnSqFt) > 0
+      ? { mosquitoTreatableSqFt: measurementValue(p.measuredTurfSf, p.lawnSqFt) + (Number(p.estimatedBedAreaSf) > 0 ? Number(p.estimatedBedAreaSf) : 0) }
+      : {}),
     estimatedTurfSf: p.estimatedTurfSf,
     // Turf provenance — a county-prior seed or a parcel-clamped vision number
     // must stay distinguishable from a real satellite measurement all the way

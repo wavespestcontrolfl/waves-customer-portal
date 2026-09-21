@@ -297,6 +297,48 @@ describe('buildEnrichedProfile stale-imagery sanitization', () => {
   });
 });
 
+describe('mosquito prices on the confirmed outdoor area when imagery is unobservable', () => {
+  const { calculatePropertyProfile } = require('../services/pricing-engine/property-calculator');
+
+  function vacantRollRecord() {
+    return { formattedAddress: '000 Future St, Parrish, FL 34219', county: 'Manatee', lotSize: 6985, _parcel: { landUseDescription: 'Vacant Residential Platted (1554)', dorUseCode: '00' } };
+  }
+
+  test('the confirmed turf (+ entered bed area) becomes mosquitoTreatableSqFt through translate and the calculator', () => {
+    const profile = { ...buildEnrichedProfile(vacantRollRecord(), bareDirtAi(), 27.58, -82.42), homeSqFt: 2400, stories: 1, measuredTurfSf: 4000, estimatedBedAreaSf: 300 };
+    const v1 = translateV2CallToV1Input(profile, ['MOSQUITO'], {});
+    expect(v1.mosquitoTreatableSqFt).toBe(4300);
+    const priced = calculatePropertyProfile(v1);
+    expect(priced.mosquitoTreatableSqFt).toBe(4300);
+    // Not the lot-geometry default the gate exists to block.
+    expect(priced.mosquitoTreatableSqFt).not.toBe(Math.max(0, 6985 - priced.footprint - priced.hardscape));
+  });
+
+  test('a normal profile never carries an explicit area — the calculator keeps its lot-geometry derivation', () => {
+    const lawn = { ...bareDirtAi(), estimatedTurfSf: 3200, imperviousSurfacePercent: 35, imperviosSurfacePercent: 35 };
+    const profile = { ...buildEnrichedProfile(vacantRollRecord(), lawn, 27.58, -82.42), homeSqFt: 2400, stories: 1, measuredTurfSf: 4000 };
+    const v1 = translateV2CallToV1Input(profile, ['MOSQUITO'], {});
+    expect(v1.mosquitoTreatableSqFt).toBeUndefined();
+    const priced = calculatePropertyProfile(v1);
+    expect(priced.mosquitoTreatableSqFt).toBe(Math.max(0, 6985 - priced.footprint - priced.hardscape));
+  });
+
+  test('end to end: the pricing engine prices mosquito on the explicit area, not lot geometry', () => {
+    const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
+    const base = { homeSqFt: 2400, stories: 1, lotSqFt: 6985, services: { mosquito: { tier: 'monthly12' } } };
+    const derived = generateEstimate(base);
+    const explicit = generateEstimate({ ...base, mosquitoTreatableSqFt: 1500 });
+    expect(explicit.property.mosquitoTreatableSqFt).toBe(1500);
+    expect(derived.property.mosquitoTreatableSqFt).toBe(Math.max(0, 6985 - derived.property.footprint - derived.property.hardscape));
+    expect(explicit.property.mosquitoTreatableSqFt).not.toBe(derived.property.mosquitoTreatableSqFt);
+  });
+
+  test('the stale-imagery (county-home) profile takes the same path', () => {
+    const profile = { ...buildEnrichedProfile(newBuildRecord(), bareDirtAi(), 27.58, -82.42), measuredTurfSf: 3500 };
+    expect(translateV2CallToV1Input(profile, ['OT_MOSQUITO'], {}).mosquitoTreatableSqFt).toBe(3500);
+  });
+});
+
 describe('detectVacantRollBareLandImagery', () => {
   const { detectVacantRollBareLandImagery } = require('../services/property-lookup/ai-property-lookup');
   const vacant = { lotSize: 6985, _parcel: { landUseDescription: 'Vacant Residential Platted (1554)', dorUseCode: '00' } };

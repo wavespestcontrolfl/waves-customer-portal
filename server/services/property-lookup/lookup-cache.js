@@ -29,7 +29,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { normalizeLeadAddress } = require('../../utils/address-normalizer');
-const { buildPropertyDataQuality, detectUnassessedVacantParcel, detectStaleImageryTurfConflict, hasCountyEvidence, hasCountyPricingCore, hasUnconfirmedCountyEvidence, isPreMarkerParkRecord } = require('./ai-property-lookup');
+const { buildPropertyDataQuality, detectUnassessedVacantParcel, detectStaleImageryTurfConflict, detectVacantRollBareLandImagery, hasCountyEvidence, hasCountyPricingCore, hasUnconfirmedCountyEvidence, isPreMarkerParkRecord } = require('./ai-property-lookup');
 
 const DEFAULT_TTL_DAYS = 180;
 // Unassessed vacant parcel (vacant roll parcel, no building record — often
@@ -263,11 +263,16 @@ async function getCachedLookup(address) {
     // read-side short TTL for the same reason: fresher tiles are the only
     // real fix, and the rows poisoned before this shipped carry the 180-day
     // expiry.
+    // The vacant-roll bare-land imagery state joins them: when a listing or
+    // verified size fills the dimensions the vacant-parcel branch no longer
+    // fires, yet the roll/tiles catching up is still the only real fix.
     const shortTtlReason = detectUnassessedVacantParcel(row.property_record)
       ? 'vacant-parcel'
       : detectStaleImageryTurfConflict(row.property_record, row.ai_analysis)
         ? 'stale-imagery-conflict'
-        : !hasCountyPricingCore(row.property_record) ? 'missing-pricing-dimensions' : null;
+        : detectVacantRollBareLandImagery(row.property_record, row.ai_analysis)
+          ? 'vacant-roll-bare-land-imagery'
+          : !hasCountyPricingCore(row.property_record) ? 'missing-pricing-dimensions' : null;
     if (shortTtlReason) {
       const savedAt = row.data_saved_at ? new Date(row.data_saved_at).getTime() : 0;
       const maxAgeMs = vacantParcelTtlDays() * 24 * 60 * 60 * 1000;
@@ -495,8 +500,9 @@ async function saveLookup(address, result) {
     // Stale-imagery conflicts share the vacant-parcel short TTL: both are
     // "the imagery/roll will catch up" windows, not stable property facts.
     const staleImagery = Boolean(detectStaleImageryTurfConflict(record, result.aiAnalysis));
+    const vacantBareLand = Boolean(detectVacantRollBareLandImagery(record, result.aiAnalysis));
     const rollMiss = !hasCountyEvidence(record);
-    const ttlDays = (vacantParcel || staleImagery || !hasCountyPricingCore(record)) ? vacantParcelTtlDays()
+    const ttlDays = (vacantParcel || staleImagery || vacantBareLand || !hasCountyPricingCore(record)) ? vacantParcelTtlDays()
       : rollMiss ? rollMissTtlDays()
       : cacheTtlDays();
     const expiresAt = new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000);

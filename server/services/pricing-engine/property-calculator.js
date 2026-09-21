@@ -627,10 +627,15 @@ function calculatePropertyProfile(input) {
   // the smallest bucket (codex P2) — undefined lets the ACRE proxy carry
   // the same 43,560 sq ft it always has. Whether missing-lot mosquito
   // should instead fail cheap or hard quote-require is an owner policy call.
-  const mosquitoTreatableSqFt = hasFiniteLot
-    ? Math.max(0, input.lotSqFt - footprint - hardscape)
-    : undefined;
-  const mosquitoLotCategory = hasFiniteLot
+  // An explicit positive treatable area (the confirmed outdoor entry on an
+  // unobservable-imagery profile) outranks the lot-geometry derivation —
+  // that derivation is exactly the unverified default the confirmation gate
+  // blocks, so honoring it here is what makes the gate mean something.
+  const explicitMosquitoTreatableSqFt = toPositiveNumber(input.mosquitoTreatableSqFt);
+  const mosquitoTreatableSqFt = explicitMosquitoTreatableSqFt > 0
+    ? explicitMosquitoTreatableSqFt
+    : (hasFiniteLot ? Math.max(0, input.lotSqFt - footprint - hardscape) : undefined);
+  const mosquitoLotCategory = mosquitoTreatableSqFt !== undefined
     ? getMosquitoTreatableCategory(mosquitoTreatableSqFt, lotCategory)
     : 'ACRE';
 
