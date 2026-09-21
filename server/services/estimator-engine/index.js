@@ -514,14 +514,15 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
     // enriched.subdivisionMedian) — reuse it rather than hitting the county
     // layer a second time. The direct dig remains only for rows the lookup
     // served without a stamp (cached before the stamp existed).
-    // The profile is the gate: when the lookup built one, its
-    // subdivisionMedian (null for a unit-inside-a-building lookup, a thin
-    // sample, or a parcel that stopped reading as unassessed) is final. The
-    // raw record stamp is consulted only when no profile came back at all.
-    // Same sample floor the admin profile applies (subdivisionMedianEstimate)
-    // and source arbitration checks again: a below-floor stamp is "no stamp".
+    // The profile is the ONLY reader of the lookup's raw _subdivisionMedian
+    // stamp: enriched.subdivisionMedian is null for a unit-inside-a-building
+    // lookup, a thin sample, an unconfirmed address, or a parcel that stopped
+    // reading as unassessed, and every one of those gates must hold here
+    // too — so the engine never touches the raw stamp itself. No profile →
+    // the pre-existing direct dig. Same sample floor the profile applies
+    // (subdivisionMedianEstimate) and source arbitration checks again.
     const { lookupSubdivisionMedianLivingSqft, SUBDIVISION_MEDIAN_MIN_SAMPLES } = require('../property-lookup/county-parcel-gis');
-    const stamped = enriched ? (enriched.subdivisionMedian || null) : (propertyRecord?._subdivisionMedian || null);
+    const stamped = enriched?.subdivisionMedian || null;
     if (Number(stamped?.medianSqft) > 0 && Number(stamped?.sampleCount) >= SUBDIVISION_MEDIAN_MIN_SAMPLES) {
       // Normalized to the arbitration contract ({ medianSqft, sampleCount })
       // so the profile's and the helper's extra fields never diverge here.

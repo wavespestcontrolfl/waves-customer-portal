@@ -243,6 +243,15 @@ describe('buildFieldVerifyFlags — plat-median sq ft copy', () => {
     expect(flags.find((f) => f.field === 'vacantParcel')).toBeTruthy();
   });
 
+  it('uses the median-free copy when the address audit could not confirm the parcel', () => {
+    const audit = { snappedRecord: { typed: '1010', record: '1012' }, hasExactMatch: false, streetExists: true, county: 'Manatee', nearestNumbers: [] };
+    const flags = buildFieldVerifyFlags(vacantRecord({ _subdivisionMedian: platMedianStamp() }), null, audit);
+    expect(flags.some((f) => f.field === 'address')).toBe(true);
+    const sqft = flags.find((f) => f.field === 'homeSqFt');
+    expect(sqft.reason).toContain('defaults to 2,000');
+    expect(JSON.stringify(flags)).not.toMatch(/3,071|174 assessed/);
+  });
+
   it('omits the range when the stamp has none and keeps the default copy for a thin sample', () => {
     const noRange = buildFieldVerifyFlags(vacantRecord({ _subdivisionMedian: platMedianStamp({ minSqft: null, maxSqft: null }) }), null, null)
       .find((f) => f.field === 'homeSqFt');

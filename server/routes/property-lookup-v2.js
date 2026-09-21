@@ -3828,7 +3828,10 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   // Home sq ft has no source (client + lead automation fall back to a flat
   // 2,000 sq ft default — there is no lot-size estimator, so say so).
   if (rc && !rc.squareFootage && rc.lotSize) {
-    const platMedian = vacantParcel ? subdivisionMedianEstimate(rc) : null;
+    // Same gate as the profile's subdivisionMedian: an unconfirmed address
+    // (address flags are pushed above) gets the median-free copy too.
+    const platMedian = vacantParcel && !flags.some((flag) => flag?.field === 'address')
+      ? subdivisionMedianEstimate(rc) : null;
     flags.push({
       field: 'homeSqFt',
       reason: vacantParcel

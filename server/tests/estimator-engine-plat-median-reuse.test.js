@@ -58,14 +58,14 @@ describe('gatherPropertySignals — plat median reuse', () => {
     expect(lookupSubdivisionMedianLivingSqft).not.toHaveBeenCalled();
   });
 
-  it('falls back to the record stamp only when the lookup returned NO profile', async () => {
+  it('never reads the raw record stamp — with no profile it runs the direct dig', async () => {
     lookupResult.current = {
       propertyRecord: vacantRecord({ _subdivisionMedian: { medianSqft: 3071, sampleCount: 174, subdivisionQueried: PLAT, county: 'Manatee' } }),
       enriched: null,
     };
     const signals = await gatherPropertySignals(CONTEXT, { persistLookup: false });
-    expect(signals.subdivisionMedian).toMatchObject({ medianSqft: 3071, sampleCount: 174 });
-    expect(lookupSubdivisionMedianLivingSqft).not.toHaveBeenCalled();
+    expect(lookupSubdivisionMedianLivingSqft).toHaveBeenCalledTimes(1);
+    expect(signals.subdivisionMedian).toMatchObject({ medianSqft: 2277, sampleCount: 9 });
   });
 
   it('respects a profile that nulled the median (unit-inside-a-building lookup) despite a record stamp', async () => {
@@ -86,10 +86,10 @@ describe('gatherPropertySignals — plat median reuse', () => {
     expect(signals.subdivisionMedian).toMatchObject({ medianSqft: 2277, sampleCount: 9 });
   });
 
-  it('treats a below-floor record stamp as no stamp — never prices on a thin sample', async () => {
+  it('treats a below-floor profile median as no stamp — never prices on a thin sample', async () => {
     lookupResult.current = {
       propertyRecord: vacantRecord({ _subdivisionMedian: { medianSqft: 3071, sampleCount: 7, subdivisionQueried: PLAT, county: 'Manatee' } }),
-      enriched: { homeSqFt: 0, unassessedVacantParcel: true, subdivisionMedian: null },
+      enriched: { homeSqFt: 0, unassessedVacantParcel: true, subdivisionMedian: { medianSqft: 3071, sampleCount: 7 } },
     };
     lookupSubdivisionMedianLivingSqft.mockResolvedValueOnce(null);
     const signals = await gatherPropertySignals(CONTEXT, { persistLookup: false });
