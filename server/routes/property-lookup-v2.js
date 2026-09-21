@@ -16,7 +16,7 @@ const router = express.Router();
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
-const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality, detectUnassessedVacantParcel, detectMultiSitusMasterParcel, detectStaleImageryTurfConflict, COUNTY_LOT_SQFT_MAX } = require('../services/property-lookup/ai-property-lookup');
+const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality, detectUnassessedVacantParcel, detectVacantRollBareLandImagery, detectMultiSitusMasterParcel, detectStaleImageryTurfConflict, COUNTY_LOT_SQFT_MAX } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
 const { isInServiceAreaBox } = require('../services/service-area');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
@@ -581,7 +581,10 @@ async function performPropertyLookupCore(address, options = {}) {
         // result, the way the construction-permit read above does.
         const diag = {};
         const median = await lookupSubdivisionMedianLivingSqft(
-          { county: parcelMeta.county, subdivision: platName },
+          // Lot area narrows the sample to the parcel's lot series when
+          // enough neighbors share it (plats mix 40'/52'/62' lots, each
+          // with its own plans).
+          { county: parcelMeta.county, subdivision: platName, lotSqft: result.propertyRecord.lotSize || parcelMeta.lotSqft || null },
           { timeoutMs: options.prioritizeAccuracy ? SUBDIVISION_MEDIAN_TIMEOUT_MS : Math.min(medianBudgetMs, SUBDIVISION_MEDIAN_TIMEOUT_MS), diag },
         ).catch((err) => {
           diag.failed = true;
@@ -1782,7 +1785,9 @@ function subdivisionMedianEstimate(rc) {
     maxSqft: positive(stamped.maxSqft),
     subdivision: stamped.subdivisionQueried || null,
     county: stamped.county || null,
-    sourceLabel: `median of ${sampleCount.toLocaleString('en-US')} assessed homes in this plat`,
+    // Sample narrowed to the parcel's lot series (see county-parcel-gis).
+    lotBanded: stamped.lotBanded === true,
+    sourceLabel: `median of ${sampleCount.toLocaleString('en-US')} assessed homes ${stamped.lotBanded === true ? 'on similar-size lots ' : ''}in this plat`,
   };
 }
 
@@ -1831,6 +1836,17 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // Running here (not in the lookup pipeline) means cache-hit rebuilds
   // sanitize rows poisoned before this shipped, no backfill needed.
   const staleImageryConflict = detectStaleImageryTurfConflict(rc, ai);
+  // Vacant-roll twin: no building on the roll AND bare-land vision zeros —
+  // the dirt reading must not become the lawn's measurement either.
+  const vacantBareLandImagery = staleImageryConflict ? null : detectVacantRollBareLandImagery(rc, ai);
+  const imageryUnobservable = Boolean(staleImageryConflict || vacantBareLandImagery);
+  if (vacantBareLandImagery) {
+    ai = discardVisionAreaFields(ai);
+    logger.info('[property-lookup] vacant-roll bare-land imagery — vision area fields discarded', {
+      county: rc?.county || null,
+      lotSqFt: rc?.lotSize || null,
+    });
+  }
   if (staleImageryConflict) {
     ai = discardVisionAreaFields(ai);
     // Fires on every profile build for a conflicted address (fresh + cache
@@ -2010,7 +2026,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // ratio prior would just trade one unsupported point estimate for
     // another — the default lot ladder (with its verify flag) is the
     // documented fallback there.
-    && !staleImageryConflict
+    && !imageryUnobservable
     && !turfCountyPriorDisabled()
     && countyCeiling
     && countyCeiling.turfSf >= TURF_COUNTY_PRIOR_MIN_CEILING_SF
@@ -2038,6 +2054,13 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     fieldVerifyFlags.push({
       field: 'estimatedTurfSf',
       reason: `Satellite analysis conflicts with county records — the imagery shows undeveloped land but the county assesses a ${staleImageryConflict.countySqFt.toLocaleString()} sq ft home${staleImageryConflict.yearBuilt ? ` (built ${staleImageryConflict.yearBuilt})` : ''}. Imagery is likely stale or misaligned; its turf/hardscape estimates were discarded. Confirm treatable lawn area before pricing.`,
+      priority: 'HIGH',
+    });
+  }
+  if (vacantBareLandImagery) {
+    fieldVerifyFlags.push({
+      field: 'estimatedTurfSf',
+      reason: `Satellite imagery shows bare land and the county roll shows ${vacantBareLandImagery.landUseDescription || 'vacant land'} with no building. If a home is standing, the imagery predates it — its turf/hardscape estimates were discarded rather than priced as a no-lawn property. Confirm treatable lawn area before pricing.`,
       priority: 'HIGH',
     });
   }
@@ -2317,8 +2340,10 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // confirm-before-pricing posture. Absent on normal profiles; an explicit
     // vision 0 with the structure visible is a real measurement and never
     // carries this.
-    turfObservation: staleImageryConflict ? 'unobservable' : undefined,
-    turfReason: staleImageryConflict ? 'county_structure_vision_bare_land_conflict' : undefined,
+    turfObservation: imageryUnobservable ? 'unobservable' : undefined,
+    turfReason: staleImageryConflict
+      ? 'county_structure_vision_bare_land_conflict'
+      : (vacantBareLandImagery ? 'vacant_roll_bare_land_imagery' : undefined),
     countyTurfPriorSf,
     // TRUSTED ceiling (county-complete + county-sourced dims) — feeds the
     // exceeds-ceiling review reason AND rides into the pricing engine, where
@@ -2506,7 +2531,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // guard fired, and re-asks /turf-preview (same computation) as the form
   // is edited. Fail-open: a preview miss leaves the client on its own
   // heuristic rather than breaking the profile.
-  if (staleImageryConflict) {
+  if (imageryUnobservable) {
     try {
       const previewProfile = {
         ...profile,
@@ -2817,7 +2842,9 @@ function needsTurfManualConfirmation(profile = {}, selectedServices = [], option
       turfObservation: 'unobservable',
       estimatedTurfSf: 0,
       reasons: turfRiskReasons(profile),
-      message: 'Satellite imagery conflicts with county records for this property, so there is no reliable turf estimate. Confirm treatable lawn area before generating lawn pricing.',
+      message: profile.turfReason === 'vacant_roll_bare_land_imagery'
+        ? 'Satellite imagery shows bare land and the county roll shows no building yet, so there is no reliable turf estimate. Confirm treatable lawn area before generating lawn pricing.'
+        : 'Satellite imagery conflicts with county records for this property, so there is no reliable turf estimate. Confirm treatable lawn area before generating lawn pricing.',
     };
   }
 
@@ -3864,7 +3891,7 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
       field: 'homeSqFt',
       reason: vacantParcel
         ? (platMedian
-          ? `Home sq ft not on the county roll (vacant parcel — possibly new construction). Prefilled with the median of ${platMedian.sampleCount.toLocaleString('en-US')} assessed homes in this plat, ${platMedian.medianSqft.toLocaleString('en-US')} sq ft${platMedian.minSqft && platMedian.maxSqft ? ` (range ${platMedian.minSqft.toLocaleString('en-US')}–${platMedian.maxSqft.toLocaleString('en-US')})` : ''} — confirm the size with the customer before pricing`
+          ? `Home sq ft not on the county roll (vacant parcel — possibly new construction). Prefilled with the median of ${platMedian.sampleCount.toLocaleString('en-US')} assessed homes ${platMedian.lotBanded ? 'on similar-size lots ' : ''}in this plat, ${platMedian.medianSqft.toLocaleString('en-US')} sq ft${platMedian.minSqft && platMedian.maxSqft ? ` (range ${platMedian.minSqft.toLocaleString('en-US')}–${platMedian.maxSqft.toLocaleString('en-US')})` : ''} — confirm the size with the customer before pricing`
           : VACANT_SQFT_FLAG_COPY)
         : 'Home sq ft missing from records — estimator defaults to 2,000 sq ft; verify before pricing',
       priority: 'HIGH'

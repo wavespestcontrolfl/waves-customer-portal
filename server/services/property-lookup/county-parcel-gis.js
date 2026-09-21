@@ -862,10 +862,15 @@ async function queryStreetSitusAddresses(county, streetText, options = {}) {
 // fail-open: any miss returns null and the caller falls to its next source.
 // Charlotte's ownership layer carries no living-area figure — unsupported.
 const SUBDIVISION_MEDIAN_FIELDS = {
-  Manatee: { nameField: 'PAR_SUBDIV_NAME', livingField: 'BLDGS_SQFT_LIVING' },
-  Sarasota: { nameField: 'subd', livingField: 'living' },
+  Manatee: { nameField: 'PAR_SUBDIV_NAME', livingField: 'BLDGS_SQFT_LIVING', lotField: 'LAND_SQFT_CAMA' },
+  Sarasota: { nameField: 'subd', livingField: 'living', lotField: 'lsqft' },
 };
 const SUBDIVISION_MEDIAN_MIN_SAMPLES = 8;
+// Plats mix lot series (40'/52'/62' frontages), each with its own plans, so
+// the whole-plat range runs wide. When the subject parcel's lot area is
+// known, neighbors within this tolerance of it are the better sample —
+// used only when they clear the same floor; otherwise the whole plat.
+const SUBDIVISION_LOT_BAND_TOLERANCE = 0.10;
 
 // Recorded plat names carry phase/unit suffixes ("PARRISH LAKES PH IIE
 // PB81/164"); when the exact phase has too few assessed homes the query
@@ -886,12 +891,21 @@ const SUBDIVISION_MAX_PAGES = 5;
 // deadline left to be worth sending.
 const SUBDIVISION_MIN_QUERY_MS = 250;
 
-async function querySubdivisionLivingSqft(county, whereName, deadlineMs) {
+// Rows: [{ living, lot }] sorted by living area. `exact` matches the
+// recorded plat name as-is (the subject's own phase); otherwise the name is
+// a BASE plat and the match is delimiter-aware — the base itself or the
+// base followed by a space — so "FOO PH I" can never absorb "FOO PH II"
+// (a trailing-wildcard prefix did exactly that; Codex r6 P2).
+async function querySubdivisionLivingSqft(county, whereName, deadlineMs, { exact = false } = {}) {
   const cfg = SUBDIVISION_MEDIAN_FIELDS[county];
   // Injection guard: plat names are alnum/space/slash/dash/&/' — drop quotes
   // entirely rather than escaping (ArcGIS string WHERE, county-hosted layers).
   const safe = String(whereName || '').replace(/'/g, '').trim();
   if (!cfg || !safe) return null;
+  const upper = safe.toUpperCase();
+  const nameClause = exact
+    ? `UPPER(${cfg.nameField}) = '${upper}'`
+    : `(UPPER(${cfg.nameField}) = '${upper}' OR UPPER(${cfg.nameField}) LIKE '${upper} %')`;
   const values = [];
   // Offset advances by the rows the server actually RETURNED (a cut-off
   // page can be shorter than the page size), never by the page size.
@@ -899,8 +913,8 @@ async function querySubdivisionLivingSqft(county, whereName, deadlineMs) {
   for (let page = 0; page < SUBDIVISION_MAX_PAGES; page += 1) {
     const params = new URLSearchParams({
       f: 'json',
-      where: `UPPER(${cfg.nameField}) LIKE '${safe.toUpperCase()}%' AND ${cfg.livingField} > 0`,
-      outFields: cfg.livingField,
+      where: `${nameClause} AND ${cfg.livingField} > 0`,
+      outFields: [cfg.livingField, cfg.lotField].filter(Boolean).join(','),
       returnGeometry: 'false',
       resultRecordCount: String(SUBDIVISION_PAGE_SIZE),
       // A stable sort makes resultOffset pages disjoint (ArcGIS gives no
@@ -924,11 +938,12 @@ async function querySubdivisionLivingSqft(county, whereName, deadlineMs) {
     if (data?.error) throw new Error(`subdivision layer error: ${data.error.message || data.error.code}`);
     const features = Array.isArray(data?.features) ? data.features : [];
     for (const f of features) {
-      const v = positiveOrNull(ciAttr(f?.attributes || {})(cfg.livingField));
-      if (v) values.push(v);
+      const attrs = ciAttr(f?.attributes || {});
+      const living = positiveOrNull(attrs(cfg.livingField));
+      if (living) values.push({ living, lot: cfg.lotField ? positiveOrNull(attrs(cfg.lotField)) : null });
     }
     // No rows with the limit flag set would loop on the same offset forever.
-    if (data?.exceededTransferLimit !== true || features.length === 0) return values.sort((a, b) => a - b);
+    if (data?.exceededTransferLimit !== true || features.length === 0) return values.sort((a, b) => a.living - b.living);
     offset += features.length;
   }
   // Still truncated after the page cap: an incomplete, unordered population.
@@ -937,17 +952,20 @@ async function querySubdivisionLivingSqft(county, whereName, deadlineMs) {
 }
 
 // Returns { medianSqft, sampleCount, minSqft, maxSqft, p25, p75,
-// subdivisionQueried } or null (unsupported county, no subdivision, too few
-// samples, provider failure). min/max are the assessed neighbors' range —
-// the admin lookup shows it beside the median so an operator can judge how
-// tight the plat's plans run before confirming a size with the customer.
+// subdivisionQueried, lotBanded, platSampleCount } or null (unsupported
+// county, no subdivision, too few samples, provider failure). min/max are
+// the assessed neighbors' range — the admin lookup shows it beside the
+// median so an operator can judge how tight the plat's plans run before
+// confirming a size with the customer. With `lotSqft`, the sample narrows
+// to neighbors on similar-size lots when enough of them exist (lotBanded);
+// platSampleCount is the whole plat's count either way.
 // options.timeoutMs is ONE deadline shared by the exact-phase query, its
 // widened base-plat retry, and any pagination — never a per-request
 // allowance, so the caller's budget holds. options.diag (optional object)
 // gets `failed: true` when the layer errored/timed out, so a caller can
 // tell "the county answered and the sample was too thin" (a settled
 // negative) from "the county never answered" (worth retrying later).
-async function lookupSubdivisionMedianLivingSqft({ county, subdivision } = {}, options = {}) {
+async function lookupSubdivisionMedianLivingSqft({ county, subdivision, lotSqft = null } = {}, options = {}) {
   if (isDisabled()) {
     // Kill switch: nothing was attempted — never a settled negative.
     if (options.diag && typeof options.diag === 'object') options.diag.skipped = true;
@@ -960,24 +978,39 @@ async function lookupSubdivisionMedianLivingSqft({ county, subdivision } = {}, o
   const deadlineMs = t0 + timeoutMs;
   try {
     let queried = String(subdivision).trim();
-    let values = await querySubdivisionLivingSqft(key, queried, deadlineMs);
-    if ((values?.length || 0) < SUBDIVISION_MEDIAN_MIN_SAMPLES) {
+    let rows = await querySubdivisionLivingSqft(key, queried, deadlineMs, { exact: true });
+    if ((rows?.length || 0) < SUBDIVISION_MEDIAN_MIN_SAMPLES) {
       const base = subdivisionBaseName(queried);
       if (base && base.toUpperCase() !== queried.toUpperCase()) {
         if (deadlineMs - Date.now() >= SUBDIVISION_MIN_QUERY_MS) {
           queried = base;
-          values = await querySubdivisionLivingSqft(key, base, deadlineMs);
+          rows = await querySubdivisionLivingSqft(key, base, deadlineMs);
         } else if (options.diag && typeof options.diag === 'object') {
           // The broader population was never asked — not a settled negative.
           options.diag.incomplete = true;
         }
       }
     }
-    if (!values || values.length < SUBDIVISION_MEDIAN_MIN_SAMPLES) return null;
+    if (!rows || rows.length < SUBDIVISION_MEDIAN_MIN_SAMPLES) return null;
+    // Lot-series band: neighbors within the tolerance of the subject's lot
+    // area, when enough of them clear the floor on their own.
+    let lotBanded = false;
+    let sample = rows;
+    const lot = Number(lotSqft);
+    if (Number.isFinite(lot) && lot > 0) {
+      const lo = lot * (1 - SUBDIVISION_LOT_BAND_TOLERANCE);
+      const hi = lot * (1 + SUBDIVISION_LOT_BAND_TOLERANCE);
+      const banded = rows.filter((r) => r.lot && r.lot >= lo && r.lot <= hi);
+      if (banded.length >= SUBDIVISION_MEDIAN_MIN_SAMPLES) {
+        sample = banded;
+        lotBanded = true;
+      }
+    }
+    const values = sample.map((r) => r.living);
     const mid = Math.floor(values.length / 2);
     const median = values.length % 2 ? values[mid] : (values[mid - 1] + values[mid]) / 2;
     logger.info('[county-parcel-gis] subdivision median resolved', {
-      county: key, samples: values.length, elapsedMs: Date.now() - t0,
+      county: key, samples: values.length, platSamples: rows.length, lotBanded, elapsedMs: Date.now() - t0,
     });
     return {
       medianSqft: Math.round(median),
@@ -987,6 +1020,8 @@ async function lookupSubdivisionMedianLivingSqft({ county, subdivision } = {}, o
       p25: values[Math.floor(values.length / 4)],
       p75: values[Math.floor((values.length * 3) / 4)],
       subdivisionQueried: queried,
+      lotBanded,
+      platSampleCount: rows.length,
     };
   } catch (err) {
     if (options.diag && typeof options.diag === 'object') options.diag.failed = true;

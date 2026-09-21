@@ -220,18 +220,65 @@ describe('buildEnrichedProfile stale-imagery sanitization', () => {
     expect(profile.estimatedBedAreaSf).toBe(120);
   });
 
-  test('a vacant/unassessed parcel keeps its vision zeros — imagery IS the fresher source there', () => {
-    const vacantRecord = {
+  // Owner ruling 2026-09-21 (supersedes the earlier "imagery is the fresher
+  // source" pin): a bare-land reading on a vacant-roll parcel is the
+  // IMAGERY's state — nobody prices lawn or mosquito work on a dirt reading
+  // for a home the customer is asking to treat — so the zeros are
+  // unobservable, never a no-lawn measurement.
+  function vacantRollRecord() {
+    return {
       formattedAddress: '000 Future St, Parrish, FL 34219',
       county: 'Manatee',
       lotSize: 6985,
       _parcel: { landUseDescription: 'Vacant Residential Platted (1554)', dorUseCode: '00' },
     };
-    const profile = buildEnrichedProfile(vacantRecord, bareDirtAi(), 27.58, -82.42);
+  }
+
+  test('a vacant/unassessed parcel with bare-land zeros is unobservable, not a no-lawn measurement', () => {
+    const profile = buildEnrichedProfile(vacantRollRecord(), bareDirtAi(), 27.58, -82.42);
     expect(profile.unassessedVacantParcel).toBe(true);
-    expect(profile.turfObservation).toBeUndefined();
+    expect(profile.turfObservation).toBe('unobservable');
+    expect(profile.turfReason).toBe('vacant_roll_bare_land_imagery');
     expect(profile.estimatedTurfSf).toBe(0);
+    expect(profile.turfSource).toBe('none');
+    expect(profile.imperviousSurfacePercent).not.toBe(0);
+    const flag = profile.fieldVerifyFlags.find((f) => f.field === 'estimatedTurfSf' && /bare land/.test(f.reason));
+    expect(flag).toMatchObject({ priority: 'HIGH' });
+    expect(flag.reason).toContain('Vacant Residential Platted');
+    expect(flag.reason).toContain('imagery predates it');
+    // The stale-imagery (county-home) flag is a different situation and must not also fire.
+    expect(profile.fieldVerifyFlags.some((f) => /conflicts with county records/.test(f.reason))).toBe(false);
+  });
+
+  test('a vacant/unassessed parcel whose imagery already shows a lawn keeps the vision reading', () => {
+    const lawn = { ...bareDirtAi(), estimatedTurfSf: 3200, imperviousSurfacePercent: 35, imperviosSurfacePercent: 35 };
+    const profile = buildEnrichedProfile(vacantRollRecord(), lawn, 27.58, -82.42);
+    expect(profile.turfObservation).toBeUndefined();
+    expect(profile.estimatedTurfSf).toBe(3200);
     expect(profile.turfSource).toBe('vision');
+  });
+
+  test('needsTurfManualConfirmation names the vacant-roll situation on that profile', () => {
+    const { needsTurfManualConfirmation } = require('../routes/property-lookup-v2');
+    const profile = buildEnrichedProfile(vacantRollRecord(), bareDirtAi(), 27.58, -82.42);
+    const gate = needsTurfManualConfirmation(profile, ['LAWN'], {});
+    expect(gate).toMatchObject({ field: 'measuredTurfSf', turfObservation: 'unobservable' });
+    expect(gate.message).toContain('county roll shows no building yet');
+  });
+});
+
+describe('detectVacantRollBareLandImagery', () => {
+  const { detectVacantRollBareLandImagery } = require('../services/property-lookup/ai-property-lookup');
+  const vacant = { lotSize: 6985, _parcel: { landUseDescription: 'Vacant Residential Platted (1554)', dorUseCode: '00' } };
+
+  test('fires only on a vacant-roll parcel with explicit zeros for turf AND impervious', () => {
+    expect(detectVacantRollBareLandImagery(vacant, bareDirtAi())).toEqual({ landUseDescription: 'Vacant Residential Platted (1554)' });
+    expect(detectVacantRollBareLandImagery(newBuildRecord(), bareDirtAi())).toBeNull(); // county home → the stale-imagery guard's case
+    const noTurf = bareDirtAi();
+    delete noTurf.estimatedTurfSf;
+    expect(detectVacantRollBareLandImagery(vacant, noTurf)).toBeNull(); // not measured ≠ explicit zero
+    expect(detectVacantRollBareLandImagery(vacant, { ...bareDirtAi(), imperviousSurfacePercent: 40, imperviosSurfacePercent: 40 })).toBeNull();
+    expect(detectVacantRollBareLandImagery(vacant, null)).toBeNull();
   });
 });
 

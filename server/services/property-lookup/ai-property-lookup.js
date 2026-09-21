@@ -1390,6 +1390,28 @@ function detectStaleImageryTurfConflict(record, ai) {
   };
 }
 
+// The vacant-roll twin of detectStaleImageryTurfConflict: the county roll
+// carries NO building (unassessed vacant parcel — the new-construction
+// window) and the satellite pass measured bare land (explicit 0 turf AND 0
+// impervious). Whether the lot is truly unbuilt or the tiles predate a
+// finished home, nobody prices lawn or mosquito work on a dirt reading:
+// the zeros are the IMAGERY's state, not a measurement of a lawn a customer
+// is asking to treat. Same explicit-zero rule as the stale-imagery guard —
+// null/undefined is "not measured" — and a bare-land reading with the roll
+// showing a home stays with that guard (this one only fires when it can't).
+// Returns the vacant evidence (drives the profile sanitization + HIGH verify
+// flag in buildEnrichedProfile) or null.
+function detectVacantRollBareLandImagery(record, ai) {
+  if (!record || !ai) return null;
+  const vacant = detectUnassessedVacantParcel(record);
+  if (!vacant) return null;
+  const explicitZero = (value) => value === 0 || value === '0';
+  if (!explicitZero(ai.estimatedTurfSf)) return null;
+  const impervious = ai.imperviousSurfacePercent ?? ai.imperviosSurfacePercent;
+  if (!explicitZero(impervious)) return null;
+  return { landUseDescription: vacant.landUseDescription || null };
+}
+
 // Non-detached residential types the county land-use description captures but
 // the PAO building-type text / numeric DOR code flatten to "Single Family".
 const COUNTY_GIS_SPECIFIC_TYPES = new Set(['Townhome', 'Interior Townhome', 'Condo', 'Duplex', 'Multifamily']);
@@ -5246,6 +5268,7 @@ module.exports = {
   hasUnconfirmedCountyEvidence,
   buildPropertyDataQuality,
   detectUnassessedVacantParcel,
+  detectVacantRollBareLandImagery,
   detectStaleImageryTurfConflict,
   detectMultiSitusMasterParcel,
   isPreMarkerParkRecord,

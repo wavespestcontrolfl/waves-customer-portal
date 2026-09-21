@@ -181,8 +181,16 @@ describe('subdivisionMedianEstimate — plat median for an unassessed vacant par
       maxSqft: 3242,
       subdivision: 'EXAMPLE ESPLANADE PH VI SUBPH A & B PB80/131',
       county: 'Manatee',
+      lotBanded: false,
       sourceLabel: 'median of 174 assessed homes in this plat',
     });
+  });
+
+  it('names a lot-series sample when the stamp was banded by lot size', () => {
+    const est = subdivisionMedianEstimate(vacantRecord({ _subdivisionMedian: platMedianStamp({ sampleCount: 118, lotBanded: true, platSampleCount: 174 }) }));
+    expect(est).toMatchObject({ sampleCount: 118, lotBanded: true, sourceLabel: 'median of 118 assessed homes on similar-size lots in this plat' });
+    const flags = buildFieldVerifyFlags(vacantRecord({ _subdivisionMedian: platMedianStamp({ sampleCount: 118, lotBanded: true }) }), null, null);
+    expect(flags.find((f) => f.field === 'homeSqFt').reason).toContain('118 assessed homes on similar-size lots in this plat');
   });
 
   it('disappears the moment a real building fact lands (roll posting or a verified sqft)', () => {
