@@ -165,21 +165,40 @@ async function clearBacklogResetMarkers({ scope, ids, convs }) {
 // rows carrying that application id) up to the snapshot the owner saw
 // (readBefore), through this one writer — same read stamp, legacy mirror,
 // backlog-marker strip and bell reconciliation as any other read.
-async function markInboundSmsRead({ messageIds = [], conversationIds = [], applicationId = null, readBefore = null, adminUserId = null, role } = {}) {
+// The application scope is bound to the replies the owner actually SAW
+// (Codex r29 P1): `replyMessageIds` are the unified message ids carried by
+// the applicant_reply entries in the returned application snapshot, and
+// `replyEntryIds` those entries' own ids (the bell's replyId is the Twilio
+// SID when there is one, else the entry id). A time cutoff alone is wrong:
+// the unified row is written BEFORE the comms_history append, so a reply
+// can exist in `messages` under the cutoff and still be absent from the
+// snapshot — acknowledging it would read a reply nobody has seen and retire
+// its bell as soon as it rings.
+async function markInboundSmsRead({
+  messageIds = [], conversationIds = [], applicationId = null, replyMessageIds = null, replyEntryIds = [],
+  readBefore = null, adminUserId = null, role,
+} = {}) {
   const ids = messageIds.filter((id) => typeof id === 'string' && id.trim());
   const convs = conversationIds.filter((id) => typeof id === 'string' && id.trim());
   if (!ids.length && !convs.length && !applicationId) return { updated: 0, notificationsCleared: 0 };
   if ((convs.length || applicationId) && !(readBefore instanceof Date && !Number.isNaN(readBefore.getTime()))) {
     throw new Error('readBefore required when marking a conversation or application read');
   }
+  if (applicationId && !Array.isArray(replyMessageIds)) {
+    throw new Error('replyMessageIds (the replies in the returned snapshot) required when marking an application read');
+  }
+  const appReplyIds = applicationId ? replyMessageIds.filter((id) => typeof id === 'string' && id.trim()) : [];
+  const appEntryIds = applicationId ? (replyEntryIds || []).filter((id) => typeof id === 'string' && id.trim()) : [];
+  if (!ids.length && !convs.length && applicationId && !appReplyIds.length) return { updated: 0, notificationsCleared: 0 };
   const now = new Date();
   const scope = function scope() {
     if (ids.length) this.whereIn('id', ids);
     if (convs.length) this.orWhere(function conv() { this.whereIn('conversation_id', convs).where('created_at', '<=', readBefore); });
-    if (applicationId) {
+    if (applicationId && appReplyIds.length) {
       this.orWhere(function applicant() {
         this.where({ message_type: 'job_applicant_reply' })
           .whereRaw("metadata->>'job_application_id' = ?", [String(applicationId)])
+          .whereIn('id', appReplyIds)
           .where('created_at', '<=', readBefore);
       });
     }
@@ -234,9 +253,15 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], appli
     notificationsCleared += await NotificationService.markInboundSmsReadAdmin({ twilioSids: knownSids, before: now, role });
   } catch (e) { logger.warn('[inbound-sms-read] bell clear by sid failed', { code: e.code || 'unknown' }); }
   notificationsCleared += await clearCustomerThreadCrossBells({ ids, convs, now, role });
-  if (applicationId) {
+  if (applicationId && appReplyIds.length) {
     try {
-      notificationsCleared += await NotificationService.markApplicantRepliesReadAdmin({ applicationId, before: readBefore, role });
+      // Only the bells of the replies in the snapshot: their SIDs (the
+      // bell's replyId for a Twilio-delivered reply) plus the entry ids.
+      const snapshotSids = (await db('messages').whereIn('id', appReplyIds).whereNotNull('twilio_sid').pluck('twilio_sid')).filter(Boolean);
+      const replyIds = [...new Set([...snapshotSids, ...appEntryIds])];
+      if (replyIds.length) {
+        notificationsCleared += await NotificationService.markApplicantRepliesReadAdmin({ applicationId, replyIds, before: readBefore, role });
+      }
     } catch (e) { logger.warn('[inbound-sms-read] applicant-reply bell clear failed', { code: e.code || 'unknown' }); }
   }
 

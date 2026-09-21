@@ -131,9 +131,16 @@ router.get('/:id', async (req, res) => {
     // response, so it keeps its unread flag for the next open. Through the
     // ONE inbound read writer (Codex r20 P1): read stamp + admin attribution,
     // legacy mirror, backlog-marker strip and the applicant-reply bell.
+    // Bound to the replies IN this snapshot (Codex r29 P1), not a time cutoff:
+    // the unified row lands before the comms_history append, so a reply can
+    // be under the cutoff and still absent from the response the owner saw.
+    const snapshotReplies = (Array.isArray(row.comms_history) ? row.comms_history : [])
+      .filter((e) => e && e.stage === 'applicant_reply' && e.channel === 'sms');
+    const replyMessageIds = snapshotReplies.map((e) => e.unified_message_id).filter((id) => typeof id === 'string' && id);
+    const replyEntryIds = snapshotReplies.map((e) => e.id).filter((id) => typeof id === 'string' && id);
     void (async () => {
       const { markInboundSmsRead } = require('../services/inbound-sms-read');
-      await markInboundSmsRead({ applicationId: row.id, readBefore: loadedAt, adminUserId: req.technicianId, role: req.techRole });
+      await markInboundSmsRead({ applicationId: row.id, replyMessageIds, replyEntryIds, readBefore: loadedAt, adminUserId: req.technicianId, role: req.techRole });
     })().catch((err) => {
       logger.warn(`[admin-careers] reply read-ack failed (application ${req.params.id}): ${RecruitingComms.errorSummary(err)}`);
     });
@@ -333,6 +340,14 @@ async function applyStatusTransition(trx, applicationId, technicianId, plan) {
     .first();
   if (!row) return null;
 
+  // A resend is only ever a same-stage action (Codex r29 P1): if the locked
+  // row has left Interview since the dialog opened — the applicant withdrew,
+  // another admin rejected — the stale request must not be reinterpreted as
+  // a transition BACK to Interview that reopens the application, keeps the
+  // link alive and sends another invite. Refuse it; the owner re-reads.
+  if (plan.resend && row.status !== 'interview') {
+    return { row, conflict: `Cannot resend: the application is now '${row.status}', not in Interview` };
+  }
   const { isResendOnly, isNoOp, interviewApplicable, willSend } = classifyStatusTransition(row, plan);
   if (isNoOp) return { row, interviewApplicable: false };
 
@@ -443,6 +458,7 @@ router.patch('/:id/status', async (req, res) => {
     }
 
     if (!txResult) return res.status(404).json({ error: 'Not found' });
+    if (txResult.conflict) return res.status(409).json({ error: txResult.conflict, application: withoutToken(txResult.row) });
     const { row: updated, interviewApplicable, willSend } = txResult;
 
     if (!interviewApplicable) {

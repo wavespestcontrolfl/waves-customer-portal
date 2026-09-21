@@ -76,6 +76,18 @@ test('SMS history offers older pages instead of labeling a page the full thread'
   expect(result).toMatchObject({ returned_count: 1, has_more: true, next_offset: 1 });
 });
 
+test('comms tools never surface recruiting (job_*) sms_log rows — applicants are answered from Recruiting (PR #4623 Codex r29 P1)', async () => {
+  db.__rows = () => [];
+  await executeCommsTool('get_conversation_thread', { phone: '+12025550123', limit: 5 });
+  expect(db.__queries.some((q) => q.sql.includes('from "sms_log"') && /not like/.test(q.sql) && q.bindings.includes('job\\_%'))).toBe(true);
+  db.__queries.length = 0;
+  await executeCommsTool('get_unanswered_threads', { hours_back: 24 });
+  expect(db.__queries.some((q) => q.sql.includes('from "sms_log"') && /not like/.test(q.sql) && q.bindings.includes('job\\_%'))).toBe(true);
+  db.__queries.length = 0;
+  await executeCommsTool('search_messages', { search: 'hello', days_back: 3 });
+  expect(db.__queries.some((q) => q.sql.includes('from "sms_log"') && /not like/.test(q.sql) && q.bindings.includes('job\\_%'))).toBe(true);
+});
+
 test('call drill-down returns transcript continuation rather than only the greeting', async () => {
   db.__rows = () => [{ transcription: 'x'.repeat(12001) }];
   const result = await executeCommsTool('get_call_log', { call_id: '00000000-0000-0000-0000-000000000001' });

@@ -6,6 +6,7 @@
  * query is untouched.
  */
 const {
+  excludeRecruitingSmsLog,
   hideRecruitingThreadsFromNonAdmin,
   isRecruitingMessageType,
   isRecruitingPhone,
@@ -49,6 +50,15 @@ describe('hideRecruitingThreadsFromNonAdmin (message-level)', () => {
     const { q, inner } = fakeQuery();
     hideRecruitingThreadsFromNonAdmin(q, undefined, 'm.message_type');
     expect(inner.orWhere).toHaveBeenCalledWith('m.message_type', 'not like', 'job\\_%');
+  });
+});
+
+describe('excludeRecruitingSmsLog (Intelligence Bar comms tools, Codex r29 P1)', () => {
+  test('filters job_* rows out of an sms_log query regardless of role; NULL types stay', () => {
+    const { q, inner } = fakeQuery();
+    expect(excludeRecruitingSmsLog(q)).toBe(q);
+    expect(inner.whereNull).toHaveBeenCalledWith('sms_log.message_type');
+    expect(inner.orWhere).toHaveBeenCalledWith('sms_log.message_type', 'not like', 'job\\_%');
   });
 });
 

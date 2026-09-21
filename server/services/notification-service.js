@@ -541,8 +541,9 @@ const NotificationService = {
   // it in Recruiting (PR #4623 r20): read up to the snapshot they saw.
   // `replyId` narrows the clear to ONE reply's bell (the post-write check in
   // recruiting-inbound.js retires a bell whose reply was already read).
-  async markApplicantRepliesReadAdmin({ applicationId, replyId = null, before = new Date(), role } = {}) {
+  async markApplicantRepliesReadAdmin({ applicationId, replyId = null, replyIds = null, before = new Date(), role } = {}) {
     if (!applicationId) return 0;
+    if (Array.isArray(replyIds) && !replyIds.length) return 0;
     let q = scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin', category: 'job_application' }),
       role,
@@ -552,6 +553,8 @@ const NotificationService = {
       .whereNull('read_at')
       .where('created_at', '<=', before);
     if (replyId) q = q.whereRaw("metadata->'payload'->>'replyId' = ?", [String(replyId)]);
+    // Bound to the replies the reader actually saw (Codex #4623 r29 P1).
+    if (Array.isArray(replyIds)) q = q.whereRaw("metadata->'payload'->>'replyId' = ANY (?::text[])", [replyIds.map(String)]);
     return q.update({ read_at: new Date() });
   },
 

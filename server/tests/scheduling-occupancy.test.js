@@ -641,9 +641,13 @@ describe('findConflictingVisits — recruiting interviews as occupancy (PR #4623
     const noRaw = jest.fn(() => makeQuery([]));
     await expect(findConflictingVisits({ db: noRaw, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true })).resolves.toEqual([]);
     const failing = dbWithInterviews([]);
-    failing.raw = jest.fn(async () => { throw Object.assign(new Error('relation job_applications does not exist'), { code: '42P01' }); });
+    failing.raw = jest.fn(async () => { throw Object.assign(new Error('connection reset'), { code: '57P01' }); });
     await expect(findConflictingVisits({ db: failing, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true }))
       .rejects.toMatchObject({ code: 'INTERVIEW_OCCUPANCY_UNAVAILABLE', retryable: true });
+    // a database with no recruiting tables at all (42P01) has no applicants: definite "no interviews", not an outage
+    const unprovisioned = dbWithInterviews([]);
+    unprovisioned.raw = jest.fn(async () => { throw Object.assign(new Error('relation job_applications does not exist'), { code: '42P01' }); });
+    await expect(findConflictingVisits({ db: unprovisioned, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true })).resolves.toEqual([]);
     // without the opt-in the failing connection is never touched
     await expect(findConflictingVisits({ db: failing, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00' })).resolves.toEqual([]);
     // a foreign raw result (e.g. a lock probe double) never manufactures a conflict
@@ -664,7 +668,7 @@ describe('interview side read inside a caller transaction (PR #4623, Codex r7 P1
     expect(trx.transaction).toHaveBeenCalledTimes(1);
     expect(trx.raw).not.toHaveBeenCalled();
     expect(rows).toHaveLength(1);
-    trx.transaction = jest.fn(async () => { throw Object.assign(new Error('relation missing'), { code: '42P01' }); });
+    trx.transaction = jest.fn(async () => { throw Object.assign(new Error('deadlock detected'), { code: '40P01' }); });
     // the savepoint has rolled back; the guard still fails closed (Codex r28 P1)
     await expect(findConflictingVisits({ db: trx, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true }))
       .rejects.toMatchObject({ code: 'INTERVIEW_OCCUPANCY_UNAVAILABLE' });

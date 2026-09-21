@@ -294,6 +294,18 @@ describe('PATCH /:id/status', () => {
     expect(rows[0].status).toBe('interview'); // the committed transition stands
   });
 
+  test('resend after the application left Interview (applicant withdrew while the dialog was open) -> 409, row untouched, nothing sent (Codex r29 P1)', async () => {
+    mockDb.__setRows([appRow({ status: 'withdrawn', interview_token: 'c'.repeat(64) })]);
+    const { status, body } = await patch('aaaaaaaa-0000-4000-8000-000000000001', { status: 'interview', resend: true, notify: { sms: true, email: true } });
+    expect(status).toBe(409);
+    expect(body.error).toMatch(/Cannot resend/);
+    expect(body.application.interview_token).toBeUndefined();
+    const row = mockDb.__rows()[0];
+    expect(row.status).toBe('withdrawn');
+    expect(row.status_history).toHaveLength(0);
+    expect(mockSendStageComms).not.toHaveBeenCalled();
+  });
+
   test('applicant BOOKED between commit and send -> the "pick a time" invite is stale (Codex r28 P2): bound to the booking snapshot, not just status+token', async () => {
     mockDb.__setRows([appRow({ status: 'reviewed' })]);
     const originalTableApi = mockDb.getMockImplementation();
@@ -472,7 +484,14 @@ describe('PATCH /:id/status', () => {
 
 describe('GET /:id detail never exposes the raw token', () => {
   test('opening the detail acknowledges the applicant replies through the ONE inbound read writer, bounded to the loaded snapshot', async () => {
-    mockDb.__setRows([appRow({ status: 'interview' })]);
+    mockDb.__setRows([appRow({
+      status: 'interview',
+      comms_history: [
+        { id: 'e-1', stage: 'applicant_reply', channel: 'sms', outcome: 'received', unified_message_id: 'm-1' },
+        { id: 'e-2', stage: 'applicant_reply', channel: 'sms', outcome: 'received', unified_message_id: 'm-2' },
+        { id: 'e-3', stage: 'interview_invite', channel: 'sms', outcome: 'sent' },
+      ],
+    })]);
     mockMarkInboundSmsRead.mockClear();
     const before = new Date();
     const res = await fetch(`${base}/api/admin/careers/aaaaaaaa-0000-4000-8000-000000000001`, { headers: { Authorization: 'Bearer admin' } });
@@ -483,6 +502,10 @@ describe('GET /:id detail never exposes the raw token', () => {
     expect(mockMarkInboundSmsRead).toHaveBeenCalledTimes(1);
     const args = mockMarkInboundSmsRead.mock.calls[0][0];
     expect(args).toMatchObject({ applicationId: 'aaaaaaaa-0000-4000-8000-000000000001', adminUserId: expect.any(String), role: 'admin' });
+    // Bound to the replies IN the returned snapshot (Codex r29 P1): the
+    // unified ids of the applicant_reply entries, nothing else.
+    expect(args.replyMessageIds).toEqual(['m-1', 'm-2']);
+    expect(args.replyEntryIds).toEqual(['e-1', 'e-2']);
     // Bounded to the loaded snapshot (Codex r18 P2): a reply committing after
     // the detail row was read keeps its unread flag.
     expect(args.readBefore.getTime()).toBeGreaterThanOrEqual(before.getTime());

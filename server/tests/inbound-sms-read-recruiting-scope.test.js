@@ -50,14 +50,22 @@ test('an application scope reads that application\'s applicant replies up to the
   const chains = [];
   db.mockImplementation(() => { const q = chain([]); chains.push(q); return q; });
   const readBefore = new Date('2027-03-16T15:00:00.000Z');
-  await expect(markInboundSmsRead({ applicationId: 'app-1', adminUserId: 'admin-1', role: 'admin' })).rejects.toThrow(/readBefore required/);
-  const result = await markInboundSmsRead({ applicationId: 'app-1', readBefore, adminUserId: 'admin-1', role: 'admin' });
-  // the scope names the application's reply rows, bounded to the snapshot
+  await expect(markInboundSmsRead({ applicationId: 'app-1', replyMessageIds: ['m-1'], adminUserId: 'admin-1', role: 'admin' })).rejects.toThrow(/readBefore required/);
+  // the replies IN the snapshot are required (Codex r29 P1): a time cutoff alone would read a reply nobody saw
+  await expect(markInboundSmsRead({ applicationId: 'app-1', readBefore, adminUserId: 'admin-1', role: 'admin' })).rejects.toThrow(/replyMessageIds/);
+  // an empty snapshot acknowledges nothing and clears no bell
+  await expect(markInboundSmsRead({ applicationId: 'app-1', replyMessageIds: [], readBefore, adminUserId: 'admin-1', role: 'admin' })).resolves.toEqual({ updated: 0, notificationsCleared: 0 });
+  expect(bellSpy).not.toHaveBeenCalled();
+  const result = await markInboundSmsRead({ applicationId: 'app-1', replyMessageIds: ['m-1', 'm-2'], replyEntryIds: ['e-1', 'e-2'], readBefore, adminUserId: 'admin-1', role: 'admin' });
+  // the scope names the application's reply rows, bounded to the snapshot's message ids
   const scoped = chains.filter((q) => q.whereRaw.mock.calls.some((c) => /job_application_id/.test(c[0]) && c[1][0] === 'app-1'));
   expect(scoped.length).toBeGreaterThan(0);
+  expect(scoped[0].whereIn.mock.calls.some((c) => c[0] === 'id' && c[1].join() === 'm-1,m-2')).toBe(true);
   expect(scoped[0].where.mock.calls.some((c) => c[0] === 'created_at' && c[1] === '<=' && c[2] === readBefore)).toBe(true);
   expect(scoped[0].where.mock.calls.some((c) => c[0] && c[0].message_type === 'job_applicant_reply')).toBe(true);
-  expect(bellSpy).toHaveBeenCalledWith({ applicationId: 'app-1', before: readBefore, role: 'admin' });
+  // bells: only the snapshot replies (SIDs of those rows + the entry ids), never the whole application
+  expect(bellSpy).toHaveBeenCalledTimes(1);
+  expect(bellSpy.mock.calls[0][0]).toMatchObject({ applicationId: 'app-1', before: readBefore, role: 'admin', replyIds: expect.arrayContaining(['e-1', 'e-2']) });
   expect(result.notificationsCleared).toBeGreaterThanOrEqual(2);
   bellSpy.mockRestore(); sidSpy.mockRestore();
 });

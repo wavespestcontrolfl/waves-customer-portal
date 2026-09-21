@@ -562,6 +562,11 @@ async function withInterviewConflicts(visits, { db, date, windowStart, windowEnd
   try {
     interviews = await bookedInterviewConflictRows(db, dateStr, timeToMinutes(windowStart), timeToMinutes(windowEnd));
   } catch (err) {
+    // 42P01 = the recruiting tables are not provisioned in this database at
+    // all (a schema-subset test database) — there can be no applicants and
+    // so no interviews: a definite answer, not an outage (same rule as
+    // recruiting-inbound.js).
+    if (err && err.code === '42P01') return visits;
     // Propagate, never degrade to "no interviews": the caller is a commit
     // guard and its transaction must fail (the read ran in a savepoint, so
     // the transaction itself is still usable for the caller's rollback).

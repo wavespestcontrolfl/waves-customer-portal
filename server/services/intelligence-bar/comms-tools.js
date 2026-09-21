@@ -11,6 +11,7 @@ const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
+const { excludeRecruitingSmsLog } = require('../../utils/recruiting-thread-scope');
 
 // Admin phones to exclude from results
 const ADMIN_PHONE_RAW = '9415993489';
@@ -300,8 +301,11 @@ async function getUnansweredThreads(input) {
   const limit = Math.min(rawLimit || 20, 50);
   const since = new Date(Date.now() - hours_back * 3600000).toISOString();
 
-  // Get recent inbound messages
-  const inbound = await db('sms_log')
+  // Get recent inbound messages. Recruiting rows (job_*) are never a thread
+  // for this tool (Codex #4623 r29 P1): an applicant reply answered through
+  // the generic send would become customer-thread evidence on a shared
+  // phone — applicants are answered from Recruiting.
+  const inbound = await excludeRecruitingSmsLog(db('sms_log'))
     .where('direction', 'inbound')
     .where('created_at', '>=', since)
     .leftJoin('customers', 'sms_log.customer_id', 'customers.id')
@@ -390,6 +394,8 @@ async function getConversationThread(input) {
     // #4331 P2): the in-flight placeholder must not displace a real message
     // out of this bounded conversation window — a resolved row still shows.
     .modify(excludeUnresolvedSendReservations)
+    // Recruiting rows stay out of the Intelligence Bar (Codex #4623 r29 P1).
+    .modify((qb) => excludeRecruitingSmsLog(qb))
     .select(
       'sms_log.id', 'sms_log.direction', 'sms_log.message_body',
       'sms_log.from_phone', 'sms_log.to_phone',
@@ -439,7 +445,7 @@ async function searchMessages(input) {
   // Unresolved review-ask reservations excluded BEFORE the limit (Codex
   // #4331 P2): a still in-flight placeholder must not surface here as a
   // real sent message — a resolved row still shows.
-  let query = excludeUnresolvedSendReservations(db('sms_log'))
+  let query = excludeRecruitingSmsLog(excludeUnresolvedSendReservations(db('sms_log')))
     .where('sms_log.created_at', '>=', since)
     .leftJoin('customers', 'sms_log.customer_id', 'customers.id')
     .select(

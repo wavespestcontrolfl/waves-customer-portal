@@ -46,6 +46,24 @@ function hideRecruitingThreadsFromNonAdmin(query, req, messageTypeColumn = 'mess
 }
 
 /**
+ * sms_log-level exclusion for readers that are NOT the recruiting queue —
+ * the Intelligence Bar comms tools (Codex r29 P1): an applicant reply
+ * surfaced as an "unanswered thread" there gets answered through the
+ * generic customer send, which becomes newer customer-thread evidence on a
+ * shared phone and hands the applicant's next reply to the customer
+ * pipeline. Recruiting threads are answered from Recruiting only.
+ *
+ * @param {import('knex').Knex.QueryBuilder} query - a query over `sms_log`
+ * @param {string} [messageTypeColumn]
+ */
+function excludeRecruitingSmsLog(query, messageTypeColumn = 'sms_log.message_type') {
+  return query.where(function recruitingSmsLogFilter() {
+    this.whereNull(messageTypeColumn)
+      .orWhere(messageTypeColumn, 'not like', `${RECRUITING_MESSAGE_TYPE_PREFIX_LIKE}%`);
+  });
+}
+
+/**
  * Has this phone ever been party to a recruiting text (either direction)?
  * For readers that key on a caller-supplied phone rather than a joined
  * conversation (the AI draft composer): a non-admin must be refused before
@@ -141,5 +159,5 @@ function newerEvidence(candidate, best) {
 
 module.exports = {
   RECRUITING_MESSAGE_TYPE_PREFIX, OPEN_APPLICATION_STATUSES, SMS_EVIDENCE_OUTCOMES,
-  isRecruitingMessageType, hideRecruitingThreadsFromNonAdmin, isRecruitingPhone, effectiveSendMs, newerEvidence,
+  isRecruitingMessageType, hideRecruitingThreadsFromNonAdmin, excludeRecruitingSmsLog, isRecruitingPhone, effectiveSendMs, newerEvidence,
 };
