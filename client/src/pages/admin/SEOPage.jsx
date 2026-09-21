@@ -1,4 +1,5 @@
 import { Fragment, useState, useEffect, useRef, lazy, Suspense } from "react";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { formatETDate, formatETDateTime } from "../../lib/timezone";
 import {
   Activity,
@@ -8775,7 +8776,13 @@ function SitemapIssuesSubTab({ domain }) {
 // ── Main Page ──
 
 export default function SEOPage() {
-  const [workspace, setWorkspace] = useState("command");
+  const [searchParams] = useSearchParams();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const requestedWorkspace = searchParams.get("workspace");
+  const workspace = Object.hasOwn(WORKSPACE_BY_KEY, requestedWorkspace)
+    ? requestedWorkspace
+    : "command";
   const [activeViews, setActiveViews] = useState(() =>
     Object.fromEntries(
       SEO_WORKSPACES.map((item) => [
@@ -8785,24 +8792,51 @@ export default function SEOPage() {
     ),
   );
   const activeWorkspace = WORKSPACE_BY_KEY[workspace] || SEO_WORKSPACES[0];
-  const activeView =
-    activeViews[workspace] || defaultViewForWorkspace(workspace);
-  function handleWorkspaceChange(key) {
-    setWorkspace(key);
+  const requestedView = searchParams.get("view");
+  const activeView = activeWorkspace.sections.some(
+    (section) => section.key === requestedView,
+  )
+    ? requestedView
+    : defaultViewForWorkspace(workspace);
+
+  useEffect(() => {
     setActiveViews((prev) =>
-      prev[key]
+      prev[workspace] === activeView
         ? prev
-        : {
-            ...prev,
-            [key]: defaultViewForWorkspace(key),
-          },
+        : { ...prev, [workspace]: activeView },
     );
+  }, [activeView, workspace]);
+
+  function handleWorkspaceChange(key) {
+    if (!Object.hasOwn(WORKSPACE_BY_KEY, key) || key === workspace) return;
+    const nextView = activeViews[key] || defaultViewForWorkspace(key);
+    const next = new URLSearchParams(searchParams);
+    next.set("workspace", key);
+    next.set("view", nextView);
+    navigate({
+      pathname: location.pathname,
+      search: `?${next.toString()}`,
+      hash: location.hash,
+    });
   }
   function handleViewChange(key) {
+    if (
+      key === activeView ||
+      !activeWorkspace.sections.some((section) => section.key === key)
+    )
+      return;
     setActiveViews((prev) => ({
       ...prev,
       [workspace]: key,
     }));
+    const next = new URLSearchParams(searchParams);
+    next.set("workspace", workspace);
+    next.set("view", key);
+    navigate({
+      pathname: location.pathname,
+      search: `?${next.toString()}`,
+      hash: location.hash,
+    });
   }
   return (
     <UiSurface

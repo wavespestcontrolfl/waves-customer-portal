@@ -65,11 +65,49 @@ jobs:
         env:
           DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx knex migrate:latest --knexfile server/knexfile.js
+      - name: Customer 360 SMS read and bell transaction tests
+        run: |
+          node <<'JS'
+          const { Client } = require('pg');
+          const { randomBytes } = require('node:crypto');
+          const { spawnSync } = require('node:child_process');
+          const name = `waves_qa_${randomBytes(16).toString('hex')}`;
+          const base = 'postgresql://waves:waves@localhost:5432/';
+          const client = new Client({ connectionString: `${base}waves_test` });
+          function run(args, options = {}) {
+            const result = spawnSync(process.execPath, args, { stdio: 'inherit', ...options });
+            if (result.error) throw result.error;
+            if (result.status !== 0) throw new Error(`QA command exited ${result.status}`);
+          }
+          (async () => {
+            await client.connect();
+            try {
+              await client.query(`CREATE DATABASE "${name}"`);
+              try {
+                run(['node_modules/knex/bin/cli.js', 'migrate:latest', '--knexfile', 'server/knexfile.js'],
+                  { env: { ...process.env, DATABASE_URL: `${base}${name}` } });
+                run(['../node_modules/jest/bin/jest.js', '--ci', '--runInBand', '--no-coverage',
+                  'tests/customer360-workspace-postgres.test.js'],
+                  { cwd: 'server', env: { ...process.env, C360_TEST_DATABASE_URL: `${base}${name}` } });
+              } finally { await client.query(`DROP DATABASE "${name}" WITH (FORCE)`); }
+            } finally { await client.end(); }
+          })().catch(error => { console.error(error); process.exitCode = 1; });
+          JS
+      - name: Estimate deposit settlement transaction tests
+        working-directory: server
+        env:
+          VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/estimate-deposit-late-reconciliation.pg.test.js tests/estimate-converter-deposit-lock.pg.test.js tests/invoice-send-open-visit-copy-postgres.test.js
       - name: SMS operational transaction tests
         working-directory: server
         env:
           SMS_OPERATIONS_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/sms-operations-postgres.test.js tests/sms-commitments-postgres.test.js tests/sms-inbound-consumers-postgres.test.js
+      - name: Reschedule-link-promise transaction tests
+        working-directory: server
+        env:
+          RESCHEDULE_LINK_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/reschedule-link-promises-postgres.test.js
       - name: SMS copy migration transaction tests
         working-directory: server
         env:
@@ -95,6 +133,11 @@ jobs:
         env:
           DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/invoice-issued-closeout-postgres.test.js
+      - name: Invoice claim ownership transaction tests
+        working-directory: server
+        env:
+          DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/invoice-claim-ownership-postgres.test.js tests/invoice-review-hold-serializer-postgres.test.js tests/invoice-scheduled-readiness-postgres.test.js
       - name: Historical invoice repair transaction tests
         working-directory: server
         env:
@@ -155,11 +198,12 @@ jobs:
         env:
           SCHEDULING_CAPACITY_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/scheduling-catalog-postgres.test.js tests/scheduling-capacity-holds-postgres.test.js tests/scheduling-capacity-accept-postgres.test.js tests/scheduling-capacity-allocation-postgres.test.js
-      - name: Shared reservation arrival transaction tests
+      - name: Shared reservation arrival and hold-grace transaction tests
         working-directory: server
         env:
           RESERVATION_ARRIVAL_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/reservation-arrival-postgres.test.js
+          RESERVATION_HOLD_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/reservation-arrival-postgres.test.js tests/reservation-hold-grace-postgres.test.js
       - name: Staff arrival-window transaction tests
         working-directory: server
         env:

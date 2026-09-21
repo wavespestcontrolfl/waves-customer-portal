@@ -12,6 +12,9 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/weather-forecast', () => ({
+  ...jest.requireActual('../services/weather-forecast'), getDailyRainOutlookBounded: jest.fn(async () => null),
+}));
 jest.mock('../sockets', () => ({ getIo: jest.fn(() => null) }));
 jest.mock('../services/service-report/application-conditions', () => ({ fetchApplicationConditions: jest.fn(async () => null) }));
 jest.mock('../services/recap-visit-context', () => ({ buildRecapVisitContext: jest.fn(async () => '') }));
@@ -40,25 +43,48 @@ jest.mock('../services/tree-shrub-assessment', () => ({
   scoreAndStoreTreeShrubAssessment: jest.fn(async () => null),
 }));
 jest.mock('../services/referral-engine', () => ({ creditReferralOnFirstService: jest.fn(async () => {}) }));
+jest.mock('../services/new-recurring-welcome-sms', () => ({
+  isNewRecurringSignupCandidate: jest.fn(async () => false), sendNewRecurringWelcome: jest.fn(async () => {}),
+}));
+jest.mock('../services/account-membership-email', () => ({ sendMembershipStarted: jest.fn(async () => {}) }));
+jest.mock('../services/tech-visit-notifications', () => ({ notifyTechVisitChange: jest.fn(async () => {}) }));
+
+jest.mock('../services/email-template-library', () => ({
+  sendTemplate: jest.fn(),
+  // The summary handoff rechecks the suppression ledger through the library.
+  loadTemplateByKey: jest.fn(async () => ({ template: { template_key: 'service.visit_summary' } })),
+  activeSuppressionFor: jest.fn(async () => null),
+}));
+jest.mock('../services/review-request', () => ({ enrollPostService: jest.fn(async () => ({ started: true })), completionReviewDelay: jest.fn(() => undefined) }));
 
 const knex = require('knex');
 const { randomUUID } = require('crypto');
-const { saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, resumePendingVisitCompletions } = require('../services/visit-completion-packets');
+const fs = require('node:fs');
+const path = require('node:path');
+const { saveVisitCompletionPacket, runVisitCompletionPacketEffects, runVisitCompletionPacketMemberEffects, resumePendingVisitCompletions } = require('../services/visit-completion-packets');
 const { completeScheduledService } = require('../services/complete-scheduled-service');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 const { stopBaseKey, dateOnly } = require('../services/visit-groups');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { chargeInvoiceWithSavedCard } = require('../services/stripe');
 const InvoiceService = require('../services/invoice');
 const { acquireScheduledInvoiceMintLock, mintScheduledServiceInvoiceWithDeposit } = require('../services/scheduled-invoice-mint');
 const { createVisitCompletionInvoice } = require('../services/visit-completion-invoice');
+const { acquireEstimateDepositLedgerLock } = require('../services/estimate-deposits');
 const { collectVisitCompletionInvoice, assertVisitCompletionCharge } = require('../services/visit-completion-payment');
+const EstimateConverter = require('../services/estimate-converter');
+const { reserveSlot, commitReservation } = require('../services/slot-reservation');
+const { resolveCatalogSlotProfile } = require('../services/estimate-slot-availability');
+const { signSlotOffer, appendOfferToSlotId } = require('../utils/slot-offer-token');
+const { itemizeFirstApplication } = require('../services/estimate-first-application-invoice');
 const connection = process.env.VISIT_PACKET_TEST_DATABASE_URL;
 const originalPestRecap = process.env.PEST_RECAP;
 const postgres = connection ? describe : describe.skip;
 let mockPg;
 let fixture;
 let mockNotificationRecipientId;
+const originalSummaryKey = process.env.DATA_HYGIENE_VAULT_KEY;
+const originalCloseoutGate = process.env.GATE_VISIT_CLOSEOUT;
 jest.setTimeout(90000);
 
 function submission(overrides = {}) {
@@ -71,6 +97,174 @@ function submission(overrides = {}) {
     } })),
     ...overrides,
   };
+}
+
+async function linkFixtureEstimate() {
+  const estimateId = randomUUID();
+  fixture.estimateIds.push(estimateId);
+  await mockPg('estimates').insert({ id: estimateId, customer_id: fixture.customerId, status: 'accepted' });
+  await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ source_estimate_id: estimateId });
+  return estimateId;
+}
+
+async function linkFixtureEstimateWithSetupObligation() {
+  const estimateId = await linkFixtureEstimate();
+  await mockPg('estimates').where({ id: estimateId }).update({
+    accepted_at: new Date(),
+    estimate_data: JSON.stringify({
+      recurring: { services: [{ name: 'Pest Control', frequency: 'quarterly', mo: 29.33 }] },
+      sendSnapshot: { pricingBundle: { firstVisitFees: [{ service: 'waveguard_setup', amount: 99 }] } },
+    }),
+  });
+  await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ is_recurring: true });
+  await mockPg('activity_log').insert({ customer_id: fixture.customerId,
+    action: 'estimate_converted', description: `Estimate #${estimateId} converted: synthetic setup obligation` });
+  return estimateId;
+}
+
+async function createPaidSetupFee(estimateId, stampedId = estimateId) {
+  const invoice = await InvoiceService.create({
+    customerId: fixture.customerId, serviceDate: etDateString(),
+    lineItems: [{ description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99 }],
+    notes: `Auto-generated from accepted estimate #${stampedId}. $99 setup fee only.`,
+  });
+  await mockPg('invoices').where({ id: invoice.id }).update({ status: 'paid', paid_at: new Date() });
+  return invoice;
+}
+
+async function enableFixtureAutopay(label) {
+  const methodId = randomUUID();
+  await mockPg('payment_methods').insert({ id: methodId, customer_id: fixture.customerId,
+    processor: 'stripe', method_type: 'card', stripe_payment_method_id: `pm_fixture_${label}_${methodId}`,
+    is_default: true, autopay_enabled: true, exp_month: 12, exp_year: new Date().getUTCFullYear() + 1 });
+  await mockPg('customers').where({ id: fixture.customerId })
+    .update({ autopay_enabled: true, autopay_payment_method_id: methodId });
+  return methodId;
+}
+
+async function assertPacketCharge(saved) {
+  return mockPg.transaction(async (trx) => {
+    const invoice = await trx('invoices').where({ id: saved.body.billing.invoiceId }).forUpdate().first();
+    await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
+    return assertVisitCompletionCharge(trx, invoice, saved.body.packetId);
+  });
+}
+
+function acceptanceInvoiceNotes(estimateId, detail = '$99.00 setup fee plus first application') {
+  return `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — ${detail}.`;
+}
+
+async function prepareAcceptanceInvoice({
+  coverage = 'exact', status = 'draft', withAdjustments = false, scheduledPrices = null, uppercaseStamp = false,
+} = {}) {
+  const estimateId = randomUUID();
+  fixture.estimateIds.push(estimateId);
+  await mockPg('estimates').insert({ id: estimateId, customer_id: fixture.customerId, status: 'accepted',
+    accepted_at: mockPg.fn.now(), estimate_data: { acceptedSetupFeeAmount: 99 } });
+  const [pestId, lawnId] = fixture.serviceIds;
+  const prices = scheduledPrices || (withAdjustments ? [110, 112] : [120, 100]);
+  await mockPg('scheduled_services').where({ id: pestId }).update({ source_estimate_id: estimateId,
+    service_type: 'Quarterly Pest Control', estimated_price: prices[0], recurring_parent_id: null });
+  await mockPg('scheduled_services').where({ id: lawnId }).update({ source_estimate_id: estimateId,
+    service_type: 'Lawn Care', estimated_price: prices[1], recurring_parent_id: null });
+  const primary = [
+    { client_id: `scheduled_${pestId}_primary`, description: 'Quarterly Pest Control', quantity: 1,
+      unit_price: 120, accepted_service_type: 'Quarterly Pest Control', accepted_service_id: fixture.catalogId },
+    { client_id: `scheduled_${lawnId}_primary`, description: 'Lawn Care', quantity: 1,
+      unit_price: withAdjustments ? 120 : 100, accepted_service_type: 'Lawn Care', accepted_service_id: fixture.catalogId },
+  ];
+  if (coverage === 'aggregate') primary.splice(0, primary.length,
+    { description: 'First service application', quantity: 1, unit_price: 220 });
+  if (coverage === 'partial') primary.pop();
+  if (coverage === 'foreign') primary[1].accepted_service_id = randomUUID();
+  const lineItems = [
+    { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99 },
+    ...primary,
+    ...(withAdjustments ? [{ _kind: 'discount', description: 'Accepted plan credit', quantity: 1, unit_price: -18 }] : []),
+  ];
+  let deposit = null;
+  if (withAdjustments) {
+    [deposit] = await mockPg('estimate_deposits').insert({ estimate_id: estimateId,
+      customer_id: fixture.customerId, amount: 50, status: 'received',
+      stripe_payment_intent_id: `pi_fixture_${randomUUID()}` }).returning('*');
+  }
+  const stampedId = uppercaseStamp ? estimateId.toUpperCase() : estimateId;
+  const notes = uppercaseStamp
+    ? acceptanceInvoiceNotes(stampedId).replace('accepted estimate', 'ACCEPTED ESTIMATE')
+    : acceptanceInvoiceNotes(stampedId);
+  const invoice = await InvoiceService.create({ database: mockPg, customerId: fixture.customerId,
+    scheduledServiceId: pestId, title: 'WaveGuard Membership Setup + First Application', notes, lineItems,
+    ...(deposit ? { depositCredit: { amount: 50, estimateId } } : {}), dueDate: etDateString() });
+  if (deposit) {
+    await mockPg('estimate_deposits').where({ id: deposit.id }).update({ credited_amount: 50,
+      credited_invoice_id: invoice.id });
+    deposit = await mockPg('estimate_deposits').where({ id: deposit.id }).first();
+  }
+  if (status !== 'draft') {
+    await mockPg('invoices').where({ id: invoice.id }).update({ status });
+    invoice.status = status;
+  }
+  return { estimateId, invoice, deposit, pestId, lawnId };
+}
+
+async function prepareTwoFamilyRetentionPacket({ addon = false } = {}) {
+  const lawnCatalogId = randomUUID();
+  fixture.extraCatalogIds.push(lawnCatalogId);
+  await mockPg('services').where({ id: fixture.catalogId }).update({
+    name: 'Fixture Pest Control', engine_keys: JSON.stringify(['pest_control']),
+  });
+  await mockPg('services').insert({ id: lawnCatalogId, name: 'Fixture Lawn Care',
+    service_key: `fixture_${lawnCatalogId}`, engine_keys: JSON.stringify(['lawn_care']), is_active: true });
+  const [pestId, lawnId] = fixture.serviceIds;
+  await mockPg('scheduled_services').where({ id: pestId }).update({
+    service_type: 'Quarterly Pest Control', is_recurring: true, recurring_ongoing: true,
+    ...(addon ? { estimated_price: 145 } : {}),
+  });
+  await mockPg('scheduled_services').where({ id: lawnId }).update({
+    service_id: lawnCatalogId, service_type: 'Lawn Care', is_recurring: true, recurring_ongoing: true,
+  });
+  if (addon) {
+    await mockPg('scheduled_service_addons').insert({ scheduled_service_id: pestId,
+      service_id: fixture.catalogId, service_name: 'Fixture Pest Add-on', base_price: 25, estimated_price: 25 });
+  }
+  const saved = await saveVisitCompletionPacket(submission());
+  await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+  const invoice = await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).first();
+  return { saved, invoice, pestId, lawnId };
+}
+
+async function createUnownedInvoiceLink({ scheduledDate, recordDate = scheduledDate }) {
+  const visitId = randomUUID();
+  const scheduledServiceId = randomUUID();
+  const serviceRecordId = randomUUID();
+  await mockPg('service_visits').insert({
+    id: visitId, customer_id: fixture.customerId, technician_id: fixture.techId,
+    scheduled_date: scheduledDate, window_start: '13:00', window_end: '14:00',
+    stop_base_key: stopBaseKey({ customerId: fixture.customerId, scheduledDate }), stop_seq: 99, created_by: 'test',
+  });
+  await mockPg('scheduled_services').insert({
+    id: scheduledServiceId, customer_id: fixture.customerId, technician_id: fixture.techId,
+    service_id: fixture.catalogId, visit_id: visitId, service_type: 'Fixture General Pest Control',
+    scheduled_date: scheduledDate, window_start: '13:00', window_end: '14:00',
+    status: 'completed', estimated_price: 120, estimated_duration_minutes: 60,
+  });
+  await mockPg('service_records').insert({
+    id: serviceRecordId, customer_id: fixture.customerId, technician_id: fixture.techId,
+    scheduled_service_id: scheduledServiceId, service_date: recordDate,
+    service_type: 'Fixture General Pest Control', status: 'completed',
+  });
+  return { visitId, scheduledServiceId, serviceRecordId };
+}
+
+async function waitForPgBlocker(blockerPid, message) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const { rows } = await mockPg.raw(
+      'SELECT pid FROM pg_stat_activity WHERE ?::int = ANY(pg_blocking_pids(pid))', [blockerPid]);
+    if (rows.length) return rows[0].pid;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(message);
 }
 
 // Inject a real failed SQL statement; a JS rejection cannot prove transaction recovery.
@@ -106,6 +300,8 @@ async function withReadFailure(matches, run) {
 
 postgres('visit completion packet records on PostgreSQL', () => {
   beforeAll(async () => {
+    process.env.DATA_HYGIENE_VAULT_KEY = 'synthetic-visit-summary-test-key';
+    process.env.GATE_VISIT_CLOSEOUT = 'true';
     const url = new URL(connection);
     const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname);
     const ciTest = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(url.hostname)
@@ -114,15 +310,38 @@ postgres('visit completion packet records on PostgreSQL', () => {
     mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 8 } });
     if (!(await mockPg.schema.hasTable('visit_completion_packets'))) throw new Error('Run the repository migrations first');
   });
-  afterAll(async () => { if (mockPg) await mockPg.destroy(); });
+  afterAll(async () => {
+    if (originalSummaryKey === undefined) delete process.env.DATA_HYGIENE_VAULT_KEY;
+    else process.env.DATA_HYGIENE_VAULT_KEY = originalSummaryKey;
+    if (originalCloseoutGate === undefined) delete process.env.GATE_VISIT_CLOSEOUT;
+    else process.env.GATE_VISIT_CLOSEOUT = originalCloseoutGate;
+    if (mockPg) await mockPg.destroy();
+  });
   beforeEach(async () => {
     mockNotificationRecipientId = null;
     jest.restoreAllMocks();
+    process.env.GATE_VISIT_CLOSEOUT = 'true';
+    process.env.DATA_HYGIENE_VAULT_KEY = 'synthetic-visit-summary-test-key';
     jest.clearAllMocks();
     chargeInvoiceWithSavedCard.mockReset();
+    require('../services/stripe').savedCardChargeSuppressesAlternateCollection.mockImplementation((err) => err?.code === 'STRIPE_AMBIGUOUS_OUTCOME');
+    // The canonical sender's locked handoff: the caller's claim runs inside
+    // withSmsHandoff and its verdict decides whether anything sends.
+    sendCustomerMessage.mockImplementation(async (input) => {
+      const allowed = await input.withSmsHandoff(async () => ({ ok: true }));
+      return allowed.ok ? { sent: true, providerMessageId: 'fixture-sms' } : { blocked: true, code: allowed.code };
+    });
+    // The email library's equivalent boundary around its provider request.
+    require('../services/email-template-library').sendTemplate.mockImplementation(async (input) => {
+      let dispatched = false;
+      const allowed = await input.withProviderHandoff(async () => { dispatched = true; });
+      return dispatched && allowed.ok ? { sent: true } : { sent: false, aborted: true };
+    });
+
     require('../services/notification-triggers').triggerNotification.mockReset().mockResolvedValue({ suppressed: true });
     fixture = { customerId: randomUUID(), techId: randomUUID(), catalogId: randomUUID(), productId: randomUUID(),
-      visitId: randomUUID(), serviceIds: [randomUUID(), randomUUID()].sort(), key: randomUUID(), estimateIds: [] };
+      visitId: randomUUID(), serviceIds: [randomUUID(), randomUUID()].sort(), key: randomUUID(), estimateIds: [],
+      extraCatalogIds: [] };
     const date = etDateString();
     await mockPg('customers').insert({ id: fixture.customerId, first_name: 'Fixture', phone: '+12025550123',
       email: `${fixture.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: false,
@@ -145,6 +364,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
   afterEach(async () => {
     if (!fixture) return;
     jest.restoreAllMocks();
+    if (fixture.httpServer) await new Promise((resolve) => fixture.httpServer.close(resolve));
     if (originalPestRecap === undefined) delete process.env.PEST_RECAP;
     else process.env.PEST_RECAP = originalPestRecap;
     // Only the synthetic fixture's rows; the private database's seeded catalog
@@ -167,13 +387,84 @@ postgres('visit completion packet records on PostgreSQL', () => {
     await mockPg('customers').where({ id: fixture.customerId }).del();
     if (fixture.formTemplateId) await mockPg('job_form_templates').where({ id: fixture.formTemplateId }).del();
     if (fixture.discountId) await mockPg('discounts').where({ id: fixture.discountId }).del();
+    if (fixture.taxabilityId) await mockPg('service_taxability').where({ id: fixture.taxabilityId }).del();
+    if (fixture.taxExemptionId) await mockPg('tax_exemptions').where({ id: fixture.taxExemptionId }).del();
     if (fixture.payerId) await mockPg('payers').where({ id: fixture.payerId }).del();
     await mockPg('notification_preferences').where({ admin_user_id: fixture.techId }).del();
     await mockPg('push_subscriptions').where({ admin_user_id: fixture.techId }).del();
+    if (fixture.historyTechId) await mockPg('technicians').where({ id: fixture.historyTechId }).del();
     await mockPg('technicians').where({ id: fixture.techId }).del();
     await mockPg('service_completion_profiles').where({ service_key: `fixture_${fixture.catalogId}` }).del();
     await mockPg('services').where({ id: fixture.catalogId }).del();
+    if (fixture.extraCatalogIds.length) await mockPg('services').whereIn('id', fixture.extraCatalogIds).del();
     await mockPg('products_catalog').where({ id: fixture.productId }).del();
+  });
+
+  test.each([
+    ['ordinary', 'accepted estimate', 99], ['ordinary', 'ACCEPTED ESTIMATE', 99],
+    ['terminal', 'accepted estimate', 99], ['terminal', 'ACCEPTED ESTIMATE', 99],
+    ['terminal', 'ACCEPTED ESTIMATE', 40],
+  ])('%s completion recognizes a late fee invoice with %s stamp ($%s)', async (lane, phrase, feeAmount) => {
+    const estimateId = randomUUID();
+    const serviceId = fixture.serviceIds[0];
+    fixture.estimateIds.push(estimateId);
+    const priorGate = process.env.GATE_UNMINTED_SETUP_FEE_PARK;
+    process.env.GATE_UNMINTED_SETUP_FEE_PARK = 'true';
+    const obligations = require('../services/setup-fee-obligation');
+    const readObligation = obligations.findUnmintedSetupFeeObligation;
+    let observedOwed = false;
+    let coveringInvoice;
+    try {
+      await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ visit_id: null });
+      await mockPg('estimates').insert({ id: estimateId, customer_id: fixture.customerId, status: 'accepted',
+        accepted_at: new Date(), estimate_data: JSON.stringify({
+          recurring: { services: [{ name: 'Pest Control', frequency: 'quarterly', mo: 29.33 }] },
+          sendSnapshot: { pricingBundle: { firstVisitFees: [{ service: 'waveguard_setup', amount: 99 }] } },
+        }) });
+      await mockPg('scheduled_services').where({ id: serviceId }).update({ source_estimate_id: estimateId, is_recurring: true });
+      await mockPg('activity_log').insert({ customer_id: fixture.customerId,
+        action: 'estimate_converted', description: `Estimate #${estimateId} converted: synthetic stamp coverage` });
+      if (lane === 'terminal') {
+        const prior = await InvoiceService.create({ customerId: fixture.customerId, scheduledServiceId: serviceId,
+          lineItems: [{ description: 'First service application', quantity: 1, unit_price: 120 }] });
+        await mockPg('invoices').where({ id: prior.id }).update({ status: 'refunded' });
+      }
+      jest.spyOn(obligations, 'findUnmintedSetupFeeObligation').mockImplementationOnce(async (...args) => {
+        const read = await readObligation(...args);
+        observedOwed = read.owed;
+        // Commit through the real writer after the initial read, before
+        // completion's locked recheck. No post-create reconciliation runs.
+        coveringInvoice = await InvoiceService.create({ customerId: fixture.customerId,
+          lineItems: [{ description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: feeAmount }],
+          notes: `${phrase} #${phrase === 'ACCEPTED ESTIMATE' ? estimateId.toUpperCase() : estimateId}.`,
+        });
+        return read;
+      });
+      const result = await completeScheduledService({ serviceId, idempotencyKey: randomUUID(),
+        actor: submission().actor, body: { ...submission().items[0].body, sendCompletionSms: false, requestReview: false } });
+      expect(observedOwed).toBe(true);
+      expect(result.status).toBeLessThan(300);
+      const alerts = await mockPg('notifications').where({ recipient_type: 'admin', category: 'billing' })
+        .whereRaw("metadata->>'scheduledServiceId' = ?", [serviceId]);
+      expect(alerts).toHaveLength(1);
+      if (lane === 'ordinary') {
+        expect(alerts[0].body).toContain(`setup fee is covered by invoice ${coveringInvoice.invoice_number}`);
+        expect(alerts[0].body).toContain('do NOT re-bill the setup fee');
+      } else if (feeAmount < 99) {
+        expect(alerts[0].body).toContain('$59.00 remaining');
+        expect(alerts[0].metadata.expectedSetupFeeCents).toBe(9900);
+      } else {
+        expect(alerts[0].body).not.toContain('ALSO:');
+        expect(alerts[0].body).not.toContain('setup fee');
+      }
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    } finally {
+      jest.restoreAllMocks();
+      if (priorGate === undefined) delete process.env.GATE_UNMINTED_SETUP_FEE_PARK;
+      else process.env.GATE_UNMINTED_SETUP_FEE_PARK = priorGate;
+      await mockPg('notifications').whereRaw("metadata->>'scheduledServiceId' = ?", [serviceId]).del();
+    }
   });
 
   test('two canonical records commit together and their effects remain pending', async () => {
@@ -193,6 +484,672 @@ postgres('visit completion packet records on PostgreSQL', () => {
     });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['inspection only', false], ['inspection only', true], ['callback', true], ['always-free follow-up', true],
+  ])('nonbillable estimate members (%s) leave unrelated acceptance invoices outside packet billing (lock=%s)', async (kind, heldLock) => {
+    const billableEstimateId = await linkFixtureEstimate();
+    const nonbillableEstimateId = randomUUID();
+    fixture.estimateIds.push(nonbillableEstimateId);
+    await mockPg('estimates').insert({ id: nonbillableEstimateId, customer_id: fixture.customerId, status: 'accepted' });
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ source_estimate_id: nonbillableEstimateId });
+    const acceptance = await InvoiceService.create({ customerId: fixture.customerId, serviceDate: etDateString(),
+      lineItems: [{ description: 'First service application', quantity: 1, unit_price: 120 }],
+      notes: `Auto-generated from accepted estimate #${nonbillableEstimateId}. First application.`,
+    });
+    const input = submission();
+    if (kind === 'inspection only') input.items[1].body.visitOutcome = 'inspection_only';
+    if (kind === 'callback') await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ is_callback: true });
+    if (kind === 'always-free follow-up') {
+      await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ service_type: 'Fixture Follow-up Service' });
+    }
+    const holder = heldLock ? await mockPg.transaction() : null;
+    try {
+      if (holder) await holder.raw('SELECT pg_advisory_xact_lock(hashtext(?))',
+        [`unminted_setup_fee_manual_billing:${nonbillableEstimateId}`]);
+      const saved = await saveVisitCompletionPacket(input);
+      expect(saved.body.billing).toMatchObject({ state: 'invoice_ready', total: 120 });
+      const packetInvoice = await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).first();
+      expect(packetInvoice.id).not.toBe(acceptance.id);
+      expect(packetInvoice.scheduled_service_id).toBe(fixture.serviceIds[0]);
+      expect(packetInvoice.visit_completion_packet_id).toBe(saved.body.packetId);
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(2);
+      expect((await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first()).source_estimate_id)
+        .toBe(billableEstimateId);
+    } finally {
+      if (holder && !holder.isCompleted()) await holder.rollback();
+    }
+  });
+
+  test.each(['uncovered', 'paid', 'canceled sibling'])('a performed recurring application adjusted to zero still reviews its accepted setup fee (%s)', async (coverage) => {
+    const covered = coverage === 'paid';
+    const estimateId = await linkFixtureEstimateWithSetupObligation();
+    const key = `fixture_${fixture.catalogId}`;
+    const accepted = await mockPg('estimates').where({ id: estimateId }).first('estimate_data');
+    await mockPg('estimates').where({ id: estimateId }).update({
+      address: '100 Synthetic Test Lane, Bradenton, FL 34201',
+      estimate_data: JSON.stringify({ sendSnapshot: accepted.estimate_data.sendSnapshot, result: { recurring: { services: [{
+        service: 'pest_control', serviceKey: key, name: 'Fixture General Pest Control',
+        perTreatment: 120, priceAfterDiscount: 102, visitsPerYear: 4, frequency: 'quarterly',
+        discount: { effectiveDiscount: 0.15 },
+      }] } } }),
+    });
+    await mockPg('customers').where({ id: fixture.customerId }).update({ per_application_fee: 120 });
+    await mockPg('services').where({ id: fixture.catalogId }).update({
+      frequency: 'quarterly', billing_type: 'recurring', visits_per_year: 4,
+    });
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({
+      service_address_line1: '100 Synthetic Test Lane', service_address_city: 'Bradenton', service_address_zip: '34201',
+    });
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({
+      recurring_pattern: 'quarterly', primary_line_price: 120, estimated_price: 18,
+    });
+    fixture.discountId = randomUUID();
+    await mockPg('discounts').insert({ id: fixture.discountId, discount_key: `fixture_${fixture.discountId}`,
+      name: 'Synthetic fixed adjustment', discount_type: 'fixed_amount', amount: 102, is_stackable: true });
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({
+      discount_id: fixture.discountId, discount_name: 'Synthetic fixed adjustment',
+      discount_type: 'fixed_amount', discount_amount: 102, discount_dollars: 102,
+    });
+    if (covered) await createPaidSetupFee(estimateId);
+    const { gates } = require('../config/feature-gates');
+    const priorGates = [gates.completionServicePricing, gates.editApptPriceServiceScope];
+    gates.completionServicePricing = true;
+    gates.editApptPriceServiceScope = true;
+    let siblingId;
+    let siblingInvoiceId;
+    try {
+      if (coverage === 'canceled sibling') {
+        siblingId = randomUUID();
+        await mockPg('scheduled_services').insert({ id: siblingId, customer_id: fixture.customerId,
+          technician_id: fixture.techId, service_id: fixture.catalogId,
+          source_estimate_id: estimateId, service_type: 'Fixture General Pest Control',
+          scheduled_date: etDateString(), window_start: '12:00', window_end: '13:00',
+          status: 'on_site', estimated_price: 99, is_recurring: true });
+        const fee = await InvoiceService.create({ customerId: fixture.customerId,
+          scheduledServiceId: siblingId, serviceDate: etDateString(),
+          lineItems: [{ description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99 }],
+          notes: `Auto-generated from accepted estimate #${estimateId}. $99 setup fee only.`,
+        });
+        siblingInvoiceId = fee.id;
+        await mockPg('invoices').where({ id: fee.id }).update({ status: 'canceled' });
+        await mockPg('scheduled_services').where({ id: siblingId }).update({ status: 'cancelled' });
+      }
+      const plan = await require('../services/completion-pricing')
+        .loadCompletionPricing(fixture.serviceIds[0], { database: mockPg, role: 'admin' });
+      expect(plan.view).toMatchObject({ canApply: true, proposedAmount: 0 });
+      const input = submission({ actor: { techRole: 'admin', technicianId: fixture.techId } });
+      input.items[0].body.pricingReview = { witness: plan.view.witness, applyDiscounts: true };
+      input.items[1].body.visitOutcome = 'inspection_only';
+      const saved = await saveVisitCompletionPacket(input);
+      expect(saved.body.billing).toMatchObject(covered
+        ? { state: 'no_charge', invoiceId: null }
+        : { state: 'office_required', reason: 'setup_fee_requires_review', serviceId: fixture.serviceIds[0] });
+      const record = await mockPg('service_records').where({ scheduled_service_id: fixture.serviceIds[0] }).first();
+      expect(record.structured_notes.completionPricing.amountCents).toBe(0);
+      expect((await saveVisitCompletionPacket(input)).body.billing).toMatchObject(covered
+        ? { state: 'no_charge', invoiceId: null }
+        : { state: 'office_required', reason: 'setup_fee_requires_review' });
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(
+        coverage === 'uncovered' ? 0 : 1);
+    } finally {
+      [gates.completionServicePricing, gates.editApptPriceServiceScope] = priorGates;
+      if (siblingInvoiceId) await mockPg('invoices').where({ id: siblingInvoiceId }).del();
+      if (siblingId) await mockPg('scheduled_services').where({ id: siblingId }).del();
+    }
+  });
+
+  test('freezes one server-measured visit duration and replays its proportional allocation', async () => {
+    const arrivedAt = new Date(Date.now() - 59 * 60000);
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({ arrived_at: arrivedAt });
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({
+      arrived_at: arrivedAt, actual_start_time: arrivedAt, estimated_duration_minutes: 60,
+    });
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({
+      estimated_duration_minutes: 30,
+    });
+    const input = submission();
+    input.items.forEach((entry) => { entry.body.timeOnSite = '0:59:00'; });
+
+    const saved = await saveVisitCompletionPacket(input);
+    expect(saved).toMatchObject({ status: 202, body: { replayed: false } });
+    const packet = await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first('payload');
+    const allocation = packet.payload.durationAllocation;
+    expect(allocation).toMatchObject({ version: 1, source: 'visit_arrived_at', totalMinutes: 59 });
+    expect(allocation.items.map((entry) => entry.allocatedMinutes)).toEqual([39, 20]);
+    expect(allocation.items.reduce((sum, entry) => sum + entry.allocatedMinutes, 0)).toBe(allocation.totalMinutes);
+
+    const services = await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).orderBy('id');
+    const records = await mockPg('service_records').whereIn('scheduled_service_id', fixture.serviceIds)
+      .orderBy('scheduled_service_id');
+    expect(services.map((row) => row.actual_duration_minutes)).toEqual([39, 20]);
+    expect(services[1]).toMatchObject({ arrived_at: null, actual_start_time: null, check_in_time: null });
+    expect(records.map((row) => row.structured_notes.visitDurationAllocation.allocatedMinutes)).toEqual([39, 20]);
+    expect(records.every((row) => row.structured_notes.visitDurationAllocation.packetId === saved.body.packetId)).toBe(true);
+
+    const changedTimer = structuredClone(input);
+    changedTimer.items.forEach((entry) => { entry.body.timeOnSite = '9:59:00'; });
+    expect(await saveVisitCompletionPacket(changedTimer)).toMatchObject({
+      status: 202, body: { replayed: true, packetId: saved.body.packetId },
+    });
+    expect((await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first('payload')).payload.durationAllocation)
+      .toEqual(allocation);
+  });
+
+  test('same-stop retained work reserves recorded minutes and drive cost across save and replay', async () => {
+    const [retainedId, liveId] = fixture.serviceIds;
+    const start = new Date(Date.now() - 60 * 60000);
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({ arrived_at: start });
+    await mockPg('scheduled_services').where({ id: retainedId }).update({
+      status: 'completed', actual_start_time: start,
+      actual_end_time: new Date(start.getTime() + 20 * 60000),
+      service_time_minutes: 20, actual_duration_minutes: 20,
+    });
+    await mockPg('service_records').insert({
+      customer_id: fixture.customerId, technician_id: fixture.techId, scheduled_service_id: retainedId,
+      service_date: etDateString(), service_type: 'Fixture General Pest Control', status: 'completed',
+      structured_notes: JSON.stringify({ timeOnSite: 20 }),
+    });
+    const { calculateJobCost } = require('../services/job-costing');
+    const priorCost = await calculateJobCost(retainedId, mockPg);
+    const priorRecord = await mockPg('service_records').where({ scheduled_service_id: retainedId }).first();
+    const input = submission();
+    input.items = input.items.filter((item) => item.serviceId === liveId);
+    const saved = await saveVisitCompletionPacket(input);
+    expect(saved.status).toBe(202);
+    const packet = await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first();
+    expect(packet.payload.durationAllocation).toMatchObject({
+      totalMinutes: 60, retainedMinutes: 20, driveCostOwnerServiceId: retainedId,
+      items: [{ serviceId: liveId, allocatedMinutes: 40 }],
+    });
+    await runVisitCompletionPacketMemberEffects(saved.body.packetId);
+    expect((await calculateJobCost(liveId, mockPg)).drive_cost).toBe(0);
+    const retainedRecord = await mockPg('service_records').where({ scheduled_service_id: retainedId }).first();
+    expect(retainedRecord).toEqual({ ...priorRecord, structured_notes: {
+      ...priorRecord.structured_notes,
+      visitDriveCostAllocation: { version: 1, packetId: saved.body.packetId, ownerServiceId: retainedId },
+    } });
+    expect((await mockPg('scheduled_services').where({ id: liveId }).first()).actual_duration_minutes).toBe(40);
+    // Later row edits cannot change the saved packet's accounting decisions.
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({ arrived_at: new Date() });
+    expect((await saveVisitCompletionPacket(input)).body.replayed).toBe(true);
+    expect((await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).payload.durationAllocation)
+      .toEqual(packet.payload.durationAllocation);
+    const ledger = await mockPg('job_costs').whereIn('scheduled_service_id', fixture.serviceIds);
+    expect(ledger.reduce((sum, row) => sum + Number(row.drive_cost), 0)).toBe(priorCost.drive_cost);
+  });
+
+  test('multiple retained same-stop reports reconcile to one drive charge atomically', async () => {
+    const liveId = randomUUID();
+    await mockPg('scheduled_services').insert({ id: liveId, customer_id: fixture.customerId,
+      technician_id: fixture.techId, service_id: fixture.catalogId, visit_id: fixture.visitId,
+      service_type: 'Fixture General Pest Control', scheduled_date: etDateString(),
+      window_start: '11:00', window_end: '12:00', status: 'on_site', estimated_price: 120,
+      estimated_duration_minutes: 60 });
+    const retainedIds = [...fixture.serviceIds];
+    fixture.serviceIds.push(liveId);
+    fixture.serviceIds.sort();
+    const start = new Date(Date.now() - 60 * 60000);
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({ arrived_at: start });
+    const { calculateJobCost } = require('../services/job-costing');
+    const priorCosts = [];
+    for (const id of retainedIds) {
+      await mockPg('scheduled_services').where({ id }).update({ status: 'completed',
+        actual_start_time: start, actual_end_time: new Date(start.getTime() + 20 * 60000),
+        service_time_minutes: 20, actual_duration_minutes: 20 });
+      await mockPg('service_records').insert({ customer_id: fixture.customerId,
+        technician_id: fixture.techId, scheduled_service_id: id, service_date: etDateString(),
+        service_type: 'Fixture General Pest Control', status: 'completed',
+        structured_notes: JSON.stringify({ timeOnSite: 20 }) });
+      priorCosts.push(await calculateJobCost(id, mockPg));
+    }
+    expect(priorCosts.every((cost) => cost.drive_cost > 0)).toBe(true);
+    const input = submission();
+    input.items = input.items.filter((item) => item.serviceId === liveId);
+    await withReadFailure(({ sql }) => sql.startsWith('update "job_costs"'), async () => {
+      await expect(saveVisitCompletionPacket(input)).rejects.toThrow();
+      expect(await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId }).first()).toBeUndefined();
+      const records = await mockPg('service_records').whereIn('scheduled_service_id', retainedIds);
+      expect(records.every((record) => !record.structured_notes.visitDriveCostAllocation)).toBe(true);
+      expect(records.every((record) => Number(record.drive_cost) === priorCosts[0].drive_cost)).toBe(true);
+    });
+    const saved = await saveVisitCompletionPacket(input);
+    expect(saved.status).toBe(202);
+    const packet = await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first();
+    expect(packet.payload.durationAllocation).toMatchObject({ retainedMinutes: 40,
+      driveCostOwnerServiceId: retainedIds[0], items: [{ serviceId: liveId, allocatedMinutes: 20 }] });
+    await runVisitCompletionPacketMemberEffects(saved.body.packetId);
+    for (const id of [...fixture.serviceIds].reverse()) await calculateJobCost(id, mockPg);
+    expect((await saveVisitCompletionPacket(input)).body.replayed).toBe(true);
+    const ledger = await mockPg('job_costs').whereIn('scheduled_service_id', fixture.serviceIds);
+    const records = await mockPg('service_records').whereIn('scheduled_service_id', fixture.serviceIds);
+    expect(records.every((record) => record.structured_notes.visitDriveCostAllocation.ownerServiceId === retainedIds[0])).toBe(true);
+    expect(ledger.reduce((sum, row) => sum + Number(row.drive_cost), 0)).toBe(priorCosts[0].drive_cost);
+    expect(records.reduce((sum, row) => sum + Number(row.drive_cost), 0)).toBe(priorCosts[0].drive_cost);
+  });
+
+  test('a retained backfill consumes neither current minutes nor the current stop drive charge', async () => {
+    const [retainedId, liveId] = fixture.serviceIds;
+    const start = new Date(Date.now() - 60 * 60000);
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({ arrived_at: start });
+    await mockPg('scheduled_services').where({ id: retainedId }).update({
+      status: 'completed', actual_start_time: start, actual_end_time: new Date(), service_time_minutes: 20,
+    });
+    await mockPg('service_records').insert({
+      customer_id: fixture.customerId, technician_id: fixture.techId, scheduled_service_id: retainedId,
+      service_date: etDateString(), service_type: 'Fixture General Pest Control', status: 'completed',
+      structured_notes: JSON.stringify({ backfill: true, timeOnSite: 20 }),
+    });
+    const input = submission();
+    input.items = input.items.filter((item) => item.serviceId === liveId);
+    const saved = await saveVisitCompletionPacket(input);
+    expect(saved.status).toBe(202);
+    const packet = await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first();
+    expect(packet.payload.durationAllocation).toMatchObject({ retainedWork: [], retainedMinutes: 0,
+      driveCostOwnerServiceId: liveId, items: [{ serviceId: liveId, allocatedMinutes: 60 }],
+    });
+    const record = await mockPg('service_records').where({ scheduled_service_id: liveId }).first();
+    expect(record.structured_notes.visitDriveCostAllocation.ownerServiceId).toBe(liveId);
+  });
+
+  test('new live members share one durable drive charge even with an explicit admin duration', async () => {
+    const input = submission({ actor: { techRole: 'admin', technicianId: fixture.techId } });
+    input.items[0].body.timeOnSite = 20;
+    const saved = await saveVisitCompletionPacket(input);
+    expect(saved.status).toBe(202);
+    const { calculateJobCost } = require('../services/job-costing');
+    const owner = fixture.serviceIds[0];
+    const records = await mockPg('service_records').whereIn('scheduled_service_id', fixture.serviceIds);
+    expect(records.every((record) => record.structured_notes.visitDriveCostAllocation.ownerServiceId === owner)).toBe(true);
+    const first = await calculateJobCost(owner, mockPg);
+    expect(first.drive_cost).toBeGreaterThan(0);
+    expect((await calculateJobCost(fixture.serviceIds[1], mockPg)).drive_cost).toBe(0);
+    await runVisitCompletionPacketMemberEffects(saved.body.packetId);
+    // Recalculate in reverse order: the drive charge cannot move or multiply.
+    for (const id of [...fixture.serviceIds].reverse()) await calculateJobCost(id, mockPg);
+    const ledger = await mockPg('job_costs').whereIn('scheduled_service_id', fixture.serviceIds);
+    const updated = await mockPg('service_records').whereIn('scheduled_service_id', fixture.serviceIds);
+    expect(ledger.reduce((sum, row) => sum + Number(row.drive_cost), 0)).toBe(first.drive_cost);
+    expect(updated.reduce((sum, row) => sum + Number(row.drive_cost), 0)).toBe(first.drive_cost);
+  });
+
+  test('a visit with no server-side start freezes unknown duration instead of duplicating row spans', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    const packet = await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first('payload');
+    expect(packet.payload.durationAllocation).toMatchObject({
+      source: 'unavailable', startedAt: null, totalMinutes: null,
+      items: expect.arrayContaining(fixture.serviceIds.map((serviceId) => expect.objectContaining({
+        serviceId, allocatedMinutes: null,
+      }))),
+    });
+    const services = await mockPg('scheduled_services').whereIn('id', fixture.serviceIds);
+    const records = await mockPg('service_records').whereIn('scheduled_service_id', fixture.serviceIds);
+    expect(services.every((row) => row.service_time_minutes == null && row.actual_duration_minutes == null)).toBe(true);
+    expect(records.every((row) => row.structured_notes.visitDurationAllocation.allocatedMinutes === null)).toBe(true);
+  });
+
+  test('preserves a recordless member correction and allocates only the remaining visit minutes', async () => {
+    const start = new Date(Date.now() - 60 * 60000);
+    const end = new Date();
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({ arrived_at: start });
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({
+      status: 'completed', actual_start_time: start, actual_end_time: end, completed_at: end,
+    });
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({
+      time_on_site_adjusted_minutes: 20, time_on_site_correction_seq: 1,
+      actual_duration_minutes: 20, service_time_minutes: 20,
+      actual_end_time: new Date(start.getTime() + 20 * 60000),
+    });
+    const input = submission();
+    input.items.forEach((entry) => { entry.body.timeOnSite = '1:00:00'; });
+    const saved = await saveVisitCompletionPacket(input);
+    expect(saved.status).toBe(202);
+    const packet = await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first('payload');
+    expect(packet.payload.durationAllocation).toMatchObject({
+      totalMinutes: 60, explicitMinutes: 20,
+      items: [{ serviceId: fixture.serviceIds[1], allocatedMinutes: 40 }],
+    });
+    const record = await mockPg('service_records').where({ scheduled_service_id: fixture.serviceIds[0] }).first();
+    expect(record.structured_notes).toMatchObject({ timeOnSite: 20, timeOnSiteAdjusted: true });
+    expect(record.structured_notes.visitDurationAllocation).toBeUndefined();
+    await runVisitCompletionPacketMemberEffects(saved.body.packetId);
+    const services = await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).orderBy('id');
+    expect(services.map((row) => row.actual_duration_minutes)).toEqual([20, 40]);
+  });
+
+  test.each([0, null])('tracker recovery preserves a saved %s allocation after its first transition fails', async (minutes) => {
+    if (minutes === 0) {
+      await mockPg('service_visits').where({ id: fixture.visitId }).update({ arrived_at: new Date() });
+    }
+    const saved = await saveVisitCompletionPacket(submission());
+    // A subsequently repaired shared start must not become per-member labor.
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({
+      actual_start_time: new Date(Date.now() - 59 * 60000),
+    });
+    const transitions = require('../services/track-transitions');
+    const markComplete = transitions.markComplete;
+    const failed = new Set();
+    jest.spyOn(transitions, 'markComplete').mockImplementation((id, options) => {
+      if (!failed.has(id)) {
+        failed.add(id);
+        return Promise.reject(new Error('Synthetic first tracker transition outage'));
+      }
+      return markComplete(id, options);
+    });
+    expect(await runVisitCompletionPacketMemberEffects(saved.body.packetId)).toMatchObject({
+      status: 202, body: { state: 'member_effects_ready' },
+    });
+    const services = await mockPg('scheduled_services').whereIn('id', fixture.serviceIds);
+    expect(services).toHaveLength(2);
+    for (const service of services) {
+      expect(service).toMatchObject({
+        track_state: 'complete', service_time_minutes: minutes, actual_duration_minutes: minutes,
+      });
+    }
+  });
+
+  test('an implausibly large item array is refused before any per-item lock is taken', async () => {
+    const input = submission();
+    const flood = Array.from({ length: 51 }, () => ({ serviceId: randomUUID(), body: { ...input.items[0].body } }));
+    const execute = mockPg.client.constructor.prototype._query;
+    const spy = jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(function record(connection, query) {
+      return execute.call(this, connection, query);
+    });
+    try {
+      expect(await saveVisitCompletionPacket({ ...input, items: flood })).toMatchObject({ status: 400, body: { code: 'visit_closeout_members_invalid' } });
+      expect(spy.mock.calls.some(([, query]) => /advisory/i.test(query.sql))).toBe(false);
+    } finally {
+      jest.restoreAllMocks();
+    }
+  });
+
+  test('resuming effects re-applies the technician scope on the locked members', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved).toMatchObject({ status: 202 });
+    const technician = { techRole: 'technician', technicianId: fixture.techId };
+    // A whole-visit reassignment that committed after the route's preflight.
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ technician_id: null });
+    expect(await runVisitCompletionPacketEffects(saved.body.packetId, undefined, { actor: technician }))
+      .toMatchObject({ status: 409, body: { code: 'visit_out_of_scope' } });
+    expect(await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).toMatchObject({ status: 'processing' });
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ technician_id: fixture.techId });
+    expect(await runVisitCompletionPacketEffects(saved.body.packetId, undefined, { actor: technician })).toMatchObject({ status: 200 });
+  });
+
+  test('status-only completed members still require canonical closeout forms', async () => {
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ status: 'completed' });
+    const input = submission();
+    expect(await saveVisitCompletionPacket({ ...input, items: input.items.slice(1) }))
+      .toMatchObject({ status: 409, body: { code: 'visit_members_changed' } });
+    expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
+    expect(await saveVisitCompletionPacket(input)).toMatchObject({ status: 202 });
+    expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(2);
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId }).first()).toMatchObject({ total: '240.00' });
+  });
+
+  test.each([true, false])('staff scope excludes completed history only with a canonical record: %s', async (hasRecord) => {
+    const [historyId, liveId] = fixture.serviceIds;
+    fixture.historyTechId = randomUUID();
+    const authFields = { role: 'technician', active: true, employment_status: 'active', auth_token_version: 1, must_change_password: false };
+    await mockPg('technicians').insert({ id: fixture.historyTechId, name: 'Fixture Former Technician', ...authFields });
+    await mockPg('technicians').where({ id: fixture.techId }).update(authFields);
+    const { addETDays } = require('../utils/datetime-et');
+    await mockPg('scheduled_services').where({ id: historyId }).update({ status: 'completed',
+      technician_id: fixture.historyTechId, scheduled_date: etDateString(addETDays(new Date(), -8)) });
+    if (hasRecord) await mockPg('service_records').insert({ customer_id: fixture.customerId,
+      technician_id: fixture.historyTechId, scheduled_service_id: historyId, service_date: etDateString(),
+      service_type: 'Fixture General Pest Control', status: 'completed' });
+    const app = require('express')();
+    app.use(require('express').json());
+    app.use('/api/admin/visit-closeouts', require('../routes/admin-visit-closeouts'));
+    app.use((err, req, res, next) => res.status(500).json({ error: err.message }));
+    fixture.httpServer = await new Promise((resolve) => {
+      const server = app.listen(0, '127.0.0.1', () => resolve(server));
+    });
+    const request = async (technicianId, method = 'GET') => {
+      const token = require('jsonwebtoken').sign({ technicianId, type: 'access', tokenVersion: 1 }, require('../config').jwt.secret);
+      const response = await fetch(`http://127.0.0.1:${fixture.httpServer.address().port}/api/admin/visit-closeouts/${fixture.visitId}`, {
+        method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': fixture.key },
+        ...(method === 'POST' ? { body: JSON.stringify({ items: submission().items.slice(1) }) } : {}),
+      });
+      return { status: response.status, body: await response.json() };
+    };
+    expect((await request(fixture.historyTechId)).status).toBe(403);
+    const read = await request(fixture.techId);
+    expect(read.status).toBe(hasRecord ? 200 : 403);
+    if (hasRecord) expect(read.body.members).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: historyId, requiresForm: false }),
+      expect.objectContaining({ id: liveId, requiresForm: true }),
+    ]));
+    expect((await request(fixture.techId, 'POST')).status).toBe(hasRecord ? 200 : 403);
+    expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(hasRecord ? 2 : 0);
+    const invoices = await mockPg('invoices').where({ customer_id: fixture.customerId });
+    expect(invoices).toHaveLength(hasRecord ? 1 : 0);
+    if (hasRecord) expect(invoices[0].total).toBe('120.00');
+  });
+
+  test.each([false, true])('staff routes preserve combined closeout after the gate closes (created with full behavior: %s)', async (fullBehavior) => {
+    if (fullBehavior) {
+      const methodId = randomUUID();
+      await mockPg('payment_methods').insert({ id: methodId, customer_id: fixture.customerId,
+        processor: 'stripe', method_type: 'card', stripe_payment_method_id: 'pm_fixture_visit',
+        is_default: true, autopay_enabled: true, exp_month: 12, exp_year: new Date().getUTCFullYear() + 1 });
+      await mockPg('customers').where({ id: fixture.customerId }).update({ autopay_enabled: true, autopay_payment_method_id: methodId });
+      await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ visit_id: null });
+      await mockPg('service_visits').where({ id: fixture.visitId }).del();
+      await mockPg('services').where({ id: fixture.catalogId }).update({ groupable: true, group_family: 'recurring_property_service' });
+      const visit = await require('../services/visit-groups').createOrJoinVisit({ rows: fixture.serviceIds, createdBy: 'test' });
+      expect(visit.behavior_version).toBe(2);
+      fixture.visitId = visit.id;
+      chargeInvoiceWithSavedCard.mockImplementation(async (invoiceId, selectedMethod, options) => {
+        expect(selectedMethod).toBe(methodId);
+        await mockPg.transaction(async (trx) => {
+          const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+          await trx('customers').where({ id: fixture.customerId }).forUpdate().first();
+          await require('../services/visit-completion-payment').assertVisitCompletionCharge(trx, invoice, options.requireVisitCompletionPacketId);
+          await trx('invoices').where({ id: invoiceId }).update({ status: 'paid', stripe_payment_intent_id: 'pi_fixture_visit' });
+        });
+      });
+      process.env.GATE_VISIT_CLOSEOUT = 'false';
+      expect(await require('../services/visit-groups').ensureLegacyCompletable(fixture.serviceIds[0]))
+        .toMatchObject({ ok: false, reason: 'visit_closeout_required' });
+      expect(await completeScheduledService({ serviceId: fixture.serviceIds[0], idempotencyKey: randomUUID(),
+        actor: submission().actor, body: submission().items[0].body }))
+        .toMatchObject({ status: 409, body: { code: 'visit_grouped' } });
+      expect(await require('../services/visit-groups').dissolveForLegacyCompletion(fixture.visitId)).toBe(false);
+      expect(await mockPg('service_completion_attempts').whereIn('service_id', fixture.serviceIds)).toHaveLength(0);
+    }
+    const app = require('express')();
+    app.use(require('express').json());
+    app.use('/api/admin/visit-closeouts', require('../routes/admin-visit-closeouts'));
+    app.use('/api/visit-summary', require('../routes/visit-summary-public'));
+    app.use('/api/admin/schedule', require('../routes/admin-schedule'));
+    app.use('/api/admin/dispatch', require('../routes/admin-dispatch'));
+    app.use((err, req, res, next) => res.status(500).json({ error: err.message }));
+    fixture.httpServer = await new Promise((resolve) => {
+      const server = app.listen(0, '127.0.0.1', () => resolve(server));
+    });
+    const request = async (path, { method = 'GET', auth = {}, body } = {}) => {
+      const response = await fetch(`http://127.0.0.1:${fixture.httpServer.address().port}${path}`, {
+        method, headers: { ...auth, 'Content-Type': 'application/json', 'Idempotency-Key': fixture.key },
+        ...(body ? { body: JSON.stringify(body) } : {}),
+      });
+      return { status: response.status, body: await response.json(), headers: Object.fromEntries(response.headers) };
+    };
+    await mockPg('technicians').where({ id: fixture.techId }).update({ employment_status: 'active', auth_token_version: 1, must_change_password: false });
+    const token = require('jsonwebtoken').sign({ technicianId: fixture.techId, type: 'access', tokenVersion: 1 }, require('../config').jwt.secret);
+    const path = `/api/admin/visit-closeouts/${fixture.visitId}`;
+    const auth = { Authorization: `Bearer ${token}` };
+    expect((await request(path)).status).toBe(401);
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ technician_id: null });
+    expect((await request(path, { method: 'POST', auth, body: { ...submission(), actor: { techRole: 'admin' } } })).status).toBe(403);
+    expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ technician_id: fixture.techId });
+    const assignedMember = await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).first();
+    const { addETDays, etDateString } = require('../utils/datetime-et');
+    await mockPg('scheduled_services').where({ id: assignedMember.id }).update({ scheduled_date: etDateString(addETDays(new Date(), -8)) });
+    expect((await request(path, { auth })).status).toBe(404);
+    expect((await request(path, { method: 'POST', auth, body: { items: submission().items } })).status).toBe(404);
+    expect((await request(`${path}/resume`, { method: 'POST', auth, body: {} })).status).toBe(404);
+    await mockPg('technicians').where({ id: fixture.techId }).update({ role: 'admin' });
+    expect((await request(path, { auth })).status).toBe(200);
+    await mockPg('technicians').where({ id: fixture.techId }).update({ role: 'technician' });
+    await mockPg('scheduled_services').where({ id: assignedMember.id }).update({ scheduled_date: assignedMember.scheduled_date });
+    // A retained cancelled sibling is history, not a gate: the technician
+    // still reaches the closeout for the live member, and a form for the
+    // retained child is refused by the saver's own membership rule.
+    await mockPg('scheduled_services').where({ id: assignedMember.id }).update({ status: 'cancelled', technician_id: null });
+    expect((await request(path, { auth })).status).toBe(200);
+    expect((await request(path, { method: 'POST', auth, body: { items: submission().items } })).body.code).toBe('visit_members_changed');
+    await mockPg('scheduled_services').where({ id: assignedMember.id }).update({ status: assignedMember.status, technician_id: fixture.techId });
+    // A rescheduled sibling the frozen visit kept is history too: it is
+    // outside the technician's current scope, so it must not gate the
+    // closeout as a "current" member, and it is not one of the forms.
+    await mockPg('scheduled_services').where({ id: assignedMember.id }).update({ status: 'rescheduled' });
+    expect((await request(path, { auth })).status).toBe(200);
+    expect((await request(path, { auth })).body.members.map((member) => member.status)).toContain('rescheduled');
+    expect((await request(path, { method: 'POST', auth, body: { items: submission().items } })).body.code).toBe('visit_members_changed');
+    await mockPg('scheduled_services').where({ id: assignedMember.id }).update({ status: assignedMember.status });
+    expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
+    if (fullBehavior) {
+      expect((await request(`/api/admin/dispatch/${fixture.serviceIds[0]}/completion-status`, { auth })).status).toBe(409);
+      delete process.env.DATA_HYGIENE_VAULT_KEY;
+      expect((await request(path, { method: 'POST', auth, body: { items: submission().items } })).status).toBe(503);
+      expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
+      process.env.DATA_HYGIENE_VAULT_KEY = 'synthetic-visit-summary-test-key';
+    }
+    const date = dateOnly((await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first()).scheduled_date);
+    const gateBeforeReadinessCheck = process.env.GATE_VISIT_CLOSEOUT;
+    process.env.GATE_VISIT_CLOSEOUT = 'true';
+    delete process.env.DATA_HYGIENE_VAULT_KEY;
+    const unavailableWeek = await request(`/api/admin/schedule/week?start=${date}`, { auth });
+    expect(unavailableWeek.status).toBe(200);
+    expect(unavailableWeek.body.visitCloseout).toBe(false);
+    expect(unavailableWeek.body.days.flatMap((day) => day.services)).toEqual(expect.arrayContaining(fixture.serviceIds.map((id) => (
+      expect.objectContaining({ id, visitCloseoutEnabled: fullBehavior })
+    ))));
+    const unavailableDay = await request(`/api/admin/schedule?date=${date}`, { auth });
+    expect(unavailableDay.status).toBe(200);
+    expect(unavailableDay.body.visitCloseout).toBe(false);
+    expect(unavailableDay.body.services).toEqual(expect.arrayContaining(fixture.serviceIds.map((id) => (
+      expect.objectContaining({ id, visitCloseoutEnabled: fullBehavior })
+    ))));
+    process.env.DATA_HYGIENE_VAULT_KEY = 'synthetic-visit-summary-test-key';
+    process.env.GATE_VISIT_CLOSEOUT = gateBeforeReadinessCheck;
+    const week = await request(`/api/admin/schedule/week?start=${date}`, { auth });
+    expect(week.status).toBe(200);
+    expect(week.body.days.flatMap((day) => day.services)).toEqual(expect.arrayContaining(fixture.serviceIds.map((id) => (
+      expect.objectContaining({ id, visitId: fixture.visitId, visitCloseoutEnabled: true, visitCloseoutPacket: null })
+    ))));
+    const day = await request(`/api/admin/schedule?date=${date}`, { auth });
+    expect(day.status).toBe(200);
+    expect(day.body.services).toEqual(expect.arrayContaining(fixture.serviceIds.map((id) => (
+      expect.objectContaining({ id, visitId: fixture.visitId, visitCloseoutEnabled: true })
+    ))));
+    const result = await request(path, { method: 'POST', auth, body: { items: submission().items } });
+    expect(result.status).toBe(200);
+    expect(result.body).toMatchObject({ state: 'done', payment: { state: fullBehavior ? 'paid' : 'payment_needed' } });
+    expect(result.headers['cache-control']).toContain('no-store');
+    process.env.GATE_VISIT_CLOSEOUT = 'false';
+    const savedWeek = await request(`/api/admin/schedule/week?start=${date}`, { auth });
+    expect(savedWeek.status).toBe(200);
+    expect(savedWeek.body.days.flatMap((day) => day.services)).toEqual(expect.arrayContaining(fixture.serviceIds.map((id) => (
+      expect.objectContaining({ id, visitId: fixture.visitId, visitCloseoutEnabled: true,
+        visitCloseoutPacket: { id: result.body.packetId, status: 'done' } })
+    ))));
+    const savedDay = await request(`/api/admin/schedule?date=${date}`, { auth });
+    expect(savedDay.status).toBe(200);
+    expect(savedDay.body.services).toEqual(expect.arrayContaining(fixture.serviceIds.map((id) => (
+      expect.objectContaining({ id, visitId: fixture.visitId, visitCloseoutEnabled: true,
+        visitCloseoutPacket: { id: result.body.packetId, status: 'done' } })
+    ))));
+    const detail = await request(path, { auth });
+    expect(detail.body).toMatchObject({ packet: { status: 'done' }, invoice: { total: 240, status: fullBehavior ? 'paid' : 'scheduled' } });
+    expect((await request(`${path}/resume`, { method: 'POST', auth, body: { items: [], actor: { techRole: 'admin' } } })).status).toBe(200);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(require('../services/email-template-library').sendTemplate).toHaveBeenCalledTimes(1);
+    expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(2);
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+    expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(fullBehavior ? 1 : 0);
+    const summaryPath = result.body.summaryUrl.replace('/visit/', '/api/visit-summary/');
+    const summary = await request(summaryPath);
+    expect(summary.status).toBe(200);
+    expect(summary.body.services).toHaveLength(2);
+    expect(summary.headers['referrer-policy']).toBe('no-referrer');
+    expect(summary.headers['x-robots-tag']).toContain('noindex');
+    expect(summary.headers['cache-control']).toContain('no-store');
+    expect((await request(`${path}/revoke-summary`, { method: 'POST', auth, body: {} })).status).toBe(403);
+    await mockPg('technicians').where({ id: fixture.techId }).update({ role: 'admin' });
+    expect((await request(path, { auth })).body.canRevokeSummary).toBe(true);
+    expect((await request(`${path}/revoke-summary`, { method: 'POST', auth, body: {} })).body).toEqual({ revoked: true });
+    const revoked = await request(summaryPath);
+    const malformed = await request('/api/visit-summary/not-a-token');
+    expect(revoked.status).toBe(404);
+    expect(malformed.status).toBe(404);
+    expect(revoked.body).toEqual(malformed.body);
+
+    const claimToken = randomUUID();
+    await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' })
+      .update({ status: 'claimed', claim_token: claimToken, claimed_at: mockPg.fn.now() });
+    expect(await require('../services/visit-groups').beginVisitNotificationDispatch(fixture.visitId, 'completion_sms', claimToken)).toBe(false);
+    await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).update({ status: 'sent' });
+    const resumed = await request(`${path}/resume`, { method: 'POST', auth, body: {} });
+    expect(resumed.status).toBe(200);
+    expect(resumed.body.summaryUrl).toBeNull();
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(require('../services/email-template-library').sendTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  test('new closeouts require the creation gate and summary key before any record commits', async () => {
+    process.env.GATE_VISIT_CLOSEOUT = 'false';
+    expect(await saveVisitCompletionPacket(submission()))
+      .toMatchObject({ status: 404, body: { code: 'visit_closeout_disabled' } });
+    process.env.GATE_VISIT_CLOSEOUT = 'true';
+    delete process.env.DATA_HYGIENE_VAULT_KEY;
+    expect(await saveVisitCompletionPacket(submission()))
+      .toMatchObject({ status: 503, body: { code: 'visit_closeout_unavailable' } });
+    expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
+    expect(await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId })).toHaveLength(0);
+  });
+
+  test('Auto Pay grouping becomes eligible only with the full closeout gate and summary key', async () => {
+    const { createOrJoinVisit } = require('../services/visit-groups');
+    await mockPg('customers').where({ id: fixture.customerId }).update({ autopay_enabled: true });
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ visit_id: null });
+    await mockPg('service_visits').where({ id: fixture.visitId }).del();
+    await mockPg('services').where({ id: fixture.catalogId }).update({ groupable: true, group_family: 'recurring_property_service' });
+    process.env.GATE_VISIT_CLOSEOUT = 'false';
+    await expect(createOrJoinVisit({ rows: fixture.serviceIds, createdBy: 'test' })).rejects.toThrow('autopay_enrolled');
+    process.env.GATE_VISIT_CLOSEOUT = 'true';
+    delete process.env.DATA_HYGIENE_VAULT_KEY;
+    await expect(createOrJoinVisit({ rows: fixture.serviceIds, createdBy: 'test' })).rejects.toThrow('autopay_enrolled');
+    process.env.DATA_HYGIENE_VAULT_KEY = 'synthetic-visit-summary-test-key';
+    expect(await createOrJoinVisit({ rows: fixture.serviceIds, createdBy: 'test' })).toMatchObject({ behavior_version: 2 });
+    // The staff grouping route's fast path renders the same decision.
+    const { groupingRefusedByAutopay } = require('../services/visit-groups');
+    expect(await groupingRefusedByAutopay(fixture.customerId)).toBe(false);
+    process.env.GATE_VISIT_CLOSEOUT = 'false';
+    expect(await groupingRefusedByAutopay(fixture.customerId)).toBe(true);
+    process.env.GATE_VISIT_CLOSEOUT = 'true';
+  });
+
+  test('a technician cannot close a visit that left their current window after the preflight read', async () => {
+    const { memberInTechnicianScope } = require('../services/visit-completion-packets');
+    const actor = { techRole: 'technician', technicianId: fixture.techId };
+    const today = etDateString();
+    expect(memberInTechnicianScope({ technician_id: fixture.techId, status: 'on_site', scheduled_date: today }, actor)).toBe(true);
+    expect(memberInTechnicianScope({ technician_id: fixture.techId, status: 'rescheduled', scheduled_date: today }, actor)).toBe(false);
+    expect(memberInTechnicianScope({ technician_id: fixture.techId, status: 'on_site', scheduled_date: '2026-01-01' }, actor)).toBe(false);
+    expect(memberInTechnicianScope({ technician_id: fixture.techId, status: 'on_site', scheduled_date: '2026-01-01' }, { techRole: 'admin' })).toBe(true);
+    // The locked save re-applies the predicate: the whole visit moved to an old date.
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ scheduled_date: '2026-01-01' });
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({ scheduled_date: '2026-01-01',
+      stop_base_key: stopBaseKey({ customerId: fixture.customerId, scheduledDate: '2026-01-01' }) });
+    expect(await saveVisitCompletionPacket(submission({ actor }))).toMatchObject({ status: 409, body: { code: 'visit_out_of_scope' } });
+    expect(await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId })).toHaveLength(0);
   });
 
   test('member recovery keeps forms, reports and operational records without collecting or delivering', async () => {
@@ -464,6 +1421,32 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).toMatchObject({ status: 'processing' });
     expect((await mockPg('service_visits').where({ id: fixture.visitId }).first()).billing_hold).toBe(false);
     expect(await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereIn('job_id', fixture.serviceIds)).toHaveLength(0);
+  });
+
+  // A cancelled child loses its assignment; a rescheduled child keeps a
+  // stale date and window while it awaits re-placement. Neither is this
+  // visit's work, so neither reaches the ownership or compatibility checks.
+  // The retained child carries the lexicographically FIRST id: the packet's
+  // effects must pick their owner from the recorded member, not from the
+  // visit's first child, or the history row's stale tuple detaches every
+  // claim and the visit never closes.
+  test.each([
+    ['cancelled', { status: 'cancelled', technician_id: null }],
+    ['rescheduled', { status: 'rescheduled', scheduled_date: '2000-01-01', window_start: '14:00', window_end: '16:00' }],
+  ])('a retained %s child does not block the live member or own its effects', async (status, changes) => {
+    const [retainedId, liveId] = fixture.serviceIds;
+    await mockPg('scheduled_services').where({ id: retainedId }).update(changes);
+    expect(await saveVisitCompletionPacket(submission())).toMatchObject({ status: 409, body: { code: 'visit_members_changed' } });
+    const input = submission({ items: submission().items.filter((item) => item.serviceId === liveId) });
+    const saved = await saveVisitCompletionPacket(input);
+    expect(saved).toMatchObject({ status: 202, body: { state: 'records_saved' } });
+    expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(1);
+    const packet = await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId }).first();
+    expect(packet.payload.retainedMembers).toEqual([{ serviceId: retainedId, status }]);
+    expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+    const effects = await mockPg('visit_effects').where({ visit_id: fixture.visitId }).select('effect_type', 'status');
+    expect(effects.map((effect) => effect.effect_type).sort()).toEqual(expect.arrayContaining(['completion_email', 'completion_sms', 'visit_payment']));
+    expect(effects.every((effect) => !['pending', 'claimed'].includes(effect.status))).toBe(true);
   });
 
   test('a member another runner finished first is accepted instead of failing the packet', async () => {
@@ -774,6 +1757,168 @@ postgres('visit completion packet records on PostgreSQL', () => {
       state: total === 0 ? 'prepaid' : 'payment_needed', invoiceId,
     });
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('a retention offer granted after packet mint stops automatic collection before provider submission', async () => {
+    const methodId = await enableFixtureAutopay('late_retention');
+    await mockPg('services').where({ id: fixture.catalogId }).update({ engine_keys: JSON.stringify(['pest_control']) });
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ is_recurring: true });
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    await mockPg('retention_offers').insert({ customer_id: fixture.customerId, family_key: 'pest_control',
+      percent_off: 15, max_charges: 2, cap_amount: 75, status: 'granted' });
+
+    await expect(assertPacketCharge(saved)).rejects.toMatchObject({
+      code: 'VISIT_PAYMENT_REVIEW_REQUIRED', reason: 'retention_offer_changed',
+    });
+    const provider = jest.fn();
+    chargeInvoiceWithSavedCard.mockImplementation(async (invoiceId, selectedMethod, options) => {
+      expect(selectedMethod).toBe(methodId);
+      await mockPg.transaction(async (trx) => {
+        const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+        await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
+        await assertVisitCompletionCharge(trx, invoice, options.requireVisitCompletionPacketId);
+        provider();
+      });
+    });
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'office_required' });
+    expect(provider).not.toHaveBeenCalled();
+  });
+
+  test('a late offer for a family removed from a shared invoice does not hold the remaining family', async () => {
+    const { saved, invoice, pestId } = await prepareTwoFamilyRetentionPacket();
+    const remainingLines = invoice.line_items.filter((line) => line.client_id !== `scheduled_${pestId}_primary`);
+    await InvoiceService.update(invoice.id, { line_items: remainingLines });
+    await mockPg('retention_offers').insert({ customer_id: fixture.customerId, family_key: 'pest_control',
+      percent_off: 15, max_charges: 2, cap_amount: 75, status: 'granted' });
+
+    await expect(assertPacketCharge(saved)).resolves.toBeUndefined();
+  });
+
+  test('a late offer still holds when its family has a positive line on the shared invoice', async () => {
+    const { saved } = await prepareTwoFamilyRetentionPacket();
+    await mockPg('retention_offers').insert({ customer_id: fixture.customerId, family_key: 'pest_control',
+      percent_off: 15, max_charges: 2, cap_amount: 75, status: 'granted' });
+
+    await expect(assertPacketCharge(saved)).rejects.toMatchObject({
+      code: 'VISIT_PAYMENT_REVIEW_REQUIRED', reason: 'retention_offer_changed',
+    });
+  });
+
+  test('an unattributed positive edit keeps every scheduled family offer conservative', async () => {
+    const { saved, invoice, pestId } = await prepareTwoFamilyRetentionPacket();
+    const editedLines = invoice.line_items
+      .filter((line) => line.client_id !== `scheduled_${pestId}_primary`)
+      .concat({ description: 'Office-added service charge', quantity: 1, unit_price: 25, amount: 25 });
+    await InvoiceService.update(invoice.id, { line_items: editedLines });
+    await mockPg('retention_offers').insert({ customer_id: fixture.customerId, family_key: 'pest_control',
+      percent_off: 15, max_charges: 2, cap_amount: 75, status: 'granted' });
+
+    await expect(assertPacketCharge(saved)).rejects.toMatchObject({ reason: 'retention_offer_changed' });
+  });
+
+  test.each(['unreadable', false, [], ' ', null, undefined].map((amount) => [amount]))('a malformed stored line amount %p cannot prove a scheduled family absent', async (amount) => {
+    const { saved, invoice, pestId, lawnId } = await prepareTwoFamilyRetentionPacket();
+    await mockPg('invoices').where({ id: invoice.id }).update({ line_items: JSON.stringify([
+      { client_id: `scheduled_${lawnId}_primary`, description: 'Lawn Care', amount: 120 },
+      { client_id: `scheduled_${pestId}_primary`, description: 'Quarterly Pest Control', amount },
+    ]) });
+    await mockPg('retention_offers').insert({ customer_id: fixture.customerId, family_key: 'pest_control',
+      percent_off: 15, max_charges: 2, cap_amount: 75, status: 'granted' });
+
+    await expect(assertPacketCharge(saved)).rejects.toMatchObject({ reason: 'retention_offer_changed' });
+  });
+
+  test('a positive add-on keeps its family offer applicable after staff removes the base line', async () => {
+    const { saved, invoice, pestId } = await prepareTwoFamilyRetentionPacket({ addon: true });
+    const editedLines = invoice.line_items.filter((line) => line.client_id !== `scheduled_${pestId}_primary`);
+    expect(editedLines).toEqual(expect.arrayContaining([
+      expect.objectContaining({ client_id: expect.stringMatching(new RegExp(`^scheduled_${pestId}_addon_`)), amount: 25 }),
+    ]));
+    await InvoiceService.update(invoice.id, { line_items: editedLines });
+    await mockPg('retention_offers').insert({ customer_id: fixture.customerId, family_key: 'pest_control',
+      percent_off: 15, max_charges: 2, cap_amount: 75, status: 'granted' });
+
+    await expect(assertPacketCharge(saved)).rejects.toMatchObject({ reason: 'retention_offer_changed' });
+  });
+
+  test('an offer already allocated to this invoice does not hold its positive family line', async () => {
+    const { saved, invoice } = await prepareTwoFamilyRetentionPacket();
+    await mockPg('retention_offers').insert({ customer_id: fixture.customerId, family_key: 'pest_control',
+      percent_off: 15, max_charges: 2, cap_amount: 75, status: 'granted',
+      applied_invoice_ids: JSON.stringify([invoice.id]) });
+
+    await expect(assertPacketCharge(saved)).resolves.toBeUndefined();
+  });
+
+  test('a retention grant holding the customer advisory lock makes collection retry without provider submission', async () => {
+    await enableFixtureAutopay('retention_lock');
+    await mockPg('services').where({ id: fixture.catalogId }).update({ engine_keys: JSON.stringify(['pest_control']) });
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ is_recurring: true });
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    const grant = await mockPg.transaction();
+    const provider = jest.fn();
+    chargeInvoiceWithSavedCard.mockImplementation(async (invoiceId, _methodId, options) => {
+      await mockPg.transaction(async (trx) => {
+        const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+        await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
+        await assertVisitCompletionCharge(trx, invoice, options.requireVisitCompletionPacketId);
+        provider();
+      });
+    });
+    try {
+      await grant.raw('SELECT pg_advisory_xact_lock(hashtext(?::text))', [String(fixture.customerId)]);
+      expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'payment_pending' });
+      expect(provider).not.toHaveBeenCalled();
+    } finally {
+      if (!grant.isCompleted()) await grant.rollback();
+    }
+  });
+
+  test('collection retains the customer advisory lock through the provider boundary', async () => {
+    await enableFixtureAutopay('retention_boundary');
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    let reachedProvider;
+    const atProvider = new Promise((resolve) => { reachedProvider = resolve; });
+    let releaseProvider;
+    const providerReleased = new Promise((resolve) => { releaseProvider = resolve; });
+    let collectionPid;
+    chargeInvoiceWithSavedCard.mockImplementation(async (invoiceId, _methodId, options) => {
+      await mockPg.transaction(async (trx) => {
+        const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+        await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
+        await assertVisitCompletionCharge(trx, invoice, options.requireVisitCompletionPacketId);
+        ({ rows: [{ pid: collectionPid }] } = await trx.raw('SELECT pg_backend_pid() AS pid'));
+        reachedProvider();
+        await providerReleased;
+        await trx('invoices').where({ id: invoiceId })
+          .update({ status: 'paid', stripe_payment_intent_id: 'pi_fixture_retention_boundary' });
+      });
+    });
+
+    const collection = collectVisitCompletionInvoice(saved.body.packetId);
+    await atProvider;
+    let writer;
+    const writerStarted = new Promise((resolve) => {
+      writer = mockPg.transaction(async (trx) => {
+        resolve();
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?::text))', [String(fixture.customerId)]);
+        await trx('retention_offers').insert({ customer_id: fixture.customerId, family_key: 'pest_control',
+          percent_off: 15, max_charges: 2, cap_amount: 75, status: 'granted' });
+      });
+    });
+    await writerStarted;
+    try {
+      await expect(waitForPgBlocker(collectionPid, 'Retention writer did not wait at the provider boundary'))
+        .resolves.toEqual(expect.any(Number));
+    } finally {
+      releaseProvider();
+      await writer;
+    }
+    expect(await collection).toMatchObject({ state: 'paid' });
+    expect(await mockPg('retention_offers').where({ customer_id: fixture.customerId })).toHaveLength(1);
   });
 
   test('positive shared-invoice collection remains singular and replays its paid state', async () => {
@@ -1577,6 +2722,57 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(Number((await mockPg('estimate_deposits').where({ estimate_id: estimateId }).first()).credited_amount)).toBe(70);
   });
 
+  test('packet mint waits for a concurrent deposit receipt before reading its ledger', async () => {
+    const estimateId = randomUUID();
+    fixture.estimateIds.push(estimateId);
+    await mockPg('estimates').insert({ id: estimateId, customer_id: fixture.customerId, status: 'accepted' });
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ source_estimate_id: estimateId });
+    let releaseLedger;
+    const held = new Promise((resolve) => { releaseLedger = resolve; });
+    let ledgerReady;
+    const ready = new Promise((resolve) => { ledgerReady = resolve; });
+    const receipt = mockPg.transaction(async (trx) => {
+      await acquireEstimateDepositLedgerLock(trx, estimateId);
+      ledgerReady();
+      await held;
+      await trx('estimate_deposits').insert({ estimate_id: estimateId,
+        amount: 70, status: 'received', stripe_payment_intent_id: `pi_fixture_${randomUUID()}` });
+    });
+    await ready;
+    let reachedLock;
+    const attempted = new Promise((resolve) => { reachedLock = resolve; });
+    const observedAdvisory = [];
+    const observe = (query) => {
+      if (query.sql.includes('pg_advisory')) observedAdvisory.push({ sql: query.sql, bindings: query.bindings });
+      if (query.sql.includes('pg_advisory_xact_lock')
+        && query.bindings?.[0] === 'estimate.deposit.ledger'
+        && query.bindings?.[1] === estimateId) reachedLock();
+    };
+    mockPg.on('query', observe);
+    const packet = saveVisitCompletionPacket(submission());
+    let lockTimer;
+    try {
+      await Promise.race([
+        attempted,
+        packet.then((result) => { throw new Error(`Packet finished before deposit lock: ${JSON.stringify(result.body?.billing)}`); }),
+        new Promise((_, reject) => { lockTimer = setTimeout(() => reject(new Error(`Packet never reached deposit lock: ${JSON.stringify(observedAdvisory)}`)), 60000); }),
+      ]);
+      releaseLedger();
+      await receipt;
+      const saved = await packet;
+      const invoice = await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).first();
+      expect(Number(invoice.total)).toBe(170);
+      expect(invoice.line_items.filter((line) => line.category === 'deposit_credit')).toHaveLength(1);
+      expect(Number((await mockPg('estimate_deposits').where({ estimate_id: estimateId }).first()).credited_amount)).toBe(70);
+    } finally {
+      clearTimeout(lockTimer);
+      releaseLedger();
+      mockPg.removeListener('query', observe);
+      await receipt;
+      await packet.catch(() => {});
+    }
+  });
+
   test('individual scheduled, record-linked and recovery mints refuse packet-owned members', async () => {
     const result = await saveVisitCompletionPacket(submission());
     for (const item of result.body.items) {
@@ -1593,6 +2789,973 @@ postgres('visit completion packet records on PostgreSQL', () => {
     }
     expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('an edited packet invoice still owns an unlinked accepted-estimate application mint', async () => {
+    const estimateId = await linkFixtureEstimate();
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('invoices').where({ id: saved.body.billing.invoiceId })
+      .update({ notes: 'Office edited these notes after the visit invoice was minted.' });
+
+    await expect(InvoiceService.create({
+      customerId: fixture.customerId,
+      lineItems: [{ description: 'First service application', quantity: 1, unit_price: 120 }],
+      notes: `Auto-generated from accepted estimate #${estimateId.toUpperCase()}.`,
+    })).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409, statusCode: 409, isOperational: true });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+  });
+
+
+
+  test.each([
+    ['historical aggregate', 'aggregate', null], ['partial member coverage', 'partial', null],
+    ['foreign accepted-service identity', 'foreign', null],
+    ['partial coverage and an unpriced same-trip member', 'partial', [240, null]],
+    ['accepted net above its known scheduled ceiling', 'exact', [200, null]],
+  ])('rejects an acceptance invoice with %s', async (_label, coverage, scheduledPrices) => {
+    const { invoice } = await prepareAcceptanceInvoice({ coverage, scheduledPrices });
+    const result = await saveVisitCompletionPacket(submission());
+    expect(result.body.billing).toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+    expect(await mockPg('invoices').where({ id: invoice.id }).first()).toMatchObject({
+      visit_completion_packet_id: null, service_record_id: null, status: 'draft',
+    });
+  });
+
+  test('parks adoption while a concurrent stamped invoice writer owns the estimate lock', async () => {
+    const { estimateId } = await prepareAcceptanceInvoice();
+    const writer = await mockPg.transaction();
+    try {
+      await writer.raw('SELECT pg_advisory_xact_lock(hashtext(?))',
+        [`unminted_setup_fee_manual_billing:${estimateId}`]);
+      await expect(saveVisitCompletionPacket(submission())).rejects.toMatchObject({
+        code: 'visit_busy', statusCode: 409, isOperational: true,
+      });
+      expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
+    } finally { await writer.rollback(); }
+  });
+
+  test('an edited packet invoice still owns an unlinked accepted-estimate mint', async () => {
+    const estimateId = await linkFixtureEstimate();
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('invoices').where({ id: saved.body.billing.invoiceId })
+      .update({ notes: 'Office edited these notes after the visit invoice was minted.' });
+    await expect(InvoiceService.create({ customerId: fixture.customerId,
+      lineItems: [{ description: 'Synthetic accepted-estimate charge', quantity: 1, unit_price: 99 }],
+      notes: `Auto-generated from accepted estimate #${estimateId}.` }))
+      .rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+  });
+
+  test('an unlinked accepted-estimate writer that wins the shared lock parks ordinary packet mint', async () => {
+    const estimateId = await linkFixtureEstimate();
+    const writer = await mockPg.transaction();
+    try {
+      await InvoiceService.create({ database: writer, customerId: fixture.customerId,
+        lineItems: [{ description: 'Synthetic accepted-estimate charge', quantity: 1, unit_price: 99 }],
+        notes: `Auto-generated from ACCEPTED ESTIMATE #${estimateId.toUpperCase()}.` });
+      await expect(saveVisitCompletionPacket(submission())).rejects.toMatchObject({
+        code: 'visit_busy', statusCode: 409, isOperational: true,
+      });
+      await writer.commit();
+      expect((await saveVisitCompletionPacket(submission())).body.billing)
+        .toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+    } finally {
+      if (!writer.isCompleted()) await writer.rollback();
+    }
+  });
+
+
+  test.each(['granted', 'exhausted'])('acceptance adoption respects a %s retention offer', async (status) => {
+    const { invoice } = await prepareAcceptanceInvoice();
+    await mockPg('services').where({ id: fixture.catalogId }).update({ engine_keys: JSON.stringify(['pest_control']) });
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ is_recurring: true });
+    const [offer] = await mockPg('retention_offers').insert({ customer_id: fixture.customerId,
+      family_key: 'pest_control', percent_off: 15, max_charges: 2, cap_amount: 75, status }).returning('*');
+    const result = await saveVisitCompletionPacket(submission());
+    expect(result.body.billing.state).toBe(status === 'granted' ? 'office_required' : 'invoice_ready');
+    expect((await mockPg('retention_offers').where({ id: offer.id }).first()).charges_applied).toBe(0);
+    expect(Number((await mockPg('invoices').where({ id: invoice.id }).first()).total)).toBe(Number(invoice.total));
+  });
+
+
+  test('adopts the exact acceptance invoice without repricing its setup fee, discount or deposit', async () => {
+    const { invoice, deposit } = await prepareAcceptanceInvoice({ withAdjustments: true });
+    const before = await mockPg('invoices').where({ id: invoice.id }).first();
+    const saved = await saveVisitCompletionPacket(submission());
+    const after = await mockPg('invoices').where({ id: invoice.id }).first();
+    expect(saved.body.billing).toMatchObject({ state: 'invoice_ready', invoiceId: invoice.id, total: 271 });
+    expect(after.line_items).toEqual(before.line_items);
+    expect(after.token).toBe(before.token);
+    expect(await mockPg('estimate_deposits').where({ id: deposit.id }).first()).toEqual(deposit);
+    expect(after).toMatchObject({ visit_completion_packet_id: saved.body.packetId, status: 'draft' });
+    expect((await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).payload.billingSnapshot)
+      .toMatchObject({ invoiceId: invoice.id, totalCents: 27100, netSubtotalCents: 32100,
+        billedServiceIds: expect.arrayContaining(fixture.serviceIds) });
+  });
+
+  test('adopts an exact acceptance invoice for its deliberately unpriced same-trip member', async () => {
+    const { invoice, lawnId } = await prepareAcceptanceInvoice({ scheduledPrices: [240, null] });
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'invoice_ready', invoiceId: invoice.id, total: 319 });
+    const snapshot = (await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first())
+      .payload.billingSnapshot;
+    expect(snapshot.memberPricing.find((member) => member.id === lawnId).price).toBeNull();
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    await expect(assertPacketCharge(saved)).resolves.toBeUndefined();
+    await mockPg('scheduled_services').where({ id: lawnId }).update({ estimated_price: 0 });
+    await expect(assertPacketCharge(saved)).rejects.toMatchObject({ reason: 'member_price_changed' });
+  });
+
+  test('mixed commercial tax treatment cannot inherit an acceptance invoice owner rate', async () => {
+    await mockPg('customers').where({ id: fixture.customerId }).update({
+      property_type: 'commercial', zip: '34209',
+    });
+    const { invoice, pestId, lawnId } = await prepareAcceptanceInvoice({ scheduledPrices: [240, null] });
+    fixture.taxabilityId = randomUUID();
+    const exemptType = `Fixture Exempt Treatment ${fixture.taxabilityId}`;
+    await mockPg('service_taxability').insert({ id: fixture.taxabilityId,
+      service_key: `fixture_exempt_${fixture.taxabilityId.replaceAll('-', '_')}`,
+      service_label: exemptType, is_taxable: false, tax_category: 'fixture_exempt' });
+    await mockPg('scheduled_services').where({ id: pestId }).update({ service_type: 'Recurring Pest Control' });
+    await mockPg('scheduled_services').where({ id: lawnId }).update({ service_type: exemptType });
+    const lines = invoice.line_items.map((line) => {
+      if (line.client_id === `scheduled_${pestId}_primary`) {
+        return { ...line, accepted_service_type: 'Recurring Pest Control' };
+      }
+      if (line.client_id === `scheduled_${lawnId}_primary`) {
+        return { ...line, accepted_service_type: exemptType };
+      }
+      return line;
+    });
+    await mockPg('invoices').where({ id: invoice.id }).update({ line_items: JSON.stringify(lines) });
+    const TaxCalculator = require('../services/tax-calculator');
+    const pestTax = await TaxCalculator.calculateTax(fixture.customerId, 'Recurring Pest Control', 100);
+    const lawnTax = await TaxCalculator.calculateTax(fixture.customerId, exemptType, 100);
+    expect(pestTax.rate).toBeGreaterThan(0);
+    expect(lawnTax.rate).toBe(0);
+
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'office_required', reason: 'mixed_tax_treatment' });
+    expect(await mockPg('invoices').where({ id: invoice.id }).first()).toMatchObject({
+      visit_completion_packet_id: null, service_record_id: null, status: 'draft',
+    });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['residential acceptance corrected to commercial', 'residential', 'commercial', false],
+    ['commercial acceptance corrected to residential', 'commercial', 'residential', false],
+    ['commercial acceptance followed by a verified exemption', 'commercial', 'commercial', true],
+  ])('%s requires office review', async (_label, initialType, currentType, exempt) => {
+    await mockPg('customers').where({ id: fixture.customerId }).update({ property_type: initialType, zip: '34209' });
+    const { invoice } = await prepareAcceptanceInvoice({ scheduledPrices: [240, null] });
+    const before = await mockPg('invoices').where({ id: invoice.id }).first();
+    expect(Number(before.tax_rate) > 0).toBe(initialType === 'commercial');
+    await mockPg('customers').where({ id: fixture.customerId }).update({ property_type: currentType });
+    if (exempt) {
+      fixture.taxExemptionId = randomUUID();
+      await mockPg('tax_exemptions').insert({ id: fixture.taxExemptionId, customer_id: fixture.customerId,
+        customer_name: 'Fixture Customer', exemption_type: 'resale', certificate_number: 'FIXTURE-DR14',
+        verified: true, active: true });
+    }
+
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'office_required', reason: 'invoice_tax_mismatch' });
+    expect(await mockPg('invoices').where({ id: invoice.id }).first()).toEqual(before);
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('a homogeneous taxable acceptance invoice matching current authority remains adoptable', async () => {
+    await mockPg('customers').where({ id: fixture.customerId }).update({
+      property_type: 'commercial', zip: '34209',
+    });
+    const { invoice, deposit } = await prepareAcceptanceInvoice({ withAdjustments: true });
+    const before = await mockPg('invoices').where({ id: invoice.id }).first();
+    expect(before).toMatchObject({ subtotal: '339.00', discount_amount: '18.00', tax_rate: '0.0700',
+      tax_amount: '22.47', total: '293.47' });
+
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'invoice_ready', invoiceId: invoice.id });
+    const after = await mockPg('invoices').where({ id: invoice.id }).first();
+    expect(after).toMatchObject({ tax_rate: before.tax_rate, tax_amount: before.tax_amount,
+      subtotal: before.subtotal, discount_amount: before.discount_amount });
+    expect(after.line_items).toEqual(before.line_items);
+    expect(await mockPg('estimate_deposits').where({ id: deposit.id }).first()).toEqual(deposit);
+  });
+
+  test('acceptance tax validation keeps invoice creation rounding at a fractional subtraction boundary', async () => {
+    await mockPg('customers').where({ id: fixture.customerId }).update({
+      property_type: 'commercial', zip: '34209',
+    });
+    const { invoice, pestId, lawnId } = await prepareAcceptanceInvoice();
+    const lines = invoice.line_items.map((line) => {
+      if (line.client_id === `scheduled_${pestId}_primary`) return { ...line, unit_price: 50.01, amount: 50.01 };
+      if (line.client_id === `scheduled_${lawnId}_primary`) return { ...line, unit_price: 51, amount: 51 };
+      return line;
+    });
+    lines.push({ _kind: 'discount', description: 'Accepted boundary credit', quantity: 1,
+      unit_price: -77.51, amount: -77.51 });
+    const updated = await InvoiceService.update(invoice.id, { line_items: lines });
+    expect(updated).toMatchObject({ subtotal: '200.01', discount_amount: '77.51',
+      tax_rate: '0.0700', tax_amount: '8.57' });
+
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'invoice_ready', invoiceId: invoice.id });
+  });
+
+  test('rejects an edited acceptance invoice with an unowned custom charge', async () => {
+    const { invoice } = await prepareAcceptanceInvoice();
+    await InvoiceService.update(invoice.id, { line_items: [
+      ...invoice.line_items, { description: 'Custom extra work', quantity: 1, unit_price: 75 },
+    ] });
+    expect((await saveVisitCompletionPacket(submission())).body.billing)
+      .toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+    expect((await mockPg('invoices').where({ id: invoice.id }).first()))
+      .toMatchObject({ visit_completion_packet_id: null, service_record_id: null, status: 'draft' });
+  });
+
+  test('rejects an acceptance invoice beside a notes-stamped unlinked manual invoice', async () => {
+    const { invoice, estimateId } = await prepareAcceptanceInvoice();
+    await InvoiceService.create({ database: mockPg, customerId: fixture.customerId,
+      notes: `Manual billing for ACCEPTED ESTIMATE #${estimateId.toUpperCase()}.`,
+      lineItems: [{ description: 'First service application', quantity: 1, unit_price: 220 }] });
+    expect((await saveVisitCompletionPacket(submission())).body.billing)
+      .toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+    expect((await mockPg('invoices').where({ id: invoice.id }).first()))
+      .toMatchObject({ visit_completion_packet_id: null, service_record_id: null });
+  });
+
+
+  test('a waiting stamped creator rechecks packet ownership after adoption commits', async () => {
+    const { invoice, estimateId } = await prepareAcceptanceInvoice();
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('invoices').where({ id: invoice.id }).update({ visit_completion_packet_id: null });
+    const adoption = await mockPg.transaction();
+    const writer = await mockPg.transaction();
+    let creation;
+    try {
+      await adoption.raw('SELECT pg_advisory_xact_lock(hashtext(?))',
+        [`unminted_setup_fee_manual_billing:${estimateId}`]);
+      await adoption('invoices').where({ id: invoice.id }).update({ visit_completion_packet_id: saved.body.packetId });
+      const { rows: [{ pid }] } = await adoption.raw('SELECT pg_backend_pid() AS pid');
+      creation = InvoiceService.create({ database: writer, customerId: fixture.customerId,
+        notes: acceptanceInvoiceNotes(estimateId),
+        lineItems: [{ description: 'First service application', quantity: 1, unit_price: 220 }] })
+        .then((value) => value, (error) => error);
+      await waitForPgBlocker(pid, 'stamped writer did not wait behind adoption');
+      await adoption.commit();
+      expect(await creation).toMatchObject({ status: 409, code: 'VISIT_PACKET_OWNS_BILLING' });
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+    } finally {
+      if (!adoption.isCompleted()) await adoption.rollback();
+      if (creation) await creation;
+      if (!writer.isCompleted()) await writer.rollback();
+    }
+  });
+
+  test('parks an unminted accepted setup fee before suppressing a free recurring application', async () => {
+    const estimateId = randomUUID();
+    fixture.estimateIds.push(estimateId);
+    await mockPg('estimates').insert({ id: estimateId, customer_id: fixture.customerId,
+      status: 'accepted', accepted_at: mockPg.fn.now(), estimate_data: {
+        recurring: { services: [{ name: 'Pest Control', frequency: 'quarterly', mo: 29.33 }] },
+        sendSnapshot: { pricingBundle: { firstVisitFees: [{ service: 'waveguard_setup', amount: 99 }] } },
+      } });
+    await mockPg('activity_log').insert({ customer_id: fixture.customerId, action: 'estimate_converted',
+      description: `Estimate #${estimateId} converted: synthetic recurring service` });
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({
+      source_estimate_id: estimateId, is_recurring: true, service_type: 'Pest Control', estimated_price: 0,
+    });
+    const input = submission();
+    input.items[1].body.visitOutcome = 'inspection_only';
+    expect((await saveVisitCompletionPacket(input)).body.billing)
+      .toMatchObject({ state: 'office_required', reason: 'setup_fee_requires_review' });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
+  });
+
+  test.each(['refunded', 'refunding', 'unattributed', 'shortfall'])(
+    'parks acceptance adoption when its deposit is %s', async (state) => {
+      const { invoice, deposit } = await prepareAcceptanceInvoice({ withAdjustments: true });
+      const updates = { refunded: { status: 'refunded', refunded_amount: 50 },
+        refunding: { status: 'refunding' }, unattributed: { credited_invoice_id: null },
+        shortfall: { refunded_amount: 10 } };
+      await mockPg('estimate_deposits').where({ id: deposit.id }).update(updates[state]);
+      expect((await saveVisitCompletionPacket(submission())).body.billing)
+        .toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+      expect((await mockPg('invoices').where({ id: invoice.id }).first()).visit_completion_packet_id).toBeNull();
+    });
+
+
+
+
+
+  test.each([199, 0])('rejects a setup fee changed from the accepted amount to %s', async (amount) => {
+    const { invoice } = await prepareAcceptanceInvoice();
+    await InvoiceService.update(invoice.id, { line_items: invoice.line_items.map((line) =>
+      /setup fee/i.test(line.description) ? { ...line, unit_price: amount, amount } : line) });
+    expect((await saveVisitCompletionPacket(submission())).body.billing)
+      .toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+  });
+
+
+
+
+
+
+
+
+  test.each(['record', 'scheduled'])(
+    'a packet invoice owns a same-date stamped application linked through its %s', async (linkKind) => {
+      const estimateId = await linkFixtureEstimate();
+      await saveVisitCompletionPacket(submission());
+      const target = await createUnownedInvoiceLink({ scheduledDate: etDateString() });
+
+      await expect(InvoiceService.create({
+        customerId: fixture.customerId,
+        ...(linkKind === 'record'
+          ? { serviceRecordId: target.serviceRecordId }
+          : { scheduledServiceId: target.scheduledServiceId }),
+        lineItems: [{ description: 'First service application', quantity: 1, unit_price: 120 }],
+        notes: `Auto-generated from accepted estimate #${estimateId}. Another application.`,
+      })).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+    });
+
+  test.each(['record', 'scheduled'])(
+    'a stamped application linked through its %s uses another actual date', async (linkKind) => {
+      const estimateId = await linkFixtureEstimate();
+      const saved = await saveVisitCompletionPacket(submission());
+      const otherDate = etDateString(addETDays(new Date(), 2));
+      const target = await createUnownedInvoiceLink({ scheduledDate: otherDate });
+
+      const invoice = await InvoiceService.create({
+        customerId: fixture.customerId,
+        ...(linkKind === 'record'
+          ? { serviceRecordId: target.serviceRecordId }
+          : { scheduledServiceId: target.scheduledServiceId }),
+        lineItems: [{ description: 'First service application', quantity: 1, unit_price: 120 }],
+        notes: `Auto-generated from accepted estimate #${estimateId}. Another application.`,
+      });
+
+      expect(invoice.id).not.toBe(saved.body.billing.invoiceId);
+      expect(dateOnly(invoice.service_date)).toBe(otherDate);
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(2);
+    });
+
+  test('a record link supplies the actual date when both linked ids are present', async () => {
+    const estimateId = await linkFixtureEstimate();
+    await saveVisitCompletionPacket(submission());
+    const target = await createUnownedInvoiceLink({
+      scheduledDate: etDateString(addETDays(new Date(), 2)), recordDate: etDateString(),
+    });
+
+    await expect(InvoiceService.create({
+      customerId: fixture.customerId,
+      serviceRecordId: target.serviceRecordId,
+      scheduledServiceId: target.scheduledServiceId,
+      lineItems: [{ description: 'First service application', quantity: 1, unit_price: 120 }],
+      notes: `Auto-generated from accepted estimate #${estimateId}. Another application.`,
+    })).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+  });
+
+  test('an explicit other service date overrides a linked record date', async () => {
+    const estimateId = await linkFixtureEstimate();
+    const saved = await saveVisitCompletionPacket(submission());
+    const otherDate = etDateString(addETDays(new Date(), 2));
+    const target = await createUnownedInvoiceLink({ scheduledDate: etDateString(), recordDate: etDateString() });
+
+    const invoice = await InvoiceService.create({
+      customerId: fixture.customerId,
+      serviceRecordId: target.serviceRecordId,
+      serviceDate: otherDate,
+      lineItems: [{ description: 'First service application', quantity: 1, unit_price: 120 }],
+      notes: `Auto-generated from accepted estimate #${estimateId}. Another application.`,
+    });
+
+    expect(invoice.id).not.toBe(saved.body.billing.invoiceId);
+    expect(dateOnly(invoice.service_date)).toBe(otherDate);
+  });
+
+  test('a linked other-date setup invoice cannot duplicate packet-carried fee coverage', async () => {
+    const estimateId = await linkFixtureEstimateWithSetupObligation();
+    const prior = await createPaidSetupFee(estimateId);
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('invoices').where({ id: prior.id }).update({ status: 'void' });
+    const packetInvoice = await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).first();
+    await mockPg('invoices').where({ id: packetInvoice.id }).update({
+      subtotal: Number(packetInvoice.subtotal) + 99,
+      total: Number(packetInvoice.total) + 99,
+      line_items: JSON.stringify([...packetInvoice.line_items,
+        { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99, amount: 99 }]),
+    });
+    const otherDate = etDateString(addETDays(new Date(), 2));
+    const target = await createUnownedInvoiceLink({ scheduledDate: otherDate });
+
+    await expect(InvoiceService.create({
+      customerId: fixture.customerId,
+      serviceRecordId: target.serviceRecordId,
+      lineItems: [{ description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99 }],
+      notes: `Auto-generated from accepted estimate #${estimateId}. Replacement setup fee.`,
+    })).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(2);
+  });
+
+  test('a linked mixed fee and application invoice cannot bypass estimate ownership by date', async () => {
+    const estimateId = await linkFixtureEstimate();
+    await saveVisitCompletionPacket(submission());
+    const otherDate = etDateString(addETDays(new Date(), 2));
+    const target = await createUnownedInvoiceLink({ scheduledDate: otherDate });
+
+    await expect(InvoiceService.create({
+      customerId: fixture.customerId,
+      serviceRecordId: target.serviceRecordId,
+      lineItems: [
+        { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99 },
+        { description: 'First service application', quantity: 1, unit_price: 120 },
+      ],
+      notes: `Auto-generated from accepted estimate #${estimateId}. Setup fee and another application.`,
+    })).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+  });
+
+  test('a linked setup-only writer remains capped by the estimate-wide fee remainder', async () => {
+    const estimateId = await linkFixtureEstimateWithSetupObligation();
+    const prior = await createPaidSetupFee(estimateId);
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'invoice_ready', invoiceId: expect.any(String) });
+    await mockPg('invoices').where({ id: prior.id }).update({ subtotal: 40, total: 40,
+      line_items: JSON.stringify([
+        { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 40, amount: 40 },
+      ]) });
+    const otherDate = etDateString(addETDays(new Date(), 2));
+    const target = await createUnownedInvoiceLink({ scheduledDate: otherDate });
+    const create = (amount) => InvoiceService.create({
+      customerId: fixture.customerId,
+      scheduledServiceId: target.scheduledServiceId,
+      lineItems: [{ description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: amount }],
+      notes: `Auto-generated from accepted estimate #${estimateId}. Remaining setup fee only.`,
+    });
+
+    const remainder = await create(59);
+    expect(Number(remainder.total)).toBe(59);
+    expect(dateOnly(remainder.service_date)).toBe(otherDate);
+    await expect(create(1)).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(3);
+  });
+
+  test.each([
+    ['same', 0, true],
+    ['other', 2, false],
+  ])('a linked stamped %s-date application is visible to a later packet', async (_label, days, blocks) => {
+    const estimateId = await linkFixtureEstimate();
+    const invoiceDate = etDateString(addETDays(new Date(), days));
+    const target = await createUnownedInvoiceLink({ scheduledDate: invoiceDate });
+    const manual = await InvoiceService.create({
+      customerId: fixture.customerId,
+      scheduledServiceId: target.scheduledServiceId,
+      lineItems: [{ description: 'First service application', quantity: 1, unit_price: 120 }],
+      notes: `Auto-generated from accepted estimate #${estimateId}. Another application.`,
+    });
+    expect(dateOnly(manual.service_date)).toBe(invoiceDate);
+    expect(manual.scheduled_service_id).toBe(target.scheduledServiceId);
+
+    const saved = await saveVisitCompletionPacket(submission());
+    if (blocks) {
+      expect(saved.body.billing).toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+    } else {
+      expect(saved.body.billing).toMatchObject({ state: 'invoice_ready', total: 240 });
+      expect(saved.body.billing.invoiceId).not.toBe(manual.id);
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(2);
+    }
+  });
+
+  test.each([['prior', -2], ['later', 2]])(
+    'a packet invoice allows an unlinked accepted-estimate application for a %s explicit date', async (_label, days) => {
+      const estimateId = await linkFixtureEstimate();
+      const saved = await saveVisitCompletionPacket(submission());
+      const otherDate = etDateString(addETDays(new Date(), days));
+
+      const invoice = await InvoiceService.create({
+        customerId: fixture.customerId,
+        serviceDate: otherDate,
+        lineItems: [{ description: 'First service application', quantity: 1, unit_price: 120 }],
+        notes: `Auto-generated from accepted estimate #${estimateId}. Another application.`,
+      });
+
+      expect(invoice.customer_id).toBe(fixture.customerId);
+      expect(dateOnly(invoice.service_date)).toBe(otherDate);
+      expect(invoice.id).not.toBe(saved.body.billing.invoiceId);
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(2);
+    });
+
+  test.each([
+    ['the same date', true],
+    ['no date', false],
+  ])('a packet invoice still owns an unlinked accepted-estimate application with %s', async (_label, withDate) => {
+    const estimateId = await linkFixtureEstimate();
+    await saveVisitCompletionPacket(submission());
+
+    await expect(InvoiceService.create({
+      customerId: fixture.customerId,
+      ...(withDate ? { serviceDate: etDateString() } : {}),
+      lineItems: [{ description: 'First service application', quantity: 1, unit_price: 120 }],
+      notes: `Auto-generated from accepted estimate #${estimateId}. Another application.`,
+    })).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+  });
+
+  test('an undated packet invoice fails closed against an explicitly dated application', async () => {
+    const estimateId = await linkFixtureEstimate();
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).update({ service_date: null });
+
+    await expect(InvoiceService.create({
+      customerId: fixture.customerId,
+      serviceDate: etDateString(addETDays(new Date(), 2)),
+      lineItems: [{ description: 'First service application', quantity: 1, unit_price: 120 }],
+      notes: `Auto-generated from accepted estimate #${estimateId}. Another application.`,
+    })).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+  });
+
+  test('packet-carried setup-fee coverage remains estimate-wide across service dates', async () => {
+    const estimateId = await linkFixtureEstimateWithSetupObligation();
+    const prior = await createPaidSetupFee(estimateId);
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('invoices').where({ id: prior.id }).update({ status: 'void' });
+    const packetInvoice = await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).first();
+    await mockPg('invoices').where({ id: packetInvoice.id }).update({
+      notes: 'Office edited packet notes',
+      line_items: JSON.stringify([...packetInvoice.line_items,
+        { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99, amount: 99 }]),
+    });
+
+    await expect(InvoiceService.create({
+      customerId: fixture.customerId,
+      serviceDate: etDateString(addETDays(new Date(), 2)),
+      lineItems: [{ description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99 }],
+      notes: `Auto-generated from accepted estimate #${estimateId}. Replacement setup fee.`,
+    })).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(2);
+  });
+
+  test('an application with a setup fee cannot use another date to bypass estimate-wide fee ownership', async () => {
+    const estimateId = await linkFixtureEstimateWithSetupObligation();
+    const prior = await createPaidSetupFee(estimateId);
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'invoice_ready', invoiceId: expect.any(String) });
+    await mockPg('invoices').where({ id: prior.id }).update({ status: 'void' });
+
+    await expect(InvoiceService.create({
+      customerId: fixture.customerId,
+      serviceDate: etDateString(addETDays(new Date(), 2)),
+      lineItems: [
+        { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99 },
+        { description: 'First service application', quantity: 1, unit_price: 120 },
+      ],
+      notes: `Auto-generated from accepted estimate #${estimateId}. Setup fee and another application.`,
+    })).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(2);
+  });
+
+  test.each([
+    ['voided', { status: 'void' }],
+    ['canceled', { status: 'canceled' }],
+    ['edited away', { status: 'paid', subtotal: 0, total: 0,
+      line_items: JSON.stringify([{ description: 'Office adjustment', quantity: 1, unit_price: 0, amount: 0 }]) }],
+  ])('a separate setup fee can be reissued after packet mint when its prior charge is %s', async (_label, priorUpdate) => {
+    const estimateId = await linkFixtureEstimateWithSetupObligation();
+    const prior = await createPaidSetupFee(estimateId);
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'invoice_ready', total: 240 });
+    await mockPg('invoices').where({ id: prior.id }).update(priorUpdate);
+
+    const createReplacement = () => InvoiceService.create({
+      customerId: fixture.customerId,
+      lineItems: [{ description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99, amount: 0 }],
+      notes: `Auto-generated from accepted estimate #${estimateId}. Replacement $99 setup fee only.`,
+    });
+    const replacement = await createReplacement();
+    expect(replacement.line_items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ description: 'WaveGuard Membership — one-time setup fee', amount: 99 }),
+    ]));
+    await expect(createReplacement()).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(3);
+  });
+
+  test('a raw zero application amount cannot disguise a combined acceptance invoice as setup-only', async () => {
+    const estimateId = await linkFixtureEstimateWithSetupObligation();
+    const prior = await createPaidSetupFee(estimateId);
+    await saveVisitCompletionPacket(submission());
+    await mockPg('invoices').where({ id: prior.id }).update({ status: 'void' });
+
+    await expect(InvoiceService.create({
+      customerId: fixture.customerId,
+      lineItems: [
+        { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99 },
+        { description: 'First service application', quantity: 1, unit_price: 120, amount: 0 },
+      ],
+      notes: `Auto-generated from accepted estimate #${estimateId}. Setup fee plus first application.`,
+    })).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(2);
+  });
+
+  test.each([
+    ['paid', 40, false, 59], ['paid', 40, true, 59],
+    ['refunded', 40, false, 59], ['refunded', 99, false, 0],
+    ['void', 99, false, 99], ['canceled', 99, false, 99],
+  ])('packet-carried fee coverage caps replacements: %s $%s stamped=%s remainder=$%s', async (status, fee, stamped, remainder) => {
+    const estimateId = await linkFixtureEstimateWithSetupObligation();
+    const prior = await createPaidSetupFee(estimateId);
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('invoices').where({ id: prior.id }).update({ status: 'void' });
+    const packetInvoice = await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).first();
+    await mockPg('invoices').where({ id: packetInvoice.id }).update({ status,
+      notes: stamped ? `accepted estimate #${estimateId}` : 'Office edited packet notes',
+      line_items: JSON.stringify([...packetInvoice.line_items,
+        { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: fee, amount: fee }]),
+    });
+    const create = (amount) => InvoiceService.create({ customerId: fixture.customerId,
+      lineItems: [{ description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: amount }],
+      notes: `accepted estimate #${estimateId}. Remaining setup fee only.`,
+    });
+    await expect(create(remainder + 1)).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+    if (remainder > 0) {
+      expect(Number((await create(remainder)).total)).toBe(remainder);
+      await expect(create(1)).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+    }
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(remainder > 0 ? 3 : 2);
+  });
+
+  test('a packet invoice that already carries the setup fee owns a later setup-only mint', async () => {
+    const estimateId = await linkFixtureEstimateWithSetupObligation();
+    const prior = await createPaidSetupFee(estimateId);
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('invoices').where({ id: prior.id }).update({ status: 'void' });
+    const packetInvoice = await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).first();
+    await mockPg('invoices').where({ id: packetInvoice.id }).update({
+      line_items: JSON.stringify([...packetInvoice.line_items,
+        { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99, amount: 99 }]),
+    });
+
+    await expect(InvoiceService.create({
+      customerId: fixture.customerId,
+      lineItems: [{ description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99 }],
+      notes: `Auto-generated from accepted estimate #${estimateId}. Replacement $99 setup fee only.`,
+    })).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(2);
+  });
+
+  test('a setup-only invoice without an accepted fee obligation cannot bypass packet ownership', async () => {
+    const estimateId = await linkFixtureEstimate();
+    await saveVisitCompletionPacket(submission());
+    await expect(InvoiceService.create({
+      customerId: fixture.customerId,
+      lineItems: [{ description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99 }],
+      notes: `Auto-generated from accepted estimate #${estimateId}. Replacement $99 setup fee only.`,
+    })).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+  });
+
+  test('uppercase refunded setup coverage prevents a replacement beside its packet invoice', async () => {
+    const estimateId = await linkFixtureEstimateWithSetupObligation();
+    const prior = await createPaidSetupFee(estimateId, estimateId.toUpperCase());
+    await saveVisitCompletionPacket(submission());
+    await mockPg('invoices').where({ id: prior.id }).update({ status: 'refunded' });
+
+    await expect(InvoiceService.create({
+      customerId: fixture.customerId,
+      lineItems: [{ description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99 }],
+      notes: `Auto-generated from accepted estimate #${estimateId}. Replacement $99 setup fee only.`,
+    })).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(2);
+  });
+
+  test.each([
+    ['the exact remainder', 59, false],
+    ['more than the remainder', 60, true],
+  ])('partial setup coverage allows %s only', async (_label, requestedFee, rejected) => {
+    const estimateId = await linkFixtureEstimateWithSetupObligation();
+    const prior = await createPaidSetupFee(estimateId);
+    await saveVisitCompletionPacket(submission());
+    await mockPg('invoices').where({ id: prior.id }).update({ subtotal: 40, total: 40,
+      line_items: JSON.stringify([
+        { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 40, amount: 40 },
+      ]) });
+
+    const create = InvoiceService.create({
+      customerId: fixture.customerId,
+      lineItems: [{ description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: requestedFee }],
+      notes: `Auto-generated from accepted estimate #${estimateId}. Remaining setup fee only.`,
+    });
+    if (rejected) {
+      await expect(create).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(2);
+    } else {
+      expect(Number((await create).total)).toBe(59);
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(3);
+    }
+  });
+
+  test('concurrent setup-fee replacements serialize to one invoice', async () => {
+    const estimateId = await linkFixtureEstimateWithSetupObligation();
+    const prior = await createPaidSetupFee(estimateId);
+    await saveVisitCompletionPacket(submission());
+    await mockPg('invoices').where({ id: prior.id }).update({ status: 'void' });
+    const create = () => InvoiceService.create({
+      customerId: fixture.customerId,
+      lineItems: [{ description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99 }],
+      notes: `Auto-generated from accepted estimate #${estimateId}. Replacement $99 setup fee only.`,
+    });
+
+    const results = await Promise.allSettled([create(), create()]);
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((result) => result.status === 'rejected').map((result) => result.reason))
+      .toEqual([expect.objectContaining({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 })]);
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(3);
+  });
+
+  test('a malformed accepted-estimate stamp does not enter PostgreSQL as a UUID', async () => {
+    const invoice = await InvoiceService.create({
+      customerId: fixture.customerId,
+      lineItems: [{ description: 'Synthetic manual charge', quantity: 1, unit_price: 99 }],
+      notes: 'Auto-generated from accepted estimate #deadbeef.',
+    });
+    expect(invoice).toMatchObject({ customer_id: fixture.customerId, notes: expect.stringContaining('#deadbeef') });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+  });
+
+  test.each([
+    ['a paid setup-only acceptance invoice', {
+      serviceDate: etDateString(), description: 'WaveGuard Membership — one-time setup fee', amount: 99,
+      note: 'Customer selected pay per application — $99 setup fee only.',
+    }],
+    ['a paid Bait Station setup-only acceptance invoice', {
+      serviceDate: etDateString(), description: 'Bait Station Setup — one-time setup fee', amount: 99,
+      note: 'Customer selected pay per application — $99 setup fee only.',
+    }],
+    ['a prior-date paid application', {
+      serviceDate: etDateString(new Date(Date.now() - 2 * 86400000)), description: 'First service application', amount: 120,
+      note: 'Customer selected pay per application — first application.',
+    }],
+  ])('%s does not block a later ordinary packet invoice', async (_label, prior) => {
+    const estimateId = await linkFixtureEstimate();
+    const invoice = await InvoiceService.create({
+      customerId: fixture.customerId, serviceDate: prior.serviceDate,
+      lineItems: [{ description: prior.description, quantity: 1, unit_price: prior.amount }],
+      notes: `Auto-generated from accepted estimate #${estimateId}. ${prior.note}`,
+    });
+    await mockPg('invoices').where({ id: invoice.id }).update({ status: 'paid', paid_at: new Date() });
+
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'invoice_ready', total: 240 });
+    expect(saved.body.billing.invoiceId).not.toBe(invoice.id);
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(2);
+  });
+
+  test.each([
+    ['void', 'application-only', 'First service application', false],
+    ['canceled', 'application-only', 'First service application', false],
+    ['cancelled', 'application-only', 'First service application', false],
+    ['refunded', 'application-only', 'First service application', true],
+    ['canceled', 'combined setup and application', 'WaveGuard Membership — $99 setup fee plus first application', true],
+    ['cancelled', 'combined setup and application', 'WaveGuard Membership — $99 setup fee plus first application', true],
+    ['void', 'combined setup and application', 'WaveGuard Membership — $99 setup fee plus first application', false],
+    ['canceled', 'setup-only', 'WaveGuard Membership — one-time setup fee', true],
+    ['refunded', 'setup-only', 'WaveGuard Membership — one-time setup fee', true],
+  ])('a %s %s unlinked acceptance invoice follows canonical packet ownership',
+    async (status, _kind, description, blocksPacket) => {
+      const estimateId = await linkFixtureEstimate();
+      const invoice = await InvoiceService.create({
+        customerId: fixture.customerId, serviceDate: etDateString(),
+        lineItems: [{ description, quantity: 1, unit_price: 120 }],
+        notes: `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application.`,
+      });
+      await mockPg('invoices').where({ id: invoice.id }).update({ status });
+
+      const saved = await saveVisitCompletionPacket(submission());
+      if (blocksPacket) {
+        expect(saved.body.billing).toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+        expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+      } else {
+        expect(saved.body.billing).toMatchObject({ state: 'invoice_ready', total: 240 });
+        expect(saved.body.billing.invoiceId).not.toBe(invoice.id);
+        expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(2);
+      }
+    });
+
+  test.each([
+    ['same-date', etDateString(), 'First service application'],
+    ['missing-date', null, 'First service application'],
+    ['same-date combined setup and application', etDateString(), 'WaveGuard Membership — $99 setup fee plus first application'],
+  ])('a paid %s unlinked acceptance application parks ordinary packet mint', async (_label, serviceDate, description) => {
+    const estimateId = await linkFixtureEstimate();
+    const invoice = await InvoiceService.create({
+      customerId: fixture.customerId, ...(serviceDate ? { serviceDate } : {}),
+      lineItems: [{ description, quantity: 1, unit_price: 120 }],
+      notes: `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — first application.`,
+    });
+    await mockPg('invoices').where({ id: invoice.id }).update({ status: 'paid', paid_at: new Date() });
+
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+  });
+
+  test.each([
+    ['an application invoice commits', 'Synthetic accepted-estimate charge', true, true],
+    ['a setup-only invoice commits', 'WaveGuard Membership — one-time setup fee', true, false],
+    ['an application invoice rolls back', 'Synthetic accepted-estimate charge', false, false],
+  ])('estimate-lock contention leaves packet mint retryable when %s', async (_label, description, commit, held) => {
+    const estimateId = await linkFixtureEstimate();
+    const writer = await mockPg.transaction();
+    try {
+      await InvoiceService.create({
+        database: writer, customerId: fixture.customerId,
+        lineItems: [{ description, quantity: 1, unit_price: 99 }],
+        notes: `Auto-generated from Accepted estimate #${estimateId.toUpperCase()}.`,
+      });
+      await expect(saveVisitCompletionPacket(submission())).rejects.toMatchObject({
+        code: 'visit_busy', statusCode: 409, isOperational: true,
+      });
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
+      expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
+      expect(await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId })).toHaveLength(0);
+      expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'billing_ready' })).toHaveLength(0);
+      expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({
+        status: 'open', billing_hold: false, billing_frozen_at: null,
+      });
+      if (commit) await writer.commit();
+      else await writer.rollback();
+
+      const saved = await saveVisitCompletionPacket(submission());
+      expect(saved.body.billing).toMatchObject(held
+        ? { state: 'office_required', reason: 'existing_member_invoice' }
+        : { state: 'invoice_ready', total: 240 });
+      const replay = await saveVisitCompletionPacket(submission());
+      expect(replay.body.billing).toEqual(saved.body.billing);
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(commit && !held ? 2 : 1);
+      expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(2);
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    } finally {
+      if (!writer.isCompleted()) await writer.rollback();
+    }
+  });
+
+  test('ordinary packet mint holds the estimate lock until a waiting manual writer observes its owner', async () => {
+    const estimateId = await linkFixtureEstimate();
+    const create = InvoiceService.create;
+    let packetPid;
+    let reachedMint;
+    const packetMinted = new Promise((resolve) => { reachedMint = resolve; });
+    let releaseMint;
+    const mintReleased = new Promise((resolve) => { releaseMint = resolve; });
+    const pause = jest.spyOn(InvoiceService, 'create').mockImplementation(async (...args) => {
+      const invoice = await create.apply(InvoiceService, args);
+      if (args[1]?.packetId) {
+        const { rows } = await args[0].database.raw('SELECT pg_backend_pid() AS pid');
+        packetPid = rows[0].pid;
+        reachedMint();
+        await mintReleased;
+      }
+      return invoice;
+    });
+    let closeout;
+    let manual;
+    try {
+      closeout = saveVisitCompletionPacket(submission());
+      await packetMinted;
+      manual = InvoiceService.create({
+        customerId: fixture.customerId,
+        lineItems: [{ description: 'Synthetic accepted-estimate charge', quantity: 1, unit_price: 99 }],
+        notes: `Auto-generated from accepted estimate #${estimateId.toUpperCase()}.`,
+      }).then((invoice) => ({ invoice }), (error) => ({ error }));
+      await waitForPgBlocker(packetPid, 'Manual writer did not wait on the packet estimate lock');
+      releaseMint();
+      const [saved, manualResult] = await Promise.all([closeout, manual]);
+      expect(saved.body.billing).toMatchObject({ state: 'invoice_ready' });
+      expect(manualResult.error).toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+    } finally {
+      releaseMint();
+      await Promise.allSettled([closeout, manual].filter(Boolean));
+      pause.mockRestore();
+    }
+  });
+
+  test('a locked packet invoice makes a manual mint fail operationally without inserting', async () => {
+    const estimateId = await linkFixtureEstimate();
+    const saved = await saveVisitCompletionPacket(submission());
+    const holder = await mockPg.transaction();
+    try {
+      await holder('invoices').where({ id: saved.body.billing.invoiceId }).forUpdate().first('id');
+      const create = () => InvoiceService.create({ customerId: fixture.customerId,
+        lineItems: [{ description: 'First service application', quantity: 1, unit_price: 120 }],
+        notes: `Auto-generated from accepted estimate #${estimateId}. First application.`,
+      });
+      await expect(create()).rejects.toMatchObject({
+        code: 'VISIT_PACKET_OWNS_BILLING', statusCode: 409, isOperational: true,
+      });
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+      await holder.rollback();
+      await expect(create()).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', statusCode: 409 });
+    } finally {
+      if (!holder.isCompleted()) await holder.rollback();
+    }
+  });
+
+  test('locked setup coverage rolls back a replacement and succeeds after retry', async () => {
+    const estimateId = await linkFixtureEstimateWithSetupObligation();
+    const prior = await createPaidSetupFee(estimateId);
+    await saveVisitCompletionPacket(submission());
+    await mockPg('invoices').where({ id: prior.id }).update({ status: 'void' });
+    const holder = await mockPg.transaction();
+    try {
+      await holder('invoices').where({ id: prior.id }).forUpdate().first('id');
+      const create = () => InvoiceService.create({ customerId: fixture.customerId,
+        lineItems: [{ description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99 }],
+        notes: `Auto-generated from accepted estimate #${estimateId}. Replacement fee only.`,
+      });
+      await expect(create()).rejects.toMatchObject({
+        code: 'VISIT_PACKET_OWNS_BILLING', statusCode: 409, isOperational: true,
+      });
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(2);
+      await holder.rollback();
+      expect(Number((await create()).total)).toBe(99);
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(3);
+    } finally {
+      if (!holder.isCompleted()) await holder.rollback();
+    }
+  });
+
+  test('locked unlinked acceptance row rolls back closeout before records and allows retry', async () => {
+    const estimateId = await linkFixtureEstimate();
+    const prior = await InvoiceService.create({ customerId: fixture.customerId, serviceDate: etDateString(),
+      lineItems: [{ description: 'First service application', quantity: 1, unit_price: 120 }],
+      notes: `Auto-generated from accepted estimate #${estimateId}. First application.`,
+    });
+    const holder = await mockPg.transaction();
+    try {
+      await holder('invoices').where({ id: prior.id }).forUpdate().first('id');
+      await expect(saveVisitCompletionPacket(submission())).rejects.toMatchObject({
+        code: 'visit_busy', statusCode: 409, isOperational: true,
+      });
+      expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
+      expect(await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId })).toHaveLength(0);
+      expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({
+        status: 'open', billing_hold: false, billing_frozen_at: null,
+      });
+      await holder.rollback();
+      expect((await saveVisitCompletionPacket(submission())).body.billing)
+        .toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+    } finally {
+      if (!holder.isCompleted()) await holder.rollback();
+    }
   });
 
   test.each(['paid', 'refunded', 'draft', 'void'])('a member with a %s invoice parks billing without creating another invoice', async (status) => {
@@ -1622,6 +3785,31 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
   });
 
+  test('an unpriced source-estimate member still refuses without an exact acceptance invoice', async () => {
+    await linkFixtureEstimate();
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ estimated_price: null });
+    const result = await saveVisitCompletionPacket(submission());
+    expect(result.body.billing).toMatchObject({ state: 'office_required', reason: 'member_price_missing' });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
+  });
+
+  test.each([
+    ['service type', { service_type: 'Fixture Same-Price Converted Service' }],
+    ['catalog service', { service_id: null }],
+  ])('a same-price member %s mutation is refused by the saved identity', async (_label, changes) => {
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    const packet = await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first('payload');
+    expect(packet.payload.billingSnapshot.memberPricing).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: fixture.serviceIds[0], serviceType: 'Fixture General Pest Control', serviceId: fixture.catalogId }),
+    ]));
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update(changes);
+    await expect(assertPacketCharge(saved)).rejects.toMatchObject({
+      code: 'VISIT_PAYMENT_REVIEW_REQUIRED', reason: 'member_service_changed',
+    });
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
   test('no performed applications means no invoice, including on replay', async () => {
     const input = submission();
     for (const item of input.items) item.body.visitOutcome = 'inspection_only';
@@ -1641,6 +3829,16 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(saved.charges_applied).toBe(1);
     expect(Number(saved.amount_applied)).toBe(36);
     expect(saved.applied_invoice_ids).toEqual([result.body.billing.invoiceId]);
+    await mockPg('visit_completion_packet_items').where({ packet_id: result.body.packetId }).update({ status: 'done' });
+    await mockPg('retention_offers').insert([
+      { customer_id: fixture.customerId, family_key: 'lawn_care', percent_off: 15,
+        max_charges: 2, cap_amount: 75, status: 'granted' },
+      { customer_id: fixture.customerId, family_key: 'pest_control', percent_off: 15,
+        max_charges: 2, cap_amount: 75, charges_applied: 2, amount_applied: 50, status: 'exhausted' },
+      { customer_id: fixture.customerId, family_key: 'pest_control', percent_off: 15,
+        max_charges: 2, cap_amount: 75, expires_at: new Date(Date.now() - 60000), status: 'granted' },
+    ]);
+    await expect(assertPacketCharge(result)).resolves.toBeUndefined();
     await saveVisitCompletionPacket(submission());
     expect((await mockPg('retention_offers').where({ id: offer.id }).first()).charges_applied).toBe(1);
   });
@@ -1734,6 +3932,59 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(Number((await mockPg('products_catalog').where({ id: fixture.productId }).first()).inventory_on_hand)).toBe(-0.5);
     expect((await saveVisitCompletionPacket(input)).body.replayed).toBe(true);
     expect(await mockPg('property_nutrient_ledger').where({ customer_id: fixture.customerId })).toHaveLength(2);
+  });
+
+  test.each([1, 2])('automatic grouping ignores an open version-%s visit after the closeout gate changes', async (previousVersion) => {
+    const groups = require('../services/visit-groups');
+    jest.replaceProperty(require('../config/feature-gates').gates, 'visitGroups', true);
+    process.env.GATE_VISIT_CLOSEOUT = previousVersion === 1 ? 'true' : 'false';
+    const propertyId = randomUUID();
+    await mockPg('customer_properties').insert({ id: propertyId, customer_id: fixture.customerId });
+    await mockPg('services').where({ id: fixture.catalogId }).update({ groupable: true, group_family: 'recurring_property_service' });
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ property_id: propertyId, status: 'confirmed' });
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({ property_id: propertyId,
+      behavior_version: previousVersion, group_family: 'recurring_property_service',
+      stop_base_key: stopBaseKey({ customerId: fixture.customerId, propertyId, scheduledDate: etDateString() }) });
+    const unattached = [randomUUID(), randomUUID()];
+    await mockPg('scheduled_services').insert(unattached.map((id) => ({ id, customer_id: fixture.customerId,
+      property_id: propertyId, technician_id: fixture.techId, service_id: fixture.catalogId,
+      service_type: 'Fixture General Pest Control', scheduled_date: etDateString(),
+      window_start: '09:00', window_end: '11:00', status: 'confirmed' })));
+
+    const grouped = await groups.maybeGroupRow(unattached[0], { createdBy: 'test' });
+    expect(grouped).toMatchObject({ behavior_version: previousVersion === 1 ? 2 : 1 });
+    expect(grouped.id).not.toBe(fixture.visitId);
+    expect(await mockPg('scheduled_services').where({ visit_id: grouped.id }).pluck('id')).toEqual(expect.arrayContaining(unattached));
+    expect(await mockPg('scheduled_services').where({ visit_id: fixture.visitId }).pluck('id')).toEqual(expect.arrayContaining(fixture.serviceIds));
+  });
+
+  test('joining under the closeout gate cannot rewrite an existing legacy visit contract', async () => {
+    await mockPg('services').where({ id: fixture.catalogId }).update({ groupable: true, group_family: 'recurring_property_service' });
+    await expect(require('../services/visit-groups').createOrJoinVisit({ rows: fixture.serviceIds, createdBy: 'test' }))
+      .rejects.toThrow('closeout behavior differs');
+    expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ behavior_version: 1, status: 'open' });
+    expect(await mockPg('scheduled_services').where({ visit_id: fixture.visitId })).toHaveLength(2);
+  });
+
+  test('a transient email dispatch-claim failure retries the same email instead of suppressing it', async () => {
+    const groups = require('../services/visit-groups');
+    const begin = groups.beginVisitNotificationDispatch;
+    let fail = true;
+    const dispatch = jest.spyOn(groups, 'beginVisitNotificationDispatch').mockImplementation(async (...args) => {
+      if (args[1] === 'completion_email' && fail) { fail = false; throw new Error('Synthetic database interruption'); }
+      return begin(...args);
+    });
+    try {
+      const saved = await saveVisitCompletionPacket(submission());
+      expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({ status: 202, body: { state: 'effects_pending' } });
+      expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+        .toMatchObject({ status: 'failed' });
+      expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      const email = require('../services/email-template-library').sendTemplate;
+      expect(email).toHaveBeenCalledTimes(2);
+      expect(email.mock.calls[1][0].idempotencyKey).toBe(email.mock.calls[0][0].idempotencyKey);
+    } finally { dispatch.mockRestore(); }
   });
 
   test('a caller-owned transaction is rejected before any packet query or upload', async () => {
@@ -2077,4 +4328,480 @@ postgres('visit completion packet records on PostgreSQL', () => {
       });
     });
   });
+
+  test('connected combined booking converts, arrives, closes, charges and replays as one stop', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    const baseline = { visitId: fixture.visitId, serviceIds: fixture.serviceIds, key: fixture.key,
+      estimateIds: fixture.estimateIds, httpServer: fixture.httpServer };
+    const gateNames = ['GATE_SCHEDULING_CAPACITY', 'GATE_VISIT_COMBINED_CAPACITY',
+      'GATE_SEPARATE_COMBO_VISITS', 'GATE_VISIT_GROUPS', 'GATE_CUSTOMER_PROPERTIES'];
+    const originalEnv = Object.fromEntries(gateNames.map((name) => [name, process.env[name]]));
+    const gates = require('../config/feature-gates').gates;
+    const originalGates = { visitGroups: gates.visitGroups, visitCombinedCapacity: gates.visitCombinedCapacity,
+      separateComboVisits: gates.separateComboVisits };
+    const artifactPath = path.resolve(__dirname, '../../.tmp/qa/combined-stop/backend-journey.json');
+    let coordsSpy;
+    let server;
+    mockPg = trx;
+    Object.assign(process.env, Object.fromEntries(gateNames.map((name) => [name, 'true'])));
+    process.env.GATE_SCHEDULING_CAPACITY = 'false';
+    Object.assign(gates, { visitGroups: true, visitCombinedCapacity: true, separateComboVisits: true });
+    try {
+      // Remove the generic beforeEach stop inside this rollback-only case.
+      // Every later ID comes from this reservation and its conversion.
+      await trx('scheduled_services').whereIn('id', baseline.serviceIds).del();
+      await trx('service_visits').where({ id: baseline.visitId }).del();
+      await trx('customers').where({ id: fixture.customerId }).update({ last_name: 'Connected',
+        address_line1: '100 Connected Court', city: 'Parrish', state: 'FL', zip: '34219',
+        pipeline_stage: 'active_customer', active: true, property_type: 'residential', billing_mode: 'per_application' });
+      await trx('technicians').where({ id: fixture.techId }).update({ email: `${fixture.techId}@example.invalid`,
+        employment_status: 'active', field_dispatchable: true, auth_token_version: 1, must_change_password: false });
+      const propertyId = randomUUID();
+      await trx('customer_properties').insert({ id: propertyId, customer_id: fixture.customerId,
+        is_primary: true, active: true, address_line1: '100 Connected Court', city: 'Parrish',
+        state: 'FL', zip: '34219', source: 'estimate_accept' });
+
+      const services = [
+        { service: 'pest_control', name: 'Quarterly Pest Control', visitsPerYear: 4, frequency: 'quarterly',
+          annual: 480, mo: 40, perTreatment: 120, catalog: 'pest_general_quarterly' },
+        { service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 6, frequency: 'bimonthly',
+          annual: 720, mo: 60, perTreatment: 120, catalog: 'lawn_care_recurring' },
+      ];
+      const catalogs = await trx('services').whereIn('service_key', services.map((service) => service.catalog));
+      expect(catalogs).toHaveLength(2);
+      expect(catalogs.every((catalog) => catalog.is_active && catalog.groupable && catalog.group_family)).toBe(true);
+      const { addETDays, etParts } = require('../utils/datetime-et');
+      let future = addETDays(new Date(), 45);
+      while ([0, 6].includes(etParts(future).dayOfWeek)) future = addETDays(future, 1);
+      const reservedDate = etDateString(future);
+      const estimateId = randomUUID();
+      fixture.estimateIds = [estimateId];
+      await trx('estimates').insert({ id: estimateId, customer_id: fixture.customerId, property_id: propertyId,
+        status: 'sent', token: randomUUID().replaceAll('-', '') + randomUUID().replaceAll('-', ''),
+        category: 'RESIDENTIAL', address: '100 Connected Court, Parrish, FL 34219',
+        monthly_total: 100, annual_total: 1200,
+        estimate_data: { result: { recurring: { services } } } });
+      const estimate = await trx('estimates').where({ id: estimateId }).first();
+      const estimatePublic = require('../routes/estimate-public');
+      const firstApplicationAmount = estimatePublic.sameDayVisitTotalForPricingFrequency(
+        { perServiceTreatments: services }, { services },
+      );
+      const visitEstimatedPrice = estimatePublic.acceptVisitEstimatedPrice({
+        billingTerm: 'standard', firstApplicationInvoiceAmount: firstApplicationAmount,
+      });
+      expect({ firstApplicationAmount, visitEstimatedPrice }).toEqual({
+        firstApplicationAmount: 240, visitEstimatedPrice: 240,
+      });
+      const profile = await resolveCatalogSlotProfile(estimate, {}, trx);
+      expect(profile.services.map((service) => service.service)).toEqual(['pest_control', 'lawn_care']);
+      expect(profile.durationMinutes).toBe(120);
+      expect(profile.reservationServiceMix).toMatchObject({ version: 1, durationMinutes: 120 });
+      coordsSpy = jest.spyOn(require('../services/estimate-slot-availability'), 'resolveEstimateCoords')
+        .mockResolvedValue(require('../services/route-optimizer').HQ);
+      const offer = signSlotOffer({ surface: 'estimate', scopeId: estimateId, date: reservedDate,
+        startMinutes: 540, technicianId: fixture.techId, durationMinutes: profile.durationMinutes });
+      const held = await reserveSlot({ estimateId,
+        slotId: appendOfferToSlotId(`${reservedDate}_09-00_${fixture.techId}`, offer) });
+      expect(await trx('scheduled_services').where({ id: held.scheduledServiceId }).first())
+        .toMatchObject({ customer_id: null, source_estimate_id: estimateId,
+          estimated_duration_minutes: profile.durationMinutes,
+          reservation_service_mix: { version: 1, durationMinutes: 120 } });
+      await commitReservation({ scheduledServiceId: held.scheduledServiceId, customerId: fixture.customerId,
+        estimatedPrice: visitEstimatedPrice, trx });
+      await trx('estimates').where({ id: estimateId }).update({ status: 'accepted', accepted_at: trx.fn.now() });
+      await EstimateConverter.convertEstimate(estimateId, { skipSetupInvoice: true, autoSendInvoice: false,
+        skipMembershipEmail: true, deferFollowUpReminderRegistration: true,
+        deferCommercialScheduleNotification: true,
+        firstApplicationRowAmounts: services.map((service) => ({
+          service: service.service, name: service.name, amount: service.perTreatment,
+        })),
+        database: trx });
+      // The public acceptance route calls this real post-commit coordinator;
+      // it stamps the converted booking, then forms the physical stop.
+      expect(await require('../services/estimate-property-linkage').linkAcceptedEstimateProperty({
+        estimateId, customerId: fixture.customerId, database: trx,
+      })).toMatchObject({ propertyId });
+      const parents = await trx('scheduled_services').where({ source_estimate_id: estimateId })
+        .whereNull('recurring_parent_id').orderBy('id');
+      expect(parents).toHaveLength(2);
+      expect(parents.filter((row) => row.estimated_price == null)).toHaveLength(1);
+      expect(parents.filter((row) => row.estimated_price != null).map((row) => Number(row.estimated_price))).toEqual([240]);
+      expect(parents.reduce((sum, row) => sum + Number(row.estimated_duration_minutes), 0)).toBe(120);
+      expect(parents.map((row) => [row.window_start, row.window_end]).sort())
+        .toEqual([['09:00:00', '10:00:00'], ['10:00:00', '11:00:00']]);
+      expect(new Set(parents.map((row) => row.visit_id)).size).toBe(1);
+      expect(parents.every((row) => row.property_id === propertyId && row.visit_id)).toBe(true);
+      const visitId = parents[0].visit_id;
+      expect(await trx('scheduled_services').where({ visit_id: visitId })).toHaveLength(2);
+
+      // Reach the booked day, then exercise the real technician arrival route
+      // so its stop fan-out moves both converted members on site.
+      const serviceDate = etDateString();
+      await trx('scheduled_services').whereIn('id', parents.map((row) => row.id)).update({ scheduled_date: serviceDate });
+      await trx('service_visits').where({ id: visitId }).update({ scheduled_date: serviceDate,
+        stop_base_key: stopBaseKey({ propertyId, scheduledDate: serviceDate }) });
+      fixture.visitId = visitId;
+      fixture.serviceIds = parents.map((row) => row.id).sort();
+      fixture.key = randomUUID();
+      const methodId = randomUUID();
+      await trx('payment_methods').insert({ id: methodId, customer_id: fixture.customerId, processor: 'stripe',
+        method_type: 'card', stripe_payment_method_id: 'pm_connected_combined', is_default: true,
+        autopay_enabled: true, exp_month: 12, exp_year: new Date().getUTCFullYear() + 1 });
+      await trx('customers').where({ id: fixture.customerId })
+        .update({ autopay_enabled: true, autopay_payment_method_id: methodId });
+      // The standard public accept freezes member-owned first-application
+      // lines and canonical provenance notes on the reserved parent. The card
+      // lane leaves this one draft invoice for completion to adopt and collect.
+      const acceptanceLines = await itemizeFirstApplication({ estimateId, customerId: fixture.customerId,
+        scheduledServiceId: held.scheduledServiceId,
+        rowAmounts: services.map((service) => ({ service: service.service, name: service.name,
+          amount: service.perTreatment })),
+        line: { description: 'First service application', quantity: 1, unit_price: firstApplicationAmount },
+      }, trx);
+      const acceptedInvoice = await InvoiceService.create({ database: trx, customerId: fixture.customerId,
+        scheduledServiceId: held.scheduledServiceId, title: 'First Service Application',
+        notes: acceptanceInvoiceNotes(estimateId, 'first application only'), lineItems: acceptanceLines,
+        dueDate: etDateString() });
+      expect(await trx('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+      let providerSubmissions = 0;
+      chargeInvoiceWithSavedCard.mockImplementation(async (invoiceId, selectedMethod, options) => {
+        expect(selectedMethod).toBe(methodId);
+        await mockPg.transaction(async (chargeTrx) => {
+          const invoice = await chargeTrx('invoices').where({ id: invoiceId }).forUpdate().first();
+          require('../services/invoice-helpers').assertInvoiceCollectible(invoice);
+          await chargeTrx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
+          await assertVisitCompletionCharge(chargeTrx, invoice, options.requireVisitCompletionPacketId);
+          providerSubmissions += 1;
+          await chargeTrx('invoices').where({ id: invoiceId }).update({ status: 'paid',
+            paid_at: chargeTrx.fn.now(), stripe_payment_intent_id: 'pi_connected_combined' });
+        });
+      });
+      const app = require('express')();
+      app.use(require('express').json());
+      app.use('/api/tech/services', require('../routes/tech-track'));
+      app.use('/api/admin/visit-closeouts', require('../routes/admin-visit-closeouts'));
+      app.use('/api/visit-summary', require('../routes/visit-summary-public'));
+      app.use((err, req, res, next) => res.status(500).json({ error: err.message, code: err.code }));
+      server = await new Promise((resolve) => {
+        const listener = app.listen(0, '127.0.0.1', () => resolve(listener));
+      });
+      fixture.httpServer = server;
+      const token = require('jsonwebtoken').sign({ technicianId: fixture.techId, type: 'access', tokenVersion: 1 },
+        require('../config').jwt.secret);
+      const request = async (requestPath, { method = 'GET', body, idempotencyKey } = {}) => {
+        const response = await fetch(`http://127.0.0.1:${server.address().port}${requestPath}`, { method,
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json',
+            ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) },
+          ...(body ? { body: JSON.stringify(body) } : {}) });
+        return { status: response.status, body: await response.json() };
+      };
+      expect(await request(`/api/tech/services/${fixture.serviceIds[0]}/on-site`, { method: 'POST' }))
+        .toMatchObject({ status: 200, body: { state: 'on_property' } });
+      expect((await trx('scheduled_services').whereIn('id', fixture.serviceIds).pluck('status')).sort())
+        .toEqual(['on_site', 'on_site']);
+      await trx('service_visits').where({ id: visitId }).update({ arrived_at: trx.raw("NOW() - INTERVAL '60 minutes'") });
+
+      const closeoutPath = `/api/admin/visit-closeouts/${visitId}`;
+      const closeoutBody = { items: submission().items };
+      const completed = await request(closeoutPath,
+        { method: 'POST', body: closeoutBody, idempotencyKey: fixture.key });
+      expect(completed).toMatchObject({ status: 200,
+        body: { state: 'done', payment: { state: 'paid' }, delivery: { state: 'delivered' } } });
+      const invoice = await trx('invoices').where({ customer_id: fixture.customerId }).first();
+      const packet = await trx('visit_completion_packets').where({ id: completed.body.packetId }).first();
+      const records = await trx('service_records').whereIn('scheduled_service_id', fixture.serviceIds);
+      const costs = await trx('job_costs').whereIn('scheduled_service_id', fixture.serviceIds);
+      const effects = await trx('visit_effects').where({ visit_id: visitId })
+        .whereIn('effect_type', ['completion_sms', 'completion_email']);
+      expect(records).toHaveLength(2);
+      expect(costs).toHaveLength(2);
+      expect(packet.payload.durationAllocation).toMatchObject({ totalMinutes: 60,
+        items: expect.arrayContaining(fixture.serviceIds.map((serviceId) =>
+          expect.objectContaining({ serviceId, allocatedMinutes: expect.any(Number) }))) });
+      expect(packet.payload.durationAllocation.items.reduce((sum, item) => sum + item.allocatedMinutes, 0)).toBe(60);
+      expect(invoice).toMatchObject({ id: acceptedInvoice.id, status: 'paid',
+        subtotal: '240.00', discount_amount: '0.00', total: '240.00' });
+      expect(invoice.line_items.map((line) => Number(line.amount))).toEqual([120, 120]);
+      const financials = await trx('company_financials').orderBy('effective_date', 'desc').first();
+      expect(costs.reduce((sum, row) => sum + Number(row.drive_cost), 0)).toBe(Number(financials.drive_cost_per_stop));
+      expect(costs.reduce((sum, row) => sum + Number(row.labor_cost), 0)).toBe(Number(financials.loaded_labor_rate));
+      expect(effects).toEqual(expect.arrayContaining([
+        expect.objectContaining({ effect_type: 'completion_sms', status: 'sent' }),
+        // The test's provider stub exercises the handoff but deliberately
+        // creates no email_messages ledger row, so the aggregate settles this
+        // leg as suppressed rather than treating a return value as send proof.
+        expect.objectContaining({ effect_type: 'completion_email', status: 'suppressed' }),
+      ]));
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(require('../services/email-template-library').sendTemplate).toHaveBeenCalledTimes(1);
+      expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
+      expect(providerSubmissions).toBe(1);
+      const summary = await request(completed.body.summaryUrl.replace('/visit/', '/api/visit-summary/'));
+      expect(summary.status).toBe(200);
+      expect(summary.body.services).toHaveLength(2);
+
+      const counts = async () => Object.fromEntries(await Promise.all([
+        ['records', trx('service_records').whereIn('scheduled_service_id', fixture.serviceIds).count({ count: '*' }).first()],
+        ['invoices', trx('invoices').where({ customer_id: fixture.customerId }).count({ count: '*' }).first()],
+        ['packets', trx('visit_completion_packets').where({ visit_id: visitId }).count({ count: '*' }).first()],
+        ['items', trx('visit_completion_packet_items').where({ packet_id: packet.id }).count({ count: '*' }).first()],
+        ['effects', trx('visit_effects').where({ visit_id: visitId }).count({ count: '*' }).first()],
+      ].map(async ([name, query]) => [name, Number((await query).count)])));
+      const beforeRetry = await counts();
+      expect(beforeRetry).toMatchObject({ records: 2, invoices: 1, packets: 1, items: 2 });
+      const replay = await request(closeoutPath,
+        { method: 'POST', body: closeoutBody, idempotencyKey: fixture.key });
+      expect(replay).toMatchObject({ status: 200, body: { packetId: packet.id, state: 'done',
+        payment: { state: 'paid' }, summaryUrl: completed.body.summaryUrl } });
+      expect(await counts()).toEqual(beforeRetry);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(require('../services/email-template-library').sendTemplate).toHaveBeenCalledTimes(1);
+      expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
+      expect(providerSubmissions).toBe(1);
+
+      const observations = { estimateId, reservationId: held.scheduledServiceId, visitId,
+        serviceIds: fixture.serviceIds, packetId: packet.id, invoiceId: invoice.id,
+        gates: { schedulingCapacity: false, visitCombinedCapacity: true,
+          separateComboVisits: true, visitGroups: true, customerProperties: true },
+        acceptedPricing: { billingTerm: 'standard', rowAmounts: services.map((service) => service.perTreatment),
+          firstApplicationAmount, visitEstimatedPrice },
+        reservedMix: profile.reservationServiceMix,
+        reservedMinutes: profile.durationMinutes,
+        allocatedMinutes: packet.payload.durationAllocation.items.map((item) =>
+          ({ serviceId: item.serviceId, minutes: item.allocatedMinutes })),
+        rowCounts: beforeRetry,
+        invoice: { lineAmounts: invoice.line_items.map((line) => Number(line.amount)),
+          subtotal: Number(invoice.subtotal), discount: Number(invoice.discount_amount), total: Number(invoice.total) },
+        jobCosts: { labor: costs.reduce((sum, row) => sum + Number(row.labor_cost), 0),
+          drive: costs.reduce((sum, row) => sum + Number(row.drive_cost), 0),
+          total: costs.reduce((sum, row) => sum + Number(row.total_cost), 0) },
+        invocations: { successfulCharges: providerSubmissions, smsSummaries: sendCustomerMessage.mock.calls.length,
+          emailSummaries: require('../services/email-template-library').sendTemplate.mock.calls.length },
+        retry: { samePacket: replay.body.packetId === packet.id, rowCountsUnchanged: true } };
+      fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
+      fs.writeFileSync(artifactPath, `${JSON.stringify(observations, null, 2)}\n`);
+    } finally {
+      if (server) await new Promise((resolve) => server.close(resolve));
+      fixture.httpServer = null;
+      if (coordsSpy) coordsSpy.mockRestore();
+      mockPg = pool;
+      await trx.rollback();
+      Object.assign(fixture, baseline);
+      for (const name of gateNames) {
+        if (originalEnv[name] === undefined) delete process.env[name];
+        else process.env[name] = originalEnv[name];
+      }
+      Object.assign(gates, originalGates);
+    }
+  });
+
+  test.each([false, true])('adopts an exact acceptance invoice without repricing (uppercase stamp=%s)', async (uppercaseStamp) => {
+    const { invoice: created, deposit, pestId } = await prepareAcceptanceInvoice({ withAdjustments: true, uppercaseStamp });
+    const before = await mockPg('invoices').where({ id: created.id }).first();
+    const result = await saveVisitCompletionPacket(submission());
+    expect(result.body.billing).toMatchObject({ state: 'invoice_ready', invoiceId: created.id, total: 271 });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+    const after = await mockPg('invoices').where({ id: created.id }).first();
+    expect(after).toMatchObject({ scheduled_service_id: pestId,
+      visit_completion_packet_id: result.body.packetId,
+      service_record_id: result.body.items.find((item) => item.serviceId === pestId).serviceRecordId,
+      status: 'draft', subtotal: '339.00', discount_amount: '18.00', total: '271.00' });
+    expect(after.line_items).toEqual(before.line_items);
+    expect(after.line_items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ description: 'WaveGuard Membership — one-time setup fee', amount: 99 }),
+      expect.objectContaining({ client_id: `scheduled_${fixture.serviceIds[0]}_primary`, amount: 120 }),
+      expect.objectContaining({ client_id: `scheduled_${fixture.serviceIds[1]}_primary`, amount: 120 }),
+      expect.objectContaining({ description: 'Accepted plan credit', amount: -18 }),
+      expect.objectContaining({ category: 'deposit_credit', amount: -50 }),
+    ]));
+    expect(await mockPg('estimate_deposits').where({ id: deposit.id }).first()).toEqual(deposit);
+  });
+
+  test('adoption retains a zero-priced accepted member and fences its later retention offer', async () => {
+    const { invoice } = await prepareAcceptanceInvoice({ withAdjustments: true, scheduledPrices: [0, 240] });
+    await mockPg('services').where({ id: fixture.catalogId }).update({ engine_keys: JSON.stringify(['pest_control']) });
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] })
+      .update({ is_recurring: true, recurring_ongoing: true });
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] })
+      .update({ is_recurring: false, recurring_ongoing: false });
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'invoice_ready', invoiceId: invoice.id });
+    const snapshot = (await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).payload.billingSnapshot;
+    expect(snapshot.billedServiceIds.sort()).toEqual([...fixture.serviceIds].sort());
+    expect(snapshot.acceptedLineItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({ client_id: `scheduled_${fixture.serviceIds[0]}_primary`, amount: 120 }),
+    ]));
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    await expect(assertPacketCharge(saved)).resolves.toBeUndefined();
+    await mockPg('retention_offers').insert({ customer_id: fixture.customerId,
+      family_key: 'pest_control', percent_off: 15, max_charges: 2, cap_amount: 75, status: 'granted' });
+    await expect(assertPacketCharge(saved)).rejects.toMatchObject({ reason: 'retention_offer_changed' });
+  });
+
+  test.each(['deposit', 'same-total edit'])('the adopted charge fence rejects a changed %s', async (change) => {
+    const { invoice, deposit } = await prepareAcceptanceInvoice(change === 'deposit' ? { withAdjustments: true } : {});
+    const saved = await saveVisitCompletionPacket(submission());
+    if (change === 'deposit') {
+      await mockPg('estimate_deposits').where({ id: deposit.id }).update({ status: 'refunded', refunded_amount: 50 });
+    } else {
+      const lines = invoice.line_items.map((line) => ({ ...line }));
+      lines[0].unit_price += 20; lines[0].amount += 20;
+      lines[1].unit_price -= 20; lines[1].amount -= 20;
+      await InvoiceService.update(invoice.id, { line_items: lines });
+    }
+    await expect(mockPg.transaction(async (trx) => assertVisitCompletionCharge(trx,
+      await trx('invoices').where({ id: invoice.id }).forUpdate().first(), saved.body.packetId)))
+      .rejects.toMatchObject({ code: 'VISIT_PAYMENT_REVIEW_REQUIRED',
+        reason: change === 'deposit' ? 'deposit_credit_changed' : 'accepted_invoice_lines_changed' });
+  });
+
+  test('an explicit billed callback with a prior invoice cannot mint a packet duplicate', async () => {
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({
+      is_callback: true, create_invoice_on_complete: true,
+    });
+    await InvoiceService.create({ customerId: fixture.customerId, scheduledServiceId: fixture.serviceIds[0],
+      lineItems: [{ description: 'Prior callback charge', quantity: 1, unit_price: 120 }] });
+    const result = await saveVisitCompletionPacket(submission());
+    expect(result.body.billing).toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+  });
+
+  test('rejects adoption beside a same-date stamped manual charge with custom wording', async () => {
+    const { invoice, estimateId } = await prepareAcceptanceInvoice();
+    await InvoiceService.create({ database: mockPg, customerId: fixture.customerId,
+      serviceDate: etDateString(), notes: `Manual billing for accepted estimate #${estimateId}.`,
+      lineItems: [{ description: 'Lawn treatment', quantity: 1, unit_price: 100 }] });
+    expect((await saveVisitCompletionPacket(submission())).body.billing)
+      .toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+    expect((await mockPg('invoices').where({ id: invoice.id }).first()))
+      .toMatchObject({ visit_completion_packet_id: null, service_record_id: null });
+  });
+
+  test('a stale-dated acceptance invoice remains outside packet ownership', async () => {
+    const { invoice } = await prepareAcceptanceInvoice();
+    await mockPg('invoices').where({ id: invoice.id }).update({ service_date: '2000-01-01' });
+    expect((await saveVisitCompletionPacket(submission())).body.billing)
+      .toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+    expect((await mockPg('invoices').where({ id: invoice.id }).first()).visit_completion_packet_id).toBeNull();
+  });
+
+  test('an acceptance candidate with an explicitly billed callback stays in office review', async () => {
+    const { invoice, lawnId } = await prepareAcceptanceInvoice({ coverage: 'partial' });
+    await mockPg('scheduled_services').where({ id: lawnId }).update({ is_callback: true, create_invoice_on_complete: true });
+    expect((await saveVisitCompletionPacket(submission())).body.billing)
+      .toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+    expect((await mockPg('invoices').where({ id: invoice.id }).first()).visit_completion_packet_id).toBeNull();
+  });
+
+  test('stamped creation still sees packet ownership after staff changes invoice notes', async () => {
+    const { invoice, estimateId } = await prepareAcceptanceInvoice();
+    expect((await saveVisitCompletionPacket(submission())).body.billing.state).toBe('invoice_ready');
+    await InvoiceService.update(invoice.id, { notes: 'Office reviewed this invoice.' });
+    await expect(InvoiceService.create({ database: mockPg, customerId: fixture.customerId,
+      notes: acceptanceInvoiceNotes(estimateId),
+      lineItems: [{ description: 'First service application', quantity: 1, unit_price: 220 }] }))
+      .rejects.toMatchObject({ status: 409, code: 'VISIT_PACKET_OWNS_BILLING' });
+  });
+
+  test('rejects a paid acceptance invoice', async () => {
+    const { invoice } = await prepareAcceptanceInvoice({ status: 'paid' });
+    expect((await saveVisitCompletionPacket(submission())).body.billing)
+      .toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+    expect((await mockPg('invoices').where({ id: invoice.id }).first())).toMatchObject({
+      visit_completion_packet_id: null, service_record_id: null, status: 'paid',
+    });
+  });
+
+  test('rejects an acceptance invoice with any prior charge attempt', async () => {
+    const { invoice } = await prepareAcceptanceInvoice();
+    await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: invoice.id,
+      stripe_payment_method_id: 'pm_fixture_acceptance_attempt', idempotency_key: fixture.key,
+      status: 'claimed', submitted_at: new Date() });
+    expect((await saveVisitCompletionPacket(submission())).body.billing)
+      .toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+  });
+
+  test('rejects acceptance adoption when an extra member invoice exists', async () => {
+    const { invoice, lawnId } = await prepareAcceptanceInvoice();
+    await InvoiceService.create({ database: mockPg, customerId: fixture.customerId,
+      scheduledServiceId: lawnId, title: 'Existing lawn invoice',
+      lineItems: [{ description: 'Lawn Care', quantity: 1, unit_price: 100 }], dueDate: etDateString() });
+    expect((await saveVisitCompletionPacket(submission())).body.billing)
+      .toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(2);
+    expect((await mockPg('invoices').where({ id: invoice.id }).first()))
+      .toMatchObject({ visit_completion_packet_id: null, service_record_id: null });
+  });
+
+
+  test.each(['custom', 'setup'])('charge rejects a same-total %s edit after adoption', async (edit) => {
+    const { invoice } = await prepareAcceptanceInvoice();
+    const saved = await saveVisitCompletionPacket(submission());
+    const lines = invoice.line_items.map((line) => ({ ...line }));
+    if (edit === 'custom') lines[1] = { description: 'Custom repair', quantity: 1, unit_price: 120, amount: 120 };
+    else {
+      lines[0].unit_price += 20; lines[0].amount += 20;
+      lines[1].unit_price -= 20; lines[1].amount -= 20;
+    }
+    await InvoiceService.update(invoice.id, { line_items: lines });
+    await expect(assertPacketCharge(saved)).rejects.toMatchObject({ reason: 'accepted_invoice_lines_changed' });
+  });
+
+  test('an offer granted after adoption blocks the later collection effect', async () => {
+    const { invoice } = await prepareAcceptanceInvoice();
+    await enableFixtureAutopay('adopted_late_retention');
+    await mockPg('services').where({ id: fixture.catalogId }).update({ engine_keys: JSON.stringify(['pest_control']) });
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ is_recurring: true });
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing.invoiceId).toBe(invoice.id);
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    await mockPg('retention_offers').insert({ customer_id: fixture.customerId,
+      family_key: 'pest_control', percent_off: 15, max_charges: 2, cap_amount: 75, status: 'granted' });
+    await expect(assertPacketCharge(saved)).rejects.toMatchObject({ reason: 'retention_offer_changed' });
+    const provider = jest.fn();
+    chargeInvoiceWithSavedCard.mockImplementation(async () => {
+      await assertPacketCharge(saved);
+      provider();
+    });
+    expect(await collectVisitCompletionInvoice(saved.body.packetId))
+      .toMatchObject({ state: 'office_required', invoiceId: invoice.id });
+    expect(provider).not.toHaveBeenCalled();
+  });
+
+  test('the charge fence refuses a deposit reversed after invoice adoption', async () => {
+    const { invoice, deposit } = await prepareAcceptanceInvoice({ withAdjustments: true });
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('estimate_deposits').where({ id: deposit.id }).update({ status: 'refunded', refunded_amount: 50 });
+    await expect(assertPacketCharge(saved)).rejects.toMatchObject({ reason: 'deposit_credit_changed' });
+    expect((await mockPg('invoices').where({ id: invoice.id }).first()).visit_completion_packet_id).toBe(saved.body.packetId);
+  });
+
+  test('rejects adoption after an in-place service conversion changes the accepted identity', async () => {
+    const { invoice, lawnId } = await prepareAcceptanceInvoice();
+    await mockPg('scheduled_services').where({ id: lawnId }).update({ service_type: 'Mosquito Control' });
+    expect((await saveVisitCompletionPacket(submission())).body.billing)
+      .toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+    expect((await mockPg('invoices').where({ id: invoice.id }).first()))
+      .toMatchObject({ visit_completion_packet_id: null, service_record_id: null });
+  });
+
+  test('the adopted invoice charge fence rejects a service conversion after the packet snapshot', async () => {
+    const { invoice, lawnId } = await prepareAcceptanceInvoice();
+    await enableFixtureAutopay('adopted_service_conversion');
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    await mockPg('scheduled_services').where({ id: lawnId }).update({ service_type: 'Mosquito Control' });
+    await expect(assertPacketCharge(saved)).rejects.toMatchObject({ reason: 'member_service_changed' });
+    const provider = jest.fn();
+    chargeInvoiceWithSavedCard.mockImplementation(async () => {
+      await assertPacketCharge(saved);
+      provider();
+    });
+    expect(await collectVisitCompletionInvoice(saved.body.packetId))
+      .toMatchObject({ state: 'office_required', invoiceId: invoice.id });
+    expect(provider).not.toHaveBeenCalled();
+  });
+
+
 });

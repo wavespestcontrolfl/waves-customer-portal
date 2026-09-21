@@ -52,9 +52,11 @@ function looksLikeReviewAsk(body) {
 // processFollowups also stamps it as a plain "handled" marker for
 // soft-deleted customers, dedup'd siblings, no-consent contacts, and
 // blocked/failed sends (review-request.js:2810,2875,2930,2953,3015) — none
-// of those reached the customer. The real delivery timestamp instead lives
-// in messaging_audit_log.sent_at (set only once the provider actually
-// dispatches), correlated back to this row via the review_request_id the
+// of those reached the customer. Real follow-up delivery evidence lives in
+// TWO places: review_requests.followup_delivered_at, which the serialized
+// processFollowups stamps at provider accept, and messaging_audit_log.sent_at
+// (set only once the provider actually dispatches) for follow-ups delivered
+// before that column existed — correlated back via the review_request_id the
 // followup send stamps into its metadata.
 const FOLLOWUP_DELIVERED_SUBQUERY = `(
   SELECT metadata->>'review_request_id' AS review_request_id, MAX(sent_at) AS followup_delivered_at
@@ -63,40 +65,54 @@ const FOLLOWUP_DELIVERED_SUBQUERY = `(
   GROUP BY metadata->>'review_request_id'
 ) followups`;
 
-function deliveredAskRows(customerId, { since = null, excludeRequestId = null } = {}) {
+function deliveredAskRows(customerId, { since = null, excludeRequestId = null, includeReservations = true } = {}) {
+  const timestampColumns = ['review_requests.sms_sent_at', 'review_requests.sent_at',
+    'review_requests.followup_delivered_at', 'followups.followup_delivered_at'];
+  if (includeReservations) timestampColumns.push('review_requests.followup_reserved_at');
   const q = db('review_requests')
     // Correlated to the customer so the derived table uses the audit log's
     // customer index instead of grouping every follow-up ever delivered.
     .joinRaw(`LEFT JOIN ${FOLLOWUP_DELIVERED_SUBQUERY} ON followups.review_request_id = review_requests.id::text`, [customerId])
     .where({ 'review_requests.customer_id': customerId })
-    .whereRaw('(review_requests.sms_sent_at IS NOT NULL OR review_requests.sent_at IS NOT NULL OR followups.followup_delivered_at IS NOT NULL)')
+    .whereRaw(`(${timestampColumns.map(column => `${column} IS NOT NULL`).join(' OR ')})`)
     .whereRaw(ASK_TOUCH_SQL)
     .select('review_requests.id', 'review_requests.sequence_id', 'review_requests.template_key',
-      'review_requests.sms_sent_at', 'review_requests.sent_at', 'followups.followup_delivered_at');
-  if (since) q.whereRaw('GREATEST(review_requests.sms_sent_at, review_requests.sent_at, followups.followup_delivered_at) > ?', [since]);
+      'review_requests.sms_sent_at', 'review_requests.sent_at', 'review_requests.followup_reserved_at',
+      // Both delivery evidence sources ride the row: the audit-log join keeps
+      // the followup_delivered_at name (older callers/tests read it), the
+      // column this slice stamps at provider accept is followup_recorded_at.
+      'followups.followup_delivered_at', 'review_requests.followup_delivered_at as followup_recorded_at');
+  if (since) q.whereRaw(`GREATEST(${timestampColumns.join(', ')}) > ?`, [since]);
   if (excludeRequestId) q.where('review_requests.id', '!=', excludeRequestId);
   return q;
 }
 
-// A retried email leg, or the genuinely delivered legacy follow-up SMS, can
-// be later than the original ask's own sms_sent_at/sent_at on the same row.
-function latestDeliveredAt(rows) {
+// An unresolved follow-up reservation conservatively holds spacing until its
+// real outcome is recorded; it does not populate the delivery timestamp.
+// A retried email leg, or the genuinely delivered legacy follow-up SMS (from
+// either evidence source), can be later than the original ask's own
+// sms_sent_at/sent_at on the same row.
+function latestDeliveredAt(rows, { includeReservations = true } = {}) {
+  const timestampFields = ['sms_sent_at', 'sent_at', 'followup_delivered_at', 'followup_recorded_at'];
+  if (includeReservations) timestampFields.push('followup_reserved_at');
   return rows.reduce((latest, row) => {
-    const at = Math.max(...[row.sms_sent_at, row.sent_at, row.followup_delivered_at].map(value => value ? new Date(value).getTime() : 0));
+    const at = Math.max(...timestampFields.map(field => row[field] ? new Date(row[field]).getTime() : 0));
     return Number.isFinite(at) && at > (latest?.getTime() || 0) ? new Date(at) : latest;
   }, null);
 }
 
 async function lastDeliveredAskAt(customerId, options) {
-  return latestDeliveredAt(await deliveredAskRows(customerId, options));
+  return latestDeliveredAt(await deliveredAskRows(customerId, options), {
+    includeReservations: options?.includeReservations !== false,
+  });
 }
 
 // Lookups throw: dispatch callers must hold when evidence is unavailable.
 // The enrollment standdown retains its explicit fail-open wrapper.
-async function lastManualAskAt(customerId, { since, includeReservations = true } = {}) {
+async function lastManualAskAt(customerId, { since, includeReservations = true, excludeReservationId = null } = {}) {
   const sinceAt = since ? new Date(since) : new Date(Date.now() - 30 * 86400000);
   const fetchFloor = new Date(sinceAt.getTime() - 90000);
-  const outbound = await db('sms_log')
+  const rows = await db('sms_log')
     .where({ customer_id: customerId, direction: 'outbound' })
     // Include correspondence just before the boundary so its timestamp
     // cannot instead be assigned to a manual ask just after the boundary.
@@ -107,25 +123,52 @@ async function lastManualAskAt(customerId, { since, includeReservations = true }
     // confirmation must not be lost just because the placeholder predates
     // the boundary (codex P1, review-request.js:1476).
     .whereRaw('(created_at >= ? OR updated_at >= ?)', [fetchFloor, fetchFloor])
-    .whereNotIn('status', ['scheduled', 'canceled', 'cancelled', 'failed', 'undelivered', 'blocked'])
+    .where(q => q.whereNotIn('status', ['scheduled', 'canceled', 'cancelled', 'failed', 'undelivered', 'blocked'])
+      // Finalize-only replay already delivered, even while bookkeeping retries.
+      .orWhereRaw("metadata->>'finalize_only' = 'true'")
+      // Stale-claim recovery can requeue/fail a possibly accepted attempt.
+      .orWhereRaw("metadata->>'review_ask_reservation' = 'true'"))
     .orderBy('created_at', 'desc')
-    .select('message_body', 'created_at', 'updated_at', 'status', 'metadata');
-  const isReviewReservation = row => row.metadata?.review_ask_reservation === true;
+    .select('id', 'message_body', 'created_at', 'updated_at', 'status', 'metadata');
+  // The caller's OWN in-flight reservation (already inserted under the same
+  // per-customer lock this check runs inside — see admin-communications.js)
+  // is the current attempt's own evidence, not a PRIOR ask to space against;
+  // excluding it here is exactly the excludeRequestId pattern lastDeliveredAskAt
+  // already uses for a caller's own claimed review_requests row.
+  const outbound = excludeReservationId ? rows.filter(row => row.id !== excludeReservationId) : rows;
+  const metadata = row => {
+    try { return typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata || {}; }
+    catch { return {}; }
+  };
+  const isReviewReservation = row => metadata(row).review_ask_reservation === true;
+  const isConfirmed = row => ['sent', 'delivered'].includes(row.status) || metadata(row).finalize_only === true;
   // An unresolved provider attempt conservatively holds the same 72-hour
   // window only when the caller includes reservations. A confirmed marker
   // belongs in candidates below: it is durable delivery evidence even when
   // its short-link body is not independently recognizable as a review ask,
   // and the normal request/log correlation must still distinguish an
   // automated pipeline send from a staff ask.
+  // Deliberately NOT the shared isUnresolvedReviewAskReservation predicate the
+  // general sms_log readers use. That one hides only a still-in-flight
+  // placeholder (status 'sending'); spacing evidence needs the wider notion —
+  // any reservation that is not CONFIRMED delivered, including the ones
+  // stale-claim recovery requeued or failed, still holds the 72-hour window
+  // because the provider may have taken the text anyway. Must stay the same
+  // predicate the candidates filter below excludes on, or a recovered
+  // reservation would fall out of both and lose the hold entirely.
   const reservations = includeReservations
-    ? outbound.filter(row => row.status === 'sending' && isReviewReservation(row))
+    ? outbound.filter(row => isReviewReservation(row) && !isConfirmed(row))
     : [];
   const reservedAt = reservations.reduce((latest, row) => {
     const at = new Date(row.created_at);
     return at >= sinceAt && (!latest || at > latest) ? at : latest;
   }, null);
-  const candidates = outbound.filter(row => row.status !== 'sending'
-    && (isReviewReservation(row) || looksLikeReviewAsk(row.message_body)));
+  const candidates = outbound.filter(row => {
+    const meta = metadata(row);
+    if ((isReviewReservation(row) && !isConfirmed(row)) || (row.status === 'sending' && !meta.finalize_only)) return false;
+    return isReviewReservation(row) || looksLikeReviewAsk(row.message_body)
+      || !!(meta.bundled_review_request_id || meta.review_ask_delivered_at);
+  });
   // A resolved reservation's real ask-evidence time is its provider
   // confirmation (updated_at), not the placeholder's created_at: the
   // reservation is opened before the send, so its created_at can land

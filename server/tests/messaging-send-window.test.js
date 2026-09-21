@@ -297,11 +297,31 @@ describe('sendCustomerMessage send-window integration', () => {
     // async since the move-hold boundary re-check joined the hook (codex
     // #3609 r31) — the provider awaits it either way.
     await expect(hooks.preSendCheck()).resolves.toEqual({ ok: true });
+    expect(hooks.preSendCheck.isStillValid()).toBe(true);
     jest.setSystemTime(WINDOW_CLOSE);
+    expect(hooks.preSendCheck.isStillValid()).toBe(false);
     const lateVerdict = await hooks.preSendCheck();
     expect(lateVerdict.ok).toBe(false);
     expect(lateVerdict.code).toBe('QUIET_HOURS_HOLD');
     expect(lateVerdict.nextAllowedAt).toBe('2026-08-07T12:00:00.000Z');
+  });
+
+  test('the final window check catches an async caller guard that crosses 20:00 ET', async () => {
+    jest.useFakeTimers({ now: LAST_MINUTE, doNotFake: ['nextTick', 'setImmediate'] });
+    const callerGuard = jest.fn(async () => {
+      jest.setSystemTime(WINDOW_CLOSE);
+      return { ok: true };
+    });
+    await sendCustomerMessage({ ...INPUT, preSendCheck: callerGuard });
+
+    const verdict = await sendViaTwilio.mock.calls[0][1].preSendCheck();
+    expect(callerGuard).toHaveBeenCalledWith({ channel: 'sms' });
+    expect(verdict).toMatchObject({
+      ok: false,
+      code: 'QUIET_HOURS_HOLD',
+      retryable: true,
+      deferred: true,
+    });
   });
 
   test('a provider-handoff block maps back onto the QUIET_HOURS_HOLD deferral contract', async () => {
@@ -350,5 +370,18 @@ describe('sendCustomerMessage send-window integration', () => {
     expect(auditArgs.validatorsFailed).toEqual(['check_owned_number_recipient']);
     expect(auditArgs.blockedBy.code).toBe('OWNED_NUMBER_RECIPIENT');
     expect(auditArgs.providerOutcome).toBeNull();
+  });
+});
+
+describe('applicant audience', () => {
+  test('applicant SMS is subject to the same send window as customers/leads', async () => {
+    const { checkSendWindow } = require('../services/messaging/validators/send-window');
+    const { isEnabled } = require('../config/feature-gates');
+    if (typeof isEnabled?.mockImplementation === 'function') isEnabled.mockImplementation(() => true);
+    const night = new Date('2027-03-16T07:30:00.000Z'); // 03:30 ET
+    const res = await checkSendWindow({ channel: 'sms', audience: 'applicant', purpose: 'application_received', to: '+19415550142', metadata: {} }, {}, {}, night);
+    expect(res.ok).toBe(false);
+    const other = await checkSendWindow({ channel: 'sms', audience: 'internal', purpose: 'internal_briefing', to: '+19415550142' }, {}, {}, night);
+    expect(other.ok).toBe(true);
   });
 });

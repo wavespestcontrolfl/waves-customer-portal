@@ -101,6 +101,22 @@ function callExtractionV2PrimaryEnabled() {
 }
 const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
+
+// The address_recovered card's pass marker, reconciled to THIS pass. The two
+// branches are mirror images and each must clear the other's keys: a pass that
+// recovered re-stamps its provenance AND drops any recovery_superseded_at a
+// failed pass left behind; a pass that did not recover strips the provenance
+// and records when it was superseded. Leaving the failed pass's marker on a
+// later SUCCESS made success -> failure -> success reject the current recovery
+// forever, so the booking banner kept selecting the stale validation failure
+// (codex #4437 r5 pre-push P1). Exported for the round-trip test — this SQL is
+// the contract, and it has now been wrong in both directions.
+function recoveryMarkerPayload(db, passStamp) {
+  return passStamp
+    ? db.raw('(coalesce(payload, \'{}\'::jsonb) - \'recovery_superseded_at\') || ?::jsonb', [JSON.stringify(passStamp)])
+    : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\') || ?::jsonb',
+      [JSON.stringify({ recovery_superseded_at: new Date().toISOString() })]);
+}
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem, V2_DECISION_VERSION } = require('./call-routing-gates');
@@ -5964,6 +5980,19 @@ function applyRecurringIntentDefault(extracted, transcription, bookableServiceNa
 // endpoint changed. Gemini's response_mime_type='application/json'
 // forces structured output so we rarely have to strip markdown fences,
 // but we still guard-parse for the "text-only refusal" edge case.
+// Call direction for both extraction prompts (codex #4618 r1): a greeting
+// names the OTHER party, and who that is follows from who dialed — never
+// from speaker labels, which diarization can swap.
+function buildCallDirectionBlock(callDirection) {
+  if (callDirection === 'outbound') {
+    return '\nCALL DIRECTION: OUTBOUND — Waves staff placed this call; the person who answered is the customer/prospect. A name our staff uses to greet them ("Hi Mary, it\'s Adam") is the customer\'s name.\n';
+  }
+  if (callDirection === 'inbound') {
+    return '\nCALL DIRECTION: INBOUND — the caller dialed our office; the person who answered is Waves staff. A name the caller uses to greet them ("Hey Tom") is a staff name, never the caller\'s.\n';
+  }
+  return '';
+}
+
 async function extractCallData(transcription, callerPhone, opts = {}) {
   if (!process.env.GEMINI_API_KEY) {
     throw new Error('GEMINI_API_KEY not configured');
@@ -5991,6 +6020,7 @@ async function extractCallData(transcription, callerPhone, opts = {}) {
       }${knownCaller.name ? ` (${knownCaller.name})` : ''}. They are already in our system — treat coordination of an existing/scheduled visit, "are you coming today?", arrival check-ins, complaints about work already done, reschedules, and billing/invoice questions as NOT a new lead (is_lead=false). Only treat a brand-new service request they haven't bought yet as a lead.\n`
     : '';
   const priorCallBlock = buildPriorCallBlock(opts.priorCall);
+  const callDirectionBlock = buildCallDirectionBlock(opts.callDirection);
 
   const prompt = `Analyze this phone call transcript for Waves Pest Control (pest control + lawn care, SW Florida). Waves is an established company with many existing customers, so not every call is a new sales lead — some are existing customers coordinating service, complaints, or billing.
 
@@ -5998,7 +6028,7 @@ Waves only schedules pest control, lawn care, mosquito, termite, rodent, bed bug
 
 Caller phone: ${callerPhone || 'unknown'}
 Call date in Eastern Time: ${callDateET}
-${knownCallerBlock}${priorCallBlock}
+${callDirectionBlock}${knownCallerBlock}${priorCallBlock}
 Transcript:
 ${transcription}
 
@@ -6049,6 +6079,7 @@ IMPORTANT — secondary_contact (a SECOND person who is a party to the service):
 - ARRANGER CALLS HAVE A SECONDARY CONTACT BY DEFAULT: a caller who identifies as a realtor/agent, lender or title/closing coordinator, property manager, or landlord is arranging service for someone else — real-estate/WDO-inspection calls almost always name the buyer (and often the seller/occupant providing access). If such a caller named anyone with a name or contact detail and you are about to return null, re-scan the transcript — you likely missed the party.
 - RELAYED DETAILS BELONG TO THE OTHER PERSON: a phone/email the caller dictates FOR another person ("the buyer is Joseph — his email is ...", "her phone number is ...") goes on secondary_contact, NEVER into the top-level email/phone, even though the caller is the one speaking it.
 - The CALLER's own identity always goes in the top-level first_name/last_name/phone/email fields. secondary_contact is ONLY the other person — never duplicate the caller into it, and never put the other person's phone/email into the caller's fields.
+- first_name/last_name are the caller's OWN name. A name used to greet or address the OTHER party ("Hey Tom", "Hi Mary, it's Adam") belongs to that other party: on an inbound call the person who answered is Waves staff, so the caller's "Hey Tom" names staff, never the caller; on an outbound call Waves staff placed, the person our staff greets by name IS the customer. Take who-is-staff from CALL DIRECTION, not from speaker labels, which can be swapped. When the caller's own name is never stated, leave first_name/last_name null.
 - role describes the secondary person's relationship to the transaction (the BUYER a realtor is booking for is home_buyer, not real_estate_agent; a loan officer named as a party is lender).
 - wants_notifications: true ONLY when the caller explicitly directs that this person receive notifications, confirmations, updates, the report, or the invoice ("send notifications to the buyer and myself", "text my tenant when you're on the way"). A person merely mentioned — or explicitly excluded ("you don't have to involve Matt") — gets wants_notifications false.
 - When several other people are mentioned, extract the one the caller designates for contact/notifications; if none is designated, the one most central to the service (the property's buyer/occupant beats a bystander).
@@ -7707,7 +7738,7 @@ const CallRecordingProcessor = {
     let extracted;
     try {
       const extractStartedAt = Date.now();
-      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at, knownCaller, bookableServiceNames, priorCall });
+      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at, knownCaller, bookableServiceNames, priorCall, callDirection: isOutboundCall(call) ? 'outbound' : 'inbound' });
       stageTimings.extraction_v1_ms = Date.now() - extractStartedAt;
     } catch (err) {
       logger.error(`[call-proc] AI extraction failed: ${err.message}`);
@@ -7761,6 +7792,9 @@ const CallRecordingProcessor = {
           knownCaller,
           callerIdName: callerIdNameForPrompt(call),
           priorCall,
+          // Who is staff and who is the customer follows from who dialed —
+          // the prompt's greeting rule needs it (codex #4618 r1 P1).
+          callDirection: isOutboundCall(call) ? 'outbound' : 'inbound',
         });
         // Address validation runs in shadow on every valid extraction (no-ops
         // instantly when ADDRESS_VALIDATION_ENABLED is off), so the verdict is
@@ -8181,6 +8215,13 @@ const CallRecordingProcessor = {
       // lead: the send validator still resolves it by sid, so the draft
       // must be INVALIDATED. Runs after the token-fenced terminal write
       // (the pass no longer owns processing_token) and never blocks.
+      if (isEnabled('rescheduleProposalCard')) {
+        try {
+          await require('./call-reschedule-proposals').stageProposal(db, { callId: call.id, procGeneration, retireOnly: true });
+        } catch (err) {
+          logger.warn(`[call-proc] proposal retirement failed for ${call.id}: ${err.code || err.name || 'error'}`);
+        }
+      }
       logger.info(`[call-proc] Skipping ${callSid}: ${extracted.is_spam ? 'spam' : 'voicemail'}`);
       return { success: true, skipped: true, reason: extracted.is_spam ? 'spam' : 'voicemail' };
     }
@@ -8428,14 +8469,85 @@ const CallRecordingProcessor = {
     // rather than the only check.
     await db('triage_items')
       .where({ call_log_id: call.id, reason_code: 'address_recovered' })
+      .whereExists(function owningPass() {
+        this.select(db.raw('1')).from('call_log')
+          .whereRaw('call_log.id = ?', [call.id])
+          .where('call_log.processing_token', procToken);
+      })
       .update({
-        payload: addressRecovery?.recovered
-          ? db.raw('coalesce(payload, \'{}\'::jsonb) || ?::jsonb', [JSON.stringify(recoveryPassStamp)])
-          : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\') || ?::jsonb',
-            [JSON.stringify({ recovery_superseded_at: new Date().toISOString() })]),
+        payload: recoveryMarkerPayload(db, addressRecovery?.recovered ? recoveryPassStamp : null),
         updated_at: new Date(),
       })
       .catch((e) => logger.warn(`[call-proc] recovery-marker reconcile failed for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`));
+
+    // The near-miss predictions recovery could not PROVE unique are the most
+    // useful thing an address card can carry — they are the street the caller
+    // most likely said, already house-number- and ZIP-matched. The shadow
+    // bridge has always attached them; the ENFORCE sites did not, so on the
+    // live path the reviewer saw only the garble (2026-09-10, call c3c27b01: a
+    // card carrying the mis-heard street while recovery had the ordinal street
+    // in hand and no site wrote it down). Same shape the bridge files, so one card
+    // reads identically whichever site won the onConflict race.
+    const addressRecoveryPayload = (flag) => (
+      (flag === 'address_unverified' || flag === 'address_recovered') && addressRecovery?.attempted
+        ? {
+          address_as_heard: rawStreetBeforeAdopt,
+          address_candidates: addressRecovery.candidates || [],
+          recovery_method: addressRecovery.method || null,
+          ...(flag === 'address_recovered' ? { recovery_superseded_at: new Date().toISOString() } : {}),
+        }
+        : null);
+
+    // Reconcile candidate evidence after every filing
+    // site in both modes. Patching inserts one at a time kept
+    // leaving sites out — the two fail-open demotion loops and the dedicated
+    // address_recovered branch never carried the evidence at all, and a card
+    // that already existed kept a stale payload through the conflict-ignored
+    // insert. This single write owns the invariant instead of six call sites
+    // sharing it: whatever address cards this call has open, they carry THIS
+    // pass's recovery evidence, including sites added later.
+    //
+    // Fenced on the claim. The recovery fan-out above awaits bounded network
+    // calls, so a worker that lost its claim meanwhile must not overwrite the
+    // replacement pass's evidence with its own stale candidates — the same
+    // processing_token predicate every other post-provider write here uses.
+    // New recovered cards start retired. Otherwise a worker that loses its
+    // claim can insert after the replacement's failed pass, making an obsolete
+    // recovery look current even though both UPDATE statements are fenced.
+    // Only this owning-pass update activates a freshly inserted recovery.
+    const reconcileAddressRecoveryEvidence = async () => {
+      if (!addressRecovery?.attempted) return;
+      const evidence = {
+        address_as_heard: rawStreetBeforeAdopt,
+        address_candidates: addressRecovery.candidates || [],
+        recovery_method: addressRecovery.method || null,
+      };
+      const fenceToOwningPass = (qb) => qb.whereExists(function owningPass() {
+        this.select(db.raw('1')).from('call_log')
+          .whereRaw('call_log.id = ?', [call.id])
+          .where('call_log.processing_token', procToken);
+      });
+      const onCards = (reasonCode) => fenceToOwningPass(db('triage_items')
+        .where('call_log_id', call.id)
+        .where('reason_code', reasonCode)
+        .whereIn('status', ['open', 'in_progress']));
+
+      await onCards('address_unverified')
+        .update({
+          payload: db.raw('coalesce(payload, \'{}\'::jsonb) || ?::jsonb', [JSON.stringify(evidence)]),
+          updated_at: new Date(),
+        })
+        .catch((e) => logger.warn(`[call-proc] address-evidence reconcile failed for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`));
+
+      await onCards('address_recovered')
+        .update({
+          payload: addressRecovery?.recovered
+            ? recoveryMarkerPayload(db, { ...evidence, ...recoveryPassStamp, address_recovered: addressRecovery.recovered.address_line1 })
+            : db.raw('coalesce(payload, \'{}\'::jsonb) || ?::jsonb', [JSON.stringify(evidence)]),
+          updated_at: new Date(),
+        })
+        .catch((e) => logger.warn(`[call-proc] address-evidence reconcile failed for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`));
+    };
 
     // Explicit SMS consent is a property of the CALL, not of the routing mode:
     // the secondary-contact fan-out at the send site requires it even when V2
@@ -8475,6 +8587,10 @@ const CallRecordingProcessor = {
           const knownCustomerForFailOpen = failOpenKnownCustomer(knownCaller);
           let routingResult = canAutoRoute(v2Extraction, {
             contactPhone, addressValidation,
+            // The merged canonical record: on-file address satisfaction must
+            // see a V1-only address the same way the fail-open conflict check
+            // does, and the unit ask the same way the merge point does.
+            canonicalRecord: extracted,
             failOpen: failOpenBooking, callerAni: contactPhone, knownCustomer: knownCustomerForFailOpen,
             agentCommitFailOpen: isEnabled('callAgentCommitBooking') && !isOutboundCall(call),
             // Grounds the agent-commitment evidence quote against the labeled
@@ -8511,7 +8627,14 @@ const CallRecordingProcessor = {
           // Strip model address flags too when AV accepted/corrected — otherwise
           // a stale model out_of_service_area would hard-veto a verified address.
           const modelFlags = suppressAddressFlagsForAV(v2Extraction.triage_flags, addressValidation);
-          const finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
+          // Address flags the routing verdict found satisfied by the linked
+          // customer's on-file address file no card either — the verdict
+          // (persisted in ai_validation.routing) is the audit trail.
+          const onFileSatisfied = routingResult.onFileAddressSatisfiedFlags || [];
+          const finalFlags = mergeTriageFlags(modelFlags, deterministicFlags).filter((f) => !onFileSatisfied.includes(f));
+          if (onFileSatisfied.length) {
+            logger.info(`[call-proc] Address flags satisfied by the on-file address for ${maskSid(callSid)}: ${onFileSatisfied.join(', ')} (no card)`);
+          }
           // Implied consent (GATE_CALL_INBOUND_IMPLIED_CONSENT): an inbound
           // caller who booked has implied consent for the transactional
           // confirmation SMS (established business relationship; they called
@@ -8560,7 +8683,7 @@ const CallRecordingProcessor = {
                 // writes onto the record (codex r18 P1).
                 ...(flag === 'missing_last_name'
                   ? { extraPayload: { heard_name_v1: { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null } } }
-                  : {}),
+                  : { extraPayload: addressRecoveryPayload(flag) }),
               }))
               .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
               .ignore();
@@ -8584,7 +8707,7 @@ const CallRecordingProcessor = {
                   address_recovered: addressRecovery.recovered.address_line1,
                   address_candidates: addressRecovery.candidates || [],
                   recovery_method: addressRecovery.method || null,
-                  ...recoveryPassStamp,
+                  recovery_superseded_at: new Date().toISOString(),
                   ...(contactDictation?.addresses?.[0]?.confirmation_question
                     ? { confirmation_question: contactDictation.addresses[0].confirmation_question } : {}),
                 },
@@ -8649,9 +8772,18 @@ const CallRecordingProcessor = {
             // of letting the Needs Review row explain only the advisory note and
             // hide why the call was actually held. (Advisory flags get their own
             // rows from the advisory loop above.)
+            // A call that made NO scheduling ask (scheduling.status 'none' —
+            // a quote request, a service question, a cancellation) and holds
+            // on nothing else is not held at all: "not_confirmed" names the
+            // absence of a booking, not owed work. Filing it as a BLOCKING
+            // card left 26 such cards open with nothing to do (2026-09-20
+            // audit). A requested / tentative time that never got confirmed
+            // is still owed follow-through and keeps its card.
+            const noSchedulingAsk = routingResult.reason === 'not_confirmed'
+              && ['none', '', null, undefined].includes(routingResult.schedulingStatus);
             const blockingReasons = (routingResult.appointmentBlockingFlags && routingResult.appointmentBlockingFlags.length)
               ? routingResult.appointmentBlockingFlags
-              : [routingResult.reason || 'routing_rejected'];
+              : (noSchedulingAsk ? [] : [routingResult.reason || 'routing_rejected']);
             const triageReasons = blockingReasons;
             // A held scheduling CHANGE (cancel / reschedule / coordination on
             // an existing visit) is owed work. The card files below, but
@@ -8660,9 +8792,12 @@ const CallRecordingProcessor = {
             // cancellation, two reschedules and a re-treat with no owner).
             if (blockingReasons.some((f) => SCHEDULING_CHANGE_REVIEW_FLAGS.includes(f))) schedulingChangeHeld = true;
             for (const flag of triageReasons.slice(0, 10)) {
-              const triageItem = buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction, addressValidation, onFileAddress });
+              const triageItem = buildTriageItem({
+                callLogId: call.id, flag, extraction: v2Extraction, addressValidation, onFileAddress,
+                extraPayload: addressRecoveryPayload(flag),
+              });
               await db('triage_items').insert(triageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
-            }
+              }
             // Demoted flags survive a block by ANOTHER gate (codex round-4
             // P2): an agent-committed call held on e.g. address_unverified
             // must still surface the "confirm the account holder" advisory —
@@ -8946,21 +9081,18 @@ const CallRecordingProcessor = {
                   extraPayload: flag === 'missing_last_name' ? {
                     heard_name_v1: { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null },
                   } : (isAddressFlag && addressRecovery?.attempted) ? {
-                    address_as_heard: rawStreetBeforeAdopt,
+                    // The same candidate evidence as the enforce path.
+                    ...addressRecoveryPayload(flag),
                     address_recovered: flag === 'address_recovered' ? extracted.address_line1 : null,
-                    address_candidates: addressRecovery.candidates || [],
-                    recovery_method: addressRecovery.method || null,
-                    // Same pass stamp the enforce site writes — this is the
-                    // site that files the card in SHADOW mode, which is
-                    // exactly the cohort the promotion gate audits.
-                    ...(flag === 'address_recovered' ? recoveryPassStamp : {}),
+                    // Inserts start retired; only the owning reconcile can activate them.
+                    ...(flag === 'address_recovered' ? { recovery_superseded_at: new Date().toISOString() } : {}),
                     ...(contactDictation?.addresses?.[0]?.confirmation_question
                       ? { confirmation_question: contactDictation.addresses[0].confirmation_question } : {}),
                   } : null,
                 }))
                 .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
                 .ignore();
-            } catch (triageErr) {
+              } catch (triageErr) {
               logger.warn(`[call-proc-bridge] triage_items insert failed for ${maskSid(callSid)}: ${triageErr.message}`);
             }
           }
@@ -9074,6 +9206,11 @@ const CallRecordingProcessor = {
       }
     }
 
+    // Every address card for this pass is filed by now (both modes, every
+    // branch) — reconcile the recovery evidence onto all of them in one
+    // fenced write.
+    await reconcileAddressRecoveryEvidence();
+
     // Hard veto → record extraction for audit, skip all canonical writes
     // (no customer, no lead, no appointment, no automation). Mirrors the
     // spam/voicemail early-return below.
@@ -9147,6 +9284,13 @@ const CallRecordingProcessor = {
         { procGeneration },
       );
       await updateUnifiedVoiceMessage({ ...call, transcription }, { body: transcription });
+      if (isEnabled('rescheduleProposalCard')) {
+        try {
+          await require('./call-reschedule-proposals').stageProposal(db, { callId: call.id, procGeneration, retireOnly: true });
+        } catch (err) {
+          logger.warn(`[call-proc] proposal retirement failed for ${call.id}: ${err.code || err.name || 'error'}`);
+        }
+      }
       logger.info(`[call-proc] V2 hard veto for ${callSid}; skipped canonical writes (customer/lead/appointment)`);
       return { success: true, skipped: true, reason: 'v2_canonical_write_blocked' };
     }
@@ -15876,7 +16020,10 @@ const CallRecordingProcessor = {
         if (scoreResult?.skipped && scoreResult.reason === 'ownership_lost') {
           return abandonToPeer('finalization after CSR scoring');
         }
-        csrScoreResult = { score: scoreResult?.score?.total_score, outcome: scoreResult?.score?.call_outcome };
+        // CSRCoach.scoreCall returns the score object itself (total_score,
+        // call_outcome, ...), not a wrapper — the old `.score.` read logged
+        // "undefined/15 (undefined)" on every call (2026-09-20 audit).
+        csrScoreResult = { score: scoreResult?.total_score, outcome: scoreResult?.call_outcome };
         logger.info(`[call-proc] CSR scored: ${csrScoreResult.score}/15 (${csrScoreResult.outcome})`);
       } catch (err) {
         logger.error(`[call-proc] CSR scoring failed (non-blocking): ${err.message}`);
@@ -16166,6 +16313,7 @@ const CallRecordingProcessor = {
         routingResult = canAutoRoute(v2ExtractionForAudit, {
           contactPhone,
           addressValidation: v2AddressValidation,
+          canonicalRecord: extracted,
           // Keep the audit/shadow decision consistent with the enforce path.
           failOpen: isEnabled('callFailOpenBooking') && !isOutboundCall(call),
           callerAni: contactPhone,
@@ -16175,6 +16323,10 @@ const CallRecordingProcessor = {
           transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'),
           callStartedAt: call.created_at,
         });
+        // Same on-file satisfaction the live merge point applies to its card set.
+        if (routingResult?.onFileAddressSatisfiedFlags?.length) {
+          finalFlags = finalFlags.filter((f) => !routingResult.onFileAddressSatisfiedFlags.includes(f));
+        }
         // Mirror the enforce path's V1 address-conflict demotion — the saved
         // shadow decision must hold exactly where enforce would hold, or
         // rollout metrics overstate safe fail-open bookings.
@@ -16207,6 +16359,11 @@ const CallRecordingProcessor = {
           reason: routingResult.reason || null,
           flags: finalFlags,
           appointment_blocking_flags: routingResult.appointmentBlockingFlags || [],
+          // Address flags the on-file address satisfied (codex r1 P2): the
+          // persisted verdict is the audit trail for a card that never filed.
+          ...(routingResult.onFileAddressSatisfiedFlags?.length
+            ? { on_file_address_satisfied_flags: routingResult.onFileAddressSatisfiedFlags }
+            : {}),
         } : null,
         address_validation_status: v2AddressValidation?.status || null,
         errors: v2Result.errors || null,
@@ -16565,6 +16722,13 @@ const CallRecordingProcessor = {
       // agent-committed move of an on-the-books visit lands on the visit.
       // No customer comms. Generation-fenced, never blocking.
       await applyCallRescheduleStep({ call, callSid, customerId, extracted, v2Result, appointmentResult, procGeneration });
+      if (isEnabled('rescheduleProposalCard')) {
+        try {
+          await require('./call-reschedule-proposals').stageProposal(db, { callId: call.id, procGeneration });
+        } catch (err) {
+          logger.warn(`[call-proc] proposal staging failed for ${call.id}: ${err.code || err.name || 'error'}`);
+        }
+      }
 
       // The window this booking call committed needs no capture step either:
       // the visit row carries source_call_log_id, written in the booking
@@ -17429,5 +17593,6 @@ CallRecordingProcessor.CALL_EXTRACTION_MAX_ATTEMPTS = CALL_EXTRACTION_MAX_ATTEMP
 // the booking path wrote window_start from — a second implementation of the
 // ET-offset-vs-instant rule would drift from it.
 CallRecordingProcessor.v2IsoToEtWallClock = v2IsoToEtWallClock;
+CallRecordingProcessor.recoveryMarkerPayload = recoveryMarkerPayload;
 
 module.exports = CallRecordingProcessor;

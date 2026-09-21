@@ -8,7 +8,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import AdsPage from "./AdsPage";
 
@@ -16,6 +16,17 @@ vi.mock("../../lib/adminUsage", () => ({ trackAdminPageView: vi.fn() }));
 vi.mock("./PPCDashboardPage", () => ({
   default: () => <div>Existing PPC dashboard</div>,
 }));
+
+function RouterState() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  return (
+    <>
+      <output data-testid="location">{location.search}{location.hash}</output>
+      <button type="button" onClick={() => navigate(-1)}>Browser Back</button>
+    </>
+  );
+}
 
 beforeEach(() => {
   vi.stubGlobal("localStorage", { getItem: () => "fixture-token" });
@@ -38,6 +49,45 @@ beforeEach(() => {
       if (!data) throw new Error(`Unexpected fixture request: ${url}`);
       return { ok: true, json: async () => data };
     }),
+  );
+});
+
+it("deep-links PPC tabs and preserves query and hash through browser history", async () => {
+  render(
+    <MemoryRouter initialEntries={["/admin/ppc?source=audit#evidence"]}>
+      <AdsPage />
+      <RouterState />
+    </MemoryRouter>,
+  );
+  await screen.findByText("Existing PPC dashboard");
+
+  fireEvent.click(screen.getByRole("button", { name: "Call Bridge" }));
+  expect(screen.getByTestId("location")).toHaveTextContent(
+    "?source=audit&tab=call-bridge#evidence",
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Capacity" }));
+  expect(screen.getByTestId("location")).toHaveTextContent(
+    "?source=audit&tab=capacity#evidence",
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Browser Back" }));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Call Bridge" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    ),
+  );
+});
+
+it("renders the dashboard for an invalid PPC tab", async () => {
+  render(
+    <MemoryRouter initialEntries={["/admin/ppc?tab=unknown"]}>
+      <AdsPage />
+    </MemoryRouter>,
+  );
+  expect(await screen.findByText("Existing PPC dashboard")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "PPC Dashboard" })).toHaveAttribute(
+    "aria-current",
+    "page",
   );
 });
 afterEach(() => {

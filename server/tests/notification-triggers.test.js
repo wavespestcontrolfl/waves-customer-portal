@@ -46,6 +46,9 @@ describe('notification trigger push tags', () => {
 
   test('non-SMS triggers keep collapsing by trigger key', () => {
     expect(__private.pushTagFor('payment_failed', {})).toBe('waves-payment_failed');
+    // per-attempt when the webhook passes the identity (codex P2 on #4392)
+    expect(__private.pushTagFor('payment_failed', { paymentIntentId: 'pi_1', attemptId: 'ch_9' })).toBe('waves-payment_failed-ch_9');
+    expect(__private.pushTagFor('payment_failed', { paymentIntentId: 'pi_1' })).toBe('waves-payment_failed-pi_1');
   });
 
   it('customer_landline_from_call gets a per-customer push tag so concurrent alerts do not collapse', () => {
@@ -279,6 +282,27 @@ describe('triggerNotification bell outcome', () => {
     ));
   });
 
+  test('a keyed SMS replay reuses its committed bell and does not push again', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'committed-bell', deduped: true });
+    expect(await triggerNotification('sms_reply', { twilioSid: 'SM-synthetic-replay' },
+      { dedupeKey: 'sms-reply:SM-synthetic-replay' })).toMatchObject({ bellWritten: true, deduped: true, push: null });
+    expect(require('../services/push-notifications').sendToAdminUsers).not.toHaveBeenCalled();
+  });
+
+  test('push-only SMS recovery retains its message tag and avoids renotification', async () => {
+    db.mockImplementation(table => tableMock(table === 'technicians' ? [{ id: 'admin-1' }]
+      : [{ admin_user_id: 'admin-1', bell_enabled: false, push_enabled: true }]));
+    const PushService = require('../services/push-notifications');
+    const payload = { twilioSid: 'SM-synthetic-push-only' };
+    await triggerNotification('sms_reply', payload, { dedupeKey: 'sms-reply:SM-synthetic-push-only' });
+    await triggerNotification('sms_reply', payload, { dedupeKey: 'sms-reply:SM-synthetic-push-only' });
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(2);
+    for (const [, build] of PushService.sendToAdminUsers.mock.calls) {
+      expect(build('admin-1')).toMatchObject({ tag: 'waves-sms_reply-SM-synthetic-push-only', renotify: false });
+    }
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
   test('reports bellWritten false when the notification insert fails', async () => {
     // NotificationService.create catches insert errors and returns null —
     // callers deciding whether an alert was delivered must see the truth.
@@ -502,5 +526,51 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
     );
     gateSpy.mockRestore();
     bellPolicy.clearOverrideCache();
+  });
+});
+
+describe('payment failure settlement recheck', () => {
+  const PushService = require('../services/push-notifications');
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.mockImplementation((table) => table === 'technicians'
+      ? tableMock([{ id: 'admin-1', role: 'admin' }]) : tableMock([]));
+    NotificationService.notifyAdmin.mockImplementation(async (_category, _title, _body, opts) => (
+      await opts.shouldContinue() ? { id: 'synthetic-bell' } : { suppressed: true }
+    ));
+  });
+
+  test('a settlement discovered at the persistence boundary suppresses both channels', async () => {
+    const shouldContinue = jest.fn(async () => false);
+    const result = await triggerNotification('payment_failed', { paymentIntentId: 'pi_synthetic' }, {
+      dedupeKey: 'payment-failed:pi_synthetic:ch_synthetic', shouldContinue, beforePush: shouldContinue,
+    });
+    expect(shouldContinue).toHaveBeenCalled();
+    expect(result.bellWritten).toBe(false);
+    expect(result.suppressed).toBe(true);
+    expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
+  });
+
+  test('partial phone failure stays retryable even after the bell is written', async () => {
+    PushService.sendToAdminUsers.mockResolvedValueOnce({ sent: 1, failed: 1, deliveredSubscriptionIds: ['sub-accepted'] });
+    const shouldContinue = jest.fn(async () => true);
+    const result = await triggerNotification('payment_failed', { paymentIntentId: 'pi_synthetic' }, {
+      dedupeKey: 'payment-failed:pi_synthetic:ch_synthetic', shouldContinue,
+      beforePush: shouldContinue, deliveredSubscriptionIds: ['sub-prior'],
+    });
+    expect(result).toMatchObject({ bellWritten: true, retryable: true,
+      push: { deliveredSubscriptionIds: ['sub-accepted'] } });
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledWith(expect.any(Array), expect.any(Function),
+      expect.objectContaining({ deliveredSubscriptionIds: ['sub-prior'] }));
+  });
+
+  test('settlement after bell persistence prevents provider fan-out', async () => {
+    const shouldContinue = jest.fn().mockResolvedValueOnce(true).mockResolvedValue(false);
+    const result = await triggerNotification('payment_failed', { paymentIntentId: 'pi_synthetic' }, {
+      dedupeKey: 'payment-failed:pi_synthetic:ch_synthetic', shouldContinue, beforePush: shouldContinue,
+    });
+    expect(result.bellWritten).toBe(true);
+    expect(result.push.skipped).toBe('superseded_before_push');
+    expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
   });
 });

@@ -190,11 +190,19 @@ describe('resolveOutboundCallReason', () => {
     expect(state.queries).toHaveLength(4);
   });
 
+  test('the inbound-text scan excludes recruiting (job_*) sms_log rows — an applicant reply on a shared phone is never the "saw your text" (PR #4623 Codex r31 P2)', async () => {
+    installDb({ sms_log: [{ id: 'sms-1', created_at: hoursAgo(1), message_body: 'Can you come look at the ants?' }] });
+    await resolveOutboundCallReason(call({ customer_id: null, metadata: { to: PHONE } }));
+    const sms = state.queries.find((q) => q.table === 'sms_log');
+    expect(sms.wheres).toEqual(expect.arrayContaining([['NULL', 'message_type'], ['OR', 'message_type', 'not like', 'job\\_%']]));
+  });
+
   test('phone-only contact (no customer) uses a plain where on the last-10', async () => {
     installDb({ sms_log: [{ id: 'sms-1', created_at: hoursAgo(1), message_body: 'Can you come look at the ants?' }] });
     const r = await resolveOutboundCallReason({ call: call({ customer_id: null }), phone: PHONE });
     expect(r.reason).toBe(REASONS.SAW_TEXT);
-    expect(state.queries[1].wheres.some((w) => w[0] === 'OR')).toBe(false);
+    // no customer arm: the only OR in the query is the recruiting-row exclusion's (message_type)
+    expect(state.queries[1].wheres.some((w) => w[0] === 'OR' && w[1] !== 'message_type')).toBe(false);
   });
 
   test('our own quote-form bridge to them inside 48h → quote_request (the follow-up call is about the quote)', async () => {

@@ -34,12 +34,14 @@ describe('estimate converter annual prepay orchestration', () => {
       if (table === 'estimates') {
         return {
           where: jest.fn().mockReturnThis(),
+          forUpdate: jest.fn().mockReturnThis(),
           first: jest.fn().mockResolvedValue(estimate),
         };
       }
       if (table === 'customers') {
         return {
           where: jest.fn().mockReturnThis(),
+          forUpdate: jest.fn().mockReturnThis(),
           first: jest.fn().mockResolvedValue(customer),
           update: jest.fn().mockResolvedValue(1),
         };
@@ -49,6 +51,7 @@ describe('estimate converter annual prepay orchestration', () => {
           where: jest.fn().mockReturnThis(),
           whereNotNull: jest.fn().mockReturnThis(),
           whereNull: jest.fn().mockReturnThis(),
+          forUpdate: jest.fn().mockReturnThis(),
           count: jest.fn().mockReturnThis(),
           first: jest.fn().mockResolvedValue({ count: 0 }),
         };
@@ -71,6 +74,10 @@ describe('estimate converter annual prepay orchestration', () => {
   // a clean null read is the default no-deposit path.
   function setup(recurringServices, totals, { deposits = null, invoiceCreateResult = { id: 'invoice-1' } } = {}) {
     const db = makeDb(recurringServices, totals);
+    const invoiceTrx = jest.fn((table) => db(table));
+    invoiceTrx.raw = jest.fn().mockResolvedValue(undefined);
+    invoiceTrx.isTransaction = true;
+    db.transaction = jest.fn(async (callback) => callback(invoiceTrx));
     const invoiceService = {
       create: jest.fn().mockResolvedValue(invoiceCreateResult),
       voidInvoice: jest.fn().mockResolvedValue({ id: 'invoice-1', status: 'void' }),
@@ -85,13 +92,15 @@ describe('estimate converter annual prepay orchestration', () => {
     jest.doMock('../services/annual-prepay-renewals', () => renewals);
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn, error: jest.fn() }));
     jest.doMock('../services/account-membership-email', () => ({ sendMembershipStarted: jest.fn() }));
-    jest.doMock('../services/estimate-deposits', () => deposits || {
+    jest.doMock('../services/estimate-deposits', () => ({
+      acquireEstimateDepositLedgerLock: jest.fn().mockResolvedValue(undefined),
       pendingDepositCredit: jest.fn().mockResolvedValue(null),
       consumeDepositCredit: jest.fn().mockResolvedValue(0),
-    });
+      ...deposits,
+    }));
 
     const EstimateConverter = require('../services/estimate-converter');
-    return { EstimateConverter, invoiceService, renewals, warn };
+    return { EstimateConverter, invoiceService, renewals, warn, db, invoiceTrx };
   }
 
   const convertOpts = { billingTerm: 'prepay_annual', skipAutoSchedule: true };
@@ -141,10 +150,11 @@ describe('estimate converter annual prepay orchestration', () => {
 
   test('acceptance deposit credits the prepay invoice: create carries depositCredit, the ledger consumes exactly the applied amount, and the term records the GROSS prepay', async () => {
     const deposits = {
+      acquireEstimateDepositLedgerLock: jest.fn().mockResolvedValue(undefined),
       pendingDepositCredit: jest.fn().mockResolvedValue({ amount: 49 }),
       consumeDepositCredit: jest.fn().mockResolvedValue(49),
     };
-    const { EstimateConverter, invoiceService, renewals } = setup(
+    const { EstimateConverter, invoiceService, renewals, db, invoiceTrx } = setup(
       [{ service: 'lawn_care', name: 'Lawn Care', frequency: 'monthly' }],
       undefined,
       // Net invoice total after the $49 credit: 627 gross (660 - 5% prepay
@@ -155,19 +165,77 @@ describe('estimate converter annual prepay orchestration', () => {
     await expect(EstimateConverter.convertEstimate('estimate-1', convertOpts))
       .rejects.toThrow('Annual prepay term was not created');
 
-    expect(deposits.pendingDepositCredit).toHaveBeenCalledWith('estimate-1', expect.anything());
+    expect(db.transaction).toHaveBeenCalled();
+    expect(invoiceTrx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', [
+      'unminted_setup_fee_manual_billing:estimate-1',
+    ]);
+    expect(deposits.acquireEstimateDepositLedgerLock).toHaveBeenCalledWith(invoiceTrx, 'estimate-1');
+    expect(invoiceTrx.raw).toHaveBeenNthCalledWith(2,
+      'SELECT id FROM customers WHERE id = ? FOR KEY SHARE', ['customer-1']);
+    expect(invoiceTrx.raw.mock.invocationCallOrder[1]).toBeLessThan(
+      deposits.acquireEstimateDepositLedgerLock.mock.invocationCallOrder[0],
+    );
+    expect(deposits.pendingDepositCredit).toHaveBeenCalledWith('estimate-1', invoiceTrx);
     expect(invoiceService.create).toHaveBeenCalledWith(expect.objectContaining({
+      database: invoiceTrx,
       depositCredit: { amount: 49, estimateId: 'estimate-1' },
     }));
     expect(deposits.consumeDepositCredit).toHaveBeenCalledWith(expect.objectContaining({
       estimateId: 'estimate-1',
       amount: 49,
       invoiceId: 'invoice-1',
+      trx: invoiceTrx,
     }));
     const args = renewals.createTermForAnnualPrepay.mock.calls[0][0];
     // GROSS = net invoice total (578) + credited deposit (49): recording the
     // net would understate the year by the deposit.
     expect(args).toMatchObject({ prepayAmount: 627 });
+  });
+
+  test('annual prepay inside a caller transaction try-locks the ledger and returns a retryable 409 on contention', async () => {
+    const deposits = {
+      acquireEstimateDepositLedgerLock: jest.fn(),
+      pendingDepositCredit: jest.fn(),
+      consumeDepositCredit: jest.fn(),
+    };
+    const { EstimateConverter, invoiceService, db, invoiceTrx } = setup(
+      [{ service: 'lawn_care', name: 'Lawn Care', frequency: 'monthly' }],
+      undefined,
+      { deposits },
+    );
+    invoiceTrx.raw.mockImplementation(async (sql, bindings) => ({
+      rows: [{ acquired: !(sql.includes('pg_try_advisory_xact_lock') && bindings?.[0] === 'estimate.deposit.ledger') }],
+    }));
+    const callerTrx = jest.fn((table) => db(table));
+    callerTrx.isTransaction = true;
+    callerTrx.raw = invoiceTrx.raw;
+    callerTrx.transaction = jest.fn(async (callback) => callback(invoiceTrx));
+
+    await expect(EstimateConverter.convertEstimate('estimate-1', {
+      ...convertOpts,
+      database: callerTrx,
+    })).rejects.toMatchObject({
+      status: 409,
+      statusCode: 409,
+      code: 'DEPOSIT_LEDGER_BUSY_RETRY',
+      isOperational: true,
+    });
+
+    expect(invoiceTrx.raw).toHaveBeenCalledWith(
+      'SELECT pg_try_advisory_xact_lock(hashtext(?)) AS acquired',
+      ['unminted_setup_fee_manual_billing:estimate-1'],
+    );
+    expect(invoiceTrx.raw).toHaveBeenCalledWith(
+      'SELECT id FROM customers WHERE id = ? FOR KEY SHARE NOWAIT',
+      ['customer-1'],
+    );
+    expect(invoiceTrx.raw).toHaveBeenCalledWith(
+      'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS acquired',
+      ['estimate.deposit.ledger', 'estimate-1'],
+    );
+    expect(deposits.acquireEstimateDepositLedgerLock).not.toHaveBeenCalled();
+    expect(deposits.pendingDepositCredit).not.toHaveBeenCalled();
+    expect(invoiceService.create).not.toHaveBeenCalled();
   });
 
   test('deposit ledger READ failure aborts the prepay conversion (fail closed — never mint with a dropped credit)', async () => {
@@ -191,17 +259,207 @@ describe('estimate converter annual prepay orchestration', () => {
       pendingDepositCredit: jest.fn().mockResolvedValue({ amount: 49 }),
       consumeDepositCredit: jest.fn().mockResolvedValue(20),
     };
-    const { EstimateConverter, invoiceService } = setup(
+    const { EstimateConverter, invoiceService, db, invoiceTrx } = setup(
       [{ service: 'lawn_care', name: 'Lawn Care', frequency: 'monthly' }],
       undefined,
       { deposits, invoiceCreateResult: { id: 'invoice-1', total: 578, applied_deposit_credit: 49 } },
     );
+    let rolledBack = false;
+    db.transaction.mockImplementation(async (callback) => {
+      try {
+        return await callback(invoiceTrx);
+      } catch (err) {
+        rolledBack = true;
+        throw err;
+      }
+    });
 
     await expect(EstimateConverter.convertEstimate('estimate-1', convertOpts))
       .rejects.toThrow('deposit allocation mismatch');
-    // draftInvoiceId is assigned BEFORE the consume, so the no-caller-trx
-    // cleanup voids the just-created invoice instead of orphaning it.
-    expect(invoiceService.voidInvoice).toHaveBeenCalledWith('invoice-1');
+    // The mismatch happens inside the invoice transaction. A bare-DB caller
+    // rolls back the new invoice itself instead of relying on a later void.
+    expect(rolledBack).toBe(true);
+    expect(invoiceService.create).toHaveBeenCalledWith(expect.objectContaining({ database: invoiceTrx }));
+    expect(deposits.consumeDepositCredit).toHaveBeenCalledWith(expect.objectContaining({ trx: invoiceTrx }));
+    expect(invoiceService.voidInvoice).not.toHaveBeenCalled();
+  });
+
+  test('standard invoice locks and checks the deposit ledger inside its mint transaction even when no credit exists', async () => {
+    const deposits = {
+      acquireEstimateDepositLedgerLock: jest.fn().mockResolvedValue(undefined),
+      pendingDepositCredit: jest.fn().mockResolvedValue(null),
+    };
+    const { EstimateConverter, invoiceService, db, invoiceTrx } = setup(
+      [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly', visitsPerYear: 4 }],
+      undefined,
+      { deposits },
+    );
+
+    await EstimateConverter.convertEstimate('estimate-1', {
+      billingTerm: 'standard', skipAutoSchedule: true, autoSendInvoice: false,
+      skipWelcomeSms: true, skipMembershipEmail: true,
+    });
+
+    expect(db.transaction).toHaveBeenCalled();
+    expect(invoiceTrx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', [
+      'unminted_setup_fee_manual_billing:estimate-1',
+    ]);
+    expect(invoiceTrx.raw).toHaveBeenCalledWith(
+      'SELECT id FROM customers WHERE id = ? FOR KEY SHARE', ['customer-1'],
+    );
+    expect(deposits.acquireEstimateDepositLedgerLock).toHaveBeenCalledWith(invoiceTrx, 'estimate-1');
+    expect(deposits.pendingDepositCredit).toHaveBeenCalledWith('estimate-1', invoiceTrx);
+    expect(deposits.acquireEstimateDepositLedgerLock.mock.invocationCallOrder[0]).toBeLessThan(
+      deposits.pendingDepositCredit.mock.invocationCallOrder[0],
+    );
+    expect(deposits.pendingDepositCredit.mock.invocationCallOrder[0]).toBeLessThan(
+      invoiceService.create.mock.invocationCallOrder[0],
+    );
+    expect(invoiceService.create).toHaveBeenCalledWith(expect.objectContaining({ database: invoiceTrx }));
+    expect(invoiceService.create.mock.calls[0][0]).not.toHaveProperty('depositCredit');
+  });
+
+  test('standard invoice applies and consumes exactly one credit atomically; mismatch rolls its mint back', async () => {
+    const deposits = {
+      pendingDepositCredit: jest.fn().mockResolvedValue({ amount: 49 }),
+      consumeDepositCredit: jest.fn().mockResolvedValue(20),
+    };
+    const { EstimateConverter, invoiceService, db, invoiceTrx, warn } = setup(
+      [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly', visitsPerYear: 4 }],
+      undefined,
+      { deposits, invoiceCreateResult: { id: 'invoice-1', total: 116, applied_deposit_credit: 49 } },
+    );
+    let depositMintRollbacks = 0;
+    db.transaction.mockImplementation(async (callback) => {
+      try {
+        return await callback(invoiceTrx);
+      } catch (err) {
+        if (err.message.includes('deposit allocation mismatch')) depositMintRollbacks += 1;
+        throw err;
+      }
+    });
+
+    await EstimateConverter.convertEstimate('estimate-1', {
+      billingTerm: 'standard', skipAutoSchedule: true, autoSendInvoice: false,
+      skipWelcomeSms: true, skipMembershipEmail: true,
+    });
+
+    expect(depositMintRollbacks).toBe(2);
+    expect(invoiceService.create).toHaveBeenCalledTimes(2);
+    expect(invoiceService.create).toHaveBeenCalledWith(expect.objectContaining({
+      database: invoiceTrx,
+      depositCredit: { amount: 49, estimateId: 'estimate-1' },
+    }));
+    expect(deposits.consumeDepositCredit).toHaveBeenCalledWith(expect.objectContaining({
+      estimateId: 'estimate-1', amount: 49, invoiceId: 'invoice-1', trx: invoiceTrx,
+    }));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('retrying with a fresh ledger read'));
+  });
+
+  test('standard invoice commits the exact deposit allocation and reports the credited balance', async () => {
+    const deposits = {
+      pendingDepositCredit: jest.fn().mockResolvedValue({ amount: 49 }),
+      consumeDepositCredit: jest.fn().mockResolvedValue(49),
+    };
+    const { EstimateConverter, invoiceService, invoiceTrx } = setup(
+      [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly', visitsPerYear: 4 }],
+      undefined,
+      { deposits, invoiceCreateResult: { id: 'invoice-1', token: 'pay-1', total: 116, applied_deposit_credit: 49 } },
+    );
+
+    const result = await EstimateConverter.convertEstimate('estimate-1', {
+      billingTerm: 'standard', skipAutoSchedule: true, autoSendInvoice: false,
+      skipWelcomeSms: true, skipMembershipEmail: true,
+    });
+
+    expect(invoiceService.create).toHaveBeenCalledTimes(1);
+    expect(invoiceService.create).toHaveBeenCalledWith(expect.objectContaining({
+      database: invoiceTrx, depositCredit: { amount: 49, estimateId: 'estimate-1' },
+    }));
+    expect(deposits.consumeDepositCredit).toHaveBeenCalledWith(expect.objectContaining({
+      estimateId: 'estimate-1', amount: 49, invoiceId: 'invoice-1', trx: invoiceTrx,
+    }));
+    expect(result).toEqual(expect.objectContaining({
+      draftInvoiceId: 'invoice-1', draftInvoiceAmount: 116,
+    }));
+  });
+
+  test('standard invoice uses the caller database transaction for its deposit mint', async () => {
+    const deposits = { pendingDepositCredit: jest.fn().mockResolvedValue(null) };
+    const { EstimateConverter, invoiceService, db, invoiceTrx } = setup(
+      [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly', visitsPerYear: 4 }],
+      undefined,
+      { deposits },
+    );
+    const callerDb = jest.fn((table) => db(table));
+    callerDb.transaction = jest.fn(async (callback) => callback(invoiceTrx));
+
+    await EstimateConverter.convertEstimate('estimate-1', {
+      billingTerm: 'standard', skipAutoSchedule: true, autoSendInvoice: false,
+      skipWelcomeSms: true, skipMembershipEmail: true, database: callerDb,
+    });
+
+    expect(callerDb.transaction).toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(deposits.pendingDepositCredit).toHaveBeenCalledWith('estimate-1', invoiceTrx);
+    expect(invoiceService.create).toHaveBeenCalledWith(expect.objectContaining({ database: invoiceTrx }));
+  });
+
+  test('standard invoice inside a caller transaction does not retry or swallow a busy-ledger 409', async () => {
+    const deposits = {
+      acquireEstimateDepositLedgerLock: jest.fn(),
+      pendingDepositCredit: jest.fn(),
+    };
+    const { EstimateConverter, invoiceService, db, invoiceTrx, warn } = setup(
+      [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly', visitsPerYear: 4 }],
+      undefined,
+      { deposits },
+    );
+    invoiceTrx.raw.mockImplementation(async (sql, bindings) => ({
+      rows: [{ acquired: !(sql.includes('pg_try_advisory_xact_lock') && bindings?.[0] === 'estimate.deposit.ledger') }],
+    }));
+    const callerTrx = jest.fn((table) => db(table));
+    callerTrx.isTransaction = true;
+    callerTrx.raw = invoiceTrx.raw;
+    callerTrx.transaction = jest.fn(async (callback) => callback(invoiceTrx));
+
+    await expect(EstimateConverter.convertEstimate('estimate-1', {
+      billingTerm: 'standard', skipAutoSchedule: true, autoSendInvoice: false,
+      skipWelcomeSms: true, skipMembershipEmail: true, database: callerTrx,
+    })).rejects.toMatchObject({
+      status: 409,
+      code: 'DEPOSIT_LEDGER_BUSY_RETRY',
+      retryableAcceptInvoiceLock: true,
+    });
+
+    expect(invoiceTrx.raw.mock.calls.filter(([sql, bindings]) => (
+      sql.includes('pg_try_advisory_xact_lock') && bindings?.[0] === 'estimate.deposit.ledger'
+    ))).toHaveLength(1);
+    expect(invoiceService.create).not.toHaveBeenCalled();
+    expect(deposits.acquireEstimateDepositLedgerLock).not.toHaveBeenCalled();
+    expect(deposits.pendingDepositCredit).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('retrying with a fresh ledger read'));
+  });
+
+  test('caller-transaction visit prelock preserves FOR UPDATE strength without waiting', async () => {
+    const { EstimateConverter } = setup(
+      [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly', visitsPerYear: 4 }],
+    );
+    const trx = {
+      raw: jest.fn().mockResolvedValue({ rows: [{ acquired: true }] }),
+    };
+
+    await EstimateConverter.acquireConverterInvoiceDepositLocks(trx, {
+      estimateId: 'estimate-1',
+      customerId: 'customer-1',
+      scheduledServiceId: 'service-1',
+      nonblocking: true,
+    });
+
+    expect(trx.raw).toHaveBeenCalledWith(
+      'SELECT id FROM scheduled_services WHERE id = ? FOR UPDATE NOWAIT',
+      ['service-1'],
+    );
   });
 
   test('single quarterly service with explicit visitsPerYear: coverage count comes from the line', async () => {

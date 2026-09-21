@@ -10,7 +10,7 @@
  *    order holds across overlapping deploy instances.
  *  - crash recovery — stale 'running' locks requeue; stale 'reserved'
  *    rows (route died before its finally) are promoted when the message
- *    still shows correction intent and links to a single customer, and
+ *    has a saved inbox source, still shows correction intent, and links to a single customer;
  *    cancelled otherwise. This is the replay for a message whose
  *    MessageSid claim was durable but whose detached run died.
  *  - runner integration — the worker passes the persisted CAS baseline
@@ -330,6 +330,7 @@ describe('crash recovery', () => {
     const knex = makeStubKnex({
       contact_correction_jobs: [jobRow({ id: 1, customer_id: CUSTOMER_ID, expected_values: snapshot, created_at: Date.now() - 11 * 60_000 })],
       customers: [{ id: CUSTOMER_ID, deleted_at: null }],
+      messages: [{ id: 'message-9', twilio_sid: 'SM-test-1', channel: 'sms', direction: 'inbound' }],
       sms_log: [{ id: 'sms-9', twilio_sid: 'SM-test-1', direction: 'inbound', created_at: Date.now() }],
     });
     const summary = await queue.processDueContactCorrectionJobs({ limit: 3, knex });
@@ -491,6 +492,7 @@ describe('round-18 hardening', () => {
         jobRow({ id: 2, customer_id: CUSTOMER_ID, created_at: Date.now() - 11 * 60_000 }),
       ],
       customers: [{ id: CUSTOMER_ID, deleted_at: null }],
+      messages: [{ id: 'message-1', twilio_sid: 'SM-test-1', channel: 'sms', direction: 'inbound' }],
       sms_log: [],
     });
     const summary = await queue.processDueContactCorrectionJobs({ limit: 3, knex });
@@ -913,4 +915,19 @@ describe('round-32 hardening', () => {
     expect(ok).toBe(true);
     expect(knex._data.contact_correction_jobs[0].body).toBe('My last name is wrong, it is Rivers');
   });
+});
+
+
+test('a dead reservation without an inbox source cannot run a correction', async () => {
+  const knex = makeStubKnex({
+    contact_correction_jobs: [jobRow({ status: 'reserved', customer_id: CUSTOMER_ID, created_at: Date.now() - 20 * 60_000 })],
+    messages: [],
+  });
+  mockDetectIntent.mockReturnValue(true);
+  const promoted = await queue._internals.promoteStaleReservations(knex);
+  expect(promoted).toBe(0);
+  const job = await knex('contact_correction_jobs').first();
+  expect(job.status).toBe('cancelled');
+  expect(job.cancel_reason).toBe('stale_no_inbox_source');
+  expect(job.body).toBeNull();
 });

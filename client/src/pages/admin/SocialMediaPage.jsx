@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, lazy, Suspense } from "react";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import {
   Activity,
   BarChart3,
@@ -354,7 +355,24 @@ function AutomationStatusBanner({ automation, pauseLoading, onTogglePause }) {
 }
 
 export default function SocialMediaPage() {
-  const [tab, setTab] = useState("campaigns");
+  const [searchParams] = useSearchParams();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const requestedTab = searchParams.get("tab");
+  const tab = Object.hasOwn(SOCIAL_LEAF_BY_KEY, requestedTab) ? requestedTab : "campaigns";
+  const setTab = useCallback(
+    (nextTab) => {
+      if (!Object.hasOwn(SOCIAL_LEAF_BY_KEY, nextTab) || nextTab === tab) return;
+      const next = new URLSearchParams(searchParams);
+      next.set("tab", nextTab);
+      navigate({
+        pathname: location.pathname,
+        search: `?${next.toString()}`,
+        hash: location.hash,
+      });
+    },
+    [location.hash, location.pathname, navigate, searchParams, tab],
+  );
   const activeGroup =
     SOCIAL_TAB_GROUPS.find((g) => g.tabs.includes(tab)) || SOCIAL_TAB_GROUPS[0];
   const [status, setStatus] = useState(null);

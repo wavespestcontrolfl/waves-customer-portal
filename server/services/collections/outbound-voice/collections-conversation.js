@@ -51,7 +51,7 @@ const { isStaffedHours } = require('./staffed-hours');
 const { callSupervision } = require('./supervision');
 const { writeCallOutcome } = require('./outcomes');
 const flags = require('./flags');
-const { invoiceAmountDue } = require('../../invoice-helpers');
+const { invoiceAmountDue, SEND_CLAIMABLE_STATUSES } = require('../../invoice-helpers');
 const { etCalendarDayOf, etDateString } = require('../../../utils/datetime-et');
 const { anchorInvoiceOf, orderByDue, dueDayOf, invoiceDaysOverdue, accountDaysOverdue, dunningTierForOverdue, registerForTier } = require('../account-anchor');
 
@@ -62,7 +62,6 @@ const { anchorInvoiceOf, orderByDue, dueDayOf, invoiceDaysOverdue, accountDaysOv
 // oldest-due SENDABLE invoice instead; the dunning clock still anchors on
 // the oldest-due invoice of any status.
 function linkAnchorOf(invoices = []) {
-  const { SEND_CLAIMABLE_STATUSES } = require('../../invoice');
   return orderByDue(invoices).find((inv) => SEND_CLAIMABLE_STATUSES.includes(String(inv.status || ''))) || null;
 }
 
@@ -1665,6 +1664,24 @@ class CollectionsConversation {
         }
         this.payLinkSent = false;
         return `No text was sent: account credit covered that invoice in full, but $${this._ctx.balance.total.toFixed(2)} across ${remaining.length} invoice${remaining.length === 1 ? '' : 's'} is still open. Tell the customer, and if they still want the link, call send_pay_link again for the remaining balance.`;
+      }
+      if (result && result.settled_zero_due) {
+        // Mirrors the covered_by_credit precedent above (Codex round-1 P1
+        // #4131): nothing was texted — the anchor invoice's balance
+        // zeroed out under the send claim's own settlement re-check — so
+        // the generic sent||ok success copy below ("the payment link was
+        // texted") would misstate what happened to the customer. No SMS
+        // went out: the reservation above must not stand as a contact,
+        // same reasoning as covered_by_credit.
+        const stamp = { stage: 'send_via_sms', code: 'zero_due', never_contacted: true };
+        let released = await ContactLedger.markSendFailed(entry, stamp);
+        if (!released) released = await ContactLedger.markSendFailed(entry, stamp);
+        if (!released) {
+          logger.error(`[collections-voice] never_contacted stamp FAILED TWICE for ledger ${entry.id} callSid=${this.callSid} — pay link stays closed this call`);
+          return 'No text was sent: nothing was due on that invoice, but the pay link cannot be re-offered on this call. Say the office will follow up on any remaining balance — do NOT state a figure and do NOT say the account is settled.';
+        }
+        this.payLinkSent = false;
+        return 'No text was sent: nothing was due on that invoice. If other invoices are still open, call send_pay_link again for the remaining balance.';
       }
       if (result && (result.sent || result.ok)) {
         this._captures.payLinkSent = true;

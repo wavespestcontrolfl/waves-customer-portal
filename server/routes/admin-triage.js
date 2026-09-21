@@ -20,6 +20,15 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 
 const OPEN_STATES = ['open', 'in_progress'];
 const ALL_STATES = ['open', 'in_progress', 'resolved', 'dismissed'];
+// Match the booking/estimate address-confirmation notices before applying the
+// inbox page limit. A busy customer's newer unrelated work must not hide an
+// older, still-active address ask.
+const ADDRESS_CONFIRMATION_REASONS = [
+  'missing_unit_number', 'address_unverified', 'missing_service_address',
+  'low_confidence_address', 'address_validation_unavailable',
+  'address_unverifiable', 'address_not_validated', 'on_file_proof_customer_mismatch',
+  'address_recovered', 'address_readback',
+];
 
 // Decision-support feedback (Phase 1). Captured from the triage inbox and the
 // auto-routed review list; nothing here changes routing automatically.
@@ -97,6 +106,11 @@ router.get('/', async (req, res) => {
       .leftJoin('route_feedback', 'triage_items.call_log_id', 'route_feedback.call_log_id')
       .whereIn('triage_items.status', status)
       .modify((q) => { if (customerId) q.where('customers.id', customerId); })
+      .modify((q) => {
+        if (req.query.address_confirmation === 'true') {
+          q.whereIn('triage_items.reason_code', ADDRESS_CONFIRMATION_REASONS);
+        }
+      })
       .modify((q) => { if (source) q.where('triage_items.resolution_source', source); })
       // property_role_confirm payloads embed the customer's OTHER property
       // addresses — the same data admin-customers gates behind requireAdmin —
@@ -161,8 +175,8 @@ router.get('/', async (req, res) => {
 // Status transition WITHOUT touching res, so callers can gate side effects (like
 // the feedback write) on actually winning the compare-and-swap. Returns an
 // outcome the caller maps to HTTP: 'ok' | 'not_found' | 'already' | 'conflict'.
-async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdatedAt }) {
-  const item = await db('triage_items').where({ id }).first();
+async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdatedAt, conn = db, requireVersion = false, beforeTransition, afterTransition }) {
+  const item = await conn('triage_items').where({ id }).first();
   if (!item) return { outcome: 'not_found' };
   if (!OPEN_STATES.includes(item.status)) return { outcome: 'already', current: item.status };
 
@@ -187,8 +201,8 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
   // null = not checked (not resolving an email card); the release below runs
   // only when the check ran inside the transaction and found none live.
   let siblingLive = null;
-  const holdsTable = emailReviewCard && await db.schema.hasTable('first_touch_holds');
-  const result = await db.transaction(async (trx) => {
+  const holdsTable = emailReviewCard && await conn.schema.hasTable('first_touch_holds');
+  const result = await conn.transaction(async (trx) => {
     // GLOBAL LOCK ORDER (owner ruling 2026-08-02, reconciling #3119's
     // advisory contract with this lane's r33 row-lock discipline):
     // advisory call lock → first_touch_holds rows → triage_items.
@@ -208,8 +222,13 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
     // so a dismissal/resolve judged on the OLD payload must not close the
     // newer one. Same rule as Apply — required (the lane is dark, no
     // legacy clients); checked under the lock.
-    if (item.reason_code === 'property_role_confirm') {
-      const live = await trx('triage_items').where({ id }).first('updated_at');
+    if (beforeTransition) await beforeTransition(trx);
+    const live = await trx('triage_items').where({ id }).first('updated_at', 'payload');
+    // Promise cards can gain another commitment while this action waits for
+    // the call lock. The operator must review that newer payload before a
+    // Resolve/Dismiss settles every commitment now attached to the card.
+    if (item.reason_code === 'property_role_confirm' || item.reason_code === 'reschedule_link_promise'
+      || requireVersion || live?.payload?.reschedule_proposal) {
       if (!live || !expectedUpdatedAt
         || new Date(expectedUpdatedAt).getTime() !== new Date(live.updated_at).getTime()) {
         return { outcome: 'stale_version' };
@@ -236,6 +255,30 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
       // P1 on #3804). Atomic with the dismissal, under the call lock.
       const { clearCallUnitAnswer } = require('../utils/estimate-claim-sql');
       await clearCallUnitAnswer(trx, item.call_log_id);
+    }
+    if (item.reason_code === 'reschedule_link_promise' && ['resolved', 'dismissed'].includes(nextStatus)) {
+      // A promise exception is not closed by generic bookkeeping alone: the
+      // underlying call_commitments row and its outbox_messages row must
+      // move to a terminal state IN THE SAME transition, or the promise
+      // stays open and the outbox stays parked in 'review' with nothing
+      // left to ever surface it again — parkReview only (re)creates a card
+      // when the outbox row's own status or last_error actually changes
+      // (codex #4293 P1; see reschedule-link-promises.settleParkedPromiseCard).
+      // Reload the payload UNDER THE LOCK: another promise can park
+      // (parkReview, itself lockTriageCall-serialized) in the gap between
+      // this route's initial pre-lock read of `item` and this point,
+      // appending its commitment id to payload.reschedule_link_promise
+      // .commitment_ids. Settling against the stale pre-lock snapshot would
+      // only settle the OLDER ids — the newly appended commitment stays
+      // open with its outbox parked in 'review' and no card left to ever
+      // surface it again, since parkReview only (re)creates a card when the
+      // outbox row's own status or last_error actually changes (codex
+      // #4293 P1).
+      const liveCard = await trx('triage_items').where({ id }).first('payload');
+      await require('../services/reschedule-link-promises').settleParkedPromiseCard(
+        trx, { ...item, payload: liveCard ? liveCard.payload : item.payload },
+        { action: nextStatus, reviewedBy: assignedTo, note },
+      );
     }
     if (nextStatus === 'resolved' && emailReviewCard) {
       // A force-reprocess can leave BOTH an email_invalid and an
@@ -288,6 +331,7 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
         .update({ review_status: remaining > 0 ? 'open' : nextStatus, updated_at: new Date() });
     }
 
+    if (afterTransition) await afterTransition(trx);
     return { outcome: 'ok', item };
   });
   if (result.outcome !== 'ok') return result;
@@ -306,7 +350,7 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
   // it must not run under the advisory lock above.)
   if (nextStatus === 'resolved' && emailReviewCard && siblingLive === false) {
     try {
-      const call = await db('call_log').where({ id: item.call_log_id }).first('customer_id');
+      const call = await conn('call_log').where({ id: item.call_log_id }).first('customer_id');
       if (call?.customer_id) {
         await resumeHeldFirstTouch({ customerId: call.customer_id, callLogId: item.call_log_id, source: 'triage_resolve' });
       }
@@ -323,7 +367,7 @@ function sendTransitionResult(res, result, id, nextStatus) {
     case 'not_found': return res.status(404).json({ error: 'Triage item not found' });
     case 'already': return res.status(409).json({ error: `Item already ${result.current}` });
     case 'conflict': return res.status(409).json({ error: 'Item was just actioned by someone else' });
-    case 'stale_version': return res.status(409).json({ error: 'Card proposals changed since they were displayed — reload and review the latest' });
+    case 'stale_version': return res.status(409).json({ error: 'Card changed since it was displayed — reload and review the latest' });
     default: return res.json({ ok: true, id, status: nextStatus });
   }
 }
@@ -555,7 +599,7 @@ router.post('/:id/apply-property-roles', async (req, res) => {
 
 // POST /api/admin/triage/:id/verdict  { verdict, wrong_fields?, note? }
 // Records the human verdict on a TRIAGED call. The verdict is CALL-level
-// ("accept = the AI got this call right"), so it resolves EVERY open triage row
+// ("accept = the AI got this call right"), so it resolves open routing rows
 // for the call, not just the clicked one — a call can have several flags
 // (address_review + name_review …) and the reviewer judges the call once. The
 // per-flag detail lives in wrong_fields. Resolving the whole call also avoids
@@ -586,6 +630,13 @@ router.post('/:id/verdict', async (req, res) => {
     // judgments — they apply via /apply-property-roles or dismiss.
     if (item.reason_code === 'property_role_confirm') {
       return res.status(400).json({ error: 'This card is a pending property-role confirmation, not a call verdict — use Apply or Dismiss instead.' });
+    }
+    // A parked reschedule-link promise is exception handling on an
+    // OBLIGATION, not a call-routing judgment — and settling it (see
+    // transitionCore) needs the single-card Resolve/Dismiss transition, not
+    // a call-level cascade that never touches the underlying commitment.
+    if (item.reason_code === 'reschedule_link_promise') {
+      return res.status(400).json({ error: 'This card is a parked reschedule-link promise, not a call verdict — use Resolve or Dismiss instead.' });
     }
 
     // Call-level compare-and-swap: resolve ALL open triage rows for this call in
@@ -635,11 +686,17 @@ router.post('/:id/verdict', async (req, res) => {
           .forUpdate()
           .select('id');
       }
+      const live = await trx('triage_items').where({ id }).first('payload');
+      if (live?.payload?.reschedule_proposal) {
+        throw Object.assign(new Error('Review or dismiss the reschedule proposal instead of recording a call verdict.'), { proposalConflict: true });
+      }
       const resolvedRows = await trx('triage_items')
         .where({ call_log_id: item.call_log_id })
-        // Bounce follow-ups AND pending property-role confirmations survive a
-        // call verdict — both carry work of their own (see the guards above).
-        .whereNotIn('reason_code', ['email_bounce_reverify', 'property_role_confirm'])
+        // Bounce follow-ups, pending property-role confirmations, and parked
+        // reschedule-link promises all survive a call verdict, as do
+        // reschedule proposals — each has its own review action.
+        .whereNotIn('reason_code', ['email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise'])
+        .whereRaw("payload->'reschedule_proposal' IS NULL")
         .whereIn('status', OPEN_STATES)
         .update({
           status: 'resolved',
@@ -775,6 +832,7 @@ router.post('/:id/verdict', async (req, res) => {
 
     return res.json({ ok: true, id, status: 'resolved', verdict, resolved_count: resolved });
   } catch (err) {
+    if (err.proposalConflict) return res.status(409).json({ error: err.message });
     logger.error(`[admin-triage] verdict failed: ${err.message}`);
     if (!res.headersSent) res.status(500).json({ error: 'Failed to record verdict' });
   }
@@ -858,4 +916,5 @@ router.post('/auto-routed/:callLogId/verdict', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.transitionCore = transitionCore;
 module.exports.__private = { sanitizeWrongFields, denyRejectsUnitEvidence, WRONG_FIELDS, VERDICTS };

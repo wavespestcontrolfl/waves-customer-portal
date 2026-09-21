@@ -4,6 +4,7 @@ jest.mock('../services/sendgrid-mail', () => ({
   sendOne: jest.fn(async () => ({})),
 }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
+jest.mock('../services/ops-digest-fall-off', () => ({ retireIfClean: jest.fn(async () => 1) }));
 jest.mock('../models/db', () => {
   // Marker reads/writes are try/caught in the service; loaders are injected.
   const qb = () => { throw new Error('db must not be touched when loadRows is injected'); };
@@ -12,10 +13,11 @@ jest.mock('../models/db', () => {
 });
 
 const sendgrid = require('../services/sendgrid-mail');
+const { retireIfClean } = require('../services/ops-digest-fall-off');
 const {
   runPromisedEstimateWatcher,
   commitmentsHandoffClause,
-  _private: { composePromisedEstimateDigest },
+  _private: { composePromisedEstimateDigest, loadUnkeptPromises },
 } = require('../services/promised-estimate-watcher');
 const { isEnabled } = require('../config/feature-gates');
 
@@ -39,6 +41,22 @@ beforeEach(() => {
   sendgrid.isConfigured.mockReturnValue(true);
   delete process.env.PROMISED_ESTIMATE_WATCHER_DISABLED;
   delete process.env.PROMISED_ESTIMATE_WATCHER_EMAIL;
+});
+
+test('the unfulfilled-promise query has no lower date bound that would clear aged obligations', async () => {
+  const db = require('../models/db');
+  const originalRaw = db.raw;
+  const agedPromise = row(45);
+  db.raw = jest.fn(async () => ({ rows: [agedPromise] }));
+  try {
+    await expect(loadUnkeptPromises()).resolves.toEqual([agedPromise]);
+    const [sql, bindings] = db.raw.mock.calls[0];
+    expect(sql).toContain('WHERE c.created_at < now()');
+    expect(sql).not.toMatch(/c\.created_at\s*>=/);
+    expect(bindings).not.toHaveProperty('lookbackHours');
+  } finally {
+    db.raw = originalRaw;
+  }
 });
 
 describe('commitmentsHandoffClause', () => {
@@ -147,11 +165,19 @@ describe('runPromisedEstimateWatcher', () => {
     expect(stamp).not.toHaveBeenCalled();
   });
 
-  test('recent send short-circuits before the query', async () => {
-    const loadRows = jest.fn();
+  test('recent send suppresses another alert after checking outstanding promises', async () => {
+    const loadRows = jest.fn(async () => [row(2)]);
     const result = await runPromisedEstimateWatcher({ loadRows, sentRecently: async () => true });
     expect(result).toEqual({ skipped: 'recent_send' });
-    expect(loadRows).not.toHaveBeenCalled();
+    expect(loadRows).toHaveBeenCalledTimes(1);
+    expect(retireIfClean).not.toHaveBeenCalled();
+  });
+
+  test('recovery retires the alert during the send cooldown', async () => {
+    const result = await runPromisedEstimateWatcher({ loadRows: async () => [], sentRecently: async () => true });
+    expect(result).toEqual({ skipped: 'nothing_found' });
+    expect(retireIfClean).toHaveBeenCalledWith('promised-estimate');
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 
   test('query failure is a distinct skip (never a false clean)', async () => {

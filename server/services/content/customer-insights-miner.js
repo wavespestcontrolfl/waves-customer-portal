@@ -250,6 +250,9 @@ class CustomerInsightsMiner {
         .where('messages.direction', 'inbound')
         .where('messages.channel', 'sms')
         .where('messages.author_type', 'customer')
+        // Recruiting texts (applicant replies, PR #4623) are hiring content,
+        // never customer demand — keep them out of the corpus.
+        .where((q) => { q.whereNull('messages.message_type').orWhere('messages.message_type', 'not like', 'job\\_%'); })
         .where('messages.created_at', '>=', since)
         .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
         .leftJoin('customers', 'conversations.customer_id', 'customers.id')

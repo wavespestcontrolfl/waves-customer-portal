@@ -26,6 +26,7 @@ const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { smtpFallbackAllowed } = require('./email-fallback-gate');
 
 const RENEWAL_DAYS = 7;
+const { FIXED_BID_VALIDITY_ABSENT_SQL } = require('./proposal-bid');
 
 function canFallbackFromTemplateEmailError(err) {
   return /relation .*email_templates.* does not exist|active template not found|template version not found|template not found/i.test(err?.message || '');
@@ -70,6 +71,13 @@ const EstimateAutoRenew = {
       for (const est of stale) {
         try {
           if (estimateOptedOutOfAutoRenew(est)) continue;
+          // A renewal is a silent group extension: the same group-wide fixed
+          // hold verdict the generic extension applies (any live fixed
+          // sibling, including one mid-send) refuses it here, or an ordinary
+          // sibling would be renewed and emailed while the fixed property
+          // drops out of the revived group link (pre-push codex P1 on #4309).
+          const { fixedBidBlocksExtension } = require('./estimate-extension');
+          if (await fixedBidBlocksExtension(db, est)) continue;
           // Engine-authoritative pricing gate (#3750, GH codex P1 r13): a
           // renewal re-emails the estimate link — never for a delivered row
           // the engine never verified while the gate is on. Not renewed
@@ -79,10 +87,65 @@ const EstimateAutoRenew = {
             continue;
           }
           const newExpiry = new Date(Date.now() + RENEWAL_DAYS * 86400000);
-          await db('estimates').where({ id: est.id }).update({
-            expires_at: newExpiry,
-            renewal_count: db.raw('COALESCE(renewal_count, 0) + 1'),
+          const updated = await db.transaction(async (trx) => {
+            // GH codex P2 r4 on #4309: `est` can be stale by the time this
+            // transaction runs — moved into, out of, or between groups. Lock
+            // and evaluate the row's CURRENT membership (not the outer
+            // read's), then pin that same membership on the write below so a
+            // membership change between the re-read and the update makes the
+            // update match nothing rather than silently renewing (and
+            // emailing) a now-grouped estimate a fixed sibling should block.
+            // Lock ORDER matches proposal saves and grouped sends (group
+            // advisory lock first, row lock second), so the membership is
+            // peeked without a row lock, the group lock is taken, and only
+            // then is the row locked and its membership confirmed.
+            const peek = await trx('estimates').where({ id: est.id }).first('estimate_group_id');
+            if (!peek) return 0;
+            let current = peek;
+            const currentGroupId = peek.estimate_group_id || null;
+            if (currentGroupId) {
+              // Same lock proposal saves, grouped sends and extensions take,
+              // then the fixed verdict is re-read under it before writing.
+              await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+                ['estimate-group-send', String(currentGroupId)]);
+              current = await trx('estimates').where({ id: est.id }).forUpdate().first();
+              if (!current || (current.estimate_group_id || null) !== currentGroupId) return 0;
+              if (await fixedBidBlocksExtension(trx, current)) return 0;
+            }
+            // Delivery-guards slice (re-cut of #4569): the renewal UPDATE is
+            // itself a handoff — it extends expires_at and (below) emails the
+            // customer a link to an offer that may no longer be deliverable.
+            // Reread and lock the row fresh under this same transaction right
+            // before the write and skip the renewal entirely when withheld:
+            // no expires_at/renewal_count advance, no email.
+            //
+            // Codex round 3 on #4608 (P1 PRRT_kwDOR3YQi86j8Ydo): the single-
+            // row verdict missed a link-visible WITHHELD SIBLING — a non-
+            // annual anchor whose group link also surfaces a withheld annual
+            // sibling still got its token reactivated (and consumed its one
+            // renewal_count). annualHandoffGuard itself expands to
+            // link-visible group siblings (the SAME membership this group
+            // lock above already establishes), so a block on ANY member —
+            // anchor or sibling — now stops the anchor's renewal too. The
+            // FOR UPDATE reread stays: it locks the anchor row fresh for the
+            // UPDATE below; the guard's own (unlocked, by design — a
+            // chokepoint recheck must never contend with this transaction's
+            // own lock) reads run right after, on the same trx connection.
+            const { loadAnnualOfferRow, annualHandoffGuard } = require('./estimate-annual-guard');
+            await loadAnnualOfferRow(trx, est.id, { forUpdate: true });
+            const guardVerdict = await annualHandoffGuard({ db: trx, estimateIds: [est.id] })();
+            if (guardVerdict.blocked) return 0;
+            return trx('estimates').where({ id: est.id })
+              .whereRaw(FIXED_BID_VALIDITY_ABSENT_SQL)
+              .modify((qb) => (currentGroupId
+                ? qb.where({ estimate_group_id: currentGroupId })
+                : qb.whereNull('estimate_group_id')))
+              .update({
+                expires_at: newExpiry,
+                renewal_count: trx.raw('COALESCE(renewal_count, 0) + 1'),
+              });
           });
+          if (!updated) continue;
 
           const firstName = (est.customer_name || '').split(' ')[0] || 'there';
           const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
@@ -136,12 +199,26 @@ const EstimateAutoRenew = {
                       recipientType: est.customer_id ? 'customer' : 'lead',
                       recipientId: est.customer_id || null,
                       triggerEventId: `estimate_auto_renew:${est.id}`,
+                      estimateId: est.id,
                       categories: ['estimate_auto_renew'],
                     });
                     if (result.blocked) {
                       logger.warn(`[est-auto-renew] Email suppressed for estimate ${est.id}: ${result.reason || 'suppressed'}`);
+                      sentWithTemplateLibrary = true;
+                    } else if (result.aborted) {
+                      // Pre-push audit P1: a pre-dispatch abort (the annual
+                      // guard's own lookup threw, most likely) is a real
+                      // failure, never a handled/deduped outcome. It must NOT
+                      // fall through to the raw SMTP fallback either — that
+                      // path bypasses the guarded send library, so a guard
+                      // outage would send the link unguarded (fail-open).
+                      // Log it as a failure and stop; the direct path has no
+                      // durable retry (deferred, see PR body).
+                      logger.error(`[est-auto-renew] Email pre-dispatch abort for estimate ${est.id}: ${result.reason || 'aborted'}${result.error ? ` (${result.error})` : ''}`);
+                      sentWithTemplateLibrary = true;
+                    } else {
+                      sentWithTemplateLibrary = true;
                     }
-                    sentWithTemplateLibrary = true;
                   }
                 } catch (e) {
                   if (!canFallbackFromTemplateEmailError(e) && !canFallbackFromAutomationEmailError(e)) throw e;
@@ -152,6 +229,15 @@ const EstimateAutoRenew = {
                 if (!smtpFallbackAllowed()) {
                   logger.error(`[est-auto-renew] SMTP fallback disabled in production for estimate ${est.id} — SendGrid template send required`);
                 } else {
+                  // This raw SMTP send bypasses the guarded send library, so
+                  // it carries the chokepoint verdict itself: fresh row, no
+                  // lock, immediately before the provider call. Fails closed.
+                  const { annualHandoffGuard } = require('./estimate-annual-guard');
+                  const fallbackVerdict = await annualHandoffGuard({ db, estimateIds: [est.id] })();
+                  if (fallbackVerdict.blocked) {
+                    logger.warn(`[est-auto-renew] SMTP fallback withheld for estimate ${est.id}: ${fallbackVerdict.reason}`);
+                    throw Object.assign(new Error('annual offer withheld at SMTP fallback'), { code: 'ANNUAL_OFFER_WITHHELD' });
+                  }
                   await EmailService.send({
                     to: est.customer_email,
                     subject: 'Your Waves estimate was extended',

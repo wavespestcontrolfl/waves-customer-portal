@@ -324,6 +324,9 @@ async function runLeadToCashInvariantSweep({ now = new Date(), mailer = sendgrid
   const exceptions = results.filter((r) => !r.ok);
   if (!exceptions.length) {
     logger.info(`[l2c-invariants] clean: ${JSON.stringify(summary)}`);
+    // closeout_failed_facts checks yesterday only. A clean later window
+    // does not prove older failures (including license facts) were fixed,
+    // so this aggregate cannot automatically retire its prior alerts.
     return { skipped: 'clean', results: summary };
   }
   const report = composeReport(results, { now });

@@ -91,6 +91,13 @@ checkout. State and test artifacts belong under `.tmp/`, outside the public root
 - `npm run audit:estimate-previews`: fixture-based visual and PDF checks.
 - Backend or migration verification requires the configured dev database.
 
+The Customer 360 SMS read/bell PostgreSQL suite requires a migrated private
+`waves_qa_<32 hex digits>` database selected in `C360_TEST_DATABASE_URL`. From
+`server/`, run `../node_modules/.bin/jest --runInBand --no-coverage
+tests/customer360-workspace-postgres.test.js` with that verified QA URL. The
+server CI job creates, migrates and drops its own empty database for this suite;
+unset URLs deliberately skip the suite and do not count as DB verification.
+
 A frontend build or fixture preview is not end-to-end database evidence. Record
 which checks ran and explicitly state when migrations/DB flows were not run.
 

@@ -10,8 +10,8 @@
  * readable for post-visit paperwork; a stale never-actioned pending row
  * from months ago grants nothing. Admin requests stay unscoped.
  *
- * Consumers: admin-schedule (board, per-visit money endpoints) and
- * admin-protocols (job card). Query columns are table-qualified, so the
+ * Consumers include admin-schedule, admin-protocols and customer/profile
+ * routes. Query columns are table-qualified, so the
  * builder must be on `scheduled_services` unaliased.
  */
 const { addETDays, etDateString } = require('../utils/datetime-et');
@@ -32,6 +32,18 @@ function technicianCurrentVisitFilter(req, q) {
   return q;
 }
 
+// Customer-level field access follows the same current/recent assignment
+// window, including post-visit paperwork. Call only after staff authentication.
+async function technicianServicesCustomer(req, customerId) {
+  if (!isTechnicianRequest(req)) return true;
+  const db = require('../models/db');
+  const assigned = await technicianCurrentVisitFilter(
+    req,
+    db('scheduled_services').where({ customer_id: customerId }),
+  ).first('id');
+  return !!assigned;
+}
+
 // MUTATION access (prepaid, invoice mint, status): a LIVE visit only — a
 // completed one is settled; corrections on it are office work.
 function technicianLiveVisitFilter(req, q) {
@@ -42,4 +54,15 @@ function technicianLiveVisitFilter(req, q) {
   return q;
 }
 
-module.exports = { isTechnicianRequest, TECH_DEAD_ASSIGNMENT_STATUSES, TECH_ACCESS_WINDOW_DAYS, techAccessCutoff, technicianCurrentVisitFilter, technicianLiveVisitFilter };
+// The same predicate as technicianCurrentVisitFilter, judged on a row already
+// in hand (a locked member row at a save or resume boundary); administrators
+// are unscoped. Every scope change lands here and in the SQL filter together.
+function technicianVisitRowInScope(actor, row) {
+  if (!isTechnicianRequest(actor)) return true;
+  const { dateOnly } = require('./visit-groups');
+  return String(row.technician_id || '') === String(actor.technicianId || '')
+    && !TECH_DEAD_ASSIGNMENT_STATUSES.includes(String(row.status || ''))
+    && dateOnly(row.scheduled_date) >= techAccessCutoff();
+}
+
+module.exports = { isTechnicianRequest, TECH_DEAD_ASSIGNMENT_STATUSES, TECH_ACCESS_WINDOW_DAYS, techAccessCutoff, technicianCurrentVisitFilter, technicianServicesCustomer, technicianLiveVisitFilter, technicianVisitRowInScope };

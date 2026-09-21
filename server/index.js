@@ -233,6 +233,24 @@ app.use('/api/public/pest-forecast', (req, res, next) => {
   next();
 });
 
+// Ops-digest ingest (routes/ops-digest-ingest.js): unobservable-when-dark,
+// mounted ABOVE the global cors() (which would answer an OPTIONS preflight
+// 204 on its own), the global /api/ limiter (429) and the body parsers
+// (400/413) — while OPS_DIGEST_INGEST_TOKEN is unset EVERY request to the
+// path, any method, gets the generic unknown-route 404 (codex P0 r1/r4 on
+// #4392). Token-route privacy baseline (no-store, noindex, no-referrer) is
+// stamped first so the dark 404 carries it too; the router chain re-stamps
+// for the authenticated outcomes. The router's own darkUnlessConfigured
+// stays as the in-router layer; this one runs first.
+app.use('/api/ops/digest', require('./middleware/no-store').noStore, (req, res, next) => {
+  if (!process.env.OPS_DIGEST_INGEST_TOKEN) {
+    // middleware/errors.js notFoundBody — the one formatter, so this stays
+    // indistinguishable from an unknown route while dark.
+    return res.status(404).json(require('./middleware/errors').notFoundBody(req));
+  }
+  next();
+});
+
 // CORS — allow frontend dev server and production domain
 const { allowedOrigins } = require('./config/cors-origins');
 app.use(cors({
@@ -290,10 +308,28 @@ app.use('/api/public/lawn-assessment', (req, res, next) => {
   }
   next();
 });
+// Interview self-scheduling family (GATE_RECRUITING_COMMS): token-route
+// privacy headers on EVERY response — mounted ahead of the outer careers
+// gate below so the dark 404 from either gate (jobApplications OR
+// recruitingComms) carries no-store/noindex too (Codex r1 P0).
+app.use('/api/public/careers/interview', require('./middleware/no-store').noStore);
 // Careers funnel: same unobservable-when-dark contract — 404 while
 // GATE_JOB_APPLICATIONS is off, even for a limiter-exhausted IP.
 app.use('/api/public/careers', (req, res, next) => {
+  // Issued interview links stay live when INTAKE closes: /interview/* is
+  // governed by GATE_RECRUITING_COMMS alone (next mount), so turning
+  // GATE_JOB_APPLICATIONS off stops new applications without killing the
+  // bearer links applicants already hold (Codex r5 P0).
+  if (req.path.startsWith('/interview')) return next();
   if (!require('./config/feature-gates').isEnabled('jobApplications')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
+// Interview family dark gate — ahead of the global /api limiter, so a dark
+// probe can never be answered with a 429 instead of the generic 404.
+app.use('/api/public/careers/interview', (req, res, next) => {
+  if (!require('./config/feature-gates').isEnabled('recruitingComms')) {
     return res.status(404).json({ error: 'Not found' });
   }
   next();
@@ -348,6 +384,7 @@ app.use('/api/public/a2a', (req, res, next) => {
   }
   next();
 });
+app.use('/api/visit-summary', require('./middleware/no-store').noStore);
 app.use('/api/', limiter);
 
 // Stricter rate limit for auth endpoints
@@ -444,6 +481,11 @@ app.use('/api/webhooks/resend', require('./routes/webhooks-resend'));
 // parsers so login/reset floods cannot force large JSON parsing work.
 const { staffAuthBodyParsers } = require('./middleware/staff-auth-body');
 app.use('/api/admin/auth', ...staffAuthBodyParsers);
+
+// Ops-digest ingest: dark 404 → limiter → bearer auth → 1 MB JSON parse,
+// all BEFORE the global body parsers, so an unauthenticated caller can
+// never reach a 400/413 (routes/ops-digest-ingest.js ingestPreParsers).
+app.use('/api/ops/digest', ...require('./routes/ops-digest-ingest').ingestPreParsers);
 
 // MCP knowledge endpoint: authenticate (403/503/401 fail-closed) BEFORE any
 // body parsing, then parse with its own 256kb cap — same reason as staff
@@ -555,6 +597,7 @@ app.use('/api/tracking', trackingRoutes);
 app.use('/api/admin/auth', adminAuthRoutes);
 app.use('/api/admin/push', adminPushRoutes);
 app.use('/api/admin/visits', adminVisitsRoutes);
+app.use('/api/admin/visit-closeouts', require('./routes/admin-visit-closeouts'));
 app.use('/api/admin/intelligence-bar', adminIntelligenceBarRoutes);
 app.use('/api/admin/agent-estimate', adminAgentEstimateRoutes);
 app.use('/api/admin/tool-health', toolHealthRoutes);
@@ -676,6 +719,7 @@ app.use('/api/leads', leadIntakeLimiter, require('./routes/lead-webhook'));
 // auth inside the route). JSON body — mounted after express.json above.
 app.use('/api/webhooks/voice-agent', require('./routes/webhooks-voice-agent'));
 app.use('/api/reports', reportsPublicRoutes);
+app.use('/api/visit-summary', require('./routes/visit-summary-public'));
 app.use('/api/admin/inventory', adminInventoryRoutes);
 app.use('/api/admin/price-match', adminPriceMatchRoutes);
 app.use('/api/admin/price-change', require('./routes/admin-price-change'));
@@ -767,6 +811,9 @@ app.use('/api/integrations/watchdog-worker', require('./routes/integrations-watc
 app.use('/api/integrations/commitments-worker', require('./routes/integrations-commitments-worker'));
 // MCP read-only knowledge tools — machine auth (MCP_SERVICE_TOKEN), gated.
 app.use('/api/mcp', require('./routes/mcp'));
+// External ops-cron findings → ops_digest bell rows — machine auth
+// (OPS_DIGEST_INGEST_TOKEN); 404 until the token is set.
+app.use('/api/ops/digest', require('./routes/ops-digest-ingest'));
 app.use('/api/integrations/vendor-login-worker', require('./routes/integrations-vendor-login-worker'));
 app.use('/api/integrations/vendor-price-worker', require('./routes/integrations-vendor-price-worker'));
 app.use('/api/admin/kb', require('./routes/admin-kb'));
@@ -931,6 +978,7 @@ if (config.nodeEnv === 'production') {
   });
   app.get(/^\/report\/[a-f0-9]{32}\/?$/i, reportsPublicRoutes.reportLimiter, sendSpaHtml);
   app.get(/^\/recap\/[a-f0-9]{32}\/?$/i, reportsPublicRoutes.reportLimiter, sendSpaHtml);
+  app.get(/^\/visit\/[a-f0-9]{64}\/?$/, require('./middleware/no-store').noStore, reportsPublicRoutes.reportLimiter, sendSpaHtml);
 
   app.use(express.static(clientBuild, {
     maxAge: '1y',       // Cache hashed assets (/assets/*) for 1 year
@@ -1146,6 +1194,19 @@ primeCatalogNames.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV
       scheduledCron.scheduleInterval(runReceiptDeliveryQueue, 60 * 1000).unref();
     }
 
+    {
+      const runPaymentFailureNotifications = async () => {
+        try {
+          await require('./services/payment-failure-notifications')
+            .processPendingPaymentFailureNotifications({ limit: 10 });
+        } catch (err) {
+          logger.error(`[payment-failure-notifications] processor failed: ${err.message}`);
+        }
+      };
+      scheduledCron.scheduleTimeout(runPaymentFailureNotifications, 30 * 1000).unref();
+      scheduledCron.scheduleInterval(runPaymentFailureNotifications, 60 * 1000).unref();
+    }
+
     // Contact-correction jobs (codex #3413 r17): the durable queue behind
     // GATE_CONTACT_CORRECTION. The webhook enqueues before its ack and
     // kicks an immediate pass; this interval is the recovery guarantee —
@@ -1353,6 +1414,16 @@ primeCatalogNames.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV
           }
         }, { timezone: 'America/New_York' });
       }
+    }
+
+    // Finish request-path lawn delivery after a process exit, even with the
+    // lawn visit gate off: persisted runs and renewable ownership select the
+    // work and the service verifies each step's own completion state. It rides
+    // the cron fleet like every other sweep, and resuming a delivery can send a
+    // real customer SMS, so it is double-gated — cronJobs here, and its own
+    // fail-closed GATE_LAWN_DELIVERY_RECOVERY inside the sweep.
+    if (config.nodeEnv !== 'test' && require('./config/feature-gates').isEnabled('cronJobs')) {
+      require('./services/lawn-visit-delivery').scheduleRecovery(require('./utils/scheduled-cron'));
     }
 
     // Weekly: recompute all assessment analytics (product efficacy, protocol

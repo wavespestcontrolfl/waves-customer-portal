@@ -102,6 +102,8 @@ async function hasRepliedRecently(est, days = 14, { throwOnError = false } = {})
       .join("conversations", "messages.conversation_id", "conversations.id")
       .where("messages.direction", "inbound")
       .where("messages.channel", "sms")
+      // Recruiting replies (job_*, PR #4623) are never customer context.
+      .where((q) => { q.whereNull("messages.message_type").orWhere("messages.message_type", "not like", "job\\_%"); })
       .where("messages.created_at", ">=", cutoff)
       .first("messages.id");
     if (est.customer_id) {
@@ -527,6 +529,7 @@ async function sendDualChannel(est, { sms, email }) {
         recipientId: est.customer_id || null,
         triggerEventId: idempotencyKey,
         idempotencyKey,
+        estimateId: est.id,
         categories: ["estimate_followup", `estimate_followup_${email.stage}`],
         // SendGrid rejection bodies can echo the recipient address — keep
         // them out of the provider log; the catch below redacts too.
@@ -1442,6 +1445,13 @@ const EstimateFollowUp = {
       if (!delivery.expiring.anyEnabled) {
         logger.info("[est-followup] Expiring stage disabled — SMS and email templates inactive");
       }
+      // expires_at is never widened by a grouped sibling any more (#4309
+      // round 7), so the ordinary one-to-three-day window is correct for
+      // every row again — fixed-validity included. The blanket
+      // fixed-validity OR that used to admit rows whose raw column had been
+      // pushed outward is gone with it, which restores the ONE-DAY LOWER
+      // BOUND this stage is supposed to have: a bid inside its final day is
+      // not reminded (GH codex P2 r7 on #4309).
       const expiring = delivery.expiring.anyEnabled ? await db("estimates")
         .whereIn("status", ["sent", "viewed"])
         .whereNull("archived_at")
@@ -1490,6 +1500,9 @@ const EstimateFollowUp = {
           claimed = true;
           const firstName = (est.customer_name || "").split(" ")[0] || "there";
           const { smsUrl, emailUrl } = await mintStageLinks(est, "estimate_followup_expiring");
+          // The row's own offer deadline — the same value the candidate bound
+          // selected on, so the copy can never quote a different date than
+          // the one that made this estimate eligible (#4309 round 7).
           const expDate = new Date(est.expires_at).toLocaleDateString("en-US", {
             month: "long",
             day: "numeric",

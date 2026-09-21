@@ -18,13 +18,15 @@
     {
       "router": "server/index.js",
       "mount": "/",
-      "reason": "Pre-router middleware inventoried as USE surface: the global helmet CSP selector (embed vs strict headers, always next()s), embed-CORS + privacy header stamps (pest-forecast, secure-card), and unobservable-when-dark 404 gates (payer statements, lawn assessment, careers, pest identifier, AI content report, public MCP/A2A) — each either sets headers and next()s or 404s while its GATE_* is off",
+      "reason": "Pre-router middleware inventoried as USE surface: the global helmet CSP selector (embed vs strict headers, always next()s), embed-CORS + privacy header stamps (pest-forecast, secure-card), and unobservable-when-dark 404 gates (payer statements, lawn assessment, careers, pest identifier, AI content report, public MCP/A2A, ops-digest ingest while OPS_DIGEST_INGEST_TOKEN is unset) — each either sets headers and next()s or 404s while its GATE_* is off",
       "routes": [
         "USE / (inline function#1fe36153)",
         "USE /api/ai/chat/report (inline function#6b8b71c2)",
+        "USE /api/ops/digest (inline function#4a372dfc)",
         "USE /api/pay/statement (inline function#cf970c43)",
         "USE /api/public/a2a (inline function#c621253a)",
-        "USE /api/public/careers (inline function#91580da7)",
+        "USE /api/public/careers (inline function#1ef2d7c2)",
+        "USE /api/public/careers/interview (inline function#656a8908)",
         "USE /api/public/lawn-assessment (inline function#8e4982f2)",
         "USE /api/public/mcp (inline function#6af8a3db)",
         "USE /api/public/pest-forecast (inline function#a972e744)",
@@ -71,6 +73,7 @@
         "GET /sw.js [conditional: config.nodeEnv === 'production' [with config.nodeEnv=process.env.NODE_ENV || 'development']]",
         "GET <re:^\\/recap\\/[a-f0-9]{32}\\/?$/i> [conditional: config.nodeEnv === 'production' [with config.nodeEnv=process.env.NODE_ENV || 'development']]",
         "GET <re:^\\/report\\/[a-f0-9]{32}\\/?$/i> [conditional: config.nodeEnv === 'production' [with config.nodeEnv=process.env.NODE_ENV || 'development']]",
+        "GET <re:^\\/visit\\/[a-f0-9]{64}\\/?$> [conditional: config.nodeEnv === 'production' [with config.nodeEnv=process.env.NODE_ENV || 'development']]",
         "STATIC / (clientBuild = path.join(__dirname, '..', 'client', 'dist'), { maxAge: '1y', // Cache hashed assets (/assets/*) for 1 year immutable: true, s…#b5ade038) [conditional: config.nodeEnv === 'production' [with config.nodeEnv=process.env.NODE_ENV || 'development']]",
         "STATIC / (path.join(__dirname, '..', 'client', 'public'), { index: false, maxAge: config.nodeEnv === 'production' ? '1h' : 0, })"
       ]
@@ -459,9 +462,13 @@
     {
       "router": "server/routes/public-careers.js",
       "mount": "/api/public/careers",
-      "reason": "Job-application intake — GATE_JOB_APPLICATIONS dark-404, IP + per-phone limiters, honeypot, Turnstile (the AGENTS.md careers contract)",
+      "reason": "Job-application intake — GATE_JOB_APPLICATIONS dark-404, IP + per-phone limiters, honeypot, Turnstile (the AGENTS.md careers contract); the /interview/:token family is the applicant's interview self-scheduling page by 64-hex bearer token — GATE_RECRUITING_COMMS dark-404 before the limiter (the USE entry is that gate + noStore), router.param format gate before any DB read, generic 404 for unknown/non-interview tokens, 30/10min per-IP limiter, atomic book/withdraw under the booking advisory lock (docs/public-route-contracts.md, PR #4623)",
       "routes": [
-        "POST /api/public/careers/apply"
+        "POST /api/public/careers/apply",
+        "USE /api/public/careers/interview (inline function#cbe61eba)",
+        "GET /api/public/careers/interview/:token",
+        "POST /api/public/careers/interview/:token/book",
+        "POST /api/public/careers/interview/:token/withdraw"
       ]
     },
     {
@@ -663,6 +670,14 @@
       "routes": [
         "GET /api/webhooks/bouncie/ping",
         "POST /api/webhooks/bouncie"
+      ]
+    },
+    {
+      "router": "server/routes/visit-summary-public.js",
+      "mount": "/api/visit-summary",
+      "reason": "Issued 64-hex visit-summary bearer token; hashed lookup, exact eligible member projection, revocation, shared report limiter, privacy headers. Creation gate never darkens issued links; docs/public-route-contracts.md.",
+      "routes": [
+        "GET /api/visit-summary/:token"
       ]
     }
   ]

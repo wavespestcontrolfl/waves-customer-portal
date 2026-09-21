@@ -120,6 +120,9 @@ function limitSeverityTone(severity) {
 
 function ApplicationLogTab({ token }) {
   const [filters, setFilters] = useState({ startDate: "", endDate: "", productName: "", page: 0 });
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState("");
+  const exportInFlight = useRef(false);
   const qs = new URLSearchParams({
     ...(filters.startDate && { startDate: filters.startDate }),
     ...(filters.endDate && { endDate: filters.endDate }),
@@ -128,28 +131,40 @@ function ApplicationLogTab({ token }) {
   }).toString();
   const { data, loading, error, reload } = useFetch(`${API}/applications?${qs}`, token, [qs]);
   const exportCSV = async () => {
-    const params = new URLSearchParams({
-      ...(filters.startDate && { startDate: filters.startDate }),
-      ...(filters.endDate && { endDate: filters.endDate }),
-    }).toString();
-    const response = await fetch(`${API}/report/export?${params}`, {
-      headers: headers(token),
-    });
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = "dacs-report.csv";
-    anchor.click();
-    URL.revokeObjectURL(url);
+    if (exportInFlight.current) return;
+    exportInFlight.current = true;
+    setExporting(true);
+    setExportError("");
+    try {
+      const params = new URLSearchParams({
+        ...(filters.startDate && { startDate: filters.startDate }),
+        ...(filters.endDate && { endDate: filters.endDate }),
+      }).toString();
+      const response = await fetch(`${API}/report/export?${params}`, {
+        headers: headers(token),
+      });
+      if (!response.ok) throw new Error(`Export failed (HTTP ${response.status}). Please try again.`);
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = "dacs-report.csv";
+      try { anchor.click(); } finally { URL.revokeObjectURL(url); }
+    } catch (requestError) {
+      setExportError(requestError.message || "Export failed. Please try again.");
+    } finally {
+      exportInFlight.current = false;
+      setExporting(false);
+    }
   };
   return <div className="space-y-4">
     <Card><CardBody className="grid gap-3 md:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(220px,1.5fr)_auto] xl:items-end">
       <Field label="Start date"><Input type="date" value={filters.startDate} onChange={(event) => setFilters((current) => ({ ...current, startDate: event.target.value, page: 0 }))} /></Field>
       <Field label="End date"><Input type="date" value={filters.endDate} onChange={(event) => setFilters((current) => ({ ...current, endDate: event.target.value, page: 0 }))} /></Field>
       <Field label="Product name"><Input placeholder="Product name…" value={filters.productName} onChange={(event) => setFilters((current) => ({ ...current, productName: event.target.value, page: 0 }))} /></Field>
-      <Button onClick={exportCSV}>Export for DACS</Button>
+      <Button onClick={exportCSV} loading={exporting}>Export for DACS</Button>
     </CardBody></Card>
+    {exportError && <ActionFeedback error>{exportError}</ActionFeedback>}
     {error ? <ErrorState onRetry={reload}>Couldn't load applications — {error}</ErrorState> : loading ? <ActionFeedback className="min-h-16">Loading…</ActionFeedback> : <>
       <Card><CardBody className="p-0"><Table className="min-w-[900px]">
         <THead><TR>{["Date", "Product", "Active Ingredient", "EPA Reg #", "Rate", "Customer", "Tech", "Method"].map((heading) => <TH key={heading} scope="col">{heading}</TH>)}</TR></THead>

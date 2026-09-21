@@ -403,7 +403,9 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     // The probe throws the same operational SLOT_TAKEN shape the fast path
     // uses, so the route's 409 handling (created-profile rollback included)
     // is identical for both.
-    const probeBlock = src.slice(probeIdx, probeIdx + 700);
+    // 760: the probe call grew by one option line (`includeInterviews: true`,
+    // PR #4623) — the SLOT_TAKEN shape still sits directly after it.
+    const probeBlock = src.slice(probeIdx, probeIdx + 760);
     expect(probeBlock).toMatch(/code: 'SLOT_TAKEN',/);
     expect(probeBlock).toMatch(/statusCode: 409/);
     // Shared module import rides the same lazy require as the lock helper.

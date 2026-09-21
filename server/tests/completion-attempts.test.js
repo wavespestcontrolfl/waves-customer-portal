@@ -8,6 +8,7 @@ const {
   markCompletionAttemptFailed,
   markCompletionAttemptSideEffectsPending,
   markCompletionAttemptSucceeded,
+  releaseCompletionAttemptForResume,
 } = require('../services/completion-attempts');
 
 function uniqueViolation() {
@@ -640,6 +641,42 @@ describe('completion attempts', () => {
       response: { success: true },
       error: null,
     });
+  });
+
+  test('a generic intervening release preserves marker-bound definite-rejection proof until a newer rejection replaces it', async () => {
+    const proofA = '[completion_sms_definite_rejection marker=2026-09-17T12:00:00.000Z] rejected A';
+    const proofB = '[completion_sms_definite_rejection marker=2026-09-17T12:05:00.000Z] rejected B';
+
+    // The completion SMS lane rejected definitively; a LATER, unrelated
+    // release (e.g. a card-hold failure) must not erase that durable proof
+    // — a resume matches its marker against structured_notes and only
+    // repeats the send if the marker is gone.
+    const genericKnex = makeKnex([{ returning: [{ id: 'attempt-1' }] }]);
+    await expect(releaseCompletionAttemptForResume(
+      { id: 'attempt-1', error: proofA },
+      new Error('invoice claim unavailable'),
+      genericKnex,
+    )).resolves.toBe(true);
+    expect(genericKnex.calls[0].op.updatePayload.error).toBe(proofA);
+
+    // A NEWER definite rejection legitimately replaces the older proof.
+    const newerRejectionKnex = makeKnex([{ returning: [{ id: 'attempt-1' }] }]);
+    await expect(releaseCompletionAttemptForResume(
+      { id: 'attempt-1', error: proofA },
+      new Error(proofB),
+      newerRejectionKnex,
+    )).resolves.toBe(true);
+    expect(newerRejectionKnex.calls[0].op.updatePayload.error).toBe(proofB);
+
+    // An attempt with no prior marker-bound proof still records the
+    // ordinary release error verbatim.
+    const plainKnex = makeKnex([{ returning: [{ id: 'attempt-1' }] }]);
+    await expect(releaseCompletionAttemptForResume(
+      { id: 'attempt-1', error: 'earlier plain failure' },
+      new Error('transient DB error'),
+      plainKnex,
+    )).resolves.toBe(true);
+    expect(plainKnex.calls[0].op.updatePayload.error).toBe('transient DB error');
   });
 
   test('request hash is stable for equivalent bodies', () => {

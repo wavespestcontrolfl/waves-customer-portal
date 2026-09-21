@@ -1,7 +1,9 @@
 const crypto = require('crypto');
 const modelOutputSchema = require('../../schemas/call-extraction.model-output.schema.json');
 
-const PROMPT_VERSION = 'v6';
+// v7: ordinal street recovery changes routing outcomes even when extraction
+// text is unchanged. Keep pre-ordinal calls outside this persisted cohort.
+const PROMPT_VERSION = 'v7';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
 // several calls — a realtor whose first call cut off mid-dictation of the
@@ -57,13 +59,21 @@ function buildExtractionPrompt(transcription, callerPhone, callDateET, opts = {}
   const callerIdBlock = opts.callerIdName
     ? `\nCALLER ID NAME (carrier record for this number, may be a household member or the account holder rather than the speaker): ${String(opts.callerIdName).trim()}\n`
     : '';
+  // Who is staff and who is the customer follows from who dialed, never
+  // from speaker labels (diarization can swap them). Per-call variable,
+  // deliberately outside the version hash like the blocks above.
+  const callDirectionBlock = opts.callDirection === 'outbound'
+    ? '\nCALL DIRECTION: OUTBOUND — Waves staff placed this call; the person who answered is the customer/prospect.\n'
+    : (opts.callDirection === 'inbound'
+      ? '\nCALL DIRECTION: INBOUND — the caller dialed our office; the person who answered is Waves staff.\n'
+      : '');
   return `You are an extraction engine for Waves Pest Control & Lawn Care, a family-owned company serving Southwest Florida (Manatee, Sarasota, Charlotte, and DeSoto counties).
 
 Analyze this phone call transcript and extract structured data matching the JSON OUTPUT CONTRACT appended at the end of this prompt. Every field must conform to the contract's type and enum constraints.
 
 Caller phone (from Twilio ANI): ${callerPhone || 'unknown'}
 Call date in Eastern Time: ${callDateET}
-${knownCallerBlock}${callerIdBlock}${priorCallBlock}
+${knownCallerBlock}${callerIdBlock}${callDirectionBlock}${priorCallBlock}
 
 Transcript:
 ${transcription}
@@ -95,6 +105,7 @@ CALLER NAME:
 - Set name_full to the full name as spoken.
 - If only one name is stated, put it in first_name; leave last_name null.
 - The caller's name may be spoken by EITHER side: when the agent greets the caller by name ("Hey Taylor", "Hi Sam, it's Adam") and the caller does not correct it, that IS the caller's name — extract it.
+- A name used to greet or address the OTHER party belongs to that other party, and who that is follows from CALL DIRECTION, not from speaker labels (diarization can swap them): on an INBOUND call the person who answered is Waves staff, so a caller's "Hey Tom" names staff, never the caller; on an OUTBOUND call Waves staff placed, the person our staff greets by name IS the customer. If the caller's own name is never stated, leave first_name / last_name / name_full null with low name_confidence rather than naming the person they addressed.
 - Name evidence, strongest first: (1) a name the caller SPELLS, (2) the KNOWN CALLER name on file when the caller answers to it or the context matches, (3) the CALLER ID NAME when it matches the spoken name closely (transcription variants: "Smith" vs SMYTHE, "Coal" vs Cole), (4) the transcribed spoken form. A stronger source overrides a weaker transcription of the same name.
 - Do NOT invent a name from caller ID, address, email, or context when nothing on the call supports it — a caller-ID name alone, with no spoken name at all, stays out of first_name/last_name.
 - Set name_confidence: 0.9+ when clearly stated, 0.5-0.8 when spelled out ambiguously, <0.5 when only partially heard.

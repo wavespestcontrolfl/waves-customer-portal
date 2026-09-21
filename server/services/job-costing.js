@@ -18,7 +18,8 @@
  *                   × company_financials.loaded_labor_rate
  *   material_cost — product_inventory_movements.cost_used, plus
  *                   property_application_history fallback costs
- *   drive_cost    — company_financials.drive_cost_per_stop (one stop per visit)
+ *   drive_cost    — company_financials.drive_cost_per_stop (once per physical
+ *                   stop when a combined-closeout allocation marker is present)
  *   expenses      — expenses WHERE scheduled_service_id=?
  *
  * Idempotent: re-running replaces the prior job_costs row and re-writes the
@@ -166,8 +167,10 @@ async function calcLaborCost(db, scheduledServiceId, technicianId, startTime, en
   untrustedLifecycleSpan = false,
   explicitLaborMinutes = null,
   overrideLaborMinutes = null,
+  allocatedLaborMinutes,
 } = {}) {
   let minutes = 0;
+  const hasAllocatedLabor = allocatedLaborMinutes !== undefined;
   // Authoritative operator correction (admin time-on-site edit): wins over
   // EVERY derived source, including the direct job time entries below — a
   // visit whose closeout was forgotten usually has a forgotten clock-out
@@ -179,13 +182,22 @@ async function calcLaborCost(db, scheduledServiceId, technicianId, startTime, en
     const override = Number(overrideLaborMinutes);
     if (Number.isFinite(override) && override > 0) minutes = Math.round(override);
   }
+  // A grouped packet allocation is authoritative over per-job clocks and
+  // lifecycle spans: those clocks/stamps describe the shared physical stop.
+  // Null means the packet had no trustworthy start and therefore contributes
+  // zero cost without claiming a measured duration; integer zero is the real
+  // rounded allocation. A later admin correction above still wins.
+  if (!minutes && hasAllocatedLabor) {
+    const allocated = Number(allocatedLaborMinutes);
+    minutes = Number.isInteger(allocated) && allocated >= 0 ? allocated : 0;
+  }
   try {
     // Prefer the JOB time entries tied directly to this visit. time_entries.job_id
     // IS the scheduled_services id (see time-tracking.js), so this attributes
     // exactly. entry_type='job' excludes the shift/break/drive/admin_time clocks
     // (a shift row spans the whole workday) and voided rows are dropped — the
     // same scoping every other time-tracking consumer uses.
-    if (!minutes && scheduledServiceId) {
+    if (!minutes && !hasAllocatedLabor && scheduledServiceId) {
       const jobEntries = await db('time_entries')
         .where({ job_id: scheduledServiceId, entry_type: 'job' })
         .whereNot('status', 'voided')
@@ -196,7 +208,7 @@ async function calcLaborCost(db, scheduledServiceId, technicianId, startTime, en
     // when both real bounds exist AND the bounds are trusted. Never a Date.now()
     // window: during the one-time backfill that would scoop up whatever a tech
     // is clocked into at deploy time and mis-attribute it to an old visit.
-    if (!minutes && !untrustedLifecycleSpan && technicianId && startTime && endTime) {
+    if (!minutes && !hasAllocatedLabor && !untrustedLifecycleSpan && technicianId && startTime && endTime) {
       const entries = await db('time_entries')
         .where({ technician_id: technicianId, entry_type: 'job' })
         .whereNot('status', 'voided')
@@ -215,12 +227,12 @@ async function calcLaborCost(db, scheduledServiceId, technicianId, startTime, en
   // labor, so only the caller's explicit operator-entered minutes count.
   // Absent them, labor stays 0 — the same "no data" posture a visit with no
   // recorded bounds gets.
-  if (!minutes && untrustedLifecycleSpan) {
+  if (!minutes && !hasAllocatedLabor && untrustedLifecycleSpan) {
     const explicit = Number(explicitLaborMinutes);
     if (Number.isFinite(explicit) && explicit > 0) minutes = Math.round(explicit);
   }
   // Final fallback: the actual_start/end span on the scheduled_service.
-  if (!minutes && !untrustedLifecycleSpan && startTime && endTime) {
+  if (!minutes && !hasAllocatedLabor && !untrustedLifecycleSpan && startTime && endTime) {
     minutes = Math.max(0, Math.round((new Date(endTime) - new Date(startTime)) / 60000));
   }
 
@@ -352,6 +364,21 @@ async function resolveServiceRecord(db, svc, srCols) {
   return { record, viaFk: false, ambiguous };
 }
 
+// Stable comparison key for the canonical record and the persisted allocation
+// fields that control drive cost. Array positions avoid depending on JSON object
+// key order when historic structured_notes arrive as serialized text.
+function serviceRecordDriveAllocationStamp({ record, ambiguous }) {
+  const canonicalRecord = ambiguous ? null : record;
+  const allocation = parseJsonObject(canonicalRecord?.structured_notes).visitDriveCostAllocation;
+  return JSON.stringify([
+    ambiguous,
+    canonicalRecord?.id ?? null,
+    allocation?.version ?? null,
+    allocation?.packetId ?? null,
+    allocation?.ownerServiceId ?? null,
+  ]);
+}
+
 /**
  * calculateJobCost(scheduledServiceId, db?, opts?)
  * Upserts a job_costs row AND writes the financials through to service_records.
@@ -375,6 +402,7 @@ async function calculateJobCost(scheduledServiceId, db, {
   untrustedLifecycleSpan = false,
   explicitLaborMinutes = null,
   overrideLaborMinutes = null,
+  allocatedLaborMinutes,
 } = {}) {
   db = resolveDb(db);
   if (!scheduledServiceId) throw new Error('scheduledServiceId required');
@@ -453,6 +481,15 @@ async function calculateJobCost(scheduledServiceId, db, {
       overrideLaborMinutes = stampedMinutes;
     }
   }
+  // New combined-closeout records freeze their share of the visit duration
+  // beside the record. Re-derive it on every no-options recalculation so a
+  // linked shared-stop timer or the truthful shared timestamp span cannot
+  // replace the allocation. A later authorized correction wins through the
+  // durable correction stamp resolved above.
+  if (allocatedLaborMinutes === undefined && recordNotes.visitDurationAllocation?.version === 1) {
+    const frozen = recordNotes.visitDurationAllocation.allocatedMinutes;
+    allocatedLaborMinutes = Number.isInteger(frozen) && frozen >= 0 ? frozen : null;
+  }
 
   // An operator can dispose a completed visit as intentionally_free in the
   // Billing Recovery workbench (visit_billing_dispositions). That decision is
@@ -473,14 +510,25 @@ async function calculateJobCost(scheduledServiceId, db, {
   });
   const { laborCost, laborHours } = await calcLaborCost(
     db, scheduledServiceId, svc.technician_id, svc.actual_start_time, svc.actual_end_time, laborRate,
-    { untrustedLifecycleSpan, explicitLaborMinutes, overrideLaborMinutes },
+    { untrustedLifecycleSpan, explicitLaborMinutes, overrideLaborMinutes, allocatedLaborMinutes },
   );
   const { productsCost, breakdown } = record?.id
     ? await calcProductsCost(db, record.id)
     : { productsCost: 0, breakdown: [] };
   const expensesCost = await calcExpenses(db, scheduledServiceId);
-  // A completed visit is one route stop, so it carries one stop's drive cost.
-  const driveCost = driveCostPerStop;
+  // A versioned combined-closeout marker freezes one drive-cost owner for the
+  // physical stop. The owner carries exactly one configured stop cost and all
+  // other marked members carry zero on completion and every later recalculation.
+  // Unmarked records outside a new packet retain the legacy one-cost-per-visit
+  // behavior; same-stop retained reports receive the packet marker at save.
+  const driveAllocation = recordNotes.visitDriveCostAllocation;
+  const driveCost = driveAllocation?.version === 1
+    ? (svc.id === driveAllocation.ownerServiceId ? driveCostPerStop : 0)
+    : driveCostPerStop;
+  const recordDriveStamp = serviceRecordDriveAllocationStamp({
+    record: resolvedRecord,
+    ambiguous,
+  });
 
   const fin = computeServiceRecordFinancials({
     revenue, laborHours, laborCost, productsCost, driveCost, expensesCost,
@@ -523,6 +571,15 @@ async function calculateJobCost(scheduledServiceId, db, {
   let staleSkipped = false;
   await db.transaction(async (trx) => {
     const rowNow = await trx('scheduled_services').where({ id: scheduledServiceId }).forUpdate().first();
+    // Completion creates/updates the canonical service record while holding this
+    // same scheduled-service lock. Re-resolve through the identical FK/legacy
+    // ambiguity path after the lock is granted: a reportless calculation may
+    // have started before packet completion, then resumed after the packet's
+    // marked non-owner calculation already wrote the correct zero drive cost.
+    // Its correction stamps would still match, so record identity + allocation
+    // are part of the stale-write fence too.
+    const currentResolution = await resolveServiceRecord(trx, rowNow, srCols);
+    const currentRecordDriveStamp = serviceRecordDriveAllocationStamp(currentResolution);
     const norm = (v) => (v == null ? null : Number(v));
     // The fence compares the monotonic correction seq as well as the minutes
     // value (codex P2 #3152 round 19): two saves of the SAME minutes are
@@ -532,11 +589,13 @@ async function calculateJobCost(scheduledServiceId, db, {
     // Missing column (pre-migration) compares null === null and proceeds,
     // same as the minutes leg.
     if (norm(rowNow?.time_on_site_adjusted_minutes) !== norm(svc.time_on_site_adjusted_minutes)
-      || norm(rowNow?.time_on_site_correction_seq) !== norm(svc.time_on_site_correction_seq)) {
+      || norm(rowNow?.time_on_site_correction_seq) !== norm(svc.time_on_site_correction_seq)
+      || currentRecordDriveStamp !== recordDriveStamp) {
       logger.warn(
-        `[job-costing] ${scheduledServiceId} — correction stamp moved during recalculation `
+        `[job-costing] ${scheduledServiceId} — costing inputs moved during recalculation `
         + `(${norm(svc.time_on_site_adjusted_minutes)} rev ${norm(svc.time_on_site_correction_seq)} → `
-        + `${norm(rowNow?.time_on_site_adjusted_minutes)} rev ${norm(rowNow?.time_on_site_correction_seq)}); skipping stale financial writes`,
+        + `${norm(rowNow?.time_on_site_adjusted_minutes)} rev ${norm(rowNow?.time_on_site_correction_seq)}, `
+        + `record/drive ${recordDriveStamp} → ${currentRecordDriveStamp}); skipping stale financial writes`,
       );
       staleSkipped = true;
       return;

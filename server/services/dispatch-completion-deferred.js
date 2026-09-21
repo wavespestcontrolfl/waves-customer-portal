@@ -20,6 +20,129 @@
 const db = require('../models/db');
 const logger = require('./logger');
 
+// Every completion template that carries a pay link puts it on its OWN
+// line — "Invoice: {pay_url}" / "Invoice for today's visit: {pay_url}"
+// (service_complete_with_invoice, service_report_v1_with_invoice, every
+// historical variant back to 2026-04). Stripping the whole line the
+// literal pay_url string appears on is therefore robust to admin-edited
+// template copy without parsing the template itself for that common case;
+// collapsing the resulting blank run mirrors stripBalanceLineFromBody's own
+// technique (open-balance.js). A body with no pay_url at all (already
+// stripped by an earlier replay attempt, or a row that never had one) is
+// returned unchanged.
+//
+// validateTemplateBody (admin-sms-templates.js) does not forbid an admin
+// from putting {report_url} or {portal_url} on the SAME line as {pay_url}
+// — whole-line removal there would silently drop the report/portal link
+// too, while the rest of the send still finalizes as a successful
+// completion (#4634 round-11 P2). When another rendered link shares the
+// pay link's line, only the pay-link CLAUSE — its recognized label (see
+// PAY_LINK_LABELS) plus the URL and the punctuation/whitespace immediately
+// touching it — is removed, keeping the rest of the line intact. A layout
+// this can't cleanly resolve (the clause touches other content with no
+// separating boundary) returns null instead of guessing, same posture as
+// the pay-link-only-body case below.
+//
+// Matching happens in SMS display form, the SAME normalization
+// reportV1InvoiceBodyCarriesPayLink (complete-scheduled-service.js) uses to
+// decide whether a rendered body carries its pay link — the pay URL is
+// stored in metadata.pay_url in its original https:// form (complete-
+// scheduled-service.js), but production template rendering strips the
+// scheme off every SMS link (stripSmsUrlScheme, admin-sms-templates.js)
+// before the body ever reaches sms_log, so a literal string match here
+// missed every normal frozen body and the stale link still sent (#4634
+// round-10 P1). Reusing stripSmsUrlScheme — not a second normalizer —
+// keeps this in lockstep with every other place that compares an SMS body
+// against a URL.
+function escapeRegExpLiteral(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// The closed set of pay-link labels this clause-scoped strip recognizes
+// and removes alongside the URL — every completion/invoice template
+// actually in use (the 20260514000002 default-copy migration). Longest
+// first so "invoice for today's visit:" is matched whole, not truncated to
+// its "invoice:" tail. A URL with no recognized label immediately before it
+// strips as a bare clause (just the URL + adjoining punctuation).
+const PAY_LINK_LABELS = [
+  "invoice for today's visit:",
+  'please pay securely here:',
+  'please pay here:',
+  'please pay now:',
+  'pay securely here:',
+  'please pay:',
+  'pay here:',
+  'pay now:',
+  'invoice:',
+  'pay:',
+].sort((a, b) => b.length - a.length);
+
+// Same URL-token shape stripSmsUrlScheme (sms-link-policy.js) matches —
+// used here only to detect whether a SECOND rendered link shares the
+// pay-link's line, not to normalize anything.
+const SMS_URL_TOKEN_RE = /(?:https?:\/\/|(?:[\p{L}\p{N}-]+\.)+[\p{L}\p{N}-]+(?=[:/?#]))[^\s<>"']*/u;
+
+function stripPayLinkLineFromBody(body, payUrl) {
+  if (typeof body !== 'string' || !payUrl || typeof payUrl !== 'string') return body;
+  const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
+  const normalizedUrl = stripSmsUrlScheme(payUrl).trim();
+  if (!normalizedUrl || !stripSmsUrlScheme(body).includes(normalizedUrl)) return body;
+  const payUrlRe = new RegExp(`(?:https?:\\/\\/)?${escapeRegExpLiteral(normalizedUrl)}`);
+  const keptLines = [];
+  for (const line of body.split('\n')) {
+    const urlMatch = payUrlRe.exec(line);
+    if (!urlMatch) {
+      keptLines.push(line);
+      continue;
+    }
+    const matchStart = urlMatch.index;
+    const matchEnd = matchStart + urlMatch[0].length;
+    const restOfLine = line.slice(0, matchStart) + line.slice(matchEnd);
+    if (!SMS_URL_TOKEN_RE.test(restOfLine)) {
+      // The pay link is the only content on this line — drop it whole,
+      // the same behavior as every release before this round.
+      continue;
+    }
+    // Another rendered link shares this line — strip only the pay-link
+    // clause, keeping the rest of the line.
+    const before = line.slice(0, matchStart);
+    let clauseStart = matchStart;
+    for (const label of PAY_LINK_LABELS) {
+      const labelMatch = before.match(new RegExp(`${escapeRegExpLiteral(label)}\\s*$`, 'i'));
+      if (labelMatch) {
+        clauseStart = labelMatch.index;
+        break;
+      }
+    }
+    // Left boundary must be a real separator (line start or whitespace) —
+    // the clause touching other content with nothing recognized in
+    // between means this layout doesn't cleanly resolve.
+    if (clauseStart > 0 && /\S/.test(line[clauseStart - 1])) return null;
+    const trailMatch = line.slice(matchEnd).match(/^[.,;:]?\s*/);
+    const clauseEnd = matchEnd + trailMatch[0].length;
+    // Right boundary: the URL must not touch the next clause with nothing
+    // between (no punctuation, no whitespace) — no safe place to cut.
+    if (clauseEnd < line.length && trailMatch[0].length === 0) return null;
+    keptLines.push(
+      line.slice(0, clauseStart).replace(/[ \t]+$/, '')
+        + line.slice(clauseEnd).replace(/^[ \t]+/, ''),
+    );
+  }
+  const stripped = keptLines
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  // An operator-edited template that is ONLY the invoice line (or whose
+  // shared-line layout couldn't be safely resolved above) strips to
+  // nothing. Restoring the original (link-bearing) body here — the prior
+  // behavior — is exactly the bug this function exists to prevent: a stale
+  // pay link would go out disguised as a successful strip (#4634 round-10
+  // P2). Return null so the caller suppresses this replay through the
+  // normal ineligible/terminal path instead of ever sending an empty body
+  // or the original link.
+  return stripped || null;
+}
+
 async function finalizeDeferredCompletionSend(claimMeta = {}, { retry = false } = {}) {
   const recordId = claimMeta.service_record_id || null;
   const sentAtIso = new Date().toISOString();
@@ -187,4 +310,10 @@ async function terminalDeferredDeclineNotice(claimMeta = {}) {
   logger.warn(`[completion-deferred] decline notice for record ${claimMeta.service_record_id} terminally blocked — status restored to failed`);
 }
 
-module.exports = { finalizeDeferredCompletionSend, finalizeDeferredDeclineNotice, terminalDeferredCompletionSend, terminalDeferredDeclineNotice };
+module.exports = {
+  finalizeDeferredCompletionSend,
+  finalizeDeferredDeclineNotice,
+  terminalDeferredCompletionSend,
+  terminalDeferredDeclineNotice,
+  stripPayLinkLineFromBody,
+};

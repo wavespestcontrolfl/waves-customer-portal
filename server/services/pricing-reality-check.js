@@ -273,13 +273,32 @@ function isBackfilledServiceRecordRow(row) {
 }
 
 function resolveActualMinutes(row) {
+  const notes = parseJson(row.service_record_structured_notes);
   const persisted = firstPositiveNumber(
     row.service_time_minutes,
     row.actual_duration_minutes,
-    row.time_entry_minutes,
-    serviceRecordTimeOnSiteMinutes(row),
+    notes?.timeOnSiteAdjusted === true ? minutesFromElapsed(notes.timeOnSite) : null,
   );
   if (persisted != null) return persisted;
+
+  // A grouped closeout freezes this service's share of the measured visit on
+  // its service record. Zero is a real allocated share and null is an honest
+  // unknown; either must stop the linked visit timer and shared timestamp
+  // spans from being counted once per service. The scheduled-service values
+  // above stay first because the admin correction route updates them later.
+  const allocation = notes?.visitDurationAllocation;
+  if (allocation?.version === 1
+    && Object.prototype.hasOwnProperty.call(allocation, 'allocatedMinutes')
+    && (allocation.allocatedMinutes === null
+      || (Number.isInteger(allocation.allocatedMinutes) && allocation.allocatedMinutes >= 0))) {
+    return allocation.allocatedMinutes;
+  }
+
+  const persistedFallback = firstPositiveNumber(
+    row.time_entry_minutes,
+    minutesFromElapsed(notes?.timeOnSite),
+  );
+  if (persistedFallback != null) return persistedFallback;
   if (isBackfilledServiceRecordRow(row)) return null;
 
   return firstPositiveNumber(
@@ -292,6 +311,14 @@ function resolveActualMinutes(row) {
 }
 
 function hasInvalidActualDuration(row) {
+  const notes = parseJson(row.service_record_structured_notes);
+  const allocation = notes?.visitDurationAllocation;
+  if (allocation?.version === 1
+    && Object.prototype.hasOwnProperty.call(allocation, 'allocatedMinutes')
+    && (allocation.allocatedMinutes === null
+      || (Number.isInteger(allocation.allocatedMinutes) && allocation.allocatedMinutes >= 0))) {
+    return false;
+  }
   // Backfilled rows: judge only the persisted statements — a fabricated
   // negative pair (stale start after the noon instant) must not reclassify
   // the honest unknown as invalid_duration.
@@ -306,17 +333,12 @@ function hasInvalidActualDuration(row) {
     row.service_time_minutes,
     row.actual_duration_minutes,
     row.time_entry_minutes,
-    serviceRecordTimeOnSiteMinutes(row),
+    minutesFromElapsed(notes?.timeOnSite),
     ...pairs,
   ].some((value) => {
     const n = finiteNumber(value);
     return n != null && n <= 0;
   });
-}
-
-function serviceRecordTimeOnSiteMinutes(row) {
-  const notes = parseJson(row.service_record_structured_notes);
-  return minutesFromElapsed(notes?.timeOnSite);
 }
 
 function sqftBand(value) {

@@ -148,7 +148,7 @@ function isPlanApplicationRow(row) {
  * @param {{is_recurring?: boolean, recurring_parent_id?: string|null}|null}
  *   params.visitPlanRow  the completing visit's recurrence identity; when
  *   given, a NON-plan row (a one-time add-on from the same estimate:
- *   is_recurring falsy and no recurring_parent_id) reports not-owed so
+ *   is_recurring falsy, including a linked booster) reports not-owed so
  *   its own mint is never suppressed
  * @param {object} conn  knex connection/transaction
  * @returns {Promise<{owed: boolean, setupFee?: number, estimateId?: string,
@@ -271,7 +271,7 @@ async function findUnmintedSetupFeeObligation({
   const expectedFeeCents = Math.round(Number(authoritativeFee) * 100);
   const stampedRows = await conn('invoices')
     .where({ customer_id: estimate.customer_id })
-    .where('notes', 'like', `%accepted estimate #${estimate.id}%`)
+    .where('notes', 'ilike', `%accepted estimate #${estimate.id}%`)
     .select('id', 'invoice_number', 'status', 'scheduled_service_id', 'service_record_id', 'line_items', 'notes');
   // Every clearing path requires the invoice to have ACTUALLY BILLED the
   // fee (Codex P0, pre-push round 5): the converter legitimately mints
@@ -346,8 +346,8 @@ async function findUnmintedSetupFeeObligation({
   // customer_declined outcome or a coverage-suppressed billing still
   // marks the row completed while minting nothing — clearing the
   // obligation on it would let every later performed application bypass
-  // parking and lose the fee permanently. Only plan rows (is_recurring /
-  // recurring_parent_id) count either way: a completed one-time add-on /
+  // parking and lose the fee permanently. Only plan rows (is_recurring)
+  // count either way: a completed one-time add-on /
   // inspection from the same estimate must not release the hold on the
   // actual first application (Codex P0, round 1).
   let priorQuery = conn('scheduled_services')

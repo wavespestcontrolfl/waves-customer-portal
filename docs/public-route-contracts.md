@@ -1,5 +1,28 @@
 # Public route contracts
 
+## Combined visit summary
+
+`GET /api/visit-summary/:token` (`server/routes/visit-summary-public.js`) and
+the `/visit/:token` React shell use a 64-character lowercase hex bearer token.
+The API format-gates before any database read, hashes the token for lookup,
+and returns the same 404 for malformed, unknown, revoked, or ineligible links.
+Only issued, non-revoked links on closing/closed visits with a complete,
+identity-matched saved packet resolve. Backfilled and withheld service reports
+are excluded. The payload contains the service date and each visible service's
+record id, type, outcome, and existing report link; no technician notes,
+access codes, customer contact details, prices, invoice tokens, or payments.
+
+The API and shell share the existing public report limiter (20 requests/minute
+per IP). Privacy headers (`no-store`, `noindex`, and `no-referrer`) precede the
+limiter; the API also stamps them before the global API limiter. Tokens are
+redacted by the shared URL logger. `GATE_VISIT_CLOSEOUT` controls new packet
+creation, not issued links: disabling it does not revoke customer summaries.
+The admin-only `POST /api/admin/visit-closeouts/:visitId/revoke-summary`
+sets `service_visits.summary_token_revoked_at`; reads immediately refuse the
+link and future dispatch checks refuse it. Revocation does not block packet
+recovery or alter individual report/receipt tokens. The page
+only opens each service's existing report; it adds no write or ask endpoint.
+
 Security contract for every route the portal serves with NO session auth
 at all: token-gated customer surfaces, machine-to-machine webhooks, and
 the anonymous public API. Routes behind the customer JWT (`authenticate`,
@@ -32,13 +55,28 @@ fallback until an approved manual primary-property change freezes it. Contact
 recipients, third-party Bill-To authority, amounts, and permanent receipt tokens
 are unchanged; snapshots remain authoritative when the rollout gate is off.
 
+Invoice line-item ownership metadata: `/api/pay/:token` and
+`/api/receipt/:token` return the invoice's persisted `line_items` as `lineItems`.
+On itemized accepted-plan invoices, each base-application row intentionally may
+include `client_id` (`scheduled_<scheduled-service UUID>_primary`),
+`accepted_service_type`, and `accepted_service_id` (the catalog service UUID).
+These values freeze the billed row's service ownership for combined-visit
+closeout. They are opaque, non-bearer references that grant no read or write
+access; no sibling invoice, report, receipt, or other bearer token rides a line
+item. Legacy and unrelated invoice rows may omit the ownership fields.
+
 `/api/pay/:token`
 (+ `/setup`, `/quote`, `/finalize`, `/confirm`, `/consent`,
 `/capture-setup`, `/setup-complete`, `/update-amount`, `/error`,
 `/invoice.pdf`, `/attachments/:id` — the invoice pay surface; router-wide
 60/min limiter + url-safe 20-64 token format gate with generic 404,
 mirroring pay-statement.js; legacy 25-32 char invoice tokens remain
-valid. OWNER RULING 2026-08-16, superseding the earlier "no sibling-
+valid. A received estimate deposit awaiting invoice reconciliation blocks
+the pay-page GET and new collection with HTTP 409 and
+`reconciliationRequired: true`. The deposit ledger is the hold authority;
+payer-billed invoices are exempt. Recording an already-settled PaymentIntent
+and permanent receipt access remain available. OWNER RULING 2026-08-16,
+superseding the earlier "no sibling-
 invoice data on this surface" P0: with GATE_PAY_INCLUDE_BALANCE on, the
 pay page ITEMIZES the customer's other open self-pay invoices — numbers,
 dates, amounts, an accepted forwarded-link disclosure — and the Pay
@@ -232,6 +270,42 @@ the SPA `/recap/:token` "Your Visit, in Motion" recap player (token-gated; serve
 only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
 same noindex/no-referrer/no-store headers as `/report/:token`),
 `/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound;
+recruiting replies (classification is NOT gated — `GATE_RECRUITING_COMMS`
+is the send / public-link kill switch only; applicants texted before it
+was turned off keep classifying from stored evidence for the window; a
+database with no recruiting tables at all (42P01) answers "not a
+recruiting reply"; any other lookup error fails closed — 503, claim
+released, nothing persisted — ONLY for a phone that is plausibly an
+applicant (a 60-second snapshot of open applications' phones, or no
+snapshot available at all); every other phone continues on the ordinary
+path so a recruiting-store hiccup never stalls the inbound pipeline): an inbound
+from a phone that
+(a) belongs to an OPEN job application (new/reviewed/interview/offer)
+AND (b) has a `job_*` SMS `handoff`/`sent`/`uncertain` entry — a queued `deferred`
+entry is NOT evidence (nothing reached the applicant) — (the `handoff`
+entry is written BEFORE the provider call, stamped with the outbound
+`from_number`, and reconciled in place after — DURABLE evidence that
+always precedes the text; the post-acceptance sms_log row is never the
+basis) in that application's
+`comms_history` within 45 days — the reply is tied to the application
+that received the text, never phone recency — AND (c) arrived on the
+number that text went out from, with NO newer DELIVERED customer-facing
+(non-`job_*`, non-internal) outbound text to that phone FROM THAT SAME
+Waves line in sms_log after the effective handoff (queue time, replay
+attempt time, or finalized send time — whichever is latest)
+(that advisory read only ever hands a reply BACK to the customer path; a
+missing sms_log row leaves the durable evidence standing) — is classified by
+`services/recruiting-inbound.js` BEFORE the unified inbox persist — the
+inbox row is born typed `job_applicant_reply` (a classification lookup
+failure releases the claim and answers 503 with nothing persisted) — and
+then, after STOP/HELP/START handling and before the reaction / customer
+paths, recorded on the application (`comms_history` + an `sms_log` row
+typed `job_applicant_reply`, one transaction, idempotent on the SID; a
+persistence failure also releases + 503s), raised ONLY as the admin-only
+`job_applicant_reply` bell, and answered with empty TwiML; it never
+reaches the tech-visible `sms_reply` bell, lead intake, the estimator or
+any customer automation, even when the phone also belongs to a customer
+(owner-only recruiting boundary, `utils/recruiting-thread-scope.js`);
 `GATE_SMS_SPAM_CLASSIFIER=shadow` enables a bounded solicitation screen for
 unknown-sender SMS; `true` enables enforcement at confidence >= 0.85.
 Unset or any other value disables screening.
@@ -292,6 +366,28 @@ country codes), or an active
 503 with empty TwiML before either consumer runs; the owned SID claim is
 released before that response. Twilio's configured retry/fallback policy
 governs redelivery),
+Accepted inbound SMS also requires a saved unified inbox message before a
+successful acknowledgment or ordinary downstream processing. A missing message
+returns 503 and releases only this delivery's owned inbound claim. Eligible
+STOP requests still persist suppression, recipient decline, and preference
+updates before that error; non-idempotent logs and alerts wait for redelivery.
+Those STOP effects and a permanent MessageSid application receipt commit
+atomically under the canonical phone lock. A failed consent transaction also
+returns 503. A retry of an applied STOP saves the inbox and completes deferred
+handling without changing consent again or sending an unsubscribe confirmation;
+it cannot undo a newer START. Receipts must remain for the lifetime of retries.
+Inbound media uses stable account/message/index storage keys across retries.
+Stale contact-correction reservations require a saved unified inbox message
+before promotion; failed route cancellation cannot replay an unrecorded source.
+Provider retry/fallback remains governed by the configured Twilio policy.
+The shared SMS-alert delivery protocol uses a two-minute owned sender lease,
+confirmed to four hours only after actual bell/push delivery evidence and a
+durable legacy receipt. Committed bells keep immutable message keys so lost
+receipts can be repaired without dispatching again; repair preserves original
+delivery time. Deliberate suppression is terminal. Push-only retries reuse the
+message tag without renotification; provider acceptance followed by a crash
+before receipt persistence remains ambiguous and can repeat a provider handoff.
+
 `/api/webhooks/twilio/outbound-amd` +
 `/api/webhooks/twilio/outbound-dial-complete` (POST; machine-to-machine
 callbacks under the existing Twilio-signature-validated mount. The shared
@@ -533,7 +629,17 @@ before either provider path; both provider paths re-read the row and repeat
 the customer-viewable + call-side-hold check as the LAST step before the
 SendGrid/Twilio handoff, so a clarify hold or archive that lands during the
 PDF render withholds the packet with the same generic 404 and releases the
-SMS dedup claim so a later legitimate retap can send).
+SMS dedup claim so a later legitimate retap can send; every success or
+deduplicated response on either channel rechecks the annual guard
+(server/services/estimate-annual-guard.js) through one shared helper
+(withheldOr) before answering — the fresh-dispatch success, the in-process
+and cross-restart SMS dedup hits, the cross-process claim-loser's dedup
+hit, and the email per-day idempotency dedup all funnel through it, so a
+changed or never-delivered annual offer can never surface through a
+shortcut that skips the check — mapping a blocked verdict to the same
+generic 404, with the SMS dedup claim stamped/released exactly like the
+customer-viewable/call-side-hold case; no new request shape, no new
+payload).
 `/api/estimates/:token/bond` (PUT; customer bond-term switcher on the
 estimate page — same contract family as the service-preferences toggles.
 Token IS the auth: slug-or-64-hex format gate rejects malformed probes
@@ -567,7 +673,12 @@ and keys via the shared /64-collapsing `rateLimitKey`). Eligibility
 requires a PUBLISHED estimate (sent_at/viewed_at set — the expiration
 sweep flips never-sent drafts to 'expired' too, and those must never
 qualify) that is past expires_at or sweep-expired, not
-accepted/declined/archived. Concurrency: the 24h dedupe stamp and the
+accepted/declined/archived. Fixed-validity bids and groups containing any live
+fixed-validity sibling (draft, scheduled, mid-send, published or expired —
+not only the rows an extension would revive) are ineligible before
+any claim: both the POST and the expired `/data` response use generic 404
+without the extension-offer bit. Admin extensions refuse the whole group
+before changing any expiry. Concurrency: the 24h dedupe stamp and the
 lifetime auto-grant burn live in DEDICATED estimates columns
 (`extension_requested_at` / `extension_auto_granted_at`, migration
 20260711000001 — never estimate_data, whose full-blob writers could erase
@@ -714,6 +825,11 @@ same pair is accepted by `/api/webhooks/lead` and its `/api/leads` alias
 with identical semantics. Also accepts the OPTIONAL `timeline` described
 under `/api/webhooks/lead` above, with the same storage and urgency
 semantics; it survives the later `/api/public/quote/calculate` snapshot).
+The returned and lead-stored `enriched` profile is the admin lookup's profile
+MINUS the staff-only `subdivisionMedian` block (the plat name, county, and
+assessed-neighbor sample/range that back the admin estimator's home-size
+estimate for an unassessed vacant parcel) — `publicEnrichedProfile` strips it
+on both paths; the response otherwise describes only the requested parcel).
 `/api/public/estimator/lead-prefill` (POST exchange, read-only semantics;
 swaps the voicemail text-back link's `lead_id` + HMAC token for that ONE
 lead's own contact fields — first/last name, email, phone, address, city,
@@ -967,8 +1083,30 @@ against all live tokens 2026-08-07); accept/decline carry a 10/hr
 limiter — the two heaviest public money-adjacent writes; select-tier/
 preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
 Authored commercial proposals expose reviewed four-decimal quantities and unit
-rates, explicit unit labels and cent-rounded line amounts through the existing
-normalized proposal and document output. These additions do not widen draft access.
+rates, explicit unit labels, cent-rounded line amounts, and the fixed
+`validThrough` date in their normalized proposal and document output. Internal
+`estimate_data.proposalCosting` stays outside that public allowlist. A fixed
+price hold governs expiry even after resends and cannot be changed by the
+generic extension or auto-renew paths; these additions do not widen draft access.
+A delivered group anchor may remain navigable through its stored
+`estimate_data.groupLinkViewableThrough` after its own offer expires, in both
+the HTML and `/data` views, so valid siblings remain reachable. Expired legacy
+anchors with this navigation window route to the React property-group view
+(the API HTML mount redirects to `/estimate/:token`). This window
+never changes offer deadlines, acceptance, CTA eligibility or reminder copy.
+Archived, unpublished, send-failed and off-surface rows remain withheld, and
+the call-side block still overrides navigation access. During an admitted group
+navigation window, eligible published expired members remain in `propertyGroup`
+with `status: expired`; a member whose own link is no longer viewable omits
+`token` and renders as a nonclickable expired summary.
+An active anchor's own unexpired deadline also permits these summaries; receipt
+visibility alone after acceptance or decline does not extend this window. Expired
+navigation-only pages hide the unavailable PDF download. Legacy token redirects
+retain no-store privacy headers. An expired anchor without a live window can
+recover a missed grant on HTML or `/data` access after a temporary call block
+clears: the shared transaction pins its id, token and group, requires current
+published/call-clear eligibility, and updates only navigation metadata from
+eligible actual offer deadlines.
 The `/estimate/:token?website=1` SPA uses the website's compact pricing →
 scheduling → Auto Pay presentation over these same APIs. `embed=1` permits
 framing only while `GATE_WEBSITE_QUOTE_BOOKING` is on and only from the
@@ -1837,6 +1975,46 @@ tools may be added here — the write surface stays IB-only behind
 write-gates. JSON-RPC batches are capped at 20; GET returns 405 (stateless
 server, no SSE). Treat the auth ordering and the read-only tool surface as
 security-critical).
+`/api/ops/digest` and `/api/ops/digest/resolve` (POST; machine-to-machine
+— the external Waves ops crons on the owner's Mac post their FIX:/ACT:
+findings so they land as `ops_digest` admin bell rows (the Waves Ops lane
+in Agents → Activity) instead of emails to contact@, and retire a finding's
+standing rows once its check has run clean N times (fall-off rule, owner
+2026-09-11). Token-only auth: `OPS_DIGEST_INGEST_TOKEN` via
+`Authorization: Bearer`, constant-time compare. Privacy baseline on every
+outcome (`Cache-Control: no-store`, `X-Robots-Tag: noindex`,
+`Referrer-Policy: no-referrer` via middleware/no-store.js). Fail-closed in
+ordered layers, the dark check FIRST — a pre-router `app.use('/api/ops/digest')`
+gate in server/index.js mounted ahead of the global `cors()` (so even an
+OPTIONS preflight reads 404 while dark), the global `/api/` limiter, and a
+pre-parser chain (`ingestPreParsers`: dark gate → own limiter → bearer auth
+→ 1 MB JSON parse → JSON body-error handler) mounted ahead of the global
+JSON parser, same pattern as `/api/mcp`. While the token is unset every
+request reads the SAME generic 404 an unknown route gets (`Route not
+found: METHOD path`), never a revealing 429, 400 or 413; with the token set
+a malformed or oversized body is parsed only AFTER auth, so an
+unauthenticated caller sees 401, never 400/413. Layers: 404 while the token
+is unset (that IS the kill switch), then 120/15-min per-IP limiter
+(/64-collapsed), 401 on mismatch,
+409 while `GATE_OPS_DIGESTS_IN_APP` / `GATE_AGENT_ACTIVITY` are off, 400 on
+a rejected payload (kinds other than FIX/ACT are refused — routine/FYI
+reporting stays on email), 503 when no row landed; the caller emails on
+any non-2xx so nothing is lost. A failure observed at or before this key's
+latest clean observation returns 200 `{ ok: true, stale: true }` without a
+bell or email fallback. `/resolve` shares the 404 → limiter → 401
+→ 400 layers but deliberately has NO 409: retiring history must never
+depend on the ingest lane being on. Under the same per-key advisory lock
+as ingest, it atomically retires rows by observation time (using created_at
+only when no observation stamp exists) and advances a durable clean watermark
+even when no rows stand; success answers 200 `{ resolved: N }` (N may be 0),
+and a DB failure answers retryable 503, never false success. Writes exactly
+one admin `ops_digest` row
+(bell:true, dedupe on the check+key pair inside a rolling day; links must
+be `/admin`-relative; subject/body/metadata size-capped) or marks rows
+read + `metadata.resolved` — never deletes, never touches customer rows.
+No customer PII may be posted here (the ops-cron contract is id prefixes
+and masked phones). Treat the auth ordering and the exceptions-only kind
+allowlist as security/ruling-critical).
 `/api/client-errors` (POST; unauthenticated client error telemetry. An
 anonymous surface — /admin/login, a public token route, or any page — can
 crash in the browser, so the reporter cannot require auth. Error reports
@@ -1951,14 +2129,152 @@ with 400 fail-closed (malformed shapes, non-string or over-length
 answers, over-length city, unknown role all reject; answer keys are an
 ALLOWLIST — unknown keys are dropped by contract, and `source` is
 server-sanitized attribution, not applicant content). Applicants
-are NEVER customers or leads — the route never touches either table —
-and nothing sends applicant-facing comms (owner contacts every applicant
-himself). Post-insert side effects are fire-and-forget: an AI ranking
+are NEVER customers or leads — the route never touches either table.
+Post-insert side effects are fire-and-forget: an AI ranking
 screen that is assist-only (it never changes status or any
 applicant-facing outcome — every decision is the owner's, which also
-keeps us clear of automated-employment-decision law) and an owner
-bell/push. Treat the gate, the limiters, the no-customer/no-lead rule,
-and the no-comms contract as security-critical.)
+keeps us clear of automated-employment-decision law), an owner
+bell/push, and — as of the recruiting-comms lane, `GATE_RECRUITING_COMMS`
+— the applicant's own submit confirmation: an email whenever one is on
+file, plus SMS only when `sms_consent` was checked on the form. While
+that gate is dark the confirmation is skipped entirely (byte-identical to
+before the lane); it is never a blocking part of the request either way.
+Treat the gate, the limiters, the no-customer/no-lead rule, and the
+fire-and-forget-only comms contract as security-critical.)
+`/api/public/careers/interview/:token` (GET; `/interview/:token/book` and
+`/interview/:token/withdraw`, both POST — the interview self-scheduling
+funnel a `job_interview_invite` text/email sends the applicant, gated
+`GATE_RECRUITING_COMMS` ALONE (404 for the WHOLE `/interview/*` family
+before even the limiter runs). The `jobApplications` INTAKE gate in
+index.js carves `/interview/*` out: closing intake stops new applications
+without killing the bearer links applicants already hold. `interview_token` is 64
+lowercase hex chars, minted once (first move to `interview`, never
+rotated in this PR) and format-gated via `router.param` before any
+database read — malformed, unknown, and non-`interview`-status tokens all
+answer the same generic `{error:'Not found'}` 404. A 30/10min per-IP
+limiter (prod only, `ipFallbackKey`) sits behind both gates. GET returns
+`{first_name, status:'open'|'booked', mode_options, in_person_address,
+timezone, booked, slots}` — `slots` come from
+`server/services/interview-slots.js` (weekly window template, 4-hour lead
+time, 30-minute slots, 15-minute buffer against the owner's own route
+stops, and against every other applicant's booked interview) and are
+ALWAYS present, booked or not, so "Change time" needs no second fetch.
+Booked interviews are ALSO occupancy for customer scheduling: the shared
+conflict reader `findConflictingVisits` (scheduling/occupancy.js) appends
+them as synthetic conflict rows (`conflict_reason:'interview'`, interview
+±15 minutes, `interview`/`offer` rows, best-effort raw side read) for the
+callers that opt in with `includeInterviews:true` — the customer booking
+writers: the availability confirm probe, `routes/booking.js`, and every
+`slot-reservation.js` commit path — and the availability slot builder
+merges the same windows into its occupied set. Staff/automation readers
+(rebooker, rain-out, renewals, admin schedule, capacity mode) do not opt
+in yet: full coverage needs interviews represented as calendar rows
+(owner decision, PR 2). An identical `{mode, start}`
+retry of the current booking is answered with the current payload and no
+side effects. POST `/book` establishes token eligibility (a non-authoritative read;
+unknown/inactive ⇒ generic 404) BEFORE any body validation, so an invalid
+token's response never depends on body shape; then re-validates the
+client's chosen `start` against that SAME live offered set — the client's slot choice is never trusted — and
+writes `interview_mode`/`interview_at`/`interview_end_at`/
+`interview_booked_at` inside ONE transaction that first takes the SHARED
+date-wide occupancy lock (`acquireOccupancyLock`, scheduling/occupancy.js
+rung 1 — the same lock every customer scheduling writer takes for that
+day), re-lists the offered slots THROUGH that transaction, and row-locks
+the application (`FOR UPDATE`) — two applicants who both saw a free slot,
+or an applicant and a customer confirm on the same day, are serialized;
+two taps on one application cannot overwrite each other,
+and the status_history entry is appended in SQL; the write is still
+conditional on `status='interview' AND interview_token=?`, a 0-row result
+(a race with a withdraw) is a 409, never a silent overwrite. Privacy
+headers (`noStore`: no-store + noindex + no-referrer) are mounted on the
+`/api/public/careers/interview` prefix in index.js AHEAD of the outer
+`jobApplications` careers gate and ahead of the global `/api` limiter, so
+every outcome — including a dark 404 from either gate — carries them; the
+SPA document `/careers/interview/<64-hex>` gets the same headers via
+`utils/sensitive-spa-headers.js`. Applicant threads are OWNER-ONLY in
+every shared reader: the invite carries this bearer link and dual-writes
+into the unified inbox, so `utils/recruiting-thread-scope.js` filters every
+recruiting MESSAGE (`message_type LIKE 'job_%'` — the invite/confirmation
+and the applicant's reply, which the webhook types `job_applicant_reply` at
+birth) out of `/api/admin/communications/log`, the dashboard inbox + its
+unread count + reply lookup — message-level, so a customer's own texts in
+a thread shared with an applicant stay visible —
+applicant rows (`audience='applicant'`) out of the compliance export, and
+refuses (403) a non-admin `POST /api/admin/communications/ai-draft` for a
+phone that has ever been party to a recruiting text
+(`isRecruitingPhone` — durable applicant-ledger evidence first, the
+provider log second) before any history for that phone is loaded; the
+composer and `/schedule-sms` use `activeOnly` (ANY open application on
+the phone, delivery evidence or not — an email-only applicant, one whose
+consent box was unticked, or one whose first text is still queued has no
+ledger evidence yet, and the owner's first text is what creates it; a
+validated `customerId` is explicit customer context and bypasses the
+check on the immediate send only, never with a retained recruiting
+`replyToMessageId`), so a former applicant who is also a customer
+receives ordinary service texts again once their application closes. An
+OWNER texting an applicant from a shared surface — the dashboard inbox
+reply on a `job_applicant_reply` row, or the Communications composer to
+a recruiting phone — rides the recruiting rail (`sendOwnerReply`: purpose
+`applicant_reply`, message_type `job_owner_reply`, sent from the line the
+applicant texted, handoff evidence on the application; refused with outcome `closed` for a
+rejected/withdrawn/hired application — the classifier would not protect
+the reply), never a 'manual' customer text; a non-admin is refused (403)
+on both, and `POST /schedule-sms` refuses a recruiting phone for everyone
+(403 non-admin, 409 admin) — applicant texts are never queued as manual
+customer texts. The owner reply carries the same provider-boundary
+eligibility guard as every recruiting send and lands on the open
+application whose ledger owns the newest SMS attempt. A technician's
+read-marking scope (`markInboundSmsRead`) excludes hidden recruiting rows
+exactly as the display query does. A standalone compliance command (STOP /
+START / HELP) bypasses recruiting classification entirely, so a
+recruiting-store outage can never delay a suppression write; the recruiting
+ledger still counts as compliance ELIGIBILITY evidence (an applicant's STOP
+is honored even when the provider-log writes failed), failing open. Reply evidence is scoped to the line the reply arrived on
+before the newest entry is chosen (two recruiting lines = two threads).
+The immediate SMS ledger entry is written `pending` (not evidence) before
+the pipeline and moved to `handoff` inside the pipeline's preSendCheck —
+right before Twilio, after suppression/consent/line-type — so a send
+blocked by a validator never leaves delivery evidence. Applicant emails
+never invite an email reply (questions go to the phone), stay off the
+generic transactional retry rail, and never resolve to a customer in
+bounce recovery. Every applicant send re-checks eligibility at the ACTUAL provider
+boundary (a `preSendCheck` inside the SMS pipeline; a `beforeProvider`
+check immediately before SendGrid — a stale one settles its ledger row
+`failed` and sends nothing). Applicant texts obey the 8am–8pm ET send window; a held send is queued
+on the scheduled-SMS rail (`sms_log` status `scheduled`, metadata
+`audience:'applicant'` + `purpose` + `consent_basis` + the ledger entry id
+and the application's interview token/time, replayed by
+services/scheduler.js under the applicant policy through the
+`recruiting_comms_deferred` deferred-replay registry entry — the recheck
+fails closed on the gate, a missing/closed application, a changed token
+or a rebooked time/mode (the ledger entry moves to `handoff` only in the
+locked provider handoff — a transaction holding the application row FOR
+UPDATE from the eligibility read through the provider request — after the
+fresh suppression/consent checks pass and after the eligibility recheck is
+run AGAIN at that boundary — a stale
+application answers `RECRUITING_STALE_AT_HANDOFF` with no provider call;
+never at the claim-time recheck), and on a NEWER attempt of the same stage in the
+ledger (a resend supersedes a queued invite even after the worker claimed
+it); the recheck marks the queued entry `handoff`
+before dispatch, finalize marks it `sent`, and a terminal block never
+downgrades evidence — never-attempted `deferred` → `blocked`, attempted
+`handoff` → `uncertain`, `sent`/`uncertain` untouched) and
+the ledger entry reads `deferred` with its `scheduled_for` (a `deferred`
+entry is owner-only reply context like a sent one). Queued recruiting
+rows are hidden from non-admins in `GET /api/admin/communications/scheduled`
+and refused (403) on `DELETE`. A successful book fires
+(fire-and-forget) the `interview_confirmation`
+comms — SMS only with `sms_consent` or evidence the owner already texted
+this applicant by hand — and the `job_interview_booked` admin
+bell/push. POST `/withdraw` is the same atomic-update shape targeting
+`status='withdrawn'` (0 rows ⇒ 404) and fires `job_application_withdrawn`.
+Neither admin notification carries applicant PII (mode + a formatted time
+label only), matching `new_job_application`'s contract — the recruiting
+queue itself stays `requireAdmin`. No logger call anywhere in this family
+ever receives a raw phone, email, name, or message body — only ids and
+masked forms. Treat the gate-before-limiter ordering, the token format
+gate, the atomic conditional updates, and the no-PII-in-notifications rule
+as security-critical.)
 `/api/estimates/:token/service-opt-out` (PUT; the customer drops ONE
 recurring service line from a sent estimate. Unlike the bond and interior
 switchers this route re-prices the WHOLE estimate through the canonical
@@ -1979,7 +2295,18 @@ call-side linkage verdict; `isEstimateAcceptActive` + an explicit
 PRESENCE (not `proposal.enabled`) — the same refusal applies to RESTORES
 and suppresses the add-back projection, because an itemization added after
 a removal is the authoritative billed quote — plus the last remaining
-recurring line, `tree_shrub` and every `commercial_*` key; a fail-CLOSED 409 when the
+recurring line, `tree_shrub`, every `commercial_*` key, and an annual-protection
+termite line (removal would erase its priced-program replay provenance).
+Quarterly termite remains removable; a pre-provenance restore recovers the
+sold program and station pricing knobs from the original opt-out baseline
+when present, while an annual sale or an unproven annual request remains
+blocked for customer restores. `/data` keeps such keys in `removedKeys` to
+suppress a duplicate add-service offer, but lists them in
+`restoreBlockedKeys` so the customer page omits their unusable add-back
+control. A server-initiated compensation for a preexisting staff-parked
+annual line may restore its captured annual terms after a failed send;
+customer restores remain refused;
+a fail-CLOSED 409 when the
 recompute cannot run; and a 400 refusal when the removal would turn a
 bundled-free one-time item into a charge (owner ruling — that one goes to
 the office; the before-state resolves through `result` OR the mapped raw

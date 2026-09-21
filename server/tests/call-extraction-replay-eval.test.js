@@ -1,4 +1,5 @@
 jest.mock('../services/ops-digest', () => ({ deliverOpsDigest: jest.fn(async ({ sendEmail }) => sendEmail()) }));
+jest.mock('../services/ops-digest-fall-off', () => ({ retireIfClean: jest.fn(async () => 1) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const {
@@ -68,6 +69,13 @@ function failingRun() {
 const failIfRealEmail = async () => { throw new Error('test fell through to default email sender'); };
 
 describe('call extraction replay scheduled eval', () => {
+  const { retireIfClean } = require('../services/ops-digest-fall-off');
+  beforeEach(() => retireIfClean.mockClear());
+
+  test('a manual pass does not retire standing failures', async () => {
+    await runCallExtractionReplayEval({ runReplay: async () => replayRun(), notifyOnFailure: false });
+    expect(retireIfClean).not.toHaveBeenCalled();
+  });
   test('a manual run (notifyOnFailure: false) inserts no notification and sends no email', async () => {
     const digest = require('../services/ops-digest').deliverOpsDigest;
     digest.mockClear();
@@ -98,6 +106,9 @@ describe('call extraction replay scheduled eval', () => {
     });
     expect(runReplay).toHaveBeenCalledTimes(1);
     expect(notifications).toEqual([]);
+    expect(retireIfClean).toHaveBeenCalledWith('call-extraction-eval', { alsoRetire: {
+      category: 'eval_regression', field: 'evalKey', legacyTitlePrefix: 'Call extraction replay eval',
+    } });
   });
 
   test('carries answer-key accuracy into the result and the failure notification', async () => {

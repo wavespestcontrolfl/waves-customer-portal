@@ -19,6 +19,75 @@ jest.mock('../config/feature-gates', () => ({
 const db = require('../models/db');
 const { resolveScheduledRecipient, scheduledDepositReceiptAllowed, classifyDepositReplayFallback } = require('../services/scheduler');
 
+test.each([false, true])('scheduled replay uses trusted row identities and registered dispatch: %s', async (registered) => {
+  // Exercise the actual dispatch block without starting cron jobs or importing
+  // live integrations. A forged descriptor must not override its claimed row.
+  const source = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
+  const start = source.indexOf('const sendReplay = () => {');
+  const end = source.indexOf('if (smsResult.scheduledHold) continue;', start);
+  expect(start).toBeGreaterThan(-1);
+  expect(end).toBeGreaterThan(start);
+  const sendCustomerMessage = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
+  const refusal = { sent: false, deliveryOutcome: 'not_sent', retryable: true };
+  const dispatchDeferredReplay = jest.fn(async (_entry, _meta, fallback) => registered ? refusal : fallback());
+  const dispatchScheduledSms = jest.fn(async (_msg, _meta, send) => send());
+  const result = await require('vm').runInNewContext(`(async () => { ${source.slice(start, end)} return smsResult; })()`, {
+    msg: { id: 'queue-row', customer_id: 'row-customer', message_body: 'Current queued copy' },
+    claimMeta: { entry_point: 'fixture', scheduled_sms_log_id: 'forged-row', customer_id: 'forged-customer' },
+    toPhone: 'fixture-phone', purpose: 'appointment', replayConsentBasis: undefined,
+    sendCustomerMessage,
+    dispatchScheduledSms,
+    SCHEDULED_SMS_MAX_ATTEMPTS: 3,
+    require: () => ({ deferredSmsHandoff: () => undefined, dispatchDeferredReplay }),
+  });
+  expect(dispatchScheduledSms).toHaveBeenCalledWith(expect.objectContaining({ id: 'queue-row' }),
+    expect.objectContaining({ entry_point: 'fixture' }), expect.any(Function), 'appointment', 3);
+  expect(dispatchDeferredReplay).toHaveBeenCalledWith('fixture', expect.objectContaining({
+    scheduled_sms_log_id: 'queue-row', customer_id: 'row-customer',
+  }), expect.any(Function));
+  if (registered) {
+    expect(result).toBe(refusal);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  } else {
+    expect(result).toMatchObject({ sent: true });
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      body: 'Current queued copy', to: 'fixture-phone', customerId: 'row-customer', entryPoint: 'scheduled_sms_cron',
+    }));
+  }
+});
+
+test('scheduled completion sends the body after the review guard strips its bundled ask', async () => {
+  const source = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
+  const start = source.indexOf('const sendReplay = () => {');
+  const end = source.indexOf('if (smsResult.scheduledHold) continue;', start);
+  expect(start).toBeGreaterThan(-1);
+  expect(end).toBeGreaterThan(start);
+  const completion = 'Receipt: https://portal.test/receipt/xyz';
+  const sendCustomerMessage = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
+  const dispatchDeferredReplay = jest.fn(async (_entry, _meta, fallback) => fallback());
+  const dispatchScheduledSms = jest.fn(async (msg, meta, send) => {
+    // dispatchScheduledSms persists this rewrite before invoking send.
+    msg.message_body = completion;
+    delete meta.bundled_review_request_id;
+    return send();
+  });
+  await require('vm').runInNewContext(`(async () => { ${source.slice(start, end)} return smsResult; })()`, {
+    msg: { id: 'queue-row', customer_id: 'customer-1', message_body: completion
+      + '\n\nEnjoyed the service? A quick review means the world: https://portal.test/rate/ask' },
+    claimMeta: { entry_point: 'dispatch_completion_deferred', bundled_review_request_id: 'review-1' },
+    toPhone: 'fixture-phone', purpose: 'service_complete', replayConsentBasis: undefined,
+    sendCustomerMessage, dispatchScheduledSms, SCHEDULED_SMS_MAX_ATTEMPTS: 3,
+    require: () => ({ deferredSmsHandoff: () => undefined, dispatchDeferredReplay }),
+  });
+  expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+    body: completion,
+    metadata: expect.objectContaining({ bundled_review_request_id: undefined }),
+  }));
+  expect(dispatchDeferredReplay).toHaveBeenCalledWith('dispatch_completion_deferred',
+    expect.objectContaining({ scheduled_sms_log_id: 'queue-row' }), expect.any(Function));
+  expect(dispatchDeferredReplay.mock.calls[0][1]).not.toHaveProperty('bundled_review_request_id');
+});
+
 function mockCustomerLookup(row) {
   db.mockImplementation((table) => {
     if (table !== 'customers') throw new Error(`unexpected table: ${table}`);

@@ -530,7 +530,7 @@ async function attachToInvoice(invoice, database = db) {
  * invoice. No-ops once the snapshot already carries the delivered address. Never
  * throws — a bookkeeping write must not break a successful send.
  */
-async function freezeApEmail(invoice, deliveredEmail, database = db) {
+async function freezeApEmail(invoice, deliveredEmail, database = db, options = {}) {
   try {
     if (!invoice || !invoice.payer_id) return;
     const email = cleanEmail(deliveredEmail);
@@ -539,7 +539,12 @@ async function freezeApEmail(invoice, deliveredEmail, database = db) {
     if (stored && cleanEmail(stored.ap_email) === email) return; // already frozen with this AP email
     const base = (invoice.payer && typeof invoice.payer === 'object') ? invoice.payer : (stored || {});
     const snap = { ...base, ap_email: email };
-    await database('invoices').where({ id: invoice.id }).update({ payer_snapshot: JSON.stringify(snap) });
+    const update = database('invoices').where({ id: invoice.id });
+    if (Object.prototype.hasOwnProperty.call(options, 'claimToken')) {
+      update.where({ send_claim_token: options.claimToken || null });
+    }
+    const changed = await update.update({ payer_snapshot: JSON.stringify(snap) });
+    if (changed === 0) return;
     invoice.payer = snap;
   } catch (err) {
     logger.warn(`[payer] freezeApEmail failed for invoice ${invoice && invoice.id}: ${err.message}`);

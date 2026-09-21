@@ -9,6 +9,7 @@ const logger = require('./logger');
 const { etDateString, addETDays, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { acceptedScheduledSms, markScheduledSmsSent, dispatchScheduledSms } = require('./scheduled-sms-delivery');
 const { isEnabled, gateEnvValue } = require('../config/feature-gates');
 const { runExclusive, recordMissedTick } = require('../utils/cron-lock');
 const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
@@ -30,6 +31,10 @@ function purposeForScheduledMessageType(messageType, { hasCustomer = true } = {}
   // for customer-linked rows; lead rows have no customerId so they replay
   // under the transactional-grade conversational policy with the forwarded
   // consent basis — payment_receipt would hard-require a customerId.
+  // Recruiting texts held by the send window replay under their own
+  // applicant purpose (audience 'applicant' rides claimMeta.audience).
+  if (type === 'job_owner_reply') return 'applicant_reply';
+  if (type.startsWith('job_')) return type.slice('job_'.length);
   if (type === 'visit_summary') return 'service_completion';
   if (type === 'deposit_receipt') return hasCustomer ? 'payment_receipt' : 'conversational';
   // Deferred completion texts (service_complete*, service_report_v1*) replay
@@ -136,9 +141,27 @@ function scheduledSmsAttemptSql() {
   `;
 }
 
+async function holdFinalReviewUncertainty(msgId, meta, failedAt) {
+  const safetyUntil = meta.review_delivery_safety_until
+    ? new Date(meta.review_delivery_safety_until)
+    : null;
+  if (meta.review_delivery_uncertain_exhausted !== true
+      || !safetyUntil || Number.isNaN(safetyUntil.getTime())
+      || safetyUntil <= failedAt) return false;
+  const held = await db('sms_log').where({ id: msgId, status: 'sending' }).update({
+    status: 'scheduled',
+    scheduled_for: safetyUntil,
+    updated_at: failedAt,
+  });
+  if (!held) throw new Error(`Scheduled review claim lost while restoring uncertainty hold (${msgId})`);
+  logger.warn(`[scheduled-sms] Ambiguous final review handoff on ${msgId} — holding terminal recovery until ${safetyUntil.toISOString()}`);
+  return true;
+}
+
 async function recoverStaleScheduledSmsClaims(now) {
   const staleBefore = new Date(now.getTime() - SCHEDULED_SMS_STALE_CLAIM_MS);
   const attemptsSql = scheduledSmsAttemptSql();
+  const reviewSafetyUntilSql = "NULLIF(metadata->>'review_delivery_safety_until', '')::timestamptz";
   const { DURABLE_FINALIZE_ENTRY_POINTS, TERMINAL_HOOK_ENTRY_POINTS } = require('./messaging/deferred-replay-registry');
   const DURABLE_FINALIZE_PLACEHOLDERS = DURABLE_FINALIZE_ENTRY_POINTS.map(() => '?').join(', ') || "''";
   const TERMINAL_HOOK_PLACEHOLDERS = TERMINAL_HOOK_ENTRY_POINTS.map(() => '?').join(', ') || "''";
@@ -155,7 +178,12 @@ async function recoverStaleScheduledSmsClaims(now) {
         created_at = ?,
         updated_at = ?,
         metadata = COALESCE(s.metadata, '{}'::jsonb) || jsonb_build_object(
-          'queued_at', s.created_at,
+          -- Keep an enqueue time an earlier pass already saved: the dispatch
+          -- path re-stamps created_at to send time and parks the real one in
+          -- metadata.queued_at, so reading created_at unconditionally here
+          -- would overwrite it with the dispatch time and lose the queue
+          -- audit trail (codex #4334). Same idiom as scheduled-sms-delivery.
+          'queued_at', COALESCE(s.metadata->'queued_at', to_jsonb(s.created_at)),
           'scheduled_sms_recovered_sent_at', ?::timestamptz
         )
         -- Deferred replays settled here crashed BETWEEN Twilio's accept and
@@ -222,8 +250,13 @@ async function recoverStaleScheduledSmsClaims(now) {
   const result = await db.raw(`
     UPDATE sms_log
     SET status = CASE
+          WHEN ${reviewSafetyUntilSql} > ? THEN 'scheduled'
           WHEN ${attemptsSql} >= ? THEN 'failed'
           ELSE 'scheduled'
+        END,
+        scheduled_for = CASE
+          WHEN ${reviewSafetyUntilSql} > ? THEN ${reviewSafetyUntilSql}
+          ELSE scheduled_for
         END,
         updated_at = ?,
         metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
@@ -235,7 +268,8 @@ async function recoverStaleScheduledSmsClaims(now) {
         -- obligation the terminal-hook sweep can find. Entry-point list =
         -- registry entries with an onTerminal hook.
         || CASE
-          WHEN ${attemptsSql} >= ? AND COALESCE(metadata->>'entry_point', '') IN (${TERMINAL_HOOK_PLACEHOLDERS})
+          WHEN COALESCE(${reviewSafetyUntilSql} <= ?, true)
+            AND ${attemptsSql} >= ? AND COALESCE(metadata->>'entry_point', '') IN (${TERMINAL_HOOK_PLACEHOLDERS})
             THEN jsonb_build_object('terminal_pending', true)
           ELSE '{}'::jsonb
         END
@@ -244,7 +278,7 @@ async function recoverStaleScheduledSmsClaims(now) {
       AND scheduled_for <= ?
       AND updated_at <= ?
     RETURNING id, status, metadata
-  `, [SCHEDULED_SMS_MAX_ATTEMPTS, now, now, SCHEDULED_SMS_MAX_ATTEMPTS, ...TERMINAL_HOOK_ENTRY_POINTS, now, staleBefore]);
+  `, [now, SCHEDULED_SMS_MAX_ATTEMPTS, now, now, now, now, SCHEDULED_SMS_MAX_ATTEMPTS, ...TERMINAL_HOOK_ENTRY_POINTS, now, staleBefore]);
 
   const recovered = result.rows || [];
   if (recovered.length > 0) {
@@ -302,6 +336,15 @@ async function claimDueScheduledSms(now) {
           'scheduled_sms_claimed_at', ?::timestamptz,
           'scheduled_sms_attempts',
           CASE
+            -- An exhausted ambiguous review handoff is claimed only so the
+            -- terminal hook can run after its 72-hour safety hold. It must not
+            -- consume a fourth send attempt.
+            WHEN s.metadata->>'review_delivery_uncertain_exhausted' = 'true'
+              THEN CASE
+                WHEN COALESCE(s.metadata->>'scheduled_sms_attempts', '') ~ '^[0-9]+$'
+                  THEN (s.metadata->>'scheduled_sms_attempts')::int
+                ELSE 0
+              END
             WHEN COALESCE(s.metadata->>'scheduled_sms_attempts', '') ~ '^[0-9]+$'
               THEN (s.metadata->>'scheduled_sms_attempts')::int + 1
             ELSE 1
@@ -1494,6 +1537,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // Keep the existing daily call watchdog independent of timer latency.
+  cron.schedule('0 */5 * * * *', async () => {
+    if (require('./reschedule-link-promises').mode() === 'off') return;
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const result = await runExclusive('reschedule-link-promises', () => require('./reschedule-link-promises').sweep());
+      if (result?.skipped && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`Promised-link tick skipped: ${result.reason || 'no_connection'}`);
+        await recordJobStart('reschedule-link-promises').catch(() => {});
+        await recordJobEnd('reschedule-link-promises', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch (err) {
+      logger.error(`[reschedule-link-promises] tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('0 20 7 * * *', async () => {
     try {
       const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
@@ -3488,6 +3549,55 @@ function initScheduledJobs() {
               }
               continue;
             }
+            // dispatch_completion_deferred's recheck (#4634 round 9): the
+            // completion/report still sends, but the invoice went
+            // uncollectible overnight (settled zero-due, moved to a payer,
+            // voided) — strip the now-stale pay-link line from the FROZEN
+            // body before it reaches the provider, and drop
+            // mark_invoice_delivery so finalize below never marks a pay
+            // link "delivered" that was never actually sent. Persisted
+            // under the same claimed-row guard the review-ask strip above
+            // uses (this row is 'sending' from claimDueScheduledSms), and
+            // idempotent: a body with no pay_url left (an earlier partial
+            // attempt already stripped it) is returned unchanged, and
+            // removing an already-absent 'mark_invoice_delivery' key is a
+            // no-op.
+            if (recheck && recheck.stripPayLink === true && claimMeta.pay_url) {
+              const { stripPayLinkLineFromBody } = require('./dispatch-completion-deferred');
+              const strippedBody = stripPayLinkLineFromBody(msg.message_body, claimMeta.pay_url);
+              if (strippedBody === null) {
+                // An operator-edited template that was ONLY the invoice
+                // line has no safe body left to send — never restore the
+                // original (link-bearing) text and never send an empty
+                // one (#4634 round-10 P2). Suppress through the exact same
+                // terminal path an ordinary eligible:false recheck refusal
+                // takes above: blocked status, claim release, review
+                // fallback armed via onTerminal.
+                await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                  status: 'blocked',
+                  updated_at: new Date(),
+                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?, 'terminal_pending', ?::boolean)", [`stale_replay:${recheck.reason || 'pay-link-only-body'}`, requiresTerminalHook(claimMeta.entry_point)]),
+                });
+                logger.info(`[scheduled-sms] deferred completion ${msg.id} suppressed: template body was pay-link-only, nothing safe to strip (${recheck.reason || 'invoice-not-collectible'})`);
+                await runTerminalHookDurably(msg.id, claimMeta.entry_point, recheckMeta);
+                continue;
+              }
+              const stampedAt = new Date();
+              const changed = await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                message_body: strippedBody,
+                metadata: db.raw(
+                  "(COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('pay_link_stripped_at', ?::timestamptz, 'pay_link_stripped_reason', ?::text)) - 'mark_invoice_delivery'",
+                  [stampedAt, recheck.reason || null],
+                ),
+                updated_at: stampedAt,
+              });
+              if (!changed) throw new Error('Scheduled completion claim lost before stripping the stale pay link');
+              msg.message_body = strippedBody;
+              delete claimMeta.mark_invoice_delivery;
+              claimMeta.pay_link_stripped_at = stampedAt.toISOString();
+              claimMeta.pay_link_stripped_reason = recheck.reason || null;
+              logger.info(`[scheduled-sms] deferred completion ${msg.id} pay link stripped at delivery (${recheck.reason || 'invoice-not-collectible'})`);
+            }
           }
           // replay_purpose: an enqueue whose message_type has no useful
           // purpose mapping (the Stripe billing-notice templates —
@@ -3755,11 +3865,20 @@ function initScheduledJobs() {
             }
             // 'sms_fallback' — fall through to the normal replay send below.
           }
-          const smsResult = await sendCustomerMessage({
+          // The review spacing guard may durably strip a bundled ask before
+          // invoking this callback. Build both replay arguments at that point
+          // so the provider receives the rewritten completion body/linkage.
+          const sendReplay = () => {
+          const replayDispatchMeta = {
+            ...claimMeta,
+            scheduled_sms_log_id: msg.id,
+            customer_id: msg.customer_id,
+          };
+          const replayInput = {
             to: toPhone,
             body: msg.message_body,
             channel: 'sms',
-            audience: msg.customer_id ? 'customer' : 'lead',
+            audience: claimMeta.audience === 'applicant' ? 'applicant' : (msg.customer_id ? 'customer' : 'lead'),
             purpose,
             customerId: msg.customer_id || undefined,
             identityTrustLevel: msg.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
@@ -3864,34 +3983,26 @@ function initScheduledJobs() {
                 ? claimMeta.parked_decision_ids
                 : undefined,
             },
-          });
+          };
+          return require('./messaging/deferred-replay-registry')
+            .dispatchDeferredReplay(claimMeta.entry_point, replayDispatchMeta, () => sendCustomerMessage(replayInput));
+          };
+          const smsResult = await dispatchScheduledSms(msg, claimMeta, sendReplay,
+          purpose, SCHEDULED_SMS_MAX_ATTEMPTS);
+          if (smsResult.scheduledHold) continue;
           const completedAt = new Date();
+          const lawnPipelineRetryAt = claimMeta.entry_point === 'lawn_assessment_notification_deferred'
+            && smsResult.sent === false
+            && smsResult.deliveryOutcome === 'not_sent'
+            && smsResult.code === 'LAWN_NOTIFICATION_BUSY'
+            && smsResult.retryable === true
+            && smsResult.nextAllowedAt
+            && !Number.isNaN(new Date(smsResult.nextAllowedAt).getTime())
+            ? new Date(smsResult.nextAllowedAt)
+            : null;
           if (smsResult.sent) {
-            // created_at is re-stamped to send time on purpose — comms
-            // threads order by it, and a scheduled SMS composed days ago
-            // must appear when it was DELIVERED. Preserve the original
-            // queue moment in metadata so the audit trail isn't lost
-            // (jsonb_build_object reads the pre-update column value).
-            // finalize_pending is stamped ATOMICALLY with the sent
-            // settlement for entry points that owe post-delivery
-            // finalization — a crash between this update and the hook below
-            // must leave durable evidence, which the executor's stranded-
-            // finalization sweep converts to a finalize_only retry.
             const { requiresDurableFinalize, finalizeDeferredReplay: finalizeReplay } = require('./messaging/deferred-replay-registry');
             const owesFinalization = requiresDurableFinalize(claimMeta.entry_point);
-            await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
-              status: 'sent',
-              created_at: completedAt,
-              updated_at: completedAt,
-              // provider_message_id rides the durable stamp so a
-              // finalize_only retry can re-run finalization with the REAL
-              // accepted SID — the lead-menu finalizer reads a missing SID
-              // as non-delivery and releases its once-ever claim, which
-              // would re-arm a duplicate menu for an SMS Twilio accepted.
-              metadata: owesFinalization
-                ? db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('queued_at', created_at, 'finalize_pending', true, 'provider_message_id', ?::text)", [smsResult.providerMessageId || null])
-                : db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('queued_at', created_at)"),
-            });
             logger.info(`[scheduled-sms] Sent scheduled SMS ${msg.id}`);
 
             // Deferred-replay finalization (registry): the state
@@ -3947,6 +4058,31 @@ function initScheduledJobs() {
                 reviewedBy: msg.admin_user_id || 'Admin',
               });
             }
+          } else if (lawnPipelineRetryAt) {
+            // A concurrent lawn pipeline prevented this replay from owning the
+            // delivery and may be deduping its quiet-hours obligation against
+            // this sending row. Wait through its reported lease/backoff without
+            // spending one of the provider retries: no handoff occurred.
+            await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+              status: 'scheduled',
+              scheduled_for: lawnPipelineRetryAt,
+              updated_at: completedAt,
+              metadata: db.raw(`
+                COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                  'lawn_pipeline_hold_at', ?::timestamptz,
+                  'scheduled_sms_attempts',
+                  GREATEST(
+                    CASE
+                      WHEN COALESCE(metadata->>'scheduled_sms_attempts', '') ~ '^[0-9]+$'
+                        THEN (metadata->>'scheduled_sms_attempts')::int - 1
+                      ELSE 0
+                    END,
+                    0
+                  )
+                )
+              `, [completedAt]),
+            });
+            logger.info(`[scheduled-sms] lawn notification ${msg.id} waiting after a concurrent pipeline claim — rescheduled for ${lawnPipelineRetryAt.toISOString()} (attempt refunded)`);
           } else if (smsResult.code === 'QUIET_HOURS_HOLD' && smsResult.nextAllowedAt) {
             // Send-window hold: a validator deferral, not a delivery
             // attempt — no provider send was tried. Handled BEFORE the
@@ -4048,8 +4184,9 @@ function initScheduledJobs() {
                   metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', ?::boolean)", [requiresTerminalHook(claimMeta.entry_point)]),
                 });
                 logger.warn(`[scheduled-sms] Blocked/failed scheduled SMS ${msg.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
-                // Terminal block on a deferred replay: the message provably
-                // never delivered — hand the obligation off per the entry
+                // Terminal block on a deferred replay: delivery was refused,
+                // or an exhausted ambiguous review passed its safety hold.
+                // Hand the obligation off per the entry
                 // point's registry hook (release once-ever claims, arm the
                 // standalone review fallback, flip referral/report state into
                 // the admin retry lane). Armed ONLY here, never on timers,
@@ -4079,44 +4216,13 @@ function initScheduledJobs() {
             // tagged with this row's id proves the send — settle as sent
             // and resolve the decisions; reopening here would resurface a
             // card on an answered thread and invite a duplicate reply.
-            const providerRow = await db('sms_log')
-              .where({ direction: 'outbound' })
-              .whereIn('status', ['queued', 'sent', 'delivered'])
-              .whereRaw("metadata->>'scheduled_sms_log_id' = ?", [String(msg.id)])
-              .first('id', 'twilio_sid');
+            const accepted = await acceptedScheduledSms(msg.id, err);
             const failedAt = new Date();
-            // The provider log is best-effort (TwilioService.sendSMS
-            // swallows its own insert failure), so its absence proves
-            // nothing when the error itself carries the provider outcome:
-            // sendCustomerMessage attaches the KNOWN outcome to an
-            // audit-write throw precisely so send-once callers can tell an
-            // accepted-but-unaudited send from a pre-accept failure.
-            // sent:true = Twilio accepted — settle, never retry (a
-            // duplicate customer text is the worse failure). sent:false or
-            // no providerOutcome = genuinely pre-accept, retry below.
-            if (providerRow || err?.providerOutcome?.sent === true) {
-              // Same finalize_pending stamp as the normal settlement: a
-              // deferred replay settled through THIS crash path also
-              // delivered without its finalization running — the
-              // stranded-finalization sweep picks the stamp up. (claimMeta
-              // is scoped to the try above — re-parse from the row here.)
+            if (accepted) {
               const crashMeta = typeof msg.metadata === 'string'
                 ? (() => { try { return JSON.parse(msg.metadata); } catch { return {}; } })()
                 : (msg.metadata || {});
-              const { requiresDurableFinalize: crashDurable } = require('./messaging/deferred-replay-registry');
-              const crashOwesFinalization = crashDurable(crashMeta.entry_point);
-              // Recover the accepted SID for the finalize_only retry
-              // (provider log first, then the outcome the throw carried) —
-              // same contract as the normal settlement's stamp.
-              const crashProviderSid = providerRow?.twilio_sid || err?.providerOutcome?.providerMessageId || null;
-              await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
-                status: 'sent',
-                created_at: failedAt,
-                updated_at: failedAt,
-                metadata: crashOwesFinalization
-                  ? db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('queued_at', created_at, 'finalize_pending', true, 'provider_message_id', ?::text)", [crashProviderSid])
-                  : db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('queued_at', created_at)"),
-              });
+              await markScheduledSmsSent(msg, crashMeta, accepted, err.scheduledReviewAsk);
               const recoveredMeta = await readFreshMeta();
               const suggest = require('./sms-suggest-mode');
               if (recoveredMeta.agent_decision_id) {
@@ -4134,15 +4240,13 @@ function initScheduledJobs() {
               }
               logger.warn(`[scheduled-sms] Settled ${msg.id} as sent after post-accept error`);
             } else {
-              // Pre-accept exception (no provider row proves a send): the
-              // text never left, so retry on the bounded rail while
-              // attempts remain; at exhaustion, run the registry terminal
-              // hook so deferred obligations (review fallbacks, once-ever
-              // claims, referral/report state) hand off instead of
-              // silently dying with the row — parallel to the
-              // provider-result terminal paths.
+              // Without a provider row, ordinary failures retry on the bounded
+              // rail. A final review handoff can still be ambiguous, so its
+              // pre-provider safety deadline wins before terminal hooks run.
               const failedMeta = await readFreshMeta().catch(() => ({}));
-              if ((Number(failedMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
+              if (await holdFinalReviewUncertainty(msg.id, failedMeta, failedAt)) {
+                // Durable hold owns the row until the safety deadline.
+              } else if ((Number(failedMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
                 await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
                   status: 'scheduled',
                   scheduled_for: new Date(Date.now() + 15 * 60 * 1000),
@@ -4363,7 +4467,7 @@ function initScheduledJobs() {
           // the attempts ran out; parked as send_failed with no due time it
           // is inert, as the sibling release leaves a held row (pre-push
           // codex P1 on #3750; codex r18 P2 on #3804).
-          const deterministicRefusal = !!(e && ['CLIENT_FALLBACK_PRICING', 'PRICING_AUTHORITY_NOT_SERVER', 'REPRICE_PENDING', 'ESTIMATE_REVIEW_STALE', 'SEND_OUTCOME_UNCERTAIN'].includes(e.code));
+          const deterministicRefusal = !!(e && ['CLIENT_FALLBACK_PRICING', 'PRICING_AUTHORITY_NOT_SERVER', 'REPRICE_PENDING', 'ESTIMATE_REVIEW_STALE', 'SEND_OUTCOME_UNCERTAIN', 'BID_VALIDITY_EXPIRED'].includes(e.code));
           // A reviewed attempt cannot be retimed: its receipt and pinned
           // offer belong to the original schedule. Even a bookkeeping throw
           // can follow provider acceptance, so stop for explicit staff review.
@@ -6849,6 +6953,8 @@ module.exports = {
   resolveScheduledRecipient,
   scheduledDepositReceiptAllowed,
   classifyDepositReplayFallback,
+  holdFinalReviewUncertainty,
+  recoverStaleScheduledSmsClaims,
   runContentRegistryMaintenance,
   runAutonomousOpportunityMining,
   parseListEnv,

@@ -1,5 +1,13 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/estimate-deposits', () => ({
+  assertInvoiceDepositSettlementReady: jest.fn(async () => {}),
+  withInvoiceDepositSettlement: jest.fn(async (_id, callback) => {
+    const database = require('../models/db');
+    await require('../services/estimate-deposits').assertInvoiceDepositSettlementReady(database, {});
+    return callback(database);
+  }),
+}));
 jest.mock('../services/stripe', () => ({
   assertNoInvoiceChargeReconciliationPending: jest.fn(),
   parkInvoiceForSavedCardReconciliation: jest.fn(),
@@ -15,6 +23,7 @@ jest.mock('../services/stripe', () => ({
 const express = require('express');
 const db = require('../models/db');
 const StripeService = require('../services/stripe');
+const { assertInvoiceDepositSettlementReady } = require('../services/estimate-deposits');
 const router = require('../routes/pay-v2');
 
 function invoiceQuery(invoice) {
@@ -44,6 +53,7 @@ async function withServer(fn) {
 describe('POST /api/pay/:token/setup saved-card reconciliation fence', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    assertInvoiceDepositSettlementReady.mockResolvedValue(undefined);
     db.mockImplementation((table) => {
       if (table === 'invoices') {
         return invoiceQuery({
@@ -61,6 +71,51 @@ describe('POST /api/pay/:token/setup saved-card reconciliation fence', () => {
       }
       throw new Error(`unexpected table ${table}`);
     });
+  });
+
+  test.each([
+    ['setup', {}, 'createInvoicePaymentIntent'],
+    ['update-amount', { paymentIntentId: 'pi-old', methodCategory: 'card' }, 'updateInvoicePaymentIntentMethod'],
+    ['quote', { paymentMethodId: 'pm-old' }, 'quoteInvoiceSurcharge'],
+    ['finalize', { quoteToken: 'quote-old' }, 'finalizeInvoicePayment'],
+  ])('holds /%s while a received deposit awaits reconciliation', async (route, body, method) => {
+    assertInvoiceDepositSettlementReady.mockRejectedValue(Object.assign(
+      new Error('A received deposit is awaiting invoice reconciliation'),
+      { code: 'DEPOSIT_RECONCILIATION_REQUIRED', statusCode: 409 },
+    ));
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/pay/public-token-0123456789/${route}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        error: 'A received deposit is awaiting invoice reconciliation', reconciliationRequired: true,
+      });
+    });
+    expect(StripeService[method]).not.toHaveBeenCalled();
+    expect(StripeService.parkInvoiceForSavedCardReconciliation).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['setup', {}, 'createInvoicePaymentIntent'],
+    ['update-amount', { paymentIntentId: 'pi-old', methodCategory: 'card' }, 'updateInvoicePaymentIntentMethod'],
+    ['finalize', { quoteToken: 'quote-old' }, 'finalizeInvoicePayment'],
+  ])('preserves a /%s deposit hold discovered after route preflight', async (route, body, method) => {
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockResolvedValue(undefined);
+    StripeService[method].mockRejectedValueOnce(Object.assign(
+      new Error('A received deposit is awaiting invoice reconciliation'),
+      { code: 'DEPOSIT_RECONCILIATION_REQUIRED', statusCode: 409 },
+    ));
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/pay/public-token-0123456789/${route}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        error: 'A received deposit is awaiting invoice reconciliation', reconciliationRequired: true,
+      });
+    });
+    expect(StripeService[method]).toHaveBeenCalledTimes(1);
   });
 
   test.each([
@@ -94,6 +149,28 @@ describe('POST /api/pay/:token/setup saved-card reconciliation fence', () => {
       }));
     } else {
       expect(StripeService.parkInvoiceForSavedCardReconciliation).not.toHaveBeenCalled();
+    }
+  });
+
+  test('pay-page GET holds a collectible invoice without offering payment controls', async () => {
+    const read = jest.spyOn(require('../services/invoice'), 'getByToken').mockResolvedValue({
+      id: 'inv-1', customer_id: 'cust-1', status: 'sent', total: 100,
+    });
+    assertInvoiceDepositSettlementReady.mockRejectedValue(Object.assign(
+      new Error('A received deposit is awaiting invoice reconciliation'),
+      { code: 'DEPOSIT_RECONCILIATION_REQUIRED', status: 409 },
+    ));
+    try {
+      await withServer(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/api/pay/public-token-0123456789`);
+        expect(response.status).toBe(409);
+        expect(await response.json()).toEqual({
+          error: 'A received deposit is awaiting invoice reconciliation', reconciliationRequired: true,
+        });
+      });
+      expect(StripeService.createInvoicePaymentIntent).not.toHaveBeenCalled();
+    } finally {
+      read.mockRestore();
     }
   });
 

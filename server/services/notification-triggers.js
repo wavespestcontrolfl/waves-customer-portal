@@ -207,6 +207,58 @@ const TRIGGER_REGISTRY = {
         : '/admin/recruiting',
     }),
   },
+  // Fired by the public interview self-scheduling route (POST
+  // /interview/:token/book) when an applicant picks or changes a time.
+  // Same no-PII contract as new_job_application: mode + when label only,
+  // no name/phone/email cross the requireAdmin boundary.
+  job_interview_booked: {
+    label: 'Interview booked',
+    category: 'job_application',
+    priority: 'high',
+    group: 'Leads & Sales',
+    adminRoleOnly: true,
+    build: (p) => ({
+      title: 'Interview booked',
+      body: p.whenLabel
+        ? `${p.mode === 'in_person' ? 'In person' : 'Phone'} interview — ${p.whenLabel}.`
+        : 'An applicant booked an interview time.',
+      link: p.applicationId
+        ? `/admin/recruiting?application=${p.applicationId}`
+        : '/admin/recruiting',
+    }),
+  },
+  // Fired by the public interview link's "I'm no longer interested" action.
+  job_application_withdrawn: {
+    label: 'Applicant withdrew',
+    category: 'job_application',
+    priority: 'normal',
+    group: 'Leads & Sales',
+    adminRoleOnly: true,
+    build: (p) => ({
+      title: 'Applicant withdrew',
+      body: 'An applicant is no longer interested — open the recruiting queue.',
+      link: p.applicationId
+        ? `/admin/recruiting?application=${p.applicationId}`
+        : '/admin/recruiting',
+    }),
+  },
+  // Fired by the Twilio inbound webhook (services/recruiting-inbound.js)
+  // when an applicant texts back. Admin-only: recruiting threads never
+  // reach the tech-visible sms_reply bell; no name/phone/body crosses.
+  job_applicant_reply: {
+    label: 'Applicant replied',
+    category: 'job_application',
+    priority: 'high',
+    group: 'Leads & Sales',
+    adminRoleOnly: true,
+    build: (p) => ({
+      title: 'Applicant replied',
+      body: 'An applicant texted back — open the recruiting queue to read it.',
+      link: p.applicationId
+        ? `/admin/recruiting?application=${p.applicationId}`
+        : '/admin/recruiting',
+    }),
+  },
   // Fired by reschedule-intent-flagger when an inbound SMS reads as a
   // reschedule/away request while a visit is still armed — the automation
   // does not act on these, so the owner must (2026-08-05 incident class:
@@ -826,6 +878,12 @@ function pushTagFor(triggerKey, payload = {}) {
     // push-only attempt. Different caller windows still have distinct tags.
     return `waves-repeat_caller-${payload.repeatCallerDeliveryId || payload.callLogId || 'unknown-call'}`;
   }
+  if (triggerKey === 'payment_failed' && (payload.attemptId || payload.paymentIntentId)) {
+    // Per-attempt tag: the service worker replaces same-tag pushes with
+    // renotify:false, so two customers' failures before the first is
+    // dismissed must not collapse into one banner (codex P2 on #4392).
+    return `waves-payment_failed-${payload.attemptId || payload.paymentIntentId}`;
+  }
   if (triggerKey === 'customer_email_received') {
     // Per-email tag: same-tag pushes replace each other without renotifying,
     // so two customer emails must not collapse into one banner (hook P1).
@@ -857,6 +915,18 @@ function pushTagFor(triggerKey, payload = {}) {
     // notifications must not collapse into one push (same-tag replacement).
     return `waves-new_job_application-${payload.applicationId || 'unknown-application'}`;
   }
+  if (triggerKey === 'job_applicant_reply') {
+    // Distinct per reply (Codex r12 P2): a second text before the first push
+    // is dismissed must alert again, not silently replace it (same-tag
+    // pushes are renotify:false in the service worker) — like sms_reply.
+    return `waves-job_applicant_reply-${payload.applicationId || 'unknown-application'}-${payload.replyId || Date.now()}`;
+  }
+  if (triggerKey === 'job_interview_booked' || triggerKey === 'job_application_withdrawn') {
+    // Per-application tag, same reasoning as new_job_application above — a
+    // rebooked time (a second job_interview_booked for the same applicant)
+    // may legitimately replace its own earlier push.
+    return `waves-${triggerKey}-${payload.applicationId || 'unknown-application'}`;
+  }
   if (triggerKey === 'service_report_token_mint_failed' || triggerKey === 'completion_sms_failed') {
     // Per-service-record tag: an outage that fails several completions must
     // not let later customers' banners silently replace earlier ones.
@@ -871,7 +941,7 @@ function pushTagFor(triggerKey, payload = {}) {
  * @param {string} triggerKey — must match a key in TRIGGER_REGISTRY
  * @param {object} payload — trigger-specific data, see each build() for shape
  */
-async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null } = {}) {
+async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, shouldContinue = null, deliveredSubscriptionIds = null } = {}) {
   try {
     const trigger = TRIGGER_REGISTRY[triggerKey];
     if (!trigger) {
@@ -935,6 +1005,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       })
       .map((u) => u.id);
     let bellWritten = false;
+    let replayedSmsBell = false;
     let bellSuppressed = false;
     // ONE routing decision per event (owner ruling 2026-08-28 — "some are
     // banners, some are bells"): the bell policy is evaluated ONCE per event,
@@ -974,9 +1045,11 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
             built.body,
             { link: built.link, metadata: { triggerKey, priority: trigger.priority, payload: safePayload },
               ...(dedupeKey ? { dedupeKey } : {}),
+              ...(shouldContinue ? { shouldContinue } : {}),
               ...(relayFailureCall ? { relayFailureCall, dedupeKey: `relay-failure:${relayFailureCall.callSid}` } : {}) }
           );
           if (created && !created.suppressed) bellWritten = true;
+          if (created?.deduped && triggerKey === 'sms_reply' && dedupeKey) replayedSmsBell = true;
           if (created?.suppressed) bellSuppressed = true;
         } catch (e) {
           logger.error(`[notification-triggers] bell write failed: ${e.message}`);
@@ -987,7 +1060,11 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     const stats = { bellWritten, push: null,
       ...(dedupeKey ? { retryable: anyBellEnabled && !bellWritten && !bellSuppressed } : {}),
     };
+    if (shouldContinue && bellSuppressed && !bellWritten) stats.suppressed = true;
     onBell?.(bellWritten); // durable bell result is available before badge lookup or push
+    // A concurrent SMS lease winner can reach this dispatcher before the first
+    // bell commits. Its canonical dedupe result also prevents a second push.
+    if (replayedSmsBell) return { ...stats, deduped: true };
     if (relayFailureCall && !bellWritten) return stats; // an unclaimed callback never dispatches a push
     // Every active admin turned BOTH channels off: that is deliberate
     // preference suppression, not a delivery failure — report it so
@@ -1090,16 +1167,18 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
               title: built.title,
               body: built.body,
               url: built.link || '/admin',
-              tag: pushTagFor(triggerKey, payload),
+              tag: triggerKey === 'sms_reply' && dedupeKey
+                ? `waves-sms_reply-${payload.twilioSid}` : pushTagFor(triggerKey, payload),
               priority: trigger.priority,
               vibrate: wantsSound ? PRIORITY_VIBRATE[trigger.priority] : [0],
               silent: !wantsSound,
-              renotify: triggerKey === 'sms_reply' || (triggerKey === 'new_lead' && Boolean(payload.twilioSid)),
+              renotify: (triggerKey === 'sms_reply' && !dedupeKey) || (triggerKey === 'new_lead' && Boolean(payload.twilioSid)),
               ...(badgeInfo ? { badge: badgeInfo.count, badgeAt: badgeInfo.at } : {}),
             };
           },
-          { beforeDispatch },
+          { beforeDispatch, ...(deliveredSubscriptionIds ? { deliveredSubscriptionIds } : {}) },
         );
+        if (dedupeKey && stats.push?.failed > 0) stats.retryable = true;
         if (stats.push?.superseded) stats.push = { sent: 0, skipped: 'superseded_before_push' };
       }
     } catch (e) {

@@ -359,6 +359,7 @@ function lazyWithRetry(factory) {
 const StaffDocumentLibrary = lazyWithRetry(() => import('./components/staffDocuments/Library'));
 const PortalPage = lazyWithRetry(() => import('./pages/PortalPage'));
 const ReportViewPage = lazyWithRetry(() => import('./pages/ReportViewPage'));
+const VisitSummaryPage = lazyWithRetry(() => import('./pages/VisitSummaryPage'));
 const ProjectReportViewPage = lazyWithRetry(() => import('./pages/ProjectReportViewPage'));
 const AdminReviewsPage = lazyWithRetry(() => import('./pages/admin/ReviewsPage'));
 const AdminDispatchPage = lazyWithRetry(() => import('./pages/admin/AdminDispatchPage'));
@@ -387,6 +388,7 @@ const KnowledgeHubPage = lazyWithRetry(() => import('./pages/admin/KnowledgeHubP
 const AdminSettingsPage = lazyWithRetry(() => import('./pages/admin/SettingsPage'));
 const PestPressureSettingsPage = lazyWithRetry(() => import('./pages/admin/PestPressureSettingsPage'));
 const RatePage = lazyWithRetry(() => import('./pages/RatePage'));
+const CareersInterviewPage = lazyWithRetry(() => import('./pages/CareersInterviewPage'));
 const CardPage = lazyWithRetry(() => import('./pages/CardPage'));
 const AdminSocialMediaPage = lazyWithRetry(() => import('./pages/admin/SocialMediaPage'));
 const AdminTaxPage = lazyWithRetry(() => import('./pages/admin/TaxPage'));
@@ -650,12 +652,15 @@ export default function App() {
           {/* WavesShell wraps (owner 2026-07-06): every customer page gets
               the standard top bar + trust footer. */}
           <Route path="/rate/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><RatePage /></WavesShell></Suspense>} />
+          {/* Applicant self-scheduling link (recruiting-comms) — same external-WavesShell shape as /rate/:token. */}
+          <Route path="/careers/interview/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><CareersInterviewPage /></WavesShell></Suspense>} />
           {/* Digital business card — navy glass scene, so the fallback wash
               matches the scene instead of the light doc wash. */}
           <Route path="/card/:token" element={<Suspense fallback={<div style={{background:'#04395E',minHeight:'100vh'}}/>}><WavesShell><CardPage /></WavesShell></Suspense>} />
           <Route path="/report/project/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><ProjectReportViewPage /></WavesShell></Suspense>} />
           <Route path="/report/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><ReportViewPage /></WavesShell></Suspense>} />
           <Route path="/recap/:token" element={<RecapLinkRedirect />} />
+          <Route path="/visit/:token" element={<Suspense fallback={<div />}><WavesShell><VisitSummaryPage /></WavesShell></Suspense>} />
           <Route path="/pay/statement/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><StatementPayPage /></Suspense>} />
           <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><PayPage /></Suspense>} />
           <Route path="/receipt/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ReceiptPage /></Suspense>} />

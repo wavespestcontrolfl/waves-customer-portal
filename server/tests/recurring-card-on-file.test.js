@@ -117,7 +117,7 @@ const {
   replaceRecurringCardIntent,
   bankTenderAllowedUnderLock,
   completeRecurringCardEnrollment,
-  _private: { recurringCardIntentMatchesEstimate },
+  _private: { recurringCardIntentMatchesEstimate, classifyDeliveryOutcome },
 } = require('../services/recurring-card-on-file');
 
 const EST = { id: 'est-1', customer_id: 'cust-1' };
@@ -300,6 +300,38 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
     });
   });
 
+  describe('classifyDeliveryOutcome — the sweep\'s payer-billed and card-decline fallback deliveries share this (Codex round-8 audit P1 #4131)', () => {
+    test('settled_zero_due: settled, never reported delivered, and NOT reported credit-covered (Codex round-8 audit P2 #4131 slice 4)', () => {
+      // settleZeroBalance also closes an invoice retotaled/discounted to a
+      // literal $0 with credit_applied = 0 — the generic settled_zero_due
+      // code proves nothing about deposit/account credit, so a caller
+      // building alert copy off this classification must not invent a
+      // credit transaction that never happened.
+      expect(classifyDeliveryOutcome({ ok: true, settled_zero_due: true }))
+        .toEqual({ settled: true, delivered: false, creditCovered: false });
+    });
+
+    test('covered_by_credit: settled, never reported delivered, and IS reported credit-covered', () => {
+      expect(classifyDeliveryOutcome({ ok: true, covered_by_credit: true }))
+        .toEqual({ settled: true, delivered: false, creditCovered: true });
+    });
+
+    test('an ordinary successful send: delivered, not settled, not credit-covered', () => {
+      expect(classifyDeliveryOutcome({ ok: true, sms: { ok: true }, email: { ok: true } }))
+        .toEqual({ settled: false, delivered: true, creditCovered: false });
+    });
+
+    test('a genuine failure (ok: false): neither settled nor delivered nor credit-covered', () => {
+      expect(classifyDeliveryOutcome({ ok: false, code: 'payer_billed' }))
+        .toEqual({ settled: false, delivered: false, creditCovered: false });
+    });
+
+    test('a null/undefined result (an unresolved fence, or the catch path): neither settled nor delivered nor credit-covered', () => {
+      expect(classifyDeliveryOutcome(null)).toEqual({ settled: false, delivered: false, creditCovered: false });
+      expect(classifyDeliveryOutcome(undefined)).toEqual({ settled: false, delivered: false, creditCovered: false });
+    });
+  });
+
   describe('sweepStrandedPrepayAutoCharges', () => {
     it('still scans with the gate OFF (kill switch must drain committed jobs, not strand them)', async () => {
       delete process.env.GATE_PREPAY_CARD_AND_CHARGE;
@@ -333,6 +365,58 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
     mockQualifyingRows.mockResolvedValue([{ id: 'svc' }]);
     const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST });
     expect(p.exemptReason).toBe('existing_plan_customer');
+  });
+
+  // Prod incident 2026-09-18: a lawn member on per-application Auto Pay
+  // accepted a pest estimate and got a due-today pay-link invoice texted +
+  // emailed, because the plan-member exemption returned before the Auto Pay
+  // check and only `autopay_already_active` / `saved_method_consented` count
+  // as the hold-for-completion lane in the accept route.
+  describe('existing plan member on Auto Pay classifies into the completion-charge lane', () => {
+    it('reports autopay_already_active for a member (snapshot) already on Auto Pay', async () => {
+      mockDbFixtures.customers = { id: 'cust-1', autopay_enabled: true };
+      mockCustomerOnAutopay.mockResolvedValue(true);
+      const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: { isExistingCustomer: true } });
+      expect(p.required).toBe(false);
+      expect(p.exemptReason).toBe('autopay_already_active');
+    });
+
+    it('reports autopay_already_active for a member (LIVE rows) already on Auto Pay', async () => {
+      mockQualifyingRows.mockResolvedValue([{ id: 'svc' }]);
+      mockDbFixtures.customers = { id: 'cust-1', autopay_enabled: true };
+      mockCustomerOnAutopay.mockResolvedValue(true);
+      const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST });
+      expect(p.exemptReason).toBe('autopay_already_active');
+    });
+
+    it('keeps a payer-billed member OUT of the lane (completion never auto-charges payer invoices)', async () => {
+      mockResolveForInvoice.mockResolvedValue({ payerId: 'payer-1' });
+      mockDbFixtures.customers = { id: 'cust-1', autopay_enabled: true };
+      mockCustomerOnAutopay.mockResolvedValue(true);
+      const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: { isExistingCustomer: true }, scheduledServiceId: 'ss-9', useLinkedFallback: false });
+      expect(p.required).toBe(false);
+      expect(p.exemptReason).toBe('payer_billed');
+    });
+
+    it('keeps an autopay-PAUSED member on the payable path', async () => {
+      mockDbFixtures.customers = { id: 'cust-1', autopay_enabled: true, autopay_paused_until: '2099-01-01' };
+      mockIsPaused.mockReturnValue(true);
+      try {
+        const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: { isExistingCustomer: true } });
+        expect(p.exemptReason).toBe('autopay_paused');
+      } finally {
+        mockIsPaused.mockReturnValue(false);
+      }
+    });
+
+    it('still reports existing_plan_customer for a member NOT on Auto Pay, even with a consented saved card (no enrollment by a later accept)', async () => {
+      mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pmrow-7', stripe_payment_method_id: 'pm_7' });
+      const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: { isExistingCustomer: true } });
+      expect(p.required).toBe(false);
+      expect(p.exemptReason).toBe('existing_plan_customer');
+      expect(p.savedMethodRowId).toBeUndefined();
+      expect(mockFindConsentedChargeableCard).not.toHaveBeenCalled();
+    });
   });
 
   it('keeps the card REQUIRED when the live plan check fails (fail toward protection)', async () => {

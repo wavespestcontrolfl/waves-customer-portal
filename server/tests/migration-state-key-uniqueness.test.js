@@ -14,11 +14,31 @@ const path = require('path');
 const MIGRATIONS_DIR = path.join(__dirname, '..', 'models', 'migrations');
 const DERIVED_KEY = /['"`](migration[.:](\d{14})(?:\.state)?)['"`]/g;
 
+// The corrective termite changelog migration READS the prior seed's audit tag
+// to copy its value into a new changelog row. It never owns or writes that tag.
+// Keep this exception tied to the exact read-only use: another SEED_TAG use,
+// including a later mutation, must be caught by the ownership scan.
+function isReadOnlySeedAuditReference(file, src, literal, matchIndex) {
+  const declaration = "const SEED_TAG = 'migration:20260911000020';";
+  return file === '20260914000001_termite_annual_plan_changelog.js'
+    && literal === 'migration:20260911000020'
+    && matchIndex === src.indexOf(declaration) + 'const SEED_TAG = '.length
+    && src.includes(declaration)
+    && /\.where\(\{ config_key: KEY, changed_by: SEED_TAG \}\)\.whereNull\('old_value'\)\.first\(\)/.test(src)
+    && [...src.matchAll(/\bSEED_TAG\b/g)].length === 2;
+}
+
+function derivedKeys(file, src) {
+  return [...src.matchAll(DERIVED_KEY)]
+    .filter((match) => !isReadOnlySeedAuditReference(file, src, match[1], match.index))
+    .map(([, literal, stamp]) => ({ literal, stamp }));
+}
+
 function derivedKeysByFile() {
   const byFile = new Map();
   for (const file of fs.readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith('.js'))) {
     const src = fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8');
-    const keys = [...src.matchAll(DERIVED_KEY)].map(([, literal, stamp]) => ({ literal, stamp }));
+    const keys = derivedKeys(file, src);
     if (keys.length) byFile.set(file, keys);
   }
   return byFile;
@@ -29,6 +49,18 @@ describe('migration-derived state keys and audit tags', () => {
 
   test('the scan sees the migrations that keep an ownership record', () => {
     expect(byFile.size).toBeGreaterThan(10);
+  });
+
+  test('the prior seed lookup is exempt only while it stays read-only', () => {
+    const file = '20260914000001_termite_annual_plan_changelog.js';
+    const src = fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8');
+    expect(derivedKeys(file, src)).not.toContainEqual({ literal: 'migration:20260911000020', stamp: '20260911000020' });
+    const mutatingSrc = src.replace('  const existing =',
+      "  await knex('pricing_config_audit').insert({ changed_by: SEED_TAG });\n  const existing =");
+    expect(derivedKeys(file, mutatingSrc)).toContainEqual({ literal: 'migration:20260911000020', stamp: '20260911000020' });
+    const literalMutation = src.replace('  const existing =',
+      "  await knex('pricing_config_audit').insert({ changed_by: 'migration:20260911000020' });\n  const existing =");
+    expect(derivedKeys(file, literalMutation)).toContainEqual({ literal: 'migration:20260911000020', stamp: '20260911000020' });
   });
 
   test('every derived key carries the stamp of the file that owns it', () => {

@@ -30,6 +30,9 @@ function isProviderBlockedEvent(ev) {
 function isTransactionalRetryEligible(message) {
   if (!message || message.has_attachments) return false;
   if (String(message.recipient_type || '').toLowerCase() === 'test') return false;
+  // Applicant emails (recruiting-comms.js) have no email_templates row and
+  // their own eligibility (application state); they stay off this rail.
+  if (String(message.recipient_type || '').toLowerCase() === 'job_application') return false;
   const group = String(message.suppression_group_key_snapshot || '').trim().toLowerCase();
   if (group.startsWith('marketing_')) return false;
   if (asArray(message.categories).map((v) => String(v).toLowerCase()).includes('bounce_recovery')) return false;
@@ -303,7 +306,15 @@ async function retrySummaryThroughHandoff(message, dispatchToProvider, state) {
     logger.warn(`[email-provider-retry] visit summary handoff guard failed after acceptance for ${message.id}: ${err.message}`);
   }
   if (!state.result) {
-    return { outcome: await stopRetry(message, { status: 'blocked', reason: `Suppressed before retry: ${fence?.reason || 'visit_summary_unavailable'}` }) };
+    // Pre-push audit P1 (2eb19ceff7): the annual-offer guard (inside
+    // dispatchToProvider, above) also resolves without setting state.result
+    // when it blocks — distinguish that from the summary re-authorization's
+    // own "unavailable" verdict so the row's error_message names the real
+    // reason.
+    return { outcome: await stopRetry(message, {
+      status: 'blocked',
+      reason: state.blocked ? 'annual_offer_withheld' : `Suppressed before retry: ${fence?.reason || 'visit_summary_unavailable'}`,
+    }) };
   }
   return { result: state.result };
 }
@@ -321,6 +332,13 @@ async function recordRetrySend(message, result) {
         error_message: null,
         updated_at: new Date(),
         status: db.raw("CASE WHEN status = 'queued' THEN 'sent' ELSE status END"),
+        // Round 9 structural fix (P1): sendOne rewrote a withheld estimate
+        // link before this retry actually sent — persist the rewritten
+        // bytes so the stored row reflects what the customer received, same
+        // as a fresh sendTemplate send does (email-template-library.js).
+        ...(result.withheldLinksRewritten?.length
+          ? { html_snapshot: result.html, text_snapshot: result.text }
+          : {}),
       })
       .returning('*');
   } catch (err) {
@@ -357,7 +375,7 @@ async function retryOne(message) {
   // dispatchStarted is set immediately before the Mail Send request: a
   // failure clearing the provider block is provably pre-send and keeps the
   // ordinary retry schedule.
-  const state = { dispatchStarted: false, result: null };
+  const state = { dispatchStarted: false, result: null, blocked: false };
   const dispatchToProvider = async () => {
     // Blocks are a provider-specific suppression distinct from hard bounces.
     // If it remains, SendGrid will drop the retry before attempting delivery.
@@ -374,23 +392,72 @@ async function retryOne(message) {
         .update({ error_message: HANDOFF_STARTED, updated_at: new Date() });
       if (Number(started) !== 1) throw new Error('Visit summary retry claim was reclaimed before the provider request');
     }
+    // Codex round 3 on #4608 (structural move): the annual-offer guard's
+    // AUTHORITATIVE check now runs inside sendgrid.sendOne itself, the true
+    // provider boundary — an automatic retry re-sends the SAME stored
+    // html/text a fresh send would, and sendOne's own content derivation
+    // over that html/text covers it without composing the guard here
+    // separately (no explicit id: a retried email_messages row has no
+    // structured estimate reference to pass as one).
+    //
+    // Round 9 structural fix (P1): `templateKey: message.template_key`
+    // lets sendOne resolve the SAME rewrite-vs-refuse policy a fresh send
+    // of this template would get (estimate-annual-guard.js's
+    // withheldLinkPolicyForTemplate) — a stored deposit receipt whose
+    // content still carries a withheld link (queued before an earlier
+    // rewrite persisted, or re-rendered) is rewritten and retried
+    // successfully here, not refused permanently just because this sweep
+    // has no explicit opinion of its own.
+    //
+    // dispatchStarted flips true optimistically (a real sendOne attempt is
+    // about to happen) and is reverted on catching sendOne's OWN blocked
+    // refusal (.annualOfferWithheld) — that refusal means the wire was
+    // never touched, so both this file's own catch below and
+    // retrySummaryThroughHandoff's (visit-completion-summary.js's) must see
+    // "never attempted", not a failed attempt. state.blocked signals the
+    // caller to stop the retry permanently (below); any OTHER thrown error
+    // (a real provider failure) propagates unchanged into the existing
+    // "not dispatched"/"uncertain" classification this file already has.
     state.dispatchStarted = true;
-    state.result = await sendgrid.sendOne({
-      to: message.recipient_email_snapshot,
-      fromEmail: message.from_email_snapshot,
-      fromName: message.from_name_snapshot,
-      replyTo: message.reply_to_snapshot,
-      subject: message.subject_snapshot,
-      html: message.html_snapshot,
-      text: message.text_snapshot,
-      categories: asArray(message.categories),
-      asmGroupId,
-      customArgs: {
-        email_message_id: message.id,
-        send_attempt_token: message.send_attempt_token,
-      },
-      suppressErrorLog: true,
-    });
+    try {
+      state.result = await sendgrid.sendOne({
+        to: message.recipient_email_snapshot,
+        fromEmail: message.from_email_snapshot,
+        fromName: message.from_name_snapshot,
+        replyTo: message.reply_to_snapshot,
+        subject: message.subject_snapshot,
+        html: message.html_snapshot,
+        text: message.text_snapshot,
+        categories: asArray(message.categories),
+        asmGroupId,
+        customArgs: {
+          email_message_id: message.id,
+          send_attempt_token: message.send_attempt_token,
+        },
+        suppressErrorLog: true,
+        templateKey: message.template_key,
+      });
+    } catch (err) {
+      // Pre-push audit P1 (b49be57b12 round 4): a guard INFRASTRUCTURE
+      // failure (.annualOfferGuardFailed) happens at the exact same
+      // pre-request point as a blocked verdict — sendOne's own guard check,
+      // before any HTTP call — so it must revert dispatchStarted exactly
+      // like the withheld case, or retrySummaryThroughHandoff's catch below
+      // (state.dispatchStarted && !state.result) wrongly reads "the wire
+      // was touched, settle uncertain" for a request that was never
+      // attempted. Unlike withheld, it is NOT a permanent stop: rethrown
+      // unchanged so the ordinary retry-later classification applies (this
+      // file's ownnot-dispatched branches, both here and in retryOne's own
+      // catch), same as any other pre-send recheck failure.
+      if (err && (err.annualOfferWithheld || err.annualOfferGuardFailed)) {
+        state.dispatchStarted = false;
+      }
+      if (err && err.annualOfferWithheld) {
+        state.blocked = true;
+        return;
+      }
+      throw err;
+    }
   };
   try {
     // A visit summary is a bearer link: its recipient, the customer's
@@ -402,6 +469,9 @@ async function retryOne(message) {
       if (handoff.outcome) return handoff.outcome;
     } else {
       await dispatchToProvider();
+    }
+    if (state.blocked) {
+      return await stopRetry(message, { status: 'blocked', reason: 'annual_offer_withheld' });
     }
     return await recordRetrySend(message, state.result);
   } catch (err) {

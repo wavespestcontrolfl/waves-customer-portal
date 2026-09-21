@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 const WORKFLOW = 'estimate_conversion_sms';
 const SERVICE_SCHEDULING_WORKFLOW = 'service_scheduling_sms';
@@ -514,8 +515,14 @@ async function resolveRecentSmsThread({ customer, phone, smsLogId }) {
     currentCreatedAt = current?.created_at || null;
   }
 
-  const q = db('sms_log')
+  // codex #4331 P2 (structural pass): an unresolved review-ask reservation
+  // must not read as a delivered message in this composer-facing thread.
+  const q = excludeUnresolvedSendReservations(db('sms_log'))
     .select('id', 'direction', 'message_body', 'message_type', 'admin_user_id', 'created_at')
+    // Recruiting threads (job_*) are owner-only and never customer context —
+    // an applicant sharing this phone must not feed interview links or
+    // replies into estimate routing (codex #4623 r15).
+    .whereRaw("COALESCE(message_type, '') NOT LIKE 'job\\_%'")
     .orderBy('created_at', 'desc')
     .limit(8);
 

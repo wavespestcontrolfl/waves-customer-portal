@@ -115,7 +115,7 @@ const FORBIDDEN_TARGET_RE = /ganoderma|thielaviopsis/i;
 // Either word order — "Waves Pest & Lawn" is the same retired name (r15).
 // The real brand ("Waves Pest Control & Lawn Care") stays safe: 'control'
 // is a word, so \W-only separators never bridge pest→lawn across it.
-const RETIRED_NAME_RE = /waves\W+(?:lawn\W*(?:and\W+)?\W*pest|pest\W*(?:and\W+)?\W*lawn)/i;
+const { RETIRED_NAME_RE, NONCANONICAL_SUFFIX_RE } = require('./customer-company-name');
 // The APPROVED company name, as a whole normalized phrase — prose, not a
 // product reference (r17: bare 'waves' is no longer common prose).
 // Canonical name ONLY per AGENTS.md — no blessed variants (codex r19).
@@ -133,7 +133,6 @@ const APPROVED_NAME_TERM_RE = /^waves\s+pest\s+control$/;
 // Strong connectors (& + /) always denote a name suffix; weak ones
 // (- ,) and bare/and brand words need the end-of-name lookahead —
 // "- pest activity reviewed" is a clause, "- Lawn Care" a suffix (r49).
-const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:&|\+|\/)\s*\w+|\s*(?:-|,)\s*(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s*(?:-|,)\s*(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b(?!\s+(?:was|is|were|are|has|have|had|will|would|being|remains?|stays?|continues?|scheduled|planned|discussed|requested|completed|begins?|starts?|needs?|ends?|resumes?)\b))|\s+(?:and\s+)?(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s+(?:and\s+)?(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b(?!\s+(?:was|is|were|are|has|have|had|will|would|being|remains?|stays?|continues?|scheduled|planned|discussed|requested|completed|begins?|starts?|needs?|ends?|resumes?)\b))|\s+(?:and\s+)?(?:group|groups|solutions|enterprises|holdings|partners|brands)\b|\s+of\s+(?:florida|sarasota|bradenton|venice|parrish|palmetto|swfl|america|tampa)\b|\s+(?:florida|sarasota|bradenton|venice|parrish|palmetto|north\s+port)\b|\s+and\s+(?:termite|lawn|pest|mosquito|rodent|wildlife|turf|shrub|tree|bed\s*bug)\s+(?:control|care|services?)(?!\s+(?:was|is|were|are|has|have|had|will|would|being|remains?|stays?|continues?|scheduled|planned|discussed|requested|completed|begins?|starts?|needs?|ends?|resumes?)\b))/i;
 
 function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';

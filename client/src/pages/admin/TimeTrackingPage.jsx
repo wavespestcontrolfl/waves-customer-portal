@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
+import useModalFocus from "../../hooks/useModalFocus";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
@@ -2446,6 +2447,10 @@ export function TeamTab({ showToast }) {
   const [saving, setSaving] = useState(false);
   const [earningsTech, setEarningsTech] = useState(null);
   const [capabilitiesTech, setCapabilitiesTech] = useState(null);
+  const [deactivateTech, setDeactivateTech] = useState(null);
+  const [deactivateError, setDeactivateError] = useState("");
+  const [deactivating, setDeactivating] = useState(false);
+  const deactivateInFlightRef = useRef(false);
   // The capabilities routes are admin-only; the roster itself is readable by
   // technicians, so the action is hidden for them rather than 403ing.
   const isAdmin = useMemo(() => readStaffRole() === "admin", []);
@@ -2562,11 +2567,10 @@ export function TeamTab({ showToast }) {
   };
 
   const handleDeactivate = async (tech) => {
-    if (
-      !confirm(
-        `Deactivate ${tech.name}'s staff account? They will be signed out and can no longer access Staff tools. Historical time, payroll, job, and audit records will be kept.`,
-      )
-    ) return;
+    if (deactivateInFlightRef.current) return;
+    deactivateInFlightRef.current = true;
+    setDeactivating(true);
+    setDeactivateError("");
     try {
       const res = await adminFetch(`/admin/timetracking/technicians/${tech.id}`, {
         method: "DELETE",
@@ -2579,9 +2583,15 @@ export function TeamTab({ showToast }) {
           ? `${tech.name} deactivated — ${pending.length} upcoming visit${pending.length === 1 ? "" : "s"} still assigned; reassign on the Schedule`
           : `${tech.name} deactivated`,
       );
+      setDeactivateTech(null);
       load();
     } catch (e) {
-      showToast("Failed to deactivate: " + String(e.message || "Unknown error"));
+      const message = "Failed to deactivate: " + String(e.message || "Unknown error");
+      setDeactivateError(message);
+      showToast(message);
+    } finally {
+      deactivateInFlightRef.current = false;
+      setDeactivating(false);
     }
   };
 
@@ -3356,9 +3366,15 @@ export function TeamTab({ showToast }) {
                       {uploadingId === t.id ? "Uploading…" : "Photo"}
                     </button>{" "}
                     <button
-                      onClick={() => (
-                        t.active ? handleDeactivate(t) : handleActivate(t)
-                      )}
+                      onClick={(event) => {
+                        if (t.active) {
+                          event.currentTarget.focus({ preventScroll: true });
+                          setDeactivateError("");
+                          setDeactivateTech(t);
+                        } else {
+                          handleActivate(t);
+                        }
+                      }}
                       title={t.employment_status === "prospective" ? "Marks this hire as started. They set their password with Forgot password on the admin login (needs their email on this row)." : undefined}
                       style={{
                         padding: "4px 10px",
@@ -3404,7 +3420,92 @@ export function TeamTab({ showToast }) {
           showToast={showToast}
         />
       )}
+      {deactivateTech && (
+        <DeactivateStaffDialog
+          tech={deactivateTech}
+          error={deactivateError}
+          submitting={deactivating}
+          onCancel={() => {
+            if (!deactivating) setDeactivateTech(null);
+          }}
+          onConfirm={() => handleDeactivate(deactivateTech)}
+        />
+      )}
     </div>
+  );
+}
+
+function DeactivateStaffDialog({ tech, error, submitting, onCancel, onConfirm }) {
+  const dialogRef = useModalFocus(true, () => {
+    if (!submitting) onCancel();
+  });
+  const titleId = `deactivate-staff-title-${tech.id}`;
+
+  return createPortal(
+    <div
+      className="staff-foundation"
+      onClick={() => {
+        if (!submitting) onCancel();
+      }}
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 200,
+        background: "rgba(0,0,0,0.45)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: "calc(16px + env(safe-area-inset-top, 0px)) calc(16px + env(safe-area-inset-right, 0px)) calc(16px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))",
+        overflowY: "auto",
+      }}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        onClick={(event) => event.stopPropagation()}
+        style={{
+          background: D.card,
+          border: `1px solid ${D.border}`,
+          borderRadius: 6,
+          width: "100%",
+          maxWidth: 480,
+          maxHeight: "100%",
+          overflowY: "auto",
+          padding: 20,
+          boxSizing: "border-box",
+        }}
+      >
+        <div id={titleId} style={{ fontSize: 18, fontWeight: 500, color: D.heading }}>
+          Deactivate {tech.name}?
+        </div>
+        <p style={{ fontSize: 14, lineHeight: 1.55, color: D.text, margin: "12px 0 0" }}>
+          They will be signed out and can no longer access Staff tools. Historical time, payroll, job, and audit records will be kept.
+        </p>
+        {error && (
+          <div role="alert" style={{ color: D.red, fontSize: 14, lineHeight: 1.55, marginTop: 12 }}>
+            {error}
+          </div>
+        )}
+        <div style={{ display: "flex", justifyContent: "flex-end", flexWrap: "wrap", gap: 8, marginTop: 20 }}>
+          <button type="button" onClick={onCancel} disabled={submitting} style={sBtn("transparent", D.text)}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={submitting}
+            aria-busy={submitting || undefined}
+            style={{ ...sBtn(D.red, D.white), cursor: submitting ? "wait" : "pointer", opacity: submitting ? 0.6 : 1 }}
+          >
+            {submitting ? "Deactivating…" : "Deactivate"}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 

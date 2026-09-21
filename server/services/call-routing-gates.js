@@ -86,8 +86,14 @@ function checkTcpaConsent(extraction, opts = {}) {
 // v2-1.6.0 recognizes matching saved-address components and preserves stated
 // geography through service-area validation (the change once reserved as
 // 1.4, landed after 1.5). Reprocessing gets a fresh decision.
-const V2_DECISION_VERSION = 'v2-1.6.0';
-const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0'];
+// v2-1.7.0: a linked, actively served customer's on-file address satisfies
+// the four recoverable address flags on an unconfirmed call (they leave the
+// verdict and the card set; onFileAddressSatisfiedFlags records them), and a
+// not_confirmed verdict with no scheduling ask files no fallback card — a
+// force-reprocess of an older recording can now change its blocked reasons,
+// so the route_decisions key must not collide with the pre-change row.
+const V2_DECISION_VERSION = 'v2-1.7.0';
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0'];
 
 function buildRouteDecision({
   callLogId,

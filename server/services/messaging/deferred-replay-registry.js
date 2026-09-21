@@ -4,7 +4,7 @@
  *
  * Every send path that requeues a held text (QUIET_HOURS_HOLD →
  * sms_log status 'scheduled') registers its entry_point here with up to
- * four hooks, and the executor consults the registry generically:
+ * five hooks, and the executor consults the registry generically:
  *
  *   recheck(claimMeta)   — BEFORE dispatch: is this message still valid?
  *                          The world moves overnight — estimates get
@@ -21,6 +21,11 @@
  *                          then runs `dispatch(trx)` while those rows are
  *                          still held, so nothing can change under the
  *                          provider request.
+ *   dispatch(claimMeta) — replace the frozen-body replay with a fresh,
+ *                          guarded canonical send. It must return the same
+ *                          canonical send outcome as the default dispatcher;
+ *                          its outcome or error is final, with no fallback to
+ *                          the frozen queued body.
  *   finalize(claimMeta, ctx) — AFTER the provider accepts: the state
  *                          transitions the immediate path would have run
  *                          inline (invoice draft→sent, review delivered
@@ -80,7 +85,110 @@ const failClosed = (label, id, err) => {
   return { eligible: false, reason: 'recheck-failed', retryable: true };
 };
 
+// recruiting_comms_deferred#recheck's three phases (each returns a
+// { eligible: false, reason } refusal, or null to continue). Split out so
+// the eligibility read (with its optional row lock), the ledger-history
+// supersession check, and the booking-version check each carry a single
+// named responsibility instead of one function doing all three.
+
+// Application eligibility: loads the application (FOR UPDATE when `lock` is
+// set — smsHandoff's locked re-check holds the row from here through the
+// provider request) and confirms it is missing or in a status this stage
+// can still act on.
+async function checkRecruitingApplicationEligibility(meta, conn, lock) {
+  if (!meta.job_application_id) return { refusal: { eligible: false, reason: 'application-missing' } };
+  let appQuery = conn('job_applications').where({ id: meta.job_application_id });
+  if (lock) appQuery = appQuery.forUpdate();
+  const app = await appQuery
+    .first('id', 'status', 'interview_token', 'interview_at', 'interview_mode', 'interview_booked_at', 'comms_history');
+  if (!app) return { refusal: { eligible: false, reason: 'application-missing' } };
+  const status = String(app.status || '');
+  if (!['new', 'reviewed', 'interview', 'offer'].includes(status)) {
+    return { refusal: { eligible: false, reason: `application-${status || 'unknown'}` } };
+  }
+  return { app };
+}
+
+// Stage supersession: for the interview stages only, the application must
+// still be at 'interview', and this queued attempt must not have been
+// superseded by a newer attempt of the same stage in the ledger (Codex r7
+// P2) or by a token that changed since this row was queued.
+function checkRecruitingStageSupersession(meta, app, stage) {
+  if (stage === 'application_received') return checkReceiptSupersession(meta, app);
+  if (stage !== 'interview_invite' && stage !== 'interview_confirmation') return null;
+  const status = String(app.status || '');
+  if (status !== 'interview') return { eligible: false, reason: `application-${status}` };
+  const history = Array.isArray(app.comms_history) ? app.comms_history : [];
+  const mineIdx = history.findIndex((e) => e && e.id === meta.ledger_entry_id);
+  // Append position is the total order (Codex r23 P2): appendCommsHistory is
+  // one atomic jsonb append per attempt, so a resend appended in the same
+  // millisecond as this claim still sits AFTER it — a timestamp compare
+  // would miss it. 'pending' counts too (Codex r14 P2): an immediate resend
+  // sits at 'pending' while it runs the validators, and its own boundary
+  // check only looks for attempts newer than ITSELF — so this claimed row
+  // must yield to it, or both would reach Twilio.
+  const newer = mineIdx >= 0 && history.slice(mineIdx + 1).some((e) => e && e.channel === 'sms' && e.stage === stage
+    && ['pending', 'handoff', 'sent', 'uncertain', 'deferred'].includes(e.outcome));
+  if (newer) return { eligible: false, reason: 'superseded-by-newer-attempt' };
+  // A queued "pick a time" invite is moot once the applicant has booked
+  // (Codex r24 P2) — e.g. the email leg let them book overnight before the
+  // SMS window opened — or once a confirmation for that booking is already
+  // live after it in the ledger.
+  if (stage === 'interview_invite') {
+    if (app.interview_booked_at) return { eligible: false, reason: 'interview-already-booked' };
+    const confirmed = mineIdx >= 0 && history.slice(mineIdx + 1).some((e) => e && e.channel === 'sms' && e.stage === 'interview_confirmation'
+      && ['pending', 'handoff', 'sent', 'uncertain', 'deferred'].includes(e.outcome));
+    if (confirmed) return { eligible: false, reason: 'superseded-by-confirmation' };
+  }
+  if (!meta.interview_token || app.interview_token !== meta.interview_token) {
+    return { eligible: false, reason: 'interview-token-changed' };
+  }
+  return null;
+}
+
+// A queued application receipt ("we'll reach out within 2 business days")
+// is stale once the owner has moved on: the application advanced past the
+// review stages, or a LATER stage/owner text is already live in the ledger
+// (Codex #4623 r17). Either way the applicant must not get the older
+// acknowledgment after the newer message.
+const LIVE_SMS_OUTCOMES = ['pending', 'handoff', 'sent', 'uncertain', 'deferred'];
+function checkReceiptSupersession(meta, app) {
+  const status = String(app.status || '');
+  if (status !== 'new' && status !== 'reviewed') return { eligible: false, reason: `application-advanced-${status}` };
+  const history = Array.isArray(app.comms_history) ? app.comms_history : [];
+  const mine = history.find((e) => e && e.id === meta.ledger_entry_id);
+  const mineAt = mine ? Date.parse(mine.at || '') : NaN;
+  const later = history.some((e) => e && e.id !== meta.ledger_entry_id && e.channel === 'sms' && e.stage !== 'application_received'
+    && LIVE_SMS_OUTCOMES.includes(e.outcome) && Number.isFinite(mineAt) && Date.parse(e.at || '') > mineAt);
+  return later ? { eligible: false, reason: 'superseded-by-later-stage' } : null;
+}
+
+// Booking version: interview_confirmation only — the queued copy names a
+// specific pinned time and mode, so a rebook to a different time, or the
+// same time under a different mode (phone ↔ in person), makes it stale.
+function checkRecruitingBookingVersion(meta, app, stage) {
+  if (stage !== 'interview_confirmation') return null;
+  const pinned = meta.interview_at ? new Date(meta.interview_at).toISOString() : null;
+  const current = app.interview_at ? new Date(app.interview_at).toISOString() : null;
+  if (!pinned || pinned !== current) return { eligible: false, reason: 'interview-rebooked' };
+  if ((meta.interview_mode || null) !== (app.interview_mode || null)) return { eligible: false, reason: 'interview-mode-changed' };
+  return null;
+}
+
 const REGISTRY = {
+  lawn_assessment_notification_deferred: {
+    async recheck(meta) {
+      // The durable descriptor carries the customer identity. Reuse
+      // the dispatcher's live service-complete preferences so a quiet window
+      // that extends past 08:00 waits on the scheduler's named retry rail,
+      // while a later opt-out remains a terminal suppression.
+      const { deferredNotificationStillWanted } = require('../notification-dispatcher');
+      return deferredNotificationStillWanted('service_complete', meta.customer_id || null);
+    },
+    async dispatch(meta) {
+      return require('../lawn-visit-delivery').replayDeferredNotification(meta);
+    },
+  },
   request_app_deferred: {
     async recheck(meta) {
       try {
@@ -244,6 +352,71 @@ const REGISTRY = {
   },
 
   dispatch_completion_deferred: {
+    async recheck(meta) {
+      // Most completion replays carry no pay link at all (report-only,
+      // already-paid completions) — cheap no-op before any DB read.
+      if (!meta.invoice_id || !meta.pay_url) return { eligible: true };
+      const collectible = await invoiceStillCollectible(meta);
+      if (collectible?.eligible === false) {
+        // A transient read failure (DB outage mid-recheck) is NOT a
+        // confirmed fact about the invoice — invoiceStillCollectible's own
+        // failClosed reports it as { eligible: false, reason:
+        // 'recheck-failed', retryable: true } specifically so the
+        // scheduler's bounded 15-minute retry ladder holds the row and
+        // tries again with a fresh read. Promoting it to stripPayLink here
+        // (round-9's original bug, #4634 round-10 P1) would strip a pay
+        // link that is still perfectly valid on nothing more than a
+        // hiccup, and do so permanently — the strip is one-way, there is
+        // no re-check on a later successful attempt. Return it unchanged.
+        if (collectible.retryable === true) return collectible;
+        const reason = collectible.reason || '';
+        // Owner ruling on Codex round 8 #4634: settlement must never
+        // cancel this entry point outright — cancelling drops the WHOLE
+        // completion/report text (not just the stale pay link), strands
+        // service_records.structured_notes.completionSmsStatus at
+        // 'deferred' forever (the completion dedupe treats that as an
+        // owned send — see complete-scheduled-service.js), and never
+        // re-arms a bundled review ask (onTerminal is what does that, and
+        // a direct sms_log cancel outside the executor's own terminal flip
+        // never stamps terminal_pending, so onTerminal never runs). The
+        // customer's report still has every reason to go out; only the
+        // pay-link sentence is now asking for money the invoice no longer
+        // owes. That is true for a CONFIRMED terminal/payer-owned/
+        // withdrawn invoice — never for every ineligible reason
+        // invoiceStillCollectible can return, so each is decided by name
+        // rather than treated as one bucket:
+        //   - invoice-terminal:* / payer-billed / payer-billed-withdrawn:
+        //     the invoice itself is confirmed dead or reassigned — the pay
+        //     link is definitely stale. Strip it.
+        //   - invoice-missing: the row is gone outright — the pay link
+        //     cannot possibly resolve. Same as terminal: strip it.
+        //   - sequence-stopped / amount-changed (and any future reason):
+        //     neither is "this exact pay link is stale" — sequence-stopped
+        //     is a live stop signal (reply/opt-out) on the invoice's
+        //     follow-up sequence, and amount-changed means the frozen body
+        //     may be quoting the WRONG balance, not just a dead link.
+        //     Stripping the link and sending the rest would still hand the
+        //     customer a report with a wrong-amount narrative. Suppress
+        //     the whole replay through the normal eligible:false path
+        //     instead — same terminal handling (blocked status + the
+        //     review-ask fallback) confirmed-dead invoices used to get
+        //     before the round-8 ruling carved those out above.
+        if (
+          reason.startsWith('invoice-terminal:')
+          || reason === 'payer-billed'
+          || reason === 'payer-billed-withdrawn'
+          || reason === 'invoice-missing'
+        ) {
+          // Strip just that line at actual delivery time instead — the
+          // scheduler applies `stripPayLink` to the frozen body before
+          // dispatch and clears `mark_invoice_delivery` so finalize below
+          // does not mark a pay link delivered that never sent.
+          return { eligible: true, stripPayLink: true, reason };
+        }
+        return { eligible: false, reason };
+      }
+      return { eligible: true };
+    },
     async finalize(meta, ctx = {}) {
       const { finalizeDeferredCompletionSend } = require('../dispatch-completion-deferred');
       return finalizeDeferredCompletionSend(meta, { retry: ctx.retry === true });
@@ -289,6 +462,15 @@ const REGISTRY = {
       // (customer paid through another rail, admin voided) or moved onto a
       // third-party payer (the AP contact owns collection, and billing
       // texts must never reach the homeowner on payer-billed invoices).
+      // This IS the sole collectibility guard for this entry point (round
+      // 9 #4634): settlement no longer cancels a scheduled row of this type
+      // directly — a direct cancel bypasses this file's own onTerminal
+      // (below), which is what restores paymentFailedNoticeStatus off
+      // 'deferred' and is required for the completion resume dedupe to ever
+      // retry the notice. isTerminalInvoice already covers 'prepaid', so a
+      // zero-due settlement lands here (this recheck runs BEFORE dispatch,
+      // suppresses, and the executor's own terminal-block path runs
+      // onTerminal correctly) instead of via a settlement-side cancel.
       try {
         if (!meta.invoice_id) return { eligible: true };
         const { isTerminalInvoice } = require('../invoice-followups');
@@ -559,6 +741,95 @@ const REGISTRY = {
     },
   },
 
+  // Applicant texts held by the send window (services/recruiting-comms.js).
+  // Fail closed on every recheck: the lane's kill switch, and the
+  // application version the queue row pinned — an applicant who withdrew,
+  // was moved, or re-picked overnight never receives an obsolete invite or
+  // confirmation. The ledger entry written before the original handoff is
+  // reconciled on send / terminal block so reply classification and the
+  // owner's Messages list stay truthful.
+  recruiting_comms_deferred: {
+    async recheck(meta, { conn = db, lock = false } = {}) {
+      try {
+        if (!require('../../config/feature-gates').isEnabled('recruitingComms')) {
+          return { eligible: false, reason: 'recruiting-gate-off' };
+        }
+        const { app, refusal } = await checkRecruitingApplicationEligibility(meta, conn, lock);
+        if (refusal) return refusal;
+
+        const stage = String(meta.stage || '');
+        const supersessionRefusal = checkRecruitingStageSupersession(meta, app, stage);
+        if (supersessionRefusal) return supersessionRefusal;
+
+        const bookingRefusal = checkRecruitingBookingVersion(meta, app, stage);
+        if (bookingRefusal) return bookingRefusal;
+
+        return { eligible: true };
+      } catch (err) {
+        return failClosed('recruiting-comms', meta.job_application_id, err);
+      }
+    },
+    // The canonical sender's locked handoff (Codex r8 P1): the queued entry
+    // moves to 'handoff' IMMEDIATELY before the provider request — after
+    // every fresh suppression/consent check has passed — so a text blocked
+    // at those checks never leaves 'handoff' evidence, while an ambiguous
+    // or timed-out provider result still does.
+    async smsHandoff(meta, dispatch) {
+      // The LOCKED handoff (Codex r12 P1): the application row is held FOR
+      // UPDATE from the eligibility read through the provider request, so an
+      // admin stage change or an applicant rebook cannot commit between the
+      // recheck and Twilio — it waits for this dispatch to finish and then
+      // re-derives from the committed row. Same posture as the visit-summary
+      // handoff (claimDispatchThroughHandoff).
+      return db.transaction(async (trx) => {
+        // Shared SMS phone lock BEFORE the application row (Codex r30 P1):
+        // the STOP writer (applyInboundOptout) commits under the same phone
+        // lock, so a late STOP serializes against this handoff instead of
+        // slipping between the pipeline's suppression read and Twilio.
+        if (meta.job_application_id) {
+          const contact = await trx('job_applications').where({ id: meta.job_application_id }).first('contact_snapshot');
+          const phone = contact && contact.contact_snapshot && contact.contact_snapshot.phone;
+          if (phone) await require('../../utils/customer-comms-lock').lockSmsPhone(trx, phone);
+        }
+        const again = await REGISTRY.recruiting_comms_deferred.recheck(meta, { conn: trx, lock: true });
+        if (!again || again.eligible === false) {
+          return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'RECRUITING_STALE_AT_HANDOFF', reason: (again && again.reason) || 'ineligible' };
+        }
+        if (meta.job_application_id && meta.ledger_entry_id) {
+          const { reconcileCommsHistoryEntryByOutcome } = require('../recruiting-comms');
+          await reconcileCommsHistoryEntryByOutcome(meta.job_application_id, meta.ledger_entry_id, {
+            deferred: { outcome: 'handoff', replay_attempted_at: new Date().toISOString() },
+          }, trx);
+        }
+        return dispatch(trx);
+      });
+    },
+    async finalize(meta) {
+      if (!meta.job_application_id || !meta.ledger_entry_id) return { ok: true };
+      const { finalizeCommsHistoryEntry } = require('../recruiting-comms');
+      await finalizeCommsHistoryEntry(meta.job_application_id, meta.ledger_entry_id, {
+        outcome: 'sent', code: null, finalized_at: new Date().toISOString(), sent_by: 'scheduled_sms_cron',
+      });
+      return { ok: true };
+    },
+    durableFinalize: true,
+    async onTerminal(meta) {
+      if (!meta.job_application_id || !meta.ledger_entry_id) return;
+      // Never downgrade evidence (local audit P0): a row that was never
+      // attempted ('deferred') is proven undelivered → 'blocked'; a row
+      // whose attempt ended ambiguous ('handoff' left by recheck) may have
+      // reached the applicant → 'uncertain', which the reply classifier
+      // keeps treating as owner-only context. 'sent'/'uncertain' are left
+      // as they are.
+      const { reconcileCommsHistoryEntryByOutcome } = require('../recruiting-comms');
+      const at = new Date().toISOString();
+      await reconcileCommsHistoryEntryByOutcome(meta.job_application_id, meta.ledger_entry_id, {
+        deferred: { outcome: 'blocked', code: 'deferred_terminal', finalized_at: at },
+        handoff: { outcome: 'uncertain', code: 'deferred_terminal_after_attempt', finalized_at: at },
+      });
+      logger.info(`[deferred-replay] recruiting text for application ${meta.job_application_id} terminal — ledger reconciled without downgrading delivery evidence`);
+    },
+  },
   voicemail_lead_sms_deferred: {
     async recheck(meta) {
       // The quote link is a speed play for a fresh voicemail — a lead
@@ -1193,6 +1464,25 @@ async function recheckDeferredReplay(entryPoint, claimMeta = {}) {
   }
 }
 
+// Registered dispatchers own the complete replay, including preparation of
+// fresh copy and its final send guard. Their outcome/error propagates as-is:
+// falling back after either one could send the frozen queued body. The marker
+// protects rows produced during a rolling deploy until their entry is loaded.
+async function dispatchDeferredReplay(entryPoint, claimMeta = {}, defaultDispatch) {
+  const entry = entryFor(entryPoint);
+  if (entry && typeof entry.dispatch === 'function') return entry.dispatch(claimMeta);
+  if (claimMeta.requires_registered_dispatch === true) {
+    return {
+      sent: false,
+      blocked: true,
+      code: 'DEFERRED_DISPATCH_UNAVAILABLE',
+      retryable: true,
+      deliveryOutcome: 'not_sent',
+    };
+  }
+  return defaultDispatch();
+}
+
 // undefined = no locked handoff registered: the sender dispatches normally.
 // Errors propagate: the provider wrapper distinguishes a failed read before
 // the handoff (retryable, nothing left) from a failure after acceptance.
@@ -1369,6 +1659,7 @@ const DURABLE_FINALIZE_ENTRY_POINTS = Object.entries(REGISTRY)
 
 module.exports = {
   recheckDeferredReplay,
+  dispatchDeferredReplay,
   deferredSmsHandoff,
   finalizeDeferredReplay,
   onTerminalDeferredReplay,

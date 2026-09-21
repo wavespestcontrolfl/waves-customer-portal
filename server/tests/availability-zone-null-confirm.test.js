@@ -151,6 +151,7 @@ describe('confirmBooking — zone-null occupancy fallback', () => {
     const result = await Availability.confirmBooking(null, 'cust-1', DATE, '09:00', null);
     expect(result.confirmationCode).toBeTruthy();
     expect(findConflictingVisits).toHaveBeenCalledWith({
+      includeInterviews: true,
       db: trx,
       date: DATE,
       windowStart: '09:00',
@@ -208,6 +209,7 @@ describe('confirmBooking — zone-null occupancy fallback', () => {
     // visit whose customer city is outside the zone list, and rung 1 only
     // serializes writers — it cannot widen what the check sees.
     expect(findConflictingVisits).toHaveBeenCalledWith({
+      includeInterviews: true,
       db: trx,
       date: DATE,
       windowStart: '09:00',

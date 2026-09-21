@@ -42,3 +42,66 @@ describe('send_payment_link operator context', () => {
     expect(InvoiceService.sendViaSMS).toHaveBeenCalledWith('inv-1', { operatorInitiated: true, actorTechnicianId: null });
   });
 });
+
+describe('send_payment_link — sent must reflect actual delivery, never sendResult.ok (Codex round-5 P1 #4131 finding 3)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('a zero-due settlement resolves sent: false with settledZeroDue: true — never told to the customer as a delivered link', async () => {
+    // The chokepoint's own resolved outcome for this case: { sent: false,
+    // ok: true, ... }. Before this fix, `sent` read `sendResult?.sent ||
+    // sendResult?.ok` — a genuine ok:true good outcome (nothing texted)
+    // would have reported sent: true here, telling the customer a pay
+    // link went out when nothing was ever delivered.
+    InvoiceService.sendViaSMS.mockResolvedValue({
+      sent: false, ok: true, code: 'zero_due', settled_zero_due: true,
+      reason: 'Nothing is due on this invoice — settled instead of delivering a $0 pay link',
+    });
+
+    const out = await executeToolCall('send_payment_link', { invoice_id: 'inv-1' }, 'cust-1', {});
+
+    expect(out.sent).toBe(false);
+    expect(out.settledZeroDue).toBe(true);
+    // A genuine good outcome (ok: true) must never also carry an `error`
+    // field just because nothing was texted.
+    expect(out.error).toBeUndefined();
+  });
+
+  test('a genuine send failure (ok: false) still reports sent: false WITH an error — unaffected by the ok:true carve-out above', async () => {
+    InvoiceService.sendViaSMS.mockResolvedValue({ sent: false, ok: false, code: 'provider_rejected' });
+
+    const out = await executeToolCall('send_payment_link', { invoice_id: 'inv-1' }, 'cust-1', {});
+
+    expect(out.sent).toBe(false);
+    expect(out.settledZeroDue).toBeUndefined();
+    expect(out.error).toBe('provider_rejected');
+  });
+
+  test('an ordinary successful text keeps sent: true with no settledZeroDue', async () => {
+    InvoiceService.sendViaSMS.mockResolvedValue({ sent: true, ok: true, payUrl: 'https://pay.example/x' });
+
+    const out = await executeToolCall('send_payment_link', { invoice_id: 'inv-1' }, 'cust-1', {});
+
+    expect(out.sent).toBe(true);
+    expect(out.settledZeroDue).toBeUndefined();
+    expect(out.error).toBeUndefined();
+  });
+
+  test('a covered-by-credit settlement resolves sent: false with coveredByCredit: true — the sibling outcome settledZeroDue silently dropped (Codex round-8 audit P2 #4131 slice 4, consumer sweep)', async () => {
+    // sendViaSMS's OWN covered_by_credit shape: { sent: false, ok: true,
+    // covered_by_credit: true, code: 'covered_by_credit', ... }. Before
+    // this fix, only settled_zero_due was passed through — this sibling
+    // outcome vanished with no signal at all, though sent correctly stayed
+    // false.
+    InvoiceService.sendViaSMS.mockResolvedValue({
+      sent: false, ok: true, covered_by_credit: true, code: 'covered_by_credit',
+      reason: 'Invoice covered by account credit — nothing to collect',
+    });
+
+    const out = await executeToolCall('send_payment_link', { invoice_id: 'inv-1' }, 'cust-1', {});
+
+    expect(out.sent).toBe(false);
+    expect(out.coveredByCredit).toBe(true);
+    expect(out.settledZeroDue).toBeUndefined();
+    expect(out.error).toBeUndefined();
+  });
+});

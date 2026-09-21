@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
+import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter, Outlet, Route, Routes, useNavigate } from 'react-router-dom';
+import { MemoryRouter, Outlet, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import InventoryPage from './InventoryPage';
 import { IntelligenceBarPageDataProvider, useIntelligenceBarActions } from '../../hooks/useIntelligenceBarPageData';
 
@@ -17,12 +18,16 @@ function RefreshButton() {
   return <><button onClick={() => notifyMutation({ id: crypto.randomUUID(), product_id: productId, domain: 'inventory' })}>Receive verified result</button>
     <button onClick={() => navigate(-1)}>Browser Back</button></>;
 }
-function Host() {
-  return <IntelligenceBarPageDataProvider><RefreshButton /><Outlet context={{ user: { role: 'admin' } }} /></IntelligenceBarPageDataProvider>;
+function Host({ role = 'admin' }) {
+  return <IntelligenceBarPageDataProvider><RefreshButton /><Outlet context={{ user: { role } }} /></IntelligenceBarPageDataProvider>;
 }
-function mount(query) {
-  render(<MemoryRouter initialEntries={[`/admin/inventory?${query}`]}><Routes>
-    <Route element={<Host />}><Route path="/admin/inventory" element={<InventoryPage />} /></Route>
+function LocationState() {
+  const location = useLocation();
+  return <output data-testid="location">{location.search}{location.hash}</output>;
+}
+function mount(query, { role = 'admin', hash = '' } = {}) {
+  render(<MemoryRouter initialEntries={[`/admin/inventory?${query}${hash}`]}><LocationState /><Routes>
+    <Route element={<Host role={role} />}><Route path="/admin/inventory" element={<InventoryPage />} /></Route>
   </Routes></MemoryRouter>);
 }
 beforeEach(() => { vi.stubGlobal('localStorage', { getItem: () => 'synthetic-test' }); });
@@ -93,4 +98,29 @@ test.each([false, true])('browser Back restores a closed pinned request after Sh
   await screen.findByText('Synthetic closed request');
   expect(fetch.mock.calls.filter(([url]) => url.includes('/restock-requests?')).at(-1)[0])
     .toContain(`status=all&requestId=${requestId}`);
+});
+
+test('inventory group and leaf changes are URL-backed and preserve unrelated URL state', async () => {
+  vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(reply({}))));
+  mount('source=audit', { hash: '#evidence' });
+  await screen.findByText('Products');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Vendors & Pricing' }));
+  expect(screen.getByTestId('location')).toHaveTextContent('?source=audit&tab=price-sync#evidence');
+  fireEvent.click(screen.getByRole('button', { name: 'Vendors', exact: true }));
+  expect(screen.getByTestId('location')).toHaveTextContent('?source=audit&tab=vendors#evidence');
+  fireEvent.click(screen.getByText('Browser Back'));
+  await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent('?source=audit&tab=price-sync#evidence'));
+});
+
+test('inventory rejects owner-only and unknown deep links for technicians', async () => {
+  vi.stubGlobal('fetch', vi.fn(url => Promise.resolve(reply(
+    url.includes('/inventory?') ? { products: [], categories: [], total: 0 } : {},
+  ))));
+  mount('tab=vendors&source=audit', { role: 'tech' });
+  await screen.findByText('No products found');
+  expect(screen.queryByRole('button', { name: 'Vendors & Pricing' })).toBeNull();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Planning' }));
+  expect(screen.getByTestId('location')).toHaveTextContent('?tab=forecast&source=audit');
 });

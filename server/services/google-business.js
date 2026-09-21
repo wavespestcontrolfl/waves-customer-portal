@@ -5,7 +5,8 @@ function getGoogle() {
   return _googleapis;
 }
 const logger = require('./logger');
-const { deliverOpsDigest } = require('./ops-digest');
+const { deliverOpsDigest, readCleanWatermark } = require('./ops-digest');
+const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const MODELS = require('../config/models');
@@ -1466,6 +1467,9 @@ class GoogleBusinessService {
   // REVIEW SYNC - GBP Reviews API primary; Places kept for stats/fallback.
   // =========================================================================
   async syncAllReviews() {
+    // Order the whole fleet observation before any Places/GBP fetch. Arrival
+    // at the later escalation lock does not identify which cycle is newer.
+    const observedAt = new Date().toISOString();
     // The Maps key powers only the Places stats + review-sample fallback.
     // GBP Reviews auth is separate (_getClient), so a missing Maps key must
     // not stop the authoritative GBP loop — that would also silence the
@@ -1650,7 +1654,7 @@ class GoogleBusinessService {
     // class the 2026-08-08 manual review-status backfill fixed by hand.
     // Best-effort: health
     // reporting must never break the sync itself.
-    await this._assessReviewSyncHealth(sources, pulledCounts, gbpFailures).catch((err) => {
+    await this._assessReviewSyncHealth(sources, pulledCounts, gbpFailures, observedAt).catch((err) => {
       logger.warn(`[gbp] review sync health assessment failed: ${err.message}`);
     });
 
@@ -1723,7 +1727,7 @@ class GoogleBusinessService {
    * backup channel, 24h-deduped via the notifications table. Kill switch:
    * REVIEW_SYNC_HEALTH_EMAIL=off (same convention as EMAIL_BOUNCE_RECOVERY).
    */
-  async _assessReviewSyncHealth(sources = {}, pulledCounts = {}, gbpFailures = {}) {
+  async _assessReviewSyncHealth(sources = {}, pulledCounts = {}, gbpFailures = {}, observedAt = new Date().toISOString()) {
     if (String(process.env.REVIEW_SYNC_HEALTH_EMAIL || '').toLowerCase() === 'off') return { skipped: 'disabled' };
     // A cycle split across overlapping runners (per-location locks) gives
     // each runner a PARTIAL fleet view — two different signatures would both
@@ -1772,8 +1776,21 @@ class GoogleBusinessService {
       });
       if (verdict) findings.push({ loc, ...verdict });
     }
-    if (!findings.length) return { healthy: true };
+    if (!findings.length) {
+      // The transaction's observation bound protects newer failure markers;
+      // its durable clean watermark also rejects delayed older failures.
+      await runExclusive('gbp-sync-health-notify', () => retireIfClean('gbp-sync-health', {
+        alsoRetire: { category: 'review', field: 'opsKey', legacyTitlePrefix: 'Review sync health escalation [' },
+        lockKey: 'ops-digest:gbp-sync-health',
+        notAfter: observedAt,
+      }), { recordHealth: false });
+      return { healthy: true };
+    }
 
+    return this._maybeEscalateReviewSyncHealth(findings, observedAt);
+  }
+
+  async _maybeEscalateReviewSyncHealth(findings, observedAt) {
     const anyFix = findings.some((f) => f.severity === 'FIX');
     // Signature-keyed dedupe (pre-push audit): a constant title would let one
     // location's stats_stale suppress a DIFFERENT location going feed_down an
@@ -1781,62 +1798,104 @@ class GoogleBusinessService {
     // new title → sends immediately.
     const signature = findings.map((f) => `${f.loc.id}:${f.cls}`).sort().join('|');
     const title = `Review sync health escalation [${signature}]`;
-    const result = await runExclusive('gbp-sync-health-notify', async () => {
-      const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-      const recent = await db('notifications')
-        .where({ recipient_type: 'admin', title })
-        .where('created_at', '>', dayAgo)
-        .first();
-      if (recent) return { deduped: true };
+    const lines = findings.map((f) => `${f.severity} ${f.loc.name} [${f.cls}]: ${f.detail}`);
+    const body = [
+      'Hourly Google review sync — per-location health check found problems the mechanical degraded-sync alert cannot see:',
+      '', ...lines, '',
+      'A dead or stale feed means reviewers on that profile are never auto-marked as having reviewed, so review asks keep going to customers who already reviewed.',
+      'Remediation: reconnect the GBP account for credential failures (/admin/reviews sync status); for silent_empty confirm the profile state in Google Business Profile (removed/suspended listings need the support case); stats_stale usually means the Places API call is failing — check GOOGLE_MAPS_API_KEY quota/validity.',
+    ].join('\n');
+    const subject = `${anyFix ? 'FIX' : 'ACT'}: Google review sync — ${findings.length} location${findings.length === 1 ? '' : 's'} degraded or stale`;
+    const lockKey = 'ops-digest:gbp-sync-health';
+    let result;
+    try {
+      result = await runExclusive('gbp-sync-health-notify', () => db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${lockKey}`]);
+        const cleanAt = await readCleanWatermark(trx, lockKey);
+        if (cleanAt && Date.parse(observedAt) <= Date.parse(cleanAt)) return { stale: true };
+        const newer = await trx('notifications')
+          .where({ recipient_type: 'admin', category: 'review' })
+          .whereRaw("metadata->>'source' IS NULL")
+          .where((q) => q.whereRaw("metadata->>'opsKey' = ?", ['gbp-sync-health'])
+            .orWhere((legacy) => legacy.whereRaw("metadata->>'opsKey' IS NULL")
+              .where('title', 'like', 'Review sync health escalation [%')))
+          .whereRaw("COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at) > ?::timestamptz", [observedAt])
+          .first('id');
+        if (newer) return { stale: true };
+        const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const recent = await trx('notifications')
+          .where({ recipient_type: 'admin', category: 'review', title })
+          .whereRaw("metadata->>'source' IS NULL")
+          .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
+          .where('created_at', '>', dayAgo)
+          .first();
+        if (recent) {
+          // Same-signature failures are still NEW observations. Advance both
+          // standing surfaces without re-belling, so an older clean cannot
+          // retire the marker or digest created by an earlier failing cycle.
+          await trx('notifications').where({ id: recent.id }).update({
+            metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ opsKey: 'gbp-sync-health', observedAt })]),
+          });
+          await trx('notifications').where({ recipient_type: 'admin', category: 'ops_digest' })
+            .whereRaw("metadata->>'opsKey' = ?", ['gbp-sync-health'])
+            .whereRaw("metadata->>'source' IS NULL")
+            .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
+            .update({ metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ observedAt })]) });
+          return { deduped: true };
+        }
 
-      const lines = findings.map((f) => `${f.severity} ${f.loc.name} [${f.cls}]: ${f.detail}`);
-      const body = [
-        'Hourly Google review sync — per-location health check found problems the mechanical degraded-sync alert cannot see:',
-        '',
-        ...lines,
-        '',
-        'A dead or stale feed means reviewers on that profile are never auto-marked as having reviewed, so review asks keep going to customers who already reviewed.',
-        'Remediation: reconnect the GBP account for credential failures (/admin/reviews sync status); for silent_empty confirm the profile state in Google Business Profile (removed/suspended listings need the support case); stats_stale usually means the Places API call is failing — check GOOGLE_MAPS_API_KEY quota/validity.',
-      ].join('\n');
-      const subject = `${anyFix ? 'FIX' : 'ACT'}: Google review sync — ${findings.length} location${findings.length === 1 ? '' : 's'} degraded or stale`;
+        // Durable claim BEFORE the external send (pre-push audit): SMTP
+        // succeeding before the marker lands would resend the email every
+        // hourly run if the process died or the insert failed (notifyAdmin
+        // swallows DB errors → null). The bell row is the claim AND the backup
+        // surface, so it always carries the full body; no marker → no send,
+        // and the next hourly tick retries the whole escalation.
+        const marker = await NotificationService.notifyAdmin(
+          'review',
+          title,
+          `${subject}\n\n${body}`,
+          // bell: true — GATE_ADMIN_BELL_POLICY suppressing this row would
+          // erase the dedupe marker (codex #3298 r1).
+          { link: '/admin/reviews', bell: true, metadata: { opsKey: 'gbp-sync-health', observedAt }, trx },
+        );
+        if (!marker) throw new Error('Review sync health marker was not persisted');
 
-      // Durable claim BEFORE the external send (pre-push audit): SMTP
-      // succeeding before the marker lands would resend the email every
-      // hourly run if the process died or the insert failed (notifyAdmin
-      // swallows DB errors → null). The bell row is the claim AND the backup
-      // surface, so it always carries the full body; no marker → no send,
-      // and the next hourly tick retries the whole escalation.
-      const marker = await NotificationService.notifyAdmin(
-        'review',
-        title,
-        `${subject}\n\n${body}`,
-        // bell: true — GATE_ADMIN_BELL_POLICY suppressing this row would
-        // erase the dedupe marker (codex #3298 r1).
-        { link: '/admin/reviews', bell: true },
-      );
-      if (!marker) return { skipped: 'marker_failed' };
-
-      let emailed = false;
-      try {
-        const email = require('./email');
-        // The 'review' bell above stays the claim; in-app mode adds the
-        // ops_digest row the Activity feed lists (email cadence).
-        const sent = await deliverOpsDigest({
-          key: 'gbp-sync-health',
-          subject,
-          text: body,
-          link: '/admin/reviews',
-          sendEmail: () => email.send({ to: 'contact@wavespestcontrol.com', subject, heading: 'Review sync health', body }),
-        });
-        emailed = !!sent?.ok;
-      } catch { /* the bell already carries the full body */ }
-      if (!emailed) {
-        logger.warn('[gbp] sync-health escalation email failed — the bell carries the full escalation');
-      }
-      return { emailed, findings: findings.length };
-    }, { recordHealth: false });
+        let deliverByEmail = false;
+        try {
+          // A savepoint contains a failed digest write while keeping the full
+          // review marker durable. SMTP fallback runs only after both locks
+          // and the outer transaction finish; this callback has no provider.
+          await trx.transaction(async (savepoint) => {
+            const sent = await deliverOpsDigest({
+              fallOff: true, // retired by retireIfClean on the clean run
+              key: 'gbp-sync-health',
+              subject,
+              text: body,
+              link: '/admin/reviews',
+              metadata: { observedAt },
+              trx: savepoint,
+              sendEmail: async () => ({ ok: true }),
+            });
+            if (sent.channel !== 'in_app') throw new Error('Review sync health email deferred');
+          });
+        } catch { deliverByEmail = true; }
+        return { deliverByEmail };
+      }), { recordHealth: false });
+    } catch (error) {
+      logger.warn(`[gbp] sync-health marker transaction failed: ${error.message}`);
+      return { skipped: 'marker_failed' };
+    }
     if (result?.skipped === true) return { skipped: 'lock' };
-    return result;
+    if (result?.deduped || result?.stale) return result;
+    let emailed = true;
+    if (result.deliverByEmail) {
+      try {
+        const sent = await require('./email').send({ to: 'contact@wavespestcontrol.com', subject, heading: 'Review sync health', body });
+        emailed = !!sent?.ok;
+      } catch { emailed = false; }
+    }
+    if (!emailed) logger.warn('[gbp] sync-health escalation email failed — the bell carries the full escalation');
+    return { emailed, findings: findings.length };
   }
 
   /**

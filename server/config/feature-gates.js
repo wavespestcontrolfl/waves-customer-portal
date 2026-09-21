@@ -24,6 +24,7 @@
  *   GATE_BLOG_BODY_IMAGES=true  (autonomous posts get ≥2 generated in-article images)
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
  *   GATE_WEBHOOKS=true          (enable inbound webhook processing)
+ *   GATE_TERMITE_ANNUAL_PLAN=true (estimator emits the Subterranean Termite Protection plan — station setup fee + prepaid annual fee, 1 inspection/yr — when an estimate requests plan 'annual_protection'; also requires GATE_CANCEL_FLOW_V2 for online nonrenewal; dark = today's quarterly program; flip only after the agreement v3 sign-off, ruling A-11)
  *   GATE_ONE_TIME_WELCOME_EMAIL=true (welcome email for eligible first one-time bookings; enqueue + delivery opt-in, SMS unchanged)
  *     RETIRED BY OWNER DECISION 2026-09-09: one-time customers do not get a welcome email — the booking confirmation
  *     plus the en-route app-intro email (GATE_APP_INTRO_EMAIL) is the whole one-time onboarding. Unset in prod the
@@ -98,6 +99,7 @@
  *   GATE_LAWN_PROPERTY_HISTORY=true (property-scoped confirmed lawn history, one installed row per visit, report-date/reset windows and confirm-time baseline; dark in dev AND prod; consumers read at call time)
  *   GATE_LAWN_COMPLETION_DEFAULTS=true (appointment-plan completion defaults; requires GATE_LAWN_PROPERTY_HISTORY; opt-in in every environment)
  *   GATE_LAWN_ACTUALS_LEDGER=true (lawn actuals ledger for EVERY lawn visit — one-time, commercial and incomplete-with-products included, no protocol attribution invented; off = WaveGuard-only writer, byte-identical; read at call time)
+ *   GATE_LAWN_DELIVERY_RECOVERY=true (resume a confirmed lawn visit's interrupted customer delivery; FAILS CLOSED everywhere — off = the sweep shadow-logs candidates and sends nothing)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -135,6 +137,14 @@ const gates = {
   lawnCompletionDefaults: gateEnvValue('GATE_LAWN_COMPLETION_DEFAULTS'),
   // Registered for startup logging; the completion writer reads it at call time (strict 'true').
   lawnActualsLedger: process.env.GATE_LAWN_ACTUALS_LEDGER === 'true',
+  // Lawn delivery recovery sweep. Resuming a confirmed visit's delivery can put
+  // a real customer SMS on the wire, so it FAILS CLOSED in every environment per
+  // the house rule — a dev box or preview pointed at a production-seeded database
+  // must never text a customer on boot. Off → the sweep shadow-logs its candidate
+  // count and delivers nothing. Double-gated: the cron also needs cronJobs.
+  // gateEnvValue here and in the sweep, so startup logging can never report this
+  // safety gate as disabled while it is actually open ('1' / 'on').
+  lawnDeliveryRecovery: gateEnvValue('GATE_LAWN_DELIVERY_RECOVERY'),
   // Complete Service: job-matched estimate evidence and reviewed discounts.
   completionServicePricing: process.env.GATE_COMPLETION_SERVICE_PRICING === 'true',
   // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.
@@ -385,6 +395,9 @@ const gates = {
   // creation) and issued /visit/:token links keep resolving. Fail-closed
   // ==='true' in EVERY environment; kill switch: unset.
   visitGroups: process.env.GATE_VISIT_GROUPS === 'true',
+  // Creation only. Saved packets and issued summary links survive the kill
+  // switch. Read at call time so grouping and closeout share one decision.
+  get visitCloseout() { return process.env.GATE_VISIT_CLOSEOUT === 'true'; },
 
   // Creation only: stamped reservations retain their full service capacity
   // through acceptance even after this gate is disabled. Strict opt-in.
@@ -540,6 +553,28 @@ const gates = {
   // when it flips.
   editApptPriceServiceScope: process.env.GATE_EDIT_APPT_PRICE_SERVICE_SCOPE === 'true',
 
+  // Multiple discounts on one service, and the one rule for how they combine
+  // (owner ruling 2026-09-11, "the lesser of the two"): dollar credits come
+  // off first, then percentages compound on what is left (10% then 5% off
+  // $111 is $16.10, never an additive $16.65), with one WaveGuard tier per
+  // document. The rule lives in server/services/discount-stack.js
+  // (stackDiscounts / stackVisitDiscounts / stackDocumentDiscounts) and
+  // GET /api/admin/discounts/stacking reports this value for pickers to
+  // read. discount-engine.js's /calculate preview and invoice.js's manual-
+  // discount save both already import discount-stack.js for its cent-exact
+  // percentage rounding (live regardless of this gate), but neither reads
+  // this gate to decide whether to COMPOUND — the preview always calls
+  // stackDiscounts with compound:false, and the save doesn't compound at
+  // all yet, so flipping this gate today changes nothing observable: off
+  // OR on, every existing total stays byte-identical (rounding-corrected)
+  // until slice 5 (invoice/document calculation) wires both the preview
+  // and invoice.js's line-item/manual-discount save to read the live gate
+  // TOGETHER. This map entry is for logGateStatus only — the canonical
+  // CALL-TIME reader is discountStackingLive() below (strict 'true');
+  // every caller, present and future, must use that, not this cached-at-
+  // load value, so a flip needs no redeploy.
+  discountStacking: process.env.GATE_DISCOUNT_STACKING === 'true',
+
   // Collective series moves on every staff surface (owner rulings 2026-07-30
   // + 2026-08-28): with the gate on, ANY date move of a cadence visit that
   // reaches SmartRebooker.reschedule — dispatch drag, the Edit appointment
@@ -584,6 +619,17 @@ const gates = {
   // Dark until the owner turns hiring on; the admin recruiting queue works
   // at any setting (it only reads/updates existing rows).
   jobApplications: process.env.GATE_JOB_APPLICATIONS === 'true',
+
+  // Recruiting comms (GATE_RECRUITING_COMMS): applicant-facing SMS/email —
+  // the submit confirmation, the interview self-scheduling link + its
+  // confirmation, and the admin stage-change notify modal's sends. Customer-
+  // facing (well, applicant-facing) auto-send, so strict opt-in in EVERY
+  // environment like techArrivedSms. Off: submit confirmation is skipped,
+  // PATCH /admin/careers/:id/status ignores `notify` and reports
+  // sending_enabled:false, and the public /interview/:token routes 404
+  // BEFORE their rate limiter (same unobservable-when-dark contract as the
+  // jobApplications prefix gate above, which stays in force independently).
+  recruitingComms: process.env.GATE_RECRUITING_COMMS === 'true',
 
   // Route-aware estimate slot ranking (2026-07-20): when ON, the estimate
   // funnel's offered slots lead with the guaranteed soonest card, then
@@ -787,6 +833,11 @@ const gates = {
   // voice_corpus_examples (redacted text only, reader-not-ingestor).
   // No sends, no customer-visible effect; prod opt-in per house pattern.
   voiceCorpusMiner: isProd ? process.env.GATE_VOICE_CORPUS_MINER === 'true' : true,
+
+  // Reviewed human-email pairs only; strict opt-in in every environment.
+  // The miner re-reads the gate at call time and requires a reviewed selection.
+  voiceCorpusEmailSource: gateEnvValue('GATE_VOICE_CORPUS_EMAIL_SOURCE'),
+  emailVoiceProfile: gateEnvValue('GATE_EMAIL_VOICE_PROFILE'),
 
   // Call-Research Miner (voice-of-customer corpus) — nightly extraction of
   // verbatim double-redacted quote chunks from call transcripts into
@@ -1335,6 +1386,7 @@ const gates = {
   // before. See services/call-reschedule-apply.js.
   // Automatic moves also require GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS.
   callRescheduleApply: process.env.GATE_CALL_RESCHEDULE_APPLY === 'true',
+  rescheduleProposalCard: gateEnvValue('GATE_RESCHEDULE_PROPOSAL_CARD'),
   callbackCard: gateEnvValue('GATE_CALLBACK_CARD'),
   smsAdditionalProperty: gateEnvValue('GATE_SMS_ADDITIONAL_PROPERTY'),
   // Missing-departure/arrival tracking: flags a scheduled_services row whose
@@ -1397,6 +1449,8 @@ const gates = {
   // env at call time via gateEnvValue('GATE_CANCEL_FLOW_V2'); kill switch =
   // unset. Owner flips with the C1 portal flow.
   cancelFlowV2: process.env.GATE_CANCEL_FLOW_V2 === 'true',
+  // Boot diagnostics show the effective conjunction; selection reads it at call time.
+  termiteAnnualPlan: termiteAnnualPlanSelectionEnabled(),
   // Schedule-integrity watchdog: daily cron paging two silent-loss classes —
   // past-dated visits stuck in on_site/en_route (performed but never
   // completed → no service record, invoice, report, or post-service SMS;
@@ -1434,6 +1488,17 @@ const gates = {
   // call named. Every rule needs evidence that postdates the CARD, never
   // same-customer coincidence. Off → the four original rules only.
   triageAutoResolveEvidence: process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE === 'true',
+  // First-touch auto-release (2026-09-20 call-agent audit, finding 3): a
+  // call-captured email whose read-back card is still open resolves on its
+  // own when the dictation was UNAMBIGUOUS — no arbiter digit doubt, V1 and
+  // V2 and the release target all agree, top candidate >= 0.9, no
+  // name/email mismatch on the call, the domain has MX, the pending hold
+  // targets that exact address, and the card is younger than
+  // FIRST_TOUCH_AUTO_RELEASE_MAX_AGE_DAYS (default 7). The ledger sweep
+  // then releases the hold — the new-lead drip and newsletter opt-in go
+  // out. Layered on triageAutoResolve + triageAutoResolveEvidence. Sends
+  // customer email — owner-flip only. Ships DARK.
+  firstTouchAutoRelease: process.env.GATE_FIRST_TOUCH_AUTO_RELEASE === 'true',
   // Bounce-triggered call-audio email re-verification: a hard bounce on a
   // call-captured address re-runs the source RECORDING through transcription
   // (letter-fidelity contact pass) + a deterministic name-anchored candidate
@@ -1918,8 +1983,8 @@ const gates = {
   // Kill switch: unset GATE_COMMERCIAL_ONETIME_SCOPED.
   commercialOneTimeScoped: gateEnvValue('GATE_COMMERCIAL_ONETIME_SCOPED'),
 
-  // Bid unit controls; default off everywhere.
-  // Readers always honor saved quantities and units after the controls are off.
+  // Bid unit, private costing and validity controls; default off everywhere.
+  // Readers always honor saved quantities and dates after the controls are off.
   commercialBidBuilder: gateEnvValue('GATE_COMMERCIAL_BID_BUILDER'),
 
   // Browser-rendered estimate PDF — GET /api/estimates/:token/pdf, the admin
@@ -2625,6 +2690,17 @@ const gates = {
 
   opsDigestsInApp: gateEnvValue('GATE_OPS_DIGESTS_IN_APP'),
 
+  // Ops digest ingest — routes/ops-digest-ingest.js, POST /api/ops/digest.
+  // The external Waves ops crons on the owner's Mac (~/waves-ops/ops-crons,
+  // 35 read-only checks) post their FIX:/ACT: findings here so they
+  // land as ops_digest bell rows (the Waves Ops lane in Agents → Activity)
+  // instead of emails to contact@ (owner ask 2026-09-11). Machine auth via
+  // the OPS_DIGEST_INGEST_TOKEN bearer; the route 404s while the token is
+  // unset, 409s while GATE_OPS_DIGESTS_IN_APP / GATE_AGENT_ACTIVITY are off,
+  // and the caller emails on any non-2xx. Kill switch: unset the token.
+  // Presence-only here for logGateStatus; the route reads env at CALL time.
+  opsDigestIngest: Boolean(process.env.OPS_DIGEST_INGEST_TOKEN),
+
   // Closeout money + comms alerts — services/closeout-alerts.js maps three
   // more closeout facts to operator issues: comms failed (completion notice
   // rejected by the provider), invoice pending on an actionable reason
@@ -2653,6 +2729,27 @@ const gates = {
 // truth: '1' / 'true' / 'on', case-insensitive.
 function gateEnvValue(envName) {
   return ['1', 'true', 'on'].includes(String(process.env[envName] || '').toLowerCase());
+}
+
+// GATE_DISCOUNT_STACKING read at CALL time — strict `=== 'true'`, NOT
+// gateEnvValue's more permissive '1'/'true'/'on' case-insensitive rule,
+// because this gate's documented contract (and the endpoint test locking it
+// in) is that any other spelling or casing — 'TRUE', '1', unset — is off.
+// The `discountStacking` gates-map entry above is for logGateStatus only;
+// this is the one canonical reader every caller must use — today
+// server/routes/admin-discounts.js's GET /stacking, and later whichever
+// schedule/invoice slice wires an actual caller — so none of them can drift
+// from what the endpoint reports (Codex pre-push audit P1: the route used
+// to read the load-time gates-map value via isEnabled(), which never sees a
+// flip until the process restarts).
+function discountStackingLive() {
+  return process.env.GATE_DISCOUNT_STACKING === 'true';
+}
+
+// Fresh annual contracts require the term-aware cancellation path. Read both
+// switches at call time so pricing, availability and delivery agree.
+function termiteAnnualPlanSelectionEnabled() {
+  return gateEnvValue('GATE_TERMITE_ANNUAL_PLAN') && gateEnvValue('GATE_CANCEL_FLOW_V2');
 }
 
 // Timestamp-valued gate parsed at CALL time (rollout EPOCHS such as
@@ -2696,5 +2793,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, termiteAnnualPlanSelectionEnabled };
 // gates 1775330914

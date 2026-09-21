@@ -239,6 +239,17 @@ class AvailabilityEngine {
         start: this.timeToMin(s.window_start),
         end: this.timeToMin(s.window_end || this.addMinutes(s.window_start, s.estimated_duration_minutes || 60)),
       }));
+      // The owner's booked interviews (recruiting) occupy the calendar too —
+      // the reciprocal of the interview picker's route-stop check (the
+      // confirm path gets them from the shared findConflictingVisits probe).
+      // Best-effort: a recruiting read error must not take slot building down.
+      try {
+        for (const w of await require('./interview-slots').bookedInterviewWindowsForDate(dateStr)) {
+          occupied.push({ start: this.timeToMin(w.start), end: this.timeToMin(w.end) });
+        }
+      } catch (err) {
+        require('./logger').warn(`[availability] interview occupancy read failed for ${dateStr}: ${err.name || 'Error'}${err.code ? ` ${err.code}` : ''}`);
+      }
 
       // Only unlinked legacy bookings use the copied date/time. Once a visit
       // exists, its live status and window above are authoritative.
@@ -588,6 +599,7 @@ class AvailabilityEngine {
       // so that date lock is the only rung shared with it.
       const occupancyClash = await findConflictingVisits({
         db: trx,
+        includeInterviews: true,
         date: dateStr,
         windowStart: startTime,
         windowEnd: endTime,

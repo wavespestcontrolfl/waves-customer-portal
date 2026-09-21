@@ -126,6 +126,19 @@ describe('createJobApplication', () => {
     await createJobApplication({ body: { ...VALID_BODY, language: 'es' }, database });
     expect(database.inserts[1].language).toBe('es');
   });
+
+  test('sms_consent parses true/"true"/"on"/"yes" as true, everything else false', async () => {
+    const cases = [
+      [true, true], ['true', true], ['on', true], ['yes', true],
+      [false, false], ['no', false], [undefined, false], ['1', false], [1, false],
+    ];
+    for (const [raw, expected] of cases) {
+      const database = mockDb();
+       
+      await createJobApplication({ body: { ...VALID_BODY, sms_consent: raw }, database });
+      expect(database.inserts[0].sms_consent).toBe(expected);
+    }
+  });
 });
 
 describe('AI screen prompt-injection posture', () => {

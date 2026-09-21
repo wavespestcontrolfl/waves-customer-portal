@@ -51,7 +51,10 @@ function fixture(api, method, body) {
   if (api === '/admin/communications/unread-count') return { conversations: 0, messages: 0 };
   if (api === '/admin/usage/track') return { ok: true };
   if (api === '/admin/pricing-config') return { configs };
-  if (api === '/admin/pricing-config/audit-log') return { logs: [{ config_key: 'global_labor_rate', changed_by: 'Fixture operator', changed_at: now, reason: 'Synthetic QA' }] };
+  if (api === '/admin/pricing-config/audit-log') return { logs: [
+    { config_key: 'global_labor_rate', changed_by: 'Fixture operator', changed_at: '2026-09-12T12:14:59Z', reason: 'Synthetic later change' },
+    { config_key: 'global_labor_rate', changed_by: 'Fixture operator', changed_at: '2026-09-12T12:14:07Z', reason: 'Synthetic earlier change' },
+  ] };
   if (api === '/admin/pricing-config/margin-check') return { waveguardTier: 'gold', services: [{ service: 'pest', annual: 1200, estimatedCost: 300, materialCostSource: 'inventory_cost_per_unit', materialPerVisit: 2.5, afterDiscount: 1020, margin: 0.7 }] };
   if (api === '/admin/pricing-config/pest-calibration') return {
     summary: { count: 2, avgDelta: 2.2, avgAbsDelta: 3.1, outlierCount: 1, byPoolCageSize: [{ key: 'medium', count: 2, avgDelta: 2.2, avgAbsDelta: 3.1 }], byLotBand: [{ key: '10k–20k', count: 2, avgDelta: 2.2, avgAbsDelta: 3.1 }], reviewQueueCount: 1, reviewQueue: [{ id: 'review-1', service_date: '2026-09-10', customer_name: 'Review customer', delta_minutes: 18, pool_cage_size: 'medium', lot_sqft: 15000, calibration_review_reasons: ['large delta'] }] },
@@ -101,7 +104,7 @@ async function main() {
   let stage = 'startup';
 
   async function openPage(width) {
-    const page = await browser.newPage({ viewport: { width, height: 1000 }, timezoneId: 'America/New_York', serviceWorkers: 'block' });
+    const page = await browser.newPage({ viewport: { width, height: 1000 }, locale: 'en-US', timezoneId: 'America/New_York', serviceWorkers: 'block' });
     page.setDefaultTimeout(15000);
     await page.addInitScript(() => {
       localStorage.setItem('waves_admin_token', 'synthetic-local-token');
@@ -152,10 +155,13 @@ async function main() {
     assert.deepEqual(undersizedControls, [], `controls below 44px: ${JSON.stringify(undersizedControls)}`);
   }
 
-  async function shot(page, name) {
+  async function shot(page, name, focus) {
     await waitForFonts(page);
-    await page.evaluate(() => window.scrollTo(0, 0));
-    await page.locator('#admin-main').evaluate((element) => element.scrollTo({ top: 0, left: 0, behavior: 'instant' }));
+    if (focus) await focus.scrollIntoViewIfNeeded();
+    else {
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.locator('#admin-main').evaluate((element) => element.scrollTo({ top: 0, left: 0, behavior: 'instant' }));
+    }
     await page.waitForTimeout(100);
     const file = path.join(output, `${name}.png`);
     await page.screenshot({ path: file, fullPage: false });
@@ -169,6 +175,13 @@ async function main() {
     report.scenarios.push({ name, passed: true });
   }
 
+  async function assertAuditSeconds(page) {
+    await page.getByText('Recent changes', { exact: true }).waitFor();
+    // Same operator, setting and minute: seconds are the displayed distinction.
+    await page.getByText(/8:14:59 AM/, { exact: false }).last().waitFor();
+    await page.getByText(/8:14:07 AM/, { exact: false }).last().waitFor();
+  }
+
   try {
     server = await previewServer(root);
     browser = await launchBrowser();
@@ -179,6 +192,8 @@ async function main() {
       await desktop.getByRole('heading', { name: 'Pricing', level: 1 }).waitFor();
       await desktop.getByText('Loaded labor rate', { exact: true }).waitFor();
       await assertFoundation(desktop);
+      await assertAuditSeconds(desktop);
+      await shot(desktop, 'pricing-audit-desktop-1440', desktop.getByRole('heading', { name: 'Recent changes', exact: true }).locator('../..'));
       await desktop.getByText('Loaded labor rate', { exact: true }).click();
       await desktop.getByTitle('Click to edit').first().click();
       const editor = desktop.locator('input[type="number"]').last();
@@ -242,6 +257,14 @@ async function main() {
     });
 
     const mobile = await openPage(390);
+    await scenario('mobile pricing audit distinguishes writes within one minute', async () => {
+      await mobile.goto(`${server.baseUrl}/admin/pricing-logic?section=logic`);
+      await mobile.getByText('Loaded labor rate', { exact: true }).waitFor();
+      await assertAuditSeconds(mobile);
+      await assertFoundation(mobile);
+      assert.equal(await mobile.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+      await shot(mobile, 'pricing-audit-mobile-390', mobile.getByRole('heading', { name: 'Recent changes', exact: true }).locator('../..'));
+    });
     await scenario('mobile pricing logic remains readable without page overflow', async () => {
       await mobile.goto(`${server.baseUrl}/admin/pricing-logic?section=margins`);
       await mobile.getByRole('table', { name: 'Service margins' }).waitFor();

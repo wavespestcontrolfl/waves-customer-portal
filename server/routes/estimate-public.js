@@ -20,6 +20,8 @@ const { formatAddress } = require('../utils/address-normalizer');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
+const { groupLinkStillViewable } = require('../services/proposal-bid');
+const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 
 // Gate pass for the accepted-estimate /book links (GATE_BOOKING_CUSTOMERS_ONLY):
 // the links carry only the correlation estimate_id, so under the customers-only
@@ -1668,6 +1670,49 @@ function estimateAcceptError(message, status = 422) {
   const err = new Error(message);
   err.status = status;
   return err;
+}
+
+// Acceptance already owns the estimate row by the time it mints a first
+// invoice. A deposit receipt owns the ledger key before its estimate FK
+// check, so waiting on that key here can deadlock the receipt. Try-lock and
+// roll back the whole accept on contention; a retry sees the recorded money.
+async function lockAcceptInvoiceDepositLedger(trx, { estimateId, customerId, scheduledServiceId = null }) {
+  const retry = (message, code) => {
+    const err = estimateAcceptError(message, 409);
+    err.code = code;
+    throw err;
+  };
+  if (scheduledServiceId) {
+    const { SCHEDULED_SERVICE_INVOICE_MINT_LOCK } = require('../services/scheduled-invoice-mint');
+    const mint = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS acquired', [
+      SCHEDULED_SERVICE_INVOICE_MINT_LOCK, String(scheduledServiceId),
+    ]);
+    if (!mint.rows?.[0]?.acquired) retry('This visit invoice is being prepared. Please try again in a moment.', 'ACCEPT_INVOICE_BUSY_RETRY');
+  }
+  const setup = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?)) AS acquired', [
+    `unminted_setup_fee_manual_billing:${estimateId}`,
+  ]);
+  if (!setup.rows?.[0]?.acquired) retry('This estimate invoice is being prepared. Please try again in a moment.', 'ACCEPT_INVOICE_BUSY_RETRY');
+  // Hoist the invoice insert's FK locks before the ledger key. A collector
+  // can already own the customer row while waiting for that same key.
+  try {
+    // NOWAIT matters here: receipt/reconciliation and collection can own
+    // these rows while this accept owns the estimate. A blocked FK prelock
+    // would recreate the lock cycle the ledger try-lock avoids.
+    await trx.raw('SELECT id FROM customers WHERE id = ? FOR KEY SHARE NOWAIT', [customerId]);
+    if (scheduledServiceId) {
+      await trx.raw('SELECT id FROM scheduled_services WHERE id = ? FOR KEY SHARE NOWAIT', [scheduledServiceId]);
+    }
+  } catch (err) {
+    if (err.code === '55P03') retry('This invoice is being updated. Please try accepting again in a moment.', 'ACCEPT_INVOICE_BUSY_RETRY');
+    throw err;
+  }
+  const locked = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS acquired', [
+    'estimate.deposit.ledger', String(estimateId),
+  ]);
+  if (!locked.rows?.[0]?.acquired) {
+    retry('Your deposit is being recorded. Please try accepting again in a moment.', 'DEPOSIT_LEDGER_BUSY_RETRY');
+  }
 }
 
 function roundInvoiceAmount(value) {
@@ -8132,7 +8177,21 @@ function applyMembershipRepriceToEstimate(estimate, estData, reprice) {
   return estimate;
 }
 
-async function reconcileFrozenMembershipSnapshot(estimate) {
+// Resolves undefined when there was nothing to reconcile, { ok: true } after a
+// reconcile, { ok: false, error } when the live lookup / reprice failed (the
+// row is then still the UNRECONCILED snapshot). Never rejects.
+//
+// strictMembership is OPT-IN and off for every public renderer: the default
+// live probe reads a failed customers lookup as "no plan", which is right for
+// the page (it degrades to nonmember pricing, the conservative direction, and
+// the customer still sees a quote). A reader that must not report ANY price
+// from an unverified member snapshot — the intelligence bar's
+// get_estimate_detail — passes strictMembership so the lookup failure throws
+// into the catch below and comes back as { ok: false }, and withholds.
+// Making this strict for the public route instead was the #4345 r5
+// REGRESSION: the public callers ignore the result, so strictness there
+// bought nothing and only risked repricing paths it could not report to.
+async function reconcileFrozenMembershipSnapshot(estimate, { strictMembership = false } = {}) {
   try {
     if (!estimate || !estimate.customer_id) return;
     // Never reconcile an accepted or price-locked estimate: that deal was
@@ -8189,7 +8248,7 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
     const frozenUnwaivedSetup = !frozenSetupWaiver && !!estimate.customer_id
       && require('../services/estimate-converter').frozenRodentBaitSetupAmount(estData) > 0;
     if (!frozenSnapshot && !frozenRecurring && !frozenSetupWaiver && !frozenUnwaivedSetup) return;
-    const activeMember = await isActivePlanCustomer(db, estimate.customer_id);
+    const activeMember = await isActivePlanCustomer(db, estimate.customer_id, { strict: strictMembership });
     // The rodent setup waiver is re-validated INDEPENDENTLY of plan
     // membership (codex #3591 r39 P1): it was granted by ANOTHER qualifying
     // family (e.g. pest) and rodent bait never self-waives, so a still-active
@@ -8231,7 +8290,7 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
         invalidateSendSnapshotPricingBundle(estData);
         estimate.estimate_data = isString ? JSON.stringify(estData) : estData;
         clearEstimatePricingCache(estimate.id);
-        return;
+        return { ok: false, error: 'setup_waiver_unverified_requote' };
       }
     }
     // Gained-family probe (codex #3591 r78 P1): the stored positive setup
@@ -8338,14 +8397,22 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
     // here to force a fresh recompute with the new-customer setup fee + annual
     // prepay restored.
     clearEstimatePricingCache(estimate.id);
+    if (!reprice.recomputed) return { ok: false, error: reprice.reason || 'membership_lapsed_requote' };
   } catch (err) {
     logger.warn(`[estimate-public] membership snapshot reconcile skipped: ${err.message}`);
+    // Never throws (the public renderers fall back to the stored row), but
+    // the failure is REPORTED to callers that can act on it: a reader that
+    // must not price from an unverified member snapshot (the intelligence
+    // bar's get_estimate_detail, codex #4345 r7 P1) checks ok === false and
+    // withholds. The early returns above resolve undefined = nothing to do.
+    return { ok: false, error: err.message };
   }
+  return { ok: true };
 }
 
 async function handleEstimateView(req, res, next) {
   try {
-    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    let estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) {
       return res.status(404).set('Content-Type', 'text/html').send(renderEstimateNotFoundPage());
     }
@@ -8381,6 +8448,33 @@ async function handleEstimateView(req, res, next) {
       || await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
       if (req.path.startsWith('/estimate/')) return next();
       return res.status(404).set('Content-Type', 'text/html').send(renderEstimateNotFoundPage());
+    }
+
+    // A call reprocess may have held a published sibling during the original
+    // send/save. Once that durable verdict clears, refresh the promised group
+    // window under the group's lock before deciding this expired entry link.
+    if (needsExpiredGroupNavigationRefresh(estimate)) {
+      const fresh = await refreshExpiredGroupNavigation(db, estimate);
+      if (!fresh) {
+        if (req.path.startsWith('/estimate/')) return next();
+        return res.status(404).set('Content-Type', 'text/html').send(renderEstimateNotFoundPage());
+      }
+      estimate = fresh;
+    }
+
+    // Only React renders property-group navigation. A legacy link whose
+    // offer expired must reach that view to expose its still-valid siblings.
+    if (estimate.estimate_group_id
+      && ['sent', 'viewed', 'expired'].includes(estimate.status)
+      && (estimate.status === 'expired' || new Date(estimate.expires_at) < new Date())
+      && groupLinkStillViewable(estimate)) {
+      if (req.path.startsWith('/estimate/')) return next();
+      const originalUrl = req.originalUrl || '';
+      const qs = originalUrl.includes('?') ? originalUrl.slice(originalUrl.indexOf('?')) : '';
+      res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.set('Pragma', 'no-cache');
+      res.set('Expires', '0');
+      return res.redirect(302, `/estimate/${encodeURIComponent(estimate.token)}${qs}`);
     }
 
     await reconcileFrozenMembershipSnapshot(estimate);
@@ -8718,6 +8812,7 @@ async function handleEstimateView(req, res, next) {
       onetimeTotal: parseFloat(estimate.onetime_total || 0),
       tier: estimate.waveguard_tier,
       createdAt: estimate.created_at,
+      // This property's own offer deadline (#4309 round 7).
       expiresAt: estimate.expires_at,
       satelliteUrl: estimate.satellite_url || null,
       showOneTimeOption: !!estimate.show_one_time_option,
@@ -11290,11 +11385,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // after-tax total (a pre-tax cap here under-applied the credit on
         // taxed invoices and stranded the difference on the ledger) and
         // reports the effective amount back as applied_deposit_credit.
-        // Read through the accept trx so the consume below shares its
-        // snapshot; a read failure degrades to "no credit" (the deposit
-        // stays received on the ledger), never to an unbacked discount.
+        // Hold the deposit key across the read, invoice insert and exact
+        // consume. A competing receipt either commits before this read or
+        // records after our invoice commit and reconciles against it.
         const { pendingDepositCredit: pendingEstimateDepositCredit, consumeDepositCredit: consumeEstimateDepositCredit } = require('../services/estimate-deposits');
-        const invoiceDepositCredit = await pendingEstimateDepositCredit(estimate.id, trx).catch(() => null);
+        await lockAcceptInvoiceDepositLedger(trx, {
+          estimateId: estimate.id, customerId, scheduledServiceId: acceptLinkedSsId,
+        });
+        const invoiceDepositCredit = await pendingEstimateDepositCredit(estimate.id, trx);
         const requestedInvoiceDepositCredit = invoiceDepositCredit ? Number(invoiceDepositCredit.amount) : 0;
         const inv = await InvoiceService.create({
           database: trx,
@@ -11730,13 +11828,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               const manualSlice = acceptManualDiscountItemization?.perApplication > 0
                 ? acceptManualDiscountItemization.perApplication
                 : 0;
-              lineItems.push({
-                description: 'First service application',
-                quantity: 1,
-                unit_price: manualSlice > 0
-                  ? Math.round((standardFirstApplicationAmount + manualSlice) * 100) / 100
-                  : standardFirstApplicationAmount,
-              });
+              lineItems.push(...await require('../services/estimate-first-application-invoice').itemizeFirstApplication({
+                estimateId: estimate.id, customerId,
+                scheduledServiceId: standardConversionResult.firstScheduledServiceId,
+                rowAmounts: firstApplicationRowAmounts,
+                rowDiscounts: acceptPlanCreditSlice?.rowSlices,
+                line: {
+                  description: 'First service application',
+                  quantity: 1,
+                  unit_price: manualSlice > 0
+                    ? Math.round((standardFirstApplicationAmount + manualSlice) * 100) / 100
+                    : standardFirstApplicationAmount,
+                },
+              }, trx));
               if (manualSlice > 0) {
                 lineItems.push({
                   // _kind tags the row for the admin invoice editor's
@@ -11768,14 +11872,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               firstApplicationAmount: standardFirstApplicationAmount,
               firstScheduledServiceId: standardConversionResult.firstScheduledServiceId,
             }) ? standardConversionResult.firstScheduledServiceId : undefined;
-            // Acceptance deposit credits this first invoice — same trx-shared
-            // ledger read + consume as the invoice-mode mint above: the credit
-            // line exists IFF the ledger consumed exactly that amount, or the
-            // whole accept rolls back. A clean read failure degrades to "no
-            // credit" (the deposit stays received on the ledger and rolls
-            // forward), never to an unbacked discount.
+            // Acceptance deposit credits this first invoice under the same
+            // ledger key through read, insert and exact consumption. A read
+            // failure rolls back instead of publishing an unknown balance.
             const { pendingDepositCredit: pendingStandardDepositCredit, consumeDepositCredit: consumeStandardDepositCredit } = require('../services/estimate-deposits');
-            const standardDepositCredit = await pendingStandardDepositCredit(estimate.id, trx).catch(() => null);
+            await lockAcceptInvoiceDepositLedger(trx, {
+              estimateId: estimate.id, customerId, scheduledServiceId: attachScheduledServiceId,
+            });
+            const standardDepositCredit = await pendingStandardDepositCredit(estimate.id, trx);
             const requestedStandardDepositCredit = standardDepositCredit ? Number(standardDepositCredit.amount) : 0;
             const inv = await InvoiceService.create({
               database: trx,
@@ -12200,6 +12304,22 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     let invoiceAmount = txResult.invoiceAmount || null;
     let invoicePayUrl = txResult.invoicePayUrl || null;
     let invoiceLinkDelivered = false;
+    // A fully-offset invoice's delivery resolves settled_zero_due (or
+    // covered_by_credit) — ok: true, but nothing was texted or emailed
+    // (Codex round-8 audit P1 #4131): distinct from invoiceLinkDelivered,
+    // so the notification/success-payload builders below say "settled",
+    // never "sent", and never keep a pay link for an invoice with nothing
+    // due.
+    let invoiceSettledByCredit = false;
+    // The SPECIFIC reason the invoice settled, when known — 'covered_by_credit'
+    // or the generic 'settled_zero_due' (Codex round-9 audit P2 #4131):
+    // settleZeroBalance also accepts a visit-linked invoice retotaled or
+    // discounted to a literal $0 with credit_applied = 0, so
+    // invoiceSettledByCredit alone does not prove deposit/account credit
+    // caused the zero balance. buildAcceptNotificationPayload only claims
+    // credit coverage for the specific reason; the generic outcome gets
+    // neutral "nothing is due" copy instead.
+    let invoiceSettledReason = null;
     // Quiet-hours cohort (GH Codex P2 r5): a phone-only after-hours accept
     // queues the invoice SMS for the 8 AM window open (sms.scheduled) and
     // returns ok:false — delivery is in flight, not failed. Tracked apart
@@ -13513,7 +13633,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         }
         if (delivery?.payUrl) invoicePayUrl = delivery.payUrl;
         if (delivery?.sms?.scheduled === true) invoiceSmsQueued = true;
-        if (delivery?.ok) {
+        if (delivery?.settled_zero_due || delivery?.covered_by_credit) {
+          // Codex round-8 audit P1 (#4131): sendViaSMSAndEmail resolves
+          // { ok: true, settled_zero_due: true } (or covered_by_credit)
+          // for a visit-linked invoice fully offset by deposit/account
+          // credit — a genuine success, but NOTHING was texted or
+          // emailed. `delivery.ok` alone can't distinguish this from an
+          // actual send, so it must be checked FIRST: never
+          // invoiceLinkDelivered, and never a pay link presented as
+          // actionable for an invoice that already has nothing due.
+          invoiceSettledByCredit = true;
+          invoiceSettledReason = delivery?.covered_by_credit ? 'covered_by_credit' : 'settled_zero_due';
+          invoicePayUrl = null;
+        } else if (delivery?.ok) {
           invoiceLinkDelivered = true;
         } else {
           const errors = [
@@ -13525,7 +13657,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       } catch (deliveryErr) {
         logger.error(`[estimate-accept] Invoice delivery failed: ${deliveryErr.message}`);
       }
-      logger.info(`[estimate-accept] Accept invoice ${invoiceId} created for estimate ${estimate.id} — $${invoiceAmount}; delivery=${invoiceLinkDelivered ? 'sent' : 'failed'}`);
+      logger.info(`[estimate-accept] Accept invoice ${invoiceId} created for estimate ${estimate.id} — $${invoiceAmount}; delivery=${invoiceSettledByCredit ? 'settled' : invoiceLinkDelivered ? 'sent' : 'failed'}`);
     }
 
     // Annual-prepay acceptance text (owner ruling 2026-08-31: revived — it
@@ -13793,6 +13925,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         invoiceMode,
         invoiceLinkDelivered,
         invoicePayUrl,
+        invoiceSettledByCredit,
+        invoiceSettledReason,
         payerBilled: invoiceIsPayerBilled,
         reservationCommitted,
         bookingUrl,
@@ -13861,7 +13995,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // the success payload must say "confirmed", never "pay your prepay
       // invoice" (same override the already-accepted retry path derives
       // from the live invoice status).
-      invoiceSettled: ['paid', 'processing', 'ambiguous', 'deferred'].includes(prepayAutoCharge?.status),
+      invoiceSettled: ['paid', 'processing', 'ambiguous', 'deferred'].includes(prepayAutoCharge?.status) || invoiceSettledByCredit,
       // 'ambiguous' is preserved (Codex r6 P1) — the client renders
       // tender-neutral "we're confirming your payment" copy for it, never
       // a bank-debit assertion.
@@ -15098,9 +15232,12 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
 
     // Provenance the prune would erase (the pest curve stamp above all) —
     // captured BEFORE the inputs change, re-planted on restore.
-    const provenance = included === false
+    let provenance = included === false
       ? OptOut.captureServiceOptOutProvenance(parsedData, serviceKey)
       : ((optOutState?.events || []).filter((e) => e.serviceKey === serviceKey && e.included === false).pop()?.provenance || null);
+    if (mode === 'restore' && serviceKey === 'termite_bait') {
+      provenance = OptOut.termiteRestoreProvenance(parsedData, provenance);
+    }
     const restoreInputs = mode === 'restore'
       ? OptOut.readRemovedInputs(
         (optOutState?.events || []).filter((e) => e.serviceKey === serviceKey && e.included === false).pop(),
@@ -15115,7 +15252,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     }
 
     const applied = OptOut.applyServiceOptOutToEstimateData(parsedData, {
-      serviceKey, included, removedInputs: restoreInputs, provenance,
+      serviceKey, included, removedInputs: restoreInputs, provenance, actor,
     });
     if (!applied.ok) return { status: 400, body: ({ error: applied.reason }) };
 
@@ -15175,6 +15312,8 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
     const reprice = await serverRecomputeFromEstimateData(parsedData, {
       replaySavedPricingKnobs: true,
+      termitePricingKnobsForRestore: mode === 'restore' && serviceKey === 'termite_bait'
+        ? provenance?.termitePricingKnobs : null,
       priorQualifyingServices: priors,
       // computeMembershipContext persists a snapshot even for a linked NEW
       // customer (isExistingCustomer: false) — snapshot presence alone must not
@@ -16020,6 +16159,50 @@ router.post('/:token/measurement-review', measurementReviewLimiter, async (req, 
 // later requests fall back to notify-office-only, and the office extends
 // manually via POST /api/admin/estimates/:id/extend on their own judgment.
 // Every path raises an in-app admin notification.
+// The notify-only extension claim: group lock (same lock proposal saves,
+// grouped sends, extensions and renewals take) → re-read the row FOR UPDATE
+// and confirm it is STILL in the group just locked → fixed-hold verdict on
+// that CONFIRMED group → dedupe claim pinned to that same membership, all in
+// one transaction. `blocked` is the generic-404 answer; `claimed` 0 without a
+// block is the ordinary 24h dedupe (GH codex P1 r5 on #4309).
+//
+// Lock-then-reread ordering matches the auto-renew sweep
+// (estimate-auto-renew.js): the initial read is only a PEEK of the group to
+// lock — an eligible sent/viewed row can be moved into or between groups
+// while this transaction waits on that group's advisory lock (or, for an
+// initially ungrouped row, no lock is taken at all), so the code re-reads
+// `estimate_group_id` FOR UPDATE after the lock and refuses to judge or
+// claim on the stale peek if membership changed underneath it. The final
+// update is predicated on that same confirmed membership so a membership
+// change between the verdict and the write makes the update match nothing
+// rather than committing the estimate into a fixed-validity sibling's group,
+// burning `extension_requested_at`, and paging the office instead of
+// returning the contract's generic 404 (GH codex P1 r6 on #4309). Exported
+// for tests.
+async function claimNotifyOnlyExtensionRequest(estimateId, dedupeOpen) {
+  return db.transaction(async (trx) => {
+    const initial = await trx('estimates').where({ id: estimateId }).first();
+    if (!initial) return { claimed: 0, blocked: true };
+    const groupId = initial.estimate_group_id || null;
+    if (groupId) {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['estimate-group-send', String(groupId)]);
+    }
+    // Ungrouped proposal saves also take this row lock. Re-read after it so
+    // a newly added fixed hold or group move cannot slip past the claim.
+    const fresh = await trx('estimates').where({ id: estimateId }).forUpdate().first();
+    if (!fresh || (fresh.estimate_group_id || null) !== groupId) return { claimed: 0, blocked: true };
+    if (await require('../services/estimate-extension').fixedBidBlocksExtension(trx, fresh)) return { claimed: 0, blocked: true };
+    let query = trx('estimates').where({ id: estimateId });
+    query = groupId ? query.where({ estimate_group_id: groupId }) : query.whereNull('estimate_group_id');
+    const claimed = await query
+      .where(dedupeOpen)
+      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+      .update({ extension_requested_at: trx.fn.now() });
+    return { claimed, blocked: false };
+  });
+}
+
 router.post('/:token/extension-request', extensionRequestLimiter, async (req, res, next) => {
   try {
     if (!featureGates.isEnabled('estimateExtensionRequest')) {
@@ -16037,7 +16220,8 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
     if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
-    if (!estimate || !isEstimateExtensionRequestEligible(estimate)) {
+    if (!estimate || !isEstimateExtensionRequestEligible(estimate)
+      || await require('../services/estimate-extension').fixedBidBlocksExtension(db, estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
 
@@ -16119,6 +16303,7 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
             ? { extension_requested_at: null, extension_auto_granted_at: null }
             : { extension_requested_at: null },
         ).catch((e) => logger.warn(`[estimate-extension-request] auto-claim release failed for estimate ${estimate.id}: ${e.message}`));
+        if (err.code === 'FIXED_BID_VALIDITY') return res.status(404).json({ error: 'Estimate not found' });
         logger.error(`[estimate-extension-request] auto-grant failed for estimate ${estimate.id}: ${err.message}`);
         return res.status(500).json({ error: 'extension_request_failed' });
       }
@@ -16172,11 +16357,13 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
     // must not fall through to a 201 that pages the office — the row is off
     // the surface, so the answer is the same generic 404 as an unknown
     // token (no enumeration). A zero row is re-read to tell the two apart.
-    const claimed = await db('estimates')
-      .where({ id: estimate.id })
-      .where(DEDUPE_OPEN)
-      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
-      .update({ extension_requested_at: db.fn.now() });
+    // Serialized and re-judged like the auto-grant inside extendEstimate
+    // (GH codex P1 r5 on #4309): a sibling can gain a fixed date between
+    // the preflight above and this claim, and the route contract answers a
+    // fixed-validity group with the generic 404 BEFORE any claim burns the
+    // window or pages the office.
+    const { claimed, blocked } = await claimNotifyOnlyExtensionRequest(estimate.id, DEDUPE_OPEN);
+    if (blocked) return res.status(404).json({ error: 'Estimate not found' });
     if (!claimed) {
       const fresh = await db('estimates').where({ id: estimate.id }).first('id', 'estimate_data');
       if (!fresh || estimateOffCustomerSurface(fresh)) {
@@ -18305,6 +18492,13 @@ function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
   return true;
 }
 
+function needsExpiredGroupNavigationRefresh(estimate, at = new Date()) {
+  return Boolean(estimate?.estimate_group_id
+    && ['sent', 'viewed', 'expired'].includes(estimate.status)
+    && (estimate.status === 'expired' || (estimate.expires_at && new Date(estimate.expires_at) < at))
+    && !groupLinkStillViewable(estimate, at));
+}
+
 // Whether this estimate may receive a customer "extension request" from the
 // React expired/not-found screen. Deliberately the complement of the narrow
 // expired slice of isEstimateCustomerViewable: a real, PUBLISHED estimate the
@@ -18320,6 +18514,7 @@ function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
 // archived rows are office-retired. Gate + rate limit live at the call sites.
 function isEstimateExtensionRequestEligible(estimate = {}, now = new Date()) {
   if (!estimate || estimate.archived_at) return false;
+  if (require('../services/proposal-bid').hasFixedBidValidity(estimate)) return false;
   // plan_restart quotes never self-extend (codex GH #3671 r9 P1): the C4
   // ruling requires every restart price to be a CURRENT recompute — the
   // customer's path back is the Restart button, which re-prices; an
@@ -18825,6 +19020,18 @@ function buildAcceptNotificationPayload({
   invoiceMode = false,
   invoiceLinkDelivered = false,
   invoicePayUrl = null,
+  // Codex round-8 audit P1 (#4131): a visit-linked invoice fully offset
+  // by deposit/account credit resolves ok: true with NOTHING texted or
+  // emailed — checked before every billing-term branch below, same
+  // precedence as payerBilled.
+  invoiceSettledByCredit = false,
+  // The SPECIFIC settled reason, when known ('covered_by_credit' vs the
+  // generic 'settled_zero_due') — Codex round-9 audit P2 (#4131):
+  // settleZeroBalance also accepts a visit-linked invoice retotaled or
+  // discounted to a literal $0 with credit_applied = 0, so
+  // invoiceSettledByCredit alone does not prove deposit/account credit
+  // caused the zero balance. Only 'covered_by_credit' may say so below.
+  invoiceSettledReason = null,
   payerBilled = false,
   reservationCommitted = false,
   bookingUrl = null,
@@ -18876,6 +19083,46 @@ function buildAcceptNotificationPayload({
       adminBody: `${adminPlanLabel} approved. Invoice billed to a third-party payer — sent to their AP inbox.`,
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${planLabel} is approved. The invoice was sent to your billing contact — nothing is due from you.`,
+      customerLink: '/?tab=billing',
+    };
+  }
+
+  // Codex round-8 audit P1 (#4131): the invoice resolved settled_zero_due
+  // (or covered_by_credit) — a genuine success, but nothing was texted or
+  // emailed, so the "pay link sent" copy every branch below would build
+  // is false. Checked before every billing-term branch, same precedence
+  // as payerBilled — this can happen for any of them (a deposit/credit
+  // fully offsetting the invoice regardless of billing mode).
+  if (invoiceSettledByCredit) {
+    // P2 (Codex round-9 audit #4131): a commercial recurring accept is a
+    // flat service plan, NOT a WaveGuard membership — mirrors the
+    // commercial branch below, which this early return ran BEFORE and so
+    // always rendered "Commercial WaveGuard plan" for a settled commercial
+    // accept.
+    const isCommercial = !treatAsOneTime && String(waveguardTier || '').trim().toLowerCase() === 'commercial';
+    const planLabel = isCommercial
+      ? `Commercial service plan (${monthlyText})`
+      : (treatAsOneTime ? serviceLabel : `${waveguardTier} WaveGuard plan`);
+    const adminPlanText = isCommercial ? `${planLabel}${proposedNote}` : planLabel;
+    // P2 (Codex round-9 audit #4131): settled_zero_due does not prove
+    // deposit or account credit caused the zero balance — settleZeroBalance
+    // also accepts a visit-linked invoice retotaled or discounted to a
+    // literal $0 with credit_applied = 0. Only the specific
+    // covered_by_credit reason may say the customer's credit covered it;
+    // the generic settled_zero_due outcome gets neutral "nothing is due"
+    // copy instead, never inventing a credit that may not exist.
+    const settledByCreditSpecifically = invoiceSettledReason === 'covered_by_credit';
+    const adminReasonText = settledByCreditSpecifically
+      ? 'fully covered by deposit/account credit'
+      : 'already settled — nothing is due';
+    const customerReasonText = settledByCreditSpecifically
+      ? 'Your deposit/account credit covered the invoice in full — nothing is due.'
+      : 'Nothing is due on this invoice.';
+    return {
+      adminTitle: `Estimate accepted: ${customerName}`,
+      adminBody: `${adminPlanText} approved — the invoice was ${adminReasonText}; no pay link was sent.`,
+      customerTitle: 'Estimate accepted',
+      customerBody: `Your ${planLabel} is approved. ${customerReasonText}`,
       customerLink: '/?tab=billing',
     };
   }
@@ -24761,6 +25008,18 @@ router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, r
 // estimate:service:phone → epoch ms. See the dedup comment at the SMS branch.
 const serviceDetailsSmsClaims = new Map();
 const SERVICE_DETAILS_SMS_DEDUP_MS = 10 * 60 * 1000;
+// Pre-push audit P1 (b49be57b12 round 4): the concurrent-loser poll loop
+// below (3 attempts * 1.5s = 4.5s) is the whole window a genuinely
+// concurrent request needs to observe a withheld winner's durable stamp.
+// A claim row past this age is provably not concurrent with the request
+// that stamped it — comfortable margin over 4.5s — so a withheld claim
+// becomes reclaimable here, distinct from (and far shorter than) the
+// crash-recovery staleness window below. Without this, a withheld claim
+// row was only ever reclaimable after the FULL 10-minute crash-recovery
+// window, so a legitimate retap minutes later — after a fresh delivery
+// makes the offer eligible again — found the claim still held and could
+// never send.
+const WITHHELD_SMS_CLAIM_RECLAIM_SECONDS = 6;
 
 router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (req, res, next) => {
   try {
@@ -24792,6 +25051,35 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
         return res.status(404).json({ error: 'Estimate not found' });
       }
     }
+
+    // Structural fix (round 9, P0 "server/routes/estimate-public.js:25207"
+    // — the 5th finding on this route across 8 local-audit rounds; every
+    // prior round closed one MORE success/dedup site that skipped the
+    // recheck, and the claim-poll timeout site — a loser whose winner is
+    // still in flight has no recorded outcome and no sms_log row yet, so
+    // its poll times out and answers 502 while a fresh request for the
+    // SAME withheld estimate answers 404 — was the one no per-site patch
+    // could close, because it depends on ANOTHER request's timing. Moved
+    // here instead: this is now the VERY NEXT gate after the existing
+    // customer-viewable/call-side-hold/pricing-authority checks above,
+    // BEFORE channel/service validation, BEFORE contact resolution, and
+    // BEFORE any claim acquisition, dedup, or polling on either channel.
+    // A loser no longer depends on the winner's recorded outcome (or on
+    // ever reaching the claim machinery at all) to answer 404 for a
+    // withheld estimate — its OWN fresh read already decides that here,
+    // before either branch below even starts. The success-site withheldOr
+    // calls further down stay: the offer can still change DURING the
+    // send/dedup window between this read and the actual response, and
+    // the durable claim-outcome column stays useful for a genuinely
+    // in-flight concurrent winner that later resolves. This early gate is
+    // what closes the oracle for every remaining branch, including "the
+    // winner has no outcome yet".
+    const withheldOr = async (onEligible, onBlocked = () => res.status(404).json({ error: 'Estimate not found' })) => {
+      const { annualHandoffGuard } = require('../services/estimate-annual-guard');
+      const verdict = await annualHandoffGuard({ db, estimateIds: [estimate.id] })();
+      return verdict.blocked ? onBlocked() : onEligible();
+    };
+    return await withheldOr(async () => {
     const serviceKey = String(req.body?.service || '');
     const channel = String(req.body?.channel || '');
     if (!['email', 'sms'].includes(channel)) {
@@ -24851,6 +25139,10 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           // but a retap shouldn't stack identical emails.
           idempotencyKey: `estimate_service_details:${estimate.id}:${serviceKey}:${etDateString()}`,
           categories: ['estimate_service_details'],
+          // Codex round 1 on #4608 (P1): content derivation would catch the
+          // estimate_url in the payload anyway, but the explicit id is
+          // cheaper (no regex/DB round trip through the rendered body).
+          estimateId: estimate.id,
           attachments: [{
             filename: `Waves_${serviceTitle.replace(/[^A-Za-z0-9]+/g, '_')}_Details.pdf`,
             content: buffer.toString('base64'),
@@ -24867,9 +25159,23 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
         logger.error(`[estimate-public] service-details email failed for estimate ${estimate.id}: ${reason}`);
         return res.status(502).json({ ok: false, error: 'Email could not be sent right now.' });
       }
-      if (result.blocked) return res.status(409).json({ ok: false, error: 'Email is unavailable for this address — text yourself the link instead.' });
+      if (result.blocked) {
+        // Codex round 1 audit (P0, AGENTS.md public-route rule): a
+        // suppression block is address-level (recipient unsubscribed/
+        // bounced) and safe to surface as 409 — it says nothing about the
+        // estimate's own state. An annual-offer withhold is row-level, like
+        // the customer-viewable/call-side-hold check above, and must be
+        // indistinguishable from an unknown token — the same generic 404.
+        if (result.reason === 'annual_offer_withheld') return res.status(404).json({ error: 'Estimate not found' });
+        return res.status(409).json({ ok: false, error: 'Email is unavailable for this address — text yourself the link instead.' });
+      }
       if (!result.sent) return res.status(502).json({ ok: false, error: 'Email could not be sent right now.' });
-      return res.json({ ok: true, channel: 'email' });
+      // Structural fix (round 6): EVERY success path here — a fresh
+      // dispatch and sendTemplate's own same-day idempotency dedup alike —
+      // answers through withheldOr, so a same-day repeat for a NOW-withheld
+      // estimate can never answer 200 from a shortcut a fresh request would
+      // answer 404 for.
+      return await withheldOr(() => res.json({ ok: true, channel: 'email' }));
     }
 
     if (!contact.customerPhone) return res.status(400).json({ error: 'No phone on this estimate' });
@@ -24886,21 +25192,46 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // covers restarts, best-effort: its failure never blocks the send.
     const tenDigits = String(contact.customerPhone).replace(/\D/g, '').slice(-10);
     const dedupKey = `${estimate.id}:${serviceKey}:${tenDigits}`;
+    const claimKey = dedupKey;
+    // Codex round 3 on #4608 (P0): stamps the claim row's outcome durably so
+    // a concurrent loser's poll can read the SAME refusal — best-effort,
+    // never blocks the actual response to THIS request. Defined here, ahead
+    // of every site that can now call it (round 6: both the cross-restart
+    // dedup AND the cross-process loser-poll dedup route their own withheld
+    // verdict through this same stamp).
+    const markClaimWithheld = async () => {
+      try {
+        await db('sms_send_claims').where({ claim_key: claimKey }).update({ outcome: 'withheld' });
+      } catch (e) { logger.warn(`[estimate-public] service-details SMS claim outcome write failed: ${e.message}`); }
+    };
     const priorClaim = serviceDetailsSmsClaims.get(dedupKey);
     if (priorClaim?.promise) {
       // A send for this exact packet is in flight — share ITS outcome rather
-      // than declaring success for a text that may still fail.
+      // than declaring success for a text that may still fail. Codex round 2
+      // on #4608 (P0): this shares the SAME resolved value the winner below
+      // maps to a generic 404 for a withheld row — mirror that mapping here
+      // too (AGENTS.md public-route rule), or the loser of the race would
+      // answer a distinguishable 502 for what the winner calls 404,
+      // revealing a live-but-ineligible row through request timing alone.
       const shared = await priorClaim.promise.catch(() => null);
-      if (shared?.success) return res.json({ ok: true, channel: 'sms', deduped: true });
+      // Structural fix (round 6): `shared` is the WINNER's own sendPromise
+      // resolution, which (below) already routes through withheldOr itself
+      // — but recheck here too rather than relying on that alone, so this
+      // response site is unconditionally covered on its own, the same as
+      // every other one on this route.
+      if (shared?.success) return await withheldOr(() => res.json({ ok: true, channel: 'sms', deduped: true }));
+      if (shared?.withheld || shared?.code === 'ANNUAL_OFFER_WITHHELD') return res.status(404).json({ error: 'Estimate not found' });
       return res.status(502).json({ ok: false, error: 'Text could not be sent right now.' });
     }
     if (priorClaim?.sentAt && Date.now() - priorClaim.sentAt < SERVICE_DETAILS_SMS_DEDUP_MS) {
-      return res.json({ ok: true, channel: 'sms', deduped: true });
+      // Pre-push audit P0 (round 5 / structural fix round 6): this dedup hit
+      // answers success from a send that may have happened before a later
+      // withhold — recheck the annual verdict fresh before reporting it.
+      return await withheldOr(() => res.json({ ok: true, channel: 'sms', deduped: true }));
     }
     // Cross-process gate: a SLIDING unique claim (atomic stale-takeover
     // upsert — no bucket edges) covers rolling-deploy overlap and any future
     // multi-replica config, where the Map only covers one process.
-    const claimKey = dedupKey;
     const recentPacketSend = async () => db('sms_log')
       .where({ direction: 'outbound', message_type: 'estimate_service_details' })
       .whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [tenDigits])
@@ -24911,12 +25242,23 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       // Claim acquired = fresh insert OR takeover of a claim older than the
       // window (a crashed winner never blocks forever). Claim-infra failure
       // fails OPEN to sending — dedup is protection, not a send gate.
+      //
+      // Pre-push audit P1 (b49be57b12 round 4): a SECOND, much shorter
+      // takeover path for a claim the winner stamped 'withheld' — that
+      // outcome is durable on purpose (so a concurrent loser can read it,
+      // above/below) but must not hold the claim_key for the full crash-
+      // recovery window, or a legitimate retap after a real delivery makes
+      // the offer eligible again could never send. `outcome = NULL` on
+      // takeover so a subsequent read (this send's own, or a later crash-
+      // recovery cycle) never sees the stale marker.
       let claimAcquired = true;
       try {
         const claim = await db.raw(
           `INSERT INTO sms_send_claims (claim_key) VALUES (?)
-           ON CONFLICT (claim_key) DO UPDATE SET created_at = NOW()
+           ON CONFLICT (claim_key) DO UPDATE SET created_at = NOW(), outcome = NULL
            WHERE sms_send_claims.created_at < NOW() - interval '10 minutes'
+              OR (sms_send_claims.outcome = 'withheld'
+                  AND sms_send_claims.created_at < NOW() - interval '${WITHHELD_SMS_CLAIM_RECLAIM_SECONDS} seconds')
            RETURNING id`,
           [claimKey],
         );
@@ -24927,13 +25269,39 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
         // winner's sms_log row) earns a deduped success — a still-in-flight
         // or failed winner must NOT be reported as sent, so poll briefly and
         // otherwise return a retryable failure.
+        //
+        // Codex round 3 on #4608 (P0 PRRT_kwDOR3YQi86j8Ydq): a withheld
+        // winner never reaches Twilio, so it never writes an sms_log row —
+        // recentPacketSend() alone can never distinguish "withheld" from
+        // "still working on it", and this loser fell all the way through to
+        // the generic claimHeldElsewhere 502 while the winner itself answers
+        // a generic 404 for the SAME row — an existence-oracle leak (a
+        // concurrent pair of requests could tell a withheld estimate apart
+        // from an unknown one purely by which status code came back). Also
+        // poll the claim row's own `outcome` column, which the winner stamps
+        // durably (below) BEFORE it releases — a loser that sees it answers
+        // the identical 404 the winner would.
         for (let attempt = 0; attempt < 3; attempt += 1) {
           await new Promise((resolve) => { setTimeout(resolve, 1500); });
           try {
             if (tenDigits.length === 10 && await recentPacketSend()) {
-              return { success: true, deduped: true };
+              // Structural fix (round 6, P0 "estimate-public.js:25174"):
+              // this loser found DURABLE proof of a real send — but that
+              // send may have happened before a later withhold, exactly
+              // like the winner's own cross-restart dedup site. Recheck
+              // through the SAME helper (onEligible/onBlocked return plain
+              // values here — this closure is not allowed to write `res`
+              // itself, the outer code does that once, below).
+              return await withheldOr(
+                () => ({ success: true, deduped: true }),
+                async () => { await markClaimWithheld(); return { success: false, withheld: true }; },
+              );
             }
           } catch (e) { logger.warn(`[estimate-public] service-details SMS dedup poll skipped: ${e.message}`); }
+          try {
+            const claimRow = await db('sms_send_claims').where({ claim_key: claimKey }).first('outcome');
+            if (claimRow?.outcome === 'withheld') return { success: false, withheld: true };
+          } catch (e) { logger.warn(`[estimate-public] service-details SMS claim outcome poll skipped: ${e.message}`); }
         }
         return { success: false, claimHeldElsewhere: true };
       }
@@ -24942,13 +25310,22 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       // query failure never blocks the send.
       try {
         if (tenDigits.length === 10 && await recentPacketSend()) {
-          return { success: true, deduped: true };
+          // Pre-push audit P0 (round 5 / structural fix round 6): this
+          // dedup hit answers success from a PRIOR send — recheck through
+          // the same helper as every other dedup site on this route.
+          return await withheldOr(
+            () => ({ success: true, deduped: true }),
+            async () => { await markClaimWithheld(); return { success: false, withheld: true }; },
+          );
         }
       } catch (e) { logger.warn(`[estimate-public] service-details SMS dedup check skipped: ${e.message}`); }
       // Last read before the handoff — inside the claim, so a withheld send
       // releases it below and a later legitimate retap can send.
-      if (!(await stillOnCustomerSurface())) return { success: false, withheld: true };
-      return TwilioService.sendSMS(
+      if (!(await stillOnCustomerSurface())) {
+        await markClaimWithheld();
+        return { success: false, withheld: true };
+      }
+      const smsSendResult = await TwilioService.sendSMS(
         contact.customerPhone,
         `Waves Pest Control: here's the full ${serviceTitle} details packet you requested — how visits work, products, labels & safety sheets: ${pdfUrl}`,
         {
@@ -24962,18 +25339,42 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           // through the canonical validator anyway (this legacy path
           // bypasses sendCustomerMessage) so any future change to that
           // classification automatically applies here too.
-          preSendCheck: () => {
+          //
+          // Codex round 1 on #4608 (P1): this path bypasses sendCustomerMessage
+          // entirely, so the chokepoint guard never gets a chance to run —
+          // composed in here instead, window check first (unchanged shape/
+          // priority), then the annual-offer guard on THIS estimate. A
+          // blocked verdict returns the same not-ok shape checkSendWindow
+          // does, so TwilioService.sendSMS withholds the send exactly like a
+          // window hold — no Twilio call — and the existing claim-release
+          // path above (a rejected sendPromise) runs unchanged. A guard
+          // infra error is caught by TwilioService's own preSendCheck
+          // wrapper and fails closed the same way (see services/twilio.js
+          // runPreSendCheck).
+          preSendCheck: async () => {
             const { checkSendWindow } = require('../services/messaging/validators/send-window');
-            return checkSendWindow({
+            const windowVerdict = checkSendWindow({
               channel: 'sms',
               audience: 'customer',
               purpose: 'conversational',
               conversationalContext: true,
               to: contact.customerPhone,
             }, null, null);
+            if (!windowVerdict.ok) return windowVerdict;
+            const { annualHandoffGuard } = require('../services/estimate-annual-guard');
+            const verdict = await annualHandoffGuard({ db, estimateIds: [estimate.id] })();
+            if (verdict.blocked) {
+              return { ok: false, code: 'ANNUAL_OFFER_WITHHELD', reason: 'annual_offer_withheld', retryable: false };
+            }
+            return { ok: true };
           },
         },
       );
+      // Codex round 3 on #4608 (P0): the SAME durable stamp for the OTHER
+      // withheld path — the composed preSendCheck's annual-offer block,
+      // resolved above as a coded refusal rather than a throw.
+      if (smsSendResult?.code === 'ANNUAL_OFFER_WITHHELD') await markClaimWithheld();
+      return smsSendResult;
     })();
     serviceDetailsSmsClaims.set(dedupKey, { promise: sendPromise });
     const releaseClaims = () => {
@@ -24993,30 +25394,69 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       throw err;
     }
     if (!smsResult?.success) {
+      const withheld = smsResult?.withheld || smsResult?.code === 'ANNUAL_OFFER_WITHHELD';
       // Never release a claim we never held — deleting the WINNER's live
       // claim would reopen the duplicate window it is guarding.
-      if (smsResult?.claimHeldElsewhere) serviceDetailsSmsClaims.delete(dedupKey);
-      else releaseClaims();
-      if (smsResult?.withheld) return res.status(404).json({ error: 'Estimate not found' });
+      if (smsResult?.claimHeldElsewhere) {
+        serviceDetailsSmsClaims.delete(dedupKey);
+      } else if (withheld) {
+        // Codex round 3 on #4608 (P0 PRRT_kwDOR3YQi86j8Ydq): keep the DB
+        // claim row (its outcome is already stamped 'withheld' inside
+        // sendPromise, above) so a concurrent loser's poll can still read
+        // it — deleting it immediately, the way an ordinary failure does,
+        // could erase the marker before a loser polling on a 1.5s cadence
+        // ever sees it, reopening the exact leak this closes. Only the
+        // in-process Map entry clears; the DB row becomes reclaimable on its
+        // own (round 4 P1) once WITHHELD_SMS_CLAIM_RECLAIM_SECONDS has
+        // passed — a retap moments later still re-checks eligibility fresh
+        // rather than being stuck behind the crash-recovery window.
+        serviceDetailsSmsClaims.delete(dedupKey);
+      } else {
+        releaseClaims();
+      }
+      if (withheld) return res.status(404).json({ error: 'Estimate not found' });
       return res.status(502).json({ ok: false, error: 'Text could not be sent right now.' });
     }
-    // Confirmed success only: start the dedup window and prune stale entries
-    // (Map here; expired claim rows fire-and-forget — one row per send, so a
-    // daily horizon keeps the table trivial).
-    const sentAt = Date.now();
-    serviceDetailsSmsClaims.set(dedupKey, { sentAt });
-    if (serviceDetailsSmsClaims.size > 500) {
-      for (const [key, claim] of serviceDetailsSmsClaims) {
-        if (claim.sentAt && sentAt - claim.sentAt >= SERVICE_DETAILS_SMS_DEDUP_MS) {
-          serviceDetailsSmsClaims.delete(key);
+    // Structural fix (round 6): the LAST response site on this route —
+    // covers a fresh dispatch AND both sendPromise-internal dedup sites
+    // uniformly (they already rechecked once, at their own site; this is
+    // the same defense-in-depth every other response on this route now
+    // gets). A blocked verdict here skips the success bookkeeping below
+    // entirely — never marks the in-process dedup window, never answers
+    // 200 for a response this same call is about to call withheld.
+    return await withheldOr(() => {
+      // Confirmed success only: start the dedup window and prune stale
+      // entries (Map here; expired claim rows fire-and-forget — one row per
+      // send, so a daily horizon keeps the table trivial).
+      const sentAt = Date.now();
+      serviceDetailsSmsClaims.set(dedupKey, { sentAt });
+      if (serviceDetailsSmsClaims.size > 500) {
+        for (const [key, claim] of serviceDetailsSmsClaims) {
+          if (claim.sentAt && sentAt - claim.sentAt >= SERVICE_DETAILS_SMS_DEDUP_MS) {
+            serviceDetailsSmsClaims.delete(key);
+          }
         }
       }
-    }
-    void db('sms_send_claims')
-      .where('created_at', '<', db.raw("NOW() - interval '1 day'"))
-      .del()
-      .catch(() => {});
-    return res.json({ ok: true, channel: 'sms', ...(smsResult.deduped ? { deduped: true } : {}) });
+      void db('sms_send_claims')
+        .where('created_at', '<', db.raw("NOW() - interval '1 day'"))
+        .del()
+        .catch(() => {});
+      return res.json({ ok: true, channel: 'sms', ...(smsResult.deduped ? { deduped: true } : {}) });
+    }, async () => {
+      // Pre-push audit P1 (round 7): the offer changed between the send
+      // (or dedup hit) and THIS final response — declining to report the
+      // success this call was about to report must not leave the claim
+      // pending. Same cleanup every other withheld branch on this route
+      // uses: stamp the durable outcome (a concurrent poller reads the
+      // SAME refusal) and clear the in-process Map entry — never
+      // releaseClaims()'s DB delete here, for the same reason the other
+      // withheld branches keep the row: a concurrent loser mid-poll must
+      // still be able to read it before it expires on its own.
+      await markClaimWithheld();
+      serviceDetailsSmsClaims.delete(dedupKey);
+      return res.status(404).json({ error: 'Estimate not found' });
+    });
+    });
   } catch (err) { next(err); }
 });
 
@@ -25099,194 +25539,32 @@ router.get('/:token/warranty-comparison/pdf', dataLimiter, async (req, res, next
   } catch (err) { next(err); }
 });
 
-router.get('/:token/data', dataLimiter, async (req, res, next) => {
-  try {
-    // This JSON carries the customer's address, phone/email, notes, pricing,
-    // and a bearer askToken. With React as the default estimate view it's the
-    // primary payload, so it must be as uncacheable as the legacy server-HTML
-    // page (which sets the same on sendEstimatePage) — no shared-browser or
-    // intermediary retention of a tokenized estimate. Set on every response
-    // path (incl. 404s) by stamping before any branch.
-    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.set('Pragma', 'no-cache');
-    res.set('Referrer-Policy', 'no-referrer');
-
-    const estimate = await db('estimates').where({ token: req.params.token }).first();
-    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
-    await reconcileFrozenMembershipSnapshot(estimate);
-
-    const ip = extractRequestIp(req);
-
-    // Security gate: the React SPA fetches this for ANY token, so an expired
-    // link, an unpublished draft/scheduled-send, or a send-failed estimate must
-    // NOT return the full quote + customer phone/email/address/notes. The legacy
-    // server-HTML page short-circuited these to the expired/not-found shell
-    // before building any payload; the data endpoint owns that guard for the
-    // React path. Non-viewable → 404 (the SPA renders its "this link may have
-    // expired or isn't valid" screen).
-    //
-    // ONE bypass: the staff draft preview. When the page URL carries
-    // ?adminPreview=1 the SPA attaches the staff session's Bearer token, and
-    // an UNPUBLISHED row is served to a VERIFIED staff JWT only
-    // (verifyStaffBearer — same checks as adminAuthenticate+requireTechOrAdmin;
-    // the `waves_admin` marker cookie is a 2-year logout-persistent view-count
-    // signal, never authorization, and still grants nothing here). This is
-    // what lets "Customer View" show a draft through the RENDERER the customer
-    // actually gets, instead of the diverging legacy SSR page. Expired /
-    // send_failed / archived rows stay 404 even for staff, and every view
-    // side effect below is skipped — a preview must not count views or flip
-    // a draft's status.
-    // Verified staff preview, independent of publish status: a staff
-    // "Customer View" of a PUBLISHED estimate (?adminPreview=1 + valid staff
-    // Bearer) must not count as a customer view or fire first-view side
-    // effects — without this, previewing from a device without the marker
-    // cookie and off the admin IP inflates view_count and pings the
-    // "Estimate viewed" notification. adminDraftPreview stays the narrow
-    // unpublished-only gate for serving drafts + the payload flag. (The
-    // legacy SSR path can't get this guard: full-page navigations carry no
-    // Bearer header, so it stays on the cookie/IP heuristics.)
-    const verifiedStaffPreview = req.query.adminPreview === '1'
-      && Boolean(await verifyStaffBearer(req));
-    const adminDraftPreview = adminDraftPreviewEligible(estimate, req.query.adminPreview)
-      && verifiedStaffPreview;
-    // Signed document-render pin — verified BEFORE the viewability gate
-    // (codex #3281 r1): an operator resend of a proposal whose stored
-    // expires_at already passed supplies a pinned new validThrough, but the
-    // stored date would 404 this fetch and silently downgrade the emailed
-    // attachment to the pdfkit document. The pin only mints server-side, so
-    // honoring it here serves exactly the renders our own routes vetted —
-    // archived rows and unpublished drafts stay 404 even pinned.
-    const isPdfRenderPass = req.query.mode === 'pdf';
-    const docRenderPin = isPdfRenderPass && req.query.dpin
-      ? require('../services/pdf/estimate-doc-pdf').verifyEstimateDocPin(req.query.dpin, estimate.token)
-      : null;
-    const docPinViewBypass = docRenderPin !== null
-      && !estimate.archived_at
-      && !UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)
-      && !estimateOffCustomerSurface(estimate);
-    // Call-side verdict check runs alongside the estimate-side gate (codex
-    // P1, PR #3304 GH r9) and overrides EVERY bypass — a staff preview or
-    // a pinned document render of a blocked estimate is the same
-    // disclosure.
-    const callSideBlock = await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate));
-    if (callSideBlock) {
-      return res.status(404).json({ error: 'Estimate not found' });
-    }
-    if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview && !docPinViewBypass) {
-      // Carries exactly one extra bit beyond the bare 404: this token maps to
-      // a real, published estimate that died of expiry (never a draft), so the
-      // SPA's not-found screen may offer the "Request an extension" button.
-      // The legacy SSR path already reveals more for the same rows (a
-      // personalized expired page), and POST /:token/extension-request
-      // re-checks eligibility + gate server-side regardless. The flag is only
-      // ever INCLUDED when true — an explicit `false` here would distinguish
-      // real-but-ineligible tokens (drafts, archived, send_failed) from
-      // unknown ones and break the generic-404 contract.
-      if (featureGates.isEnabled('estimateExtensionRequest')
-        && isEstimateExtensionRequestEligible(estimate)) {
-        return res.status(404).json({ error: 'Estimate not found', extensionRequestEligible: true });
-      }
-      return res.status(404).json({ error: 'Estimate not found' });
-    }
-
-    // View signals fire on every 200 EXCEPT bot UAs and admin-IP previews
-    // (filtered by shouldCountView). Defensive try/catch because schema
-    // drift on estimate_views or a locked row shouldn't break the
-    // customer-facing endpoint. The React page re-fetches /data after
-    // preference/slot/accept actions (and tags those `?refresh=1`); only the
-    // initial open counts, so internal refreshes don't inflate view_count the
-    // way the single legacy HTML page load never did. `refresh` is a public
-    // query param, so honor it ONLY once a first view is already recorded
-    // (`viewed_at` set) — otherwise a caller could hit `?refresh=1` first to
-    // suppress the very first "viewed" count + admin notification.
-    const isInternalRefresh = req.query.refresh === '1' && Boolean(estimate.viewed_at);
-    // Headless document render (?mode=pdf — the estimate-PDF browser pass,
-    // mirroring /report/:token?mode=pdf). `mode` alone only shapes CONTENT
-    // (the proposal block + publicOrigin below — data the token holder's own
-    // PDF already carries). Side-effect suppression additionally requires the
-    // SIGNED render pin (isPdfRenderPass/docRenderPin resolved above the
-    // viewability gate): without it, building the proposal email ATTACHMENT
-    // would stamp viewed_at and fire the "Estimate viewed" notification
-    // before the customer ever opened the link — while a customer poking
-    // ?mode=pdf by hand still counts as the view it is (unlike the refresh
-    // param above, no public input can dodge first-view tracking).
-    const verifiedPdfRenderPass = isPdfRenderPass && docRenderPin !== null;
-    // Whether THIS request is represented in estimate_views: an internal
-    // refresh belongs to the sitting that was already counted; a fresh open
-    // counts only once its row actually lands. The returning-visitor
-    // projection below refuses to run otherwise — it would treat the last
-    // stored session as current and report a visit number one too low (GH
-    // codex P2 on #3708).
-    let currentViewRecorded = isInternalRefresh;
-    if (!verifiedStaffPreview && !isInternalRefresh && !verifiedPdfRenderPass && shouldCountView(req, ip, estimate)) {
-      // ONE transaction for the aggregate counter + the per-open row: written
-      // separately, a failure of either half leaves view_count permanently
-      // diverged from COUNT(estimate_views) — the dashboard count and the
-      // engagement engine (which sessionizes off estimate_views) would then
-      // disagree forever. Still one defensive catch so schema drift or a
-      // locked row never breaks the customer-facing endpoint.
-      try {
-        const ua = (req.get('user-agent') || '').slice(0, 1000);
-        await db.transaction(async (trx) => {
-          await trx('estimates').where({ id: estimate.id }).update({
-            view_count: db.raw('COALESCE(view_count, 0) + 1'),
-            last_viewed_at: db.fn.now(),
-          });
-          await trx('estimate_views').insert({
-            estimate_id: estimate.id,
-            viewed_at: db.fn.now(),
-            ip: ip || null,
-            user_agent: ua || null,
-          });
-        });
-        currentViewRecorded = true;
-      } catch (e) { logger.error(`[estimate-data] view tracking failed: ${e.message}`); }
-
-      // Engagement-engine hook — same contract as the legacy HTML view
-      // site: fire-and-forget, never blocks the response.
-      try {
-        const EngagementEngine = require('../services/estimate-engagement-engine');
-        void EngagementEngine.onEstimateViewed(estimate).catch((err) => logger.warn(`[estimate-data] engagement hook failed: ${err.message}`));
-      } catch (e) { logger.warn(`[estimate-data] engagement hook unavailable: ${e.message}`); }
-    }
-
-    // First-view transition — keep admin preview clicks from making the
-    // estimate look customer-opened. Internal React refreshes (?refresh=1) are
-    // never the first view, so they must not flip status or notify admin twice.
-    // The staff draft preview is hard-excluded above IP/UA heuristics: the
-    // CASE below would flip a DRAFT straight to 'viewed' (publishing it in
-    // effect) if a staff preview ever slipped through shouldApplyFirstView.
-    if (!verifiedStaffPreview && !isInternalRefresh && !verifiedPdfRenderPass && !estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
-      // Don't break an in-flight send's `sending` claim (which also gates
-      // PUT /:id/proposal): stamp viewed_at but leave status='sending' alone —
-      // the send's final write reconciles to `viewed` via viewed_at.
-      // Snapshot the as-viewed price for accept-time copy — see the matching
-      // first-view block in handleEstimateView for why jsonb_set.
-      await db('estimates').where({ id: estimate.id }).update({
-        viewed_at: db.fn.now(),
-        status: db.raw("CASE WHEN status = 'sending' THEN status ELSE 'viewed' END"),
-        estimate_data: db.raw(
-          "CASE WHEN jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object' THEN jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{viewedMonthlyTotal}', to_jsonb(?::numeric), true) ELSE estimate_data END",
-          [Number(estimate.monthly_total || 0)],
-        ),
-      }).catch((e) => logger.error(`[estimate-data] first-view flip failed: ${e.message}`));
-      try {
-        await markLinkedLeadEstimateViewed({ estimateId: estimate.id });
-      } catch (e) {
-        logger.warn(`[estimate-data] linked lead view status update failed: ${e.message}`);
-      }
-
-      try {
-        const NotificationService = require('../services/notification-service');
-        await NotificationService.notifyAdmin(
-          'estimate',
-          `Estimate viewed: ${estimate.customer_name}`,
-          `${estimate.address || 'no address'} — ${proposalPriceLabel(estimate)}`,
-          { icon: '\u{1F4CB}', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } }
-        );
-      } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
-    }
-
+/**
+ * Composes the JSON payload for GET /:token/data — the exact post-
+ * withholding, post-viewability-gate projection the customer estimate page
+ * renders. Pulled out of the route handler (codex #4345 re-cut) so the
+ * intelligence bar's get_estimate_detail tool can consume the SAME
+ * chokepoint instead of hand re-projecting the pricing shape: every field
+ * the page withholds (or reshapes) is withheld (or reshaped) here once, and
+ * both callers see it. Pure — reads only `estimate` and the four render-mode
+ * flags below, no `req`/`res`/`ip`; the route still owns the request-scoped
+ * work (token lookup, membership reconcile, the viewability/404 gate, view-
+ * count and first-view side effects) and passes their outcomes in as
+ * options so this stays a byte-identical move: `verifiedStaffPreview`,
+ * `currentViewRecorded`, and `isInternalRefresh` feed the returnVisit block
+ * and the verifiedStaffPreview flag exactly like the inline code did. A
+ * caller with no real request (the intelligence bar) leaves all three at
+ * their default false, which naturally withholds returnVisit and the
+ * staff-preview flag rather than fabricating request state.
+ */
+async function composeEstimateDataPayload(estimate, {
+  adminDraftPreview = false,
+  isPdfRenderPass = false,
+  docRenderPin = null,
+  verifiedStaffPreview = false,
+  currentViewRecorded = false,
+  isInternalRefresh = false,
+} = {}) {
     let estimateDataForIntelligence = {};
     try {
       estimateDataForIntelligence = typeof estimate.estimate_data === 'string'
@@ -25393,7 +25671,12 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
 
     const terminalState = (() => {
       if (['accepted', 'declined', 'expired'].includes(estimate.status)) return estimate.status;
-      if (estimate.expires_at && new Date(estimate.expires_at) < new Date()) return 'expired';
+      // The CTA/activity state follows THIS property's own offer deadline,
+      // which is exactly what expires_at now holds (#4309 round 7). Group-link
+      // viewability never softens it: a reachable group of expired cards still
+      // renders every card expired.
+      const shownExpiry = estimate.expires_at;
+      if (shownExpiry && new Date(shownExpiry) < new Date()) return 'expired';
       return null;
     })();
     const ctaTerminalState = terminalState || (quoteRequirement.quoteRequired ? 'quote_required' : null);
@@ -25514,24 +25797,54 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // hero always lists email/phone/address when Waves has them on file.
     const contact = await resolveEstimateContactFields(estimate);
 
-    // Multi-property group: the customer's ONE link renders every property in
-    // the group, each independently acceptable via its own token. Siblings are
-    // filtered through the same customer-viewability gate as the requested
-    // token, so an unpublished draft/archived sibling never leaks. Key is only
-    // present for grouped estimates — ungrouped responses stay byte-identical.
+    // Multi-property group: the customer's ONE link renders every published
+    // property in the group. Live siblings keep their own accept links.
+    // During the delivered anchor's navigation window, published
+    // expired siblings remain as summaries; their dead tokens cannot open a
+    // quote or accept an offer. Key is only present for grouped estimates.
     let propertyGroup = null;
     if (estimate.estimate_group_id) {
       try {
+        const groupViewNow = new Date();
+        const ownOfferExpiry = estimate.expires_at ? new Date(estimate.expires_at).getTime() : NaN;
+        const anchorNavigationOpen = (Number.isFinite(ownOfferExpiry)
+          && ownOfferExpiry > groupViewNow.getTime()
+          && isEstimateCustomerViewable(estimate, groupViewNow))
+          || groupLinkStillViewable(estimate, groupViewNow);
         const siblingRows = await db('estimates')
           .where({ estimate_group_id: estimate.estimate_group_id })
           .whereNull('archived_at')
           .orderBy('created_at', 'asc');
-        const viewable = siblingRows.filter((s) => s.id === estimate.id || isEstimateCustomerViewable(s));
+        const viewable = [];
+        for (const sibling of siblingRows) {
+          if (sibling.id === estimate.id) {
+            // The entry row may have been refreshed under the group lock
+            // earlier in this request; use that authoritative copy.
+            viewable.push(estimate);
+            continue;
+          }
+          const ordinaryViewable = isEstimateCustomerViewable(sibling, groupViewNow);
+          const expiredPublished = anchorNavigationOpen
+            && ['sent', 'viewed', 'expired'].includes(sibling.status)
+            && (sibling.sent_at || sibling.viewed_at)
+            && (sibling.status === 'expired' || (sibling.expires_at && new Date(sibling.expires_at) < groupViewNow))
+            && sibling.disposition !== 'expired_unsent'
+            && !sibling.price_locked_at
+            && !sibling.archived_at
+            && !estimateOffCustomerSurface(sibling);
+          if ((ordinaryViewable || expiredPublished)
+            && !(await callSideBlockForEstimateData(db, parseEstimateDataSafe(sibling)))) {
+            viewable.push(sibling);
+          }
+        }
         if (viewable.length > 1) {
           propertyGroup = viewable.map((s) => ({
-            token: s.token,
+            // Only a reachable estimate gets a navigation target. Expired
+            // siblings without their own window are display-only summaries.
+            ...((isEstimateCustomerViewable(s, groupViewNow) || groupLinkStillViewable(s, groupViewNow)) ? { token: s.token } : {}),
             address: s.address || null,
-            status: s.status,
+            status: ['accepted', 'declined'].includes(s.status) ? s.status
+              : (s.status === 'expired' || (s.expires_at && new Date(s.expires_at) < groupViewNow) ? 'expired' : s.status),
             monthlyTotal: s.monthly_total != null ? Number(s.monthly_total) : null,
             annualTotal: s.annual_total != null ? Number(s.annual_total) : null,
             onetimeTotal: s.onetime_total != null ? Number(s.onetime_total) : null,
@@ -25583,6 +25896,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
           taxRate: proposalForView.taxRate,
           taxLabel: proposalForView.taxLabel,
           terms: proposalForView.terms,
+          ...(proposalForView.validThrough ? { validThrough: proposalForView.validThrough } : {}),
           buildings: (proposalForView.buildings || []).map((building) => ({
             name: building.name,
             note: building.note,
@@ -25724,7 +26038,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       }
     }
 
-    res.json({
+    return {
       ...(propertyGroup ? { propertyGroup } : {}),
       ...returnVisitBlock,
       ...(successReferral ? { referral: successReferral } : {}),
@@ -25792,6 +26106,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         const {
           currentlyOptedOutKeys, serviceOptOutLabel, serviceOptOutBlockedByProposal,
           serviceOptOutTierSelectionActive, serviceOptOutAddableKeys, staffOfferedKeys,
+          serviceOptOutRestoreBlockedKeys,
         } = require('../services/estimate-service-opt-out');
         const projected = parseEstimateDataSafe(estimate);
         // Staff-parked offers (lead-service send) belong to the add lane: with
@@ -25805,6 +26120,8 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         const staffOffersAllowed = serviceAddGateOn() && !addStampBlockedByMembership;
         const removedKeys = currentlyOptedOutKeys(projected)
           .filter((k) => staffOffersAllowed || !staffParked.includes(k));
+        const restoreBlockedKeys = serviceOptOutRestoreBlockedKeys(projected)
+          .filter((key) => removedKeys.includes(key));
         // Priced adds (GATE_ESTIMATE_SERVICE_ADD): same resolver as the PUT,
         // live accept-active rows only, never a staff draft preview.
         const addableKeys = serviceAddGateOn() && !adminDraftPreview && !addStampBlockedByMembership
@@ -25832,6 +26149,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
             removedKeys,
             removedLabels: removedKeys.map((key) => serviceOptOutLabel(key)),
             ...(restoreBlocked ? { restoreBlocked: true } : {}),
+            ...(restoreBlockedKeys.length ? { restoreBlockedKeys } : {}),
             ...(staffOffered.length ? { staffOfferedKeys: staffOffered } : {}),
             ...(addableKeys.length && !restoreBlocked
               ? { addable: addableKeys.map((key) => ({ key, label: serviceOptOutLabel(key) })) }
@@ -26081,7 +26399,218 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         engineVersion: estimate.pricing_version || null,
         cacheHit: !!pricingBundle.cacheHit,
       },
-    });
+    };
+}
+
+router.get('/:token/data', dataLimiter, async (req, res, next) => {
+  try {
+    // This JSON carries the customer's address, phone/email, notes, pricing,
+    // and a bearer askToken. With React as the default estimate view it's the
+    // primary payload, so it must be as uncacheable as the legacy server-HTML
+    // page (which sets the same on sendEstimatePage) — no shared-browser or
+    // intermediary retention of a tokenized estimate. Set on every response
+    // path (incl. 404s) by stamping before any branch.
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Referrer-Policy', 'no-referrer');
+
+    let estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    await reconcileFrozenMembershipSnapshot(estimate);
+
+    const ip = extractRequestIp(req);
+
+    // Security gate: the React SPA fetches this for ANY token, so an expired
+    // link, an unpublished draft/scheduled-send, or a send-failed estimate must
+    // NOT return the full quote + customer phone/email/address/notes. The legacy
+    // server-HTML page short-circuited these to the expired/not-found shell
+    // before building any payload; the data endpoint owns that guard for the
+    // React path. Non-viewable → 404 (the SPA renders its "this link may have
+    // expired or isn't valid" screen).
+    //
+    // ONE bypass: the staff draft preview. When the page URL carries
+    // ?adminPreview=1 the SPA attaches the staff session's Bearer token, and
+    // an UNPUBLISHED row is served to a VERIFIED staff JWT only
+    // (verifyStaffBearer — same checks as adminAuthenticate+requireTechOrAdmin;
+    // the `waves_admin` marker cookie is a 2-year logout-persistent view-count
+    // signal, never authorization, and still grants nothing here). This is
+    // what lets "Customer View" show a draft through the RENDERER the customer
+    // actually gets, instead of the diverging legacy SSR page. Expired /
+    // send_failed / archived rows stay 404 even for staff, and every view
+    // side effect below is skipped — a preview must not count views or flip
+    // a draft's status.
+    // Verified staff preview, independent of publish status: a staff
+    // "Customer View" of a PUBLISHED estimate (?adminPreview=1 + valid staff
+    // Bearer) must not count as a customer view or fire first-view side
+    // effects — without this, previewing from a device without the marker
+    // cookie and off the admin IP inflates view_count and pings the
+    // "Estimate viewed" notification. adminDraftPreview stays the narrow
+    // unpublished-only gate for serving drafts + the payload flag. (The
+    // legacy SSR path can't get this guard: full-page navigations carry no
+    // Bearer header, so it stays on the cookie/IP heuristics.)
+    const verifiedStaffPreview = req.query.adminPreview === '1'
+      && Boolean(await verifyStaffBearer(req));
+    const adminDraftPreview = adminDraftPreviewEligible(estimate, req.query.adminPreview)
+      && verifiedStaffPreview;
+    // Signed document-render pin — verified BEFORE the viewability gate
+    // (codex #3281 r1): an operator resend of a proposal whose stored
+    // expires_at already passed supplies a pinned new validThrough, but the
+    // stored date would 404 this fetch and silently downgrade the emailed
+    // attachment to the pdfkit document. The pin only mints server-side, so
+    // honoring it here serves exactly the renders our own routes vetted —
+    // archived rows and unpublished drafts stay 404 even pinned.
+    const isPdfRenderPass = req.query.mode === 'pdf';
+    const docRenderPin = isPdfRenderPass && req.query.dpin
+      ? require('../services/pdf/estimate-doc-pdf').verifyEstimateDocPin(req.query.dpin, estimate.token)
+      : null;
+    const docPinViewBypass = docRenderPin !== null
+      && !estimate.archived_at
+      && !UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)
+      && !estimateOffCustomerSurface(estimate);
+    // Call-side verdict check runs alongside the estimate-side gate (codex
+    // P1, PR #3304 GH r9) and overrides EVERY bypass — a staff preview or
+    // a pinned document render of a blocked estimate is the same
+    // disclosure.
+    const callSideBlock = await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate));
+    if (callSideBlock) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    if (needsExpiredGroupNavigationRefresh(estimate)) {
+      const fresh = await refreshExpiredGroupNavigation(db, estimate);
+      if (!fresh) return res.status(404).json({ error: 'Estimate not found' });
+      estimate = fresh;
+    }
+    // Navigation only: the delivered group link can outlive its own offer.
+    // Withholding still applies; acceptance and CTA state use expires_at.
+    const groupLinkViewBypass = Boolean(estimate.estimate_group_id)
+      && ['sent', 'viewed', 'expired'].includes(estimate.status)
+      && !estimate.archived_at
+      && !estimateOffCustomerSurface(estimate)
+      && groupLinkStillViewable(estimate);
+    if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview && !docPinViewBypass && !groupLinkViewBypass) {
+      // Carries exactly one extra bit beyond the bare 404: this token maps to
+      // a real, published estimate that died of expiry (never a draft), so the
+      // SPA's not-found screen may offer the "Request an extension" button.
+      // The legacy SSR path already reveals more for the same rows (a
+      // personalized expired page), and POST /:token/extension-request
+      // re-checks eligibility + gate server-side regardless. The flag is only
+      // ever INCLUDED when true — an explicit `false` here would distinguish
+      // real-but-ineligible tokens (drafts, archived, send_failed) from
+      // unknown ones and break the generic-404 contract.
+      if (featureGates.isEnabled('estimateExtensionRequest')
+        && isEstimateExtensionRequestEligible(estimate)
+        && !(await require('../services/estimate-extension').fixedBidBlocksExtension(db, estimate))) {
+        return res.status(404).json({ error: 'Estimate not found', extensionRequestEligible: true });
+      }
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+
+    // View signals fire on every 200 EXCEPT bot UAs and admin-IP previews
+    // (filtered by shouldCountView). Defensive try/catch because schema
+    // drift on estimate_views or a locked row shouldn't break the
+    // customer-facing endpoint. The React page re-fetches /data after
+    // preference/slot/accept actions (and tags those `?refresh=1`); only the
+    // initial open counts, so internal refreshes don't inflate view_count the
+    // way the single legacy HTML page load never did. `refresh` is a public
+    // query param, so honor it ONLY once a first view is already recorded
+    // (`viewed_at` set) — otherwise a caller could hit `?refresh=1` first to
+    // suppress the very first "viewed" count + admin notification.
+    const isInternalRefresh = req.query.refresh === '1' && Boolean(estimate.viewed_at);
+    // Headless document render (?mode=pdf — the estimate-PDF browser pass,
+    // mirroring /report/:token?mode=pdf). `mode` alone only shapes CONTENT
+    // (the proposal block + publicOrigin below — data the token holder's own
+    // PDF already carries). Side-effect suppression additionally requires the
+    // SIGNED render pin (isPdfRenderPass/docRenderPin resolved above the
+    // viewability gate): without it, building the proposal email ATTACHMENT
+    // would stamp viewed_at and fire the "Estimate viewed" notification
+    // before the customer ever opened the link — while a customer poking
+    // ?mode=pdf by hand still counts as the view it is (unlike the refresh
+    // param above, no public input can dodge first-view tracking).
+    const verifiedPdfRenderPass = isPdfRenderPass && docRenderPin !== null;
+    // Whether THIS request is represented in estimate_views: an internal
+    // refresh belongs to the sitting that was already counted; a fresh open
+    // counts only once its row actually lands. The returning-visitor
+    // projection below refuses to run otherwise — it would treat the last
+    // stored session as current and report a visit number one too low (GH
+    // codex P2 on #3708).
+    let currentViewRecorded = isInternalRefresh;
+    if (!verifiedStaffPreview && !isInternalRefresh && !verifiedPdfRenderPass && shouldCountView(req, ip, estimate)) {
+      // ONE transaction for the aggregate counter + the per-open row: written
+      // separately, a failure of either half leaves view_count permanently
+      // diverged from COUNT(estimate_views) — the dashboard count and the
+      // engagement engine (which sessionizes off estimate_views) would then
+      // disagree forever. Still one defensive catch so schema drift or a
+      // locked row never breaks the customer-facing endpoint.
+      try {
+        const ua = (req.get('user-agent') || '').slice(0, 1000);
+        await db.transaction(async (trx) => {
+          await trx('estimates').where({ id: estimate.id }).update({
+            view_count: db.raw('COALESCE(view_count, 0) + 1'),
+            last_viewed_at: db.fn.now(),
+          });
+          await trx('estimate_views').insert({
+            estimate_id: estimate.id,
+            viewed_at: db.fn.now(),
+            ip: ip || null,
+            user_agent: ua || null,
+          });
+        });
+        currentViewRecorded = true;
+      } catch (e) { logger.error(`[estimate-data] view tracking failed: ${e.message}`); }
+
+      // Engagement-engine hook — same contract as the legacy HTML view
+      // site: fire-and-forget, never blocks the response.
+      try {
+        const EngagementEngine = require('../services/estimate-engagement-engine');
+        void EngagementEngine.onEstimateViewed(estimate).catch((err) => logger.warn(`[estimate-data] engagement hook failed: ${err.message}`));
+      } catch (e) { logger.warn(`[estimate-data] engagement hook unavailable: ${e.message}`); }
+    }
+
+    // First-view transition — keep admin preview clicks from making the
+    // estimate look customer-opened. Internal React refreshes (?refresh=1) are
+    // never the first view, so they must not flip status or notify admin twice.
+    // The staff draft preview is hard-excluded above IP/UA heuristics: the
+    // CASE below would flip a DRAFT straight to 'viewed' (publishing it in
+    // effect) if a staff preview ever slipped through shouldApplyFirstView.
+    if (!verifiedStaffPreview && !isInternalRefresh && !verifiedPdfRenderPass && !estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
+      // Don't break an in-flight send's `sending` claim (which also gates
+      // PUT /:id/proposal): stamp viewed_at but leave status='sending' alone —
+      // the send's final write reconciles to `viewed` via viewed_at.
+      // Snapshot the as-viewed price for accept-time copy — see the matching
+      // first-view block in handleEstimateView for why jsonb_set.
+      await db('estimates').where({ id: estimate.id }).update({
+        viewed_at: db.fn.now(),
+        status: db.raw("CASE WHEN status = 'sending' THEN status ELSE 'viewed' END"),
+        estimate_data: db.raw(
+          "CASE WHEN jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object' THEN jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{viewedMonthlyTotal}', to_jsonb(?::numeric), true) ELSE estimate_data END",
+          [Number(estimate.monthly_total || 0)],
+        ),
+      }).catch((e) => logger.error(`[estimate-data] first-view flip failed: ${e.message}`));
+      try {
+        await markLinkedLeadEstimateViewed({ estimateId: estimate.id });
+      } catch (e) {
+        logger.warn(`[estimate-data] linked lead view status update failed: ${e.message}`);
+      }
+
+      try {
+        const NotificationService = require('../services/notification-service');
+        await NotificationService.notifyAdmin(
+          'estimate',
+          `Estimate viewed: ${estimate.customer_name}`,
+          `${estimate.address || 'no address'} — ${proposalPriceLabel(estimate)}`,
+          { icon: '\u{1F4CB}', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } }
+        );
+      } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
+    }
+
+    res.json(await composeEstimateDataPayload(estimate, {
+      adminDraftPreview,
+      isPdfRenderPass,
+      docRenderPin,
+      verifiedStaffPreview,
+      currentViewRecorded,
+      isInternalRefresh,
+    }));
   } catch (err) { next(err); }
 });
 
@@ -26108,6 +26637,7 @@ async function handleEstimateAsk(req, res, next) {
     if (!verifyEstimateAskToken(req, estimate)) {
       return res.status(403).json({ error: 'estimate_ask_forbidden' });
     }
+    // Same authored-deadline rule as the page's CTA state (GH codex P2 r4 on #4309).
     if (!isEstimateAskAnswerable(estimate)) {
       return res.status(409).json({ error: 'estimate_expired' });
     }
@@ -26159,6 +26689,8 @@ async function handleEstimateAsk(req, res, next) {
 }
 
 module.exports = router;
+// Codex round 2 on #4608: exported so estimate-annual-guard.js's content-derivation regex tests can assert exact parity against the canonical token format gate, instead of a hand-copied literal that could silently drift from it.
+module.exports.ESTIMATE_TOKEN_RE = ESTIMATE_TOKEN_RE;
 module.exports.refuseFrozenRestartMutation = refuseFrozenRestartMutation;
 module.exports.acceptVisitEstimatedPrice = acceptVisitEstimatedPrice;
 module.exports.selectTierCeiling = selectTierCeiling;
@@ -26214,6 +26746,12 @@ module.exports.isStructuralOneTimeOnlyEstimate = isStructuralOneTimeOnlyEstimate
 module.exports.isRodentGuaranteeOnlyEstimate = isRodentGuaranteeOnlyEstimate;
 module.exports.resolveEstimateInvoiceMode = resolveEstimateInvoiceMode;
 module.exports.reconcileFrozenMembershipSnapshot = reconcileFrozenMembershipSnapshot;
+module.exports.composeEstimateDataPayload = composeEstimateDataPayload;
+// The route's own estimate_data parser — exported so a reader feeding the
+// SAME provenance gate (callSideBlockForEstimateData) parses the row exactly
+// the way this route does, instead of hand-rolling a second JSON fallback
+// that could disagree on a malformed row (pre-push audit P1, #4345).
+module.exports.parseEstimateDataSafe = parseEstimateDataSafe;
 module.exports.stripInternalMarginFieldsDeep = stripInternalMarginFieldsDeep;
 module.exports.sanitizePublicOneTimeBreakdown = sanitizePublicOneTimeBreakdown;
 module.exports.defaultServiceModeForEstimate = defaultServiceModeForEstimate;
@@ -26306,6 +26844,7 @@ module.exports.recurringServiceReceivesTierDiscount = recurringServiceReceivesTi
 module.exports.recurringServiceCountsTowardTier = recurringServiceCountsTowardTier;
 module.exports.adminDraftPreviewEligible = adminDraftPreviewEligible;
 module.exports.isEstimateExtensionRequestEligible = isEstimateExtensionRequestEligible;
+module.exports.claimNotifyOnlyExtensionRequest = claimNotifyOnlyExtensionRequest;
 module.exports.anchoredAnnualTotal = anchoredAnnualTotal;
 module.exports.clampLawnLadderEntry = clampLawnLadderEntry;
 module.exports.pricingBundleMissingRequiredSetupFee = pricingBundleMissingRequiredSetupFee;

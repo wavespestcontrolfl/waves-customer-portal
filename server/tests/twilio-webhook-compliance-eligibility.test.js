@@ -3,6 +3,7 @@
 // robotext's own "reply NO to stop texting" footer cannot earn an
 // unsubscribe reply from a Waves line (audit 2026-09-09).
 const state = { results: [], fail: false, tables: [] };
+jest.mock('../utils/recruiting-thread-scope', () => { const real = jest.requireActual('../utils/recruiting-thread-scope'); return { ...real, isRecruitingPhone: jest.fn(async () => false) }; });
 jest.mock('../models/db', () => {
   const q = {
     where: jest.fn(() => q), whereIn: jest.fn(() => q), whereNotIn: jest.fn(() => q), whereRaw: jest.fn(() => q),

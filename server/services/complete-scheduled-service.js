@@ -15,6 +15,37 @@ const CompletionAttempts = require('../services/completion-attempts');
 // attribution are derived from before the row lock; any of them moving under
 // the lock refuses the closeout (GitHub r11 P2 #4127).
 const ISSUED_CLOSEOUT_IDENTITY_FIELDS = ['service_type', 'service_catalog_id', 'service_id', 'technician_id'];
+
+// The messaging layer returns provider outcomes and also attaches the same
+// shape to thrown post-dispatch errors. Keep one classifier so every
+// completion pay-link sender treats an unknown outcome as "may have sent".
+function deliveryUnverifiedProviderOutcome(value) {
+  const outcome = value?.providerOutcome || value;
+  return outcome?.deliveryOutcome === 'uncertain' ? outcome : null;
+}
+
+function throwIfDeliveryUnverified(result) {
+  const providerOutcome = deliveryUnverifiedProviderOutcome(result);
+  if (!providerOutcome) return result;
+  const err = new Error(providerOutcome.reason || providerOutcome.error || providerOutcome.code || 'Provider delivery outcome is unknown');
+  err.code = providerOutcome.code;
+  err.providerOutcome = providerOutcome;
+  throw err;
+}
+
+const { COMPLETION_SMS_DEFINITE_REJECTION_PREFIX } = CompletionAttempts;
+
+function completionSmsDefiniteRejectionError(message, markerAt) {
+  return new Error(`${COMPLETION_SMS_DEFINITE_REJECTION_PREFIX}${markerAt || 'missing'}] ${message || 'Completion SMS provider failure'}`);
+}
+
+function definiteRejectionMarkerFromAttemptError(error) {
+  const value = String(error || '');
+  if (!value.startsWith(COMPLETION_SMS_DEFINITE_REJECTION_PREFIX)) return null;
+  const end = value.indexOf(']', COMPLETION_SMS_DEFINITE_REJECTION_PREFIX.length);
+  return end === -1 ? null : value.slice(COMPLETION_SMS_DEFINITE_REJECTION_PREFIX.length, end);
+}
+
 const PropertyZones = require('../services/property-zones');
 const TermiteStations = require('../services/termite-stations');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -2325,6 +2356,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
       || (packetRecords && (!db?.isTransaction || !Array.isArray(packetContext.uploadedPhotoRows))))) {
     throw new TypeError('Packet completion requires its phase, item and record transaction');
   }
+  // New grouped packets freeze one server-measured visit duration and an
+  // integer allocation for each automatic member. Null is a deliberate
+  // "unknown" allocation (no trustworthy visit/member start), while zero is
+  // a real rounded observation. Old packets carry no marker and retain their
+  // original replay behavior.
+  let packetDurationAllocation = packetContext?.durationAllocation
+    && packetContext.durationAllocation.version === 1
+    && (packetContext.durationAllocation.allocatedMinutes === null
+      || (Number.isInteger(packetContext.durationAllocation.allocatedMinutes)
+        && packetContext.durationAllocation.allocatedMinutes >= 0))
+    ? packetContext.durationAllocation
+    : null;
   let completionAttempt = null;
   let legacyVisitToDissolve = null;
   let markedSucceeded = false;
@@ -2738,6 +2781,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
     let effectiveTimeOnSite = isBackfillCompletion
       ? backfillTimeOnSiteMinutes(timeOnSite)
       : livePlan.effectiveTimeOnSite;
+    // The packet coordinator, not a repeated client timer, owns automatic
+    // grouped duration. Explicit admin/backfill values are not assigned a
+    // packet allocation and continue through the existing validator above.
+    if (packetDurationAllocation && !isBackfillCompletion) {
+      effectiveTimeOnSite = packetDurationAllocation.allocatedMinutes;
+    }
     if (isBackfillCompletion && effectiveTimeOnSite == null && timeOnSite != null && timeOnSite !== '') {
       logger.warn(`[completion] backfill timeOnSite ${JSON.stringify(timeOnSite)} rejected for service ${svc.id} (not a positive duration ≤ ${BACKFILL_MAX_TIME_ON_SITE_MINUTES}min) — recorded as unknown`);
     }
@@ -3571,7 +3620,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // The guard must precede replay/resume too: a saved packet member
           // has a resumable single-service attempt, whose legacy side effects
           // would otherwise invoice and message the customer independently.
-          const member = await lockTrx('scheduled_services').where({ id: svc.id }).first('visit_id');
+          const member = await lockTrx('scheduled_services as member')
+            .leftJoin('service_visits as visit', 'visit.id', 'member.visit_id')
+            .where('member.id', svc.id).first('member.visit_id', 'visit.behavior_version');
           // Invoice-issued closeout: the grouped-stop refusal ran unlocked
           // in invoice-issued-closeout.js; a createOrJoinVisit that grouped
           // this row since would otherwise let a packet-less open group
@@ -3597,7 +3648,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               derived_idempotency_key: idempotencyKey,
             }).first('id', 'service_record_id', 'attempt_count')
             : null;
-          if (((packet || packetContext) && !ownedItem) || (packetEffects && !ownedItem.service_record_id)) {
+          if (((packet || packetContext || Number(member?.behavior_version) >= 2) && !ownedItem) || (packetEffects && !ownedItem.service_record_id)) {
             return { action: 'conflict', status: 409, payload: {
               error: 'This service is owned by a visit closeout. Resume the visit closeout.',
               code: 'visit_grouped', visitId: member?.visit_id || null,
@@ -3694,6 +3745,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         if (!parent) return { blockedBy: lockedRow.visit_id }; // orphan: fail closed
         if (ownedPacketVisitId === parent.id) return parent.status === 'closing' ? null : { blockedBy: parent.id };
         if (String(parent.status) === 'dissolved') return null;
+        if (Number(parent.behavior_version) >= 2) return { blockedBy: parent.id };
         // READ-ONLY (codex #3590 r4: later validators can still 422, and a
         // rejected completion must not have dissolved anything): an open
         // packet-less visit is allowed through and remembered — the
@@ -4737,6 +4789,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
         } });
       }
       const resumedStructuredNotes = parseJsonObject(record.structured_notes);
+      // An authorized correction can land after the packet committed its
+      // records but before an effects replay. Its durable revision and notes
+      // supersede the original allocation for lifecycle/tracker handling;
+      // the frozen marker remains historical evidence for costing readers,
+      // where the correction stamp has explicit precedence.
+      if (packetDurationAllocation
+        && (resumedStructuredNotes.timeOnSiteAdjusted === true
+          || Number(svc.time_on_site_adjusted_minutes) > 0)) {
+        packetDurationAllocation = null;
+      }
       linkedLawnAssessmentId = resumedStructuredNotes.lawnAssessmentId || null;
       // The WaveGuard advisory records were committed with the record, but
       // the resume path skips the preflight and the deduction transaction —
@@ -5062,15 +5124,24 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // invoice re-resolves it on its new day.
           if (issuedInvoiceCloseout) {
             const lockedDay = serviceDateOnly(lockedSvcRow?.scheduled_date);
-            if (!lockedDay || lockedDay !== serviceDateOnly(svc.scheduled_date) || lockedDay > etDateString()) {
+            const { isLiveVisitStatus, issuedCloseoutServiceDayEligible } = require('../services/invoice-issued-closeout');
+            if (lockedDay !== serviceDateOnly(svc.scheduled_date)
+              || !issuedCloseoutServiceDayEligible(lockedDay, {
+                today: etDateString(),
+                trigger: issuedInvoiceCloseout.trigger,
+              })) {
               throw Object.assign(new Error('visit rescheduled during the issued-invoice closeout'), { code: 'issued_visit_rescheduled' });
             }
             // The office-only status set, re-checked on the LOCKED row (pre-push
             // P1 r9): the wrapper admits pending/confirmed on an unlocked read;
             // a technician who started the visit in between (en_route /
             // on_site) owns it — a running timer and a completion of their own
-            // — so the closeout refuses instead of completing over them.
-            if (!['pending', 'confirmed'].includes(String(lockedSvcRow?.status))) {
+            // — so the closeout refuses instead of completing over them. Uses
+            // the SAME null-tolerant predicate the resolver does (Codex round
+            // 16 P2 #4131) — a legacy NULL-status visit the resolver had just
+            // admitted used to throw issued_visit_in_progress here on the
+            // string-only check.
+            if (!isLiveVisitStatus(lockedSvcRow?.status)) {
               throw Object.assign(new Error('visit started by its technician during the issued-invoice closeout'), { code: 'issued_visit_in_progress' });
             }
             // The LOCKED status is the transition source (GitHub r10 P2
@@ -5079,8 +5150,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // requires an exact current-status match — carrying the stale
             // svc.status rolled a delivered invoice's closeout back with
             // "not in state" and left an eligible visit open until another
-            // send or payment retried it.
-            fromStatus = String(lockedSvcRow.status);
+            // send or payment retried it. Never String()-coerced — r16 P2
+            // #4131: String(null) 0-rowed a legacy row's atomic guard.
+            fromStatus = lockedSvcRow.status;
             // Identity and assignment drift refuses too (GitHub r11 P2
             // #4127): the record, service line and technician attribution
             // below are built from the PRE-lock svc — an /update-details
@@ -5298,12 +5370,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
             if (Number.isFinite(stampedMinutes) && stampedMinutes > 0
               && (stampMovedMidFlight
                 || (!isBackfillCompletion && !liveAdjustedTimeOnSite
-                  && typeof effectiveTimeOnSite !== 'number'))) {
+                  && (packetRecords || typeof effectiveTimeOnSite !== 'number')))) {
               effectiveTimeOnSite = stampedMinutes;
+              packetDurationAllocation = null;
               correctionPreservedMidFlight = true;
             }
           }
-          const completionEndedAt = new Date();
+          const completionEndedAt = packetRecords
+            ? (finiteDate(packetContext.completionAt) || new Date())
+            : new Date();
           completionWallClockAt = completionEndedAt;
           // Backfill: the service happened on its scheduled day — stamp the
           // record (and everything keyed off it: activity-score dates, the
@@ -5341,7 +5416,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
             ? adjustedCompletionEndInstant(svc, effectiveTimeOnSite, completionEndedAt)
             : null;
           const completionLifecycleAt = backfillEndedAt || adjustedEndedAt || completionEndedAt;
-          const lifecycleUpdates = buildCompletionLifecycleUpdates(svc, completionLifecycleAt, { elapsed: effectiveTimeOnSite });
+          // The allocation is costing metadata, not a claim that each member
+          // started at completion minus its share. Let the lifecycle helper
+          // use only real row timestamps, then overwrite duration columns.
+          const lifecycleUpdates = buildCompletionLifecycleUpdates(svc, completionLifecycleAt, {
+            elapsed: packetDurationAllocation ? null : effectiveTimeOnSite,
+          });
+          // Zero and unknown are meaningful for an allocated visit. The
+          // generic helper treats both as absent and would fall back to this
+          // member row's whole arrival→completion span, duplicating labor.
+          // Keep truthful shared timestamps, but make the integer columns
+          // carry the allocation (including zero) or explicit unknown.
+          if (packetDurationAllocation) {
+            lifecycleUpdates.service_time_minutes = packetDurationAllocation.allocatedMinutes;
+            lifecycleUpdates.actual_duration_minutes = packetDurationAllocation.allocatedMinutes;
+          }
           // Backfill: never derive a duration from the stale on-row
           // timestamps (a weeks-old check-in against today's checkout), and
           // never let a typed duration back-derive a today-dated arrival for
@@ -5424,7 +5513,29 @@ async function completeScheduledService(completionInput, packetContext = null) {
             incompleteReason,
             customerConcernText: concernText || null,
             customerRecap: effectiveCustomerRecap || null,
-            timeOnSite: effectiveTimeOnSite || null,
+            timeOnSite: packetDurationAllocation
+              ? packetDurationAllocation.allocatedMinutes
+              : (effectiveTimeOnSite || null),
+            ...(packetDurationAllocation ? {
+              visitDurationAllocation: {
+                version: 1,
+                packetId: packetContext.packetId || null,
+                source: packetDurationAllocation.source,
+                completedAtSource: packetDurationAllocation.completedAtSource,
+                visitStartedAt: packetDurationAllocation.startedAt,
+                visitCompletedAt: packetDurationAllocation.completedAt,
+                visitTotalMinutes: packetDurationAllocation.totalMinutes,
+                estimatedMinutes: packetDurationAllocation.estimatedMinutes,
+                allocatedMinutes: packetDurationAllocation.allocatedMinutes,
+              },
+            } : {}),
+            ...(packetRecords && !isBackfillCompletion && packetContext.driveCostOwnerServiceId ? {
+              visitDriveCostAllocation: {
+                version: 1,
+                packetId: packetContext.packetId,
+                ownerServiceId: packetContext.driveCostOwnerServiceId,
+              },
+            } : {}),
             customerInteraction: normalizedCustomerInteraction,
             invoiceAlreadySent: !!invoiceAlreadySent,
             // Backfill frozen on the record: a crash-resumed retry may lack
@@ -7725,8 +7836,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // completed_at comes from the backdated end-instant rule (or stays
         // NULL for the unknown-end shape); the policy's persisted values
         // survive.
-        untrustedLifecycleSpan: isBackfillCompletion,
-        completedAt: backfillTrackerCompletedAt,
+        // Allocated grouped members already persisted their duration in the
+        // record transaction. Rebuilding from their shared lifecycle span
+        // here would overwrite zero/unknown with the whole visit duration.
+        untrustedLifecycleSpan: isBackfillCompletion || !!packetDurationAllocation,
+        completedAt: packetDurationAllocation?.completedAtSource === 'packet_save'
+          ? packetDurationAllocation.completedAt
+          : backfillTrackerCompletedAt,
         // Fences the tracker writes (codex P2 #3152 rounds 13/17): this
         // instant belongs to the correction revision this request observed
         // on the (lock-reconciled) row — null when it has never been
@@ -7972,7 +8088,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // excluded: their entries are historic and the quiet-closeout posture
     // owns them.
     let completionTimerSync = { corrected: null, blocked: null };
-    if (!isBackfillCompletion && typeof effectiveTimeOnSite === 'number') {
+    if (!packetDurationAllocation && !isBackfillCompletion && typeof effectiveTimeOnSite === 'number') {
       completionTimerSync = await syncLinkedJobTimer({
         serviceId: svc.id,
         minutes: effectiveTimeOnSite,
@@ -8302,6 +8418,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // The terminal (refunded-invoice) alert lane owns this visit —
           // append the missing-fee instruction to ITS alert rather than
           // parking a second one (Codex P0, pre-push round 11).
+          // Retain the accepted fee for the terminal alert's locked coverage recheck.
+          unmintedSetupFeeObligation = obligation;
           terminalSetupFeeNote = ` ALSO: the one-time WaveGuard setup fee ($${Number(obligation.setupFee || 0).toFixed(2)}) for accepted estimate ${obligation.estimateSlug || obligation.estimateId} was never invoiced — bill it beside the visit charge above; verify it is not already on a live invoice before billing.`;
         } else if (obligation.owed && !obligation.firstVisitAlreadyCompleted) {
           // One parked visit per estimate (Codex P0, pre-push round 8):
@@ -8521,7 +8639,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // Both lookups are consulted (Codex P0, pre-push round 7): an
       // invoice minted between the two reads appears only in
       // preMintedInvoice, and the hold and beside-branch must agree.
-      unmintedSetupFeeHold: !!unmintedSetupFeeObligation && !existingCompletionInvoice && !preMintedInvoice,
+      unmintedSetupFeeHold: !!unmintedSetupFeeObligation && !terminalCompletionInvoice && !existingCompletionInvoice && !preMintedInvoice,
       createInvoiceOnComplete: svc.create_invoice_on_complete,
       waveguardTier: svc.cust_waveguard_tier,
       explicitMembership: explicitMembershipLane,
@@ -8702,7 +8820,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const stampedFeeRowsNow = unmintedSetupFeeObligation && svc.source_estimate_id
             ? await trx('invoices')
               .where({ customer_id: svc.customer_id })
-              .where('notes', 'like', `%accepted estimate #${svc.source_estimate_id}%`)
+              .where('notes', 'ilike', `%accepted estimate #${svc.source_estimate_id}%`)
               .forUpdate()
               .select('id', 'status', 'line_items', 'notes')
             : [];
@@ -8954,7 +9072,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           }
           const stampedNowRows = await trx('invoices')
             .where({ customer_id: svc.customer_id })
-            .where('notes', 'like', `%accepted estimate #${unmintedSetupFeeObligation.estimateId}%`)
+            .where('notes', 'ilike', `%accepted estimate #${unmintedSetupFeeObligation.estimateId}%`)
             .forUpdate()
             .orderBy('created_at', 'desc')
             .select('id', 'invoice_number', 'status', 'notes', 'line_items', 'scheduled_service_id', 'service_record_id');
@@ -10967,13 +11085,40 @@ async function completeScheduledService(completionInput, packetContext = null) {
       && completionSmsAttemptedAt
       && Date.now() - completionSmsAttemptedAt < 10 * 60 * 1000
       && !resumingReleasedCompletion;
+    // A provider rejection is known NOT delivered. If both status writes
+    // failed, the pre-provider uncertainty marker remains, but the attempt's
+    // release error durably carries the exact marker it rejected. Repair only
+    // that matching marker on resume (including a stale-running reclaim); a
+    // later/unknown handoff has a different marker and remains fenced.
+    const resumedDefiniteRejectionMarker = resumingCommittedCompletion
+      ? definiteRejectionMarkerFromAttemptError(completionAttempt?.error)
+      : null;
+    const completionSmsMarkerWasDefinitelyRejected = !!recordStructuredNotes.completionSmsDeliveryUnverifiedAt
+      && resumedDefiniteRejectionMarker === recordStructuredNotes.completionSmsDeliveryUnverifiedAt;
+    if (completionSmsMarkerWasDefinitelyRejected) {
+      try {
+        await mergeRecordNotesKeys(record.id, { completionSmsDeliveryUnverifiedAt: null });
+        recordStructuredNotes.completionSmsDeliveryUnverifiedAt = null;
+        record.structured_notes = { ...parseJsonObject(record.structured_notes), completionSmsDeliveryUnverifiedAt: null };
+      } catch (clearErr) {
+        // Re-release the same marker-bound proof. A generic error here would
+        // erase the only durable fact that the provider rejected this exact
+        // attempt and make the next resume treat it as possibly delivered.
+        throw completionSmsDefiniteRejectionError(clearErr.message, resumedDefiniteRejectionMarker);
+      }
+    }
     const completionSmsAlreadyHandled = !!recordStructuredNotes.sentSmsBody
       || recordStructuredNotes.completionSmsStatus === 'sent'
       // 'deferred' = a send-window hold requeued the text on the
       // scheduled-SMS rail; that queued row owns the obligation, so a
       // re-completion must not send a second copy.
       || recordStructuredNotes.completionSmsStatus === 'deferred'
-      || completionSmsSendingFresh;
+      // An uncertain provider handoff may have delivered. Its existing
+      // 'failed' closeout status surfaces office review; this durable marker
+      // distinguishes it from a definite failure and prevents a released
+      // side-effects resume from replaying the text.
+      || (!!recordStructuredNotes.completionSmsDeliveryUnverifiedAt && !completionSmsMarkerWasDefinitelyRejected)
+      || (completionSmsSendingFresh && !completionSmsMarkerWasDefinitelyRejected);
     // The pest-recap path (services/pest-recap.js) writes its own
     // service_records row and claims recap_sms_sent_at when it texts the
     // customer. That recap text and this completion SMS are two wordings of
@@ -11883,6 +12028,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // never the whole snapshot.
           const smsNotesDelta = {
             completionSmsStatus: 'sending',
+            // Persist the uncertainty fence before calling the provider.
+            // Every definitive outcome below clears it in the same durable
+            // notes write; if later bookkeeping throws, a side-effects
+            // resume still cannot replay a message that may have gone out.
+            completionSmsDeliveryUnverifiedAt: new Date().toISOString(),
             completionSmsType: sentSmsType,
             completionSmsBody: sentSmsBody,
             completionSmsTruncated: completionSmsWasTruncated,
@@ -11941,8 +12091,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // Block-scoped inside this try; the accepted-error catch reads it
             // from the snapshot for the invoice bookkeeping.
             invoiceLinkAllowed: allowCompletionInvoiceLink,
+            deliveryUnverifiedAt: smsNotesDelta.completionSmsDeliveryUnverifiedAt,
           };
-          let smsResult = await sendCustomerMessage(sendInput);
+          let smsResult = throwIfDeliveryUnverified(await sendCustomerMessage(sendInput));
           if (smsResult.channel === 'push') {
             sentSmsChannel = 'push';
             completionSmsAcceptedSnapshot.channel = 'push';
@@ -11954,10 +12105,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             delete fallbackMetadata.allowMediaUrls;
             fallbackMetadata.mms_fallback_reason = smsResult.reason || smsResult.code || 'provider_failure';
             completionSmsAcceptedSnapshot.channel = 'sms';
-            smsResult = await sendCustomerMessage({
+            smsResult = throwIfDeliveryUnverified(await sendCustomerMessage({
               ...sendInput,
               metadata: fallbackMetadata,
-            });
+            }));
             sentSmsChannel = 'sms';
             mmsFallbackToSms = true;
             smsNotesDelta.completionSmsMmsFallbackAt = new Date().toISOString();
@@ -11991,6 +12142,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
               const deferredDelta = {
                 completionSmsStatus: 'deferred',
                 completionSmsDeferredTo: smsResult.nextAllowedAt,
+                // The pre-send uncertainty marker is cleared atomically with
+                // the queue insertion: the queued row now owns delivery and
+                // the 'deferred' status is the duplicate guard. Left in
+                // place, a terminal failure of the queued replay (status →
+                // failed only) would keep the marker and block every later
+                // completion retry despite a definite non-delivery.
+                completionSmsDeliveryUnverifiedAt: null,
               };
               // The balance clause never rides a frozen replay body (codex
               // P2, round 2): the send-window PREcheck at the line's compute
@@ -12087,6 +12245,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             };
             Object.assign(smsNotesDelta, {
               completionSmsStatus: policyBlocked ? 'blocked' : 'failed',
+              completionSmsDeliveryUnverifiedAt: null,
               completionSmsError: holdEnqueueFailed
                 ? `send-window requeue failed: ${completionHoldQueueError.message || completionHoldQueueError}`
                 : (smsResult.reason || smsResult.code || 'SMS send failed'),
@@ -12135,14 +12294,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 });
               }
               if (resumable) {
-                return exitForCompletionSmsResume(holdEnqueueFailed
-                  ? completionHoldQueueError
-                  : new Error(smsResult.reason || smsResult.code || 'Completion SMS provider failure'));
+                return exitForCompletionSmsResume(completionSmsDefiniteRejectionError(
+                  holdEnqueueFailed
+                    ? (completionHoldQueueError.message || String(completionHoldQueueError))
+                    : (smsResult.reason || smsResult.code || 'Completion SMS provider failure'),
+                  completionSmsAcceptedSnapshot?.deliveryUnverifiedAt,
+                ));
               }
             }
           } else {
             Object.assign(smsNotesDelta, {
               completionSmsStatus: 'sent',
+              completionSmsDeliveryUnverifiedAt: null,
               sentSmsBody,
               sentSmsAt: new Date().toISOString(),
               sentSmsType,
@@ -12214,11 +12377,30 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // resume would send it again — GitHub Codex r2/r3/r4 P1s). No
         // failure bell, no release-for-resume, and the bundled review is
         // marked exactly as the success path would have.
+        const unverifiedOutcome = deliveryUnverifiedProviderOutcome(e);
         const providerAccepted = completionSmsProviderAccepted || e.providerOutcome?.sent === true;
-        if (providerAccepted) {
+        if (unverifiedOutcome) {
+          // The provider request started, but its result is unknown — the
+          // text may have reached the customer. Preserve the durable
+          // 'delivery unverified' marker (written before the send above)
+          // instead of clearing it: a 'failed' closeout status surfaces
+          // office review, and the marker itself is what stops a released
+          // side-effects resume from replaying the possibly-delivered text.
+          const unverifiedDelta = {
+            completionSmsStatus: 'failed',
+            completionSmsError: e.message || 'provider delivery outcome is unknown',
+            completionSmsDeliveryUnverifiedAt: new Date().toISOString(),
+          };
+          const unverifiedNotes = { ...parseJsonObject(record.structured_notes), ...unverifiedDelta };
+          await mergeRecordNotesKeys(record.id, unverifiedDelta)
+            .catch((updateErr) => logger.error(`Completion SMS unverified-state update failed: ${updateErr.message}`));
+          record.structured_notes = unverifiedNotes;
+          logger.error(`[dispatch] Completion SMS delivery unverified for service_record ${record.id} — send claim held for review: ${e.message}`);
+        } else if (providerAccepted) {
           const snap = completionSmsAcceptedSnapshot || {};
           const acceptedDelta = {
             completionSmsStatus: 'sent',
+            completionSmsDeliveryUnverifiedAt: null,
             ...(snap.body ? { sentSmsBody: snap.body } : {}),
             sentSmsAt: new Date().toISOString(),
             ...(snap.type ? { sentSmsType: snap.type } : {}),
@@ -12268,6 +12450,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             || completionSmsRejectedOutcome;
           const failedDelta = {
             completionSmsStatus: 'failed',
+            completionSmsDeliveryUnverifiedAt: null,
             completionSmsError: (rejected ? rejected.error : null) || e.message || 'SMS send failed',
             completionSmsFailedAt: new Date().toISOString(),
           };
@@ -12301,7 +12484,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             });
           }
           if (resumable) {
-            return exitForCompletionSmsResume(new Error(rejected.error || 'Completion SMS provider failure'));
+            return exitForCompletionSmsResume(completionSmsDefiniteRejectionError(
+              rejected.error || 'Completion SMS provider failure',
+              completionSmsAcceptedSnapshot?.deliveryUnverifiedAt,
+            ));
           }
         }
       }
@@ -12377,12 +12563,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
       const result = await trackTransitions.markComplete(svc.id, {
         actorType: 'admin',
         actorId: completionInput.actor.technicianId,
-        // Same backfill contract as the first markComplete above: normally
+        // Same duration contract as the first markComplete above: normally
         // idempotent by now, but when that call failed this one performs the
         // real flip — it must honor the duration policy AND the backdated
         // completed_at stamp too.
-        untrustedLifecycleSpan: isBackfillCompletion,
-        completedAt: backfillTrackerCompletedAt,
+        untrustedLifecycleSpan: isBackfillCompletion || !!packetDurationAllocation,
+        completedAt: packetDurationAllocation?.completedAtSource === 'packet_save'
+          ? packetDurationAllocation.completedAt
+          : backfillTrackerCompletedAt,
         // Same fence as the first markComplete above (codex rounds 13/17).
         expectedCorrectionSeq: svc.time_on_site_correction_seq ?? null,
       });
@@ -12802,6 +12990,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
 
 module.exports = {
   completeScheduledService,
+  deliveryUnverifiedProviderOutcome,
+  throwIfDeliveryUnverified,
+  completionSmsDefiniteRejectionError,
+  definiteRejectionMarkerFromAttemptError,
   COMPLETION_ACCESS_CODE_RE,
   serviceReportEmailEligible,
   lawnAssessmentCompletionBlockPayload,
