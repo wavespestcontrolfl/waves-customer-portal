@@ -5124,15 +5124,24 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // invoice re-resolves it on its new day.
           if (issuedInvoiceCloseout) {
             const lockedDay = serviceDateOnly(lockedSvcRow?.scheduled_date);
-            if (!lockedDay || lockedDay !== serviceDateOnly(svc.scheduled_date) || lockedDay > etDateString()) {
+            const { isLiveVisitStatus, issuedCloseoutServiceDayEligible } = require('../services/invoice-issued-closeout');
+            if (lockedDay !== serviceDateOnly(svc.scheduled_date)
+              || !issuedCloseoutServiceDayEligible(lockedDay, {
+                today: etDateString(),
+                trigger: issuedInvoiceCloseout.trigger,
+              })) {
               throw Object.assign(new Error('visit rescheduled during the issued-invoice closeout'), { code: 'issued_visit_rescheduled' });
             }
             // The office-only status set, re-checked on the LOCKED row (pre-push
             // P1 r9): the wrapper admits pending/confirmed on an unlocked read;
             // a technician who started the visit in between (en_route /
             // on_site) owns it — a running timer and a completion of their own
-            // — so the closeout refuses instead of completing over them.
-            if (!['pending', 'confirmed'].includes(String(lockedSvcRow?.status))) {
+            // — so the closeout refuses instead of completing over them. Uses
+            // the SAME null-tolerant predicate the resolver does (Codex round
+            // 16 P2 #4131) — a legacy NULL-status visit the resolver had just
+            // admitted used to throw issued_visit_in_progress here on the
+            // string-only check.
+            if (!isLiveVisitStatus(lockedSvcRow?.status)) {
               throw Object.assign(new Error('visit started by its technician during the issued-invoice closeout'), { code: 'issued_visit_in_progress' });
             }
             // The LOCKED status is the transition source (GitHub r10 P2
@@ -5141,8 +5150,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // requires an exact current-status match — carrying the stale
             // svc.status rolled a delivered invoice's closeout back with
             // "not in state" and left an eligible visit open until another
-            // send or payment retried it.
-            fromStatus = String(lockedSvcRow.status);
+            // send or payment retried it. Never String()-coerced — r16 P2
+            // #4131: String(null) 0-rowed a legacy row's atomic guard.
+            fromStatus = lockedSvcRow.status;
             // Identity and assignment drift refuses too (GitHub r11 P2
             // #4127): the record, service line and technician attribution
             // below are built from the PRE-lock svc — an /update-details
