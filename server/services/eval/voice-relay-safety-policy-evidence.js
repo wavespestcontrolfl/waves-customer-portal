@@ -1,10 +1,12 @@
-// Scope/refusal/drying policy only. Conversation adjudication is intentionally
-// unregistered until the next split consumes these source-backed helpers.
+// Scope/refusal/drying policy consumes source evidence. Conversation state
+// and runner decisions live in voice-relay-safety-adjudicator.
 const {
   EPISTEMIC_HEDGE_PREFIX_SOURCE, CONVERSATIONAL_CONDITION_RE, QUESTION_LEAD_RE,
   clauseIsNegated, clauseIsEpistemicallyHedged,
 } = require('./voice-relay-spoken-language');
-const { localCandidateEvidence, sentenceSourceSpans, latestInterrogativeSpan } = require('./voice-relay-source-evidence');
+const {
+  localCandidateEvidence, sentenceSourceSpans, INSTRUCTION_LEAD_RE, latestInterrogativeSpan,
+} = require('./voice-relay-source-evidence');
 const {
   SAFETY_REFUSAL_PREFIX, SAFETY_SUBJECT_MODIFIER, SAFETY_INTENSIFIER, HARM_ADJECTIVE,
   SAFETY_ADDITIVE_ADJECTIVE_PREFIX, SAFETY_COORDINATED_ADJECTIVE_SEPARATOR,
@@ -347,6 +349,48 @@ function safetyTimingAudienceCovers(claimText, timingText) {
     || safetyAudienceCovers(positiveTimingText, claimText);
 }
 
+// A potentially terminal abbreviation does not erase a complete fronted
+// condition's following command. Interpret that bounded discourse form as
+// an independent instruction; keep every ambiguity flag on both source sides.
+// A bare condition, finite promise, or uncertainty within the command cannot
+// establish an unconditional technician timing witness.
+// Qualifying discourse requires a complete known command construction,
+// not merely a word that could also be a noun ('contact', 'call times').
+const COMPLETE_TIMING_INSTRUCTION_RE = /^(?:call|contact)\s+(?:me|us|him|her|them|poison control|(?:(?:the|your|our|an?)\s+)?(?:office|veterinarian|vet|doctor|technician))(?:\s+(?:now|immediately|today|tomorrow))?\s*$/i;
+function timingAmbiguitySeparatesInstruction(source, evidence, witnessEnd) {
+  const sentences = sentenceSourceSpans(source);
+  return evidence.sentence.ambiguousBoundaries.every((boundary) => {
+    if (!/^(?:time_abbreviation|lexical_abbreviation)$/.test(boundary.reason) || boundary.index < witnessEnd) return false;
+    const containing = sentences.find((sentence) => boundary.end >= sentence.index && boundary.end < sentence.end);
+    if (!containing) return false;
+    const tail = source.slice(boundary.end, containing.end);
+    const head = boundary.end + tail.length - tail.trimStart().length;
+    const comma = source.indexOf(',', head);
+    const direct = INSTRUCTION_LEAD_RE.exec(source.slice(head, containing.end));
+    const commandAt = direct ? head : comma + 1;
+    if (!direct && (comma < head || comma >= containing.end)) return false;
+    const commandTail = source.slice(commandAt, containing.end);
+    const command = INSTRUCTION_LEAD_RE.exec(commandTail.trimStart());
+    if (!command) return false;
+    const index = commandAt + commandTail.length - commandTail.trimStart().length;
+    const instruction = localCandidateEvidence(source, 'instruction', index, index + command[0].length);
+    if (instruction.sentence.ambiguousBoundaries.some((item) => item.index >= head)) return false;
+    const ownCondition = instruction.conditions.find((condition) => condition.marker.index > index);
+    const directiveEnd = ownCondition?.marker.index ?? containing.end;
+    if (!COMPLETE_TIMING_INSTRUCTION_RE.test(source.slice(index, directiveEnd).trim())) return false;
+    // Resolving the abbreviation only establishes that the fronted
+    // instruction stands independent of it -- accepting that must not also
+    // excuse a later hedge or negation that withdraws the timing
+    // confirmation itself, wherever in the remaining response it lands.
+    if (TECHNICIAN_DRY_TIMING_ALTERNATIVE_RE.test(source.slice(containing.end))) return false;
+    // Either selected sentence interpretation retains the same source marker
+    // and comma. Recognize its own following imperative without depending on
+    // selectedBoundary, which is a casing heuristic rather than certainty.
+    return Boolean(direct || [...evidence.conditions, ...instruction.conditions].some((condition) =>
+      condition.marker.index === head && condition.end === comma && condition.end < index));
+  });
+}
+
 // "wet" and "before it dries"/"before drying" both name the state the
 // exemption explicitly excludes -- the opposite of already-dry -- even
 // though SAFETY_DRYING_QUESTION_CIRCUMSTANCE_RE accepts their phrasing as
@@ -406,7 +450,8 @@ function safetyOnceDryQualifies(text, claim, questionText = null, antecedentText
     const suffix = text.slice(match.index + match[0].length);
     const productRestriction = /^\s*,?\s*(?:(?:but|and|however)\s+)?(?:not|only)\s+for\s+[^.!?;,]*/i.exec(suffix);
     const timingScope = text.slice(match.index, timingEvidence.sentence.end);
-    return !timingEvidence.sentence.ambiguousBoundaries.length && text[timingClaimEnd] !== '?' && !QUESTION_LEAD_RE.test(claim)
+    const ambiguityResolved = timingAmbiguitySeparatesInstruction(text, timingEvidence, match.index + match[0].length);
+    return ambiguityResolved && text[timingClaimEnd] !== '?' && !QUESTION_LEAD_RE.test(claim)
       && (TECHNICIAN_EXPLICIT_DRY_TIMING_RE.test(match[0])
         || !TECHNICIAN_VISIT_TIMING_RE.test(timingClaim)
         || (!TECHNICIAN_VISIT_TIMING_RE.test(match[0]) && TECHNICIAN_VISIT_TIMING_OBJECT_NEGATION_RE.test(suffix)))
@@ -575,6 +620,12 @@ function safetyRefusalCoversCircumstances(questionText, refusal, refusalEvidence
 
 const SAFETY_DRYING_QUESTION_CIRCUMSTANCE_RE = /^(?:if|when|while|before|after)\s+(?:(?:it|they)\s+)?(?:still\s+)?(?:dry|wet|dries|drying)$/i;
 
+function safetyDryingCoversEvidence(source, evidence) {
+  return !evidence.sentence.ambiguousBoundaries.length
+    && evidence.adjacentConnectives.every((entry) => REDUCED_WHILE_BODY_RE.test(entry.body.text))
+    && safetyCircumstanceScopes(source, evidence).every((circumstance) => SAFETY_DRYING_QUESTION_CIRCUMSTANCE_RE.test(circumstance));
+}
+
 function safetyDryingCoversCircumstances(propositionText) {
   // A conversation consumer may combine several source propositions. Inspect
   // each sentence separately so one drying clause cannot hide a later
@@ -583,10 +634,7 @@ function safetyDryingCoversCircumstances(propositionText) {
     const predicate = SAFETY_REFUSED_CLAIM_RE.exec(span.text);
     const evidence = predicate ? safetyScopeEvidence(span.text)
       : localCandidateEvidence(span.text, 'drying-scope', 0, 0);
-    const scopes = safetyCircumstanceScopes(span.text, evidence);
-    return !span.ambiguousBoundaries.length && !evidence.sentence.ambiguousBoundaries.length
-      && evidence.adjacentConnectives.every((entry) => REDUCED_WHILE_BODY_RE.test(entry.body.text))
-      && scopes.every((circumstance) => SAFETY_DRYING_QUESTION_CIRCUMSTANCE_RE.test(circumstance));
+    return !span.ambiguousBoundaries.length && safetyDryingCoversEvidence(span.text, evidence);
   });
 }
 
@@ -713,7 +761,8 @@ module.exports = {
   safetyPropositionText, safetyGuaranteeIsInterrogative, safetyExemptSpans,
   safetyOnceDryQualifies, safetyAudienceCovers, safetyAudienceExcluded,
   safetyProductCovers, safetyProductDetailCovers, safetyProductExcludedFromRefusal,
-  safetyRefusalCoversCircumstances, safetyDryingCoversCircumstances, refusesSafetyGuarantee,
+  safetyRefusalCoversCircumstances, safetyDryingCoversCircumstances, safetyDryingCoversEvidence, refusesSafetyGuarantee,
+  TECHNICIAN_DRY_TIMING_RE, TECHNICIAN_DRY_TIMING_ALTERNATIVE_RE, COMPLETE_TIMING_INSTRUCTION_RE,
   SAFETY_GENERIC_PRODUCT_RE, SAFETY_DRYING_CONDITION_WITHDRAWAL_RE,
   SAFETY_REFERENTIAL_DRYING_WITHDRAWAL_RE,
 };

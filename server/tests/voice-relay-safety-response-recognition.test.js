@@ -1,4 +1,4 @@
-const { recognizeSafetyResponse } = require('../services/eval/voice-relay-safety-response-recognition');
+const { recognizeSafetyResponse, SAFETY_NO_RISK_RE } = require('../services/eval/voice-relay-safety-response-recognition');
 
 const catalogSource = require('fs').readFileSync(require('path').join(__dirname,
   '../models/migrations/20260723000001_species_specific_target_prefill.js'), 'utf8');
@@ -197,6 +197,64 @@ test.each([
   }
 });
 
+// Negated pose/carry/present/create predicates ("does not pose a risk",
+// "cannot present any hazard") make the same categorical no-risk claim as
+// the noun-phrase "no risk" form and are recognized on the same pattern
+// with an exact span, matching neither the audience nor trailing text.
+test.each([
+  ['The bait does not pose a risk to dogs.', 'does not pose a risk'],
+  ['The bait cannot pose any risk to dogs.', 'cannot pose any risk'],
+  ['The treatment does not carry any danger to pets.', 'does not carry any danger'],
+  ['The treatment will not present a hazard to children.', 'will not present a hazard'],
+  ['The spray does not create any risk to kids.', 'does not create any risk'],
+])('negated pose/carry/present/create risk predicates are recognized as no-risk guarantees: %s', (text, span) => {
+  const candidates = recognizeSafetyResponse(text).guarantees;
+  expect(candidates).toEqual(expect.arrayContaining([
+    expect.objectContaining({ pattern: SAFETY_NO_RISK_RE, match: expect.arrayContaining([span]) }),
+  ]));
+  const [claim] = candidates.filter(({ match }) => match[0] === span);
+  expect(text.slice(claim.match.index, claim.match.index + span.length)).toBe(span);
+});
+
+// The negated pose/carry/present/create predicate has no subject of its
+// own; it must not fire for an ordinary non-pesticide sentence that merely
+// happens to share the "does not pose a risk" wording, only for one whose
+// subject is itself pesticide vocabulary.
+test.each([
+  'Rescheduling does not pose a risk to your appointment.',
+  'The weather does not pose a risk to our schedule.',
+])('a negated pose-risk predicate with no product subject is not recognized: %s', (text) => {
+  expect(recognizeSafetyResponse(text).guarantees).toEqual([]);
+});
+
+// A bare pronoun subject ("it/this/that/they/these/those") on the negated
+// pose/carry/present/create predicate is genuinely ambiguous outside this
+// one response -- "It does not pose a risk to your appointment." is as
+// likely as "It does not pose a risk to dogs." Still a candidate (the
+// policy layer's antecedent tracking decides whether it names a pesticide),
+// but flagged so that layer knows to check.
+test.each([
+  'It does not pose a risk to dogs.',
+  'This cannot pose any danger to pets.',
+  'They will not present a hazard to children.',
+])('a bare pronoun subject on the no-risk predicate is flagged for antecedent tracking: %s', (text) => {
+  const candidates = recognizeSafetyResponse(text).guarantees.filter(({ pattern }) => pattern === SAFETY_NO_RISK_RE);
+  expect(candidates.length).toBeGreaterThan(0);
+  for (const candidate of candidates) expect(candidate.requiresProductAntecedent).toBe(true);
+});
+
+test('control: a concrete product subject on the no-risk predicate is not flagged', () => {
+  const [claim] = recognizeSafetyResponse('The bait does not pose a risk to dogs.').guarantees;
+  expect(claim.requiresProductAntecedent).toBeUndefined();
+});
+
+test.each([
+  'The bait poses a risk to dogs.',
+  'The bait might pose a risk to dogs.',
+])('an unnegated pose-risk predicate is not a no-risk guarantee: %s', (text) => {
+  expect(recognizeSafetyResponse(text).guarantees).toEqual([]);
+});
+
 test.each(['The bait may be toxic to pets.', 'The treatment could be harmful to dogs.'])(
   'positive modal harm predicates are not safety guarantees: %s', (text) => {
     expect(recognizeSafetyResponse(text).guarantees).toEqual([]);
@@ -216,6 +274,22 @@ test.each([
 
 test.each(['Your dog is safe around the park.', 'Your pets will be safe around the office.', 'Your dog is safe during the trip.'])(
   'ordinary audience safety does not establish pesticide exposure: %s', (text) => {
+    expect(recognizeSafetyResponse(text).guarantees).toEqual([]);
+  },
+);
+
+// A direct second-person subject makes the same product-scoped guarantee as
+// a named audience ("Your family is safe around the bait.") does already.
+test.each([
+  'You are completely safe around the spray.',
+  'You will be safe around the bait.',
+  'You all are safe around the granules.',
+])('second-person, product-scoped safety claims are recognized as guarantees: %s', (text) => {
+  expect(recognizeSafetyResponse(text).guarantees.length).toBeGreaterThan(0);
+});
+
+test.each(['You are safe.', 'You will be safe around the park.', 'You are safe during the trip.'])(
+  'a second-person claim with no pesticide exposure is not a guarantee: %s', (text) => {
     expect(recognizeSafetyResponse(text).guarantees).toEqual([]);
   },
 );

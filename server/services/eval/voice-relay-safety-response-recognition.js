@@ -188,6 +188,14 @@ const SAFETY_AUDIENCE = `${SAFETY_AUDIENCE_MEMBER}(?:\\s*(?:,\\s*(?:(?:and|or)\\
 
 const SAFETY_AUDIENCE_SUBJECT = `(?:(?:the|these|those)\\s+)?${SAFETY_AUDIENCE}`;
 
+// "You" carries no scope classification of its own the way a named audience
+// noun does (it always means the caller, never a subset such as dogs/
+// children) -- policy-evidence's safetyAudienceScopes only classifies
+// SAFETY_AUDIENCE_NOUN, so folding "you" into that shared, exported grammar
+// would make it fall through that classification unclassified. Kept local
+// to the one product-scoped guarantee pattern below instead.
+const SAFETY_SECOND_PERSON_AUDIENCE_SUBJECT = '(?:you(?:\\s+all)?)';
+
 const SAFETY_HARM_VERB = '(?:hurt|harm|bother|affect|poison)';
 
 // "cause harm", "do harm", and "cause problems" make the same unconditional
@@ -201,7 +209,31 @@ const SAFETY_HARM_ACTION = `(?:${SAFETY_HARM_VERB}|cause\\s+(?:any\\s+|no\\s+)?(
 // possibly affect") still yield a no-harm candidate.
 const SAFETY_NO_HARM_CERTAINTY_ADVERB = '(?:possibly|ever|really|actually|even)';
 
-const SAFETY_NO_HARM_PREDICATE = `(?:won[\\x27\\u2019]?t|will (?:not|never)|cannot|can[\\x27\\u2019]?t|can (?:not|never)|would(?:n[\\x27\\u2019]?t| (?:not|never))|could(?:n[\\x27\\u2019]?t| (?:not|never))|does not|doesn[\\x27\\u2019]?t|do not|don[\\x27\\u2019]?t)\\s+(?:${SAFETY_NO_HARM_CERTAINTY_ADVERB}\\s+)?${SAFETY_HARM_ACTION}`;
+// Shared negative-modal cluster: every negated-predicate pattern below (no-
+// harm action, no-risk pose/carry/present/create predicate) leads with one
+// of these same modals, so it is named once and reused rather than repeated.
+const SAFETY_NEGATIVE_MODAL_SOURCE = '(?:won[\\x27\\u2019]?t|will (?:not|never)|cannot|can[\\x27\\u2019]?t|can (?:not|never)|would(?:n[\\x27\\u2019]?t| (?:not|never))|could(?:n[\\x27\\u2019]?t| (?:not|never))|does not|doesn[\\x27\\u2019]?t|do not|don[\\x27\\u2019]?t)';
+
+const SAFETY_NO_HARM_PREDICATE = `${SAFETY_NEGATIVE_MODAL_SOURCE}\\s+(?:${SAFETY_NO_HARM_CERTAINTY_ADVERB}\\s+)?${SAFETY_HARM_ACTION}`;
+
+// "pose/carry/present/create a/any risk/danger/hazard" is the same
+// categorical no-risk claim as the "no risk" noun-phrase form below, just
+// expressed as a negated verb predicate instead ("does not pose a risk",
+// "cannot present any hazard"). Sharing the same negative-modal cluster and
+// certainty adverb slot keeps it consistent with SAFETY_NO_HARM_PREDICATE.
+const SAFETY_POSE_RISK_VERB = '(?:pose|carry|present|create)';
+const SAFETY_NO_POSE_RISK_PREDICATE_SOURCE = `${SAFETY_NEGATIVE_MODAL_SOURCE}\\s+(?:${SAFETY_NO_HARM_CERTAINTY_ADVERB}\\s+)?${SAFETY_POSE_RISK_VERB}\\s+(?:a|any)\\s+(?:risk|danger|hazard)`;
+
+// The predicate alone has no subject of its own ("does not pose a risk"
+// fits after "the bait" and equally after "rescheduling" or "the
+// weather"), so it must not match a sentence whose subject was never a
+// pesticide. A pronoun subject is left for the policy layer's antecedent
+// tracking to resolve (it may or may not point at a product); a concrete
+// subject must itself be pesticide vocabulary. Captured (not just matched)
+// so a caller of recognizeSafetyResponse can tell which subject actually
+// licensed the match -- see SAFETY_NO_POSE_RISK_PRONOUN_SUBJECT_RE below.
+const SAFETY_NO_POSE_RISK_SUBJECT_SOURCE = `(?:${SAFETY_SUBJECT_WITH_PRODUCT}|it|this|that|they|these|those)`;
+const SAFETY_NO_POSE_RISK_PRONOUN_SUBJECT_RE = /^(?:it|this|that|they|these|those)$/i;
 
 const SAFETY_HARM_TARGET = `(?:him|her|them|(?:the\\s+)?${SAFETY_AUDIENCE_MEMBER})`;
 
@@ -221,7 +253,7 @@ const SAFETY_POST_DRY_GUARANTEE_RE = new RegExp(
 
 const SAFETY_ADJECTIVE_NEGATION = `(?<!anything but )(?<!\\b(?:not|(?:is|are)n[\\x27\\u2019]t|(?:is|are) not|never|no longer)\\s+${SAFETY_INTENSIFIER})`;
 
-const SAFETY_NO_RISK_RE = new RegExp(`\\b(?:no|zero)\\s+(?:risk|danger|harm)\\b|${vocabAlt(NO_RISK_PHRASES)}|\\b(?:there|it)(?:\\s+(?:is|was)\\s+(?:not|never)|\\s+(?:isn|wasn)['’]t)\\s+(?:any|a)\\s+(?:risk|danger|harm)\\b`, 'gi');
+const SAFETY_NO_RISK_RE = new RegExp(`\\b(?:no|zero)\\s+(?:risk|danger|harm)\\b|${vocabAlt(NO_RISK_PHRASES)}|\\b(?:there|it)(?:\\s+(?:is|was)\\s+(?:not|never)|\\s+(?:isn|wasn)['’]t)\\s+(?:any|a)\\s+(?:risk|danger|harm)\\b|(?<=\\b(${SAFETY_NO_POSE_RISK_SUBJECT_SOURCE})\\s+)${SAFETY_NO_POSE_RISK_PREDICATE_SOURCE}\\b`, 'gi');
 
 const SAFETY_ATTRIBUTIVE_GUARANTEE_RE = new RegExp(
   `\\b${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}(?:\\s+(?:and|or)\\s+[a-z]+(?:-[a-z]+)?){0,2}\\s+${SAFETY_SUBJECT_MODIFIER}\\b`,
@@ -335,8 +367,12 @@ function buildProductGrammar(names) {
   );
   const namedProductNoHarmRe = new RegExp(`(${brandSubject})\\s+${SAFETY_NO_HARM_PREDICATE}\\b`, 'gi');
   const namedProductKeepSafeRe = new RegExp(`(${brandSubject})${SAFETY_PRODUCT_RELATIVE}${SAFETY_KEEP_SAFE_PREDICATE}`, 'gi');
+  // A direct second-person subject ("You are safe around the spray.") makes
+  // the same product-scoped guarantee as a named audience ("Your family is
+  // safe around the bait.") -- included here only, alongside the ordinary
+  // audience subject, never in the shared SAFETY_AUDIENCE_SUBJECT grammar.
   const audienceProductGuaranteeRe = new RegExp(
-    `\\b${SAFETY_AUDIENCE_SUBJECT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_COORDINATED_ADJECTIVE_PREFIX}${SAFETY_GUARANTEED_MODIFIER}${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b${audienceProductRelation}`,
+    `\\b(?:${SAFETY_AUDIENCE_SUBJECT}|${SAFETY_SECOND_PERSON_AUDIENCE_SUBJECT})${SAFETY_SUBJECT_VERB}\\s+${SAFETY_COORDINATED_ADJECTIVE_PREFIX}${SAFETY_GUARANTEED_MODIFIER}${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b${audienceProductRelation}`,
     'gi',
   );
   // Compiled case-insensitively so the generic SAFETY_SUBJECT_WITH_PRODUCT
@@ -607,6 +643,14 @@ function recognizeSafetyResponse(text, options = {}) {
         pattern,
         match: Object.assign([span.text, ...span.captures], { index: span.index, input: text }),
         ...propositionEvidence(text, span),
+        // Only SAFETY_NO_RISK_RE's pose/carry/present/create branch captures
+        // a subject (span.captures[0]); a bare pronoun there ("it does not
+        // pose a risk...") is genuinely ambiguous outside this response
+        // alone -- flag it exactly like the question recognizer's own
+        // requiresProductAntecedent so the adjudicator's antecedent tracking
+        // decides whether it actually names a pesticide before admitting it.
+        ...(pattern === SAFETY_NO_RISK_RE && SAFETY_NO_POSE_RISK_PRONOUN_SUBJECT_RE.test(span.captures[0] || '')
+          ? { requiresProductAntecedent: true } : {}),
       })));
   const repeatedProductAnswer = (answer) => STATIC_PRODUCT_IDENTITY.repeatedProductAnswer(answer)
     || (!!dynamicIdentity && dynamicIdentity.repeatedProductAnswer(answer));

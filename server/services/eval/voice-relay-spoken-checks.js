@@ -1,5 +1,5 @@
 const {
-  vocabAlt,
+  vocabAlt, FREE_VISIT_ACKNOWLEDGMENT_RE,
   CERTAINTY_IDIOM_RE, EPISTEMIC_HEDGE_RE, EPISTEMIC_HEDGE_PREFIX_SOURCE, clauseIsNegated, clauseIsEpistemicallyHedged,
   EPISTEMIC_REFUSAL_VERBS,
   EPISTEMIC_DENIAL_WORDS,
@@ -20,6 +20,8 @@ const {
   REFUND_PAYMENT_ACTION_RE,
   CLAUSE_FINITE_PREDICATE_RE,
 } = require('./voice-relay-spoken-language');
+
+const { no_safety_guarantee } = require('./voice-relay-safety-adjudicator');
 
 /**
  * Named spoken-content checks for the voice relay eval — one implementation
@@ -624,7 +626,6 @@ function freeVisitHasSharedPreposedCondition(sentencePrefix) {
 const FOLLOWUP_QUESTION_RE = /(?:,\s*|\s+(?:and|but|so)\s+)(?:(?:and|but|so)\s+)?(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how|where|when)\b/i;
 const FREE_VISIT_LEADING_QUESTION_RE = /^(?!\s*(?:do|does|did)\s+not\b)\s*(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how)\b[^,;:]*$/i;
 const FREE_VISIT_QUESTION_TERMINATOR_RE = /^(?:\?|or\s+(?:not|paid|billable|charged)\?\s*$)/i;
-const FREE_VISIT_ACKNOWLEDGMENT_RE = /^\s*,?\s*(?:ok(?:ay)?|all\s*right|alright|sounds?\s+good|got\s+it|you\s+(?:follow|understand|know)|understood|yeah|yes|good)(?:\s+then)?(?=\s*(?:$|[,;]))/i;
 const FREE_VISIT_TRUTH_QUESTION_RE = /^\s*,?\s*(?:(?:is|was)\s+(?:that|this|it)\s+(?:true|correct|right)|(?:isn['’]t|wasn['’]t)\s+(?:it|this|that)\s+(?:true|correct|right)|(?:isn['’]t|wasn['’]t|won['’]t|wouldn['’]t)\s+it|am\s+i\s+(?:right|correct)|right|correct)\s*$/i;
 const FREE_VISIT_TRAILING_RETRACTION_RE = /^\s*,?\s*(?:but|however)\s+(?:(?:it|that|this)(?:\s+(?:(?:is|was)\s+(?:not\s+true|false|untrue|incorrect|wrong)|(?:isn['’]t|wasn['’]t)\s+true)|['’]s\s+(?:not\s+true|false|untrue|incorrect|wrong))|i\s+take\s+(?:that|this|it)\s+back|scratch\s+(?:that|this|it)|let\s+me\s+correct\s+(?:that|this|it))(?=\s*(?:$|[,;.!?]|\b(?:because|since|as(?!\s+(?:long|soon)\s+as\b))\b))/i;
 const FREE_VISIT_POSSIBILITY_PREFIX_RE = /^\s*(?:maybe|perhaps|possibly|potentially|(?:it|this|that)(?:['’]s|\s+is)\s+(?:possible|unlikely|improbable|a\s+possibility)\s+that)\s*,?\s*[^,;.!?]*$/i;
@@ -1599,6 +1600,7 @@ const compiles = (source, requireContent = false) => {
 };
 
 const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
+  no_safety_guarantee: () => (v) => (v === true ? null : 'value must be true'),
   report_readback_confirms: () => (v) => (isPlainObject(v) && Object.keys(v).length === 2
     && typeof v.subject === 'string' && v.subject.trim() && compiles(v.subject)
     && reportPatternMayConsumeText(v.subject)
@@ -2791,6 +2793,7 @@ const REPORT_LEADING_FRAME_RE = /^\s*(?:the report will show that|as you can see
 const REPORT_TRAILING_FRAME_RE = /,\s*(?:as\s+the\s+report\s+(?:will|may|might|should|would)\s+show|which\s+you\s+can\s+see\s+in\s+the\s+report)\b[^.!?;]*/gi;
 
 const SPOKEN_CHECK_RUNNERS = Object.freeze({
+  no_safety_guarantee,
   report_readback_confirms,
  no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_free_visit_promise, no_third_party_disclosure, only_language, capture_lead_input_asserts });
 
