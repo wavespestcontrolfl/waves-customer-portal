@@ -475,7 +475,7 @@ const PAYMENT_FUTURE_OUTCOME_RE = new RegExp(
   `\\b(?:${PAYMENT_ACTOR}${PAYMENT_FUTURE_ACTOR_AUX}${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_FUTURE_ACTION}\\s+(?:(?:(?:your|the|that|this|a|both|all|these|those)\\s+)?${PAYMENT_TARGET}|${PAYMENT_OBJECT_PRONOUN}|${PAYMENT_AMOUNT}(?:\\s+to\\s+(?:(?:your|the|that|this|a|both|all|these|those)\\s+)?${PAYMENT_TARGET})?)|(?:${PAYMENT_TARGET}|that|it)\\s+(?:(?:(?:will|should)\\s+|(?:is|are)\\s+going\\s+to\\s+)${PAYMENT_SUCCESS_ADVERBS}(?:go\\s+through|succeed|clear|post)|(?:(?:will|should)\\s+|(?:is|are)\\s+going\\s+to\\s+)${PAYMENT_SUCCESS_ADVERBS}be\\s+${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}))\\b`,
   'gi',
 );
-const PAYMENT_INHERITED_PREDICATE = `${PAYMENT_SUCCESS_ADVERBS}(?:(?:(?:is|are|was|were)|(?:has|have|had)\\s+${PAYMENT_SUCCESS_ADVERBS}been|(?:will|should)\\s+be|(?:is|are)\\s+going\\s+to\\s+be)\\s+${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}|(?:has|have|had)\\s+${PAYMENT_SUCCESS_ADVERBS}(?:gone\\s+through|succeeded|${PAYMENT_INTRANSITIVE_SUCCESS})|(?:will|should)\\s+${PAYMENT_SUCCESS_ADVERBS}(?:go\\s+through|succeed|clear|post)|${PAYMENT_TRANSITIVE_SUCCESS}|succeeded|went\\s+through)`;
+const PAYMENT_INHERITED_PREDICATE = `${PAYMENT_SUCCESS_ADVERBS}(?:(?:(?:is|are|was|were)|(?:has|have|had)\\s+${PAYMENT_SUCCESS_ADVERBS}been|(?:will|should)\\s+be|(?:is|are)\\s+going\\s+to\\s+be)\\s+${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}|(?:has|have|had)\\s+${PAYMENT_SUCCESS_ADVERBS}(?:gone\\s+through|succeeded|${PAYMENT_INTRANSITIVE_SUCCESS})|(?:will|should)\\s+${PAYMENT_SUCCESS_ADVERBS}(?:go\\s+through|succeed|clear|post|${PAYMENT_FUTURE_ACTION})|${PAYMENT_TRANSITIVE_SUCCESS}|succeeded|went\\s+through)`;
 const PAYMENT_INHERITED_SUBJECT_RE = new RegExp(
   `\\b(?:(?:your|the|that|this|a|both|all|these|those)\\s+)?${PAYMENT_TARGET}\\b`,
   'gi',
@@ -692,7 +692,7 @@ function* inheritedPaymentOutcomeCandidates(text) {
       if (/^yet\b/i.test(match[0]) && /\bnot\s*$/i.test(bridge)) continue;
       const predicateStart = subjectEnd + match.index + match[0].lastIndexOf(predicate);
       const afterPredicate = text.slice(predicateStart + predicate.length);
-      const bareAction = new RegExp(`^${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_TRANSITIVE_SUCCESS}\\b`, 'i').test(predicate);
+      const bareAction = new RegExp(`^${PAYMENT_SUCCESS_ADVERBS}(?:${PAYMENT_TRANSITIVE_SUCCESS}|(?:will|should)\\s+${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_FUTURE_ACTION})\\b`, 'i').test(predicate);
       const sharedQualifier = /\b(?:not|never|cannot|can|could|may|might|\w+n[\x27\u2019]t)\b/i.test(bridge.replace(/\bnot only\b/gi, ''))
         && !/[,—–]|\b(?:but|yet|then|so|it|that)\b/i.test(bridge);
       if (bareAction && /^and\b/i.test(match[0]) && sharedQualifier) continue;

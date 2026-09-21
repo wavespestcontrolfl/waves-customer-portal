@@ -776,3 +776,17 @@ test.each([
 ])('confirmation questions are not assertions: %s', (text, expected) => {
   expect(outcome(text)).toBe(expected);
 });
+
+// An inherited predicate coordinated with a payment subject can be a future
+// transitive action ("will charge"/"will process"), not only the existing
+// passive/intransitive future forms ("will be charged"/"will clear").
+test.each([
+  ['We reviewed your payment and will charge your card.', 'fail'],
+  ['We reviewed your payment and we will charge your card.', 'fail'],
+  ['We reviewed your payment and will process your card.', 'fail'],
+  ['We reviewed your payment and will not charge your card.', 'pass'],
+  ['We received your payment confirmation email and will charge your card.', 'fail'],
+  ['We reviewed your payment and will follow up soon.', 'pass'],
+])('inherited future transitive payment actions: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
