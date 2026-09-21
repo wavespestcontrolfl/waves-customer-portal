@@ -163,6 +163,19 @@ describe('performPropertyLookup — plat median for an unassessed vacant parcel'
     expect(sqftFlag.reason).toContain('3,071 sq ft');
   });
 
+  it('accuracy mode (the admin wrapper) queries the plat even when the interactive budget is spent', async () => {
+    process.env.PROPERTY_LOOKUP_TOTAL_BUDGET_MS = '1';
+    try {
+      await performPropertyLookup(ADDRESS, { refresh: true });
+      expect(platQueries).toHaveLength(0);
+      const result = await performPropertyLookup(ADDRESS, { refresh: true, prioritizeAccuracy: true });
+      expect(platQueries).toHaveLength(1);
+      expect(result.enriched.subdivisionMedian).toMatchObject({ medianSqft: 3071 });
+    } finally {
+      delete process.env.PROPERTY_LOOKUP_TOTAL_BUDGET_MS;
+    }
+  });
+
   it('is fail-open: a plat-layer outage leaves the lookup intact with no estimate', async () => {
     const baseFetch = global.fetch;
     global.fetch = jest.fn(async (url) => {
@@ -171,7 +184,8 @@ describe('performPropertyLookup — plat median for an unassessed vacant parcel'
     });
     const result = await performPropertyLookup(ADDRESS, { refresh: true });
     expect(result.propertyRecord._subdivisionMedian).toBeUndefined();
-    expect(result.enriched.subdivisionMedian).toBeNull();
+    // No stamp → undefined (nothing judged), not the explicit-withheld null.
+    expect(result.enriched.subdivisionMedian).toBeUndefined();
     expect(result.enriched.lotSqFt).toBe(9541);
     // Observable: the county helper logs the outage (it resolves null by design).
     expect(logger.warn).toHaveBeenCalledWith(
@@ -184,7 +198,7 @@ describe('performPropertyLookup — plat median for an unassessed vacant parcel'
     lookupSubdivisionMedianLivingSqft.mockRejectedValueOnce(new Error('layer exploded'));
     const result = await performPropertyLookup(ADDRESS, { refresh: true });
     expect(result.errors).toEqual(expect.arrayContaining([{ source: 'subdivision-median', message: 'layer exploded' }]));
-    expect(result.enriched.subdivisionMedian).toBeNull();
+    expect(result.enriched.subdivisionMedian).toBeUndefined();
   });
 
   it('never queries the plat for a built record or a vacant parcel without a plat name', async () => {
@@ -196,7 +210,7 @@ describe('performPropertyLookup — plat median for an unassessed vacant parcel'
     });
     let result = await performPropertyLookup(ADDRESS, { refresh: true });
     expect(platQueries).toHaveLength(0);
-    expect(result.enriched.subdivisionMedian).toBeNull();
+    expect(result.enriched.subdivisionMedian).toBeUndefined();
 
     trioRecord.current = () => vacantTrioRecord({
       _raw: { county: 'Manatee', dorUseCode: '00', landUseDescription: 'Vacant Residential Platted (1554)', subdivision: null },
@@ -205,6 +219,6 @@ describe('performPropertyLookup — plat median for an unassessed vacant parcel'
     result = await performPropertyLookup(ADDRESS, { refresh: true });
     expect(platQueries).toHaveLength(0);
     expect(result.enriched.unassessedVacantParcel).toBe(true);
-    expect(result.enriched.subdivisionMedian).toBeNull();
+    expect(result.enriched.subdivisionMedian).toBeUndefined();
   });
 });

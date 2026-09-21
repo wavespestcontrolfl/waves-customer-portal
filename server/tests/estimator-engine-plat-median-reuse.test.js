@@ -87,14 +87,21 @@ describe('gatherPropertySignals — plat median reuse', () => {
     expect(signals.subdivisionMedian).toMatchObject({ medianSqft: 2277, sampleCount: 9 });
   });
 
-  it('treats a below-floor profile median as no stamp — never prices on a thin sample', async () => {
+  it('a thin-sample stamp the profile withheld (null) is final — never prices on it, never re-digs', async () => {
     lookupResult.current = {
       propertyRecord: vacantRecord({ _subdivisionMedian: { medianSqft: 3071, sampleCount: 7, subdivisionQueried: PLAT, county: 'Manatee' } }),
-      enriched: { homeSqFt: 0, unassessedVacantParcel: true, subdivisionMedian: { medianSqft: 3071, sampleCount: 7 } },
+      enriched: { homeSqFt: 0, unassessedVacantParcel: true, subdivisionMedian: null },
     };
     const signals = await gatherPropertySignals(CONTEXT, { persistLookup: false });
     expect(lookupSubdivisionMedianLivingSqft).not.toHaveBeenCalled();
     expect(signals.subdivisionMedian).toBeNull();
+  });
+
+  it('keeps the direct dig for a pre-stamp cache row: a profile with NO median key is not a refusal', async () => {
+    lookupResult.current = { propertyRecord: vacantRecord(), enriched: { homeSqFt: 0, unassessedVacantParcel: true } };
+    const signals = await gatherPropertySignals(CONTEXT, { persistLookup: false });
+    expect(lookupSubdivisionMedianLivingSqft).toHaveBeenCalledTimes(1);
+    expect(signals.subdivisionMedian).toMatchObject({ medianSqft: 2277, sampleCount: 9 });
   });
 
   it('never digs for a built parcel', async () => {

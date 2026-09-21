@@ -219,8 +219,8 @@ describe('buildEnrichedProfile — plat median rides beside an EMPTY homeSqFt', 
     expect(profile.subdivisionMedian).toBeNull();
   });
 
-  it('is null without the stamp and null once the record carries a home', () => {
-    expect(buildEnrichedProfile(vacantRecord(), null, 27.47, -82.39).subdivisionMedian).toBeNull();
+  it('is undefined without a stamp (nothing judged) and null once the record carries a home (withheld)', () => {
+    expect(buildEnrichedProfile(vacantRecord(), null, 27.47, -82.39).subdivisionMedian).toBeUndefined();
     const built = buildEnrichedProfile(vacantRecord({ _subdivisionMedian: platMedianStamp(), squareFootage: 2980, yearBuilt: 2026 }), null, 27.47, -82.39);
     expect(built.subdivisionMedian).toBeNull();
     expect(built.homeSqFt).toBe(2980);

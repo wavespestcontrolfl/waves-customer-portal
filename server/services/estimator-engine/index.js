@@ -522,17 +522,20 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
     // the pre-existing direct dig. Same sample floor the profile applies
     // (subdivisionMedianEstimate) and source arbitration checks again.
     const { lookupSubdivisionMedianLivingSqft, SUBDIVISION_MEDIAN_MIN_SAMPLES } = require('../property-lookup/county-parcel-gis');
-    const stamped = enriched?.subdivisionMedian || null;
+    const stamped = enriched ? enriched.subdivisionMedian : undefined;
     if (Number(stamped?.medianSqft) > 0 && Number(stamped?.sampleCount) >= SUBDIVISION_MEDIAN_MIN_SAMPLES) {
       // Normalized to the arbitration contract ({ medianSqft, sampleCount })
       // so the profile's and the helper's extra fields never diverge here.
       subdivisionMedian = { medianSqft: Math.round(Number(stamped.medianSqft)), sampleCount: Math.round(Number(stamped.sampleCount)) };
-    } else if (enriched) {
-      // A profile that withheld the median already decided (unit lookup,
-      // unconfirmed address, thin sample): a direct dig here would price on
-      // exactly what it refused.
+    } else if (stamped === null) {
+      // An explicit null means a stamp exists and the profile WITHHELD it
+      // (unit lookup, unconfirmed address, thin sample): a direct dig here
+      // would price on exactly what it refused.
       subdivisionMedian = null;
     } else {
+      // undefined: no profile, or a profile over a record with no stamp
+      // (cache rows written before the stamp existed) — nothing was judged,
+      // so the pre-existing direct dig stands.
       try {
         subdivisionMedian = await lookupSubdivisionMedianLivingSqft({
           county: parcelView.county,

@@ -567,15 +567,18 @@ async function performPropertyLookupCore(address, options = {}) {
     const vacantParcel = detectUnassessedVacantParcel(result.propertyRecord);
     const platName = vacantParcel?.subdivision || parcelMeta?.subdivision || null;
     if (vacantParcel && parcelMeta?.county && platName) {
+      // Accuracy mode (the admin wrapper) bypasses the interactive budget
+      // gate like the vision and stories stages do — a slow property search
+      // must not cost the exact new-construction lookup this serves.
       const medianBudgetMs = Math.max(0, remainingLookupMs(t0, timing) - timing.responseMarginMs);
-      if (medianBudgetMs >= MIN_SUBDIVISION_MEDIAN_BUDGET_MS) {
+      if (options.prioritizeAccuracy || medianBudgetMs >= MIN_SUBDIVISION_MEDIAN_BUDGET_MS) {
         // The helper is itself fail-open (a layer outage logs
         // "[county-parcel-gis] subdivision median lookup failed" and resolves
         // null); this catch records anything that escapes it on the lookup
         // result, the way the construction-permit read above does.
         const median = await lookupSubdivisionMedianLivingSqft(
           { county: parcelMeta.county, subdivision: platName },
-          { timeoutMs: Math.min(medianBudgetMs, SUBDIVISION_MEDIAN_TIMEOUT_MS) },
+          { timeoutMs: options.prioritizeAccuracy ? SUBDIVISION_MEDIAN_TIMEOUT_MS : Math.min(medianBudgetMs, SUBDIVISION_MEDIAN_TIMEOUT_MS) },
         ).catch((err) => {
           result.errors.push({ source: 'subdivision-median', message: err?.message || String(err) });
           return null;
@@ -2146,8 +2149,16 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // parcel dims were dropped on purpose), and neither does an address the
     // audit could not confirm — a median for a possibly wrong parcel must
     // not reach any consumer (admin prefill or the call estimator).
-    subdivisionMedian: (residentialUnitLookup || fieldVerifyFlags.some((flag) => flag?.field === 'address'))
-      ? null : subdivisionMedianEstimate(rc),
+    // Three states, and consumers rely on the difference: an object (usable
+    // estimate), null (a stamp exists but the profile WITHHELD it — unit
+    // lookup, unconfirmed address, thin sample, no longer unassessed), or
+    // undefined (the record carries no stamp at all — rows cached before the
+    // stamp existed — so there was nothing to judge and the call estimator
+    // keeps its own direct dig).
+    subdivisionMedian: rc?._subdivisionMedian === undefined
+      ? undefined
+      : ((residentialUnitLookup || fieldVerifyFlags.some((flag) => flag?.field === 'address'))
+        ? null : subdivisionMedianEstimate(rc)),
     // Machine-readable twin of the parkParcel verify flag (multi-situs master
     // parcel — land-lease mobile-home park or similar; the roll vouches for
     // the address but not for any per-unit dimension).
