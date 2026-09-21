@@ -182,6 +182,26 @@ describe('performPropertyLookup — plat median for an unassessed vacant parcel'
     expect(result.enriched.fieldVerifyFlags.find((f) => f.field === 'homeSqFt').reason).toContain('9 assessed homes on similar-size lots in this plat');
   });
 
+  it('bands against the physical parcel area, not the pricing-capped lotSize', async () => {
+    // A 300,000 sq ft parcel: the merged lotSize is capped for pricing while
+    // _parcel keeps the roll's area; the plat's similar lots are ~300k.
+    trioRecord.current = () => vacantTrioRecord({
+      lotSize: 200000,
+      _parcel: { parcelId: '999990002', county: 'Manatee', lotSqft: 300000, polygonAreaSqft: 301000, dorUseCode: '00', landUseDescription: 'Vacant Residential Platted (1554)', subdivision: PLAT },
+    });
+    const baseFetch = global.fetch;
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('gis.manateepao.gov') && String(url).includes('BLDGS_SQFT_LIVING')) {
+        const pairs = [[4100, 295000], [4300, 305000], [3900, 298000], [4200, 302000], [4000, 299000], [4400, 310000], [3800, 290000], [4150, 300000], [4250, 296000],
+          [2101, 200000], [2200, 201000], [2300, 199000], [2050, 198000], [2400, 202000], [2150, 200500], [2250, 199500], [2350, 201500]];
+        return { ok: true, json: async () => ({ features: pairs.map(([living, lot]) => ({ attributes: { BLDGS_SQFT_LIVING: living, LAND_SQFT_CAMA: lot } })) }) };
+      }
+      return baseFetch(url);
+    });
+    const result = await performPropertyLookup(ADDRESS, { refresh: true });
+    expect(result.propertyRecord._subdivisionMedian).toMatchObject({ medianSqft: 4150, sampleCount: 9, lotBanded: true });
+  });
+
   it('accuracy mode (the admin wrapper) queries the plat even when the interactive budget is spent', async () => {
     process.env.PROPERTY_LOOKUP_TOTAL_BUDGET_MS = '1';
     try {

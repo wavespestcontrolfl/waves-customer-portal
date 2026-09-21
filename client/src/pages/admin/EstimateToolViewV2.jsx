@@ -5419,7 +5419,11 @@ export default function EstimateToolViewV2({
                   )}
                 </div>
               )}
-              {hasTurfPricedSelection && (
+              {(hasTurfPricedSelection
+                // An unobservable-imagery profile gates mosquito on the same
+                // confirmed outdoor area (server needsTurfManualConfirmation),
+                // so the control must be reachable on a mosquito-only estimate.
+                || (turfUnobservable && (!!form.svcMosquito || !!form.svcOnetimeMosquito))) && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
                   <div className="flex items-center justify-between gap-3 mb-2">

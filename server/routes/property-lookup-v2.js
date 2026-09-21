@@ -584,7 +584,10 @@ async function performPropertyLookupCore(address, options = {}) {
           // Lot area narrows the sample to the parcel's lot series when
           // enough neighbors share it (plats mix 40'/52'/62' lots, each
           // with its own plans).
-          { county: parcelMeta.county, subdivision: platName, lotSqft: result.propertyRecord.lotSize || parcelMeta.lotSqft || null },
+          // The PHYSICAL area (parcel roll / polygon), never the pricing-capped
+          // lotSize (LOT_SQFT_MAX) — a huge parcel would otherwise band against
+          // the cap instead of its neighbors (Codex r2 P2).
+          { county: parcelMeta.county, subdivision: platName, lotSqft: parcelMeta.lotSqft || parcelMeta.polygonAreaSqft || result.propertyRecord.lotSize || null },
           { timeoutMs: options.prioritizeAccuracy ? SUBDIVISION_MEDIAN_TIMEOUT_MS : Math.min(medianBudgetMs, SUBDIVISION_MEDIAN_TIMEOUT_MS), diag },
         ).catch((err) => {
           diag.failed = true;
@@ -2807,9 +2810,18 @@ function turfRiskReasons(source = {}) {
   return reasons;
 }
 
+// Mosquito prices its treatable area off lot − footprint − hardscape; with
+// the vision fields discarded (turfObservation 'unobservable') that is
+// default lot geometry, so an unobservable profile gates mosquito on the
+// same measured outdoor entry as the turf services (Codex r2 P1 on #4639).
+const MOSQUITO_SERVICES = new Set(['MOSQUITO', 'OT_MOSQUITO']);
+
 function needsTurfManualConfirmation(profile = {}, selectedServices = [], options = {}) {
   const allTurfServices = selectedTurfPricedServices(selectedServices);
-  if (allTurfServices.length === 0) return null;
+  const unobservable = profile.turfObservation === 'unobservable';
+  const mosquitoSelected = (selectedServices || [])
+    .some((service) => MOSQUITO_SERVICES.has(String(service || '').toUpperCase()));
+  if (allTurfServices.length === 0 && !(unobservable && mosquitoSelected)) return null;
   const manualTurfSf = firstNonNegativeNumber(profile.measuredTurfSf, profile.lawnSqFt);
   if (manualTurfSf !== undefined) return null;
   // Services whose treated area is entered directly (front/back-yard scope)
@@ -2823,7 +2835,9 @@ function needsTurfManualConfirmation(profile = {}, selectedServices = [], option
     PLUGGING: plugArea > 0,
     TOPDRESS: topDressArea > 0,
   };
-  if (allTurfServices.every((service) => areaBoundedExempt[service])) return null;
+  // (An empty turf list here means the unobservable mosquito case — never
+  // vacuously exempt.)
+  if (allTurfServices.length > 0 && allTurfServices.every((service) => areaBoundedExempt[service])) return null;
 
   // Stale-imagery conflict profiles (turfObservation 'unobservable') have
   // NO trustworthy turf basis — the vision zeros were discarded and the
@@ -2843,8 +2857,8 @@ function needsTurfManualConfirmation(profile = {}, selectedServices = [], option
       estimatedTurfSf: 0,
       reasons: turfRiskReasons(profile),
       message: profile.turfReason === 'vacant_roll_bare_land_imagery'
-        ? 'Satellite imagery shows bare land and the county roll shows no building yet, so there is no reliable turf estimate. Confirm treatable lawn area before generating lawn pricing.'
-        : 'Satellite imagery conflicts with county records for this property, so there is no reliable turf estimate. Confirm treatable lawn area before generating lawn pricing.',
+        ? 'Satellite imagery shows bare land and the county roll shows no building yet, so there is no reliable outdoor-area estimate. Confirm treatable lawn area before generating lawn or mosquito pricing.'
+        : 'Satellite imagery conflicts with county records for this property, so there is no reliable outdoor-area estimate. Confirm treatable lawn area before generating lawn or mosquito pricing.',
     };
   }
 

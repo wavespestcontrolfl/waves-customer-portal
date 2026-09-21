@@ -1286,11 +1286,12 @@ function mobileHomeParkSignalFromParcel(parcel) {
   };
 }
 
-function detectUnassessedVacantParcel(record) {
+// The COUNTY ROLL's own vacancy verdict, read from the parcel/raw evidence
+// alone — independent of the merged dimension fields, which a listing, an
+// AI provider, or a tech-verified override can fill while the roll still
+// carries no building. Returns the vacant evidence or null.
+function countyRollVacant(record) {
   if (!record) return null;
-  // Any building fact means the roll (or a stronger source, incl. a tech
-  // verified override) knows the home — not the pending-roll window.
-  if (record.squareFootage || record.yearBuilt) return null;
   const parcel = record._parcel || {};
   const raw = record._raw || {};
   // _raw.landUse joins the read: preserveCountyGisLandUse parks the county
@@ -1316,6 +1317,14 @@ function detectUnassessedVacantParcel(record) {
     dorUseCode: parcel.dorUseCode ?? raw.dorUseCode ?? null,
     subdivision: raw.subdivision || null,
   };
+}
+
+function detectUnassessedVacantParcel(record) {
+  if (!record) return null;
+  // Any building fact means the roll (or a stronger source, incl. a tech
+  // verified override) knows the home — not the pending-roll window.
+  if (record.squareFootage || record.yearBuilt) return null;
+  return countyRollVacant(record);
 }
 
 // Sanitization is restricted to builds this recent — see the demolition
@@ -1403,7 +1412,12 @@ function detectStaleImageryTurfConflict(record, ai) {
 // flag in buildEnrichedProfile) or null.
 function detectVacantRollBareLandImagery(record, ai) {
   if (!record || !ai) return null;
-  const vacant = detectUnassessedVacantParcel(record);
+  // The ROLL's verdict, not the merged record's: a listing/AI square footage
+  // or a tech-verified size can fill the dimensions while the county still
+  // carries no building — and the stale-imagery guard refuses those
+  // non-authoritative / year-less cases, so the zeros would otherwise stay
+  // trusted (Codex r2 P1 on #4639).
+  const vacant = countyRollVacant(record);
   if (!vacant) return null;
   const explicitZero = (value) => value === 0 || value === '0';
   if (!explicitZero(ai.estimatedTurfSf)) return null;
@@ -5268,6 +5282,7 @@ module.exports = {
   hasUnconfirmedCountyEvidence,
   buildPropertyDataQuality,
   detectUnassessedVacantParcel,
+  countyRollVacant,
   detectVacantRollBareLandImagery,
   detectStaleImageryTurfConflict,
   detectMultiSitusMasterParcel,
