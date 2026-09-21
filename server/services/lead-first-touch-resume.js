@@ -62,20 +62,20 @@ async function emailSuppressedForNewLead(email, dbh) {
 // claim older than the stale window belongs to a dead worker and is
 // reclaimable.
 const STALE_CLAIM_MS = 10 * 60 * 1000;
-// A first touch has a shelf life (2026-09-20 audit: 123 pending holds, the
-// oldest from 2026-08-04, would all have mailed a "welcome, new lead" weeks
-// late the day their cards were finally resolved). A pending hold older
-// than this retires as blocked/first_touch_stale — terminal, never sent;
-// the correction fanout retargets only pending/releasing rows, so a stale
-// hold is never resurrected either.
+// A first touch has a shelf life (2026-09-20 call-agent audit: 123 pending
+// holds, the oldest from 2026-08-04, would all have mailed a "welcome, new
+// lead" weeks late the day their cards were finally resolved). A hold older
+// than this — by its own age OR its source call's — retires as blocked /
+// first_touch_stale: terminal, never sent. The correction fanout retargets
+// only pending/releasing rows, so a stale hold is never resurrected either.
 const FIRST_TOUCH_HOLD_MAX_AGE_DAYS = (() => {
   const n = Number(process.env.FIRST_TOUCH_HOLD_MAX_AGE_DAYS);
   return Number.isFinite(n) && n > 0 ? n : 14;
 })();
-// Aged from the hold AND from the source call (codex #4622 r2 P1): a
-// force-reprocess of a months-old call with no ledger row mints a fresh
-// hold, and that must not reset the shelf life of the customer's actual
-// inquiry. An unknown timestamp is not this guard's call.
+// Aged from the hold AND from the source call: a force-reprocess of a
+// months-old call with no ledger row mints a fresh hold, and that must not
+// reset the shelf life of the customer's actual inquiry. An unknown
+// timestamp is not this guard's call.
 function firstTouchHoldIsStale(hold, { callCreatedAt = null, now = Date.now() } = {}) {
   const limit = FIRST_TOUCH_HOLD_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
   const stale = (value) => {
@@ -671,17 +671,16 @@ async function resumeHeldFirstTouch({
       inFlightHoldId = hold.id;
       claimStamps.set(hold.id, claimStamp);
 
-      // Shelf life, enforced on the canonical path every release takes
-      // (codex #4622 r1 P1): a hold older than the first-touch window is
-      // never sent — not by an operator resolve landing between sweeps,
-      // not by a reclaimed stale 'releasing' row, not by a correction.
+      // Shelf life, enforced on the canonical path every release takes: a
+      // hold older than the first-touch window is never sent — not by an
+      // operator resolve landing between sweeps, not by a reclaimed stale
+      // 'releasing' row, not by a correction. The source-call age is part
+      // of the decision; an unreadable one is retryable, never a pass.
       let callCreatedAt = null;
       if (hold.call_log_id) {
         try {
           callCreatedAt = (await dbh('call_log').where({ id: hold.call_log_id }).first('created_at'))?.created_at || null;
         } catch (_e) {
-          // The source-call age is part of the shelf-life decision; an
-          // unreadable one is retryable, never a pass (codex #4622 r3 P1).
           await settleHold(hold.id, { status: 'pending', last_error: 'call_age_unavailable' }, dbh, claimStamp);
           result.skipped = result.skipped || 'call_age_unavailable';
           continue;
@@ -1909,31 +1908,31 @@ async function sweepAbandonedFirstTouchHolds({ dbh = db, limit = 10 } = {}) {
     } catch (recoverErr) {
       logger.warn(`[first-touch-resume] merged-work recovery pass failed: ${recoverErr.code || recoverErr.name || 'db_error'} — next sweep retries`);
     }
-    // Staleness pass: retire pending holds past the first-touch window
-    // before scanning for releases. Deny-stamped rows keep their stamp —
-    // the correction path owns them.
+    // Staleness pass: retire holds past the first-touch window — by the
+    // hold's age, then by the source call's — before scanning for releases.
+    // Pending rows and reclaimable stale 'releasing' rows alike; deny-
+    // stamped rows keep their stamp (the correction path owns them).
     try {
       const cutoff = new Date(Date.now() - FIRST_TOUCH_HOLD_MAX_AGE_DAYS * 24 * 60 * 60 * 1000);
+      const reclaimable = function scope() {
+        this.where({ status: 'pending' })
+          .orWhere(function stale() {
+            this.where({ status: 'releasing' })
+              .where('updated_at', '<', new Date(Date.now() - STALE_CLAIM_MS));
+          });
+      };
+      const notDenied = function notDenied() {
+        this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
+      };
       const expired = await dbh('first_touch_holds')
-        .where(function scope() {
-          this.where({ status: 'pending' })
-            .orWhere(function stale() {
-              this.where({ status: 'releasing' })
-                .where('updated_at', '<', new Date(Date.now() - STALE_CLAIM_MS));
-            });
-        })
+        .where(reclaimable)
         .where('created_at', '<', cutoff)
-        .where(function notDenied() {
-          this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
-        })
+        .where(notDenied)
         .update({ status: 'blocked', last_error: 'first_touch_stale', updated_at: new Date() });
-      // …and by the SOURCE CALL's age, for fresh holds on old calls.
       const expiredByCall = await dbh('first_touch_holds')
-        .where({ status: 'pending' })
+        .where(reclaimable)
         .whereIn('call_log_id', dbh('call_log').select('id').where('created_at', '<', cutoff))
-        .where(function notDenied() {
-          this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
-        })
+        .where(notDenied)
         .update({ status: 'blocked', last_error: 'first_touch_stale', updated_at: new Date() });
       const retired = (Number(expired) || 0) + (Number(expiredByCall) || 0);
       if (retired) {

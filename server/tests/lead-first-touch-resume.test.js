@@ -1497,12 +1497,12 @@ describe('DOI dedupe guard and ledger sweep', () => {
     expect(mockEnroll).not.toHaveBeenCalled();
   });
 
-  test('the sweep retires pending holds older than the first-touch window as first_touch_stale, after the recovery pass', async () => {
+  test('the sweep retires holds older than the first-touch window as first_touch_stale, after the recovery pass', async () => {
     mockHolds = [];
     const swept = await sweepAbandonedFirstTouchHolds({});
     expect(mockHoldUpdates[0]).toMatchObject({ status: 'pending' }); // recovery pass first
-    expect(mockHoldUpdates[1]).toMatchObject({ status: 'blocked', last_error: 'first_touch_stale' });
     // Two retire writes (by hold age, by source-call age); the fake answers 1 row each.
+    expect(mockHoldUpdates[1]).toMatchObject({ status: 'blocked', last_error: 'first_touch_stale' });
     expect(mockHoldUpdates[2]).toMatchObject({ status: 'blocked', last_error: 'first_touch_stale' });
     expect(swept.expired).toBe(2);
     expect(mockEnroll).not.toHaveBeenCalled();

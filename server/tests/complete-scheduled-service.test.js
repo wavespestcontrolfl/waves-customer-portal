@@ -9,6 +9,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/completion-attempts', () => ({
+  COMPLETION_SMS_DEFINITE_REJECTION_PREFIX: jest.requireActual('../services/completion-attempts').COMPLETION_SMS_DEFINITE_REJECTION_PREFIX,
   claimCompletionAttempt: jest.fn(),
   hashCompletionRequest: jest.fn(() => 'synthetic-request-hash'),
   markCompletionAttemptFailed: jest.fn(async () => {}),
@@ -23,7 +24,13 @@ jest.mock('../services/pest-pressure/store', () => ({ loadActiveConfig: jest.fn(
 
 const db = require('../models/db');
 const attempts = require('../services/completion-attempts');
-const { completeScheduledService } = require('../services/complete-scheduled-service');
+const {
+  completeScheduledService,
+  deliveryUnverifiedProviderOutcome,
+  throwIfDeliveryUnverified,
+  completionSmsDefiniteRejectionError,
+  definiteRejectionMarkerFromAttemptError,
+} = require('../services/complete-scheduled-service');
 const { etDateString } = require('../utils/datetime-et');
 
 const SERVICE_ID = '00000000-0000-4000-8000-000000000101';
@@ -217,4 +224,96 @@ test('packet fields in the submitted form cannot grant packet ownership', async 
   const result = await complete({ packetRecord: { itemId: SERVICE_ID }, visitPacketId: SERVICE_ID });
   expect(result.status).toBe(409);
   expect(attempts.claimCompletionAttempt).not.toHaveBeenCalled();
+});
+
+describe('completion SMS delivery-unverified classifiers', () => {
+  test('deliveryUnverifiedProviderOutcome recognizes a bare uncertain outcome and one nested under providerOutcome', () => {
+    const bare = { deliveryOutcome: 'uncertain', code: 'PROVIDER_TIMEOUT' };
+    expect(deliveryUnverifiedProviderOutcome(bare)).toBe(bare);
+    const err = Object.assign(new Error('boom'), { providerOutcome: bare });
+    expect(deliveryUnverifiedProviderOutcome(err)).toBe(bare);
+  });
+
+  test('deliveryUnverifiedProviderOutcome returns null for a definite outcome or a missing one', () => {
+    expect(deliveryUnverifiedProviderOutcome({ deliveryOutcome: 'not_sent' })).toBeNull();
+    expect(deliveryUnverifiedProviderOutcome({ sent: true })).toBeNull();
+    expect(deliveryUnverifiedProviderOutcome(null)).toBeNull();
+    expect(deliveryUnverifiedProviderOutcome(undefined)).toBeNull();
+  });
+
+  test('throwIfDeliveryUnverified passes a definite result through untouched', () => {
+    const result = { sent: true, deliveryOutcome: 'provider_accepted' };
+    expect(throwIfDeliveryUnverified(result)).toBe(result);
+  });
+
+  test('throwIfDeliveryUnverified converts an uncertain RETURN into a throw carrying the same providerOutcome', () => {
+    const result = { sent: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_TIMEOUT', reason: 'socket closed' };
+    expect(() => throwIfDeliveryUnverified(result)).toThrow('socket closed');
+    try {
+      throwIfDeliveryUnverified(result);
+    } catch (err) {
+      expect(err.code).toBe('PROVIDER_TIMEOUT');
+      expect(err.providerOutcome).toBe(result);
+    }
+  });
+
+  test('completionSmsDefiniteRejectionError embeds the marker so definiteRejectionMarkerFromAttemptError can extract it back out', () => {
+    const err = completionSmsDefiniteRejectionError('Twilio refused the message', '2026-09-17T12:00:00.000Z');
+    expect(err.message).toBe('[completion_sms_definite_rejection marker=2026-09-17T12:00:00.000Z] Twilio refused the message');
+    expect(definiteRejectionMarkerFromAttemptError(err.message)).toBe('2026-09-17T12:00:00.000Z');
+  });
+
+  test('completionSmsDefiniteRejectionError falls back to "missing" when no marker is available', () => {
+    const err = completionSmsDefiniteRejectionError('Twilio refused the message', null);
+    expect(err.message).toContain('marker=missing');
+  });
+
+  test('definiteRejectionMarkerFromAttemptError returns null for any error not carrying this marker', () => {
+    expect(definiteRejectionMarkerFromAttemptError('plain failure')).toBeNull();
+    expect(definiteRejectionMarkerFromAttemptError(undefined)).toBeNull();
+    expect(definiteRejectionMarkerFromAttemptError('[completion_sms_definite_rejection marker=abc without a closing bracket')).toBeNull();
+  });
+});
+
+describe('quiet-hours completion SMS deferral clears the pre-send uncertainty marker (commit 1c882ef6df)', () => {
+  // The pre-send completionSmsDeliveryUnverifiedAt marker is stamped just
+  // before the provider handoff (see the classifiers above) so a thrown
+  // uncertain outcome is never mistaken for a definite one. A QUIET_HOURS_HOLD
+  // response is a DEFINITE non-delivery whose obligation moves to the queued
+  // replay — but terminalDeferredCompletionSend's own write (services/
+  // dispatch-completion-deferred.js) only ever sets completionSmsStatus,
+  // completionSmsError and completionSmsFailedAt; it merges into
+  // structured_notes and never touches completionSmsDeliveryUnverifiedAt.
+  // A pre-send marker left in place by the deferral write would therefore
+  // survive a terminal replay failure untouched and, per the
+  // completionSmsAlreadyHandled guard beside completionSmsMarkerWasDefinitely-
+  // Rejected, block every later completion retry despite the definite
+  // non-delivery the terminal failure just recorded. This function is ~13k
+  // lines deep with no functional harness reaching this exact branch
+  // (confirmed: no test in this repo drives completeScheduledService's own
+  // completion-SMS QUIET_HOURS_HOLD deferral to a real sendCustomerMessage
+  // call), so the fix is pinned structurally, matching this repo's own
+  // "source contracts" convention (tests/invoice-issued-closeout-completion-
+  // postgres.test.js) for exactly this situation.
+  test('the deferredDelta written with the queue insertion clears completionSmsDeliveryUnverifiedAt', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    // The SAME object also carries the marker clear inside the atomic
+    // db.transaction that inserts the dispatch_completion_deferred queue
+    // row and merges these exact keys into structured_notes — so this one
+    // object literal IS the fix: reverting the added key desyncs the
+    // written notes from the queue row that now owns delivery.
+    expect(source).toMatch(
+      /const deferredDelta = \{\s*\n\s*completionSmsStatus: 'deferred',\s*\n\s*completionSmsDeferredTo: smsResult\.nextAllowedAt,\s*\n(?:\s*\/\/[^\n]*\n)*\s*completionSmsDeliveryUnverifiedAt: null,\s*\n\s*\};/,
+    );
+    // Confirms the SAME object (not a stray copy) is what actually reaches
+    // structured_notes, atomically with the queue insert.
+    const deferredDeltaAt = source.indexOf("const deferredDelta = {");
+    const txAt = source.indexOf('await db.transaction(async (trx) => {', deferredDeltaAt);
+    const mergeAt = source.indexOf('JSON.stringify(deferredDelta)', txAt);
+    expect(deferredDeltaAt).toBeGreaterThan(-1);
+    expect(txAt).toBeGreaterThan(deferredDeltaAt);
+    expect(mergeAt).toBeGreaterThan(txAt);
+  });
 });

@@ -40,7 +40,16 @@
  *   `fromStatus` — if a racing transition already advanced past it,
  *   the UPDATE affects 0 rows and the function throws. Same shape as
  *   track-transitions.markEnRoute. fromStatus is required (Codex P1
- *   on #290) — null was a footgun that bypassed the guard.
+ *   on #290) — omitting it (undefined) was a footgun that used to drop
+ *   the status predicate and match the row on `{ id: jobId }` alone,
+ *   letting racing writers clobber each other. An explicit `null` does
+ *   NOT reopen that footgun (Codex P2 r16 #4131): scheduled_services.status
+ *   is nullable (job_status_history.from_status even carries its own
+ *   `IS NULL OR ...` check for exactly this), a legacy visit can
+ *   genuinely have no prior status, and Knex compiles `{ status: null }`
+ *   to `status IS NULL` — the guard still matches only the row(s)
+ *   actually holding that state, same as any other value. Only
+ *   `undefined` (the argument never supplied) is rejected.
  *
  * Auto-resolve overdue-family alerts on terminal-ish transitions:
  *   When toStatus is in OVERDUE_ALERT_AUTO_RESOLVE_STATUSES (on_site,
@@ -280,9 +289,13 @@ async function buildPayloads(trx, jobId, fromStatus, toStatus, transitionedBy) {
  *
  * @param {object} args
  * @param {string} args.jobId           required, scheduled_services.id
- * @param {string} args.fromStatus      required for the atomic guard.
+ * @param {string|null} args.fromStatus required for the atomic guard.
  *                                       Must match the row's current
- *                                       status; null/undefined rejected.
+ *                                       status — `null` is accepted and
+ *                                       matches a row whose status is
+ *                                       actually NULL (a legacy visit,
+ *                                       Codex P2 r16 #4131); only
+ *                                       `undefined` (omitted) is rejected.
  * @param {string} args.toStatus        required, must be in the
  *                                       scheduled_services_status_check
  *                                       value set
@@ -318,7 +331,7 @@ async function transitionJobStatus({
   // launch 100 concurrent route repair/measurement passes (codex #4295 r1 P2).
   qualityDates = null,
 }) {
-  if (!jobId || !toStatus || fromStatus == null) {
+  if (!jobId || !toStatus || fromStatus === undefined) {
     throw new Error(
       'transitionJobStatus: jobId, fromStatus, and toStatus are required'
     );
