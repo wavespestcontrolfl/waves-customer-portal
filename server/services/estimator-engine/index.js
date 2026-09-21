@@ -527,6 +527,11 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
       // Normalized to the arbitration contract ({ medianSqft, sampleCount })
       // so the profile's and the helper's extra fields never diverge here.
       subdivisionMedian = { medianSqft: Math.round(Number(stamped.medianSqft)), sampleCount: Math.round(Number(stamped.sampleCount)) };
+    } else if (enriched) {
+      // A profile that withheld the median already decided (unit lookup,
+      // unconfirmed address, thin sample): a direct dig here would price on
+      // exactly what it refused.
+      subdivisionMedian = null;
     } else {
       try {
         subdivisionMedian = await lookupSubdivisionMedianLivingSqft({

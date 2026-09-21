@@ -73,13 +73,14 @@ describe('gatherPropertySignals — plat median reuse', () => {
       propertyRecord: vacantRecord({ _subdivisionMedian: { medianSqft: 3071, sampleCount: 174, subdivisionQueried: PLAT, county: 'Manatee' } }),
       enriched: { homeSqFt: 0, unassessedVacantParcel: true, residentialUnitLookup: { wholePropertyCategory: 'residential' }, subdivisionMedian: null },
     };
-    lookupSubdivisionMedianLivingSqft.mockResolvedValueOnce(null);
     const signals = await gatherPropertySignals(CONTEXT, { persistLookup: false });
     expect(signals.subdivisionMedian).toBeNull();
+    // ...and no direct dig either — that would price on what the profile refused.
+    expect(lookupSubdivisionMedianLivingSqft).not.toHaveBeenCalled();
   });
 
-  it('keeps the direct dig for a vacant row served without a stamp (pre-stamp cache rows)', async () => {
-    lookupResult.current = { propertyRecord: vacantRecord(), enriched: { homeSqFt: 0, unassessedVacantParcel: true } };
+  it('keeps the direct dig only when the lookup produced NO profile at all', async () => {
+    lookupResult.current = { propertyRecord: vacantRecord(), enriched: null };
     const signals = await gatherPropertySignals(CONTEXT, { persistLookup: false });
     expect(lookupSubdivisionMedianLivingSqft).toHaveBeenCalledTimes(1);
     expect(lookupSubdivisionMedianLivingSqft).toHaveBeenCalledWith({ county: 'Manatee', subdivision: PLAT });
@@ -91,9 +92,8 @@ describe('gatherPropertySignals — plat median reuse', () => {
       propertyRecord: vacantRecord({ _subdivisionMedian: { medianSqft: 3071, sampleCount: 7, subdivisionQueried: PLAT, county: 'Manatee' } }),
       enriched: { homeSqFt: 0, unassessedVacantParcel: true, subdivisionMedian: { medianSqft: 3071, sampleCount: 7 } },
     };
-    lookupSubdivisionMedianLivingSqft.mockResolvedValueOnce(null);
     const signals = await gatherPropertySignals(CONTEXT, { persistLookup: false });
-    expect(lookupSubdivisionMedianLivingSqft).toHaveBeenCalledTimes(1);
+    expect(lookupSubdivisionMedianLivingSqft).not.toHaveBeenCalled();
     expect(signals.subdivisionMedian).toBeNull();
   });
 
