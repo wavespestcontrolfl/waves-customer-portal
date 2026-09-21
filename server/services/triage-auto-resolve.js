@@ -142,7 +142,9 @@ const RULE_NOTES = {
   // owed action was PERFORMED after the card was filed.
   quote_fulfilled: 'Auto-resolved: an estimate linked to this call was delivered after the call; the promised quote went out.',
   email_engaged: 'Auto-resolved: the email captured on this call opened or clicked a later message; the read-back is moot.',
-  email_dictation_unambiguous: 'Auto-resolved: the email was dictated unambiguously (V1, V2 and the release target agree, no digit doubt, domain accepts mail); released without a read-back.',
+  // Read from the release engine: the ledger tells this approval from an
+  // operator's by this exact note (codex #4622 r4 P1, gate re-asked at send).
+  email_dictation_unambiguous: require('./lead-first-touch-resume').FIRST_TOUCH_AUTO_RELEASE_NOTE,
   caller_phone_added: "Auto-resolved: the caller's number was added as a service contact on the account after this call.",
   booking_created: 'Auto-resolved: a live appointment matching the requested window was booked after this card was filed.',
   visit_completed_at_address: 'Auto-resolved: a visit was completed at the address this call named; the address is proven.',
@@ -1172,6 +1174,10 @@ const UNAMBIGUOUS_MIN_CONFIDENCE = 0.9;
 const emailLc = (v) => String(v || '').trim().toLowerCase();
 function unambiguousDictationTarget(item, { now = new Date(), maxAgeDays = FIRST_TOUCH_AUTO_RELEASE_MAX_AGE_DAYS } = {}) {
   if (item.reason_code !== 'email_unverified' || !item.call_customer_id) return null;
+  // An archived customer gets no first-touch mail (codex #4622 r4 P1): the
+  // candidate join carries the soft-delete stamp, and the release engine
+  // re-asks this at the send.
+  if (item.customer_deleted_at) return null;
   // The first touch has a shelf life: a read-back left for a week is stale
   // work for a human, never a late automatic send. Aged from the CALL as
   // well as the card (codex r1 P1): a force-reprocess of an old call mints

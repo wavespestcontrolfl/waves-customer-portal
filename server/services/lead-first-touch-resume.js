@@ -203,8 +203,67 @@ async function emailReviewBlocksRelease(callLogId, dbh = db) {
     .where({ call_log_id: callLogId })
     .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
     .orderByRaw("COALESCE(resolved_at, updated_at, created_at) DESC, (status = 'dismissed') DESC, id DESC")
-    .first('status');
+    .first('status', 'resolution_source', 'resolution_note');
   if (latest && latest.status !== 'resolved') return 'email_review_dismissed';
+  // Provenance (codex #4622 r4 P1): a card the nightly resolver closed
+  // under GATE_FIRST_TOUCH_AUTO_RELEASE is an approval only while that
+  // gate is still on. The card records who resolved it (resolution_source
+  // 'auto') and under which rule (the rule's note), so the dark-ship
+  // switch, flipped off between the resolver and the ledger sweep, stops
+  // every send it queued — an operator's resolution is untouched.
+  if (latest && isAutoReleaseResolution(latest)
+      && !require('../config/feature-gates').isEnabled('firstTouchAutoRelease')) {
+    return 'auto_release_gated';
+  }
+  return null;
+}
+
+// The resolution note the auto-resolver stamps on a card it closed under
+// the first-touch auto-release rule (triage-auto-resolve RULE_NOTES reads
+// it from here) — the ledger's only way to tell that approval from an
+// operator's.
+const FIRST_TOUCH_AUTO_RELEASE_NOTE = 'Auto-resolved: the email was dictated unambiguously (V1, V2 and the release target agree, no digit doubt, domain accepts mail); released without a read-back.';
+function isAutoReleaseResolution(card) {
+  return Boolean(card) && card.resolution_source === 'auto' && card.resolution_note === FIRST_TOUCH_AUTO_RELEASE_NOTE;
+}
+
+// The release-boundary guards, in ONE place (codex #4622 r4 — four rounds
+// found the same shape: a check made while the nightly resolver closes
+// the card, or in the claim, but not repeated where the send actually
+// happens). Every trigger-driven send re-asks all of them UNDER the hold's
+// row lock, inside the transaction it holds open across the side effect:
+//   1. the card's disposition (live card, dismissal, gated auto-release);
+//   2. the hold still belongs to the customer its call is linked to NOW —
+//      an operator relink moves call_log, not this ledger row, and the
+//      engine enrolls the ROW's customer;
+//   3. that customer is live — an archived record gets no first-touch mail
+//      on either branch (enrollCustomer refuses the drip; the newsletter
+//      DOI never asked);
+//   4. address ownership under the shared per-address lock the assigning
+//      writers take — an assignment to another party either committed
+//      before this read or queues behind it until the send has settled.
+// An explicit operator correction (`explicit`) already answered 1 and 4 in
+// the fanout; 2 and 3 hold for every path. Returns the block reason, or
+// null. Throws propagate — every caller fails closed.
+async function releaseBoundaryBlocks(opts) {
+  const { callLogId, customerId, emailLc, explicit, dbh } = opts;
+  if (!explicit && callLogId) {
+    const card = await emailReviewBlocksRelease(callLogId, dbh);
+    if (card) return card;
+  }
+  if (callLogId && customerId) {
+    const call = await dbh('call_log').where({ id: callLogId }).first('customer_id');
+    if (String(call?.customer_id ?? '') !== String(customerId)) return 'hold_customer_mismatch';
+  }
+  if (customerId) {
+    const customer = await dbh('customers').where({ id: customerId }).first('id', 'deleted_at');
+    if (!customer) return 'customer_not_found';
+    if (customer.deleted_at) return 'customer_archived';
+  }
+  if (!explicit && emailLc && customerId) {
+    await require('../utils/customer-comms-lock').lockCustomerEmail(dbh, emailLc);
+    if (await require('./email-bounce-recovery').correctedAddressOwnedByOther(emailLc, customerId, dbh)) return 'email_owned_elsewhere';
+  }
   return null;
 }
 
@@ -244,25 +303,26 @@ async function emailReviewBlocksRelease(callLogId, dbh = db) {
 // trade. Correction-driven sends (the fanout, an operator's explicit
 // address override) pass no id and deliberately bypass: a correction IS
 // the read-back.
+// (7) Since codex #4622 r3/r4 the row lock is taken for EVERY caller and
+// all release-boundary guards run under it (releaseBoundaryBlocks): the
+// card question and address ownership for a trigger-driven release
+// (reviewCallLogId / ownershipCustomerId given), the hold→call customer
+// binding and the customer's liveness for every send, a correction's
+// included. Any error fails closed: an unverifiable release never sends.
 async function gateHoldForSend(holdId, claimStamp, dbh = db, targetEmailLc = null, reviewCallLogId = null, ownershipCustomerId = null) {
-  if (reviewCallLogId) {
-    await dbh('first_touch_holds').where({ id: holdId }).forUpdate().first('id');
-    if (await emailReviewBlocksRelease(reviewCallLogId, dbh)) return null;
-  }
-  // (7) Ownership under the shared per-address lock (codex #4622 r3 P1):
-  // every writer that ASSIGNS a customer email takes lockCustomerEmail,
-  // and this gate runs inside the transaction the release holds open
-  // across the provider call — so an assignment to another party either
-  // committed before this read (refused here) or queues behind it until
-  // the send has settled. Trigger-driven releases only; an explicit
-  // operator correction already answered ownership in the fanout.
-  if (ownershipCustomerId && targetEmailLc) {
-    try {
-      await require('../utils/customer-comms-lock').lockCustomerEmail(dbh, targetEmailLc);
-      if (await require('./email-bounce-recovery').correctedAddressOwnedByOther(targetEmailLc, ownershipCustomerId, dbh)) return null;
-    } catch (_e) {
-      return null; // fail closed: an unverifiable owner never gets a send
-    }
+  const row = await dbh('first_touch_holds').where({ id: holdId }).forUpdate().first('id', 'call_log_id', 'customer_id');
+  if (!row) return null;
+  try {
+    const blocked = await releaseBoundaryBlocks({
+      callLogId: reviewCallLogId || row.call_log_id,
+      customerId: ownershipCustomerId || row.customer_id,
+      emailLc: targetEmailLc,
+      explicit: !reviewCallLogId,
+      dbh,
+    });
+    if (blocked) return null;
+  } catch {
+    return null; // fail closed: an unverifiable release never sends
   }
   const stamp = new Date();
   const qb = dbh('first_touch_holds')
@@ -677,9 +737,14 @@ async function resumeHeldFirstTouch({
       // 'releasing' row, not by a correction. The source-call age is part
       // of the decision; an unreadable one is retryable, never a pass.
       let callCreatedAt = null;
+      let callCustomerId = null;
+      let callFound = !hold.call_log_id;
       if (hold.call_log_id) {
         try {
-          callCreatedAt = (await dbh('call_log').where({ id: hold.call_log_id }).first('created_at'))?.created_at || null;
+          const call = await dbh('call_log').where({ id: hold.call_log_id }).first('created_at', 'customer_id');
+          callFound = Boolean(call);
+          callCreatedAt = call?.created_at || null;
+          callCustomerId = call?.customer_id || null;
         } catch (_e) {
           await settleHold(hold.id, { status: 'pending', last_error: 'call_age_unavailable' }, dbh, claimStamp);
           result.skipped = result.skipped || 'call_age_unavailable';
@@ -739,11 +804,29 @@ async function resumeHeldFirstTouch({
         await settleHold(hold.id, { status: 'pending', last_error: 'no_customer_linked' }, dbh, claimStamp);
         continue;
       }
+      // The hold must still belong to the customer its call is linked to
+      // NOW (codex #4622 r4 P1): an operator relink moves call_log, not
+      // this ledger row, and the engine enrolls the ROW's customer. A
+      // specific marker here; re-asked under the row lock at the send.
+      if (hold.call_log_id && (!callFound || String(callCustomerId || '') !== String(holdCustomerId))) {
+        await settleHold(hold.id, { status: 'pending', last_error: 'hold_customer_mismatch' }, dbh, claimStamp);
+        logger.info(`[first-touch-resume] hold ${hold.id}: call no longer linked to the hold's customer — hold stays pending (${source})`);
+        result.skipped = result.skipped || 'hold_customer_mismatch';
+        continue;
+      }
       const customer = await dbh('customers')
         .where({ id: holdCustomerId })
-        .first('id', 'first_name', 'last_name');
+        .first('id', 'first_name', 'last_name', 'deleted_at');
       if (!customer) {
         await settleHold(hold.id, { status: 'pending', last_error: 'customer_not_found' }, dbh, claimStamp);
+        continue;
+      }
+      // An archived customer gets no first-touch mail on either branch
+      // (codex #4622 r4 P1) — terminal, like do-not-contact.
+      if (customer.deleted_at) {
+        await settleHold(hold.id, { status: 'blocked', last_error: 'customer_archived' }, dbh, claimStamp);
+        logger.info(`[first-touch-resume] customer ${holdCustomerId}: archived — hold blocked (${source})`);
+        result.skipped = result.skipped || 'customer_archived';
         continue;
       }
 
@@ -929,16 +1012,28 @@ async function resumeHeldFirstTouch({
             // — whose first step is immediately due — starts the drip to
             // an address the operator is being asked to read back. Skipped
             // for an explicit correction, which IS the read-back.
-            if (!email && hold.call_log_id) {
-              const cardBlocked = await emailReviewBlocksRelease(hold.call_log_id, trx);
-              if (cardBlocked) {
-                // No writes here: the enroll transaction rolls back and
-                // the PLAIN re-pend below returns the row to pending with
-                // its marker untouched (a deny stays intact), exactly as
-                // the in-claim card refusal does.
-                dripSkip = { skipped: cardBlocked, plainRepen: true };
-                return;
-              }
+            // …and every OTHER release-boundary guard with it (codex #4622
+            // r4 P1): the hold→call customer binding, the customer's
+            // liveness, and — trigger-driven only — address ownership
+            // under the per-address lock the assigning writers take, so a
+            // claim on this address landing after the in-claim check
+            // either committed before this read or waits behind it until
+            // the enrollment has committed. No writes on a refusal: the
+            // enroll transaction rolls back and the row is settled below
+            // (plain re-pend, marker untouched; an archived customer
+            // blocks terminally). A guard that cannot be evaluated fails
+            // closed the same way.
+            let boundary = null;
+            try {
+              boundary = await releaseBoundaryBlocks({
+                callLogId: hold.call_log_id, customerId: holdCustomerId, emailLc: sendEmail, explicit: Boolean(email), dbh: trx,
+              });
+            } catch {
+              boundary = 'release_guard_unverified';
+            }
+            if (boundary) {
+              dripSkip = { skipped: boundary, block: boundary === 'customer_archived', plainRepen: boundary !== 'customer_archived' };
+              return;
             }
             const AutomationRunner = require('./automation-runner');
             const enroll = await AutomationRunner.enrollCustomer({
@@ -1005,6 +1100,8 @@ async function resumeHeldFirstTouch({
           if (dripSkip) {
             if (dripSkip.repen) {
               await repenHoldPreservingDeny(hold.id, 'superseded_during_send', dbh, claimStamp);
+            } else if (dripSkip.block) {
+              await settleHold(hold.id, { status: 'blocked', last_error: dripSkip.skipped }, dbh, claimStamp);
             } else if (dripSkip.plainRepen) {
               await settleHold(hold.id, { status: 'pending' }, dbh, claimStamp);
             } else {
@@ -2060,4 +2157,6 @@ module.exports = {
   repenAmbiguousDelivery,
   repenHoldsForFreshEmailReview,
   emailReviewBlocksRelease,
+  releaseBoundaryBlocks,
+  FIRST_TOUCH_AUTO_RELEASE_NOTE,
 };

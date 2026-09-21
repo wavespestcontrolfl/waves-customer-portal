@@ -38,6 +38,8 @@ let mockConsumeZeroOnce = false; // next marker-consume clear matches 0 rows (r3
 let mockTrxCommitFailOnce = false; // next db.transaction runs its callback, then fails at COMMIT (r38)
 let mockSubscriberAdoptZero = false; // subscriber adoption updates match 0 rows (r39: row linked elsewhere)
 let mockRawSqls = []; // every whereRaw/orderByRaw sql, for predicate pins (r42)
+let mockCallRow = { customer_id: 'cust-1' }; // call_log's CURRENT customer link (codex #4622 r4 binding); null = call missing
+let mockGates = {}; // feature-gates.isEnabled by name (codex #4622 r4 gate provenance)
 jest.mock('../models/db', () => {
   const handler = (table) => {
     let markerFilter = false; // this chain filters on the resend marker
@@ -148,6 +150,13 @@ jest.mock('../models/db', () => {
           // read on this table. It reads nothing the tests model, so it
           // must never consume mockHoldFirstQueue.
           if (cols.length === 1 && cols[0] === 'id') return { id: whereId };
+          // The pre-send gate's row lock reads the hold's own ids for the
+          // release-boundary guards (codex #4622 r4) — modeled from the
+          // hold fixture, never from the queue.
+          if (cols[0] === 'id' && cols.includes('call_log_id')) {
+            const src = (mockHolds || []).find((h) => h.id === whereId) || mockHold || {};
+            return { id: whereId, call_log_id: src.call_log_id ?? 'call-1', customer_id: src.customer_id ?? 'cust-1' };
+          }
           if (mockHoldFirstQueue && mockHoldFirstQueue.length) {
             const next = mockHoldFirstQueue.shift();
             if (next instanceof Error) throw next;
@@ -168,6 +177,12 @@ jest.mock('../models/db', () => {
           return mockHold;
         }
         if (table === 'customers') {
+          // The liveness re-read (id, deleted_at — codex #4622 r4) is
+          // served from the fixture and never consumes the queue, which
+          // models the name read only.
+          if (!cols.includes('first_name')) {
+            return mockCustomerRow ? { id: mockCustomerRow.id, deleted_at: mockCustomerRow.deleted_at ?? null } : null;
+          }
           if (mockCustomerFirstQueue && mockCustomerFirstQueue.length) {
             const next = mockCustomerFirstQueue.shift();
             if (next instanceof Error) throw next;
@@ -175,7 +190,17 @@ jest.mock('../models/db', () => {
           }
           return mockCustomerRow;
         }
-        if (table === 'call_log') return mockDncRow;
+        if (table === 'call_log') {
+          // The age + binding read (created_at, customer_id) and the
+          // gate's binding re-read (customer_id) come from mockCallRow;
+          // a thenable mockDncRow still models the read failing.
+          if (cols.includes('customer_id')) {
+            if (mockDncRow && typeof mockDncRow.then === 'function') return mockDncRow;
+            if (mockCallRow === null) return null;
+            return { created_at: mockDncRow?.created_at ?? null, ...mockCallRow };
+          }
+          return mockDncRow;
+        }
         if (table === 'triage_items') {
           if (mockTriageFirstQueue && mockTriageFirstQueue.length) return mockTriageFirstQueue.shift();
           return mockTriageCardRow;
@@ -225,6 +250,7 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: (gate) => Boolean(mockGates[gate]) }));
 
 const mockEnroll = jest.fn(async () => ({ enrolled: true }));
 jest.mock('../services/automation-runner', () => ({
@@ -240,7 +266,7 @@ let mockOwnedElsewhere = false;
 jest.mock('../services/email-bounce-recovery', () => ({
   correctedAddressOwnedByOther: async () => {
     if (mockOwnedElsewhere === 'throw') throw new Error('db');
-    return mockOwnedElsewhere;
+    return Array.isArray(mockOwnedElsewhere) ? mockOwnedElsewhere.shift() : mockOwnedElsewhere;
   },
 }));
 
@@ -251,6 +277,7 @@ const {
   sweepAbandonedFirstTouchHolds,
   repenHoldsForFreshEmailReview,
 } = require('../services/lead-first-touch-resume');
+const { FIRST_TOUCH_AUTO_RELEASE_NOTE } = require('../services/lead-first-touch-resume');
 const logger = require('../services/logger');
 
 function baseHold(overrides = {}) {
@@ -272,6 +299,8 @@ beforeEach(() => {
   mockSuppressionRow = null;
   mockHoldUpdates = [];
   mockCustomerRow = { id: 'cust-1', first_name: 'Pat', last_name: 'Sample' };
+  mockCallRow = { customer_id: 'cust-1' };
+  mockGates = {};
   mockTriageCardRow = null;
   mockMergeFailures = 0;
   mockMergeArgs = [];
@@ -1538,6 +1567,65 @@ describe('DOI dedupe guard and ledger sweep', () => {
       expect(mockHoldUpdates.some((p) => p.status === 'pending' && p.last_error === 'email_owned_elsewhere')).toBe(true);
       expect(mockEnroll).not.toHaveBeenCalled();
     }
+  });
+  test('a hold whose call is now linked to another customer, to none, or gone never releases (codex #4622 r4)', async () => {
+    for (const knob of [{ customer_id: 'cust-2' }, { customer_id: null }, null]) {
+      mockCallRow = knob;
+      mockEnroll.mockClear(); mockHoldUpdates.length = 0;
+      mockHolds = [baseHold({ created_at: new Date().toISOString() })];
+      mockTriageFirstQueue = [null, { status: 'resolved' }];
+      const res = await resumeHeldFirstTouch({ callLogId: 'call-1', source: 'ledger_sweep' });
+      expect(res.resumed).toBe(false);
+      expect(res.skipped).toBe('hold_customer_mismatch');
+      expect(mockHoldUpdates.some((p) => p.status === 'pending' && p.last_error === 'hold_customer_mismatch')).toBe(true);
+      expect(mockEnroll).not.toHaveBeenCalled();
+      expect(mockNewsletter).not.toHaveBeenCalled();
+    }
+  });
+  test('an archived customer blocks the hold terminally before any send (codex #4622 r4)', async () => {
+    mockCustomerRow = { id: 'cust-1', first_name: 'Pat', last_name: 'Sample', deleted_at: '2026-09-19T00:00:00Z' };
+    mockHolds = [baseHold({ created_at: new Date().toISOString() })];
+    mockTriageFirstQueue = [null, { status: 'resolved' }];
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1', source: 'ledger_sweep' });
+    expect(res.resumed).toBe(false);
+    expect(res.skipped).toBe('customer_archived');
+    expect(mockHoldUpdates.some((p) => p.status === 'blocked' && p.last_error === 'customer_archived')).toBe(true);
+    expect(mockEnroll).not.toHaveBeenCalled();
+    expect(mockNewsletter).not.toHaveBeenCalled();
+  });
+  test('ownership is re-asked under the row lock before the drip enrolls — a claim on the address after the in-claim check still blocks (codex #4622 r4)', async () => {
+    mockOwnedElsewhere = [false, true]; // in-claim check passes; the locked re-ask inside the enroll transaction finds the address taken
+    mockHolds = [baseHold({ created_at: new Date().toISOString(), held_newsletter: false })];
+    mockTriageFirstQueue = [null, { status: 'resolved' }, null, { status: 'resolved' }];
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1', source: 'ledger_sweep' });
+    expect(res.resumed).toBe(false);
+    expect(res.skipped).toBe('email_owned_elsewhere');
+    expect(mockEnroll).not.toHaveBeenCalled();
+    expect(mockHoldUpdates.some((p) => p.status === 'pending')).toBe(true);
+  });
+  test('a card the resolver closed under GATE_FIRST_TOUCH_AUTO_RELEASE approves a send only while the gate is still on (codex #4622 r4)', async () => {
+    const autoCard = { status: 'resolved', resolution_source: 'auto', resolution_note: FIRST_TOUCH_AUTO_RELEASE_NOTE };
+    mockHolds = [baseHold({ created_at: new Date().toISOString() })];
+    mockTriageFirstQueue = [null, autoCard];
+    let res = await resumeHeldFirstTouch({ callLogId: 'call-1', source: 'ledger_sweep' });
+    expect(res.resumed).toBe(false);
+    expect(res.skipped).toBe('auto_release_gated');
+    expect(mockEnroll).not.toHaveBeenCalled();
+    expect(mockNewsletter).not.toHaveBeenCalled();
+    // An operator's resolution never depends on the gate.
+    mockHoldUpdates.length = 0;
+    mockHolds = [baseHold({ created_at: new Date().toISOString() })];
+    mockTriageFirstQueue = [null, { status: 'resolved', resolution_source: 'human', resolution_note: 'Confirmed on the read-back.' }];
+    res = await resumeHeldFirstTouch({ callLogId: 'call-1', source: 'ledger_sweep' });
+    expect(res.resumed).toBe(true);
+    // Gate back on: the auto-resolution is honored again.
+    mockGates = { firstTouchAutoRelease: true };
+    mockEnroll.mockClear(); mockNewsletter.mockClear();
+    mockHolds = [baseHold({ created_at: new Date().toISOString() })];
+    mockTriageFirstQueue = [null, { ...autoCard }, null, { ...autoCard }, null, { ...autoCard }];
+    res = await resumeHeldFirstTouch({ callLogId: 'call-1', source: 'ledger_sweep' });
+    expect(res.resumed).toBe(true);
+    expect(mockEnroll).toHaveBeenCalled();
   });
   test('an unreadable source-call age re-pends the hold instead of passing the shelf-life guard', async () => {
     mockHolds = [baseHold({ created_at: new Date().toISOString() })];

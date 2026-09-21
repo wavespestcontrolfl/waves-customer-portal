@@ -1288,6 +1288,8 @@ describe('email_dictation_unambiguous (GATE_FIRST_TOUCH_AUTO_RELEASE)', () => {
   });
   test('an unlinked call gets no evidence', () => {
     expect(unambiguousDictationTarget(card({ call_customer_id: null }), { now: NOW })).toBeNull();
+    // …and an ARCHIVED customer's card never auto-resolves (codex #4622 r4 P1).
+    expect(unambiguousDictationTarget(card({ customer_deleted_at: '2026-09-19T00:00:00Z' }), { now: NOW })).toBeNull();
   });
   test('a card with no filing-time release target never auto-resolves (candidates are spellings awaiting read-back)', () => {
     const c = card(); delete c.payload.email_release_target;
