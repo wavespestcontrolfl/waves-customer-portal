@@ -788,6 +788,26 @@ describe('POST /batch/send held vs. failed classification', () => {
     });
   });
 
+  test('a covered_by_credit resolved success is filed settled, never as sent with both channels false (round-8 audit P1 #4131 slice 4)', async () => {
+    db.mockImplementation(() => ({
+      where: function where() { return this; },
+      first: async () => ({ status: 'scheduled', sent_at: null, sms_sent_at: null, email_sent_at: null }),
+    }));
+    InvoiceService.sendViaSMSAndEmail.mockResolvedValue({
+      ok: true, covered_by_credit: true, sms: { ok: false }, email: { ok: false },
+    });
+
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/batch/send', { invoiceIds: ['inv-1'] });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.sent_count).toBe(0);
+      expect(body.failed_count).toBe(0);
+      expect(body.settled_count).toBe(1);
+      expect(body.settled[0]).toMatchObject({ invoiceId: 'inv-1', code: 'covered_by_credit' });
+    });
+  });
+
   test('a genuine dual-channel failure (no recognized held code) still counts failed, unaffected by the held carve-out above', async () => {
     db.mockImplementation(() => ({
       where: function where() { return this; },

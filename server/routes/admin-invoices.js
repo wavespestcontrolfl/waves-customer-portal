@@ -1512,8 +1512,12 @@ router.post('/batch/send', requireAdmin, async (req, res, next) => {
         const row = await db('invoices').where({ id: invoiceId }).first('status', 'sent_at', 'sms_sent_at', 'email_sent_at');
         firstDeliveryOnly = isFirstDeliveryRow(row);
         const result = await InvoiceService.sendViaSMSAndEmail(invoiceId, { firstDeliveryOnly, operatorInitiated: true, actorTechnicianId: req.technicianId || null });
-        if (result.ok && result.settled_zero_due) {
-          settled.push({ invoiceId, code: 'settled_zero_due' });
+        if (result.ok && (result.settled_zero_due || result.covered_by_credit)) {
+          // covered_by_credit is the chokepoint's sibling settled flag
+          // (credit consumed, nothing sent): bucketing it as "sent" with
+          // both channels false is the same mystery-success read this
+          // route already avoids for settled_zero_due (round-8 audit P1).
+          settled.push({ invoiceId, code: result.settled_zero_due ? 'settled_zero_due' : 'covered_by_credit' });
         } else if (result.ok) {
           sent.push({
             invoiceId,
@@ -1563,8 +1567,8 @@ router.post('/batch/send', requireAdmin, async (req, res, next) => {
         // hitting the same code is a real conflict — falls through to
         // failed below, matching /:id/send's non-first-delivery path.
         if (outcome?.type === 'noop') {
-          if (outcome.settled_zero_due) {
-            settled.push({ invoiceId, code: 'settled_zero_due' });
+          if (outcome.settled_zero_due || outcome.covered_by_credit) {
+            settled.push({ invoiceId, code: outcome.settled_zero_due ? 'settled_zero_due' : 'covered_by_credit' });
           } else {
             sent.push({
               invoiceId,
