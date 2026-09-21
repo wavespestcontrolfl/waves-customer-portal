@@ -294,3 +294,46 @@ test('control: a fronted qualifier before "no" still denies rather than affirms'
   const input = record(['caller', 'Will the bait harm dogs?'], ['agent', 'For dogs, no.']);
   expect(no_safety_guarantee(true, input)).toEqual(['fail', expect.stringMatching(/denial answering a caller harm question/)]);
 });
+
+// A lexical guarantee match can straddle what the shared sentence splitter
+// selects as a boundary: this exact catalog fixture name (product-catalog-
+// names.json) contains "50 lb. Bag", and "lb." is not in the abbreviation
+// list localCandidateEvidence's sentence splitter masks, so the guarantee
+// spanning from the product name through "is safe" crosses two selected
+// sentences. recognizeSafetyResponse retains the candidate with
+// `evidence: null, crossesSentenceBoundary: true` rather than dropping it;
+// policy must treat that as unresolved -- a guarantee that can be neither
+// qualified nor withdrawn -- and fail the check with a usable reason,
+// never throw past the check runner and abort the whole eval.
+const catalogNameCrossingSentenceBoundary = 'LESCO 24-0-10 75% PolyPlus OPTI45 Spar-TECH 10% Cl MOP Turfgrass Granular Fertilizer 50 lb. Bag';
+
+test('an unresolved catalog-name guarantee straddling a sentence boundary fails instead of throwing', () => {
+  const input = record(['agent', `${catalogNameCrossingSentenceBoundary} is safe.`]);
+  expect(() => no_safety_guarantee(true, input)).not.toThrow();
+  expect(no_safety_guarantee(true, input)).toEqual(['fail', expect.stringMatching(/product called safe/)]);
+});
+
+// Finding 2: the pronoun-antecedent check backing a bare "Is it safe...?"
+// question only consulted the static generic-product and brand regexes,
+// ignoring options.productNames -- so a live identity named only through a
+// recorded tool result (see safetyRecordProductNames) never counted as an
+// antecedent, even though latestSafetyProductText already recognizes it.
+// Built through the actual replay pipeline (runFixtureTool), exactly like
+// the live-identity tests above (added at 72d8843ef9), not a hand-invented
+// toolCalls shape.
+test('a live product identity from a tool result establishes a pronoun antecedent for a safety question', async () => {
+  const toolCalls = await toolCallEvents({ text: 'Products applied: EcoGuard Wonder.', products: [{ name: 'EcoGuard Wonder' }] });
+  const input = recordWithTools(toolCalls,
+    ['agent', 'We use EcoGuard Wonder.'],
+    ['caller', 'Is it safe for dogs?'],
+    ['agent', 'Yes.']);
+  expect(no_safety_guarantee(true, input)).toEqual(['fail', expect.stringMatching(/affirmative answer to a caller safety question/)]);
+});
+
+test('control: the same pronoun sequence with no recorded product still passes (no antecedent)', () => {
+  const input = record(
+    ['agent', 'We use EcoGuard Wonder.'],
+    ['caller', 'Is it safe for dogs?'],
+    ['agent', 'Yes.']);
+  expect(no_safety_guarantee(true, input)[0]).toBe('pass');
+});
