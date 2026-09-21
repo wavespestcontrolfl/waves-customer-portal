@@ -76,6 +76,17 @@ describe('gatherPropertySignals — plat median reuse', () => {
     expect(signals.subdivisionMedian).toMatchObject({ medianSqft: 2277, sampleCount: 9 });
   });
 
+  it('treats a below-floor record stamp as no stamp — never prices on a thin sample', async () => {
+    lookupResult.current = {
+      propertyRecord: vacantRecord({ _subdivisionMedian: { medianSqft: 3071, sampleCount: 7, subdivisionQueried: PLAT, county: 'Manatee' } }),
+      enriched: { homeSqFt: 0, unassessedVacantParcel: true, subdivisionMedian: null },
+    };
+    lookupSubdivisionMedianLivingSqft.mockResolvedValueOnce(null);
+    const signals = await gatherPropertySignals(CONTEXT, { persistLookup: false });
+    expect(lookupSubdivisionMedianLivingSqft).toHaveBeenCalledTimes(1);
+    expect(signals.subdivisionMedian).toBeNull();
+  });
+
   it('never digs for a built parcel', async () => {
     lookupResult.current = {
       propertyRecord: vacantRecord({ squareFootage: 2980, yearBuilt: 2025, _parcel: { parcelId: '999990002', county: 'Manatee', dorUseCode: '01', landUseDescription: 'Single Family', subdivision: PLAT } }),

@@ -514,12 +514,14 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
     // enriched.subdivisionMedian) — reuse it rather than hitting the county
     // layer a second time. The direct dig remains only for rows the lookup
     // served without a stamp (cached before the stamp existed).
+    // Same sample floor the admin profile applies (subdivisionMedianEstimate)
+    // and source arbitration checks again: a below-floor stamp is "no stamp".
+    const { lookupSubdivisionMedianLivingSqft, SUBDIVISION_MEDIAN_MIN_SAMPLES } = require('../property-lookup/county-parcel-gis');
     const stamped = enriched?.subdivisionMedian || propertyRecord?._subdivisionMedian || null;
-    if (Number(stamped?.medianSqft) > 0) {
+    if (Number(stamped?.medianSqft) > 0 && Number(stamped?.sampleCount) >= SUBDIVISION_MEDIAN_MIN_SAMPLES) {
       subdivisionMedian = stamped;
     } else {
       try {
-        const { lookupSubdivisionMedianLivingSqft } = require('../property-lookup/county-parcel-gis');
         subdivisionMedian = await lookupSubdivisionMedianLivingSqft({
           county: parcelView.county,
           subdivision: parcelView.subdivision,
