@@ -163,3 +163,17 @@ it("keeps an international customer's history in the rewrite request", async () 
   expect(bodyOf("/admin/communications/rewrite-sms")).toMatchObject({ customerId: intl.id, customerPhone: intl.phone, lastInboundMessage: "Can you come Tuesday?", recentMessages: [{ direction: "inbound", body: "Can you come Tuesday?" }] });
   await waitFor(() => expect(field).toHaveValue("Tuesday works for us."));
 });
+
+it("the IMMEDIATE composer send carries replyToMessageId (the answered inbox row), not only the scheduled one (Codex #4623 r26 P1)", async () => {
+  // Source contract: the recruiting rail decision on the server keys on this
+  // field, so the payload that Text back actually sends must include it.
+  const fs = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const src = fs.readFileSync(fileURLToPath(new URL("./CommunicationsPageV2.jsx", import.meta.url)), "utf8");
+  const immediate = src.slice(src.indexOf('adminFetch("/admin/communications/sms", {'));
+  const payload = immediate.slice(0, immediate.indexOf("});") + 3);
+  expect(payload).toMatch(/replyToMessageId: replyContext\?\.messageId \|\| undefined/);
+  // both Text back entry points feed that context
+  expect(src).toMatch(/onReply\(contactPhone, ourNumber, m\.customerId, \{ messageId: m\.id, messageType: m\.messageType \}\)/);
+  expect(src).toMatch(/onReply\(contactPhone, thread\.ourNumber, thread\.customerId, latestInboundContext\(thread\.messages\)\)/);
+});

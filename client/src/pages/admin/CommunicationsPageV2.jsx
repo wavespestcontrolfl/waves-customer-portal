@@ -1342,8 +1342,6 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             to: toNumber.trim(),
             body: msgBody.trim(),
             customerId: selectedCustomerId || undefined,
-            // The inbox row this answers (recruiting rows stay on the recruiting rail even on a shared customer phone)
-            replyToMessageId: replyContext?.messageId || undefined,
             messageType: "manual",
             fromNumber,
             scheduledFor,
@@ -1362,6 +1360,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             to: toNumber.trim(),
             body: msgBody.trim(),
             customerId: selectedCustomerId || undefined,
+            // The inbox row this answers: a recruiting row keeps the reply on the
+            // recruiting rail even when the shared phone is a linked customer's.
+            replyToMessageId: replyContext?.messageId || undefined,
             messageType: "manual",
             fromNumber,
             mediaUrls:
