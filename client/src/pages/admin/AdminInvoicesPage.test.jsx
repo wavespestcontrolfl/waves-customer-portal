@@ -14,6 +14,9 @@ import {
   noticeCandidateLabel,
   orderNoticeCandidates,
   persistedSendDisposition,
+  sendErrorMessage,
+  resendConflictMessage,
+  sendOutcomeMessage,
   validateAttachmentFiles,
 } from "./AdminInvoicesPage.jsx";
 
@@ -244,6 +247,70 @@ describe("AdminInvoicesPage create-path toast edge cases", () => {
       "Invoice WPC-2026-0001 created but not scheduled — scheduledFor must be in the future. Adjust the time and press the button again to schedule this same invoice.",
     );
   });
+
+  // A first-delivery request (firstDelivery: true) finding the invoice
+  // already owned by another live delivery is a 200 ok success carrying
+  // already_delivered / queued_delivery, not a thrown error — sms.ok and
+  // email.ok are both false by construction, so these must be read as a
+  // no-op success, never "send failed" (round-6 P1 #4131).
+  it("reports a first-delivery already_delivered outcome as a no-op success", () => {
+    expect(
+      invoiceCreatedSendToast("WPC-2026-0001", {
+        ok: true,
+        already_delivered: true,
+        sms: { ok: false, code: "already_delivered" },
+        email: { ok: false, code: "already_delivered" },
+      }),
+    ).toBe("Invoice created: WPC-2026-0001 — already delivered");
+  });
+
+  it("reports a first-delivery queued_delivery outcome as a no-op success", () => {
+    expect(
+      invoiceCreatedSendToast("WPC-2026-0001", {
+        ok: true,
+        queued_delivery: true,
+        sms: { ok: false, code: "queued_pay_link" },
+        email: { ok: false, code: "queued_pay_link" },
+      }),
+    ).toBe("Invoice created: WPC-2026-0001 — queued for the send window");
+  });
+});
+
+describe("AdminInvoicesPage send outcome/error helpers", () => {
+  it("sendOutcomeMessage reads the four no-op-success flags a 200 response can carry", () => {
+    expect(sendOutcomeMessage({ covered_by_credit: true })).toBe(
+      "fully covered by account credit, nothing to send",
+    );
+    expect(sendOutcomeMessage({ already_delivered: true })).toBe(
+      "already delivered",
+    );
+    expect(sendOutcomeMessage({ queued_delivery: true })).toBe(
+      "queued for the send window",
+    );
+    // Pre-push audit P1 (PR #4633): a concurrent first-delivery claim
+    // already won the race — a no-op success, never a failure.
+    expect(sendOutcomeMessage({ in_progress: true })).toBe(
+      "already being delivered",
+    );
+    expect(sendOutcomeMessage({ ok: true, sms: { ok: true } })).toBeNull();
+    expect(sendOutcomeMessage(null)).toBeNull();
+  });
+
+  // Reached only by an explicit Resend — a first delivery never throws
+  // these as errors (see the no-op-success cases above).
+  it("sendErrorMessage translates a thrown send error's code for a Resend", () => {
+    expect(sendErrorMessage({ code: "queued_pay_link" })).toBe(
+      "queued for the send window",
+    );
+    expect(sendErrorMessage({ code: "already_delivered" })).toBe(
+      "already delivered",
+    );
+    expect(sendErrorMessage({ code: "delivery_in_progress" })).toBe(
+      "already being delivered",
+    );
+    expect(sendErrorMessage({ code: "send_claim_lost" })).toBeNull();
+    expect(sendErrorMessage(new Error("boom"))).toBeNull();
+  });
 });
 
 describe("AdminInvoicesPage ambiguous-send disposition", () => {
@@ -288,5 +355,21 @@ describe("AdminInvoicesPage ambiguous-send disposition", () => {
     expect(
       persistedSendDisposition({ status: "draft", sent_at: null, sms_sent_at: null }),
     ).toBe("unsent");
+  });
+});
+
+describe("resendConflictMessage", () => {
+  it("words a refused Resend as a block, distinct from the first-delivery no-op phrasing", () => {
+    const blocked = resendConflictMessage({ code: "queued_pay_link" });
+    expect(blocked).toMatch(/^Invoice send blocked:/);
+    expect(blocked).not.toBe(sendErrorMessage({ code: "queued_pay_link" }));
+    expect(resendConflictMessage({ code: "already_delivered" })).toMatch(/^Invoice send blocked:/);
+    // Pre-push audit P1 (PR #4633): a concurrent claim in progress is a
+    // real conflict for a deliberate Resend, not the first-delivery no-op.
+    expect(resendConflictMessage({ code: "delivery_in_progress" })).toBe(
+      "Invoice send blocked: a delivery is already in progress",
+    );
+    expect(resendConflictMessage({ code: "send_claim_lost" })).toBeNull();
+    expect(resendConflictMessage(new Error("boom"))).toBeNull();
   });
 });
