@@ -18,6 +18,10 @@ jest.mock('../middleware/admin-auth', () => ({
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false), gateEnvValue: jest.fn(() => false),
+  // estimate-annual-guard.js (via estimate-offer-version.js) needs this —
+  // every gate in this file defaults off, so this stays consistent with
+  // gateEnvValue's own always-false mock above.
+  termiteAnnualPlanSelectionEnabled: jest.fn(() => false),
 }));
 jest.mock('../services/email-fallback-gate', () => ({ smtpFallbackAllowed: jest.fn(() => false) }));
 jest.mock('../services/sendgrid-mail', () => ({
@@ -928,6 +932,12 @@ describe('annual provider delivery receipts', () => {
     row.estimate_data = annualData();
     sendgrid.isConfigured.mockReturnValue(false);
     require('../services/email-fallback-gate').smtpFallbackAllowed.mockReturnValueOnce(true);
+    // Pre-push audit P1: the SMTP fallback now runs the real annual-offer
+    // guard too — a FRESH (never-delivered) annual estimate while the
+    // selection gate is off is legitimately withheld, so this test (which
+    // proves the delivery receipt gets recorded AFTER a real handoff, not
+    // guard behavior) turns the gate on for its one send.
+    require('../config/feature-gates').termiteAnnualPlanSelectionEnabled.mockReturnValueOnce(true);
     const sendMail = jest.fn(async () => {
       expect(dataOf().deliveryState).toBeUndefined();
     });
@@ -938,6 +948,59 @@ describe('annual provider delivery receipts', () => {
       expect(sendMail).toHaveBeenCalledTimes(1);
       expect(annualPlanHasDeliveredOffer(row)).toBe(true);
     } finally {
+      if (priorPassword === undefined) delete process.env.GOOGLE_SMTP_PASSWORD;
+      else process.env.GOOGLE_SMTP_PASSWORD = priorPassword;
+    }
+  });
+
+  test('pre-push audit P1: the SMTP fallback withholds a withheld annual estimate — no transport call', async () => {
+    const priorPassword = process.env.GOOGLE_SMTP_PASSWORD;
+    process.env.GOOGLE_SMTP_PASSWORD = 'synthetic-password';
+    row.estimate_data = annualData(); // fresh, undelivered, gate off -> withheld
+    sendgrid.isConfigured.mockReturnValue(false);
+    require('../services/email-fallback-gate').smtpFallbackAllowed.mockReturnValueOnce(true);
+    const sendMail = jest.fn();
+    require('nodemailer').createTransport.mockReturnValueOnce({ sendMail });
+    try {
+      const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+      // sendEstimateNowInner's channel mapping keeps only ok/error on its
+      // not-ok branch (channels.email = result.ok ? {...} : { ok: false,
+      // error: result.error || 'Email send failed' }) — sendEstimateEmail's
+      // own richer shape (blocked/provider/providerAttempted) is what the
+      // pre-push audit's fix contract describes at that inner layer;
+      // confirmed directly against sendEstimateEmail below.
+      expect(result.channels.email).toMatchObject({ ok: false, error: 'annual_offer_withheld' });
+      expect(sendMail).not.toHaveBeenCalled();
+      expect(dataOf().deliveryState).toBeUndefined();
+      expect(annualPlanHasDeliveredOffer(row)).toBe(false);
+    } finally {
+      if (priorPassword === undefined) delete process.env.GOOGLE_SMTP_PASSWORD;
+      else process.env.GOOGLE_SMTP_PASSWORD = priorPassword;
+    }
+  });
+
+  test('pre-push audit P1: an SMTP-fallback guard infrastructure error is a definite failure — no transport call, never uncertain', async () => {
+    const priorPassword = process.env.GOOGLE_SMTP_PASSWORD;
+    process.env.GOOGLE_SMTP_PASSWORD = 'synthetic-password';
+    row.estimate_data = annualData();
+    sendgrid.isConfigured.mockReturnValue(false);
+    require('../services/email-fallback-gate').smtpFallbackAllowed.mockReturnValueOnce(true);
+    // Surgical: spy on the real module's annualHandoffGuard just for this
+    // call, rather than sabotaging the shared db mock (which the SMTP
+    // fallback's own PRIOR estimates reads — claim, verdict re-read — also
+    // depend on to reach this point at all).
+    const annualGuardModule = require('../services/estimate-annual-guard');
+    const guardSpy = jest.spyOn(annualGuardModule, 'annualHandoffGuard')
+      .mockReturnValueOnce(async () => { throw new Error('estimates lookup unavailable'); });
+    const sendMail = jest.fn();
+    require('nodemailer').createTransport.mockReturnValueOnce({ sendMail });
+    try {
+      const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+      expect(result.channels.email).toMatchObject({ ok: false, error: 'estimates lookup unavailable' });
+      expect(result.channels.email.uncertain).toBeUndefined();
+      expect(sendMail).not.toHaveBeenCalled();
+    } finally {
+      guardSpy.mockRestore();
       if (priorPassword === undefined) delete process.env.GOOGLE_SMTP_PASSWORD;
       else process.env.GOOGLE_SMTP_PASSWORD = priorPassword;
     }
@@ -1046,6 +1109,15 @@ describe('annual provider delivery receipts', () => {
   test.each([
     ['email rejection', 'email', () => email.sendTemplate.mockRejectedValueOnce(new Error('Template disabled'))],
     ['suppressed SMS', 'sms', () => sendCustomerMessage.mockResolvedValueOnce({ sent: true, reason: 'SMS suppressed' })],
+    // Delivery-guards slice (re-cut of #4569): the annual-offer guard at the
+    // send chokepoint blocked this handoff — same "no receipt, not sent"
+    // contract as any other blocked/rejected channel.
+    ['annual offer withheld (email)', 'email', () => email.sendTemplate.mockResolvedValueOnce({
+      sent: false, blocked: true, reason: 'annual_offer_withheld', providerAttempted: false,
+    })],
+    ['annual offer withheld (sms)', 'sms', () => sendCustomerMessage.mockResolvedValueOnce({
+      sent: false, blocked: true, code: 'ANNUAL_OFFER_WITHHELD', reason: 'annual_offer_withheld',
+    })],
   ])('%s cannot issue an annual receipt', async (_name, method, arrange) => {
     row.estimate_data = annualData();
     arrange();
@@ -1170,6 +1242,50 @@ describe('annual provider delivery receipts', () => {
       expect(sibling.status).toBe('accepted');
       expect(sibling.annual_total).toBe('777');
       expect(dataOf(sibling).deliveryState?.annualPlanOfferFingerprint).toBe(actual ? fingerprint : undefined);
+    });
+
+    test('annual-offer delivery guard (delivery-guards slice, re-cut of #4569): a withheld sibling aborts the whole group send', async () => {
+      email.sendTemplate.mockResolvedValueOnce({
+        sent: false, blocked: true, reason: 'annual_offer_withheld', providerAttempted: false,
+      });
+      const response = await invoke('/:id/send', 'post', { sendMethod: 'email' });
+      expect(response.statusCode).toBe(422);
+      expect(response.body.success).toBe(false);
+      expect(response.body.channels.email).toMatchObject({ ok: false });
+      // The whole claimed set — anchor + sibling — rode the ONE provider
+      // call, so a withheld sibling aborts it rather than publishing the
+      // group around it (the customer's link shows every property).
+      expect(email.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+        estimateIds: expect.arrayContaining([row.id, sibling.id]),
+      }));
+      // The sibling was claimed ('sending') then released back to its
+      // pre-claim status — never published alongside a blocked anchor.
+      expect(sibling.status).toBe('draft');
+      expect(dataOf(sibling).groupPublishedByEstimateId).toBeUndefined();
+      expect(row.status).not.toBe('sent');
+      expect(annualPlanHasDeliveredOffer(sibling)).toBe(false);
+    });
+
+    test('pre-push audit P1: a guard infrastructure error leaves channels.email ok:false and NOT uncertain, and releases the group claim', async () => {
+      email.sendTemplate.mockResolvedValueOnce({
+        sent: false, aborted: true, guardError: true, reason: 'annual_offer_guard_failed',
+        providerAttempted: false, error: 'estimates lookup unavailable',
+      });
+      const response = await invoke('/:id/send', 'post', { sendMethod: 'email' });
+      expect(response.statusCode).toBe(422);
+      expect(response.body.success).toBe(false);
+      expect(response.body.channels.email).toMatchObject({ ok: false });
+      // Never uncertain: sendTemplate resolved (didn't throw), so the
+      // admin-estimates catch block that COMPUTES `uncertain` from a
+      // possible-but-unproven provider attempt is never reached — this is
+      // the exact misclassification the pre-push audit flagged (a thrown
+      // guard error, after onQueued had already fired, read as an uncertain
+      // delivery even though SendGrid was never called).
+      expect(response.body.channels.email.uncertain).toBeUndefined();
+      // The sibling was claimed ('sending') then released back to its
+      // pre-claim status — a guard infra failure never publishes.
+      expect(sibling.status).toBe('draft');
+      expect(row.status).not.toBe('sent');
     });
   });
 });

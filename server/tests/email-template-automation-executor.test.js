@@ -235,6 +235,9 @@ describe('email template automation executor', () => {
       triggerEventId: 'estimate_auto_renew:est-1',
       idempotencyKey: 'estimate.extension_notice:est-1:2026-06-01',
       suppressionGroupKey: 'service_operational',
+      // Delivery-guards slice (re-cut of #4569): an estimate-entity run
+      // carries its id through to the send chokepoint's annual-offer guard.
+      estimateId: 'est-1',
     }));
     expect(sentRunQuery.update).toHaveBeenCalledWith(expect.objectContaining({
       status: 'sent',
@@ -803,6 +806,8 @@ describe('email template automation executor', () => {
         renewal_count: 1,
         status: 'sent',
       }),
+      // Delivery-guards slice (re-cut of #4569).
+      estimateId: 'est-1',
     }));
     expect(EmailTemplates.sendTemplate.mock.calls[0][0].suppressionGroupKey).toBeUndefined();
     expect(sentRunQuery.update).toHaveBeenCalledWith(expect.objectContaining({
@@ -968,6 +973,10 @@ describe('email template automation executor', () => {
       prep_template_key: 'prep.flea',
       prep_sent_at: 'NOW()',
     }));
+    // Delivery-guards slice (re-cut of #4569): a non-estimate entity type
+    // (scheduled_service, here) never carries estimateId through — this
+    // executor is generic across entity types.
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.not.objectContaining({ estimateId: expect.anything() }));
   });
 
   test('a blocked prep guide run never stamps the visit', async () => {

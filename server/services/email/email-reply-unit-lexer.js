@@ -46,19 +46,36 @@ const PATTERNS = [
   ['period', '(?:monthly|yearly|annually|annual)\\b(?!-[a-z])'],
 ].map(([kind, source]) => ({ kind, re: new RegExp(source, 'iy') }));
 
+const PERIOD_PATTERNS = [
+  ...PATTERNS.filter((pattern) => pattern.kind === 'period'),
+  ...[
+    // "a month ago", "a month or two ago", "a year and a half ago" stay
+    // temporal. Only an "or" quantity or "and a half" may sit before "ago":
+    // a general "and <quantity> <unit>" would erase a real recurring price
+    // in "$98 a month and two years ago it cost less" (known trade-off:
+    // "a year and six months ago" is a period and over-flags).
+    '(?:a|each|every)\\s+(?:months?|mos?|years?|yrs?)\\b(?!-[a-z]|(?:\\s+or\\s+(?:a\\s+)?(?:[a-z]+|\\d+)(?:\\s+[a-z]+)?|\\s+and\\s+a\\s+half)?\\s+ago\\b)',
+    'for\\s+the\\s+(?:months?|mos?|years?|yrs?)\\b(?!-[a-z])',
+    // "every calendar month", "per calendar year": the calendar qualifier is
+    // part of the period, never a separate word.
+    '(?:per|a|each|every)\\s+calendar\\s+(?:months?|mos?|years?|yrs?)\\b(?!-[a-z]|(?:\\s+or\\s+(?:a\\s+)?(?:[a-z]+|\\d+)(?:\\s+[a-z]+)?|\\s+and\\s+a\\s+half)?\\s+ago\\b)',
+    'annualized\\b(?!-[a-z])',
+  ].map((source) => ({ kind: 'period', re: new RegExp(source, 'iy') })),
+];
+
 function previousCharacter(source, at) {
   const previousCodeUnit = source.charCodeAt(at - 1);
   const previousWidth = previousCodeUnit >= 0xdc00 && previousCodeUnit <= 0xdfff ? 2 : 1;
   return source.slice(Math.max(0, at - previousWidth), at);
 }
 
-function matchEmailReplyUnitAt(source, at = 0) {
+function matchUnitPatternsAt(source, at, patterns) {
   if (typeof source !== 'string' || source.length > 8192
     || Buffer.byteLength(source, 'utf8') > 8192
     || !Number.isInteger(at) || at < 0 || at >= source.length) return null;
   if (/[\p{L}\p{N}\p{M}_]/u.test(previousCharacter(source, at)) && !/[-/]/.test(source[at])) return null;
   let longest = null;
-  for (const pattern of PATTERNS) {
+  for (const pattern of patterns) {
     pattern.re.lastIndex = at;
     const matched = pattern.re.exec(source);
     if (matched && /^(?:[\p{L}\p{N}\p{M}_]|-[\p{L}\p{N}\p{M}_])/u
@@ -73,4 +90,13 @@ function matchEmailReplyUnitAt(source, at = 0) {
   return longest;
 }
 
-module.exports = { matchEmailReplyUnitAt };
+function matchEmailReplyUnitAt(source, at = 0) {
+  return matchUnitPatternsAt(source, at, PATTERNS);
+}
+
+// Separate period candidates retain periods embedded inside a longer visit token.
+function matchEmailReplyPeriodAt(source, at = 0) {
+  return matchUnitPatternsAt(source, at, PERIOD_PATTERNS);
+}
+
+module.exports = { matchEmailReplyUnitAt, matchEmailReplyPeriodAt };

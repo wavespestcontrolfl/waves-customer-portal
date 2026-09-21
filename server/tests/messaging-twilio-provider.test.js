@@ -343,4 +343,28 @@ describe('Twilio messaging provider adapter', () => {
       providerMessageId,
     });
   });
+
+  test('round 8 P1: forwards withheldLinkPolicy through to TwilioService.sendSMS, and surfaces withheldLinksRewritten from a successful result', async () => {
+    TwilioService.sendSMS.mockResolvedValueOnce({
+      success: true, sid: 'SM_rewritten', deliveryOutcome: 'accepted', withheldLinksRewritten: ['est-1'],
+    });
+
+    const outcome = await sendViaTwilio(baseInput({ withheldLinkPolicy: 'rewrite', estimateId: 'est-1' }));
+
+    expect(TwilioService.sendSMS).toHaveBeenCalledWith(
+      '+15551230000',
+      'Hello from Waves',
+      expect.objectContaining({ withheldLinkPolicy: 'rewrite', estimateId: 'est-1' }),
+    );
+    expect(outcome).toMatchObject({ sent: true, withheldLinksRewritten: ['est-1'] });
+  });
+
+  test('round 8 P1: no withheldLinkPolicy on the input forwards undefined — the default (refuse) applies downstream', async () => {
+    await sendViaTwilio(baseInput());
+    expect(TwilioService.sendSMS).toHaveBeenCalledWith(
+      '+15551230000',
+      'Hello from Waves',
+      expect.objectContaining({ withheldLinkPolicy: undefined }),
+    );
+  });
 });
