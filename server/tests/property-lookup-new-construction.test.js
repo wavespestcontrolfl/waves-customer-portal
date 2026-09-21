@@ -212,6 +212,13 @@ describe('buildEnrichedProfile — plat median rides beside an EMPTY homeSqFt', 
     expect(profile.subdivisionMedian).toMatchObject({ medianSqft: 3071, sampleCount: 174, minSqft: 2101, maxSqft: 3242 });
   });
 
+  it('is null when the address audit could not confirm the parcel (snapped house number)', () => {
+    const audit = { snappedRecord: { typed: '1010', record: '1012' }, hasExactMatch: false, streetExists: true, county: 'Manatee', nearestNumbers: [] };
+    const profile = buildEnrichedProfile(vacantRecord({ _subdivisionMedian: platMedianStamp() }), null, 27.47, -82.39, null, audit);
+    expect(profile.fieldVerifyFlags.some((f) => f.field === 'address')).toBe(true);
+    expect(profile.subdivisionMedian).toBeNull();
+  });
+
   it('is null without the stamp and null once the record carries a home', () => {
     expect(buildEnrichedProfile(vacantRecord(), null, 27.47, -82.39).subdivisionMedian).toBeNull();
     const built = buildEnrichedProfile(vacantRecord({ _subdivisionMedian: platMedianStamp(), squareFootage: 2980, yearBuilt: 2026 }), null, 27.47, -82.39);

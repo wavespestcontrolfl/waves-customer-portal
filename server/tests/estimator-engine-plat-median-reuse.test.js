@@ -54,7 +54,7 @@ describe('gatherPropertySignals — plat median reuse', () => {
     };
     const signals = await gatherPropertySignals(CONTEXT, { persistLookup: false });
     expect(signals.parcelView.unassessedVacant).toBeTruthy();
-    expect(signals.subdivisionMedian).toMatchObject({ medianSqft: 3071, sampleCount: 174 });
+    expect(signals.subdivisionMedian).toEqual({ medianSqft: 3071, sampleCount: 174 });
     expect(lookupSubdivisionMedianLivingSqft).not.toHaveBeenCalled();
   });
 

@@ -2143,8 +2143,11 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // homeSqFt (which stays 0) so the client can prefill the estimator with
     // it and label it as an estimate, instead of the silent 2,000 sq ft
     // default. A unit-inside-a-building lookup never carries one (its
-    // parcel dims were dropped on purpose).
-    subdivisionMedian: residentialUnitLookup ? null : subdivisionMedianEstimate(rc),
+    // parcel dims were dropped on purpose), and neither does an address the
+    // audit could not confirm — a median for a possibly wrong parcel must
+    // not reach any consumer (admin prefill or the call estimator).
+    subdivisionMedian: (residentialUnitLookup || fieldVerifyFlags.some((flag) => flag?.field === 'address'))
+      ? null : subdivisionMedianEstimate(rc),
     // Machine-readable twin of the parkParcel verify flag (multi-situs master
     // parcel — land-lease mobile-home park or similar; the roll vouches for
     // the address but not for any per-unit dimension).
