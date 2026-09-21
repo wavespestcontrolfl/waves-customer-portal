@@ -358,6 +358,18 @@ const REGISTRY = {
       if (!meta.invoice_id || !meta.pay_url) return { eligible: true };
       const collectible = await invoiceStillCollectible(meta);
       if (collectible?.eligible === false) {
+        // A transient read failure (DB outage mid-recheck) is NOT a
+        // confirmed fact about the invoice — invoiceStillCollectible's own
+        // failClosed reports it as { eligible: false, reason:
+        // 'recheck-failed', retryable: true } specifically so the
+        // scheduler's bounded 15-minute retry ladder holds the row and
+        // tries again with a fresh read. Promoting it to stripPayLink here
+        // (round-9's original bug, #4634 round-10 P1) would strip a pay
+        // link that is still perfectly valid on nothing more than a
+        // hiccup, and do so permanently — the strip is one-way, there is
+        // no re-check on a later successful attempt. Return it unchanged.
+        if (collectible.retryable === true) return collectible;
+        const reason = collectible.reason || '';
         // Owner ruling on Codex round 8 #4634: settlement must never
         // cancel this entry point outright — cancelling drops the WHOLE
         // completion/report text (not just the stale pay link), strands
@@ -369,12 +381,39 @@ const REGISTRY = {
         // never stamps terminal_pending, so onTerminal never runs). The
         // customer's report still has every reason to go out; only the
         // pay-link sentence is now asking for money the invoice no longer
-        // owes (settled zero-balance overnight, moved to a payer, voided).
-        // Strip just that line at actual delivery time instead — the
-        // scheduler applies `stripPayLink` to the frozen body before
-        // dispatch and clears `mark_invoice_delivery` so finalize below
-        // does not mark a pay link delivered that never sent.
-        return { eligible: true, stripPayLink: true, reason: collectible.reason };
+        // owes. That is true for a CONFIRMED terminal/payer-owned/
+        // withdrawn invoice — never for every ineligible reason
+        // invoiceStillCollectible can return, so each is decided by name
+        // rather than treated as one bucket:
+        //   - invoice-terminal:* / payer-billed / payer-billed-withdrawn:
+        //     the invoice itself is confirmed dead or reassigned — the pay
+        //     link is definitely stale. Strip it.
+        //   - invoice-missing: the row is gone outright — the pay link
+        //     cannot possibly resolve. Same as terminal: strip it.
+        //   - sequence-stopped / amount-changed (and any future reason):
+        //     neither is "this exact pay link is stale" — sequence-stopped
+        //     is a live stop signal (reply/opt-out) on the invoice's
+        //     follow-up sequence, and amount-changed means the frozen body
+        //     may be quoting the WRONG balance, not just a dead link.
+        //     Stripping the link and sending the rest would still hand the
+        //     customer a report with a wrong-amount narrative. Suppress
+        //     the whole replay through the normal eligible:false path
+        //     instead — same terminal handling (blocked status + the
+        //     review-ask fallback) confirmed-dead invoices used to get
+        //     before the round-8 ruling carved those out above.
+        if (
+          reason.startsWith('invoice-terminal:')
+          || reason === 'payer-billed'
+          || reason === 'payer-billed-withdrawn'
+          || reason === 'invoice-missing'
+        ) {
+          // Strip just that line at actual delivery time instead — the
+          // scheduler applies `stripPayLink` to the frozen body before
+          // dispatch and clears `mark_invoice_delivery` so finalize below
+          // does not mark a pay link delivered that never sent.
+          return { eligible: true, stripPayLink: true, reason };
+        }
+        return { eligible: false, reason };
       }
       return { eligible: true };
     },

@@ -4297,6 +4297,14 @@ const InvoiceService = {
           // pre-claim path already gives this exact code, and the batch
           // routes counted it failed instead of held. Skip the email leg
           // too — nothing is due to email either.
+          //
+          // This wrapper still owns the OUTER claim (the nested call was
+          // told adoptsQueuedInvoiceSend: false and never touches it) — the
+          // nested leg resolving on its own claim doesn't release ours, so
+          // restore it here exactly like every other early exit does
+          // (round-10 #4634 P1: without this the invoice was left
+          // 'sending' until stale-claim recovery parked it).
+          await restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueuedSendRows, db, claim.invoice.send_claim_token);
           return { ok: false, code: "deposit_settlement_pending", error: smsResult.reason,
             sms: { ok: false, code: "deposit_settlement_pending", deliveryOutcome: "not_sent" },
             email: { ok: false, code: "deposit_settlement_pending" },
@@ -4311,7 +4319,13 @@ const InvoiceService = {
         // genuinely retryable race as a failure instead of the SAME 409/held
         // treatment the RESOLVED direct-call path already gives this code.
         // Skip the email leg too — nothing is due to email either.
+        //
+        // Same outer-claim restore as deposit_settlement_pending above
+        // (round-10 #4634 P1) — this early return bypassed it too, leaving
+        // the invoice 'sending' with scheduled_send_at cleared until
+        // stale-claim recovery parked it.
         if (smsResult?.code === "balance_changed_retry") {
+          await restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueuedSendRows, db, claim.invoice.send_claim_token);
           return { ok: false, code: "balance_changed_retry", error: smsResult.reason,
             sms: { ok: false, code: "balance_changed_retry", deliveryOutcome: "not_sent" },
             email: { ok: false, code: "balance_changed_retry" },

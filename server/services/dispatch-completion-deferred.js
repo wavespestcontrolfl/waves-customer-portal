@@ -30,19 +30,37 @@ const logger = require('./logger');
 // run mirrors stripBalanceLineFromBody's own technique (open-balance.js).
 // A body with no pay_url at all (already stripped by an earlier replay
 // attempt, or a row that never had one) is returned unchanged.
+//
+// Matching happens in SMS display form, the SAME normalization
+// reportV1InvoiceBodyCarriesPayLink (complete-scheduled-service.js) uses to
+// decide whether a rendered body carries its pay link — the pay URL is
+// stored in metadata.pay_url in its original https:// form (complete-
+// scheduled-service.js), but production template rendering strips the
+// scheme off every SMS link (stripSmsUrlScheme, admin-sms-templates.js)
+// before the body ever reaches sms_log, so a literal string match here
+// missed every normal frozen body and the stale link still sent (#4634
+// round-10 P1). Reusing stripSmsUrlScheme — not a second normalizer —
+// keeps this in lockstep with every other place that compares an SMS body
+// against a URL.
 function stripPayLinkLineFromBody(body, payUrl) {
   if (typeof body !== 'string' || !payUrl || typeof payUrl !== 'string') return body;
-  if (!body.includes(payUrl)) return body;
+  const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
+  const normalizedUrl = stripSmsUrlScheme(payUrl).trim();
+  if (!normalizedUrl || !stripSmsUrlScheme(body).includes(normalizedUrl)) return body;
   const stripped = body
     .split('\n')
-    .filter((line) => !line.includes(payUrl))
+    .filter((line) => !stripSmsUrlScheme(line).includes(normalizedUrl))
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
-  // Defensive: never hand back an empty completion text — a template whose
-  // ENTIRE body was somehow just the pay-link line would otherwise send
-  // nothing. Never observed in practice (the report link always precedes).
-  return stripped || body;
+  // An operator-edited template that is ONLY the invoice line strips to
+  // nothing. Restoring the original (link-bearing) body here — the prior
+  // behavior — is exactly the bug this function exists to prevent: a stale
+  // pay link would go out disguised as a successful strip (#4634 round-10
+  // P2). Return null so the caller suppresses this replay through the
+  // normal ineligible/terminal path instead of ever sending an empty body
+  // or the original link.
+  return stripped || null;
 }
 
 async function finalizeDeferredCompletionSend(claimMeta = {}, { retry = false } = {}) {

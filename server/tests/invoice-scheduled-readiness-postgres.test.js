@@ -602,10 +602,16 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
     expect(await read()).toMatchObject({ status: 'draft', prepaid_by: null });
   });
 
-  test('a nested balance_changed_retry from the preclaimed SMS leg is promoted to sendViaSMSAndEmail\'s top-level result, never lost as a generic SMS failure with the email leg attempted (Codex round-8 audit P2 #4131 finding 5)', async () => {
+  test('a nested balance_changed_retry from the preclaimed SMS leg is promoted to sendViaSMSAndEmail\'s top-level result, never lost as a generic SMS failure with the email leg attempted (Codex round-8 audit P2 #4131 finding 5) — and the outer claim is restored so a retry can proceed (round-10 #4634 finding 4)', async () => {
     // Genuinely collectible — not zero-due — so the wrapper's own claim
-    // succeeds normally and reaches the nested sendViaSMS call.
-    await trx('invoices').where({ id: invoiceId }).update({ credit_applied: 0 });
+    // succeeds normally and reaches the nested sendViaSMS call. Scheduled
+    // (not draft) with a real scheduled_send_at, mirroring the queue's own
+    // due-invoice shape, so restoring the claim has something meaningful to
+    // preserve rather than restoring a field that was never set.
+    const originalScheduledSendAt = new Date('2040-01-01T12:00:00.000Z');
+    await trx('invoices').where({ id: invoiceId }).update({
+      credit_applied: 0, status: 'scheduled', scheduled_send_at: originalScheduledSendAt,
+    });
     const smsSpy = jest.spyOn(Invoice, 'sendViaSMS').mockResolvedValueOnce({
       sent: false, ok: false, code: 'balance_changed_retry', deliveryOutcome: 'not_sent', retryable: true,
       reason: 'The balance changed while sending; try again',
@@ -621,6 +627,32 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
       expect(require('../services/invoice-email').sendInvoiceEmail).not.toHaveBeenCalled();
     } finally {
       smsSpy.mockRestore();
+    }
+
+    // Round-10 #4634 finding 4: this 409-shaped early return bypassed the
+    // shared restoreSendClaim cleanup every other early exit in this
+    // function uses — the invoice was left 'sending' with its claim token
+    // still live, a state only stale-claim recovery would eventually
+    // unwind (parking it with scheduled_send_at wiped to null). With the
+    // fix, the claim this call itself owns is restored immediately: status
+    // and scheduled_send_at both back to exactly what they were before
+    // this call ever claimed the row.
+    const restored = await read();
+    expect(restored.status).toBe('scheduled');
+    expect(restored.send_claim_token).toBeNull();
+    expect(new Date(restored.scheduled_send_at).toISOString()).toBe(originalScheduledSendAt.toISOString());
+
+    // And the row is not stuck behind an unrestored claim — a subsequent
+    // send can claim it fresh and deliver normally.
+    const secondSpy = jest.spyOn(Invoice, 'sendViaSMS').mockResolvedValueOnce({
+      sent: true, payUrl: 'https://pay.example.invalid/i/retry-after-restore',
+    });
+    try {
+      const secondResult = await Invoice.sendViaSMSAndEmail(invoiceId);
+      expect(secondResult.ok).toBe(true);
+      expect(secondResult.sms.ok).toBe(true);
+    } finally {
+      secondSpy.mockRestore();
     }
   });
 

@@ -56,15 +56,51 @@ describe('stripPayLinkLineFromBody (round 9 #4634 finding 1)', () => {
     expect(twice).toBe(once);
   });
 
-  test('defensive: a body that is nothing but the pay-link line is returned as-is rather than emptied', () => {
+  test('round 10 #4634 finding 2: a body that is nothing but the pay-link line strips to null, never restored with the stale link', () => {
+    // The round-9 fallback returned the ORIGINAL (link-bearing) body here —
+    // a stale pay link disguised as a successful strip. The caller
+    // (scheduler.js) treats null as "suppress this replay through the
+    // normal ineligible/terminal path", never a bare skip and never a
+    // resend of the link.
     const body = `Invoice: ${payUrl}`;
-    expect(stripPayLinkLineFromBody(body, payUrl)).toBe(body);
+    expect(stripPayLinkLineFromBody(body, payUrl)).toBeNull();
   });
 
   test('non-string body or missing pay_url passes through unchanged', () => {
     expect(stripPayLinkLineFromBody(null, payUrl)).toBeNull();
     expect(stripPayLinkLineFromBody('hello', null)).toBe('hello');
     expect(stripPayLinkLineFromBody('hello', undefined)).toBe('hello');
+  });
+
+  test('round 10 #4634 finding 1: matches a scheme-stripped body against the full https:// pay_url stored in metadata', () => {
+    // complete-scheduled-service.js stores metadata.pay_url in its original
+    // https:// form, but the rendered/frozen sms_log body already had its
+    // scheme stripped by admin-sms-templates.js before it was ever queued —
+    // the literal-match bug this normalizes away.
+    const scheme = 'https://pay.wavespestcontrol.com/i/abc123';
+    const body = `Report: https://portal.example.invalid/r/xyz\n\nInvoice: pay.wavespestcontrol.com/i/abc123\n\nReply STOP to opt out.`;
+    const stripped = stripPayLinkLineFromBody(body, scheme);
+    expect(stripped).not.toContain('pay.wavespestcontrol.com/i/abc123');
+    expect(stripped).toContain('Report:');
+    expect(stripped).toContain('Reply STOP to opt out.');
+  });
+
+  test('round 10 #4634 finding 1: matches when the body still carries the full https:// URL', () => {
+    const stripped = stripPayLinkLineFromBody(`Report: r\n\nInvoice: ${payUrl}`, payUrl);
+    expect(stripped).not.toContain(payUrl);
+    expect(stripped).toBe('Report: r');
+  });
+
+  test('round 10 #4634 finding 1: trailing punctuation/query variants the shared normalizer already tolerates still match', () => {
+    // stripSmsUrlScheme's regex consumes the whole URL token (including a
+    // trailing query string), so a pay_url minted with query params still
+    // matches the frozen body's scheme-stripped line.
+    const withQuery = `${payUrl}?src=sms`;
+    const body = `Report: r\n\nInvoice: pay.wavespestcontrol.com/i/abc123?src=sms.\n\nThanks!`;
+    const stripped = stripPayLinkLineFromBody(body, withQuery);
+    expect(stripped).not.toContain('abc123');
+    expect(stripped).toContain('Report: r');
+    expect(stripped).toContain('Thanks!');
   });
 });
 

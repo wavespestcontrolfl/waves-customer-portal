@@ -3565,6 +3565,23 @@ function initScheduledJobs() {
             if (recheck && recheck.stripPayLink === true && claimMeta.pay_url) {
               const { stripPayLinkLineFromBody } = require('./dispatch-completion-deferred');
               const strippedBody = stripPayLinkLineFromBody(msg.message_body, claimMeta.pay_url);
+              if (strippedBody === null) {
+                // An operator-edited template that was ONLY the invoice
+                // line has no safe body left to send — never restore the
+                // original (link-bearing) text and never send an empty
+                // one (#4634 round-10 P2). Suppress through the exact same
+                // terminal path an ordinary eligible:false recheck refusal
+                // takes above: blocked status, claim release, review
+                // fallback armed via onTerminal.
+                await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                  status: 'blocked',
+                  updated_at: new Date(),
+                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?, 'terminal_pending', ?::boolean)", [`stale_replay:${recheck.reason || 'pay-link-only-body'}`, requiresTerminalHook(claimMeta.entry_point)]),
+                });
+                logger.info(`[scheduled-sms] deferred completion ${msg.id} suppressed: template body was pay-link-only, nothing safe to strip (${recheck.reason || 'invoice-not-collectible'})`);
+                await runTerminalHookDurably(msg.id, claimMeta.entry_point, recheckMeta);
+                continue;
+              }
               const stampedAt = new Date();
               const changed = await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
                 message_body: strippedBody,
