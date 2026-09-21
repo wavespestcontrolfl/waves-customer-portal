@@ -137,6 +137,11 @@ function getLookupTimingConfig() {
   };
 }
 
+// Vacant-parcel sq ft flag copy WITHOUT the plat median — also what the
+// public estimator route substitutes so the staff-only neighbor figures
+// never ride an unauthenticated payload as flag text.
+const VACANT_SQFT_FLAG_COPY = 'Home sq ft not on the county roll (vacant parcel — possibly new construction) — estimator defaults to 2,000 sq ft; replace with the customer\'s plan sq ft';
+
 // Plat-median query for unassessed vacant parcels: one county GIS call,
 // skipped outright when the lookup budget can't fit a meaningful attempt.
 const SUBDIVISION_MEDIAN_TIMEOUT_MS = 3500;
@@ -3826,7 +3831,7 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
       reason: vacantParcel
         ? (platMedian
           ? `Home sq ft not on the county roll (vacant parcel — possibly new construction). Prefilled with the median of ${platMedian.sampleCount.toLocaleString('en-US')} assessed homes in this plat, ${platMedian.medianSqft.toLocaleString('en-US')} sq ft${platMedian.minSqft && platMedian.maxSqft ? ` (range ${platMedian.minSqft.toLocaleString('en-US')}–${platMedian.maxSqft.toLocaleString('en-US')})` : ''} — confirm the size with the customer before pricing`
-          : 'Home sq ft not on the county roll (vacant parcel — possibly new construction) — estimator defaults to 2,000 sq ft; replace with the customer\'s plan sq ft')
+          : VACANT_SQFT_FLAG_COPY)
         : 'Home sq ft missing from records — estimator defaults to 2,000 sq ft; verify before pricing',
       priority: 'HIGH'
     });
@@ -5282,6 +5287,7 @@ function extractOpenAIText(data) {
 module.exports = router;
 module.exports.performPropertyLookup = performPropertyLookup;
 module.exports.buildEnrichedProfile = buildEnrichedProfile;
+module.exports.VACANT_SQFT_FLAG_COPY = VACANT_SQFT_FLAG_COPY;
 module.exports.translateV2CallToV1Input = translateV2CallToV1Input;
 module.exports.needsTurfManualConfirmation = needsTurfManualConfirmation;
 module.exports.resolveCalculateQualifyingEvidence = resolveCalculateQualifyingEvidence;

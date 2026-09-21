@@ -58,14 +58,24 @@ describe('gatherPropertySignals — plat median reuse', () => {
     expect(lookupSubdivisionMedianLivingSqft).not.toHaveBeenCalled();
   });
 
-  it('falls back to the record stamp when the profile carries none, still without a re-query', async () => {
+  it('falls back to the record stamp only when the lookup returned NO profile', async () => {
     lookupResult.current = {
       propertyRecord: vacantRecord({ _subdivisionMedian: { medianSqft: 3071, sampleCount: 174, subdivisionQueried: PLAT, county: 'Manatee' } }),
-      enriched: { homeSqFt: 0, unassessedVacantParcel: true },
+      enriched: null,
     };
     const signals = await gatherPropertySignals(CONTEXT, { persistLookup: false });
     expect(signals.subdivisionMedian).toMatchObject({ medianSqft: 3071, sampleCount: 174 });
     expect(lookupSubdivisionMedianLivingSqft).not.toHaveBeenCalled();
+  });
+
+  it('respects a profile that nulled the median (unit-inside-a-building lookup) despite a record stamp', async () => {
+    lookupResult.current = {
+      propertyRecord: vacantRecord({ _subdivisionMedian: { medianSqft: 3071, sampleCount: 174, subdivisionQueried: PLAT, county: 'Manatee' } }),
+      enriched: { homeSqFt: 0, unassessedVacantParcel: true, residentialUnitLookup: { wholePropertyCategory: 'residential' }, subdivisionMedian: null },
+    };
+    lookupSubdivisionMedianLivingSqft.mockResolvedValueOnce(null);
+    const signals = await gatherPropertySignals(CONTEXT, { persistLookup: false });
+    expect(signals.subdivisionMedian).toBeNull();
   });
 
   it('keeps the direct dig for a vacant row served without a stamp (pre-stamp cache rows)', async () => {

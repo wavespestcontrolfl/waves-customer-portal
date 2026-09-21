@@ -3,7 +3,7 @@ const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { performPropertyLookup } = require('./property-lookup-v2');
+const { performPropertyLookup, VACANT_SQFT_FLAG_COPY } = require('./property-lookup-v2');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
 const { normalizeLeadAddress, formatAddress } = require('../utils/address-normalizer');
 const { normalizeWebAdditionalProperties } = require('../utils/intake-normalize');
@@ -69,8 +69,16 @@ function publicPropertySummary(record) {
 // so the block is dropped from both the response and the lead snapshot.
 function publicEnrichedProfile(enriched) {
   if (!enriched || typeof enriched !== 'object') return enriched ?? null;
-  const { subdivisionMedian: _omitted, ...rest } = enriched;
-  return rest;
+  const { subdivisionMedian, ...rest } = enriched;
+  if (!subdivisionMedian || !Array.isArray(rest.fieldVerifyFlags)) return rest;
+  // The homeSqFt verify flag spells the same figures out in prose — swap in
+  // the median-free vacant-parcel copy (one shared string, never a regex).
+  return {
+    ...rest,
+    fieldVerifyFlags: rest.fieldVerifyFlags.map((flag) => (
+      flag?.field === 'homeSqFt' ? { ...flag, reason: VACANT_SQFT_FLAG_COPY } : flag
+    )),
+  };
 }
 
 function firstNonEmpty(...values) {
