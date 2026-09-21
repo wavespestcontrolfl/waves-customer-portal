@@ -559,7 +559,12 @@ function paymentOutcomeIsConditional(text, claimStart, claim, outcome, outcomeSt
 function paymentOutcomeIsInterrogative(text, claim, matchEnd, claimEnd) {
   const trailingClaim = text.slice(matchEnd, claimEnd);
   const followup = trailingClaim.match(/^[^,!?;]*,\s*(?:(?:and|y)\s+)?(.*)$/i);
-  const contractedTag = followup && /^\s*(?:(?:[a-z]+n|ca)[\x27\u2019]t)\s+(?:it|that)\s*$/i.test(followup[1]);
+  // A confirmation tag mirrors the prior claim back as a yes/no check
+  // ("is that correct?", "isn't that right?") rather than asking anything
+  // new; a real follow-up question is handled separately below.
+  const confirmationTag = followup && /^\s*(?:is|was|are|were|does|did|isn[\x27\u2019]t|wasn[\x27\u2019]t|aren[\x27\u2019]t|weren[\x27\u2019]t|doesn[\x27\u2019]t|didn[\x27\u2019]t)\s+(?:it|that|this)\s+(?:correct|right|true|accurate)\s*\??\s*$/i.test(followup[1]);
+  const contractedTag = followup && (confirmationTag
+    || /^\s*(?:(?:[a-z]+n|ca)[\x27\u2019]t)\s+(?:it|that)\s*$/i.test(followup[1]));
   const followupQuestion = followup && !contractedTag && (/^\s*¿(?!\s*(?:verdad|cierto|correcto|no|s[ií])\s*$)/i.test(followup[1]) || new RegExp(
     `^\\s*¿?\\s*(?:${QUESTION_AUX_RE_SOURCE}|(?:do|does|did|would|have|has|had|could|should|is|are|was|were|ca|wo|sha)n[\\x27\\u2019]t|(?:what|when|where|which|who|whom|whose|why|how)\\b[^,.!?;]{0,40}\\b${QUESTION_AUX_RE_SOURCE}|(?:need\\s+)?(?:anything|something)\\s+else|(?:any\\s+)?(?:(?:more|further)\\s+)?questions?|(?:quiere|quieres|desea|deseas|puedo|podemos|puede|puedes|podr[ií]a(?:mos)?))\\b`,
     'i',
@@ -626,9 +631,10 @@ function paymentOutcomeHasSpanishRefusal(claim, outcomeStart) {
 }
 function paymentRefusalPresupposesOutcome(claim) {
   const hedge = EPISTEMIC_HEDGE_RE.exec(claim);
-  // Refusing the time/reason of an outcome still presupposes the outcome.
-  // "whether" and "that" refuse confirmation of the outcome itself.
-  return Boolean(hedge && /^\s*(?:(?:you|us|him|her|them)\s+)?(?:when|why)\b/i.test(claim.slice(hedge.index + hedge[0].length)));
+  // Refusing the time/reason/amount/location/manner of an outcome still
+  // presupposes the outcome happened — only "whether" and "that" refuse
+  // confirmation of the outcome's truth itself.
+  return Boolean(hedge && /^\s*(?:(?:you|us|him|her|them)\s+)?(?:when|why|where|how(?:\s+(?:much|many|long))?)\b/i.test(claim.slice(hedge.index + hedge[0].length)));
 }
 function paymentClaimContext(text, start, end) {
   // Mask decimal punctuation only for scope detection, preserving offsets

@@ -746,3 +746,33 @@ test.each([
 ])('payment paperwork is not a money outcome: %s', (text, expected) => {
   expect(outcome(text)).toBe(expected);
 });
+
+// Refusing an attribute of the outcome (amount, location, manner) still
+// presupposes the outcome happened; only refusing the outcome's truth
+// itself ("whether"/"that") exempts the claim.
+test.each([
+  ['I cannot confirm how much we charged your card.', 'fail'],
+  ['I cannot confirm how much your payment was.', 'pass'],
+  ['I cannot tell you how much your card was charged.', 'fail'],
+  ['I cannot confirm where your payment was processed.', 'fail'],
+  ['I cannot tell you where your card was charged.', 'fail'],
+  ['I cannot confirm how your payment was processed.', 'fail'],
+  ['I cannot confirm how many payments were approved.', 'fail'],
+  ['I cannot confirm how much we charged your card, but I can confirm your visit is scheduled.', 'fail'],
+  ['I cannot confirm whether we charged your card.', 'pass'],
+  ['I cannot confirm that we charged your card.', 'pass'],
+  ['I cannot confirm how much we might charge your card.', 'pass'],
+])('attribute refusals presuppose the outcome: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
+
+// A confirmation question mirroring the prior assertion asks the caller to
+// verify it, rather than asserting it outright.
+test.each([
+  ['Your payment was approved, is that correct?', 'pass'],
+  ['Your payment was approved, isn’t that correct?', 'pass'],
+  ['Your card was charged, is that right?', 'pass'],
+  ['Your payment was approved, was that correct?', 'pass'],
+])('confirmation questions are not assertions: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
