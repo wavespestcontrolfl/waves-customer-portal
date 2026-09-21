@@ -564,10 +564,17 @@ async function performPropertyLookupCore(address, options = {}) {
     if (vacantParcel && parcelMeta?.county && platName) {
       const medianBudgetMs = Math.max(0, remainingLookupMs(t0, timing) - timing.responseMarginMs);
       if (medianBudgetMs >= MIN_SUBDIVISION_MEDIAN_BUDGET_MS) {
+        // The helper is itself fail-open (a layer outage logs
+        // "[county-parcel-gis] subdivision median lookup failed" and resolves
+        // null); this catch records anything that escapes it on the lookup
+        // result, the way the construction-permit read above does.
         const median = await lookupSubdivisionMedianLivingSqft(
           { county: parcelMeta.county, subdivision: platName },
           { timeoutMs: Math.min(medianBudgetMs, SUBDIVISION_MEDIAN_TIMEOUT_MS) },
-        ).catch(() => null);
+        ).catch((err) => {
+          result.errors.push({ source: 'subdivision-median', message: err?.message || String(err) });
+          return null;
+        });
         if (median) result.propertyRecord._subdivisionMedian = { ...median, county: parcelMeta.county };
       }
     }

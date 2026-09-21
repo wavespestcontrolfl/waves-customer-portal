@@ -825,6 +825,11 @@ same pair is accepted by `/api/webhooks/lead` and its `/api/leads` alias
 with identical semantics. Also accepts the OPTIONAL `timeline` described
 under `/api/webhooks/lead` above, with the same storage and urgency
 semantics; it survives the later `/api/public/quote/calculate` snapshot).
+The returned and lead-stored `enriched` profile is the admin lookup's profile
+MINUS the staff-only `subdivisionMedian` block (the plat name, county, and
+assessed-neighbor sample/range that back the admin estimator's home-size
+estimate for an unassessed vacant parcel) — `publicEnrichedProfile` strips it
+on both paths; the response otherwise describes only the requested parcel).
 `/api/public/estimator/lead-prefill` (POST exchange, read-only semantics;
 swaps the voicemail text-back link's `lead_id` + HMAC token for that ONE
 lead's own contact fields — first/last name, email, phone, address, city,

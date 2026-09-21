@@ -22,6 +22,7 @@ jest.mock('../models/db', () => {
   return mock;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+const logger = require('../services/logger');
 
 const PLAT = 'EXAMPLE ESPLANADE PH VI SUBPH A & B PB80/131';
 const trioRecord = { current: null };
@@ -35,6 +36,13 @@ jest.mock('../services/property-lookup/ai-property-lookup', () => {
   };
 });
 
+// Pass-through mock so one test can make the helper REJECT (the route binds
+// it at load time, so a late spy would never be seen).
+jest.mock('../services/property-lookup/county-parcel-gis', () => {
+  const actual = jest.requireActual('../services/property-lookup/county-parcel-gis');
+  return { ...actual, lookupSubdivisionMedianLivingSqft: jest.fn((...args) => actual.lookupSubdivisionMedianLivingSqft(...args)) };
+});
+const { lookupSubdivisionMedianLivingSqft } = require('../services/property-lookup/county-parcel-gis');
 const { performPropertyLookup } = require('../routes/property-lookup-v2');
 
 const ADDRESS = '1010 Example Loop, Lakewood Ranch, FL 34211';
@@ -165,6 +173,18 @@ describe('performPropertyLookup — plat median for an unassessed vacant parcel'
     expect(result.propertyRecord._subdivisionMedian).toBeUndefined();
     expect(result.enriched.subdivisionMedian).toBeNull();
     expect(result.enriched.lotSqFt).toBe(9541);
+    // Observable: the county helper logs the outage (it resolves null by design).
+    expect(logger.warn).toHaveBeenCalledWith(
+      '[county-parcel-gis] subdivision median lookup failed',
+      expect.objectContaining({ county: 'Manatee', error: expect.stringContaining('503') }),
+    );
+  });
+
+  it('records an escaped helper failure on result.errors instead of dropping it', async () => {
+    lookupSubdivisionMedianLivingSqft.mockRejectedValueOnce(new Error('layer exploded'));
+    const result = await performPropertyLookup(ADDRESS, { refresh: true });
+    expect(result.errors).toEqual(expect.arrayContaining([{ source: 'subdivision-median', message: 'layer exploded' }]));
+    expect(result.enriched.subdivisionMedian).toBeNull();
   });
 
   it('never queries the plat for a built record or a vacant parcel without a plat name', async () => {
