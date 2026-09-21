@@ -7059,12 +7059,31 @@ const InvoiceService = {
       // same direct way elsewhere in this file (consumeQueuedInvoiceSend,
       // an invoice-send retry adopting its own held leg) — cancelling it
       // here too is safe and keeps this the one place that retires it.
-      const livePayLinkRows = await trx("sms_log")
-        .whereRaw("metadata->>'invoice_id' = ?", [String(id)])
-        .whereRaw("metadata->>'entry_point' = ANY(?)", [PAY_LINK_QUEUE_ENTRY_POINTS])
-        .whereRaw(LIVE_PAY_LINK_QUEUE_ROW_SQL)
-        .forUpdate()
-        .select("id", "status", trx.raw("metadata->>'entry_point' as entry_point"));
+      //
+      // NOWAIT (round-10 pre-push audit P1): this transaction already holds
+      // the invoice and customer rows. Waiting here on an sms_log row that a
+      // scheduler worker holds while it goes on to touch the invoice is the
+      // exact cross-table cycle lockVisitForSettlement documents; never
+      // WAIT on another table while holding the invoice. A held queue row
+      // means a worker is claiming that very text right now, which is the
+      // same retryable in-flight posture as the status check below. The
+      // lock is taken inside a SAVEPOINT (knex nested transaction): a
+      // 55P03 aborts the enclosing PG transaction otherwise, and the caller
+      // still owns this transaction after a refusal. Row locks acquired in
+      // the savepoint survive its release.
+      let livePayLinkRows;
+      try {
+        livePayLinkRows = await trx.transaction((savepoint) => savepoint("sms_log")
+          .whereRaw("metadata->>'invoice_id' = ?", [String(id)])
+          .whereRaw("metadata->>'entry_point' = ANY(?)", [PAY_LINK_QUEUE_ENTRY_POINTS])
+          .whereRaw(LIVE_PAY_LINK_QUEUE_ROW_SQL)
+          .forUpdate()
+          .noWait()
+          .select("id", "status", savepoint.raw("metadata->>'entry_point' as entry_point")));
+      } catch (err) {
+        if (err?.code !== "55P03") throw err;
+        return { ...skip("queued_pay_link_in_flight"), retryable: true };
+      }
       if (livePayLinkRows.some((row) => row.status !== "scheduled")) {
         // Already mid-send (a worker claimed it) or delivered-but-
         // unfinalized — same posture as the invoice's own 'sending' check

@@ -602,6 +602,30 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
     expect(await read()).toMatchObject({ status: 'draft', prepaid_by: null });
   });
 
+  test('settleZeroBalance never WAITS on a queue row another worker holds — NOWAIT maps 55P03 to the same retryable in-flight refusal (round-10 #4634 pre-push audit P1)', async () => {
+    // The row must be COMMITTED for a second connection to hold it, so it
+    // lives outside trx (customer_id is nullable; invoice_id rides in
+    // metadata only) and is deleted below. The holder is a second
+    // transaction on the pool, exactly like a scheduler worker mid-claim.
+    const [queued] = await database('sms_log').insert({
+      direction: 'outbound', from_phone: '+12025550100', to_phone: '+12025550124',
+      status: 'scheduled', message_type: 'invoice',
+      metadata: { entry_point: 'invoice_send_deferred', invoice_id: invoiceId },
+    }).returning('id');
+    const holder = await database.transaction();
+    try {
+      await holder('sms_log').where({ id: queued.id }).forUpdate().first('id');
+
+      const result = await Invoice.settleZeroBalance(invoiceId, trx);
+
+      expect(result).toMatchObject({ settled: false, reason: 'queued_pay_link_in_flight', retryable: true });
+      expect(await read()).toMatchObject({ status: 'draft', prepaid_by: null });
+    } finally {
+      await holder.rollback();
+      await database('sms_log').where({ id: queued.id }).del();
+    }
+  });
+
   test('a nested balance_changed_retry from the preclaimed SMS leg is promoted to sendViaSMSAndEmail\'s top-level result, never lost as a generic SMS failure with the email leg attempted (Codex round-8 audit P2 #4131 finding 5) — and the outer claim is restored so a retry can proceed (round-10 #4634 finding 4)', async () => {
     // Genuinely collectible — not zero-due — so the wrapper's own claim
     // succeeds normally and reaches the nested sendViaSMS call. Scheduled
