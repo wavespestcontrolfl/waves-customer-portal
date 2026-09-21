@@ -53,21 +53,20 @@ const SAFETY_ONCE_DRY_APPENDED_DURATION_RE = new RegExp(
 // helper that accepts it, so a product created or renamed after the
 // checked-in catalog snapshot (voice-relay-safety-response-recognition's
 // SAFETY_KNOWN_PRODUCT_NAMES) is still recognized when the agent names it.
-// Contract: record.toolCalls[*] carries the tool's structured return value
-// either directly on the entry or nested under `.result` (a generic tool-call
-// recorder puts it there; this eval corpus's own simpler recorder puts
-// fields straight on the entry) -- from whichever of those two objects is
-// present, a `product_name` string and a `products` array's entries (each
-// either a bare string or an object with a `.name`) are collected. A record
-// with neither shape (no toolCalls, or tool calls that never touch product
-// data) yields no names and behaves exactly as before this existed.
+// Contract: record.toolCalls[*] is what voice-relay-replay.js's
+// recordToolCall/runFixtureTool actually produce -- a fixture tool response's
+// `product_name` string and/or `products` array (each entry a bare string or
+// an object with a `.name`), threaded straight onto the recorded event
+// unchanged (never parsed out of the free-prose `.text` the caller hears).
+// A record with neither field (no toolCalls, or tool calls whose fixture
+// never set them) yields no names and behaves exactly as before this
+// existed.
 function safetyRecordProductNames(record) {
   const names = [];
   for (const call of (record && record.toolCalls) || []) {
     if (!call || typeof call !== 'object') continue;
-    const source = call.result && typeof call.result === 'object' ? call.result : call;
-    if (typeof source.product_name === 'string') names.push(source.product_name);
-    for (const product of Array.isArray(source.products) ? source.products : []) {
+    if (typeof call.product_name === 'string') names.push(call.product_name);
+    for (const product of Array.isArray(call.products) ? call.products : []) {
       if (typeof product === 'string') names.push(product);
       else if (product && typeof product.name === 'string') names.push(product.name);
     }
