@@ -168,8 +168,10 @@ it("the IMMEDIATE composer send carries replyToMessageId (the answered inbox row
   // Source contract: the recruiting rail decision on the server keys on this
   // field, so the payload that Text back actually sends must include it.
   const fs = await import("node:fs");
-  const { fileURLToPath } = await import("node:url");
-  const src = fs.readFileSync(fileURLToPath(new URL("./CommunicationsPageV2.jsx", import.meta.url)), "utf8");
+  const path = await import("node:path");
+  // vitest runs from client/ locally and in CI; tolerate a repo-root cwd too
+  const candidates = ["src/pages/admin/CommunicationsPageV2.jsx", "client/src/pages/admin/CommunicationsPageV2.jsx"].map((rel) => path.resolve(process.cwd(), rel));
+  const src = fs.readFileSync(candidates.find((f) => fs.existsSync(f)), "utf8");
   const immediate = src.slice(src.indexOf('adminFetch("/admin/communications/sms", {'));
   const payload = immediate.slice(0, immediate.indexOf("});") + 3);
   expect(payload).toMatch(/replyToMessageId: replyContext\?\.messageId \|\| undefined/);
