@@ -27,7 +27,8 @@ jest.mock('../services/logger', () => ({
 
 const { detectUnassessedVacantParcel } = require('../services/property-lookup/ai-property-lookup');
 const { saveLookup, getCachedLookup } = require('../services/property-lookup/lookup-cache');
-const { buildFieldVerifyFlags } = require('../routes/property-lookup-v2')._private;
+const { buildEnrichedProfile } = require('../routes/property-lookup-v2');
+const { buildFieldVerifyFlags, subdivisionMedianEstimate } = require('../routes/property-lookup-v2')._private;
 
 // Merged-record shape for the probed case: county GIS matched (lot + land
 // use on _parcel), no building facts anywhere. Fictional parcel identity.
@@ -149,6 +150,141 @@ describe('buildFieldVerifyFlags — vacant-parcel copy', () => {
     const sqft = flags.find((f) => f.field === 'homeSqFt');
     expect(sqft.reason).toContain('defaults to 2,000');
     expect(sqft.reason).not.toContain('estimated from lot size');
+  });
+});
+
+// Plat-median stamp the fresh lookup path writes for a vacant parcel whose
+// plat already has assessed neighbors (shape from a 2026-09-21 live probe of
+// a Lakewood Ranch plat: 174 assessed homes, median 3,071 sq ft, 2,101–3,242;
+// fictional plat name).
+function platMedianStamp(overrides = {}) {
+  return {
+    medianSqft: 3070.5,
+    sampleCount: 174,
+    minSqft: 2101,
+    maxSqft: 3242,
+    p25: 2650,
+    p75: 3180,
+    subdivisionQueried: 'EXAMPLE ESPLANADE PH VI SUBPH A & B PB80/131',
+    county: 'Manatee',
+    ...overrides,
+  };
+}
+
+describe('subdivisionMedianEstimate — plat median for an unassessed vacant parcel', () => {
+  it('exposes the rounded median, sample count, range, and plat while the parcel is unassessed', () => {
+    const est = subdivisionMedianEstimate(vacantRecord({ _subdivisionMedian: platMedianStamp() }));
+    expect(est).toEqual({
+      medianSqft: 3071,
+      sampleCount: 174,
+      minSqft: 2101,
+      maxSqft: 3242,
+      subdivision: 'EXAMPLE ESPLANADE PH VI SUBPH A & B PB80/131',
+      county: 'Manatee',
+      sourceLabel: 'median of 174 assessed homes in this plat',
+    });
+  });
+
+  it('disappears the moment a real building fact lands (roll posting or a verified sqft)', () => {
+    expect(subdivisionMedianEstimate(vacantRecord({ _subdivisionMedian: platMedianStamp(), squareFootage: 2980 }))).toBeNull();
+    expect(subdivisionMedianEstimate(vacantRecord({ _subdivisionMedian: platMedianStamp(), yearBuilt: 2026 }))).toBeNull();
+  });
+
+  it('refuses a thin sample or a non-positive median', () => {
+    expect(subdivisionMedianEstimate(vacantRecord({ _subdivisionMedian: platMedianStamp({ sampleCount: 7 }) }))).toBeNull();
+    expect(subdivisionMedianEstimate(vacantRecord({ _subdivisionMedian: platMedianStamp({ medianSqft: 0 }) }))).toBeNull();
+    expect(subdivisionMedianEstimate(vacantRecord())).toBeNull();
+    expect(subdivisionMedianEstimate(null)).toBeNull();
+  });
+
+  it('tolerates a stamp without a range (older helper shape)', () => {
+    const est = subdivisionMedianEstimate(vacantRecord({ _subdivisionMedian: platMedianStamp({ minSqft: undefined, maxSqft: undefined }) }));
+    expect(est).toMatchObject({ medianSqft: 3071, minSqft: null, maxSqft: null });
+  });
+});
+
+describe('buildEnrichedProfile — plat median rides beside an EMPTY homeSqFt', () => {
+  it('surfaces subdivisionMedian on a vacant parcel without claiming a measurement', () => {
+    const profile = buildEnrichedProfile(vacantRecord({ _subdivisionMedian: platMedianStamp() }), null, 27.47, -82.39);
+    expect(profile.unassessedVacantParcel).toBe(true);
+    expect(profile.homeSqFt).toBe(0);
+    expect(profile.fieldEvidence.squareFootage).toBeUndefined();
+    expect(profile.subdivisionMedian).toMatchObject({ medianSqft: 3071, sampleCount: 174, minSqft: 2101, maxSqft: 3242 });
+  });
+
+  it('is null when the address audit could not confirm the parcel (snapped house number)', () => {
+    const audit = { snappedRecord: { typed: '1010', record: '1012' }, hasExactMatch: false, streetExists: true, county: 'Manatee', nearestNumbers: [] };
+    const profile = buildEnrichedProfile(vacantRecord({ _subdivisionMedian: platMedianStamp() }), null, 27.47, -82.39, null, audit);
+    expect(profile.fieldVerifyFlags.some((f) => f.field === 'address')).toBe(true);
+    expect(profile.subdivisionMedian).toBeNull();
+  });
+
+  it('is withheld (null) on a commercial profile — neighboring homes say nothing about a building', () => {
+    const rec = vacantRecord({ _subdivisionMedian: platMedianStamp(), propertyType: 'Warehouse' });
+    rec._parcel = { ...rec._parcel, dorUseCode: '00', landUseDescription: 'Vacant Commercial' };
+    rec._raw = { landUse: 'Vacant Commercial', dorUseCode: '00' };
+    const profile = buildEnrichedProfile(rec, null, 27.47, -82.39);
+    expect(profile.isCommercial).toBe(true);
+    expect(profile.subdivisionMedian).toBeNull();
+  });
+
+  it('is undefined without a stamp (nothing judged) and null once the record carries a home (withheld)', () => {
+    expect(buildEnrichedProfile(vacantRecord(), null, 27.47, -82.39).subdivisionMedian).toBeUndefined();
+    const built = buildEnrichedProfile(vacantRecord({ _subdivisionMedian: platMedianStamp(), squareFootage: 2980, yearBuilt: 2026 }), null, 27.47, -82.39);
+    expect(built.subdivisionMedian).toBeNull();
+    expect(built.homeSqFt).toBe(2980);
+  });
+});
+
+describe('buildFieldVerifyFlags — plat-median sq ft copy', () => {
+  it('names the median, sample count, and range, and asks for customer confirmation', () => {
+    const flags = buildFieldVerifyFlags(vacantRecord({ _subdivisionMedian: platMedianStamp() }), null, null);
+    const sqft = flags.find((f) => f.field === 'homeSqFt');
+    expect(sqft.priority).toBe('HIGH');
+    expect(sqft.reason).toContain('vacant parcel');
+    expect(sqft.reason).toContain('174 assessed homes');
+    expect(sqft.reason).toContain('3,071 sq ft');
+    expect(sqft.reason).toContain('range 2,101–3,242');
+    expect(sqft.reason).toContain('confirm the size with the customer');
+    // The flat-default wording is gone: the estimator no longer prices on 2,000 here.
+    expect(sqft.reason).not.toContain('2,000');
+    // The situation flag is unchanged — the roll still can't split lot from build.
+    expect(flags.find((f) => f.field === 'vacantParcel')).toBeTruthy();
+  });
+
+  it('uses the median-free copy when the address audit could not confirm the parcel', () => {
+    const audit = { snappedRecord: { typed: '1010', record: '1012' }, hasExactMatch: false, streetExists: true, county: 'Manatee', nearestNumbers: [] };
+    const flags = buildFieldVerifyFlags(vacantRecord({ _subdivisionMedian: platMedianStamp() }), null, audit);
+    expect(flags.some((f) => f.field === 'address')).toBe(true);
+    const sqft = flags.find((f) => f.field === 'homeSqFt');
+    expect(sqft.reason).toContain('defaults to 2,000');
+    expect(JSON.stringify(flags)).not.toMatch(/3,071|174 assessed/);
+  });
+
+  it('uses the median-free copy on a commercial parcel, like the profile', () => {
+    const rec = vacantRecord({ _subdivisionMedian: platMedianStamp(), propertyType: 'Warehouse' });
+    rec._parcel = { ...rec._parcel, landUseDescription: 'Vacant Commercial' };
+    rec._raw = { landUse: 'Vacant Commercial', dorUseCode: '00' };
+    const flags = buildFieldVerifyFlags(rec, null, null);
+    expect(flags.find((f) => f.field === 'homeSqFt').reason).toContain('defaults to 2,000');
+    expect(JSON.stringify(flags)).not.toMatch(/3,071|174 assessed/);
+  });
+
+  it('uses the median-free copy for a unit-inside-a-building lookup, like the profile', () => {
+    const flags = buildFieldVerifyFlags(vacantRecord({ _subdivisionMedian: platMedianStamp() }), null, null, { residentialUnitLookup: true });
+    const sqft = flags.find((f) => f.field === 'homeSqFt');
+    expect(sqft.reason).toContain('defaults to 2,000');
+    expect(JSON.stringify(flags)).not.toMatch(/3,071|174 assessed/);
+  });
+
+  it('omits the range when the stamp has none and keeps the default copy for a thin sample', () => {
+    const noRange = buildFieldVerifyFlags(vacantRecord({ _subdivisionMedian: platMedianStamp({ minSqft: null, maxSqft: null }) }), null, null)
+      .find((f) => f.field === 'homeSqFt');
+    expect(noRange.reason).toContain('3,071 sq ft');
+    expect(noRange.reason).not.toContain('range');
+    const thin = buildFieldVerifyFlags(vacantRecord({ _subdivisionMedian: platMedianStamp({ sampleCount: 5 }) }), null, null)
+      .find((f) => f.field === 'homeSqFt');
+    expect(thin.reason).toContain('defaults to 2,000');
   });
 });
 

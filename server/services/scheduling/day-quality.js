@@ -1,6 +1,8 @@
 /** Planned route measurements. No writes, geocoding, traffic calls or invented
  * stop capacity. Gross calendar gaps are not automatically bookable time. */
-const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration } = require('../route-reorder-window-fit');
+const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration, isCoVisitPair } = require('../route-reorder-window-fit');
+const { allocationKey, occupiedRows } = require('./visit-capacity');
+const { isHoldStop } = require('./travel-gap');
 
 // Route-quality measures work still to be performed. stops-ahead keeps
 // completed visits as route stops (position/total on the day of service),
@@ -9,6 +11,52 @@ const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration }
 // location, duration, grouping or lateness cards (codex #4295 r3 P2).
 const QUALITY_EXCLUDED_STATUSES = [...require('../stops-ahead').NOT_A_ROUTE_STOP_STATUSES, 'completed'];
 const { parseHHMM } = require('./window-rules');
+
+// Two customers promised the same technician at the same time. Staff and
+// phone-reschedule saves commit through such a clash by owner ruling
+// (2026-08-25, advisory only), so the planned board is where it must show.
+//
+// SCOPE (owner decision 2026-09-20, PR #4620): the plain case only — two
+// ungrouped rows with a known duration, neither a live hold, occupying the
+// rebooker's own probe span (visit-capacity occupiedRows: COALESCE(
+// window_end, start + estimate)), so the card agrees with what let the
+// save through. Rows that are part of a service-visit group (visit_id) or
+// a version-2 combined booking (allocationKey) are NOT measured here: their
+// occupancy is the SUM of members plus co-visit chaining (arrival-route
+// groupRouteStops, route-reorder-window-fit), and this measurement does not
+// re-compose those models — such days stay under the existing grouped-work
+// review line. One customer's ungrouped pest + lawn rows that isCoVisitPair
+// proves are one stop never pair; a second property or unit still does. An
+// unknown customer on either side is never waved on.
+function doubleBookedPairs(stops) {
+  const plain = stops.filter(stop => parseHHMM(stop.window_start) != null
+    && !stop.visit_id && !allocationKey(stop) && !isHoldStop(stop)
+    && (Number(stop.estimated_duration_minutes) > 0 || parseHHMM(stop.window_end) > parseHHMM(stop.window_start)));
+  const rows = occupiedRows(plain)
+    .map((row, index) => ({ stop: plain[index], start: row.startMin, end: row.endMin }))
+    .filter(row => row.start != null && row.end > row.start)
+    .sort((a, b) => a.start - b.start || String(a.stop.id).localeCompare(String(b.stop.id)));
+  // A proven co-visit is ONE physical appointment: collapse it so a clash
+  // with a third customer is one collision, not one per member. Its span is
+  // the union of the members' probe spans (the summed tail is out of scope).
+  const blocks = [];
+  for (const row of rows) {
+    const host = blocks.find(block => isCoVisitPair(effectiveWindowRange, block.stops[block.stops.length - 1], row.stop));
+    if (host) {
+      host.ids.push(row.stop.id);
+      host.stops.push(row.stop);
+      host.end = Math.max(host.end, row.end);
+    } else blocks.push({ ids: [row.stop.id], stops: [row.stop], start: row.start, end: row.end });
+  }
+  const pairs = [];
+  for (let i = 0; i < blocks.length; i++) {
+    for (let j = i + 1; j < blocks.length && blocks[j].start < blocks[i].end; j++) {
+      const [a, b] = [blocks[i], blocks[j]];
+      pairs.push({ ids: [...a.ids, ...b.ids], minutes: Math.min(a.end, b.end) - b.start });
+    }
+  }
+  return pairs;
+}
 
 function measureDayQuality(RouteOptimizer, stops, {
   departureMinutes = null, targetReturnMinutes = null, breakMinutes = null, future = true,
@@ -27,17 +75,22 @@ function measureDayQuality(RouteOptimizer, stops, {
     overlapMinutes += Math.max(0, Math.min(end, block.end) - block.start);
     end = Math.max(end, block.end);
   }
+  const doubleBookedVisits = doubleBookedPairs(stops);
   const missingCoordinates = stops.filter(stop => !Number.isFinite(Number(stop.lat)) || !Number.isFinite(Number(stop.lng))
     || !Number(stop.lat) || !Number(stop.lng)).map(stop => stop.id);
   const defaultDurations = stops.filter(stop => !(Number(stop.estimated_duration_minutes) > 0)
     && !(parseHHMM(stop.window_end) > parseHHMM(stop.window_start) && parseHHMM(stop.window_start) != null)).map(stop => stop.id);
   const grouped = stops.some(stop => stop.visit_id);
+  // A version-2 combined booking is excluded from double-booking pairs (see
+  // doubleBookedPairs), so its day carries the grouped-work review line too.
+  // A live hold on a combined estimate is not yet a customer stop.
+  const combined = stops.some(stop => allocationKey(stop) && !isHoldStop(stop));
   const configured = [departureMinutes, targetReturnMinutes, breakMinutes].every(Number.isFinite)
     && targetReturnMinutes > departureMinutes && breakMinutes >= 0;
   const unknown = Object.entries({
     missing_coordinates: missingCoordinates.length > 0,
     default_service_durations: defaultDurations.length > 0,
-    grouped_work_requires_review: grouped,
+    grouped_work_requires_review: grouped || combined,
     actual_progress_required: !future,
     workday_or_break_allowance_unset: !configured,
   }).filter(([, present]) => present).map(([reason]) => reason);
@@ -50,7 +103,7 @@ function measureDayQuality(RouteOptimizer, stops, {
     ? targetReturnMinutes - departureMinutes - serviceMinutes - simulation.travelMin - breakMinutes : null;
   return {
     scheduledVisits: stops.length, serviceMinutes,
-    grossGapMinutes: gaps.reduce((sum, gap) => sum + gap.minutes, 0), grossGaps: gaps, overlapMinutes,
+    grossGapMinutes: gaps.reduce((sum, gap) => sum + gap.minutes, 0), grossGaps: gaps, overlapMinutes, doubleBookedVisits,
     untimedVisits: stops.length - timed.length, missingCoordinates, defaultDurations,
     modeledDriveMinutes: null, modeledWaitingMinutes: null, modeledReturnMinuteBeforeBreaks: null, modeledLateVisits: null,
     ...(simulation ? { modeledDriveMinutes: simulation.travelMin, modeledWaitingMinutes: simulation.waitingMin,
@@ -108,7 +161,7 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
     const date = etDateString(addETDays(parseETDateTime(`${from}T12:00`), index));
     const stops = await dayStopsQuery(conn, { dateStr: date, excludeStatuses: QUALITY_EXCLUDED_STATUSES,
       select: ['scheduled_services.id', 'scheduled_services.technician_id', 'scheduled_services.route_order',
-        'scheduled_services.customer_id',
+        'scheduled_services.customer_id', 'scheduled_services.scheduled_date', 'scheduled_services.reservation_service_mix',
         'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
         'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
         {

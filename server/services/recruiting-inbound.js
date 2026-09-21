@@ -1,0 +1,270 @@
+/**
+ * Recruiting inbound — an applicant texting back to our interview invite or
+ * confirmation (GATE_RECRUITING_COMMS).
+ *
+ * Applicant threads are owner-only (utils/recruiting-thread-scope.js). The
+ * Twilio inbound webhook therefore consults this module BEFORE the ordinary
+ * customer path: a reply from a phone we recently texted a `job_*` message
+ * to, that belongs to an open application, is recorded on the application
+ * (comms_history + an sms_log row typed `job_applicant_reply`) and raised
+ * as the admin-only `job_applicant_reply` bell — it never reaches the
+ * tech-visible sms_reply bell or any customer automation, even when the
+ * same phone also belongs to a customer (Codex r1 P1 on #4623).
+ *
+ * Matching is deliberately narrow: an open application (new/reviewed/
+ * interview/offer) AND a recent outbound recruiting text to that phone.
+ * Anything else falls through to the normal inbound handling.
+ */
+
+const crypto = require('crypto');
+const db = require('../models/db');
+const logger = require('./logger');
+const { phoneMatchDigits } = require('../utils/phone');
+const { appendCommsHistory, maskPhone, errorSummary } = require('./recruiting-comms');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+const { effectiveSendMs, newerEvidence } = require('../utils/recruiting-thread-scope');
+
+const OPEN_STATUSES = ['new', 'reviewed', 'interview', 'offer'];
+const RECENT_OUTBOUND_DAYS = 45;
+const REPLY_MESSAGE_TYPE = 'job_applicant_reply';
+
+function digitsExpr(column) {
+  return `regexp_replace(COALESCE(${column}, ''), '[^0-9]', '', 'g') = ANY (?::text[])`;
+}
+
+/**
+ * @returns {Promise<{ applicationId: string } | null>}
+ */
+// Outbound types that are not customer-facing texts (mirrors the webhook's
+// hasOutboundHistory exclusion) — they never count as "what the phone last
+// received from us".
+const NON_CONVERSATIONAL_OUTBOUND = ['internal_alert', 'admin_alert', 'ai_assistant', 'ai_assistant_reply'];
+// Customer-facing outbound predicate. sms_log.message_type is NULLABLE: a
+// legacy/direct-insert customer text carries no type, and a plain NOT IN /
+// NOT LIKE is UNKNOWN for NULL and would drop exactly that row (Codex r14
+// P1) — so the untyped row is customer context, and only the explicit
+// internal and job_* types are excluded. Constant SQL, bound list.
+const CUSTOMER_FACING_TYPE_SQL = `COALESCE(message_type, '') NOT IN (${NON_CONVERSATIONAL_OUTBOUND.map(() => '?').join(', ')}) AND COALESCE(message_type, '') NOT LIKE 'job\\_%'`;
+
+// The newest SMS the applicant could actually hold, across every open
+// application on this phone. Evidence is scoped to the line the reply
+// arrived on (local audit P0): an invite from line A and a newer owner
+// reply from line B are two threads — a reply to A must match A's
+// evidence, not lose to B's. Ranked by effectiveSendMs (never phone
+// recency: a later, untexted application must not swallow a reply meant
+// for an earlier one).
+function newestSmsEvidence(apps, toNumber, cutoffMs) {
+  const toDigits = toNumber ? phoneMatchDigits(String(toNumber)) : [];
+  const onInboundLine = (entry) => {
+    if (!toDigits.length || !entry.from_number) return true; // unknown line: keep
+    const fromDigits = phoneMatchDigits(String(entry.from_number));
+    return !fromDigits.length || toDigits.some((d) => fromDigits.includes(d));
+  };
+  let best = null;
+  for (const app of apps) {
+    const history = Array.isArray(app.comms_history) ? app.comms_history : [];
+    for (const entry of history) {
+      // 'deferred' / 'pending' are NOT delivery evidence (effectiveSendMs
+      // returns NaN): a queued text has definitely not reached the applicant.
+      const at = effectiveSendMs(entry);
+      if (!Number.isFinite(at) || at < cutoffMs || !onInboundLine(entry)) continue;
+      const candidate = { at, applicationId: app.id, entryId: entry.id || null, fromNumber: entry.from_number || null };
+      if (newerEvidence(candidate, best)) best = candidate;
+    }
+  }
+  return best;
+}
+
+// Reply CONTEXT: the phone may also be a customer's. A NEWER customer-facing
+// text (appointment, billing, ...) that actually went out (sent/delivered —
+// never merely scheduled, blocked or failed) from the SAME Waves line after
+// our handoff hands the reply back to the ordinary customer path. The
+// sms_log read is advisory — when it is missing (logging is best-effort)
+// the durable evidence stands and the reply stays owner-only.
+async function newerCustomerTextExists(variants, best) {
+  const fromVariants = best.fromNumber ? phoneMatchDigits(String(best.fromNumber)) : [];
+  const row = await excludeUnresolvedSendReservations(db('sms_log'))
+    .where({ direction: 'outbound' })
+    .whereIn('status', ['sent', 'delivered'])
+    .whereRaw(digitsExpr('to_phone'), [variants])
+    .modify((q) => { if (fromVariants.length) q.whereRaw(digitsExpr('from_phone'), [fromVariants]); })
+    .whereRaw(CUSTOMER_FACING_TYPE_SQL, NON_CONVERSATIONAL_OUTBOUND)
+    .where('created_at', '>', new Date(best.at))
+    .first('id');
+  return Boolean(row);
+}
+
+/**
+ * @param {string} fromPhone - the inbound sender
+ * @param {string} [toNumber] - the Waves number the text arrived on
+ * @returns {Promise<{ applicationId: string } | null>}
+ */
+async function matchApplicantReply(fromPhone, toNumber) {
+  const variants = phoneMatchDigits(fromPhone);
+  if (!variants.length) return null;
+
+  // DURABLE evidence first (local audit P0): the pre-handoff comms_history
+  // entry (written before the provider call, stamped with the outbound
+  // number) — never the post-acceptance, best-effort sms_log row. Every open
+  // application on this phone, with its ledger; the reply is tied to the
+  // application whose latest handoff/sent/uncertain SMS entry is newest
+  // within the window, never to phone recency (a later, untexted
+  // application must not swallow a reply meant for an earlier one).
+  let apps;
+  try {
+    apps = await db('job_applications')
+      .whereRaw(digitsExpr("contact_snapshot->>'phone'"), [variants])
+      .whereIn('status', OPEN_STATUSES)
+      .select('id', 'comms_history');
+  } catch (err) {
+    // 42P01 = the recruiting tables are not provisioned in this database at
+    // all (a schema-subset test database) — there can be no applicants, so
+    // this is a definite "not a recruiting reply", not an outage.
+    if (err && err.code === '42P01') return null;
+    throw err;
+  }
+  if (!apps.length) return null;
+
+  const cutoff = Date.now() - RECENT_OUTBOUND_DAYS * 24 * 60 * 60 * 1000;
+  const best = newestSmsEvidence(apps, toNumber, cutoff);
+  if (!best) return null;
+  if (await newerCustomerTextExists(variants, best)) return null;
+  return { applicationId: best.applicationId };
+}
+
+/**
+ * Persists the reply on the application — sms_log row + comms_history entry
+ * in ONE transaction, idempotent on the Twilio SID — then rings the
+ * admin-only bell. Throws when the persistence transaction fails so the
+ * webhook can defer the delivery for a Twilio retry (fail closed); the bell
+ * is best-effort after the commit.
+ *
+ * @returns {Promise<{ persisted: boolean, duplicate: boolean }>}
+ */
+async function recordApplicantReply({ applicationId, from, to, body, messageSid, mediaCount = 0, media = [], unifiedMessageId = null }) {
+  const entry = {
+    id: crypto.randomUUID(),
+    at: new Date().toISOString(),
+    stage: 'applicant_reply',
+    channel: 'sms',
+    to: maskPhone(from),
+    outcome: 'received',
+    code: null,
+    body: body || (mediaCount ? `${mediaCount} photo${mediaCount === 1 ? '' : 's'}` : ''),
+    by: 'applicant',
+    // Attachments: stored media references (never a public URL) and the
+    // unified message id, so the recruiting detail can sign them for the
+    // owner (Codex r9 P2).
+    ...(Array.isArray(media) && media.length ? { media: media.map((m) => ({ key: m.key || null, url: m.key ? null : (m.url || null), contentType: m.contentType || null })) } : {}),
+    ...(unifiedMessageId ? { unified_message_id: unifiedMessageId } : {}),
+  };
+
+  const duplicate = await db.transaction(async (trx) => {
+    const existing = messageSid
+      ? await excludeUnresolvedSendReservations(trx('sms_log')).where({ twilio_sid: messageSid, message_type: REPLY_MESSAGE_TYPE }).first('id')
+      : null;
+    if (existing) return true;
+    await trx('sms_log').insert({
+      customer_id: null,
+      direction: 'inbound',
+      from_phone: from,
+      to_phone: to,
+      message_body: body || '',
+      twilio_sid: messageSid,
+      status: 'received',
+      message_type: REPLY_MESSAGE_TYPE,
+      is_read: false,
+      metadata: JSON.stringify({ job_application_id: applicationId, media_count: mediaCount }),
+    });
+    await appendCommsHistory(applicationId, [entry], trx);
+    return false;
+  });
+
+  if (!duplicate) {
+    const replyId = messageSid || entry.id;
+    try {
+      const { triggerNotification } = require('./notification-triggers');
+      await triggerNotification('job_applicant_reply', { applicationId, replyId });
+    } catch (err) {
+      logger.error(`[recruiting-inbound] bell failed (application ${applicationId}): ${errorSummary(err)}`);
+    }
+    await retireBellIfAlreadyRead({ applicationId, replyId, messageSid });
+  }
+
+  return { persisted: true, duplicate };
+}
+
+// Post-write unread check (Codex r23 P2, the ordinary SMS bell pattern): the
+// reply row commits BEFORE its bell is created, so an owner who opened
+// Recruiting in that gap read the reply — and the read-ack's snapshot cutoff
+// predates the bell. Retire that one bell when its reply is already read.
+async function retireBellIfAlreadyRead({ applicationId, replyId, messageSid }) {
+  if (!messageSid) return;
+  try {
+    const row = await excludeUnresolvedSendReservations(db('sms_log'))
+      .where({ twilio_sid: messageSid, message_type: REPLY_MESSAGE_TYPE })
+      .first('is_read');
+    if (!row || row.is_read !== true) return;
+    await require('./notification-service').markApplicantRepliesReadAdmin({ applicationId, replyId, before: new Date() });
+  } catch (err) {
+    logger.warn(`[recruiting-inbound] post-write bell reconcile failed (application ${applicationId}): ${errorSummary(err)}`);
+  }
+}
+
+// ---- blast-radius bound for the fail-closed path ---------------------------
+// The webhook fails CLOSED (503, claim released) when classification is
+// unavailable — but only for phones that are PLAUSIBLY applicants, or the
+// whole inbound pipeline would stall on a recruiting-store hiccup (local
+// audit P1). A short-lived snapshot of open applications' phones answers
+// that cheaply; a refresh failure keeps the last snapshot, and "never
+// loaded" is treated as unknown (conservative: fail closed).
+const phoneCache = { digits: null, loadedAt: 0, loading: null };
+
+async function refreshRecruitingPhoneCache() {
+  const rows = await db('job_applications')
+    .whereIn('status', OPEN_STATUSES)
+    .select(db.raw("regexp_replace(COALESCE(contact_snapshot->>'phone', ''), '[^0-9]', '', 'g') AS digits"));
+  const set = new Set();
+  for (const r of rows) {
+    const d = String(r.digits || '');
+    if (d.length >= 10) { set.add(d.slice(-10)); }
+  }
+  phoneCache.digits = set;
+  phoneCache.loadedAt = Date.now();
+  return set;
+}
+
+/**
+ * Runs only AFTER a classification failure (twilio-webhook.js), so:
+ * true  — a snapshot (any age) lists the phone: fail closed
+ * false — a FRESH read, just made, does not list it: fail open
+ * null  — unknown: the fresh read failed too (fail closed → Twilio retry)
+ * A cached negative is never evidence (Codex r17/r25 P1): an application
+ * created and texted after the snapshot — inside its TTL or not — is absent
+ * from it, and 'false' would hand the applicant's reply to the customer
+ * pipeline. Every negative therefore forces a fresh read; a positive stands.
+ */
+async function isPlausibleRecruitingPhone(fromPhone) {
+  const variants = phoneMatchDigits(fromPhone);
+  const last10 = variants.length ? variants[variants.length - 1].slice(-10) : null;
+  if (!last10) return false;
+  if (phoneCache.digits && phoneCache.digits.has(last10)) return true;
+  try {
+    phoneCache.loading = phoneCache.loading || refreshRecruitingPhoneCache();
+    await phoneCache.loading;
+  } catch (err) {
+    logger.warn(`[recruiting-inbound] phone snapshot refresh failed (${err && err.name ? err.name : 'Error'}${err && err.code ? ` ${err.code}` : ''}) — answer unknown`);
+    return null;
+  } finally {
+    phoneCache.loading = null;
+  }
+  return phoneCache.digits ? phoneCache.digits.has(last10) : null;
+}
+
+function _resetRecruitingPhoneCacheForTests() {
+  phoneCache.digits = null; phoneCache.loadedAt = 0; phoneCache.loading = null;
+}
+
+module.exports = {
+  isPlausibleRecruitingPhone,
+  _resetRecruitingPhoneCacheForTests, matchApplicantReply, recordApplicantReply, OPEN_STATUSES, RECENT_OUTBOUND_DAYS, REPLY_MESSAGE_TYPE, NON_CONVERSATIONAL_OUTBOUND };

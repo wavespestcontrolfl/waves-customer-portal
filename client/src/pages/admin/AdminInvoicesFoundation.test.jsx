@@ -108,9 +108,98 @@ describe("Invoice foundation workflow preservation", () => {
     fireEvent.click(submit);
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(requests.filter(request => request.key === key).map(request => request.body)).toEqual([
-      { invoiceRecipientEmail: "alternate@example.invalid", invoiceRecipientName: "Example Accounts", saveBillingRecipient: false },
-      { invoiceRecipientEmail: "alternate@example.invalid", invoiceRecipientName: "Example Accounts", saveBillingRecipient: false },
+      { resend: true, invoiceRecipientEmail: "alternate@example.invalid", invoiceRecipientName: "Example Accounts", saveBillingRecipient: false },
+      { resend: true, invoiceRecipientEmail: "alternate@example.invalid", invoiceRecipientName: "Example Accounts", saveBillingRecipient: false },
     ]);
+  });
+
+  // Round-6 P1 (#4131): a draft/scheduled invoice has never been delivered
+  // — this dialog's own "Send invoice" title (vs. "Resend invoice" above)
+  // IS the first-delivery / explicit-resend distinction, and the request
+  // body must say so: firstDelivery: true, never operator resend intent.
+  it("a first (never-delivered) send states firstDelivery: true on the request", async () => {
+    rows = [{ ...invoice, status: "draft" }];
+    await openPage(); await expand();
+    const dialog = await dialogFrom("Send", "Send invoice");
+    await dialog.findByText("billing@example.invalid");
+    const key = `POST /api/admin/invoices/${invoice.id}/send`;
+    overrides.set(key, () => response({ ok: true, sms: { ok: true }, email: { ok: true } }));
+    fireEvent.click(dialog.getByRole("button", { name: /Send/, exact: false }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(requests.find(request => request.key === key).body).toEqual({ firstDelivery: true });
+  });
+
+  // Third audit P1 (#4131): a parked row (processScheduledSends left it
+  // under a stale-claim review hold — status still 'scheduled' but the due
+  // time cleared and an error note left in its place) must show as a
+  // Resend, not a first delivery, and post the explicit override intent —
+  // never firstDelivery: true, which can never clear the hold.
+  it("a parked row (stale-claim review hold) shows as Resend — delivery unverified and posts resend: true", async () => {
+    rows = [{
+      ...invoice,
+      status: "scheduled",
+      scheduled_send_at: null,
+      scheduled_send_error: "Recovered from stale sending claim — delivery unverified; check whether the customer received it, then resend or re-schedule manually",
+      // The server's own predicate (isStaleClaimReviewHold), computed by
+      // the list/detail serializers — the client reads this field
+      // directly and must NEVER re-derive it from scheduled_send_error's
+      // text (fourth audit gap #4131).
+      review_hold: true,
+    }];
+    await openPage(); await expand();
+    const dialog = await dialogFrom("Send", "Resend invoice — delivery unverified");
+    await dialog.findByText("billing@example.invalid");
+    const key = `POST /api/admin/invoices/${invoice.id}/send`;
+    overrides.set(key, () => response({ ok: true, sms: { ok: true }, email: { ok: true } }));
+    fireEvent.click(dialog.getByRole("button", { name: /Send/, exact: false }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(requests.find(request => request.key === key).body).toEqual({ resend: true });
+  });
+
+  // Fourth audit gap #4131: /batch/send can report invoices "held" (parked
+  // under a stale-claim review hold) separately from sent/failed — without
+  // surfacing it, sent_count + failed_count looks like an unexplained
+  // shortfall against total.
+  it("a batch send with held invoices reports them in the toast, not just sent/failed", async () => {
+    await openPage();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select invoice WPC-QA-001" }));
+    overrides.set("POST /api/admin/invoices/batch/send", () => response({
+      total: 3, sent_count: 1, failed_count: 1, held_count: 1,
+      sent: [{ invoiceId: "a" }], failed: [{ invoiceId: "b", error: "no phone" }],
+      held: [{ invoiceId: "c", code: "stale_claim_review_hold" }],
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "Send 1", exact: true }));
+    await screen.findByText(/1 held for review/);
+    expect(screen.getByText(/Sent 1 of 3 invoices/)).toBeInTheDocument();
+    expect(screen.getByText(/1 failed/)).toBeInTheDocument();
+  });
+
+  // Fourth audit gap #4131: a scheduled row can carry a scheduled_send_error
+  // for a reason that has NOTHING to do with the stale-claim review hold
+  // (e.g. a provider rejected the number) — review_hold: false there, and
+  // the modal must show the ORDINARY Resend title, never "delivery
+  // unverified", since the server (not a client guess at the error text)
+  // is the one that decides.
+  it("a scheduled row with an unrelated send error (review_hold: false) shows the ordinary Resend, not delivery-unverified", async () => {
+    rows = [{
+      ...invoice,
+      status: "scheduled",
+      // A prior attempt actually reached the customer (this is a RETRY
+      // scenario, not a first delivery) — the unrelated error is what a
+      // provider rejection on the retry attempt looks like.
+      sent_at: "2026-09-01T12:00:00Z",
+      scheduled_send_at: null,
+      scheduled_send_error: "Twilio rejected: invalid phone number",
+      review_hold: false,
+    }];
+    await openPage(); await expand();
+    const dialog = await dialogFrom("Send", "Resend invoice");
+    expect(screen.queryByRole("dialog", { name: "Resend invoice — delivery unverified" })).not.toBeInTheDocument();
+    const key = `POST /api/admin/invoices/${invoice.id}/send`;
+    overrides.set(key, () => response({ ok: true, sms: { ok: true }, email: { ok: true } }));
+    fireEvent.click(dialog.getByRole("button", { name: /Send/, exact: false }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(requests.find(request => request.key === key).body).toEqual({ resend: true });
   });
 
   it("retains an offline-payment draft and its receipt choice after a failed request", async () => {

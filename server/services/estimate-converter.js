@@ -4186,6 +4186,86 @@ async function seedRecurringFollowUpsForParent(database, parentRow, svc = {}, op
   return seedResult;
 }
 
+function converterInvoiceLockRetry(message, code) {
+  const err = new Error(message);
+  // Public accept reads `status`; manual acceptance preserves operational
+  // `statusCode` errors. Set both so every caller rolls its transaction back
+  // and presents the same retryable conflict instead of an opaque 500.
+  err.status = 409;
+  err.statusCode = 409;
+  err.code = code;
+  err.isOperational = true;
+  err.retryableAcceptInvoiceLock = true;
+  return err;
+}
+
+// A converter running inside its caller's transaction may already own the
+// estimate (and sometimes customer / visit) row. Deposit receipts take the
+// ledger key before their estimate FK check, so blocking on that key here can
+// form an ABBA deadlock. In that situation mirror estimate-public's invoice
+// prelocks: every possibly-contended lock is nonblocking and the whole caller
+// transaction retries. Pool-owned conversions keep their established blocking
+// order because they do not enter with earlier row locks.
+async function acquireConverterInvoiceDepositLocks(trx, {
+  estimateId,
+  customerId,
+  scheduledServiceId = null,
+  nonblocking = false,
+}) {
+  const retry = (message, code) => { throw converterInvoiceLockRetry(message, code); };
+  if (!nonblocking) {
+    if (scheduledServiceId) {
+      await require('./scheduled-invoice-mint')
+        .acquireScheduledInvoiceMintLock(trx, scheduledServiceId);
+    }
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [
+      `unminted_setup_fee_manual_billing:${estimateId}`,
+    ]);
+    await trx.raw('SELECT id FROM customers WHERE id = ? FOR KEY SHARE', [customerId]);
+    if (scheduledServiceId) {
+      await trx('scheduled_services').where({ id: scheduledServiceId }).forUpdate().first('id');
+    }
+    const { acquireEstimateDepositLedgerLock } = require('./estimate-deposits');
+    await acquireEstimateDepositLedgerLock(trx, estimateId);
+    return;
+  }
+
+  if (scheduledServiceId) {
+    const { SCHEDULED_SERVICE_INVOICE_MINT_LOCK } = require('./scheduled-invoice-mint');
+    const mint = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS acquired', [
+      SCHEDULED_SERVICE_INVOICE_MINT_LOCK, String(scheduledServiceId),
+    ]);
+    if (!mint.rows?.[0]?.acquired) {
+      retry('This visit invoice is being prepared. Please try again in a moment.', 'ACCEPT_INVOICE_BUSY_RETRY');
+    }
+  }
+  const setup = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?)) AS acquired', [
+    `unminted_setup_fee_manual_billing:${estimateId}`,
+  ]);
+  if (!setup.rows?.[0]?.acquired) {
+    retry('This estimate invoice is being prepared. Please try again in a moment.', 'ACCEPT_INVOICE_BUSY_RETRY');
+  }
+  try {
+    await trx.raw('SELECT id FROM customers WHERE id = ? FOR KEY SHARE NOWAIT', [customerId]);
+    if (scheduledServiceId) {
+      // Preserve the converter's existing visit serialization strength while
+      // refusing immediately if another transaction already owns the row.
+      await trx.raw('SELECT id FROM scheduled_services WHERE id = ? FOR UPDATE NOWAIT', [scheduledServiceId]);
+    }
+  } catch (err) {
+    if (err.code === '55P03') {
+      retry('This invoice is being updated. Please try accepting again in a moment.', 'ACCEPT_INVOICE_BUSY_RETRY');
+    }
+    throw err;
+  }
+  const ledger = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS acquired', [
+    'estimate.deposit.ledger', String(estimateId),
+  ]);
+  if (!ledger.rows?.[0]?.acquired) {
+    retry('Your deposit is being recorded. Please try accepting again in a moment.', 'DEPOSIT_LEDGER_BUSY_RETRY');
+  }
+}
+
 const EstimateConverter = {
   /**
    * Convert an accepted estimate into an active customer with scheduled services.
@@ -4235,6 +4315,7 @@ const EstimateConverter = {
     const deferFollowUpReminderRegistration = opts.deferFollowUpReminderRegistration === true;
     const usingCallerDatabase = !!opts.database;
     const database = opts.database || db;
+    const nonblockingInvoiceLocks = database.isTransaction === true;
     const estimate = await database('estimates').where({ id: estimateId }).first();
     // Catalog SHARE lock BEFORE any scheduled_services row lock in this
     // transaction (codex #4369 r3 P1): the version-2 protected catalog
@@ -6719,20 +6800,12 @@ const EstimateConverter = {
           // a real deposit, so a read error must abort the accept
           // (retryable) rather than mint the year with the credit silently
           // dropped. A clean null read is the legitimate no-deposit path
-          // (legacy/manual conversions). Ledger read and consumption both
-          // ride `database` (the accept transaction when called from
-          // accept): the credit line exists IFF the ledger consumed exactly
-          // that amount, or the whole accept rolls back — never an accepted
-          // prepay beside an unconsumed deposit row.
+          // (legacy/manual conversions). The ledger read, invoice insert,
+          // and exact consumption share a transaction even when the exported
+          // converter receives the bare DB; for public accepts this is a
+          // savepoint inside the caller's transaction.
           let appliedPrepayDepositCredit = 0;
           const { pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
-          let prepayDepositCredit;
-          try {
-            prepayDepositCredit = await pendingDepositCredit(estimateId, database);
-          } catch (ledgerErr) {
-            throw new Error(`deposit ledger read failed for annual prepay invoice (estimate ${estimateId}): ${ledgerErr.message}`);
-          }
-          const requestedPrepayDepositCredit = prepayDepositCredit ? Number(prepayDepositCredit.amount) : 0;
           // Labeled manual discount on the prepay invoice (owner 2026-07-11):
           // DESCRIPTION-level only — the prepay line stays at the NET
           // annualAmount because annual-prepay-renewals seeds each covered
@@ -6755,46 +6828,57 @@ const EstimateConverter = {
           // setup lines before dividing by visits (setup is not per-visit
           // coverage money).
           const prepayRodentSetupAmount = frozenRodentBaitSetupAmount(estimateData);
-          const inv = await InvoiceService.create({
-            database,
-            customerId,
-            title: `${prepayPlanPrefix} — Annual Prepay (12 months)`,
-            lineItems: [{
-              description: prepayManualLabel
-                ? `${prepayLineDescription} — ${prepayManualLabel} applied`
-                : prepayLineDescription,
-              quantity: 1,
-              unit_price: annualAmount,
-            },
-            ...(prepayRodentSetupAmount > 0 ? [{
-              description: 'Bait Station Setup — one-time setup fee',
-              quantity: 1,
-              unit_price: prepayRodentSetupAmount,
-            }] : [])],
-            notes: prepayNotes,
-            dueDate: etDateString(),
-            ...(prepayTaxRate !== undefined ? { taxRate: prepayTaxRate } : {}),
-            ...(requestedPrepayDepositCredit > 0
-              ? { depositCredit: { amount: requestedPrepayDepositCredit, estimateId } }
-              : {}),
-          });
-          // Assign the id BEFORE consuming the credit: an allocation-mismatch
-          // throw below must leave draftInvoiceId set so the outer cleanup can
-          // void the just-created invoice on a no-caller-transaction run
-          // (accept-path runs ride the caller trx and roll back wholesale).
-          draftInvoiceId = inv?.id || null;
-          appliedPrepayDepositCredit = Number(inv?.applied_deposit_credit) || 0;
-          if (inv?.id && appliedPrepayDepositCredit > 0) {
-            const allocated = await consumeDepositCredit({
-              estimateId,
-              amount: appliedPrepayDepositCredit,
-              invoiceId: inv.id,
-              trx: database,
+          const inv = await database.transaction(async (invoiceTrx) => {
+            await acquireConverterInvoiceDepositLocks(invoiceTrx, {
+              estimateId, customerId, nonblocking: nonblockingInvoiceLocks,
             });
-            if (Math.round(allocated * 100) !== Math.round(appliedPrepayDepositCredit * 100)) {
-              throw new Error(`deposit allocation mismatch on annual prepay invoice (applied ${appliedPrepayDepositCredit}, allocated ${allocated})`);
+            let prepayDepositCredit;
+            try {
+              prepayDepositCredit = await pendingDepositCredit(estimateId, invoiceTrx);
+            } catch (ledgerErr) {
+              throw new Error(`deposit ledger read failed for annual prepay invoice (estimate ${estimateId}): ${ledgerErr.message}`);
             }
-          }
+            const requestedPrepayDepositCredit = prepayDepositCredit ? Number(prepayDepositCredit.amount) : 0;
+            const created = await InvoiceService.create({
+              database: invoiceTrx,
+              customerId,
+              title: `${prepayPlanPrefix} — Annual Prepay (12 months)`,
+              lineItems: [{
+                description: prepayManualLabel
+                  ? `${prepayLineDescription} — ${prepayManualLabel} applied`
+                  : prepayLineDescription,
+                quantity: 1,
+                unit_price: annualAmount,
+              },
+              ...(prepayRodentSetupAmount > 0 ? [{
+                description: 'Bait Station Setup — one-time setup fee',
+                quantity: 1,
+                unit_price: prepayRodentSetupAmount,
+              }] : [])],
+              notes: prepayNotes,
+              dueDate: etDateString(),
+              ...(prepayTaxRate !== undefined ? { taxRate: prepayTaxRate } : {}),
+              ...(requestedPrepayDepositCredit > 0
+                ? { depositCredit: { amount: requestedPrepayDepositCredit, estimateId } }
+                : {}),
+            });
+            appliedPrepayDepositCredit = Number(created?.applied_deposit_credit) || 0;
+            if (created?.id && appliedPrepayDepositCredit > 0) {
+              const allocated = await consumeDepositCredit({
+                estimateId,
+                amount: appliedPrepayDepositCredit,
+                invoiceId: created.id,
+                trx: invoiceTrx,
+              });
+              if (Math.round(allocated * 100) !== Math.round(appliedPrepayDepositCredit * 100)) {
+                throw new Error(`deposit allocation mismatch on annual prepay invoice (applied ${appliedPrepayDepositCredit}, allocated ${allocated})`);
+              }
+            }
+            return created;
+          });
+          // A mismatch rolled back the invoice with its ledger writes. Once
+          // committed, keep the id for the existing term-failure void path.
+          draftInvoiceId = inv?.id || null;
           // Quote the amount actually invoiced/charged (tax-inclusive, net of
           // the deposit credit) so the customer/admin messaging matches what
           // the pay link collects. For residential (untaxed, no deposit)
@@ -7061,10 +7145,22 @@ const EstimateConverter = {
           let inv = null;
           let appliedDepositCredit = 0;
           for (let attempt = 0; attempt < 2 && !inv; attempt += 1) {
-            const depositCredit = await pendingDepositCredit(estimateId).catch(() => null);
-            const requestedDepositCredit = depositCredit ? Number(depositCredit.amount) : 0;
+            let requestedDepositCredit = 0;
+            let depositLedgerReadFailed = false;
             try {
-              inv = await db.transaction(async (trx) => {
+              inv = await database.transaction(async (trx) => {
+                await acquireConverterInvoiceDepositLocks(trx, {
+                  estimateId, customerId, scheduledServiceId,
+                  nonblocking: nonblockingInvoiceLocks,
+                });
+                let depositCredit;
+                try {
+                  depositCredit = await pendingDepositCredit(estimateId, trx);
+                } catch (ledgerErr) {
+                  depositLedgerReadFailed = true;
+                  throw new Error(`deposit ledger read failed for standard invoice (estimate ${estimateId}): ${ledgerErr.message}`);
+                }
+                requestedDepositCredit = depositCredit ? Number(depositCredit.amount) : 0;
                 const created = await InvoiceService.create({
                   database: trx,
                   customerId,
@@ -7100,6 +7196,7 @@ const EstimateConverter = {
               }
             } catch (err) {
               appliedDepositCredit = 0;
+              if (err?.retryableAcceptInvoiceLock) throw err;
               if (attempt === 0) {
                 logger.warn(`[estimate-converter] invoice+deposit transaction failed for estimate ${estimateId} — retrying with a fresh ledger read: ${err.message}`);
               } else {
@@ -7109,7 +7206,7 @@ const EstimateConverter = {
                 // balance (not the applied amount — create() may have thrown
                 // before reporting one) and raise an explicit reconciliation
                 // hold for a human before this throw is swallowed.
-                if (requestedDepositCredit > 0) {
+                if (requestedDepositCredit > 0 || depositLedgerReadFailed) {
                   try {
                     const { triggerNotification } = require('./notification-triggers');
                     await triggerNotification('estimate_deposit_reconcile_needed', { estimateId });
@@ -7199,6 +7296,7 @@ const EstimateConverter = {
         }
       }
     } catch (err) {
+      if (err?.retryableAcceptInvoiceLock) throw err;
       if (billingTerm === 'prepay_annual') {
         logger.error(`[estimate-converter] Annual prepay invoice/term creation failed for estimate ${estimateId}: ${err.message}`);
         if (draftInvoiceId && !usingCallerDatabase) {
@@ -7789,3 +7887,4 @@ module.exports.assertPerApplicationAddOnPriced = assertPerApplicationAddOnPriced
 module.exports.legacyFlatMonthlyTermiteUnit = legacyFlatMonthlyTermiteUnit;
 module.exports.assertLegacyMonthlyTermiteConvertible = assertLegacyMonthlyTermiteConvertible;
 module.exports.perApplicationFeeUnresolvedBody = perApplicationFeeUnresolvedBody;
+module.exports.acquireConverterInvoiceDepositLocks = acquireConverterInvoiceDepositLocks;

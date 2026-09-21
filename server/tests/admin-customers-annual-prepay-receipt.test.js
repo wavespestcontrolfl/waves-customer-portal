@@ -269,3 +269,27 @@ test.each([undefined, 'false', '1', 'true'])('receipt rollout requires explicit 
     else process.env.GATE_RECORDED_ANNUAL_PREPAY_RECEIPT = saved;
   }
 });
+
+describe('_private.deliverySettledLiveCredit — the annual-prepay-invoice route reuses this for the live send-time credit race (Codex round-8 audit P1 #4131)', () => {
+  const { deliverySettledLiveCredit } = router._private;
+
+  test('settled_zero_due: settled by live credit', () => {
+    expect(deliverySettledLiveCredit({ ok: true, settled_zero_due: true })).toBe(true);
+  });
+
+  test('covered_by_credit: settled by live credit', () => {
+    expect(deliverySettledLiveCredit({ ok: true, covered_by_credit: true })).toBe(true);
+  });
+
+  test('an ordinary successful send is NOT settled', () => {
+    expect(deliverySettledLiveCredit({ ok: true, sms: { ok: true }, email: { ok: true } })).toBe(false);
+  });
+
+  test('a genuine failure is NOT settled', () => {
+    expect(deliverySettledLiveCredit({ ok: false, error: 'no phone on file' })).toBe(false);
+  });
+
+  test('a null delivery (skipped when settledByDepositCredit was already true) is NOT settled', () => {
+    expect(deliverySettledLiveCredit(null)).toBe(false);
+  });
+});

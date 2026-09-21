@@ -52,6 +52,7 @@ const EVAL_CALLER_TO = '+19415550100';
 const SCRIPT_PATH = path.join(__dirname, '..', '..', 'scripts', 'run-voice-relay-eval.js');
 const MANUAL_RERUN = 'node server/scripts/run-voice-relay-eval.js --json --judge';
 const OPS_KEY = 'voice-relay-eval';
+const { retireIfClean } = require('../ops-digest-fall-off');
 const OPS_HEADING = 'Voice relay conversation eval';
 // Operational ceiling for the shipped fixture plus one retry, sized for a
 // fixture of up to ninety caller turns and thirty-four scenarios (today's is
@@ -222,6 +223,18 @@ const TOOL_RESPONSES_SCHEMA = Joi.array().min(1).items(Joi.alternatives().try(
     // names, as the live relay registers it — so a ref to the caller's OWN
     // account is graded as their own write, not a third party's.
     refs: Joi.object().min(1).pattern(/^C\d+(?:-\d+)?$/, Joi.string().pattern(/\S/)),
+    // The visit's live product identities (get_service_report's "what was
+    // applied", chiefly): threaded onto the recorded event unchanged so the
+    // safety adjudicator can recognize a product created or renamed after
+    // its checked-in catalog snapshot (safetyRecordProductNames in
+    // voice-relay-safety-adjudicator.js). response.text carries only the
+    // prose a caller hears; these are the ONLY structured product fields
+    // the recorded event preserves.
+    product_name: Joi.string().pattern(/\S/),
+    products: Joi.array().min(1).items(Joi.alternatives().try(
+      Joi.string().pattern(/\S/),
+      Joi.object({ name: Joi.string().pattern(/\S/).required() }),
+    )),
   }).custom((entry, helpers) => {
     const hasEffect = ['hang', 'transfer', 'booking', 'reservice', 'capture'].some((key) => entry[key] === true) || entry.reservice === 'existing';
     if (entry.text || hasEffect || (entry.capture && typeof entry.capture === 'object')) return entry;
@@ -883,6 +896,14 @@ function applyToolSideEffects(response, { input, ctx, scenario }) {
   return { text: text || TRANSFER_TEXT, receipt: true };
 }
 
+// Preserve the fixture's structured product identities on the event
+// (never invented from response.text) -- the only shape
+// safetyRecordProductNames (voice-relay-safety-adjudicator.js) reads.
+function attachRecordedProducts(event, response) {
+  if (typeof response.product_name === 'string') event.product_name = response.product_name;
+  if (Array.isArray(response.products)) event.products = response.products;
+}
+
 function recordToolCall(record, name, input) {
   const event = { kind: 'tool', name, input: safeInput(input), text: '', turn: record.turn, modelRound: record.modelCalls, ok: false, receipt: false, existing: false, unexpected: false, invalid: false, mismatch: false, index: record.events.length };
   record.events.push(event);
@@ -944,6 +965,7 @@ async function runFixtureTool(state, name, input = {}, ctx = {}) {
   const { text, receipt, existing } = applyToolSideEffects(response, { input, ctx, scenario });
   event.receipt = receipt === true;
   event.existing = existing === true;
+  attachRecordedProducts(event, response);
   // A fixture `ok: false` stands in for the live tool THROWING: relay-tools'
   // catch answers with a string and raises ctx.toolFailed so the session
   // counts the failure (two in a row hand the call off) and the handoff
@@ -1750,7 +1772,7 @@ async function notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixtur
       body,
       icon: '\u{1F9EA}',
       link: '/admin/dashboard',
-      metadata: JSON.stringify({ fixturePath, summary, failures: lines, attempts: attempts.map(compactAttempt) }),
+      metadata: JSON.stringify({ evalKey: OPS_KEY, fixturePath, summary, failures: lines, attempts: attempts.map(compactAttempt) }),
     });
   } catch (err) {
     notifyError = err;
@@ -1772,7 +1794,7 @@ async function notifyInconclusive({ notify, sendEmail, attempt, fixturePath }) {
       body,
       icon: '\u{1F9EA}',
       link: '/admin/dashboard',
-      metadata: JSON.stringify({ fixturePath, error: attempt.error || null }),
+      metadata: JSON.stringify({ evalKey: OPS_KEY, fixturePath, error: attempt.error || null }),
     });
   } catch (err) {
     notifyError = err;
@@ -1800,6 +1822,13 @@ async function notifyOutcome({ notifyOnFailure, notify, sendEmail, finalAttempt,
   }
   if (finalAttempt.status === 'fail') return notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixturePath });
   if (finalAttempt.status === 'inconclusive') return notifyInconclusive({ notify, sendEmail, attempt: finalAttempt, fixturePath });
+  // Fall-off: an explicit SCHEDULED PASS clears the standing FIX — 'skip'
+  // (fixture missing / sandbox untested) must leave the bell standing
+  // (pre-push P1 on #4397). `notifyOnFailure` is already true here (the
+  // manual-run case returned above).
+  if (finalAttempt.status === 'pass') await retireIfClean(OPS_KEY, { alsoRetire: {
+    category: 'eval_regression', field: 'evalKey', legacyTitlePrefix: 'Voice relay eval',
+  } });
   return null;
 }
 

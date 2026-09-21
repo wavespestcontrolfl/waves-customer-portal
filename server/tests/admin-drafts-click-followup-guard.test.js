@@ -240,7 +240,10 @@ describe('approve — verdict mapping (shared-gate parity)', () => {
     });
   }
 
-  const HOLD_CASES = ['cadence_due', 'recent_outbound', 'replied_recently'];
+  // annual_offer_withheld (delivery-guards slice, re-cut of #4569): the
+  // annual-offer guard's own hold — not in GATE_RETIRE, so it falls to the
+  // same generic HOLD path as the other transient verdicts.
+  const HOLD_CASES = ['cadence_due', 'recent_outbound', 'replied_recently', 'annual_offer_withheld'];
 
   for (const code of HOLD_CASES) {
     test(`${code} → 409, draft LEFT PENDING (claim released), never retired, NO send`, async () => {

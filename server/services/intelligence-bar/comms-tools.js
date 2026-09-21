@@ -11,6 +11,7 @@ const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
+const { excludeRecruitingSmsLog } = require('../../utils/recruiting-thread-scope');
 
 // Admin phones to exclude from results
 const ADMIN_PHONE_RAW = '9415993489';
@@ -300,8 +301,12 @@ async function getUnansweredThreads(input) {
   const limit = Math.min(rawLimit || 20, 50);
   const since = new Date(Date.now() - hours_back * 3600000).toISOString();
 
-  // Get recent inbound messages
+  // Get recent inbound messages. Recruiting rows (job_*) are never a thread
+  // for this tool (Codex #4623 r29 P1): an applicant reply answered through
+  // the generic send would become customer-thread evidence on a shared
+  // phone — applicants are answered from Recruiting.
   const inbound = await db('sms_log')
+    .modify((qb) => excludeRecruitingSmsLog(qb))
     .where('direction', 'inbound')
     .where('created_at', '>=', since)
     .leftJoin('customers', 'sms_log.customer_id', 'customers.id')
@@ -390,6 +395,8 @@ async function getConversationThread(input) {
     // #4331 P2): the in-flight placeholder must not displace a real message
     // out of this bounded conversation window — a resolved row still shows.
     .modify(excludeUnresolvedSendReservations)
+    // Recruiting rows stay out of the Intelligence Bar (Codex #4623 r29 P1).
+    .modify((qb) => excludeRecruitingSmsLog(qb))
     .select(
       'sms_log.id', 'sms_log.direction', 'sms_log.message_body',
       'sms_log.from_phone', 'sms_log.to_phone',
@@ -439,7 +446,7 @@ async function searchMessages(input) {
   // Unresolved review-ask reservations excluded BEFORE the limit (Codex
   // #4331 P2): a still in-flight placeholder must not surface here as a
   // real sent message — a resolved row still shows.
-  let query = excludeUnresolvedSendReservations(db('sms_log'))
+  let query = excludeRecruitingSmsLog(excludeUnresolvedSendReservations(db('sms_log')))
     .where('sms_log.created_at', '>=', since)
     .leftJoin('customers', 'sms_log.customer_id', 'customers.id')
     .select(
@@ -839,6 +846,8 @@ async function draftSmsReply(input) {
 
   // Get the last inbound message from this customer
   const lastInbound = await db('sms_log')
+    // never an applicant's hiring reply on a shared phone (PR #4623 r31)
+    .modify((qb) => excludeRecruitingSmsLog(qb))
     .where('direction', 'inbound')
     .where(scope => scope.where('customer_id', customer.id).orWhereNull('customer_id'))
     .where(function () {
@@ -968,8 +977,8 @@ async function getTodaysActivity() {
   // count or count as the reply that closes out an unanswered thread — a
   // resolved row still counts/replies normally.
   const [smsIn, smsOut, calls, unanswered] = await Promise.all([
-    db('sms_log').where('direction', 'inbound').where('created_at', '>=', since).count('* as c').first(),
-    excludeUnresolvedSendReservations(db('sms_log')).where('direction', 'outbound').where('created_at', '>=', since).count('* as c').first(),
+    db('sms_log').modify((qb) => excludeRecruitingSmsLog(qb)).where('direction', 'inbound').where('created_at', '>=', since).count('* as c').first(),
+    excludeUnresolvedSendReservations(db('sms_log')).modify((qb) => excludeRecruitingSmsLog(qb)).where('direction', 'outbound').where('created_at', '>=', since).count('* as c').first(),
     db('call_log').where('created_at', '>=', since)
       .modify((qb) => require('../voice-agent/relay-protocol').whereNotSandboxCall(qb)) // bake-off calls are not today's activity
       .select(
@@ -978,7 +987,7 @@ async function getTodaysActivity() {
       db.raw("COUNT(*) FILTER (WHERE status = 'no-answer' OR status = 'busy') as missed"),
     ).first(),
     // Count unanswered inbound messages from today
-    db('sms_log').where('direction', 'inbound').where('created_at', '>=', since)
+    db('sms_log').modify((qb) => excludeRecruitingSmsLog(qb)).where('direction', 'inbound').where('created_at', '>=', since)
       .whereNotExists(function () {
         excludeUnresolvedSendReservations(
           this.select(db.raw(1)).from(db.raw('sms_log as reply'))

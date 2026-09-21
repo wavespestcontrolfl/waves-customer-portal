@@ -203,6 +203,8 @@ async function threadHasLiveAnswer(trx, { threadLast10, customerId, inboundCreat
 
   const newerInbound = await trx('sms_log')
     .where({ direction: 'inbound' })
+    // Recruiting replies (job_*, PR #4623) are not customer-thread activity.
+    .whereRaw("COALESCE(message_type, '') NOT LIKE 'job\\_%'")
     .where(byThread('from_phone'))
     .where('created_at', '>', after)
     .modify(notSelf)
@@ -433,6 +435,7 @@ async function suggestionAnchorIsStale({ decisionId, dbi = db, excludeSmsLogId }
   if (!last10) return false;
   const newer = await dbi('sms_log')
     .where({ direction: 'inbound' })
+    .whereRaw("COALESCE(message_type, '') NOT LIKE 'job\\_%'")
     .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
     .where('created_at', '>', row.inbound_at)
     .whereNot('id', row.sms_log_id)

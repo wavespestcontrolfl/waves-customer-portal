@@ -3,6 +3,7 @@ import {
   ATTACHMENT_HELP_TEXT,
   ATTACHMENT_VISIBILITY_TEXT,
   attachmentTotalBytes,
+  batchSendToast,
   buildInvoiceListParams,
   canAddInvoiceAttachments,
   invoiceAttachmentLimitLabel,
@@ -14,6 +15,9 @@ import {
   noticeCandidateLabel,
   orderNoticeCandidates,
   persistedSendDisposition,
+  sendErrorMessage,
+  resendConflictMessage,
+  sendOutcomeMessage,
   validateAttachmentFiles,
 } from "./AdminInvoicesPage.jsx";
 
@@ -244,6 +248,101 @@ describe("AdminInvoicesPage create-path toast edge cases", () => {
       "Invoice WPC-2026-0001 created but not scheduled — scheduledFor must be in the future. Adjust the time and press the button again to schedule this same invoice.",
     );
   });
+
+  // A first-delivery request (firstDelivery: true) finding the invoice
+  // already owned by another live delivery is a 200 ok success carrying
+  // already_delivered / queued_delivery, not a thrown error — sms.ok and
+  // email.ok are both false by construction, so these must be read as a
+  // no-op success, never "send failed" (round-6 P1 #4131).
+  it("reports a first-delivery already_delivered outcome as a no-op success", () => {
+    expect(
+      invoiceCreatedSendToast("WPC-2026-0001", {
+        ok: true,
+        already_delivered: true,
+        sms: { ok: false, code: "already_delivered" },
+        email: { ok: false, code: "already_delivered" },
+      }),
+    ).toBe("Invoice created: WPC-2026-0001 — already delivered");
+  });
+
+  it("reports a first-delivery queued_delivery outcome as a no-op success", () => {
+    expect(
+      invoiceCreatedSendToast("WPC-2026-0001", {
+        ok: true,
+        queued_delivery: true,
+        sms: { ok: false, code: "queued_pay_link" },
+        email: { ok: false, code: "queued_pay_link" },
+      }),
+    ).toBe("Invoice created: WPC-2026-0001 — queued for the send window");
+  });
+});
+
+describe("AdminInvoicesPage send outcome/error helpers", () => {
+  it("sendOutcomeMessage reads the six no-op-success flags a 200 response can carry", () => {
+    expect(sendOutcomeMessage({ covered_by_credit: true })).toBe(
+      "fully covered by account credit, nothing to send",
+    );
+    // #4131 slice 4: a zero-due visit invoice settled (now prepaid) rather
+    // than being delivered — same no-op-success shape as covered_by_credit.
+    expect(sendOutcomeMessage({ settled_zero_due: true })).toBe(
+      "nothing due — invoice marked prepaid, nothing to send",
+    );
+    expect(sendOutcomeMessage({ already_delivered: true })).toBe(
+      "already delivered",
+    );
+    expect(sendOutcomeMessage({ queued_delivery: true })).toBe(
+      "queued for the send window",
+    );
+    // Pre-push audit P1 (PR #4633): a concurrent first-delivery claim
+    // already won the race — a no-op success, never a failure.
+    expect(sendOutcomeMessage({ in_progress: true })).toBe(
+      "already being delivered",
+    );
+    // Codex round-9 audit P2 (#4131 slice 4): the completed terminal-visit
+    // void — POST /:id/send now resolves this with ok:true, voided:true —
+    // is a genuine no-op success, never a failed-send toast.
+    expect(sendOutcomeMessage({ ok: true, voided: true })).toBe(
+      "the linked visit is terminal — voided instead of sent, nothing due",
+    );
+    expect(sendOutcomeMessage({ ok: true, sms: { ok: true } })).toBeNull();
+    expect(sendOutcomeMessage(null)).toBeNull();
+  });
+
+  // Reached only by an explicit Resend — a first delivery never throws
+  // these as errors (see the no-op-success cases above).
+  it("sendErrorMessage translates a thrown send error's code for a Resend", () => {
+    expect(sendErrorMessage({ code: "queued_pay_link" })).toBe(
+      "queued for the send window",
+    );
+    expect(sendErrorMessage({ code: "already_delivered" })).toBe(
+      "already delivered",
+    );
+    expect(sendErrorMessage({ code: "delivery_in_progress" })).toBe(
+      "already being delivered",
+    );
+    expect(sendErrorMessage({ code: "send_claim_lost" })).toBeNull();
+    expect(sendErrorMessage(new Error("boom"))).toBeNull();
+  });
+
+  // Codex round-3 P2 #4131: settled_count only exists on /batch/send — a
+  // zero-due invoice settled instead of sent must show up distinctly, or
+  // sent_count + failed_count alone reads as an unexplained shortfall.
+  it("batchSendToast surfaces settled_count alongside held_count and failed_count", () => {
+    expect(
+      batchSendToast({ sent_count: 2, total: 3, settled_count: 1 }, "invoice"),
+    ).toBe("Sent 2 of 3 invoices (1 settled — nothing due)");
+    expect(
+      batchSendToast({ sent_count: 1, total: 1 }, "invoice"),
+    ).toBe("Sent 1 of 1 invoice");
+    expect(
+      batchSendToast(
+        { sent_count: 1, total: 4, settled_count: 1, held_count: 1, failed_count: 1 },
+        "invoice",
+      ),
+    ).toBe(
+      "Sent 1 of 4 invoices (1 settled — nothing due) (1 held for review) (1 failed)",
+    );
+  });
 });
 
 describe("AdminInvoicesPage ambiguous-send disposition", () => {
@@ -288,5 +387,21 @@ describe("AdminInvoicesPage ambiguous-send disposition", () => {
     expect(
       persistedSendDisposition({ status: "draft", sent_at: null, sms_sent_at: null }),
     ).toBe("unsent");
+  });
+});
+
+describe("resendConflictMessage", () => {
+  it("words a refused Resend as a block, distinct from the first-delivery no-op phrasing", () => {
+    const blocked = resendConflictMessage({ code: "queued_pay_link" });
+    expect(blocked).toMatch(/^Invoice send blocked:/);
+    expect(blocked).not.toBe(sendErrorMessage({ code: "queued_pay_link" }));
+    expect(resendConflictMessage({ code: "already_delivered" })).toMatch(/^Invoice send blocked:/);
+    // Pre-push audit P1 (PR #4633): a concurrent claim in progress is a
+    // real conflict for a deliberate Resend, not the first-delivery no-op.
+    expect(resendConflictMessage({ code: "delivery_in_progress" })).toBe(
+      "Invoice send blocked: a delivery is already in progress",
+    );
+    expect(resendConflictMessage({ code: "send_claim_lost" })).toBeNull();
+    expect(resendConflictMessage(new Error("boom"))).toBeNull();
   });
 });

@@ -8,8 +8,10 @@ jest.mock('../models/db', () => {
   qb.raw = () => { throw new Error('db.raw must not be touched when loaders are injected'); };
   return qb;
 });
+jest.mock('../services/ops-digest-fall-off', () => ({ retireIfClean: jest.fn(async () => {}) }));
 
 const sendgrid = require('../services/sendgrid-mail');
+const { retireIfClean } = require('../services/ops-digest-fall-off');
 const {
   runUnworkedCommsWatcher,
   _private: { composeUnworkedCommsDigest },
@@ -49,6 +51,17 @@ describe('composeUnworkedCommsDigest', () => {
     expect(out.text).toContain('asked for a callback');
     expect(out.text).toContain('…and 1 more not shown');
     expect(out.html).not.toContain('…and 5 more not shown');
+  });
+
+  test('applicant replies (job_%) never appear in the unworked-SMS digest (source contract, #4623 r14)', () => {
+    // Recruiting threads are owner-only and answered through the recruiting
+    // rail (job_owner_reply, not a HUMAN_REPLY_TYPES type) — the inbound
+    // worklist must exclude them or a handled reply lingers forever.
+    const src = require('fs').readFileSync(
+      require('path').join(__dirname, '../services/unworked-comms-watcher.js'), 'utf8',
+    );
+    const block = src.split("AND direction = 'inbound'")[1].slice(0, 900);
+    expect(block).toMatch(/COALESCE\(message_type, ''\) NOT LIKE 'job\\\\_%'/);
   });
 
   test('a zero-delivery click-to-estimate mint never fulfills a send_estimate task (source contract, #3391)', () => {
@@ -160,6 +173,16 @@ describe('runUnworkedCommsWatcher', () => {
     const result = await runUnworkedCommsWatcher(loaders());
     expect(result).toEqual({ skipped: 'nothing_found' });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(retireIfClean).toHaveBeenCalledWith('unworked-comms');
+  });
+
+  test('an aged-out callback prevents false recovery of the standing digest', async () => {
+    const loadCallbackCalls = jest.fn(async (_cutoff, { includeExpired } = {}) =>
+      includeExpired ? [callback()] : []);
+    const result = await runUnworkedCommsWatcher(loaders({ loadCallbackCalls }));
+    expect(result).toEqual({ skipped: 'nothing_found' });
+    expect(loadCallbackCalls).toHaveBeenCalledWith(expect.any(Date), { includeExpired: true });
+    expect(retireIfClean).not.toHaveBeenCalled();
   });
 
   test('one lane failing still sends the surviving lanes and NAMES the failed lane', async () => {
@@ -208,9 +231,29 @@ describe('runUnworkedCommsWatcher', () => {
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 
-  test('recent send short-circuits', async () => {
-    const result = await runUnworkedCommsWatcher(loaders({ sentRecently: async () => true }));
+  test('recent send suppresses another alert while work remains', async () => {
+    const result = await runUnworkedCommsWatcher(loaders({ loadCallbackCalls: async () => [callback()], sentRecently: async () => true }));
     expect(result).toEqual({ skipped: 'recent_send' });
+    expect(retireIfClean).not.toHaveBeenCalled();
+  });
+
+  test('a proven empty backlog retires the alert during the send cooldown', async () => {
+    const result = await runUnworkedCommsWatcher(loaders({ sentRecently: async () => true }));
+    expect(result).toEqual({ skipped: 'nothing_found' });
+    expect(retireIfClean).toHaveBeenCalledWith('unworked-comms');
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('a failed recovery proof is reported as query_failed and preserves the alert', async () => {
+    const result = await runUnworkedCommsWatcher(loaders({
+      loadCallbackCalls: async (_cutoff, { includeExpired } = {}) => {
+        if (includeExpired) throw new Error('synthetic recovery query failure');
+        return [];
+      },
+    }));
+    expect(result).toEqual({ skipped: 'query_failed' });
+    expect(retireIfClean).not.toHaveBeenCalled();
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 
   test('non-internal recipient fails closed', async () => {
@@ -246,7 +289,11 @@ describe('lane SQL binding integrity', () => {
     await loaders.loadDroppedFollowUps(new Date('2026-08-08T00:00:00Z'));
     await loaders.loadUnansweredThreads(new Date('2026-08-08T00:00:00Z'));
     await loaders.loadOpenServiceRequests(new Date('2026-08-08T00:00:00Z'));
-    expect(captured.length).toBe(4);
+    await loaders.loadCallbackCalls(new Date('2026-08-08T00:00:00Z'), { includeExpired: true });
+    await loaders.loadDroppedFollowUps(new Date('2026-08-08T00:00:00Z'), { includeExpired: true });
+    await loaders.loadUnansweredThreads(new Date('2026-08-08T00:00:00Z'), { includeExpired: true });
+    expect(captured.length).toBe(7);
+    expect(captured.slice(4).every(({ bindings }) => bindings.includeExpired === true)).toBe(true);
 
     const knexPg = require('knex')({ client: 'pg' });
     for (const { sql, bindings } of captured) {

@@ -690,6 +690,38 @@ describe('classifyManualPrepayMintOutcome', () => {
     });
   });
 
+  it('reports live send-time zero-due settlement (settled_zero_due) as settled, never as sent (Codex round-9 audit P1 #4131)', () => {
+    // The route resolves { ok: true, settled_zero_due: true } from a live
+    // send-time deposit/credit offset and folds it into its top-level
+    // settledByDepositCredit flag — this must not fall through to the
+    // "sent" copy at the bottom, which would tell the operator the
+    // customer received an invoice neither channel ever delivered.
+    const outcome = classifyManualPrepayMintOutcome({
+      minted: {
+        invoice: { invoice_number: 'INV-10' }, settledByDepositCredit: true,
+        delivery: { ok: true, settled_zero_due: true }, warnings: [],
+      },
+      fresh: { prepayTotal: 300 },
+    });
+    expect(outcome).toEqual({
+      notice: 'Annual prepay invoice INV-10 for $300.00 was settled — nothing is due, so nothing was sent to the customer.',
+      warnings: [],
+      blockingAlert: null,
+    });
+  });
+
+  it('also reports the UPFRONT deposit-credit settlement (delivery never even runs) as settled, never as sent', () => {
+    // appliedDepositCredit fully covering the total settles BEFORE
+    // sendViaSMSAndEmail is ever called — delivery stays null entirely,
+    // so only the top-level settledByDepositCredit flag is available here.
+    const outcome = classifyManualPrepayMintOutcome({
+      minted: { invoice: { invoice_number: 'INV-11' }, settledByDepositCredit: true, delivery: null },
+      fresh: { prepayTotal: 300 },
+    });
+    expect(outcome.notice).toContain('was settled — nothing is due');
+    expect(outcome.blockingAlert).toBeNull();
+  });
+
   it('raises a blocking alert when the invoice was created but sending it failed', () => {
     const outcome = classifyManualPrepayMintOutcome({
       minted: { invoice: {}, delivery: { ok: false } },

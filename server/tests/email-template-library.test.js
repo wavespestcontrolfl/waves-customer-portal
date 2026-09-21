@@ -13,11 +13,37 @@ const sendgrid = require('../services/sendgrid-mail');
 const NotificationService = require('../services/notification-service');
 const EmailTemplates = require('../services/email-template-library');
 
+// Codex round 3 on #4608 (structural move): the annual-offer guard's
+// AUTHORITATIVE check now runs inside sendgrid.sendOne, which this file
+// mocks away entirely — so these tests simulate sendOne's own refusal
+// contract (an error flagged .annualOfferWithheld / .annualOfferGuardFailed)
+// rather than mocking annualHandoffGuard directly. Round 9 structural fix
+// (P1): the rewrite-vs-refuse decision (estimate-annual-guard.js's
+// withheldLinkPolicyForTemplate + rewriteWithheldEstimateLinks) also moved
+// into sendOne — this file no longer needs to mock estimate-annual-guard.js
+// at all, since email-template-library.js itself no longer requires it.
+function annualOfferWithheldError(estimateId = 'est-1') {
+  const err = new Error('annual_offer_withheld');
+  err.code = 'ANNUAL_OFFER_WITHHELD';
+  err.annualOfferWithheld = true;
+  err.retryable = false;
+  err.estimateId = estimateId;
+  return err;
+}
+function annualOfferGuardFailedError(message = 'estimates lookup unavailable') {
+  const err = new Error(`annual offer guard failed: ${message}`);
+  err.code = 'ANNUAL_OFFER_GUARD_FAILED';
+  err.annualOfferGuardFailed = true;
+  return err;
+}
+
 function chain({ result = [], first, returning } = {}) {
   const q = {};
   [
     'where',
     'whereRaw',
+    'whereNull',
+    'whereIn',
     'select',
     'orderBy',
     'limit',
@@ -40,6 +66,7 @@ function setDbQueues(queues) {
     if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
     return queue.shift();
   });
+  db.transaction = jest.fn(async callback => callback(db));
   // sendTemplate guards the post-send status with a CASE expression.
   db.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
 }
@@ -363,7 +390,164 @@ describe('email template library rendering', () => {
       payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
     });
 
-    expect(result).toEqual(expect.objectContaining({ sent: true, deduped: true, superseded: true }));
+    expect(result).toEqual(expect.objectContaining({ sent: true, deduped: true, superseded: true, providerAccepted: true }));
+  });
+
+  test.each(['queued', 'failed', 'sent'])('a rejected superseded attempt cannot borrow newer %s acceptance', async (status) => {
+    const queuedMessage = { id: 'msg-stale', status: 'queued', subject_snapshot: 'S' };
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [chain({ returning: [queuedMessage] }),
+        chain({ first: { ...queuedMessage, status, send_attempt_token: 'newer-attempt' } })],
+    });
+    sendgrid.sendOne.mockRejectedValueOnce(new Error('provider rejected stale attempt'));
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice', to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+    });
+    expect(result).toMatchObject({ sent: true, superseded: true, providerAttempted: true, providerAccepted: false });
+  });
+
+  test.each([['delivered', 'delivered'], ['bounced', 'bounce'], ['failed', 'bounce'], ['failed', 'blocked']])('a matching %s/%s webhook proves acceptance after a lost SDK response', async (status, eventType) => {
+    const queuedMessage = { id: 'msg-webhook', status: 'queued', subject_snapshot: 'S' };
+    const current = { ...queuedMessage, status };
+    const event = chain({ first: { event_type: eventType } });
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [chain({ returning: [queuedMessage] }), chain({ first: current }), chain()],
+      email_message_events: [event],
+    });
+    sendgrid.sendOne.mockImplementationOnce(async ({ customArgs }) => {
+      current.send_attempt_token = customArgs.send_attempt_token;
+      throw new Error('response lost after provider acceptance');
+    });
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice', to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+    });
+    expect(result).toMatchObject({ sent: true, providerAttempted: true, providerAccepted: true });
+    // A provider-block bounce intentionally remains failed for its existing retry rail.
+    expect(result.message.status).toBe(status);
+    expect(event.whereIn).toHaveBeenCalledWith('event_type', expect.arrayContaining([eventType]));
+  });
+
+  test.each([false, true])('SDK acceptance survives ledger failure (retry fails=%s)', async (retryFails) => {
+    const queuedMessage = { id: 'msg-ledger', status: 'queued', subject_snapshot: 'S' };
+    const failedWrite = chain();
+    failedWrite.returning.mockRejectedValue(new Error('ledger unavailable'));
+    const retry = chain({ returning: [{ ...queuedMessage, status: 'sent' }] });
+    if (retryFails) retry.returning.mockRejectedValue(new Error('ledger still unavailable'));
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [chain({ returning: [queuedMessage] }), failedWrite, retry],
+    });
+    sendgrid.sendOne.mockResolvedValueOnce({ messageId: 'sg-accepted' });
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice', to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+    });
+    expect(result).toMatchObject({ sent: true, providerAccepted: true, bookkeepingFailed: retryFails });
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect(retry.update.mock.calls[0][0].status).not.toBe('failed');
+  });
+
+  test.each(['opened_at', 'clicked_at', 'processed', 'deferred'].flatMap(field => [false, true].map(fails => [field, fails])))('matching %s evidence survives lost response (recovery fails=%s)', async (field, fails) => {
+    const queuedMessage = { id: 'msg-engaged', status: 'queued', subject_snapshot: 'S' };
+    const current = { ...queuedMessage, [field]: '2026-01-01T00:00:00Z' };
+    const promote = chain({ returning: [{ ...current, status: 'sent' }] });
+    if (fails) promote.returning.mockRejectedValueOnce(new Error('recovery write unavailable'));
+    const insert = chain({ returning: [queuedMessage] });
+    const failure = chain({ returning: [{ id: queuedMessage.id }] });
+    const event = chain();
+    event.first.mockImplementation(async () => {
+      expect(failure.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed' }));
+      return { event_type: field === 'opened_at' ? 'open' : field === 'clicked_at' ? 'click' : field };
+    });
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [insert, chain({ first: current }), failure, promote],
+      email_message_events: [event],
+    });
+    sendgrid.sendOne.mockImplementationOnce(async ({ customArgs }) => {
+      current.send_attempt_token = customArgs.send_attempt_token;
+      throw new Error('response lost');
+    });
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice', to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+    });
+    expect(result).toMatchObject({ sent: true, providerAccepted: true, bookkeepingFailed: fails });
+    expect(promote.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'sent', sent_at: expect.any(Date) }));
+    expect(promote.where).toHaveBeenCalledWith({ status: 'failed' });
+    expect(event.whereRaw).toHaveBeenCalledWith("raw_event->>'send_attempt_token' = ?", [current.send_attempt_token]);
+  });
+
+  test.each(['queued', 'delivered'])('a delayed older webhook cannot certify the newer %s attempt', async (status) => {
+    const queuedMessage = { id: 'msg-late-event', status: 'queued', subject_snapshot: 'S' };
+    const current = { ...queuedMessage, status, opened_at: '2026-01-01T00:00:00Z' };
+    const event = chain();
+    event.first.mockImplementation(async () => (
+      event.whereRaw.mock.calls[0][1][0] === 'older-attempt' ? { id: 'old-event' } : undefined
+    ));
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [chain({ returning: [queuedMessage] }), chain({ first: current }), chain()],
+      email_message_events: [event],
+    });
+    const rejection = new Error('new attempt rejected');
+    sendgrid.sendOne.mockImplementationOnce(async ({ customArgs }) => {
+      current.send_attempt_token = customArgs.send_attempt_token;
+      throw rejection;
+    });
+    const send = EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice', to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+    });
+    if (status === 'queued') await expect(send).rejects.toBe(rejection);
+    else expect(await send).toMatchObject({ providerAccepted: false });
+    expect(event.where).toHaveBeenCalledWith({ email_message_id: queuedMessage.id, provider: 'sendgrid' });
+  });
+
+  test.each(['before', 'during'])('processed evidence preserves a provider block arriving %s recovery', async (timing) => {
+    const queued = { id: 'msg-block-race', status: 'queued', subject_snapshot: 'S' };
+    const current = { ...queued, status: timing === 'before' ? 'failed' : 'queued' };
+    const durable = { ...queued, status: 'failed', provider_retry_next_at: '2026-01-01T00:00:00Z' };
+    const promotion = chain();
+    promotion.returning.mockImplementation(async () => {
+      const statusGuard = promotion.where.mock.calls.find(([filter]) => filter.status)?.[0].status;
+      if (durable.status !== statusGuard) return [];
+      Object.assign(durable, promotion.update.mock.calls[0][0]);
+      return [durable];
+    });
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [chain({ returning: [queued] }), chain({ first: current }), chain(), promotion],
+      // Both processed and provider-block bounce exist; an unordered first may return processed.
+      email_message_events: [chain({ first: { event_type: 'processed' } })],
+    });
+    sendgrid.sendOne.mockImplementationOnce(async ({ customArgs }) => {
+      current.send_attempt_token = customArgs.send_attempt_token;
+      throw new Error('response lost');
+    });
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice', to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+    });
+    expect(result.providerAccepted).toBe(true);
+    expect(durable).toMatchObject({ status: 'failed', provider_retry_next_at: '2026-01-01T00:00:00Z' });
+    if (timing === 'before') expect(promotion.update).not.toHaveBeenCalled();
   });
 
   test('onQueued resolving false ABORTS before dispatch: row marked failed (pre-provider), no sendOne (codex #3565 gh-r20)', async () => {
@@ -410,6 +594,44 @@ describe('email template library rendering', () => {
     });
     expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
     expect(result.sent).toBe(true);
+  });
+
+  test('a provider error rethrown by a locked handoff follows provider recovery, not pre-dispatch abort', async () => {
+    const queuedMessage = { id: 'msg-provider-error', status: 'queued', subject_snapshot: 'S' };
+    const current = { ...queuedMessage };
+    const providerFailUpdate = chain({ returning: [] });
+    const providerError = new Error('provider socket closed without a response');
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [
+        chain({ returning: [queuedMessage] }),
+        chain({ first: current }),
+        providerFailUpdate,
+      ],
+      email_message_events: [chain()],
+    });
+    sendgrid.sendOne.mockImplementationOnce(async ({ customArgs }) => {
+      current.send_attempt_token = customArgs.send_attempt_token;
+      throw providerError;
+    });
+
+    await expect(EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+      withProviderHandoff: async (dispatch) => dispatch(),
+    })).rejects.toBe(providerError);
+
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect(providerFailUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed',
+      error_message: providerError.message,
+    }));
+    expect(providerFailUpdate.update).not.toHaveBeenCalledWith(expect.objectContaining({
+      error_message: 'aborted_by_caller_before_dispatch',
+    }));
   });
 
   test('deduplicates membership.started categories before provider send', async () => {
@@ -1030,8 +1252,8 @@ describe('email template library rendering', () => {
       email_suppressions: [chain({ result: [] })],
       email_messages: [
         queueInsert,
-        failUpdate,
         chain({ first: { ...queuedMessage, status: 'failed' } }),
+        failUpdate,
       ],
     });
     // SendGrid 4xx bodies can echo the recipient address.
@@ -1236,5 +1458,338 @@ describe('email template library rendering', () => {
 
     expect(result).toEqual(expect.objectContaining({ sent: false, blocked: true }));
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  describe('annual-offer delivery guard at the provider handoff (delivery-guards slice, re-cut of #4569)', () => {
+    const queuedMessage = { id: 'msg-annual', status: 'queued', subject_snapshot: 'S' };
+    const sentMessage = { ...queuedMessage, status: 'sent', provider_message_id: 'sg-annual' };
+    const withheldMessage = { ...queuedMessage, status: 'failed', error_message: 'annual_offer_withheld' };
+
+    beforeEach(() => {
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_suppressions: [chain({ result: [] })],
+      });
+    });
+
+    const send = (fields) => EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+      ...fields,
+    });
+
+    test('estimateId present + sendOne refuses as withheld: blocked result, providerAttempted false', async () => {
+      const queueInsert = chain({ returning: [queuedMessage] });
+      const withheldUpdate = chain({ returning: [withheldMessage] });
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [queueInsert, withheldUpdate],
+      });
+      sendgrid.sendOne.mockRejectedValueOnce(annualOfferWithheldError('est-1'));
+
+      const result = await send({ estimateId: 'est-1' });
+
+      expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ estimateIds: ['est-1'] }));
+      expect(result).toEqual(expect.objectContaining({
+        sent: false, blocked: true, reason: 'annual_offer_withheld', providerAttempted: false,
+      }));
+      expect(result.message.status).toBe('failed');
+      expect(withheldUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', error_message: 'annual_offer_withheld' }));
+    });
+
+    test('estimateIds (plural, grouped) are threaded through to sendOne as the explicit addition', async () => {
+      const queueInsert = chain({ returning: [queuedMessage] });
+      const withheldUpdate = chain({ returning: [withheldMessage] });
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [queueInsert, withheldUpdate],
+      });
+      sendgrid.sendOne.mockRejectedValueOnce(annualOfferWithheldError('est-2'));
+
+      const result = await send({ estimateIds: ['est-1', 'est-2'] });
+
+      expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ estimateIds: ['est-1', 'est-2'] }));
+      expect(result).toEqual(expect.objectContaining({ sent: false, blocked: true, reason: 'annual_offer_withheld' }));
+    });
+
+    test('estimateId present + sendOne accepts: dispatches to the provider', async () => {
+      const queueInsert = chain({ returning: [queuedMessage] });
+      const sentUpdate = chain({ returning: [sentMessage] });
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [queueInsert, sentUpdate],
+      });
+      sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-annual' });
+
+      const result = await send({ estimateId: 'est-1' });
+
+      expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      expect(result).toEqual(expect.objectContaining({ sent: true, providerAttempted: true }));
+    });
+
+    test('without estimateId/estimateIds — sendOne is still called with an empty explicit-id list (its own content derivation covers the rest)', async () => {
+      // Codex round 1 on #4608 (P1) / round 3 structural move: the guard's
+      // content derivation now lives entirely inside sendOne, not here —
+      // this library only ever threads the EXPLICIT id(s) through.
+      const queueInsert = chain({ returning: [queuedMessage] });
+      const sentUpdate = chain({ returning: [sentMessage] });
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [queueInsert, sentUpdate],
+      });
+      sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-annual' });
+
+      const result = await send({});
+
+      expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ estimateIds: [] }));
+      expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      expect(result.sent).toBe(true);
+    });
+
+    test('composes with a caller withProviderHandoff: caller lock outermost, sendOne innermost, still able to block', async () => {
+      const queueInsert = chain({ returning: [queuedMessage] });
+      const withheldUpdate = chain({ returning: [withheldMessage] });
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [queueInsert, withheldUpdate],
+      });
+      const order = [];
+      const withProviderHandoff = jest.fn(async (dispatch) => {
+        order.push('lock');
+        await dispatch();
+        order.push('unlock');
+      });
+      sendgrid.sendOne.mockImplementationOnce(async () => {
+        order.push('provider');
+        throw annualOfferWithheldError('est-1');
+      });
+
+      const result = await send({ estimateId: 'est-1', withProviderHandoff });
+
+      expect(order).toEqual(['lock', 'provider', 'unlock']);
+      expect(result).toEqual(expect.objectContaining({ sent: false, blocked: true, reason: 'annual_offer_withheld', providerAttempted: false }));
+    });
+
+    test('composes with a caller withProviderHandoff that is allowed through: lock, then sendgrid', async () => {
+      const queueInsert = chain({ returning: [queuedMessage] });
+      const sentUpdate = chain({ returning: [sentMessage] });
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [queueInsert, sentUpdate],
+      });
+      const order = [];
+      const withProviderHandoff = jest.fn(async (dispatch) => {
+        order.push('lock');
+        await dispatch();
+        order.push('unlock');
+      });
+      sendgrid.sendOne.mockImplementationOnce(async () => {
+        order.push('provider');
+        return { messageId: 'sg-annual' };
+      });
+
+      const result = await send({ estimateId: 'est-1', withProviderHandoff });
+
+      expect(order).toEqual(['lock', 'provider', 'unlock']);
+      expect(result.sent).toBe(true);
+    });
+
+    test('a guard infrastructure error surfaced by sendOne is a DEFINITE pre-dispatch failure — never uncertain, never a handled/deduped success (pre-push audit P1)', async () => {
+      // Resolves (never throws) so a caller like admin-estimates.js's
+      // sendEstimateEmail — whose onQueued sets emailDispatchStarted before
+      // this guard ever runs — cannot compute `uncertain` from a thrown
+      // provider-shaped error the SDK never actually produced.
+      const queueInsert = chain({ returning: [queuedMessage] });
+      const guardFailedUpdate = chain({ returning: [{ ...queuedMessage, status: 'failed', error_message: 'annual_offer_guard_failed: annual offer guard failed: estimates lookup unavailable' }] });
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [queueInsert, guardFailedUpdate],
+      });
+      sendgrid.sendOne.mockRejectedValueOnce(annualOfferGuardFailedError('estimates lookup unavailable'));
+
+      const result = await send({ estimateId: 'est-1' });
+
+      expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      expect(result).toEqual(expect.objectContaining({
+        sent: false, aborted: true, guardError: true, reason: 'annual_offer_guard_failed',
+        providerAttempted: false, error: 'annual offer guard failed: estimates lookup unavailable',
+      }));
+      expect(result.message.status).toBe('failed');
+      expect(guardFailedUpdate.where).toHaveBeenCalledWith(expect.objectContaining({ id: 'msg-annual', status: 'queued' }));
+    });
+
+    test('a guard infrastructure error with a caller withProviderHandoff present: the same definite failure, and the lock still releases', async () => {
+      const queueInsert = chain({ returning: [queuedMessage] });
+      const guardFailedUpdate = chain({ returning: [{ ...queuedMessage, status: 'failed', error_message: 'annual_offer_guard_failed: annual offer guard failed: estimates lookup unavailable' }] });
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [queueInsert, guardFailedUpdate],
+      });
+      const order = [];
+      const withProviderHandoff = jest.fn(async (dispatch) => {
+        order.push('lock');
+        await dispatch();
+        order.push('unlock');
+      });
+      sendgrid.sendOne.mockImplementationOnce(async () => {
+        order.push('provider');
+        throw annualOfferGuardFailedError('estimates lookup unavailable');
+      });
+
+      const result = await send({ estimateId: 'est-1', withProviderHandoff });
+
+      // dispatchToProvider catches the flagged error and resolves to a
+      // sentinel instead of letting it propagate — so the caller's lock
+      // unwinds normally instead of seeing an exception (runProviderHandoff
+      // still reads this as "ran with a result").
+      expect(order).toEqual(['lock', 'provider', 'unlock']);
+      expect(result).toEqual(expect.objectContaining({
+        sent: false, aborted: true, guardError: true, reason: 'annual_offer_guard_failed',
+        providerAttempted: false, error: 'annual offer guard failed: estimates lookup unavailable',
+      }));
+    });
+  });
+
+  describe('withheldLinkPolicy: rewrite (round 9 structural move — resolved by sendOne, not here)', () => {
+    // Codex round 3 on #4608 originally had THIS library call
+    // rewriteWithheldEstimateLinks itself before dispatch. Round 9 (P1)
+    // moved that decision into sendgrid.sendOne (the true provider
+    // boundary, keyed on templateKey via estimate-annual-guard.js's
+    // withheldLinkPolicyForTemplate) so a retry or bounce recovery — which
+    // call sendOne directly, never through this library — get the SAME
+    // rewrite. sendgrid is mocked wholesale in this file, so these tests
+    // pin what THIS library still owns: forwarding templateKey (and an
+    // explicit policy override, only when the caller set one) into the
+    // sendOne call, and persisting whatever sendOne reports it rewrote onto
+    // the stored row.
+    const queuedMessage = { id: 'msg-rewrite', status: 'queued', subject_snapshot: 'S' };
+    const sentMessage = { ...queuedMessage, status: 'sent', provider_message_id: 'sg-rewrite' };
+
+    beforeEach(() => {
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_suppressions: [chain({ result: [] })],
+      });
+    });
+
+    const send = (fields) => EmailTemplates.sendTemplate({
+      templateKey: 'deposit.receipt',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/estimate/withheld-token-123456', expires_at: 'June 12' },
+      ...fields,
+    });
+
+    test('templateKey is always forwarded to sendOne, so it can resolve the policy itself', async () => {
+      const queueInsert = chain({ returning: [queuedMessage] });
+      const sentUpdate = chain({ returning: [sentMessage] });
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [queueInsert, sentUpdate],
+      });
+      sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-rewrite' });
+
+      await send({});
+
+      expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ templateKey: 'deposit.receipt' }));
+      // No explicit override was passed — sendOne's own template-keyed
+      // resolution must govern, not a policy this library injects.
+      expect(sendgrid.sendOne.mock.calls[0][0]).not.toHaveProperty('withheldLinkPolicy');
+    });
+
+    test('an explicit withheldLinkPolicy override is forwarded through to sendOne', async () => {
+      const queueInsert = chain({ returning: [queuedMessage] });
+      const sentUpdate = chain({ returning: [sentMessage] });
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [queueInsert, sentUpdate],
+      });
+      sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-rewrite' });
+
+      await send({ withheldLinkPolicy: 'rewrite' });
+
+      expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
+        templateKey: 'deposit.receipt', withheldLinkPolicy: 'rewrite',
+      }));
+    });
+
+    test('sendOne performing the rewrite (withheldLinksRewritten + the rewritten bytes on the result) persists the stored row after dispatch, marked withheldLinksRewritten', async () => {
+      const queueInsert = chain({ returning: [queuedMessage] });
+      const persistUpdate = chain({ result: [1] });
+      const sentUpdate = chain({ returning: [sentMessage] });
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [queueInsert, persistUpdate, sentUpdate],
+      });
+      sendgrid.sendOne.mockResolvedValue({
+        messageId: 'sg-rewrite',
+        withheldLinksRewritten: ['est-1'],
+        html: '<p>https://portal.wavespestcontrol.com</p>',
+        text: 'https://portal.wavespestcontrol.com',
+      });
+
+      const result = await send({});
+
+      expect(result).toEqual(expect.objectContaining({ sent: true, withheldLinksRewritten: ['est-1'] }));
+      // The queued row's own snapshot fields are updated to the REWRITTEN
+      // content sendOne reported sending — no estimate link survives in the
+      // stored record — scoped to this attempt (id + still-queued +
+      // send_attempt_token), the same pre-dispatch bookkeeping shape as the
+      // other guard writes. This necessarily happens AFTER sendOne returns
+      // now (this library only learns about the rewrite from its result),
+      // not before dispatch as it did when this library did the rewrite
+      // itself.
+      expect(persistUpdate.where).toHaveBeenCalledWith(expect.objectContaining({
+        id: 'msg-rewrite', status: 'queued', send_attempt_token: expect.any(String),
+      }));
+      expect(persistUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+        html_snapshot: '<p>https://portal.wavespestcontrol.com</p>',
+        text_snapshot: 'https://portal.wavespestcontrol.com',
+      }));
+      expect(persistUpdate.update.mock.calls[0][0].html_snapshot).not.toMatch(/\/estimate\//);
+    });
+
+    test('sendOne reporting no rewrite: nothing is persisted, no marker on the result', async () => {
+      const queueInsert = chain({ returning: [queuedMessage] });
+      const sentUpdate = chain({ returning: [sentMessage] });
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [queueInsert, sentUpdate],
+      });
+      sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-rewrite' });
+
+      const result = await send({});
+
+      expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      expect(result).toEqual(expect.objectContaining({ sent: true }));
+      expect(result.withheldLinksRewritten).toBeUndefined();
+    });
   });
 });

@@ -1,0 +1,442 @@
+const { inspectEmailReplyPlanTotal } = require('../services/email/email-reply-plan-total-verifier');
+
+// Preserve every frozen policy assertion while checking the new no-approval contract.
+const verify = (input) => {
+  const result = inspectEmailReplyPlanTotal(input);
+  expect(result.disposition).toBe('needs_review');
+  expect(result).not.toHaveProperty('ok');
+  return { ok: result.violations.length === 0, violations: result.violations };
+};
+
+const verdict = (text, options = {}) => verify({ text, ...options });
+const rejected = (text, options) => expect(verdict(text, options)).toEqual({
+  ok: false, violations: ['customer_copy_compliance'],
+});
+const allowed = (text, options) => expect(verdict(text, options)).toEqual({
+  ok: true, violations: [],
+});
+
+describe('inactive email reply plan-total policy', () => {
+  test('exports only the requested verifier and accepts empty copy', () => {
+    expect(Object.keys(require('../services/email/email-reply-plan-total-verifier')))
+      .toEqual(['inspectEmailReplyPlanTotal']);
+    expect(verify()).toEqual({ ok: true, violations: [] });
+  });
+
+  test.each([
+    '$98/mo', '$1176/yr', '$98 per month', '$1176 per year',
+    'The plan is $98 monthly', 'Our plan costs $1176 annually',
+    'The annual plan is $1176',
+    'Monthly price is $98', 'Yearly fee: USD 1176',
+    'Annual price: $1176', 'Monthly price: $98', 'Yearly price: $1176',
+    'The monthly plan costs $98', 'Annually, we charge $1176',
+    '$98 is the monthly price', 'The $98 fee is yearly',
+    'The price is $98 per year', 'Our account balance is $98/mo',
+    'We pay $98 per month',
+  ])('rejects an explicit monthly or annual plan amount: %s', (text) => {
+    rejected(text);
+  });
+
+  test.each([
+    'Monthly price is 98', 'Yearly fee: 1176',
+    'Our service costs 98 per month', 'The service runs 1176 yearly',
+    '98 per month is the price', 'The price of our service is 98 monthly',
+    'Our total is 1176/yr',
+  ])('rejects a bare number only with a pricing cue: %s', (text) => {
+    rejected(text);
+  });
+
+  test.each([
+    'Your payment of $98 is due next month.',
+    'Your account balance is $98 this month.',
+    'The price is $98, monthly reminders are sent.',
+    'We received $98 for your account, and monthly updates follow.',
+    'Monthly visits cost $98 per application.',
+    'Annual visits cost $98 per application.',
+    'Yearly visits cost $98 per application.',
+    'Monthly price is $98 per application.',
+    'Price per visit is $98 monthly.',
+    'The monthly plan costs $98 per visit.',
+    '$98 for each application; the schedule is monthly.',
+    'The price is $98 @ monthly.',
+    'Price $98; monthly service continues.',
+    'The price is $98, annual reminders are sent.',
+    '98 per month',
+    'Monthly plan is 98',
+    'Each visit is 98 minutes, and the schedule is monthly.',
+  ])('preserves unrelated payment, scheduling, or sibling pricing: %s', (text) => {
+    allowed(text);
+  });
+
+  test('rejects one total without letting a sibling amount shield it', () => {
+    rejected('Price $98 per application and $1176 yearly');
+    rejected('$98 per application, $1176/yr');
+    rejected('Price $98 per application, $1176 yearly');
+    allowed('$98 per application. We schedule visits monthly.');
+    allowed('Price per visit: $98 monthly.');
+  });
+
+  test.each([
+    'The monthly price is $98, applications are scheduled separately.',
+    'The yearly fee is $1176, visits are scheduled separately.',
+    'The monthly price is 98, applications are scheduled separately.',
+    'Monthly, we charge $98.',
+    'Yearly, we charge $1176.',
+    'Annually, we charge $1176.',
+  ])('keeps a plan price distinct from later units and fronted period punctuation: %s', (text) => {
+    rejected(text);
+  });
+
+  test.each([
+    'Your payment was $98, monthly prices remain unchanged.',
+    'Your refund was $1176, annual fees remain unchanged.',
+    'Your payment was 98, monthly prices remain unchanged.',
+    'Monthly updates were sent, the price is $98.',
+    'Annually, reminders are sent, the price is $1176.',
+    'The monthly price is $98 per application.',
+    'The monthly price is $98: per application.',
+    'The yearly fee is $1176 per visit.',
+  ])('respects independent comma claims and attached application or visit units: %s', (text) => {
+    allowed(text);
+  });
+
+  test.each([
+    '$98 monthly, your payment posted.', '$1176 yearly, your payment posted.',
+    '$98 monthly, your refund cleared.', '$1176 annually, your credit posted.',
+  ])('keeps an explicit trailing period price separate from later account prose: %s', (text) => rejected(text));
+
+  test('permits a fronted period comma only at the beginning of its claim', () => {
+    rejected('Monthly, we charge $98');
+    rejected('Your payment posted, Monthly, we charge $98');
+    rejected('$1176 yearly, your payment posted.', { legacyMonthlyPlan: true });
+    allowed('$98 monthly, your payment posted.', { legacyMonthlyPlan: true });
+    allowed('Your payment was $98, monthly prices remain unchanged.');
+  });
+
+  test.each([
+    'The plan costs $98 a month', '$98 each month', '$1,176 every year',
+    'USD 98 every month', '$1176 a year', '98 dollars each month',
+    'The price is 98 a month', 'The yearly price is 1176 every year',
+  ])('recognizes determined month/year words without changing the scanner: %s', (text) => rejected(text));
+
+  test.each([
+    'The monthly plan costs $98: applications are scheduled separately',
+    'The monthly plan costs $98 - applications are scheduled separately',
+    'The monthly plan costs $98 (applications are scheduled separately)',
+    'The annual price is $1176: visits are scheduled separately',
+    'The monthly price is $98 applications are scheduled separately',
+  ])('does not treat later noun prose as an amount unit: %s', (text) => rejected(text));
+
+  test.each([
+    'The monthly plan costs $98: per application',
+    'The monthly plan costs $98 - for each application',
+    'The monthly plan costs $98 (per application)',
+    'The annual price is $1176: per visit',
+    'Monthly application price is $98',
+  ])('preserves real sibling pricing units: %s', (text) => allowed(text));
+
+  test.each([
+    'The monthly price of the standard plan for your home is $98',
+    'The total annual cost for your pest-control service is $1176',
+    '$98 is the price of the standard plan for your home monthly',
+    'The yearly price of our standard program for your account is 1176',
+  ])('follows a price relationship to its claim boundary: %s', (text) => rejected(text));
+
+  test('handles a long bounded claim and repeated nearest anchors', () => {
+    rejected(`The monthly price for your ${'standard '.repeat(400)}plan is $98`);
+    rejected(`${Array(70).fill('$98 monthly payment posted,').join(' ')}$1176/yr`);
+  });
+
+  test.each([
+    '$98/mo', '$98 a month', '$98 each month', '$98 every month',
+    'The monthly payment is $98', 'The monthly price is 98',
+    '$98/month', '$98/months', '$98/mos', '$98 per months', '$98 per mos',
+  ])('permits only the legacy plan\'s own monthly unit: %s', (text) => {
+    allowed(text, { legacyMonthlyPlan: true });
+  });
+
+  test.each([
+    '$1176/yr', '$1176 a year', '$1176 each year', '$1176 every year',
+    'The annual price is $1176', 'The yearly price is 1176',
+    '$98/mo, $1176/yr', '$98 a month; the annual total is $1176',
+    '$1176/year', '$1176/years', '$1176/yrs', '$1176 per years', '$1176 per yrs',
+  ])('rejects yearly aggregates even for a trusted monthly legacy plan: %s', (text) => {
+    rejected(text, { legacyMonthlyPlan: true });
+  });
+
+  test.each([
+    '98 a month', '98 each month', '1176 every year',
+    'Our monthly plan is 98', 'Our plan is 98 every month',
+  ])('still requires a pricing predicate for bare determined-period numbers: %s', (text) => allowed(text));
+
+  test.each([
+    'The monthly payment is $98', 'Your monthly payment amount is $98',
+    'The monthly account fee is $98', 'The annual account fee is $1176',
+    'The monthly payment is 98', 'Monthly reminder fee is $98',
+    'Monthly service reminders cost $98',
+  ])('keeps account and activity nouns inside explicit pricing predicates: %s', (text) => rejected(text));
+
+  test.each([
+    'Your account balance of $98 remains unchanged, monthly prices are unchanged',
+    'Monthly reminder mentions the price of the standard application for your home: $98',
+  ])('preserves account events and singular or modified activity cadence: %s', (text) => allowed(text));
+
+
+  test.each([
+    'The monthly price is $98 after the payment posted.',
+    'The monthly plan is $98 after the payment posted.',
+    '$98 is the monthly price after your payment posted.',
+    'The yearly account fee is $1176 after your payment posted.',
+    'Monthly fee: $98 after your payment posted.',
+    '$98/mo was the payment that posted.',
+    '$1176 per year was the payment that posted.',
+  ])('preserves explicit price assertions even beside account-event prose: %s', (text) => rejected(text));
+
+  test.each([
+    'The monthly payment is $98 after your payment posted.',
+    'The annual payment is $1176 after your payment posted.',
+    'The yearly payment is $1176 after your payment posted.',
+    'The monthly payment is 98 after your payment posted.',
+  ])('retains an explicit payment predicate beside an earlier account event: %s', (text) => rejected(text));
+
+  test.each([
+    'The monthly plan costs only $98 after your payment posted.',
+    'Your annual plan costs exactly $1176 after the credit posted.',
+    'The monthly plan costs just about $98 after your payment posted.',
+    'Your yearly plan costs at least $1176 after the credit posted.',
+    'The monthly plan costs as low as $98 after your payment posted.',
+    'The annual plan costs only roughly exactly $1176 after your payment posted.',
+    'The annual plan costs up to at least as low as $1176 after your payment posted.',
+    'Monthly fee only about: $98 after your payment posted.',
+    'The monthly plan costs just 98 after your payment posted.',
+  ])('retains finite qualified price assertions beside account events: %s', (text) => rejected(text));
+
+
+  test('preserves monthly-only legacy exemptions for qualified pricing assertions', () => {
+    allowed('The monthly plan costs only $98 after your payment posted.', { legacyMonthlyPlan: true });
+    rejected('The annual plan costs exactly $1176 after the credit posted.', { legacyMonthlyPlan: true });
+  });
+
+  test.each([
+    'The plan is $98 monthly after your payment posted.',
+    'The plan is $1176 yearly after your payment posted.',
+    'Our program will be only $98 monthly after your payment posted.',
+    'The package was exactly $1176 annually after the credit posted.',
+    'The price is just about $98 monthly after your payment posted.',
+    'The fee is up to at least as low as: $1176 yearly after the credit posted.',
+    'The payment is $98 monthly after your payment posted.',
+    'The payment is 98 monthly after your payment posted.',
+    '$98 is the monthly payment after your payment posted.',
+    'The payment will be exactly $1176 yearly after your payment posted.',
+  ])('retains noun/copula assertions with a trailing period beside account events: %s', (text) => rejected(text));
+
+  test.each([
+    'The price is only $98 per application after your payment posted.',
+    'Your payment posted. The price is $98 per application, visits are monthly.',
+  ])('keeps trailing-period account events and application prices distinct: %s', (text) => allowed(text));
+
+
+  test.each([
+    'Your monthly payment is only about $98 after your credit posted',
+    'Your payment is monthly exactly $98 after your credit posted',
+    '$98 is the payment monthly after your credit posted',
+    'Your yearly payment will be at least $1176 after your credit posted',
+  ])('recognizes actual bounded payment copulas in both period orders: %s', (text) => rejected(text));
+
+  test.each([
+    'Monthly dues are $98', 'Your monthly subscription is $98',
+    'The annual subscription is $1176', 'Monthly dues are 98',
+    'Your yearly subscription is 1176',
+    'The monthly subscription is only $98 after your payment posted',
+    'We paid $98 a month', 'We paid $1176 a year',
+    'We refunded $98 a month ago; monthly dues are $98',
+  ])('recognizes live billing labels and preserves recurring totals: %s', (text) => rejected(text));
+
+  test.each([
+    'We refunded $98 a month ago', 'We received $98 a year ago',
+    'We credited $98 a mo ago', 'We received $1176 a yr ago',
+    'The price was $98 a month ago', 'We refunded 98 a month ago',
+  ])('keeps a bounded ago continuation temporal rather than recurring: %s', (text) => allowed(text));
+
+  test('applies billing-label legacy exemptions only to monthly dues', () => {
+    allowed('Monthly dues are $98', { legacyMonthlyPlan: true });
+    allowed('Your monthly subscription is $98', { legacyMonthlyPlan: true });
+    rejected('Yearly dues are $1176', { legacyMonthlyPlan: true });
+    rejected('Your annual subscription is $1176', { legacyMonthlyPlan: true });
+  });
+
+  test('keeps the trailing-period copula exemption monthly-only', () => {
+    allowed('The plan is only $98 monthly after your payment posted.', { legacyMonthlyPlan: true });
+    rejected('The plan is only $1176 yearly after your payment posted.', { legacyMonthlyPlan: true });
+  });
+
+  test('applies legacy monthly exemptions to payment predicates without exempting yearly aggregates', () => {
+    allowed('The monthly payment is $98 after your payment posted.', { legacyMonthlyPlan: true });
+    rejected('The yearly payment is $1176 after your payment posted.', { legacyMonthlyPlan: true });
+    rejected('The annual payment is $1176 after your payment posted.', { legacyMonthlyPlan: true });
+    allowed('Your monthly payment of $98 posted after the fee adjustment.', { legacyMonthlyPlan: true });
+  });
+
+  test.each([
+    [['Your annualized plan total is $1176', 'Annualized subscription is 1176'], []],
+    [['Your monthly spread is $98', 'The annual spread is 1176'], []],
+    [['For the monthly plan, the price is $98', 'For our yearly package, the fee is $1176', 'The plan is $98 and is billed monthly', 'The price is only $1176 and will be charged yearly'], ['Your payment was $98, monthly prices remain unchanged.', 'The plan is $98 and visits occur monthly.', 'For the monthly plan, your payment posted for $98.']],
+    [['$98 is per month', '$1176 was per year', '$98 will be monthly', '$1176 is yearly after your payment posted'], ['Your refund was $98; service is monthly.']],
+    [['Our annual renewal rate is 98', 'Monthly routes run 98', 'Monthly price is $98'], ['Our annual renewal rate is 98 percent', 'Our annual renewal rate is 98%', 'Monthly routes run 98 miles', 'Monthly routes run 98 kilometers']],
+  ])('covers supported R3 forms with independent-fact controls: %j', (blocked, permitted) => {
+    blocked.forEach((text) => rejected(text));
+    permitted.forEach((text) => allowed(text));
+  });
+  test.each([
+    [['The plan costs $1,176 for the year', 'The plan costs $98 for the month', 'The price for the year is $1,176'], []],
+    [['Your monthly payment totals $98', 'Your yearly payment equals $1,176', 'The monthly payment comes to $98', 'Your monthly payment will total 98 after your credit posted'], []],
+    [['Each month, we charge $98', 'Per year, the plan costs $1,176', 'The plan is $98, billed monthly', 'The price is $1,176, charged yearly'], ['The initial price is $98, service occurs monthly']],
+    [['Monthly service costs $98', 'Monthly treatment fee is $98', 'Monthly service weekly reminders cost $98'], []],
+  ])('covers supported R4 pricing while preserving account and cadence facts: %j', (blocked, permitted) => {
+    blocked.forEach((text) => rejected(text));
+    permitted.forEach((text) => allowed(text));
+  });
+  test('keeps R4 legacy exceptions monthly-only', () => {
+    for (const text of ['The plan costs $98 for the month', 'Your monthly payment totals $98', 'Each month, we charge $98', 'The plan is $98, billed monthly']) allowed(text, { legacyMonthlyPlan: true });
+    for (const text of ['The plan costs $1,176 for the year', 'Your yearly payment equals $1,176', 'Per year, the plan costs $1,176', 'The price is $1,176, charged yearly']) rejected(text, { legacyMonthlyPlan: true });
+  });
+  test('recognizes active recurring pay assertions without overriding transaction notices', () => {
+    ['You pay $98 monthly', 'You pay $1176 annually', 'Customers may pay $1176 yearly', 'You pay 98 monthly', 'We paid $98 monthly'].forEach((text) => rejected(text));
+    ['We refunded $1176 a year ago', 'We paid $98 a month ago'].forEach((text) => allowed(text));
+  });
+  test('keeps active pay assertions subject to unit-specific trusted exemptions', () => {
+    allowed('You pay $98 monthly', { legacyMonthlyPlan: true });
+    rejected('You pay $1176 annually', { legacyMonthlyPlan: true });
+    allowed('You pay $1176 annually', { commercialProposal: true });
+  });
+  test('keeps R3 pricing exceptions unit-specific and trusted', () => {
+    for (const text of ['Your monthly spread is $98', 'For the monthly plan, the price is $98', 'The plan is $98 and is billed monthly', '$98 is per month']) allowed(text, { legacyMonthlyPlan: true });
+    for (const text of ['Your annualized plan total is $1176', '$1176 was per year', 'The plan is $1176 and is billed yearly']) rejected(text, { legacyMonthlyPlan: true });
+    allowed('Your annualized plan total is $1176', { commercialProposal: true });
+  });
+
+  test('uses only trusted literal true exemption flags', () => {
+    allowed('$98/mo', { commercialProposal: true });
+    allowed('$98/mo', { legacyMonthlyPlan: true });
+    allowed('$98/mo', { commercialProposal: true, legacyMonthlyPlan: false });
+    rejected('$98/mo', { commercialProposal: 'true' });
+    rejected('$98/mo', { legacyMonthlyPlan: 'true' });
+    rejected('$98/mo', { commercialProposal: new Boolean(true) });
+    rejected('Commercial proposal: $98/mo');
+    rejected('This is a legacy monthly plan: $98/mo');
+  });
+
+  test('normalizes copy before checking claims or exemptions', () => {
+    rejected('**&#36;98/mo**');
+    expect(verdict(null, { commercialProposal: true })).toEqual({
+      ok: false, violations: ['copy_type'],
+    });
+    expect(verdict('a'.repeat(8193), { legacyMonthlyPlan: true })).toEqual({
+      ok: false, violations: ['copy_size'],
+    });
+    expect(verdict('a '.repeat(513))).toEqual({
+      ok: false, violations: ['copy_tokens'],
+    });
+  });
+});
+
+describe('owner ruling 2026-09-19: positive evidence first', () => {
+  test.each([
+    'Your $98 monthly payment posted.',
+    'Your $98 monthly payment posted and prices remain unchanged.',
+    'Your $98 monthly payment posted and fees are unchanged.',
+    'Your $98 monthly payment posted, prices remain unchanged.',
+    'The monthly payment of $98 posted.',
+    'We send monthly reminders about your $98 balance.',
+    'Monthly updates mention the $98 price.',
+    'The annual payment of $1176 posted.',
+    'Annual updates mention the $98 price.',
+  ])('account/activity notices beside a money+period pair are findings: %s', (text) => rejected(text));
+
+  test('a fronted period comma before a payment notice is a finding', () => {
+    rejected('Monthly, your payment of $98 posted.');
+  });
+
+  test('a long repeated bare-number cadence phrase is a finding', () => {
+    rejected(Array(80).fill('98 monthly payment posted,').join(' '));
+  });
+
+  test('a bare determined-period number beside unchanged-price prose is a finding', () => {
+    rejected('Your monthly payment of 98 posted, prices remain unchanged');
+  });
+
+  test.each([
+    'The monthly payment of $98 posted',
+    'Your monthly payment was $98 and it cleared',
+    'We received your monthly payment of $98',
+    'Monthly reminder mentions the $98 initial-service price',
+    'Monthly service reminders mention the $98 initial-service price',
+    'Yearly service update mentions the $1176 initial-service cost',
+    'Annual scheduled appointment details mention the $98 initial-service price',
+  ])('account events and modified activity cadence beside a price are findings: %s', (text) => rejected(text));
+
+  test.each([
+    'We received your monthly payment of $98 for the plan.',
+    'Your monthly payment of $98 posted after the fee adjustment.',
+    'Your annual payment of $1176 posted after the plan adjustment.',
+    'We received your monthly payment of 98 for the plan.',
+    'Your monthly payment of 98 posted after the fee adjustment.',
+    'We received your monthly payment after the fee adjustment of $98.',
+    'Your monthly payment after the plan adjustment of $98 posted.',
+  ])('descriptive plan/fee words beside an account event are findings: %s', (text) => rejected(text));
+
+  test.each([
+    'We received your monthly payment of only $98 for the plan.',
+    'Your monthly payment of exactly $98 posted after the fee adjustment.',
+    'We received your monthly payment only just $98 for the plan.',
+    'Your annual payment amount of exactly $1176 posted after the fee adjustment.',
+    'Your monthly payment of at least $98 posted after the cost adjustment.',
+    'We received your monthly payment of $98 for the plan that costs only $1176.',
+  ])('qualified account notices and separate unpaired amounts are findings: %s', (text) => rejected(text));
+
+  test.each([
+    'Your payment was $98 monthly after the credit posted.',
+    'Your payment of $98 monthly is posted after the fee adjustment.',
+    'We received your payment of exactly $98 monthly for the plan.',
+    'Your payment of $98 monthly for the plan is now posted.',
+  ])('trailing-period account events beside a monthly amount are findings: %s', (text) => rejected(text));
+
+  test.each([
+    'Your monthly payment is posted for $98',
+    'Your monthly payment has been received in the amount of $98',
+    'Your annual payment is posted for $1176',
+    'Your yearly payment has been received in the amount of $1176',
+    'Your monthly payment is posted for exactly $98 after the plan adjustment',
+    'Your monthly payment has been received in the amount of 98',
+  ])('event copulas with a payment amount are findings: %s', (text) => rejected(text));
+
+  test('a legacy-monthly annual payment notice is a finding', () => {
+    rejected('We received your annual payment of $1176 for the plan.', { legacyMonthlyPlan: true });
+  });
+
+  test.each([
+    'Annualized reminders mention the $98 initial price; payments are received.',
+    'We received your monthly payment of $98 after the spread adjustment.',
+    'We received $98 and it was billed monthly.',
+    'Your payment of $98 monthly posted.',
+  ])('R3 independent-fact controls beside a money+period pair are findings: %s', (text) => rejected(text));
+
+  test.each([
+    'Your account balance is $98 for the month',
+    'We received $98 for the month after the plan adjustment',
+    'Your monthly payment of $98 posted after the total adjustment',
+    'Your yearly payment was $1,176 and it cleared',
+    'We received $98, billed monthly',
+    'Each month, we send reminders about your $98 balance',
+    'Per year, your payment posted for $1,176',
+    'The initial service costs $98 with monthly treatments afterward',
+    'The initial price is $98 followed by monthly service',
+    'The initial price is $98 followed by yearly treatments',
+  ])('R4 account and cadence facts beside a money+period pair are findings: %s', (text) => rejected(text));
+
+  test.each([
+    'We received $98 monthly for the plan',
+    'Your monthly payment of $98 posted',
+    'Your monthly payment was paid $98',
+  ])('transaction notices beside an active recurring pay assertion are findings: %s', (text) => rejected(text));
+});

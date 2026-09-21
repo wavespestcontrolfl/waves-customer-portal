@@ -417,6 +417,14 @@ async function verifyAllocationLocked(trx, allocation, { anchorInvoiceId, expect
       throw staleErr(`invoice ${row.invoice_number} lost its payment binding`);
     }
   }
+  // All allocation invoice locks are acquired above. Take estimate ledger
+  // locks only now, in the same stable invoice order, and hold them until the
+  // caller has finished its Stripe PI decision. One blocked sibling refuses
+  // the whole combined amount.
+  const { assertInvoiceDepositSettlementReady } = require('./estimate-deposits');
+  for (const row of rows) {
+    await assertInvoiceDepositSettlementReady(trx, row);
+  }
   return rows;
 }
 

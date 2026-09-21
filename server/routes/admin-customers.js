@@ -1164,6 +1164,16 @@ function isValidStage(stage) {
   return !stage || CUSTOMER_STAGE_SET.has(stage);
 }
 
+// Codex round-8 audit P1 (#4131): sendViaSMSAndEmail resolves
+// { ok: true, settled_zero_due: true } (or covered_by_credit) for an
+// invoice fully offset by live account credit at send time — genuine
+// success, but NOTHING was texted or emailed. Named + exported so the
+// annual-prepay-invoice route's settledByDepositCredit reuse is testable
+// in isolation.
+function deliverySettledLiveCredit(delivery) {
+  return !!(delivery?.settled_zero_due || delivery?.covered_by_credit);
+}
+
 // Lifecycle field stamps on pipeline_stage change now live in the canonical
 // customer-stages service (single source of truth for member_since /
 // churned_at / active consistency, shared with the Intelligence Bar paths) —
@@ -5170,14 +5180,23 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
         logger.warn(`[customers:annual-prepay-invoice] send failed for ${invoice.id}: ${err.message}`);
       }
     }
+    if (deliverySettledLiveCredit(delivery)) {
+      // Codex round-8 audit P1 (#4131): the live send-time credit
+      // application can settle the invoice even when the upfront
+      // settledByDepositCredit check (computed before the send) said
+      // otherwise — ok: true, but NOTHING was delivered. Reuse the same
+      // flag so the response never manufactures a pay link for an
+      // invoice that already has nothing due.
+      settledByDepositCredit = true;
+    }
 
-    const payUrl = delivery?.payUrl || await shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {
+    const payUrl = settledByDepositCredit ? null : (delivery?.payUrl || await shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {
       kind: 'invoice',
       entityType: 'invoices',
       entityId: invoice.id,
       customerId: customer.id,
       codePrefix: invoiceShortCodePrefix(invoice),
-    });
+    }));
 
     await auditCustomerMutation(req, 'customer.annual_prepay.invoice_send', customer.id, {
       invoiceId: invoice.id,
@@ -5822,6 +5841,7 @@ router._private = {
   normalizeAdminAddressInput,
   parseAnnualPrepayAmount,
   parseAnnualPrepayVisitCount,
+  deliverySettledLiveCredit,
   scheduleLinesFromEstimate,
   serviceCatalogMatch,
 };

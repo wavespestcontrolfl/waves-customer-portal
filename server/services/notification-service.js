@@ -90,6 +90,7 @@ async function existingCustomerNotification(customerId, dedupeKey, connection = 
 const { stripEmoji } = require('../utils/strip-emoji');
 
 const NotificationService = {
+  scopeAdminFeedToRole,
   // Create a notification.
   // `bell` (admin recipients only) is an explicit site-level policy tag:
   // true always rings, false never rings — see notification-bell-policy.js.
@@ -519,16 +520,41 @@ const NotificationService = {
   // recipient/role scoping as every other admin read. `before` bounds to bells
   // that existed when the read request entered; `twilioSid` narrows to the
   // single bell written for one inbound message.
-  async markInboundSmsReadAdmin({ customerId, before = new Date(), twilioSid = null, role } = {}) {
-    if (!customerId) return 0;
+  // Retires inbound_sms bells. By customer (the thread deep-link) and/or
+  // by the message SID(s) the bell was written for — an unknown-sender
+  // bell has no customer, so the SID is its only handle (codex #4210 P2).
+  async markInboundSmsReadAdmin({ customerId, before = new Date(), twilioSid = null, twilioSids = null, role } = {}) {
+    const sids = [...(twilioSids || []), ...(twilioSid ? [twilioSid] : [])].filter(Boolean);
+    if (!customerId && !sids.length) return 0;
     let q = scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin', category: 'inbound_sms' }),
       role,
     )
       .whereNull('read_at')
-      .where('link', `/admin/communications?thread=${customerId}`)
       .where('created_at', '<=', before);
-    if (twilioSid) q = q.whereRaw("metadata->'payload'->>'twilioSid' = ?", [twilioSid]);
+    if (customerId) q = q.where('link', `/admin/communications?thread=${customerId}`);
+    if (sids.length) q = q.whereRaw("metadata->'payload'->>'twilioSid' = ANY(?)", [sids]);
+    return q.update({ read_at: new Date() });
+  },
+
+  // Applicant-reply bells for one application, once the owner has opened
+  // it in Recruiting (PR #4623 r20): read up to the snapshot they saw.
+  // `replyId` narrows the clear to ONE reply's bell (the post-write check in
+  // recruiting-inbound.js retires a bell whose reply was already read).
+  async markApplicantRepliesReadAdmin({ applicationId, replyId = null, replyIds = null, before = new Date(), role } = {}) {
+    if (!applicationId) return 0;
+    if (Array.isArray(replyIds) && !replyIds.length) return 0;
+    let q = scopeAdminFeedToRole(
+      db('notifications').where({ recipient_type: 'admin', category: 'job_application' }),
+      role,
+    )
+      .whereRaw("COALESCE(metadata->>'triggerKey', '') = 'job_applicant_reply'")
+      .whereRaw("metadata->'payload'->>'applicationId' = ?", [String(applicationId)])
+      .whereNull('read_at')
+      .where('created_at', '<=', before);
+    if (replyId) q = q.whereRaw("metadata->'payload'->>'replyId' = ?", [String(replyId)]);
+    // Bound to the replies the reader actually saw (Codex #4623 r29 P1).
+    if (Array.isArray(replyIds)) q = q.whereRaw("metadata->'payload'->>'replyId' = ANY (?::text[])", [replyIds.map(String)]);
     return q.update({ read_at: new Date() });
   },
 

@@ -1010,6 +1010,21 @@ export function classifyManualPrepayMintOutcome({ minted, fresh }) {
       blockingAlert: null,
     };
   }
+  // Codex round-9 audit P1 (#4131): live send-time settlement resolves
+  // { ok: true, settled_zero_due: true } — a genuine success, but NEITHER
+  // channel ran — and the route folds that (and its OWN upfront
+  // deposit-credit settlement, which never even calls delivery at all)
+  // into the top-level settledByDepositCredit flag. Before this, only
+  // delivery.covered_by_credit was recognized here, so this case fell
+  // through to the "sent" copy below and told the operator the customer
+  // received an invoice neither channel ever delivered.
+  if (minted?.settledByDepositCredit || minted?.delivery?.settled_zero_due) {
+    return {
+      notice: `Annual prepay invoice${num} for ${formatMoney(fresh.prepayTotal)} was settled — nothing is due, so nothing was sent to the customer.`,
+      warnings,
+      blockingAlert: null,
+    };
+  }
   if (minted?.delivery?.ok === false) {
     return {
       notice: `Annual prepay invoice${num} created for ${formatMoney(fresh.prepayTotal)}, but sending it failed — send it from the customer's invoices.`,

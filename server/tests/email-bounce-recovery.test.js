@@ -745,3 +745,222 @@ describe('commitRecoveryOnDelivery persists lead/estimate source address (codex 
     expect(body).not.toContain('estimates.customer_email');
   });
 });
+
+// Pre-push audit P1 (2eb19ceff7): dispatchRecoveryMessage (only reachable
+// through attemptRecovery — it is not itself exported) re-sends the SAME
+// stored html/text to a corrected address straight through sendgrid.sendOne.
+// This routes 'estimates' through ONE chain that answers three distinct
+// call shapes without colliding: resolveCustomerEmailField/on-file gate
+// never touches 'estimates' here (the bounced address is the customer's
+// OWN email column, so bouncedAddressStillOnFile short-circuits true on
+// match.field before any estimates/leads read); correctedAddressOwnedByOther
+// always runs its exact + gmail-mailbox ownership scan regardless of the
+// guard (`.whereRaw(...).select('customer_id')` — tracked separately from
+// the guard's own `.whereIn('token', ...)` scan so a real "no link" case
+// can assert the guard issued no query while that pre-existing scan still
+// legitimately runs).
+function makeRecoveryDb({ estimateRow, customerRow, messageRow, recoveryId = 'rec-annual' } = {}) {
+  const state = { tokenQueried: false };
+  const calls = [];
+  const fn = jest.fn((table) => {
+    const chain = {};
+    for (const m of ['whereRaw', 'whereNot', 'andWhere', 'orWhereRaw', 'onConflict', 'ignore', 'modify', 'whereNotIn']) {
+      chain[m] = jest.fn(() => chain);
+    }
+    chain.where = jest.fn((cond) => {
+      if (table === 'estimates' && cond && typeof cond === 'object' && 'id' in cond) chain._estId = cond.id;
+      return chain;
+    });
+    chain.whereIn = jest.fn((col, vals) => {
+      if (table === 'estimates' && col === 'token') { state.tokenQueried = true; chain._tokenVals = vals; }
+      return chain;
+    });
+    chain.insert = jest.fn(() => chain);
+    chain.first = jest.fn(() => {
+      if (table === 'customers') return Promise.resolve(customerRow || null);
+      if (table === 'estimates') {
+        return Promise.resolve(estimateRow && chain._estId === estimateRow.id ? estimateRow : undefined);
+      }
+      return Promise.resolve(null);
+    });
+    chain.select = jest.fn(() => {
+      if (table === 'estimates' && chain._tokenVals) {
+        return Promise.resolve(estimateRow && chain._tokenVals.includes(estimateRow.token) ? [{ id: estimateRow.id }] : []);
+      }
+      return Promise.resolve([]);
+    });
+    chain.returning = jest.fn(() => {
+      if (table === 'email_bounce_recoveries') return Promise.resolve([{ id: recoveryId }]);
+      if (table === 'email_messages') return Promise.resolve([messageRow]);
+      return Promise.resolve([]);
+    });
+    chain.update = jest.fn((data) => { calls.push({ table, data }); return Promise.resolve(1); });
+    chain.then = (res, rej) => Promise.resolve([]).then(res, rej);
+    chain.catch = (rej) => Promise.resolve([]).catch(rej);
+    return chain;
+  });
+  fn.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+  fn._calls = calls;
+  fn._state = state;
+  return fn;
+}
+
+describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery re-sends', () => {
+  const orig = { ...process.env };
+  beforeEach(() => {
+    delete process.env.EMAIL_BOUNCE_RECOVERY;
+    delete process.env.EMAIL_RECOVERY_MIN_CONFIDENCE;
+    emailLib.loadTemplateByKey.mockResolvedValue(undefined); // falls to the email_suppressions fallback (no rows -> not suppressed)
+    sendgrid.sendOne.mockReset();
+  });
+  afterEach(() => { process.env = { ...orig }; });
+
+  // Codex round 3 on #4608: the annual-offer guard's AUTHORITATIVE check
+  // moved to sendgrid.sendOne itself (the true provider boundary) — which
+  // this test file mocks away entirely. These tests simulate sendOne's own
+  // refusal contract (an error flagged .annualOfferWithheld /
+  // .annualOfferGuardFailed) rather than exercising a real guard query
+  // through the fake table-routed db — that content-derivation mechanism
+  // now belongs to sendgrid-mail's own test suite. What THIS file must
+  // still prove: it calls sendOne with the bounced message's stored
+  // html/text and correctly maps sendOne's refusal onto its bookkeeping.
+  function annualOfferWithheldError() {
+    const err = new Error('annual_offer_withheld');
+    err.code = 'ANNUAL_OFFER_WITHHELD';
+    err.annualOfferWithheld = true;
+    err.retryable = false;
+    return err;
+  }
+  function annualOfferGuardFailedError(message = 'estimates lookup unavailable') {
+    const err = new Error(`annual offer guard failed: ${message}`);
+    err.code = 'ANNUAL_OFFER_GUARD_FAILED';
+    err.annualOfferGuardFailed = true;
+    return err;
+  }
+
+  test('sendOne refuses as withheld: the resend stops permanently', async () => {
+    const messageRow = { id: 'msg-annual-1', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com', subject_snapshot: 'S' };
+    const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
+    db.mockImplementation(mockDb);
+    sendgrid.sendOne.mockRejectedValueOnce(annualOfferWithheldError());
+
+    const res = await recovery.attemptRecovery(
+      {
+        id: 'orig-annual-1', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'jane@gmial.com',
+        template_key: 'estimate.expiring_notice', suppression_group_key_snapshot: 'service_operational', categories: ['email_template'],
+        trigger_event_id: 'estimate_delivery:3f2a1b4c-1111-4222-8333-444455556666',
+        html_snapshot: '<p>Your estimate is expiring: https://portal.wavespestcontrol.com/estimate/recovery-token-a</p>',
+        text_snapshot: 'View it: https://portal.wavespestcontrol.com/estimate/recovery-token-a',
+      },
+      { event: 'bounce', type: 'bounce' },
+    );
+
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
+      html: '<p>Your estimate is expiring: https://portal.wavespestcontrol.com/estimate/recovery-token-a</p>',
+      text: 'View it: https://portal.wavespestcontrol.com/estimate/recovery-token-a',
+      estimateIds: ['3f2a1b4c-1111-4222-8333-444455556666'],
+    }));
+    expect(res).toEqual({ skipped: 'annual_offer_withheld' });
+    // dispatchRecoveryMessage's own permanent-refusal bookkeeping: the stored
+    // row is marked 'blocked' with the withheld reason, guarded on still-'queued'
+    // (never overwrites a row a concurrent webhook already terminalized).
+    const messageUpdate = mockDb._calls.find((c) => c.table === 'email_messages' && c.data.status === 'blocked');
+    expect(messageUpdate).toMatchObject({ data: { status: 'blocked', error_message: 'annual_offer_withheld' } });
+    // This row carries no provider_retry_next_at (bounce-recovery rows never
+    // do), so transactional-email-provider-retry.js's claimDueRetries sweep
+    // (whereNotNull('provider_retry_next_at')) can never re-pick it.
+    expect(messageUpdate.data.provider_retry_next_at).toBeUndefined();
+    // The ledger itself also reflects the suppression, not a bare send failure.
+    const ledgerUpdate = mockDb._calls.filter((c) => c.table === 'email_bounce_recoveries').pop();
+    expect(ledgerUpdate.data).toMatchObject({ status: 'recipient_unauthorized' });
+  });
+
+  test('sendOne accepts: the resend goes out normally', async () => {
+    const messageRow = { id: 'msg-annual-2', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com', subject_snapshot: 'S' };
+    const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
+    db.mockImplementation(mockDb);
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'pm-annual-delivered' });
+
+    const res = await recovery.attemptRecovery(
+      {
+        id: 'orig-annual-2', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'jane@gmial.com',
+        template_key: 'estimate.expiring_notice', suppression_group_key_snapshot: 'service_operational', categories: ['email_template'],
+        html_snapshot: '<p>https://portal.wavespestcontrol.com/estimate/recovery-token-b</p>',
+        text_snapshot: '',
+      },
+      { event: 'bounce', type: 'bounce' },
+    );
+
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect(res).toMatchObject({ resent: true });
+  });
+
+  test('round 9 structural fix (P1): a bounce-recovered deposit.receipt whose stored content still carries a withheld link is rewritten by sendOne and re-sent — the recovery row snapshot is updated to match', async () => {
+    const messageRow = { id: 'msg-annual-rewrite', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com', subject_snapshot: 'S' };
+    const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
+    db.mockImplementation(mockDb);
+    const rewrittenHtml = '<p>https://portal.wavespestcontrol.com</p>';
+    const rewrittenText = 'https://portal.wavespestcontrol.com';
+    sendgrid.sendOne.mockResolvedValue({
+      messageId: 'pm-deposit-receipt-recovered',
+      withheldLinksRewritten: ['est-withheld-2'],
+      html: rewrittenHtml,
+      text: rewrittenText,
+    });
+
+    const res = await recovery.attemptRecovery(
+      {
+        id: 'orig-annual-rewrite', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'jane@gmial.com',
+        template_key: 'deposit.receipt', suppression_group_key_snapshot: 'service_operational', categories: ['email_template'],
+        html_snapshot: '<p>https://portal.wavespestcontrol.com/estimate/recovery-token-withheld</p>',
+        text_snapshot: 'https://portal.wavespestcontrol.com/estimate/recovery-token-withheld',
+      },
+      { event: 'bounce', type: 'bounce' },
+    );
+
+    // templateKey lets sendOne resolve 'rewrite' for deposit.receipt on its
+    // own — bounce recovery has no explicit opinion of its own to forward.
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ templateKey: 'deposit.receipt' }));
+    expect(res).toMatchObject({ resent: true });
+    // The recovery row's snapshot is updated to the rewritten bytes sendOne
+    // reported sending, in the same write as the provider acceptance.
+    const messageUpdate = mockDb._calls.find((c) => c.table === 'email_messages' && c.data.provider_message_id === 'pm-deposit-receipt-recovered');
+    expect(messageUpdate).toMatchObject({ data: { html_snapshot: rewrittenHtml, text_snapshot: rewrittenText } });
+  });
+
+  test('sendOne refuses with a guard INFRASTRUCTURE failure: the ordinary failure path applies, not the permanent withheld one', async () => {
+    const messageRow = { id: 'msg-annual-3', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com', subject_snapshot: 'S' };
+    const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
+    db.mockImplementation(mockDb);
+    sendgrid.sendOne.mockRejectedValueOnce(annualOfferGuardFailedError());
+
+    const res = await recovery.attemptRecovery(
+      {
+        id: 'orig-annual-3', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'jane@gmial.com',
+        template_key: 'quote.request_received', suppression_group_key_snapshot: 'service_operational', categories: ['email_template'],
+        html_snapshot: '<p>Hi Jane, your technician is on the way!</p>',
+        text_snapshot: 'Hi Jane, your technician is on the way!',
+      },
+      { event: 'bounce', type: 'bounce' },
+    );
+
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect(res).not.toEqual({ skipped: 'annual_offer_withheld' });
+    const messageUpdate = mockDb._calls.find((c) => c.table === 'email_messages' && c.data.status === 'failed');
+    expect(messageUpdate).toBeTruthy();
+    expect(messageUpdate.data.error_message).toMatch(/annual offer guard failed/);
+  });
+});
+
+describe('annual guard trigger-id parsing (pre-push audit P1)', () => {
+  const { guardEstimateIdFromTriggerEvent } = require('../services/email-bounce-recovery');
+  test('takes the id segment after the prefix and validates its shape', () => {
+    expect(guardEstimateIdFromTriggerEvent('estimate_extended:3f2a1b4c-1111-4222-8333-444455556666:2026-09-19T00:00:00.000Z'))
+      .toBe('3f2a1b4c-1111-4222-8333-444455556666');
+    expect(guardEstimateIdFromTriggerEvent('estimate_auto_renew:12345')).toBe('12345');
+    expect(guardEstimateIdFromTriggerEvent('estimate_extended:not-an-id:2026-09-19T00:00:00.000Z')).toBeNull();
+    expect(guardEstimateIdFromTriggerEvent('invoice_reminder:12345')).toBeNull();
+    expect(guardEstimateIdFromTriggerEvent(null)).toBeNull();
+  });
+});

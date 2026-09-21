@@ -273,12 +273,56 @@ function normalizeState(value) {
   return US_STATE_ABBREVIATIONS[state.toLowerCase()] || '';
 }
 
+// State codes that are also ordinary spoken words. Spoken raw text carries
+// them as English — "it's Palmetto, so, or it could be Ellenton" / "that's
+// in Parrish, 34219" / "I live in 34221" — and reading them as Oregon /
+// Indiana marks a served Florida address out of the service area, which
+// vetoes every customer and lead write for the call (four calls in the
+// week of 2026-09-15). Punctuation or a ZIP next to the word is not enough
+// to tell the two apart (codex r5 P1), so THESE codes are a state only when
+// they are written as a deliberate abbreviation: uppercase in the source
+// ("Portland, OR 97201", "Boise, ID"), or in address-tail position — the
+// whole terminal segment ("…, Tulsa, OK", "…, Boise, Id"; codex r6 P1) or
+// directly before a ZIP, preceded by a segment start or a capitalized
+// locality ("…, or 97201", "Tulsa OK 74103") but never by a lowercase
+// verb or a contraction ("I live in 34221", "it's in, I think"). "OK" and
+// "LA" are common all-caps words ("OK", Los Angeles) and get only the
+// address-tail route. Every other
+// code ("CA", "CO", "TX") and every full state name ("Kentucky") reads from
+// any position exactly as before, so unpunctuated ASR trailing speech
+// ("Venice, CA but I don't know the ZIP") keeps its explicit geography.
+const FILLER_STATE_CODES = new Set(['AL', 'DE', 'HI', 'ID', 'IN', 'LA', 'MA', 'ME', 'OH', 'OK', 'OR', 'PA']);
+const FILLER_CODES_UPPERCASE_AMBIGUOUS = new Set(['OK', 'LA']);
+const SEGMENT_PUNCTUATION = /[.,;:!?]/;
+// "OR" → "[Oo][Rr]": a case-insensitive literal inside a case-sensitive regex.
+const anyCase = (token) => token.split('').map((c) => `[${c.toUpperCase()}${c.toLowerCase()}]`).join('');
+const TRAILING_COUNTRY = /\s*(?:usa|u\.s\.a\.?|u\.s\.|us|united states(?: of america)?)\s*[.,;:!?]?\s*$/i;
 function findState(value) {
-  const text = cleanString(value).replace(/[.,]/g, ' ');
-  if (!text) return { raw: '', state: '' };
+  // Country first, before any punctuation rewrite ("U.S.A." must still
+  // match its own dotted form — codex r5 P1).
+  const base = cleanString(value).replace(TRAILING_COUNTRY, '').trim();
+  if (!base) return { raw: '', state: '' };
+  // Full names match with punctuation removed ("North, Carolina" is still
+  // North Carolina); codes see the punctuation, which marks segment starts.
+  const plain = base.replace(/[.,;:!?]/g, ' ').replace(/\s+/g, ' ').trim();
+  const segmented = base.replace(/\s*([.,;:!?])\s*/g, '$1 ').trim();
   for (const token of STATE_TOKENS) {
-    const match = text.match(new RegExp(`\\b${escapeRegExp(token)}\\b`, 'i'));
-    if (match) return { raw: match[0], state: normalizeState(token) };
+    const tok = escapeRegExp(token);
+    let match = null;
+    if (token.length > 2) {
+      match = plain.match(new RegExp(`\\b(${tok})\\b`, 'i'));
+    } else if (!FILLER_STATE_CODES.has(token)) {
+      match = segmented.match(new RegExp(`\\b(${tok})\\b`, 'i'));
+    } else {
+      match = (!FILLER_CODES_UPPERCASE_AMBIGUOUS.has(token) && segmented.match(new RegExp(`\\b(${tok})\\b`)))
+        // Case-sensitive on purpose: the code may be in any case ("Id"),
+        // but the preceding locality must actually be capitalized.
+        || segmented.match(new RegExp(
+          `(?:^|${SEGMENT_PUNCTUATION.source}\\s*|(?:^|\\s)[A-Z][A-Za-z]*\\s+)(${anyCase(token)})(?=\\s*${SEGMENT_PUNCTUATION.source}?\\s*(?:$|\\d{5}(?:-\\d{4})?\\b))`,
+        ))
+        || null;
+    }
+    if (match) return { raw: match[1], state: normalizeState(token) };
   }
   return { raw: '', state: '' };
 }
@@ -620,7 +664,9 @@ function parseRawAddress(raw) {
     }
     line1 = parts.slice(0, unitEnd).join(' ');
     city = parts[unitEnd] || '';
-    const stateZip = parts.slice(unitEnd + 1).join(' ');
+    // Joined with the comma kept: findState treats a comma as the end of a
+    // segment, so "CA, but I don't know the ZIP" still reads CA.
+    const stateZip = parts.slice(unitEnd + 1).join(', ');
     zip = normalizeZip(stateZip);
     state = findState(stateZip).state;
   } else if (parts.length === 2) {

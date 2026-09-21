@@ -519,6 +519,10 @@ async function resolveRecentSmsThread({ customer, phone, smsLogId }) {
   // must not read as a delivered message in this composer-facing thread.
   const q = excludeUnresolvedSendReservations(db('sms_log'))
     .select('id', 'direction', 'message_body', 'message_type', 'admin_user_id', 'created_at')
+    // Recruiting threads (job_*) are owner-only and never customer context —
+    // an applicant sharing this phone must not feed interview links or
+    // replies into estimate routing (codex #4623 r15).
+    .whereRaw("COALESCE(message_type, '') NOT LIKE 'job\\_%'")
     .orderBy('created_at', 'desc')
     .limit(8);
 

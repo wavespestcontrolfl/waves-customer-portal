@@ -7,6 +7,10 @@ jest.mock('../models/db', () => {
   fn.transaction = jest.fn(async (cb) => cb(fn));
   return fn;
 });
+jest.mock('../utils/recruiting-thread-scope', () => {
+  const real = jest.requireActual('../utils/recruiting-thread-scope');
+  return { ...real, isRecruitingPhone: jest.fn(async () => false) };
+});
 jest.mock('../services/twilio', () => ({}));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
@@ -406,6 +410,83 @@ describe('admin communications SMS route', () => {
       expect(body.error).toBe('Body contains emoji "👍" but audience="lead" forbids it. Customer/lead-facing messages must be emoji-free.');
       expect(body.code).toBe('EMOJI_FOR_CUSTOMER');
     });
+  });
+
+  test('a VALIDATED customerId is explicit customer context: an active applicant phone attached to that customer takes the ordinary path, not the recruiting rail (Codex r16 P1)', async () => {
+    const { isRecruitingPhone } = require('../utils/recruiting-thread-scope');
+    isRecruitingPhone.mockResolvedValue(true);
+    db.mockImplementation((table) => {
+      const first = jest.fn(async () => (table === 'customers' ? { id: 'cust-A', phone: '+15551234567' } : null));
+      return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), whereRaw: jest.fn(function () { return this; }), orderBy: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1) };
+    });
+    sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM-cust' });
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', body: 'Your tech is on the way.', messageType: 'manual', customerId: 'cust-A' }),
+        });
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body.recruiting).toBeUndefined();
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+        expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({ to: '+15551234567', audience: expect.any(String) });
+      });
+    } finally {
+      isRecruitingPhone.mockResolvedValue(false);
+    }
+  });
+
+  test('schedule-sms: a retained recruiting reply context (replyToMessageId on a job_* row) is refused with 409 even with a validated customerId (Codex r30 P1)', async () => {
+    const { isRecruitingPhone } = require('../utils/recruiting-thread-scope');
+    isRecruitingPhone.mockResolvedValue(false);
+    db.mockImplementation((table) => {
+      const first = jest.fn(async () => {
+        if (table === 'customers') return { id: 'cust-A', phone: '+15551234567' };
+        if (table === 'messages') return { message_type: 'job_applicant_reply', metadata: { job_application_id: 'app-1' }, contact_phone: '+15551234567', our_endpoint_id: null };
+        return null;
+      });
+      const q = { first, select: jest.fn(async () => []), update: jest.fn(async () => 1), insert: jest.fn(() => ({ returning: jest.fn(async () => [{ id: 'sched-1' }]) })) };
+      ['where', 'whereNull', 'whereIn', 'whereRaw', 'orderBy', 'leftJoin', 'andWhere'].forEach((m) => { q[m] = jest.fn(function () { return this; }); });
+      return q;
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/schedule-sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Are you free Tuesday at 4?', messageType: 'manual', scheduledFor: '2099-01-01T10:00', customerId: 'cust-A', replyToMessageId: 'msg-recruiting-1' }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/Applicant texts are not scheduled here/);
+    });
+  });
+
+  test('schedule-sms: a VALIDATED customerId is explicit customer context and is not refused as an applicant text; without it the open application still refuses (Codex r28 P2)', async () => {
+    const { isRecruitingPhone } = require('../utils/recruiting-thread-scope');
+    isRecruitingPhone.mockResolvedValue(true);
+    db.mockImplementation((table) => {
+      const first = jest.fn(async () => (table === 'customers' ? { id: 'cust-A', phone: '+15551234567' } : null));
+      return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), whereRaw: jest.fn(function () { return this; }), orderBy: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1), insert: jest.fn(() => ({ returning: jest.fn(async () => [{ id: 'sched-1' }]) })) };
+    });
+    try {
+      await withServer(async (baseUrl) => {
+        const post = (payload) => fetch(`${baseUrl}/admin/communications/schedule-sms`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', body: 'Your tech is on the way.', messageType: 'manual', scheduledFor: '2099-01-01T10:00', ...payload }),
+        });
+        const explicit = await post({ customerId: 'cust-A' });
+        expect(explicit.status).not.toBe(409);
+        expect(isRecruitingPhone).not.toHaveBeenCalled();
+        const implicit = await post({});
+        expect(implicit.status).toBe(409);
+        expect((await implicit.json()).error).toMatch(/Applicant texts are not scheduled here/);
+        expect(isRecruitingPhone).toHaveBeenCalledWith('+15551234567', undefined, { activeOnly: true });
+      });
+    } finally {
+      isRecruitingPhone.mockResolvedValue(false);
+    }
   });
 
   test('allows desktop manual sends with exact quote prices', async () => {

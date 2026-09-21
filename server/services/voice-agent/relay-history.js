@@ -206,7 +206,13 @@ async function loadRecentMessages(fromPhone, { customerId = null, tier = 'redact
   // counterparty provenance to filter by, the read stays ANI-keyed and FAILS
   // CLOSED — and the empty-result copy says "none on file WITH THIS NUMBER",
   // never "no messages exist" (the account thread usually does).
-  const rows = await db('messages')
+  // Recruiting rows (job_*: applicant replies, interview invites carrying a
+  // BEARER scheduling link) never reach the voice agent (Codex #4623 r31
+  // P1): applicant threads are owner-only in every shared reader, and an
+  // applicant or a customer sharing the number calling the AI line must
+  // not have hiring history spoken or handled as customer service.
+  const { hideRecruitingThreadsFromNonAdmin } = require('../../utils/recruiting-thread-scope');
+  const rows = await hideRecruitingThreadsFromNonAdmin(db('messages'), null, 'messages.message_type')
     .join('conversations', 'messages.conversation_id', 'conversations.id')
     .where('messages.channel', 'sms')
     .whereIn('messages.direction', ['inbound', 'outbound'])

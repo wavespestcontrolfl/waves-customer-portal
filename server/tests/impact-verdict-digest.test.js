@@ -2,6 +2,9 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/sendgrid-mail', () => ({ isConfigured: jest.fn(() => true), sendOne: jest.fn() }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: (_name, fn) => fn() }));
+jest.mock('../services/ops-digest-fall-off', () => ({ retireIfClean: jest.fn(async () => 1) }));
+
+const { retireIfClean } = require('../services/ops-digest-fall-off');
 
 const digest = require('../services/seo/impact-verdict-digest');
 const { composePausedAlert, composeBlindLoopAlert, composeVerdictRollup } = digest;
@@ -65,6 +68,38 @@ beforeEach(() => {
 });
 
 afterAll(() => { delete process.env.GATE_IMPACT_DIGEST; });
+
+describe('blind-loop recovery during the send cooldown', () => {
+  const markers = () => ['impact-loop-blind', 'impact-verdict-rollup']
+    .map((email_key) => ({ email_key, last_sent_at: new Date() }));
+
+  test('a measured verdict clears the standing alert even after a recent send', async () => {
+    const fakeDb = makeDb({ rows: [{ verdict: 'improved' }], markers: markers() });
+    const out = await digest.sendImpactDigestsIfDue({ db: fakeDb, sendgrid, tracker: { pausedBuckets: async () => [] } });
+    expect(out.blind).toEqual({ skipped: 'grading' });
+    expect(retireIfClean).toHaveBeenCalledWith('impact-digest:blind-loop alert');
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('continued insufficient data preserves the alert and suppresses another send', async () => {
+    const fakeDb = makeDb({ rows: Array.from({ length: 6 }, () => ({ verdict: 'insufficient_data' })), markers: markers() });
+    const out = await digest.sendImpactDigestsIfDue({ db: fakeDb, sendgrid, tracker: { pausedBuckets: async () => [] } });
+    expect(out.blind).toEqual({ skipped: 'already-alerted' });
+    expect(retireIfClean).not.toHaveBeenCalledWith('impact-digest:blind-loop alert');
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('a failed grading query cannot clear the standing alert', async () => {
+    const markersDb = makeDb({ markers: markers() });
+    const fakeDb = (table) => {
+      if (table === 'ops_email_send_state') return markersDb(table);
+      throw new Error('synthetic grading query failure');
+    };
+    await expect(digest.sendImpactDigestsIfDue({ db: fakeDb, sendgrid, tracker: { pausedBuckets: async () => [] } }))
+      .rejects.toThrow('blind:error');
+    expect(retireIfClean).not.toHaveBeenCalledWith('impact-digest:blind-loop alert');
+  });
+});
 
 describe('composePausedAlert', () => {
   test('null when no bucket is paused — a quiet day sends nothing', () => {

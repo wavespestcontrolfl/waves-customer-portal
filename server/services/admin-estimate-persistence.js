@@ -1192,6 +1192,13 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     const termiteKnobs = require('./estimate-tree-shrub-knob-replay')
       .termiteKnobSignalForReplay(estimateData);
     if (termiteKnobs) v1Input.termitePricingKnobs = termiteKnobs;
+    // A customer restore deleted the old termite result row on removal, so
+    // the ordinary reader above has no quote-time stamp to recover. The
+    // service-mix route passes the server-captured removal provenance for
+    // this one recompute; its newly mapped result persists the stamp again.
+    if (deps.termitePricingKnobsForRestore && typeof deps.termitePricingKnobsForRestore === 'object') {
+      v1Input.termitePricingKnobs = deps.termitePricingKnobsForRestore;
+    }
     // v4.8 palm provenance (pre-push r2 P0): a translator-based replay of a
     // persisted engineRequest whose stored T&S line priced no service-line
     // palms must not adopt the new property-palm promotion — same

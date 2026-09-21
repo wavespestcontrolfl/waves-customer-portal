@@ -173,6 +173,11 @@ async function probeMoveConflicts({
     && options.adminWindowRules === true && arrivalWindowRoutingEnabled();
   const rows = await findConflictingVisits({
     db: conn,
+    // Booked recruiting interviews are occupancy too (Codex #4623 r18 P1):
+    // the customer reschedule commit runs under the shared date lock, so
+    // this probe is what closes the race with an applicant booking that
+    // landed after the availability read.
+    includeInterviews: true,
     date: target.date,
     windowStart: target.windowStart,
     windowEnd: target.windowEnd,

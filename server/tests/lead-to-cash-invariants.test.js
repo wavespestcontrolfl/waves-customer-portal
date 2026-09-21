@@ -28,8 +28,9 @@ jest.mock('../models/db', () => {
   return mock;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvValue: jest.fn(() => false) }));
 jest.mock('../services/sendgrid-mail', () => ({ isConfigured: jest.fn(() => true), sendOne: jest.fn(async () => ({})) }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 
 // Detector dependencies — mocked so each adapter's SHAPE is tested, not the
 // predicates (which own their own suites).
@@ -53,7 +54,9 @@ jest.mock('../services/completion-record-invariants', () => {
 
 const db = require('../models/db');
 const sendgrid = require('../services/sendgrid-mail');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, gateEnvValue } = require('../config/feature-gates');
+const NotificationService = require('../services/notification-service');
+const opsDigest = require('../services/ops-digest');
 const { auditChurnedAccountsLiveState } = require('../scripts/audit-churned-accounts-live-state');
 const { scanAlignment } = require('../scripts/align-waveguard-portal-records');
 const { auditRecurringScheduleAnomalies } = require('../services/recurring-schedule-audit');
@@ -74,6 +77,7 @@ beforeEach(() => {
   for (const k of Object.keys(mockTables)) delete mockTables[k];
   jest.clearAllMocks();
   isEnabled.mockReturnValue(true);
+  gateEnvValue.mockReturnValue(false);
   sendgrid.isConfigured.mockReturnValue(true);
   delete process.env.LEAD_TO_CASH_SWEEP_EMAIL;
 });
@@ -187,6 +191,42 @@ describe('runLeadToCashInvariantSweep', () => {
     expect(res).toEqual({ skipped: 'clean', results: { a: 0, b: 0 } });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
     expect(db).not.toHaveBeenCalledWith('ops_email_send_state');
+  });
+
+  test('a clean next window cannot resolve a prior closeout license failure alert', async () => {
+    gateEnvValue.mockReturnValue(true);
+    const alert = { id: 'prior-closeout-alert', read_at: null, metadata: null };
+    NotificationService.notifyAdmin.mockImplementation(async (_category, _title, _body, options) => {
+      alert.metadata = options.metadata;
+      return alert;
+    });
+    const resolve = jest.spyOn(opsDigest, 'resolveOpsDigest').mockImplementation(async () => {
+      alert.read_at = 'resolved';
+      alert.metadata.resolved = true;
+      return 1;
+    });
+    try {
+      const closeout = DETECTORS.find((d) => d.key === 'closeout_failed_facts');
+      mockTables.scheduled_services = mockChain({ select: [{ id: 'old-visit' }] });
+      getCloseoutStatus.mockResolvedValue({ found: true, summary: { failed: ['license_current'], contradictions: [] } });
+      expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [closeout] })).toMatchObject({ sent: true, violations: 1 });
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+      expect(alert.metadata).toMatchObject({ opsKey: 'lead-to-cash-invariants' });
+      expect(alert.metadata).not.toHaveProperty('fallOff');
+
+      mockTables.scheduled_services = mockChain({ select: [] });
+      const nextWindow = new Date(NOW.getTime() + 24 * 60 * 60 * 1000);
+      expect(await runLeadToCashInvariantSweep({ now: nextWindow, detectors: [closeout] })).toEqual({
+        skipped: 'clean', results: { closeout_failed_facts: 0 },
+      });
+      expect(getCloseoutStatus).toHaveBeenCalledTimes(1); // The older visit was not rechecked.
+      expect(resolve).not.toHaveBeenCalled();
+      expect(alert.read_at).toBeNull();
+      expect(alert.metadata).not.toHaveProperty('resolved');
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    } finally {
+      resolve.mockRestore();
+    }
   });
 
   test('violation → one FIX email to the internal inbox, then the send marker is stamped', async () => {
