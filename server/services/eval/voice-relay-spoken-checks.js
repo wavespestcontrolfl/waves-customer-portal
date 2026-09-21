@@ -569,8 +569,11 @@ function paymentOutcomeIsInterrogative(text, claim, matchEnd, claimEnd) {
     `^\\s*¿?\\s*(?:${QUESTION_AUX_RE_SOURCE}|(?:do|does|did|would|have|has|had|could|should|is|are|was|were|ca|wo|sha)n[\\x27\\u2019]t|(?:what|when|where|which|who|whom|whose|why|how)\\b[^,.!?;]{0,40}\\b${QUESTION_AUX_RE_SOURCE}|(?:need\\s+)?(?:anything|something)\\s+else|(?:any\\s+)?(?:(?:more|further)\\s+)?questions?|(?:quiere|quieres|desea|deseas|puedo|podemos|puede|puedes|podr[ií]a(?:mos)?))\\b`,
     'i',
   ).test(followup[1]));
+  // A coordinated clause confirming another payment outcome can carry its
+  // own explicit subject ("and your card was charged"), not only an
+  // elliptical inherited predicate ("and charged").
   const coordinatedQuestion = new RegExp(
-    `^\\s*(?:(?:and|but|yet|then)\\s+${PAYMENT_INHERITED_PREDICATE}\\s*)+(?:,\\s*(?:right|correct|yes|no|okay|ok|isn[\\x27\\u2019]t\\s+it|didn[\\x27\\u2019]t\\s+it))?\\s*\\?`, 'i',
+    `^\\s*(?:(?:and|but|yet|then)\\s+(?:(?:(?:your|the|that|this|a|both|all|these|those)\\s+)?${PAYMENT_TARGET}\\s+)?${PAYMENT_INHERITED_PREDICATE}\\s*)+(?:,\\s*(?:right|correct|yes|no|okay|ok|isn[\\x27\\u2019]t\\s+it|didn[\\x27\\u2019]t\\s+it|(?:is|was|isn[\\x27\\u2019]t|wasn[\\x27\\u2019]t)\\s+(?:it|that|this)\\s+(?:correct|right|true|accurate)))?\\s*\\?`, 'i',
   ).test(text.slice(claimEnd).replace(/\bnot(?:\s+only)?\s+/gi, ''));
   return QUESTION_LEAD_RE.test(claim) || coordinatedQuestion || (text[claimEnd] === '?' && !followupQuestion);
 }

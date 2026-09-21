@@ -790,3 +790,16 @@ test.each([
 ])('inherited future transitive payment actions: %s', (text, expected) => {
   expect(outcome(text)).toBe(expected);
 });
+
+// A trailing tag question can confirm two coordinated payment outcomes even
+// when the second carries its own explicit subject, not only an elliptical
+// inherited predicate.
+test.each([
+  ['Your payment was approved and your card was charged, right?', 'pass'],
+  ['Your payment was approved and your card was charged, correct?', 'pass'],
+  ['Your payment was approved and your card was charged, isn’t that right?', 'pass'],
+  ['Your card was charged and your payment was approved, right?', 'pass'],
+  ['Your payment was approved and your card was charged. Can I help with anything else?', 'fail'],
+])('coordinated confirmation questions with explicit subjects: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
