@@ -102,6 +102,49 @@ describe('stripPayLinkLineFromBody (round 9 #4634 finding 1)', () => {
     expect(stripped).toContain('Report: r');
     expect(stripped).toContain('Thanks!');
   });
+
+  describe('round 11 #4634 finding 2: clause-scoped strip when a report/portal link shares the pay line', () => {
+    const reportUrl = 'https://portal.example.invalid/r/xyz';
+
+    test('report link BEFORE the pay link on the same line: only the pay clause is removed', () => {
+      const body = `Report: ${reportUrl}  Invoice: ${payUrl}`;
+      const stripped = stripPayLinkLineFromBody(body, payUrl);
+      expect(stripped).not.toContain(payUrl);
+      expect(stripped).not.toContain('abc123');
+      expect(stripped).toBe(`Report: ${reportUrl}`);
+    });
+
+    test('report link AFTER the pay link on the same line: only the pay clause is removed', () => {
+      const body = `Invoice: ${payUrl}  Report: ${reportUrl}`;
+      const stripped = stripPayLinkLineFromBody(body, payUrl);
+      expect(stripped).not.toContain(payUrl);
+      expect(stripped).not.toContain('abc123');
+      expect(stripped).toBe(`Report: ${reportUrl}`);
+    });
+
+    test('scheme-stripped variant: the frozen body has no scheme on either link, matched against the https:// pay_url from metadata', () => {
+      const body = 'Report: portal.example.invalid/r/xyz  Invoice: pay.wavespestcontrol.com/i/abc123';
+      const stripped = stripPayLinkLineFromBody(body, payUrl);
+      expect(stripped).not.toContain('abc123');
+      expect(stripped).toBe('Report: portal.example.invalid/r/xyz');
+    });
+
+    test('the pay link alone on its own line strips the whole line unchanged (existing behavior, unaffected by clause-scoping)', () => {
+      const body = `Report: ${reportUrl}\n\nInvoice: ${payUrl}\n\nReply STOP to opt out.`;
+      const stripped = stripPayLinkLineFromBody(body, payUrl);
+      expect(stripped).not.toContain(payUrl);
+      expect(stripped).toContain(`Report: ${reportUrl}`);
+      expect(stripped).toContain('Reply STOP to opt out.');
+    });
+
+    test('ambiguous layout — the pay clause touches the report link with no separating boundary — returns null rather than guessing', () => {
+      // No space at all between the two placeholders' rendered output: the
+      // "Invoice:" label runs directly into the report URL on its left with
+      // nothing to cut cleanly between them.
+      const body = `Report: ${reportUrl}Invoice: ${payUrl}`;
+      expect(stripPayLinkLineFromBody(body, payUrl)).toBeNull();
+    });
+  });
 });
 
 test('the delivered-at stamp is only added when the record has none; status is always re-asserted', async () => {

@@ -4304,11 +4304,28 @@ const InvoiceService = {
           // restore it here exactly like every other early exit does
           // (round-10 #4634 P1: without this the invoice was left
           // 'sending' until stale-claim recovery parked it).
-          await restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueuedSendRows, db, claim.invoice.send_claim_token);
+          const restored = await restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueuedSendRows, db, claim.invoice.send_claim_token);
+          // Round-11 #4634 P1: this retryable early return can follow a
+          // PARTIAL autoApplyAccountCreditIfEnabled apply above (~4211) —
+          // same failure shape as the generic path at ~4622, so reverse it
+          // the same way. Reverse ONLY when we own the claim (restored &&
+          // !allowClaimed): a preclaimed scheduled send leaves the row
+          // 'sending', where reverseAppliedCredit refuses, and the worker
+          // reverses off creditApplied below after its own restore instead
+          // (~5231) — report creditApplied unconditionally so that read works.
+          if (restored && !allowClaimed && sendCreditResult?.applied > 0) {
+            try {
+              const { reverseAppliedCredit } = require("./customer-credit");
+              await reverseAppliedCredit({ invoiceId, amount: sendCreditResult.applied, createdBy: "system:send_retry_deposit_pending" });
+            } catch (e) {
+              logger.warn(`[invoice] credit reversal after deposit_settlement_pending retry skipped for ${invoiceId}: ${e.message}`);
+            }
+          }
           return { ok: false, code: "deposit_settlement_pending", error: smsResult.reason,
             sms: { ok: false, code: "deposit_settlement_pending", deliveryOutcome: "not_sent" },
             email: { ok: false, code: "deposit_settlement_pending" },
-            payUrl: payUrl || null };
+            payUrl: payUrl || null,
+            creditApplied: sendCreditResult?.applied || 0 };
         }
         // Codex round-8 audit P2 (#4131 slice 4): same promotion, for the
         // nested preclaimed sendViaSMS call's OTHER resolved zero-due
@@ -4325,11 +4342,30 @@ const InvoiceService = {
         // the invoice 'sending' with scheduled_send_at cleared until
         // stale-claim recovery parked it.
         if (smsResult?.code === "balance_changed_retry") {
-          await restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueuedSendRows, db, claim.invoice.send_claim_token);
+          const restored = await restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueuedSendRows, db, claim.invoice.send_claim_token);
+          // Round-11 #4634 P1: same gap as deposit_settlement_pending above —
+          // a PARTIAL autoApplyAccountCreditIfEnabled apply (~4211) survived
+          // this retryable early return with nothing to reverse it and no
+          // creditApplied on the result for the scheduled worker's own
+          // reversal (~5231) to read. Same posture as the generic failure
+          // path at ~4622: reverse locally only when we own the claim
+          // (restored && !allowClaimed) — a preclaimed send leaves the row
+          // 'sending' (reverseAppliedCredit refuses it there; the worker
+          // reverses after its own restore instead) — and report
+          // creditApplied unconditionally either way.
+          if (restored && !allowClaimed && sendCreditResult?.applied > 0) {
+            try {
+              const { reverseAppliedCredit } = require("./customer-credit");
+              await reverseAppliedCredit({ invoiceId, amount: sendCreditResult.applied, createdBy: "system:send_retry_balance_changed" });
+            } catch (e) {
+              logger.warn(`[invoice] credit reversal after balance_changed_retry retry skipped for ${invoiceId}: ${e.message}`);
+            }
+          }
           return { ok: false, code: "balance_changed_retry", error: smsResult.reason,
             sms: { ok: false, code: "balance_changed_retry", deliveryOutcome: "not_sent" },
             email: { ok: false, code: "balance_changed_retry" },
-            payUrl: payUrl || null };
+            payUrl: payUrl || null,
+            creditApplied: sendCreditResult?.applied || 0 };
         }
         if (smsResult?.sent) {
           sms.ok = true;

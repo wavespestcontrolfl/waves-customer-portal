@@ -680,6 +680,121 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
     }
   });
 
+  describe('round 11 #4634 finding 1: retryable early returns reverse the partial credit they applied', () => {
+    // These two early returns (~4290-4335 in invoice.js) share the exact
+    // same gap: autoApplyAccountCreditIfEnabled above may have PARTIALLY
+    // applied account credit before the nested preclaimed sendViaSMS call
+    // resolves either code, and neither return used to reverse it or
+    // report creditApplied for the scheduled worker's own reversal to
+    // read. The module-level customer-credit mock (autoApplyAccountCreditIfEnabled:
+    // async () => null) is swapped for the real implementation here ONLY,
+    // so the apply/reverse this test proves is a REAL ledger movement, not
+    // a stub.
+    const CustomerCredit = require('../services/customer-credit');
+    const RealCustomerCredit = jest.requireActual('../services/customer-credit');
+    let originalAutoApply;
+    let originalReverse;
+
+    beforeEach(() => {
+      originalAutoApply = CustomerCredit.autoApplyAccountCreditIfEnabled;
+      originalReverse = CustomerCredit.reverseAppliedCredit;
+      CustomerCredit.autoApplyAccountCreditIfEnabled = (invoiceId) => RealCustomerCredit.applyAccountCreditToInvoice({ invoiceId, createdBy: 'system' });
+      CustomerCredit.reverseAppliedCredit = RealCustomerCredit.reverseAppliedCredit;
+    });
+    afterEach(() => {
+      CustomerCredit.autoApplyAccountCreditIfEnabled = originalAutoApply;
+      CustomerCredit.reverseAppliedCredit = originalReverse;
+    });
+
+    // total stays 150 (beforeEach) — only credit_applied resets to 0, so
+    // $150 is genuinely due; a $50 balance can only PARTIALLY cover it.
+    async function seedPartialCredit(scheduledSendAt = new Date('2040-01-01T12:00:00.000Z')) {
+      await trx('customers').where({ id: customerId }).update({ account_credits: 50, auto_apply_account_credit: true });
+      await trx('invoices').where({ id: invoiceId }).update({
+        credit_applied: 0, status: 'scheduled', scheduled_send_at: scheduledSendAt,
+      });
+      return scheduledSendAt;
+    }
+
+    test.each([
+      ['balance_changed_retry', 'The balance changed while sending; try again'],
+      ['deposit_settlement_pending', 'Existing payment work must settle first'],
+    ])('a nested %s retry (direct send) reverses the partial credit and reports creditApplied', async (code, reason) => {
+      const originalScheduledSendAt = await seedPartialCredit();
+
+      const smsSpy = jest.spyOn(Invoice, 'sendViaSMS').mockResolvedValueOnce({
+        sent: false, ok: false, code, deliveryOutcome: 'not_sent', retryable: true, reason,
+      });
+      let result;
+      try {
+        result = await Invoice.sendViaSMSAndEmail(invoiceId);
+      } finally {
+        smsSpy.mockRestore();
+      }
+
+      // The pre-send apply happened for real ($50 of $150 due) before the
+      // nested SMS leg's retryable refusal ran.
+      expect(result).toMatchObject({
+        ok: false, code, creditApplied: 50,
+        sms: { ok: false, code, deliveryOutcome: 'not_sent' },
+        email: { ok: false, code },
+      });
+
+      const invoiceRow = await read();
+      // Reversed back to its pre-send value — never left edit-locked with
+      // credit_applied set for a pay link that was never delivered.
+      expect(Number(invoiceRow.credit_applied)).toBe(0);
+      expect(invoiceRow.status).toBe('scheduled');
+      expect(invoiceRow.send_claim_token).toBeNull();
+      expect(new Date(invoiceRow.scheduled_send_at).toISOString()).toBe(originalScheduledSendAt.toISOString());
+
+      const customerRow = await trx('customers').where({ id: customerId }).first('account_credits');
+      expect(Number(customerRow.account_credits)).toBe(50);
+
+      // The LEDGER, not just the cached balance, proves the credit
+      // actually returned: an apply (-50) and a reversal (+50).
+      const ledgerRows = await trx('customer_credit_ledger').where({ invoice_id: invoiceId });
+      expect(ledgerRows.map((r) => Number(r.delta)).sort((a, b) => a - b)).toEqual([-50, 50]);
+    });
+
+    test('a nested balance_changed_retry via the PRECLAIMED scheduled worker leaves creditApplied on the result for the worker to reverse — the worker\'s own reversal runs', async () => {
+      // Must be genuinely DUE (past) for processScheduledSends' own due-page
+      // query to select it — unlike the direct-send cases above, this path
+      // goes through the queue, not a direct invoiceId call.
+      await seedPartialCredit(new Date(Date.now() - 60000));
+
+      const smsSpy = jest.spyOn(Invoice, 'sendViaSMS').mockResolvedValueOnce({
+        sent: false, ok: false, code: 'balance_changed_retry', deliveryOutcome: 'not_sent', retryable: true,
+        reason: 'The balance changed while sending; try again',
+      });
+      let result;
+      try {
+        result = await Invoice.processScheduledSends();
+      } finally {
+        smsSpy.mockRestore();
+      }
+
+      // The generic failure branch (no special-cased code) — an attempt
+      // spent, not held/deferred.
+      expect(result).toEqual({ sent: 0, failed: 1, deferred: 0 });
+
+      const invoiceRow = await read();
+      expect(invoiceRow.status).toBe('scheduled');
+      expect(invoiceRow.send_claim_token).toBeNull();
+      // The worker's own reversal (result.creditApplied > 0, ~5231) ran
+      // after ITS restore — not sendViaSMSAndEmail's local branch, which
+      // is skipped for a preclaimed (allowClaimed: true) call so the two
+      // reversals can never double-fire.
+      expect(Number(invoiceRow.credit_applied)).toBe(0);
+
+      const customerRow = await trx('customers').where({ id: customerId }).first('account_credits');
+      expect(Number(customerRow.account_credits)).toBe(50);
+
+      const ledgerRows = await trx('customer_credit_ledger').where({ invoice_id: invoiceId });
+      expect(ledgerRows.map((r) => Number(r.delta)).sort((a, b) => a - b)).toEqual([-50, 50]);
+    });
+  });
+
   test('a due packet invoice already billed to a payer (payer_id set, not a live withdrawal) is durably dequeued — not re-selected on the next due-loop pass (Codex round-8 audit P1 #4131 finding 6)', async () => {
     // The pre-emptive fence (claimPacketInvoiceForSend fenceOnly) only
     // fires when payer_id is still NULL — this row is already payer-owned,
