@@ -637,12 +637,15 @@ describe('findConflictingVisits — recruiting interviews as occupancy (PR #4623
     expect(conn.raw).not.toHaveBeenCalled();
   });
 
-  test('a connection without raw (test doubles) or a read error is best-effort: visits still returned, no throw', async () => {
+  test('a connection without raw (test doubles) reads as no interviews; a READ ERROR fails closed (Codex r28 P1) — commit guards must not degrade', async () => {
     const noRaw = jest.fn(() => makeQuery([]));
     await expect(findConflictingVisits({ db: noRaw, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true })).resolves.toEqual([]);
     const failing = dbWithInterviews([]);
     failing.raw = jest.fn(async () => { throw Object.assign(new Error('relation job_applications does not exist'), { code: '42P01' }); });
-    await expect(findConflictingVisits({ db: failing, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true })).resolves.toEqual([]);
+    await expect(findConflictingVisits({ db: failing, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true }))
+      .rejects.toMatchObject({ code: 'INTERVIEW_OCCUPANCY_UNAVAILABLE', retryable: true });
+    // without the opt-in the failing connection is never touched
+    await expect(findConflictingVisits({ db: failing, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00' })).resolves.toEqual([]);
     // a foreign raw result (e.g. a lock probe double) never manufactures a conflict
     const foreign = dbWithInterviews([{ locked: true }]);
     await expect(findConflictingVisits({ db: foreign, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true })).resolves.toEqual([]);
@@ -662,7 +665,9 @@ describe('interview side read inside a caller transaction (PR #4623, Codex r7 P1
     expect(trx.raw).not.toHaveBeenCalled();
     expect(rows).toHaveLength(1);
     trx.transaction = jest.fn(async () => { throw Object.assign(new Error('relation missing'), { code: '42P01' }); });
-    await expect(findConflictingVisits({ db: trx, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true })).resolves.toEqual([]);
+    // the savepoint has rolled back; the guard still fails closed (Codex r28 P1)
+    await expect(findConflictingVisits({ db: trx, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true }))
+      .rejects.toMatchObject({ code: 'INTERVIEW_OCCUPANCY_UNAVAILABLE' });
   });
 });
 

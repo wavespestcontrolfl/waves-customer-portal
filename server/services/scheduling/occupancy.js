@@ -540,8 +540,14 @@ async function findConflictingVisits({
 // raw statement on the caller's connection, and the staff/automation
 // callers of this reader (rebooker, rain-out, renewals, admin schedule, ...)
 // stay byte-identical until interviews are represented as calendar rows
-// themselves (owner decision pending — see the PR). Best-effort: a read
-// error yields no interview rows and never takes scheduling down.
+// themselves (owner decision pending — see the PR). FAIL-CLOSED (Codex r28
+// P1): every `includeInterviews: true` caller is a commit-time mirror
+// guard (booking, confirmation, reservation refresh/commit, rebooker), so
+// a failed read must propagate as a retryable error — a swallowed failure
+// would let a customer visit commit over an existing interview. Only a
+// connection that cannot run raw SQL at all (unit-test doubles) reads as
+// "no interviews". Display/offer readers do not come through here: the
+// slot builder reads interview windows via interview-slots.js.
 // Interview conflicts ALONE, for a caller whose visit check runs elsewhere
 // (capacity mode: verifyArrivalCapacity reads only scheduled_services, so a
 // booked interview must still be probed — Codex #4623 r15 P1).
@@ -556,11 +562,16 @@ async function withInterviewConflicts(visits, { db, date, windowStart, windowEnd
   try {
     interviews = await bookedInterviewConflictRows(db, dateStr, timeToMinutes(windowStart), timeToMinutes(windowEnd));
   } catch (err) {
-    // A real database error (pg code) is worth a warning; a TypeError from a
-    // caller whose connection cannot run raw SQL is not an incident.
-    const line = `[occupancy] interview occupancy read skipped for ${dateStr}: ${err && err.name ? err.name : 'Error'}${err && err.code ? ` ${err.code}` : ''}`;
-    if (err && err.code) logger.warn(line); else logger.debug(line);
-    return visits;
+    // Propagate, never degrade to "no interviews": the caller is a commit
+    // guard and its transaction must fail (the read ran in a savepoint, so
+    // the transaction itself is still usable for the caller's rollback).
+    logger.warn(`[occupancy] interview occupancy read FAILED for ${dateStr}: ${err && err.name ? err.name : 'Error'}${err && err.code ? ` ${err.code}` : ''}`);
+    const wrapped = new Error('interview occupancy could not be read');
+    wrapped.name = 'InterviewOccupancyReadError';
+    wrapped.code = 'INTERVIEW_OCCUPANCY_UNAVAILABLE';
+    wrapped.retryable = true;
+    wrapped.cause = err;
+    throw wrapped;
   }
   return interviews.length ? [...visits, ...interviews] : visits;
 }

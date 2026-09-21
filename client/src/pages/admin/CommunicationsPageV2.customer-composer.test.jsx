@@ -174,8 +174,43 @@ it("the IMMEDIATE composer send carries replyToMessageId (the answered inbox row
   const src = fs.readFileSync(candidates.find((f) => fs.existsSync(f)), "utf8");
   const immediate = src.slice(src.indexOf('adminFetch("/admin/communications/sms", {'));
   const payload = immediate.slice(0, immediate.indexOf("});") + 3);
-  expect(payload).toMatch(/replyToMessageId: replyContext\?\.messageId \|\| undefined/);
-  // both Text back entry points feed that context
+  // The field only rides along when the context still matches the live
+  // compose target (Codex #4623 r? P1) — a diverged recipient/customer
+  // must send `undefined`, not the stale messageId.
+  expect(payload).toMatch(
+    /replyToMessageId:\s*replyContext\s*&&\s*phoneKey\(toNumber\) === replyContext\.phone\s*&&\s*\(selectedCustomerId \|\| null\) === \(replyContext\.customerId \|\| null\)\s*\?\s*replyContext\.messageId\s*:\s*undefined,/,
+  );
+  // both Text back entry points feed that context, now tagged with the
+  // recipient (phone) and customer it was minted for.
   expect(src).toMatch(/onReply\(contactPhone, ourNumber, m\.customerId, \{ messageId: m\.id, messageType: m\.messageType \}\)/);
   expect(src).toMatch(/onReply\(contactPhone, thread\.ourNumber, thread\.customerId, latestInboundContext\(thread\.messages\)\)/);
+  expect(src).toMatch(/setReplyContext\(replyTo \? \{ \.\.\.replyTo, phone: phoneKey\(contactPhone\), customerId: customerId \|\| null \} : null\)/);
+  expect(src).toMatch(/setReplyContext\(replyTo \? \{ \.\.\.replyTo, phone: phoneKey\(phone\), customerId: customerId \|\| null \} : null\)/);
+});
+
+it("clears a stale reply context when the compose target diverges, and always on a completed send (Codex #4623 P1)", async () => {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const candidates = ["src/pages/admin/CommunicationsPageV2.jsx", "client/src/pages/admin/CommunicationsPageV2.jsx"].map((rel) => path.resolve(process.cwd(), rel));
+  const src = fs.readFileSync(candidates.find((f) => fs.existsSync(f)), "utf8");
+  // A useEffect keyed on [toNumber, selectedCustomerId] nulls replyContext
+  // the instant either no longer matches the values it was captured with —
+  // an edited recipient, a different picked customer, or a new thread —
+  // so a later send can't carry a messageId that answers something else.
+  const effectStart = src.indexOf("Invalidate a stale \"Text back\" context");
+  expect(effectStart).toBeGreaterThan(-1);
+  const effectBlock = src.slice(effectStart, src.indexOf("}, [toNumber, selectedCustomerId]);", effectStart) + "}, [toNumber, selectedCustomerId]);".length);
+  expect(effectBlock).toMatch(/if \(!replyContext\) return;/);
+  expect(effectBlock).toMatch(/phoneKey\(toNumber\) !== replyContext\.phone/);
+  expect(effectBlock).toMatch(/\(selectedCustomerId \|\| null\) !== \(replyContext\.customerId \|\| null\)/);
+  expect(effectBlock).toMatch(/setReplyContext\(null\);/);
+  expect(effectBlock).toMatch(/}, \[toNumber, selectedCustomerId\]\);$/);
+  // The post-send reset block (shared by draft-approve, scheduled, and
+  // immediate sends) unconditionally forgets the context too, so the next
+  // compose session never inherits it from a completed one.
+  const resetBlock = src.slice(
+    src.indexOf('setToNumber(customer?.phone || "");'),
+    src.indexOf('setMsgBody("");') + 'setMsgBody("");'.length,
+  );
+  expect(resetBlock).toMatch(/setReplyContext\(null\);/);
 });

@@ -816,6 +816,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const [selectedCustomerId, setSelectedCustomerId] = useState(customer?.id || null);
   // The inbox row a "Text back" answers — sent as replyToMessageId so the
   // server routes a recruiting reply onto the recruiting rail (Codex r25 P1).
+  // Carries the recipient (normalized phone) and customerId it was minted
+  // for; a divergence between them and the live compose target invalidates
+  // it (Codex #4623 P1) rather than riding along onto a different send.
   const [replyContext, setReplyContext] = useState(null);
   const [fromNumber, setFromNumber] = useState("+19413187612");
   const [msgBody, setMsgBody] = useState("");
@@ -1178,6 +1181,21 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     }
   }, [fromNumber, loadedMessageDraft, toNumber]);
 
+  // Invalidate a stale "Text back" context the moment the compose target no
+  // longer matches the row it was minted for — an edited recipient number,
+  // a different picked customer, or opening another thread. Without this a
+  // recruiting inbox row's messageId could ride onto an unrelated send and
+  // get routed onto the recruiting rail server-side (Codex #4623 P1).
+  useEffect(() => {
+    if (!replyContext) return;
+    if (
+      phoneKey(toNumber) !== replyContext.phone ||
+      (selectedCustomerId || null) !== (replyContext.customerId || null)
+    ) {
+      setReplyContext(null);
+    }
+  }, [toNumber, selectedCustomerId]);
+
   const toggleAiAutoReply = async () => {
     setTogglingAi(true);
     try {
@@ -1362,7 +1380,15 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             customerId: selectedCustomerId || undefined,
             // The inbox row this answers: a recruiting row keeps the reply on the
             // recruiting rail even when the shared phone is a linked customer's.
-            replyToMessageId: replyContext?.messageId || undefined,
+            // Only carried when the context still matches the live compose
+            // target — a diverged recipient/customer means it answers a row
+            // this send is no longer addressed to (Codex #4623 P1).
+            replyToMessageId:
+              replyContext &&
+              phoneKey(toNumber) === replyContext.phone &&
+              (selectedCustomerId || null) === (replyContext.customerId || null)
+                ? replyContext.messageId
+                : undefined,
             messageType: "manual",
             fromNumber,
             mediaUrls:
@@ -1393,6 +1419,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       setToNumber(customer?.phone || "");
       setToSearch("");
       setSelectedCustomerId(customer?.id || null);
+      setReplyContext(null);
       setMsgBody("");
       // Cleared in the same batch as the body: the strip effect must see the
       // sent links as already forgotten, not as operator-withdrawn (which
@@ -2294,7 +2321,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     setToNumber(contactPhone);
     setToSearch("");
     setSelectedCustomerId(customerId || null);
-    setReplyContext(replyTo || null);
+    setReplyContext(replyTo ? { ...replyTo, phone: phoneKey(contactPhone), customerId: customerId || null } : null);
     if (ourNumber) {
       setFromNumber(ourNumber);
       setThreadLock({
@@ -3228,7 +3255,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                     setToNumber(phone);
                     setToSearch("");
                     setSelectedCustomerId(customerId || null);
-                    setReplyContext(replyTo || null);
+                    setReplyContext(replyTo ? { ...replyTo, phone: phoneKey(phone), customerId: customerId || null } : null);
                     setFromNumber(from);
                     // The admin shell scrolls .admin-main, not the window —
                     // window.scrollTo() is a no-op here.

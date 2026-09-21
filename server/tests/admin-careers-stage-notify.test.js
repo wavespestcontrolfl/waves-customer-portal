@@ -294,6 +294,48 @@ describe('PATCH /:id/status', () => {
     expect(rows[0].status).toBe('interview'); // the committed transition stands
   });
 
+  test('applicant BOOKED between commit and send -> the "pick a time" invite is stale (Codex r28 P2): bound to the booking snapshot, not just status+token', async () => {
+    mockDb.__setRows([appRow({ status: 'reviewed' })]);
+    const originalTableApi = mockDb.getMockImplementation();
+    let firstReadDone = false;
+    mockDb.mockImplementation((table) => {
+      const api = originalTableApi(table);
+      if (table === 'job_applications') {
+        const origFirst = api.first;
+        api.first = async (...cols) => {
+          const r = await origFirst.call(api, ...cols);
+          // the applicant booked from the SMS leg: status/token unchanged, booking fields set
+          if (r && cols.includes('interview_token') && !firstReadDone) {
+            firstReadDone = true;
+            return { ...r, interview_booked_at: '2027-03-15T12:00:00.000Z', interview_at: '2027-03-16T21:00:00.000Z' };
+          }
+          return r;
+        };
+      }
+      return api;
+    });
+    const { status, body } = await patch('aaaaaaaa-0000-4000-8000-000000000001', { status: 'interview', notify: { sms: true, email: true } });
+    mockDb.mockImplementation(originalTableApi);
+    expect(status).toBe(200);
+    expect(body.sent).toEqual({ sms: 'stale', email: 'stale' });
+    expect(mockSendStageComms).not.toHaveBeenCalled();
+  });
+
+  test('the per-leg stillEligible handed to sendStageComms turns false once a booking lands mid-send (email leg after the SMS leg)', async () => {
+    mockDb.__setRows([appRow({ status: 'reviewed' })]);
+    let eligibility = null;
+    mockSendStageComms.mockImplementationOnce(async (app, stage, opts) => {
+      eligibility = opts.stillEligible;
+      return { sms: 'sent', email: 'sent' };
+    });
+    const { status } = await patch('aaaaaaaa-0000-4000-8000-000000000001', { status: 'interview', notify: { sms: true, email: true } });
+    expect(status).toBe(200);
+    expect(typeof eligibility).toBe('function');
+    await expect(eligibility()).resolves.toBe(true);
+    Object.assign(mockDb.__rows()[0], { interview_booked_at: new Date('2027-03-15T12:00:00.000Z'), interview_at: new Date('2027-03-16T21:00:00.000Z') });
+    await expect(eligibility()).resolves.toBe(false);
+  });
+
   test('resend WITH a note keeps the note as a same-status history entry', async () => {
     mockDb.__setRows([appRow({ status: 'interview', interview_token: 'h'.repeat(64) })]);
     const { status } = await patch('aaaaaaaa-0000-4000-8000-000000000001', { status: 'interview', resend: true, note: 'resent after voicemail', notify: { sms: true } });

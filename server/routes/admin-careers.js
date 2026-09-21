@@ -368,8 +368,20 @@ async function deliverStageComms(applicationId, technicianId, updated, plan) {
     // another admin moved this application out of Interview (or the token
     // changed) between our commit and this send, the invite's link would
     // 404 the moment it arrived — send nothing.
-    const current = await db('job_applications').where({ id: updated.id }).first('status', 'interview_token');
-    if (!current || current.status !== 'interview' || current.interview_token !== updated.interview_token) {
+    // ...and bound to the BOOKING snapshot as well (Codex r28 P2): the SMS
+    // leg finishes before the email leg starts, so an applicant can book
+    // from the text while the "pick a time" email is still waiting. A
+    // booking (or re-booking) that landed since the committed row was read
+    // makes that email obsolete — the confirmation already covers it.
+    const sameInstant = (a, b) => (!a && !b) || (Boolean(a) && Boolean(b) && new Date(a).getTime() === new Date(b).getTime());
+    const inviteStillCurrent = (row) => Boolean(row)
+      && row.status === 'interview'
+      && row.interview_token === updated.interview_token
+      && sameInstant(row.interview_booked_at, updated.interview_booked_at)
+      && sameInstant(row.interview_at, updated.interview_at);
+    const current = await db('job_applications').where({ id: updated.id })
+      .first('status', 'interview_token', 'interview_booked_at', 'interview_at');
+    if (!inviteStillCurrent(current)) {
       throw Object.assign(new Error('stage changed before send'), { name: 'StaleStageError', code: 'stale_stage' });
     }
 
@@ -381,8 +393,9 @@ async function deliverStageComms(applicationId, technicianId, updated, plan) {
       ? RecruitingComms.substituteInterviewLinkPlaceholder(plan.emailBodyOverride, finalInterviewUrl)
       : undefined;
     const stillEligible = async (conn = db) => {
-      const now = await conn('job_applications').where({ id: updated.id }).first('status', 'interview_token');
-      return Boolean(now && now.status === 'interview' && now.interview_token === updated.interview_token);
+      const now = await conn('job_applications').where({ id: updated.id })
+        .first('status', 'interview_token', 'interview_booked_at', 'interview_at');
+      return inviteStillCurrent(now);
     };
 
     const sent = await RecruitingComms.sendStageComms(updated, 'interview_invite', {

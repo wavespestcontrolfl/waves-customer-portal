@@ -438,6 +438,33 @@ describe('admin communications SMS route', () => {
     }
   });
 
+  test('schedule-sms: a VALIDATED customerId is explicit customer context and is not refused as an applicant text; without it the open application still refuses (Codex r28 P2)', async () => {
+    const { isRecruitingPhone } = require('../utils/recruiting-thread-scope');
+    isRecruitingPhone.mockResolvedValue(true);
+    db.mockImplementation((table) => {
+      const first = jest.fn(async () => (table === 'customers' ? { id: 'cust-A', phone: '+15551234567' } : null));
+      return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), whereRaw: jest.fn(function () { return this; }), orderBy: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1), insert: jest.fn(() => ({ returning: jest.fn(async () => [{ id: 'sched-1' }]) })) };
+    });
+    try {
+      await withServer(async (baseUrl) => {
+        const post = (payload) => fetch(`${baseUrl}/admin/communications/schedule-sms`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', body: 'Your tech is on the way.', messageType: 'manual', scheduledFor: '2099-01-01T10:00', ...payload }),
+        });
+        const explicit = await post({ customerId: 'cust-A' });
+        expect(explicit.status).not.toBe(409);
+        expect(isRecruitingPhone).not.toHaveBeenCalled();
+        const implicit = await post({});
+        expect(implicit.status).toBe(409);
+        expect((await implicit.json()).error).toMatch(/Applicant texts are not scheduled here/);
+        expect(isRecruitingPhone).toHaveBeenCalledWith('+15551234567', undefined, { activeOnly: true });
+      });
+    } finally {
+      isRecruitingPhone.mockResolvedValue(false);
+    }
+  });
+
   test('allows desktop manual sends with exact quote prices', async () => {
     sendCustomerMessage.mockResolvedValue({
       sent: true,

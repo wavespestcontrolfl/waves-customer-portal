@@ -3187,12 +3187,22 @@ router.post('/schedule-sms', async (req, res, next) => {
     if (!to || !cleanBody || !scheduledFor) {
       return res.status(400).json({ error: 'to, body, scheduledFor required' });
     }
+    // Explicit customer context is validated FIRST (Codex r28 P2): a
+    // customerId the operator selected, whose phone matches `to`, is a
+    // customer text even when an open application shares the phone — the
+    // same rule the immediate /sms path applies (Codex r16 P1). The
+    // no-customerId fallback (single customer on the phone) is NOT explicit
+    // context and does not bypass the applicant guard.
+    const trusted = await trustedCustomerForScheduledSms(customerId, to);
+    if (trusted.error) return res.status(trusted.status).json({ error: trusted.error });
+    const trustedCustomerId = trusted.customerId;
+    const explicitCustomerContext = Boolean(customerId && trustedCustomerId);
     // Recruiting boundary (Codex r7 P0): a scheduled 'manual' text to an
     // applicant would later hand their reply to the customer pipeline —
     // applicant texts are not scheduled from here at all (owner sends now
     // from the recruiting queue / reply box; the send window queues them
     // itself), and a non-admin is refused outright.
-    if (await isRecruitingPhone(to, undefined, { activeOnly: true })) {
+    if (!explicitCustomerContext && await isRecruitingPhone(to, undefined, { activeOnly: true })) {
       if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
       return res.status(409).json({ error: 'Applicant texts are not scheduled here — send now from the recruiting queue or the reply box' });
     }
@@ -3212,10 +3222,6 @@ router.post('/schedule-sms', async (req, res, next) => {
     if (!TWILIO_NUMBERS.findByNumber(chosenFrom)) {
       return res.status(400).json({ error: 'fromNumber must be a Waves Twilio number' });
     }
-
-    const trusted = await trustedCustomerForScheduledSms(customerId, to);
-    if (trusted.error) return res.status(trusted.status).json({ error: trusted.error });
-    const trustedCustomerId = trusted.customerId;
 
     // An Agent Review draft can be scheduled instead of sent now. Carry the
     // verified decision id on the scheduled row so the 5-min dispatch cron
