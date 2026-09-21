@@ -320,6 +320,7 @@ describe('reschedule — shared occupancy conflict gate', () => {
 
     expect(findConflictingVisits).toHaveBeenCalledWith({
       db: trx,
+      includeInterviews: true,
       date: TARGET,
       windowStart: '09:00',
       windowEnd: '11:00',

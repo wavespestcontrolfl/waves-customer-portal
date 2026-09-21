@@ -6,6 +6,7 @@ const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { hideRecruitingThreadsFromNonAdmin, isRecruitingPhone, isRecruitingMessageType } = require('../utils/recruiting-thread-scope');
 const { resolveLocation } = require('../config/locations');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
@@ -142,6 +143,8 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
     if (decision.inbound_created_at) {
       const threadLast10 = normalizePhoneLast10(decision.sms_from_phone) || sentPhoneLast10;
       const newerInbound = await db('sms_log')
+        // an applicant's hiring reply on a shared phone is not "the thread moved on" (PR #4623 r31)
+        .modify((qb) => require('../utils/recruiting-thread-scope').excludeRecruitingSmsLog(qb, 'message_type'))
         .where({ direction: 'inbound' })
         .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [threadLast10])
         .where('created_at', '>', decision.inbound_created_at)
@@ -414,6 +417,10 @@ router.post('/sms', async (req, res, next) => {
       customerId,
       messageType,
       fromNumber,
+      // The inbox row this text answers (Communications "Text back"): a
+      // recruiting row keeps the reply on the recruiting rail even when the
+      // shared phone is also a customer's (Codex r25 P1).
+      replyToMessageId,
       mediaUrls,
       mediaAttachments,
       agentDecisionId,
@@ -455,6 +462,33 @@ router.post('/sms', async (req, res, next) => {
         return res.status(400).json({ error: 'to must match the selected customer phone' });
       }
       trustedCustomerId = customer.id;
+    }
+    // Texting an applicant from the composer stays on the recruiting rail
+    // (Codex r7 P0): owner-only, typed job_owner_reply, handoff evidence on
+    // the application — never a 'manual' customer text that would hand the
+    // applicant's next reply to the customer pipeline. Intent comes from the
+    // MESSAGE being answered, not from a linked customerId (Codex r25 P1):
+    // "Text back" on a recruiting row is a recruiting reply even when the
+    // shared phone is also a customer's; a validated customerId with no
+    // recruiting row behind it is explicit customer context and keeps the
+    // ordinary path (Codex r16 P1).
+    const recruitingContext = await recruitingReplyContext(replyToMessageId, to);
+    if (recruitingContext || (!trustedCustomerId && await isRecruitingPhone(to, undefined, { activeOnly: true }))) {
+      if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+      if (media.length > 0) return res.status(400).json({ error: 'Attachments are not supported for applicant texts' });
+      const RecruitingComms = require('../services/recruiting-comms');
+      // The line this reply goes out from decides which application's thread
+      // it belongs to (Codex r23 P2) — the answered row's line when there is
+      // one, else the composer's pick, else the applicant default.
+      const replyLine = fromNumber || (recruitingContext && recruitingContext.ourEndpointId) || await RecruitingComms.outboundNumberForApplicants();
+      const applicationId = (recruitingContext && recruitingContext.applicationId)
+        || await RecruitingComms.openApplicationIdForPhone(to, { fromNumber: replyLine });
+      if (!applicationId) return res.status(409).json({ error: 'No open application for this applicant — text them from the recruiting queue' });
+      const reply = await RecruitingComms.sendOwnerReply({ applicationId, body: cleanBody, by: req.technicianId, fromNumber: replyLine });
+      if (!['sent', 'uncertain', 'deferred'].includes(reply.outcome)) {
+        return res.status(422).json({ error: `Applicant text ${reply.outcome}` });
+      }
+      return res.json({ success: true, recruiting: true, outcome: reply.outcome });
     }
 
     const reviewLooking = !!reviewRequestId || require('../services/review-ask-history').looksLikeReviewAsk(cleanBody);
@@ -1644,6 +1678,10 @@ router.get('/log', async (req, res, next) => {
       )
       .orderBy('messages.created_at', 'desc');
 
+    // Recruiting threads (applicant texts carry a bearer interview link) are
+    // owner-only — see utils/recruiting-thread-scope.js.
+    query = hideRecruitingThreadsFromNonAdmin(query, req);
+
     // Exclude internal admin phone messages from either side of the conversation.
     for (const phone of ADMIN_PHONES) {
       query = query
@@ -1828,7 +1866,7 @@ router.get('/unread-count', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'Invalid customer id' });
     }
     const { countUnreadInboundSms } = require('../services/inbound-sms-read');
-    res.json(await countUnreadInboundSms({ excludePhones: ADMIN_PHONES, customerId }));
+    res.json(await countUnreadInboundSms({ excludePhones: ADMIN_PHONES, customerId, role: req.techRole }));
   } catch (err) { next(err); }
 });
 
@@ -1931,16 +1969,34 @@ router.post('/ai-draft', async (req, res, next) => {
     const { customerPhone, lastMessage } = req.body;
     if (!customerPhone) return res.status(400).json({ error: 'customerPhone required' });
 
+    // ONE normalized identity for both the recruiting guard and the history
+    // read (Codex r8 P0): the history is keyed by the last 10 digits, so the
+    // guard must judge exactly that identity — a foreign prefix on the same
+    // 10 digits must not slip past the guard and into the prompt.
+    const cleanPhone = String(customerPhone).replace(/\D/g, '').slice(-10);
+    if (cleanPhone.length !== 10) return res.status(400).json({ error: 'customerPhone must be a 10-digit NANP number' });
+
+    // Recruiting boundary (utils/recruiting-thread-scope.js): applicant
+    // history carries the bearer interview link and is owner-only — refuse a
+    // non-admin BEFORE any history for this phone is loaded into a prompt.
+    if (req.techRole !== 'admin' && await isRecruitingPhone(cleanPhone)) {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+
     // Look up customer context
-    const cleanPhone = customerPhone.replace(/\D/g, '').slice(-10);
     const customer = await db('customers').where('phone', 'like', `%${cleanPhone}`).first();
 
-    // Get recent SMS history for context
+    // Get recent SMS history for context. Recruiting rows (job_*) are
+    // excluded for EVERY caller, admin included: this is a customer-copy
+    // prompt, and an applicant sharing the phone must never have interview
+    // discussion or the bearer scheduling link fed into a service reply
+    // (Codex #4623 r17). /log keeps showing them to admins.
     const recentSms = await excludeUnresolvedSendReservations(
       db('sms_log').where(function () {
         this.where('from_phone', 'like', `%${cleanPhone}`).orWhere('to_phone', 'like', `%${cleanPhone}`);
       }),
     )
+      .whereRaw("COALESCE(sms_log.message_type, '') NOT LIKE 'job\\_%'")
       .orderBy('created_at', 'desc')
       .limit(5);
 
@@ -3128,10 +3184,38 @@ async function trustedCustomerForScheduledSms(customerId, to) {
 
 router.post('/schedule-sms', async (req, res, next) => {
   try {
-    const { to, body, scheduledFor, customerId, fromNumber, from, messageType, agentDecisionId, agentDraft } = req.body || {};
+    const { to, body, scheduledFor, customerId, fromNumber, from, messageType, agentDecisionId, agentDraft, replyToMessageId } = req.body || {};
     const cleanBody = typeof body === 'string' ? body.trim() : '';
     if (!to || !cleanBody || !scheduledFor) {
       return res.status(400).json({ error: 'to, body, scheduledFor required' });
+    }
+    // A retained "Text back" context on a recruiting row makes this an
+    // applicant reply whatever customer is selected (Codex r30 P1, same
+    // rule as the immediate /sms path): applicant texts are never
+    // scheduled here, so refuse before the customer bypass below.
+    const recruitingContext = await recruitingReplyContext(replyToMessageId, to);
+    if (recruitingContext) {
+      if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+      return res.status(409).json({ error: 'Applicant texts are not scheduled here — send now from the recruiting queue or the reply box' });
+    }
+    // Explicit customer context is validated FIRST (Codex r28 P2): a
+    // customerId the operator selected, whose phone matches `to`, is a
+    // customer text even when an open application shares the phone — the
+    // same rule the immediate /sms path applies (Codex r16 P1). The
+    // no-customerId fallback (single customer on the phone) is NOT explicit
+    // context and does not bypass the applicant guard.
+    const trusted = await trustedCustomerForScheduledSms(customerId, to);
+    if (trusted.error) return res.status(trusted.status).json({ error: trusted.error });
+    const trustedCustomerId = trusted.customerId;
+    const explicitCustomerContext = Boolean(customerId && trustedCustomerId);
+    // Recruiting boundary (Codex r7 P0): a scheduled 'manual' text to an
+    // applicant would later hand their reply to the customer pipeline —
+    // applicant texts are not scheduled from here at all (owner sends now
+    // from the recruiting queue / reply box; the send window queues them
+    // itself), and a non-admin is refused outright.
+    if (!explicitCustomerContext && await isRecruitingPhone(to, undefined, { activeOnly: true })) {
+      if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+      return res.status(409).json({ error: 'Applicant texts are not scheduled here — send now from the recruiting queue or the reply box' });
     }
     if (messageType && BLOCKED_SCHEDULED_PURPOSES.has(purposeForScheduledMessageType(messageType))) {
       return res.status(400).json({ error: 'marketing/retention sends are not allowed on this endpoint' });
@@ -3149,10 +3233,6 @@ router.post('/schedule-sms', async (req, res, next) => {
     if (!TWILIO_NUMBERS.findByNumber(chosenFrom)) {
       return res.status(400).json({ error: 'fromNumber must be a Waves Twilio number' });
     }
-
-    const trusted = await trustedCustomerForScheduledSms(customerId, to);
-    if (trusted.error) return res.status(trusted.status).json({ error: trusted.error });
-    const trustedCustomerId = trusted.customerId;
 
     // An Agent Review draft can be scheduled instead of sent now. Carry the
     // verified decision id on the scheduled row so the 5-min dispatch cron
@@ -3273,8 +3353,11 @@ router.post('/schedule-sms', async (req, res, next) => {
 // GET /api/admin/communications/scheduled — list scheduled messages
 router.get('/scheduled', async (req, res, next) => {
   try {
+    // Queued recruiting texts carry the bearer interview link — owner-only
+    // (utils/recruiting-thread-scope.js), same as every other reader.
     const scheduled = await db('sms_log')
       .where({ status: 'scheduled' })
+      .modify((q) => hideRecruitingThreadsFromNonAdmin(q, req, 'sms_log.message_type'))
       .leftJoin('customers', 'sms_log.customer_id', 'customers.id')
       .select('sms_log.*', 'customers.first_name', 'customers.last_name')
       .orderBy('scheduled_for', 'asc');
@@ -3289,6 +3372,36 @@ router.get('/scheduled', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// A queued recruiting text cancelled here never reaches the replay rail's
+// onTerminal, so its comms_history entry would stay 'deferred' and the
+// recruiting queue would keep promising an automatic send (Codex #4623 r17).
+// Same never-downgrade posture as onTerminal: a never-attempted row is
+// proven undelivered → 'blocked'.
+async function reconcileCancelledRecruitingText(meta, trx) {
+  if (!meta || meta.entry_point !== 'recruiting_comms_deferred' || !meta.job_application_id || !meta.ledger_entry_id) return;
+  const { reconcileCommsHistoryEntryByOutcome } = require('../services/recruiting-comms');
+  await reconcileCommsHistoryEntryByOutcome(meta.job_application_id, meta.ledger_entry_id, {
+    deferred: { outcome: 'blocked', code: 'cancelled_by_admin', finalized_at: new Date().toISOString() },
+  }, trx);
+}
+
+// The recruiting row a composer send answers (replyToMessageId), verified
+// server-side: the row must exist, carry a recruiting type, and belong to
+// the phone being texted — a stale context from an earlier reply target is
+// ignored. Returns { applicationId, ourEndpointId } or null.
+async function recruitingReplyContext(messageId, to) {
+  if (!messageId || typeof messageId !== 'string') return null;
+  const row = await db('messages')
+    .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
+    .where('messages.id', messageId)
+    .first('messages.message_type', 'messages.metadata', 'conversations.contact_phone', 'conversations.our_endpoint_id');
+  if (!row || !isRecruitingMessageType(row.message_type)) return null;
+  const rowPhone = normalizePhone(row.contact_phone);
+  if (!rowPhone || rowPhone !== normalizePhone(to)) return null;
+  const meta = parseJson(row.metadata, {});
+  return { applicationId: meta.job_application_id || null, ourEndpointId: row.our_endpoint_id || null };
+}
+
 // DELETE /api/admin/communications/scheduled/:id — cancel scheduled message
 router.delete('/scheduled/:id', async (req, res, next) => {
   try {
@@ -3297,6 +3410,13 @@ router.delete('/scheduled/:id', async (req, res, next) => {
       .where({ id: req.params.id, status: 'scheduled' })
       .first('id', 'to_phone');
     if (!peek) return res.json({ success: true });
+    if (req.techRole !== 'admin') {
+      // Queued recruiting texts are owner-only (utils/recruiting-thread-scope.js).
+      const typed = await excludeUnresolvedSendReservations(db('sms_log')).where({ id: peek.id }).first('message_type');
+      if (typed && isRecruitingMessageType(typed.message_type)) {
+        return res.status(403).json({ error: 'Admin access required' });
+      }
+    }
     const threadLast10 = normalizePhoneLast10(peek.to_phone);
 
     // Lock the thread BEFORE deleting, and resolve the decisions before the
@@ -3350,6 +3470,7 @@ router.delete('/scheduled/:id', async (req, res, next) => {
       if (!row) return;
 
       const meta = parseJson(row.metadata, {});
+      await reconcileCancelledRecruitingText(meta, trx);
       const decisionIds = [
         meta.agent_decision_id,
         ...(Array.isArray(meta.parked_decision_ids) ? meta.parked_decision_ids : []),
@@ -3524,6 +3645,10 @@ router.get('/compliance-export', async (req, res, next) => {
 
     if (req.query.customerId) auditQuery = auditQuery.where({ customer_id: req.query.customerId });
     if (normalizedPhone) auditQuery = auditQuery.where({ to_hash: phoneHash(normalizedPhone) });
+    // Applicant sends are owner-only (body_preview holds the whole invite,
+    // bearer interview link included) — same boundary as /log, see
+    // utils/recruiting-thread-scope.js.
+    if (req.techRole !== 'admin') auditQuery = auditQuery.whereNot({ audience: 'applicant' });
 
     const auditRows = await auditQuery.select(
       'id',

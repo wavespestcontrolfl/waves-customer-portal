@@ -1109,3 +1109,142 @@ describe('invoice_followup_deferred × collections policy', () => {
     expect(requiresDurableFinalize('invoice_followup_deferred')).toBe(true);
   });
 });
+
+describe('recruiting_comms_deferred (PR #4623)', () => {
+  const { recheckDeferredReplay, finalizeDeferredReplay, onTerminalDeferredReplay } = require('../services/messaging/deferred-replay-registry');
+  const db = require('../models/db');
+  const gates = require('../config/feature-gates');
+  const meta = { job_application_id: 'app-1', stage: 'interview_invite', interview_token: 'a'.repeat(64), interview_at: null, ledger_entry_id: 'e-1' };
+  const ENTRY = 'recruiting_comms_deferred';
+
+  function rowChain(row) {
+    const q = { where: jest.fn(() => q), first: jest.fn(async () => row) };
+    return q;
+  }
+
+  test('gate off -> ineligible (kill switch honored on replay)', async () => {
+    const spy = jest.spyOn(gates, 'isEnabled').mockImplementation(() => false);
+    expect(await recheckDeferredReplay(ENTRY, meta)).toMatchObject({ eligible: false, reason: 'recruiting-gate-off' });
+    spy.mockRestore();
+  });
+
+  test('withdrawn application / changed token / rebooked time -> ineligible; matching state -> eligible', async () => {
+    const spy = jest.spyOn(gates, 'isEnabled').mockImplementation(() => true);
+    const recSpy = jest.spyOn(require('../services/recruiting-comms'), 'reconcileCommsHistoryEntryByOutcome').mockResolvedValue(undefined);
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'withdrawn', interview_token: 'a'.repeat(64) }));
+    expect(await recheckDeferredReplay(ENTRY, meta)).toMatchObject({ eligible: false, reason: 'application-withdrawn' });
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'interview', interview_token: 'b'.repeat(64) }));
+    expect(await recheckDeferredReplay(ENTRY, meta)).toMatchObject({ eligible: false, reason: 'interview-token-changed' });
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'interview', interview_token: 'a'.repeat(64), interview_at: '2027-03-16T20:00:00.000Z' }));
+    expect(await recheckDeferredReplay(ENTRY, { ...meta, stage: 'interview_confirmation', interview_at: '2027-03-16T21:00:00.000Z' })).toMatchObject({ eligible: false, reason: 'interview-rebooked' });
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'interview', interview_token: 'a'.repeat(64), interview_at: '2027-03-16T20:00:00.000Z', interview_mode: 'in_person' }));
+    expect(await recheckDeferredReplay(ENTRY, { ...meta, stage: 'interview_confirmation', interview_at: '2027-03-16T20:00:00.000Z', interview_mode: 'phone' })).toMatchObject({ eligible: false, reason: 'interview-mode-changed' });
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'interview', interview_token: 'a'.repeat(64), interview_at: '2027-03-16T20:00:00.000Z', interview_mode: 'phone' }));
+    expect(await recheckDeferredReplay(ENTRY, { ...meta, stage: 'interview_confirmation', interview_at: '2027-03-16T20:00:00.000Z', interview_mode: 'phone' })).toMatchObject({ eligible: true });
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'reviewed', interview_token: null }));
+    expect(await recheckDeferredReplay(ENTRY, { ...meta, stage: 'application_received', interview_token: null })).toMatchObject({ eligible: true });
+    // Append position is the total order (Codex r23 P2): a resend appended in
+    // the SAME millisecond as the claimed entry still supersedes it.
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'interview', interview_token: 'a'.repeat(64), comms_history: [
+      { id: meta.ledger_entry_id, at: '2027-03-16T02:00:00.000Z', stage: 'interview_invite', channel: 'sms', outcome: 'deferred' },
+      { id: 'resend', at: '2027-03-16T02:00:00.000Z', stage: 'interview_invite', channel: 'sms', outcome: 'pending' },
+    ] }));
+    expect(await recheckDeferredReplay(ENTRY, meta)).toMatchObject({ eligible: false, reason: 'superseded-by-newer-attempt' });
+    // A queued invite is moot once the applicant booked (Codex r24 P2), or
+    // once a confirmation is already live after it.
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'interview', interview_token: 'a'.repeat(64), interview_booked_at: '2027-03-16T03:00:00.000Z', comms_history: [] }));
+    expect(await recheckDeferredReplay(ENTRY, meta)).toMatchObject({ eligible: false, reason: 'interview-already-booked' });
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'interview', interview_token: 'a'.repeat(64), comms_history: [
+      { id: meta.ledger_entry_id, at: '2027-03-16T02:00:00.000Z', stage: 'interview_invite', channel: 'sms', outcome: 'deferred' },
+      { id: 'conf', at: '2027-03-16T03:00:00.000Z', stage: 'interview_confirmation', channel: 'sms', outcome: 'deferred' },
+    ] }));
+    expect(await recheckDeferredReplay(ENTRY, meta)).toMatchObject({ eligible: false, reason: 'superseded-by-confirmation' });
+    // A queued receipt yields once the owner moved on (Codex r17 P2): the
+    // application advanced past review, or a later-stage / owner text is live.
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'interview', interview_token: 'a'.repeat(64) }));
+    expect(await recheckDeferredReplay(ENTRY, { ...meta, stage: 'application_received', interview_token: null })).toMatchObject({ eligible: false, reason: 'application-advanced-interview' });
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'new', interview_token: null, comms_history: [
+      { id: meta.ledger_entry_id, at: '2027-03-16T02:00:00.000Z', stage: 'application_received', channel: 'sms', outcome: 'deferred' },
+      { id: 'owner-1', at: '2027-03-16T03:00:00.000Z', stage: 'owner_reply', channel: 'sms', outcome: 'sent' },
+    ] }));
+    expect(await recheckDeferredReplay(ENTRY, { ...meta, stage: 'application_received', interview_token: null })).toMatchObject({ eligible: false, reason: 'superseded-by-later-stage' });
+    recSpy.mockRestore();
+    spy.mockRestore();
+  });
+
+  test('the locked handoff refuses (no provider call) when the application went stale between claim and provider', async () => {
+    const gatesSpy = jest.spyOn(gates, 'isEnabled').mockImplementation(() => true);
+    const { deferredSmsHandoff } = require('../services/messaging/deferred-replay-registry');
+    const handoff = deferredSmsHandoff(ENTRY, meta);
+    const lockChain = rowChain({ id: 'app-1', status: 'withdrawn', interview_token: 'a'.repeat(64) });
+    lockChain.forUpdate = jest.fn(() => lockChain);
+    db.transaction = jest.fn(async (fn) => fn(jest.fn(() => lockChain)));
+    const dispatch = jest.fn(async () => ({ sent: true }));
+    await expect(handoff(dispatch)).resolves.toMatchObject({ sent: false, blocked: true, code: 'RECRUITING_STALE_AT_HANDOFF' });
+    expect(dispatch).not.toHaveBeenCalled();
+    gatesSpy.mockRestore();
+  });
+
+  test('a newer attempt of the same stage in the ledger supersedes this queued invite (even if already claimed)', async () => {
+    const spy = jest.spyOn(gates, 'isEnabled').mockImplementation(() => true);
+    const history = [
+      { id: 'e-1', channel: 'sms', stage: 'interview_invite', outcome: 'deferred', at: '2027-03-16T03:00:00.000Z' },
+      { id: 'e-2', channel: 'sms', stage: 'interview_invite', outcome: 'sent', at: '2027-03-16T14:00:00.000Z' },
+    ];
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'interview', interview_token: 'a'.repeat(64), comms_history: history }));
+    expect(await recheckDeferredReplay(ENTRY, meta)).toMatchObject({ eligible: false, reason: 'superseded-by-newer-attempt' });
+    spy.mockRestore();
+  });
+
+  test('a database error fails CLOSED', async () => {
+    const spy = jest.spyOn(gates, 'isEnabled').mockImplementation(() => true);
+    db.mockReturnValueOnce({ where: () => { throw Object.assign(new Error('boom'), { code: '57014' }); } });
+    expect(await recheckDeferredReplay(ENTRY, meta)).toMatchObject({ eligible: false });
+    spy.mockRestore();
+  });
+
+  test('recheck never stamps; the locked smsHandoff stamps deferred -> handoff immediately before dispatch', async () => {
+    const gatesSpy = jest.spyOn(gates, 'isEnabled').mockImplementation(() => true);
+    const comms = require('../services/recruiting-comms');
+    const spy = jest.spyOn(comms, 'reconcileCommsHistoryEntryByOutcome').mockResolvedValue(undefined);
+    db.mockReturnValueOnce(rowChain({ id: 'app-1', status: 'reviewed', interview_token: null }));
+    expect(await recheckDeferredReplay(ENTRY, { ...meta, stage: 'application_received', interview_token: null })).toMatchObject({ eligible: true });
+    expect(spy).not.toHaveBeenCalled();
+    const { deferredSmsHandoff } = require('../services/messaging/deferred-replay-registry');
+    const handoff = deferredSmsHandoff(ENTRY, meta);
+    // the handoff runs in a transaction that holds the application row FOR UPDATE through dispatch
+    const lockChain = rowChain({ id: 'app-1', status: 'interview', interview_token: 'a'.repeat(64), comms_history: [], contact_snapshot: { phone: '9415550142' } });
+    const order = [];
+    lockChain.forUpdate = jest.fn(() => { order.push('row-lock'); return lockChain; });
+    const trx = jest.fn(() => lockChain);
+    // the shared SMS phone lock is taken BEFORE the application row (Codex r30 P1)
+    trx.raw = jest.fn(async (sql, bindings) => { if (/pg_advisory_xact_lock/.test(sql) && /twilio_21610/.test(sql)) order.push(`phone-lock:${bindings[0]}`); });
+    db.transaction = jest.fn(async (fn) => fn(trx));
+    spy.mockImplementation(async () => { order.push('stamp'); });
+    const dispatch = jest.fn(async () => { order.push('dispatch'); return { sent: true }; });
+    await expect(handoff(dispatch)).resolves.toEqual({ sent: true });
+    expect(lockChain.forUpdate).toHaveBeenCalled();
+    expect(order.slice(0, 2)).toEqual(['phone-lock:+19415550142', 'row-lock']);
+    expect(dispatch).toHaveBeenCalledWith(trx);
+    expect(spy).toHaveBeenCalledWith('app-1', 'e-1', { deferred: expect.objectContaining({ outcome: 'handoff' }) }, expect.anything());
+    expect(order.slice(2)).toEqual(['stamp', 'dispatch']);
+    spy.mockRestore(); gatesSpy.mockRestore();
+  });
+
+  test('finalize -> sent; terminal never downgrades: deferred -> blocked, handoff (attempted, ambiguous) -> uncertain', async () => {
+    const comms = require('../services/recruiting-comms');
+    const fin = jest.spyOn(comms, 'finalizeCommsHistoryEntry').mockResolvedValue(undefined);
+    const rec = jest.spyOn(comms, 'reconcileCommsHistoryEntryByOutcome').mockResolvedValue(undefined);
+    await finalizeDeferredReplay(ENTRY, meta);
+    expect(fin).toHaveBeenCalledWith('app-1', 'e-1', expect.objectContaining({ outcome: 'sent', sent_by: 'scheduled_sms_cron' }));
+    await onTerminalDeferredReplay(ENTRY, meta);
+    expect(rec).toHaveBeenCalledWith('app-1', 'e-1', {
+      deferred: expect.objectContaining({ outcome: 'blocked', code: 'deferred_terminal' }),
+      handoff: expect.objectContaining({ outcome: 'uncertain', code: 'deferred_terminal_after_attempt' }),
+    });
+    // an entry already 'sent' or 'uncertain' has no transition — evidence retained
+    const terminalCall = rec.mock.calls.find((c) => c[2] && c[2].handoff);
+    expect(Object.keys(terminalCall[2])).toEqual(['deferred', 'handoff']);
+    fin.mockRestore(); rec.mockRestore();
+  });
+});

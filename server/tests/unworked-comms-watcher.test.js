@@ -53,6 +53,17 @@ describe('composeUnworkedCommsDigest', () => {
     expect(out.html).not.toContain('…and 5 more not shown');
   });
 
+  test('applicant replies (job_%) never appear in the unworked-SMS digest (source contract, #4623 r14)', () => {
+    // Recruiting threads are owner-only and answered through the recruiting
+    // rail (job_owner_reply, not a HUMAN_REPLY_TYPES type) — the inbound
+    // worklist must exclude them or a handled reply lingers forever.
+    const src = require('fs').readFileSync(
+      require('path').join(__dirname, '../services/unworked-comms-watcher.js'), 'utf8',
+    );
+    const block = src.split("AND direction = 'inbound'")[1].slice(0, 900);
+    expect(block).toMatch(/COALESCE\(message_type, ''\) NOT LIKE 'job\\\\_%'/);
+  });
+
   test('a zero-delivery click-to-estimate mint never fulfills a send_estimate task (source contract, #3391)', () => {
     // Those mints stamp sent_at without delivering anything — they must not
     // clear a send obligation owed from a call.

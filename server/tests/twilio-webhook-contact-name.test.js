@@ -1,3 +1,4 @@
+jest.mock('../utils/recruiting-thread-scope', () => { const real = jest.requireActual('../utils/recruiting-thread-scope'); return { ...real, isRecruitingPhone: jest.fn(async () => false) }; });
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/twilio', () => ({}));
 jest.mock('../services/logger', () => ({

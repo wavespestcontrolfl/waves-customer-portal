@@ -94,6 +94,8 @@ async function hasRepliedRecently({ customerId, phone }, days = 14) {
       .join('conversations', 'messages.conversation_id', 'conversations.id')
       .where('messages.direction', 'inbound')
       .where('messages.channel', 'sms')
+      // Recruiting replies (job_*, PR #4623) are never customer context.
+      .where((q) => { q.whereNull('messages.message_type').orWhere('messages.message_type', 'not like', 'job\\_%'); })
       .where('messages.created_at', '>=', cutoff)
       .first('messages.id');
     q.andWhere(function () {

@@ -2626,6 +2626,7 @@ async function createSelfBooking(payload = {}) {
       // double-submit replay returned above before any conflict check).
       const globalClash = await findConflictingVisits({
         db: trx,
+        includeInterviews: true,
         date: slotDateStr,
         windowStart: slot_start,
         windowEnd: endTime,
@@ -3835,6 +3836,7 @@ async function createSelfBooking(payload = {}) {
             // conflicts — same fail-open the guard's own input contract keeps.
             const clashes = await findConflictingVisits({
               db: trx,
+        includeInterviews: true,
               date: rowDate,
               windowStart: row.window_start,
               windowEnd: row.window_end,

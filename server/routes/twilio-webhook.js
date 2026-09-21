@@ -360,6 +360,53 @@ router.post('/sms', async (req, res) => {
       else logger.warn(`[contact-correction] enqueue deferred to stale sweep for customer ${customer.id}, sms_log ${smsLogId || 'n/a'}`);
     };
 
+    // Recruiting classification BEFORE the inbox persist (Codex #4623 P0):
+    // the unified row must be born typed `job_applicant_reply` so no shared
+    // reader ever sees an applicant's reply untyped — not even when they
+    // texted a different Waves number whose thread holds no outbound job_*
+    // row. A lookup failure fails CLOSED while nothing is persisted yet:
+    // release the claim and 503 so Twilio redelivers. Handling of the reply
+    // itself still happens further down, AFTER STOP/HELP/START.
+    // NOT gated on GATE_RECRUITING_COMMS (Codex r6 P1): the gate is the
+    // send / public-link kill switch — applicants texted BEFORE it was turned
+    // off can still reply for the evidence window, and those replies must
+    // keep classifying from stored evidence. A database with no recruiting
+    // tables at all answers "not a recruiting reply" (see the matcher).
+    // A standalone compliance command (STOP / START / HELP) must never WAIT
+    // on this lookup: a recruiting-store outage can never delay a
+    // suppression write (Codex r10 P1). It is still classified best-effort
+    // (Codex r22 P2) so the persisted row carries the recruiting type and
+    // stays out of technician-visible readers — a lookup failure simply
+    // leaves it untyped and the compliance action proceeds.
+    const complianceCommand = Boolean(detectSmsOptCommand(Body || '').action);
+    let recruitingReply = null;
+    if (complianceCommand) {
+      recruitingReply = await require('../services/recruiting-inbound').matchApplicantReply(From, To).catch((e) => {
+        logger.warn(`[recruiting-inbound] match failed on a compliance command (${e.name || 'Error'}${e.code ? ` ${e.code}` : ''}) — proceeding untyped`);
+        return null;
+      });
+    }
+    try {
+      if (!complianceCommand) {
+        recruitingReply = await require('../services/recruiting-inbound').matchApplicantReply(From, To);
+      }
+    } catch (e) {
+      // Fail CLOSED only where it matters (local audit P1): a phone that is
+      // plausibly an applicant (open-application snapshot, or no snapshot
+      // available at all) defers for a Twilio retry — release the claim and
+      // 503 with nothing persisted. Every other phone continues on the
+      // ordinary path so a recruiting-store hiccup never stalls the whole
+      // inbound pipeline.
+      const plausible = await require('../services/recruiting-inbound').isPlausibleRecruitingPhone(From).catch(() => null);
+      if (plausible !== false) {
+        logger.error(`[recruiting-inbound] match failed (${e.name || 'Error'}${e.code ? ` ${e.code}` : ''}) — deferring inbound for retry`);
+        if (claimOwned && !persisted) await releaseInboundWebhook(MessageSid);
+        return res.status(503).type('text/xml').send('<Response></Response>');
+      }
+      logger.warn(`[recruiting-inbound] match failed (${e.name || 'Error'}${e.code ? ` ${e.code}` : ''}) — not a known applicant phone, continuing on the ordinary path`);
+      recruitingReply = null;
+    }
+
     // The unified inbox is required before acknowledging an accepted SMS.
     // STOP suppression still runs below if this write fails; all other effects
     // wait for a durable message so redelivery can safely resume processing.
@@ -379,8 +426,8 @@ router.post('/sms', async (req, res) => {
       isRead: quietReaction || courtesyOnly,
       // Loud reactions are typed as ordinary inbound so the unanswered digest
       // and completion guard count them (codex r3).
-      messageType: quietReaction ? 'sms_reaction' : undefined,
-      metadata: { location: numberConfig?.label, numberType: numberConfig?.type, ...(courtesyOnly ? { courtesyOnly: true } : {}) },
+      messageType: recruitingReply ? 'job_applicant_reply' : (quietReaction ? 'sms_reaction' : undefined),
+      metadata: { location: numberConfig?.label, numberType: numberConfig?.type, ...(courtesyOnly ? { courtesyOnly: true } : {}), ...(recruitingReply ? { job_application_id: recruitingReply.applicationId } : {}) },
     }).catch(() => {});
 
     sourcePersistenceFailed = !inboundTouchpoint?.message?.id;
@@ -424,10 +471,24 @@ router.post('/sms', async (req, res) => {
     // line, a known caller record, or genuine outbound history), OR a
     // lookup that failed and fails OPEN so a real STOP is never silently
     // refused.
+    // The recruiting ledger is durable proof Waves texted this phone even
+    // when the best-effort sms_log / unified writes both failed (Codex r11
+    // P1): an applicant's STOP must be honored. Consulted for eligibility
+    // ONLY — never routes the command through the recruiting reply flow.
+    // Fails OPEN (eligible) on a lookup error, like the other evidence.
+    let recruitingLedgerEvidence = false;
+    let recruitingLedgerLookupFailed = false;
+    try {
+      recruitingLedgerEvidence = await require('../utils/recruiting-thread-scope').isRecruitingPhone(From);
+    } catch (e) {
+      recruitingLedgerLookupFailed = true;
+    }
     const complianceEligible = isAiNumber
       || Boolean(knownCallerLookupFailed || knownCallerRecord)
       || outboundHistoryMatch
-      || outboundHistoryLookupFailed;
+      || outboundHistoryLookupFailed
+      || recruitingLedgerEvidence
+      || recruitingLedgerLookupFailed;
 
     // ── STOP / UNSUBSCRIBE / HELP / START keyword handling ──
     // Consent runs BEFORE the classifier, and ONLY for eligible senders, on
@@ -770,6 +831,35 @@ router.post('/sms', async (req, res) => {
       return res.type('text/xml').send(optInLanded
         ? `<Response><Message>You've been re-subscribed to Waves Pest Control SMS.</Message></Response>`
         : `<Response><Message>We received your request to receive texts from Waves Pest Control. Our office will confirm your subscription shortly.</Message></Response>`);
+    }
+
+    // ── Recruiting: an applicant replying to our interview invite /
+    // confirmation text (classified above, before the inbox persist).
+    // Owner-only boundary (utils/recruiting-thread-scope.js): the reply
+    // lands on the application + the admin-only bell and never reaches the
+    // tech-visible sms_reply bell or any customer automation below — even
+    // when this phone also belongs to a customer (Codex r1 P1 on #4623).
+    // Placed AFTER STOP/HELP/START handling so compliance keywords are
+    // always honored first.
+    if (recruitingReply) {
+      requireInboxMessage();
+      try {
+        // sms_log row + comms_history entry commit together, idempotent on
+        // the SID — a retry after a partial failure cannot double-record.
+        await require('../services/recruiting-inbound').recordApplicantReply({
+          applicationId: recruitingReply.applicationId,
+          from: From, to: To, body: Body, messageSid: MessageSid, mediaCount: inboundMedia.length,
+          media: inboundMedia, unifiedMessageId: inboundTouchpoint?.message?.id || null,
+        });
+      } catch (e) {
+        // Fail closed: the typed inbox row is already hidden from shared
+        // readers; release the claim and 503 so Twilio redelivers the rest.
+        logger.error(`[recruiting-inbound] persistence failed (${e.name || 'Error'}${e.code ? ` ${e.code}` : ''}) — deferring inbound for retry`);
+        if (claimOwned && !persisted) await releaseInboundWebhook(MessageSid);
+        return res.status(503).type('text/xml').send('<Response></Response>');
+      }
+      persisted = true;
+      return res.type('text/xml').send('<Response></Response>');
     }
 
     if (smsReaction) {

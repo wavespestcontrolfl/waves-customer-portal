@@ -620,6 +620,17 @@ const gates = {
   // at any setting (it only reads/updates existing rows).
   jobApplications: process.env.GATE_JOB_APPLICATIONS === 'true',
 
+  // Recruiting comms (GATE_RECRUITING_COMMS): applicant-facing SMS/email —
+  // the submit confirmation, the interview self-scheduling link + its
+  // confirmation, and the admin stage-change notify modal's sends. Customer-
+  // facing (well, applicant-facing) auto-send, so strict opt-in in EVERY
+  // environment like techArrivedSms. Off: submit confirmation is skipped,
+  // PATCH /admin/careers/:id/status ignores `notify` and reports
+  // sending_enabled:false, and the public /interview/:token routes 404
+  // BEFORE their rate limiter (same unobservable-when-dark contract as the
+  // jobApplications prefix gate above, which stays in force independently).
+  recruitingComms: process.env.GATE_RECRUITING_COMMS === 'true',
+
   // Route-aware estimate slot ranking (2026-07-20): when ON, the estimate
   // funnel's offered slots lead with the guaranteed soonest card, then
   // route-fit days (detour ≤ the existing 20-min proximity bound to a stop

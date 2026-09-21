@@ -73,7 +73,12 @@ async function checkConsentForPurpose(input, policy, contactState) {
 
   if (!prefs) {
     if (
-      input.audience === 'lead' &&
+      // Applicants mirror the lead exemption: a job_applications row is
+      // never a customers/notification_prefs row (job-applicant rule), so
+      // an applicant-purpose send always arrives with an explicit
+      // transactional_allowed consentBasis from recruiting-comms.js — there
+      // is no prefs row to ever load instead.
+      (input.audience === 'lead' || input.audience === 'applicant') &&
       policy.requireConsent === 'transactional' &&
       input.consentBasis &&
       ['transactional_allowed', 'opted_in'].includes(input.consentBasis.status)
@@ -348,7 +353,7 @@ async function loadContactState(input, dbh = db) {
   const needsReplyEvidence = !state.prefs
     && !state.lookupFailed
     && input.purpose === 'conversational'
-    && !['lead', 'internal', 'tech', 'admin'].includes(input.audience);
+    && !['lead', 'internal', 'tech', 'admin', 'applicant'].includes(input.audience);
   if (needsReplyEvidence) {
     // Twilio records sms_log.from_phone in canonical E.164, but input.to /
     // customer.phone can carry stored formatting (e.g. '+44 20 7946 0958',

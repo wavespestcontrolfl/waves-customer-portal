@@ -208,6 +208,11 @@ async function correctedAddressSuppressed(bouncedMessage, correctedEmail) {
 
 /** Resolve the customer + which email column held the bounced address. */
 async function resolveCustomerEmailField(bouncedMessage, bouncedEmail) {
+  // Applicant emails (recipient_type 'job_application', PR #4623) never
+  // resolve to a customer: applicant and customer identities are separate,
+  // and a bounce correction must not resend hiring mail or rewrite a
+  // customer's email through the fanout (Codex r13 P1).
+  if (String(bouncedMessage?.recipient_type || '').toLowerCase() === 'job_application') return null;
   let customer = null;
   if (String(bouncedMessage.recipient_type || '').toLowerCase() === 'customer' && bouncedMessage.recipient_id) {
     customer = await db('customers').where({ id: bouncedMessage.recipient_id }).first().catch(() => null);

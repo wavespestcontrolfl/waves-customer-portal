@@ -20,19 +20,19 @@ jest.mock('../services/logger', () => ({ warn: jest.fn() }));
 const { countUnreadInboundSms, markInboundSmsRead } = require('../services/inbound-sms-read');
 beforeEach(() => { mockQueries.length = 0; });
 test('global counts retain their scope and separate units', async () => {
-  expect(await countUnreadInboundSms()).toEqual({ conversations: 2, messages: 5 });
+  expect(await countUnreadInboundSms({ role: 'admin' })).toEqual({ conversations: 2, messages: 5 });
   expect(mockQueries[0].sql).not.toContain('and "conversations"."customer_id" = ?');
   expect(mockQueries[0].sql).toContain('"messages"."is_read" is null');
   expect(mockQueries[0].bindings).toEqual(['sms', 'inbound', false, 1]);
 });
 test('a blocked (marked-spam) sender never counts toward the badge', async () => {
-  await countUnreadInboundSms();
+  await countUnreadInboundSms({ role: 'admin' });
   expect(mockQueries[0].sql).toContain('not exists (select 1 from "blocked_numbers"');
 });
 test('customer counts bind the account id and retain unread exclusions', async () => {
   const customerId = '00000000-0000-4000-8000-000000000001';
   const internalPhone = '+19415550199';
-  await countUnreadInboundSms({ customerId, excludePhones: [internalPhone] });
+  await countUnreadInboundSms({ customerId, excludePhones: [internalPhone], role: 'admin' });
   expect(mockQueries[0].sql).toContain('and "conversations"."customer_id" = ?');
   expect(mockQueries[0].sql).not.toContain(customerId);
   expect(mockQueries[0].bindings).toEqual(['sms', 'inbound', false, customerId, internalPhone, internalPhone, internalPhone, 1]);

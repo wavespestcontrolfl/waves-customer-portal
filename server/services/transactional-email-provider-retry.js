@@ -30,6 +30,9 @@ function isProviderBlockedEvent(ev) {
 function isTransactionalRetryEligible(message) {
   if (!message || message.has_attachments) return false;
   if (String(message.recipient_type || '').toLowerCase() === 'test') return false;
+  // Applicant emails (recruiting-comms.js) have no email_templates row and
+  // their own eligibility (application state); they stay off this rail.
+  if (String(message.recipient_type || '').toLowerCase() === 'job_application') return false;
   const group = String(message.suppression_group_key_snapshot || '').trim().toLowerCase();
   if (group.startsWith('marketing_')) return false;
   if (asArray(message.categories).map((v) => String(v).toLowerCase()).includes('bounce_recovery')) return false;

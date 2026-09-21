@@ -1177,10 +1177,10 @@ async function getTodayBriefing() {
         'technicians.name as tech_name')
       .orderByRaw('COALESCE(route_order, 999)'),
 
-    // Unread SMS
+    // Unread SMS — recruiting rows stay out of the Intelligence Bar (PR #4623 r31)
     db('sms_log').where({ direction: 'inbound' }).where(function () {
       this.where({ is_read: false }).orWhereNull('is_read');
-    }).count('* as c').first(),
+    }).modify((qb) => require('../../utils/recruiting-thread-scope').excludeRecruitingSmsLog(qb)).count('* as c').first(),
 
     // Pending estimates
     // archived_at: the conversion-guard sweep archives converted customers'
