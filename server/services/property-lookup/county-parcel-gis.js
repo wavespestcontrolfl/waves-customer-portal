@@ -979,16 +979,22 @@ async function lookupSubdivisionMedianLivingSqft({ county, subdivision, lotSqft 
   try {
     let queried = String(subdivision).trim();
     let rows = await querySubdivisionLivingSqft(key, queried, deadlineMs, { exact: true });
-    if ((rows?.length || 0) < SUBDIVISION_MEDIAN_MIN_SAMPLES) {
-      const base = subdivisionBaseName(queried);
-      if (base && base.toUpperCase() !== queried.toUpperCase()) {
-        if (deadlineMs - Date.now() >= SUBDIVISION_MIN_QUERY_MS) {
-          queried = base;
-          rows = await querySubdivisionLivingSqft(key, base, deadlineMs);
-        } else if (options.diag && typeof options.diag === 'object') {
-          // The broader population was never asked — not a settled negative.
-          options.diag.incomplete = true;
-        }
+    // null = the exact phase was TRUNCATED past the page cap (a huge
+    // population) — widening could only be bigger, so stop here.
+    if (rows === null) return null;
+    if (rows.length < SUBDIVISION_MEDIAN_MIN_SAMPLES) {
+      // Widen to the base plat with the delimiter-aware match. This runs
+      // even when the recorded name IS the base (no phase/unit suffix):
+      // the exact query above matched only rows stored under that bare
+      // string, while the phases ("BASE PH I", "BASE UNIT 2") sit behind
+      // the `LIKE 'BASE %'` arm (Codex r1 P2 on #4639).
+      const base = subdivisionBaseName(queried) || queried;
+      if (deadlineMs - Date.now() >= SUBDIVISION_MIN_QUERY_MS) {
+        queried = base;
+        rows = await querySubdivisionLivingSqft(key, base, deadlineMs);
+      } else if (options.diag && typeof options.diag === 'object') {
+        // The broader population was never asked — not a settled negative.
+        options.diag.incomplete = true;
       }
     }
     if (!rows || rows.length < SUBDIVISION_MEDIAN_MIN_SAMPLES) return null;

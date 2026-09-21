@@ -607,6 +607,17 @@ describe('lookupSubdivisionMedianLivingSqft — plat median with range', () => {
     expect(diag.failed).toBe(true);
   });
 
+  test('a recorded name with no phase suffix still widens (delimiter-aware) when its exact rows are thin', async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce(living([2101, 2200]))
+      .mockResolvedValueOnce(living([1558, 1678, 1920, 1920, 2277, 2421, 2421, 3070, 3101]));
+    const result = await lookupSubdivisionMedianLivingSqft({ county: 'Manatee', subdivision: 'EXAMPLE PLAT' });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(decodeURIComponent(String(global.fetch.mock.calls[0][0])).replace(/\+/g, ' ')).toContain("UPPER(PAR_SUBDIV_NAME) = 'EXAMPLE PLAT'");
+    expect(decodeURIComponent(String(global.fetch.mock.calls[1][0])).replace(/\+/g, ' ')).toContain("(UPPER(PAR_SUBDIV_NAME) = 'EXAMPLE PLAT' OR UPPER(PAR_SUBDIV_NAME) LIKE 'EXAMPLE PLAT %')");
+    expect(result).toMatchObject({ medianSqft: 2277, sampleCount: 9, subdivisionQueried: 'EXAMPLE PLAT' });
+  });
+
   test('null below the sample floor, on layer failure, and for an unsupported county', async () => {
     global.fetch = jest.fn().mockResolvedValue(living([2101, 2200, 2300]));
     await expect(lookupSubdivisionMedianLivingSqft({ county: 'Manatee', subdivision: 'TINY PLAT' })).resolves.toBeNull();
