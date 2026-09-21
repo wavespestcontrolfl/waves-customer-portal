@@ -1213,18 +1213,21 @@ describe('recruiting_comms_deferred (PR #4623)', () => {
     const { deferredSmsHandoff } = require('../services/messaging/deferred-replay-registry');
     const handoff = deferredSmsHandoff(ENTRY, meta);
     // the handoff runs in a transaction that holds the application row FOR UPDATE through dispatch
-    const lockChain = rowChain({ id: 'app-1', status: 'interview', interview_token: 'a'.repeat(64), comms_history: [] });
-    lockChain.forUpdate = jest.fn(() => lockChain);
-    const trx = jest.fn(() => lockChain);
-    db.transaction = jest.fn(async (fn) => fn(trx));
+    const lockChain = rowChain({ id: 'app-1', status: 'interview', interview_token: 'a'.repeat(64), comms_history: [], contact_snapshot: { phone: '9415550142' } });
     const order = [];
+    lockChain.forUpdate = jest.fn(() => { order.push('row-lock'); return lockChain; });
+    const trx = jest.fn(() => lockChain);
+    // the shared SMS phone lock is taken BEFORE the application row (Codex r30 P1)
+    trx.raw = jest.fn(async (sql, bindings) => { if (/pg_advisory_xact_lock/.test(sql) && /twilio_21610/.test(sql)) order.push(`phone-lock:${bindings[0]}`); });
+    db.transaction = jest.fn(async (fn) => fn(trx));
     spy.mockImplementation(async () => { order.push('stamp'); });
     const dispatch = jest.fn(async () => { order.push('dispatch'); return { sent: true }; });
     await expect(handoff(dispatch)).resolves.toEqual({ sent: true });
     expect(lockChain.forUpdate).toHaveBeenCalled();
+    expect(order.slice(0, 2)).toEqual(['phone-lock:+19415550142', 'row-lock']);
     expect(dispatch).toHaveBeenCalledWith(trx);
     expect(spy).toHaveBeenCalledWith('app-1', 'e-1', { deferred: expect.objectContaining({ outcome: 'handoff' }) }, expect.anything());
-    expect(order).toEqual(['stamp', 'dispatch']);
+    expect(order.slice(2)).toEqual(['stamp', 'dispatch']);
     spy.mockRestore(); gatesSpy.mockRestore();
   });
 

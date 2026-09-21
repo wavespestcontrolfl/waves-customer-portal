@@ -23,7 +23,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { loadSuppressionState } = require('./messaging/validators/suppression');
 const { activeSuppressionFor } = require('./email-template-library');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
-const { lockCustomerEmail } = require('../utils/customer-comms-lock');
+const { lockSmsPhone, lockCustomerEmail } = require('../utils/customer-comms-lock');
 const sendgrid = require('./sendgrid-mail');
 const { isEnabled } = require('../config/feature-gates');
 const { portalUrl } = require('../utils/portal-url');
@@ -680,8 +680,15 @@ function overlappingCrossedAttempt(history, entryId, stage, channel, nowMs) {
 // P2), refuses this one; (2) the caller's eligibility read, through this
 // same transaction; (3) the pipeline's own fresh rechecks, then the
 // pending → handoff stamp right before the SDK request (onProviderStart).
-function lockedRecruitingHandoff({ app, stage, handoffEntry, legEligible }) {
+function lockedRecruitingHandoff({ app, stage, handoffEntry, legEligible, phone }) {
   return (handoff) => db.transaction(async (trx) => {
+    // The shared SMS phone lock FIRST (Codex r30 P1), then the application
+    // row — the order every other SMS handoff keeps (customer-comms → phone
+    // → rows). applyInboundOptout takes the same phone lock to commit a
+    // STOP, so a STOP that lands after the pipeline's fresh suppression
+    // read either commits before this handoff's authority reads or waits
+    // until after the provider request — never in between.
+    await lockSmsPhone(trx, phone || contactOf(app).phone);
     const row = await trx('job_applications').where({ id: app.id }).forUpdate().first('comms_history');
     const history = row && row.comms_history;
     if (SUPERSEDABLE_STAGES.has(stage)
@@ -925,7 +932,7 @@ function buildSmsSendInput({ app, stage, opts, contact, applicantFromNumber, bod
     // authoritative eligibility read, the pipeline's fresh rechecks and
     // the pending → handoff stamp all run with the application row held
     // through the Twilio request — see lockedRecruitingHandoff.
-    withSmsHandoff: lockedRecruitingHandoff({ app, stage, handoffEntry, legEligible }),
+    withSmsHandoff: lockedRecruitingHandoff({ app, stage, handoffEntry, legEligible, phone: contact.phone }),
     ...(stage === 'owner_reply' && byOperator ? { operatorInitiated: true } : {}),
     metadata: { original_message_type: `job_${stage}`, job_application_id: app.id, ...(byOperator ? { adminUserId: opts.by } : {}), ...(applicantFromNumber ? { fromNumber: applicantFromNumber } : {}) },
   };

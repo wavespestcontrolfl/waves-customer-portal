@@ -175,11 +175,20 @@ it("the IMMEDIATE composer send carries replyToMessageId (the answered inbox row
   const immediate = src.slice(src.indexOf('adminFetch("/admin/communications/sms", {'));
   const payload = immediate.slice(0, immediate.indexOf("});") + 3);
   // The field only rides along when the context still matches the live
-  // compose target (Codex #4623 r? P1) — a diverged recipient/customer
-  // must send `undefined`, not the stale messageId.
-  expect(payload).toMatch(
-    /replyToMessageId:\s*replyContext\s*&&\s*phoneKey\(toNumber\) === replyContext\.phone\s*&&\s*\(selectedCustomerId \|\| null\) === \(replyContext\.customerId \|\| null\)\s*\?\s*replyContext\.messageId\s*:\s*undefined,/,
+  // compose target (Codex #4623 r28 P1) — a diverged recipient/customer
+  // must send `undefined`, not the stale messageId. ONE guarded value,
+  // computed at the top of handleSend...
+  const sendFn = src.slice(src.indexOf("const handleSend = async () => {"));
+  expect(sendFn).toMatch(
+    /const carriedReplyToMessageId =\s*replyContext\s*&&\s*phoneKey\(toNumber\) === replyContext\.phone\s*&&\s*\(selectedCustomerId \|\| null\) === \(replyContext\.customerId \|\| null\)\s*\?\s*replyContext\.messageId\s*:\s*undefined;/,
   );
+  // ...carried on the immediate send AND the scheduled send (Codex #4623
+  // r30 P1): the server refuses to schedule an applicant reply, so a
+  // retained recruiting context cannot become a queued customer text.
+  expect(payload).toMatch(/replyToMessageId: carriedReplyToMessageId,/);
+  const scheduled = src.slice(src.indexOf('adminFetch("/admin/communications/schedule-sms", {'));
+  const scheduledPayload = scheduled.slice(0, scheduled.indexOf("});") + 3);
+  expect(scheduledPayload).toMatch(/replyToMessageId: carriedReplyToMessageId,/);
   // both Text back entry points feed that context, now tagged with the
   // recipient (phone) and customer it was minted for.
   expect(src).toMatch(/onReply\(contactPhone, ourNumber, m\.customerId, \{ messageId: m\.id, messageType: m\.messageType \}\)/);

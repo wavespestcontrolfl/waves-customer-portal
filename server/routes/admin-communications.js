@@ -3182,10 +3182,19 @@ async function trustedCustomerForScheduledSms(customerId, to) {
 
 router.post('/schedule-sms', async (req, res, next) => {
   try {
-    const { to, body, scheduledFor, customerId, fromNumber, from, messageType, agentDecisionId, agentDraft } = req.body || {};
+    const { to, body, scheduledFor, customerId, fromNumber, from, messageType, agentDecisionId, agentDraft, replyToMessageId } = req.body || {};
     const cleanBody = typeof body === 'string' ? body.trim() : '';
     if (!to || !cleanBody || !scheduledFor) {
       return res.status(400).json({ error: 'to, body, scheduledFor required' });
+    }
+    // A retained "Text back" context on a recruiting row makes this an
+    // applicant reply whatever customer is selected (Codex r30 P1, same
+    // rule as the immediate /sms path): applicant texts are never
+    // scheduled here, so refuse before the customer bypass below.
+    const recruitingContext = await recruitingReplyContext(replyToMessageId, to);
+    if (recruitingContext) {
+      if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+      return res.status(409).json({ error: 'Applicant texts are not scheduled here — send now from the recruiting queue or the reply box' });
     }
     // Explicit customer context is validated FIRST (Codex r28 P2): a
     // customerId the operator selected, whose phone matches `to`, is a

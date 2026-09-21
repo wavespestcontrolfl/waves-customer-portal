@@ -1258,6 +1258,18 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   };
 
   const handleSend = async () => {
+    // The inbox row this send answers — only when the retained "Text back"
+    // context still matches the live compose target (Codex #4623 P1); a
+    // diverged recipient/customer sends `undefined`, never a stale id. The
+    // same value rides BOTH the immediate and the scheduled send (r30 P1):
+    // the server routes an immediate recruiting reply onto the recruiting
+    // rail and refuses to schedule one at all.
+    const carriedReplyToMessageId =
+      replyContext &&
+      phoneKey(toNumber) === replyContext.phone &&
+      (selectedCustomerId || null) === (replyContext.customerId || null)
+        ? replyContext.messageId
+        : undefined;
     if (sendInFlightRef.current || uploading || rewritingSms || aiDrafting || listening) return;
     if (!toNumber.trim() || (!msgBody.trim() && attachments.length === 0))
       return;
@@ -1360,6 +1372,11 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             to: toNumber.trim(),
             body: msgBody.trim(),
             customerId: selectedCustomerId || undefined,
+            // The scheduled send carries the same context (Codex #4623 r30
+            // P1): the server refuses to schedule an applicant reply, so a
+            // retained recruiting context can never become a queued
+            // customer text on a shared phone.
+            replyToMessageId: carriedReplyToMessageId,
             messageType: "manual",
             fromNumber,
             scheduledFor,
@@ -1380,15 +1397,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             customerId: selectedCustomerId || undefined,
             // The inbox row this answers: a recruiting row keeps the reply on the
             // recruiting rail even when the shared phone is a linked customer's.
-            // Only carried when the context still matches the live compose
-            // target — a diverged recipient/customer means it answers a row
-            // this send is no longer addressed to (Codex #4623 P1).
-            replyToMessageId:
-              replyContext &&
-              phoneKey(toNumber) === replyContext.phone &&
-              (selectedCustomerId || null) === (replyContext.customerId || null)
-                ? replyContext.messageId
-                : undefined,
+            replyToMessageId: carriedReplyToMessageId,
             messageType: "manual",
             fromNumber,
             mediaUrls:

@@ -305,7 +305,8 @@ async function getUnansweredThreads(input) {
   // for this tool (Codex #4623 r29 P1): an applicant reply answered through
   // the generic send would become customer-thread evidence on a shared
   // phone — applicants are answered from Recruiting.
-  const inbound = await excludeRecruitingSmsLog(db('sms_log'))
+  const inbound = await db('sms_log')
+    .modify((qb) => excludeRecruitingSmsLog(qb))
     .where('direction', 'inbound')
     .where('created_at', '>=', since)
     .leftJoin('customers', 'sms_log.customer_id', 'customers.id')

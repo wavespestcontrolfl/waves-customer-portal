@@ -708,6 +708,15 @@ const REGISTRY = {
       // re-derives from the committed row. Same posture as the visit-summary
       // handoff (claimDispatchThroughHandoff).
       return db.transaction(async (trx) => {
+        // Shared SMS phone lock BEFORE the application row (Codex r30 P1):
+        // the STOP writer (applyInboundOptout) commits under the same phone
+        // lock, so a late STOP serializes against this handoff instead of
+        // slipping between the pipeline's suppression read and Twilio.
+        if (meta.job_application_id) {
+          const contact = await trx('job_applications').where({ id: meta.job_application_id }).first('contact_snapshot');
+          const phone = contact && contact.contact_snapshot && contact.contact_snapshot.phone;
+          if (phone) await require('../../utils/customer-comms-lock').lockSmsPhone(trx, phone);
+        }
         const again = await REGISTRY.recruiting_comms_deferred.recheck(meta, { conn: trx, lock: true });
         if (!again || again.eligible === false) {
           return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'RECRUITING_STALE_AT_HANDOFF', reason: (again && again.reason) || 'ineligible' };

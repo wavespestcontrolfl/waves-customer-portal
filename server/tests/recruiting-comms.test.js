@@ -1029,6 +1029,20 @@ describe('owner reply — boundary guard and evidence-owning application', () =>
     await expect(boundary(input)).resolves.toMatchObject({ ok: false, code: 'RECRUITING_STALE' });
   });
 
+  test('the locked handoff takes the shared SMS phone lock BEFORE the application row (Codex r30 P1) — a late STOP serializes against the provider request', async () => {
+    mockDb.__tables.job_applications.push({ ...baseApp(), status: 'interview', comms_history: [] });
+    await RecruitingComms.sendOwnerReply({ applicationId: 'app-1', body: 'ok', by: 'tech-1' });
+    const input = mockSendCustomerMessage.mock.calls[0][0];
+    mockDb.mockClear(); mockDb.raw.mockClear();
+    await input.withSmsHandoff(async () => ({ ok: true }));
+    const lockCall = mockDb.raw.mock.calls.findIndex((c) => /pg_advisory_xact_lock/.test(c[0]) && /twilio_21610/.test(c[0]) && c[1][0] === '+19415550142');
+    expect(lockCall).toBeGreaterThan(-1);
+    const lockOrder = mockDb.raw.mock.invocationCallOrder[lockCall];
+    const firstRowRead = mockDb.mock.calls.findIndex((c) => c[0] === 'job_applications');
+    expect(firstRowRead).toBeGreaterThan(-1);
+    expect(lockOrder).toBeLessThan(mockDb.mock.invocationCallOrder[firstRowRead]);
+  });
+
   test('openApplicationIdForPhone picks the open application whose ledger owns the newest SMS attempt, not the newest row', async () => {
     mockDb.__tables.job_applications.push(
       { ...baseApp(), id: 'app-old', status: 'interview', updated_at: '2027-03-10T00:00:00.000Z', comms_history: [{ channel: 'sms', outcome: 'sent', at: '2027-03-10T12:00:00.000Z' }] },
