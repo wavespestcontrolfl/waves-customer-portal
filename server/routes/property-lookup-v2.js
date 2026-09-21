@@ -2817,6 +2817,20 @@ function turfRiskReasons(source = {}) {
 // same measured outdoor entry as the turf services (Codex r2 P1 on #4639).
 const MOSQUITO_SERVICES = new Set(['MOSQUITO', 'OT_MOSQUITO']);
 
+// The confirmed OUTDOOR area on an unobservable-imagery profile: the
+// measured turf entry plus the operator-entered bed area (the vision bed
+// reading was discarded with the rest). Coerced — request bodies and saved
+// replays carry these as strings, and "4000" + "300" must never be
+// "4000300" (Codex r4 P1 #4639). undefined when no turf measurement exists;
+// 0 when the operator entered zero turf and no beds. ONE helper feeds both
+// the confirmation gate and the pricing translator so they can't disagree.
+function confirmedOutdoorAreaSf(p = {}) {
+  const turf = firstNonNegativeNumber(p.measuredTurfSf, p.lawnSqFt);
+  if (turf === undefined) return undefined;
+  const bed = Number(p.estimatedBedAreaSf);
+  return turf + (Number.isFinite(bed) && bed > 0 ? bed : 0);
+}
+
 function needsTurfManualConfirmation(profile = {}, selectedServices = [], options = {}) {
   const allTurfServices = selectedTurfPricedServices(selectedServices);
   const unobservable = profile.turfObservation === 'unobservable';
@@ -2824,7 +2838,13 @@ function needsTurfManualConfirmation(profile = {}, selectedServices = [], option
     .some((service) => MOSQUITO_SERVICES.has(String(service || '').toUpperCase()));
   if (allTurfServices.length === 0 && !(unobservable && mosquitoSelected)) return null;
   const manualTurfSf = firstNonNegativeNumber(profile.measuredTurfSf, profile.lawnSqFt);
-  if (manualTurfSf !== undefined) return null;
+  if (manualTurfSf !== undefined) {
+    // A zero turf entry is a real no-lawn answer for the turf services, but
+    // mosquito needs a POSITIVE outdoor area on an unobservable profile: the
+    // calculator ignores zero and would silently fall back to lot geometry
+    // (Codex r4 P1 #4639). Beds count — a no-lawn yard can still have them.
+    if (!(unobservable && mosquitoSelected) || confirmedOutdoorAreaSf(profile) > 0) return null;
+  }
   // Services whose treated area is entered directly (front/back-yard scope)
   // don't need whole-lawn turf confirmation when an explicit area is given.
   // Exempt only when EVERY selected turf service is such a bounded add-on, so a
@@ -2861,8 +2881,8 @@ function needsTurfManualConfirmation(profile = {}, selectedServices = [], option
       estimatedTurfSf: 0,
       reasons: turfRiskReasons(profile),
       message: profile.turfReason === 'vacant_roll_bare_land_imagery'
-        ? 'Satellite imagery shows bare land and the county roll shows no building yet, so there is no reliable outdoor-area estimate. Confirm treatable lawn area before generating lawn or mosquito pricing.'
-        : 'Satellite imagery conflicts with county records for this property, so there is no reliable outdoor-area estimate. Confirm treatable lawn area before generating lawn or mosquito pricing.',
+        ? 'Satellite imagery shows bare land and the county roll shows no building yet, so there is no reliable outdoor-area estimate. Confirm treatable lawn area (or bed area) before generating lawn or mosquito pricing.'
+        : 'Satellite imagery conflicts with county records for this property, so there is no reliable outdoor-area estimate. Confirm treatable lawn area (or bed area) before generating lawn or mosquito pricing.',
     };
   }
 
@@ -4814,8 +4834,8 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     // default geometry the gate exists to block (Codex r3 P1 #4639).
     // Confirmed turf plus the operator-entered bed area (the vision bed
     // reading was discarded with the rest).
-    ...(p.turfObservation === 'unobservable' && measurementValue(p.measuredTurfSf, p.lawnSqFt) > 0
-      ? { mosquitoTreatableSqFt: measurementValue(p.measuredTurfSf, p.lawnSqFt) + (Number(p.estimatedBedAreaSf) > 0 ? Number(p.estimatedBedAreaSf) : 0) }
+    ...(p.turfObservation === 'unobservable' && confirmedOutdoorAreaSf(p) > 0
+      ? { mosquitoTreatableSqFt: confirmedOutdoorAreaSf(p) }
       : {}),
     estimatedTurfSf: p.estimatedTurfSf,
     // Turf provenance — a county-prior seed or a parcel-clamped vision number

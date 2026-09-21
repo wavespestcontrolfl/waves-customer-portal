@@ -1419,6 +1419,18 @@ function detectVacantRollBareLandImagery(record, ai) {
   // trusted (Codex r2 P1 on #4639).
   const vacant = countyRollVacant(record);
   if (!vacant) return null;
+  // A COUNTY-assessed building beside a vacant classification is a teardown
+  // / demolition, not the new-construction window: the bare-land zeros are
+  // then the correct reading (the stale-imagery guard declines that old-
+  // building case on purpose). Listing / AI / verified dimensions stay
+  // ignored, as intended (Codex r4 P2 #4639).
+  const countySourced = (field) => {
+    const entry = record._fieldEvidence?.[field];
+    const sourceType = Array.isArray(entry) ? entry[0]?.sourceType : entry?.sourceType;
+    return ['county', 'cadastral'].includes(String(sourceType || '').toLowerCase());
+  };
+  if ((Number(record.squareFootage) > 0 && countySourced('squareFootage'))
+      || (Number(record.yearBuilt) > 0 && countySourced('yearBuilt'))) return null;
   const explicitZero = (value) => value === 0 || value === '0';
   if (!explicitZero(ai.estimatedTurfSf)) return null;
   const impervious = ai.imperviousSurfacePercent ?? ai.imperviosSurfacePercent;

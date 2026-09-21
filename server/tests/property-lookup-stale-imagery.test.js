@@ -291,6 +291,26 @@ describe('buildEnrichedProfile stale-imagery sanitization', () => {
     expect(needsTurfManualConfirmation(profile, ['TOPDRESS'], { topDressArea: 800 })).toBeNull();
   });
 
+  test('a ZERO turf entry does not clear mosquito on an unobservable profile — a positive outdoor area does (beds count)', () => {
+    const { needsTurfManualConfirmation } = require('../routes/property-lookup-v2');
+    const profile = buildEnrichedProfile(vacantRollRecord(), bareDirtAi(), 27.58, -82.42);
+    expect(needsTurfManualConfirmation({ ...profile, measuredTurfSf: 0 }, ['MOSQUITO'], {})).not.toBeNull();
+    expect(needsTurfManualConfirmation({ ...profile, measuredTurfSf: '0' }, ['LAWN', 'MOSQUITO'], {})).not.toBeNull();
+    expect(needsTurfManualConfirmation({ ...profile, measuredTurfSf: 0, estimatedBedAreaSf: 250 }, ['MOSQUITO'], {})).toBeNull();
+    // Zero stays a real no-lawn answer for the turf services alone.
+    expect(needsTurfManualConfirmation({ ...profile, measuredTurfSf: 0 }, ['LAWN'], {})).toBeNull();
+    // The gate and the pricing translator agree on the same number.
+    expect(translateV2CallToV1Input({ ...profile, measuredTurfSf: 0, estimatedBedAreaSf: 250 }, ['MOSQUITO'], {}).mosquitoTreatableSqFt).toBe(250);
+    expect(translateV2CallToV1Input({ ...profile, measuredTurfSf: 0 }, ['MOSQUITO'], {}).mosquitoTreatableSqFt).toBeUndefined();
+  });
+
+  test('string request values add as numbers, never concatenate', () => {
+    const profile = buildEnrichedProfile(vacantRollRecord(), bareDirtAi(), 27.58, -82.42);
+    const v1 = translateV2CallToV1Input({ ...profile, homeSqFt: '2400', stories: '1', measuredTurfSf: '4000', estimatedBedAreaSf: '300' }, ['MOSQUITO'], {});
+    expect(v1.mosquitoTreatableSqFt).toBe(4300);
+    expect(typeof v1.mosquitoTreatableSqFt).toBe('number');
+  });
+
   test('needsTurfManualConfirmation names the vacant-roll situation on that profile', () => {
     const { needsTurfManualConfirmation } = require('../routes/property-lookup-v2');
     const profile = buildEnrichedProfile(vacantRollRecord(), bareDirtAi(), 27.58, -82.42);
@@ -350,6 +370,13 @@ describe('detectVacantRollBareLandImagery', () => {
     expect(detectVacantRollBareLandImagery(vacant, bareDirtAi())).toEqual({ landUseDescription: 'Vacant Residential Platted (1554)' });
     // Roll verdict, not merged dims: a listing size on a vacant roll still fires.
     expect(detectVacantRollBareLandImagery({ ...vacant, squareFootage: 2400 }, bareDirtAi())).toEqual({ landUseDescription: 'Vacant Residential Platted (1554)' });
+    // ...but a COUNTY-assessed building beside a vacant classification is a
+    // teardown: the zeros are the correct reading, the guard stands down.
+    const demolished = { ...vacant, squareFootage: 1800, yearBuilt: 1985, _fieldEvidence: { squareFootage: { sourceType: 'county' }, yearBuilt: { sourceType: 'county' } } };
+    expect(detectVacantRollBareLandImagery(demolished, bareDirtAi())).toBeNull();
+    const demolishedProfile = buildEnrichedProfile(demolished, bareDirtAi(), 27.58, -82.42);
+    expect(demolishedProfile.turfObservation).toBeUndefined();
+    expect(demolishedProfile.turfSource).toBe('vision');
     expect(detectVacantRollBareLandImagery(newBuildRecord(), bareDirtAi())).toBeNull(); // county home → the stale-imagery guard's case
     const noTurf = bareDirtAi();
     delete noTurf.estimatedTurfSf;
