@@ -584,10 +584,11 @@ async function performPropertyLookupCore(address, options = {}) {
           // Lot area narrows the sample to the parcel's lot series when
           // enough neighbors share it (plats mix 40'/52'/62' lots, each
           // with its own plans).
-          // The PHYSICAL area (parcel roll / polygon), never the pricing-capped
-          // lotSize (LOT_SQFT_MAX) — a huge parcel would otherwise band against
-          // the cap instead of its neighbors (Codex r2 P2).
-          { county: parcelMeta.county, subdivision: platName, lotSqft: parcelMeta.lotSqft || parcelMeta.polygonAreaSqft || result.propertyRecord.lotSize || null },
+          // The PHYSICAL area (parcel roll / polygon) only — never the
+          // pricing-capped lotSize (LOT_SQFT_MAX): a huge parcel would band
+          // against the cap instead of its neighbors (Codex r2 P2). No
+          // physical area → no band (whole plat).
+          { county: parcelMeta.county, subdivision: platName, lotSqft: parcelMeta.lotSqft || parcelMeta.polygonAreaSqft || null },
           { timeoutMs: options.prioritizeAccuracy ? SUBDIVISION_MEDIAN_TIMEOUT_MS : Math.min(medianBudgetMs, SUBDIVISION_MEDIAN_TIMEOUT_MS), diag },
         ).catch((err) => {
           diag.failed = true;
