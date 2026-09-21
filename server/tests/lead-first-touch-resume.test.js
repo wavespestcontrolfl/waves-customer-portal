@@ -40,6 +40,8 @@ let mockSubscriberAdoptZero = false; // subscriber adoption updates match 0 rows
 let mockRawSqls = []; // every whereRaw/orderByRaw sql, for predicate pins (r42)
 let mockCallRow = { customer_id: 'cust-1' }; // call_log's CURRENT customer link (codex #4622 r4 binding); null = call missing
 let mockGates = {}; // feature-gates.isEnabled by name (codex #4622 r4 gate provenance)
+let mockLockOrder = []; // 'email_key' (advisory lock) / 'hold_row' (first_touch_holds FOR UPDATE), in acquisition order (codex #4622 r5)
+let mockSuppressionQueue = null; // shift per email_suppressions read; each entry is the row list (codex #4622 r5)
 jest.mock('../models/db', () => {
   const handler = (table) => {
     let markerFilter = false; // this chain filters on the resend marker
@@ -61,7 +63,7 @@ jest.mock('../models/db', () => {
       orWhereNot: jest.fn(() => chain),
       whereExists: jest.fn(() => chain),
       whereNotExists: jest.fn(() => chain),
-      forUpdate: jest.fn(() => chain),
+      forUpdate: jest.fn(() => { if (table === 'first_touch_holds') mockLockOrder.push('hold_row'); return chain; }),
       from: jest.fn(() => chain),
       orderBy: jest.fn(() => chain),
       limit: jest.fn(() => chain),
@@ -222,6 +224,9 @@ jest.mock('../models/db', () => {
             : Promise.resolve(mockDoiMarkerRow ? [mockDoiMarkerRow] : [])
           ).then(resolve, reject);
         }
+        if (table === 'email_suppressions' && mockSuppressionQueue && mockSuppressionQueue.length) {
+          return Promise.resolve(mockSuppressionQueue.shift()).then(resolve, reject);
+        }
         return Promise.resolve(
           table === 'email_suppressions' ? (mockSuppressionRow ? [mockSuppressionRow] : [])
             : table === 'first_touch_holds' ? (mockHolds || (mockHold ? [mockHold] : []))
@@ -233,7 +238,10 @@ jest.mock('../models/db', () => {
   };
   const db = jest.fn(handler);
   db.schema = { hasTable: jest.fn(async () => true) };
-  db.raw = jest.fn((sql, bindings) => (bindings === undefined ? sql : { sql, bindings }));
+  db.raw = jest.fn((sql, bindings) => {
+    if (String(sql).includes('pg_advisory_xact_lock')) mockLockOrder.push('email_key');
+    return bindings === undefined ? sql : { sql, bindings };
+  });
   // The r29 enroll validation wraps creation in a transaction (a savepoint
   // on trx handles) — the stub hands back the same connection. The r38
   // knob models a COMMIT that fails after the callback completed.
@@ -301,6 +309,8 @@ beforeEach(() => {
   mockCustomerRow = { id: 'cust-1', first_name: 'Pat', last_name: 'Sample' };
   mockCallRow = { customer_id: 'cust-1' };
   mockGates = {};
+  mockLockOrder = [];
+  mockSuppressionQueue = null;
   mockTriageCardRow = null;
   mockMergeFailures = 0;
   mockMergeArgs = [];
@@ -1600,6 +1610,31 @@ describe('DOI dedupe guard and ledger sweep', () => {
     const res = await resumeHeldFirstTouch({ callLogId: 'call-1', source: 'ledger_sweep' });
     expect(res.resumed).toBe(false);
     expect(res.skipped).toBe('email_owned_elsewhere');
+    expect(mockEnroll).not.toHaveBeenCalled();
+    expect(mockHoldUpdates.some((p) => p.status === 'pending')).toBe(true);
+  });
+  test('the address key is taken before the hold row on every locked release path — the correction fanout\'s order (codex #4622 r5)', async () => {
+    mockHolds = [baseHold({ created_at: new Date().toISOString() })];
+    mockTriageFirstQueue = [null, { status: 'resolved' }];
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1', source: 'ledger_sweep' });
+    expect(res.resumed).toBe(true);
+    const rows = mockLockOrder.map((x, i) => [x, i]).filter(([x]) => x === 'hold_row').map(([, i]) => i);
+    expect(rows.length).toBeGreaterThanOrEqual(2); // the drip transaction and the DOI gate
+    // Every hold-row lock is preceded by an address-key lock taken since the previous hold-row lock.
+    let last = -1;
+    for (const i of rows) {
+      expect(mockLockOrder.slice(last + 1, i)).toContain('email_key');
+      last = i;
+    }
+  });
+  test('a hard bounce landing after the in-claim check is caught under the address key before the enroll (codex #4622 r5)', async () => {
+    // in-claim read, pre-enroll re-run, then the locked boundary read finds the fresh bounce suppression
+    mockSuppressionQueue = [[], [], [{ id: 'sup-1', suppression_type: 'bounce', group_key: null }]];
+    mockHolds = [baseHold({ created_at: new Date().toISOString(), held_newsletter: false })];
+    mockTriageFirstQueue = [null, { status: 'resolved' }, null, { status: 'resolved' }];
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1', source: 'ledger_sweep' });
+    expect(res.resumed).toBe(false);
+    expect(res.skipped).toBe('email_suppressed');
     expect(mockEnroll).not.toHaveBeenCalled();
     expect(mockHoldUpdates.some((p) => p.status === 'pending')).toBe(true);
   });

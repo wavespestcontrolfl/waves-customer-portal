@@ -239,9 +239,11 @@ function isAutoReleaseResolution(card) {
 //   3. that customer is live — an archived record gets no first-touch mail
 //      on either branch (enrollCustomer refuses the drip; the newsletter
 //      DOI never asked);
-//   4. address ownership under the shared per-address lock the assigning
-//      writers take — an assignment to another party either committed
-//      before this read or queues behind it until the send has settled.
+//   4. address ownership AND suppression under the shared per-address key
+//      the assigning writers and the bounce webhook take — the CALLER holds
+//      it, taken before the hold row (see gateHoldForSend), so a claim on
+//      the address or a hard bounce either committed before these reads or
+//      queues behind them until the send has settled.
 // An explicit operator correction (`explicit`) already answered 1 and 4 in
 // the fanout; 2 and 3 hold for every path. Returns the block reason, or
 // null. Throws propagate — every caller fails closed.
@@ -260,9 +262,11 @@ async function releaseBoundaryBlocks(opts) {
     if (!customer) return 'customer_not_found';
     if (customer.deleted_at) return 'customer_archived';
   }
-  if (!explicit && emailLc && customerId) {
-    await require('../utils/customer-comms-lock').lockCustomerEmail(dbh, emailLc);
-    if (await require('./email-bounce-recovery').correctedAddressOwnedByOther(emailLc, customerId, dbh)) return 'email_owned_elsewhere';
+  if (!explicit && emailLc) {
+    if (customerId && await require('./email-bounce-recovery').correctedAddressOwnedByOther(emailLc, customerId, dbh)) return 'email_owned_elsewhere';
+    // A SendGrid hard bounce commits its suppression under this same key
+    // (codex #4622 r5 P1): re-read it here, not only in the claim.
+    if (await emailSuppressedForNewLead(emailLc, dbh)) return 'email_suppressed';
   }
   return null;
 }
@@ -310,6 +314,27 @@ async function releaseBoundaryBlocks(opts) {
 // binding and the customer's liveness for every send, a correction's
 // included. Any error fails closed: an unverifiable release never sends.
 async function gateHoldForSend(holdId, claimStamp, dbh = db, targetEmailLc = null, reviewCallLogId = null, ownershipCustomerId = null) {
+  // A correction-driven caller (the fanout, an operator's explicit address
+  // override) passes NEITHER trigger argument. A hold with no call_log_id
+  // released by the sweep passes a null review id but still names its
+  // ownership customer — that is trigger-driven, and the ownership
+  // recheck must run (round-0 audit P1).
+  const triggerDriven = Boolean(reviewCallLogId || ownershipCustomerId);
+  // Lock ORDER (codex #4622 r5 P1): the canonical correction holds the
+  // customers row, then the address key, then the hold rows
+  // (admin-customers → propagateCustomerEmailChange). A release that took
+  // the hold row first and then waited for the key would deadlock it, and
+  // a correction PostgreSQL aborted would let this release mail the very
+  // address being replaced. The key therefore comes BEFORE the hold row on
+  // every trigger-driven path (here and in the drip transaction); this
+  // path never locks the customers row. An unavailable key fails closed.
+  if (triggerDriven && targetEmailLc) {
+    try {
+      await require('../utils/customer-comms-lock').lockCustomerEmail(dbh, targetEmailLc);
+    } catch {
+      return null;
+    }
+  }
   const row = await dbh('first_touch_holds').where({ id: holdId }).forUpdate().first('id', 'call_log_id', 'customer_id');
   if (!row) return null;
   try {
@@ -317,12 +342,7 @@ async function gateHoldForSend(holdId, claimStamp, dbh = db, targetEmailLc = nul
       callLogId: reviewCallLogId || row.call_log_id,
       customerId: ownershipCustomerId || row.customer_id,
       emailLc: targetEmailLc,
-      // A correction-driven caller (the fanout, an operator's explicit
-      // address override) passes NEITHER trigger argument. A hold with no
-      // call_log_id released by the sweep passes a null review id but
-      // still names its ownership customer — that is trigger-driven, and
-      // the ownership recheck must run (round-0 audit P1).
-      explicit: !reviewCallLogId && !ownershipCustomerId,
+      explicit: !triggerDriven,
       dbh,
     });
     if (blocked) return null;
@@ -977,6 +997,10 @@ async function resumeHeldFirstTouch({
         let dripStamp = null;
         try {
           await dbh.transaction(async (trx) => {
+            // Address key BEFORE the hold row — the correction fanout's
+            // order (codex #4622 r5 P1); the boundary guard below re-reads
+            // ownership and suppression under it. Trigger-driven only.
+            if (!email) await require('../utils/customer-comms-lock').lockCustomerEmail(trx, sendEmail);
             const locked = await trx('first_touch_holds')
               .where({ id: hold.id })
               .forUpdate()
