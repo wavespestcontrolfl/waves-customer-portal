@@ -286,6 +286,9 @@ describe('buildEnrichedProfile stale-imagery sanitization', () => {
     expect(needsTurfManualConfirmation(buildEnrichedProfile(vacantRollRecord(), lawn, 27.58, -82.42), ['MOSQUITO'], {})).toBeNull();
     // The county-home stale-imagery profile gates mosquito the same way.
     expect(needsTurfManualConfirmation(buildEnrichedProfile(newBuildRecord(), bareDirtAi(), 27.58, -82.42), ['MOSQUITO'], {})).not.toBeNull();
+    // A bounded add-on's entered area exempts ITSELF, never the mosquito selection beside it.
+    expect(needsTurfManualConfirmation(profile, ['TOPDRESS', 'MOSQUITO'], { topDressArea: 800 })).not.toBeNull();
+    expect(needsTurfManualConfirmation(profile, ['TOPDRESS'], { topDressArea: 800 })).toBeNull();
   });
 
   test('needsTurfManualConfirmation names the vacant-roll situation on that profile', () => {

@@ -2837,8 +2837,11 @@ function needsTurfManualConfirmation(profile = {}, selectedServices = [], option
     TOPDRESS: topDressArea > 0,
   };
   // (An empty turf list here means the unobservable mosquito case — never
-  // vacuously exempt.)
-  if (allTurfServices.length > 0 && allTurfServices.every((service) => areaBoundedExempt[service])) return null;
+  // vacuously exempt; and a bounded add-on's own area says nothing about the
+  // mosquito yard, so the exemption never clears an unobservable mosquito
+  // selection either.)
+  if (allTurfServices.length > 0 && allTurfServices.every((service) => areaBoundedExempt[service])
+      && !(unobservable && mosquitoSelected)) return null;
 
   // Stale-imagery conflict profiles (turfObservation 'unobservable') have
   // NO trustworthy turf basis — the vision zeros were discarded and the
