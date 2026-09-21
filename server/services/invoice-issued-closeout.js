@@ -49,9 +49,14 @@ function dateOnly(value) {
 // Shared by the unlocked resolver and the canonical completion's locked
 // recheck. Delivery only proves a past visit happened; payment also proves a
 // same-day visit happened. Future or unparseable dates are never eligible.
+// An ALLOWLIST (pre-push audit P1, slice 6): only a proven payment admits
+// today. A send, a missing trigger (a caller that forgot to pass one) or a
+// trigger this module has never heard of all fail CLOSED on a same-day
+// visit — a denylist of just 'sent' would silently re-open the same-day
+// completion this rule exists to prevent the moment a new trigger appeared.
 function issuedCloseoutServiceDayEligible(scheduledDate, { today = etDateString(), trigger = null } = {}) {
   const day = dateOnly(scheduledDate);
-  return Boolean(day && day <= today && !(day === today && trigger === 'sent'));
+  return Boolean(day && day <= today && (day < today || trigger === 'paid'));
 }
 
 // The visit this invoice names — directly (scheduled_service_id, the only

@@ -54,6 +54,12 @@ describe('backfillCompletionPlan same-day switch', () => {
     expect(issuedCloseoutServiceDayEligible('2040-03-04', { ...options, trigger: 'paid' })).toBe(true);
     expect(issuedCloseoutServiceDayEligible('2040-03-03', { ...options, trigger: 'sent' })).toBe(true);
     expect(issuedCloseoutServiceDayEligible('2040-03-05', { ...options, trigger: 'paid' })).toBe(false);
+    // Fail closed: a missing or unknown trigger never admits today (allowlist,
+    // pre-push audit P1) — only a past day is eligible without proof of payment.
+    expect(issuedCloseoutServiceDayEligible('2040-03-04', options)).toBe(false);
+    expect(issuedCloseoutServiceDayEligible('2040-03-04', { ...options, trigger: 'resend' })).toBe(false);
+    expect(issuedCloseoutServiceDayEligible('2040-03-03', options)).toBe(true);
+    expect(issuedCloseoutServiceDayEligible('not-a-date', { ...options, trigger: 'paid' })).toBe(false);
   });
 
   test('the panel rule stays past-only; the internal issued-invoice trigger admits today, never the future', () => {
@@ -128,7 +134,9 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
 
   test('a linked open visit on or before today resolves; closed, future and cancelled visits do not', async () => {
     const open = await visit({ date: TODAY });
-    expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: open.id, date: TODAY }), { today: TODAY })).svc.id).toBe(open.id);
+    // No trigger supplied → the resolver fails closed on a same-day visit
+    // (allowlist, pre-push audit P1); only payment proves today happened.
+    expect(await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: open.id, date: TODAY }), { today: TODAY })).toMatchObject({ svc: null, reason: 'visit_scheduled_today' });
     const past = await visit({ date: '2040-02-20', status: 'pending' });
     expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: past.id, date: '2040-02-20' }), { today: TODAY })).svc.id).toBe(past.id);
     // A SEND leaves a visit scheduled for TODAY open (Codex P1 r7 #4131): the
