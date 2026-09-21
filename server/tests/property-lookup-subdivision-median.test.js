@@ -176,6 +176,22 @@ describe('performPropertyLookup — plat median for an unassessed vacant parcel'
     }
   });
 
+  it('stamps an explicit null for a plat the county answered but found too thin — a settled negative', async () => {
+    const baseFetch = global.fetch;
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('gis.manateepao.gov')) {
+        return { ok: true, json: async () => ({ features: [2101, 2200, 2300].map((v) => ({ attributes: { BLDGS_SQFT_LIVING: v } })) }) };
+      }
+      return baseFetch(url);
+    });
+    const result = await performPropertyLookup(ADDRESS, { refresh: true });
+    expect(result.propertyRecord._subdivisionMedian).toBeNull();
+    expect('_subdivisionMedian' in result.propertyRecord).toBe(true);
+    // Profile reports "withheld" (null), so the call estimator never re-runs the same query.
+    expect(result.enriched.subdivisionMedian).toBeNull();
+    expect(result.enriched.fieldVerifyFlags.find((f) => f.field === 'homeSqFt').reason).toContain('defaults to 2,000');
+  });
+
   it('is fail-open: a plat-layer outage leaves the lookup intact with no estimate', async () => {
     const baseFetch = global.fetch;
     global.fetch = jest.fn(async (url) => {

@@ -576,14 +576,24 @@ async function performPropertyLookupCore(address, options = {}) {
         // "[county-parcel-gis] subdivision median lookup failed" and resolves
         // null); this catch records anything that escapes it on the lookup
         // result, the way the construction-permit read above does.
+        const diag = {};
         const median = await lookupSubdivisionMedianLivingSqft(
           { county: parcelMeta.county, subdivision: platName },
-          { timeoutMs: options.prioritizeAccuracy ? SUBDIVISION_MEDIAN_TIMEOUT_MS : Math.min(medianBudgetMs, SUBDIVISION_MEDIAN_TIMEOUT_MS) },
+          { timeoutMs: options.prioritizeAccuracy ? SUBDIVISION_MEDIAN_TIMEOUT_MS : Math.min(medianBudgetMs, SUBDIVISION_MEDIAN_TIMEOUT_MS), diag },
         ).catch((err) => {
+          diag.failed = true;
           result.errors.push({ source: 'subdivision-median', message: err?.message || String(err) });
           return null;
         });
-        if (median) result.propertyRecord._subdivisionMedian = { ...median, county: parcelMeta.county };
+        if (median) {
+          result.propertyRecord._subdivisionMedian = { ...median, county: parcelMeta.county };
+        } else if (!diag.failed) {
+          // The county ANSWERED and the plat is too thin (or truncated): a
+          // settled negative. Stamp an explicit null so the profile reports
+          // "withheld" and the call estimator doesn't repeat the same query
+          // (Codex r3 P1). An outage leaves no stamp — that IS worth a retry.
+          result.propertyRecord._subdivisionMedian = null;
+        }
       }
     }
   }
