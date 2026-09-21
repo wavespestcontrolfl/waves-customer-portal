@@ -203,14 +203,15 @@ async function emailReviewBlocksRelease(callLogId, dbh = db) {
     .where({ call_log_id: callLogId })
     .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
     .orderByRaw("COALESCE(resolved_at, updated_at, created_at) DESC, (status = 'dismissed') DESC, id DESC")
-    .first('status', 'resolution_source', 'resolution_note');
+    .first('status', 'resolution_source', 'resolution_rule');
   if (latest && latest.status !== 'resolved') return 'email_review_dismissed';
   // Provenance (codex #4622 r4 P1): a card the nightly resolver closed
   // under GATE_FIRST_TOUCH_AUTO_RELEASE is an approval only while that
   // gate is still on. The card records who resolved it (resolution_source
-  // 'auto') and under which rule (the rule's note), so the dark-ship
-  // switch, flipped off between the resolver and the ledger sweep, stops
-  // every send it queued — an operator's resolution is untouched.
+  // 'auto') and under which rule (resolution_rule — a stable key, never
+  // the note's wording, round-0 audit P1), so the dark-ship switch,
+  // flipped off between the resolver and the ledger sweep, stops every
+  // send it queued — an operator's resolution is untouched.
   if (latest && isAutoReleaseResolution(latest)
       && !require('../config/feature-gates').isEnabled('firstTouchAutoRelease')) {
     return 'auto_release_gated';
@@ -218,13 +219,13 @@ async function emailReviewBlocksRelease(callLogId, dbh = db) {
   return null;
 }
 
-// The resolution note the auto-resolver stamps on a card it closed under
-// the first-touch auto-release rule (triage-auto-resolve RULE_NOTES reads
-// it from here) — the ledger's only way to tell that approval from an
-// operator's.
-const FIRST_TOUCH_AUTO_RELEASE_NOTE = 'Auto-resolved: the email was dictated unambiguously (V1, V2 and the release target agree, no digit doubt, domain accepts mail); released without a read-back.';
+// The auto-resolver's rule key for a card it closed under the first-touch
+// auto-release gate (triage-auto-resolve's rule table and RULE_NOTES read
+// it from here; the resolve write stamps it in triage_items.resolution_rule)
+// — the ledger's way to tell that approval from an operator's.
+const FIRST_TOUCH_AUTO_RELEASE_RULE = 'email_dictation_unambiguous';
 function isAutoReleaseResolution(card) {
-  return Boolean(card) && card.resolution_source === 'auto' && card.resolution_note === FIRST_TOUCH_AUTO_RELEASE_NOTE;
+  return Boolean(card) && card.resolution_source === 'auto' && card.resolution_rule === FIRST_TOUCH_AUTO_RELEASE_RULE;
 }
 
 // The release-boundary guards, in ONE place (codex #4622 r4 — four rounds
@@ -2187,5 +2188,5 @@ module.exports = {
   repenHoldsForFreshEmailReview,
   emailReviewBlocksRelease,
   releaseBoundaryBlocks,
-  FIRST_TOUCH_AUTO_RELEASE_NOTE,
+  FIRST_TOUCH_AUTO_RELEASE_RULE,
 };

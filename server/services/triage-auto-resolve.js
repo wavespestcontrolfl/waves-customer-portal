@@ -142,9 +142,10 @@ const RULE_NOTES = {
   // owed action was PERFORMED after the card was filed.
   quote_fulfilled: 'Auto-resolved: an estimate linked to this call was delivered after the call; the promised quote went out.',
   email_engaged: 'Auto-resolved: the email captured on this call opened or clicked a later message; the read-back is moot.',
-  // Read from the release engine: the ledger tells this approval from an
-  // operator's by this exact note (codex #4622 r4 P1, gate re-asked at send).
-  email_dictation_unambiguous: require('./lead-first-touch-resume').FIRST_TOUCH_AUTO_RELEASE_NOTE,
+  // Keyed from the release engine's constant: the ledger tells this approval
+  // from an operator's by resolution_rule (codex #4622 r4 P1, gate re-asked
+  // at the send), never by this wording.
+  [require('./lead-first-touch-resume').FIRST_TOUCH_AUTO_RELEASE_RULE]: 'Auto-resolved: the email was dictated unambiguously (V1, V2 and the release target agree, no digit doubt, domain accepts mail); released without a read-back.',
   caller_phone_added: "Auto-resolved: the caller's number was added as a service contact on the account after this call.",
   booking_created: 'Auto-resolved: a live appointment matching the requested window was booked after this card was filed.',
   visit_completed_at_address: 'Auto-resolved: a visit was completed at the address this call named; the address is proven.',
@@ -968,7 +969,7 @@ const CLASSIFY_RULES = [
   // GATE_FIRST_TOUCH_AUTO_RELEASE: the read-back question answers itself
   // when the dictation left nothing to read back — see
   // unambiguousDictationTarget / loadUnambiguousEmailEvidence.
-  { rule: 'email_dictation_unambiguous', action: 'resolve', when: (item, ev) => item.reason_code === 'email_unverified' && ev?.email_unambiguous === true },
+  { rule: require('./lead-first-touch-resume').FIRST_TOUCH_AUTO_RELEASE_RULE, action: 'resolve', when: (item, ev) => item.reason_code === 'email_unverified' && ev?.email_unambiguous === true },
   // Clearing the authorization question must not make a confirmed-but-
   // unbooked call (the routing block kept its appointment from being
   // created, and no not_confirmed sibling exists) read as fully resolved
@@ -1999,6 +2000,9 @@ async function sweep({ now = new Date() } = {}) {
           status,
           resolution_note: RULE_NOTES[rule],
           resolution_source: 'auto',
+          // The stable key the first-touch ledger reads for gate provenance
+          // (round-0 audit P1: never the note's wording).
+          resolution_rule: rule,
           resolved_at: now,
           updated_at: now,
         })

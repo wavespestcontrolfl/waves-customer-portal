@@ -285,7 +285,7 @@ const {
   sweepAbandonedFirstTouchHolds,
   repenHoldsForFreshEmailReview,
 } = require('../services/lead-first-touch-resume');
-const { FIRST_TOUCH_AUTO_RELEASE_NOTE } = require('../services/lead-first-touch-resume');
+const { FIRST_TOUCH_AUTO_RELEASE_RULE } = require('../services/lead-first-touch-resume');
 const logger = require('../services/logger');
 
 function baseHold(overrides = {}) {
@@ -1647,7 +1647,7 @@ describe('DOI dedupe guard and ledger sweep', () => {
     expect(mockEnroll).not.toHaveBeenCalled();
   });
   test('a card the resolver closed under GATE_FIRST_TOUCH_AUTO_RELEASE approves a send only while the gate is still on (codex #4622 r4)', async () => {
-    const autoCard = { status: 'resolved', resolution_source: 'auto', resolution_note: FIRST_TOUCH_AUTO_RELEASE_NOTE };
+    const autoCard = { status: 'resolved', resolution_source: 'auto', resolution_rule: FIRST_TOUCH_AUTO_RELEASE_RULE };
     mockHolds = [baseHold({ created_at: new Date().toISOString() })];
     mockTriageFirstQueue = [null, autoCard];
     let res = await resumeHeldFirstTouch({ callLogId: 'call-1', source: 'ledger_sweep' });
@@ -1658,7 +1658,7 @@ describe('DOI dedupe guard and ledger sweep', () => {
     // An operator's resolution never depends on the gate.
     mockHoldUpdates.length = 0;
     mockHolds = [baseHold({ created_at: new Date().toISOString() })];
-    mockTriageFirstQueue = [null, { status: 'resolved', resolution_source: 'human', resolution_note: 'Confirmed on the read-back.' }];
+    mockTriageFirstQueue = [null, { status: 'resolved', resolution_source: 'human', resolution_rule: null }];
     res = await resumeHeldFirstTouch({ callLogId: 'call-1', source: 'ledger_sweep' });
     expect(res.resumed).toBe(true);
     // Gate back on: the auto-resolution is honored again.
