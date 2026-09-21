@@ -114,7 +114,13 @@ function noRiskDescribesScheduling(re, suffix) {
 // Shared by every exemption below that turns on whether a candidate's own
 // nearby antecedent actually names a pesticide -- the contextual no-harm
 // pronoun and the no-risk pronoun-subject flag both ask the same question.
-const antecedentNamesNoProduct = (antecedent) => !SAFETY_PRODUCT_MENTION_RE.test(antecedent) && !SAFETY_BRAND_MENTION_RE.test(antecedent);
+// The static regexes cover only the checked-in catalog snapshot;
+// safetyProductScope also resolves options.productNames (the visit's live
+// identities from the recorded tool result), the same source
+// safetyQuestionHasProductAntecedent reads for pronoun safety questions.
+const antecedentNamesNoProduct = (antecedent, options = {}) => !SAFETY_PRODUCT_MENTION_RE.test(antecedent)
+  && !SAFETY_BRAND_MENTION_RE.test(antecedent)
+  && !safetyProductScope(antecedent, options).size;
 
 // SAFETY_CONTEXTUAL_STRONG_GUARANTEE_RE's fronted intensifier ("completely
 // safe to reschedule") can describe a scheduling action rather than the
@@ -151,14 +157,14 @@ function firstUnexemptGuarantee(candidates, text, antecedentText, questionText, 
     const locallyNegatedAttributive = re === SAFETY_ATTRIBUTIVE_GUARANTEE_RE
       && SAFETY_ATTRIBUTIVE_NEGATION_RE.test(prefix);
     const antecedent = `${antecedentText} ${text.slice(Math.max(0, m.index - 160), m.index)}`;
-    const contextualNoHarmWithoutProduct = re === SAFETY_CONTEXTUAL_NO_HARM_RE && antecedentNamesNoProduct(antecedent);
+    const contextualNoHarmWithoutProduct = re === SAFETY_CONTEXTUAL_NO_HARM_RE && antecedentNamesNoProduct(antecedent, options);
     // A bare pronoun subject on the negated pose/carry/present/create
     // predicate ("It does not pose a risk...") is response recognition's own
     // genuinely ambiguous case (SAFETY_NO_POSE_RISK_PRONOUN_SUBJECT_RE,
     // flagged as requiresProductAntecedent) -- admit it only once this same
     // antecedent scan already proves a pesticide is actually in view,
     // exactly like the contextual no-harm check just above.
-    const pronounRiskWithoutProduct = requiresProductAntecedent && antecedentNamesNoProduct(antecedent);
+    const pronounRiskWithoutProduct = requiresProductAntecedent && antecedentNamesNoProduct(antecedent, options);
     if (!insideAnySpan(spans, m.index)
       && !locallyNegatedNoRisk
       && !schedulingNoRisk

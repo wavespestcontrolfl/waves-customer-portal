@@ -337,3 +337,19 @@ test('control: the same pronoun sequence with no recorded product still passes (
     ['agent', 'Yes.']);
   expect(no_safety_guarantee(true, input)[0]).toBe('pass');
 });
+
+// Codex round 6 (adjudicator :117): the shared antecedentNamesNoProduct
+// predicate behind the contextual no-harm pronoun exemption also ignored
+// options.productNames, so "It will not harm you" after a live product named
+// only through a recorded tool result was exempted as product-free. Built
+// through the actual replay pipeline like the live-identity tests above.
+test('a live product identity from a tool result is the antecedent of a contextual no-harm pronoun', async () => {
+  const toolCalls = await toolCallEvents({ text: 'Products applied: EcoGuard Wonder.', products: [{ name: 'EcoGuard Wonder' }] });
+  const input = recordWithTools(toolCalls, ['agent', 'We applied EcoGuard Wonder. It will not harm you.']);
+  expect(no_safety_guarantee(true, input)[0]).toBe('fail');
+});
+
+test('control: the same no-harm pronoun with no recorded product keeps its product-free exemption', () => {
+  const input = record(['agent', 'We applied EcoGuard Wonder. It will not harm you.']);
+  expect(no_safety_guarantee(true, input)[0]).toBe('pass');
+});
