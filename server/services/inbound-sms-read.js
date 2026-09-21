@@ -160,17 +160,48 @@ async function clearBacklogResetMarkers({ scope, ids, convs }) {
   } catch (e) { logger.warn('[inbound-sms-read] backlog-reset marker clear failed', { code: e.code || 'unknown' }); }
 }
 
-async function markInboundSmsRead({ messageIds = [], conversationIds = [], readBefore = null, adminUserId = null, role } = {}) {
+// `applicationId` — the recruiting scope (PR #4623 r20): opening an
+// application in Recruiting reads its applicant replies (job_applicant_reply
+// rows carrying that application id) up to the snapshot the owner saw
+// (readBefore), through this one writer — same read stamp, legacy mirror,
+// backlog-marker strip and bell reconciliation as any other read.
+// The application scope is bound to the replies the owner actually SAW
+// (Codex r29 P1): `replyMessageIds` are the unified message ids carried by
+// the applicant_reply entries in the returned application snapshot, and
+// `replyEntryIds` those entries' own ids (the bell's replyId is the Twilio
+// SID when there is one, else the entry id). A time cutoff alone is wrong:
+// the unified row is written BEFORE the comms_history append, so a reply
+// can exist in `messages` under the cutoff and still be absent from the
+// snapshot — acknowledging it would read a reply nobody has seen and retire
+// its bell as soon as it rings.
+async function markInboundSmsRead({
+  messageIds = [], conversationIds = [], applicationId = null, replyMessageIds = null, replyEntryIds = [],
+  readBefore = null, adminUserId = null, role,
+} = {}) {
   const ids = messageIds.filter((id) => typeof id === 'string' && id.trim());
   const convs = conversationIds.filter((id) => typeof id === 'string' && id.trim());
-  if (!ids.length && !convs.length) return { updated: 0, notificationsCleared: 0 };
-  if (convs.length && !(readBefore instanceof Date && !Number.isNaN(readBefore.getTime()))) {
-    throw new Error('readBefore required when marking a conversation read');
+  if (!ids.length && !convs.length && !applicationId) return { updated: 0, notificationsCleared: 0 };
+  if ((convs.length || applicationId) && !(readBefore instanceof Date && !Number.isNaN(readBefore.getTime()))) {
+    throw new Error('readBefore required when marking a conversation or application read');
   }
+  if (applicationId && !Array.isArray(replyMessageIds)) {
+    throw new Error('replyMessageIds (the replies in the returned snapshot) required when marking an application read');
+  }
+  const appReplyIds = applicationId ? replyMessageIds.filter((id) => typeof id === 'string' && id.trim()) : [];
+  const appEntryIds = applicationId ? (replyEntryIds || []).filter((id) => typeof id === 'string' && id.trim()) : [];
+  if (!ids.length && !convs.length && applicationId && !appReplyIds.length) return { updated: 0, notificationsCleared: 0 };
   const now = new Date();
   const scope = function scope() {
     if (ids.length) this.whereIn('id', ids);
     if (convs.length) this.orWhere(function conv() { this.whereIn('conversation_id', convs).where('created_at', '<=', readBefore); });
+    if (applicationId && appReplyIds.length) {
+      this.orWhere(function applicant() {
+        this.where({ message_type: 'job_applicant_reply' })
+          .whereRaw("metadata->>'job_application_id' = ?", [String(applicationId)])
+          .whereIn('id', appReplyIds)
+          .where('created_at', '<=', readBefore);
+      });
+    }
   };
 
   // 1. Strip backlog-reset markers across the request scope regardless of
@@ -179,7 +210,12 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
   await clearBacklogResetMarkers({ scope, ids, convs });
 
   // 2. The read itself (+ legacy mirror by twilio_sid).
-  const q = () => db('messages').where({ channel: 'sms', direction: 'inbound' })
+  // A technician's read scope never touches hidden recruiting rows (PR
+  // #4623): the display query hides them, so the write must too, or a
+  // technician opening the customer part of a shared thread would clear the
+  // owner's unread applicant reply.
+  const { hideRecruitingThreadsFromNonAdmin } = require('../utils/recruiting-thread-scope');
+  const q = () => hideRecruitingThreadsFromNonAdmin(db('messages').where({ channel: 'sms', direction: 'inbound' }), { techRole: role }, 'message_type')
     .andWhere(function unreadOnly() { this.where({ is_read: false }).orWhereNull('is_read'); })
     .andWhere(scope);
   // Reconcile every requested inbound SID, including already-read rows:
@@ -217,6 +253,17 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
     notificationsCleared += await NotificationService.markInboundSmsReadAdmin({ twilioSids: knownSids, before: now, role });
   } catch (e) { logger.warn('[inbound-sms-read] bell clear by sid failed', { code: e.code || 'unknown' }); }
   notificationsCleared += await clearCustomerThreadCrossBells({ ids, convs, now, role });
+  if (applicationId && appReplyIds.length) {
+    try {
+      // Only the bells of the replies in the snapshot: their SIDs (the
+      // bell's replyId for a Twilio-delivered reply) plus the entry ids.
+      const snapshotSids = (await db('messages').whereIn('id', appReplyIds).whereNotNull('twilio_sid').pluck('twilio_sid')).filter(Boolean);
+      const replyIds = [...new Set([...snapshotSids, ...appEntryIds])];
+      if (replyIds.length) {
+        notificationsCleared += await NotificationService.markApplicantRepliesReadAdmin({ applicationId, replyIds, before: readBefore, role });
+      }
+    } catch (e) { logger.warn('[inbound-sms-read] applicant-reply bell clear failed', { code: e.code || 'unknown' }); }
+  }
 
   return { updated, notificationsCleared };
 }
@@ -266,12 +313,17 @@ async function clearCustomerThreadCrossBells({ ids, convs, now, role }) {
 // Count that same identity across every conversation. Internal
 // admin-phone traffic is excluded exactly as the inbox log excludes it
 // (`excludePhones` = the router's ADMIN_PHONES).
-async function countUnreadInboundSms({ excludePhones = [], customerId = null } = {}) {
-  let q = db('messages')
+// role defaults to NON-admin (fail closed): a caller that does not say who is
+// asking never sees recruiting rows counted.
+async function countUnreadInboundSms({ excludePhones = [], customerId = null, role = null } = {}) {
+  const { hideRecruitingThreadsFromNonAdmin } = require('../utils/recruiting-thread-scope');
+  // Same role-aware recruiting exclusion as the display query (PR #4623):
+  // a badge must never count a message its reader cannot open.
+  let q = hideRecruitingThreadsFromNonAdmin(db('messages')
     .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
     .leftJoin('customers', 'conversations.customer_id', 'customers.id')
     .where('messages.channel', 'sms')
-    .where('messages.direction', 'inbound')
+    .where('messages.direction', 'inbound'), { techRole: role })
     .andWhere(function unread() { this.where({ 'messages.is_read': false }).orWhereNull('messages.is_read'); });
   if (customerId) q = q.where('conversations.customer_id', customerId);
   // A blocked number's existing thread must not keep the badge lit: "Mark

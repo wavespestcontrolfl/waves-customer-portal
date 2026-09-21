@@ -68,6 +68,8 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/twilio', () => ({}));
+const mockReconcileLedger = jest.fn(async () => undefined);
+jest.mock('../services/recruiting-comms', () => ({ reconcileCommsHistoryEntryByOutcome: (...args) => mockReconcileLedger(...args) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
@@ -228,6 +230,24 @@ describe('DELETE /admin/communications/scheduled/:id', () => {
     const row = db.__store.sms_log['sms-json'];
     expect(row).toBeDefined();
     expect(row.status).toBe('canceled');
+  });
+
+  test('an admin cancelling a queued recruiting text settles its comms_history entry (deferred → blocked) so the queue stops promising an automatic send (#4623 r17)', async () => {
+    seedScheduledRow('sms-r', {
+      message_type: 'job_application_received',
+      metadata: { entry_point: 'recruiting_comms_deferred', job_application_id: 'app-1', ledger_entry_id: 'entry-1', audience: 'applicant' },
+    });
+    mockReconcileLedger.mockClear();
+
+    const { status } = await withServer((baseUrl) => cancel(baseUrl, 'sms-r'));
+
+    expect(status).toBe(200);
+    expect(db.__store.sms_log['sms-r']).toBeUndefined();
+    expect(mockReconcileLedger).toHaveBeenCalledTimes(1);
+    const [appId, entryId, transitions] = mockReconcileLedger.mock.calls[0];
+    expect(appId).toBe('app-1');
+    expect(entryId).toBe('entry-1');
+    expect(transitions).toEqual({ deferred: expect.objectContaining({ outcome: 'blocked', code: 'cancelled_by_admin' }) });
   });
 
   test('an ordinary scheduled message (no reservation marker) is still physically deleted', async () => {

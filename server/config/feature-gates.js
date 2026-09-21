@@ -620,6 +620,17 @@ const gates = {
   // at any setting (it only reads/updates existing rows).
   jobApplications: process.env.GATE_JOB_APPLICATIONS === 'true',
 
+  // Recruiting comms (GATE_RECRUITING_COMMS): applicant-facing SMS/email —
+  // the submit confirmation, the interview self-scheduling link + its
+  // confirmation, and the admin stage-change notify modal's sends. Customer-
+  // facing (well, applicant-facing) auto-send, so strict opt-in in EVERY
+  // environment like techArrivedSms. Off: submit confirmation is skipped,
+  // PATCH /admin/careers/:id/status ignores `notify` and reports
+  // sending_enabled:false, and the public /interview/:token routes 404
+  // BEFORE their rate limiter (same unobservable-when-dark contract as the
+  // jobApplications prefix gate above, which stays in force independently).
+  recruitingComms: process.env.GATE_RECRUITING_COMMS === 'true',
+
   // Route-aware estimate slot ranking (2026-07-20): when ON, the estimate
   // funnel's offered slots lead with the guaranteed soonest card, then
   // route-fit days (detour ≤ the existing 20-min proximity bound to a stop
@@ -1477,6 +1488,17 @@ const gates = {
   // call named. Every rule needs evidence that postdates the CARD, never
   // same-customer coincidence. Off → the four original rules only.
   triageAutoResolveEvidence: process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE === 'true',
+  // First-touch auto-release (2026-09-20 call-agent audit, finding 3): a
+  // call-captured email whose read-back card is still open resolves on its
+  // own when the dictation was UNAMBIGUOUS — no arbiter digit doubt, V1 and
+  // V2 and the release target all agree, top candidate >= 0.9, no
+  // name/email mismatch on the call, the domain has MX, the pending hold
+  // targets that exact address, and the card is younger than
+  // FIRST_TOUCH_AUTO_RELEASE_MAX_AGE_DAYS (default 7). The ledger sweep
+  // then releases the hold — the new-lead drip and newsletter opt-in go
+  // out. Layered on triageAutoResolve + triageAutoResolveEvidence. Sends
+  // customer email — owner-flip only. Ships DARK.
+  firstTouchAutoRelease: process.env.GATE_FIRST_TOUCH_AUTO_RELEASE === 'true',
   // Bounce-triggered call-audio email re-verification: a hard bounce on a
   // call-captured address re-runs the source RECORDING through transcription
   // (letter-fidelity contact pass) + a deterministic name-anchored candidate

@@ -122,6 +122,7 @@ async function createJobApplication({ body = {}, database }) {
 
   const language = LANGUAGES.includes(body.language) ? body.language : 'en';
   const answers = normalizeAnswers(body.answers);
+  const smsConsent = [true, 'true', 'on', 'yes'].includes(body.sms_consent);
 
   const [row] = await database('job_applications')
     .insert({
@@ -130,12 +131,13 @@ async function createJobApplication({ body = {}, database }) {
       language,
       contact_snapshot: JSON.stringify({ name, phone, email, city }),
       answers: JSON.stringify(answers),
+      sms_consent: smsConsent,
       source: (() => {
         const source = normalizeSource(body.source);
         return source ? JSON.stringify(source) : null;
       })(),
     })
-    .returning(['id', 'role', 'status', 'language', 'created_at']);
+    .returning(['id', 'role', 'status', 'language', 'created_at', 'contact_snapshot', 'sms_consent']);
 
   return row;
 }

@@ -171,6 +171,7 @@ function localCandidateEvidence(source, kind, index, end) {
 }
 
 module.exports = {
+  INSTRUCTION_LEAD_RE,
   sourceSpan, splitSourceSpans, sentenceSourceSpans, latestInterrogativeSpan,
   lexicalSourceSpans, localCandidateEvidence,
 };

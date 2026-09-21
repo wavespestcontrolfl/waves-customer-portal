@@ -372,3 +372,16 @@ describe('sendCustomerMessage send-window integration', () => {
     expect(auditArgs.providerOutcome).toBeNull();
   });
 });
+
+describe('applicant audience', () => {
+  test('applicant SMS is subject to the same send window as customers/leads', async () => {
+    const { checkSendWindow } = require('../services/messaging/validators/send-window');
+    const { isEnabled } = require('../config/feature-gates');
+    if (typeof isEnabled?.mockImplementation === 'function') isEnabled.mockImplementation(() => true);
+    const night = new Date('2027-03-16T07:30:00.000Z'); // 03:30 ET
+    const res = await checkSendWindow({ channel: 'sms', audience: 'applicant', purpose: 'application_received', to: '+19415550142', metadata: {} }, {}, {}, night);
+    expect(res.ok).toBe(false);
+    const other = await checkSendWindow({ channel: 'sms', audience: 'internal', purpose: 'internal_briefing', to: '+19415550142' }, {}, {}, night);
+    expect(other.ok).toBe(true);
+  });
+});
