@@ -497,6 +497,30 @@ describe('deferred-replay registry', () => {
       .toBeLessThan(markInlineRetryable.mock.invocationCallOrder[0]);
   });
 
+  test('completion recheck (round 9 #4634 finding 1): a stale invoice strips the pay link instead of suppressing the whole completion/report send', async () => {
+    // Most completion replays carry no pay link at all — a no-op read.
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', { service_record_id: 'rec-1' }))
+      .toEqual({ eligible: true });
+    expect(db).not.toHaveBeenCalled();
+
+    // Still collectible — nothing to strip.
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null }));
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p' }))
+      .toEqual({ eligible: true });
+
+    // Settled zero-due overnight (or otherwise terminal): the report still
+    // sends (eligible: true, never cancelled/suppressed — the owner's r8
+    // ruling), but the frozen pay-link line is now stale.
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'prepaid', payer_id: null }));
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p' }))
+      .toEqual({ eligible: true, stripPayLink: true, reason: 'invoice-terminal:prepaid' });
+
+    // Moved to a payer overnight: same treatment — strip, don't suppress.
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: 'payer-1' }));
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p' }))
+      .toEqual({ eligible: true, stripPayLink: true, reason: 'payer-billed' });
+  });
+
   test('voicemail (r15): claim settlement rides the durable rail and propagates failed stamps', async () => {
     expect(requiresDurableFinalize('voicemail_lead_sms_deferred')).toBe(true);
     expect(DURABLE_FINALIZE_ENTRY_POINTS).toContain('voicemail_lead_sms_deferred');

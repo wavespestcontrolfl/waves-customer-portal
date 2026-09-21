@@ -20,6 +20,31 @@
 const db = require('../models/db');
 const logger = require('./logger');
 
+// Every completion template that carries a pay link puts it on its OWN
+// line — "Invoice: {pay_url}" / "Invoice for today's visit: {pay_url}"
+// (service_complete_with_invoice, service_report_v1_with_invoice, every
+// historical variant back to 2026-04) — never mixed on a line with the
+// report link or trailing prose. Stripping the whole line the literal
+// pay_url string appears on is therefore robust to admin-edited template
+// copy without parsing the template itself; collapsing the resulting blank
+// run mirrors stripBalanceLineFromBody's own technique (open-balance.js).
+// A body with no pay_url at all (already stripped by an earlier replay
+// attempt, or a row that never had one) is returned unchanged.
+function stripPayLinkLineFromBody(body, payUrl) {
+  if (typeof body !== 'string' || !payUrl || typeof payUrl !== 'string') return body;
+  if (!body.includes(payUrl)) return body;
+  const stripped = body
+    .split('\n')
+    .filter((line) => !line.includes(payUrl))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  // Defensive: never hand back an empty completion text — a template whose
+  // ENTIRE body was somehow just the pay-link line would otherwise send
+  // nothing. Never observed in practice (the report link always precedes).
+  return stripped || body;
+}
+
 async function finalizeDeferredCompletionSend(claimMeta = {}, { retry = false } = {}) {
   const recordId = claimMeta.service_record_id || null;
   const sentAtIso = new Date().toISOString();
@@ -187,4 +212,10 @@ async function terminalDeferredDeclineNotice(claimMeta = {}) {
   logger.warn(`[completion-deferred] decline notice for record ${claimMeta.service_record_id} terminally blocked — status restored to failed`);
 }
 
-module.exports = { finalizeDeferredCompletionSend, finalizeDeferredDeclineNotice, terminalDeferredCompletionSend, terminalDeferredDeclineNotice };
+module.exports = {
+  finalizeDeferredCompletionSend,
+  finalizeDeferredDeclineNotice,
+  terminalDeferredCompletionSend,
+  terminalDeferredDeclineNotice,
+  stripPayLinkLineFromBody,
+};

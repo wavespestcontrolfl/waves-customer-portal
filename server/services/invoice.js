@@ -1402,6 +1402,26 @@ async function settleZeroDueBeforeSend(invoiceId, { fenceOwnership = false, row 
       } catch (enrollErr) {
         logger.error(`[invoice] ${invoiceId}: review enrollment after zero-due settlement threw — settlement stands: ${enrollErr.message}`);
       }
+    } else if (row.service_record_id) {
+      // Codex round-9 audit P2 (#4131 slice 4, #4634): an ORDINARY
+      // completion invoice (linked via service_record_id, no packet) that
+      // settles zero-due here ALSO gets no payment webhook — the same
+      // no-webhook gap enrollPacketReviewAfterCredit closes for packets
+      // just above. Without this, a send with review intent that resolves
+      // to a zero-due settlement (a deposit or prior credit covers it)
+      // never enrolls the review the completion recorded: the at-delivery
+      // path (invoice.js ~4616) defers an unpaid completion invoice's
+      // review ask to the eventual paid webhook, which a non-cash prepaid
+      // transition never fires. Reuses the SAME shared helper the Stripe
+      // paid-invoice webhook and the admin record-payment path already
+      // call for this exact purpose (enrollForPaidInvoice reads the
+      // completion's own requestReview/visitOutcome from structured_notes
+      // and no-ops for a standalone invoice) — no new enrollment logic.
+      try {
+        await require("./review-request").enrollForPaidInvoice(row, { source: "zero_due_settled" });
+      } catch (enrollErr) {
+        logger.error(`[invoice] ${invoiceId}: review enrollment after zero-due settlement threw — settlement stands: ${enrollErr.message}`);
+      }
     }
     return { kind: "settled", invoice: settlement.invoice };
   }
@@ -6993,25 +7013,44 @@ const InvoiceService = {
       if (await require("./invoice-helpers").visitRefusesSettlement(trx, canonicalScheduledServiceId)) {
         return skip("visit_never_ran");
       }
-      // Codex round-8 audit P1 (#4131 slice 4): a queued pay-link text
-      // (dispatch_completion_deferred's own deferred-replay-registry entry
-      // has no collectibility recheck — its finalize marks the invoice
-      // delivered unconditionally) can already own this invoice's delivery
-      // independent of the invoice's OWN status — the queue row is a
-      // separate sms_log entry, so the 'sending' in-flight check above
-      // never sees it. Settling here without retiring that obligation would
-      // let the frozen $-owing pay link text go out AFTER this invoice is
-      // marked prepaid. Retire it atomically under THIS SAME row lock —
-      // settleZeroBalance is the one place every zero-due settlement path
-      // (the send chokepoint, the completion-payment writer, the deposit
-      // reconciler) converges, so every caller gets the guarantee, not just
-      // whichever send path happened to check queuedPayLinkText itself.
+      // Codex round-8 audit P1 (#4131 slice 4): a queued pay-link text can
+      // already own this invoice's delivery independent of the invoice's
+      // OWN status — the queue row is a separate sms_log entry, so the
+      // 'sending' in-flight check above never sees it. Lock all three
+      // queue types' live rows under THIS SAME row lock — settleZeroBalance
+      // is the one place every zero-due settlement path (the send
+      // chokepoint, the completion-payment writer, the deposit reconciler)
+      // converges, so every caller gets the guarantee.
+      //
+      // Round 9 (#4634) narrowed what happens next per entry point, after
+      // round 8's blanket direct cancel of a still-'scheduled' row proved
+      // wrong for two of the three: cancelling dispatch_completion_deferred
+      // drops the WHOLE completion/report text (not just the stale pay
+      // link) and, worse, bypasses the registry's onTerminal hook — a
+      // direct status write here never stamps terminal_pending, so
+      // onTerminal never runs, and completionSmsStatus is stranded at
+      // 'deferred' forever (the completion dedupe treats that as an owned
+      // send) with any bundled review request never re-armed. The same
+      // hazard applies to autopay_completion_decline_deferred, which
+      // registers its own onTerminal to restore paymentFailedNoticeStatus
+      // off 'deferred' for the next attempt. Both now rely entirely on
+      // their OWN deferred-replay recheck (invoiceStillCollectible, which
+      // already treats 'prepaid' as terminal) to handle staleness AT REPLAY
+      // TIME, through the executor's own correct terminal-block path —
+      // dispatch_completion_deferred's recheck strips just the pay-link
+      // line and still sends the report; autopay_completion_decline_
+      // deferred's recheck suppresses the whole notice and its onTerminal
+      // runs normally. invoice_send_deferred has no onTerminal to bypass
+      // (its own status IS the obligation) and is already cancelled this
+      // same direct way elsewhere in this file (consumeQueuedInvoiceSend,
+      // an invoice-send retry adopting its own held leg) — cancelling it
+      // here too is safe and keeps this the one place that retires it.
       const livePayLinkRows = await trx("sms_log")
         .whereRaw("metadata->>'invoice_id' = ?", [String(id)])
         .whereRaw("metadata->>'entry_point' = ANY(?)", [PAY_LINK_QUEUE_ENTRY_POINTS])
         .whereRaw(LIVE_PAY_LINK_QUEUE_ROW_SQL)
         .forUpdate()
-        .select("id", "status");
+        .select("id", "status", trx.raw("metadata->>'entry_point' as entry_point"));
       if (livePayLinkRows.some((row) => row.status !== "scheduled")) {
         // Already mid-send (a worker claimed it) or delivered-but-
         // unfinalized — same posture as the invoice's own 'sending' check
@@ -7019,8 +7058,11 @@ const InvoiceService = {
         // evidence of payment work.
         return { ...skip("queued_pay_link_in_flight"), retryable: true };
       }
-      if (livePayLinkRows.length) {
-        await trx("sms_log").whereIn("id", livePayLinkRows.map((row) => row.id)).update({
+      const cancellableRows = livePayLinkRows.filter(
+        (row) => row.entry_point === INVOICE_SEND_DEFERRED_ENTRY_POINT,
+      );
+      if (cancellableRows.length) {
+        await trx("sms_log").whereIn("id", cancellableRows.map((row) => row.id)).update({
           status: "cancelled",
           updated_at: trx.fn.now(),
           metadata: trx.raw(

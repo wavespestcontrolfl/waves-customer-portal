@@ -21,16 +21,27 @@ jest.mock('../services/customer-credit', () => ({
   autoApplyAccountCreditIfEnabled: async () => null,
   restoreAccountCreditForVoidedInvoice: jest.fn(async () => null),
 }));
-jest.mock('../services/invoice-followups', () => ({ scheduleForInvoice: jest.fn(), stopForInvoice: jest.fn() }));
+jest.mock('../services/invoice-followups', () => ({
+  // Real isTerminalInvoice (and every other export) — needed for real
+  // invoiceStillCollectible rechecks (deferred-replay-registry.js) added by
+  // round 9 (#4634); only the two side-effecting schedulers are stubbed.
+  ...jest.requireActual('../services/invoice-followups'),
+  scheduleForInvoice: jest.fn(),
+  stopForInvoice: jest.fn(),
+}));
 jest.mock('../services/invoice-issued-closeout', () => ({ closeOutVisitForIssuedInvoice: jest.fn(async () => null), issuedCloseoutOwnsRecord: () => false }));
 jest.mock('../services/inspection-credit', () => ({ reverseInspectionCreditForBooking: jest.fn(async () => null) }));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: async () => null }));
 jest.mock('../services/lead-estimate-link', () => ({ convertLeadFromEvent: async () => null }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: () => false }));
+jest.mock('../services/review-request', () => ({ enrollForPaidInvoice: jest.fn(async () => ({ enrolled: true })) }));
 const { randomUUID } = require('node:crypto');
 const Invoice = require('../services/invoice');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { restoreAccountCreditForVoidedInvoice } = require('../services/customer-credit');
+const { enrollForPaidInvoice } = require('../services/review-request');
+const { recheckDeferredReplay } = require('../services/messaging/deferred-replay-registry');
+const { stripPayLinkLineFromBody } = require('../services/dispatch-completion-deferred');
 
 jest.setTimeout(30000);
 postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () => {
@@ -480,13 +491,14 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
     expect(await read()).toMatchObject({ status: 'scheduled', credit_applied: '100.00', prepaid_by: null });
   });
 
-  test('settleZeroBalance atomically retires a queued dispatch_completion_deferred pay-link text when it settles a zero-due invoice (Codex round-8 audit P1 #4131 finding 2)', async () => {
-    // dispatch_completion_deferred's own deferred-replay-registry entry has
-    // NO collectibility recheck (unlike autopay_completion_decline_deferred's
-    // invoiceStillCollectible) — its finalize marks the invoice delivered
-    // unconditionally. Left alone, this queued text would still go out
-    // AFTER the invoice below is marked prepaid, texting a frozen pay link
-    // for money no longer owed.
+  test('settleZeroBalance does NOT cancel a queued dispatch_completion_deferred row when it settles a zero-due invoice — it stays scheduled for the replay\'s own delivery-time recheck (round 9 #4634 finding 1, supersedes round-8 direct cancel)', async () => {
+    // Round 8 cancelled this row directly under the invoice's own lock — the
+    // owner ruled that wrong (#4634): a direct sms_log status write here
+    // never stamps terminal_pending, so the registry's onTerminal hook
+    // (which restores completionSmsStatus off 'deferred' and re-arms a
+    // bundled review fallback) never runs, stranding the record's send
+    // state forever. The fix moves collectibility to the REPLAY side — this
+    // row must survive settlement untouched.
     const [queued] = await trx('sms_log').insert({
       customer_id: customerId, direction: 'outbound', from_phone: '+12025550100', to_phone: '+12025550124',
       status: 'scheduled', message_type: 'invoice',
@@ -498,8 +510,83 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
     expect(result).toMatchObject({ settled: true });
     expect(await read()).toMatchObject({ status: 'prepaid', prepaid_by: 'system:zero_balance' });
     const row = await trx('sms_log').where({ id: queued.id }).first();
+    expect(row.status).toBe('scheduled');
+    expect(row.metadata.cancelled_reason).toBeUndefined();
+  });
+
+  test('settleZeroBalance does NOT cancel a queued autopay_completion_decline_deferred row either — it relies entirely on that entry point\'s OWN invoiceStillCollectible recheck (round 9 #4634 finding 1)', async () => {
+    // Same onTerminal-bypass hazard as dispatch_completion_deferred: this
+    // entry point ALSO registers onTerminal (restores paymentFailedNoticeStatus
+    // off 'deferred' for the next completion attempt), so a direct
+    // settlement-side cancel would strand it too. Its recheck already
+    // treats 'prepaid' as terminal (isTerminalInvoice) — the row is left
+    // scheduled and the executor's own recheck-then-block path (which DOES
+    // stamp terminal_pending and DOES run onTerminal) handles it correctly
+    // at replay time instead.
+    const [queued] = await trx('sms_log').insert({
+      customer_id: customerId, direction: 'outbound', from_phone: '+12025550100', to_phone: '+12025550124',
+      status: 'scheduled', message_type: 'payment_failed',
+      metadata: { entry_point: 'autopay_completion_decline_deferred', invoice_id: invoiceId },
+    }).returning('id');
+
+    const result = await Invoice.settleZeroBalance(invoiceId, trx);
+
+    expect(result).toMatchObject({ settled: true });
+    const row = await trx('sms_log').where({ id: queued.id }).first();
+    expect(row.status).toBe('scheduled');
+    // Proves the recheck alone now carries the whole guarantee: reading the
+    // JUST-settled (prepaid) invoice, the entry's existing recheck already
+    // refuses the stale decline notice.
+    expect(await recheckDeferredReplay('autopay_completion_decline_deferred', { invoice_id: invoiceId }))
+      .toMatchObject({ eligible: false, reason: 'invoice-terminal:prepaid' });
+  });
+
+  test('settleZeroBalance STILL cancels a queued invoice_send_deferred row directly — it has no onTerminal to bypass, and this is the one place that retires it synchronously (round 9 #4634 finding 1, unchanged from round 8)', async () => {
+    const [queued] = await trx('sms_log').insert({
+      customer_id: customerId, direction: 'outbound', from_phone: '+12025550100', to_phone: '+12025550124',
+      status: 'scheduled', message_type: 'invoice',
+      metadata: { entry_point: 'invoice_send_deferred', invoice_id: invoiceId },
+    }).returning('id');
+
+    const result = await Invoice.settleZeroBalance(invoiceId, trx);
+
+    expect(result).toMatchObject({ settled: true });
+    const row = await trx('sms_log').where({ id: queued.id }).first();
     expect(row.status).toBe('cancelled');
     expect(row.metadata.cancelled_reason).toBe('settled_zero_due');
+  });
+
+  test('the completion-queue race (Codex round-8 audit P1 finding "Fence completion-queue inserts against settlement", #4634 finding 2): a dispatch_completion_deferred row enqueued AFTER the invoice already settled prepaid still gets its stale pay link stripped at replay, and the report still sends', async () => {
+    // complete-scheduled-service.js's quiet-hours completion path inserts
+    // its queue row without locking the invoice (it can't — the invoice may
+    // not even exist yet when the completion runs) — the FOR UPDATE fence in
+    // settleZeroBalance can only ever see rows that already exist. This
+    // proves the race closes by construction: the row below is inserted
+    // AFTER settlement already committed the invoice to prepaid, exactly
+    // the interleaving the fence cannot prevent, and the replay-side
+    // recheck+strip still gets it right.
+    const settleResult = await Invoice.settleZeroBalance(invoiceId, trx);
+    expect(settleResult).toMatchObject({ settled: true });
+    expect(await read()).toMatchObject({ status: 'prepaid' });
+
+    const payUrl = 'https://pay.example.invalid/t/racey-token';
+    const frozenBody = `Hello Synthetic! Pest Control report: https://portal.example.invalid/r/abc\n\nInvoice: ${payUrl}`;
+    const [queued] = await trx('sms_log').insert({
+      customer_id: customerId, direction: 'outbound', from_phone: '+12025550100', to_phone: '+12025550124',
+      status: 'scheduled', message_type: 'service_complete_with_invoice', message_body: frozenBody,
+      metadata: { entry_point: 'dispatch_completion_deferred', invoice_id: invoiceId, pay_url: payUrl, mark_invoice_delivery: true },
+    }).returning('id');
+
+    const recheck = await recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: invoiceId, pay_url: payUrl });
+
+    // The completion/report still sends (eligible: true) — settlement never
+    // cancelled it and the recheck never suppresses it — but the frozen
+    // body's pay-link line is now stale.
+    expect(recheck).toMatchObject({ eligible: true, stripPayLink: true, reason: 'invoice-terminal:prepaid' });
+    const row = await trx('sms_log').where({ id: queued.id }).first();
+    const strippedBody = stripPayLinkLineFromBody(row.message_body, payUrl);
+    expect(strippedBody).not.toContain(payUrl);
+    expect(strippedBody).toContain('Pest Control report: https://portal.example.invalid/r/abc');
   });
 
   test('settleZeroBalance refuses (retryable) while a queued pay-link text is already mid-delivery — never settles out from under it (Codex round-8 audit P1 #4131 finding 2)', async () => {
@@ -568,6 +655,70 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
     const secondResult = await Invoice.processScheduledSends();
     expect(secondResult).toEqual({ sent: 0, failed: 0, deferred: 0 });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a zero-due settlement enrolls the review for an ORDINARY completion invoice (service_record_id, no packet) through the shared paid-invoice helper (Codex round-9 audit P2 #4131 slice 4, #4634 finding 3)', async () => {
+    // Before this fix, settleZeroDueBeforeSend's success branch enrolled a
+    // review ONLY for a visit_completion_packet_id invoice — an ordinary
+    // completed-visit invoice linked via service_record_id got no payment
+    // webhook (a non-cash prepaid transition fires none) and no enrollment,
+    // so a send with review intent that resolved to a zero-due settlement
+    // silently dropped the review ask forever.
+    await trx('invoices').where({ id: invoiceId }).update({ scheduled_service_id: null });
+    const recordId = randomUUID();
+    await trx('service_records').insert({
+      id: recordId, customer_id: customerId, scheduled_service_id: visitId,
+      service_type: 'Pest Control', service_date: '2040-03-04', status: 'completed',
+    });
+    await trx('invoices').where({ id: invoiceId }).update({ service_record_id: recordId });
+
+    const result = await Invoice.sendViaSMS(invoiceId);
+
+    expect(result).toMatchObject({ sent: false, ok: true, code: 'zero_due', settled_zero_due: true });
+    expect(await read()).toMatchObject({ status: 'prepaid', prepaid_by: 'system:zero_balance' });
+    // Reuses the SAME helper the Stripe paid-invoice webhook and the admin
+    // record-payment path already call — no duplicated enrollment logic.
+    expect(enrollForPaidInvoice).toHaveBeenCalledTimes(1);
+    expect(enrollForPaidInvoice).toHaveBeenCalledWith(
+      expect.objectContaining({ id: invoiceId, customer_id: customerId, service_record_id: recordId }),
+      { source: 'zero_due_settled' },
+    );
+  });
+
+  test('a zero-due settlement of a STANDALONE invoice (no service_record_id, no packet) enrolls no review — enrollForPaidInvoice is never called', async () => {
+    // The default fixture (scheduled_service_id only, no service_record_id)
+    // is not a "completion invoice" by this system's own vocabulary
+    // (enrollForPaidInvoice's own not_completion_invoice branch agrees) —
+    // this pins that the new branch does not fire speculatively for it.
+    const result = await Invoice.sendViaSMS(invoiceId);
+
+    expect(result).toMatchObject({ sent: false, ok: true, code: 'zero_due', settled_zero_due: true });
+    expect(await read()).toMatchObject({ status: 'prepaid' });
+    expect(enrollForPaidInvoice).not.toHaveBeenCalled();
+  });
+
+  test('a zero-due settlement of a PACKET invoice keeps going through enrollPacketReviewAfterCredit, not the new service_record_id branch — no duplicate enrollment call', async () => {
+    const packetId = await insertPacket();
+    const recordId = randomUUID();
+    await trx('service_records').insert({
+      id: recordId, customer_id: customerId, scheduled_service_id: visitId,
+      service_type: 'Pest Control', service_date: '2040-03-04', status: 'completed',
+    });
+    await trx('invoices').where({ id: invoiceId }).update({
+      visit_completion_packet_id: packetId, service_record_id: recordId,
+    });
+
+    const result = await Invoice.sendViaSMS(invoiceId);
+
+    expect(result).toMatchObject({ sent: false, ok: true, code: 'zero_due', settled_zero_due: true });
+    // enrollPacketReviewAfterCredit's own call passes a narrow projection
+    // ({ id, visit_completion_packet_id }), not the full row — exactly ONE
+    // call either way, proving the packet branch alone fired.
+    expect(enrollForPaidInvoice).toHaveBeenCalledTimes(1);
+    expect(enrollForPaidInvoice).toHaveBeenCalledWith(
+      expect.objectContaining({ id: invoiceId, visit_completion_packet_id: packetId }),
+      { source: 'credit_covered' },
+    );
   });
 
 });

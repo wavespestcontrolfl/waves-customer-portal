@@ -352,6 +352,32 @@ const REGISTRY = {
   },
 
   dispatch_completion_deferred: {
+    async recheck(meta) {
+      // Most completion replays carry no pay link at all (report-only,
+      // already-paid completions) — cheap no-op before any DB read.
+      if (!meta.invoice_id || !meta.pay_url) return { eligible: true };
+      const collectible = await invoiceStillCollectible(meta);
+      if (collectible?.eligible === false) {
+        // Owner ruling on Codex round 8 #4634: settlement must never
+        // cancel this entry point outright — cancelling drops the WHOLE
+        // completion/report text (not just the stale pay link), strands
+        // service_records.structured_notes.completionSmsStatus at
+        // 'deferred' forever (the completion dedupe treats that as an
+        // owned send — see complete-scheduled-service.js), and never
+        // re-arms a bundled review ask (onTerminal is what does that, and
+        // a direct sms_log cancel outside the executor's own terminal flip
+        // never stamps terminal_pending, so onTerminal never runs). The
+        // customer's report still has every reason to go out; only the
+        // pay-link sentence is now asking for money the invoice no longer
+        // owes (settled zero-balance overnight, moved to a payer, voided).
+        // Strip just that line at actual delivery time instead — the
+        // scheduler applies `stripPayLink` to the frozen body before
+        // dispatch and clears `mark_invoice_delivery` so finalize below
+        // does not mark a pay link delivered that never sent.
+        return { eligible: true, stripPayLink: true, reason: collectible.reason };
+      }
+      return { eligible: true };
+    },
     async finalize(meta, ctx = {}) {
       const { finalizeDeferredCompletionSend } = require('../dispatch-completion-deferred');
       return finalizeDeferredCompletionSend(meta, { retry: ctx.retry === true });
@@ -397,6 +423,15 @@ const REGISTRY = {
       // (customer paid through another rail, admin voided) or moved onto a
       // third-party payer (the AP contact owns collection, and billing
       // texts must never reach the homeowner on payer-billed invoices).
+      // This IS the sole collectibility guard for this entry point (round
+      // 9 #4634): settlement no longer cancels a scheduled row of this type
+      // directly — a direct cancel bypasses this file's own onTerminal
+      // (below), which is what restores paymentFailedNoticeStatus off
+      // 'deferred' and is required for the completion resume dedupe to ever
+      // retry the notice. isTerminalInvoice already covers 'prepaid', so a
+      // zero-due settlement lands here (this recheck runs BEFORE dispatch,
+      // suppresses, and the executor's own terminal-block path runs
+      // onTerminal correctly) instead of via a settlement-side cancel.
       try {
         if (!meta.invoice_id) return { eligible: true };
         const { isTerminalInvoice } = require('../invoice-followups');
