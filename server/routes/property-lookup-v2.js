@@ -3841,7 +3841,7 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   if (rc && !rc.squareFootage && rc.lotSize) {
     // Same gate as the profile's subdivisionMedian: an unconfirmed address
     // (address flags are pushed above) gets the median-free copy too.
-    const platMedian = vacantParcel && !flags.some((flag) => flag?.field === 'address')
+    const platMedian = vacantParcel && !residentialUnitLookup && !flags.some((flag) => flag?.field === 'address')
       ? subdivisionMedianEstimate(rc) : null;
     flags.push({
       field: 'homeSqFt',
