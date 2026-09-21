@@ -1410,6 +1410,29 @@ async function settleZeroDueBeforeSend(invoiceId, { fenceOwnership = false, row 
     const scheduledServiceId = await linkedScheduledServiceId(row, db);
     return { kind: "terminal", reason: settlement.reason, scheduledServiceId };
   }
+  if (settlement.reason === "payer_billed") {
+    // settleZeroBalance's own re-validation caught a withdrawal this
+    // fence never saw (Codex round-9 audit P1 #4131) — same descriptor
+    // shape as the pre-emptive fence branch above so every caller of this
+    // chokepoint keeps ONE payer_billed shape to read, whichever check
+    // caught it.
+    const withdrawnInvoice = settlement.invoice || {};
+    const payerId = withdrawnInvoice.payer_id
+      || String(withdrawnInvoice.scheduled_send_error || "").match(/^payer_billed:([^:]+)/)?.[1]
+      || "unknown";
+    logger.info(`[invoice] ${invoiceId}: zero-due settlement refused under its own lock — the visit is now billed to payer ${payerId}`);
+    return { kind: "refused", code: "payer_billed", reason: `withdrawn to payer ${payerId}` };
+  }
+  if (settlement.reason === "already_settled" && settlement.invoice?.status === "prepaid") {
+    // A concurrent zero-due settlement won the race between this caller's
+    // detection and its own settleZeroBalance call (Codex round-9 audit
+    // P2 #4131): the row is ALREADY the same completed no-op success this
+    // caller would have produced — report it that way, not a retryable
+    // deposit_settlement_pending/not_zero_due refusal for an invoice the
+    // competing request already settled.
+    logger.info(`[invoice] ${invoiceId}: zero-due settlement lost a concurrent race — another caller already marked it prepaid; reporting the same settled no-op success`);
+    return { kind: "settled", invoice: settlement.invoice };
+  }
   logger.warn(`[invoice] ${invoiceId}: nothing due on the visit-linked invoice but zero-balance settlement was refused (${settlement.reason}) — send refused`);
   return { kind: "refused", code: "deposit_settlement_pending", reason: settlement.reason };
 }
@@ -6804,6 +6827,25 @@ const InvoiceService = {
       const invoice = await trx("invoices").where({ id }).forUpdate().first();
       if (!invoice) return { settled: false, reason: "not_found", invoice: null };
       const skip = (reason) => ({ settled: false, reason, invoice });
+      // Packet ownership RE-VALIDATED under THIS lock (Codex round-9 audit
+      // P1 #4131): settleZeroDueBeforeSend's own packet fence
+      // (claimPacketInvoiceForSend fenceOnly) commits and returns in its
+      // OWN transaction, before this one ever opens — a Bill-To withdrawal
+      // (withdrawPacketInvoiceForPayer) landing in that gap is invisible to
+      // a fence check that already ran. The withdrawal leaves payer_id
+      // NULL and records ownership ONLY in the scheduled_send_error stamp
+      // (`payer_billed:<payerId>[:park]`), so re-check BOTH under the row
+      // this transaction just locked — the same row-aware helper every
+      // other collection seam already reads that stamp through
+      // (invoiceWithdrawnFromCustomer), not a second hand-rolled regex. A
+      // distinct reason (not one of the generic refusals below) lets
+      // settleZeroDueBeforeSend map it to the SAME { kind: 'refused',
+      // code: 'payer_billed' } descriptor its pre-emptive fence already
+      // returns, instead of the generic deposit_settlement_pending retry.
+      if (invoice.visit_completion_packet_id
+        && (invoice.payer_id || require("./invoice-helpers").invoiceWithdrawnFromCustomer(invoice))) {
+        return skip("payer_billed");
+      }
       // Worker-originated calls only (requireDueBy is set exclusively by
       // settleZeroDueBeforeSend when it was handed the due loop's own row —
       // Codex round-8 audit P2 #4131): an operator reschedule landing

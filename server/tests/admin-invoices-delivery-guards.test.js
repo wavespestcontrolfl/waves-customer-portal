@@ -260,7 +260,8 @@ describe('POST /admin/invoices/:id/send — first delivery vs. explicit Resend a
     // The RESOLVED wrapper shape zeroDueWrapperOutcome now produces when
     // the void sweep itself safety-refuses (a live PaymentIntent, money
     // in flight, an unverifiable Stripe lookup) — distinct from the
-    // completed-void INVOICE_VISIT_TERMINAL case already covered above.
+    // COMPLETED-void INVOICE_VISIT_TERMINAL case pinned in the sibling
+    // test right below.
     InvoiceService.sendViaSMSAndEmail.mockResolvedValue({
       ok: false, code: 'INVOICE_VISIT_TERMINAL_UNVOIDED', voided: false,
       error: 'Linked visit is terminal; delivery not attempted, but the invoice could not be safely voided yet — held for review',
@@ -273,6 +274,27 @@ describe('POST /admin/invoices/:id/send — first delivery vs. explicit Resend a
       const body = await res.json();
       expect(body).toMatchObject({ ok: false, code: 'INVOICE_VISIT_TERMINAL_UNVOIDED' });
       expect(body.error).toMatch(/held for review/);
+    });
+  });
+
+  test('a COMPLETED terminal void (INVOICE_VISIT_TERMINAL — the sweep DID void it) is reported a 200 no-op success, never a generic 400 (Codex round-9 audit P2 #4131)', async () => {
+    // Distinct from INVOICE_VISIT_TERMINAL_UNVOIDED above: the sweep
+    // successfully voided the invoice, so nothing is left for an operator
+    // to fix. Before this fix, this code matched none of resolvedSend
+    // Outcome's branches (returned null) and fell straight through the
+    // route's `!result.ok` 400 fallback — a completed, correct cleanup
+    // reported to the operator as a failed send.
+    InvoiceService.sendViaSMSAndEmail.mockResolvedValue({
+      ok: false, code: 'INVOICE_VISIT_TERMINAL',
+      error: 'Linked visit is terminal; delivery not attempted',
+      sms: { ok: false, code: 'INVOICE_VISIT_TERMINAL', deliveryOutcome: 'not_sent' },
+      email: { ok: false, code: 'INVOICE_VISIT_TERMINAL', deliveryOutcome: 'not_sent' },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await postSend(baseUrl, {});
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toMatchObject({ ok: true, code: 'INVOICE_VISIT_TERMINAL', voided: true });
     });
   });
 

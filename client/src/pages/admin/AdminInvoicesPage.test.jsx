@@ -278,7 +278,7 @@ describe("AdminInvoicesPage create-path toast edge cases", () => {
 });
 
 describe("AdminInvoicesPage send outcome/error helpers", () => {
-  it("sendOutcomeMessage reads the five no-op-success flags a 200 response can carry", () => {
+  it("sendOutcomeMessage reads the six no-op-success flags a 200 response can carry", () => {
     expect(sendOutcomeMessage({ covered_by_credit: true })).toBe(
       "fully covered by account credit, nothing to send",
     );
@@ -297,6 +297,12 @@ describe("AdminInvoicesPage send outcome/error helpers", () => {
     // already won the race — a no-op success, never a failure.
     expect(sendOutcomeMessage({ in_progress: true })).toBe(
       "already being delivered",
+    );
+    // Codex round-9 audit P2 (#4131 slice 4): the completed terminal-visit
+    // void — POST /:id/send now resolves this with ok:true, voided:true —
+    // is a genuine no-op success, never a failed-send toast.
+    expect(sendOutcomeMessage({ ok: true, voided: true })).toBe(
+      "the linked visit is terminal — voided instead of sent, nothing due",
     );
     expect(sendOutcomeMessage({ ok: true, sms: { ok: true } })).toBeNull();
     expect(sendOutcomeMessage(null)).toBeNull();

@@ -12311,6 +12311,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // never "sent", and never keep a pay link for an invoice with nothing
     // due.
     let invoiceSettledByCredit = false;
+    // The SPECIFIC reason the invoice settled, when known — 'covered_by_credit'
+    // or the generic 'settled_zero_due' (Codex round-9 audit P2 #4131):
+    // settleZeroBalance also accepts a visit-linked invoice retotaled or
+    // discounted to a literal $0 with credit_applied = 0, so
+    // invoiceSettledByCredit alone does not prove deposit/account credit
+    // caused the zero balance. buildAcceptNotificationPayload only claims
+    // credit coverage for the specific reason; the generic outcome gets
+    // neutral "nothing is due" copy instead.
+    let invoiceSettledReason = null;
     // Quiet-hours cohort (GH Codex P2 r5): a phone-only after-hours accept
     // queues the invoice SMS for the 8 AM window open (sms.scheduled) and
     // returns ok:false — delivery is in flight, not failed. Tracked apart
@@ -13634,6 +13643,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // invoiceLinkDelivered, and never a pay link presented as
           // actionable for an invoice that already has nothing due.
           invoiceSettledByCredit = true;
+          invoiceSettledReason = delivery?.covered_by_credit ? 'covered_by_credit' : 'settled_zero_due';
           invoicePayUrl = null;
         } else if (delivery?.ok) {
           invoiceLinkDelivered = true;
@@ -13916,6 +13926,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         invoiceLinkDelivered,
         invoicePayUrl,
         invoiceSettledByCredit,
+        invoiceSettledReason,
         payerBilled: invoiceIsPayerBilled,
         reservationCommitted,
         bookingUrl,
@@ -19014,6 +19025,13 @@ function buildAcceptNotificationPayload({
   // emailed — checked before every billing-term branch below, same
   // precedence as payerBilled.
   invoiceSettledByCredit = false,
+  // The SPECIFIC settled reason, when known ('covered_by_credit' vs the
+  // generic 'settled_zero_due') — Codex round-9 audit P2 (#4131):
+  // settleZeroBalance also accepts a visit-linked invoice retotaled or
+  // discounted to a literal $0 with credit_applied = 0, so
+  // invoiceSettledByCredit alone does not prove deposit/account credit
+  // caused the zero balance. Only 'covered_by_credit' may say so below.
+  invoiceSettledReason = null,
   payerBilled = false,
   reservationCommitted = false,
   bookingUrl = null,
@@ -19076,12 +19094,35 @@ function buildAcceptNotificationPayload({
   // as payerBilled — this can happen for any of them (a deposit/credit
   // fully offsetting the invoice regardless of billing mode).
   if (invoiceSettledByCredit) {
-    const planLabel = treatAsOneTime ? serviceLabel : `${waveguardTier} WaveGuard plan`;
+    // P2 (Codex round-9 audit #4131): a commercial recurring accept is a
+    // flat service plan, NOT a WaveGuard membership — mirrors the
+    // commercial branch below, which this early return ran BEFORE and so
+    // always rendered "Commercial WaveGuard plan" for a settled commercial
+    // accept.
+    const isCommercial = !treatAsOneTime && String(waveguardTier || '').trim().toLowerCase() === 'commercial';
+    const planLabel = isCommercial
+      ? `Commercial service plan (${monthlyText})`
+      : (treatAsOneTime ? serviceLabel : `${waveguardTier} WaveGuard plan`);
+    const adminPlanText = isCommercial ? `${planLabel}${proposedNote}` : planLabel;
+    // P2 (Codex round-9 audit #4131): settled_zero_due does not prove
+    // deposit or account credit caused the zero balance — settleZeroBalance
+    // also accepts a visit-linked invoice retotaled or discounted to a
+    // literal $0 with credit_applied = 0. Only the specific
+    // covered_by_credit reason may say the customer's credit covered it;
+    // the generic settled_zero_due outcome gets neutral "nothing is due"
+    // copy instead, never inventing a credit that may not exist.
+    const settledByCreditSpecifically = invoiceSettledReason === 'covered_by_credit';
+    const adminReasonText = settledByCreditSpecifically
+      ? 'fully covered by deposit/account credit'
+      : 'already settled — nothing is due';
+    const customerReasonText = settledByCreditSpecifically
+      ? 'Your deposit/account credit covered the invoice in full — nothing is due.'
+      : 'Nothing is due on this invoice.';
     return {
       adminTitle: `Estimate accepted: ${customerName}`,
-      adminBody: `${planLabel} approved — the invoice was fully covered by deposit/account credit; nothing is due, no pay link was sent.`,
+      adminBody: `${adminPlanText} approved — the invoice was ${adminReasonText}; no pay link was sent.`,
       customerTitle: 'Estimate accepted',
-      customerBody: `Your ${planLabel} is approved. Your deposit/account credit covered the invoice in full — nothing is due.`,
+      customerBody: `Your ${planLabel} is approved. ${customerReasonText}`,
       customerLink: '/?tab=billing',
     };
   }

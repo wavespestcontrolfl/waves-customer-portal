@@ -993,6 +993,25 @@ function firstDeliveryOutcome(err, firstDeliveryOnly) {
       reason: err.message,
     };
   }
+  // Codex round-9 audit P2 (#4131 slice 4): the COMPLETED terminal-visit
+  // void (INVOICE_VISIT_TERMINAL — the sweep DID void it, distinct from
+  // the un-voided refusal just above) is a genuine no-op success:
+  // zeroDueDirectSendOutcome/zeroDueWrapperOutcome's own comment calls it
+  // exactly that. Before this branch nothing here recognized this code at
+  // all, so a resolved result fell through every check below (never
+  // matching the held/noop/409 branches) straight into the callers'
+  // generic-failure handling — /batch/send counted a completed void as a
+  // batch failure and /:id/send returned a bare 400, even though the
+  // sweep had already committed and nothing was left for the operator to
+  // fix. Not gated on firstDeliveryOnly — the void already committed
+  // regardless of whether this call was a first delivery or a resend.
+  if (err?.code === 'INVOICE_VISIT_TERMINAL') {
+    return {
+      type: 'noop',
+      code: 'INVOICE_VISIT_TERMINAL',
+      voided: true,
+    };
+  }
   // Codex round-7 audit P1 (#4131 slice 4): the single _zeroDueRetried
   // retry exhausted (the balance changed again while resolving the send)
   // — genuinely retryable, held for review the same as
@@ -1305,6 +1324,17 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
               entry.reason = resolvedOutcome.reason;
               entry.sent = { sent: false, held: true, code: resolvedOutcome.code };
             }
+            // Codex round-9 audit P2 (#4131 slice 4) follow-up: the SAME
+            // RESOLVED completed-terminal-void convergence /batch/send and
+            // /:id/send already carry — a keyed retry hitting this code
+            // must not report a completed, correct void as a batch
+            // failure via the raw ok:false shape below.
+            if (resolvedOutcome?.type === 'noop') {
+              entry.sent = { sent: false, ok: true, code: resolvedOutcome.code,
+                already_delivered: resolvedOutcome.already_delivered, queued_delivery: resolvedOutcome.queued_delivery,
+                in_progress: resolvedOutcome.in_progress, settled_zero_due: resolvedOutcome.settled_zero_due,
+                voided: resolvedOutcome.voided };
+            }
           } catch (sendErr) {
             const outcome = firstDeliveryOutcome(sendErr, firstDeliveryOnly);
             if (outcome?.type === 'held') {
@@ -1368,6 +1398,16 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
             const resolvedOutcome = resolvedSendOutcome(sendResult);
             if (resolvedOutcome?.type === 'held') {
               sendResult = { sent: false, held: true, code: resolvedOutcome.code };
+            }
+            // Same RESOLVED completed-terminal-void convergence as the
+            // keyed-retry branch above — a fresh create+send hitting this
+            // code must not report a completed, correct void as a batch
+            // failure via the raw ok:false shape below.
+            if (resolvedOutcome?.type === 'noop') {
+              sendResult = { sent: false, ok: true, code: resolvedOutcome.code,
+                already_delivered: resolvedOutcome.already_delivered, queued_delivery: resolvedOutcome.queued_delivery,
+                in_progress: resolvedOutcome.in_progress, settled_zero_due: resolvedOutcome.settled_zero_due,
+                voided: resolvedOutcome.voided };
             }
           } catch (sendErr) {
             const outcome = firstDeliveryOutcome(sendErr, true);
@@ -1491,6 +1531,16 @@ router.post('/batch/send', requireAdmin, async (req, res, next) => {
           const resolvedOutcome = resolvedSendOutcome(result);
           if (resolvedOutcome?.type === 'held') {
             held.push({ invoiceId, code: resolvedOutcome.code, reason: resolvedOutcome.reason });
+            continue;
+          }
+          // Codex round-9 audit P2 (#4131 slice 4): a RESOLVED completed
+          // terminal void (INVOICE_VISIT_TERMINAL) is the same no-op
+          // success the thrown-form catch below already files as
+          // `settled` — before this it fell straight into the generic
+          // failure just below, counting a completed void as a batch
+          // failure with nothing left for an operator to fix.
+          if (resolvedOutcome?.type === 'noop') {
+            settled.push({ invoiceId, code: resolvedOutcome.code });
             continue;
           }
           const error = [result.sms?.error && `sms: ${result.sms.error}`, result.email?.error && `email: ${result.email.error}`]
@@ -1823,6 +1873,17 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       // never a $0 pay link or a silent "handled" (#4131 slice 4, round-6
       // and round-7 audit P1s).
       return res.status(409).json(result);
+    }
+    // Codex round-9 audit P2 (#4131 slice 4): the void sweep COMPLETED —
+    // the linked visit is terminal and the invoice was voided instead of
+    // delivering a pay link. A genuine no-op success (distinct from the
+    // 409 above, which is only the safety-refused/un-voided case), never
+    // the generic 400 below.
+    if (result.code === 'INVOICE_VISIT_TERMINAL') {
+      return res.json({
+        ok: true, code: result.code, voided: true,
+        sms: { ok: false, code: result.code }, email: { ok: false, code: result.code },
+      });
     }
     if (!result.ok) {
       // Both channels failed. adminFetch toasts `body.error` — without a

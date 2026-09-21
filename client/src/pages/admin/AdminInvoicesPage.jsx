@@ -379,6 +379,12 @@ export function sendOutcomeMessage(res) {
   // push audit P1 #4633) — the pay link IS on its way, just not from this
   // request. A no-op success, never a failure.
   if (res?.in_progress) return "already being delivered";
+  // Codex round-9 audit P2 (#4131 slice 4): the linked visit is terminal
+  // and the void sweep completed — a genuine no-op success (nothing was
+  // ever due to send), never a failed send. Distinct from
+  // INVOICE_VISIT_TERMINAL_UNVOIDED, which the server still reports as a
+  // 409 conflict and never reaches this classifier at all.
+  if (res?.voided) return "the linked visit is terminal — voided instead of sent, nothing due";
   return null;
 }
 

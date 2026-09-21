@@ -638,6 +638,36 @@ describe('POST /batch idempotency (batchKey)', () => {
     });
   });
 
+  test('a RESOLVED COMPLETED terminal void (INVOICE_VISIT_TERMINAL) from an immediate send is reported a handled no-op success, never a batch failure (Codex round-9 audit P2 #4131 follow-up)', async () => {
+    // The SAME shared classifier (resolvedSendOutcome/firstDeliveryOutcome)
+    // /batch/send and /:id/send already converge on for this code — before
+    // this fix, the fresh-create send path here had no noop handling of
+    // its own, so a completed, correct void fell through the raw ok:false
+    // result straight into created[].sent, reading as a failed send.
+    InvoiceService.create.mockResolvedValue({
+      id: 'inv-new', invoice_number: 'WPC-2', total: 100, token: 'tok-2', payer_id: null,
+    });
+    InvoiceService.sendViaSMS.mockResolvedValue({
+      sent: false, ok: false, code: 'INVOICE_VISIT_TERMINAL',
+      reason: 'Linked visit is terminal; delivery not attempted',
+    });
+
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/batch', {
+        customerIds: ['cust-1'], title: 'Quarterly Pest Control', lineItems, sendImmediately: true,
+      });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.created_count).toBe(1);
+      expect(body.failed_count).toBe(0);
+      // Converged onto the SAME shared-classifier shape /batch/send and
+      // /:id/send already report for this code.
+      expect(body.created[0].sent).toEqual({
+        sent: false, ok: true, code: 'INVOICE_VISIT_TERMINAL', voided: true,
+      });
+    });
+  });
+
   test('a keyed retry\'s RESOLVED deposit_settlement_pending on an unfinished send is reported held, not skipped as an ordinary failure', async () => {
     db.mockImplementation((table) => table === 'invoice_batch_keys' ? makeRegistryChain() : makeDupChain({
       id: 'inv-existing', invoice_number: 'WPC-1', status: 'draft', payer_id: null,
@@ -656,6 +686,31 @@ describe('POST /batch idempotency (batchKey)', () => {
       expect(body.skipped_count).toBe(1);
       expect(body.skipped[0].sent).toEqual({ sent: false, held: true, code: 'deposit_settlement_pending' });
       expect(body.skipped[0].reason).toMatch(/not sent yet/);
+    });
+  });
+
+  test('a keyed retry\'s RESOLVED COMPLETED terminal void (INVOICE_VISIT_TERMINAL) on an unfinished send is reported a handled no-op success, never skipped as an ordinary failure (Codex round-9 audit P2 #4131 follow-up)', async () => {
+    // Same shared-classifier convergence as the fresh-create test above,
+    // for the keyed-retry-finishing-an-unfinished-send branch.
+    db.mockImplementation((table) => table === 'invoice_batch_keys' ? makeRegistryChain() : makeDupChain({
+      id: 'inv-existing', invoice_number: 'WPC-1', status: 'draft', payer_id: null,
+    }));
+    InvoiceService.sendViaSMS.mockResolvedValue({
+      sent: false, ok: false, code: 'INVOICE_VISIT_TERMINAL',
+      reason: 'Linked visit is terminal; delivery not attempted',
+    });
+
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/batch', {
+        customerIds: ['cust-1'], title: 'Quarterly Pest Control', lineItems, sendImmediately: true,
+        batchKey: 'b7f9c2d4-0000-4000-8000-00000000000a',
+      });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.skipped_count).toBe(1);
+      expect(body.skipped[0].sent).toEqual({
+        sent: false, ok: true, code: 'INVOICE_VISIT_TERMINAL', voided: true,
+      });
     });
   });
 });
@@ -702,6 +757,34 @@ describe('POST /batch/send held vs. failed classification', () => {
       expect(body.failed_count).toBe(0);
       expect(body.held_count).toBe(1);
       expect(body.held[0]).toMatchObject({ invoiceId: 'inv-1', code: 'INVOICE_VISIT_TERMINAL_UNVOIDED' });
+    });
+  });
+
+  test('a COMPLETED terminal void (INVOICE_VISIT_TERMINAL — the sweep DID void it) is filed settled, never counted failed (Codex round-9 audit P2 #4131)', async () => {
+    // Distinct from INVOICE_VISIT_TERMINAL_UNVOIDED above: the sweep
+    // successfully voided the invoice, so nothing is left for an operator
+    // to fix. Before this fix, resolvedSendOutcome recognized no branch
+    // for this code (returned null), so it fell straight past the held
+    // carve-out into the generic failed.push below — a completed, correct
+    // cleanup counted as a batch failure.
+    db.mockImplementation(() => ({
+      where: function where() { return this; },
+      first: async () => ({ status: 'scheduled', sent_at: null, sms_sent_at: null, email_sent_at: null }),
+    }));
+    InvoiceService.sendViaSMSAndEmail.mockResolvedValue({
+      ok: false, code: 'INVOICE_VISIT_TERMINAL',
+      error: 'Linked visit is terminal; delivery not attempted',
+      sms: { ok: false, code: 'INVOICE_VISIT_TERMINAL' }, email: { ok: false, code: 'INVOICE_VISIT_TERMINAL' },
+    });
+
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/batch/send', { invoiceIds: ['inv-1'] });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.failed_count).toBe(0);
+      expect(body.held_count).toBe(0);
+      expect(body.settled_count).toBe(1);
+      expect(body.settled[0]).toMatchObject({ invoiceId: 'inv-1', code: 'INVOICE_VISIT_TERMINAL' });
     });
   });
 

@@ -365,4 +365,94 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  // Both payer-billed re-validation tests need a REAL visit_completion_packets
+  // row — invoices.visit_completion_packet_id carries a foreign key — which
+  // itself needs a real service_visits row. Minimal columns only; nothing
+  // here is read by settleZeroBalance's own check.
+  async function insertPacket() {
+    const packetVisitId = randomUUID();
+    const packetId = randomUUID();
+    await trx('service_visits').insert({
+      id: packetVisitId, customer_id: customerId, scheduled_date: '2040-03-04',
+      stop_base_key: `test-${packetVisitId.slice(0, 8)}`, created_by: 'test',
+    });
+    await trx('visit_completion_packets').insert({
+      id: packetId, visit_id: packetVisitId, idempotency_key: randomUUID(), request_hash: 'a'.repeat(64), payload: '{}',
+    });
+    return packetId;
+  }
+
+  test('settleZeroBalance itself refuses a packet invoice whose LOCKED row already carries payer_id — re-validated under its own FOR UPDATE lock, not just the pre-emptive fence (Codex round-9 audit P1 #4131)', async () => {
+    // The packet-fence branch in settleZeroDueBeforeSend deliberately
+    // skips itself when payer_id is already set (fenceOwnership &&
+    // row.visit_completion_packet_id && !row.payer_id) — a plain,
+    // already-payer-billed row is expected to be caught elsewhere. Before
+    // this fix, nothing on THIS chokepoint ever re-checked payer_id at
+    // settlement time, so a packet invoice reaching settleZeroBalance with
+    // payer_id already set (any writer that attaches it directly, not
+    // only the scheduled_send_error stamp the sibling test below covers)
+    // would still be settled 'prepaid' out from under the payer.
+    const packetId = await insertPacket();
+    const [payer] = await trx('payers').insert({ display_name: 'Fixture Payer' }).returning('id');
+    await trx('invoices').where({ id: invoiceId }).update({
+      visit_completion_packet_id: packetId, payer_id: payer.id,
+    });
+
+    const result = await Invoice.settleZeroBalance(invoiceId, trx);
+
+    expect(result).toMatchObject({ settled: false, reason: 'payer_billed' });
+    expect(await read()).toMatchObject({ status: 'draft', prepaid_by: null });
+  });
+
+  test('the same re-validation catches the scheduled_send_error withdrawal STAMP alone — payer_id stays NULL on a real Bill-To withdrawal (Codex round-9 audit P1 #4131)', async () => {
+    // withdrawPacketInvoiceForPayer (server/services/visit-completion-
+    // packets.js) never sets payer_id — it records ownership ONLY in this
+    // stamp. The chokepoint's own end-to-end mapping is exercised here
+    // (fenceOwnership: false so the pre-emptive fence — which resolves
+    // LIVE ownership and would find no attached payer — never runs and
+    // never touches the stamp), proving settleZeroBalance's own lock
+    // catches a withdrawal the fence never saw and that
+    // settleZeroDueBeforeSend maps it to the SAME payer_billed descriptor
+    // shape the fence branch already returns.
+    const packetId = await insertPacket();
+    const payerId = randomUUID();
+    await trx('invoices').where({ id: invoiceId }).update({
+      visit_completion_packet_id: packetId, scheduled_send_error: `payer_billed:${payerId}`,
+    });
+
+    const outcome = await Invoice._settleZeroDueBeforeSend(invoiceId, { fenceOwnership: false });
+
+    expect(outcome).toMatchObject({ kind: 'refused', code: 'payer_billed', reason: expect.stringContaining(payerId) });
+    expect(await read()).toMatchObject({ status: 'draft', prepaid_by: null });
+  });
+
+  test('settleZeroDueBeforeSend maps a competing settlement\'s already_settled/prepaid refusal to the SAME settled no-op success, never a retryable refusal (Codex round-9 audit P2 #4131)', async () => {
+    // The full real-concurrency version of this race (two overlapping
+    // sendViaSMS calls against a real second connection) is pinned in
+    // visit-completion-summary-postgres.test.js, which can model a
+    // genuinely concurrent commit; this file shares one transaction, so
+    // the mapping is pinned directly here instead: settleZeroBalance is
+    // called through InvoiceService.settleZeroBalance (not a bare local
+    // call — see the other settleZeroBalance call sites), so a real
+    // instance of ITS OWN already_settled/prepaid return value (exactly
+    // what a competing request's commit produces) can be substituted
+    // here to prove settleZeroDueBeforeSend's mapping alone, independent
+    // of proving the interleaving itself again.
+    const settleSpy = jest.spyOn(Invoice, 'settleZeroBalance').mockResolvedValueOnce({
+      settled: false, reason: 'already_settled',
+      invoice: { id: invoiceId, status: 'prepaid', prepaid_by: 'system:zero_balance' },
+    });
+    try {
+      const outcome = await Invoice._settleZeroDueBeforeSend(invoiceId);
+
+      expect(settleSpy).toHaveBeenCalled();
+      expect(outcome).toMatchObject({ kind: 'settled', invoice: { id: invoiceId, status: 'prepaid' } });
+      // Untouched by this call — settleZeroDueBeforeSend never re-writes a
+      // row it did not itself settle.
+      expect(await read()).toMatchObject({ status: 'draft', prepaid_by: null });
+    } finally {
+      settleSpy.mockRestore();
+    }
+  });
+
 });
