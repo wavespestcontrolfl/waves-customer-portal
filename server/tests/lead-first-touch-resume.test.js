@@ -1603,6 +1603,14 @@ describe('DOI dedupe guard and ledger sweep', () => {
     expect(mockEnroll).not.toHaveBeenCalled();
     expect(mockHoldUpdates.some((p) => p.status === 'pending')).toBe(true);
   });
+  test('a hold with no call id is still trigger-driven at the DOI gate — ownership is re-asked there too (round-0 audit P1)', async () => {
+    mockOwnedElsewhere = [false, true]; // in-claim passes; the gate's locked re-ask finds the address taken
+    mockHolds = [baseHold({ call_log_id: null, created_at: new Date().toISOString(), held_drip: false })];
+    const res = await resumeHeldFirstTouch({ customerId: 'cust-1', source: 'ledger_sweep' });
+    expect(res.resumed).toBe(false);
+    expect(mockNewsletter).not.toHaveBeenCalled();
+    expect(mockEnroll).not.toHaveBeenCalled();
+  });
   test('a card the resolver closed under GATE_FIRST_TOUCH_AUTO_RELEASE approves a send only while the gate is still on (codex #4622 r4)', async () => {
     const autoCard = { status: 'resolved', resolution_source: 'auto', resolution_note: FIRST_TOUCH_AUTO_RELEASE_NOTE };
     mockHolds = [baseHold({ created_at: new Date().toISOString() })];

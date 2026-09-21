@@ -317,7 +317,12 @@ async function gateHoldForSend(holdId, claimStamp, dbh = db, targetEmailLc = nul
       callLogId: reviewCallLogId || row.call_log_id,
       customerId: ownershipCustomerId || row.customer_id,
       emailLc: targetEmailLc,
-      explicit: !reviewCallLogId,
+      // A correction-driven caller (the fanout, an operator's explicit
+      // address override) passes NEITHER trigger argument. A hold with no
+      // call_log_id released by the sweep passes a null review id but
+      // still names its ownership customer — that is trigger-driven, and
+      // the ownership recheck must run (round-0 audit P1).
+      explicit: !reviewCallLogId && !ownershipCustomerId,
       dbh,
     });
     if (blocked) return null;
