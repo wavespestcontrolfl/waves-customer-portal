@@ -484,6 +484,38 @@ describe('FIX 1 — standard recurring conversion is atomic with acceptance', ()
     expect(InvoiceService.sendViaSMSAndEmail).toHaveBeenCalledWith('inv-1', expect.anything());
   });
 
+  test('a first-application invoice fully offset by deposit credit (settled_zero_due) is reported settled — never a pay link "sent", never nextStep pay_invoice (Codex round-8 audit P1 #4131)', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-atomic-1z', token: 'tok-atomic-1z-x0123456789' }));
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-1',
+      tier: 'Bronze',
+      monthlyRate: 60,
+      firstScheduledServiceId: null,
+      recurringConversionSkipped: false,
+      welcomeSms: null,
+      membershipEmail: null,
+      deferredFollowUpReminderRows: [],
+    });
+    // The real settled_zero_due shape sendViaSMSAndEmail resolves for a
+    // visit-linked invoice fully offset by deposit/account credit: ok:
+    // true, but NOTHING was texted or emailed — payUrl is always null.
+    InvoiceService.sendViaSMSAndEmail.mockImplementationOnce(async () => ({
+      ok: true, settled_zero_due: true,
+      sms: { ok: false, code: 'settled_zero_due' }, email: { ok: false, code: 'settled_zero_due' },
+      payUrl: null,
+    }));
+
+    const response = await putAccept('tok-atomic-1z-x0123456789');
+
+    expect(response.status).toBe(200);
+    expect(response.data.success).toBe(true);
+    // NOT pay_invoice — there is nothing left to pay.
+    expect(response.data.nextStep).toBe('confirmed');
+    expect(response.data.invoiceSettled).toBe(true);
+    expect(response.data.invoiceLinkDelivered).toBe(false);
+    expect(response.data.invoicePayUrl).toBeFalsy();
+  });
+
   test('in-transaction invoice mint failure also rolls the acceptance back', async () => {
     resetStore(recurringPestEstimate({ id: 'est-atomic-2', token: 'tok-atomic-2-x0123456789' }));
     EstimateConverter.convertEstimate.mockResolvedValueOnce({

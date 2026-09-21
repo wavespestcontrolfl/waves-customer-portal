@@ -961,6 +961,76 @@ function firstDeliveryOutcome(err, firstDeliveryOnly) {
       reason: 'Invoice is parked under a stale-claim review hold (delivery unverified) — not sent; use Resend to confirm and clear it',
     };
   }
+  // Pre-push audit P1 (#4131 slice 4): a thrown deposit_settlement_pending
+  // (the claim-path race re-check) reports the SAME retryable refusal the
+  // RESOLVED chokepoint outcome already does — without this branch the
+  // thrown form fell through to the generic failure handling below (a 500
+  // on /:id/send) for the SAME underlying condition. NOT gated on
+  // firstDeliveryOnly: an explicit Resend can hit this exact race too.
+  // Unlike zero_due below, this branch stays live even though no current
+  // caller still THROWS this code (Codex round-5 audit #4131 slice 4) —
+  // resolvedSendOutcome forwards a RESOLVED deposit_settlement_pending
+  // refusal through this exact branch too (see below).
+  if (err?.code === 'deposit_settlement_pending') {
+    return {
+      type: 'held',
+      code: 'deposit_settlement_pending',
+      reason: err.message,
+    };
+  }
+  // Codex round-6 audit P1 (#4131 slice 4): a terminal-visit zero-due
+  // invoice the void sweep safety-refused to touch (a live PaymentIntent,
+  // money in flight, an unverifiable Stripe lookup) is distinct from a
+  // COMPLETED void (INVOICE_VISIT_TERMINAL, a genuine no-op success below)
+  // — this one is un-voided and must surface as held for an operator, not
+  // silently reported handled. Reachable only as a RESOLVED result (see
+  // resolvedSendOutcome) — zeroDueDirectSendOutcome/zeroDueWrapperOutcome
+  // never throw it.
+  if (err?.code === 'INVOICE_VISIT_TERMINAL_UNVOIDED') {
+    return {
+      type: 'held',
+      code: 'INVOICE_VISIT_TERMINAL_UNVOIDED',
+      reason: err.message,
+    };
+  }
+  // Codex round-9 audit P2 (#4131 slice 4): the COMPLETED terminal-visit
+  // void (INVOICE_VISIT_TERMINAL — the sweep DID void it, distinct from
+  // the un-voided refusal just above) is a genuine no-op success:
+  // zeroDueDirectSendOutcome/zeroDueWrapperOutcome's own comment calls it
+  // exactly that. Before this branch nothing here recognized this code at
+  // all, so a resolved result fell through every check below (never
+  // matching the held/noop/409 branches) straight into the callers'
+  // generic-failure handling — /batch/send counted a completed void as a
+  // batch failure and /:id/send returned a bare 400, even though the
+  // sweep had already committed and nothing was left for the operator to
+  // fix. Not gated on firstDeliveryOnly — the void already committed
+  // regardless of whether this call was a first delivery or a resend.
+  if (err?.code === 'INVOICE_VISIT_TERMINAL') {
+    return {
+      type: 'noop',
+      code: 'INVOICE_VISIT_TERMINAL',
+      voided: true,
+    };
+  }
+  // Codex round-7 audit P1 (#4131 slice 4): the single _zeroDueRetried
+  // retry exhausted (the balance changed again while resolving the send)
+  // — genuinely retryable, held for review the same as
+  // deposit_settlement_pending, never reported as a plain failure.
+  if (err?.code === 'balance_changed_retry') {
+    return {
+      type: 'held',
+      code: 'balance_changed_retry',
+      reason: err.message,
+    };
+  }
+  // NOTE: a thrown zero_due used to be recognized here too (a settlement
+  // that ran INSIDE claimInvoiceForSend's own claim, reported as a noop
+  // success). Codex round-5 audit #4131 slice 4 confirmed it dead: since
+  // the chokepoint rework, zero-due settlement is never thrown as a
+  // success sentinel — sendViaSMS/sendViaSMSAndEmail always RESOLVE it
+  // (ok: true, settled_zero_due: true), and a resolved ok:true result
+  // never reaches this classifier at all (resolvedSendOutcome below only
+  // forwards a !ok result). Removed along with its mock-only test.
   if (firstDeliveryOnly && FIRST_DELIVERY_NOOP_CODES.has(err?.code)) {
     return {
       type: 'noop',
@@ -974,6 +1044,24 @@ function firstDeliveryOutcome(err, firstDeliveryOnly) {
     };
   }
   return null;
+}
+
+// A RESOLVED sendViaSMS/sendViaSMSAndEmail result and a THROWN claim-path
+// error report the exact same business refusals in two different shapes —
+// deposit_settlement_pending's resolved form (settleZeroDueBeforeSend's
+// chokepoint resolving a settlement refusal, #4131 slice 4 round-5) used to
+// fall through EVERY caller's generic failure handling instead of the held
+// treatment its thrown form already got (converged onto the 409 in
+// firstDeliveryOutcome above). Normalizing a resolved !ok result into the
+// same {code, message} shape firstDeliveryOutcome already reads routes
+// BOTH forms through that ONE classifier — never a second, drifting copy
+// of the same business rule. firstDeliveryOnly is irrelevant here (the
+// codes this recognizes are never gated on it), so it is always false.
+function resolvedSendOutcome(result) {
+  if (!result || result.ok) return null;
+  // Direct sendViaSMS shapes carry their explanation as `reason`; the wrapper's
+  // as `error`. Read both so the held reason survives into the batch response.
+  return firstDeliveryOutcome({ code: result.code, message: result.error ?? result.reason }, false);
 }
 
 // POST / — create invoice manually
@@ -1228,6 +1316,25 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
             entry.sent = existing.payer_id
               ? await InvoiceService.sendViaSMSAndEmail(existing.id, { firstDeliveryOnly, operatorInitiated: true, actorTechnicianId: req.technicianId || null })
               : await InvoiceService.sendViaSMS(existing.id, { firstDeliveryOnly, operatorInitiated: true, actorTechnicianId: req.technicianId || null });
+            // Codex round-5 audit P1 (#4131 slice 4): converge a RESOLVED
+            // held outcome onto the SAME { held: true } shape the thrown
+            // form already reports below — the shared classifier again.
+            const resolvedOutcome = resolvedSendOutcome(entry.sent);
+            if (resolvedOutcome?.type === 'held') {
+              entry.reason = resolvedOutcome.reason;
+              entry.sent = { sent: false, held: true, code: resolvedOutcome.code };
+            }
+            // Codex round-9 audit P2 (#4131 slice 4) follow-up: the SAME
+            // RESOLVED completed-terminal-void convergence /batch/send and
+            // /:id/send already carry — a keyed retry hitting this code
+            // must not report a completed, correct void as a batch
+            // failure via the raw ok:false shape below.
+            if (resolvedOutcome?.type === 'noop') {
+              entry.sent = { sent: false, ok: true, code: resolvedOutcome.code,
+                already_delivered: resolvedOutcome.already_delivered, queued_delivery: resolvedOutcome.queued_delivery,
+                in_progress: resolvedOutcome.in_progress, settled_zero_due: resolvedOutcome.settled_zero_due,
+                voided: resolvedOutcome.voided };
+            }
           } catch (sendErr) {
             const outcome = firstDeliveryOutcome(sendErr, firstDeliveryOnly);
             if (outcome?.type === 'held') {
@@ -1239,7 +1346,7 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
             if (outcome?.type === 'noop') {
               entry.sent = { sent: false, ok: true, code: outcome.code,
                 already_delivered: outcome.already_delivered, queued_delivery: outcome.queued_delivery,
-                in_progress: outcome.in_progress };
+                in_progress: outcome.in_progress, settled_zero_due: outcome.settled_zero_due };
               skipped.push(entry);
               return;
             }
@@ -1285,6 +1392,23 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
             sendResult = invoice.payer_id
               ? await InvoiceService.sendViaSMSAndEmail(invoice.id, { firstDeliveryOnly: true, operatorInitiated: true, actorTechnicianId: req.technicianId || null })
               : await InvoiceService.sendViaSMS(invoice.id, { firstDeliveryOnly: true, operatorInitiated: true, actorTechnicianId: req.technicianId || null });
+            // Codex round-5 audit P1 (#4131 slice 4): converge a RESOLVED
+            // held outcome onto the SAME { held: true } shape the thrown
+            // form below already reports — the shared classifier again.
+            const resolvedOutcome = resolvedSendOutcome(sendResult);
+            if (resolvedOutcome?.type === 'held') {
+              sendResult = { sent: false, held: true, code: resolvedOutcome.code };
+            }
+            // Same RESOLVED completed-terminal-void convergence as the
+            // keyed-retry branch above — a fresh create+send hitting this
+            // code must not report a completed, correct void as a batch
+            // failure via the raw ok:false shape below.
+            if (resolvedOutcome?.type === 'noop') {
+              sendResult = { sent: false, ok: true, code: resolvedOutcome.code,
+                already_delivered: resolvedOutcome.already_delivered, queued_delivery: resolvedOutcome.queued_delivery,
+                in_progress: resolvedOutcome.in_progress, settled_zero_due: resolvedOutcome.settled_zero_due,
+                voided: resolvedOutcome.voided };
+            }
           } catch (sendErr) {
             const outcome = firstDeliveryOutcome(sendErr, true);
             if (outcome?.type === 'held') {
@@ -1292,7 +1416,7 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
             } else if (outcome?.type === 'noop') {
               sendResult = { sent: false, ok: true, code: outcome.code,
                 already_delivered: outcome.already_delivered, queued_delivery: outcome.queued_delivery,
-                in_progress: outcome.in_progress };
+                in_progress: outcome.in_progress, settled_zero_due: outcome.settled_zero_due };
             } else {
               logger.error(`[admin-invoices:batch] send failed for ${invoice.id}: ${sendErr.message}`);
               sendResult = { sent: false, error: sendErr.message };
@@ -1366,6 +1490,11 @@ router.post('/batch/send', requireAdmin, async (req, res, next) => {
     }
 
     const sent = [];
+    // A resolved zero-due settlement (the common pre-claim path) is a
+    // genuine no-send success — nothing was texted or emailed, so counting
+    // it as "sent" with both channels false reads as a mystery failure
+    // (Codex round-3 P2 #4131). Counted and reported separately.
+    const settled = [];
     const failed = [];
     const held = [];
 
@@ -1383,7 +1512,13 @@ router.post('/batch/send', requireAdmin, async (req, res, next) => {
         const row = await db('invoices').where({ id: invoiceId }).first('status', 'sent_at', 'sms_sent_at', 'email_sent_at');
         firstDeliveryOnly = isFirstDeliveryRow(row);
         const result = await InvoiceService.sendViaSMSAndEmail(invoiceId, { firstDeliveryOnly, operatorInitiated: true, actorTechnicianId: req.technicianId || null });
-        if (result.ok) {
+        if (result.ok && (result.settled_zero_due || result.covered_by_credit)) {
+          // covered_by_credit is the chokepoint's sibling settled flag
+          // (credit consumed, nothing sent): bucketing it as "sent" with
+          // both channels false is the same mystery-success read this
+          // route already avoids for settled_zero_due (round-8 audit P1).
+          settled.push({ invoiceId, code: result.settled_zero_due ? 'settled_zero_due' : 'covered_by_credit' });
+        } else if (result.ok) {
           sent.push({
             invoiceId,
             channels: { sms: Boolean(result.sms?.ok), email: Boolean(result.email?.ok) },
@@ -1391,6 +1526,27 @@ router.post('/batch/send', requireAdmin, async (req, res, next) => {
             queued_delivery: Boolean(result.queued_delivery),
           });
         } else {
+          // Codex round-5 audit P1 (#4131 slice 4): a RESOLVED
+          // deposit_settlement_pending (the chokepoint's settlement
+          // refusal) used to fall straight into the generic failure below
+          // — a held-for-now retryable state reported as a batch failure.
+          // Same held treatment as the thrown form, and as /:id/send's
+          // 409, via the shared classifier.
+          const resolvedOutcome = resolvedSendOutcome(result);
+          if (resolvedOutcome?.type === 'held') {
+            held.push({ invoiceId, code: resolvedOutcome.code, reason: resolvedOutcome.reason });
+            continue;
+          }
+          // Codex round-9 audit P2 (#4131 slice 4): a RESOLVED completed
+          // terminal void (INVOICE_VISIT_TERMINAL) is the same no-op
+          // success the thrown-form catch below already files as
+          // `settled` — before this it fell straight into the generic
+          // failure just below, counting a completed void as a batch
+          // failure with nothing left for an operator to fix.
+          if (resolvedOutcome?.type === 'noop') {
+            settled.push({ invoiceId, code: resolvedOutcome.code });
+            continue;
+          }
           const error = [result.sms?.error && `sms: ${result.sms.error}`, result.email?.error && `email: ${result.email.error}`]
             .filter(Boolean)
             .join(' | ') || 'no channel succeeded';
@@ -1411,13 +1567,17 @@ router.post('/batch/send', requireAdmin, async (req, res, next) => {
         // hitting the same code is a real conflict — falls through to
         // failed below, matching /:id/send's non-first-delivery path.
         if (outcome?.type === 'noop') {
-          sent.push({
-            invoiceId,
-            channels: { sms: false, email: false },
-            already_delivered: outcome.already_delivered,
-            queued_delivery: outcome.queued_delivery,
-            in_progress: outcome.in_progress,
-          });
+          if (outcome.settled_zero_due || outcome.covered_by_credit) {
+            settled.push({ invoiceId, code: outcome.settled_zero_due ? 'settled_zero_due' : 'covered_by_credit' });
+          } else {
+            sent.push({
+              invoiceId,
+              channels: { sms: false, email: false },
+              already_delivered: outcome.already_delivered,
+              queued_delivery: outcome.queued_delivery,
+              in_progress: outcome.in_progress,
+            });
+          }
           continue;
         }
         logger.error(`[admin-invoices:batch-send] ${invoiceId}: ${err.message}`);
@@ -1428,9 +1588,11 @@ router.post('/batch/send', requireAdmin, async (req, res, next) => {
     res.json({
       total: invoiceIds.length,
       sent_count: sent.length,
+      settled_count: settled.length,
       failed_count: failed.length,
       held_count: held.length,
       sent,
+      settled,
       failed,
       held,
     });
@@ -1689,11 +1851,43 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
           already_delivered: outcome.already_delivered,
           queued_delivery: outcome.queued_delivery,
           in_progress: outcome.in_progress,
+          settled_zero_due: outcome.settled_zero_due,
           sms: { ok: false, code: outcome.code },
           email: { ok: false, code: outcome.code },
         });
       }
+      // Pre-push audit P1 (#4131 slice 4): converges the THROWN claim-path
+      // race re-check onto the SAME 409 shape the RESOLVED pre-claim path
+      // below already returns for this code — an operator must see one
+      // consistent retryable conflict regardless of which check caught it.
+      if (outcome?.code === 'deposit_settlement_pending') {
+        return res.status(409).json({
+          ok: false, code: outcome.code, error: outcome.reason,
+          sms: { ok: false, code: outcome.code }, email: { ok: false, code: outcome.code },
+        });
+      }
       throw err;
+    }
+    if (result.code === 'deposit_settlement_pending' || result.code === 'INVOICE_VISIT_TERMINAL_UNVOIDED'
+      || result.code === 'balance_changed_retry') {
+      // Nothing due (deposit-covered) but not settleable right now; a
+      // terminal-visit invoice the void sweep safety-refused to touch; or
+      // an exhausted zero-due retry (the balance changed again while
+      // resolving the send): all a retryable/held-for-review conflict,
+      // never a $0 pay link or a silent "handled" (#4131 slice 4, round-6
+      // and round-7 audit P1s).
+      return res.status(409).json(result);
+    }
+    // Codex round-9 audit P2 (#4131 slice 4): the void sweep COMPLETED —
+    // the linked visit is terminal and the invoice was voided instead of
+    // delivering a pay link. A genuine no-op success (distinct from the
+    // 409 above, which is only the safety-refused/un-voided case), never
+    // the generic 400 below.
+    if (result.code === 'INVOICE_VISIT_TERMINAL') {
+      return res.json({
+        ok: true, code: result.code, voided: true,
+        sms: { ok: false, code: result.code }, email: { ok: false, code: result.code },
+      });
     }
     if (!result.ok) {
       // Both channels failed. adminFetch toasts `body.error` — without a

@@ -7997,6 +7997,67 @@ describe('public estimate one-time breakdown', () => {
     }));
   });
 
+  test('a settled invoice keeps commercial service-plan labeling instead of "Commercial WaveGuard plan" (Codex round-9 audit P2 #4131)', () => {
+    const payload = buildAcceptNotificationPayload({
+      customerName: 'Jane Doe',
+      waveguardTier: 'Commercial',
+      monthlyTotal: 300,
+      treatAsOneTime: false,
+      invoiceSettledByCredit: true,
+      invoiceSettledReason: 'covered_by_credit',
+    });
+    expect(payload.adminBody).not.toContain('Commercial WaveGuard');
+    expect(payload.adminBody).toContain('Commercial service plan ($300.00/mo)');
+    expect(payload.customerBody).toContain('Commercial service plan ($300.00/mo)');
+    expect(payload.customerBody).not.toContain('WaveGuard');
+  });
+
+  test('a settled invoice with the generic settled_zero_due reason never invents credit coverage that may not be true (Codex round-9 audit P2 #4131)', () => {
+    // settleZeroBalance also settles a visit-linked invoice retotaled or
+    // discounted to a literal $0 with credit_applied = 0 — this outcome
+    // alone does not prove deposit/account credit caused the zero
+    // balance, so the copy must stay neutral rather than telling the
+    // customer their credit covered it.
+    const payload = buildAcceptNotificationPayload({
+      customerName: 'Jane Doe',
+      waveguardTier: 'Gold',
+      monthlyTotal: 89,
+      treatAsOneTime: false,
+      invoiceSettledByCredit: true,
+      invoiceSettledReason: 'settled_zero_due',
+    });
+    expect(payload.adminBody).toBe('Gold WaveGuard plan approved — the invoice was already settled — nothing is due; no pay link was sent.');
+    expect(payload.customerBody).toBe('Your Gold WaveGuard plan is approved. Nothing is due on this invoice.');
+    expect(payload.adminBody).not.toContain('credit');
+    expect(payload.customerBody).not.toContain('credit');
+  });
+
+  test('a settled invoice with the specific covered_by_credit reason keeps the original credit-coverage copy', () => {
+    const payload = buildAcceptNotificationPayload({
+      customerName: 'Jane Doe',
+      waveguardTier: 'Gold',
+      monthlyTotal: 89,
+      treatAsOneTime: false,
+      invoiceSettledByCredit: true,
+      invoiceSettledReason: 'covered_by_credit',
+    });
+    expect(payload.adminBody).toBe('Gold WaveGuard plan approved — the invoice was fully covered by deposit/account credit; no pay link was sent.');
+    expect(payload.customerBody).toBe('Your Gold WaveGuard plan is approved. Your deposit/account credit covered the invoice in full — nothing is due.');
+  });
+
+  test('a settled invoice with NO specific reason known falls back to the neutral copy, never assuming credit (backward-compatible caller)', () => {
+    const payload = buildAcceptNotificationPayload({
+      customerName: 'Jane Doe',
+      waveguardTier: 'Bronze',
+      monthlyTotal: 60,
+      treatAsOneTime: false,
+      invoiceSettledByCredit: true,
+      // invoiceSettledReason omitted — an older/unaware caller.
+    });
+    expect(payload.adminBody).toContain('already settled — nothing is due');
+    expect(payload.customerBody).toBe('Your Bronze WaveGuard plan is approved. Nothing is due on this invoice.');
+  });
+
   test('admin marker cookie suppresses first-view customer side effects', () => {
     const token = jwt.sign(
       { kind: 'admin_marker', sub: 'tech-1' },

@@ -497,6 +497,72 @@ describe('deferred-replay registry', () => {
       .toBeLessThan(markInlineRetryable.mock.invocationCallOrder[0]);
   });
 
+  test('completion recheck (round 9 #4634 finding 1): a stale invoice strips the pay link instead of suppressing the whole completion/report send', async () => {
+    // Most completion replays carry no pay link at all — a no-op read.
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', { service_record_id: 'rec-1' }))
+      .toEqual({ eligible: true });
+    expect(db).not.toHaveBeenCalled();
+
+    // Still collectible — nothing to strip.
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null }));
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p' }))
+      .toEqual({ eligible: true });
+
+    // Settled zero-due overnight (or otherwise terminal): the report still
+    // sends (eligible: true, never cancelled/suppressed — the owner's r8
+    // ruling), but the frozen pay-link line is now stale.
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'prepaid', payer_id: null }));
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p' }))
+      .toEqual({ eligible: true, stripPayLink: true, reason: 'invoice-terminal:prepaid' });
+
+    // Moved to a payer overnight: same treatment — strip, don't suppress.
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: 'payer-1' }));
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p' }))
+      .toEqual({ eligible: true, stripPayLink: true, reason: 'payer-billed' });
+  });
+
+  test('completion recheck (round 10 #4634 finding 3): a transient collectibility-read failure stays retryable-ineligible, never promoted to a strip', async () => {
+    // invoiceStillCollectible's own db read throws — failClosed reports
+    // { eligible: false, reason: 'recheck-failed', retryable: true }. The
+    // round-9 bug converted EVERY ineligible result (this one included)
+    // into { eligible: true, stripPayLink: true } — permanently stripping
+    // a pay link that never had anything actually wrong with it, on
+    // nothing more than a DB hiccup that the scheduler's bounded retry
+    // ladder would otherwise have resolved on the next pass.
+    db.mockReturnValueOnce(throwChain());
+    await expect(recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p' }))
+      .resolves.toEqual({ eligible: false, reason: 'recheck-failed', retryable: true });
+  });
+
+  test('completion recheck (round 10 #4634 finding 3): an invoice row that is simply gone is treated like a confirmed-terminal invoice (strip, never suppress)', async () => {
+    db.mockReturnValueOnce(firstChain(undefined));
+    await expect(recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p' }))
+      .resolves.toEqual({ eligible: true, stripPayLink: true, reason: 'invoice-missing' });
+  });
+
+  test('completion recheck (round 10 #4634 finding 3): a withdrawn-from-customer invoice strips like payer-billed', async () => {
+    // invoiceWithdrawnFromCustomer (invoice-helpers.js, real implementation)
+    // keys on the payer_billed: prefix a packet withdrawal stamps on
+    // scheduled_send_error — no mock needed, a real row triggers it.
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: 'payer_billed: adopted 2026-09-20' }));
+    await expect(recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p' }))
+      .resolves.toEqual({ eligible: true, stripPayLink: true, reason: 'payer-billed-withdrawn' });
+  });
+
+  test('completion recheck (round 10 #4634 finding 3): a stopped follow-up sequence suppresses the whole replay instead of stripping the link', async () => {
+    // sequence-stopped is a live stop signal on the invoice's own follow-up
+    // sequence (a reply/opt-out), not "this one pay link went stale" — the
+    // round-9 bug would have stripped the link and sent the rest of the
+    // completion text anyway. It must take the same suppress/terminal path
+    // every other genuinely-ineligible reason took before the round-8
+    // strip carve-out.
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null }));
+    db.mockReturnValueOnce(firstChain({ status: 'stopped' }));
+    await expect(recheckDeferredReplay('dispatch_completion_deferred', {
+      invoice_id: 'inv-1', pay_url: 'https://p', followup_sequence_id: 'seq-1',
+    })).resolves.toEqual({ eligible: false, reason: 'sequence-stopped' });
+  });
+
   test('voicemail (r15): claim settlement rides the durable rail and propagates failed stamps', async () => {
     expect(requiresDurableFinalize('voicemail_lead_sms_deferred')).toBe(true);
     expect(DURABLE_FINALIZE_ENTRY_POINTS).toContain('voicemail_lead_sms_deferred');

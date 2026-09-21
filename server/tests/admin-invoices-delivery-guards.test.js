@@ -214,6 +214,112 @@ describe('POST /admin/invoices/:id/send — first delivery vs. explicit Resend a
     });
   });
 
+  // Pre-push audit P1: zeroDueOpenVisitSendOutcome's pre-claim settle is
+  // the COMMON zero-due path (checked before any claim is ever taken) —
+  // its success is a RESOLVED result, not a thrown error, so it must carry
+  // the SAME settled_zero_due field the throw-shaped under-claim path
+  // (tested above) reports, not a stale field name only that rarer path
+  // used to use.
+  test('the pre-claim settle (the common zero-due path, no claim ever taken) also reports settled_zero_due: true', async () => {
+    InvoiceService.sendViaSMSAndEmail.mockResolvedValue({
+      ok: true, settled_zero_due: true,
+      sms: { ok: false, code: 'settled_zero_due' }, email: { ok: false, code: 'settled_zero_due' }, payUrl: null,
+    });
+    await withServer(async (baseUrl) => {
+      const res = await postSend(baseUrl, {});
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toMatchObject({ ok: true, settled_zero_due: true });
+    });
+  });
+
+  // Pre-push audit P1: the claim-path race re-check (throwForZero
+  // DueVisitInvoice / reverifyClaimedVisitInvoice) used to throw this
+  // exact code, and this test's mock still models that shape — kept as
+  // defensive coverage of the catch block's own 409-mapping wiring even
+  // though no live caller throws it any more (Codex round-5 audit #4131
+  // slice 4: sendViaSMSAndEmail now always RESOLVES this refusal instead;
+  // see resolvedSendOutcome, which routes the SAME classifier branch this
+  // exercises).
+  test('the thrown deposit_settlement_pending race path converges on the SAME 409 shape as the resolved pre-claim path', async () => {
+    InvoiceService.sendViaSMSAndEmail.mockImplementation(async () => {
+      const e = new Error('Nothing is due on this invoice, but it could not be settled yet (existing_payment_work) — not sent.');
+      e.code = 'deposit_settlement_pending';
+      throw e;
+    });
+    await withServer(async (baseUrl) => {
+      const res = await postSend(baseUrl, {});
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body).toMatchObject({ ok: false, code: 'deposit_settlement_pending' });
+      expect(body.error).toMatch(/could not be settled yet/);
+    });
+  });
+
+  test('a safety-refused terminal void (INVOICE_VISIT_TERMINAL_UNVOIDED) is held for review as a 409, never a generic 400 or a silent success (Codex round-6 audit P1 #4131)', async () => {
+    // The RESOLVED wrapper shape zeroDueWrapperOutcome now produces when
+    // the void sweep itself safety-refuses (a live PaymentIntent, money
+    // in flight, an unverifiable Stripe lookup) — distinct from the
+    // COMPLETED-void INVOICE_VISIT_TERMINAL case pinned in the sibling
+    // test right below.
+    InvoiceService.sendViaSMSAndEmail.mockResolvedValue({
+      ok: false, code: 'INVOICE_VISIT_TERMINAL_UNVOIDED', voided: false,
+      error: 'Linked visit is terminal; delivery not attempted, but the invoice could not be safely voided yet — held for review',
+      sms: { ok: false, code: 'INVOICE_VISIT_TERMINAL_UNVOIDED', deliveryOutcome: 'not_sent' },
+      email: { ok: false, code: 'INVOICE_VISIT_TERMINAL_UNVOIDED', deliveryOutcome: 'not_sent' },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await postSend(baseUrl, {});
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body).toMatchObject({ ok: false, code: 'INVOICE_VISIT_TERMINAL_UNVOIDED' });
+      expect(body.error).toMatch(/held for review/);
+    });
+  });
+
+  test('a COMPLETED terminal void (INVOICE_VISIT_TERMINAL — the sweep DID void it) is reported a 200 no-op success, never a generic 400 (Codex round-9 audit P2 #4131)', async () => {
+    // Distinct from INVOICE_VISIT_TERMINAL_UNVOIDED above: the sweep
+    // successfully voided the invoice, so nothing is left for an operator
+    // to fix. Before this fix, this code matched none of resolvedSend
+    // Outcome's branches (returned null) and fell straight through the
+    // route's `!result.ok` 400 fallback — a completed, correct cleanup
+    // reported to the operator as a failed send.
+    InvoiceService.sendViaSMSAndEmail.mockResolvedValue({
+      ok: false, code: 'INVOICE_VISIT_TERMINAL',
+      error: 'Linked visit is terminal; delivery not attempted',
+      sms: { ok: false, code: 'INVOICE_VISIT_TERMINAL', deliveryOutcome: 'not_sent' },
+      email: { ok: false, code: 'INVOICE_VISIT_TERMINAL', deliveryOutcome: 'not_sent' },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await postSend(baseUrl, {});
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toMatchObject({ ok: true, code: 'INVOICE_VISIT_TERMINAL', voided: true });
+    });
+  });
+
+  test('an exhausted zero-due retry (balance_changed_retry) is held for review as a 409 with an honest reason, never "nothing is due" (Codex round-7 audit P1 #4131)', async () => {
+    // The RESOLVED wrapper shape zeroDueWrapperOutcome now produces when
+    // the single _zeroDueRetried retry is exhausted — the balance
+    // changed again while resolving the send. Distinct from
+    // deposit_settlement_pending: never the "nothing is due" wording,
+    // since the invoice IS collectible.
+    InvoiceService.sendViaSMSAndEmail.mockResolvedValue({
+      ok: false, code: 'balance_changed_retry',
+      error: 'The balance changed while sending; try again',
+      sms: { ok: false, code: 'balance_changed_retry', deliveryOutcome: 'not_sent' },
+      email: { ok: false, code: 'balance_changed_retry', deliveryOutcome: 'not_sent' },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await postSend(baseUrl, {});
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body).toMatchObject({ ok: false, code: 'balance_changed_retry' });
+      expect(body.error).toMatch(/balance changed/);
+      expect(body.error).not.toMatch(/nothing is due/i);
+    });
+  });
+
   test('an explicit Resend that finds a queued pay-link text is a real conflict, not a no-op success', async () => {
     InvoiceService.sendViaSMSAndEmail.mockImplementation(async () => {
       const e = new Error('Invoice send already in progress — a text carrying this pay link is queued for the send window');
@@ -425,6 +531,30 @@ describe('POST /admin/invoices/batch/send — derives firstDeliveryOnly per invo
       // Derived correctly from the row's own stamps (not a first delivery)
       // — the hold refusal is independent of that value entirely.
       expect(opts.firstDeliveryOnly).toBe(false);
+    });
+  });
+
+  // Codex round-3 P2 #4131: the RESOLVED zero-due settlement shape
+  // (result.ok: true, settled_zero_due: true — the common pre-claim path)
+  // used to fall into the generic result.ok branch, counted as "sent" with
+  // both channels false — the page then reports a send that never
+  // happened, with no channel to explain it.
+  test('a resolved zero-due settlement is counted separately from sent, never as a false send', async () => {
+    InvoiceService.sendViaSMSAndEmail.mockResolvedValueOnce({
+      ok: true, settled_zero_due: true,
+      sms: { ok: false, code: 'settled_zero_due' }, email: { ok: false, code: 'settled_zero_due' }, payUrl: null,
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/batch/send`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invoiceIds: [RESEND_ID] }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.sent_count).toBe(0);
+      expect(body.settled_count).toBe(1);
+      expect(body.sent).toEqual([]);
+      expect(body.settled).toEqual([{ invoiceId: RESEND_ID, code: 'settled_zero_due' }]);
     });
   });
 });

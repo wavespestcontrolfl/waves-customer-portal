@@ -2188,6 +2188,287 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('a successful requireDue claim returns the FULL invoice row, not just the four worker fields (pre-push audit P1)', async () => {
+    const invoiceId = randomUUID();
+    const token = randomUUID();
+    const invoiceNumber = `FIX-${invoiceId.slice(0, 8)}`;
+    await mockPg('invoices').insert({ id: invoiceId, token, invoice_number: invoiceNumber,
+      customer_id: fixture.customerId, status: 'scheduled', total: 120, visit_completion_packet_id: fixture.packetId,
+      scheduled_send_at: new Date(Date.now() - 60000) });
+    try {
+      const result = await require('../services/invoice').claimPacketInvoiceForSend(invoiceId, fixture.packetId, { requireDue: true });
+      expect(result.payerBilled).toBe(false);
+      expect(result.claim.claimed).toBe(true);
+      // claimDueScheduledInvoiceForSend used to .returning() only four
+      // columns (id, scheduled_request_review, scheduled_review_delay_
+      // minutes, send_claim_token) — downstream consumers reading
+      // customer_id, token, invoice_number, or payer_id off a packet
+      // claim's invoice got undefined instead of the real value.
+      expect(result.claim.invoice).toMatchObject({
+        id: invoiceId, customer_id: fixture.customerId, token,
+        invoice_number: invoiceNumber, payer_id: null, status: 'sending',
+      });
+    } finally {
+      await mockPg('invoices').where({ id: invoiceId }).del();
+    }
+  });
+
+  test('a combined-visit invoice whose Bill-To moved to a payer since scheduling is withdrawn, NOT settled prepaid for the homeowner, even though it is zero-due (Codex round-3 P1)', async () => {
+    // The wrapper's early zero-due settlement used to run BEFORE
+    // claimPacketInvoiceForSend's own locked ownership fence — a Bill-To
+    // move to a payer since scheduling would lose that race and the
+    // invoice settled 'prepaid' for the homeowner's allocation instead of
+    // being withdrawn to the payer.
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({
+      id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 120, credit_applied: 120,
+      subtotal: 120, line_items: '[]', visit_completion_packet_id: fixture.packetId,
+      // Visit-linked (a real scheduled_services row from the fixture, not
+      // fixture.visitId itself — that's the service_visits parent), zero
+      // due, still claimable: exactly the shape zeroDueVisitInvoice looks
+      // for. Without this the invoice never registers as zero-due at all
+      // and the test would pass vacuously regardless of the fix.
+      scheduled_service_id: fixture.serviceIds[0],
+    });
+    const [payer] = await mockPg('payers').insert({
+      display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true,
+    }).returning('id');
+    await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+    try {
+      const result = await require('../services/invoice').sendViaSMSAndEmail(invoiceId, {});
+
+      expect(result).toMatchObject({ ok: false, code: 'payer_billed' });
+      const row = await mockPg('invoices').where({ id: invoiceId }).first();
+      expect(row.status).not.toBe('prepaid');
+      expect(row.prepaid_by).toBeNull();
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
+  test('the scheduled-send WORKER fences packet ownership before settling too — a Bill-To move to a payer wins over the due-loop\'s own settlement, never prepaid for the homeowner (Codex round-5 P1 #4131 finding 1)', async () => {
+    // Round-3 already fixed sendViaSMSAndEmail's own claim path (the test
+    // above). This is the OTHER call site the same finding named: the
+    // scheduled-send worker's due loop calls settleZeroDueBeforeSend
+    // directly (never through claimPacketInvoiceForSend's normal claim at
+    // all) — before this round it ran with no ownership fence of its own,
+    // so a Bill-To move to a payer between scheduling and the worker's
+    // tick lost this exact race. settleZeroDueBeforeSend now runs the SAME
+    // locked fence (claimPacketInvoiceForSend fenceOnly) before it ever
+    // calls settleZeroBalance, regardless of which caller reached it.
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({
+      id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'scheduled', total: 120, credit_applied: 120,
+      subtotal: 120, line_items: '[]', visit_completion_packet_id: fixture.packetId,
+      scheduled_service_id: fixture.serviceIds[0], scheduled_send_at: new Date(Date.now() - 60000),
+    });
+    const [payer] = await mockPg('payers').insert({
+      display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true,
+    }).returning('id');
+    await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+    try {
+      const result = await require('../services/invoice').processScheduledSends();
+
+      expect(result).toEqual({ sent: 0, failed: 0, deferred: 0 });
+      const row = await mockPg('invoices').where({ id: invoiceId }).first();
+      expect(row.status).not.toBe('prepaid');
+      expect(row.prepaid_by).toBeNull();
+      expect(row.scheduled_send_error).toBe(`payer_billed:${payer.id}:hold`);
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
+  test('a Bill-To withdrawal that COMMITS IN THE GAP between the worker\'s own packet fence and settleZeroBalance\'s row lock is still caught — never marked prepaid for the homeowner after its debt moved to the payer (Codex round-9 audit P1 #4131)', async () => {
+    // Round-5's fix (the sibling test above) closed the race where a payer
+    // was ALREADY live when the worker's own fence ran. This closes the
+    // narrower window that left open: claimPacketInvoiceForSend's
+    // fenceOnly call commits its OWN transaction and returns BEFORE
+    // settleZeroBalance ever opens one — a Bill-To withdrawal that lands
+    // in exactly that gap is invisible to a fence check that already ran
+    // and returned payerBilled:false (no live payer existed yet). The
+    // withdrawal is run here as a REAL second fenceOnly call, for real,
+    // right as settleZeroBalance is about to lock the invoice row — the
+    // same _query interception point the operator-reschedule test below
+    // uses for its own gap.
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({
+      id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'scheduled', total: 120, credit_applied: 120,
+      subtotal: 120, line_items: '[]', visit_completion_packet_id: fixture.packetId,
+      scheduled_service_id: fixture.serviceIds[0], scheduled_send_at: new Date(Date.now() - 60000),
+    });
+    const [payer] = await mockPg('payers').insert({
+      display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true,
+    }).returning('id');
+    const Invoice = require('../services/invoice');
+    const execute = mockPg.client.constructor.prototype._query;
+    let withdrawnInGap = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(async function withdrawBeforeLock(connection, query) {
+      if (!withdrawnInGap && query.sql.includes('"invoices"') && query.sql.toLowerCase().includes('for update')) {
+        withdrawnInGap = true;
+        // The concurrent Bill-To writer: a live payer gets attached and a
+        // REAL fenceOnly withdrawal commits, all before the intercepted
+        // FOR UPDATE below is even sent.
+        await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+        const fence = await Invoice.claimPacketInvoiceForSend(invoiceId, fixture.packetId, { fenceOnly: true });
+        expect(fence).toMatchObject({ payerBilled: true, payerId: payer.id });
+      }
+      return execute.call(this, connection, query);
+    });
+    try {
+      const result = await Invoice.processScheduledSends();
+
+      expect(withdrawnInGap).toBe(true);
+      // Held (withdrawn), not failed and not settled — same shape as the
+      // sibling test above, which never surfaces `held` in this return.
+      expect(result).toEqual({ sent: 0, failed: 0, deferred: 0 });
+      const row = await mockPg('invoices').where({ id: invoiceId }).first();
+      expect(row.status).not.toBe('prepaid');
+      expect(row.prepaid_by).toBeNull();
+      expect(row.scheduled_send_error).toBe(`payer_billed:${payer.id}:hold`);
+    } finally {
+      jest.restoreAllMocks();
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
+  test('a competing zero-due settlement that COMMITS prepaid in the gap before this caller\'s own lock is reported the SAME settled no-op success, never a retryable refusal (Codex round-9 audit P2 #4131)', async () => {
+    // Two concurrent direct sends can both pass claimInvoiceForSend's
+    // zero-due detection before either settlement commits (both read the
+    // row while it is still 'draft'/zero-due). The FIRST to reach
+    // settleZeroBalance's own row lock marks the invoice prepaid; the
+    // SECOND then locks a row that is already prepaid — settleZeroBalance
+    // returns { reason: 'already_settled' } for that, which (before this
+    // fix) settleZeroDueBeforeSend mapped to the generic
+    // deposit_settlement_pending retry — reporting a retryable failure
+    // for an invoice the competing request already, genuinely, settled.
+    // The competing settlement is modeled here as a real committed write
+    // from a separate connection, landing exactly as this caller's own
+    // settleZeroBalance is about to lock the row — the same interception
+    // point the withdrawal-race test above uses for its own gap.
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({
+      id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 120, credit_applied: 120,
+      subtotal: 120, line_items: '[]', scheduled_service_id: fixture.serviceIds[0],
+    });
+    const execute = mockPg.client.constructor.prototype._query;
+    let racedSettlement = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(async function settlePrepaidBeforeLock(connection, query) {
+      if (!racedSettlement && query.sql.includes('"invoices"') && query.sql.toLowerCase().includes('for update')) {
+        racedSettlement = true;
+        // The competing request's own settlement, already committed.
+        await mockPg('invoices').where({ id: invoiceId }).update({
+          status: 'prepaid', prepaid_prev_status: 'draft', prepaid_by: 'system:zero_balance',
+          prepaid_at: new Date(), paid_at: new Date(), updated_at: new Date(),
+        });
+      }
+      return execute.call(this, connection, query);
+    });
+    try {
+      const result = await require('../services/invoice').sendViaSMS(invoiceId);
+
+      expect(racedSettlement).toBe(true);
+      // The SAME settled no-op success this caller would have reported had
+      // it won the race — never a retryable failure for a row the
+      // competing request already, correctly, settled.
+      expect(result).toMatchObject({ sent: false, ok: true, code: 'zero_due', settled_zero_due: true });
+      const row = await mockPg('invoices').where({ id: invoiceId }).first();
+      expect(row.status).toBe('prepaid');
+      expect(row.prepaid_by).toBe('system:zero_balance');
+    } finally {
+      jest.restoreAllMocks();
+      await mockPg('invoices').where({ id: invoiceId }).del();
+    }
+  });
+
+  test('an operator reschedule landing between the worker\'s due read and settleZeroBalance\'s own lock defers instead of settling — no packet review enrolled, the row keeps its NEW time (Codex round-8 audit P2 #4131)', async () => {
+    // settleZeroDueBeforeSend's requireDueBy re-check runs INSIDE
+    // settleZeroBalance's own transaction, at the exact FOR UPDATE
+    // re-read of the invoice row — intercepted here to model an operator
+    // reschedule landing in the gap between the due loop's own SELECT
+    // (read once, at tick start) and this locked re-read.
+    const invoiceId = randomUUID();
+    const later = new Date(Date.now() + 3600000);
+    await mockPg('invoices').insert({
+      id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'scheduled', total: 120, credit_applied: 120,
+      subtotal: 120, line_items: '[]', visit_completion_packet_id: fixture.packetId,
+      scheduled_service_id: fixture.serviceIds[0], scheduled_send_at: new Date(Date.now() - 60000),
+    });
+    const enrollSpy = jest.spyOn(require('../services/review-request'), 'enrollForPaidInvoice');
+    const execute = mockPg.client.constructor.prototype._query;
+    let rescheduled = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(async function rescheduleBeforeLock(connection, query) {
+      if (!rescheduled && query.sql.includes('"invoices"') && query.sql.toLowerCase().includes('for update')) {
+        rescheduled = true;
+        await mockPg('invoices').where({ id: invoiceId }).update({ scheduled_send_at: later });
+      }
+      return execute.call(this, connection, query);
+    });
+    try {
+      const result = await require('../services/invoice').processScheduledSends();
+
+      expect(rescheduled).toBe(true);
+      expect(result).toEqual({ sent: 0, failed: 0, deferred: 1 });
+      const row = await mockPg('invoices').where({ id: invoiceId }).first();
+      // NOT settled — still scheduled, never flipped to prepaid.
+      expect(row.status).toBe('scheduled');
+      expect(row.prepaid_by).toBeNull();
+      // The row keeps the operator's NEW time, untouched by this pass.
+      expect(new Date(row.scheduled_send_at).getTime()).toBe(later.getTime());
+      // No packet review enrolled off a settlement that never happened.
+      expect(enrollSpy).not.toHaveBeenCalled();
+    } finally {
+      jest.restoreAllMocks();
+      await mockPg('invoices').where({ id: invoiceId }).del();
+    }
+  });
+
+  test('a zero-due SELF-PAY packet invoice settled via sendViaSMS is COMMITTED prepaid — surviving the packet claim\'s own transaction rollback (Codex round-5 P1 #4131 finding 2)', async () => {
+    // Before this round, a zero-due settlement for a packet invoice ran
+    // INSIDE claimPacketInvoiceForSend's own db.transaction() (the same
+    // transaction the packet ownership claim runs in) — the claim's own
+    // later throw (the zero-due "success sentinel" trick) then rolled
+    // that transaction, and the settlement inside it, back, while the
+    // caller still reported ok:true / settled_zero_due to whoever called
+    // sendViaSMS. settleZeroDueBeforeSend now calls settleZeroBalance
+    // through the top-level db ONLY, never a caller's own transaction — a
+    // packet-linked invoice's own doomed claim attempt (which still
+    // throws and rolls back, exactly as before) can no longer take a
+    // real settlement down with it. Proven with a real re-read AFTER the
+    // call returns, against a real Postgres transaction boundary — a
+    // mocked db can't fake a genuine commit vs. rollback.
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({
+      id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 120, credit_applied: 120,
+      subtotal: 120, line_items: '[]', visit_completion_packet_id: fixture.packetId,
+      scheduled_service_id: fixture.serviceIds[0],
+    });
+    try {
+      const result = await require('../services/invoice').sendViaSMS(invoiceId);
+
+      expect(result).toMatchObject({ sent: false, ok: true, code: 'zero_due', settled_zero_due: true });
+      // Re-read AFTER sendViaSMS has fully returned — the commit, not an
+      // in-memory result, is what this finding is about.
+      const row = await mockPg('invoices').where({ id: invoiceId }).first();
+      expect(row.status).toBe('prepaid');
+      expect(row.prepaid_by).toBe('system:zero_balance');
+    } finally {
+      await mockPg('invoices').where({ id: invoiceId }).del();
+    }
+  });
+
   test('a payer deactivation that follows a withdrawal returns the invoice to its queue and lifts the hold', async () => {
     const Invoice = require('../services/invoice');
     const Payer = require('../services/payer');

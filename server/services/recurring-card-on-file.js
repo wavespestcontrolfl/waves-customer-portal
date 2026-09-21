@@ -44,6 +44,28 @@ function isRecurringCardOnFileEnabled() {
   return flag === '1' || flag === 'true' || flag === 'on';
 }
 
+// Codex round-8 audit P1 (#4131): sendViaSMSAndEmail resolves
+// { ok: true, settled_zero_due: true } (or covered_by_credit) for an
+// invoice fully offset by deposit/account credit — genuine success, but
+// NOTHING was texted or emailed. `!!result.ok` alone reads that as
+// "delivered", which both sweep call sites below used to tell the office
+// to "follow up if it goes unpaid" on an invoice that already has nothing
+// due. Shared so both sites classify a send result the same way.
+// Codex round-8 audit P2 (#4131 slice 4, this round — "Keep generic
+// zero-balance settlement copy credit-neutral"): `settled` alone does NOT
+// prove deposit/account credit caused the zero balance — settleZeroBalance
+// (the generic settled_zero_due path) also closes an invoice retotaled or
+// discounted to a literal $0 with credit_applied = 0, no credit involved at
+// all. Only the SPECIFIC covered_by_credit reason may say the customer's
+// credit covered it; creditCovered distinguishes that from the generic case
+// so a caller's alert copy never invents a credit transaction that never
+// happened (both call sites below read it).
+function classifyDeliveryOutcome(result) {
+  const creditCovered = !!result?.covered_by_credit;
+  const settled = creditCovered || !!result?.settled_zero_due;
+  return { settled, creditCovered, delivered: !settled && !!result?.ok };
+}
+
 // Prepay-annual joins the card lane (owner ruling 2026-08-25, superseding
 // the 2026-07-12 "prepay stays an optional upsell, never the gate" carve-out).
 // The carve-out's premise — "the year is paid up front at accept" — was never
@@ -1211,23 +1233,37 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       // refusal below (Codex r10 P0).
       deliverToPayerAndResolve = async () => {
         let payerDelivered = false;
+        // Codex round-8 audit P1 (#4131): sendViaSMSAndEmail resolves
+        // { ok: true, settled_zero_due: true } (or covered_by_credit) for
+        // an invoice fully offset by deposit/account credit — genuine
+        // success, but NOTHING was delivered to the payer. `!!result.ok`
+        // alone read that as "delivered", telling the office to "follow
+        // up if it goes unpaid" on an invoice that already has nothing due.
+        let payerSettled = false;
+        let payerCreditCovered = false;
         try {
           const fenced = await withJobFence(async () => require('./invoice').sendViaSMSAndEmail(job.invoice_id));
           if (fenced.ceded) {
             logger.warn(`[recurring-cof] prepay sweep ceding estimate ${row.id}: claim superseded before payer delivery`);
             return;
           }
-          payerDelivered = !!fenced.result?.ok;
+          ({ settled: payerSettled, delivered: payerDelivered, creditCovered: payerCreditCovered } = classifyDeliveryOutcome(fenced.result));
         } catch (sendErr) {
           logger.error(`[recurring-cof] prepay sweep payer delivery failed for invoice ${job.invoice_id}: ${sendErr.message}`);
         }
         await alertUncollected(
           'Annual prepay accepted — invoice routes to a third-party payer',
-          `The accepted prepay booking is payer-billed, so no card was charged. ${payerDelivered
-            ? 'The invoice was delivered to the payer — follow up if it goes unpaid.'
-            : 'Payer invoice delivery FAILED — the sweep will retry; the payer currently has no copy.'}`,
+          `The accepted prepay booking is payer-billed, so no card was charged. ${payerSettled
+            ? (payerCreditCovered
+              ? 'The invoice settled with nothing due (deposit/account credit covered it) — no payer delivery was needed.'
+              : 'The invoice already had nothing due — no payer delivery was needed.')
+            : payerDelivered
+              ? 'The invoice was delivered to the payer — follow up if it goes unpaid.'
+              : 'Payer invoice delivery FAILED — the sweep will retry; the payer currently has no copy.'}`,
         );
-        if (payerDelivered) await resolve('skipped', { reason: 'payer_billed', delivered: true });
+        if (payerDelivered || payerSettled) {
+          await resolve('skipped', { reason: payerSettled ? 'settled_zero_due' : 'payer_billed', delivered: payerDelivered, settled: payerSettled });
+        }
       };
       if (invoice.payer_id) {
         await deliverToPayerAndResolve();
@@ -1546,28 +1582,37 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         }
       }
       let fallbackDelivered = false;
+      // Codex round-8 audit P1 (#4131): same settled_zero_due /
+      // covered_by_credit distinction as the payer branch above — a
+      // fully-offset invoice resolves ok: true with no pay link ever sent.
+      let fallbackSettled = false;
+      let fallbackCreditCovered = false;
       try {
         const fencedDelivery = await withJobFence(async () => require('./invoice').sendViaSMSAndEmail(job.invoice_id));
         if (fencedDelivery.ceded) {
           logger.warn(`[recurring-cof] prepay sweep ceding estimate ${row.id}: claim superseded before fallback delivery`);
           continue;
         }
-        fallbackDelivered = !!fencedDelivery.result?.ok;
+        ({ settled: fallbackSettled, delivered: fallbackDelivered, creditCovered: fallbackCreditCovered } = classifyDeliveryOutcome(fencedDelivery.result));
       } catch (sendErr) {
         logger.error(`[recurring-cof] prepay sweep pay-link delivery failed for invoice ${job.invoice_id}: ${sendErr.message}`);
       }
       await alertUncollected(
         'Annual prepay accepted — stranded auto-charge could not complete',
-        `The accept committed but the prepay auto-charge was interrupted and the recovery charge failed (${err.message}). ${fallbackDelivered
-          ? 'The pay link was sent — follow up if it goes unpaid.'
-          : 'Pay-link delivery ALSO failed — the customer currently has no payment path; the sweep will retry.'}`,
+        `The accept committed but the prepay auto-charge was interrupted and the recovery charge failed (${err.message}). ${fallbackSettled
+          ? (fallbackCreditCovered
+            ? 'The invoice settled with nothing due (deposit/account credit covered it) — no pay link was needed.'
+            : 'The invoice already had nothing due — no pay link was needed.')
+          : fallbackDelivered
+            ? 'The pay link was sent — follow up if it goes unpaid.'
+            : 'Pay-link delivery ALSO failed — the customer currently has no payment path; the sweep will retry.'}`,
       );
-      // Resolve only on CONFIRMED delivery (pre-push Codex P1 r7): a
-      // no-channel {ok:false} send must leave the job retryable (the
-      // stale-claim lease re-attempts) instead of retiring it with no
-      // collection path at all.
-      if (fallbackDelivered) {
-        await resolve('delivered_fallback', { reason: err.message });
+      // Resolve only on CONFIRMED delivery OR a genuine settlement
+      // (pre-push Codex P1 r7, extended round-8): a no-channel {ok:false}
+      // send must leave the job retryable (the stale-claim lease
+      // re-attempts) instead of retiring it with no collection path at all.
+      if (fallbackDelivered || fallbackSettled) {
+        await resolve('delivered_fallback', { reason: err.message, settled: fallbackSettled });
       }
     }
   }
@@ -1591,5 +1636,6 @@ module.exports = {
   completeRecurringCardEnrollment,
   _private: {
     recurringCardIntentMatchesEstimate,
+    classifyDeliveryOutcome,
   },
 };

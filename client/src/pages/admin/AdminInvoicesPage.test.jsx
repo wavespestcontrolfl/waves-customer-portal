@@ -3,6 +3,7 @@ import {
   ATTACHMENT_HELP_TEXT,
   ATTACHMENT_VISIBILITY_TEXT,
   attachmentTotalBytes,
+  batchSendToast,
   buildInvoiceListParams,
   canAddInvoiceAttachments,
   invoiceAttachmentLimitLabel,
@@ -277,9 +278,14 @@ describe("AdminInvoicesPage create-path toast edge cases", () => {
 });
 
 describe("AdminInvoicesPage send outcome/error helpers", () => {
-  it("sendOutcomeMessage reads the four no-op-success flags a 200 response can carry", () => {
+  it("sendOutcomeMessage reads the six no-op-success flags a 200 response can carry", () => {
     expect(sendOutcomeMessage({ covered_by_credit: true })).toBe(
       "fully covered by account credit, nothing to send",
+    );
+    // #4131 slice 4: a zero-due visit invoice settled (now prepaid) rather
+    // than being delivered — same no-op-success shape as covered_by_credit.
+    expect(sendOutcomeMessage({ settled_zero_due: true })).toBe(
+      "nothing due — invoice marked prepaid, nothing to send",
     );
     expect(sendOutcomeMessage({ already_delivered: true })).toBe(
       "already delivered",
@@ -291,6 +297,12 @@ describe("AdminInvoicesPage send outcome/error helpers", () => {
     // already won the race — a no-op success, never a failure.
     expect(sendOutcomeMessage({ in_progress: true })).toBe(
       "already being delivered",
+    );
+    // Codex round-9 audit P2 (#4131 slice 4): the completed terminal-visit
+    // void — POST /:id/send now resolves this with ok:true, voided:true —
+    // is a genuine no-op success, never a failed-send toast.
+    expect(sendOutcomeMessage({ ok: true, voided: true })).toBe(
+      "the linked visit is terminal — voided instead of sent, nothing due",
     );
     expect(sendOutcomeMessage({ ok: true, sms: { ok: true } })).toBeNull();
     expect(sendOutcomeMessage(null)).toBeNull();
@@ -310,6 +322,26 @@ describe("AdminInvoicesPage send outcome/error helpers", () => {
     );
     expect(sendErrorMessage({ code: "send_claim_lost" })).toBeNull();
     expect(sendErrorMessage(new Error("boom"))).toBeNull();
+  });
+
+  // Codex round-3 P2 #4131: settled_count only exists on /batch/send — a
+  // zero-due invoice settled instead of sent must show up distinctly, or
+  // sent_count + failed_count alone reads as an unexplained shortfall.
+  it("batchSendToast surfaces settled_count alongside held_count and failed_count", () => {
+    expect(
+      batchSendToast({ sent_count: 2, total: 3, settled_count: 1 }, "invoice"),
+    ).toBe("Sent 2 of 3 invoices (1 settled — nothing due)");
+    expect(
+      batchSendToast({ sent_count: 1, total: 1 }, "invoice"),
+    ).toBe("Sent 1 of 1 invoice");
+    expect(
+      batchSendToast(
+        { sent_count: 1, total: 4, settled_count: 1, held_count: 1, failed_count: 1 },
+        "invoice",
+      ),
+    ).toBe(
+      "Sent 1 of 4 invoices (1 settled — nothing due) (1 held for review) (1 failed)",
+    );
   });
 });
 
