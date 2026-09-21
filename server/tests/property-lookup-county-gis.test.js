@@ -528,7 +528,8 @@ describe('lookupSubdivisionMedianLivingSqft — plat median with range', () => {
       .mockResolvedValueOnce(living([3050, 3180, 2650, 3120, 3071]));
     const result = await lookupSubdivisionMedianLivingSqft({ county: 'Manatee', subdivision: 'EXAMPLE PLAT PH I' });
     expect(global.fetch).toHaveBeenCalledTimes(2);
-    expect(decodeURIComponent(String(global.fetch.mock.calls[1][0]))).toContain('resultOffset=1000');
+    // Offset = rows actually returned by the cut-off page (4), not the page size.
+    expect(decodeURIComponent(String(global.fetch.mock.calls[1][0]))).toContain('resultOffset=4');
     expect(result).toMatchObject({ medianSqft: 3071, sampleCount: 9, minSqft: 2101, maxSqft: 3242 });
   });
 
@@ -555,6 +556,15 @@ describe('lookupSubdivisionMedianLivingSqft — plat median with range', () => {
     } finally {
       Date.now = realNow;
     }
+  });
+
+  test('the kill switch reports diag.skipped, never a settled answer', async () => {
+    process.env.COUNTY_PARCEL_GIS_DISABLED = '1';
+    global.fetch = jest.fn();
+    const diag = {};
+    await expect(lookupSubdivisionMedianLivingSqft({ county: 'Manatee', subdivision: 'ANY PLAT' }, { diag })).resolves.toBeNull();
+    expect(diag).toEqual({ skipped: true });
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 
   test('diag.failed marks an outage so callers can tell it from a thin plat', async () => {

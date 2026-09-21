@@ -893,6 +893,9 @@ async function querySubdivisionLivingSqft(county, whereName, deadlineMs) {
   const safe = String(whereName || '').replace(/'/g, '').trim();
   if (!cfg || !safe) return null;
   const values = [];
+  // Offset advances by the rows the server actually RETURNED (a cut-off
+  // page can be shorter than the page size), never by the page size.
+  let offset = 0;
   for (let page = 0; page < SUBDIVISION_MAX_PAGES; page += 1) {
     const params = new URLSearchParams({
       f: 'json',
@@ -900,7 +903,7 @@ async function querySubdivisionLivingSqft(county, whereName, deadlineMs) {
       outFields: cfg.livingField,
       returnGeometry: 'false',
       resultRecordCount: String(SUBDIVISION_PAGE_SIZE),
-      ...(page > 0 ? { resultOffset: String(page * SUBDIVISION_PAGE_SIZE) } : {}),
+      ...(offset > 0 ? { resultOffset: String(offset) } : {}),
     });
     const remainingMs = deadlineMs - Date.now();
     if (remainingMs <= 0) throw new Error('subdivision layer deadline exhausted');
@@ -915,11 +918,14 @@ async function querySubdivisionLivingSqft(county, whereName, deadlineMs) {
       clearTimeout(timer);
     }
     if (data?.error) throw new Error(`subdivision layer error: ${data.error.message || data.error.code}`);
-    for (const f of (Array.isArray(data?.features) ? data.features : [])) {
+    const features = Array.isArray(data?.features) ? data.features : [];
+    for (const f of features) {
       const v = positiveOrNull(ciAttr(f?.attributes || {})(cfg.livingField));
       if (v) values.push(v);
     }
-    if (data?.exceededTransferLimit !== true) return values.sort((a, b) => a - b);
+    // No rows with the limit flag set would loop on the same offset forever.
+    if (data?.exceededTransferLimit !== true || features.length === 0) return values.sort((a, b) => a - b);
+    offset += features.length;
   }
   // Still truncated after the page cap: an incomplete, unordered population.
   logger.warn('[county-parcel-gis] subdivision sample truncated past the page cap', { county, pages: SUBDIVISION_MAX_PAGES });
@@ -938,7 +944,11 @@ async function querySubdivisionLivingSqft(county, whereName, deadlineMs) {
 // tell "the county answered and the sample was too thin" (a settled
 // negative) from "the county never answered" (worth retrying later).
 async function lookupSubdivisionMedianLivingSqft({ county, subdivision } = {}, options = {}) {
-  if (isDisabled()) return null;
+  if (isDisabled()) {
+    // Kill switch: nothing was attempted — never a settled negative.
+    if (options.diag && typeof options.diag === 'object') options.diag.skipped = true;
+    return null;
+  }
   const key = normalizeCountyName(county);
   if (!SUBDIVISION_MEDIAN_FIELDS[key] || !String(subdivision || '').trim()) return null;
   const timeoutMs = timeoutMsFor(options);

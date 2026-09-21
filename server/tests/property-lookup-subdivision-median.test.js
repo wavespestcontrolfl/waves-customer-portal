@@ -192,6 +192,14 @@ describe('performPropertyLookup — plat median for an unassessed vacant parcel'
     expect(result.enriched.fieldVerifyFlags.find((f) => f.field === 'homeSqFt').reason).toContain('defaults to 2,000');
   });
 
+  it('leaves no stamp under the county GIS kill switch, so the query is retried once it is lifted', async () => {
+    process.env.COUNTY_PARCEL_GIS_DISABLED = '1';
+    const result = await performPropertyLookup(ADDRESS, { refresh: true });
+    expect(platQueries).toHaveLength(0);
+    expect('_subdivisionMedian' in result.propertyRecord).toBe(false);
+    expect(result.enriched.subdivisionMedian).toBeUndefined();
+  });
+
   it('is fail-open: a plat-layer outage leaves the lookup intact with no estimate', async () => {
     const baseFetch = global.fetch;
     global.fetch = jest.fn(async (url) => {

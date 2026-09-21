@@ -570,7 +570,10 @@ async function performPropertyLookupCore(address, options = {}) {
       // Accuracy mode (the admin wrapper) bypasses the interactive budget
       // gate like the vision and stories stages do — a slow property search
       // must not cost the exact new-construction lookup this serves.
-      const medianBudgetMs = Math.max(0, remainingLookupMs(t0, timing) - timing.responseMarginMs);
+      // Interactive callers also keep the vision stage's minimum: this runs
+      // BEFORE satellite vision, and eating into that floor would silently
+      // drop the turf/pool signals downstream (Codex r4 P2).
+      const medianBudgetMs = Math.max(0, remainingLookupMs(t0, timing) - timing.responseMarginMs - timing.visionMinRemainingMs);
       if (options.prioritizeAccuracy || medianBudgetMs >= MIN_SUBDIVISION_MEDIAN_BUDGET_MS) {
         // The helper is itself fail-open (a layer outage logs
         // "[county-parcel-gis] subdivision median lookup failed" and resolves
@@ -587,11 +590,12 @@ async function performPropertyLookupCore(address, options = {}) {
         });
         if (median) {
           result.propertyRecord._subdivisionMedian = { ...median, county: parcelMeta.county };
-        } else if (!diag.failed) {
+        } else if (!diag.failed && !diag.skipped) {
           // The county ANSWERED and the plat is too thin (or truncated): a
           // settled negative. Stamp an explicit null so the profile reports
           // "withheld" and the call estimator doesn't repeat the same query
-          // (Codex r3 P1). An outage leaves no stamp — that IS worth a retry.
+          // (Codex r3 P1). An outage or the kill switch leaves no stamp —
+          // those ARE worth a retry once the layer/switch is back.
           result.propertyRecord._subdivisionMedian = null;
         }
       }
