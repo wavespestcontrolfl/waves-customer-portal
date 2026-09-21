@@ -38,6 +38,23 @@ competing units still need interpretation. Amount-free policy and all318
 frozen billing assertions remain later acceptance work. Scanner normalization,
 amount grammar and newline limitations remain inherited.
 
+Known limitations (review round 3, recorded under the inactive-module
+standard — no runtime caller, every result is `needs_review`):
+
+- `There is no fee per visit`: a direct nominal link that begins at `fee`
+  records `negated: false`; a bounded `no` determiner is not carried as
+  polarity, so an amount-free negative billing sentence produces the same
+  relation as `There is a fee per visit`. A later interpreter must read the
+  preceding determiner before treating a direct nominal link as affirmative.
+- Malformed pre-copular negation (`The fee not is per visit`, `The fee never
+  was per visit`) is accepted like `The fee is not per visit`: the connector
+  slot order permits negation before the copula without a modal.
+- Recognition is cubic on punctuation-dense clauses: `endings()` rescans the
+  amount relations for every unit/frame pair. The scanner's 8,192-byte cap
+  bounds it, but a pathological ~5.5 KB run of repeated `fee,$1,/mo,` segments
+  takes on the order of ten seconds. Precomputing endings per frame is the
+  follow-up before any runtime caller exists.
+
 ```sh
 npx jest server/tests/email-reply-billing-relations.test.js --runInBand
 ```
