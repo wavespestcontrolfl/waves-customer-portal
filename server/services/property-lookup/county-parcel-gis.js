@@ -906,8 +906,11 @@ async function querySubdivisionLivingSqft(county, whereName, timeoutMs) {
   }
 }
 
-// Returns { medianSqft, sampleCount, p25, p75, subdivisionQueried } or null
-// (unsupported county, no subdivision, too few samples, provider failure).
+// Returns { medianSqft, sampleCount, minSqft, maxSqft, p25, p75,
+// subdivisionQueried } or null (unsupported county, no subdivision, too few
+// samples, provider failure). min/max are the assessed neighbors' range —
+// the admin lookup shows it beside the median so an operator can judge how
+// tight the plat's plans run before confirming a size with the customer.
 async function lookupSubdivisionMedianLivingSqft({ county, subdivision } = {}, options = {}) {
   if (isDisabled()) return null;
   const key = normalizeCountyName(county);
@@ -933,6 +936,8 @@ async function lookupSubdivisionMedianLivingSqft({ county, subdivision } = {}, o
     return {
       medianSqft: Math.round(median),
       sampleCount: values.length,
+      minSqft: values[0],
+      maxSqft: values[values.length - 1],
       p25: values[Math.floor(values.length / 4)],
       p75: values[Math.floor((values.length * 3) / 4)],
       subdivisionQueried: queried,
@@ -955,6 +960,7 @@ module.exports = {
   dorMajorCategory,
   normalizeCountyName,
   lookupSubdivisionMedianLivingSqft,
+  SUBDIVISION_MEDIAN_MIN_SAMPLES,
   _private: {
     COUNTY_LAYERS,
     queryCountyLayer,

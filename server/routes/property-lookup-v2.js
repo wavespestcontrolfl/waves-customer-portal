@@ -20,6 +20,7 @@ const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, look
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
 const { isInServiceAreaBox } = require('../services/service-area');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
+const { lookupSubdivisionMedianLivingSqft, SUBDIVISION_MEDIAN_MIN_SAMPLES } = require('../services/property-lookup/county-parcel-gis');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
 const {
   attachFloodZoneToCachedLookup,
@@ -135,6 +136,11 @@ function getLookupTimingConfig() {
     storiesTimeoutMs: positiveIntEnv('AI_STORIES_TIMEOUT_MS', DEFAULT_AI_STORIES_TIMEOUT_MS),
   };
 }
+
+// Plat-median query for unassessed vacant parcels: one county GIS call,
+// skipped outright when the lookup budget can't fit a meaningful attempt.
+const SUBDIVISION_MEDIAN_TIMEOUT_MS = 3500;
+const MIN_SUBDIVISION_MEDIAN_BUDGET_MS = 500;
 
 function remainingLookupMs(startMs, timing) {
   return Math.max(0, timing.totalBudgetMs - (Date.now() - startMs));
@@ -540,6 +546,29 @@ async function performPropertyLookupCore(address, options = {}) {
         if (construction) result.propertyRecord._constructionActivity = construction;
       } catch (err) {
         result.errors.push({ source: 'construction-permits', message: err?.message || String(err) });
+      }
+    }
+
+    // Unassessed vacant parcel (plat filed, roll not posted — the LWR /
+    // Parrish new-construction window): no remote source carries the home's
+    // size, but the already-assessed neighbors in the same recorded plat do.
+    // Stamp the plat median on the record (rides the cache like _floodZone;
+    // the vacant row's short TTL re-derives it once the roll catches up) so
+    // the enriched profile can offer a SOURCED estimate in place of the flat
+    // 2,000 sq ft default. Never a measurement: homeSqFt stays 0 and the
+    // squareFootage evidence stays empty — subdivisionMedianEstimate is the
+    // only reader. Positive-only, fail-open, and bounded by the remaining
+    // lookup budget so it can't push the response past the client timeout.
+    const vacantParcel = detectUnassessedVacantParcel(result.propertyRecord);
+    const platName = vacantParcel?.subdivision || parcelMeta?.subdivision || null;
+    if (vacantParcel && parcelMeta?.county && platName) {
+      const medianBudgetMs = Math.max(0, remainingLookupMs(t0, timing) - timing.responseMarginMs);
+      if (medianBudgetMs >= MIN_SUBDIVISION_MEDIAN_BUDGET_MS) {
+        const median = await lookupSubdivisionMedianLivingSqft(
+          { county: parcelMeta.county, subdivision: platName },
+          { timeoutMs: Math.min(medianBudgetMs, SUBDIVISION_MEDIAN_TIMEOUT_MS) },
+        ).catch(() => null);
+        if (median) result.propertyRecord._subdivisionMedian = { ...median, county: parcelMeta.county };
       }
     }
   }
@@ -1703,6 +1732,31 @@ function discardVisionAreaFields(ai) {
   return out;
 }
 
+// Plat-median size estimate for an unassessed vacant parcel (stamped on the
+// record by the fresh lookup path as _subdivisionMedian). Read-side gate:
+// the estimate exists ONLY while the parcel still reads as unassessed — the
+// moment any real building fact lands (tech-verified sqft, the roll posting
+// the home) the detector returns null and the estimate disappears, so a
+// stale neighbor median can never sit beside a real measurement. The
+// sample floor mirrors the call estimator's source arbitration.
+function subdivisionMedianEstimate(rc) {
+  const stamped = rc?._subdivisionMedian;
+  if (!stamped || !detectUnassessedVacantParcel(rc)) return null;
+  const medianSqft = Math.round(Number(stamped.medianSqft));
+  const sampleCount = Math.round(Number(stamped.sampleCount)) || 0;
+  if (!(medianSqft > 0) || sampleCount < SUBDIVISION_MEDIAN_MIN_SAMPLES) return null;
+  const positive = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Math.round(Number(v)) : null);
+  return {
+    medianSqft,
+    sampleCount,
+    minSqft: positive(stamped.minSqft),
+    maxSqft: positive(stamped.maxSqft),
+    subdivision: stamped.subdivisionQueried || null,
+    county: stamped.county || null,
+    sourceLabel: `median of ${sampleCount.toLocaleString('en-US')} assessed homes in this plat`,
+  };
+}
+
 function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = null, lookupAddress = null) {
   // Association aggregate dimensions survive in _parcel even when a
   // same-weight PAO record (a single condo unit) won the merge — prefer them
@@ -2072,6 +2126,13 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // that would otherwise trust the defaulted dimensions can see they're
     // placeholders.
     unassessedVacantParcel: detectUnassessedVacantParcel(rc) ? true : undefined,
+    // Plat-median size ESTIMATE for that vacant window — the only sourced
+    // size signal while the roll carries no building. Exposed beside
+    // homeSqFt (which stays 0) so the client can prefill the estimator with
+    // it and label it as an estimate, instead of the silent 2,000 sq ft
+    // default. A unit-inside-a-building lookup never carries one (its
+    // parcel dims were dropped on purpose).
+    subdivisionMedian: residentialUnitLookup ? null : subdivisionMedianEstimate(rc),
     // Machine-readable twin of the parkParcel verify flag (multi-situs master
     // parcel — land-lease mobile-home park or similar; the roll vouches for
     // the address but not for any per-unit dimension).
@@ -3752,10 +3813,13 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   // Home sq ft has no source (client + lead automation fall back to a flat
   // 2,000 sq ft default — there is no lot-size estimator, so say so).
   if (rc && !rc.squareFootage && rc.lotSize) {
+    const platMedian = vacantParcel ? subdivisionMedianEstimate(rc) : null;
     flags.push({
       field: 'homeSqFt',
       reason: vacantParcel
-        ? 'Home sq ft not on the county roll (vacant parcel — possibly new construction) — estimator defaults to 2,000 sq ft; replace with the customer\'s plan sq ft'
+        ? (platMedian
+          ? `Home sq ft not on the county roll (vacant parcel — possibly new construction). Prefilled with the median of ${platMedian.sampleCount.toLocaleString('en-US')} assessed homes in this plat, ${platMedian.medianSqft.toLocaleString('en-US')} sq ft${platMedian.minSqft && platMedian.maxSqft ? ` (range ${platMedian.minSqft.toLocaleString('en-US')}–${platMedian.maxSqft.toLocaleString('en-US')})` : ''} — confirm the size with the customer before pricing`
+          : 'Home sq ft not on the county roll (vacant parcel — possibly new construction) — estimator defaults to 2,000 sq ft; replace with the customer\'s plan sq ft')
         : 'Home sq ft missing from records — estimator defaults to 2,000 sq ft; verify before pricing',
       priority: 'HIGH'
     });
@@ -5219,6 +5283,7 @@ module.exports.parcelOverlayEnabled = parcelOverlayEnabled;
 module.exports.buildParcelOverlayParam = buildParcelOverlayParam;
 module.exports._private = {
   cachedAggregateResolvesToOwnUnit,
+  subdivisionMedianEstimate,
   inFlightLookups,
   lookupCoalesceKey,
   applyParcelTurfBound,

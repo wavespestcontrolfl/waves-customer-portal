@@ -509,14 +509,24 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
 
   let subdivisionMedian = null;
   if (parcelView?.unassessedVacant && parcelView.subdivision && parcelView.county) {
-    try {
-      const { lookupSubdivisionMedianLivingSqft } = require('../property-lookup/county-parcel-gis');
-      subdivisionMedian = await lookupSubdivisionMedianLivingSqft({
-        county: parcelView.county,
-        subdivision: parcelView.subdivision,
-      });
-    } catch (err) {
-      logger.warn(`[estimator-engine] subdivision median failed (continuing without): ${err.message}`);
+    // The lookup's fresh path already queried the plat median and stamped
+    // it on the record (property-lookup-v2: _subdivisionMedian, exposed as
+    // enriched.subdivisionMedian) — reuse it rather than hitting the county
+    // layer a second time. The direct dig remains only for rows the lookup
+    // served without a stamp (cached before the stamp existed).
+    const stamped = enriched?.subdivisionMedian || propertyRecord?._subdivisionMedian || null;
+    if (Number(stamped?.medianSqft) > 0) {
+      subdivisionMedian = stamped;
+    } else {
+      try {
+        const { lookupSubdivisionMedianLivingSqft } = require('../property-lookup/county-parcel-gis');
+        subdivisionMedian = await lookupSubdivisionMedianLivingSqft({
+          county: parcelView.county,
+          subdivision: parcelView.subdivision,
+        });
+      } catch (err) {
+        logger.warn(`[estimator-engine] subdivision median failed (continuing without): ${err.message}`);
+      }
     }
   }
 

@@ -43,7 +43,7 @@ import {
   manualDiscountTypeForCatalogRow,
 } from "../../lib/discountCatalog";
 import { humanizeQuoteReason, quoteRequiredReasonNote } from "../../lib/quoteDisplay";
-import { EMPTY_PROPERTY_MEASUREMENTS, palmPrefillAllowed } from "../../lib/lookupPrefill";
+import { EMPTY_PROPERTY_MEASUREMENTS, palmPrefillAllowed, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian } from "../../lib/lookupPrefill";
 import PropertyLookupResult from "../../components/admin/PropertyLookupResult";
 import { computeProvisionalState, provisionalSummary } from "../../utils/estimateProvisional";
 
@@ -2459,6 +2459,7 @@ export default function EstimateToolViewV2({
     const address = form.address.trim();
     if (!key || !address || !Number.isFinite(value) || value <= 0) return;
     if (field === "stories" && !form._storiesEdited && enrichedProfile?.storiesSource === "default") return;
+    if (field === "squareFootage" && homeSqFtIsUnverifiedPlatMedian(form, enrichedProfile)) return;
     const fields = { [field]: value };
     const version = verificationVersionRef.current;
     setVerifySaveState((s) => ({ ...s, [field]: "saving" }));
@@ -3002,7 +3003,9 @@ export default function EstimateToolViewV2({
         const next = {
           ...f,
           ...upd,
-          homeSqFt: f._homeSqFtEdited ? f.homeSqFt : (ep.homeSqFt ? String(ep.homeSqFt) : ""),
+          // Record value, else the plat-median estimate for an unassessed
+          // vacant parcel (lib/lookupPrefill.js), else empty.
+          homeSqFt: f._homeSqFtEdited ? f.homeSqFt : lookupHomeSqFtPrefill(ep),
           lotSqFt: ep.residentialUnitLookup ? "" : f._lotSqFtEdited ? f.lotSqFt : (ep.lotSqFt ? String(ep.lotSqFt) : ""),
           stories: f._storiesEdited ? f.stories : (ep.stories ? String(ep.stories) : "1"),
           ...(termiteFootprintNumber ? { _termiteFootprintAuto: true } : {}),

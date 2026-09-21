@@ -62,6 +62,17 @@ function publicPropertySummary(record) {
   };
 }
 
+// Public copy of the enriched profile. The admin lookup's plat-median
+// estimate (subdivisionMedian: plat name, county, neighbor sample and
+// range for an unassessed vacant parcel) is staff-only context — this
+// unauthenticated route's contract returns facts for the requested parcel,
+// so the block is dropped from both the response and the lead snapshot.
+function publicEnrichedProfile(enriched) {
+  if (!enriched || typeof enriched !== 'object') return enriched ?? null;
+  const { subdivisionMedian: _omitted, ...rest } = enriched;
+  return rest;
+}
+
 function firstNonEmpty(...values) {
   for (const value of values) {
     if (value === undefined || value === null) continue;
@@ -394,6 +405,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
 
     const result = await performPropertyLookup(parcelLookupAddress);
     const propertyRecord = publicPropertySummary(result.propertyRecord || result.rentcast);
+    const enriched = publicEnrichedProfile(result.enriched);
 
     // Persist the enriched profile on the lead so a stale/abandoned row is
     // still useful for follow-up. On an attached call-pipeline lead, MERGE so
@@ -401,7 +413,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
     try {
       const completeStage = {
         stage: 'property_lookup_complete',
-        enriched: result.enriched || null,
+        enriched: enriched || null,
         propertyRecord,
         rentcast: propertyRecord,
         avm: result.avm || null,
@@ -427,7 +439,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
 
     res.json({
       lead_id: lead.id,
-      enriched: result.enriched,
+      enriched,
       propertyRecord,
       rentcast: propertyRecord,
       satellite: result.satellite ? {
@@ -451,6 +463,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
 
 module.exports = router;
 module.exports._test = {
+  publicEnrichedProfile,
   normalizeServiceInterest,
   formatServiceInterestForFrequency,
 };

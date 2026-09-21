@@ -25,6 +25,52 @@ export function palmPrefillAllowed(enrichedProfile) {
   return enrichedProfile.palmCountTrusted !== false;
 }
 
+/**
+ * Plat-median home-size prefill for an unassessed vacant parcel (new
+ * construction the county roll hasn't posted yet). The server exposes
+ * `subdivisionMedian` ONLY while the parcel carries no building fact, so a
+ * real measurement (record or tech-verified) always wins by construction:
+ * this helper is consulted only when the lookup's own homeSqFt is empty.
+ * An unconfirmed address (the lookup's `address` verify flag: Google
+ * snapped a mistyped entry to SOME parcel) yields nothing — a median for a
+ * possibly wrong parcel must never reach pricing. Returns the median as a
+ * positive integer, or null when there is nothing sourced to prefill — the
+ * operator then sees the empty field and the pricing engine's flat 2,000
+ * sq ft default, exactly as before.
+ */
+export function subdivisionMedianPrefillSqFt(enrichedProfile) {
+  if (!enrichedProfile || Number(enrichedProfile.homeSqFt) > 0) return null;
+  if ((enrichedProfile.fieldVerifyFlags || []).some((flag) => flag?.field === "address")) return null;
+  const median = Number(enrichedProfile.subdivisionMedian?.medianSqft);
+  if (!Number.isFinite(median) || median <= 0) return null;
+  return Math.round(median);
+}
+
+/**
+ * Home sq ft the lookup prefills into the estimator: the record's own value
+ * first, the plat-median estimate second, empty otherwise. A value typed by
+ * the operator (`_homeSqFtEdited`) is handled by the caller and never
+ * overwritten here.
+ */
+export function lookupHomeSqFtPrefill(enrichedProfile) {
+  if (!enrichedProfile) return "";
+  if (Number(enrichedProfile.homeSqFt) > 0) return String(enrichedProfile.homeSqFt);
+  const median = subdivisionMedianPrefillSqFt(enrichedProfile);
+  return median ? String(median) : "";
+}
+
+/**
+ * The "Verify home living area" save must never stamp a plat-median
+ * PREFILL as a tech-verified measurement (that would poison the cached
+ * record with a neighbor's number under the strongest source type). The
+ * guard clears the moment the operator edits the field — the same rule the
+ * defaulted stories value already follows.
+ */
+export function homeSqFtIsUnverifiedPlatMedian(form, enrichedProfile) {
+  if (!form || form._homeSqFtEdited) return false;
+  return subdivisionMedianPrefillSqFt(enrichedProfile) !== null;
+}
+
 // Measurements belong to the property, regardless of whether its address
 // changes through typing, Places, a customer selection, or an incoming lead.
 // Service selections and contact/linkage fields belong to the estimate.

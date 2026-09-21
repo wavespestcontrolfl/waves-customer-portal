@@ -494,3 +494,41 @@ describe('buildCadastralRecord with a county GIS parcel', () => {
     expect(record._fieldEvidence.propertyType[0].sourceType).toBe('cadastral');
   });
 });
+
+describe('lookupSubdivisionMedianLivingSqft — plat median with range', () => {
+  const { lookupSubdivisionMedianLivingSqft } = countyGis;
+  const living = (values) => ({
+    ok: true,
+    json: async () => ({ features: values.map((v) => ({ attributes: { BLDGS_SQFT_LIVING: v } })) }),
+  });
+
+  test('returns median, sample count, and the neighbors\' min/max range', async () => {
+    global.fetch = jest.fn().mockResolvedValue(living([3242, 2101, 3100, 2980, 3050, 3180, 2650, 3120, 3071]));
+    const result = await lookupSubdivisionMedianLivingSqft({ county: 'Manatee County', subdivision: 'EXAMPLE ESPLANADE PH VI SUBPH A & B PB80/131' });
+    expect(result).toMatchObject({ medianSqft: 3071, sampleCount: 9, minSqft: 2101, maxSqft: 3242 });
+    expect(result.subdivisionQueried).toBe('EXAMPLE ESPLANADE PH VI SUBPH A & B PB80/131');
+    const url = String(global.fetch.mock.calls[0][0]);
+    expect(url).toContain('gis.manateepao.gov');
+    expect(decodeURIComponent(url).replace(/\+/g, ' ')).toContain('BLDGS_SQFT_LIVING > 0');
+  });
+
+  test('widens a thin phase to the base plat name and reports which name answered', async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce(living([2101, 2200]))
+      .mockResolvedValueOnce(living([1558, 1678, 1920, 1920, 2277, 2421, 2421, 3070, 3101]));
+    const result = await lookupSubdivisionMedianLivingSqft({ county: 'Manatee', subdivision: 'EXAMPLE ESPLANADE PH VI SUBPH A & B PB80/131' });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(decodeURIComponent(String(global.fetch.mock.calls[1][0])).replace(/\+/g, ' ')).toContain("LIKE 'EXAMPLE ESPLANADE%'");
+    expect(result).toMatchObject({ medianSqft: 2277, sampleCount: 9, minSqft: 1558, maxSqft: 3101, subdivisionQueried: 'EXAMPLE ESPLANADE' });
+  });
+
+  test('null below the sample floor, on layer failure, and for an unsupported county', async () => {
+    global.fetch = jest.fn().mockResolvedValue(living([2101, 2200, 2300]));
+    await expect(lookupSubdivisionMedianLivingSqft({ county: 'Manatee', subdivision: 'TINY PLAT' })).resolves.toBeNull();
+    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 503 });
+    await expect(lookupSubdivisionMedianLivingSqft({ county: 'Manatee', subdivision: 'ANY PLAT' })).resolves.toBeNull();
+    global.fetch = jest.fn();
+    await expect(lookupSubdivisionMedianLivingSqft({ county: 'Charlotte', subdivision: 'ANY PLAT' })).resolves.toBeNull();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+});
