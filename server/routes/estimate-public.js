@@ -12304,6 +12304,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     let invoiceAmount = txResult.invoiceAmount || null;
     let invoicePayUrl = txResult.invoicePayUrl || null;
     let invoiceLinkDelivered = false;
+    // A fully-offset invoice's delivery resolves settled_zero_due (or
+    // covered_by_credit) — ok: true, but nothing was texted or emailed
+    // (Codex round-8 audit P1 #4131): distinct from invoiceLinkDelivered,
+    // so the notification/success-payload builders below say "settled",
+    // never "sent", and never keep a pay link for an invoice with nothing
+    // due.
+    let invoiceSettledByCredit = false;
     // Quiet-hours cohort (GH Codex P2 r5): a phone-only after-hours accept
     // queues the invoice SMS for the 8 AM window open (sms.scheduled) and
     // returns ok:false — delivery is in flight, not failed. Tracked apart
@@ -13617,7 +13624,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         }
         if (delivery?.payUrl) invoicePayUrl = delivery.payUrl;
         if (delivery?.sms?.scheduled === true) invoiceSmsQueued = true;
-        if (delivery?.ok) {
+        if (delivery?.settled_zero_due || delivery?.covered_by_credit) {
+          // Codex round-8 audit P1 (#4131): sendViaSMSAndEmail resolves
+          // { ok: true, settled_zero_due: true } (or covered_by_credit)
+          // for a visit-linked invoice fully offset by deposit/account
+          // credit — a genuine success, but NOTHING was texted or
+          // emailed. `delivery.ok` alone can't distinguish this from an
+          // actual send, so it must be checked FIRST: never
+          // invoiceLinkDelivered, and never a pay link presented as
+          // actionable for an invoice that already has nothing due.
+          invoiceSettledByCredit = true;
+          invoicePayUrl = null;
+        } else if (delivery?.ok) {
           invoiceLinkDelivered = true;
         } else {
           const errors = [
@@ -13629,7 +13647,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       } catch (deliveryErr) {
         logger.error(`[estimate-accept] Invoice delivery failed: ${deliveryErr.message}`);
       }
-      logger.info(`[estimate-accept] Accept invoice ${invoiceId} created for estimate ${estimate.id} — $${invoiceAmount}; delivery=${invoiceLinkDelivered ? 'sent' : 'failed'}`);
+      logger.info(`[estimate-accept] Accept invoice ${invoiceId} created for estimate ${estimate.id} — $${invoiceAmount}; delivery=${invoiceSettledByCredit ? 'settled' : invoiceLinkDelivered ? 'sent' : 'failed'}`);
     }
 
     // Annual-prepay acceptance text (owner ruling 2026-08-31: revived — it
@@ -13897,6 +13915,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         invoiceMode,
         invoiceLinkDelivered,
         invoicePayUrl,
+        invoiceSettledByCredit,
         payerBilled: invoiceIsPayerBilled,
         reservationCommitted,
         bookingUrl,
@@ -13965,7 +13984,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // the success payload must say "confirmed", never "pay your prepay
       // invoice" (same override the already-accepted retry path derives
       // from the live invoice status).
-      invoiceSettled: ['paid', 'processing', 'ambiguous', 'deferred'].includes(prepayAutoCharge?.status),
+      invoiceSettled: ['paid', 'processing', 'ambiguous', 'deferred'].includes(prepayAutoCharge?.status) || invoiceSettledByCredit,
       // 'ambiguous' is preserved (Codex r6 P1) — the client renders
       // tender-neutral "we're confirming your payment" copy for it, never
       // a bank-debit assertion.
@@ -18990,6 +19009,11 @@ function buildAcceptNotificationPayload({
   invoiceMode = false,
   invoiceLinkDelivered = false,
   invoicePayUrl = null,
+  // Codex round-8 audit P1 (#4131): a visit-linked invoice fully offset
+  // by deposit/account credit resolves ok: true with NOTHING texted or
+  // emailed — checked before every billing-term branch below, same
+  // precedence as payerBilled.
+  invoiceSettledByCredit = false,
   payerBilled = false,
   reservationCommitted = false,
   bookingUrl = null,
@@ -19041,6 +19065,23 @@ function buildAcceptNotificationPayload({
       adminBody: `${adminPlanLabel} approved. Invoice billed to a third-party payer — sent to their AP inbox.`,
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${planLabel} is approved. The invoice was sent to your billing contact — nothing is due from you.`,
+      customerLink: '/?tab=billing',
+    };
+  }
+
+  // Codex round-8 audit P1 (#4131): the invoice resolved settled_zero_due
+  // (or covered_by_credit) — a genuine success, but nothing was texted or
+  // emailed, so the "pay link sent" copy every branch below would build
+  // is false. Checked before every billing-term branch, same precedence
+  // as payerBilled — this can happen for any of them (a deposit/credit
+  // fully offsetting the invoice regardless of billing mode).
+  if (invoiceSettledByCredit) {
+    const planLabel = treatAsOneTime ? serviceLabel : `${waveguardTier} WaveGuard plan`;
+    return {
+      adminTitle: `Estimate accepted: ${customerName}`,
+      adminBody: `${planLabel} approved — the invoice was fully covered by deposit/account credit; nothing is due, no pay link was sent.`,
+      customerTitle: 'Estimate accepted',
+      customerBody: `Your ${planLabel} is approved. Your deposit/account credit covered the invoice in full — nothing is due.`,
       customerLink: '/?tab=billing',
     };
   }

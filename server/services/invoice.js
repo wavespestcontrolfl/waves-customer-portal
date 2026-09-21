@@ -1293,8 +1293,8 @@ async function refuseZeroDuePreclaimedInvoice(invoiceId, current, database) {
 // than being silently reinterpreted as "nothing due, try again later" —
 // that swallowed a permanently unsettleable invoice into an infinite,
 // silent retry loop (pre-push audit P1, #4131 slice 4).
-async function settleZeroDueVisitInvoice(invoiceId, database = db) {
-  const settlement = await InvoiceService.settleZeroBalance(invoiceId, database);
+async function settleZeroDueVisitInvoice(invoiceId, database = db, { requireDueBy = null } = {}) {
+  const settlement = await InvoiceService.settleZeroBalance(invoiceId, database, { requireDueBy });
   if (settlement?.settled) {
     logger.info(`[invoice] ${invoiceId}: nothing due on the visit-linked invoice — settled instead of delivering a $0 pay link`);
     return settlement;
@@ -1361,6 +1361,18 @@ async function settleZeroDueBeforeSend(invoiceId, { fenceOwnership = false, row 
   // the invoice is actually zero-due, exactly like every caller before
   // this chokepoint existed. A caller with only an invoiceId (a claim
   // path's zero_due_detected catch) reads fresh.
+  //
+  // workerOriginated (Codex round-8 audit P2 #4131): captured BEFORE row
+  // is defaulted below — true only when the CALLER supplied a row, which
+  // today is exclusively the due loop's own reused SELECT. That row is a
+  // snapshot from before this call, and can go stale (an operator
+  // reschedule landing in the gap) — requireDueBy re-verifies it under
+  // settleZeroBalance's OWN row lock before any status change, so a
+  // rescheduled invoice is never settled (or its packet review enrolled)
+  // ahead of its new send time. Not applied to non-worker callers (a
+  // direct claim-path resolve, an operator-initiated send) — they have no
+  // due-list snapshot to go stale in the first place.
+  const workerOriginated = !!row;
   row = row || await db("invoices").where({ id: invoiceId }).first();
   if (!(await zeroDueVisitInvoice(row, db))) return { kind: "not_zero_due" };
   if (fenceOwnership && row.visit_completion_packet_id && !row.payer_id) {
@@ -1370,7 +1382,11 @@ async function settleZeroDueBeforeSend(invoiceId, { fenceOwnership = false, row 
       return { kind: "refused", code: "payer_billed", reason: `withdrawn to payer ${fence.payerId}` };
     }
   }
-  const settlement = await settleZeroDueVisitInvoice(invoiceId, db);
+  const settlement = await settleZeroDueVisitInvoice(invoiceId, db, { requireDueBy: workerOriginated ? new Date() : null });
+  if (settlement.reason === "rescheduled") {
+    logger.info(`[invoice] ${invoiceId}: due-list row went stale — rescheduled to a later time before settlement could run; deferred, not settled`);
+    return { kind: "rescheduled" };
+  }
   if (settlement.settled) {
     // A combined-visit (packet) invoice settled here has no payment
     // webhook to trigger the packet's own review enrollment (the non-cash
@@ -4793,6 +4809,17 @@ const InvoiceService = {
         // this loop needing a second, separate fence of its own.
         const outcome = await settleZeroDueBeforeSend(inv.id, { fenceOwnership: true, row: inv });
         if (outcome.kind === "settled") continue;
+        if (outcome.kind === "rescheduled") {
+          // Codex round-8 audit P2 #4131: an operator reschedule landed
+          // between this due-list read and settleZeroBalance's own locked
+          // re-read — the row is no longer due at its OLD time and must
+          // not be settled (or its packet review enrolled) ahead of the
+          // new one. Deferred, not failed or held: nothing is wrong here,
+          // and no attempt is spent — the row is simply due later now.
+          deferred += 1;
+          logger.info(`[invoice] Scheduled send for ${inv.invoice_number} was rescheduled between the due read and zero-due settlement — deferred to its new time, not settled`);
+          continue;
+        }
         if (outcome.kind === "terminal") {
           // A terminal (never-ran) linked visit is not a retryable
           // settlement refusal — route it to the void + credit-restore
@@ -6772,11 +6799,22 @@ const InvoiceService = {
    * existing allocations for the canonical void/reversal paths. No new credit,
    * payment row, provider call or receipt is created by this transition.
    */
-  async settleZeroBalance(id, database = db) {
+  async settleZeroBalance(id, database = db, { requireDueBy = null } = {}) {
     const run = async (trx) => {
       const invoice = await trx("invoices").where({ id }).forUpdate().first();
       if (!invoice) return { settled: false, reason: "not_found", invoice: null };
       const skip = (reason) => ({ settled: false, reason, invoice });
+      // Worker-originated calls only (requireDueBy is set exclusively by
+      // settleZeroDueBeforeSend when it was handed the due loop's own row —
+      // Codex round-8 audit P2 #4131): an operator reschedule landing
+      // between the due-list SELECT and this LOCKED re-read must win. The
+      // due loop's own row is a snapshot from before this lock; without
+      // this check a reschedule to a LATER time could still be settled
+      // (and its packet review enrolled) here, ahead of the new send time.
+      if (requireDueBy && (invoice.status !== "scheduled"
+        || !invoice.scheduled_send_at || new Date(invoice.scheduled_send_at) > requireDueBy)) {
+        return skip("rescheduled");
+      }
       if (!require("./invoice-helpers").isInvoiceCollectibleStatus(invoice.status)) return skip("already_settled");
       const totalCents = Math.round(Number(invoice.total) * 100);
       const creditCents = Math.round(Number(invoice.credit_applied || 0) * 100);

@@ -467,7 +467,10 @@ describe('settleZeroDueBeforeSend — THE zero-due chokepoint (#4131 slice 4 rou
 
     const outcome = await InvoiceService._settleZeroDueBeforeSend(INVOICE_ID);
 
-    expect(settleSpy).toHaveBeenCalledWith(INVOICE_ID, expect.anything());
+    // No `row` supplied (not worker-originated) — requireDueBy stays null
+    // (Codex round-8 audit P2 #4131): only the due loop's own reused-row
+    // call re-verifies the reschedule window.
+    expect(settleSpy).toHaveBeenCalledWith(INVOICE_ID, expect.anything(), { requireDueBy: null });
     expect(outcome.kind).toBe('settled');
   });
 

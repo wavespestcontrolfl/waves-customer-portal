@@ -744,7 +744,10 @@ describe('processScheduledSends send-window handling', () => {
 
       const result = await InvoiceService.processScheduledSends();
 
-      expect(settleSpy).toHaveBeenCalledWith('inv-1', expect.anything());
+      // Worker-originated (the due loop's own row) — requireDueBy is set
+      // (Codex round-8 audit P2 #4131): re-verified under settleZeroBalance's
+      // own lock before any status change.
+      expect(settleSpy).toHaveBeenCalledWith('inv-1', expect.anything(), { requireDueBy: expect.any(Date) });
       expect(sendSpy).not.toHaveBeenCalled();
       expect(result).toEqual({ sent: 0, failed: 0, deferred: 0 });
       // Only the stale-recovery sweep and the due read — no claim flip.

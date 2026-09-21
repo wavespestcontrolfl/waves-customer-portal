@@ -2285,6 +2285,49 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('an operator reschedule landing between the worker\'s due read and settleZeroBalance\'s own lock defers instead of settling — no packet review enrolled, the row keeps its NEW time (Codex round-8 audit P2 #4131)', async () => {
+    // settleZeroDueBeforeSend's requireDueBy re-check runs INSIDE
+    // settleZeroBalance's own transaction, at the exact FOR UPDATE
+    // re-read of the invoice row — intercepted here to model an operator
+    // reschedule landing in the gap between the due loop's own SELECT
+    // (read once, at tick start) and this locked re-read.
+    const invoiceId = randomUUID();
+    const later = new Date(Date.now() + 3600000);
+    await mockPg('invoices').insert({
+      id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'scheduled', total: 120, credit_applied: 120,
+      subtotal: 120, line_items: '[]', visit_completion_packet_id: fixture.packetId,
+      scheduled_service_id: fixture.serviceIds[0], scheduled_send_at: new Date(Date.now() - 60000),
+    });
+    const enrollSpy = jest.spyOn(require('../services/review-request'), 'enrollForPaidInvoice');
+    const execute = mockPg.client.constructor.prototype._query;
+    let rescheduled = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(async function rescheduleBeforeLock(connection, query) {
+      if (!rescheduled && query.sql.includes('"invoices"') && query.sql.toLowerCase().includes('for update')) {
+        rescheduled = true;
+        await mockPg('invoices').where({ id: invoiceId }).update({ scheduled_send_at: later });
+      }
+      return execute.call(this, connection, query);
+    });
+    try {
+      const result = await require('../services/invoice').processScheduledSends();
+
+      expect(rescheduled).toBe(true);
+      expect(result).toEqual({ sent: 0, failed: 0, deferred: 1 });
+      const row = await mockPg('invoices').where({ id: invoiceId }).first();
+      // NOT settled — still scheduled, never flipped to prepaid.
+      expect(row.status).toBe('scheduled');
+      expect(row.prepaid_by).toBeNull();
+      // The row keeps the operator's NEW time, untouched by this pass.
+      expect(new Date(row.scheduled_send_at).getTime()).toBe(later.getTime());
+      // No packet review enrolled off a settlement that never happened.
+      expect(enrollSpy).not.toHaveBeenCalled();
+    } finally {
+      jest.restoreAllMocks();
+      await mockPg('invoices').where({ id: invoiceId }).del();
+    }
+  });
+
   test('a zero-due SELF-PAY packet invoice settled via sendViaSMS is COMMITTED prepaid — surviving the packet claim\'s own transaction rollback (Codex round-5 P1 #4131 finding 2)', async () => {
     // Before this round, a zero-due settlement for a packet invoice ran
     // INSIDE claimPacketInvoiceForSend's own db.transaction() (the same

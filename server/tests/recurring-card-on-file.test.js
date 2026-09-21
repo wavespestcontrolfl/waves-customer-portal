@@ -117,7 +117,7 @@ const {
   replaceRecurringCardIntent,
   bankTenderAllowedUnderLock,
   completeRecurringCardEnrollment,
-  _private: { recurringCardIntentMatchesEstimate },
+  _private: { recurringCardIntentMatchesEstimate, classifyDeliveryOutcome },
 } = require('../services/recurring-card-on-file');
 
 const EST = { id: 'est-1', customer_id: 'cust-1' };
@@ -297,6 +297,33 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
       expect(key).not.toContain('pm_');
       expect(prepayChargeMethodKey('pm_other')).not.toBe(key);
       expect(prepayChargeMethodKey(null)).toBe(null);
+    });
+  });
+
+  describe('classifyDeliveryOutcome — the sweep\'s payer-billed and card-decline fallback deliveries share this (Codex round-8 audit P1 #4131)', () => {
+    test('settled_zero_due: settled, never reported delivered', () => {
+      expect(classifyDeliveryOutcome({ ok: true, settled_zero_due: true }))
+        .toEqual({ settled: true, delivered: false });
+    });
+
+    test('covered_by_credit: settled, never reported delivered', () => {
+      expect(classifyDeliveryOutcome({ ok: true, covered_by_credit: true }))
+        .toEqual({ settled: true, delivered: false });
+    });
+
+    test('an ordinary successful send: delivered, not settled', () => {
+      expect(classifyDeliveryOutcome({ ok: true, sms: { ok: true }, email: { ok: true } }))
+        .toEqual({ settled: false, delivered: true });
+    });
+
+    test('a genuine failure (ok: false): neither settled nor delivered', () => {
+      expect(classifyDeliveryOutcome({ ok: false, code: 'payer_billed' }))
+        .toEqual({ settled: false, delivered: false });
+    });
+
+    test('a null/undefined result (an unresolved fence, or the catch path): neither settled nor delivered', () => {
+      expect(classifyDeliveryOutcome(null)).toEqual({ settled: false, delivered: false });
+      expect(classifyDeliveryOutcome(undefined)).toEqual({ settled: false, delivered: false });
     });
   });
 
