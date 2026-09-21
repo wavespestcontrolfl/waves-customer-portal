@@ -115,7 +115,7 @@ describe('inactive bounded pricing phrase candidates', () => {
     expect(recognize('We will only charge').clauses[0].phrases).toEqual([
       { type: 'participant', start: 0, end: 1, text: 'we' },
       { type: 'predicate', start: 1, end: 4, text: 'will only charge', head: 'charge',
-        headStart: 3, headEnd: 4, negated: false, prefix: [
+        headStart: 3, headEnd: 4, negated: false, priceCue: true, prefix: [
           { start: 1, end: 2, text: 'will' }, { start: 2, end: 3, text: 'only' },
         ] },
       { type: 'qualifier', start: 2, end: 3, text: 'only' },

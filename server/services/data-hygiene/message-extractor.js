@@ -186,6 +186,8 @@ async function loadCandidateMessages({ lookbackDays, limit }) {
     .where('m.direction', 'inbound')
     .whereIn('m.channel', ['sms', 'voice', 'voicemail'])
     .whereNotNull('c.customer_id')
+    // Recruiting replies (job_*, PR #4623) are hiring text, never property facts.
+    .where((q) => { q.whereNull('m.message_type').orWhere('m.message_type', 'not like', 'job\\_%'); })
     .whereNotNull('m.body')
     .where('m.created_at', '>=', db.raw(`now() - (? * interval '1 day')`, [lookbackDays]))
     .orderBy('m.created_at', 'desc')

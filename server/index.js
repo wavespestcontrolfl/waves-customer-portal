@@ -308,10 +308,28 @@ app.use('/api/public/lawn-assessment', (req, res, next) => {
   }
   next();
 });
+// Interview self-scheduling family (GATE_RECRUITING_COMMS): token-route
+// privacy headers on EVERY response — mounted ahead of the outer careers
+// gate below so the dark 404 from either gate (jobApplications OR
+// recruitingComms) carries no-store/noindex too (Codex r1 P0).
+app.use('/api/public/careers/interview', require('./middleware/no-store').noStore);
 // Careers funnel: same unobservable-when-dark contract — 404 while
 // GATE_JOB_APPLICATIONS is off, even for a limiter-exhausted IP.
 app.use('/api/public/careers', (req, res, next) => {
+  // Issued interview links stay live when INTAKE closes: /interview/* is
+  // governed by GATE_RECRUITING_COMMS alone (next mount), so turning
+  // GATE_JOB_APPLICATIONS off stops new applications without killing the
+  // bearer links applicants already hold (Codex r5 P0).
+  if (req.path.startsWith('/interview')) return next();
   if (!require('./config/feature-gates').isEnabled('jobApplications')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
+// Interview family dark gate — ahead of the global /api limiter, so a dark
+// probe can never be answered with a 429 instead of the generic 404.
+app.use('/api/public/careers/interview', (req, res, next) => {
+  if (!require('./config/feature-gates').isEnabled('recruitingComms')) {
     return res.status(404).json({ error: 'Not found' });
   }
   next();

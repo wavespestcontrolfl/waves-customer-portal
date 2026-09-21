@@ -11,6 +11,13 @@
 const mockSendMail = jest.fn(async () => ({ messageId: 'smtp-1' }));
 
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/estimate-deposits', () => ({
+  assertInvoiceDepositSettlementReady: jest.fn(async () => {}),
+  withInvoiceDepositSettlement: jest.fn(async (invoiceId, callback) => {
+    const database = require('../models/db');
+    return callback(database, await database('invoices').where({ id: invoiceId }).first());
+  }),
+}));
 jest.mock('../services/sendgrid-mail', () => ({
   isConfigured: () => true,
   newsletterGroupId: () => null,

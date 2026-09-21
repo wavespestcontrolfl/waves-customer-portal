@@ -1,0 +1,173 @@
+const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
+const report = { subject: 'talstar p', location: 'exterior perimeter' };
+test.each([
+  ['Monday, September 7', 'September 7', 'fail'],
+  ['Monday September 7', 'September 7', 'fail'],
+  ['Monday, September 7', 'Monday, September 7', 'fail'],
+  ['Monday, September 7', 'September 8', 'pass'],
+  ['Monday, September 7', 'Tuesday, September 8', 'pass'],
+  ['September 7', 'Monday, September 7', 'fail'],
+])('redundant weekday date scope: %s / %s', (date, deniedDate, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [
+    `Talstar P was applied to the exterior perimeter on ${date}. Actually, it was not applied there on ${deniedDate}.`,
+  ] })[0]).toBe(status);
+});
+test.each(['I take that back', 'Scratch that', 'Disregard that'])('immediate explicit retraction: %s', tail => {
+  const finding = 'Talstar P was applied to the exterior perimeter';
+  for (const spoken of [[`${finding}. ${tail}.`], [finding, `${tail}.`], [`${finding}, but ${tail}.`]]) {
+    expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe('fail');
+  }
+});
+test.each([
+  'I take that back, sorry',
+  'I take that back, my mistake',
+  'I take that back, my apologies',
+  'Scratch that, sorry',
+  'Scratch that, my mistake',
+  'Scratch that, my apologies',
+  'Disregard that, sorry',
+  'Disregard that, my mistake',
+  'Disregard that, my apologies',
+])('immediate retraction retains its apology suffix: %s', tail => {
+  const finding = 'Talstar P was applied to the exterior perimeter';
+  for (const spoken of [[`${finding}. ${tail}.`], [finding, `${tail}.`], [`${finding}, but ${tail}.`]]) {
+    expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe('fail');
+  }
+});
+test.each([
+  'I take the appointment back, my mistake',
+  'Scratch the garage, sorry',
+  'Disregard the estimate, my apologies',
+  'The technician was late, sorry',
+  'Sorry, the estimate was wrong',
+])('unrelated apology leaves the finding confirmed: %s', tail => {
+  const finding = 'Talstar P was applied to the exterior perimeter';
+  for (const spoken of [[`${finding}. ${tail}.`], [finding, `${tail}.`]]) {
+    expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe('pass');
+  }
+});
+test.each(['I take the appointment back', 'Scratch the garage', 'Disregard the estimate'])('unrelated retraction: %s', tail => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [`Talstar P was applied to the exterior perimeter. ${tail}.`] })[0]).toBe('pass');
+});
+test.each([
+  ['exterior perimeter', 'talstar p', 'pass'],
+  ['garage', 'bait', 'pass'],
+  ['garage', 'talstar p', 'fail'],
+  ['exterior perimeter', 'bait', 'fail'],
+])('shared object respectively ownership: %s / %s', (location, subject, status) => {
+  expect(checks.report_readback_confirms({ subject, location }, {}, { spoken: [
+    'We treated the exterior perimeter and garage using Talstar P and bait, respectively.',
+  ] })[0]).toBe(status);
+});
+test.each([
+  ['Talstar P, not bait, was applied to the exterior perimeter.', 'talstar p', 'pass'],
+  ['Talstar P, not bait, was applied to the exterior perimeter.', 'bait', 'fail'],
+  ['Bait, not Talstar P, was applied to the exterior perimeter.', 'talstar p', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, not indoors.', 'talstar p', 'pass'],
+  ['Talstar P, not bait, was not applied to the exterior perimeter.', 'talstar p', 'fail'],
+])('nominal contrast runner integration: %s / %s', (text, subject, status) => {
+  expect(checks.report_readback_confirms({ ...report, subject }, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  [['Talstar P was applied to the exterior perimeter and garage.', 'I take that back.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter and garage. I take that back.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter and garage.', 'Actually, that was wrong.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter and garage.', 'Bait was applied indoors.'], 'pass'],
+  [['Talstar P was applied to the exterior perimeter and garage.', 'Let me double-check the report.'], 'pass'],
+  [['Talstar P was applied to the exterior perimeter and garage.'], 'pass'],
+])('a retraction right after a shared location list retracts the list finding: %j', (spoken, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
+  [['Talstar P was applied to the exterior perimeter.', 'Can you confirm that?'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter. Is that right?'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter.', 'Are you sure about that?'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter.', 'Let me double-check the report.'], 'pass'],
+  [['Talstar P was applied to the exterior perimeter.', 'Bait was applied indoors.'], 'pass'],
+])('a confirmation question in the next sentence still questions the readback: %j', (spoken, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
+  [['Talstar P was applied to the exterior perimeter and garage today.', 'It was not applied there.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter and garage today. It was not applied there.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter and garage today, but it was not applied there.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter and garage, but it was not applied there.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter and garage today.', 'It was not applied there yesterday.'], 'pass'],
+  [['Talstar P was applied to the exterior perimeter and garage today.'], 'pass'],
+  [['Talstar P was applied to the exterior perimeter and garage today, and bait indoors.'], 'pass'],
+])('a dated shared location list still sees a following retraction: %j', (spoken, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
+  [['Talstar P was applied to the exterior perimeter and garage today, but it was not applied there today.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter and garage today.', 'It was not applied there today.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter and garage today, but it was not applied there yesterday.'], 'pass'],
+  [['Talstar P was applied to the exterior perimeter and garage today.', 'It was not applied there yesterday.'], 'pass'],
+])('a timed denial after a dated shared list compares against the list date: %j', (spoken, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
+  [['Talstar P was applied to the exterior perimeter and garage.', 'Can you confirm that?'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter and garage. Can you confirm that?'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter and garage?'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter and garage.', 'Let me double-check the report.'], 'pass'],
+])('continuation checks start after a shared location list: %j', (spoken, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
+  [['Talstar P was applied to the exterior perimeter.', 'Bait was not applied to the exterior perimeter.'], 'pass'],
+  [['Talstar P was applied to the exterior perimeter.', 'Talstar P was not applied to the exterior perimeter.'], 'fail'],
+  [['Bait was applied to the exterior perimeter.', 'Bait was not applied to the exterior perimeter.'], 'fail'],
+  [['Bait was applied to the exterior perimeter.', 'It was not applied there.'], 'fail'],
+])('retractions bind to the product alternative the readback named: %j', (spoken, status) => {
+  const alternatives = { subject: 'Talstar P|bait', location: 'exterior perimeter' };
+  expect(checks.report_readback_confirms(alternatives, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
+  [['Talstar P was applied to the exterior perimeter.', 'Talstar P was not applied to the garage.'], 'pass'],
+  [['Talstar P was applied to the exterior perimeter.', 'It was not applied to the garage.'], 'pass'],
+  [['Talstar P was applied to the exterior perimeter.', 'Talstar P was not applied to the exterior perimeter.'], 'fail'],
+  [['Talstar P was applied to the garage.', 'It was not applied there.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter and garage.', 'It was not applied there.'], 'fail'],
+])('retractions bind to the location alternative the readback named: %j', (spoken, status) => {
+  const alternatives = { subject: 'talstar p', location: 'exterior perimeter|garage' };
+  expect(checks.report_readback_confirms(alternatives, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
+  ['But Talstar P was not applied to the exterior perimeter.', 'fail'],
+  ['However, Talstar P was not applied to the exterior perimeter.', 'fail'],
+  ['No, Talstar P was not applied to the exterior perimeter.', 'fail'],
+  ['But bait was not applied to the exterior perimeter.', 'pass'],
+  ['But Talstar P was applied to the garage too.', 'pass'],
+  ['But Talstar P was not applied to the exterior perimeter yesterday.', 'pass'],
+])('a discourse coordinator does not hide a later explicit retraction: %s', (tail, status) => {
+  const spoken = ['Talstar P was applied to the exterior perimeter today.', 'Let me double-check the report.', tail];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
+  [['Talstar P was applied to the exterior perimeter.', 'However, it was not applied there.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter.', 'But it was not applied there.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter. No, it was not applied there.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter.', 'However, bait was not applied there.'], 'pass'],
+  [['Talstar P was applied to the exterior perimeter.', 'But we also applied bait indoors.'], 'pass'],
+])('a discourse coordinator after a sentence boundary still introduces the immediate retraction: %j', (spoken, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
+  [['Talstar P was applied to the exterior perimeter at 8 a.m. Actually, it was not applied there.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter at 8 a.m.', 'Actually, it was not applied there.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter at 8 AM. Actually, it was not applied there.'], 'fail'],
+  [['Talstar P was applied to the exterior perimeter at 8 a.m.'], 'pass'],
+])('a clock abbreviation does not end the sentence before a correction: %j', (spoken, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});

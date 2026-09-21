@@ -513,6 +513,11 @@ async function loadUnansweredThreads(cutoff = new Date(), { includeExpired = fal
           -- whose confirmation goes out BEFORE the inbound row is
           -- persisted — they are never 'unanswered' (codex r29).
           AND COALESCE(message_type, '') NOT IN ('opt_out', 'opt_in', 'sms_reaction', 'help_request', 'reschedule_reply')
+          -- Applicant replies (job_applicant_reply) are owner-only recruiting
+          -- threads answered through the recruiting rail (job_owner_reply),
+          -- which is not a customer reply type — never a "waiting customer"
+          -- in this digest (codex #4623 r14).
+          AND COALESCE(message_type, '') NOT LIKE 'job\\_%'
       ) inbound
       WHERE peer <> ''
         -- A sender marked spam in the inbox (blocked_numbers) is not

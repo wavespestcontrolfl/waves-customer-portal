@@ -242,10 +242,30 @@ describe('near-term null-position repair', () => {
     expect(trxUpdates).toEqual([]);
   });
 
-  test('does not replace an intentionally nonchronological existing order', async () => {
+  // Reverses the 2026-09-09 rule that left a nonchronological backbone
+  // untouched: in prod (Mon 2026-09-21) stale numbers from stops that had
+  // left the day put a 13:00 stop ahead of a 09:00 stop, every reader led
+  // with it, and the repair refused the day every night. An out-of-window
+  // order that no longer fits its promises is rebuilt from the windows.
+  test('rebuilds a nonchronological existing order that no longer fits every promise', async () => {
     stopsByDate[BAND[0]][0].route_order = 2;
     stopsByDate[BAND[0]][1].route_order = 1;
+    expect((await runRouteReorder({ now: NOW })).applied).toBe(1);
+    expect(trxUpdates).toEqual([{ id: 'one', route_order: 1 }, { id: 'new', route_order: 2 }, { id: 'later', route_order: 3 }]);
+    expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
+    expect(JSON.parse(ledgerInserts[0].result).reorders[0]).toMatchObject({ source: 'chronological_repair', stale_order_rebuilt: true });
+  });
+
+  test('leaves a nonchronological existing order that still meets every promise (an operator\'s drag)', async () => {
+    // Numbered 'first' ahead of 'wide' although 'wide' is promised earlier;
+    // the drive is free (same pin) and 'wide' still starts inside its window.
+    stopsByDate[BAND[0]] = [
+      stop('first', { route_order: 1, window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 60 }),
+      stop('wide', { route_order: 2, window_start: '09:30', window_end: '12:00', estimated_duration_minutes: 60 }),
+      stop('new', { route_order: null, window_start: '13:00', estimated_duration_minutes: 60 }),
+    ];
     expect((await runRouteReorder({ now: NOW })).applied).toBe(0);
+    expect(trxUpdates).toEqual([]);
   });
 
   test('does not normalize a route whose existing order still fits every promise', async () => {

@@ -105,6 +105,49 @@ async function appointmentMoveHeld(input) {
   return require('../visit-groups').appointmentSendHeld(input.appointmentId, Number.isFinite(input.renderedSlotMs) ? input.renderedSlotMs : null);
 }
 
+// Annual-offer delivery guard (delivery-guards slice, re-cut of #4569): no
+// sender rechecks annual-plan eligibility itself — it passes estimateId(s)
+// through to this send library. Codex round 3 on #4608 (structural move,
+// P1 PRRT_kwDOR3YQi86j8Ydm): the AUTHORITATIVE check now lives one layer
+// further down, inside services/twilio.js's sendSMS — the true provider
+// boundary, run from INSIDE whatever locked withSmsHandoff a caller
+// supplies, immediately before messages.create(). This call stays only as
+// an early, cheap refusal: it runs before providerPreSendCheck's other
+// rechecks (suppression, consent, window) and before any lock is acquired,
+// so an already-withheld send fails fast without the cost of getting that
+// far — but it is NOT the last word; twilio.js re-derives and re-verdicts
+// fresh, after the lock, right before the SDK call, and that is the check
+// that actually decides whether the SMS goes out.
+function annualOfferGuardEstimateIds(input) {
+  if (Array.isArray(input.estimateIds) && input.estimateIds.length) return input.estimateIds;
+  return input.estimateId ? [input.estimateId] : [];
+}
+// Codex round 1 on #4608 (P1): keying this ONLY on a caller-supplied
+// estimateId made the guard opt-in — a composer manual SMS whose body
+// carries a minted estimate link, and the estimate-public.js service-
+// details email, never passed one and sailed straight past it. Always run
+// the guard (never short-circuit on 'no explicit ids') and let it derive
+// the estimate from the final message body/content itself — estimate-
+// annual-guard.js's estimateIdsFromContent runs no query at all when
+// neither an explicit id nor a link is present, so this costs nothing on
+// the vast majority of sends that carry no estimate content whatsoever.
+async function annualOfferGuardVerdict(input) {
+  try {
+    const { annualHandoffGuard } = require('../estimate-annual-guard');
+    const db = require('../../models/db');
+    const verdict = await annualHandoffGuard({
+      db, estimateIds: annualOfferGuardEstimateIds(input), texts: [input.body],
+    })();
+    return verdict.blocked
+      ? { ok: false, code: 'ANNUAL_OFFER_WITHHELD', reason: 'annual_offer_withheld', retryable: false }
+      : { ok: true };
+  } catch (err) {
+    // Fail closed — an infrastructure error here must block the send, never
+    // silently allow it through as though the offer were unaffected.
+    return { ok: false, code: err?.code || 'ANNUAL_OFFER_GUARD_FAILED', reason: err?.message || 'annual offer guard failed', retryable: true };
+  }
+}
+
 function nextProviderRetryAt(providerOutcome, now = new Date()) {
   if (!providerOutcome || !providerOutcome.retryable) return null;
   if (providerOutcome.nextAllowedAt) {
@@ -271,7 +314,7 @@ async function sendCustomerMessageCore(input) {
 
   // 3. Normalize recipient + clone input so downstream sees the canonical
   //    form. Caller closures stay outside message state and audit payloads.
-  const { preDispatchCheck, preProviderCheck, preSendCheck, withSmsHandoff, ...inputRest } = input;
+  const { preDispatchCheck, preProviderCheck, preSendCheck, withSmsHandoff, withProviderHandoff, ...inputRest } = input;
   const normalizedTo = normalizeRecipient(input.to);
   const sendInput = { ...inputRest, to: normalizedTo };
   // Request lifecycle email companions have no text leg. Keep their App
@@ -294,13 +337,33 @@ async function sendCustomerMessageCore(input) {
     || (input.audience === 'customer' && input.purpose === 'appointment'
       && input.entryPoint === 'reschedule-link-promise'
       && input.metadata?.original_message_type === 'reschedule_link_promise'
-      && Boolean(input.metadata?.followThroughCommitmentId));
+      && Boolean(input.metadata?.followThroughCommitmentId))
+    // Recruiting texts hold the application row through the provider
+    // request: the deferred replay (deferred-replay-registry
+    // recruiting_comms_deferred) and the immediate sends (recruiting-comms.js
+    // lockedRecruitingHandoff — Codex #4623 r19 P1) alike.
+    || (input.audience === 'applicant'
+      && /^job_/.test(String(input.metadata?.original_message_type || '')));
   if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is not allowed for this message' };
   }
   if (typeof preSendCheck === 'function' && withSmsHandoff) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SEND_GUARD_COMBINATION',
       reason: 'A caller pre-send check cannot be combined with a locked SMS handoff' };
+  }
+  // Invoice delivery needs one lock boundary that covers whichever provider
+  // the canonical router actually chooses (push-first, push+SMS, or Twilio).
+  // Keep this narrowly scoped to the invoice-send entry point: other callers
+  // use the stronger recipient/consent handoffs above, whose transaction is
+  // also threaded into their fresh suppression reads.
+  const providerHandoffAllowed = input.audience === 'customer'
+    && sendInput.channel === 'sms'
+    && input.purpose === 'payment_link'
+    && input.entryPoint === 'invoice_send_via_sms';
+  if (withProviderHandoff
+    && (typeof withProviderHandoff !== 'function' || !providerHandoffAllowed || withSmsHandoff)) {
+    return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_PROVIDER_HANDOFF',
+      reason: 'Locked provider handoff is restricted to invoice delivery' };
   }
   // SMS link schemes are removed before audit counting, matching the final
   // Twilio boundary for direct callers.
@@ -326,8 +389,71 @@ async function sendCustomerMessageCore(input) {
     && sendInput.metadata.mediaUrls.length > 0
     && mediaUrlsAllowed(sendInput);
   if (sendInput.channel === 'sms' && typeof sendInput.body === 'string'
-    && ['customer', 'lead'].includes(sendInput.audience) && !sendHasMedia) {
+    && ['customer', 'lead', 'applicant'].includes(sendInput.audience) && !sendHasMedia) {
     sendInput.body = normalizeGsmPunctuation(stripSmsUrlScheme(sendInput.body));
+  }
+
+  // Round 8 P1: mirrors email's withheldLinkPolicy 'rewrite' (estimate-
+  // deposits.js's deposit.receipt) for SMS — the deposit receipt text
+  // carries the SAME estimate link and the guard's default REFUSE would
+  // deny proof of payment for an offer that changed state after the
+  // deposit, not before it. Unlike email (where the guard — and any
+  // rewrite — runs at the actual sendgrid.sendOne dispatch), the stored
+  // sms_log body and segment count are both computed HERE, well before the
+  // authoritative provider-boundary guard (services/twilio.js dispatch())
+  // ever runs — so the rewrite must happen here too, before segmentMeta
+  // and before any snapshot, or the stored/counted body would disagree
+  // with what Twilio actually sends. Text-only (rewriteWithheldEstimateLinks
+  // accepts html as undefined) since SMS has no html leg.
+  //
+  // Round 11 structural fix (P1, pre-push audit on 029ae44d53): the policy
+  // is resolved HERE from the message's own purpose/message-type via
+  // withheldLinkPolicyForSmsPurpose — the SAME place both an immediate
+  // send AND a scheduled retry/requeue of it pass through — rather than
+  // relying on each caller to pass an explicit withheldLinkPolicy. A
+  // scheduled-SMS replay (scheduler.js) carries no explicit policy of its
+  // own; without this it would refuse a retried deposit receipt instead of
+  // rewriting it, exactly like the email retry sweep before sendOne
+  // resolved its policy from templateKey. An explicit sendInput.
+  // withheldLinkPolicy still wins when a caller passes one.
+  //
+  // Clearing estimateId/estimateIds here (not just leaving content
+  // derivation to find nothing) matches the email mechanism's own
+  // sendEstimateIds = [] override: an explicit id surviving past the
+  // rewrite would still union into the boundary guard's check and refuse
+  // a body that no longer carries the link at all, defeating the rewrite.
+  // AnnualGuard.withheldLinkPolicyForSmsPurpose is cheap (a Set lookup) —
+  // resolved unconditionally so the channel/body-type check below stays a
+  // single flat condition instead of an extra nested if.
+  const AnnualGuard = require('../estimate-annual-guard');
+  const resolvedSmsWithheldLinkPolicy = sendInput.withheldLinkPolicy
+    || AnnualGuard.withheldLinkPolicyForSmsPurpose(sendInput.purpose, sendInput.metadata?.original_message_type);
+  let withheldLinksRewritten;
+  if (sendInput.channel === 'sms' && typeof sendInput.body === 'string'
+    && resolvedSmsWithheldLinkPolicy === 'rewrite') {
+    try {
+      const { rewriteWithheldEstimateLinks } = AnnualGuard;
+      const db = require('../../models/db');
+      const rewritten = await rewriteWithheldEstimateLinks({ db, text: sendInput.body });
+      // Pre-push audit P1: the rewrite policy means "never refuse this
+      // message on the estimate's account, only strip its links" — so the
+      // explicit id is dropped whether or not a link was found. A link-free
+      // receipt for a withheld estimate must still go out.
+      sendInput.estimateId = null;
+      sendInput.estimateIds = [];
+      if (rewritten.rewrittenIds.length) {
+        sendInput.body = rewritten.text;
+        withheldLinksRewritten = rewritten.rewrittenIds;
+        logger.warn(`[send_customer_message] rewrote ${rewritten.rewrittenIds.length} withheld estimate link(s) to the portal home for purpose=${sendInput.purpose}`);
+      }
+    } catch (err) {
+      // Fail OPEN to the unrewritten body, never fail the send outright —
+      // the authoritative boundary guard (twilio.js dispatch()) still runs
+      // on whatever body reaches it and fails CLOSED (refuses) on its own
+      // lookup error, so a rewrite-lookup hiccup degrades to "refused this
+      // one time", never to "sent the raw withheld link".
+      logger.warn(`[send_customer_message] withheld-link rewrite failed for purpose=${sendInput.purpose}: ${err.message}`);
+    }
   }
 
   // 4. Load contact state once (consent + suppression share the lookup)
@@ -596,6 +722,8 @@ async function sendCustomerMessageCore(input) {
     if (!callerVerdict.ok) return rememberBoundaryBlock(callerVerdict, 'pre_send_check_boundary');
     const providerVerdict = await runCallerPreProviderCheck();
     if (!providerVerdict.ok) return rememberBoundaryBlock(providerVerdict, 'pre_provider_check_boundary');
+    const annualVerdict = await annualOfferGuardVerdict(sendInput);
+    if (!annualVerdict.ok) return rememberBoundaryBlock(annualVerdict, 'annual_offer_guard_boundary');
     // The awaited caller guard may itself straddle 20:00 ET. Keep this pure
     // clock check as the final operation before returning to the provider.
     const finalWindowVerdict = checkSendWindow(sendInput, policy, contactState);
@@ -608,7 +736,7 @@ async function sendCustomerMessageCore(input) {
   providerPreSendCheck.isStillValid = () => checkSendWindow(sendInput, policy, contactState)?.ok === true;
 
   providerOutcome = { sent: false, deliveryOutcome: 'uncertain' };
-  providerOutcome = await dispatchToProvider(sendInput, {
+  const dispatchProvider = () => dispatchToProvider(sendInput, {
     // The caller's handoff receives (trx, onProviderStart): the callback fires
     // immediately before the provider request, after the rechecks below, so a
     // caller can tell a failed recheck (nothing sent) from a failed request.
@@ -632,11 +760,19 @@ async function sendCustomerMessageCore(input) {
       // Awaited: the caller's durable pre-provider transition must commit
       // before the SDK request.
       if (typeof onProviderStart === 'function') await onProviderStart();
-      await dispatch();
+      // Pre-push audit P2 (twilio.js:953, round 12): forward the held `trx`
+      // into twilio.js's own dispatch — its annual-offer recheck reads
+      // through this SAME transaction (falling back to the plain db only
+      // when there is none) instead of opening a second root-pool
+      // connection while this one is still held.
+      await dispatch(trx);
       return { ok: true };
     })),
     preSendCheck: providerPreSendCheck,
   });
+  providerOutcome = withProviderHandoff
+    ? await withProviderHandoff(dispatchProvider)
+    : await dispatchProvider();
 
   // Push fan-out normalizes a provider-hook refusal to false and therefore
   // loses its code. Restore that boundary refusal only when the provider
@@ -770,6 +906,9 @@ async function sendCustomerMessageCore(input) {
     auditLogId: audit.id,
     segmentCount: segmentMeta.segmentCount,
     encoding: segmentMeta.encoding,
+    ...((withheldLinksRewritten || providerOutcome.withheldLinksRewritten)
+      ? { withheldLinksRewritten: withheldLinksRewritten || providerOutcome.withheldLinksRewritten }
+      : {}),
   };
   } catch (err) {
     // A recursive fallback may already carry its more specific outcome.

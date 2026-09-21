@@ -8,6 +8,7 @@
  */
 jest.mock('../models/db', () => jest.fn());
 
+
 const db = require('../models/db');
 const {
   findConflictingVisits,
@@ -594,4 +595,102 @@ describe('ORDERING CONTRACT — rung 1 is first at every writer', () => {
     expect(header).toContain('post-commit');
     expect(header).toContain('findConflictingVisits read');
   });
+});
+
+describe('findConflictingVisits — recruiting interviews as occupancy (PR #4623)', () => {
+  const { findConflictingVisits } = require('../services/scheduling/occupancy');
+
+  function dbWithInterviews(rows) {
+    const conn = jest.fn(() => makeQuery([]));
+    conn.raw = jest.fn(async () => ({ rows }));
+    return conn;
+  }
+
+  test('an overlapping booked interview is returned as a synthetic conflict row (raw side read, never the builder chain)', async () => {
+    const conn = dbWithInterviews([{ id: 'app-1', interview_at: '2027-03-16T20:00:00.000Z', interview_end_at: '2027-03-16T20:30:00.000Z' }]);
+    const rows = await findConflictingVisits({ db: conn, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true });
+    expect(conn.raw).toHaveBeenCalledTimes(1);
+    expect(conn.raw.mock.calls[0][0]).toMatch(/FROM job_applications/);
+    expect(conn.raw.mock.calls[0][1].slice(0, 2)).toEqual(['interview', 'offer']);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: 'interview:app-1', customer_id: null, status: 'interview', conflict_reason: 'interview', window_start: '15:45', window_end: '16:45' });
+    // the builder chain was used exactly once — for scheduled_services
+    expect(conn).toHaveBeenCalledTimes(1);
+  });
+
+  test('findInterviewConflicts probes interviews ALONE — the capacity-mode caller whose visit check lives elsewhere (Codex r15 P1)', async () => {
+    const { findInterviewConflicts } = require('../services/scheduling/occupancy');
+    const conn = dbWithInterviews([{ id: 'app-1', interview_at: '2027-03-16T20:00:00.000Z', interview_end_at: '2027-03-16T20:30:00.000Z' }]);
+    const rows = await findInterviewConflicts({ db: conn, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00' });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: 'interview:app-1', conflict_reason: 'interview' });
+    // no scheduled_services read at all
+    expect(conn).not.toHaveBeenCalled();
+  });
+
+  test('a non-overlapping interview does not conflict; includeInterviews:false skips the read', async () => {
+    const conn = dbWithInterviews([{ id: 'app-1', interview_at: '2027-03-16T13:00:00.000Z', interview_end_at: '2027-03-16T13:30:00.000Z' }]);
+    expect(await findConflictingVisits({ db: conn, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true })).toEqual([]);
+    conn.raw.mockClear();
+    // default (no opt-in) never issues the side read — staff/automation callers stay byte-identical
+    await findConflictingVisits({ db: conn, date: '2027-03-16', windowStart: '08:30', windowEnd: '09:30' });
+    expect(conn.raw).not.toHaveBeenCalled();
+  });
+
+  test('a connection without raw (test doubles) reads as no interviews; a READ ERROR fails closed (Codex r28 P1) — commit guards must not degrade', async () => {
+    const noRaw = jest.fn(() => makeQuery([]));
+    await expect(findConflictingVisits({ db: noRaw, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true })).resolves.toEqual([]);
+    const failing = dbWithInterviews([]);
+    failing.raw = jest.fn(async () => { throw Object.assign(new Error('connection reset'), { code: '57P01' }); });
+    await expect(findConflictingVisits({ db: failing, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true }))
+      .rejects.toMatchObject({ code: 'INTERVIEW_OCCUPANCY_UNAVAILABLE', retryable: true });
+    // a database with no recruiting tables at all (42P01) has no applicants: definite "no interviews", not an outage
+    const unprovisioned = dbWithInterviews([]);
+    unprovisioned.raw = jest.fn(async () => { throw Object.assign(new Error('relation job_applications does not exist'), { code: '42P01' }); });
+    await expect(findConflictingVisits({ db: unprovisioned, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true })).resolves.toEqual([]);
+    // without the opt-in the failing connection is never touched
+    await expect(findConflictingVisits({ db: failing, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00' })).resolves.toEqual([]);
+    // a foreign raw result (e.g. a lock probe double) never manufactures a conflict
+    const foreign = dbWithInterviews([{ locked: true }]);
+    await expect(findConflictingVisits({ db: foreign, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true })).resolves.toEqual([]);
+  });
+});
+
+describe('interview side read inside a caller transaction (PR #4623, Codex r7 P1)', () => {
+  const { findConflictingVisits } = require('../services/scheduling/occupancy');
+  test('runs the raw read in a nested transaction (savepoint) so a failure cannot poison the caller\'s transaction', async () => {
+    const trx = jest.fn(() => makeQuery([]));
+    trx.isTransaction = true;
+    trx.raw = jest.fn(async () => { throw new Error('should not be called directly'); });
+    const sp = { raw: jest.fn(async () => ({ rows: [{ id: 'app-1', interview_at: '2027-03-16T20:00:00.000Z', interview_end_at: '2027-03-16T20:30:00.000Z' }] })) };
+    trx.transaction = jest.fn(async (fn) => fn(sp));
+    const rows = await findConflictingVisits({ db: trx, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true });
+    expect(trx.transaction).toHaveBeenCalledTimes(1);
+    expect(trx.raw).not.toHaveBeenCalled();
+    expect(rows).toHaveLength(1);
+    trx.transaction = jest.fn(async () => { throw Object.assign(new Error('deadlock detected'), { code: '40P01' }); });
+    // the savepoint has rolled back; the guard still fails closed (Codex r28 P1)
+    await expect(findConflictingVisits({ db: trx, date: '2027-03-16', windowStart: '16:00', windowEnd: '17:00', includeInterviews: true }))
+      .rejects.toMatchObject({ code: 'INTERVIEW_OCCUPANCY_UNAVAILABLE' });
+  });
+});
+
+describe('interview read bounds straddle midnight by the buffer (PR #4623, Codex r11 P2)', () => {
+  const { findConflictingVisits, INTERVIEW_SLOT_MINUTES, INTERVIEW_BUFFER_MINUTES } = require('../services/scheduling/occupancy');
+  test('a 00:05 ET interview next day blocks the previous day through 23:50; the read bounds are widened accordingly', async () => {
+    const conn = jest.fn(() => makeQuery([]));
+    conn.raw = jest.fn(async () => ({ rows: [{ id: 'app-1', interview_at: '2027-03-17T04:05:00.000Z', interview_end_at: '2027-03-17T04:35:00.000Z' }] }));
+    const rows = await findConflictingVisits({ db: conn, date: '2027-03-16', windowStart: '23:00', windowEnd: '23:59', includeInterviews: true });
+    const [, bindings] = conn.raw.mock.calls[0];
+    const from = bindings[bindings.length - 2]; const to = bindings[bindings.length - 1];
+    expect(from.toISOString()).toBe(new Date(new Date('2027-03-16T04:00:00.000Z').getTime() - (INTERVIEW_SLOT_MINUTES + INTERVIEW_BUFFER_MINUTES) * 60000).toISOString());
+    expect(to.toISOString()).toBe(new Date(new Date('2027-03-17T04:00:00.000Z').getTime() + INTERVIEW_BUFFER_MINUTES * 60000).toISOString());
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ window_start: '23:50', window_end: '23:59' });
+  });
+});
+
+test('knex still marks transactors with isTransaction (the savepoint decision depends on it)', () => {
+  const src = require('fs').readFileSync(require.resolve('knex/lib/execution/transaction.js'), 'utf8');
+  expect(src).toMatch(/transactor\.isTransaction = true/);
 });

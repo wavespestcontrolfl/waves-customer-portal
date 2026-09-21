@@ -3,7 +3,7 @@ const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { performPropertyLookup } = require('./property-lookup-v2');
+const { performPropertyLookup, VACANT_SQFT_FLAG_COPY } = require('./property-lookup-v2');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
 const { normalizeLeadAddress, formatAddress } = require('../utils/address-normalizer');
 const { normalizeWebAdditionalProperties } = require('../utils/intake-normalize');
@@ -59,6 +59,25 @@ function publicPropertySummary(record) {
     squareFootage: record.squareFootage,
     lotSize: record.lotSize,
     yearBuilt: record.yearBuilt,
+  };
+}
+
+// Public copy of the enriched profile. The admin lookup's plat-median
+// estimate (subdivisionMedian: plat name, county, neighbor sample and
+// range for an unassessed vacant parcel) is staff-only context — this
+// unauthenticated route's contract returns facts for the requested parcel,
+// so the block is dropped from both the response and the lead snapshot.
+function publicEnrichedProfile(enriched) {
+  if (!enriched || typeof enriched !== 'object') return enriched ?? null;
+  const { subdivisionMedian, ...rest } = enriched;
+  if (!subdivisionMedian || !Array.isArray(rest.fieldVerifyFlags)) return rest;
+  // The homeSqFt verify flag spells the same figures out in prose — swap in
+  // the median-free vacant-parcel copy (one shared string, never a regex).
+  return {
+    ...rest,
+    fieldVerifyFlags: rest.fieldVerifyFlags.map((flag) => (
+      flag?.field === 'homeSqFt' ? { ...flag, reason: VACANT_SQFT_FLAG_COPY } : flag
+    )),
   };
 }
 
@@ -394,6 +413,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
 
     const result = await performPropertyLookup(parcelLookupAddress);
     const propertyRecord = publicPropertySummary(result.propertyRecord || result.rentcast);
+    const enriched = publicEnrichedProfile(result.enriched);
 
     // Persist the enriched profile on the lead so a stale/abandoned row is
     // still useful for follow-up. On an attached call-pipeline lead, MERGE so
@@ -401,7 +421,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
     try {
       const completeStage = {
         stage: 'property_lookup_complete',
-        enriched: result.enriched || null,
+        enriched: enriched || null,
         propertyRecord,
         rentcast: propertyRecord,
         avm: result.avm || null,
@@ -427,7 +447,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
 
     res.json({
       lead_id: lead.id,
-      enriched: result.enriched,
+      enriched,
       propertyRecord,
       rentcast: propertyRecord,
       satellite: result.satellite ? {
@@ -451,6 +471,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
 
 module.exports = router;
 module.exports._test = {
+  publicEnrichedProfile,
   normalizeServiceInterest,
   formatServiceInterestForFrequency,
 };

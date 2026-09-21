@@ -145,7 +145,9 @@ const ET_LABEL = new Intl.DateTimeFormat('en-US', {
 function checkSendWindow(input, policy, contactState, now = new Date()) {
   if (!isEnabled('smsSendWindow')) return { ok: true };
   if (!['sms', 'push'].includes(input.channel)) return { ok: true };
-  if (!['customer', 'lead'].includes(input.audience)) return { ok: true };
+  // Applicants are a customer-facing audience too (recruiting comms) — the
+  // 8am–8pm ET guard applies to their automated texts as well.
+  if (!['customer', 'lead', 'applicant'].includes(input.audience)) return { ok: true };
   if (input.channel === 'push') {
     const { inCustomerQuietHours, nextCustomerQuietHoursEndET, customerQuietHoursCoverSendWindow } = require('../../notification-dispatcher');
     if (inCustomerQuietHours(contactState?.prefs, now)) {

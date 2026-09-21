@@ -487,6 +487,7 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
   const address = addressFromContext(context);
   let propertyRecord = null;
   let enriched = null;
+  let lookupCache = null;
   if (address) {
     try {
       const { performPropertyLookup } = require('../../routes/property-lookup-v2');
@@ -500,6 +501,7 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
       // record doesn't (pool/cage, shrub density, landscape complexity,
       // water adjacency) — dropping it priced known features as absent.
       enriched = lookup?.enriched || null;
+      lookupCache = lookup?.meta?.cache || null;
     } catch (err) {
       logger.warn(`[estimator-engine] property lookup failed (continuing without): ${err.message}`);
     }
@@ -509,14 +511,46 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
 
   let subdivisionMedian = null;
   if (parcelView?.unassessedVacant && parcelView.subdivision && parcelView.county) {
-    try {
-      const { lookupSubdivisionMedianLivingSqft } = require('../property-lookup/county-parcel-gis');
-      subdivisionMedian = await lookupSubdivisionMedianLivingSqft({
-        county: parcelView.county,
-        subdivision: parcelView.subdivision,
-      });
-    } catch (err) {
-      logger.warn(`[estimator-engine] subdivision median failed (continuing without): ${err.message}`);
+    // The lookup's fresh path already queried the plat median and stamped
+    // it on the record (property-lookup-v2: _subdivisionMedian, exposed as
+    // enriched.subdivisionMedian) — reuse it rather than hitting the county
+    // layer a second time. The direct dig remains only for rows the lookup
+    // served without a stamp (cached before the stamp existed).
+    // The profile is the ONLY reader of the lookup's raw _subdivisionMedian
+    // stamp: enriched.subdivisionMedian is null for a unit-inside-a-building
+    // lookup, a thin sample, an unconfirmed address, or a parcel that stopped
+    // reading as unassessed, and every one of those gates must hold here
+    // too — so the engine never touches the raw stamp itself. No profile →
+    // the pre-existing direct dig. Same sample floor the profile applies
+    // (subdivisionMedianEstimate) and source arbitration checks again.
+    const { lookupSubdivisionMedianLivingSqft, SUBDIVISION_MEDIAN_MIN_SAMPLES } = require('../property-lookup/county-parcel-gis');
+    const stamped = enriched ? enriched.subdivisionMedian : undefined;
+    if (Number(stamped?.medianSqft) > 0 && Number(stamped?.sampleCount) >= SUBDIVISION_MEDIAN_MIN_SAMPLES) {
+      // Normalized to the arbitration contract ({ medianSqft, sampleCount })
+      // so the profile's and the helper's extra fields never diverge here.
+      subdivisionMedian = { medianSqft: Math.round(Number(stamped.medianSqft)), sampleCount: Math.round(Number(stamped.sampleCount)) };
+    } else if (stamped === null) {
+      // An explicit null means a stamp exists and the profile WITHHELD it
+      // (unit lookup, unconfirmed address, thin sample): a direct dig here
+      // would price on exactly what it refused.
+      subdivisionMedian = null;
+    } else if (lookupCache === 'miss' || lookupCache === 'refresh') {
+      // undefined after a FRESH lookup: the route just attempted the query
+      // (outage, kill switch, or budget) — repeating it here would only add
+      // the same timeout and provider load (Codex r5 P2). Leave it.
+      subdivisionMedian = null;
+    } else {
+      // undefined on a cache hit (a row written before the stamp existed) or
+      // with no profile at all — nothing was judged, so the pre-existing
+      // direct dig stands.
+      try {
+        subdivisionMedian = await lookupSubdivisionMedianLivingSqft({
+          county: parcelView.county,
+          subdivision: parcelView.subdivision,
+        });
+      } catch (err) {
+        logger.warn(`[estimator-engine] subdivision median failed (continuing without): ${err.message}`);
+      }
     }
   }
 

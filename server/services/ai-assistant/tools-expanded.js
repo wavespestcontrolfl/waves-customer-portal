@@ -258,7 +258,12 @@ async function executeExpandedTool(toolName, input, contextCustomerId, context =
       // its audit row name the staff member who confirmed the write, not
       // the system (GitHub r4 P2 #4127).
       const sendResult = await InvoiceService.sendViaSMS(invoiceId, { operatorInitiated: true, actorTechnicianId });
-      const sent = !!(sendResult?.sent || sendResult?.ok);
+      // sent reflects ACTUAL delivery only — never `|| sendResult?.ok`
+      // (Codex round-5 P1 #4131): a zero-due settlement (or account
+      // credit covering the balance) resolves { sent: false, ok: true },
+      // a genuine good outcome but NOT a text the customer received; the
+      // assistant must never tell them a link went out for either.
+      const sent = !!sendResult?.sent;
       const invoice = await db('invoices').where('id', invoiceId).first();
 
       return {
@@ -267,7 +272,19 @@ async function executeExpandedTool(toolName, input, contextCustomerId, context =
         amount: parseFloat(invoice.total),
         payUrl: sendResult?.payUrl,
         status: invoice.status,
-        ...(!sent && { error: sendResult?.code || sendResult?.reason || sendResult?.email?.error || 'send_failed' }),
+        // Nothing was texted (the invoice settled to zero-due under the
+        // send claim, now 'prepaid') — an explicit signal so the assistant
+        // never tells the customer a link went out (Codex round-1 P1
+        // #4131), distinct from an ordinary successful text.
+        ...(sendResult?.settled_zero_due && { settledZeroDue: true }),
+        // Codex round-8 audit P2 (#4131 slice 4, consumer sweep): the
+        // sibling zero-due outcome — account credit covered the balance
+        // outright — was silently dropped here (sent stays false with no
+        // signal at all), so the assistant had no way to say why nothing
+        // went out. Distinct from settledZeroDue above: only this one may
+        // say the customer's credit covered it.
+        ...(sendResult?.covered_by_credit && { coveredByCredit: true }),
+        ...(!sent && !sendResult?.ok && { error: sendResult?.code || sendResult?.reason || sendResult?.email?.error || 'send_failed' }),
       };
     }
 

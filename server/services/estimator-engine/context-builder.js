@@ -323,6 +323,8 @@ async function loadSmsThread(phone, { limit = 20, before = null, since = null } 
     // must not be presented to the estimator model as a delivered message.
     let q = excludeUnresolvedSendReservations(db('sms_log'))
       .select('from_phone', 'to_phone', 'message_body', 'created_at')
+      // Recruiting texts (job_*, PR #4623) are never customer-service evidence.
+      .whereRaw("COALESCE(message_type, '') NOT LIKE 'job\\_%'")
       .where(function whereEitherDirection() {
         this.whereRaw("regexp_replace(coalesce(from_phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`])
           .orWhereRaw("regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`]);

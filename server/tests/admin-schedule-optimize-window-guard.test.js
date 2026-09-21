@@ -142,6 +142,17 @@ beforeAll((done) => {
 });
 afterAll((done) => { server.close(done); });
 
+// Every case in this file boards the hardcoded fixture DATE. On the real
+// clock the suite expired case by case as ET time passed that date's
+// service windows (#4624 pinned one case, #4635 a second, then a dozen
+// more went red the same afternoon). Pin the clock the day before DATE for
+// the whole file; the in-progress-clock cases below re-pin their own time.
+beforeEach(() => {
+  jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+  jest.setSystemTime(new Date('2026-09-19T17:00:00Z')); // 13:00 ET, the day before DATE
+});
+afterEach(() => { jest.useRealTimers(); });
+
 beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.GATE_ROUTE_REORDER_WINDOW_FIT;
@@ -578,6 +589,11 @@ describe('round-3 guards', () => {
   });
 
   test('the same live stop on a FUTURE date is not in progress and optimizes normally', async () => {
+    // Pin the clock the day BEFORE the fixture date: on the real clock this
+    // case expired at midnight ET on the fixture date itself (the "future"
+    // stop became today's and the guard answered 409 on every branch).
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+    jest.setSystemTime(new Date('2026-09-19T17:00:00Z')); // 13:00 ET, the day before DATE
     stopsByDate[DATE] = chronologyDay().map((s) => (s.id === 'T1' ? { ...s, status: 'on_site' } : s));
     mockOptimizerOrder(['T2', 'T1', 'U']);
     const { status, body } = await optimizeRoute({ technicianId: 't1', date: DATE });
@@ -718,6 +734,11 @@ test('a repaired day counts the unassigned stop’s drive minutes too', async ()
   // Non-zero travel for this case only: 1 "mile" per degree, 2 min per mile.
   const realLegs = RouteOptimizer.fallbackLegMetrics;
   RouteOptimizer.fallbackLegMetrics = (miles) => ({ meters: Math.round(miles * 1000), minutes: Math.round(miles * 2) });
+  // Pin the clock the day BEFORE the fixture date, as the "future date" case
+  // does (#4624): on the real clock this case expired at midnight ET on the
+  // fixture date itself, when the board stopped reading as window_constrained.
+  jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+  jest.setSystemTime(new Date('2026-09-19T17:00:00Z')); // 13:00 ET, the day before DATE
   try {
     // Same board twice — the only difference is one UNASSIGNED stop, which
     // belongs to no tech-day and so changes nothing else.
@@ -736,6 +757,7 @@ test('a repaired day counts the unassigned stop’s drive minutes too', async ()
     expect(withFree.totalDistanceMeters - withoutFree.totalDistanceMeters).toBe(16000);
     expect(withFree.totalDurationMinutes - withoutFree.totalDurationMinutes).toBe(32);
   } finally {
+    jest.useRealTimers();
     RouteOptimizer.fallbackLegMetrics = realLegs;
   }
 });

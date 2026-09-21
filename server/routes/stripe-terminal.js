@@ -20,12 +20,16 @@ const {
   SURCHARGE_API_VERSION,
 } = require('../services/stripe-pricing');
 const { invoiceAmountDue, invoiceWithdrawnFromCustomer } = require('../services/invoice-helpers');
+const { assertInvoiceDepositSettlementReady } = require('../services/estimate-deposits');
 const {
   assertNoInvoiceChargeReconciliationPending,
   parkInvoiceForSavedCardReconciliation,
 } = require('../services/stripe');
 
 function terminalChargeFenceResponse(err) {
+  if (err?.code === 'DEPOSIT_RECONCILIATION_REQUIRED') {
+    return { error: err.message, code: err.code, reconciliationRequired: true };
+  }
   return {
     error: err?.code === 'STRIPE_CHARGE_IN_PROGRESS'
       ? 'Another payment attempt is already in progress for this invoice'
@@ -752,7 +756,11 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
     }
     try {
       await assertNoInvoiceChargeReconciliationPending(invoice.id);
+      await assertInvoiceDepositSettlementReady(db, invoice, { lock: false });
     } catch (fenceErr) {
+      if (fenceErr.code !== 'DEPOSIT_RECONCILIATION_REQUIRED'
+        && fenceErr.code !== 'STRIPE_CHARGE_IN_PROGRESS'
+        && fenceErr.code !== 'STRIPE_AMBIGUOUS_OUTCOME') throw fenceErr;
       if (fenceErr.reconciliationRequired) {
         await parkInvoiceForSavedCardReconciliation({ invoiceId: invoice.id, error: fenceErr });
       }
@@ -827,6 +835,12 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
       const lockedAmountCents = Math.round(invoiceAmountDue(locked) * 100);
       if (lockedAmountCents !== Number(handoff.amount_cents)) {
         return { ok: false, amountChanged: true };
+      }
+      try {
+        await assertInvoiceDepositSettlementReady(trx, locked);
+      } catch (fenceErr) {
+        if (fenceErr.code !== 'DEPOSIT_RECONCILIATION_REQUIRED') throw fenceErr;
+        return { ok: false, chargeFence: terminalChargeFenceResponse(fenceErr) };
       }
       try {
         // Close the race between the unlocked pre-create fence check and PI
@@ -960,11 +974,6 @@ router.post('/apply-surcharge', terminalAuthenticate, async (req, res) => {
       return res.status(400).json({ error: 'jti required' });
     }
 
-    // Feature off → no-op. The PI stays at base and the device confirms it as-is.
-    if (!isEnabled('terminalSurcharge')) {
-      return res.json({ applied: false, reason: 'disabled' });
-    }
-
     const handoff = await db('terminal_handoff_tokens').where({ jti }).first();
     if (!handoff) {
       return res.status(404).json({ error: 'Handoff not found', code: 'handoff_unknown' });
@@ -990,119 +999,134 @@ router.post('/apply-surcharge', terminalAuthenticate, async (req, res) => {
     // stale and the tech must re-handoff. The handoff is minted for the amount DUE
     // (total − applied account credit), so verify against that, not the gross total
     // — else a partially credit-applied invoice always mismatches here.
-    const invoice = await db('invoices').where({ id: handoff.invoice_id }).first();
-    if (!invoice || ['paid', 'prepaid', 'processing', 'void', 'refunded'].includes(invoice.status)) {
-      return res.status(409).json({
-        error: invoice ? `Invoice is ${invoice.status}` : 'Invoice not found',
-        code: 'invoice_status_changed',
-      });
-    }
-    const baseCents = Number(handoff.amount_cents);
-    if (Math.round(invoiceAmountDue(invoice) * 100) !== baseCents) {
-      return res.status(409).json({ error: 'Invoice amount changed since handoff', code: 'invoice_amount_changed' });
-    }
+    // Keep the invoice and estimate ledger locks through either Stripe update
+    // or the already-finalized response. A deposit can arrive after the
+    // Terminal PI was minted but before the technician confirms it.
+    return await db.transaction(async (trx) => {
+      const invoice = await trx('invoices').where({ id: handoff.invoice_id }).forUpdate().first();
+      if (!invoice || ['paid', 'prepaid', 'processing', 'void', 'refunded'].includes(invoice.status)) {
+        return res.status(409).json({
+          error: invoice ? `Invoice is ${invoice.status}` : 'Invoice not found',
+          code: 'invoice_status_changed',
+        });
+      }
+      const baseCents = Number(handoff.amount_cents);
+      if (Math.round(invoiceAmountDue(invoice) * 100) !== baseCents) {
+        return res.status(409).json({ error: 'Invoice amount changed since handoff', code: 'invoice_amount_changed' });
+      }
+      await assertInvoiceDepositSettlementReady(trx, invoice);
 
-    const stripe = getStripe();
-    // Retrieve under the preview API version so amount_details (a preview field)
-    // is present on re-reads; expand payment_method to read card_present funding.
-    const pi = await stripe.paymentIntents.retrieve(
-      handoff.stripe_payment_intent_id,
-      { expand: ['payment_method'] },
-      { apiVersion: SURCHARGE_API_VERSION },
-    );
+      // Feature off → no surcharge write. Still fence the last server step
+      // before this already-created PI can be confirmed by the device.
+      if (!isEnabled('terminalSurcharge')) {
+        return res.json({ applied: false, reason: 'disabled' });
+      }
 
-    // Only finalize once the card has actually been read: the PI must be at
-    // requires_confirmation WITH the card_present PaymentMethod attached. Before
-    // that (requires_payment_method / no PM) funding is unknowable — return a
-    // retryable signal and write NOTHING (no metadata, no idempotency-key burn).
-    // Stamping the PI base-only here would otherwise let a later, post-collect
-    // credit-card call short-circuit on the already-finalized path and settle
-    // without the surcharge (the exact leak this route closes).
-    const pm = pi.payment_method && typeof pi.payment_method === 'object' ? pi.payment_method : null;
-    if (pi.status === 'requires_payment_method' || !pm) {
-      return res.json({ applied: false, reason: 'awaiting_card', retryable: true });
-    }
-    if (pi.status !== 'requires_confirmation') {
-      // succeeded / processing / canceled / requires_capture / requires_action —
-      // past the point of a safe amount change.
-      return res.json({ applied: false, reason: 'pi_not_updatable', status: pi.status });
-    }
+      const stripe = getStripe();
+      // Retrieve under the preview API version so amount_details (a preview field)
+      // is present on re-reads; expand payment_method to read card_present funding.
+      const pi = await stripe.paymentIntents.retrieve(
+        handoff.stripe_payment_intent_id,
+        { expand: ['payment_method'] },
+        { apiVersion: SURCHARGE_API_VERSION },
+      );
 
-    // Funding is now final (credit/debit/prepaid/unknown). null/unknown → no
-    // surcharge (fail-safe), same as the online flow.
-    const funding = pm.card_present?.funding || pm.card?.funding || null;
-    const alreadyFinalized = !!pi.metadata?.surcharge_policy_version;
+      // Only finalize once the card has actually been read: the PI must be at
+      // requires_confirmation WITH the card_present PaymentMethod attached. Before
+      // that (requires_payment_method / no PM) funding is unknowable — return a
+      // retryable signal and write NOTHING (no metadata, no idempotency-key burn).
+      // Stamping the PI base-only here would otherwise let a later, post-collect
+      // credit-card call short-circuit on the already-finalized path and settle
+      // without the surcharge (the exact leak this route closes).
+      const pm = pi.payment_method && typeof pi.payment_method === 'object' ? pi.payment_method : null;
+      if (pi.status === 'requires_payment_method' || !pm) {
+        return res.json({ applied: false, reason: 'awaiting_card', retryable: true });
+      }
+      if (pi.status !== 'requires_confirmation') {
+        // succeeded / processing / canceled / requires_capture / requires_action —
+        // past the point of a safe amount change.
+        return res.json({ applied: false, reason: 'pi_not_updatable', status: pi.status });
+      }
 
-    const plan = planCardPresentSurcharge({ baseCents, funding, alreadyFinalized });
+      // Funding is now final (credit/debit/prepaid/unknown). null/unknown → no
+      // surcharge (fail-safe), same as the online flow.
+      const funding = pm.card_present?.funding || pm.card?.funding || null;
+      const alreadyFinalized = !!pi.metadata?.surcharge_policy_version;
 
-    if (plan.action === 'already') {
-      // A prior call already stamped/raised this PI. Report what's on it now —
-      // derive the surcharge from the amount delta so it's correct regardless of
-      // whether amount_details came back on this read.
-      const existingSurcharge = Math.max(0, Number(pi.amount) - baseCents);
-      return res.json({
-        applied: existingSurcharge > 0,
-        funding,
-        base: baseCents,
-        surcharge: existingSurcharge,
-        total: Number(pi.amount),
-        rateBps: Number(pi.metadata?.surcharge_rate_bps || 0),
-        reason: 'already_finalized',
-      });
-    }
+      const plan = planCardPresentSurcharge({ baseCents, funding, alreadyFinalized });
 
-    // Metadata mirrors the online finalize path so the webhook's payment-insert
-    // records base/surcharge/funding identically for card-present and online.
-    const metadata = {
-      base_amount: String(baseCents / 100),
-      card_surcharge: String(plan.surchargeCents / 100),
-      surcharge_rate_bps: String(plan.rateBps),
-      surcharge_policy_version: plan.policyVersion,
-      card_funding: funding || 'unknown',
-    };
-
-    try {
-      if (plan.action === 'apply_surcharge') {
-        // Raise amount + attach the surcharge breakdown. amount_details requires
-        // the preview API version, passed per-request so the rest of the app
-        // stays on the account's stable version.
-        await stripe.paymentIntents.update(
-          pi.id,
-          {
-            amount: plan.totalCents,
-            amount_details: buildSurchargeAmountDetails(plan.surchargeCents, { enforceValidation: 'disabled' }),
-            metadata,
-          },
-          { apiVersion: SURCHARGE_API_VERSION, idempotencyKey: `surcharge_${jti}` },
-        );
-        logger.info(
-          `[stripe-terminal] apply-surcharge jti=${jti} PI=${pi.id} funding=${funding} ` +
-            `base=${baseCents}c surcharge=${plan.surchargeCents}c total=${plan.totalCents}c`,
-        );
+      if (plan.action === 'already') {
+        // A prior call already stamped/raised this PI. Report what's on it now —
+        // derive the surcharge from the amount delta so it's correct regardless of
+        // whether amount_details came back on this read.
+        const existingSurcharge = Math.max(0, Number(pi.amount) - baseCents);
         return res.json({
-          applied: true,
+          applied: existingSurcharge > 0,
           funding,
           base: baseCents,
-          surcharge: plan.surchargeCents,
-          total: plan.totalCents,
-          rateBps: plan.rateBps,
+          surcharge: existingSurcharge,
+          total: Number(pi.amount),
+          rateBps: Number(pi.metadata?.surcharge_rate_bps || 0),
+          reason: 'already_finalized',
         });
       }
 
-      // finalize_base — debit/prepaid/unknown. Stamp funding + zero surcharge so
-      // the payment record is honest; never touch the amount, never go preview.
-      await stripe.paymentIntents.update(pi.id, { metadata }, { idempotencyKey: `surcharge_${jti}` });
-      logger.info(`[stripe-terminal] apply-surcharge jti=${jti} PI=${pi.id} funding=${funding || 'unknown'} no-surcharge (base only)`);
-      return res.json({ applied: false, funding, base: baseCents, surcharge: 0, total: baseCents });
-    } catch (updateErr) {
-      // The update failed, so the PI is untouched (still at base) and no metadata
-      // was stamped — retrying is safe. Report apply_failed so the client aborts
-      // rather than settling a credit card at base after disclosure. Surface for
-      // monitoring; the tech re-taps.
-      logger.error(`[stripe-terminal] apply-surcharge update failed jti=${jti} PI=${pi.id}: ${updateErr.message}`);
-      return res.json({ applied: false, reason: 'apply_failed', funding, base: baseCents });
-    }
+      // Metadata mirrors the online finalize path so the webhook's payment-insert
+      // records base/surcharge/funding identically for card-present and online.
+      const metadata = {
+        base_amount: String(baseCents / 100),
+        card_surcharge: String(plan.surchargeCents / 100),
+        surcharge_rate_bps: String(plan.rateBps),
+        surcharge_policy_version: plan.policyVersion,
+        card_funding: funding || 'unknown',
+      };
+
+      try {
+        if (plan.action === 'apply_surcharge') {
+          // Raise amount + attach the surcharge breakdown. amount_details requires
+          // the preview API version, passed per-request so the rest of the app
+          // stays on the account's stable version.
+          await stripe.paymentIntents.update(
+            pi.id,
+            {
+              amount: plan.totalCents,
+              amount_details: buildSurchargeAmountDetails(plan.surchargeCents, { enforceValidation: 'disabled' }),
+              metadata,
+            },
+            { apiVersion: SURCHARGE_API_VERSION, idempotencyKey: `surcharge_${jti}` },
+          );
+          logger.info(
+            `[stripe-terminal] apply-surcharge jti=${jti} PI=${pi.id} funding=${funding} ` +
+              `base=${baseCents}c surcharge=${plan.surchargeCents}c total=${plan.totalCents}c`,
+          );
+          return res.json({
+            applied: true,
+            funding,
+            base: baseCents,
+            surcharge: plan.surchargeCents,
+            total: plan.totalCents,
+            rateBps: plan.rateBps,
+          });
+        }
+
+        // finalize_base — debit/prepaid/unknown. Stamp funding + zero surcharge so
+        // the payment record is honest; never touch the amount, never go preview.
+        await stripe.paymentIntents.update(pi.id, { metadata }, { idempotencyKey: `surcharge_${jti}` });
+        logger.info(`[stripe-terminal] apply-surcharge jti=${jti} PI=${pi.id} funding=${funding || 'unknown'} no-surcharge (base only)`);
+        return res.json({ applied: false, funding, base: baseCents, surcharge: 0, total: baseCents });
+      } catch (updateErr) {
+        // The update failed, so the PI is untouched (still at base) and no metadata
+        // was stamped — retrying is safe. Report apply_failed so the client aborts
+        // rather than settling a credit card at base after disclosure. Surface for
+        // monitoring; the tech re-taps.
+        logger.error(`[stripe-terminal] apply-surcharge update failed jti=${jti} PI=${pi.id}: ${updateErr.message}`);
+        return res.json({ applied: false, reason: 'apply_failed', funding, base: baseCents });
+      }
+    });
   } catch (err) {
+    if (err.code === 'DEPOSIT_RECONCILIATION_REQUIRED') {
+      return res.status(409).json(terminalChargeFenceResponse(err));
+    }
     logger.error(`[stripe-terminal] apply-surcharge failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }

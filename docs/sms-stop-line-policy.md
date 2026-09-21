@@ -37,6 +37,7 @@ actually need.
 | --- | --- |
 | `recipient_optin_request` | The CTIA opt-in copy itself. Note it is the one template that does not use the standard sentence — it reads "Reply YES to confirm, STOP to opt out, HELP for help." A search for the literal `Reply STOP to opt out` will not find it. |
 | `missed_call`, `lead_auto_reply_biz`, `voicemail_quote_link`, `dropped_call_address_request`, `booking_abandonment_recovery` | Lead first contact — not a customer yet. |
+| `job_application_received`, `job_application_received_es` | First text to an applicant's phone — a stranger, same as a lead's first touch. `job_interview_invite` and `job_interview_confirmation` are transactional to a known applicant already mid-process and go without the line. |
 | `estimate_sent`, `estimate_extended`, `estimate_followup_deposit`, `quote_wizard_booking_invite` | Estimate delivery / program entry; the recipient is often still a prospect. |
 | `referral_invite` | A stranger the referrer named. |
 | `referral_nudge` | A $25-off pitch — marketing content. |

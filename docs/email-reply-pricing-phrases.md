@@ -22,19 +22,25 @@ The finite candidate families are:
 - `qualifier`: longest supported qualifier at a position, including `only`,
   `about`, `up to`, `at least`, and comparative phrases such as `no more than`.
 - `participant`: a pronoun or customer/client/account noun, optionally with
-  a supported determiner. This does not establish a subject, payer, or recipient.
+  a supported determiner (including `any`). This does not establish a subject, payer, or recipient.
 - `billing_head`: a supported lexical head with `head` and `roles`. A word such
   as `charge` can retain both `noun` and `action` roles.
 - `predicate`: a supported action head with a bounded auxiliary/qualifier
   prefix. Fields `headStart` and `headEnd` identify the head tokens; `prefix`
   retains the preceding token spans/text, and `negated` records explicit
   `not`/`never` prefix evidence outside a recognized comparative qualifier.
+  `priceCue` identifies heads in the shared pricing-action vocabulary.
+  Generic `generate`, `apply`, `occur`, `has`, `due`, `required`, `payable`,
+  and `range` keep it false; they need separate currency or nominal evidence.
+  A true cue is lexical context, not a confirmed price or compliance verdict.
 
 Candidate families may overlap. Predicate candidates keep the longest
 supported prefix found for a given head, with at most 12 prefix tokens.
 An isolated action-shaped word can itself be a predicate candidate; this is
 lexical evidence rather than a grammatical assertion. The source's finite
 vocabulary and focused tests define coverage; no completeness is claimed.
+The scanner stem `range` is also an action candidate for local range-introducer
+relationships; it does not establish pricing context by itself.
 
 ## Boundaries and uncertainty
 

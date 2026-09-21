@@ -18,6 +18,27 @@ test('only calibrated timing with known durations produces a lateness card', () 
   expect(unknown[0].payload).toEqual({ date: '2040-09-10', issues: [expect.stringContaining('needs a service duration')] });
 });
 
+test('a double-booking is carded first, without a calibrated drive model, and never for a same-customer pair', () => {
+  // Staff saves commit through a clash by owner ruling (advisory only), so
+  // the planned-board card is the only place a second customer in the same
+  // slot becomes visible before the reminder text goes out.
+  // Two collisions, one of them a three-row block (combined booking + neighbour): counted per collision, not per row.
+  const clash = { doubleBookedVisits: [{ ids: ['a', 'b'], minutes: 60 }, { ids: ['m1', 'm2', 'n'], minutes: 25 }], missingCoordinates: ['c'] };
+  const alerts = buildRouteQualityAlerts(day(clash), 'legacy');
+  expect(alerts).toHaveLength(1);
+  expect(alerts[0].payload.issues).toEqual([
+    expect.stringContaining('2 double-bookings: two appointments promised at the same time'),
+    expect.stringContaining('without a usable location'),
+  ]);
+  expect(alerts[0].payload).toMatchObject({ doubleBookings: 2 });
+  expect(alerts[0].payload.issues[0]).not.toMatch(/reminder/);
+  expect(alerts[0].payload).not.toHaveProperty('departureMinutes');
+  // day-quality already drops same-customer pairs; an empty list makes no card.
+  expect(buildRouteQualityAlerts(day({ doubleBookedVisits: [] }), 'calibrated')).toEqual([]);
+  // Older measurement rows without the field still build.
+  expect(buildRouteQualityAlerts(day({ doubleBookedVisits: undefined }), 'calibrated')).toEqual([]);
+});
+
 test('location and grouped-work exceptions remain visible without a calibrated drive model', () => {
   const alerts = buildRouteQualityAlerts(day({ missingCoordinates: ['job'], uncertaintyReasons: ['grouped_work_requires_review'] }), 'legacy');
   expect(alerts).toHaveLength(1);
@@ -63,6 +84,12 @@ describe('queue capacity', () => {
     // would collide with the day card it sits beside.
     expect(capped.get('2040-09-10:overflow')).toEqual({ techId: null, payload: { date: '2040-09-10', overflow: true,
       issues: [expect.stringContaining('8 more routes on 2040-09-10')] } });
+  });
+
+  test('a one-issue double-booking card outranks multi-issue routes under the cap (codex #4620 r1 P2)', () => {
+    const clash = ['2040-09-10:tech-zz', { techId: 'tech-zz', payload: { date: '2040-09-10', doubleBookings: 1, issues: ['1 double-booking'] } }];
+    const capped = capRouteQualityCards(new Map([...techsOn('2040-09-10', 6), clash]));
+    expect([...capped.keys()].sort()).toEqual(['2040-09-10:overflow', '2040-09-10:tech-00', '2040-09-10:tech-zz']);
   });
 
   test('the cap is per date, so a one-date check and a six-date check agree', () => {

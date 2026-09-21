@@ -31,6 +31,10 @@ function purposeForScheduledMessageType(messageType, { hasCustomer = true } = {}
   // for customer-linked rows; lead rows have no customerId so they replay
   // under the transactional-grade conversational policy with the forwarded
   // consent basis — payment_receipt would hard-require a customerId.
+  // Recruiting texts held by the send window replay under their own
+  // applicant purpose (audience 'applicant' rides claimMeta.audience).
+  if (type === 'job_owner_reply') return 'applicant_reply';
+  if (type.startsWith('job_')) return type.slice('job_'.length);
   if (type === 'visit_summary') return 'service_completion';
   if (type === 'deposit_receipt') return hasCustomer ? 'payment_receipt' : 'conversational';
   // Deferred completion texts (service_complete*, service_report_v1*) replay
@@ -3545,6 +3549,55 @@ function initScheduledJobs() {
               }
               continue;
             }
+            // dispatch_completion_deferred's recheck (#4634 round 9): the
+            // completion/report still sends, but the invoice went
+            // uncollectible overnight (settled zero-due, moved to a payer,
+            // voided) — strip the now-stale pay-link line from the FROZEN
+            // body before it reaches the provider, and drop
+            // mark_invoice_delivery so finalize below never marks a pay
+            // link "delivered" that was never actually sent. Persisted
+            // under the same claimed-row guard the review-ask strip above
+            // uses (this row is 'sending' from claimDueScheduledSms), and
+            // idempotent: a body with no pay_url left (an earlier partial
+            // attempt already stripped it) is returned unchanged, and
+            // removing an already-absent 'mark_invoice_delivery' key is a
+            // no-op.
+            if (recheck && recheck.stripPayLink === true && claimMeta.pay_url) {
+              const { stripPayLinkLineFromBody } = require('./dispatch-completion-deferred');
+              const strippedBody = stripPayLinkLineFromBody(msg.message_body, claimMeta.pay_url);
+              if (strippedBody === null) {
+                // An operator-edited template that was ONLY the invoice
+                // line has no safe body left to send — never restore the
+                // original (link-bearing) text and never send an empty
+                // one (#4634 round-10 P2). Suppress through the exact same
+                // terminal path an ordinary eligible:false recheck refusal
+                // takes above: blocked status, claim release, review
+                // fallback armed via onTerminal.
+                await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                  status: 'blocked',
+                  updated_at: new Date(),
+                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?, 'terminal_pending', ?::boolean)", [`stale_replay:${recheck.reason || 'pay-link-only-body'}`, requiresTerminalHook(claimMeta.entry_point)]),
+                });
+                logger.info(`[scheduled-sms] deferred completion ${msg.id} suppressed: template body was pay-link-only, nothing safe to strip (${recheck.reason || 'invoice-not-collectible'})`);
+                await runTerminalHookDurably(msg.id, claimMeta.entry_point, recheckMeta);
+                continue;
+              }
+              const stampedAt = new Date();
+              const changed = await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                message_body: strippedBody,
+                metadata: db.raw(
+                  "(COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('pay_link_stripped_at', ?::timestamptz, 'pay_link_stripped_reason', ?::text)) - 'mark_invoice_delivery'",
+                  [stampedAt, recheck.reason || null],
+                ),
+                updated_at: stampedAt,
+              });
+              if (!changed) throw new Error('Scheduled completion claim lost before stripping the stale pay link');
+              msg.message_body = strippedBody;
+              delete claimMeta.mark_invoice_delivery;
+              claimMeta.pay_link_stripped_at = stampedAt.toISOString();
+              claimMeta.pay_link_stripped_reason = recheck.reason || null;
+              logger.info(`[scheduled-sms] deferred completion ${msg.id} pay link stripped at delivery (${recheck.reason || 'invoice-not-collectible'})`);
+            }
           }
           // replay_purpose: an enqueue whose message_type has no useful
           // purpose mapping (the Stripe billing-notice templates —
@@ -3825,7 +3878,7 @@ function initScheduledJobs() {
             to: toPhone,
             body: msg.message_body,
             channel: 'sms',
-            audience: msg.customer_id ? 'customer' : 'lead',
+            audience: claimMeta.audience === 'applicant' ? 'applicant' : (msg.customer_id ? 'customer' : 'lead'),
             purpose,
             customerId: msg.customer_id || undefined,
             identityTrustLevel: msg.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',

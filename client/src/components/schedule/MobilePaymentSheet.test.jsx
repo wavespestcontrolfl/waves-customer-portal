@@ -7,7 +7,7 @@
 // fail closed to hidden.
 
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import React from 'react';
 import MobilePaymentSheet from './MobilePaymentSheet';
@@ -68,5 +68,62 @@ describe('MobilePaymentSheet Card on File role gate', () => {
     renderSheet();
     expect(screen.getByText('Cash')).toBeInTheDocument();
     expect(screen.queryByText('Card on File')).not.toBeInTheDocument();
+  });
+});
+
+describe('MobilePaymentSheet Invoice tender request contract (fourth round-1 P2 #4633)', () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  function stubAdmin() {
+    stubLocalStorage({
+      waves_admin_token: 'test-token',
+      waves_admin_user: JSON.stringify({ id: 'u1', role: 'admin' }),
+    });
+  }
+
+  it('a fresh invoice send states firstDelivery: true — no internal legacy no-body request', async () => {
+    stubAdmin();
+    let capturedBody = null;
+    vi.stubGlobal('fetch', vi.fn(async (_url, options) => {
+      capturedBody = JSON.parse(options.body);
+      return { ok: true, json: async () => ({ ok: true, sms: { ok: true }, email: { ok: true } }) };
+    }));
+    const onInvoiceSent = vi.fn();
+    render(
+      <MobilePaymentSheet
+        desktopVisible
+        service={{ id: 'svc-1' }}
+        invoiceId="inv-1"
+        amount={125}
+        onInvoiceSent={onInvoiceSent}
+      />,
+    );
+    fireEvent.click(screen.getByText('Invoice'));
+    await waitFor(() => expect(onInvoiceSent).toHaveBeenCalled());
+    expect(capturedBody).toEqual({ firstDelivery: true });
+  });
+
+  it('a no-op already_delivered outcome (ok:true) proceeds exactly like a normal send', async () => {
+    stubAdmin();
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ ok: true, already_delivered: true, sms: { ok: false, code: 'already_delivered' }, email: { ok: false, code: 'already_delivered' } }),
+    })));
+    const onInvoiceSent = vi.fn();
+    render(
+      <MobilePaymentSheet
+        desktopVisible
+        service={{ id: 'svc-1' }}
+        invoiceId="inv-1"
+        amount={125}
+        onInvoiceSent={onInvoiceSent}
+      />,
+    );
+    fireEvent.click(screen.getByText('Invoice'));
+    await waitFor(() => expect(onInvoiceSent).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText(/Failed to send invoice/)).not.toBeInTheDocument();
   });
 });

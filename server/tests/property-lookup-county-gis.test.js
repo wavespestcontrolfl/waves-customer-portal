@@ -494,3 +494,96 @@ describe('buildCadastralRecord with a county GIS parcel', () => {
     expect(record._fieldEvidence.propertyType[0].sourceType).toBe('cadastral');
   });
 });
+
+describe('lookupSubdivisionMedianLivingSqft — plat median with range', () => {
+  const { lookupSubdivisionMedianLivingSqft } = countyGis;
+  const living = (values) => ({
+    ok: true,
+    json: async () => ({ features: values.map((v) => ({ attributes: { BLDGS_SQFT_LIVING: v } })) }),
+  });
+
+  test('returns median, sample count, and the neighbors\' min/max range', async () => {
+    global.fetch = jest.fn().mockResolvedValue(living([3242, 2101, 3100, 2980, 3050, 3180, 2650, 3120, 3071]));
+    const result = await lookupSubdivisionMedianLivingSqft({ county: 'Manatee County', subdivision: 'EXAMPLE ESPLANADE PH VI SUBPH A & B PB80/131' });
+    expect(result).toMatchObject({ medianSqft: 3071, sampleCount: 9, minSqft: 2101, maxSqft: 3242 });
+    expect(result.subdivisionQueried).toBe('EXAMPLE ESPLANADE PH VI SUBPH A & B PB80/131');
+    const url = String(global.fetch.mock.calls[0][0]);
+    expect(url).toContain('gis.manateepao.gov');
+    expect(decodeURIComponent(url).replace(/\+/g, ' ')).toContain('BLDGS_SQFT_LIVING > 0');
+  });
+
+  test('widens a thin phase to the base plat name and reports which name answered', async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce(living([2101, 2200]))
+      .mockResolvedValueOnce(living([1558, 1678, 1920, 1920, 2277, 2421, 2421, 3070, 3101]));
+    const result = await lookupSubdivisionMedianLivingSqft({ county: 'Manatee', subdivision: 'EXAMPLE ESPLANADE PH VI SUBPH A & B PB80/131' });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(decodeURIComponent(String(global.fetch.mock.calls[1][0])).replace(/\+/g, ' ')).toContain("LIKE 'EXAMPLE ESPLANADE%'");
+    expect(result).toMatchObject({ medianSqft: 2277, sampleCount: 9, minSqft: 1558, maxSqft: 3101, subdivisionQueried: 'EXAMPLE ESPLANADE' });
+  });
+
+  test('follows ArcGIS pages when the first is cut off, then reports the full population', async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ exceededTransferLimit: true, features: [3242, 2101, 3100, 2980].map((v) => ({ attributes: { BLDGS_SQFT_LIVING: v } })) }) })
+      .mockResolvedValueOnce(living([3050, 3180, 2650, 3120, 3071]));
+    const result = await lookupSubdivisionMedianLivingSqft({ county: 'Manatee', subdivision: 'EXAMPLE PLAT PH I' });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    // Offset = rows actually returned by the cut-off page (4), not the page size.
+    expect(decodeURIComponent(String(global.fetch.mock.calls[1][0]))).toContain('resultOffset=4');
+    // Both pages ask for the same stable order, so the offsets are disjoint.
+    for (const call of global.fetch.mock.calls) expect(decodeURIComponent(String(call[0]))).toContain('orderByFields=BLDGS_SQFT_LIVING');
+    expect(result).toMatchObject({ medianSqft: 3071, sampleCount: 9, minSqft: 2101, maxSqft: 3242 });
+  });
+
+  test('refuses a population still truncated past the page cap — no median from an unordered sample', async () => {
+    global.fetch = jest.fn().mockResolvedValue({ ok: true, json: async () => ({ exceededTransferLimit: true, features: [3242, 2101, 3100, 2980, 3050, 3180, 2650, 3120, 3071].map((v) => ({ attributes: { BLDGS_SQFT_LIVING: v } })) }) });
+    const diag = {};
+    await expect(lookupSubdivisionMedianLivingSqft({ county: 'Manatee', subdivision: 'HUGE PLAT' }, { diag })).resolves.toBeNull();
+    expect(global.fetch).toHaveBeenCalledTimes(5);
+    // A settled answer from the county, not an outage.
+    expect(diag.failed).toBeUndefined();
+  });
+
+  test('the widened base-plat query shares ONE deadline and is skipped when the exact phase spent it', async () => {
+    const realNow = Date.now;
+    let now = 1_000_000;
+    Date.now = () => now;
+    try {
+      global.fetch = jest.fn(async () => { now += 3400; return living([2101, 2200]); });
+      const diag = {};
+      const result = await lookupSubdivisionMedianLivingSqft({ county: 'Manatee', subdivision: 'EXAMPLE ESPLANADE PH VI SUBPH A & B PB80/131' }, { timeoutMs: 3500, diag });
+      expect(result).toBeNull();
+      expect(global.fetch).toHaveBeenCalledTimes(1); // no second request with ~100 ms left
+      expect(diag.failed).toBeUndefined();
+      expect(diag.incomplete).toBe(true); // the base plat was never asked — callers must not stamp a settled null
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  test('the kill switch reports diag.skipped, never a settled answer', async () => {
+    process.env.COUNTY_PARCEL_GIS_DISABLED = '1';
+    global.fetch = jest.fn();
+    const diag = {};
+    await expect(lookupSubdivisionMedianLivingSqft({ county: 'Manatee', subdivision: 'ANY PLAT' }, { diag })).resolves.toBeNull();
+    expect(diag).toEqual({ skipped: true });
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('diag.failed marks an outage so callers can tell it from a thin plat', async () => {
+    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 503 });
+    const diag = {};
+    await expect(lookupSubdivisionMedianLivingSqft({ county: 'Manatee', subdivision: 'ANY PLAT' }, { diag })).resolves.toBeNull();
+    expect(diag.failed).toBe(true);
+  });
+
+  test('null below the sample floor, on layer failure, and for an unsupported county', async () => {
+    global.fetch = jest.fn().mockResolvedValue(living([2101, 2200, 2300]));
+    await expect(lookupSubdivisionMedianLivingSqft({ county: 'Manatee', subdivision: 'TINY PLAT' })).resolves.toBeNull();
+    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 503 });
+    await expect(lookupSubdivisionMedianLivingSqft({ county: 'Manatee', subdivision: 'ANY PLAT' })).resolves.toBeNull();
+    global.fetch = jest.fn();
+    await expect(lookupSubdivisionMedianLivingSqft({ county: 'Charlotte', subdivision: 'ANY PLAT' })).resolves.toBeNull();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+});

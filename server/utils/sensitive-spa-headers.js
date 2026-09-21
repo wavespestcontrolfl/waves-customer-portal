@@ -101,13 +101,22 @@ function isReservicePath(reqPath = '') {
   return /^\/reservice\/[a-f0-9]{64}\/?$/.test(String(reqPath || ''));
 }
 
+// Public interview self-scheduling page — 64-hex bearer token
+// (job_applications.interview_token) that books or withdraws the applicant's
+// interview and renders their first name + slot, so the shell must never be
+// indexed/archived and must not leak the token via Referer (matches the
+// /api/public/careers/interview headers in server/index.js).
+function isCareersInterviewPath(reqPath = '') {
+  return /^\/careers\/interview\/[a-f0-9]{64}\/?$/.test(String(reqPath || ''));
+}
+
 function applySensitiveSpaHeaders(reqPath, res) {
   if (isServiceOutlinePath(reqPath)) {
     res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
     res.set('Referrer-Policy', 'no-referrer');
     return;
   }
-  if (isLawnReportPath(reqPath) || isPestReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath) || isCardPath(reqPath) || isSecureCardPath(reqPath) || isPriceChangeNoticePath(reqPath) || isContractPath(reqPath) || isAppointmentPath(reqPath) || isReservicePath(reqPath)) {
+  if (isLawnReportPath(reqPath) || isPestReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath) || isCardPath(reqPath) || isSecureCardPath(reqPath) || isPriceChangeNoticePath(reqPath) || isContractPath(reqPath) || isAppointmentPath(reqPath) || isReservicePath(reqPath) || isCareersInterviewPath(reqPath)) {
     res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
     res.set('Referrer-Policy', 'no-referrer');
     res.set('Cache-Control', 'no-store');
@@ -115,6 +124,7 @@ function applySensitiveSpaHeaders(reqPath, res) {
 }
 
 module.exports = {
+  isCareersInterviewPath,
   applySensitiveSpaHeaders,
   isServiceOutlinePath,
   isLawnReportPath,

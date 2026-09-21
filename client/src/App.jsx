@@ -388,6 +388,7 @@ const KnowledgeHubPage = lazyWithRetry(() => import('./pages/admin/KnowledgeHubP
 const AdminSettingsPage = lazyWithRetry(() => import('./pages/admin/SettingsPage'));
 const PestPressureSettingsPage = lazyWithRetry(() => import('./pages/admin/PestPressureSettingsPage'));
 const RatePage = lazyWithRetry(() => import('./pages/RatePage'));
+const CareersInterviewPage = lazyWithRetry(() => import('./pages/CareersInterviewPage'));
 const CardPage = lazyWithRetry(() => import('./pages/CardPage'));
 const AdminSocialMediaPage = lazyWithRetry(() => import('./pages/admin/SocialMediaPage'));
 const AdminTaxPage = lazyWithRetry(() => import('./pages/admin/TaxPage'));
@@ -651,6 +652,8 @@ export default function App() {
           {/* WavesShell wraps (owner 2026-07-06): every customer page gets
               the standard top bar + trust footer. */}
           <Route path="/rate/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><RatePage /></WavesShell></Suspense>} />
+          {/* Applicant self-scheduling link (recruiting-comms) — same external-WavesShell shape as /rate/:token. */}
+          <Route path="/careers/interview/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><CareersInterviewPage /></WavesShell></Suspense>} />
           {/* Digital business card — navy glass scene, so the fallback wash
               matches the scene instead of the light doc wash. */}
           <Route path="/card/:token" element={<Suspense fallback={<div style={{background:'#04395E',minHeight:'100vh'}}/>}><WavesShell><CardPage /></WavesShell></Suspense>} />

@@ -229,6 +229,7 @@ const GATE_HOLD_MESSAGES = {
   cadence_due: 'An automated estimate follow-up is due within 24h - draft left pending, retry after it goes out',
   recent_outbound: 'Contact already received an SMS in the last 48h - draft left pending, retry later',
   replied_recently: 'Contact replied by SMS recently - handle the conversation in Communications; draft left pending',
+  annual_offer_withheld: 'This annual plan offer needs a fresh delivery before its link is reused - draft left pending',
 };
 
 // Click-followup drafts (services/click-followup.js) are queued hours or days
