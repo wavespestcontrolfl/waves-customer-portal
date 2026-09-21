@@ -142,6 +142,10 @@ function isSubstantiveText(row) {
 }
 
 async function latestInboundText({ customerId, phoneLast10, before, since }) {
+  // An applicant's hiring reply on a phone that is also a customer's must
+  // not become the "saw your text" this customer call is about (Codex
+  // #4623 r31 P2): recruiting rows are excluded before the substantive pick.
+  const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
   const rows = await fromContact(
     db('sms_log')
       .where('direction', 'inbound')
@@ -149,6 +153,7 @@ async function latestInboundText({ customerId, phoneLast10, before, since }) {
       .where('created_at', '>=', since),
     { customerId, phoneLast10, phoneColumn: 'from_phone' },
   )
+    .modify((qb) => excludeRecruitingSmsLog(qb, 'message_type'))
     .orderBy('created_at', 'desc')
     // A thread of acknowledgements can be long ("Ok" / "Thanks" / a thumbs-up
     // per reminder); the real inquiry must still be reachable behind them.

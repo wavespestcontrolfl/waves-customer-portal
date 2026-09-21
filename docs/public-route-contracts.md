@@ -2199,9 +2199,14 @@ refuses (403) a non-admin `POST /api/admin/communications/ai-draft` for a
 phone that has ever been party to a recruiting text
 (`isRecruitingPhone` — durable applicant-ledger evidence first, the
 provider log second) before any history for that phone is loaded; the
-composer and `/schedule-sms` use `activeOnly` (an OPEN application with
-ledger evidence), so a former applicant who is also a customer receives
-ordinary service texts again once their application closes. An
+composer and `/schedule-sms` use `activeOnly` (ANY open application on
+the phone, delivery evidence or not — an email-only applicant, one whose
+consent box was unticked, or one whose first text is still queued has no
+ledger evidence yet, and the owner's first text is what creates it; a
+validated `customerId` is explicit customer context and bypasses the
+check on the immediate send only, never with a retained recruiting
+`replyToMessageId`), so a former applicant who is also a customer
+receives ordinary service texts again once their application closes. An
 OWNER texting an applicant from a shared surface — the dashboard inbox
 reply on a `job_applicant_reply` row, or the Communications composer to
 a recruiting phone — rides the recruiting rail (`sendOwnerReply`: purpose

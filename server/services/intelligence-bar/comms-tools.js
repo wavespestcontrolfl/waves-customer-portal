@@ -846,6 +846,8 @@ async function draftSmsReply(input) {
 
   // Get the last inbound message from this customer
   const lastInbound = await db('sms_log')
+    // never an applicant's hiring reply on a shared phone (PR #4623 r31)
+    .modify((qb) => excludeRecruitingSmsLog(qb))
     .where('direction', 'inbound')
     .where(scope => scope.where('customer_id', customer.id).orWhereNull('customer_id'))
     .where(function () {
@@ -975,8 +977,8 @@ async function getTodaysActivity() {
   // count or count as the reply that closes out an unanswered thread — a
   // resolved row still counts/replies normally.
   const [smsIn, smsOut, calls, unanswered] = await Promise.all([
-    db('sms_log').where('direction', 'inbound').where('created_at', '>=', since).count('* as c').first(),
-    excludeUnresolvedSendReservations(db('sms_log')).where('direction', 'outbound').where('created_at', '>=', since).count('* as c').first(),
+    db('sms_log').modify((qb) => excludeRecruitingSmsLog(qb)).where('direction', 'inbound').where('created_at', '>=', since).count('* as c').first(),
+    excludeUnresolvedSendReservations(db('sms_log')).modify((qb) => excludeRecruitingSmsLog(qb)).where('direction', 'outbound').where('created_at', '>=', since).count('* as c').first(),
     db('call_log').where('created_at', '>=', since)
       .modify((qb) => require('../voice-agent/relay-protocol').whereNotSandboxCall(qb)) // bake-off calls are not today's activity
       .select(
@@ -985,7 +987,7 @@ async function getTodaysActivity() {
       db.raw("COUNT(*) FILTER (WHERE status = 'no-answer' OR status = 'busy') as missed"),
     ).first(),
     // Count unanswered inbound messages from today
-    db('sms_log').where('direction', 'inbound').where('created_at', '>=', since)
+    db('sms_log').modify((qb) => excludeRecruitingSmsLog(qb)).where('direction', 'inbound').where('created_at', '>=', since)
       .whereNotExists(function () {
         excludeUnresolvedSendReservations(
           this.select(db.raw(1)).from(db.raw('sms_log as reply'))

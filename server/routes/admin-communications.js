@@ -143,6 +143,8 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
     if (decision.inbound_created_at) {
       const threadLast10 = normalizePhoneLast10(decision.sms_from_phone) || sentPhoneLast10;
       const newerInbound = await db('sms_log')
+        // an applicant's hiring reply on a shared phone is not "the thread moved on" (PR #4623 r31)
+        .modify((qb) => require('../utils/recruiting-thread-scope').excludeRecruitingSmsLog(qb, 'message_type'))
         .where({ direction: 'inbound' })
         .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [threadLast10])
         .where('created_at', '>', decision.inbound_created_at)

@@ -295,6 +295,11 @@ describe('GATE ON — get_message_history read shape', () => {
     expect(phoneArm[0].s).toMatch(/conversations\.contact_phone/);
     expect(phoneArm[0].p).toEqual(['9415550142']);
     expect(b.limit).toHaveBeenCalledWith(relayHistory.MESSAGE_HISTORY_LIMIT);
+    // Recruiting rows (job_*: applicant replies, invites carrying a bearer
+    // scheduling link) are filtered out of the voice agent's history read
+    // (PR #4623 Codex r31 P1) — the non-admin message-level filter.
+    expect(b.whereNull).toHaveBeenCalledWith('messages.message_type');
+    expect(b.orWhere).toHaveBeenCalledWith('messages.message_type', 'not like', 'job\\_%');
 
     expect(out).toContain('Customer: Can you come Thursday instead?');
     expect(out).toMatch(/Waves: Your invoice is ready/);
@@ -391,7 +396,9 @@ describe('Session RECENT TEXTS block', () => {
     const relayHistory = require('../services/voice-agent/relay-history');
     for (const tier of ['full', 'redacted']) {
       const out = await relayHistory.messageHistoryText(FROM, { customerId: 'c-1111', tier });
-      expect(builders.messages.orWhere).not.toHaveBeenCalled();
+      // no customer arm at any tier — the only orWhere is the recruiting-row exclusion's (message_type)
+      expect(JSON.stringify(builders.messages.orWhere.mock.calls)).not.toContain('customer_id');
+      expect(builders.messages.orWhere.mock.calls.every((c) => c[0] === 'messages.message_type')).toBe(true);
       expect(out).toMatch(/WITH THIS NUMBER/);
       expect(out).toMatch(/Do not tell the caller no messages exist/i);
     }

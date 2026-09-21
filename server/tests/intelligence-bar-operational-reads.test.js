@@ -86,6 +86,11 @@ test('comms tools never surface recruiting (job_*) sms_log rows — applicants a
   db.__queries.length = 0;
   await executeCommsTool('search_messages', { search: 'hello', days_back: 3 });
   expect(db.__queries.some((q) => q.sql.includes('from "sms_log"') && /not like/.test(q.sql) && q.bindings.includes('job\\_%'))).toBe(true);
+  // the AI draft's "last inbound from this customer" pick (r31 sweep)
+  db.__queries.length = 0;
+  db.__rows = (q) => (q.sql.includes('from "customers"') ? [{ id: 'fixture-customer', phone: '+12025550123', first_name: 'A', last_name: 'B' }] : []);
+  await executeCommsTool('draft_sms_reply', { customer_id: 'fixture-customer' });
+  expect(db.__queries.some((q) => q.sql.includes('from "sms_log"') && /not like/.test(q.sql) && q.bindings.includes('job\\_%'))).toBe(true);
 });
 
 test('call drill-down returns transcript continuation rather than only the greeting', async () => {
