@@ -903,6 +903,10 @@ async function querySubdivisionLivingSqft(county, whereName, deadlineMs) {
       outFields: cfg.livingField,
       returnGeometry: 'false',
       resultRecordCount: String(SUBDIVISION_PAGE_SIZE),
+      // A stable sort makes resultOffset pages disjoint (ArcGIS gives no
+      // order guarantee without one); the living-area field exists on every
+      // supported layer, and ties carry identical values anyway.
+      orderByFields: cfg.livingField,
       ...(offset > 0 ? { resultOffset: String(offset) } : {}),
     });
     const remainingMs = deadlineMs - Date.now();

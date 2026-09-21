@@ -530,6 +530,8 @@ describe('lookupSubdivisionMedianLivingSqft — plat median with range', () => {
     expect(global.fetch).toHaveBeenCalledTimes(2);
     // Offset = rows actually returned by the cut-off page (4), not the page size.
     expect(decodeURIComponent(String(global.fetch.mock.calls[1][0]))).toContain('resultOffset=4');
+    // Both pages ask for the same stable order, so the offsets are disjoint.
+    for (const call of global.fetch.mock.calls) expect(decodeURIComponent(String(call[0]))).toContain('orderByFields=BLDGS_SQFT_LIVING');
     expect(result).toMatchObject({ medianSqft: 3071, sampleCount: 9, minSqft: 2101, maxSqft: 3242 });
   });
 

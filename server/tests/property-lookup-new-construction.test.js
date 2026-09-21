@@ -261,6 +261,15 @@ describe('buildFieldVerifyFlags — plat-median sq ft copy', () => {
     expect(JSON.stringify(flags)).not.toMatch(/3,071|174 assessed/);
   });
 
+  it('uses the median-free copy on a commercial parcel, like the profile', () => {
+    const rec = vacantRecord({ _subdivisionMedian: platMedianStamp(), propertyType: 'Warehouse' });
+    rec._parcel = { ...rec._parcel, landUseDescription: 'Vacant Commercial' };
+    rec._raw = { landUse: 'Vacant Commercial', dorUseCode: '00' };
+    const flags = buildFieldVerifyFlags(rec, null, null);
+    expect(flags.find((f) => f.field === 'homeSqFt').reason).toContain('defaults to 2,000');
+    expect(JSON.stringify(flags)).not.toMatch(/3,071|174 assessed/);
+  });
+
   it('uses the median-free copy for a unit-inside-a-building lookup, like the profile', () => {
     const flags = buildFieldVerifyFlags(vacantRecord({ _subdivisionMedian: platMedianStamp() }), null, null, { residentialUnitLookup: true });
     const sqft = flags.find((f) => f.field === 'homeSqFt');
