@@ -876,52 +876,101 @@ function subdivisionBaseName(name) {
     .trim();
 }
 
-async function querySubdivisionLivingSqft(county, whereName, timeoutMs) {
+// ArcGIS pages at resultRecordCount and flags a cut-off page with
+// exceededTransferLimit; a first page is an UNORDERED sample, so its median
+// and extrema describe nothing. Follow the pages (a base plat can exceed
+// 1,000 assessed homes) up to this cap; still truncated → no estimate.
+const SUBDIVISION_PAGE_SIZE = 1000;
+const SUBDIVISION_MAX_PAGES = 5;
+// A widened (base-plat) query needs at least this much of the shared
+// deadline left to be worth sending.
+const SUBDIVISION_MIN_QUERY_MS = 250;
+
+async function querySubdivisionLivingSqft(county, whereName, deadlineMs) {
   const cfg = SUBDIVISION_MEDIAN_FIELDS[county];
   // Injection guard: plat names are alnum/space/slash/dash/&/' — drop quotes
   // entirely rather than escaping (ArcGIS string WHERE, county-hosted layers).
   const safe = String(whereName || '').replace(/'/g, '').trim();
   if (!cfg || !safe) return null;
-  const params = new URLSearchParams({
-    f: 'json',
-    where: `UPPER(${cfg.nameField}) LIKE '${safe.toUpperCase()}%' AND ${cfg.livingField} > 0`,
-    outFields: cfg.livingField,
-    returnGeometry: 'false',
-    resultRecordCount: '1000',
-  });
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const resp = await fetch(`${COUNTY_LAYERS[county].url}?${params.toString()}`, { signal: controller.signal });
-    if (!resp.ok) throw new Error(`subdivision layer ${resp.status}`);
-    const data = await resp.json();
+  const values = [];
+  // Offset advances by the rows the server actually RETURNED (a cut-off
+  // page can be shorter than the page size), never by the page size.
+  let offset = 0;
+  for (let page = 0; page < SUBDIVISION_MAX_PAGES; page += 1) {
+    const params = new URLSearchParams({
+      f: 'json',
+      where: `UPPER(${cfg.nameField}) LIKE '${safe.toUpperCase()}%' AND ${cfg.livingField} > 0`,
+      outFields: cfg.livingField,
+      returnGeometry: 'false',
+      resultRecordCount: String(SUBDIVISION_PAGE_SIZE),
+      // A stable sort makes resultOffset pages disjoint (ArcGIS gives no
+      // order guarantee without one); the living-area field exists on every
+      // supported layer, and ties carry identical values anyway.
+      orderByFields: cfg.livingField,
+      ...(offset > 0 ? { resultOffset: String(offset) } : {}),
+    });
+    const remainingMs = deadlineMs - Date.now();
+    if (remainingMs <= 0) throw new Error('subdivision layer deadline exhausted');
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), remainingMs);
+    let data;
+    try {
+      const resp = await fetch(`${COUNTY_LAYERS[county].url}?${params.toString()}`, { signal: controller.signal });
+      if (!resp.ok) throw new Error(`subdivision layer ${resp.status}`);
+      data = await resp.json();
+    } finally {
+      clearTimeout(timer);
+    }
     if (data?.error) throw new Error(`subdivision layer error: ${data.error.message || data.error.code}`);
-    const values = (Array.isArray(data?.features) ? data.features : [])
-      .map((f) => positiveOrNull(ciAttr(f?.attributes || {})(cfg.livingField)))
-      .filter(Boolean)
-      .sort((a, b) => a - b);
-    return values;
-  } finally {
-    clearTimeout(timer);
+    const features = Array.isArray(data?.features) ? data.features : [];
+    for (const f of features) {
+      const v = positiveOrNull(ciAttr(f?.attributes || {})(cfg.livingField));
+      if (v) values.push(v);
+    }
+    // No rows with the limit flag set would loop on the same offset forever.
+    if (data?.exceededTransferLimit !== true || features.length === 0) return values.sort((a, b) => a - b);
+    offset += features.length;
   }
+  // Still truncated after the page cap: an incomplete, unordered population.
+  logger.warn('[county-parcel-gis] subdivision sample truncated past the page cap', { county, pages: SUBDIVISION_MAX_PAGES });
+  return null;
 }
 
-// Returns { medianSqft, sampleCount, p25, p75, subdivisionQueried } or null
-// (unsupported county, no subdivision, too few samples, provider failure).
+// Returns { medianSqft, sampleCount, minSqft, maxSqft, p25, p75,
+// subdivisionQueried } or null (unsupported county, no subdivision, too few
+// samples, provider failure). min/max are the assessed neighbors' range —
+// the admin lookup shows it beside the median so an operator can judge how
+// tight the plat's plans run before confirming a size with the customer.
+// options.timeoutMs is ONE deadline shared by the exact-phase query, its
+// widened base-plat retry, and any pagination — never a per-request
+// allowance, so the caller's budget holds. options.diag (optional object)
+// gets `failed: true` when the layer errored/timed out, so a caller can
+// tell "the county answered and the sample was too thin" (a settled
+// negative) from "the county never answered" (worth retrying later).
 async function lookupSubdivisionMedianLivingSqft({ county, subdivision } = {}, options = {}) {
-  if (isDisabled()) return null;
+  if (isDisabled()) {
+    // Kill switch: nothing was attempted — never a settled negative.
+    if (options.diag && typeof options.diag === 'object') options.diag.skipped = true;
+    return null;
+  }
   const key = normalizeCountyName(county);
   if (!SUBDIVISION_MEDIAN_FIELDS[key] || !String(subdivision || '').trim()) return null;
   const timeoutMs = timeoutMsFor(options);
   const t0 = Date.now();
+  const deadlineMs = t0 + timeoutMs;
   try {
     let queried = String(subdivision).trim();
-    let values = await querySubdivisionLivingSqft(key, queried, timeoutMs);
+    let values = await querySubdivisionLivingSqft(key, queried, deadlineMs);
     if ((values?.length || 0) < SUBDIVISION_MEDIAN_MIN_SAMPLES) {
       const base = subdivisionBaseName(queried);
       if (base && base.toUpperCase() !== queried.toUpperCase()) {
-        queried = base;
-        values = await querySubdivisionLivingSqft(key, base, timeoutMs);
+        if (deadlineMs - Date.now() >= SUBDIVISION_MIN_QUERY_MS) {
+          queried = base;
+          values = await querySubdivisionLivingSqft(key, base, deadlineMs);
+        } else if (options.diag && typeof options.diag === 'object') {
+          // The broader population was never asked — not a settled negative.
+          options.diag.incomplete = true;
+        }
       }
     }
     if (!values || values.length < SUBDIVISION_MEDIAN_MIN_SAMPLES) return null;
@@ -933,11 +982,14 @@ async function lookupSubdivisionMedianLivingSqft({ county, subdivision } = {}, o
     return {
       medianSqft: Math.round(median),
       sampleCount: values.length,
+      minSqft: values[0],
+      maxSqft: values[values.length - 1],
       p25: values[Math.floor(values.length / 4)],
       p75: values[Math.floor((values.length * 3) / 4)],
       subdivisionQueried: queried,
     };
   } catch (err) {
+    if (options.diag && typeof options.diag === 'object') options.diag.failed = true;
     // Subdivision names never appear in logs (PII-adjacent parcel data rule).
     logger.warn('[county-parcel-gis] subdivision median lookup failed', {
       county: key || null, error: err?.message || String(err), elapsedMs: Date.now() - t0,
@@ -955,6 +1007,7 @@ module.exports = {
   dorMajorCategory,
   normalizeCountyName,
   lookupSubdivisionMedianLivingSqft,
+  SUBDIVISION_MEDIAN_MIN_SAMPLES,
   _private: {
     COUNTY_LAYERS,
     queryCountyLayer,
