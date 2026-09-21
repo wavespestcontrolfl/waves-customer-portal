@@ -1036,6 +1036,18 @@ describe('owner reply — boundary guard and evidence-owning application', () =>
     );
     await expect(RecruitingComms.openApplicationIdForPhone('+19415550142')).resolves.toBe('app-old');
   });
+
+  test('openApplicationIdForPhone: with no delivery evidence on any open application, the most recently updated open one owns the first text (Codex r27 P1)', async () => {
+    mockDb.__tables.job_applications.push(
+      { ...baseApp(), id: 'app-older', status: 'reviewed', updated_at: '2027-03-10T00:00:00.000Z', comms_history: [{ channel: 'email', outcome: 'sent', at: '2027-03-10T12:00:00.000Z' }] },
+      { ...baseApp(), id: 'app-newer', status: 'new', updated_at: '2027-03-15T00:00:00.000Z', comms_history: [{ channel: 'sms', outcome: 'deferred', at: '2027-03-15T02:00:00.000Z' }] },
+      { ...baseApp(), id: 'app-closed', status: 'rejected', updated_at: '2027-03-20T00:00:00.000Z', comms_history: [] },
+    );
+    await expect(RecruitingComms.openApplicationIdForPhone('+19415550142')).resolves.toBe('app-newer');
+    // any real evidence on an open application still wins over recency
+    mockDb.__tables.job_applications.find((r) => r.id === 'app-older').comms_history.push({ channel: 'sms', outcome: 'sent', at: '2027-03-11T12:00:00.000Z' });
+    await expect(RecruitingComms.openApplicationIdForPhone('+19415550142')).resolves.toBe('app-older');
+  });
 });
 
 describe('applicant emails never invite an email reply', () => {

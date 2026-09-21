@@ -83,9 +83,21 @@ describe('isRecruitingPhone', () => {
     await expect(isRecruitingPhone('+19415550142', database, { activeOnly: true })).resolves.toBe(false);
     expect(database.qs.job_applications.whereIn).toHaveBeenCalledWith('status', ['new', 'reviewed', 'interview', 'offer']);
     expect(database).not.toHaveBeenCalledWith('sms_log');
-    // the ledger predicate is plain SQL — no jsonpath '?' that knex would read as a binding
+  });
+
+  test('activeOnly: an OPEN application with NO delivery evidence is still recruiting context (Codex r27 P1) — the ledger predicate is not applied', async () => {
+    const database = fakeDatabase({ ledgerRow: { id: 'app-email-only' } });
+    await expect(isRecruitingPhone('+19415550142', database, { activeOnly: true })).resolves.toBe(true);
+    const sqls = database.qs.job_applications.whereRaw.mock.calls.map((c) => c[0]);
+    expect(sqls.some((q) => /jsonb_array_elements/.test(q))).toBe(false);
+  });
+
+  test('history readers (activeOnly:false) still require ledger evidence; the predicate is plain SQL with no jsonpath ?', async () => {
+    const database = fakeDatabase({ ledgerRow: null });
+    await expect(isRecruitingPhone('+19415550142', database)).resolves.toBe(false);
     const sqls = database.qs.job_applications.whereRaw.mock.calls.map((c) => c[0]);
     expect(sqls.some((q) => /jsonb_array_elements/.test(q) && !/\?/.test(q))).toBe(true);
+    expect(database.qs.job_applications.whereIn).not.toHaveBeenCalled();
   });
 
   test('falls back to a job_* sms_log row (either direction); false with neither; no query for an unparseable phone', async () => {

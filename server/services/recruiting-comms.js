@@ -1190,7 +1190,17 @@ async function openApplicationIdForPhone(phone, { fromNumber = null } = {}) {
       if (newerEvidence(candidate, best)) best = candidate;
     }
   }
-  return best ? best.applicationId : null;
+  if (best) return best.applicationId;
+  // No delivery evidence on any open application for this line (Codex r27
+  // P1): the applicant has never been texted — email-only form, consent box
+  // unticked, or the first text still queued. There is no thread for the
+  // reply classifier to disagree with, and the owner's text is about to
+  // create the evidence, so the most recently updated open application is
+  // the one it belongs to. Never a substitute for evidence when any exists.
+  const newest = rows
+    .slice()
+    .sort((a, b) => (Date.parse(b.updated_at || '') || 0) - (Date.parse(a.updated_at || '') || 0) || String(b.id).localeCompare(String(a.id)))[0];
+  return newest ? newest.id : null;
 }
 
 module.exports = {

@@ -63,9 +63,16 @@ const SMS_LEDGER_EVIDENCE_SQL = "EXISTS (SELECT 1 FROM jsonb_array_elements(COAL
  *   activeOnly:false (default — history readers such as the AI draft): any
  *     application on the phone with SMS ledger evidence, or any job_* sms_log
  *     row (either direction).
- *   activeOnly:true (composer / scheduled sends): an OPEN application with
- *     ledger evidence — a former applicant who is also a customer gets
- *     ordinary service texts again once their application closes.
+ *   activeOnly:true (composer / scheduled sends): any OPEN application on
+ *     the phone, delivery evidence or not (Codex r27 P1). An email-only
+ *     applicant, one whose consent box was unticked, or one whose first text
+ *     is still queued overnight has no ledger evidence yet — the owner's
+ *     first text from the composer is what creates it, and that text must
+ *     already ride the recruiting rail or the applicant's reply lands in the
+ *     customer pipeline and the technician bell. A former applicant who is
+ *     also a customer gets ordinary service texts again once their
+ *     application closes; a validated customerId is explicit customer
+ *     context and bypasses this check at the caller (Codex r16 P1).
  */
 async function isRecruitingPhone(phone, database = require('../models/db'), { activeOnly = false } = {}) {
   const { phoneMatchDigits } = require('./phone');
@@ -74,8 +81,10 @@ async function isRecruitingPhone(phone, database = require('../models/db'), { ac
   if (!variants.length) return false;
   const ledger = await database('job_applications')
     .whereRaw("regexp_replace(COALESCE(contact_snapshot->>'phone', ''), '[^0-9]', '', 'g') = ANY (?::text[])", [variants])
-    .modify((q) => { if (activeOnly) q.whereIn('status', OPEN_APPLICATION_STATUSES); })
-    .whereRaw(SMS_LEDGER_EVIDENCE_SQL)
+    .modify((q) => {
+      if (activeOnly) q.whereIn('status', OPEN_APPLICATION_STATUSES);
+      else q.whereRaw(SMS_LEDGER_EVIDENCE_SQL);
+    })
     .first('id');
   if (ledger) return true;
   if (activeOnly) return false;
