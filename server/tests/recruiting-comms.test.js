@@ -713,6 +713,17 @@ describe('sendStageComms — invite supersedes queued invites; suppression looku
     expect(mockDb.__tables.sms_log.find((r) => r.id === 'q1').status).toBe('scheduled');
   });
 
+  test('an admin-clicked interview invite carries admin attribution but NOT the send-window operator exemption (Codex r24 P2)', async () => {
+    mockRenderSmsTemplate.mockResolvedValue('Pick a time: https://x/careers/interview/a');
+    mockSendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, deliveryOutcome: 'accepted' });
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: true, email: false, by: 'tech-1' });
+    const input = mockSendCustomerMessage.mock.calls[0][0];
+    expect(input.operatorInitiated).toBeUndefined();
+    expect(input.metadata.adminUserId).toBe('tech-1');
+  });
+
   test('a sent interview invite retires invites still queued for the same application', async () => {
     mockRenderSmsTemplate.mockResolvedValue('Pick a time: https://x/careers/interview/a');
     mockSendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, deliveryOutcome: 'accepted' });

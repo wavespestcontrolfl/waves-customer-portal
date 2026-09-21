@@ -100,7 +100,7 @@ async function checkRecruitingApplicationEligibility(meta, conn, lock) {
   let appQuery = conn('job_applications').where({ id: meta.job_application_id });
   if (lock) appQuery = appQuery.forUpdate();
   const app = await appQuery
-    .first('id', 'status', 'interview_token', 'interview_at', 'interview_mode', 'comms_history');
+    .first('id', 'status', 'interview_token', 'interview_at', 'interview_mode', 'interview_booked_at', 'comms_history');
   if (!app) return { refusal: { eligible: false, reason: 'application-missing' } };
   const status = String(app.status || '');
   if (!['new', 'reviewed', 'interview', 'offer'].includes(status)) {
@@ -130,6 +130,16 @@ function checkRecruitingStageSupersession(meta, app, stage) {
   const newer = mineIdx >= 0 && history.slice(mineIdx + 1).some((e) => e && e.channel === 'sms' && e.stage === stage
     && ['pending', 'handoff', 'sent', 'uncertain', 'deferred'].includes(e.outcome));
   if (newer) return { eligible: false, reason: 'superseded-by-newer-attempt' };
+  // A queued "pick a time" invite is moot once the applicant has booked
+  // (Codex r24 P2) — e.g. the email leg let them book overnight before the
+  // SMS window opened — or once a confirmation for that booking is already
+  // live after it in the ledger.
+  if (stage === 'interview_invite') {
+    if (app.interview_booked_at) return { eligible: false, reason: 'interview-already-booked' };
+    const confirmed = mineIdx >= 0 && history.slice(mineIdx + 1).some((e) => e && e.channel === 'sms' && e.stage === 'interview_confirmation'
+      && ['pending', 'handoff', 'sent', 'uncertain', 'deferred'].includes(e.outcome));
+    if (confirmed) return { eligible: false, reason: 'superseded-by-confirmation' };
+  }
   if (!meta.interview_token || app.interview_token !== meta.interview_token) {
     return { eligible: false, reason: 'interview-token-changed' };
   }

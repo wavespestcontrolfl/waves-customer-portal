@@ -904,26 +904,37 @@ async function queueDeferredSms({ app, stage, contact, body, applicantFromNumber
 // The provider call + outcome classification + downstream ledger effects,
 // once the pre-handoff evidence row already exists. Returns the sms leg's
 // final outcome string.
+// The canonical pipeline input for one recruiting SMS leg: applicant
+// audience + transactional consent basis, the locked provider handoff, and
+// operator provenance (admin attribution always; the send-window operator
+// exemption ONLY for the conversational owner reply — Codex r24 P2 — so a
+// stage-change invite clicked at 9 PM is held for the 8 AM–8 PM ET window
+// and queued on the deferred rail, never sent into the night).
+function buildSmsSendInput({ app, stage, opts, contact, applicantFromNumber, body, handoffEntry, legEligible }) {
+  const byOperator = Boolean(opts.by && opts.by !== 'system' && opts.by !== 'applicant');
+  return {
+      to: contact.phone,
+    body,
+    channel: 'sms',
+    audience: 'applicant',
+    purpose: STAGE_PURPOSE[stage] || stage,
+    entryPoint: opts.entryPoint || 'recruiting_comms',
+    identityTrustLevel: 'phone_provided_unverified',
+    consentBasis: { status: 'transactional_allowed', source: 'job_application' },
+    // Locked provider handoff (Codex r19 P1): supersession + the caller's
+    // authoritative eligibility read, the pipeline's fresh rechecks and
+    // the pending → handoff stamp all run with the application row held
+    // through the Twilio request — see lockedRecruitingHandoff.
+    withSmsHandoff: lockedRecruitingHandoff({ app, stage, handoffEntry, legEligible }),
+    ...(stage === 'owner_reply' && byOperator ? { operatorInitiated: true } : {}),
+    metadata: { original_message_type: `job_${stage}`, job_application_id: app.id, ...(byOperator ? { adminUserId: opts.by } : {}), ...(applicantFromNumber ? { fromNumber: applicantFromNumber } : {}) },
+  };
+}
+
 async function runSmsDelivery({ app, stage, opts, contact, applicantFromNumber, body, handoffEntry, legEligible }) {
   let sendRes;
   try {
-    sendRes = await sendCustomerMessage({
-      to: contact.phone,
-      body,
-      channel: 'sms',
-      audience: 'applicant',
-      purpose: STAGE_PURPOSE[stage] || stage,
-      entryPoint: opts.entryPoint || 'recruiting_comms',
-      identityTrustLevel: 'phone_provided_unverified',
-      consentBasis: { status: 'transactional_allowed', source: 'job_application' },
-      // Locked provider handoff (Codex r19 P1): supersession + the caller's
-      // authoritative eligibility read, the pipeline's fresh rechecks and
-      // the pending → handoff stamp all run with the application row held
-      // through the Twilio request — see lockedRecruitingHandoff.
-      withSmsHandoff: lockedRecruitingHandoff({ app, stage, handoffEntry, legEligible }),
-      ...(opts.by && opts.by !== 'system' && opts.by !== 'applicant' ? { operatorInitiated: true } : {}),
-      metadata: { original_message_type: `job_${stage}`, job_application_id: app.id, ...(opts.by && opts.by !== 'system' && opts.by !== 'applicant' ? { adminUserId: opts.by } : {}), ...(applicantFromNumber ? { fromNumber: applicantFromNumber } : {}) },
-    });
+    sendRes = await sendCustomerMessage(buildSmsSendInput({ app, stage, opts, contact, applicantFromNumber, body, handoffEntry, legEligible }));
   } catch (err) {
     // Channel isolation: a throw here must not lose the email leg's outcome
     // (or vice versa) — record it as a failed attempt.
