@@ -426,6 +426,16 @@ export function MessageMediaV2({ media = [], inverted = false }) {
   );
 }
 
+// The newest inbound row of a thread, as the reply context a thread-level
+// "Text back" carries.
+function latestInboundContext(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  const inbound = list.filter((m) => m && m.direction === "inbound");
+  if (!inbound.length) return null;
+  const latest = inbound.reduce((a, b) => (new Date(b.createdAt || 0) > new Date(a.createdAt || 0) ? b : a));
+  return { messageId: latest.id, messageType: latest.messageType };
+}
+
 function SmsLogItemV2({ msg: m, onReply }) {
   const [expanded, setExpanded] = useState(false);
   const isLong = m.body && m.body.length > 80;
@@ -514,7 +524,7 @@ function SmsLogItemV2({ msg: m, onReply }) {
               variant="primary"
               onClick={(e) => {
                 e.stopPropagation();
-                onReply(contactPhone, ourNumber, m.customerId);
+                onReply(contactPhone, ourNumber, m.customerId, { messageId: m.id, messageType: m.messageType });
               }}
             >
               <MessageSquare size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
@@ -611,7 +621,7 @@ function ConversationViewV2({
             variant="primary"
             className="flex-1 md:flex-none"
             onClick={() =>
-              onReply(contactPhone, thread.ourNumber, thread.customerId)
+              onReply(contactPhone, thread.ourNumber, thread.customerId, latestInboundContext(thread.messages))
             }
           >
             <MessageSquare size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
@@ -804,6 +814,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const [toSearch, setToSearch] = useState("");
   const [toResults, setToResults] = useState([]);
   const [selectedCustomerId, setSelectedCustomerId] = useState(customer?.id || null);
+  // The inbox row a "Text back" answers — sent as replyToMessageId so the
+  // server routes a recruiting reply onto the recruiting rail (Codex r25 P1).
+  const [replyContext, setReplyContext] = useState(null);
   const [fromNumber, setFromNumber] = useState("+19413187612");
   const [msgBody, setMsgBody] = useState("");
   const [sending, setSending] = useState(false);
@@ -1329,6 +1342,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             to: toNumber.trim(),
             body: msgBody.trim(),
             customerId: selectedCustomerId || undefined,
+            // The inbox row this answers (recruiting rows stay on the recruiting rail even on a shared customer phone)
+            replyToMessageId: replyContext?.messageId || undefined,
             messageType: "manual",
             fromNumber,
             scheduledFor,
@@ -2274,10 +2289,11 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     }
   };
 
-  const handleThreadReply = (contactPhone, ourNumber, customerId = null) => {
+  const handleThreadReply = (contactPhone, ourNumber, customerId = null, replyTo = null) => {
     setToNumber(contactPhone);
     setToSearch("");
     setSelectedCustomerId(customerId || null);
+    setReplyContext(replyTo || null);
     if (ourNumber) {
       setFromNumber(ourNumber);
       setThreadLock({
@@ -3207,10 +3223,11 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                 <SmsLogItemV2
                   key={m.id}
                   msg={m}
-                  onReply={(phone, from, customerId) => {
+                  onReply={(phone, from, customerId, replyTo) => {
                     setToNumber(phone);
                     setToSearch("");
                     setSelectedCustomerId(customerId || null);
+                    setReplyContext(replyTo || null);
                     setFromNumber(from);
                     // The admin shell scrolls .admin-main, not the window —
                     // window.scrollTo() is a no-op here.

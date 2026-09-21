@@ -415,6 +415,10 @@ router.post('/sms', async (req, res, next) => {
       customerId,
       messageType,
       fromNumber,
+      // The inbox row this text answers (Communications "Text back"): a
+      // recruiting row keeps the reply on the recruiting rail even when the
+      // shared phone is also a customer's (Codex r25 P1).
+      replyToMessageId,
       mediaUrls,
       mediaAttachments,
       agentDecisionId,
@@ -460,19 +464,23 @@ router.post('/sms', async (req, res, next) => {
     // Texting an applicant from the composer stays on the recruiting rail
     // (Codex r7 P0): owner-only, typed job_owner_reply, handoff evidence on
     // the application — never a 'manual' customer text that would hand the
-    // applicant's next reply to the customer pipeline. A VALIDATED customerId
-    // is explicit customer context (a shared applicant/customer phone texted
-    // from the customer's thread) and keeps the ordinary path — the reply
-    // classifier then sees the newer customer text and routes the next reply
-    // to the customer pipeline (Codex r16 P1).
-    if (!trustedCustomerId && await isRecruitingPhone(to, undefined, { activeOnly: true })) {
+    // applicant's next reply to the customer pipeline. Intent comes from the
+    // MESSAGE being answered, not from a linked customerId (Codex r25 P1):
+    // "Text back" on a recruiting row is a recruiting reply even when the
+    // shared phone is also a customer's; a validated customerId with no
+    // recruiting row behind it is explicit customer context and keeps the
+    // ordinary path (Codex r16 P1).
+    const recruitingContext = await recruitingReplyContext(replyToMessageId, to);
+    if (recruitingContext || (!trustedCustomerId && await isRecruitingPhone(to, undefined, { activeOnly: true }))) {
       if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
       if (media.length > 0) return res.status(400).json({ error: 'Attachments are not supported for applicant texts' });
       const RecruitingComms = require('../services/recruiting-comms');
       // The line this reply goes out from decides which application's thread
-      // it belongs to (Codex r23 P2) — the same line the send will use.
-      const replyLine = fromNumber || await RecruitingComms.outboundNumberForApplicants();
-      const applicationId = await RecruitingComms.openApplicationIdForPhone(to, { fromNumber: replyLine });
+      // it belongs to (Codex r23 P2) — the answered row's line when there is
+      // one, else the composer's pick, else the applicant default.
+      const replyLine = fromNumber || (recruitingContext && recruitingContext.ourEndpointId) || await RecruitingComms.outboundNumberForApplicants();
+      const applicationId = (recruitingContext && recruitingContext.applicationId)
+        || await RecruitingComms.openApplicationIdForPhone(to, { fromNumber: replyLine });
       if (!applicationId) return res.status(409).json({ error: 'No open application for this applicant — text them from the recruiting queue' });
       const reply = await RecruitingComms.sendOwnerReply({ applicationId, body: cleanBody, by: req.technicianId, fromNumber: replyLine });
       if (!['sent', 'uncertain', 'deferred'].includes(reply.outcome)) {
@@ -3358,6 +3366,23 @@ async function reconcileCancelledRecruitingText(meta, trx) {
   await reconcileCommsHistoryEntryByOutcome(meta.job_application_id, meta.ledger_entry_id, {
     deferred: { outcome: 'blocked', code: 'cancelled_by_admin', finalized_at: new Date().toISOString() },
   }, trx);
+}
+
+// The recruiting row a composer send answers (replyToMessageId), verified
+// server-side: the row must exist, carry a recruiting type, and belong to
+// the phone being texted — a stale context from an earlier reply target is
+// ignored. Returns { applicationId, ourEndpointId } or null.
+async function recruitingReplyContext(messageId, to) {
+  if (!messageId || typeof messageId !== 'string') return null;
+  const row = await db('messages')
+    .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
+    .where('messages.id', messageId)
+    .first('messages.message_type', 'messages.metadata', 'conversations.contact_phone', 'conversations.our_endpoint_id');
+  if (!row || !isRecruitingMessageType(row.message_type)) return null;
+  const rowPhone = normalizePhone(row.contact_phone);
+  if (!rowPhone || rowPhone !== normalizePhone(to)) return null;
+  const meta = parseJson(row.metadata, {});
+  return { applicationId: meta.job_application_id || null, ourEndpointId: row.our_endpoint_id || null };
 }
 
 // DELETE /api/admin/communications/scheduled/:id — cancel scheduled message

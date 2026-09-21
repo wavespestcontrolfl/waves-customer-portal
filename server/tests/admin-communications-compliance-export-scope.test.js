@@ -154,6 +154,43 @@ describe('POST /sms composer recruiting boundary', () => {
       body: JSON.stringify({ to: '+19415550142', body: 'See you Tuesday', fromNumber: undefined }),
     });
   }
+  test('"Text back" on a recruiting row rides the recruiting rail even when the shared phone is a linked customer (Codex r25 P1)', async () => {
+    mockIsRecruitingPhone.mockResolvedValue(false); // the phone-level shortcut is NOT what decides here
+    mockSendOwnerReply.mockClear(); mockOpenAppId.mockClear();
+    db.mockImplementation((table) => {
+      if (table === 'customers') return query({ result: [{ id: 'cust-A', phone: '+19415550142' }] });
+      if (table === 'messages') return query({ result: [{ message_type: 'job_applicant_reply', metadata: { job_application_id: 'app-9' }, contact_phone: '+19415550142', our_endpoint_id: '+19415550199' }] });
+      return table === 'messaging_audit_log' ? auditQuery : query({ result: [] });
+    });
+    const res = await fetch(`${base}/api/admin/communications/sms`, {
+      method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: '+19415550142', body: 'See you Tuesday', customerId: 'cust-A', replyToMessageId: 'msg-job-1' }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ success: true, recruiting: true });
+    // the answered row names the application and the line — no phone-level lookup needed
+    expect(mockOpenAppId).not.toHaveBeenCalled();
+    expect(mockSendOwnerReply).toHaveBeenCalledWith(expect.objectContaining({ applicationId: 'app-9', fromNumber: '+19415550199', body: 'See you Tuesday' }));
+    mockIsRecruitingPhone.mockResolvedValue(false);
+  });
+
+  test('a stale reply context for a DIFFERENT phone is ignored (the phone-level rule decides)', async () => {
+    mockIsRecruitingPhone.mockResolvedValueOnce(true);
+    mockSendOwnerReply.mockClear(); mockOpenAppId.mockClear();
+    db.mockImplementation((table) => {
+      if (table === 'messages') return query({ result: [{ message_type: 'job_applicant_reply', metadata: { job_application_id: 'app-9' }, contact_phone: '+19415550777', our_endpoint_id: '+19415550199' }] });
+      return table === 'messaging_audit_log' ? auditQuery : query({ result: [] });
+    });
+    const res = await fetch(`${base}/api/admin/communications/sms`, {
+      method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: '+19415550142', body: 'See you Tuesday', replyToMessageId: 'msg-job-1' }),
+    });
+    expect(res.status).toBe(200);
+    expect(mockOpenAppId).toHaveBeenCalled(); // the context did not name the application for THIS phone
+    expect(mockSendOwnerReply).toHaveBeenCalledWith(expect.objectContaining({ applicationId: 'app-1' }));
+    mockSendOwnerReply.mockClear(); mockOpenAppId.mockClear();
+  });
+
   test('technician texting an applicant phone is refused (403)', async () => {
     mockIsRecruitingPhone.mockResolvedValueOnce(true);
     const res = await smsAs('tech');

@@ -22,7 +22,7 @@ const logger = require('./logger');
 const { phoneMatchDigits } = require('../utils/phone');
 const { appendCommsHistory, maskPhone, errorSummary } = require('./recruiting-comms');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
-const { effectiveSendMs } = require('../utils/recruiting-thread-scope');
+const { effectiveSendMs, newerEvidence } = require('../utils/recruiting-thread-scope');
 
 const OPEN_STATUSES = ['new', 'reviewed', 'interview', 'offer'];
 const RECENT_OUTBOUND_DAYS = 45;
@@ -68,7 +68,8 @@ function newestSmsEvidence(apps, toNumber, cutoffMs) {
       // returns NaN): a queued text has definitely not reached the applicant.
       const at = effectiveSendMs(entry);
       if (!Number.isFinite(at) || at < cutoffMs || !onInboundLine(entry)) continue;
-      if (!best || at > best.at) best = { at, applicationId: app.id, fromNumber: entry.from_number || null };
+      const candidate = { at, applicationId: app.id, entryId: entry.id || null, fromNumber: entry.from_number || null };
+      if (newerEvidence(candidate, best)) best = candidate;
     }
   }
   return best;
@@ -217,7 +218,6 @@ async function retireBellIfAlreadyRead({ applicationId, replyId, messageSid }) {
 // audit P1). A short-lived snapshot of open applications' phones answers
 // that cheaply; a refresh failure keeps the last snapshot, and "never
 // loaded" is treated as unknown (conservative: fail closed).
-const RECRUITING_PHONE_CACHE_TTL_MS = 60 * 1000;
 const phoneCache = { digits: null, loadedAt: 0, loading: null };
 
 async function refreshRecruitingPhoneCache() {
@@ -235,44 +235,36 @@ async function refreshRecruitingPhoneCache() {
 }
 
 /**
- * true  — the phone has an open application in the snapshot (fail closed)
- * false — a CURRENT snapshot is loaded and the phone is not in it (fail open)
- * null  — unknown: no snapshot could ever be loaded, or the refresh just
- *         failed and the phone is absent from the stale one (fail closed)
+ * Runs only AFTER a classification failure (twilio-webhook.js), so:
+ * true  — a snapshot (any age) lists the phone: fail closed
+ * false — a FRESH read, just made, does not list it: fail open
+ * null  — unknown: the fresh read failed too (fail closed → Twilio retry)
+ * A cached negative is never evidence (Codex r17/r25 P1): an application
+ * created and texted after the snapshot — inside its TTL or not — is absent
+ * from it, and 'false' would hand the applicant's reply to the customer
+ * pipeline. Every negative therefore forces a fresh read; a positive stands.
  */
 async function isPlausibleRecruitingPhone(fromPhone) {
   const variants = phoneMatchDigits(fromPhone);
   const last10 = variants.length ? variants[variants.length - 1].slice(-10) : null;
   if (!last10) return false;
-  let refreshFailed = false;
-  if (!phoneCache.digits || Date.now() - phoneCache.loadedAt > RECRUITING_PHONE_CACHE_TTL_MS) {
-    try {
-      phoneCache.loading = phoneCache.loading || refreshRecruitingPhoneCache();
-      await phoneCache.loading;
-    } catch (err) {
-      refreshFailed = true;
-      logger.warn(`[recruiting-inbound] phone snapshot refresh failed (${err && err.name ? err.name : 'Error'}${err && err.code ? ` ${err.code}` : ''}) — keeping the last snapshot`);
-    } finally {
-      phoneCache.loading = null;
-    }
+  if (phoneCache.digits && phoneCache.digits.has(last10)) return true;
+  try {
+    phoneCache.loading = phoneCache.loading || refreshRecruitingPhoneCache();
+    await phoneCache.loading;
+  } catch (err) {
+    logger.warn(`[recruiting-inbound] phone snapshot refresh failed (${err && err.name ? err.name : 'Error'}${err && err.code ? ` ${err.code}` : ''}) — answer unknown`);
+    return null;
+  } finally {
+    phoneCache.loading = null;
   }
-  if (!phoneCache.digits) return null;
-  if (phoneCache.digits.has(last10)) return true;
-  // A negative from a snapshot whose refresh just failed is not evidence: an
-  // application (and its first text) created since that snapshot is absent
-  // from it, and 'false' would hand the applicant's reply to the customer
-  // pipeline during the outage (Codex r17 P1). Only a positive survives a
-  // failed refresh; a negative stays unknown → the webhook's fail-closed retry.
-  return refreshFailed ? null : false;
+  return phoneCache.digits ? phoneCache.digits.has(last10) : null;
 }
 
 function _resetRecruitingPhoneCacheForTests() {
   phoneCache.digits = null; phoneCache.loadedAt = 0; phoneCache.loading = null;
 }
-function _expireRecruitingPhoneCacheForTests() {
-  phoneCache.loadedAt = 0;
-}
 
 module.exports = {
   isPlausibleRecruitingPhone,
-  _resetRecruitingPhoneCacheForTests, _expireRecruitingPhoneCacheForTests, matchApplicantReply, recordApplicantReply, OPEN_STATUSES, RECENT_OUTBOUND_DAYS, REPLY_MESSAGE_TYPE, NON_CONVERSATIONAL_OUTBOUND };
+  _resetRecruitingPhoneCacheForTests, matchApplicantReply, recordApplicantReply, OPEN_STATUSES, RECENT_OUTBOUND_DAYS, REPLY_MESSAGE_TYPE, NON_CONVERSATIONAL_OUTBOUND };

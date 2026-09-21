@@ -40,7 +40,7 @@ mockDb.raw = jest.fn((sql) => ({ sql }));
 mockDb.transaction = jest.fn(async (fn) => fn(mockDb));
 jest.mock('../models/db', () => mockDb);
 
-const { matchApplicantReply, recordApplicantReply, REPLY_MESSAGE_TYPE, _expireRecruitingPhoneCacheForTests } = require('../services/recruiting-inbound');
+const { matchApplicantReply, recordApplicantReply, REPLY_MESSAGE_TYPE } = require('../services/recruiting-inbound');
 
 const NOW = Date.now();
 const sentEntry = (daysAgo) => ({ at: new Date(NOW - daysAgo * 86400000).toISOString(), stage: 'interview_invite', channel: 'sms', outcome: 'sent', from_number: '+19415550199' });
@@ -250,11 +250,24 @@ describe('isPlausibleRecruitingPhone — blast-radius bound for the fail-closed 
     });
   }
 
-  test('true for a phone with an open application, false otherwise, and the snapshot is reused within the TTL', async () => {
+  test('a cached positive stands; a negative always forces a fresh read (Codex r25 P1) and is false only when that read succeeds', async () => {
     snapshot([{ digits: '19415550142' }]);
     await expect(isPlausibleRecruitingPhone('+19415550142')).resolves.toBe(true);
-    await expect(isPlausibleRecruitingPhone('+19415550999')).resolves.toBe(false);
+    await expect(isPlausibleRecruitingPhone('+19415550142')).resolves.toBe(true); // positive: no re-read
     expect(mockDb).toHaveBeenCalledTimes(1);
+    await expect(isPlausibleRecruitingPhone('+19415550999')).resolves.toBe(false); // negative: fresh read, still absent
+    expect(mockDb).toHaveBeenCalledTimes(2);
+    // an application texted AFTER the snapshot, inside its TTL: the fresh read finds it
+    snapshot([{ digits: '19415550142' }, { digits: '19415550999' }]);
+    await expect(isPlausibleRecruitingPhone('+19415550999')).resolves.toBe(true);
+  });
+
+  test('a fresh snapshot that lacks the phone is not trusted when the re-read fails: unknown (null), never false', async () => {
+    snapshot([{ digits: '19415550142' }]);
+    await expect(isPlausibleRecruitingPhone('+19415550142')).resolves.toBe(true);
+    mockDb.mockImplementation(() => { throw Object.assign(new Error('down'), { code: '57014' }); });
+    await expect(isPlausibleRecruitingPhone('+19415550999')).resolves.toBeNull();
+    await expect(isPlausibleRecruitingPhone('+19415550142')).resolves.toBe(true); // cached positive still stands
   });
 
   test('a refresh failure keeps the last snapshot; with no snapshot ever loaded the answer is unknown (null → fail closed)', async () => {
@@ -268,7 +281,6 @@ describe('isPlausibleRecruitingPhone — blast-radius bound for the fail-closed 
   test('after a FAILED refresh only a positive from the stale snapshot is trusted — a negative is unknown (null), never false (Codex r17 P1)', async () => {
     snapshot([{ digits: '9415550142' }]);
     await expect(isPlausibleRecruitingPhone('+19415550142')).resolves.toBe(true);
-    _expireRecruitingPhoneCacheForTests();
     mockDb.mockImplementation(() => { throw Object.assign(new Error('down'), { code: '57014' }); });
     await expect(isPlausibleRecruitingPhone('+19415550142')).resolves.toBe(true);   // stale positive still stands
     await expect(isPlausibleRecruitingPhone('+19415550999')).resolves.toBeNull();   // an applicant created since the snapshot would be absent

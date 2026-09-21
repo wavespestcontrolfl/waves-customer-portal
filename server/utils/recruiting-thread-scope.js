@@ -117,7 +117,20 @@ function effectiveSendMs(entry) {
   return Date.parse(entry.at || '');
 }
 
+/**
+ * Deterministic order between two pieces of SMS evidence — the reply
+ * classifier and the composer's owning-application pick must agree even
+ * when two handoffs share a millisecond (Codex r25 P2): effective time, then
+ * application id, then ledger entry id. `best` may be null.
+ */
+function newerEvidence(candidate, best) {
+  if (!best) return true;
+  if (candidate.at !== best.at) return candidate.at > best.at;
+  if (String(candidate.applicationId) !== String(best.applicationId)) return String(candidate.applicationId) > String(best.applicationId);
+  return String(candidate.entryId || '') > String(best.entryId || '');
+}
+
 module.exports = {
   RECRUITING_MESSAGE_TYPE_PREFIX, OPEN_APPLICATION_STATUSES, SMS_EVIDENCE_OUTCOMES,
-  isRecruitingMessageType, hideRecruitingThreadsFromNonAdmin, isRecruitingPhone, effectiveSendMs,
+  isRecruitingMessageType, hideRecruitingThreadsFromNonAdmin, isRecruitingPhone, effectiveSendMs, newerEvidence,
 };

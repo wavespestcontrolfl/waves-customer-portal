@@ -28,7 +28,7 @@ const sendgrid = require('./sendgrid-mail');
 const { isEnabled } = require('../config/feature-gates');
 const { portalUrl } = require('../utils/portal-url');
 const { formatETTime } = require('../utils/datetime-et');
-const { effectiveSendMs } = require('../utils/recruiting-thread-scope');
+const { effectiveSendMs, newerEvidence } = require('../utils/recruiting-thread-scope');
 const { WAVES_ADDRESS_LINE, WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
@@ -1185,10 +1185,12 @@ async function openApplicationIdForPhone(phone, { fromNumber = null } = {}) {
       // is the newer evidence — Codex r14 P2).
       const at = effectiveSendMs(e);
       if (!Number.isFinite(at) || !onLine(e)) continue;
-      if (!best || at > best.at) best = { at, id: r.id };
+      // Same tie-break as the reply classifier (Codex r25 P2).
+      const candidate = { at, applicationId: r.id, entryId: e.id || null };
+      if (newerEvidence(candidate, best)) best = candidate;
     }
   }
-  return best ? best.id : null;
+  return best ? best.applicationId : null;
 }
 
 module.exports = {
