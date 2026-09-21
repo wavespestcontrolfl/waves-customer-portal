@@ -39,11 +39,19 @@ export function palmPrefillAllowed(enrichedProfile) {
  * sq ft default, exactly as before.
  */
 export function subdivisionMedianPrefillSqFt(enrichedProfile) {
-  if (!enrichedProfile || Number(enrichedProfile.homeSqFt) > 0) return null;
+  if (!enrichedProfile) return null;
   if ((enrichedProfile.fieldVerifyFlags || []).some((flag) => flag?.field === "address")) return null;
   const median = Number(enrichedProfile.subdivisionMedian?.medianSqft);
   if (!Number.isFinite(median) || median <= 0) return null;
-  return Math.round(median);
+  const rounded = Math.round(median);
+  // A real record value wins. The one exception is the profile a SAVED
+  // estimate stores and restores on reopen: its homeSqFt is the median the
+  // form was prefilled with (the live lookup only ever exposes the median
+  // beside an empty homeSqFt), so a homeSqFt that IS the median still
+  // reads as the estimate, never as a measurement.
+  const own = Number(enrichedProfile.homeSqFt);
+  if (own > 0 && own !== rounded) return null;
+  return rounded;
 }
 
 /**
@@ -68,7 +76,10 @@ export function lookupHomeSqFtPrefill(enrichedProfile) {
  */
 export function homeSqFtIsUnverifiedPlatMedian(form, enrichedProfile) {
   if (!form || form._homeSqFtEdited) return false;
-  return subdivisionMedianPrefillSqFt(enrichedProfile) !== null;
+  const median = subdivisionMedianPrefillSqFt(enrichedProfile);
+  // Only the untouched median itself is blocked: a reopened estimate loses
+  // the transient edited flag, so a different typed size stays verifiable.
+  return median !== null && Number(form.homeSqFt) === median;
 }
 
 // Measurements belong to the property, regardless of whether its address

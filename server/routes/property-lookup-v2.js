@@ -590,12 +590,12 @@ async function performPropertyLookupCore(address, options = {}) {
         });
         if (median) {
           result.propertyRecord._subdivisionMedian = { ...median, county: parcelMeta.county };
-        } else if (!diag.failed && !diag.skipped) {
+        } else if (!diag.failed && !diag.skipped && !diag.incomplete) {
           // The county ANSWERED and the plat is too thin (or truncated): a
           // settled negative. Stamp an explicit null so the profile reports
           // "withheld" and the call estimator doesn't repeat the same query
-          // (Codex r3 P1). An outage or the kill switch leaves no stamp —
-          // those ARE worth a retry once the layer/switch is back.
+          // (Codex r3 P1). An outage, the kill switch, or a widening the
+          // deadline cut off leaves no stamp — those ARE worth a retry.
           result.propertyRecord._subdivisionMedian = null;
         }
       }
@@ -2169,9 +2169,11 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // undefined (the record carries no stamp at all — rows cached before the
     // stamp existed — so there was nothing to judge and the call estimator
     // keeps its own direct dig).
+    // A commercial profile never carries one either: neighboring HOMES say
+    // nothing about a building's area (the UI relabels the field).
     subdivisionMedian: rc?._subdivisionMedian === undefined
       ? undefined
-      : ((residentialUnitLookup || fieldVerifyFlags.some((flag) => flag?.field === 'address'))
+      : ((residentialUnitLookup || commercialProfile || fieldVerifyFlags.some((flag) => flag?.field === 'address'))
         ? null : subdivisionMedianEstimate(rc)),
     // Machine-readable twin of the parkParcel verify flag (multi-situs master
     // parcel — land-lease mobile-home park or similar; the roll vouches for

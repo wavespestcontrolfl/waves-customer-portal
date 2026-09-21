@@ -219,6 +219,15 @@ describe('buildEnrichedProfile — plat median rides beside an EMPTY homeSqFt', 
     expect(profile.subdivisionMedian).toBeNull();
   });
 
+  it('is withheld (null) on a commercial profile — neighboring homes say nothing about a building', () => {
+    const rec = vacantRecord({ _subdivisionMedian: platMedianStamp(), propertyType: 'Warehouse' });
+    rec._parcel = { ...rec._parcel, dorUseCode: '00', landUseDescription: 'Vacant Commercial' };
+    rec._raw = { landUse: 'Vacant Commercial', dorUseCode: '00' };
+    const profile = buildEnrichedProfile(rec, null, 27.47, -82.39);
+    expect(profile.isCommercial).toBe(true);
+    expect(profile.subdivisionMedian).toBeNull();
+  });
+
   it('is undefined without a stamp (nothing judged) and null once the record carries a home (withheld)', () => {
     expect(buildEnrichedProfile(vacantRecord(), null, 27.47, -82.39).subdivisionMedian).toBeUndefined();
     const built = buildEnrichedProfile(vacantRecord({ _subdivisionMedian: platMedianStamp(), squareFootage: 2980, yearBuilt: 2026 }), null, 27.47, -82.39);

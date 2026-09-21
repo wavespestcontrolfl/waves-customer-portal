@@ -553,6 +553,7 @@ describe('lookupSubdivisionMedianLivingSqft — plat median with range', () => {
       expect(result).toBeNull();
       expect(global.fetch).toHaveBeenCalledTimes(1); // no second request with ~100 ms left
       expect(diag.failed).toBeUndefined();
+      expect(diag.incomplete).toBe(true); // the base plat was never asked — callers must not stamp a settled null
     } finally {
       Date.now = realNow;
     }

@@ -487,6 +487,7 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
   const address = addressFromContext(context);
   let propertyRecord = null;
   let enriched = null;
+  let lookupCache = null;
   if (address) {
     try {
       const { performPropertyLookup } = require('../../routes/property-lookup-v2');
@@ -500,6 +501,7 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
       // record doesn't (pool/cage, shrub density, landscape complexity,
       // water adjacency) — dropping it priced known features as absent.
       enriched = lookup?.enriched || null;
+      lookupCache = lookup?.meta?.cache || null;
     } catch (err) {
       logger.warn(`[estimator-engine] property lookup failed (continuing without): ${err.message}`);
     }
@@ -532,10 +534,15 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
       // (unit lookup, unconfirmed address, thin sample): a direct dig here
       // would price on exactly what it refused.
       subdivisionMedian = null;
+    } else if (lookupCache === 'miss' || lookupCache === 'refresh') {
+      // undefined after a FRESH lookup: the route just attempted the query
+      // (outage, kill switch, or budget) — repeating it here would only add
+      // the same timeout and provider load (Codex r5 P2). Leave it.
+      subdivisionMedian = null;
     } else {
-      // undefined: no profile, or a profile over a record with no stamp
-      // (cache rows written before the stamp existed) — nothing was judged,
-      // so the pre-existing direct dig stands.
+      // undefined on a cache hit (a row written before the stamp existed) or
+      // with no profile at all — nothing was judged, so the pre-existing
+      // direct dig stands.
       try {
         subdivisionMedian = await lookupSubdivisionMedianLivingSqft({
           county: parcelView.county,

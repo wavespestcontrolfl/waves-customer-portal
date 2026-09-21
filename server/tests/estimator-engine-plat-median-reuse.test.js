@@ -104,6 +104,18 @@ describe('gatherPropertySignals — plat median reuse', () => {
     expect(signals.subdivisionMedian).toMatchObject({ medianSqft: 2277, sampleCount: 9 });
   });
 
+  it('does not repeat a query the fresh lookup just attempted (outage / kill switch / budget)', async () => {
+    lookupResult.current = { propertyRecord: vacantRecord(), enriched: { homeSqFt: 0, unassessedVacantParcel: true }, meta: { cache: 'miss' } };
+    let signals = await gatherPropertySignals(CONTEXT, { persistLookup: false });
+    expect(lookupSubdivisionMedianLivingSqft).not.toHaveBeenCalled();
+    expect(signals.subdivisionMedian).toBeNull();
+    // A cache HIT with no stamp is a legacy row: the direct dig still runs.
+    lookupResult.current = { propertyRecord: vacantRecord(), enriched: { homeSqFt: 0, unassessedVacantParcel: true }, meta: { cache: 'hit' } };
+    signals = await gatherPropertySignals(CONTEXT, { persistLookup: false });
+    expect(lookupSubdivisionMedianLivingSqft).toHaveBeenCalledTimes(1);
+    expect(signals.subdivisionMedian).toMatchObject({ medianSqft: 2277 });
+  });
+
   it('never digs for a built parcel', async () => {
     lookupResult.current = {
       propertyRecord: vacantRecord({ squareFootage: 2980, yearBuilt: 2025, _parcel: { parcelId: '999990002', county: 'Manatee', dorUseCode: '01', landUseDescription: 'Single Family', subdivision: PLAT } }),

@@ -959,9 +959,14 @@ async function lookupSubdivisionMedianLivingSqft({ county, subdivision } = {}, o
     let values = await querySubdivisionLivingSqft(key, queried, deadlineMs);
     if ((values?.length || 0) < SUBDIVISION_MEDIAN_MIN_SAMPLES) {
       const base = subdivisionBaseName(queried);
-      if (base && base.toUpperCase() !== queried.toUpperCase() && deadlineMs - Date.now() >= SUBDIVISION_MIN_QUERY_MS) {
-        queried = base;
-        values = await querySubdivisionLivingSqft(key, base, deadlineMs);
+      if (base && base.toUpperCase() !== queried.toUpperCase()) {
+        if (deadlineMs - Date.now() >= SUBDIVISION_MIN_QUERY_MS) {
+          queried = base;
+          values = await querySubdivisionLivingSqft(key, base, deadlineMs);
+        } else if (options.diag && typeof options.diag === 'object') {
+          // The broader population was never asked — not a settled negative.
+          options.diag.incomplete = true;
+        }
       }
     }
     if (!values || values.length < SUBDIVISION_MEDIAN_MIN_SAMPLES) return null;

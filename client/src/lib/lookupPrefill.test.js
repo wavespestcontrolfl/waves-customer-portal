@@ -58,6 +58,22 @@ describe("plat-median home sq ft prefill", () => {
   });
 });
 
+describe("plat-median prefill across save and reopen", () => {
+  // A saved estimate stores the form's homeSqFt (the median) on the profile
+  // it restores on reopen, still carrying subdivisionMedian.
+  const REOPENED = { ...VACANT_WITH_MEDIAN, homeSqFt: 3071 };
+
+  it("still reads the restored median as the estimate, so the verify guard stays on", () => {
+    expect(subdivisionMedianPrefillSqFt(REOPENED)).toBe(3071);
+    expect(homeSqFtIsUnverifiedPlatMedian({ homeSqFt: "3071" }, REOPENED)).toBe(true);
+  });
+
+  it("a size the operator typed before saving stays verifiable after reopen (edited flag lost)", () => {
+    expect(homeSqFtIsUnverifiedPlatMedian({ homeSqFt: "3000" }, { ...VACANT_WITH_MEDIAN, homeSqFt: 3000 })).toBe(false);
+    expect(subdivisionMedianPrefillSqFt({ ...VACANT_WITH_MEDIAN, homeSqFt: 3000 })).toBeNull();
+  });
+});
+
 describe("plat-median prefill never saves as tech-verified", () => {
   it("blocks the verify save while the prefill is untouched", () => {
     expect(homeSqFtIsUnverifiedPlatMedian({ homeSqFt: "3071", _homeSqFtEdited: false }, VACANT_WITH_MEDIAN)).toBe(true);
