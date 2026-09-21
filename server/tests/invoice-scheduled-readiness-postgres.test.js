@@ -455,4 +455,119 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
     }
   });
 
+  test('a genuinely positive balance found under settleZeroBalance\'s OWN lock is treated as not-zero-due, not a retryable settlement refusal (Codex round-8 audit P2 #4131 finding 3)', async () => {
+    // Models the race: the CALLER's pre-lock snapshot (the `row` argument —
+    // the worker due loop's own reused SELECT) still shows total ===
+    // credit_applied, but a credit reversal or retotal restored a genuinely
+    // positive balance in the live row BEFORE settleZeroBalance's own FOR
+    // UPDATE lock re-reads it. Before this fix, settleZeroBalance's
+    // 'balance_due' skip fell through to the generic deposit_settlement_
+    // pending refusal here — a direct send would 409 and the worker would
+    // burn an attempt on a balance that is not actually stuck.
+    await trx('invoices').where({ id: invoiceId }).update({
+      credit_applied: 100, status: 'scheduled', scheduled_send_at: new Date(Date.now() - 60000),
+    });
+    const staleRow = {
+      id: invoiceId, status: 'scheduled', total: 150, credit_applied: 150,
+      scheduled_service_id: visitId, visit_completion_packet_id: null, payer_id: null,
+    };
+
+    const outcome = await Invoice._settleZeroDueBeforeSend(invoiceId, { fenceOwnership: true, row: staleRow });
+
+    expect(outcome).toEqual({ kind: 'not_zero_due' });
+    // Untouched — no settlement committed, no attempt spent; the invoice is
+    // simply collectible again for the caller's normal send flow.
+    expect(await read()).toMatchObject({ status: 'scheduled', credit_applied: '100.00', prepaid_by: null });
+  });
+
+  test('settleZeroBalance atomically retires a queued dispatch_completion_deferred pay-link text when it settles a zero-due invoice (Codex round-8 audit P1 #4131 finding 2)', async () => {
+    // dispatch_completion_deferred's own deferred-replay-registry entry has
+    // NO collectibility recheck (unlike autopay_completion_decline_deferred's
+    // invoiceStillCollectible) — its finalize marks the invoice delivered
+    // unconditionally. Left alone, this queued text would still go out
+    // AFTER the invoice below is marked prepaid, texting a frozen pay link
+    // for money no longer owed.
+    const [queued] = await trx('sms_log').insert({
+      customer_id: customerId, direction: 'outbound', from_phone: '+12025550100', to_phone: '+12025550124',
+      status: 'scheduled', message_type: 'invoice',
+      metadata: { entry_point: 'dispatch_completion_deferred', invoice_id: invoiceId },
+    }).returning('id');
+
+    const result = await Invoice.settleZeroBalance(invoiceId, trx);
+
+    expect(result).toMatchObject({ settled: true });
+    expect(await read()).toMatchObject({ status: 'prepaid', prepaid_by: 'system:zero_balance' });
+    const row = await trx('sms_log').where({ id: queued.id }).first();
+    expect(row.status).toBe('cancelled');
+    expect(row.metadata.cancelled_reason).toBe('settled_zero_due');
+  });
+
+  test('settleZeroBalance refuses (retryable) while a queued pay-link text is already mid-delivery — never settles out from under it (Codex round-8 audit P1 #4131 finding 2)', async () => {
+    await trx('sms_log').insert({
+      customer_id: customerId, direction: 'outbound', from_phone: '+12025550100', to_phone: '+12025550124',
+      status: 'sending', message_type: 'invoice',
+      metadata: { entry_point: 'dispatch_completion_deferred', invoice_id: invoiceId },
+    });
+
+    const result = await Invoice.settleZeroBalance(invoiceId, trx);
+
+    expect(result).toMatchObject({ settled: false, reason: 'queued_pay_link_in_flight', retryable: true });
+    expect(await read()).toMatchObject({ status: 'draft', prepaid_by: null });
+  });
+
+  test('a nested balance_changed_retry from the preclaimed SMS leg is promoted to sendViaSMSAndEmail\'s top-level result, never lost as a generic SMS failure with the email leg attempted (Codex round-8 audit P2 #4131 finding 5)', async () => {
+    // Genuinely collectible — not zero-due — so the wrapper's own claim
+    // succeeds normally and reaches the nested sendViaSMS call.
+    await trx('invoices').where({ id: invoiceId }).update({ credit_applied: 0 });
+    const smsSpy = jest.spyOn(Invoice, 'sendViaSMS').mockResolvedValueOnce({
+      sent: false, ok: false, code: 'balance_changed_retry', deliveryOutcome: 'not_sent', retryable: true,
+      reason: 'The balance changed while sending; try again',
+    });
+    try {
+      const result = await Invoice.sendViaSMSAndEmail(invoiceId);
+
+      expect(result).toMatchObject({
+        ok: false, code: 'balance_changed_retry', error: 'The balance changed while sending; try again',
+        sms: { ok: false, code: 'balance_changed_retry', deliveryOutcome: 'not_sent' },
+        email: { ok: false, code: 'balance_changed_retry' },
+      });
+      expect(require('../services/invoice-email').sendInvoiceEmail).not.toHaveBeenCalled();
+    } finally {
+      smsSpy.mockRestore();
+    }
+  });
+
+  test('a due packet invoice already billed to a payer (payer_id set, not a live withdrawal) is durably dequeued — not re-selected on the next due-loop pass (Codex round-8 audit P1 #4131 finding 6)', async () => {
+    // The pre-emptive fence (claimPacketInvoiceForSend fenceOnly) only
+    // fires when payer_id is still NULL — this row is already payer-owned,
+    // so the fence is skipped entirely and settleZeroBalance's own
+    // read-only payer_billed skip is the only thing that ever sees it.
+    // total/credit_applied stay 150/150 from beforeEach — genuinely
+    // zero-due.
+    const packetId = await insertPacket();
+    const [payer] = await trx('payers').insert({ display_name: 'Fixture Payer' }).returning('id');
+    await trx('invoices').where({ id: invoiceId }).update({
+      visit_completion_packet_id: packetId, payer_id: payer.id,
+      status: 'scheduled', scheduled_send_at: new Date(Date.now() - 60000), scheduled_send_attempts: 1,
+    });
+
+    const result = await Invoice.processScheduledSends();
+
+    expect(result).toEqual({ sent: 0, failed: 0, deferred: 0 });
+    const row = await read();
+    // Held, not failed or voided — status is untouched.
+    expect(row.status).toBe('scheduled');
+    // Durably off the due queue: scheduled_send_at cleared.
+    expect(row.scheduled_send_at).toBeNull();
+    // Never a failure — no attempt spent.
+    expect(row.scheduled_send_attempts).toBe(1);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+
+    // The regression this pins: re-running the worker must NOT reselect
+    // this row (it would, forever, before this fix).
+    const secondResult = await Invoice.processScheduledSends();
+    expect(secondResult).toEqual({ sent: 0, failed: 0, deferred: 0 });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
 });

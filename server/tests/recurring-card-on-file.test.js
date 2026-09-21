@@ -301,29 +301,34 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
   });
 
   describe('classifyDeliveryOutcome — the sweep\'s payer-billed and card-decline fallback deliveries share this (Codex round-8 audit P1 #4131)', () => {
-    test('settled_zero_due: settled, never reported delivered', () => {
+    test('settled_zero_due: settled, never reported delivered, and NOT reported credit-covered (Codex round-8 audit P2 #4131 slice 4)', () => {
+      // settleZeroBalance also closes an invoice retotaled/discounted to a
+      // literal $0 with credit_applied = 0 — the generic settled_zero_due
+      // code proves nothing about deposit/account credit, so a caller
+      // building alert copy off this classification must not invent a
+      // credit transaction that never happened.
       expect(classifyDeliveryOutcome({ ok: true, settled_zero_due: true }))
-        .toEqual({ settled: true, delivered: false });
+        .toEqual({ settled: true, delivered: false, creditCovered: false });
     });
 
-    test('covered_by_credit: settled, never reported delivered', () => {
+    test('covered_by_credit: settled, never reported delivered, and IS reported credit-covered', () => {
       expect(classifyDeliveryOutcome({ ok: true, covered_by_credit: true }))
-        .toEqual({ settled: true, delivered: false });
+        .toEqual({ settled: true, delivered: false, creditCovered: true });
     });
 
-    test('an ordinary successful send: delivered, not settled', () => {
+    test('an ordinary successful send: delivered, not settled, not credit-covered', () => {
       expect(classifyDeliveryOutcome({ ok: true, sms: { ok: true }, email: { ok: true } }))
-        .toEqual({ settled: false, delivered: true });
+        .toEqual({ settled: false, delivered: true, creditCovered: false });
     });
 
-    test('a genuine failure (ok: false): neither settled nor delivered', () => {
+    test('a genuine failure (ok: false): neither settled nor delivered nor credit-covered', () => {
       expect(classifyDeliveryOutcome({ ok: false, code: 'payer_billed' }))
-        .toEqual({ settled: false, delivered: false });
+        .toEqual({ settled: false, delivered: false, creditCovered: false });
     });
 
-    test('a null/undefined result (an unresolved fence, or the catch path): neither settled nor delivered', () => {
-      expect(classifyDeliveryOutcome(null)).toEqual({ settled: false, delivered: false });
-      expect(classifyDeliveryOutcome(undefined)).toEqual({ settled: false, delivered: false });
+    test('a null/undefined result (an unresolved fence, or the catch path): neither settled nor delivered nor credit-covered', () => {
+      expect(classifyDeliveryOutcome(null)).toEqual({ settled: false, delivered: false, creditCovered: false });
+      expect(classifyDeliveryOutcome(undefined)).toEqual({ settled: false, delivered: false, creditCovered: false });
     });
   });
 

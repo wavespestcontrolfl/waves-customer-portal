@@ -190,6 +190,37 @@ postgres('invoice send episode ownership', () => {
     expect(require('../services/inspection-credit').reverseInspectionCreditForBooking).toHaveBeenCalledTimes(1);
   });
 
+  test('a terminal-visit refusal whose void the sweep safety-declines reports INVOICE_VISIT_TERMINAL_UNVOIDED, never the completed-void code (Codex round-8 audit P1 #4131 finding 1)', async () => {
+    // Distinct from the test above: here voidOpenInvoicesForCancelledService
+    // itself safety-declines cleanup (a live queued follow-up dunning text
+    // for this SAME invoice — the refusedSendCleanup branch's own
+    // liveQueuedDelivery check, exactly like the parametrized
+    // 'terminal-refusal cleanup preserves its claim for review' case
+    // above), so the row stays 'sending' for operator review. Before this
+    // fix, sendViaSMSAndEmail's own return unconditionally reported the
+    // COMPLETED-void code (INVOICE_VISIT_TERMINAL) here regardless of
+    // whether voidOpenInvoicesForCancelledService actually voided anything
+    // — admin-invoices.js's shared classifier would then read a live,
+    // un-voided, still-claimed invoice as a handled 200 no-op success.
+    await trx('scheduled_services').where({ id: visitId }).update({ status: 'cancelled' });
+    await trx('sms_log').insert({
+      customer_id: (await read()).customer_id, direction: 'outbound', from_phone: '+12025550101',
+      to_phone: '+12025550102', message_body: 'Following up on your invoice', status: 'scheduled',
+      metadata: { entry_point: 'invoice_followup_deferred', invoice_id: invoiceId },
+    });
+    const dispatch = jest.fn(async () => ({ sent: true }));
+    sendCustomerMessage.mockImplementation(({ withProviderHandoff }) => withProviderHandoff(dispatch));
+
+    const result = await Invoice.sendViaSMSAndEmail(invoiceId);
+
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: false, code: 'INVOICE_VISIT_TERMINAL_UNVOIDED' });
+    expect(result.code).not.toBe('INVOICE_VISIT_TERMINAL');
+    // The claim stays exactly where the sweep left it — held for operator
+    // review, never silently voided and never handed back for a retry.
+    expect(await read()).toMatchObject({ status: 'sending' });
+  });
+
   test('scheduled provider uncertainty retains its exact claim without spending an attempt', async () => {
     await trx('invoices').where({ id: invoiceId }).update({
       status: 'scheduled', scheduled_send_at: new Date(Date.now() - 60000), scheduled_send_attempts: 0,

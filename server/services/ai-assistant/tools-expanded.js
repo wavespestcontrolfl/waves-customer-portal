@@ -277,6 +277,13 @@ async function executeExpandedTool(toolName, input, contextCustomerId, context =
         // never tells the customer a link went out (Codex round-1 P1
         // #4131), distinct from an ordinary successful text.
         ...(sendResult?.settled_zero_due && { settledZeroDue: true }),
+        // Codex round-8 audit P2 (#4131 slice 4, consumer sweep): the
+        // sibling zero-due outcome — account credit covered the balance
+        // outright — was silently dropped here (sent stays false with no
+        // signal at all), so the assistant had no way to say why nothing
+        // went out. Distinct from settledZeroDue above: only this one may
+        // say the customer's credit covered it.
+        ...(sendResult?.covered_by_credit && { coveredByCredit: true }),
         ...(!sent && !sendResult?.ok && { error: sendResult?.code || sendResult?.reason || sendResult?.email?.error || 'send_failed' }),
       };
     }

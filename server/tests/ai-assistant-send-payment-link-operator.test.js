@@ -85,4 +85,23 @@ describe('send_payment_link — sent must reflect actual delivery, never sendRes
     expect(out.settledZeroDue).toBeUndefined();
     expect(out.error).toBeUndefined();
   });
+
+  test('a covered-by-credit settlement resolves sent: false with coveredByCredit: true — the sibling outcome settledZeroDue silently dropped (Codex round-8 audit P2 #4131 slice 4, consumer sweep)', async () => {
+    // sendViaSMS's OWN covered_by_credit shape: { sent: false, ok: true,
+    // covered_by_credit: true, code: 'covered_by_credit', ... }. Before
+    // this fix, only settled_zero_due was passed through — this sibling
+    // outcome vanished with no signal at all, though sent correctly stayed
+    // false.
+    InvoiceService.sendViaSMS.mockResolvedValue({
+      sent: false, ok: true, covered_by_credit: true, code: 'covered_by_credit',
+      reason: 'Invoice covered by account credit — nothing to collect',
+    });
+
+    const out = await executeToolCall('send_payment_link', { invoice_id: 'inv-1' }, 'cust-1', {});
+
+    expect(out.sent).toBe(false);
+    expect(out.coveredByCredit).toBe(true);
+    expect(out.settledZeroDue).toBeUndefined();
+    expect(out.error).toBeUndefined();
+  });
 });
