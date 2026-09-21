@@ -142,6 +142,10 @@ const RULE_NOTES = {
   // owed action was PERFORMED after the card was filed.
   quote_fulfilled: 'Auto-resolved: an estimate linked to this call was delivered after the call; the promised quote went out.',
   email_engaged: 'Auto-resolved: the email captured on this call opened or clicked a later message; the read-back is moot.',
+  // Keyed from the release engine's constant: the ledger tells this approval
+  // from an operator's by resolution_rule (codex #4622 r4 P1, gate re-asked
+  // at the send), never by this wording.
+  [require('./lead-first-touch-resume').FIRST_TOUCH_AUTO_RELEASE_RULE]: 'Auto-resolved: the email was dictated unambiguously (V1, V2 and the release target agree, no digit doubt, domain accepts mail); released without a read-back.',
   caller_phone_added: "Auto-resolved: the caller's number was added as a service contact on the account after this call.",
   booking_created: 'Auto-resolved: a live appointment matching the requested window was booked after this card was filed.',
   visit_completed_at_address: 'Auto-resolved: a visit was completed at the address this call named; the address is proven.',
@@ -962,6 +966,10 @@ const CLASSIFY_RULES = [
   // CARD — see loadEvidence for the exact predicates.
   { rule: 'quote_fulfilled', action: 'resolve', when: (item, ev) => item.reason_code === 'quote_promised' && ev?.estimate_direct === true },
   { rule: 'email_engaged', action: 'resolve', when: (item, ev) => item.reason_code === 'email_unverified' && ev?.email_engaged === true },
+  // GATE_FIRST_TOUCH_AUTO_RELEASE: the read-back question answers itself
+  // when the dictation left nothing to read back — see
+  // unambiguousDictationTarget / loadUnambiguousEmailEvidence.
+  { rule: require('./lead-first-touch-resume').FIRST_TOUCH_AUTO_RELEASE_RULE, action: 'resolve', when: (item, ev) => item.reason_code === 'email_unverified' && ev?.email_unambiguous === true },
   // Clearing the authorization question must not make a confirmed-but-
   // unbooked call (the routing block kept its appointment from being
   // created, and no not_confirmed sibling exists) read as fully resolved
@@ -1149,6 +1157,159 @@ async function loadEmailEvidence(conn, items, flag) {
       && strictlyAfter(r.sent_at, item.created_at)
       && (strictlyAfter(r.opened_at, item.created_at) || strictlyAfter(r.clicked_at, item.created_at)));
     if (hit) flag(item.id, 'email_engaged');
+  }
+}
+
+// email_unverified → the dictation was UNAMBIGUOUS, so there is nothing to
+// read back (GATE_FIRST_TOUCH_AUTO_RELEASE; 2026-09-20 audit finding 3:
+// 123 holds pending, oldest 2026-08-04, 9 released ever — every
+// call-captured email waits on a read-back card nobody works, and a fresh
+// lead with no other email sent can never produce the engagement evidence
+// the rule above needs). Pure and exported for tests: returns the lower-
+// cased release target, or null.
+const FIRST_TOUCH_AUTO_RELEASE_MAX_AGE_DAYS = (() => {
+  const n = Number(process.env.FIRST_TOUCH_AUTO_RELEASE_MAX_AGE_DAYS);
+  return Number.isFinite(n) && n > 0 ? n : 7;
+})();
+const UNAMBIGUOUS_MIN_CONFIDENCE = 0.9;
+const emailLc = (v) => String(v || '').trim().toLowerCase();
+function unambiguousDictationTarget(item, { now = new Date(), maxAgeDays = FIRST_TOUCH_AUTO_RELEASE_MAX_AGE_DAYS } = {}) {
+  if (item.reason_code !== 'email_unverified' || !item.call_customer_id) return null;
+  // An archived customer gets no first-touch mail (codex #4622 r4 P1): the
+  // candidate join carries the soft-delete stamp, and the release engine
+  // re-asks this at the send.
+  if (item.customer_deleted_at) return null;
+  // The first touch has a shelf life: a read-back left for a week is stale
+  // work for a human, never a late automatic send. Aged from the CALL as
+  // well as the card (codex r1 P1): a force-reprocess of an old call mints
+  // a fresh card and a fresh hold, and must not reset the shelf life of
+  // the customer's actual inquiry.
+  if (ageDays(item.created_at, now) > maxAgeDays) return null;
+  if (item.call_created_at && ageDays(item.call_created_at, now) > maxAgeDays) return null;
+  const payload = parseMaybeJson(item.payload) || {};
+  // An arbiter that could not decide ("adopt_with_confirmation": the
+  // digits were heard three ways; "review"; "reject") is exactly the doubt
+  // a read-back exists for. Only NO arbiter (the decoders agreed and no
+  // quarantine was needed) or a decisive adopt qualifies.
+  const verdict = payload.arbiter?.verdict;
+  if (verdict && verdict !== 'adopt') return null;
+  const candidates = Array.isArray(payload.email_candidates) ? payload.email_candidates : [];
+  if (candidates.length !== 1) return null;
+  const top = candidates[0] || {};
+  if (!(Number(top.confidence) >= UNAMBIGUOUS_MIN_CONFIDENCE)) return null;
+  // The FILING-TIME release target is required (codex r1 P1): a card with
+  // no snapshot — legacy, or a recovery marker — treats its candidates as
+  // spellings awaiting read-back and fails closed, the same contract the
+  // engagement arm keeps. The candidate is compared against it, never
+  // substituted for it.
+  const target = emailLc(payload.email_release_target);
+  if (!target || !/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(target)) return null;
+  if (emailLc(top.value) !== target) return null;
+  // V1 and V2 heard the same address as the target — three-way agreement.
+  const v1 = parseMaybeJson(item.call_extraction_v1) || {};
+  const v2 = parseMaybeJson(item.call_extraction) || {};
+  if (emailLc(v1.email) !== target || emailLc(v2.caller?.email) !== target) return null;
+  // The name/email mismatch flag is its own doubt about this address.
+  const flags = Array.isArray(v2.triage_flags) ? v2.triage_flags : [];
+  if (flags.includes('name_email_mismatch')) return null;
+  return target;
+}
+
+// Domain deliverability comes from the ONE classifier the intake arbiter
+// already uses (contact-quarantine-arbiter.gatherEmailDomainEvidence: MX,
+// null-MX, implicit-MX A/AAAA fallback, transient-vs-authoritative
+// errors — codex r2 P1: no parallel DNS classifier). Verdicts are cached
+// process-wide for a short while: the sweep runs this loader once unlocked
+// and once more inside the locked revalidation pass, and a DNS wait must
+// never sit on the per-call advisory locks admin triage transitions take.
+// The unlocked pass fills the cache; the locked pass reads it.
+const DOMAIN_CACHE_TTL_MS = 10 * 60 * 1000;
+const domainVerdicts = new Map(); // domain → { deliverable, at }
+async function deliverableDomains(targets, dnsDeps, now = Date.now()) {
+  const out = new Map();
+  const lookup = [];
+  for (const target of targets) {
+    const domain = target.split('@')[1];
+    const hit = domainVerdicts.get(domain);
+    if (hit && now - hit.at < DOMAIN_CACHE_TTL_MS) out.set(domain, hit.deliverable === true);
+    else if (!lookup.includes(target)) lookup.push(target);
+  }
+  if (lookup.length) {
+    const { gatherEmailDomainEvidence } = require('./contact-quarantine-arbiter');
+    let evidence = [];
+    try {
+      evidence = await gatherEmailDomainEvidence(lookup, dnsDeps || {});
+    } catch (_e) {
+      evidence = []; // fail closed: unknown stays unknown, nothing releases
+    }
+    for (const e of evidence) {
+      domainVerdicts.set(e.domain, { deliverable: e.deliverable, at: now });
+      out.set(e.domain, e.deliverable === true);
+    }
+  }
+  return out;
+}
+
+async function loadUnambiguousEmailEvidence(conn, items, flag, {
+  now = new Date(), dnsDeps = null, suppressed = null, ownedByOther = null, enabled = null,
+} = {}) {
+  const isOn = enabled || (() => require('../config/feature-gates').isEnabled('firstTouchAutoRelease'));
+  if (!isOn()) return;
+  const targets = new Map();
+  for (const item of items) {
+    const target = unambiguousDictationTarget(item, { now });
+    if (target) targets.set(item.id, { item, target });
+  }
+  if (!targets.size) return;
+  const callIds = [...new Set([...targets.values()].map(({ item }) => item.call_log_id))];
+  // The hold that would actually send must be pending, un-denied, and
+  // aimed at this exact address — the ledger, not the card, carries the
+  // send target.
+  const holds = await conn('first_touch_holds')
+    .whereIn('call_log_id', callIds)
+    .where({ status: 'pending' })
+    .whereNot('held_email', '')
+    .where(function notDenied() {
+      this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
+    })
+    .select('call_log_id', 'held_email', 'customer_id');
+  const heldByCall = new Map(holds.map((h) => [String(h.call_log_id), { email: emailLc(h.held_email), customerId: String(h.customer_id || '') }]));
+  // A LIVE name/email mismatch card is an unanswered identity question
+  // about this very address, whatever the rolling flags say after a
+  // force-reprocess (codex r1 P1); the ledger's own release guard only
+  // watches the two email codes, so it is checked here.
+  const mismatchLive = new Set((await conn('triage_items')
+    .whereIn('call_log_id', callIds)
+    .where({ reason_code: 'name_email_mismatch' })
+    .whereIn('status', ['open', 'in_progress'])
+    .select('call_log_id')).map((r) => String(r.call_log_id)));
+  const isSuppressed = suppressed || require('./lead-first-touch-resume').emailSuppressedForNewLead;
+  const isOwnedByOther = ownedByOther || require('./email-bounce-recovery').correctedAddressOwnedByOther;
+  const eligible = [];
+  for (const [itemId, { item, target }] of targets) {
+    const held = heldByCall.get(String(item.call_log_id));
+    if (!held || held.email !== target) continue;
+    // The ledger row must still belong to the customer the call is linked
+    // to NOW (codex #4622 r3 P1): an operator relink moves the call, not
+    // the hold, and the release engine enrolls the HOLD's customer.
+    if (held.customerId !== String(item.call_customer_id)) continue;
+    if (mismatchLive.has(String(item.call_log_id))) continue;
+    // Fail closed on every external check: a suppressed address (a prior
+    // hard bounce) stays open for the owner's correction instead of
+    // parking the hold behind a resolved card; an address on file for
+    // ANOTHER customer is the privacy leak the intake and bounce paths
+    // already refuse (codex r1 P1 x2).
+    let blocked = true;
+    try {
+      blocked = (await isSuppressed(target, conn)) || (await isOwnedByOther(target, item.call_customer_id, conn));
+    } catch (_e) { blocked = true; }
+    if (blocked) continue;
+    eligible.push({ itemId, target });
+  }
+  if (!eligible.length) return;
+  const verdicts = await deliverableDomains(eligible.map(({ target }) => target), dnsDeps, now.getTime());
+  for (const { itemId, target } of eligible) {
+    if (verdicts.get(target.split('@')[1]) === true) flag(itemId, 'email_unambiguous');
   }
 }
 
@@ -1746,6 +1907,7 @@ async function loadEvidence(conn, items) {
   }
   await loadEstimateEvidence(conn, candidates, flag);
   await loadEmailEvidence(conn, candidates, flag);
+  await loadUnambiguousEmailEvidence(conn, candidates, flag);
   await loadContactEvidence(conn, candidates, flag);
   await loadVisitEvidence(conn, candidates, flag);
   return evidence;
@@ -1838,6 +2000,9 @@ async function sweep({ now = new Date() } = {}) {
           status,
           resolution_note: RULE_NOTES[rule],
           resolution_source: 'auto',
+          // The stable key the first-touch ledger reads for gate provenance
+          // (round-0 audit P1: never the note's wording).
+          resolution_rule: rule,
           resolved_at: now,
           updated_at: now,
         })
@@ -1876,6 +2041,8 @@ async function sweep({ now = new Date() } = {}) {
 }
 
 module.exports = {
+  unambiguousDictationTarget,
+  loadUnambiguousEmailEvidence,
   runTriageAutoResolve,
   classifyTriageItem,
   hasNewAddressEvidence,
