@@ -123,7 +123,12 @@ const CALLBACK_TIMING_PHRASE = '(?:sometime|later)(?:\\s+(?:today|tomorrow|this\
 // swallowed as if they ended the recipient phrase.
 const CALLBACK_TRAILING_ADVERB = '(?:shortly|quickly|directly|immediately|promptly|personally|briefly)';
 const CALLBACK_TRAILING_MODIFIER = `(?:${CALLBACK_TRAILING_ADVERB}|again|back|now|then|too|instead|anyway|today|tomorrow|tonight|${CALLBACK_TIMING_PHRASE}|${CALLBACK_TIMING_ADVERB}|${WEEKDAYS}|next\\s+(?:week|weekend|month|year|${WEEKDAYS}))`;
-const CALLBACK_CONCESSION = '(?:even\\s+(?:if|though)|whether|(?:regardless|irrespective)(?:\\s+of)?)';
+// "only if" is a restrictive condition, not the "even if" concession this
+// group was named for, but it shares the same trailing shape (a focus
+// adverb directly in front of "if") and needs the same phrase-end
+// allowance so "call her only if the office opens" still closes the
+// recipient span instead of falling through to no match at all.
+const CALLBACK_CONCESSION = '(?:even\\s+(?:if|though)|only\\s+if|whether|(?:regardless|irrespective)(?:\\s+of)?)';
 // "around"/"within" join the other simple timing prepositions already
 // accepted here ("in an hour", "at noon", "by 5", "before/after lunch")
 // so an ordinary prepositional timing phrase can follow the recipient.
