@@ -480,3 +480,18 @@ it("does not restore a discarded approval when its pending lookup finishes", asy
   await act(async () => resolveDraft(response({ id: "approval-a", draftResponse: "Late approval", recipientPhone: "+19415550100", resolvedFromNumber: "+19415550199" })));
   expect(screen.getByRole("textbox", { name: "Text message" })).toHaveValue("");
 });
+
+
+it.each([null, { id: "another-approval", draftResponse: "Earlier approval", recipientPhone: "+19415550100", fromNumber: line }])("keeps an occupied draft intact when a different approval link opens (%s)", async (loadedMessageDraft) => {
+  const owner = `occupied-approval-${loadedMessageDraft?.id || "manual"}`;
+  saveDraft(owner, { msgBody: "Keep my work", fromNumber: line, selectedCustomerId: "customer-a", loadedMessageDraft, attachments: [attachment], replyContext: { messageId: "original-reply", phone: "9415550100", customerId: "customer-a" } });
+  window.history.replaceState({}, "", "/?phone=9415550100&draftId=approval-a");
+  setupWithOwner(owner); await tick();
+  expect(screen.getByText(/Your saved draft was kept/)).toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "Text message" })).toHaveValue("Keep my work");
+  expect(screen.getByRole("combobox", { name: "Send from" })).toHaveValue(line);
+  expect(screen.getByRole("button", { name: "Remove gate.png" })).toBeInTheDocument();
+  const stored = JSON.parse(sessionStorage.getItem(SMS_DRAFT_STORAGE_KEY)).owners[owner]["9415550100"];
+  expect(stored.loadedMessageDraft).toEqual(loadedMessageDraft);
+  expect(stored.replyContext.messageId).toBe("original-reply");
+});

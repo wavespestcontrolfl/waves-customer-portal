@@ -1222,7 +1222,14 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           // detach the draft (r2 P1).
           const draftFrom = draft?.resolvedFromNumber || queryFromNumber || null;
           const draftCustomerId = draft?.customerId && draft?.customerPhone && phoneKey(finalPhone) === phoneKey(draft.customerPhone) ? draft.customerId : null;
-          setDraftForRecipient(finalPhone ? smsThreadKey(finalPhone) : "", (saved) => ({
+          setDraftForRecipient(finalPhone ? smsThreadKey(finalPhone) : "", (saved) => {
+            const sameApproval = saved.loadedMessageDraft?.id === draft?.id;
+            if (!sameApproval && (saved.msgBody.trim() || saved.attachments.length || saved.loadedMessageDraft)) {
+              setSendResult({ ok: false, text: "Your saved draft was kept. Clear it before reopening this approval link." });
+              return {};
+            }
+            return {
+            ...(!sameApproval ? { attachments: [], insertedResched: null, insertedReservice: null, insertedCustomerLinks: {}, selectedAgentDraft: null, replyContext: null, sendTiming: "now", sendCustomAt: "" } : {}),
             msgBody: saved.loadedMessageDraft?.id === draft?.id ? saved.msgBody : (draft?.draftResponse || "").slice(0, 1000),
             fromNumber: draftFrom || saved.fromNumber,
             selectedCustomerId: draftCustomerId,
@@ -1233,7 +1240,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
               recipientPhone: finalPhone,
               fromNumber: draftFrom || saved.fromNumber,
             } : null,
-          }));
+            };
+          });
         })
         .catch(() => {
           if (!cancelled) setSendResult({ ok: false, text: "The approval draft could not be refreshed. Your saved text is retained." });
