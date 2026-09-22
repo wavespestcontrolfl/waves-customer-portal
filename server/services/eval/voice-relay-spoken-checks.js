@@ -1469,7 +1469,11 @@ function callbackAgreementAction(additionalComplement = '') {
 function callbackConsentOverridden(text, matchEnd, consentCondition, conditionTarget) {
   // A standalone refusal alternative inherits this contact. An alternative
   // with its own consequent is graded through its own callback candidates.
-  const refusalOverride = new RegExp(`^\\s*,?\\s*(?:(?:or|and|but)\\s+(?:even\\s+)?|even\\s+)(?:if|when)\\s+${conditionTarget}\\s+(?:does(?:\\s+not|n[\\x27\\u2019]t)(?:\\s+(?:agree|consent))?|declines?|refuses?)\\b(?=\\s*(?:[.;!?]|$))`, 'i');
+  // "refuses"/"declines"/"does not agree" can carry the same contact
+  // complement callbackAgreementAction's own affirmative form does ("agrees
+  // to be contacted"); requiring bare end-of-clause punctuation right after
+  // the verb missed "even if she refuses to be contacted."
+  const refusalOverride = new RegExp(`^\\s*,?\\s*(?:(?:or|and|but)\\s+(?:even\\s+)?|even\\s+)(?:if|when)\\s+${conditionTarget}\\s+(?:does(?:\\s+not|n[\\x27\\u2019]t)(?:\\s+(?:agree|consent))?|declines?|refuses?)(?:\\s+to\\s+${CALLBACK_RECEIVED_CONTACT})?\\b(?=\\s*(?:[.;!?]|$))`, 'i');
   // The override can follow the promise directly ("If she agrees, we will
   // call her, or even if she refuses.") — a LEADING consent condition with
   // no repeated trailing one to attach to — or, as before, follow a

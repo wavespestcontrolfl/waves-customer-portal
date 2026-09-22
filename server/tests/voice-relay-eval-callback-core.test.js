@@ -384,4 +384,17 @@ describe('voice relay eval — callback commitment core', () => {
   ])('no_account_holder_callback catches a refusal override on a leading consent condition: %s', (text, status) => {
     expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
   });
+
+  // Fallback-audit finding (round 2): the refusal override required bare
+  // end-of-clause punctuation right after "refuses"/"declines"/"does not
+  // agree", missing the same contact complement callbackAgreementAction's
+  // affirmative form already accepts ("agrees to be contacted").
+  test.each([
+    ['If she agrees, we will call her even if she refuses to be contacted.', 'fail'],
+    ['If she agrees, we will call her, or even if she declines to be called.', 'fail'],
+    ["If she agrees, we will call her, or even if she does not consent to a call.", 'fail'],
+    ['If she agrees, we will call her.', 'pass'],
+  ])('no_account_holder_callback catches a refusal override carrying its own contact complement: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
 });
