@@ -3482,18 +3482,28 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     if (fresh.known) {
       // GitHub review round 3 P1 (PR #4656): a confirmed-OFF reconciliation
       // must NEVER clear the local selection or claim the discount was
-      // removed once ANY group has already committed it — the committed
-      // group's own saved row still carries it regardless of what the LIVE
+      // removed once THIS DISCOUNT'S OWN group has already committed it —
+      // that group's saved row still carries it regardless of what the LIVE
       // gate reads now. This call bypasses pickAppointmentDiscount's own
       // createdGroupKeysRef guard entirely (it sets state directly), so
-      // that guard alone did not cover it. The snapshot still updates to
-      // the live confirmed value — appointmentDiscountGroup stays locked to
-      // the COMMITTED group either way (appointmentDiscountCommittedGroupKeyRef,
-      // round 2's own fix), so Save unblocks for the remaining,
-      // not-yet-created groups to retry, while the committed group's own
-      // preview keeps showing its saved discount rather than reporting it
-      // gone.
-      if (fresh.enabled === false && appointmentDiscountState && createdGroupKeysRef.current.size === 0) {
+      // that guard alone did not cover it.
+      //
+      // Codex pre-push audit P0 (round 11): checked createdGroupKeysRef's
+      // overall SIZE instead of appointmentDiscountCommittedGroupKeyRef
+      // (whether the DISCOUNT's own group specifically succeeded) — a
+      // DIFFERENT, unrelated group committing first (the discount's own
+      // group scoped elsewhere still failing) was enough to "preserve" a
+      // discount that was never actually saved ANYWHERE. Preserving then
+      // set appointmentDiscountCompound to the new (off) snapshot, so
+      // groupStackedPerVisitTotal stopped reflecting the discount in the
+      // client-computed prepaid.totalAmount — but the retry POST still
+      // carried the (never-cleared) appointmentDiscount field, which the
+      // server applies regardless of the client's own compound bookkeeping:
+      // four $100 visits with a $10 credit recorded $400 prepaid against
+      // $360 the server actually billed. The correct check is whether the
+      // discount's OWN group specifically committed, via the exact same ref
+      // appointmentDiscountGroup itself already trusts.
+      if (fresh.enabled === false && appointmentDiscountState && appointmentDiscountCommittedGroupKeyRef.current === null) {
         setAppointmentDiscount(null);
         setAppointmentDiscountGateSnapshot(null);
         setToast('Discount stacking is now off — the appointment discount was removed. Add it again if stacking comes back on.');

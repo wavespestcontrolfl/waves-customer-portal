@@ -1439,6 +1439,64 @@ describe('GitHub review round 3 on PR #4656', () => {
     await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(3));
     expect(JSON.parse(schedulePosts(fetcher)[2][1].body).discountId).toBeUndefined();
   });
+
+  // Codex pre-push audit P0 (round 11): checking createdGroupKeysRef's
+  // overall SIZE (ANY group committed) instead of
+  // appointmentDiscountCommittedGroupKeyRef (THIS discount's OWN group)
+  // let an UNRELATED group's success "preserve" a discount that was never
+  // actually saved anywhere -- its own (scoped) group still failed. That
+  // preserved discount kept posting on retry while compound=false made
+  // groupStackedPerVisitTotal stop reflecting it in the client-computed
+  // prepaid.totalAmount, so the posted prepaid total and the server's own
+  // discounted charge silently diverged.
+  it('clears a discount whose OWN group never committed, even though an unrelated group already did', async () => {
+    vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const retry = vi.fn();
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry });
+    const secondScheduleRequest = deferred();
+    const { fetcher } = installModalFetch({
+      secondScheduleRequest,
+      discounts: [{
+        id: 'mil', name: 'Military Discount', discount_type: 'fixed_amount', amount: 10,
+        is_active: true, show_in_invoices: true, service_key_filter: 'svc_second',
+      }],
+    });
+    const booking = renderBooking();
+    const submit = await addTwoSeasonalServices();
+    const picker = await screen.findByLabelText('Appointment discount');
+    fireEvent.change(picker, { target: { value: 'mil' } });
+    fireEvent.click(submit);
+    // "First seasonal service" (unrelated to the discount's own scope)
+    // commits; "Second seasonal service" (the discount's OWN group) is
+    // still in flight.
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(2));
+    expect(JSON.parse(schedulePosts(fetcher)[0][1].body).discountId).toBeUndefined();
+    expect(JSON.parse(schedulePosts(fetcher)[1][1].body).discountId).toBe('mil');
+    await act(async () => {
+      secondScheduleRequest.resolve(jsonResponse({ error: 'failed' }, { ok: false, status: 500 }));
+      await secondScheduleRequest.promise;
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Schedule appointment' }).disabled).toBe(false));
+
+    // The gate flips off -- the discount was never actually saved anywhere.
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: false, known: true, retry });
+    booking.view.rerender(<CreateAppointmentModal
+      defaultCustomer={CUSTOMER}
+      defaultDate={booking.scheduledDate}
+      defaultWindowStart="09:00"
+      onClose={booking.onClose}
+      onCreated={booking.onCreated}
+      onChange={booking.onChange}
+    />);
+    await screen.findByText('Could not confirm the discount-stacking status — retry before saving.');
+    vi.mocked(ensureStackingFresh).mockResolvedValue({ enabled: false, known: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    // CLEARED and announced -- correctly, since it was never actually
+    // saved anywhere, unlike the "own group already committed" case above.
+    await screen.findByText('Discount stacking is now off — the appointment discount was removed. Add it again if stacking comes back on.');
+    await waitFor(() => expect(screen.queryByLabelText('Appointment discount')).toBeNull());
+  });
 });
 
 describe('GitHub review round 3 P1 :2116 on PR #4656', () => {
