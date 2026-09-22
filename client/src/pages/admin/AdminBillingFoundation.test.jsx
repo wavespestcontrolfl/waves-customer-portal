@@ -149,6 +149,51 @@ describe("Admin billing failure and draft boundaries", () => {
     expect(screen.queryByLabelText("Amount")).not.toBeInTheDocument();
   });
 
+  it.each(["100abc", "1,00.00", "1e3", "12.345", "0"])(
+    "blocks malformed offline-payment amount %s without submitting",
+    async (invalidAmount) => {
+      const fetch = vi.fn(async (url, options) => {
+        if (options?.method === "POST") return response({ ok: true });
+        if (url.endsWith("/statements")) return response({ statements: [statement] });
+        if (url.endsWith("/ar")) return response(ar);
+        if (url.endsWith("/followups")) return response({ sequence: null });
+        return response({ lines: [] });
+      });
+      vi.stubGlobal("fetch", fetch);
+      render(<UiSurface><PayerDetailSheet payer={payer} onClose={vi.fn()} onChanged={vi.fn()} /></UiSurface>);
+      fireEvent.click(await screen.findByRole("button", { name: /S-71/ }));
+      fireEvent.click(await screen.findByRole("button", { name: "Record offline payment" }));
+      fireEvent.change(screen.getByLabelText("Amount"), { target: { value: invalidAmount } });
+
+      const record = screen.getByRole("button", { name: "Record", exact: true });
+      expect(record).toBeDisabled();
+      fireEvent.click(record);
+      expect(fetch.mock.calls.filter(([, options]) => options?.method === "POST")).toHaveLength(0);
+    },
+  );
+
+  it("submits a properly grouped offline-payment amount as the exact numeric value", async () => {
+    const fetch = vi.fn(async (url, options) => {
+      if (options?.method === "POST") return response({ ok: true });
+      if (url.endsWith("/statements")) return response({ statements: [statement] });
+      if (url.endsWith("/ar")) return response(ar);
+      if (url.endsWith("/followups")) return response({ sequence: null });
+      return response({ lines: [] });
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<UiSurface><PayerDetailSheet payer={payer} onClose={vi.fn()} onChanged={vi.fn()} /></UiSurface>);
+    fireEvent.click(await screen.findByRole("button", { name: /S-71/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Record offline payment" }));
+    fireEvent.change(screen.getByLabelText("Method"), { target: { value: "wire" } });
+    fireEvent.change(screen.getByLabelText("Amount"), { target: { value: "1,000.00" } });
+    fireEvent.click(screen.getByRole("button", { name: "Record", exact: true }));
+
+    await waitFor(() => expect(fetch.mock.calls.filter(([, options]) => options?.method === "POST")).toHaveLength(1));
+    const write = fetch.mock.calls.find(([, options]) => options?.method === "POST");
+    expect(write[0]).toBe("/api/admin/payers/42/statements/71/reconcile");
+    expect(JSON.parse(write[1].body)).toEqual({ method: "wire", amount: 1000 });
+  });
+
   it("keeps statement-authorized reminder controls available when the status read fails", async () => {
     const fetch = vi.fn(async (url, options) => {
       if (options?.method === "POST") return response({ error: "Reminder temporarily unavailable" }, 503);

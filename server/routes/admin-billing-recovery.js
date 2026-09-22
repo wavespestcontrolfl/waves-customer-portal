@@ -576,7 +576,8 @@ router.post('/:scheduledServiceId/dismiss', requireAdmin, async (req, res) => {
 
       const invoiced = await trx('invoices')
         .where(function () {
-          this.where('service_record_id', visit.service_record_id).orWhere('scheduled_service_id', scheduledServiceId);
+          this.where('scheduled_service_id', scheduledServiceId);
+          if (visit.service_record_id) this.orWhere('service_record_id', visit.service_record_id);
         })
         .whereNot('status', 'void')
         .first();

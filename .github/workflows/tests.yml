@@ -87,7 +87,7 @@ jobs:
                 run(['node_modules/knex/bin/cli.js', 'migrate:latest', '--knexfile', 'server/knexfile.js'],
                   { env: { ...process.env, DATABASE_URL: `${base}${name}` } });
                 run(['../node_modules/jest/bin/jest.js', '--ci', '--runInBand', '--no-coverage',
-                  'tests/customer360-workspace-postgres.test.js'],
+                  'tests/customer360-workspace-postgres.test.js', 'tests/admin-billing-recovery-postgres.test.js'],
                   { cwd: 'server', env: { ...process.env, C360_TEST_DATABASE_URL: `${base}${name}` } });
               } finally { await client.query(`DROP DATABASE "${name}" WITH (FORCE)`); }
             } finally { await client.end(); }

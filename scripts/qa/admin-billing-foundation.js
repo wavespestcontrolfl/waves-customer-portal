@@ -19,10 +19,10 @@ const payer = {
   tax_exempt_cert: '', notes: '', active: true,
 };
 const summary = {
-  statement_count: 1, outstanding_total: 240, past_due_total: 240, oldest_days_past_due: 18,
-  buckets: { current: { total: 0, count: 0 }, b1_15: { total: 0, count: 0 }, b16_30: { total: 240, count: 1 }, b31_45: { total: 0, count: 0 }, b45_plus: { total: 0, count: 0 } },
+  statement_count: 1, outstanding_total: 1000, past_due_total: 1000, oldest_days_past_due: 18,
+  buckets: { current: { total: 0, count: 0 }, b1_15: { total: 0, count: 0 }, b16_30: { total: 1000, count: 1 }, b31_45: { total: 0, count: 0 }, b45_plus: { total: 0, count: 0 } },
 };
-const statement = { id: 71, status: 'sent', total: 240, period_start: '2026-08-01', period_end: '2026-08-31', due_date: '2026-09-01', invoice_count: 2, overdue: true, days_past_due: 18 };
+const statement = { id: 71, status: 'sent', total: 1000, period_start: '2026-08-01', period_end: '2026-08-31', due_date: '2026-09-01', invoice_count: 2, overdue: true, days_past_due: 18 };
 const visit = { scheduled_service_id: 'visit-example', customer: 'Avery Example', completed_at: '2026-09-08T14:00:00Z', scheduled_date: '2026-09-08', service_type: 'Quarterly pest control', price: 120, billable: true };
 
 function fixtures(state) {
@@ -41,10 +41,10 @@ function fixtures(state) {
     ['GET /api/admin/payers/42', () => ({ payer: state.payer })],
     ['POST /api/admin/payers', (_url, body) => { state.payer = { ...body, id: 42 }; return { payer: state.payer }; }],
     ['PUT /api/admin/payers/42', (_url, body) => { state.payer = { ...body, id: 42 }; return { payer: state.payer }; }],
-    ['GET /api/admin/payers/ar-aging', () => ({ ...summary, by_terms: { net30: { total: 240, count: 1 } }, payers: [{ payer_id: 42, payer_name: state.payer.display_name, outstanding_total: 240, past_due_total: 240, oldest_days_past_due: 18 }] })],
+    ['GET /api/admin/payers/ar-aging', () => ({ ...summary, by_terms: { net30: { total: 1000, count: 1 } }, payers: [{ payer_id: 42, payer_name: state.payer.display_name, outstanding_total: 1000, past_due_total: 1000, oldest_days_past_due: 18 }] })],
     ['GET /api/admin/payers/42/ar', () => ({ summary })],
     ['GET /api/admin/payers/42/statements', () => ({ statements: [state.statement] })],
-    ['GET /api/admin/payers/42/statements/71', () => ({ statement: state.statement, lines: [{ service_date: '2026-08-15', service_type: 'Quarterly pest control', service_address: '100 Example Court, Example City, FL 34201', total: 240 }] })],
+    ['GET /api/admin/payers/42/statements/71', () => ({ statement: state.statement, lines: [{ service_date: '2026-08-15', service_type: 'Quarterly pest control', service_address: '100 Example Court, Example City, FL 34201', total: state.statement.total }] })],
     ['GET /api/admin/payers/42/statements/71/followups', () => ({ sequence: { status: 'paused' } })],
     ['POST /api/admin/payers/42/statements/71/reconcile', () => { state.statement = { ...state.statement, status: 'paid', paid_at: '2026-09-09T02:00:00Z' }; return { ok: true, statement: state.statement }; }],
   ]);
@@ -225,7 +225,12 @@ async function payerWorkflow(page, server, state, report, name) {
   await sheet.getByRole('button', { name: /S-71/ }).click();
   await sheet.getByRole('button', { name: 'Record offline payment' }).click();
   await sheet.getByLabel('Method', { exact: true }).selectOption('wire');
-  await sheet.getByLabel('Amount', { exact: true }).fill('239.50');
+  for (const amount of ['100abc', '100,50', '1,00.00', '1e3', '12.345']) {
+    await sheet.getByLabel('Amount', { exact: true }).fill(amount);
+    assert.equal(await sheet.getByRole('button', { name: 'Record', exact: true }).isDisabled(), true);
+  }
+  assert.equal(state.requests.filter(request => request.path.endsWith('/reconcile')).length, 0);
+  await sheet.getByLabel('Amount', { exact: true }).fill('1,000.00');
   await geometry(page, state, 'Statement payment draft');
   await screenshot(page, report, `${name}-statement`);
   const payment = 'POST /api/admin/payers/42/statements/71/reconcile';
@@ -233,11 +238,11 @@ async function payerWorkflow(page, server, state, report, name) {
   await sheet.getByRole('tab', { name: 'AR / aging' }).click();
   assert.equal(await sheet.getByRole('textbox', { name: 'Amount' }).count(), 0);
   await sheet.getByRole('tab', { name: 'Statements' }).click();
-  assert.equal(await sheet.getByLabel('Amount').inputValue(), '239.50');
+  assert.equal(await sheet.getByLabel('Amount').inputValue(), '1,000.00');
   assert.equal(await sheet.getByLabel('Method').inputValue(), 'wire');
   await sheet.getByRole('button', { name: 'Record', exact: true }).click();
   await sheet.getByText('Paid', { exact: true }).waitFor();
-  assert.deepEqual(state.requests.filter((request) => request.path.endsWith('/reconcile')).map((request) => request.body), [{ method: 'wire', amount: 239.5 }, { method: 'wire', amount: 239.5 }]);
+  assert.deepEqual(state.requests.filter((request) => request.path.endsWith('/reconcile')).map((request) => request.body), [{ method: 'wire', amount: 1000 }, { method: 'wire', amount: 1000 }]);
   await page.keyboard.press('Escape');
   await sheet.waitFor({ state: 'hidden' });
   assert.equal(await opener.evaluate((node) => document.activeElement === node), true, 'Statement focus return');

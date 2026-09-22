@@ -108,7 +108,7 @@ describe('useDiscountStacking', () => {
       now += 16000;
       render(<KnownProbe />);
       await waitFor(() => expect(screen.getByTestId('state')).toHaveTextContent('on'));
-      expect(screen.getByTestId('known')).toHaveTextContent('known');
+      expect(screen.getByTestId('known')).toHaveTextContent(/^known$/);
       expect(fetchMock).toHaveBeenCalledTimes(2);
     } finally {
       dateSpy.mockRestore();
@@ -118,12 +118,12 @@ describe('useDiscountStacking', () => {
   it('useDiscountStackingState reports known:true immediately once a value is cached from a prior probe', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ enabled: true }) })));
     render(<KnownProbe />);
-    await waitFor(() => expect(screen.getByTestId('known')).toHaveTextContent('known'));
+    await waitFor(() => expect(screen.getByTestId('known')).toHaveTextContent(/^known$/));
     cleanup();
     // A second mount with the module cache already warm should read known
     // synchronously on first render, no flash of "unknown".
     render(<KnownProbe />);
-    expect(screen.getByTestId('known')).toHaveTextContent('known');
+    expect(screen.getByTestId('known')).toHaveTextContent(/^known$/);
     expect(screen.getByTestId('state')).toHaveTextContent('on');
   });
 
@@ -140,7 +140,7 @@ describe('useDiscountStacking', () => {
         vi.stubGlobal('fetch', fetchMock);
 
         render(<KnownProbe />);
-        await waitFor(() => expect(screen.getByTestId('known')).toHaveTextContent('known'));
+        await waitFor(() => expect(screen.getByTestId('known')).toHaveTextContent(/^known$/));
         cleanup();
 
         // Well within the TTL — a fresh mount reads the still-fresh cache
@@ -149,7 +149,7 @@ describe('useDiscountStacking', () => {
         // which never trusts the cache; see useDiscountStacking.revalidate-r4.test.jsx.)
         now += 59000;
         render(<KnownProbe />);
-        expect(screen.getByTestId('known')).toHaveTextContent('known');
+        expect(screen.getByTestId('known')).toHaveTextContent(/^known$/);
         expect(screen.getByTestId('state')).toHaveTextContent('on');
         expect(fetchMock).toHaveBeenCalledTimes(1);
       } finally {
@@ -170,7 +170,7 @@ describe('useDiscountStacking', () => {
         vi.stubGlobal('fetch', fetchMock);
 
         render(<KnownProbe />);
-        await waitFor(() => expect(screen.getByTestId('known')).toHaveTextContent('known'));
+        await waitFor(() => expect(screen.getByTestId('known')).toHaveTextContent(/^known$/));
         expect(screen.getByTestId('state')).toHaveTextContent('on');
         cleanup();
 
@@ -184,7 +184,7 @@ describe('useDiscountStacking', () => {
         await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
         // Revalidation lands the real (now false) answer.
         await waitFor(() => expect(screen.getByTestId('state')).toHaveTextContent('off'));
-        expect(screen.getByTestId('known')).toHaveTextContent('known');
+        expect(screen.getByTestId('known')).toHaveTextContent(/^known$/);
       } finally {
         dateSpy.mockRestore();
       }

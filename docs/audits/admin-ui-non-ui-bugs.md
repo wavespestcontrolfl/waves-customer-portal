@@ -51,7 +51,7 @@ Separate follow-up register requested by the owner. Keep functional/data defects
 
 ## ADMIN-BUG-001 — Unrelated invoice can block marking a status-only visit free
 
-- **Status:** Open; not changed by the billing UI migration.
+- **Status:** Fixed by the billing reliability follow-up (September 22, 2026).
 - **Priority:** P1 — valid billing-recovery action can be refused.
 - **Found:** September 9, 2026; foundation source `0c6337adc683d14ce046a3b391dafa7e248dd2fe`.
 - **Source:** `server/routes/admin-billing-recovery.js`, `POST /:scheduledServiceId/dismiss`, invoice lookup inside the transaction (original lines 578–583).
@@ -60,10 +60,11 @@ Separate follow-up register requested by the owner. Keep functional/data defects
 - **Expected:** Only invoices attached to the selected visit or its existing, non-null service record block dismissal.
 - **Evidence:** Generated the exact Knex query locally with `{client:'pg'}` and a synthetic visit ID: `select * from "invoices" where ("service_record_id" is null or "scheduled_service_id" = ?) and not "status" = ? limit ?`. This confirms SQL generation; no database was connected.
 - **Follow-up:** Keep the visit predicate; add the service-record alternative only when an ID exists. Add a server regression with a status-only visit and an unrelated invoice with a null record ID, while retaining genuine-invoice rejection and the existing advisory lock.
+- **Fix and validation:** The dismissal lookup includes the service-record alternative only when the selected visit has a record. Migrated private PostgreSQL regressions cover unrelated null-linked invoices, invoices linked by visit/record, void invoices, duplicate dismissal, and contention on the canonical invoice-mint lock. All synthetic fixture writes roll back.
 
 ## ADMIN-BUG-002 — Offline payment amount accepts a partial numeric prefix
 
-- **Status:** Open; validation/payload behavior preserved in the billing UI migration.
+- **Status:** Fixed by the billing reliability follow-up (September 22, 2026).
 - **Priority:** P2 — malformed input can be submitted as a different amount.
 - **Found:** September 9, 2026; same foundation source.
 - **Source:** `client/src/pages/admin/PayerDetailSheet.jsx`, `ReconcileForm` (`parseFloat(amount)` and its `valid` check); server reconciliation in `server/routes/admin-payers.js` only receives the parsed number.
@@ -72,3 +73,4 @@ Separate follow-up register requested by the owner. Keep functional/data defects
 - **Expected:** Validate the complete input according to a deliberate accepted currency format; reject malformed strings before constructing `{method, amount}`.
 - **Evidence:** Local JavaScript reproduction confirmed `parseFloat('100abc') === 100` and `parseFloat('1,000.00') === 1`. No payment or reconciliation request was sent to a backend.
 - **Follow-up:** Define whether grouping separators are accepted, validate the entire string, and cover malformed, blank, decimal and grouped input without changing the server's settlement safeguards.
+- **Fix and validation:** The form validates the complete positive US currency string before conversion, accepts correctly grouped thousands and up to two decimals, and rejects malformed input. Component and desktop/mobile browser regressions confirm invalid input cannot submit and `1,000.00` sends numeric `1000`. Server settlement checks are unchanged; browser API calls use synthetic fixtures.
