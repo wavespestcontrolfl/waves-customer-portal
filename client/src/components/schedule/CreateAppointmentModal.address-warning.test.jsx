@@ -1290,3 +1290,96 @@ describe('GitHub review round 2 on PR #4656', () => {
     expect(screen.queryByText((_, node) => node?.textContent === 'Total: $142.48')).toBeNull();
   });
 });
+
+describe('GitHub review round 2 follow-up on PR #4656 (P0 :2571, P1 :4483)', () => {
+  // P0: an UNSCOPED appointment discount always resolves to group[0] --
+  // once one group has committed with it, removing that group's own
+  // service must never let a retry re-resolve (and re-POST) the SAME
+  // credit against whichever group is now first.
+  it('never re-posts a committed appointment discount after removing its group and retrying', async () => {
+    vi.spyOn(window, 'alert').mockImplementation(() => {});
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    const secondScheduleRequest = deferred();
+    const { fetcher } = installModalFetch({
+      secondScheduleRequest,
+      discounts: [{ id: 'mil', name: 'Military Discount', discount_type: 'fixed_amount', amount: 10, is_active: true, show_in_invoices: true }],
+    });
+    renderBooking();
+    const submit = await addTwoSeasonalServices();
+    const picker = await screen.findByLabelText('Appointment discount');
+    fireEvent.change(picker, { target: { value: 'mil' } });
+    fireEvent.click(submit);
+    // First (unscoped -> group[0], "First seasonal service") group's POST
+    // lands carrying the discount; the second is still in flight.
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(2));
+    expect(JSON.parse(schedulePosts(fetcher)[0][1].body).discountId).toBe('mil');
+    await act(async () => {
+      secondScheduleRequest.resolve(jsonResponse({ error: 'failed' }, { ok: false, status: 500 }));
+      await secondScheduleRequest.promise;
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Schedule appointment' }).disabled).toBe(false));
+
+    // Remove "First seasonal service" -- the ONLY line in the group that
+    // actually committed the discount. Without the commit-lock, an
+    // unscoped discount would now silently re-resolve to "Second seasonal
+    // service"'s group (now group[0]) and re-post the same credit. WITH
+    // the lock, the discount's own committed group no longer exists at
+    // all -- correctly read as unmatched (the same
+    // appointmentDiscountHasNoGroup path an unreachable scope already
+    // uses), blocking Save with its own named recovery rather than
+    // silently either re-posting OR silently dropping it.
+    const removeButtons = screen.getAllByRole('button', { name: 'Remove line item' });
+    fireEvent.click(removeButtons[0]);
+    await screen.findByText('This appointment discount does not match any selected service. Change or remove it before saving.');
+    const submit2 = screen.getByRole('button', { name: 'Schedule appointment' });
+    expect(submit2.disabled).toBe(true);
+    fireEvent.click(submit2);
+    expect(schedulePosts(fetcher)).toHaveLength(2);
+
+    // The labeled recovery unblocks the retry.
+    fireEvent.click(screen.getByRole('button', { name: 'Remove discount' }));
+    await waitFor(() => expect(submit2.disabled).toBe(false));
+    fireEvent.click(submit2);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(3));
+    // The retry's ONLY new POST (for "Second seasonal service") must NOT
+    // carry the discount again -- it already saved once, on the group
+    // that no longer exists.
+    expect(JSON.parse(schedulePosts(fetcher)[2][1].body).discountId).toBeUndefined();
+  });
+
+  // P1: the discount picker must be locked from the SYNCHRONOUS instant
+  // submit starts -- including the address-ask recheck await that runs
+  // BEFORE the first appointment POST, well before any group has
+  // committed (createdGroupKeysRef is still empty the whole time).
+  it('refuses a discount change during the pre-POST address-ask recheck, and saves the price that was actually displayed', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    const submitAddressRequest = deferred();
+    const { fetcher } = installModalFetch({
+      submitAddressRequest,
+      discounts: [{ id: 'mil', name: 'Military Discount', discount_type: 'fixed_amount', amount: 10, is_active: true, show_in_invoices: true }],
+    });
+    renderBooking();
+    await addOneSeasonalService();
+    const picker = await screen.findByLabelText('Appointment discount');
+    fireEvent.change(picker, { target: { value: 'mil' } });
+    await screen.findByText('Military Discount: -$10.00');
+
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    fireEvent.click(submit);
+    // Now inside the pre-POST address-ask recheck await -- no group has
+    // committed yet (createdGroupKeysRef is still empty), but the
+    // synchronous submit lock is already set.
+    await waitFor(() => expect(picker.disabled).toBe(true));
+    fireEvent.change(picker, { target: { value: '' } });
+    expect(picker.value).toBe('mil');
+
+    await act(async () => {
+      submitAddressRequest.resolve(jsonResponse({ items: [] }));
+      await submitAddressRequest.promise;
+    });
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    // The saved price matches exactly what was displayed before the
+    // refused mid-flight change -- discountId 'mil' still on the wire.
+    expect(JSON.parse(schedulePosts(fetcher)[0][1].body).discountId).toBe('mil');
+  });
+});

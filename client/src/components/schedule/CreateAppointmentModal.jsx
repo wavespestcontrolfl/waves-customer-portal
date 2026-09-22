@@ -1624,6 +1624,19 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // appointmentDiscountGateDrifted), never silently reshape what is shown
   // or sent.
   const [appointmentDiscountGateSnapshot, setAppointmentDiscountGateSnapshot] = useState(null);
+  // Codex review round 2 P0: once a group's POST actually carries the
+  // appointment discount and succeeds, this locks to THAT group's own key
+  // -- every later render (including a retry after a DIFFERENT group
+  // fails) resolves the discount against this committed identity instead
+  // of re-running resolveAppointmentDiscountGroup, which an unscoped
+  // discount (no service_key_filter/service_category_filter -- always
+  // list[0]) would silently retarget to a NEW group after the operator
+  // removes the originally-targeted service or edits a cadence. Without
+  // this, a partial-save retry could post the SAME credit a second time
+  // against the group that just became "first". Never reset except by a
+  // fresh pick/clear (pickAppointmentDiscount) or the whole-submit-session
+  // reset alongside createdGroupKeysRef.
+  const appointmentDiscountCommittedGroupKeyRef = useRef(null);
   // The discount stays visible in the preview and the POST as long as it is
   // selected — the live gate no longer decides this directly; only an
   // explicit Retry can change appointmentDiscountGateSnapshot, so a
@@ -2039,8 +2052,34 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // control after the fact either. This is checked BEFORE the
     // presetId-empty branch too — clearing is no longer a safe no-op once
     // something has already been persisted under the old selection.
-    if (createdGroupKeysRef.current.size > 0) return;
-    if (!presetId) { setAppointmentDiscount(null); setAppointmentDiscountGateSnapshot(null); return; }
+    //
+    // Codex review round 2 P0 follow-up: the ONE exception is a discount
+    // that has ALREADY become unreachable (appointmentDiscountHasNoGroup —
+    // its committed group's own service was removed entirely, so
+    // appointmentDiscountGroup now resolves null). Nothing further can
+    // ever apply it once it is in that state (its committed group, if it
+    // still existed, is skipped on retry via createdGroupKeysRef either
+    // way) — refusing the clear here would strand the operator on the
+    // "Remove discount" recovery button this same banner shows, with no
+    // way to actually press it. A brand-new (non-empty) pick stays refused
+    // unconditionally; only clearing is ever exempted.
+    if (createdGroupKeysRef.current.size > 0 && !(presetId === '' && appointmentDiscountHasNoGroup)) return;
+    // Codex review round 2 P1: submitLockRef is set SYNCHRONOUSLY at the
+    // very top of handleSubmit, before submitAppointments even starts its
+    // mosquito-price revalidation / address-ask recheck awaits that run
+    // before the FIRST POST — a change made during that whole window
+    // (createdGroupKeysRef is still empty then) would leave the IN-FLIGHT
+    // submit's own closure holding the OLD selection while the displayed
+    // total/picker already show the NEW one, so the price actually saved
+    // would silently disagree with what was on screen. Locked for the
+    // entire submit, not just after a group has committed.
+    if (submitLockRef.current) return;
+    if (!presetId) {
+      setAppointmentDiscount(null);
+      setAppointmentDiscountGateSnapshot(null);
+      appointmentDiscountCommittedGroupKeyRef.current = null;
+      return;
+    }
     // Codex pre-push audit P1 (round 5): the <select>'s own `disabled`
     // attribute (below, JSX) only stops genuine USER interaction — it does
     // not stop a programmatically dispatched change event from still
@@ -2568,6 +2607,21 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // posted to a different group (Codex r2 P1).
   const appointmentDiscountGroup = (() => {
     if (!appointmentDiscount || services.length === 0) return null;
+    // Codex review round 2 P0: once committed, the LOCKED group wins over
+    // a fresh resolve -- a service removal or cadence edit after the
+    // commit must never retarget an unscoped discount to a group that
+    // did not actually save it. If the committed group no longer exists
+    // (its service was removed entirely), this correctly returns null --
+    // appointmentDiscountHasNoGroup then blocks Save until the operator
+    // resolves it, rather than silently re-targeting.
+    if (appointmentDiscountCommittedGroupKeyRef.current) {
+      const committed = appointmentSubmitGroups.find(
+        (g) => groupKey(g) === appointmentDiscountCommittedGroupKeyRef.current,
+      );
+      return committed
+        ? { key: groupKey(committed), lines: committed.lines, split: appointmentSubmitGroups.length > 1 }
+        : null;
+    }
     const target = resolveAppointmentDiscountGroup(
       appointmentSubmitGroups, appointmentDiscount, lineServiceKey,
     );
@@ -3002,6 +3056,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         // session — a retry after partial failure shouldn't duplicate them.
         if (createdGroupKeysRef.current.has(key)) continue;
         assertSubmitCurrent();
+        // Declared OUTSIDE the try block (Codex review round 2 P0 follow-up:
+        // the catch's "recoverable" branch below also needs to read this to
+        // apply the SAME commit-lock a genuine success does).
+        let carriesAppointmentDiscount = false;
         try {
           const [primary, ...extras] = group.lines;
           const groupSubtotal = group.lines.reduce((sum, s) => sum + lineEffectiveNetAmount(s), 0);
@@ -3046,6 +3104,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             group,
             linkedEstimate,
           });
+          // Codex review round 2 P0: resolved ONCE per group iteration and
+          // reused for both the POST body below and the post-success
+          // commit-lock -- appointmentDiscountGroup itself already prefers
+          // appointmentDiscountCommittedGroupKeyRef once set, so this
+          // naturally stays pinned to the ORIGINAL committed group across a
+          // retry, never a freshly (and wrongly) re-resolved one.
+          carriesAppointmentDiscount = appointmentDiscountGroup?.key === key;
           const body = {
             ...appointmentGroupRequestBody({
               separateProgram, key, separateProgramReason,
@@ -3070,7 +3135,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               selectedPropertyId,
               customerNotes,
               internalNotes,
-              appointmentDiscount: appointmentDiscountGroup?.key === key ? appointmentDiscount : undefined,
+              appointmentDiscount: carriesAppointmentDiscount ? appointmentDiscount : undefined,
             }),
             // Only the FIRST created group of a booking asks for the customer
             // confirmation text and carries the card-link flag — a split
@@ -3118,6 +3183,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           bookingPostAttempted = true;
           const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
           createdGroupKeysRef.current.add(key);
+          // Codex review round 2 P0: lock the discount to the group that
+          // ACTUALLY carried it in a successful POST -- a later edit
+          // (removing a different service, changing a cadence) that
+          // reshuffles appointmentSubmitGroups must never retarget it to a
+          // group that has not saved it, which would post the same credit
+          // twice on retry.
+          if (carriesAppointmentDiscount) appointmentDiscountCommittedGroupKeyRef.current = key;
           // The series the prepay covers, matched by group identity — NOT
           // "the first result" (a booking can post a one-time group first).
           if (matchesPrepayTarget({ targetKey: manualPrepayPlan.targetKey, key, result: r })) {
@@ -3132,6 +3204,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           });
           if (decision.recoverable) {
             createdGroupKeysRef.current.add(key);
+            // Same lock as the success path above — a recoverable
+            // duplicate-series outcome still means this group's own save
+            // (from an earlier attempt) already carries the discount.
+            if (carriesAppointmentDiscount) appointmentDiscountCommittedGroupKeyRef.current = key;
             continue;
           }
           if (decision.duplicateConflict) {
@@ -3226,6 +3302,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           return;
         }
         createdGroupKeysRef.current = new Set();
+        appointmentDiscountCommittedGroupKeyRef.current = null;
         onCreated?.({ id: results[0]?.id, scheduledDate: apptDate });
         onChange?.({ id: results[0]?.id, scheduledDate: apptDate });
       }, 1200);
@@ -4480,7 +4557,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 // retry must never let the operator change or remove the
                 // discount a committed group already carries, or price a
                 // NEW pick against a group submitAppointments will skip.
-                disabled={!!discountSaveBlockedReason || createdGroupKeysRef.current.size > 0}
+                // GitHub review round 2 P1: ALSO disabled for the whole
+                // submit (`saving`) — including the mosquito-price/
+                // address-ask prerequisite awaits BEFORE the first POST,
+                // where createdGroupKeysRef is still empty. The functional
+                // guard is pickAppointmentDiscount's own submitLockRef
+                // check (synchronous, sooner than this React state
+                // update); this is the matching visual state.
+                disabled={!!discountSaveBlockedReason || createdGroupKeysRef.current.size > 0 || saving}
                 style={inputStyle}
               >
                 <option value="">None</option>
