@@ -609,6 +609,88 @@ describe("Invoice foundation workflow preservation", () => {
     expect(discountLine.unit_price).toBe(-200);
   });
 
+  // GitHub review round 2 P1 (PR #4659): pickService stamps
+  // service_key/service_category onto a line, but the SAME "Service"
+  // field is an ordinary free-text input bound to updateLineItem the
+  // rest of the time — a manual rename after the pick left those
+  // catalog-derived fields stale, so a line renamed AWAY from WDO
+  // Inspection still read as WDO-eligible (both in this form's own
+  // preview, which reads line.service_key directly, and on save, since
+  // the server trusts the submitted service_key verbatim and never
+  // re-derives it from description). Reproduced and fixed by having
+  // updateLineItem clear service_key/service_category on any
+  // description edit that follows a pick.
+  it("renaming a picked line's description by hand clears its service scope — a WDO-scoped invoice-wide discount no longer applies, in preview or on save", async () => {
+    overrides.set("GET /api/admin/services", () => response({ services: [
+      { id: "svc-wdo", name: "WDO Inspection", service_key: "wdo_inspection", category: "wdo", base_price: 200 },
+      { id: "svc-pest", name: "Quarterly Pest Control", service_key: "pest_control", category: "pest", base_price: 100 },
+    ] }));
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "wdo-discount", name: "WaveGuard Member WDO", discount_type: "percentage", amount: 100, is_active: true, show_in_invoices: true, service_key_filter: "wdo_inspection" },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+
+    // Line 1: PICK the WDO service (runs pickService, stamps service_key).
+    const serviceField = screen.getByLabelText("Service", { exact: true });
+    fireEvent.focus(serviceField);
+    fireEvent.change(serviceField, { target: { value: "WDO" } });
+    fireEvent.mouseDown(await screen.findByRole("button", { name: /WDO Inspection/ }));
+    await waitFor(() => expect(screen.getByLabelText("Service", { exact: true }).value).toBe("WDO Inspection"));
+
+    // Line 2: a plain unkeyed Pest line, so an orphaned scope's "$0,
+    // never a silent full-invoice widen" behavior is also exercised.
+    fireEvent.click(screen.getByRole("button", { name: "+ Add service" }));
+    const serviceFields = screen.getAllByLabelText("Service", { exact: true });
+    const secondServiceField = serviceFields[serviceFields.length - 1];
+    fireEvent.focus(secondServiceField);
+    fireEvent.change(secondServiceField, { target: { value: "Pest" } });
+    fireEvent.mouseDown(await screen.findByRole("button", { name: /Quarterly Pest Control/ }));
+
+    // Pick the WDO-scoped invoice-wide discount WHILE line 1 is still
+    // WDO Inspection — confirms it applies first, matching the sibling
+    // test's baseline, before the rename below is what actually removes
+    // it.
+    fireEvent.change(await screen.findByLabelText("Add an invoice-wide discount"), { target: { value: "WaveGuard" } });
+    fireEvent.click(await screen.findByRole("button", { name: /WaveGuard Member WDO/ }));
+    await waitFor(() => {
+      const credits = screen.getAllByLabelText("Credit ($)").map((el) => el.value);
+      expect(credits).toContain("-200");
+    });
+
+    // Now RENAME line 1 by hand — a plain free-text edit, not a new
+    // pick — away from the WDO service entirely.
+    fireEvent.change(screen.getAllByLabelText("Service", { exact: true })[0], { target: { value: "Custom WDO Follow-Up Visit" } });
+
+    // Preview: the renamed line no longer carries service_key
+    // "wdo_inspection" — the ALREADY-ADDED discount resolves orphaned
+    // ($0), never staying at -200 against the renamed line and never
+    // widening onto Pest.
+    await waitFor(() => {
+      const credits = screen.getAllByLabelText("Credit ($)").map((el) => el.value);
+      expect(credits).not.toContain("-200");
+    });
+
+    fireEvent.change(screen.getByLabelText("Send", { exact: true }), { target: { value: "draft" } });
+    const key = "POST /api/admin/invoices";
+    overrides.set(key, () => response({ id: "new-invoice-renamed", invoice_number: "WPC-2026-0103", status: "draft" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create draft", exact: true }));
+    await waitFor(() => expect(requests.some((request) => request.key === key)).toBe(true));
+    const body = requests.find((request) => request.key === key).body;
+    const renamedLine = body.lineItems.find((i) => i.description === "Custom WDO Follow-Up Visit");
+    const pestLine = body.lineItems.find((i) => i.description === "Quarterly Pest Control");
+    const discountLine = body.lineItems.find((i) => i.discount_id === "wdo-discount");
+    expect(renamedLine.service_key).toBeFalsy();
+    expect(renamedLine.unit_price).toBe(200); // the renamed line's own price is untouched — full price, no credit
+    expect(pestLine.unit_price).toBe(100); // never widened onto the unrelated line either
+    // The orphaned $0 discount is dropped entirely by the submit-time
+    // filter (lineItems.filter(i => Number(i.unit_price) !== 0)) — the
+    // strongest possible confirmation that it no longer applies at all.
+    expect(discountLine).toBeUndefined();
+  });
+
   // Pre-push audit P1 (coordinator scope extension, round 2):
   // repriceLineWithNewDiscountPick only rewrote siblings on the SAME
   // line — a fresh invoice-wide row's own displayed dollars could go

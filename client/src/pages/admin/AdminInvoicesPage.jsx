@@ -6627,12 +6627,40 @@ function CreateInvoice({
   };
   const updateLineItem = (i, field, value) => {
     const updated = [...lineItems];
-    updated[i] = {
-      ...updated[i],
+    const prev = updated[i];
+    const next = {
+      ...prev,
       [field]: field === "description" ? value : parseFloat(value) || 0,
     };
+    // GitHub review round 2 P1 (PR #4659): a free-text edit of the
+    // description on a line that was picked from the catalog (carries
+    // service_key/service_category, stamped by pickService) must clear
+    // those catalog-derived fields — otherwise a line the operator has
+    // since RENAMED away from the picked service still reads as
+    // eligible for a service-scoped document-wide discount, both in
+    // this form's own preview (resolveDocumentEligibleLines reads
+    // line.service_key directly) and on save (the server trusts the
+    // submitted service_key verbatim, never re-deriving it from
+    // description — see normalizeInvoiceLineItems). Picking another
+    // service via pickService sets them fresh; a plain price/quantity
+    // edit never touches them at all.
+    let scopeCleared = false;
+    if (field === "description" && (prev.service_key != null || prev.service_category != null)) {
+      next.service_key = null;
+      next.service_category = null;
+      scopeCleared = true;
+    }
+    updated[i] = next;
+    // A scope-clearing rename must reprice any EXISTING fresh discount
+    // row too — its own displayed Credit ($) is the item's stored
+    // unit_price, refreshed only by repriceAllFreshDiscounts (never by
+    // a plain description edit otherwise), so without this the row kept
+    // showing its stale pre-rename dollars even though the aggregate
+    // total (recomputed fresh every render from live line data) had
+    // already dropped to the new, correct figure — a display mismatch
+    // right on the row the operator just changed.
     setLineItems(
-      field === "unit_price" || field === "quantity"
+      field === "unit_price" || field === "quantity" || scopeCleared
         ? repriceAllFreshDiscounts({
           lineItems: updated,
           availableDiscounts,
