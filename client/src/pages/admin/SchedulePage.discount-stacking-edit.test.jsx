@@ -30,7 +30,19 @@ const GOLD = {
   max_discount_dollars: null, stack_group: 'waveguard', is_stackable: false,
   is_active: true, is_auto_apply: false, show_in_invoices: true,
 };
+const CUSTOM_DOLLAR = {
+  id: 'disc-custom', name: 'Custom Discount', discount_type: 'variable_amount', amount: 0,
+  max_discount_dollars: null, stack_group: null, is_stackable: true,
+  is_active: true, is_auto_apply: false, show_in_invoices: true,
+};
+const TERMITE_ONLY = {
+  id: 'disc-termite', name: 'Termite Special', discount_type: 'fixed_amount', amount: 20,
+  max_discount_dollars: null, stack_group: null, is_stackable: true,
+  is_active: true, is_auto_apply: false, show_in_invoices: true,
+  service_key_filter: 'termite_bond',
+};
 const DISCOUNTS = [MILITARY, SILVER, GOLD];
+const DISCOUNTS_R2 = [...DISCOUNTS, CUSTOM_DOLLAR, TERMITE_ONLY];
 
 // A legacy row: the mosquito add-on already carries a STORED Military stamp
 // (base_price 60, discount_amount 5, net 55) — exactly mapAddonRow's shape.
@@ -310,4 +322,106 @@ it('save-lock: a double click while a discounted save is in flight posts exactly
   await act(async () => { resolveSave(); });
   await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
   expect(writes().filter(([url]) => url.includes('/update-details'))).toHaveLength(1);
+});
+
+// ---------------------------------------------------------------------
+// Codex pre-push audit round 2 on PR #4657 (github.com/wavespestcontrolfl/
+// waves-customer-portal/pull/4657, /tmp/t4657-r1.txt): 7 P1 + 2 P2 findings
+// against 10a1ff4aaf. This section covers every finding fixed in this
+// round; #2186 (server-side line eligibility), #3293/#3295 (stored
+// appointment discount / legacy-vs-marked provenance, both needing GET/PUT
+// fields the server doesn't expose) are blocked by file ownership — see
+// the PR's own report for why.
+// ---------------------------------------------------------------------
+
+it('P1 (:2306): editing Price on an already-stamped line without touching its discount control drops the stale discount from the preview and posts the flat typed price', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(screen.getAllByText('Military Discount').length).toBeGreaterThan(0));
+  // The mosquito line's Price box shows its seeded NET ($55) — edit it to
+  // $70 WITHOUT touching the Line discount control (no Remove, no picker).
+  const priceInputs = screen.getAllByPlaceholderText('0.00');
+  const mosquitoPrice = priceInputs.find((i) => Number(i.value) === 55);
+  fireEvent.change(mosquitoPrice, { target: { value: '70' } });
+  // The stale discount must be gone from the preview — never $55-with-
+  // discount shown while $70 is what will actually save.
+  await waitFor(() => expect(screen.queryByText('Military Discount', { selector: 'div' })).not.toBeInTheDocument());
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  const body = JSON.parse(writes()[0][1].body);
+  const mosquitoLine = body.addons.find((a) => a.serviceId === 'svc-mosquito');
+  expect(mosquitoLine).toMatchObject({ price: 70 });
+  expect(mosquitoLine.discountType).toBeUndefined();
+});
+
+it('P1 (:2803): a line discount picked while the gate is on is dropped from preview AND save once the gate closes mid-edit', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
+    if (url.endsWith('/admin/discounts/stacking')) return { ok: true, json: async () => ({ enabled: true }) };
+    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => DISCOUNTS };
+    return { ok: true, json: async () => ({}) };
+  }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  const fertPicker = await screen.findByRole('combobox', { name: 'Line discount for Quarterly Fertilization' });
+  fireEvent.change(fertPicker, { target: { value: 'disc-silver' } });
+  await waitFor(() => expect(screen.getAllByText('WaveGuard Silver').length).toBeGreaterThan(0));
+  // The gate closes — a later poll reports off. Force a live re-probe the
+  // same way an already-mounted tab does (useDiscountStacking.js's own
+  // visibilitychange listener), rather than waiting a real 60s TTL window.
+  __resetDiscountStackingCache();
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
+    if (url.endsWith('/admin/discounts/stacking')) return { ok: true, json: async () => ({ enabled: false }) };
+    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => DISCOUNTS };
+    return { ok: true, json: async () => ({}) };
+  }));
+  await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+  // The control and its preview row disappear once the gate reads off —
+  // React state still holds the hidden pick underneath.
+  await waitFor(() => expect(screen.queryByText('WaveGuard Silver')).not.toBeInTheDocument());
+  await waitFor(() => expect(screen.queryByRole('combobox', { name: 'Line discount for Quarterly Fertilization' })).not.toBeInTheDocument());
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  const body = JSON.parse(writes()[0][1].body);
+  const fertLine = body.addons.find((a) => a.serviceId === 'svc-fert');
+  // The hidden pick must never reach the wire once the operator can no
+  // longer see it in the preview.
+  expect(fertLine.discountType).toBeUndefined();
+  expect(fertLine.basePrice).toBeUndefined();
+});
+
+it('P2 (:2334): a non-finite custom-dollar prompt (e.g. 1e309) is rejected, not silently accepted as "covers everything"', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, discounts: DISCOUNTS_R2 }));
+  vi.spyOn(window, 'prompt').mockReturnValue('1e309');
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  const fertPicker = await screen.findByRole('combobox', { name: 'Line discount for Quarterly Fertilization' });
+  fireEvent.change(fertPicker, { target: { value: 'disc-custom' } });
+  // Rejected: the picker stays in "None" state, no chosen-discount display.
+  expect(screen.queryByText('Custom Discount')).not.toBeInTheDocument();
+  expect(await screen.findByRole('combobox', { name: 'Line discount for Quarterly Fertilization' })).toBeInTheDocument();
+});
+
+it('P1 (:3689) + P2 (:3730): line-discount amounts use neutral (not alert-red) color, and guidance text meets the 14px floor', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(screen.getAllByText('Military Discount').length).toBeGreaterThan(0));
+  const detailEls = screen.getAllByText((_, el) => el?.textContent?.includes('$5.00') && el.tagName === 'DIV');
+  for (const el of detailEls) expect(el.style.color).not.toBe('#B42318');
+  // Guidance note under an unpicked line's select meets the 14px floor.
+  const guidance = screen.getByText(/Picking one treats the Price above/);
+  expect(guidance.style.fontSize).toBe('14px');
+});
+
+it('P1 (:2186, partial): a line-scoped catalog preset only appears on a matching line, not an unrelated one', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, discounts: DISCOUNTS_R2 }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  const fertPicker = await screen.findByRole('combobox', { name: 'Line discount for Quarterly Fertilization' });
+  const fertOptionNames = [...fertPicker.options].map((o) => o.textContent);
+  // Termite Special is scoped to service_key_filter 'termite_bond' — the
+  // fertilization line (lawn_fert) must never be offered it.
+  expect(fertOptionNames.some((t) => t.includes('Termite Special'))).toBe(false);
+  expect(fertOptionNames.some((t) => t.includes('WaveGuard Silver'))).toBe(true);
 });

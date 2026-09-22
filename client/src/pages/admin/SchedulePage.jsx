@@ -2283,8 +2283,25 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // untouched line still round-trips through deriveLegacyAddonSubmission in
   // handleSave below — never recomputing its own stored stamp — so this
   // stays a pure display/preview helper, not part of the save contract.
+  // Codex pre-push audit P1 (round 2, #4657): `lineDiscountTouched` is
+  // React state that survives a mid-session gate flip — the hook polls and
+  // fails closed on a probe error, so a line picked while the gate read on
+  // must not stay "active" once it reads off/unknown again (the control
+  // that set it is no longer even rendered). Every reader below gates on
+  // `stackingEnabled` too, so a hidden pick reverts to exactly the
+  // untouched/legacy behavior for both the preview AND the save payload —
+  // never silently posted with no way for the operator to see it.
+  const lineDiscountActive = (l) => stackingEnabled && !!l.lineDiscountTouched;
+  // Codex pre-push audit P1 (round 2, #4657): a Price edit on an untouched
+  // stamped line (the discount CONTROL itself never touched) must also
+  // stop trusting the frozen stamp — handleSave's own priceUnchanged check
+  // already falls through to the flat-net branch the moment Price differs
+  // from its seed, so a preview that kept showing the old discount here
+  // would show a total the save can never actually produce (an edited $60
+  // line previewing $55 net-with-discount, then saving $70 flat with none).
+  const priceEditedFromSeed = (l) => String(l.price) !== String(l._seededPrice ?? "");
   const origStampOf = (l) =>
-    l._origDiscountType && l._origBasePrice != null
+    l._origDiscountType && l._origBasePrice != null && !priceEditedFromSeed(l)
       ? {
           id: l._origDiscountId || null,
           name: l._origDiscountName || null,
@@ -2292,18 +2309,19 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           amount: l._origDiscountAmount != null ? l._origDiscountAmount : null,
         }
       : null;
-  const effectiveLineDiscount = (l) => (l.lineDiscountTouched ? l.lineDiscount : origStampOf(l));
+  const effectiveLineDiscount = (l) => (lineDiscountActive(l) ? l.lineDiscount : origStampOf(l));
   // A line's own GROSS for the preview/subtotal: the true stored gross for
-  // an untouched stamped line (never the seeded NET `price` — recomputing a
-  // discount against a net figure would double-discount it), the operator's
-  // own entry once the line's discount slot has been touched this session
-  // (picking a discount redefines Price as "before discount" — the same
-  // contract Create appointment already uses), or just Price when the line
-  // carries no discount at all (gross === net there).
+  // an untouched, price-unedited stamped line (never the seeded NET `price`
+  // — recomputing a discount against a net figure would double-discount
+  // it), the operator's own entry once the line's discount slot has been
+  // touched this session (picking a discount redefines Price as "before
+  // discount" — the same contract Create appointment already uses) or its
+  // Price has been edited away from the stamped seed, or just Price when
+  // the line carries no discount at all (gross === net there).
   const lineGrossFor = (l) => {
     const typed = l.price !== "" && !isNaN(parseFloat(l.price)) ? parseFloat(l.price) : 0;
-    if (!stackingEnabled || l.lineDiscountTouched) return typed;
-    return l._origDiscountType && l._origBasePrice != null ? l._origBasePrice : typed;
+    if (!stackingEnabled || lineDiscountActive(l)) return typed;
+    return l._origDiscountType && l._origBasePrice != null && !priceEditedFromSeed(l) ? l._origBasePrice : typed;
   };
   // Catalog row for a line slot (stack group, cap) — a stored stamp only
   // carries id/type/amount until the presets load.
@@ -2330,8 +2348,15 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     if (isCustomAmountPreset(d)) {
       const raw = window.prompt(`Discount amount for ${d.name} ($)`, "");
       if (raw === null) return undefined;
-      amount = Math.round((Number(raw) || 0) * 100) / 100;
-      if (!(amount > 0)) return undefined;
+      // Codex pre-push audit P2 (round 1, #4657): reject a non-finite typed
+      // amount (e.g. "1e309" -> Infinity) the same way the percentage branch
+      // already does — Infinity survives the old `amount > 0` check, then
+      // JSON.stringify silently drops it to null on the wire, so the save
+      // posts NO discount at all while the preview showed the full line
+      // covered.
+      const parsedAmount = Number(raw);
+      amount = Number.isFinite(parsedAmount) ? Math.round(parsedAmount * 100) / 100 : NaN;
+      if (!Number.isFinite(amount) || !(amount > 0)) return undefined;
     } else if (isCustomPercentagePreset(d)) {
       const raw = window.prompt(`Discount percentage for ${d.name} (%)`, "");
       if (raw === null) return undefined;
@@ -2384,9 +2409,26 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       .map((l) => effectiveLineDiscount(l))
       .filter(Boolean)
       .map((ld, i) => ({ ...lineDiscountCatalogRow(ld), scope: `line-${i}` }));
-  const lineDiscountOptionsFor = (ownKey) =>
-    stackablePresets(
-      lineDiscountPresets,
+  // Codex pre-push audit P1 (round 1, #4657) — partial, client-only
+  // mitigation: a preset's OWN catalog service_key_filter/
+  // service_category_filter (when it has one) must also match THIS line
+  // before it's even offered, mirroring lineInDiscountScope's read of the
+  // APPOINTMENT-level preset's filter. This narrows the obviously
+  // out-of-scope cases (a termite-only preset on a mosquito line); it does
+  // NOT reach customer-level eligibility (military status, minimum
+  // subtotal, WaveGuard tier requirement, customer assignment) — those need
+  // the server's manualEligibilityFailures path, which the merged
+  // update-details route doesn't yet call for a per-line discountId. Real,
+  // separate gap; server-route work outside this slice's file ownership
+  // (see the PR's own carried-findings note).
+  const presetReachesLine = (d, line) => (
+    (!d?.service_key_filter || d.service_key_filter === (line?.serviceKey || null))
+    && (!d?.service_category_filter || d.service_category_filter === (line?.serviceCategory || null))
+  );
+  const lineDiscountOptionsFor = (line) => {
+    const ownKey = line?._key;
+    return stackablePresets(
+      lineDiscountPresets.filter((d) => presetReachesLine(d, line)),
       [
         ...chosenLineDiscountRows(ownKey),
         // The appointment-level pick spans every line it reaches — never
@@ -2398,6 +2440,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       ].filter(Boolean),
       { scope: ownKey },
     );
+  };
   // The appointment-level select hides a preset that would conflict with a
   // non-stackable group already chosen on a line — an operator could
   // otherwise pick Silver on the pest line then Military appointment-wide,
@@ -2793,8 +2836,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             // server keeps an unchanged stamp verbatim elsewhere and
             // resolves a new pick through the catalog. An explicit removal
             // falls through to the flat-net branch at the bottom exactly
-            // like a line that never had a discount.
-            if (l.lineDiscountTouched && l.lineDiscount && l.price !== "" && !isNaN(parseFloat(l.price))) {
+            // like a line that never had a discount. lineDiscountActive
+            // (not the raw flag) — Codex pre-push audit P1 (round 2,
+            // #4657): if the gate closed since this line was touched, its
+            // hidden pick must NOT be posted at all; falling through to the
+            // flat-net branch below is exactly the behavior an operator who
+            // never saw a Line discount control would get.
+            if (lineDiscountActive(l) && l.lineDiscount && l.price !== "" && !isNaN(parseFloat(l.price))) {
               return {
                 ...common,
                 basePrice: parseFloat(l.price),
@@ -2805,7 +2853,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               };
             }
             const priceUnchanged =
-              !l.lineDiscountTouched && !!l.id && String(l.price) === String(l._seededPrice ?? "");
+              !lineDiscountActive(l) && !!l.id && String(l.price) === String(l._seededPrice ?? "");
             // Unchanged existing line: derive its submission the SAME way
             // the server expects (shared module, slice 4 of #4405 GitHub
             // round 3 structural fix) — a real gross + line discount
@@ -3682,7 +3730,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       {lineDiscount.name || "Discount"}
                     </div>
-                    <div style={{ fontSize: 12, color: "#B42318" }}>
+                    {/* Codex pre-push audit P1 (round 1, #4657): routine
+                        financial info, not a warning — the page's neutral
+                        muted tone, matching the guidance text below it,
+                        never the alert-fg red reserved for genuine warnings
+                        (AGENTS.md / CLAUDE.md). */}
+                    <div style={{ fontSize: 12, color: D.muted }}>
                       {lineDiscount.discount_type === "percentage" || lineDiscount.discount_type === "variable_percentage"
                         ? `${Number(lineDiscount.amount)}%`
                         : `$${Number(lineDiscount.amount || 0).toFixed(2)}`}
@@ -3724,7 +3777,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 </select>
               )}
               {!lineDiscount && (
-                <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
+                // Codex pre-push audit P2 (round 1, #4657): the portal's
+                // 14px readability floor (AGENTS.md / CLAUDE.md) — this text
+                // explains a real money-entry contract change (Price becomes
+                // "before discount"), so it must not be the hardest-to-read
+                // line on the screen, especially on mobile.
+                <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
                   Picking one treats the Price above as the amount before this
                   discount.
                 </div>
@@ -4315,7 +4373,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     onLineDiscount: stackingEnabled
                       ? (presetId) => setLineDiscount(line._key, presetId)
                       : null,
-                    lineDiscountOptions: lineDiscountOptionsFor(line._key),
+                    lineDiscountOptions: lineDiscountOptionsFor(line),
                     lineDiscountDollars: lineDiscountDollarsAt(idx),
                   })}
                 </div>,
@@ -4584,6 +4642,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   <span>Subtotal</span>
                   <strong>${servicePrice.toFixed(2)}</strong>{" "}
                 </div>
+                {/* Codex pre-push audit P1 (round 1, #4657): routine
+                    financial info, not a warning — no color override, so
+                    this inherits the same neutral tone Subtotal/Total use
+                    right above/below it, never the alert-fg red reserved
+                    for genuine warnings. */}
                 {lineDiscountRows.map((row, i) => (
                   <div
                     key={`line-discount-${i}`}
@@ -4593,7 +4656,6 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                       justifyContent: "space-between",
                       gap: 40,
                       fontSize: 14,
-                      color: "#B42318",
                     }}
                   >
                     <span>{row.name}</span>
