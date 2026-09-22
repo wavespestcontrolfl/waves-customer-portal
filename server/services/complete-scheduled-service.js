@@ -11344,20 +11344,49 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // catches its OWN database errors and resolves false rather than
       // throwing — every one of the four call sites below used to await it
       // without checking, so a transient restore failure was silently
-      // treated as a release. The claim then stays 'sending' until stale-
-      // claim recovery parks it (10 minutes later, review-hold), blocking
-      // an ordinary resend in the meantime with no signal anyone could act
-      // on sooner. One shared checked call, used at all four sites, so a
-      // future exit added to this block can't reintroduce an unchecked one.
+      // treated as a release. Checking the boolean alone (round 1's own
+      // fix) still only logged — every caller kept completing the visit
+      // with the invoice left 'sending' until the 10-minute stale-claim
+      // sweep parked it for manual review, blocking an ordinary retry in
+      // the meantime (Codex pre-push P1, round 2).
+      //
+      // Second-chance path, not a thrown/retryable completion outcome: the
+      // decline notice's own consumedQueuedSendRows is ALWAYS [] (this
+      // caller never adopts a queued row), so restoreSendClaim's real work
+      // for it is exactly ONE update — `status = previousStatus,
+      // send_claim_token = NULL WHERE id=? AND status='sending' AND
+      // send_claim_token=?` — wrapped in a transaction this caller never
+      // needed for atomicity. A bare retry of that SAME update, outside
+      // the failed transaction, is a well-justified fallback: if the first
+      // failure was transient (a connection blip), this one succeeds and
+      // the invoice is immediately back in its ordinary claimable state —
+      // no operator involvement, no review hold, nothing left 'sending'
+      // on the very next tick. Throwing to make the whole completion
+      // attempt retryable was the other option #4634's own precedent
+      // offered; rejected because this decline notice runs after the
+      // completion's core record already committed (side-effects phase),
+      // so aborting the attempt would not undo anything and would also
+      // discard the completion SMS's own already-decided pay-link
+      // fallback for no benefit over a scoped, in-place recovery.
       const restoreDeclineSendClaim = async () => {
         const restored = await DeclineNoticeInvoiceService.restoreSendClaim(
           invoice.id, declineSendClaim.previousStatus, declineSendClaim.claimed,
           [], db, declineSendClaim.invoice.send_claim_token,
         );
-        if (!restored) {
-          logger.error(`[dispatch] payment-failed notice claim restore FAILED for invoice ${invoice.id} — the claim stays 'sending' until stale-claim recovery parks it for operator review; an ordinary resend is blocked until then`);
+        if (restored) return true;
+        logger.error(`[dispatch] payment-failed notice claim restore FAILED for invoice ${invoice.id} — attempting a second-chance release before falling back to stale-claim recovery`);
+        let secondChance = 0;
+        try {
+          secondChance = await db('invoices')
+            .where({ id: invoice.id, status: 'sending', send_claim_token: declineSendClaim.invoice.send_claim_token })
+            .update({ status: declineSendClaim.previousStatus, send_claim_token: null, updated_at: new Date() });
+        } catch (secondChanceErr) {
+          logger.error(`[dispatch] payment-failed notice second-chance claim release errored for invoice ${invoice.id}: ${secondChanceErr.message} — left for stale-claim recovery`);
         }
-        return restored;
+        if (!secondChance) {
+          logger.error(`[dispatch] payment-failed notice claim second-chance release ALSO failed for invoice ${invoice.id} — the claim stays 'sending' until stale-claim recovery parks it for operator review; an ordinary resend is blocked until then`);
+        }
+        return !!secondChance;
       };
       if (declineSendClaim) {
         try {

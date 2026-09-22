@@ -2632,6 +2632,13 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
     let outcome;
     try {
       outcome = await db.transaction(async (trx) => {
+        // Codex pre-push P2 (round 2 of the owner's audit): lock the
+        // customer row before the invoice row — postCreditMovement below
+        // also locks the customer, and this route's old invoice-then-
+        // customer order could deadlock against the customer-first order
+        // settleZeroBalance now uses (server/services/invoice.js). The
+        // pre-transaction `invoice` read above already carries customer_id.
+        await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
         const locked = await trx('invoices').where({ id }).forUpdate().first();
         if (!locked) {
           const err = new Error('Invoice not found'); err.statusCode = 404; err.isOperational = true; throw err;
@@ -2661,10 +2668,9 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
         // the cancel voids it (restoring credit); consuming credit against
         // it here would race that void (#3878 r2).
         // Lock order customer → visit (same as recordManualPayment and the
-        // rest of the repo): postCreditMovement locks the customer below, so
-        // fencing the visit first would invert the order and deadlock against
-        // a customer→visit transaction (Codex r2 P2).
-        await trx('customers').where({ id: locked.customer_id }).forUpdate().first('id');
+        // rest of the repo): the customer row is already locked above (moved
+        // ahead of the invoice lock for the Codex P2 fix), so this fence
+        // still runs strictly after it.
         {
           const neverRan = await visitRefusesSettlement(trx, locked.scheduled_service_id);
           if (neverRan) {
@@ -2790,7 +2796,18 @@ router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
 
     let outcome;
     try {
+      // Codex pre-push P2 (round 2 of the owner's audit): an unlocked
+      // pre-read of customer_id, so the customer row can be locked before
+      // the invoice row inside the transaction — postCreditMovement below
+      // also locks the customer, and this route's old invoice-then-
+      // customer order could deadlock against settleZeroBalance's now
+      // customer-first order (server/services/invoice.js). A stale
+      // pre-read is harmless here: the invoice's customer_id does not
+      // change once minted, unlike a Bill-To payer, so no re-verify guard
+      // is needed the way settleZeroBalance's own customer-merge check is.
+      const preCustomer = await db('invoices').where({ id }).first('customer_id');
       outcome = await db.transaction(async (trx) => {
+        if (preCustomer) await trx('customers').where({ id: preCustomer.customer_id }).forUpdate().first('id');
         const locked = await trx('invoices').where({ id }).forUpdate().first();
         if (!locked) {
           const err = new Error('Invoice not found'); err.statusCode = 404; err.isOperational = true; throw err;

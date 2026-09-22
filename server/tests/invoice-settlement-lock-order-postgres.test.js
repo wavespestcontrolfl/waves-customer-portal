@@ -260,3 +260,125 @@ postgres('settleZeroBalance re-verifies the customer after locking (Codex pre-pu
     expect(result.reason).not.toBe('owner_changed');
   });
 });
+
+// Codex pre-push P2 (round 2 of the owner's audit): postCreditMovement
+// (server/services/customer-credit.js) locks the customer row — a caller
+// that ALSO locks an invoice row in the SAME transaction, invoice-first,
+// establishes the reversed order that deadlocks against settleZeroBalance's
+// now customer-first order (proven above with the general two-connection
+// harness — that proof covers this exact mechanism regardless of WHICH
+// caller triggers it, so it is not re-derived per caller here). Every
+// production caller of postCreditMovement was swept
+// (`grep -rn "postCreditMovement(" --include="*.js" . | grep -v node_modules
+// | grep -v /tests/`): most either open their own transaction (no external
+// caller lock precedes them) or already lock the customer/a non-invoice row
+// first (services/referral-engine.js, services/inspection-credit.js,
+// services/annual-prepay-renewals.js's five call sites, routes/admin-
+// customers.js's plain credit-issuance route) — those are unaffected and
+// not listed below. Seven callers DID lock an invoice first and are fixed
+// here, each a minimal reorder (an already-known customer_id — a function
+// parameter, an outer unlocked read, or a new one added for this fix — locked
+// before the invoice, mirroring settleZeroBalance's own fix). Two deeper,
+// foundational functions in customer-credit.js itself are NOT included:
+// applyAccountCreditToInvoice, returnAppliedCreditOnRefund, and
+// reverseAppliedCredit (three, not two — see the "Not fixed" note below)
+// have their OWN explicit, documented invoice-then-customer convention and
+// are used throughout the codebase (auto-apply-on-send, void/refund
+// reversal) — reordering them is a repo-wide lock-order decision, not a
+// one-line caller fix, and is reported rather than changed here.
+test('every production caller of postCreditMovement that locks an invoice first now locks the customer first (Codex pre-push P2, round 2)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const read = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+
+  const cases = [
+    {
+      file: 'routes/admin-invoices.js', label: 'POST /:id/apply-credit',
+      anchor: "outcome = await db.transaction(async (trx) => {",
+      customerLock: "await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');",
+      invoiceLock: "const locked = await trx('invoices').where({ id }).forUpdate().first();",
+    },
+    {
+      file: 'routes/admin-invoices.js', label: 'POST /:id/reverse-prepaid',
+      anchor: "if (preCustomer) await trx('customers').where({ id: preCustomer.customer_id }).forUpdate().first('id');",
+      customerLock: "if (preCustomer) await trx('customers').where({ id: preCustomer.customer_id }).forUpdate().first('id');",
+      invoiceLock: "const locked = await trx('invoices').where({ id }).forUpdate().first();",
+    },
+    {
+      file: 'routes/admin-projects.js', label: 'reverseProjectCreditOnAbort',
+      anchor: "if (preCustomer) await trx('customers').where({ id: preCustomer.customer_id }).forUpdate().first('id');\n        const locked = await trx('invoices').where({ id: claimedInvoice.id }).forUpdate().first();",
+      customerLock: "if (preCustomer) await trx('customers').where({ id: preCustomer.customer_id }).forUpdate().first('id');",
+      invoiceLock: "const locked = await trx('invoices').where({ id: claimedInvoice.id }).forUpdate().first();",
+    },
+    {
+      file: 'services/stripe.js', label: 'resolveFailedInvoiceSavedCardChargeAttempt',
+      anchor: "await trx('customers').where({ id: customerId }).forUpdate().first('id');\n    const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();",
+      customerLock: "await trx('customers').where({ id: customerId }).forUpdate().first('id');",
+      invoiceLock: "const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();",
+    },
+    {
+      file: 'services/stripe.js', label: 'persistSavedCardChargeCreditDelta',
+      anchor: "await trx('customers').where({ id: customerId }).forUpdate().first('id');\n    const locked = await trx('invoices').where({ id: invoiceId }).forUpdate().first();",
+      customerLock: "await trx('customers').where({ id: customerId }).forUpdate().first('id');",
+      invoiceLock: "const locked = await trx('invoices').where({ id: invoiceId }).forUpdate().first();",
+    },
+    {
+      file: 'routes/stripe-webhook.js', label: 'succeeded-PI fallback handler',
+      anchor: "await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');\n      const lockedInvoice = await trx('invoices')",
+      customerLock: "await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');",
+      invoiceLock: "const lockedInvoice = await trx('invoices')",
+    },
+    {
+      file: 'routes/stripe-webhook.js', label: 'ACH processing handler',
+      anchor: "if (invoice.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');\n    const lockedInvoice = await trx('invoices')",
+      customerLock: "if (invoice.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');",
+      invoiceLock: "const lockedInvoice = await trx('invoices')",
+    },
+  ];
+
+  for (const { file, label, anchor, customerLock, invoiceLock } of cases) {
+    const source = read(file);
+    expect(source.includes(anchor)).toBe(true);
+    const customerAt = source.indexOf(customerLock);
+    const invoiceAt = source.indexOf(invoiceLock, customerAt);
+    if (customerAt === -1) throw new Error(`${file} (${label}): customer lock string not found`);
+    if (!(invoiceAt > customerAt)) throw new Error(`${file} (${label}): invoice lock not found after customer lock`);
+  }
+});
+
+// Not fixed — reported, not reordered (see the comment above): the three
+// widely-used, foundational functions in customer-credit.js that already
+// carry their OWN deliberate invoice-then-customer convention. Structural
+// tie-back so this stays a live, named finding rather than a stale claim —
+// if any of these is ever reordered, this test's job is done and it should
+// be deleted along with the "not fixed" framing above.
+test("customer-credit.js's three foundational credit functions still use the OLDER invoice-then-customer order — a known, reported, NOT one-line-reorderable conflict", () => {
+  const fs = require('fs');
+  const path = require('path');
+  const source = fs.readFileSync(path.join(__dirname, '../services/customer-credit.js'), 'utf8');
+
+  const stillInvoiceFirst = (fnSignature, invoiceLock, customerLockOrMovement) => {
+    const fnAt = source.indexOf(fnSignature);
+    expect(fnAt).toBeGreaterThan(-1);
+    const invoiceAt = source.indexOf(invoiceLock, fnAt);
+    const laterAt = source.indexOf(customerLockOrMovement, invoiceAt);
+    expect(invoiceAt).toBeGreaterThan(fnAt);
+    expect(laterAt).toBeGreaterThan(invoiceAt);
+  };
+
+  stillInvoiceFirst(
+    "async function applyAccountCreditToInvoice(",
+    "const invoice = await t('invoices').where({ id: invoiceId }).forUpdate().first();",
+    'postCreditMovement(',
+  );
+  stillInvoiceFirst(
+    'async function returnAppliedCreditOnRefund(',
+    "const inv = await trx('invoices').where({ id: invoiceId }).forUpdate()",
+    'postCreditMovement(',
+  );
+  stillInvoiceFirst(
+    'async function reverseAppliedCredit(',
+    "const inv = await t('invoices').where({ id: invoiceId }).forUpdate()",
+    'postCreditMovement(',
+  );
+});

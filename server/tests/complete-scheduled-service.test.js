@@ -411,15 +411,41 @@ describe('payment-failed decline notice claim acquisition (#4131 slice 5, deferr
     // times.
     expect(noticeBlock).toMatch(/const restoreDeclineSendClaim = async \(\) => \{/);
     const helperAt = noticeBlock.indexOf('const restoreDeclineSendClaim = async () => {');
-    const helperBody = noticeBlock.slice(helperAt, helperAt + 600);
+    const helperBody = noticeBlock.slice(helperAt, helperAt + 2200);
     expect(helperBody).toMatch(/const restored = await DeclineNoticeInvoiceService\.restoreSendClaim\(/);
-    expect(helperBody).toMatch(/if \(!restored\) \{/);
-    expect(helperBody).toMatch(/logger\.error\(/);
-    expect(helperBody).toMatch(/return restored;/);
+    expect(helperBody).toMatch(/if \(restored\) return true;/);
     // No OTHER (bare, unchecked) call to restoreSendClaim anywhere else in
     // the notice block — every call site goes through the checked helper.
     const bareRestoreCalls = (noticeBlock.match(/DeclineNoticeInvoiceService\.restoreSendClaim\(/g) || []).length;
     expect(bareRestoreCalls).toBe(1); // only inside the helper itself
+  });
+
+  test('a false restore attempts a second-chance DIRECT release before falling back to stale-claim recovery — never just logged and left (Codex pre-push P1, round 2)', () => {
+    // Round 1's own fix (the shared helper above) checked the boolean but
+    // only logged on failure — every caller still kept completing the
+    // visit with the invoice left \'sending\' until the 10-minute
+    // stale-claim sweep parked it, blocking an ordinary resend in the
+    // meantime. The decline notice\'s own consumedQueuedSendRows is ALWAYS
+    // [] (this caller never adopts a queued row), so restoreSendClaim\'s
+    // real work for it is exactly one status-flip UPDATE wrapped in a
+    // transaction this caller never needed — a bare retry of that SAME
+    // update, outside the failed transaction, is the second-chance path.
+    const helperAt = noticeBlock.indexOf('const restoreDeclineSendClaim = async () => {');
+    expect(helperAt).toBeGreaterThan(-1);
+    const helperBody = noticeBlock.slice(helperAt, helperAt + 2200);
+    expect(helperBody).toMatch(
+      /secondChance = await db\('invoices'\)\s*\n\s*\.where\(\{ id: invoice\.id, status: 'sending', send_claim_token: declineSendClaim\.invoice\.send_claim_token \}\)\s*\n\s*\.update\(\{ status: declineSendClaim\.previousStatus, send_claim_token: null, updated_at: new Date\(\) \}\);/,
+    );
+    // The second attempt is a bare UPDATE, not routed back through
+    // restoreSendClaim itself (which just failed) or through the checked
+    // helper recursively.
+    const secondChanceRegion = helperBody.slice(helperBody.indexOf('let secondChance'));
+    expect(secondChanceRegion).not.toMatch(/restoreDeclineSendClaim\(\)/);
+    expect(secondChanceRegion).not.toMatch(/DeclineNoticeInvoiceService\.restoreSendClaim\(/);
+    // Still checked — a failed second attempt logs rather than silently
+    // proceeding, and the helper reports its final true/false honestly.
+    expect(helperBody).toMatch(/if \(!secondChance\) \{/);
+    expect(helperBody).toMatch(/return !!secondChance;/);
   });
 
   test('every resolved outcome that does NOT finalize (deferred, not-sent, no renderable body) gives the claim back through the checked helper', () => {

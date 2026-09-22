@@ -1900,6 +1900,15 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
         return QUARANTINED;
       }
 
+      // Codex pre-push P2 (round 2 of the owner's audit): lock the
+      // customer row before the invoice row — postCreditMovement further
+      // down (only reached on a matching ambiguous saved-card attempt)
+      // also locks the customer, and this handler's old invoice-then-
+      // customer order could deadlock against settleZeroBalance's now
+      // customer-first order (server/services/invoice.js). invoice.customer_id
+      // is already known from the unlocked findInvoiceForPaymentIntent read
+      // above.
+      await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
       const lockedInvoice = await trx('invoices')
         .where({ id: invoice.id })
         .forUpdate()
@@ -5931,6 +5940,14 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
   await db.transaction(async (trx) => {
     await lockPaymentIntentPaymentRow(trx, piId);
 
+    // Codex pre-push P2 (round 2 of the owner's audit): lock the customer
+    // row before the invoice row — postCreditMovement further down (only
+    // reached on a matching ambiguous saved-card attempt) also locks the
+    // customer, and this handler's old invoice-then-customer order could
+    // deadlock against settleZeroBalance's now customer-first order
+    // (server/services/invoice.js). invoice.customer_id is already known
+    // from the unlocked read above.
+    if (invoice.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
     const lockedInvoice = await trx('invoices')
       .where({ id: invoice.id })
       .forUpdate()

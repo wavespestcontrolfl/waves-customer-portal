@@ -4412,7 +4412,17 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       const { reverseAppliedCredit, postCreditMovement, round2 } = require('../services/customer-credit');
       const r = await reverseAppliedCredit({ invoiceId: claimedInvoice.id, amount: appliedProjectCredit, createdBy: 'system:project_send_failed' });
       if (r.reversed > 0) { appliedProjectCredit = 0; return; }
+      // Codex pre-push P2 (round 2 of the owner's audit): lock the customer
+      // row before the invoice row — postCreditMovement below also locks
+      // the customer, and this abort-cleanup path's old invoice-then-
+      // customer order could deadlock against settleZeroBalance's now
+      // customer-first order (server/services/invoice.js). claimedInvoice
+      // carries no customer_id, so an unlocked pre-read supplies it; stale
+      // is harmless here (an invoice's customer_id does not change once
+      // minted).
+      const preCustomer = await db('invoices').where({ id: claimedInvoice.id }).first('customer_id');
       await db.transaction(async (trx) => {
+        if (preCustomer) await trx('customers').where({ id: preCustomer.customer_id }).forUpdate().first('id');
         const locked = await trx('invoices').where({ id: claimedInvoice.id }).forUpdate().first();
         if (locked && String(locked.status || '').toLowerCase() === 'prepaid' && !locked.stripe_payment_intent_id) {
           const reverseAmt = Math.min(round2(appliedProjectCredit), round2(locked.credit_applied || 0));
