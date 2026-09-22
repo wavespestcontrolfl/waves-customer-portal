@@ -238,4 +238,48 @@ describe('P1: retention offer sizing resolves scoped stamps FIRST', () => {
     });
     expect(result.amount).toBe(10.5);
   });
+
+  // GitHub Codex round 2 on 60271e5a57, P1: the pre-resolution pass must
+  // trust the SAME sources create() trusts elsewhere in this file
+  // (EDIT_TRUSTED_DISCOUNT_SOURCES), not a narrower ad-hoc literal — an
+  // unparented validated_checkout stamp used to throw "Invalid line-item
+  // discount" out of this retention path instead of resolving normally.
+  test('an unparented validated_checkout stamp does not throw — trusted the same as scheduled_service', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const offer = offerRow();
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services as s') {
+        return { leftJoin: jest.fn(() => ({ where: jest.fn(() => ({ first: jest.fn(async () => visitRow()) })) })) };
+      }
+      if (table === 'retention_offers') {
+        return { where: jest.fn(() => ({ orderBy: jest.fn(() => ({ first: jest.fn(async () => offer) })) })) };
+      }
+      if (table === 'discounts') {
+        const q = { whereIn: jest.fn(() => q), where: jest.fn(() => q), first: jest.fn(async () => null), then: (resolve) => Promise.resolve([]).then(resolve) };
+        return q;
+      }
+      const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
+      return q;
+    });
+    const lineItems = [
+      { client_id: 'line-1', description: 'Pest', quantity: 1, unit_price: 100, amount: 100 },
+      {
+        discount_id: 'checkout-tier', discount_for: null, description: 'Mobile Checkout Silver',
+        quantity: 1, unit_price: -20, amount: -20,
+        discount_type: 'percentage', discount_amount: 20, discount_dollars: 20,
+        use_stored_discount: true, stored_discount_source: 'validated_checkout',
+      },
+    ];
+    let result;
+    await expect((async () => {
+      result = await InvoiceService.buildRetentionOfferLineForMint({
+        customerId: 'customer-1',
+        scheduledServiceId: 'sched-1',
+        lineItems,
+      });
+    })()).resolves.not.toThrow();
+    // Eligible subtotal resolves to $80 (100 - the trusted $20 stamp);
+    // 15% of that is $12.
+    expect(result.amount).toBe(12);
+  });
 });

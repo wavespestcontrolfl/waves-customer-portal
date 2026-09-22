@@ -3614,12 +3614,22 @@ const InvoiceService = {
       const lineItemDiscountRowById = new Map(
         (await loadInvoiceDiscountRows(lineItemDiscountIds, dbh)).map((row) => [String(row.id), row]),
       );
+      // Codex pre-push audit P1 (round 2 on PR #4655): reuse the file's
+      // own EDIT_TRUSTED_DISCOUNT_SOURCES (scheduled_service AND
+      // validated_checkout) instead of a narrower ad-hoc literal — an
+      // unparented validated_checkout stamp on this same invoice would
+      // otherwise classify as neither a line entry (no parent) nor a
+      // document entry (documentEntries requires stored || no discount_id,
+      // and this item has both discount_for:null and a discount_id), and
+      // computeStackedDocumentDiscountLines would throw "Invalid line-item
+      // discount" out of this retention/cancellation path for an
+      // otherwise-valid invoice.
       computeStackedDocumentDiscountLines({
         items: resolvedItems,
         serviceLineByClientId,
         lineItemDiscountRowById,
         manualDiscountRows: [],
-        trustedStoredSources: new Set(["scheduled_service"]),
+        trustedStoredSources: EDIT_TRUSTED_DISCOUNT_SOURCES,
       });
       resolvedLineItems = resolvedItems;
     }
