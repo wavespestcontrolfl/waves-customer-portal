@@ -41,6 +41,21 @@ const CALLBACK_COORDINATED_SUBJECT_RE = new RegExp(
   `(?:^|[,;:]|\\b(?:and|or|but|so|then)\\b)\\s*(?:(?:and|or|but|so|then)\\b\\s*)*${CALLBACK_COORDINATED_FILLER}(?<subject>${CALLBACK_PROMISER}|${CALLBACK_ACTOR_HEAD}(?:\\s+[a-z][\\w\\x27\\u2019.-]*){0,3})(?:\\s+${CALLBACK_GOVERNING_MODAL}|${CALLBACK_MODAL})\\b`,
   'gi',
 );
+// Moved ahead of its original position (once next to CALLBACK_RECIPIENT_
+// CHANNEL) so CALLBACK_COORDINATED_SUBJECT_SHIFT_RE below can reuse it — a
+// bare temporal/discourse adverb ("tomorrow", "otherwise") is exactly the
+// non-subject shape that list already exists to name.
+const CALLBACK_TIMING_ADVERB = '(?:soon|shortly|immediately|promptly|right away|as soon as possible|at once)';
+// "sometime"/"later" stand alone or head an ordinary timing phrase
+// ("sometime tomorrow", "later this week"); folding the bare "later" case
+// into this alternative avoids listing it twice.
+const CALLBACK_TIMING_PHRASE = '(?:sometime|later)(?:\\s+(?:today|tomorrow|this\\s+week))?';
+// A bare "\w+ly" alternative also matches possessive nouns that merely end
+// in "-ly" ("her family", "her ally"), which are not adverbs at all; a
+// bounded list of the actual trailing adverbs keeps those nouns from being
+// swallowed as if they ended the recipient phrase.
+const CALLBACK_TRAILING_ADVERB = '(?:shortly|quickly|directly|immediately|promptly|personally|briefly)';
+const CALLBACK_TRAILING_MODIFIER = `(?:${CALLBACK_TRAILING_ADVERB}|again|back|now|then|too|instead|anyway|today|tomorrow|tonight|${CALLBACK_TIMING_PHRASE}|${CALLBACK_TIMING_ADVERB}|${WEEKDAYS}|next\\s+(?:week|weekend|month|year|${WEEKDAYS}))`;
 // A coordinator introducing ANY other apparent subject before a modal —
 // including a bare name with no leading pronoun or determiner ("and Jordan
 // will review...") — signals the original promiser may no longer govern
@@ -50,8 +65,13 @@ const CALLBACK_COORDINATED_SUBJECT_RE = new RegExp(
 // Used only to exclude a bare-coordinated match from wrongly inheriting the
 // original promiser — never to attribute the shifted subject itself, since
 // this widened alternative is not anchored to a real actor phrase shape.
+// The subject's own first word still cannot be a bare temporal/discourse
+// adverb ("and tomorrow will review...", "and otherwise will call her"):
+// an adverb never itself does the coordinated action, so treating it as an
+// unresolved-actor shift would wrongly excuse the ORIGINAL promiser's own
+// unconditional promise instead of correctly still attributing it.
 const CALLBACK_COORDINATED_SUBJECT_SHIFT_RE = new RegExp(
-  `(?:^|[,;:]|\\b(?:and|or|but|so|then)\\b)\\s*(?:(?:and|or|but|so|then)\\b\\s*)*${CALLBACK_COORDINATED_FILLER}[a-z][\\w\\x27\\u2019.-]*(?:\\s+[a-z][\\w\\x27\\u2019.-]*){0,3}(?:\\s+${CALLBACK_GOVERNING_MODAL}|${CALLBACK_MODAL})\\b`,
+  `(?:^|[,;:]|\\b(?:and|or|but|so|then)\\b)\\s*(?:(?:and|or|but|so|then)\\b\\s*)*${CALLBACK_COORDINATED_FILLER}(?!\\b(?:and|or|but|so|then)\\b)(?!${CALLBACK_TRAILING_MODIFIER}\\b)[a-z][\\w\\x27\\u2019.-]*(?:\\s+(?!\\b(?:and|or|but|so|then)\\b)[a-z][\\w\\x27\\u2019.-]*){0,3}(?:\\s+${CALLBACK_GOVERNING_MODAL}|${CALLBACK_MODAL})\\b`,
   'gi',
 );
 // A bridge like "check, or call her" reuses the sentence's opening promiser,
@@ -125,17 +145,6 @@ const CALLBACK_LIGHT_ACTION_FINITE = `(?:(?:${CALLBACK_ACTION_FILLER_WORD}\\s+){
 // ("call her"), or the light verb with the recipient before the contact noun
 // ("give her a call") or after it ("place a call to her").
 const CALLBACK_RECIPIENT_CHANNEL = '(?:cell(?:ular)? phone|mobile(?: phone)?|phone(?: number)?|number)';
-const CALLBACK_TIMING_ADVERB = '(?:soon|shortly|immediately|promptly|right away|as soon as possible|at once)';
-// "sometime"/"later" stand alone or head an ordinary timing phrase
-// ("sometime tomorrow", "later this week"); folding the bare "later" case
-// into this alternative avoids listing it twice.
-const CALLBACK_TIMING_PHRASE = '(?:sometime|later)(?:\\s+(?:today|tomorrow|this\\s+week))?';
-// A bare "\w+ly" alternative also matches possessive nouns that merely end
-// in "-ly" ("her family", "her ally"), which are not adverbs at all; a
-// bounded list of the actual trailing adverbs keeps those nouns from being
-// swallowed as if they ended the recipient phrase.
-const CALLBACK_TRAILING_ADVERB = '(?:shortly|quickly|directly|immediately|promptly|personally|briefly)';
-const CALLBACK_TRAILING_MODIFIER = `(?:${CALLBACK_TRAILING_ADVERB}|again|back|now|then|too|instead|anyway|today|tomorrow|tonight|${CALLBACK_TIMING_PHRASE}|${CALLBACK_TIMING_ADVERB}|${WEEKDAYS}|next\\s+(?:week|weekend|month|year|${WEEKDAYS}))`;
 // "only if" is a restrictive condition, not the "even if" concession this
 // group was named for, but it shares the same trailing shape (a focus
 // adverb directly in front of "if") and needs the same phrase-end

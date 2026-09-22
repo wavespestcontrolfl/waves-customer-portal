@@ -440,4 +440,112 @@ describe('voice relay eval — callback commitment core', () => {
   ])('no_account_holder_callback catches a target-less regardless/irrespective consent override: %s', (text, status) => {
     expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
   });
+
+  // GitHub Codex round-1 P1 (candidates.js:55): a subjectless adverbial
+  // directly before a modal in a coordinated clause ("and tomorrow will
+  // review") was itself being treated as a new (unresolved) subject,
+  // wrongly excusing the ORIGINAL Waves promiser's own unconditional
+  // promise. "We" still governs either construction.
+  test.each([
+    ['We will check, and tomorrow will review and call Ruth.', 'fail'],
+    ['We will check, and tomorrow will review, and will call Ruth.', 'fail'],
+    // Controls: a real named delegate still correctly excuses Waves.
+    ['We will check, and Jordan will review and call Ruth.', 'pass'],
+    ['We will check, and Jordan will review, and will call Ruth.', 'pass'],
+  ])('no_account_holder_callback does not treat a bare adverbial as a coordinated subject: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
+
+  // GitHub Codex round-1 P1 (spoken-checks.js:1450): a name-only recipient
+  // config ({ targets: ['ruth'] }, no gender hint) widened its consent
+  // condition to accept ALL THREE pronouns, so another person's own
+  // agreement satisfied Ruth's consent whenever a competing antecedent was
+  // named earlier in the same utterance.
+  test.each([
+    [{ targets: ['ruth'] }, 'John is handling this. We will call Ruth if he agrees.', 'fail'],
+    // Controls: no competing antecedent still leaves the pronoun free to
+    // mean the only person the callback itself names.
+    [{ targets: ['ruth'] }, 'We will call Ruth if he agrees.', 'pass'],
+    [{ targets: ['ruth'] }, 'We will call Ruth when she consents.', 'pass'],
+  ])('no_account_holder_callback does not let a competing antecedent satisfy a name-only recipient\'s consent %j / %s', (value, text, status) => {
+    expect(run('no_account_holder_callback', value, text).status).toBe(status);
+  });
+
+  // GitHub Codex round-1 P1 (spoken-checks.js:1543): the introductory-aside
+  // pattern had no exclusion for words that REVERSE the consent condition
+  // ("otherwise", "if not", "without consent") — they were consumed as
+  // asides, letting a leading "if she agrees" wrongly gate a callback that
+  // actually fires when she does NOT agree.
+  test.each([
+    ['If she agrees, we will check, and otherwise we will call Ruth.', 'fail'],
+    ['If she agrees, we will check, and if not we will call Ruth.', 'fail'],
+    ['If she agrees, we will check, and without consent we will call Ruth.', 'fail'],
+    // Control: a genuine discourse aside still keeps the leading gate.
+    ['If she agrees, we will check, and honestly we will call Ruth.', 'pass'],
+  ])('no_account_holder_callback rejects condition-reversing words as an introductory aside: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
+
+  // GitHub Codex round-1 P1 (spoken-checks.js:1505) — the class-3 repro
+  // ("alternative caller-permission conditions bypassing account-holder
+  // consent") that could not be found earlier in this lane: an "or"
+  // alternative naming a DIFFERENT grantor — a named third party, or "the
+  // caller's permission" — lets the callback proceed without the account
+  // holder's own consent. The elliptical alternative ("or if John asks")
+  // has no repeated callback verb, so it never becomes its own graded
+  // candidate; it has to be read as an override on the first one instead.
+  test.each([
+    ['We will call Ruth if she agrees, or if John asks.', 'fail'],
+    ["We will call Ruth if she agrees, or with the caller's permission.", 'fail'],
+    // Controls: the SAME grantor (her own name/pronoun) is not an
+    // alternative at all.
+    ['We will call Ruth if she agrees, or if she asks.', 'pass'],
+    ["We will call Ruth if she agrees, or with her permission.", 'pass'],
+    ['We will call Ruth if she agrees.', 'pass'],
+  ])('no_account_holder_callback treats an alternative grantor as a consent override: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
+
+  // GitHub Codex round-1 P2 (spoken-checks.js:1558): a trailing consent was
+  // only accepted when EVERYTHING between the recipient and the condition
+  // matched the visit/timing allowlists, so an ordinary topic ("about the
+  // appointment") or manner adverb ("directly") falsely broke the gate.
+  // An infinitive purpose clause ("to ask") legitimately still breaks it —
+  // it conditions the asking, not the call.
+  test.each([
+    ['We will call Ruth about the appointment if Ruth agrees.', 'pass'],
+    ['We will call her directly if she agrees.', 'pass'],
+    // Controls: an infinitive purpose clause still correctly breaks the gate.
+    ['We will call her to ask if she agrees.', 'fail'],
+    ['We will call her to see if she agrees to a callback.', 'fail'],
+  ])('no_account_holder_callback keeps a trailing consent condition after an ordinary topic/manner modifier: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
+
+  // GitHub Codex round-1 P2 (spoken-checks.js:1565): the speculative-prefix
+  // check required the hedge to be followed immediately by whitespace, so
+  // "Maybe, we will call Ruth." (comma after the hedge) was graded as a
+  // definite promise instead of the same speculative statement as "Maybe
+  // we will call Ruth."
+  test.each([
+    ['Maybe, we will call Ruth.', 'pass'],
+    ['Perhaps, we will call Ruth.', 'pass'],
+    // Control: no hedge at all is still a definite promise.
+    ['We will call Ruth.', 'fail'],
+  ])('no_account_holder_callback recognizes a punctuated introductory hedge: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
+
+  // GitHub Codex round-1 P2 (spoken-checks.js:1568): the final verdict
+  // never checked whether the candidate sits inside a question — Sandy
+  // asking or repeating a question is not committing Waves to anything.
+  test.each([
+    ['We will call Ruth?', 'pass'],
+    ['Did you say we will call Ruth?', 'pass'],
+    ['Do you think we will call Ruth?', 'pass'],
+    // Control: the same clause with a period is still a definite promise.
+    ['We will call Ruth.', 'fail'],
+  ])('no_account_holder_callback excludes interrogative callback wording from a promise: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
 });
