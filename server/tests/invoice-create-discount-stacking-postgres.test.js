@@ -1,0 +1,207 @@
+/**
+ * Slice 5 of #4405 — REAL Postgres round trip. The mocked-db unit suites
+ * (invoice-create-discount-stacking-parity.test.js,
+ * invoice-discount-stacking-scoped-stamps.test.js) prove the arithmetic; this
+ * file proves the REAL columns this slice reads — scheduled_services.
+ * discount_service_key_filter / discount_service_category_filter /
+ * service_key_snapshot and scheduled_service_addons.service_key_snapshot /
+ * service_category_snapshot (migration 20260716000000) — actually exist and
+ * round-trip through the real pg driver into InvoiceService.create's saved
+ * discount_amount, not just a hand-typed mock shape.
+ */
+jest.setTimeout(30000);
+let mockConnection;
+jest.mock('../models/db', () => new Proxy((...args) => mockConnection(...args), {
+  get(_target, key) {
+    const value = mockConnection?.[key];
+    return typeof value === 'function' ? value.bind(mockConnection) : value;
+  },
+}));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+const postgres = process.env.DATABASE_URL ? describe : describe.skip;
+
+postgres('InvoiceService.create discount stacking — real Postgres round trip', () => {
+  const { randomUUID } = require('node:crypto');
+  const InvoiceService = require('../services/invoice');
+  let database;
+  let trx;
+
+  beforeAll(() => {
+    const url = new URL(process.env.DATABASE_URL);
+    if (!['localhost', '127.0.0.1'].includes(url.hostname)) throw new Error('Use an isolated local/CI database');
+    if (!/^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname) && process.env.CI !== 'true') {
+      throw new Error('Use a verified, task-private waves_qa_ database (or CI)');
+    }
+    database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
+  });
+  beforeEach(async () => {
+    delete process.env.GATE_DISCOUNT_STACKING;
+    trx = await database.transaction();
+    mockConnection = trx;
+  });
+  afterEach(async () => { await trx.rollback(); mockConnection = database; });
+  afterAll(async () => { await database.destroy(); });
+
+  async function insertCustomer() {
+    const id = randomUUID();
+    await trx('customers').insert({
+      id, first_name: 'Synthetic', last_name: 'DiscountStack', property_type: 'residential',
+      phone: `+1555${id.replace(/-/g, '').slice(0, 7)}`, active: true,
+    });
+    return id;
+  }
+
+  test('a scoped appointment stamp only discounts the line it names, compounds with a fresh manual pick, and persists exactly that total', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const customerId = await insertCustomer();
+    const schedId = randomUUID();
+    await trx('scheduled_services').insert({
+      id: schedId,
+      customer_id: customerId,
+      service_type: 'Pest Control',
+      scheduled_date: '2099-01-15',
+      status: 'confirmed',
+      estimated_price: 150,
+      primary_line_price: 100,
+      service_key_snapshot: 'pest_control',
+      service_category_snapshot: 'pest',
+      discount_id: randomUUID(),
+      discount_name: 'Lawn Add-on Credit',
+      discount_type: 'fixed_amount',
+      discount_amount: 12,
+      discount_dollars: 12,
+      discount_service_key_filter: 'lawn_care',
+    });
+    await trx('scheduled_service_addons').insert({
+      id: randomUUID(),
+      scheduled_service_id: schedId,
+      service_name: 'Lawn Care',
+      base_price: 50,
+      estimated_price: 50,
+      service_key_snapshot: 'lawn_care',
+      service_category_snapshot: 'lawn',
+    });
+
+    const scheduledInvoice = await InvoiceService.buildLineItemsForScheduledService(schedId, {
+      fallbackAmount: 150,
+      fallbackDescription: 'Service visit',
+    });
+    // Real columns exist and round-tripped: the lawn line carries its
+    // service_key, and its discount item carries the scope filter.
+    expect(scheduledInvoice.lineItems.find((li) => li.description === 'Lawn Care').service_key).toBe('lawn_care');
+    const stampItem = scheduledInvoice.lineItems.find((li) => li.discount_id && li.discount_for == null);
+    expect(stampItem.document_scope_service_key).toBe('lawn_care');
+
+    const invoice = await InvoiceService.create({
+      customerId,
+      scheduledServiceId: schedId,
+      title: 'Pest Control',
+      lineItems: scheduledInvoice.lineItems,
+      trustedStoredDiscountSources: ['scheduled_service'],
+    });
+
+    expect(Number(invoice.subtotal)).toBe(150);
+    expect(Number(invoice.discount_amount)).toBe(12);
+    expect(Number(invoice.total)).toBe(138);
+
+    const stored = await trx('invoices').where({ id: invoice.id }).first();
+    expect(Number(stored.subtotal)).toBe(150);
+    expect(Number(stored.discount_amount)).toBe(12);
+    expect(Number(stored.total)).toBe(138);
+  });
+
+  test('the same scoped stamp resolves to $0 when its target service is not on this invoice (orphaned), never a silent overcharge', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const customerId = await insertCustomer();
+    const schedId = randomUUID();
+    await trx('scheduled_services').insert({
+      id: schedId,
+      customer_id: customerId,
+      service_type: 'Pest Control',
+      scheduled_date: '2099-01-15',
+      status: 'confirmed',
+      estimated_price: 150,
+      primary_line_price: 100,
+      service_key_snapshot: 'pest_control',
+      service_category_snapshot: 'pest',
+      discount_id: randomUUID(),
+      discount_name: 'Lawn Add-on Credit',
+      discount_type: 'fixed_amount',
+      discount_amount: 12,
+      discount_dollars: 12,
+      discount_service_key_filter: 'lawn_care', // scoped to a service this visit no longer carries
+    });
+    await trx('scheduled_service_addons').insert({
+      id: randomUUID(),
+      scheduled_service_id: schedId,
+      service_name: 'Mosquito',
+      base_price: 50,
+      estimated_price: 50,
+      service_key_snapshot: 'mosquito',
+      service_category_snapshot: 'mosquito',
+    });
+
+    const scheduledInvoice = await InvoiceService.buildLineItemsForScheduledService(schedId, {
+      fallbackAmount: 150,
+      fallbackDescription: 'Service visit',
+    });
+    const invoice = await InvoiceService.create({
+      customerId,
+      scheduledServiceId: schedId,
+      title: 'Pest Control',
+      lineItems: scheduledInvoice.lineItems,
+      trustedStoredDiscountSources: ['scheduled_service'],
+    });
+
+    expect(Number(invoice.subtotal)).toBe(150);
+    expect(Number(invoice.discount_amount)).toBe(0);
+    expect(Number(invoice.total)).toBe(150);
+  });
+
+  test('gate off: the same fixture replays its full frozen amount regardless of scope — byte-identical to before this lane', async () => {
+    const customerId = await insertCustomer();
+    const schedId = randomUUID();
+    await trx('scheduled_services').insert({
+      id: schedId,
+      customer_id: customerId,
+      service_type: 'Pest Control',
+      scheduled_date: '2099-01-15',
+      status: 'confirmed',
+      estimated_price: 150,
+      primary_line_price: 100,
+      service_key_snapshot: 'pest_control',
+      service_category_snapshot: 'pest',
+      discount_id: randomUUID(),
+      discount_name: 'Lawn Add-on Credit',
+      discount_type: 'fixed_amount',
+      discount_amount: 12,
+      discount_dollars: 12,
+      discount_service_key_filter: 'lawn_care',
+    });
+    await trx('scheduled_service_addons').insert({
+      id: randomUUID(),
+      scheduled_service_id: schedId,
+      service_name: 'Mosquito',
+      base_price: 50,
+      estimated_price: 50,
+      service_key_snapshot: 'mosquito',
+      service_category_snapshot: 'mosquito',
+    });
+
+    const scheduledInvoice = await InvoiceService.buildLineItemsForScheduledService(schedId, {
+      fallbackAmount: 150,
+      fallbackDescription: 'Service visit',
+    });
+    const invoice = await InvoiceService.create({
+      customerId,
+      scheduledServiceId: schedId,
+      title: 'Pest Control',
+      lineItems: scheduledInvoice.lineItems,
+      trustedStoredDiscountSources: ['scheduled_service'],
+    });
+
+    expect(Number(invoice.discount_amount)).toBe(12);
+    expect(Number(invoice.total)).toBe(138);
+  });
+});

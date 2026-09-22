@@ -49,6 +49,10 @@ const mockIsGateEnabled = jest.fn(() => false);
 jest.mock('../config/feature-gates', () => ({
   isEnabled: (...args) => mockIsGateEnabled(...args),
   gateEnvValue: jest.fn(() => false),
+  // GATE_DISCOUNT_STACKING off — matches prod default and every existing
+  // test in this file; InvoiceService.create reads this directly (slice 5
+  // of #4405), independent of isEnabled/mockIsGateEnabled above.
+  discountStackingLive: jest.fn(() => false),
 }));
 const mockGetOrCreateOpenStatement = jest.fn();
 const mockRollupStatement = jest.fn();
