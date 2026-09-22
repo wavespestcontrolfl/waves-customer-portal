@@ -401,25 +401,37 @@ describe('replay stability: a saved document-wide pick totals identically on an 
 });
 
 // Coordinator design call (round 3 on PR #4659, GitHub review P0 on
-// invoice.js:807): the round-1-P0-repro fix above (persisting scope onto
-// a fresh pick's item) still resolved a STORED replay through
-// scopeEligibleLines — which keeps its own "no service_key anywhere on
-// this invoice ⇒ unscoped" fallback for EVERY stored item, including one
-// carrying a real, operator-chosen, PERSISTED scope. That let a saved
-// scoped pick silently widen to the whole invoice the moment its own
-// scoped line was removed (the invoice's remaining lines then carry no
-// service_key at all, so scopeEligibleLines' legacy check reads
-// "no keys anywhere" and falls back to unscoped) — reproduced by the
-// GitHub auditor directly. Fixed by reusing the SAME "compound" marker
-// computeStackedDocumentDiscountLines already stamps on every discount
-// line it resolves (item.stacking_regime = "compound", the same marker
-// calculateUpdateFinancials's gate-OFF branch already reads to freeze a
-// gate-priced row) — a stored item carrying it resolves STRICTLY
-// (freshPickEligibleLines-style, fail-closed) instead of through
-// scopeEligibleLines' legacy fallback; only a genuinely UNMARKED stamp
-// (pre-gate history, never priced under this engine) keeps the old
-// behavior.
-describe('a STORED scoped pick marked "compound" (priced under this engine) resolves STRICTLY, never the legacy "no keys anywhere" fallback', () => {
+// invoice.js:807, corrected in round 4): the round-1-P0-repro fix above
+// (persisting scope onto a fresh pick's item) still resolved a STORED
+// replay through scopeEligibleLines — which keeps its own "no
+// service_key anywhere on this invoice ⇒ unscoped" fallback for EVERY
+// stored item, including one carrying a real, operator-chosen,
+// PERSISTED scope. That let a saved scoped pick silently widen to the
+// whole invoice the moment its own scoped line was removed — reproduced
+// by the GitHub auditor directly.
+//
+// Round 3 first tried reusing item.stacking_regime === "compound" (the
+// marker computeStackedDocumentDiscountLines stamps on every discount
+// line it resolves) as the "safe to resolve strictly" signal. Round 4's
+// own GitHub audit caught that this was wrong: stacking_regime is
+// stamped unconditionally on EVERY item this engine touches, including
+// a genuine legacy scheduled_service/validated_checkout stamp that only
+// ever resolved through the UNSCOPED fallback — so a legacy stamp got
+// marked "compound" on its very first pass through this engine (no
+// scope change needed to trigger it), then switched to strict matching
+// on its NEXT save, silently dropping a legitimate credit the moment
+// the invoice's service_key data didn't happen to cover it.
+//
+// Fixed with a NARROWER, DEDICATED marker instead:
+// item.document_scope_strict === true, set ONLY by the fresh-pick
+// branch below at the exact moment it actually, verifiably resolves a
+// scope via freshPickEligibleLines — never by unrelated compounding-
+// engine bookkeeping. Only a stamp THIS engine itself strictly resolved
+// at least once carries it; every other stamp (every genuine
+// scheduled_service/validated_checkout credit, scoped or not) keeps
+// scopeEligibleLines' legacy behavior, completely unaffected by this
+// whole lane.
+describe('a STORED scoped pick marked document_scope_strict (THIS engine itself strictly resolved its scope) resolves STRICTLY, never the legacy "no keys anywhere" fallback', () => {
   test('GitHub auditor repro verbatim: a WDO-only $50 document credit saved alongside an unkeyed $100 service resolves to $0 once the WDO line is removed on resubmit, never $50', () => {
     const rowById = new Map([
       ['wdo-fifty-doc', catalogRow({ id: 'wdo-fifty-doc', discount_type: 'fixed_amount', amount: 50, service_key_filter: 'wdo_inspection' })],
@@ -432,7 +444,7 @@ describe('a STORED scoped pick marked "compound" (priced under this engine) reso
     const firstSave = run({ items: [wdoLine, unkeyedLine, pick], lineItemDiscountRowById: rowById });
     expect(totalOf(firstSave.lineItemDiscounts)).toBe(50);
     expect(pick.document_scope_service_key).toBe('wdo_inspection');
-    expect(pick.stacking_regime).toBe('compound');
+    expect(pick.document_scope_strict).toBe(true);
 
     // Resubmit: the operator removed the WDO line entirely. Only the
     // unkeyed $100 line and the now-STORED discount item remain — the
@@ -466,21 +478,21 @@ describe('a STORED scoped pick marked "compound" (priced under this engine) reso
     expect(netOf(150, resubmitted.lineItemDiscounts)).toBe(20);
     const docItem = items.find((i) => i.client_id === 'd-doc');
     expect(docItem.document_scope_service_category).toBe('pest');
-    expect(docItem.stacking_regime).toBe('compound');
+    expect(docItem.document_scope_strict).toBe(true);
   });
 
-  test('an UNMARKED stamp (no stacking_regime — genuine pre-gate history) still falls back to unscoped when this invoice carries no service_key data anywhere', () => {
-    // A real scheduled_service/validated_checkout stamp minted before
-    // this lane ever ran computeStackedDocumentDiscountLines on this
-    // invoice has NO stacking_regime field at all — trusted purely by
-    // its stored_discount_source, exactly like buildDiscountLineItem's
-    // appointment-level branch has always produced. Its
-    // document_scope_service_key may still be set (a scoped visit-time
-    // discount), but with the scoped line since removed and no
-    // service_key data left anywhere on the invoice, the OLD "no keys
-    // anywhere ⇒ unscoped" rule must still govern it — this stamp
-    // predates the compounding engine; there is nothing to verify
-    // strictly against.
+  test('an UNMARKED stamp (a genuine scheduled_service/validated_checkout credit — no document_scope_strict, ever) still falls back to unscoped when this invoice carries no service_key data anywhere', () => {
+    // A real scheduled_service/validated_checkout stamp is trusted
+    // purely by its stored_discount_source, exactly like
+    // buildDiscountLineItem's appointment-level branch has always
+    // produced — it never passes through the fresh-pick branch below
+    // that sets document_scope_strict, no matter how many times this
+    // invoice gets resaved. Its document_scope_service_key may still be
+    // set (a scoped visit-time discount), but with the scoped line
+    // since removed and no service_key data left anywhere on the
+    // invoice, the OLD "no keys anywhere ⇒ unscoped" rule must still
+    // govern it — this credit was never strictly verified; there is
+    // nothing to check it against.
     const unkeyedLine = positiveLine({ client_id: 'l-unkeyed', description: 'Hand-typed line', unit_price: 100, amount: 100 });
     const legacyStamp = {
       client_id: 'd-legacy',
@@ -492,14 +504,55 @@ describe('a STORED scoped pick marked "compound" (priced under this engine) reso
       document_scope_service_key: 'wdo_inspection',
       unit_price: -50,
       amount: -50,
-      // deliberately NO stacking_regime — this is the whole point
     };
     const { lineItemDiscounts } = run({ items: [unkeyedLine, legacyStamp], lineItemDiscountRowById: new Map() });
     // Unscoped (null eligibleLines) — the pre-existing, intentional
-    // fallback for a genuinely unmarked stamp — resolves its full $50
-    // face value, not $0 (which strict/fail-closed matching would give
-    // this same scope now that its line is gone).
+    // fallback for an unmarked stamp — resolves its full $50 face
+    // value, not $0 (which strict/fail-closed matching would give this
+    // same scope now that its line is gone).
     expect(totalOf(lineItemDiscounts)).toBe(50);
+  });
+
+  // Round 4 GitHub review P0 (PR #4659) — the auditor's own repro of the
+  // round-3 fix's bug: item.stacking_regime === "compound" is stamped on
+  // EVERY discount item computeStackedDocumentDiscountLines touches,
+  // including a genuine scheduled_service stamp that only ever resolves
+  // through the UNSCOPED legacy fallback. Using it as the "resolve
+  // strictly" signal meant a legacy stamp got marked "compound" on its
+  // very FIRST pass through this engine (no scope change of its own
+  // needed — merely being on an invoice that gets saved once is
+  // enough), then switched to strict matching on the NEXT save,
+  // dropping a legitimate credit entirely. Pinned here with the
+  // auditor's own numbers, TWO CONSECUTIVE saves of the SAME unchanged
+  // invoice: an unkeyed $100 service plus a genuine legacy WDO-scoped
+  // $50 credit must total $50 on BOTH saves, never $100 on the second.
+  test("round-4 P0 repro: a genuine legacy scoped stamp totals the SAME $50 across TWO CONSECUTIVE saves, never dropping to $100 on the second", () => {
+    const unkeyedLine = positiveLine({ client_id: 'l-unkeyed', description: 'Hand-typed line', unit_price: 100, amount: 100 });
+    const legacyStamp = {
+      client_id: 'd-legacy',
+      _kind: 'discount',
+      discount_for: null,
+      discount_id: null,
+      stored_discount_source: 'scheduled_service',
+      discount_dollars: 50,
+      document_scope_service_key: 'wdo_inspection',
+      unit_price: -50,
+      amount: -50,
+    };
+    const firstSave = run({ items: [unkeyedLine, legacyStamp], lineItemDiscountRowById: new Map() });
+    expect(totalOf(firstSave.lineItemDiscounts)).toBe(50);
+    // This legacy stamp must NEVER pick up document_scope_strict, no
+    // matter how many times it passes through this engine — that flag
+    // is reserved for a scope THIS engine itself strictly resolved.
+    expect(legacyStamp.document_scope_strict).toBeUndefined();
+
+    const secondSave = run({
+      items: [unkeyedLine, legacyStamp],
+      lineItemDiscountRowById: new Map(),
+      persistedClientIds: new Set([legacyStamp.client_id]),
+    });
+    expect(totalOf(secondSave.lineItemDiscounts)).toBe(50);
+    expect(legacyStamp.document_scope_strict).toBeUndefined();
   });
 });
 

@@ -782,15 +782,39 @@ function stackInvoiceDocumentDiscounts(serviceLines, lineEntries, manualDiscount
   // back to unscoped, so the $50 stamp discounts the unrelated $100
   // line instead of resolving orphaned.
   //
-  // item.stacking_regime === "compound" is the same marker
-  // computeStackedDocumentDiscountLines stamps on every discount line IT
-  // resolves (see its own comment below) — a row carrying it was priced
-  // under this engine at least once, so its document_scope_* fields
-  // (including both being null/absent, meaning "unscoped by the
-  // operator's own choice," not "no data to check") are authoritative
-  // and get STRICT, fail-closed matching, same as a fresh pick. Only an
-  // UNMARKED stamp (no stacking_regime at all — genuine pre-gate
-  // history) keeps scopeEligibleLines' legacy fallback.
+  // item.document_scope_strict === true is a DEDICATED provenance flag
+  // (NOT item.stacking_regime — see the correction below) set ONLY when
+  // THIS engine itself resolved a fresh catalog pick's scope via
+  // freshPickEligibleLines (the entry.row branch below persists it
+  // alongside document_scope_service_key/_category). A row carrying it
+  // had its scope actually, verifiably resolved strictly at least once,
+  // so replaying it strictly again is safe and correct. Every OTHER
+  // stored stamp — including a genuine scheduled_service/
+  // validated_checkout stamp that already carries a real
+  // document_scope_service_key of its own — keeps scopeEligibleLines'
+  // legacy "no service_key anywhere ⇒ unscoped" fallback, unchanged.
+  //
+  // CORRECTION (GitHub review round 1 P0, FOURTH finding — PR #4659,
+  // round 4): the first attempt at this fix read item.stacking_regime
+  // instead, on the theory that "priced under this engine at least
+  // once" was the right provenance signal. It is not:
+  // computeStackedDocumentDiscountLines' own per-item loop below stamps
+  // stacking_regime = "compound" on EVERY discount line it touches,
+  // unconditionally — including a legacy stamp that resolved through
+  // the ordinary UNSCOPED fallback, not strict matching. That stamped a
+  // legacy item as "compound" on its very first pass through this
+  // engine (which needs no scope change of its own to trigger — simply
+  // being on an invoice that gets saved once is enough), so its very
+  // NEXT save read stacking_regime === "compound" and switched a
+  // never-strictly-verified scope to strict matching, silently
+  // DROPPING a legitimate legacy credit the moment the invoice's
+  // service_key data didn't happen to cover it. Reproduced: an unkeyed
+  // $100 service plus a legacy WDO-scoped $50 credit totaled $50 on the
+  // first save (legacy fallback, unscoped) but $100 (credit dropped
+  // entirely) on a second, otherwise UNCHANGED save. document_scope_strict
+  // is scoped far more narrowly — set only by the code that actually
+  // performs strict resolution, never by unrelated compounding-engine
+  // bookkeeping — so it cannot make this mistake.
   const strictScopeEligibleLines = (scopeKey, scopeCategory) => (
     scopeKey || scopeCategory ? freshPickEligibleLines(scopeKey, scopeCategory) : null
   );
@@ -832,14 +856,17 @@ function stackInvoiceDocumentDiscounts(serviceLines, lineEntries, manualDiscount
     // resolution uses freshPickEligibleLines (fail-closed — see its own
     // comment), never scopeEligibleLines' stored-stamp fallback.
     //
-    // Round 3: a STORED entry itself splits on entry.item.stacking_regime
-    // — see strictScopeEligibleLines' own comment. A stamp marked
-    // "compound" (priced under this engine at least once) resolves
-    // strictly, same as a fresh pick; only an unmarked (genuine pre-gate)
-    // stamp still falls through to scopeEligibleLines' legacy "no
-    // service_key anywhere ⇒ unscoped" behavior.
+    // Round 3/4: a STORED entry itself splits on
+    // entry.item.document_scope_strict — see strictScopeEligibleLines'
+    // own comment for why this is NOT stacking_regime. A stamp this
+    // engine itself strictly resolved at least once (a persisted fresh
+    // pick, replayed) resolves strictly again; every other stamp —
+    // including a genuine, real-scoped scheduled_service/
+    // validated_checkout stamp — still falls through to
+    // scopeEligibleLines' legacy "no service_key anywhere ⇒ unscoped"
+    // behavior, unchanged from before this whole scope-enforcement lane.
     const eligibleLines = entry.stored
-      ? (entry.item.stacking_regime === "compound"
+      ? (entry.item.document_scope_strict === true
         ? strictScopeEligibleLines(entry.item.document_scope_service_key, entry.item.document_scope_service_category)
         : scopeEligibleLines(entry.item.document_scope_service_key, entry.item.document_scope_service_category))
       : (entry.row && (entry.row.service_key_filter || entry.row.service_category_filter)
@@ -873,6 +900,12 @@ function stackInvoiceDocumentDiscounts(serviceLines, lineEntries, manualDiscount
       if (entry.row.service_key_filter || entry.row.service_category_filter) {
         entry.item.document_scope_service_key = entry.row.service_key_filter || null;
         entry.item.document_scope_service_category = entry.row.service_category_filter || null;
+        // Round 4: stamp the dedicated strict-provenance flag ONLY here
+        // — this branch is the ONE place a scope is actually, verifiably
+        // resolved via freshPickEligibleLines. Never stacking_regime
+        // (see strictScopeEligibleLines' own comment on why that marker
+        // is unsafe for this).
+        entry.item.document_scope_strict = true;
       }
       return {
         ...lineItemDiscountTerm(entry.row, entry.item),

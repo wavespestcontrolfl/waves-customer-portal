@@ -263,18 +263,27 @@ describe("invoiceDocumentTerms — a FRESH pick with a scoped catalog row is sco
 });
 
 // Coordinator design call (round 3 on PR #4659, GitHub review P0 on
-// invoice.js:807) — client mirror. A STORED item's persisted scope used
-// to always resolve via invoiceServiceScopeEligibleLines' legacy "no
-// service_key anywhere ⇒ unscoped" fallback, even when the item was
-// itself priced under this engine (marked stacking_regime === "compound"
-// server-side and carried straight through in the invoice's line_items
-// JSON). Now a marked item resolves STRICTLY (fail-closed), matching the
-// server; only a genuinely unmarked stamp keeps the legacy fallback.
-describe("invoiceDocumentTerms — a STORED item marked stacking_regime 'compound' resolves its scope STRICTLY, never the legacy fallback", () => {
+// invoice.js:807, corrected in round 4) — client mirror. A STORED
+// item's persisted scope used to always resolve via
+// invoiceServiceScopeEligibleLines' legacy "no service_key anywhere ⇒
+// unscoped" fallback. Round 3 first tried gating that on
+// item.stacking_regime === "compound" — round 4's own GitHub audit
+// caught that marker as unsafe (stamped on EVERY discount item the
+// server's compounding engine touches, including a genuine legacy
+// stamp that only ever resolved unscoped, so it could flip a
+// never-strictly-verified scope to strict matching on that item's very
+// next save and silently drop a legitimate credit). Fixed with the
+// dedicated item.document_scope_strict === true flag instead — set
+// server-side ONLY when a scope was actually, verifiably resolved via
+// freshPickEligibleLines, never by unrelated bookkeeping. Only an item
+// carrying THAT flag resolves strictly; every other stored item
+// (including a genuine scheduled_service/validated_checkout credit)
+// keeps the legacy fallback, completely unaffected by this lane.
+describe("invoiceDocumentTerms — a STORED item marked document_scope_strict resolves its scope STRICTLY, never the legacy fallback", () => {
   test("a marked stored item whose scoped line is gone resolves an EMPTY eligibleLines ($0), never unscoped", () => {
     const items = [{
       client_id: "d1", _kind: "discount", discount_for: null, discount_id: "wdo-row",
-      discount_dollars: 50, stacking_regime: "compound", document_scope_service_key: "wdo_inspection",
+      discount_dollars: 50, document_scope_strict: true, document_scope_service_key: "wdo_inspection",
     }];
     // Only a hand-typed, unkeyed line remains — the WDO line that this
     // stamp's own scope names has been removed from the invoice.
@@ -282,11 +291,11 @@ describe("invoiceDocumentTerms — a STORED item marked stacking_regime 'compoun
     expect(terms[0].eligibleLines).toEqual([]);
   });
 
-  test("an UNMARKED stored item (no stacking_regime — genuine pre-gate history) still falls back to unscoped in the same situation", () => {
+  test("an UNMARKED stored item (no document_scope_strict — e.g. a genuine scheduled_service/validated_checkout credit) still falls back to unscoped in the same situation", () => {
     const items = [{
       client_id: "d1", _kind: "discount", discount_for: null, discount_id: "wdo-row",
       discount_dollars: 50, document_scope_service_key: "wdo_inspection",
-      // deliberately NO stacking_regime — this is the whole point
+      // deliberately NO document_scope_strict — this is the whole point
     }];
     const terms = invoiceDocumentTerms(items, [{ client_id: "l1", description: "Hand-typed line" }], new Map(), new Set(["d1"]));
     expect(terms[0]).not.toHaveProperty("eligibleLines");
