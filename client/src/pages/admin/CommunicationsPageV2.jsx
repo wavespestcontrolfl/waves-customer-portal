@@ -53,7 +53,7 @@
 //   messages. This is the untrusted-input boundary — flag any
 //   missing signature verification or path that creates customers
 //   from arbitrary inbound numbers without rate-limiting.
-import { isAcceptedSms } from "../../utils/sms-delivery";
+import { isAcceptedSms, needsSmsReply } from "../../utils/sms-delivery";
 import React, {
   useState,
   useEffect,
@@ -2188,7 +2188,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     });
     const threadList = Object.values(threadMap).map((t) => {
       t.messages.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-      t.unanswered = t.lastDirection === "inbound";
+      t.unanswered = needsSmsReply(t.messages);
       t.unread = t.messages.some((m) => m.direction === "inbound" && !m.isRead);
       return t;
     });
