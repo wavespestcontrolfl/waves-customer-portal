@@ -2757,6 +2757,24 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // projection, which otherwise multiplies a subtotal that never had the
   // appointment discount taken off it (Codex #4405 r3 P1).
   const groupStackedPerVisitTotal = (group) => {
+    const carriesAppointmentDiscount = !!appointmentDiscount
+      && !!appointmentDiscountGroup
+      && groupKey(group) === appointmentDiscountGroup.key;
+    // GitHub round 4 P1 (Codex, blocked push 3 on PR #4656): appointmentDiscountCompound
+    // is the regime the APPOINTMENT discount's own group froze at pick
+    // time (and, since :3513, stays frozen at forever once that group
+    // commits) — reading it here for EVERY group, not only the one that
+    // actually carries the appointment discount, meant an UNRELATED
+    // group's own line-discount total froze the moment the appointment
+    // discount's group committed, even though nothing about the
+    // unrelated group is committed at all: its own live-gate revalidation
+    // (below) then compared the live gate against a snapshot that had
+    // nothing to do with it, permanently failing once that snapshot could
+    // no longer update. Only the group that actually carries the
+    // appointment discount reads the frozen snapshot; every other group
+    // tracks the LIVE gate directly, exactly as it did before the
+    // appointment-discount feature's own freeze existed.
+    const compound = carriesAppointmentDiscount ? appointmentDiscountCompound : stackingEnabled;
     // Codex review round 1 (PR #4656): compound=false only changes stacking
     // ORDER in stackVisitDiscounts, never its per-discount ROUNDING —
     // percentageDiscountDollars always uses cent-exact integer half-up math
@@ -2768,13 +2786,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // discount too) made the prepay preview/payload disagree with the
     // persisted visit total on an ordinary gate-off booking, unrelated to
     // this PR's own appointment-level feature. Reuse the pre-lane per-line
-    // legacy sum whenever the frozen/live regime is compound=false.
-    if (!appointmentDiscountCompound) {
+    // legacy sum whenever the regime is compound=false.
+    if (!compound) {
       return group.lines.reduce((sum, s) => sum + lineEffectiveNetAmount(s), 0);
     }
-    const carriesAppointmentDiscount = !!appointmentDiscount
-      && !!appointmentDiscountGroup
-      && groupKey(group) === appointmentDiscountGroup.key;
     const stacked = stackVisitDiscounts({
       lines: group.lines.map((s) => ({
         gross: lineEffectiveBaseAmount(s),
@@ -2782,7 +2797,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         eligible: carriesAppointmentDiscount && appointmentDiscountReaches(s),
       })),
       appointmentDiscount: carriesAppointmentDiscount ? appointmentDiscount : null,
-      compound: appointmentDiscountCompound,
+      compound,
     });
     return stacked.total;
   };
@@ -2850,6 +2865,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           serviceAddons: extras.map((s) => {
             const preserveZero = isOneTimeMosquitoLine(s) && lineHasEnteredPrice(s);
             return {
+              // GitHub round 4 P1 (Codex, blocked push 3): the real POST's
+              // own addons array (below, in submitAppointments) always
+              // carries serviceId — buildAppointmentPricing uses it to
+              // resolve the add-on's OWN service_key/category, which
+              // service-key/category-scoped discount eligibility and the
+              // percent-exclusion catalog both key off. Missing here, an
+              // appointment discount scoped to an add-on's service could
+              // preview as ineligible even though the real POST (which
+              // does send the id) accepts it.
+              serviceId: s.id || null,
               name: s.name,
               basePrice: amountOrNull(lineBaseAmount(s), preserveZero),
               ...lineDiscountFields(s.lineDiscount, lineDiscountAmount(s)),
@@ -2880,28 +2905,65 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     }
     setServerPreview((prev) => (prev.forKey === previewRequestKey ? prev : { ...prev, status: 'loading' }));
     let cancelled = false;
-    const timer = setTimeout(async () => {
-      try {
-        const groups = JSON.parse(previewRequestKey);
-        const r = await adminFetch('/admin/schedule/preview', { method: 'POST', body: JSON.stringify({ groups }) });
-        if (cancelled) return;
-        const byKey = new Map((Array.isArray(r?.results) ? r.results : []).map((row) => [row.key, row]));
-        setServerPreview({ status: 'ready', forKey: previewRequestKey, regime: r?.regime ?? null, byKey });
-      } catch (_e) {
-        // A failed probe must not read as "confirmed" — Submit stays
-        // gated (previewConfirming below), matching manualPrepayPlan's
-        // own "fail toward unavailable" contract for its preview fetch.
-        if (!cancelled) setServerPreview({ status: 'error', forKey: previewRequestKey, regime: null, byKey: new Map() });
-      }
-    }, 350);
-    return () => { cancelled = true; clearTimeout(timer); };
+    let retryTimer = null;
+    const attempt = (delayMs, attemptNumber) => {
+      retryTimer = setTimeout(async () => {
+        try {
+          const groups = JSON.parse(previewRequestKey);
+          const r = await adminFetch('/admin/schedule/preview', { method: 'POST', body: JSON.stringify({ groups }) });
+          if (cancelled) return;
+          const byKey = new Map((Array.isArray(r?.results) ? r.results : []).map((row) => [row.key, row]));
+          setServerPreview({ status: 'ready', forKey: previewRequestKey, regime: r?.regime ?? null, byKey });
+        } catch (_e) {
+          if (cancelled) return;
+          // GitHub round 4 P1 (Codex, blocked push 3): a transient failure
+          // used to leave serverPreview stuck at 'error' forever for
+          // unchanged inputs — this effect only re-runs when
+          // previewRequestKey itself changes, so a plain fail-closed left
+          // Save disabled indefinitely with no way out short of editing the
+          // booking. Self-healing retry instead (capped backoff, unlimited
+          // attempts — this is a read-only verification fetch, not a
+          // write, so repeating it costs nothing but a request): the
+          // operator sees "Confirming…" persist rather than a dead end,
+          // and it resolves itself the moment connectivity/the server
+          // recovers, with no manual Retry click required.
+          setServerPreview({ status: 'error', forKey: previewRequestKey, regime: null, byKey: new Map() });
+          attempt(Math.min(delayMs * 2, 8000), attemptNumber + 1);
+        }
+      }, delayMs);
+    };
+    attempt(350, 0);
+    return () => { cancelled = true; clearTimeout(retryTimer); };
   }, [previewRequestKey]);
   // Submit is held while ANY regime-dependent group's server-confirmed
   // preview hasn't landed for the CURRENT inputs yet — the button reads
   // "Confirming…" during this window (below) rather than a plain
-  // disabled state with no explanation.
+  // disabled state with no explanation. Retries automatically on failure
+  // (see the effect above), so this never gets permanently stuck.
   const previewConfirming = previewGroupRequests.length > 0
     && !(serverPreview.status === 'ready' && serverPreview.forKey === previewRequestKey);
+  // GitHub round 4 P0 (Codex, blocked push 3): landing a response was
+  // being treated as "confirmed" without ever reading it — the preview's
+  // own per-group price/error was fetched and then ignored. Submit now
+  // holds when the server's OWN preview could not price a group we are
+  // about to post at all (a discount catalog row deleted/deactivated
+  // mid-session, a scope/eligibility rejection, etc.) — the same class of
+  // drift (a catalog value changed, not just the gate) this endpoint
+  // exists to catch. A full price-for-price comparison against the
+  // client's own display (closing the P0's full "$10 credit silently
+  // becomes $20" repro) is NOT done here — verifying it correctly needs a
+  // test harness that can compute the authoritative price for arbitrary
+  // discount/cadence combinations to assert against, which is a
+  // materially larger, higher-regression-risk change than fits this
+  // push's remaining budget to build AND verify blind. Flagged, not
+  // silently dropped: the gate-specific class of this exact bug (a
+  // GATE_DISCOUNT_STACKING flip, not a catalog edit) is already fully
+  // closed by items 1+3's write-time 409 and per-group revalidation,
+  // which do not depend on this comparison at all.
+  const previewGroupError = previewConfirming ? null : previewGroupRequests.find((req) => {
+    const row = serverPreview.byKey.get(req.key);
+    return !row || typeof row.error === 'string';
+  });
   const stackedLineDiscountAmount = (svc) => {
     const i = services.indexOf(svc);
     const restated = appointmentDiscountPreview.lines?.[i];
@@ -3366,6 +3428,18 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           // even one carrying no discount at all, with no way to Retry past
           // it (there is nothing left to reconcile for an unrelated group).
           const groupOwnPricingRegimeDependent = groupRegimeDependent(group, carriesAppointmentDiscount);
+          // GitHub round 4 P1 (Codex, blocked push 3): the reference this
+          // group's live probe is compared against must be the SAME
+          // per-group value groupStackedPerVisitTotal(group) itself now
+          // reads (see that function's own comment) — appointmentDiscountCompound
+          // only when THIS group carries the appointment discount (whose
+          // own snapshot may be intentionally frozen post-commit),
+          // stackingEnabled (the live value, no frozen snapshot to
+          // protect) for any other group. Comparing every group against
+          // the appointment-discount-specific frozen snapshot meant an
+          // unrelated group's own line-discount revalidation could never
+          // pass again once that snapshot stopped updating.
+          const groupPricedUnder = carriesAppointmentDiscount ? appointmentDiscountCompound : stackingEnabled;
           // The CONFIRMED live regime this group's write is bound to —
           // undefined (field omitted) whenever nothing about this group's
           // own total can move with the gate, matching #4655/#4658's own
@@ -3375,7 +3449,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           if (groupOwnPricingRegimeDependent) {
             const fresh = await ensureStackingFresh();
             assertSubmitCurrent();
-            if (!fresh.known || fresh.enabled !== appointmentDiscountCompound) {
+            if (!fresh.known || fresh.enabled !== groupPricedUnder) {
               setStaleStackingNotice('The discount-stacking setting changed while this was open. Reload before saving so the totals match what will be saved.');
               firstError = {
                 label: groupLabel(group),
@@ -3385,11 +3459,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               break;
             }
             // The LIVE value this freshness check just confirmed (already
-            // proven equal to appointmentDiscountCompound above) — the
-            // server's own POST /admin/schedule refuses a mismatch against
-            // its live discountStackingLive() with a retryable 409
-            // (GitHub round 4 P0) rather than silently saving the other
-            // regime's math, mirroring #4655/#4658's identical contract.
+            // proven equal to groupPricedUnder above) — the server's own
+            // POST /admin/schedule refuses a mismatch against its live
+            // discountStackingLive() with a retryable 409 (GitHub round 4
+            // P0) rather than silently saving the other regime's math,
+            // mirroring #4655/#4658's identical contract.
             confirmedGroupRegime = fresh.enabled;
             body.expected_discount_stacking = confirmedGroupRegime;
           }
@@ -3839,7 +3913,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     bookingPropertyState,
     alreadySubmitting: saving,
     addressAskPending,
-  }) && !discountSaveBlockedReason && !previewConfirming;
+  }) && !discountSaveBlockedReason && !previewConfirming && !previewGroupError;
   const hasRecurringServices = services.some((s) => s.cadence && s.cadence !== 'one_time');
   const firstCustomRecurringIndex = services.findIndex((s) => s.cadence === 'custom');
   const weekendRuleValue = skipWeekends ? weekendShift : 'allow';

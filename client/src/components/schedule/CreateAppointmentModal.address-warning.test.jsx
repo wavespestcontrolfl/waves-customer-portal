@@ -155,7 +155,11 @@ function installModalFetch({
     // so an in-flight 350ms timer from an EARLIER test never leaks a
     // synchronous throw into a LATER one's execution window.
     if (url.endsWith('/admin/schedule/preview') && options.method === 'POST') {
-      return Promise.resolve(jsonResponse({ regime: true, results: [] }));
+      // Echo one no-error result per requested group so previewGroupError
+      // never blocks Submit in tests that don't exercise it specifically —
+      // this mock intentionally does NOT replicate real pricing math.
+      const groups = JSON.parse(options.body || '{}').groups || [];
+      return Promise.resolve(jsonResponse({ regime: true, results: groups.map((g) => ({ key: g.key, price: 0 })) }));
     }
     throw new Error(`Unhandled fetch in CreateAppointmentModal test: ${url}`);
   });
@@ -1948,5 +1952,77 @@ describe('GitHub round 4 item 2: the preview request matches the real POST body 
     const realBody = JSON.parse(schedulePosts(fetcher)[0][1].body);
     expect(realBody.primaryLineDiscount?.discountId).toBe(previewGroup.primaryLineDiscount.discountId);
     expect(realBody.primaryLineDiscount?.discountAmount).toBe(previewGroup.primaryLineDiscount.discountAmount);
+  });
+});
+
+describe('GitHub round 4 item 3 follow-up (Codex, blocked push 3 on PR #4656)', () => {
+  // P1 (:3378): after the appointment-discount group commits,
+  // appointmentDiscountCompound freezes (round 4's own :3513 fix) — a
+  // DIFFERENT, remaining group that carries only ITS OWN line discount
+  // (never the appointment discount at all) must revalidate against the
+  // LIVE gate, not the appointment discount's now-permanently-frozen
+  // snapshot. Before this fix, comparing every group against that one
+  // frozen value meant a remaining group's own submit could never pass
+  // again once the gate drifted post-commit, even when the live gate
+  // genuinely matches what its OWN (never-frozen) total was computed
+  // under.
+  it("a remaining group's own line discount revalidates against the LIVE gate, not the committed group's frozen appointment-discount snapshot", async () => {
+    vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const retry = vi.fn();
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry });
+    const secondScheduleRequest = deferred();
+    const { fetcher } = installModalFetch({
+      secondScheduleRequest,
+      discounts: [
+        {
+          id: 'credit', name: 'Ten Oh Three', discount_type: 'fixed_amount', amount: 10.03,
+          is_active: true, show_in_invoices: true, service_key_filter: 'svc_first',
+        },
+        { id: 'five-pct', name: 'Five Percent', discount_type: 'percentage', amount: 5, is_active: true, show_in_invoices: true },
+      ],
+    });
+    const booking = renderBooking();
+    const submit = await addTwoSeasonalServices();
+    const picker = await screen.findByLabelText('Appointment discount');
+    fireEvent.change(picker, { target: { value: 'credit' } });
+    // Second group's OWN, unrelated line discount.
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for Second seasonal service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Five Percent/ }));
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+    // First (the appointment discount's own, scoped group) commits;
+    // Second (its own line discount) is still in flight.
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(2));
+    expect(JSON.parse(schedulePosts(fetcher)[0][1].body).discountId).toBe('credit');
+    await act(async () => {
+      secondScheduleRequest.resolve(jsonResponse({ error: 'failed' }, { ok: false, status: 500 }));
+      await secondScheduleRequest.promise;
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Schedule appointment' }).disabled).toBe(false));
+
+    // The gate drifts off AFTER First committed -- appointmentDiscountCompound
+    // freezes at true (round 4's :3513 fix) and never updates again. The
+    // NEW live value (false) is what ensureStackingFresh will confirm on
+    // retry, and it's also what stackingEnabled (live) now reads --
+    // Second's OWN revalidation must compare against THAT, not the frozen
+    // snapshot, so a probe confirming the ALREADY-CURRENT live value must
+    // not read as a mismatch.
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: false, known: true, retry });
+    booking.view.rerender(<CreateAppointmentModal
+      defaultCustomer={CUSTOMER}
+      defaultDate={booking.scheduledDate}
+      defaultWindowStart="09:00"
+      onClose={booking.onClose}
+      onCreated={booking.onCreated}
+      onChange={booking.onChange}
+    />);
+    vi.mocked(ensureStackingFresh).mockResolvedValue({ enabled: false, known: true });
+    const submit2 = screen.getByRole('button', { name: 'Schedule appointment' });
+    await waitFor(() => expect(submit2.disabled).toBe(false));
+    fireEvent.click(submit2);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(3));
+    // Second group's retry succeeded, carrying its OWN line discount --
+    // never blocked behind First's unrelated, now-frozen snapshot.
+    expect(JSON.parse(schedulePosts(fetcher)[2][1].body).primaryLineDiscount?.discountId).toBe('five-pct');
   });
 });
