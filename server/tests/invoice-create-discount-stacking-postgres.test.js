@@ -272,4 +272,29 @@ postgres('InvoiceService.create discount stacking — real Postgres round trip',
       ],
     })).rejects.toThrow(/Only one WaveGuard tier discount can apply/);
   });
+
+  // Codex pre-push audit P0, round 3 ("the gate-transition class"): a
+  // persisted discount row survives a gate rollback unchanged — real
+  // catalog rows, real round trip through calculateUpdateFinancials.
+  test('a compounded $10+$4.50 invoice edited under gate OFF stays $14.50, never recomputed to the additive $15', async () => {
+    const { calculateUpdateFinancials } = InvoiceService._internals;
+    const tenId = randomUUID();
+    const fiveId = randomUUID();
+    await trx('discounts').insert([
+      { id: tenId, discount_key: `ten_${tenId.slice(0, 8)}`, name: 'Ten Percent', discount_type: 'percentage', amount: 10, is_active: true, show_in_invoices: true },
+      { id: fiveId, discount_key: `five_${fiveId.slice(0, 8)}`, name: 'Five Percent', discount_type: 'percentage', amount: 5, is_active: true, show_in_invoices: true },
+    ]);
+    const persisted = [
+      { client_id: 'line-1', description: 'Pest', quantity: 1, unit_price: 100, amount: 100 },
+      { client_id: 'd1', discount_id: tenId, discount_for: 'line-1', description: 'Ten Percent', quantity: 1, unit_price: -10, amount: -10 },
+      { client_id: 'd2', discount_id: fiveId, discount_for: 'line-1', description: 'Five Percent', quantity: 1, unit_price: -4.5, amount: -4.5 },
+    ];
+    // Gate OFF at edit time — deliberately NOT setting GATE_DISCOUNT_STACKING.
+    const result = await calculateUpdateFinancials({
+      lineItems: persisted,
+      customer: { property_type: 'residential' },
+      invoice: { id: 'invoice-1', line_items: JSON.stringify(persisted) },
+    });
+    expect(result.discount_amount).toBe(14.5);
+  });
 });

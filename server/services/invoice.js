@@ -689,6 +689,47 @@ function stackInvoiceDocumentDiscounts(serviceLines, lineEntries, manualDiscount
   return { lineItemMap, manualDiscounts, documentDollarsByItem };
 }
 
+// Codex pre-push audit P0 (round 3 on PR #4655, "the gate-transition
+// class"): a NON-stackable-group conflict must only be enforced against
+// discount rows that are actually NEW in this submission. An invoice saved
+// (gate off, or under an earlier catalog configuration) with two
+// conflicting tier rows already on it must stay editable for everything
+// ELSE — a price or description change must not start throwing 400 until
+// an operator manually deletes a historical discount. Only a conflict that
+// involves at least one row NOT already on the invoice is rejected.
+// Mirrors stackGroupConflict's own clash predicate (discount-stack.js) —
+// duplicated locally rather than widening that shared module's signature,
+// which admin-schedule.js also calls and must not have its behavior
+// changed by an invoice-only concern.
+function assertNewStackGroupConflicts(rows) {
+  const byGroup = new Map();
+  for (const row of rows) {
+    if (!row || !row.stack_group || row.is_stackable === true) continue;
+    const group = String(row.stack_group);
+    if (!byGroup.has(group)) byGroup.set(group, []);
+    byGroup.get(group).push(row);
+  }
+  for (const [group, groupRows] of byGroup) {
+    if (!groupRows.some((row) => row._isNew)) continue;
+    const seen = [];
+    for (const row of groupRows) {
+      const clash = seen.find((first) => (
+        String(first.id || first.name) !== String(row.id || row.name)
+        || first.spansAll === true
+        || row.spansAll === true
+        || String(first.scope ?? "") === String(row.scope ?? "")
+      ));
+      if (clash && (row._isNew || clash._isNew)) {
+        const label = group === "tier" ? "WaveGuard tier discount" : `${group} discount`;
+        const err = new Error(`Only one ${label} can apply: ${(clash.name || "discount")} and ${(row.name || "discount")} cannot be combined`);
+        err.status = 400;
+        throw err;
+      }
+      seen.push(row);
+    }
+  }
+}
+
 // Shared by create() and calculateUpdateFinancials (Codex pre-push audit
 // P0: an earlier version of this delegation lived ONLY in create(), so an
 // unchanged edit resubmit of a $111/10%+5% invoice recomputed the additive
@@ -706,6 +747,19 @@ function stackInvoiceDocumentDiscounts(serviceLines, lineEntries, manualDiscount
 // manualDiscountRows: create()'s discountIds picks; calculateUpdateFinancials
 // has none (edits carry no invoice-level discountIds) — pass [].
 // trustedStoredSources: the Set isStoredDiscountLineItem checks against.
+// persistedClientIds (Codex pre-push audit P0, round 3, "the gate-transition
+// class"): the client_ids already on the invoice BEFORE this write —
+// create() always passes the default empty set (nothing persisted yet, so
+// every row is new — unchanged behavior). calculateUpdateFinancials passes
+// the PRE-edit invoice's own line_items' client_ids: a row that was already
+// on the invoice is FROZEN — its own submitted dollars are trusted exactly
+// like a stored stamp, regardless of which regime (additive or compounded)
+// priced it originally or which regime is live now — so a gate flip between
+// create-time and a LATER, unrelated edit (description, due date, a
+// different line's price) can never silently reprice an untouched discount
+// row. Only a row whose client_id is genuinely NEW in this submission gets
+// computed fresh, under whichever regime is live now. Same set also decides
+// which rows count as "new" for assertNewStackGroupConflicts above.
 // Returns { manualDiscounts, lineItemDiscounts } in the exact shape both
 // callers already consume downstream (labels, discount_amount, the
 // invoice_discounts audit rows) — mutates each negative item's quantity/
@@ -717,16 +771,19 @@ function computeStackedDocumentDiscountLines({
   lineItemDiscountRowById,
   manualDiscountRows,
   trustedStoredSources,
+  persistedClientIds = new Set(),
 }) {
   const positiveServiceLines = items.filter((item) => Number(item.amount) > 0);
   const negativeItems = items.filter(
     (item) => Number(item.amount) < 0 && item.category !== "deposit_credit",
   );
+  const isFrozenByPosition = (item) => !!(item?.client_id && persistedClientIds.has(item.client_id));
+  const isTrusted = (item) => isStoredDiscountLineItem(item, trustedStoredSources) || isFrozenByPosition(item);
   const classifiedNegativeItems = negativeItems.map((item) => {
     const { parent, spansAll } = classifyInvoiceDiscountItem(item, serviceLineByClientId);
     return {
       item,
-      stored: isStoredDiscountLineItem(item, trustedStoredSources),
+      stored: isTrusted(item),
       row: item.discount_id
         ? lineItemDiscountRowById.get(String(item.discount_id))
         : null,
@@ -745,15 +802,21 @@ function computeStackedDocumentDiscountLines({
   // credit or a manual discountIds pick) always conflicts with anything
   // else in its group; a line-scoped item's scope is its own parent's
   // client_id, so the SAME catalog row reaching two different lines is
-  // still fine (assertStackGroups' own same-row-different-lane carve-out)
-  // while two DIFFERENT same-group rows across lines are not.
-  assertStackGroups([
+  // still fine (the same-row-different-lane carve-out) while two
+  // DIFFERENT same-group rows across lines are not. assertNewStackGroupConflicts
+  // (round 3) only enforces a clash that involves a row NOT already
+  // persisted on the invoice — see its own comment above.
+  assertNewStackGroupConflicts([
     ...classifiedNegativeItems
       .filter((entry) => entry.row)
-      .map((entry) => (entry.spansAll
-        ? { ...entry.row, spansAll: true }
-        : { ...entry.row, scope: entry.parent ? String(entry.parent.client_id) : undefined })),
-    ...manualDiscountRows.map((row) => ({ ...row, spansAll: true })),
+      .map((entry) => ({
+        ...entry.row,
+        _isNew: !isFrozenByPosition(entry.item),
+        ...(entry.spansAll
+          ? { spansAll: true }
+          : { scope: entry.parent ? String(entry.parent.client_id) : undefined }),
+      })),
+    ...manualDiscountRows.map((row) => ({ ...row, spansAll: true, _isNew: true })),
   ]);
   // A stamp needs only its parent (or spansAll); a fresh pick needs its
   // catalog row too — same validity rule as the "Invalid line-item
@@ -782,7 +845,7 @@ function computeStackedDocumentDiscountLines({
     const documentDollars = stacked.documentDollarsByItem.get(item);
     const resolvedDollars = lineResolved ? lineResolved.dollars : documentDollars;
 
-    if (isStoredDiscountLineItem(item, trustedStoredSources)) {
+    if (isTrusted(item)) {
       return resolveStoredDiscountLineItem(item, row, resolvedDollars);
     }
     if (lineResolved) {
@@ -1099,6 +1162,23 @@ async function calculateUpdateFinancials({
       .filter((item) => Number(item.amount) > 0 && item.client_id)
       .map((item) => [String(item.client_id), item]),
   );
+  // Codex pre-push audit P0 (round 3 on PR #4655, "the gate-transition
+  // class"): the client_ids already on the invoice BEFORE this edit — a
+  // row this old is FROZEN regardless of which regime (additive or
+  // compounded) priced it, or which regime is live NOW, so an unrelated
+  // edit (title, due date, a different line's price) after a gate flip
+  // can never silently reprice a discount the operator never touched.
+  // Threaded into computeStackedDocumentDiscountLines below (gate on) and
+  // the gate-off branch's own per-item resolution (both trust a
+  // positionally-persisted row's own submitted dollars, same mechanism a
+  // stored stamp already uses). Only a client_id genuinely NEW in this
+  // submission is computed fresh, under whichever regime is live now.
+  const persistedClientIds = new Set(
+    parseInvoiceLineItems(invoice?.line_items)
+      .map((item) => item?.client_id)
+      .filter(Boolean),
+  );
+  const isFrozenByPosition = (item) => !!(item?.client_id && persistedClientIds.has(item.client_id));
 
   const lineItemDiscountIds = items
     .filter((item) => Number(item.amount) < 0 && item.discount_id)
@@ -1144,6 +1224,7 @@ async function calculateUpdateFinancials({
       lineItemDiscountRowById,
       manualDiscountRows: [], // the edit path carries no invoice-level discountIds
       trustedStoredSources: EDIT_TRUSTED_DISCOUNT_SOURCES,
+      persistedClientIds,
     }));
   } else {
     lineItemDiscounts = items
@@ -1154,7 +1235,7 @@ async function calculateUpdateFinancials({
         const row = item.discount_id
           ? lineItemDiscountRowById.get(String(item.discount_id))
           : null;
-        if (isStoredDiscountLineItem(item, EDIT_TRUSTED_DISCOUNT_SOURCES)) {
+        if (isStoredDiscountLineItem(item, EDIT_TRUSTED_DISCOUNT_SOURCES) || isFrozenByPosition(item)) {
           return resolveStoredDiscountLineItem(item, row);
         }
         const parent = item.discount_for
@@ -3384,7 +3465,19 @@ const InvoiceService = {
     // Record applied discounts in invoice_discounts table
     try {
       const auditRows = [];
+      // Codex pre-push audit P2 (round 3 on PR #4655): a resolved term can
+      // be legitimately $0 — an orphaned scoped stamp (its target service
+      // removed) or a credit an earlier one already exhausted the line's
+      // remaining balance against — and still carries its catalog id.
+      // recordInvoiceDiscounts increments discounts.times_applied for
+      // every row it's handed regardless of dollars, so a $0 replay would
+      // report as a successful use of a discount that took nothing off
+      // this invoice. Filter before recording, not after — the ledger
+      // rollup (discounts.total_discount_given) already nets to the same
+      // total either way since a $0 row contributes nothing to it, but
+      // times_applied has no such self-correcting property.
       for (const m of scaledManualDiscounts) {
+        if (!(m.dollars > 0)) continue;
         auditRows.push({
           id: m.row.id,
           name: m.row.name,
@@ -3394,6 +3487,7 @@ const InvoiceService = {
         });
       }
       for (const m of scaledLineItemDiscounts) {
+        if (!(m.dollars > 0)) continue;
         auditRows.push({
           id: m.id || m.row?.id || null,
           name: m.name,

@@ -104,7 +104,7 @@ import DictationButton from "../../components/tech/DictationButton";
 import MobileCardOnFileSheet from "../../components/schedule/MobileCardOnFileSheet";
 import { getAdminUser } from "../../lib/adminAuth";
 import { useDiscountStackingState, ensureStackingFresh } from "../../hooks/useDiscountStacking";
-import { stackDocumentDiscounts } from "../../lib/discountStack";
+import { stackDocumentDiscounts, stackablePresets } from "../../lib/discountStack";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
 // STATUS_COLORS folds cleanly — sent/viewed were both #0A7EC2 in V1, stay identical post-fold.
@@ -6028,17 +6028,47 @@ function CreateInvoice({
     }
     return null;
   };
+  // GATE_DISCOUNT_STACKING (Codex pre-push audit P2, round 3 on PR #4655):
+  // every discount item already on this invoice (any line, or a
+  // document-wide credit), reduced to the {stack_group, is_stackable,
+  // scope|spansAll} shape client/src/lib/discountStack.js's
+  // stackablePresets reads — the SAME shape server/services/invoice.js's
+  // assertNewStackGroupConflicts builds from classifiedNegativeItems, so
+  // the picker's own idea of "already chosen" matches the server's.
+  const chosenDiscountRowsForGroupCheck = () =>
+    lineItems
+      .filter((i) => i._kind === "discount" && i.discount_id)
+      .map((i) => {
+        const row = discountRowById.get(String(i.discount_id));
+        if (!row) return null;
+        return i.discount_for
+          ? { ...row, scope: String(i.discount_for) }
+          : { ...row, spansAll: true };
+      })
+      .filter(Boolean);
   const matchingDiscounts = (lineIdx) => {
     const lineKey = lineItems[lineIdx]?.client_id || lineIdx;
     const q = (discountQueries[lineKey] || "").trim().toLowerCase();
-    if (!q) return availableDiscounts.slice(0, 10);
-    return availableDiscounts
-      .filter((d) =>
-        `${d.name || ""} ${d.description || ""} ${formatDiscountLabel(d)}`
-          .toLowerCase()
-          .includes(q),
-      )
-      .slice(0, 10);
+    const nameFiltered = q
+      ? availableDiscounts.filter((d) =>
+          `${d.name || ""} ${d.description || ""} ${formatDiscountLabel(d)}`
+            .toLowerCase()
+            .includes(q),
+        )
+      : availableDiscounts;
+    // Hide a preset that would conflict with a non-stackable group already
+    // on the invoice — an operator could otherwise select Silver then
+    // Gold, see a valid-looking (but wrong) compounded total, pass the
+    // freshness probe, and only learn of the conflict from the server's
+    // 400 on Save. Gate off never enforces groups server-side either (the
+    // pre-lane behavior), so this stays a no-op there.
+    const groupFiltered = stackingEnabled
+      ? stackablePresets(nameFiltered, chosenDiscountRowsForGroupCheck(), {
+          scope: lineItems[lineIdx]?.client_id ? String(lineItems[lineIdx].client_id) : undefined,
+          spansAll: false,
+        })
+      : nameFiltered;
+    return groupFiltered.slice(0, 10);
   };
   // GATE_DISCOUNT_STACKING: the (type, amount, cap) term a discount LINE
   // ITEM contributes to its line's stack — client mirror of invoice.js's

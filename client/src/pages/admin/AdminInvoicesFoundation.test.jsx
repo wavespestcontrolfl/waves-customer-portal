@@ -383,4 +383,26 @@ describe("Invoice foundation workflow preservation", () => {
     expect(creditValues).toContain("-7");
     expect(creditValues).not.toContain("-10");
   });
+
+  // GitHub Codex round 3 on PR #4655, P2 (:6089 in that head): a preset
+  // that conflicts with a non-stackable group already on the invoice must
+  // be filtered out of the picker BEFORE save, not just refused at Save.
+  it("hides a non-stackable-group preset once its group is already chosen on the invoice", async () => {
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "silver-id", name: "WaveGuard Silver", discount_type: "percentage", amount: 10, is_active: true, show_in_invoices: true, stack_group: "tier", is_stackable: false },
+      { id: "gold-id", name: "WaveGuard Gold", discount_type: "percentage", amount: 15, is_active: true, show_in_invoices: true, stack_group: "tier", is_stackable: false },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Quarterly pest control" } });
+    fireEvent.change(screen.getByLabelText("Price ($)"), { target: { value: "100" } });
+    fireEvent.change(await screen.findByLabelText("Add a discount"), { target: { value: "Wave" } });
+    fireEvent.click(await screen.findByRole("button", { name: /WaveGuard Silver/ }));
+    fireEvent.change(await screen.findByLabelText("Add a discount"), { target: { value: "Wave" } });
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /WaveGuard Gold/ })).not.toBeInTheDocument();
+    });
+  });
 });
