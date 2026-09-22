@@ -198,7 +198,7 @@ postgres('scheduled_services discount/provenance GET fields against migrated Pos
   });
 });
 
-describe('scheduled_services PUT /:id/update-details — add-on discount catalog cap enforcement (Codex pre-push audit P0, round 4 on #4657) against migrated PostgreSQL', () => {
+postgres('scheduled_services PUT /:id/update-details — add-on discount catalog cap enforcement (Codex pre-push audit P0, round 4 on #4657) against migrated PostgreSQL', () => {
   let database;
   let trx;
   let customerId;
@@ -277,7 +277,7 @@ describe('scheduled_services PUT /:id/update-details — add-on discount catalog
   });
 });
 
-describe('scheduled_services PUT /:id/update-details — non-stackable stack_group enforcement (GitHub review round 2 on #4657, :2513) against migrated PostgreSQL', () => {
+postgres('scheduled_services PUT /:id/update-details — non-stackable stack_group enforcement (GitHub review round 2 on #4657, :2513) against migrated PostgreSQL', () => {
   let database;
   let trx;
   let customerId;
@@ -348,6 +348,20 @@ describe('scheduled_services PUT /:id/update-details — non-stackable stack_gro
       primaryLinePrice: 100,
       addons: [
         { serviceName: 'Mosquito Add-on', basePrice: 50, discountType: 'percentage', discountAmount: 10, discountId: silverId, discountName: 'WaveGuard Silver' },
+        { serviceName: 'Fert Add-on', basePrice: 50, discountType: 'percentage', discountAmount: 15, discountId: goldId, discountName: 'WaveGuard Gold' },
+      ],
+    });
+    expect(statusCode).toBe(400);
+    expect(payload.error).toMatch(/WaveGuard tier discount/);
+  });
+
+  test('a STORED appointment-level tier conflicts with a FRESH add-on pick in the same group — 400 (Codex pre-push audit P0, round 3 on #4657)', async () => {
+    await trx('scheduled_services').where({ id: visitId }).update({ discount_id: silverId, discount_type: 'percentage', discount_amount: 10 });
+    const { statusCode, payload } = await put(visitId, {
+      // Appointment-level Discount control untouched this session — no
+      // discountType/discountAmount posted at all, matching "leave alone".
+      primaryLinePrice: 100,
+      addons: [
         { serviceName: 'Fert Add-on', basePrice: 50, discountType: 'percentage', discountAmount: 15, discountId: goldId, discountName: 'WaveGuard Gold' },
       ],
     });

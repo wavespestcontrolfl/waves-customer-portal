@@ -650,3 +650,37 @@ it(':3421 — a stored appointment discount scoped to ONE service key previews a
   // subtotal ($20), which is what an unscoped preview would show.
   await waitFor(() => expect(totalText()).toBe('$194.00'));
 });
+
+// ---------------------------------------------------------------------
+// GitHub pre-push audit round 3 on PR #4657 (0f635fed84): 1 P0 + 4 P1.
+// The P0 and two of the P1s (existingFields missing discount_id/primary
+// slot; the client never sending addon row ids) are server/payload-shape
+// fixes pinned by the real-Postgres suite and by parity with the existing
+// :2513 tests (grandfathering now actually works once ids are sent). This
+// covers the remaining client-observable one.
+// ---------------------------------------------------------------------
+
+it('P1 (round 3): an UNMARKED row\'s primary discount previews at its FROZEN dollar figure, never re-derived from type/amount against a NEW price', async () => {
+  const service = {
+    ...baseService,
+    serviceAddons: [
+      { id: 'addon-1', serviceId: 'svc-mosquito', serviceName: 'Monthly Mosquito', serviceKey: 'mosquito_monthly', serviceCategory: 'mosquito', basePrice: 50, estimatedPrice: 50, estimatedDuration: 30 },
+    ],
+    primaryLinePrice: 100,
+    estimatedPrice: 150,
+    lineDiscountType: 'percentage', lineDiscountAmount: 10, lineDiscountId: 'disc-military',
+    lineDiscountDollars: 10,
+    // Unmarked: no pricingProvenance at all.
+  };
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true }));
+  render(<Harness service={service} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  // Edit the primary Price to $200 — a genuine price change. If the
+  // preview wrongly re-derived 10% of the NEW $200 ($20), Total would read
+  // $230.00. The server can never recompute this (unmarked, never
+  // resent), so it always preserves the frozen $10 — Total must be $240.00.
+  const priceInputs = await screen.findAllByPlaceholderText('0.00');
+  const primaryPriceInput = priceInputs.find((i) => Number(i.value) === 100);
+  fireEvent.change(primaryPriceInput, { target: { value: '200' } });
+  await waitFor(() => expect(totalText()).toBe('$240.00'));
+});

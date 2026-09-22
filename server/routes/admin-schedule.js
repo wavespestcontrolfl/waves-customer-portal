@@ -373,6 +373,14 @@ const DISCOUNT_PROVENANCE_COLUMNS = [
   'discount_type', 'discount_amount', 'discount_id', 'discount_max_dollars',
   'discount_service_key_filter', 'discount_service_category_filter',
   'line_discount_type', 'line_discount_amount', 'line_discount_id',
+  // Codex pre-push audit P1 (round 3 on #4657): the primary line's own
+  // FROZEN dollar figure — this editor never rewrites line_discount_* (see
+  // the "can't resend" comment on its own preservation), so an UNMARKED
+  // row's stored discount is never recomputed by ANY save; the preview
+  // must trust this stored number directly rather than re-deriving it from
+  // type/amount, which can drift from what was actually saved (a catalog
+  // rate change since, or a cap that applied at save time).
+  'line_discount_dollars',
   'pricing_provenance',
 ];
 let discountProvenanceColumnCache = null;
@@ -5276,6 +5284,7 @@ router.get('/', async (req, res, next) => {
         lineDiscountType: s.line_discount_type || null,
         lineDiscountAmount: s.line_discount_amount != null ? Number(s.line_discount_amount) : null,
         lineDiscountId: s.line_discount_id || null,
+        lineDiscountDollars: s.line_discount_dollars != null ? Number(s.line_discount_dollars) : null,
         prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
         prepaidMethod: s.prepaid_method || null,
         prepaidAt: s.prepaid_at || null,
@@ -5565,6 +5574,7 @@ router.get('/week', async (req, res, next) => {
           ...(discountProvenanceCols.line_discount_type ? ['scheduled_services.line_discount_type'] : []),
           ...(discountProvenanceCols.line_discount_amount ? ['scheduled_services.line_discount_amount'] : []),
           ...(discountProvenanceCols.line_discount_id ? ['scheduled_services.line_discount_id'] : []),
+          ...(discountProvenanceCols.line_discount_dollars ? ['scheduled_services.line_discount_dollars'] : []),
           'scheduled_services.technician_id',
           'scheduled_services.zone', 'scheduled_services.route_order',
           'scheduled_services.is_recurring',
@@ -5851,6 +5861,7 @@ router.get('/week', async (req, res, next) => {
           lineDiscountType: s.line_discount_type || null,
           lineDiscountAmount: s.line_discount_amount != null ? Number(s.line_discount_amount) : null,
           lineDiscountId: s.line_discount_id || null,
+          lineDiscountDollars: s.line_discount_dollars != null ? Number(s.line_discount_dollars) : null,
           prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
           prepaidMethod: s.prepaid_method || null,
           prepaidAt: s.prepaid_at || null,
@@ -6003,6 +6014,7 @@ router.get('/month', async (req, res, next) => {
         ...(discountProvenanceCols.line_discount_type ? ['scheduled_services.line_discount_type'] : []),
         ...(discountProvenanceCols.line_discount_amount ? ['scheduled_services.line_discount_amount'] : []),
         ...(discountProvenanceCols.line_discount_id ? ['scheduled_services.line_discount_id'] : []),
+        ...(discountProvenanceCols.line_discount_dollars ? ['scheduled_services.line_discount_dollars'] : []),
         ...(discountProvenanceCols.pricing_provenance ? ['scheduled_services.pricing_provenance'] : []),
         'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
         'customers.city', 'customers.zip',
@@ -6049,6 +6061,7 @@ router.get('/month', async (req, res, next) => {
         lineDiscountType: s.line_discount_type || null,
         lineDiscountAmount: s.line_discount_amount != null ? Number(s.line_discount_amount) : null,
         lineDiscountId: s.line_discount_id || null,
+        lineDiscountDollars: s.line_discount_dollars != null ? Number(s.line_discount_dollars) : null,
         pricingProvenance: s.pricing_provenance ?? null,
         status: s.status,
         techName: s.tech_name,
@@ -8178,6 +8191,7 @@ router.get('/list', async (req, res, next) => {
         ...(discountProvenanceCols.line_discount_type ? ['scheduled_services.line_discount_type'] : []),
         ...(discountProvenanceCols.line_discount_amount ? ['scheduled_services.line_discount_amount'] : []),
         ...(discountProvenanceCols.line_discount_id ? ['scheduled_services.line_discount_id'] : []),
+        ...(discountProvenanceCols.line_discount_dollars ? ['scheduled_services.line_discount_dollars'] : []),
         'customers.first_name', 'customers.last_name',
         // Stamped visit-specific address wins over the primary mirror here
         // too — this list is a display surface for the booked property. The
@@ -8235,6 +8249,7 @@ router.get('/list', async (req, res, next) => {
       lineDiscountType: s.line_discount_type || null,
       lineDiscountAmount: s.line_discount_amount != null ? Number(s.line_discount_amount) : null,
       lineDiscountId: s.line_discount_id || null,
+      lineDiscountDollars: s.line_discount_dollars != null ? Number(s.line_discount_dollars) : null,
       serviceAddons: listAddonsByServiceId.get(s.id) || [],
       prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
       prepaidMethod: s.prepaid_method || null,
@@ -10008,6 +10023,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         if (cols.discount_service_key_filter) existingFields.push('discount_service_key_filter');
         if (cols.discount_service_category_filter) existingFields.push('discount_service_category_filter');
         if (cols.discount_max_dollars) existingFields.push('discount_max_dollars');
+        // Codex pre-push audit P0 (round 3 on #4657): existing.discount_id
+        // was never selected at all, so the stack-group check below could
+        // never see a STORED (round-tripped/untouched) appointment-level
+        // discount — a fresh add-on pick could silently combine with it in
+        // the same non-stackable group.
+        if (cols.discount_id) existingFields.push('discount_id');
         // Read whether this row is canonically priced, and its frozen line
         // discount identity (never resent by this editor — see
         // resolveUpdateDetailsAddonFinancials' own comment — so it must
@@ -10046,7 +10067,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         };
         const appointmentDiscountIsNew = discountType !== undefined && appointmentDiscountChanged;
         const groupMetaIds = [
-          appointmentDiscountPreset?.id, existing?.discount_id,
+          appointmentDiscountPreset?.id, existing?.discount_id, existing?.line_discount_id,
           ...normalizedAddons.map((l) => l.discount?.discountId),
           ...existingAddonDiscountRows.map((r) => r.discount_id),
         ].filter(Boolean);
@@ -10060,6 +10081,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             const id = appointmentDiscountPreset?.id || existing?.discount_id || null;
             const meta = id ? groupMetaById.get(String(id)) : null;
             return meta ? [{ ...meta, spansAll: true, _isNew: appointmentDiscountIsNew }] : [];
+          })(),
+          // Codex pre-push audit P0 (round 3 on #4657): the PRIMARY line's
+          // own stored slot — this editor never writes line_discount_* at
+          // all (see the "can't resend" comment on the primary's own
+          // preservation below), so it is ALWAYS persisted, never new; but
+          // it still has to be IN the check, or a fresh add-on pick could
+          // silently combine with a primary-line WaveGuard tier.
+          ...(() => {
+            const id = existing?.line_discount_id || null;
+            const meta = id ? groupMetaById.get(String(id)) : null;
+            return meta ? [{ ...meta, scope: 'primary', _isNew: false }] : [];
           })(),
           ...normalizedAddons
             .map((l, i) => {

@@ -2417,8 +2417,21 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       if (line && typeof line === 'object' && String(line.id ?? '') === String(ld.id ?? '')) {
         return { ...ld, max_discount_dollars: line.cap };
       }
+      return verifiedLineDiscountCap(ld, linePresetById(ld?.id));
     }
-    return verifiedLineDiscountCap(ld, linePresetById(ld?.id));
+    // Codex pre-push audit P1 (round 3 on #4657): an UNMARKED row's
+    // primary discount is NEVER recomputed by ANY save this editor makes
+    // — it "can't resend" line_discount_* at all (see storedPrimaryLineDiscount's
+    // own comment), so the server always preserves exactly the stored
+    // dollar figure, whatever produced it. Representing it here as a
+    // FIXED credit at that SAME stored number (never re-derived from
+    // type/amount, which can drift from what was actually saved — a
+    // catalog rate changed since, or a cap that applied only at save
+    // time) is the only way the preview can match what an unrelated save
+    // would actually preserve.
+    const frozenDollars = service.lineDiscountDollars;
+    if (frozenDollars == null) return null;
+    return { id: ld.id, discount_type: 'fixed_amount', amount: Number(frozenDollars) };
   };
   const presetOptionLabel = (d) => {
     if (isCustomPercentagePreset(d)) return `${d.name} - custom %`;
@@ -2940,6 +2953,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       const addonsPayload = sendAddons
         ? cleanLines.map((l) => {
             const common = {
+              // Codex pre-push audit P1 (round 3 on #4657): the server's
+              // new stack-group grandfathering (:2513) matches THIS line
+              // back to its own prior stored discount by row id — without
+              // it, every existing line looked "new" and an unrelated
+              // resave of two already-persisted same-group stamps 400'd.
+              id: l.id || undefined,
               serviceId: l.serviceId || null,
               // Stable catalog key for a fallback pick (no serviceId) — the
               // server resolves the row by it before trying the label.
