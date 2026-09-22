@@ -116,13 +116,34 @@ export default function MobileCheckoutSheet({
     (sum, e) => (Number(e.amount) >= 0 ? sum + Number(e.amount) : sum), 0,
   ), [extras]);
   const servicesSubtotal = price + extraServicesTotal;
+  // Codex GitHub round 1 P1 (PR #4658): gate dark (or its probe unresolved —
+  // stackingEnabled already fails closed to false) must stay BYTE-IDENTICAL
+  // to before this lane: each row keeps the dollar amount SNAPSHOTTED at
+  // selection time (handleAddItem) and is never recomputed as services are
+  // added or removed afterward — compound:false was only ever additive vs.
+  // sequential math, not a snapshot, so it still recomputed against a
+  // moving servicesSubtotal. Only the gate-ON path re-derives live through
+  // the shared engine.
   const { stackedDiscountRows, extraDiscountsTotal } = useMemo(() => {
     const discountExtras = extras.filter((e) => Number(e.amount) < 0);
+    if (!stackingEnabled) {
+      const total = discountExtras.reduce((sum, e) => sum + Number(e.amount), 0);
+      return { stackedDiscountRows: new Map(), extraDiscountsTotal: total };
+    }
     const stacked = stackDiscounts(servicesSubtotal, discountExtras.map((e) => (
       e.discount_type
-        ? { discountType: e.discount_type, amount: e.discount_amount, maxDiscountDollars: e.max_discount_dollars }
+        ? {
+          discountType: e.discount_type,
+          amount: e.discount_amount,
+          maxDiscountDollars: e.max_discount_dollars,
+          // Codex GitHub round 1 P2 (PR #4658): the stable catalog identity
+          // rides along so stackOrder's identity tiebreak — not click
+          // order / array position — decides which of two otherwise-tying
+          // discounts (same type/value/cap/scope) resolves first.
+          id: e.discount_id ?? e.discount_key ?? undefined,
+        }
         : { discountType: 'fixed_amount', amount: Math.abs(Number(e.amount) || 0) }
-    )), { compound: stackingEnabled });
+    )), { compound: true });
     const rows = new Map();
     discountExtras.forEach((e, i) => rows.set(e.id, stacked.items[i].dollars));
     return { stackedDiscountRows: rows, extraDiscountsTotal: -stacked.totalDollars };

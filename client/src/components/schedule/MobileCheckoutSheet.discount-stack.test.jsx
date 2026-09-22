@@ -31,6 +31,16 @@ const REFERRAL = {
   id: 'referral', name: 'Referral Credit', discount_type: 'fixed_amount', amount: 25,
   is_stackable: true,
 };
+// Deliberately IDENTICAL on every canonical-order key (type, value, cap,
+// scope) except catalog id — the only thing left to break the tie.
+const PROMO_A = {
+  id: 'promo-a', name: 'Promo A', discount_type: 'percentage', amount: 50,
+  is_stackable: true,
+};
+const PROMO_B = {
+  id: 'promo-b', name: 'Promo B', discount_type: 'percentage', amount: 50,
+  is_stackable: true,
+};
 
 // Stand-in picker: one button per discount, each calling onSelect the way
 // the real sheet does.
@@ -38,7 +48,7 @@ vi.mock('./MobileItemDiscountPickerSheet', () => ({
   default: ({ onSelect, chosenDiscounts = [] }) => (
     <div>
       <div data-testid="chosen-count">{chosenDiscounts.length}</div>
-      {[SILVER, MILITARY, REFERRAL].map((d) => (
+      {[SILVER, MILITARY, REFERRAL, PROMO_A, PROMO_B].map((d) => (
         <button key={d.id} type="button" onClick={() => onSelect({ kind: 'discount', discount: d })}>
           {`pick ${d.name}`}
         </button>
@@ -46,7 +56,13 @@ vi.mock('./MobileItemDiscountPickerSheet', () => ({
     </div>
   ),
 }));
-vi.mock('./MobileServicePickerSheet', () => ({ default: () => null }));
+vi.mock('./MobileServicePickerSheet', () => ({
+  default: ({ onSelect }) => (
+    <button type="button" onClick={() => onSelect({ name: 'Extra Treatment', base_price: 100, pricing_type: 'fixed' })}>
+      pick Extra Treatment
+    </button>
+  ),
+}));
 vi.mock('../../hooks/useCustomerCards', () => ({
   useCustomerCards: () => ({ cards: null }),
   chargeableCardOnFile: () => null,
@@ -70,6 +86,11 @@ const SERVICE = {
 function addDiscount(name) {
   fireEvent.click(screen.getByRole('button', { name: 'Add Item or Discount' }));
   fireEvent.click(screen.getByRole('button', { name: `pick ${name}` }));
+}
+
+function addService() {
+  fireEvent.click(screen.getByRole('button', { name: 'Add Service' }));
+  fireEvent.click(screen.getByRole('button', { name: 'pick Extra Treatment' }));
 }
 
 describe('MobileCheckoutSheet discount stacking', () => {
@@ -223,5 +244,77 @@ describe('MobileCheckoutSheet — expected_discount_stacking on the wire', () =>
     const [, options] = fetchMock.mock.calls[0];
     const body = JSON.parse(options.body);
     expect(body.expected_discount_stacking).toBe(false);
+  });
+});
+
+// Codex GitHub review round 1 on PR #4658, P1 (MobileCheckoutSheet.jsx:125):
+// gate dark (or its probe unresolved — stackingEnabled already fails closed
+// to false) must stay BYTE-IDENTICAL to before this lane: a percentage
+// discount's dollar amount is snapshotted at selection (handleAddItem) and
+// never recomputed as services are added/removed afterward. Only the
+// gate-ON path re-derives live through the shared engine.
+describe('MobileCheckoutSheet — snapshot vs. live recompute by gate state', () => {
+  it('gate off: a picked percentage stays at its selection-time amount when a service is added after', () => {
+    stacking.enabled = false;
+    render(<MobileCheckoutSheet service={SERVICE} onClose={() => {}} />);
+    addDiscount('WaveGuard Silver');
+    // 10% of the $111 base at selection time.
+    expect(screen.getByText('−$11.10')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Charge $99.90' })).toBeInTheDocument();
+
+    addService();
+    // Adding a $100 service moves the base to $211 — a live recompute
+    // would show $21.10 off; the snapshot must still read $11.10.
+    expect(screen.getByText('−$11.10')).toBeInTheDocument();
+    expect(screen.queryByText('−$21.10')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Charge $199.90' })).toBeInTheDocument();
+  });
+
+  it('gate on: the same sequence re-derives live through the engine', () => {
+    render(<MobileCheckoutSheet service={SERVICE} onClose={() => {}} />);
+    addDiscount('WaveGuard Silver');
+    expect(screen.getByRole('button', { name: 'Charge $99.90' })).toBeInTheDocument();
+
+    addService();
+    // Live recompute: 10% of the new $211 base is $21.10.
+    expect(screen.getByText('−$21.10')).toBeInTheDocument();
+    expect(screen.queryByText('−$11.10')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Charge $189.90' })).toBeInTheDocument();
+  });
+});
+
+// Codex GitHub review round 1 on PR #4658, P2 (MobileCheckoutSheet.jsx:123):
+// two catalog discounts tying on type/value/cap/scope must resolve the
+// same regardless of click order — stackOrder's stable identity tiebreak
+// only applies when the catalog id/key rides along on each term.
+describe('MobileCheckoutSheet — stable identity tiebreak survives click order', () => {
+  // The amount div sits as the description's next sibling within the same
+  // row (see the extras.map render block) — read the row's OWN amount
+  // rather than merely asserting the {$50, $25} pair appears SOMEWHERE
+  // on screen, which can't tell the two rows apart.
+  function rowAmount(description) {
+    return screen.getByText(description).closest('.flex-1').nextElementSibling.textContent;
+  }
+
+  it('Promo A before Promo B: A (lower id) gets the larger resolved share', () => {
+    render(<MobileCheckoutSheet service={{ ...SERVICE, estimatedPrice: 100 }} onClose={() => {}} />);
+    addDiscount('Promo A');
+    addDiscount('Promo B');
+    // Identity order (promo-a < promo-b) puts A first: 50% of $100, then
+    // B takes 50% of what's left.
+    expect(rowAmount('Promo A (50%)')).toBe('−$50.00');
+    expect(rowAmount('Promo B (50%)')).toBe('−$25.00');
+  });
+
+  it('Promo B before Promo A (reversed click order): A still gets the larger share', () => {
+    render(<MobileCheckoutSheet service={{ ...SERVICE, estimatedPrice: 100 }} onClose={() => {}} />);
+    addDiscount('Promo B');
+    addDiscount('Promo A');
+    // Click order reversed, but catalog identity is unchanged — the row
+    // that gets the $50 vs. the $25 must match the un-reversed case
+    // exactly: A (lower id) always first, regardless of which was clicked
+    // first.
+    expect(rowAmount('Promo A (50%)')).toBe('−$50.00');
+    expect(rowAmount('Promo B (50%)')).toBe('−$25.00');
   });
 });
