@@ -393,11 +393,25 @@ async function scheduledServicesDiscountProvenanceColumns(database) {
     discountProvenanceColumnCache = present;
     return present;
   } catch {
+    // Codex pre-push audit P1 (round 4 on #4657): fail CLOSED, not open —
+    // scheduledServicesHasSelfPay (the pattern this guard mirrors) treats
+    // an introspection failure as "assume the column is missing," never
+    // "assume everything is present." Defaulting to true here reintroduced
+    // exactly the mid-migration 500 this guard exists to prevent: a
+    // genuine columnInfo() failure (not just a dead connection — a
+    // transient introspection error, a permissions quirk) would still
+    // attempt to SELECT a column that may not exist. Uncached (unchanged)
+    // so the next call retries instead of latching a wrong guess either way.
     const present = {};
-    for (const col of DISCOUNT_PROVENANCE_COLUMNS) present[col] = true;
+    for (const col of DISCOUNT_PROVENANCE_COLUMNS) present[col] = false;
     return present;
   }
 }
+// Test-only: the cache is a module-scope singleton shared by every caller
+// (real request or test) in this process — a test exercising a FAILING
+// introspection must be able to force a fresh check rather than silently
+// reading whatever an earlier successful (or failing) call already cached.
+function resetDiscountProvenanceColumnCache() { discountProvenanceColumnCache = null; }
 
 // Assignment currency (dead statuses + the ET date window) is the shared
 // predicate in services/technician-visit-scope.js — the job-card routes
@@ -20285,6 +20299,8 @@ function blackoutDateString(value) {
 }
 
 router._test = {
+  scheduledServicesDiscountProvenanceColumns,
+  resetDiscountProvenanceColumnCache,
   weeklyBlackoutRefreshDates,
   blackoutDateString,
   registerSpawnedVisitReminder,

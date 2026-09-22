@@ -392,3 +392,38 @@ postgres('scheduled_services PUT /:id/update-details — non-stackable stack_gro
     expect(statusCode).toBe(200);
   });
 });
+
+describe('scheduledServicesDiscountProvenanceColumns — fails CLOSED on a genuine introspection error (Codex pre-push audit P1, round 4 on #4657)', () => {
+  // Pure unit test — no live DB needed at all: the function takes its
+  // `database` handle as a plain argument, so a fake object whose own
+  // columnInfo() rejects is enough to prove the contract without a real
+  // Postgres connection.
+  const { scheduledServicesDiscountProvenanceColumns, resetDiscountProvenanceColumnCache } = require('../routes/admin-schedule')._test;
+
+  test('never throws, every column reads false (so the caller\'s own SELECT omits them, never a 500), and the failure is not cached', async () => {
+    // The cache is a module-scope singleton this file's OWN earlier real-
+    // Postgres tests already populated (successfully) — reset it so this
+    // test genuinely exercises the failing introspection below, not an
+    // already-cached answer from a prior call.
+    resetDiscountProvenanceColumnCache();
+    const failing = { scheduled_services: () => ({ columnInfo: () => Promise.reject(new Error('introspection blew up')) }) };
+    const database = (table) => failing[table]();
+
+    const present = await scheduledServicesDiscountProvenanceColumns(database);
+    expect(Object.values(present).every((v) => v === false)).toBe(true);
+    expect(present).toMatchObject({
+      discount_type: false, discount_amount: false, discount_id: false, discount_max_dollars: false,
+      discount_service_key_filter: false, discount_service_category_filter: false,
+      line_discount_type: false, line_discount_amount: false, line_discount_id: false,
+      line_discount_dollars: false, pricing_provenance: false,
+    });
+
+    // Uncached: a LATER, successful introspection is trusted, not stuck on
+    // the earlier failure's guess.
+    const recovered = { scheduled_services: () => ({ columnInfo: () => Promise.resolve({ discount_type: { type: 'varchar' } }) }) };
+    const recoveredDb = (table) => recovered[table]();
+    const present2 = await scheduledServicesDiscountProvenanceColumns(recoveredDb);
+    expect(present2.discount_type).toBe(true);
+    expect(present2.discount_amount).toBe(false);
+  });
+});
