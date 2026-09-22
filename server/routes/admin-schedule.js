@@ -2601,6 +2601,54 @@ async function resolveUpdateDetailsAddonFinancials({
   };
 }
 
+// PUT /:id/update-details gate-flip safety for an UNMARKED (legacy, or
+// gate-was-off-at-save) row — slice 4 of #4405, carrying forward #4405's
+// own round-7 P0. resolveUpdateDetailsAddonFinancials (above) falls
+// through entirely to calculateVisitFinancialsForAddons for such a row —
+// an additive, not the canonical, engine, independent of whatever regime
+// actually produced the row's stored numbers. This editor resends every
+// price field on EVERY save (notes-only included), so that recompute still
+// runs on a save that touches nothing about the money — and can silently
+// reprice a legacy $160 visit to $161.50 the moment the gate flips live,
+// just from saving notes. Whether a stored row was written under the
+// legacy or the compound regime is not recorded anywhere for an unmarked
+// row, so it cannot be known here — but a save that changes NEITHER the
+// prices NOR any discount must not change the money either way: the stored
+// numbers are that row's economics under whichever regime produced them,
+// so preserving them verbatim is correct regardless. A save that DOES
+// touch a price or a discount still recomputes live on an unmarked row
+// (unchanged): per the #4405 notes, uniform economics for an edited
+// unmarked row would need its own persisted regime marker on write, which
+// resolveUpdateDetailsAddonFinancials's canonical branch already IS for a
+// MARKED row — an unmarked row simply has none to restack from.
+//
+// Pure decision function: `existingAddonRows` (the row's stored add-on
+// base prices) MUST be loaded by the caller before this runs — an
+// add-on's own stored price is unknowable here otherwise, and "unchanged"
+// could never be confirmed (this is the round-7 P0 itself: the ORIGINAL
+// bug never loaded them at all for this check).
+function legacyEconomicsPreservationDecision({
+  legacyPreservationCandidate, discountInputsPosted, primaryGross, existingPrimaryLinePrice,
+  normalizedAddons, existingAddonRows, existingEstimatedPrice,
+}) {
+  const moneyInputsUnchanged = legacyPreservationCandidate
+    && !discountInputsPosted
+    && !moneyValuesDiffer(primaryGross, existingPrimaryLinePrice)
+    && normalizedAddons.length === existingAddonRows.length
+    && normalizedAddons.every((l) => {
+      const stored = existingAddonRows.find((row) => (
+        l.serviceId ? String(row.service_id || '') === String(l.serviceId) : String(row.service_name || '').trim() === l.serviceName
+      ));
+      return stored && !moneyValuesDiffer(l.base, stored.base_price);
+    });
+  const storedTotal = Number(existingEstimatedPrice);
+  return {
+    moneyInputsUnchanged,
+    storedTotal,
+    legacyEconomicsPreserved: moneyInputsUnchanged && Number.isFinite(storedTotal) && storedTotal > 0,
+  };
+}
+
 // Canonical restack (GATE_DISCOUNT_STACKING) for a SEEDED occurrence within
 // the SAME booking request — an initial recurring child or booster, whose
 // own due add-ons (childAddonLines/boosterAddonLines) can already differ
@@ -3202,7 +3250,24 @@ async function freezeLegacySeriesRootCaps(trx, parent, cols, parentAddons) {
     const hasNewAddonId = Object.keys(rootSnapshot.addons)
       .filter((id) => id !== (parent?.line_discount_id ?? null))
       .some((id) => !existingAddonIds.has(id));
-    if (!hasNewAddonId) return; // nothing new to merge — already-frozen values are untouched either way
+    // Slice 4 of #4405: an office edit can swap the root's OWN
+    // line_discount_id to a DIFFERENT catalog discount without ever
+    // clearing pricing_provenance (resolveStoredDiscountCaps' own round-4
+    // comment documents exactly this — it reads live for the mismatch
+    // rather than trusting a stale frozen line, so pricing itself is never
+    // wrong). But the OLD id's frozen cap-guard above never noticed the
+    // swap: with no NEW add-on id to report, it returned before ever
+    // re-freezing the NEW line id's cap — so that new id was never frozen
+    // at all, and a LATER catalog cap edit on it would silently reprice
+    // this "contracted" recurring series going forward, the exact failure
+    // this whole mechanism exists to prevent. A legacy bare-number frozen
+    // entry (written before the {id,cap} shape existed) has no comparable
+    // id and reads as unknown here, same as no entry at all.
+    const existingLineId = (existing.line && typeof existing.line === 'object' && !Array.isArray(existing.line))
+      ? (existing.line.id ?? null)
+      : null;
+    const lineIdChanged = (parent?.line_discount_id ?? null) !== existingLineId;
+    if (!hasNewAddonId && !lineIdChanged) return; // nothing new to merge — already-frozen values are untouched either way
   }
   const rootStamp = {};
   stampFrozenCapsOnly(rootStamp, cols, rootSnapshot);
@@ -9394,6 +9459,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           'discount_type',
           'discount_amount',
           'line_discount_dollars',
+          // Needed to detect a notes-only/non-money save and PRESERVE a
+          // legacy row's economics on it (see legacyEconomicsPreserved,
+          // below).
+          'estimated_price',
+          'discount_dollars',
+          'primary_line_price',
         ];
         if (cols.service_key_snapshot) existingFields.push('service_key_snapshot');
         if (cols.service_category_snapshot) existingFields.push('service_category_snapshot');
@@ -9412,6 +9483,52 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           .where({ id: req.params.id })
           .first(...existingFields)
           .catch(() => null);
+
+        // GATE-FLIP SAFETY (carried from #4405 round 7's P0; AGENTS.md
+        // "existing DB rows must keep working") for an UNMARKED (legacy, or
+        // gate-was-off-at-save) row: resolveUpdateDetailsAddonFinancials
+        // falls through entirely to calculateVisitFinancialsForAddons for a
+        // row with no pricing_provenance marker — an additive, not the
+        // canonical, engine, independent of whatever regime actually
+        // produced the row's stored numbers. A save that touches NEITHER
+        // the primary/add-on prices NOR any discount (the editor resends
+        // every price field on every save, so this block still runs) must
+        // not let that recompute silently reprice the row: a $100 primary +
+        // $100 add-on with 10% off the add-on and a $30 appointment credit
+        // saved under the legacy line-then-credit order moves to $161.50
+        // under the canonical order just by saving NOTES, on the SAME
+        // stored $160. Whether a stored row was written under the legacy or
+        // the compound regime is not recorded anywhere for an unmarked row,
+        // so it cannot be known here — but a save that changes neither the
+        // prices nor any discount must not change the money either way: the
+        // stored numbers are that row's economics under whichever regime
+        // produced them, so preserving them verbatim is correct regardless.
+        // A save that DOES touch a price or a discount still recomputes
+        // live on an unmarked row (existing behavior, unchanged) — see the
+        // eligibility note on resolveUpdateDetailsAddonFinancials for why a
+        // PRICE edit stays on that path even when nothing else changed.
+        //
+        // The existing add-on rows must be loaded BEFORE this check can run
+        // at all — without them, every add-on's own stored base price is
+        // unknowable here and "unchanged" can never be confirmed.
+        const legacyPreservationCandidate = discountStackingLive() && !hasPricingRegimeMarker(existing);
+        const existingAddonRows = legacyPreservationCandidate
+          ? await db('scheduled_service_addons')
+            .where({ scheduled_service_id: req.params.id })
+            .select('service_id', 'service_name', 'base_price')
+            .catch(() => [])
+          : [];
+        const discountInputsPosted = discountType !== undefined
+          || addons.some((a) => a?.discountId || a?.discountType);
+        const { legacyEconomicsPreserved, storedTotal } = legacyEconomicsPreservationDecision({
+          legacyPreservationCandidate,
+          discountInputsPosted,
+          primaryGross,
+          existingPrimaryLinePrice: existing?.primary_line_price,
+          normalizedAddons,
+          existingAddonRows,
+          existingEstimatedPrice: existing?.estimated_price,
+        });
 
         // Appointment-level discount: the editor only sends discountType/
         // discountAmount when one is actively selected; an omitted value means
@@ -9452,7 +9569,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           },
           ...normalizedAddons.map((l) => ({ amount: l.price || 0, serviceKey: l.serviceKey, serviceCategory: l.serviceCategory })),
         ]);
-        if (cols.estimated_price) updates.estimated_price = financials.price;
+        // legacyEconomicsPreserved (above): the visit total AND the
+        // appointment-level stamp are preserved verbatim under the SAME
+        // condition, so they can never split from each other — a partial
+        // preserve (one recomputed, one not) would itself replay a
+        // different number than either regime ever actually produced. The
+        // primary line's own stamp (line_discount_dollars) is never written
+        // by this branch at all (see the comment below), so it is already
+        // preserved by omission on both paths.
+        if (cols.estimated_price) {
+          updates.estimated_price = legacyEconomicsPreserved ? storedTotal : financials.price;
+        }
         if (cols.primary_line_price && primaryGross != null) updates.primary_line_price = primaryGross;
         // Only rewrite the appointment-level discount columns when the request
         // explicitly carried a discount value; otherwise leave them as-is.
@@ -9461,14 +9588,22 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           if (cols.discount_type) updates.discount_type = effDiscountType;
           if (cols.discount_amount) updates.discount_amount = effDiscountAmount;
         }
-        if (cols.discount_dollars) updates.discount_dollars = financials.appointmentDiscountDollars;
+        if (cols.discount_dollars) {
+          updates.discount_dollars = legacyEconomicsPreserved
+            ? (existing?.discount_dollars ?? null)
+            : financials.appointmentDiscountDollars;
+        }
         // Leave the primary line_discount_* columns untouched — invoicing reads
         // them and this editor can't resend them.
         // Re-freeze provenance with the (possibly merged/updated) caps this
         // save actually restacked against — keeps the row's canonical-pricing
         // marker while a changed discount id/amount's cap resolves fresh
         // (never a stale cap silently applied to a new discount) and joins
-        // the frozen snapshot for the next save/extension to inherit.
+        // the frozen snapshot for the next save/extension to inherit. Never
+        // reached on the legacy-preservation path: capsSnapshotToPersist is
+        // only ever produced by the MARKED-row branch of
+        // resolveUpdateDetailsAddonFinancials, so an unmarked row's
+        // preserved save stays unmarked, exactly as before this fix.
         if (capsSnapshotToPersist && cols.pricing_provenance) {
           stampPricingRegimeMarker(updates, cols, capsSnapshotToPersist);
         }
@@ -13380,6 +13515,18 @@ async function reconcileRecurringSeriesVisitCount(trx, {
   // Legacy-series root freeze (Codex round 2 P1) — once per call, before
   // the per-date loop; see freezeLegacySeriesRootCaps's own comment.
   await freezeLegacySeriesRootCaps(trx, parent, cols, parentAddons);
+  // extensionPriceParent and the discount-cap set are both loop-invariant
+  // across every date this call places (same parent, same id) — resolved
+  // ONCE here, not once per date inside the loop below, mirroring the
+  // identical fix already applied to the alert-route's own post-loop
+  // spawned-row restack (Codex pre-push audit P1, round 14) — that fix
+  // never reached this call site (slice 4 of #4405). `parentAddons` is the
+  // full superset of any single date's own due add-ons, exactly like that
+  // precedent's `spawnedDiscountCaps`.
+  const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(trx, parent.id, parent);
+  const discountCaps = discountStackingLive()
+    ? await loadDiscountCapsById(trx, [extensionPriceParent.line_discount_id, ...parentAddons.map((a) => a.discount_id)])
+    : null;
   for (const nd of extendDates) {
     const childIdentity = await resolveSeriesChildIdentity(trx, parent);
     const data = {
@@ -13409,7 +13556,6 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
     if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(childIdentity.service_type);
     if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
-    const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(trx, parent.id, parent);
     copyLineDiscountFields(data, extensionPriceParent, cols);
     if (cols.service_key_snapshot && childIdentity.service_key) data.service_key_snapshot = childIdentity.service_key;
     copyAppointmentDiscountFields(data, parent, cols);
@@ -13422,12 +13568,10 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     // plans renew through these office paths, not the auto-extend.
     applyStoredVisitFinancials(data, cols, extensionPriceParent, dueAddons, parentAddons, storedDiscountScope);
     // Canonical restack (GATE_DISCOUNT_STACKING) — see runRecurringSeriesMaintenanceLocked's
-    // identical call for the full rationale; no-op off. discountCaps is the
-    // REAL catalog cap for the primary + every due add-on's own discount,
-    // fetched fresh each occurrence (never a frozen/guessed figure).
-    const discountCaps = discountStackingLive()
-      ? await loadDiscountCapsById(trx, [extensionPriceParent.line_discount_id, ...dueAddons.map((a) => a.discount_id)])
-      : null;
+    // identical call for the full rationale; no-op off. extensionPriceParent
+    // and discountCaps are hoisted above the loop (both loop-invariant); the
+    // restack below still runs fresh per occurrence against THIS date's own
+    // due add-ons.
     const restackedAddonDollars = applyDiscountStackRestack(data, cols, extensionPriceParent, dueAddons, storedDiscountScope, discountCaps);
     // Pricing-regime provenance — see restackStoredVisitFinancials's own
     // comment for why this lets a LATER extension of this same row tell a
@@ -18796,6 +18940,21 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
     // freezeLegacySeriesRootCaps's own comment.
     await freezeLegacySeriesRootCaps(trx, parent, cols, parentAddons);
     const storedDiscountScope = await loadStoredDiscountScope(trx, parent, parentAddons);
+    // extensionPriceParent and the discount-cap set are both loop-invariant
+    // across every date EITHER insertion loop below places (same parent,
+    // same id) — resolved ONCE here, shared by both branches, not once per
+    // date inside each loop. Mirrors this same action's own post-loop
+    // spawned-row restack fix (Codex pre-push audit P1, round 14), which
+    // that round explicitly left this per-date read out of scope ("a
+    // different, unauthorized seam" — see recurring-series-maintenance.
+    // test.js); slice 4 of #4405 is that follow-up. `parentAddons` is the
+    // full superset of any single date's own due add-ons. `conn` for the
+    // template resolve, `trx` for the cap read — matching exactly which
+    // connection each per-iteration call used before this hoist.
+    const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(conn, parent.id, parent);
+    const discountCaps = discountStackingLive()
+      ? await loadDiscountCapsById(trx, [extensionPriceParent.line_discount_id, ...parentAddons.map((a) => a.discount_id)])
+      : null;
     // Extension rows keep invoice-on-complete stamping (fix: extended visits
     // of a pay-per-visit plan completed uninvoiced) — resolved once here,
     // applied in both the extend and convert_ongoing insert loops below.
@@ -18853,7 +19012,6 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
           recurring_parent_id: parentId,
         };
         if (cols.service_id && childIdentity.service_id) data.service_id = childIdentity.service_id;
-        const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(conn, parent.id, parent);
         copyLineDiscountFields(data, extensionPriceParent, cols);
         if (cols.service_key_snapshot && childIdentity.service_key) data.service_key_snapshot = childIdentity.service_key;
         copyAppointmentDiscountFields(data, parent, cols);
@@ -18867,9 +19025,9 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         applyStoredVisitFinancials(data, cols, extensionPriceParent, dueAddons, parentAddons, storedDiscountScope);
         // Canonical restack (GATE_DISCOUNT_STACKING) — see
         // runRecurringSeriesMaintenanceLocked's identical call; no-op off.
-        const discountCaps = discountStackingLive()
-          ? await loadDiscountCapsById(trx, [extensionPriceParent.line_discount_id, ...dueAddons.map((a) => a.discount_id)])
-          : null;
+        // extensionPriceParent/discountCaps are hoisted above both loops
+        // (loop-invariant); this restack still runs fresh per occurrence
+        // against THIS date's own due add-ons.
         applyDiscountStackRestack(data, cols, extensionPriceParent, dueAddons, storedDiscountScope, discountCaps);
         // Pricing-regime provenance — see restackStoredVisitFinancials's
         // own comment.
@@ -18953,7 +19111,6 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         };
         if (cols.recurring_ongoing) data.recurring_ongoing = true;
         if (cols.service_id && childIdentity.service_id) data.service_id = childIdentity.service_id;
-        const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(conn, parent.id, parent);
         copyLineDiscountFields(data, extensionPriceParent, cols);
         if (cols.service_key_snapshot && childIdentity.service_key) data.service_key_snapshot = childIdentity.service_key;
         copyAppointmentDiscountFields(data, parent, cols);
@@ -18967,9 +19124,9 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         applyStoredVisitFinancials(data, cols, extensionPriceParent, dueAddons, parentAddons, storedDiscountScope);
         // Canonical restack (GATE_DISCOUNT_STACKING) — see
         // runRecurringSeriesMaintenanceLocked's identical call; no-op off.
-        const discountCaps = discountStackingLive()
-          ? await loadDiscountCapsById(trx, [extensionPriceParent.line_discount_id, ...dueAddons.map((a) => a.discount_id)])
-          : null;
+        // extensionPriceParent/discountCaps are hoisted above both loops
+        // (loop-invariant); this restack still runs fresh per occurrence
+        // against THIS date's own due add-ons.
         applyDiscountStackRestack(data, cols, extensionPriceParent, dueAddons, storedDiscountScope, discountCaps);
         // Pricing-regime provenance — see restackStoredVisitFinancials's
         // own comment.
@@ -19431,6 +19588,7 @@ router._test = {
   isPercentDiscountType,
   calculateVisitFinancialsForAddons,
   resolveUpdateDetailsAddonFinancials,
+  legacyEconomicsPreservationDecision,
   restackLiveVisitFinancials,
   capsSnapshotFromPricing,
   occurrenceFloorPrice,

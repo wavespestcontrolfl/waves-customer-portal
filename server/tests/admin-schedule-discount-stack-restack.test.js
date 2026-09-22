@@ -1827,6 +1827,58 @@ describe('freezeLegacySeriesRootCaps — the root parent itself gets marked on t
     });
   });
 
+  // Slice 4 of #4405: an office edit can swap the root's OWN line_discount_id
+  // to a DIFFERENT catalog discount without ever clearing pricing_provenance
+  // (resolveStoredDiscountCaps' own round-4 comment documents exactly this —
+  // it reads live for the id mismatch rather than trusting a stale frozen
+  // line, so PRICING is never wrong either way). But the guard here used to
+  // check ONLY for a new ADD-ON id; with none to report, it returned before
+  // ever re-freezing the NEW line id's own cap — so that id was never frozen
+  // at all, and a LATER catalog edit on it would silently reprice this
+  // "contracted" series. Extension 2 (the id swap) must write; extension 3
+  // (nothing further changed) must not.
+  test('Codex slice 4: a root discount id swap on the line re-freezes the NEW id — a later catalog raise on it does not reach extension 3', async () => {
+    await withGateLive(async () => {
+      const discountRows = [
+        { id: 'ld-old', max_discount_dollars: 10 },
+        { id: 'ld-new', max_discount_dollars: 15 },
+      ];
+      const { conn, updates } = makeRootFreezeConn(discountRows);
+      const parent = {
+        id: 'root-7', primary_line_price: 100, line_discount_id: 'ld-old',
+        line_discount_type: 'percentage', line_discount_amount: 50, // uncapped would be $50 off
+      };
+
+      // Extension 1: freezes the OLD id's cap.
+      await freezeLegacySeriesRootCaps(conn, parent, { pricing_provenance: true }, []);
+      expect(updates).toHaveLength(1);
+      expect(frozenCapsFromRow(parent).line).toEqual({ id: 'ld-old', cap: 10 });
+
+      // An office edit (outside this function) swaps the row's own discount
+      // to a DIFFERENT catalog id, without touching pricing_provenance.
+      parent.line_discount_id = 'ld-new';
+
+      // Extension 2: no NEW add-on id appeared, but the LINE's own id did —
+      // this must still write, freezing ld-new's cap ($15) onto the root.
+      await freezeLegacySeriesRootCaps(conn, parent, { pricing_provenance: true }, []);
+      expect(updates).toHaveLength(2);
+      expect(updates[1].data.pricing_provenance.caps.line).toEqual({ id: 'ld-new', cap: 15 });
+      expect(frozenCapsFromRow(parent).line).toEqual({ id: 'ld-new', cap: 15 });
+
+      // The catalog cap on ld-new is raised to $30 after extension 2 froze $15.
+      discountRows[1] = { id: 'ld-new', max_discount_dollars: 30 };
+
+      // Extension 3: the id is unchanged and already frozen — no further write.
+      await freezeLegacySeriesRootCaps(conn, parent, { pricing_provenance: true }, []);
+      expect(updates).toHaveLength(2); // unchanged
+
+      // The actual stored restack must use the frozen $15, never the raised $30.
+      const result = restackStoredVisitFinancials(parent, [], null, new Map([['ld-new', 30]]));
+      expect(result.primaryLineDiscountDollars).toBe(15); // frozen, never the raised $30
+      expect(result.price).toBe(85);
+    });
+  });
+
   test('a root whose primary line has NO discount at all still gets marked (an empty, correct snapshot) — future add-ons still freeze correctly from it', async () => {
     await withGateLive(async () => {
       const { conn, updates } = makeRootFreezeConn([]);
