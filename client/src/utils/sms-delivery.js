@@ -50,7 +50,7 @@ function isActionableInbound(message) {
   return !NON_ACTIONABLE_INBOUND_TYPES.has(messageType) && !messageType.startsWith("job_");
 }
 
-export function unansweredSmsLine(messages) {
+export function unansweredSmsReply(messages) {
   if (!Array.isArray(messages)) return null;
 
   const latestInboundByLine = new Map();
@@ -68,12 +68,13 @@ export function unansweredSmsLine(messages) {
       latestInboundByLine.set(line, {
         createdAt,
         businessLine: message.to || null,
+        message,
       });
     }
   });
 
   let latestUnanswered = null;
-  latestInboundByLine.forEach(({ createdAt: latestInboundAt, businessLine }, line) => {
+  latestInboundByLine.forEach(({ createdAt: latestInboundAt, businessLine, message: inbound }, line) => {
     // STOP applies to the contact, not one endpoint, and closes any older ask.
     if (latestOptOutAt > latestInboundAt) return;
     const answered = messages.some((message) => {
@@ -85,9 +86,16 @@ export function unansweredSmsLine(messages) {
       return !Number.isNaN(createdAt) && createdAt > latestInboundAt;
     });
     if (!answered && latestInboundAt > (latestUnanswered?.createdAt ?? -Infinity)) {
-      latestUnanswered = { createdAt: latestInboundAt, businessLine };
+      latestUnanswered = {
+        createdAt: latestInboundAt,
+        businessLine,
+        messageId: inbound.id,
+        messageType: inbound.messageType,
+      };
     }
   });
 
-  return latestUnanswered?.businessLine || null;
+  if (!latestUnanswered?.businessLine) return null;
+  const { businessLine, messageId, messageType } = latestUnanswered;
+  return { businessLine, messageId, messageType };
 }

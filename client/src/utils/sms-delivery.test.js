@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { unansweredSmsLine } from "./sms-delivery";
+import { unansweredSmsReply } from "./sms-delivery";
 
-const needsSmsReply = (messages) => Boolean(unansweredSmsLine(messages));
+const needsSmsReply = (messages) => Boolean(unansweredSmsReply(messages));
 
 const message = (direction, createdAt, overrides = {}) => ({
   direction,
@@ -108,21 +108,39 @@ describe("needsSmsReply", () => {
   });
 
   it("returns the business line with the latest unanswered inbound", () => {
-    expect(unansweredSmsLine([
+    expect(unansweredSmsReply([
       message("inbound", "2026-09-21T13:00:00Z", { to: "+19413187612" }),
       message("inbound", "2026-09-21T13:02:00Z", { to: "+19415550199" }),
-    ])).toBe("+19415550199");
+    ])?.businessLine).toBe("+19415550199");
   });
 
   it("keeps the reply routed to an older unanswered line after newer activity elsewhere", () => {
-    expect(unansweredSmsLine([
+    expect(unansweredSmsReply([
       message("inbound", "2026-09-21T13:00:00Z", { to: "+19413187612" }),
       message("outbound", "2026-09-21T13:01:00Z", {
         from: "+19415550199",
         messageType: "reminder",
         status: "delivered",
       }),
-    ])).toBe("+19413187612");
+    ])?.businessLine).toBe("+19413187612");
+  });
+
+  it("returns reply context from the outstanding inbound instead of newer excluded activity", () => {
+    expect(unansweredSmsReply([
+      message("inbound", "2026-09-21T13:00:00Z", {
+        id: "customer-request",
+        to: "+19413187612",
+      }),
+      message("inbound", "2026-09-21T13:01:00Z", {
+        id: "applicant-reply",
+        to: "+19415550199",
+        messageType: "job_applicant_reply",
+      }),
+    ])).toEqual({
+      businessLine: "+19413187612",
+      messageId: "customer-request",
+      messageType: "inbound",
+    });
   });
 
   it.each(["opt_in", "sms_reaction", "help_request", "reschedule_reply", "job_applicant_reply"])(
