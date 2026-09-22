@@ -427,4 +427,17 @@ describe('voice relay eval — callback commitment core', () => {
   ])('no_account_holder_callback catches a concession override carrying its own contact complement: %s', (text, status) => {
     expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
   });
+
+  // Fallback-audit finding: concessionOverride's final branch required the
+  // recipient's own possessive before "consent" ("her consent"), missing
+  // the equally common target-less forms ("regardless of consent") and
+  // "permission" as a synonym for consent.
+  test.each([
+    ['If she agrees, we will call her regardless of consent.', 'fail'],
+    ['If she agrees, we will call her irrespective of consent.', 'fail'],
+    ['If she agrees, we will call her regardless of permission.', 'fail'],
+    ['If she agrees, we will call her.', 'pass'],
+  ])('no_account_holder_callback catches a target-less regardless/irrespective consent override: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
 });

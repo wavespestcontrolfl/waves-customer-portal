@@ -1490,7 +1490,10 @@ function callbackConsentOverridden(text, matchEnd, consentCondition, conditionTa
   // optional suffix so both the "or not"-terminated and bare shapes below
   // still end on the outer boundary correctly either way.
   const bareAgree = `(?:agrees?|consents?)(?:\\s+to\\s+${CALLBACK_RECEIVED_CONTACT})?`;
-  const concessionOverride = new RegExp(`^\\s*,?\\s*(?:(?:or|and|but)\\s+)?(?:whether\\s+(?:${conditionTarget}\\s+${bareAgree}\\s+or\\s+not|or\\s+not\\s+${conditionTarget}\\s+${bareAgree})|(?:regardless|irrespective)(?:\\s+of)?\\s+(?:whether\\s+${conditionTarget}\\s+${bareAgree}(?:\\s+or\\s+not)?|${conditionTarget}(?:[\\x27\\u2019]s)?\\s+(?:consent|agreement)))\\b(?=\\s*(?:[.;!?]|$))`, 'i');
+  // "regardless of consent"/"irrespective of permission" and "with or
+  // without her consent" override just as much as the possessive form
+  // ("regardless of her consent") — the recipient is implied, not required.
+  const concessionOverride = new RegExp(`^\\s*,?\\s*(?:(?:or|and|but)\\s+)?(?:whether\\s+(?:${conditionTarget}\\s+${bareAgree}\\s+or\\s+not|or\\s+not\\s+${conditionTarget}\\s+${bareAgree})|(?:regardless|irrespective)(?:\\s+of)?\\s+(?:whether\\s+${conditionTarget}\\s+${bareAgree}(?:\\s+or\\s+not)?|(?:${conditionTarget}(?:[\\x27\\u2019]s)?\\s+)?(?:consent|agreement|permission))|with\\s+or\\s+without\\s+${conditionTarget}(?:[\\x27\\u2019]s)?\\s+consent)\\b(?=\\s*(?:[.;!?]|$))`, 'i');
   const override = (slice) => refusalOverride.test(slice) || concessionOverride.test(slice);
   // The override can follow the promise directly ("If she agrees, we will
   // call her, or even if she refuses.") — a LEADING consent condition with
