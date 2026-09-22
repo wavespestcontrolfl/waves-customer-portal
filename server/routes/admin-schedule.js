@@ -2541,6 +2541,33 @@ function restackLiveVisitFinancials(pricing, addonLines) {
   };
 }
 
+// The occurrence's REAL floor price for the CREATE-time billable-amount
+// gate (floorForDate, below) — the exact pricing the insert loop stamps
+// with, so validation and persistence can never disagree. Deferred fast-
+// follow (Codex pre-push audit P1, flagged on the original push): the gate
+// used to size a date's floor via calculateVisitFinancialsForAddons alone
+// (the legacy, non-restacked computation), so once a capped line discount
+// and a large appointment credit interact, the gate could compute LESS
+// than what the row will actually be charged and wrongly 409 a
+// legitimately billable booking — Codex's repro: a $100 primary at 50%
+// off, a $100 one-time add-on, and an $80 appointment credit; a later
+// add-on-free date floored at the legacy $0 when the canonical, restacked
+// figure is $10. `addonOnlyTotal` is the caller's own one-line reducer
+// (kept local to the route) so this function only decides WHICH prices to
+// sum, not how; `isBoosterDate` mirrors the caller's own booster exclusion
+// — boosters bill their own full price, never the covered-member add-on-
+// only stamp.
+function occurrenceFloorPrice(pricing, lines, { memberSeriesCovered, isBoosterDate, addonOnlyTotal }) {
+  const restack = restackLiveVisitFinancials(pricing, lines);
+  if (memberSeriesCovered && !isBoosterDate) {
+    const restatedLines = restack
+      ? lines.map((line, i) => ({ ...line, price: restack.addonDollars[i]?.netPrice ?? line.price }))
+      : lines;
+    return addonOnlyTotal(restatedLines);
+  }
+  return restack ? (restack.price || 0) : (calculateVisitFinancialsForAddons(pricing, lines).price || 0);
+}
+
 function calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows, discountScope = null) {
   const addons = Array.isArray(addonRows) ? addonRows : [];
   const addonNetTotal = addons.reduce((sum, addon) => {
@@ -5951,9 +5978,13 @@ router.post('/', requireAdmin, async (req, res, next) => {
       const boosterDateSet = new Set(plannedBoosterDates);
       const floorForDate = (targetDate) => {
         const lines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, targetDate, seriesBlackoutDates, skipWeekendsEffective);
-        return memberSeriesCovered && !boosterDateSet.has(targetDate)
-          ? addonOnlyTotal(lines)
-          : (calculateVisitFinancialsForAddons(pricing, lines).price || 0);
+        // Codex pre-push audit P1 (deferred fast-follow from the original
+        // push): routed through occurrenceFloorPrice so the gate reads the
+        // SAME restacked pricing the insert loop stamps with — see that
+        // function's own comment for the concrete under-count this fixes.
+        return occurrenceFloorPrice(pricing, lines, {
+          memberSeriesCovered, isBoosterDate: boosterDateSet.has(targetDate), addonOnlyTotal,
+        });
       };
       const recurringFloorPrice = zeroCallbackPrice
         ? 0
@@ -18958,6 +18989,7 @@ router._test = {
   isPercentDiscountType,
   calculateVisitFinancialsForAddons,
   restackLiveVisitFinancials,
+  occurrenceFloorPrice,
   calculateStoredVisitFinancials,
   applyStoredVisitFinancials,
   restackStoredVisitFinancials,

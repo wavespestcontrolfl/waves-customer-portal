@@ -48,6 +48,8 @@ const {
   loadDiscountCapsById,
   insertRecurringChildAddons,
   insertScheduledServiceAddons,
+  occurrenceFloorPrice,
+  calculateVisitFinancialsForAddons,
 } = require('../routes/admin-schedule')._test;
 
 function discountQuery(discount) {
@@ -884,6 +886,104 @@ describe('creation-to-extension parity', () => {
 
       expect(seededChild.primaryDiscountDollars).toBe(1.04);
       expect(extension.primaryLineDiscountDollars).toBe(1.04);
+    });
+  });
+});
+
+// Deferred fast-follow (flagged on the original push, round 11): the
+// CREATE-time billable-amount validation gate (floorForDate, ~admin-schedule.js
+// POST create) used to size a date's floor via calculateVisitFinancialsForAddons
+// alone — the LEGACY, non-restacked computation — so once a capped line
+// discount and a large appointment credit interact, the gate could compute
+// LESS than what the row will actually be charged and wrongly 409 a
+// legitimately billable booking. occurrenceFloorPrice is floorForDate's own
+// extracted decision (routes through restackLiveVisitFinancials, the exact
+// pricing the insert loop stamps with, when the gate is live) so validation
+// and persistence can never disagree.
+describe('CREATE-time billable-amount gate — occurrenceFloorPrice', () => {
+  afterEach(() => { delete process.env.GATE_DISCOUNT_STACKING; });
+
+  const addonOnlyTotal = (lines) => (lines || []).reduce((sum, a) => sum + (Number(a?.price) > 0 ? Number(a.price) : 0), 0);
+
+  // Codex's own worked example: a $100 primary at 50% off, a $100 one-time
+  // add-on, and an $80 appointment credit. The anchor (add-on present)
+  // restacks its primary to a $70 net. A LATER date with no add-on due
+  // must floor at the canonical $10 (the $80 credit takes $80 of the
+  // primary's $100 first, leaving $20, then 50% of $20 = $10 line discount,
+  // net $90, minus the $80 credit = $10) — never the legacy $0 that
+  // calculateVisitFinancialsForAddons alone gives.
+  const pricingFixture = {
+    primaryBase: 100,
+    primaryNet: 70, // the anchor's OWN restacked net (add-on present) — what calculateVisitFinancialsForAddons's legacy subtotal reads
+    primaryServiceKey: 'general_pest',
+    primaryServiceCategory: 'pest_control',
+    primaryDiscount: { discountType: 'percentage', discountAmount: 50, discountDollars: 30, maxDiscountDollars: null },
+    appointmentDiscount: { discountType: 'fixed_amount', discountAmount: 80, discountDollars: 80, maxDiscountDollars: null, serviceKeyFilter: null, serviceCategoryFilter: null },
+  };
+
+  test('gate off: byte-identical to the legacy calculateVisitFinancialsForAddons floor', () => {
+    const lines = [];
+    const legacy = calculateVisitFinancialsForAddons(pricingFixture, lines).price || 0;
+    const floor = occurrenceFloorPrice(pricingFixture, lines, {
+      memberSeriesCovered: false, isBoosterDate: false, addonOnlyTotal,
+    });
+    expect(floor).toBe(legacy);
+    expect(floor).toBe(0); // the legacy bug's own $0 — unchanged when the gate is off
+  });
+
+  test('gate on: a later add-on-free date floors at the canonical $10, never the legacy $0', async () => {
+    await withGateLive(() => {
+      const later = occurrenceFloorPrice(pricingFixture, [], {
+        memberSeriesCovered: false, isBoosterDate: false, addonOnlyTotal,
+      });
+      expect(later).toBe(10);
+
+      // The date WITH the add-on due restacks to its own, different floor.
+      const withAddon = occurrenceFloorPrice(pricingFixture, [
+        { base: 100, price: 100, serviceKey: 'one_time_addon', serviceCategory: 'addon', discount: null },
+      ], { memberSeriesCovered: false, isBoosterDate: false, addonOnlyTotal });
+      expect(withAddon).toBe(90);
+    });
+  });
+
+  test('gate on: a covered-member date still uses the restacked add-on-only total', async () => {
+    await withGateLive(() => {
+      const pricing = {
+        primaryBase: 0,
+        primaryServiceKey: 'general_pest',
+        primaryServiceCategory: 'pest_control',
+        primaryDiscount: null,
+        appointmentDiscount: { discountType: 'fixed_amount', discountAmount: 30, discountDollars: 30, maxDiscountDollars: null, serviceKeyFilter: null, serviceCategoryFilter: null },
+      };
+      const recurringAddon = { base: 100, price: 84, serviceKey: 'recurring_addon', serviceCategory: 'addon', discount: { discountType: 'percentage', discountAmount: 20, discountDollars: 16, maxDiscountDollars: null } };
+      const oneTimeAddon = { base: 50, price: 50, serviceKey: 'one_time_addon', serviceCategory: 'addon', discount: null };
+
+      const anchorFloor = occurrenceFloorPrice(pricing, [recurringAddon, oneTimeAddon], {
+        memberSeriesCovered: true, isBoosterDate: false, addonOnlyTotal,
+      });
+      expect(anchorFloor).toBe(134); // 84 (restacked recurring add-on net) + 50
+
+      const laterFloor = occurrenceFloorPrice(pricing, [recurringAddon], {
+        memberSeriesCovered: true, isBoosterDate: false, addonOnlyTotal,
+      });
+      expect(laterFloor).toBe(86); // restacked to $14 off, not the frozen $16
+    });
+  });
+
+  test('gate on: a booster date is never addon-only-stripped, even for a covered member', async () => {
+    await withGateLive(() => {
+      const pricing = {
+        primaryBase: 100,
+        primaryNet: 100,
+        primaryServiceKey: 'general_pest',
+        primaryServiceCategory: 'pest_control',
+        primaryDiscount: null,
+        appointmentDiscount: null,
+      };
+      const floor = occurrenceFloorPrice(pricing, [], {
+        memberSeriesCovered: true, isBoosterDate: true, addonOnlyTotal,
+      });
+      expect(floor).toBe(100);
     });
   });
 });
