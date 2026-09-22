@@ -11506,20 +11506,28 @@ async function completeScheduledService(completionInput, packetContext = null) {
         } catch (failErr) {
           // Every branch above that resolves (deferred / not-sent /
           // delivered / no body) already gives the claim back or finalizes
-          // it. The remaining gap is a THROW reaching here — from somewhere
-          // still pre-provider (template render, the pre-send notes write),
-          // or a DEFINITE rejection (deliveryOutcome: 'not_sent') the send
-          // layer still throws rather than returns. Codex pre-push P1: the
-          // messaging layer attaches providerOutcome to every exception it
-          // raises, not only uncertain ones, so checking its mere presence
-          // wrongly retained definite non-deliveries too — the SAME
-          // deliveryUnverifiedProviderOutcome classifier every completion
-          // SMS sender in this file already uses is the correct test: only
-          // a genuinely uncertain outcome (throwIfDeliveryUnverified's own
-          // throw) must NOT be restored here, the "retained for review"
-          // posture every other sender in this codebase gives an
-          // unverified send.
-          if (declineSendClaim && !deliveryUnverifiedProviderOutcome(failErr)) {
+          // it. The remaining gap is a THROW reaching here, which falls
+          // into three classes: (1) still pre-provider (template render,
+          // the pre-send notes write) — restore; (2) a DEFINITE rejection
+          // the send layer throws rather than returns — restore; (3) the
+          // provider ACCEPTED the text and the throw came from bookkeeping
+          // AFTER that (e.g. the audit-row insert) — do NOT restore, or a
+          // customer who already has the pay link gets it re-texted. Codex
+          // pre-push P1 (round 2): checking mere presence of
+          // failErr.providerOutcome wrongly restored class (2) too (it is
+          // attached to EVERY exception the messaging layer raises, not
+          // only uncertain ones) — deliveryUnverifiedProviderOutcome fixed
+          // that. Codex pre-push P1 (round 3): that alone still missed
+          // class (3) — an ACCEPTED outcome is not 'uncertain' either, so
+          // it read as restorable too, the exact "delivered, bookkeeping
+          // failed" shape sendViaSMS's own catch (smsDelivered) instead
+          // deliberately leaves claimed for review. providerAccepted below
+          // closes that: only a genuinely pre-provider or definite
+          // non-delivery throw restores; an accepted or uncertain one is
+          // retained, the same posture every other sender in this codebase
+          // gives those two.
+          const providerAccepted = failErr?.providerOutcome?.sent === true;
+          if (declineSendClaim && !providerAccepted && !deliveryUnverifiedProviderOutcome(failErr)) {
             await DeclineNoticeInvoiceService.restoreSendClaim(
               invoice.id, declineSendClaim.previousStatus, declineSendClaim.claimed,
               [], db, declineSendClaim.invoice.send_claim_token,
