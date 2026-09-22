@@ -942,6 +942,12 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     if (sending || uploading || listening) return;
     setDraftForRecipient(contactPhone ? smsThreadKey(contactPhone) : "", (draft) => {
       const hasDraft = draft.msgBody.trim() || draft.attachments.length || draft.loadedMessageDraft;
+      if (hasDraft && draft.fromNumber && ourNumber && replyTo?.messageId
+        && phoneKey(draft.fromNumber) !== phoneKey(ourNumber)
+        && replyTo.messageId !== draft.replyContext?.messageId) {
+        setSendResult({ ok: false, text: "Saved draft kept on its original sending number and reply target. Clear it or change the sending number before replying to this message." });
+        return {};
+      }
       const line = hasDraft ? draft.fromNumber : ourNumber || fromNumber;
       return {
         selectedCustomerId: draft.loadedMessageDraft ? draft.selectedCustomerId : (customerId || null),
@@ -982,8 +988,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     const logUrl = `/admin/communications/log?${params.toString()}`;
     return Promise.allSettled([
       adminFetch(logUrl, { signal: controller.signal }),
-      adminFetch("/admin/communications/stats", { signal: controller.signal }),
-      adminFetch("/admin/communications/blocked-numbers", { signal: controller.signal }),
+      options.background ? null : adminFetch("/admin/communications/stats", { signal: controller.signal }),
+      options.background ? null : adminFetch("/admin/communications/blocked-numbers", { signal: controller.signal }),
     ]).then(([logResult, statsResult, blockedResult]) => {
       if (
         controller.signal.aborted ||
@@ -1006,12 +1012,14 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       } else {
         setSmsLoadError("Messages could not be refreshed. Any messages shown are from the last successful load.");
       }
-      const statsData = statsResult.status === "fulfilled" ? statsResult.value : null;
-      setSmsStatsError(!statsData || !!statsData.error);
-      if (statsData && !statsData.error) setStats(statsData);
-      const blockedData = blockedResult.status === "fulfilled" ? blockedResult.value : null;
-      if (blockedData && Array.isArray(blockedData.numbers)) {
-        setBlocked(blockedFromNumbers(blockedData.numbers.map((b) => b.number)));
+      if (!options.background) {
+        const statsData = statsResult.status === "fulfilled" ? statsResult.value : null;
+        setSmsStatsError(!statsData || !!statsData.error);
+        if (statsData && !statsData.error) setStats(statsData);
+        const blockedData = blockedResult.status === "fulfilled" ? blockedResult.value : null;
+        if (blockedData && Array.isArray(blockedData.numbers)) {
+          setBlocked(blockedFromNumbers(blockedData.numbers.map((b) => b.number)));
+        }
       }
       setLoading(false);
     }).finally(() => {
@@ -2458,7 +2466,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         {smsStatsError && <ActionFeedback error>Activity counts are unavailable. Previously loaded counts may be out of date.</ActionFeedback>}
       </div>}
       {/* Stats + auto-reply */}
-      {!customer && !smsStatsError && <div className="hidden md:flex items-center gap-2 mb-4 flex-wrap">
+      {!customer && (!smsStatsError || stats) && <div className="hidden md:flex items-center gap-2 mb-4 flex-wrap">
         {" "}
         <StatCardV2
           label="Sent This Month"
@@ -2697,6 +2705,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             );
           })()}
         </>}
+        {!toNumber.trim() && <p className="mb-3 text-14 text-ink-secondary">Choose a recipient to start a message.</p>}
+        <fieldset disabled={!toNumber.trim()} className="m-0 min-w-0 border-0 p-0">
         {(agentDraft || agentDraftLoading) && (
           <div className="mb-3 px-3 py-2.5 bg-white border-hairline border-zinc-300 rounded-sm">
             <div className="flex items-center gap-2 mb-2">
@@ -3053,6 +3063,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             {sendResult.text}
           </div>
         )}
+        </fieldset>
         </fieldset>
       </Card>
       {!customer && <>

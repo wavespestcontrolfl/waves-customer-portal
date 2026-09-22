@@ -14,7 +14,7 @@ const inbound = (id, body, phone = "+19415550100") => ({
   id, from: phone, to: line, direction: "inbound", body, isRead: true,
   createdAt: "2024-07-01T12:00:00Z",
 });
-let messages, failLog, hasMore, loadLog;
+let messages, failLog, failStats, hasMore, loadLog;
 const attachment = { url: "https://example.invalid/gate.png", key: "fixture/gate", fileName: "gate.png", size: 4, mimeType: "image/png", attachmentToken: "fixture-token" };
 const response = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
 const tick = async (ms = 350) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
@@ -39,7 +39,7 @@ beforeEach(() => {
     static revokeObjectURL = vi.fn();
   });
   messages = [inbound("a", "Please check the gate")];
-  failLog = false; hasMore = false; loadLog = null;
+  failLog = false; failStats = false; hasMore = false; loadLog = null;
   vi.stubGlobal("fetch", vi.fn(async (url) => {
     const parsed = new URL(String(url), "http://localhost");
     if (parsed.pathname.endsWith("/log")) {
@@ -47,6 +47,7 @@ beforeEach(() => {
       return failLog ? response({ error: "Unavailable" }, 503) : response({ messages, hasMore, page: Number(parsed.searchParams.get("page")) });
     }
     if (parsed.pathname.endsWith("/blocked-numbers")) return response({ numbers: [] });
+    if (parsed.pathname.endsWith("/stats")) return failStats ? response({ error: "Unavailable" }, 503) : response({});
     if (parsed.pathname.endsWith("/attach")) return response({ attachments: [attachment] });
     if (parsed.pathname.endsWith("/sms")) return response({ sent: true, providerMessageId: "SMaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" });
     if (parsed.pathname.endsWith("/drafts/approval-a")) return response({ id: "approval-a", draftResponse: "Original reply", recipientPhone: "+19415550100", customerPhone: "+19415550100", customerId: "customer-a", resolvedFromNumber: "+19415550199" });
@@ -90,6 +91,40 @@ it("pauses polling while hidden or on another channel and refreshes on return", 
   expect(logRequests()).toHaveLength(initialCalls + 1);
   view.rerender(<SmsTab active />); await tick();
   expect(logRequests()).toHaveLength(initialCalls + 2);
+});
+
+it("polls messages without repeating statistics and blocklist queries", async () => {
+  setup(); await tick();
+  const callsTo = (path) => fetch.mock.calls.filter(([url]) => String(url).endsWith(path));
+  await tick(90000);
+  fireEvent(document, new Event("visibilitychange")); await tick();
+  expect(logRequests()).toHaveLength(5);
+  expect(callsTo("/stats")).toHaveLength(1);
+  expect(callsTo("/blocked-numbers")).toHaveLength(1);
+  fireEvent.click(screen.getByRole("button", { name: "Refresh messages" })); await tick();
+  expect(callsTo("/stats")).toHaveLength(2);
+  expect(callsTo("/blocked-numbers")).toHaveLength(2);
+});
+
+it("keeps an active statistics filter available to clear after its refresh fails", async () => {
+  setup(); await tick();
+  fireEvent.click(screen.getByRole("button", { name: /Sent This Month/ }));
+  expect(screen.queryByText("Please check the gate")).not.toBeInTheDocument();
+  failStats = true;
+  fireEvent.click(screen.getByRole("button", { name: "Refresh messages" })); await tick();
+  expect(screen.getByRole("alert")).toHaveTextContent("Activity counts are unavailable");
+  fireEvent.click(screen.getByRole("button", { name: /Sent This Month/ }));
+  expect(screen.getByText("Please check the gate")).toBeInTheDocument();
+});
+
+it("requires a recipient before composing text, media, or a scheduled send", async () => {
+  const { container } = setup(); await tick();
+  expect(screen.getByRole("textbox", { name: "Text message" })).toBeDisabled();
+  expect(container.querySelector('input[type="file"]')).toBeDisabled();
+  expect(screen.getByText("Choose a recipient to start a message.")).toBeInTheDocument();
+  fireEvent.change(screen.getByPlaceholderText("Search by name or enter phone number…"), { target: { value: "+19415550100" } });
+  expect(screen.getByRole("textbox", { name: "Text message" })).toBeEnabled();
+  expect(container.querySelector('input[type="file"]')).toBeEnabled();
 });
 
 it("keeps refreshed arrivals first in the log and uses the latest inbound for AI Draft", async () => {
@@ -189,6 +224,32 @@ it("does not carry a reply target into a manually changed recipient", async () =
   const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/communications/sms"));
   expect(JSON.parse(request[1].body)).toMatchObject({ to: "+19415550102", body: "New recipient reply" });
   expect(JSON.parse(request[1].body)).not.toHaveProperty("replyToMessageId");
+});
+
+it.each(["text", "media"])("keeps a saved %s draft's sender and reply target together across lines", async (content) => {
+  messages = [
+    { ...inbound("request-a", "Request on original line"), messageType: "inbound" },
+    { ...inbound("applicant-b", "Reply on recruiting line"), to: "+19412972606", messageType: "job_applicant_reply", createdAt: "2024-07-01T12:01:00Z" },
+  ];
+  const { container } = setup(); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Log View" }));
+  fireEvent.click(screen.getByText("Request on original line"));
+  fireEvent.click(screen.getByRole("button", { name: "Text back" }));
+  if (content === "text") fireEvent.change(screen.getByRole("textbox", { name: "Text message" }), { target: { value: "Keep this draft" } });
+  else {
+    fireEvent.change(container.querySelector('input[type="file"]'), { target: { files: [new File(["test"], "gate.png", { type: "image/png" })] } });
+    await tick();
+  }
+  fireEvent.click(screen.getByText("Request on original line"));
+  fireEvent.click(screen.getByText("Reply on recruiting line"));
+  fireEvent.click(screen.getByRole("button", { name: "Text back" }));
+  expect(screen.getByText(/Saved draft kept on its original sending number and reply target/)).toBeInTheDocument();
+  expect(screen.getByRole("combobox", { name: "Send from" })).toHaveValue(line);
+  if (content === "text") expect(screen.getByRole("textbox", { name: "Text message" })).toHaveValue("Keep this draft");
+  else expect(screen.getByRole("button", { name: "Remove gate.png" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
+  const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/communications/sms"));
+  expect(JSON.parse(request[1].body)).toMatchObject({ fromNumber: line, replyToMessageId: "request-a" });
 });
 
 it("replies to the outstanding request on its own line after newer recruiting activity", async () => {
