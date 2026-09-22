@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AdminInvoicesPage from "./AdminInvoicesPage";
+import { __resetDiscountStackingCache } from "../../hooks/useDiscountStacking";
 
 const customer = { id: "customer-example", first_name: "Avery", last_name: "Example", email: "avery@example.invalid", phone: "9415550100", property_type: "residential" };
 const invoice = { ...customer, customer_id: customer.id, id: "invoice-example", invoice_number: "WPC-QA-001", status: "sent", total: 120, due_date: "2099-12-31", service_date: "2026-09-08", line_items: [{ description: "Quarterly pest control", quantity: 1, unit_price: 120, amount: 120 }], notes: "Existing notes" };
@@ -14,6 +15,7 @@ let overrides, requests, unmatched, rows;
 
 beforeEach(() => {
   overrides = new Map(); requests = []; unmatched = []; rows = [{ ...invoice }];
+  __resetDiscountStackingCache();
   localStorage.clear(); localStorage.setItem("waves_admin_token", "synthetic-token");
   localStorage.setItem("waves_admin_user", JSON.stringify({ id: "fixture-user", role: "admin" }));
   vi.stubGlobal("confirm", vi.fn(() => true));
@@ -29,6 +31,10 @@ beforeEach(() => {
     if (key === "GET /api/admin/invoices/customers/search") return response({ customers: [customer] });
     if (key === `GET /api/admin/invoices/service-records/${customer.id}`) return response({ records: [] });
     if (key === "GET /api/admin/discounts") return response({ discounts: [] });
+    // GATE_DISCOUNT_STACKING probe (useDiscountStacking.js) — every money
+    // surface with a discount preview issues this once per mount; off by
+    // default here, matching the gate's dark-ships-off contract.
+    if (key === "GET /api/admin/discounts/stacking") return response({ enabled: false });
     if (key === "GET /api/admin/services") return response({ services: [] });
     if (key === `GET /api/admin/invoices/${invoice.id}`) return response(rows[0]);
     if (key === `GET /api/admin/invoices/${invoice.id}/recipients`) return response(recipients);
@@ -305,5 +311,335 @@ describe("Invoice foundation workflow preservation", () => {
     const writes = requests.filter(request => request.key.startsWith("POST "));
     expect(writes).toHaveLength(1); expect(writes[0].key).toBe(key);
     expect(writes[0].body).toMatchObject({ customerId: customer.id, serviceRecordId: null, notes: "Preserve new draft", lineItems: [{ description: "Quarterly pest control", quantity: 1, unit_price: 120, amount: 120 }] });
+  });
+
+  // GATE_DISCOUNT_STACKING (coordinator ruling after Codex round 2 on PR
+  // #4655): the stacking-freshness probe must never gate a discount-free
+  // save — an unreachable /admin/discounts/stacking endpoint (simulated
+  // here as a hard failure on every call) must not block an ordinary
+  // invoice create that carries no discount line items at all.
+  it("a failed stacking probe never blocks a discount-free create", async () => {
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ error: "stacking probe down" }, 503));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Quarterly pest control" } });
+    fireEvent.change(screen.getByLabelText("Price ($)"), { target: { value: "120" } });
+    fireEvent.change(screen.getByLabelText("Send", { exact: true }), { target: { value: "draft" } });
+    const key = "POST /api/admin/invoices";
+    overrides.set(key, () => response({ id: "new-invoice-1", invoice_number: "WPC-2026-0100", status: "draft" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create draft", exact: true }));
+    await waitFor(() => expect(requests.some(request => request.key === key)).toBe(true));
+    expect(screen.queryByText(/Discount rules just changed/)).not.toBeInTheDocument();
+  });
+
+  // Same probe failure, but the invoice now carries a discount line item —
+  // the save must refuse rather than silently post additive totals the
+  // server might actually compound (or vice versa).
+  it("a failed stacking probe refuses a create that carries a discount line item", async () => {
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [{ id: "ten-pct", name: "Ten Percent", discount_type: "percentage", amount: 10, is_active: true, show_in_invoices: true }] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ error: "stacking probe down" }, 503));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Quarterly pest control" } });
+    fireEvent.change(screen.getByLabelText("Price ($)"), { target: { value: "120" } });
+    fireEvent.change(screen.getByLabelText("Send", { exact: true }), { target: { value: "draft" } });
+    fireEvent.change(await screen.findByLabelText("Add a discount"), { target: { value: "Ten" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Ten Percent/ }));
+    const key = "POST /api/admin/invoices";
+    fireEvent.click(screen.getByRole("button", { name: "Create draft", exact: true }));
+    expect(await screen.findAllByText(/Discount rules just changed/)).not.toHaveLength(0);
+    expect(requests.some(request => request.key === key)).toBe(false);
+  });
+
+  // GitHub Codex round 2 on PR #4655, P2 (:5993 in that head): a CUSTOM
+  // pick (operator-typed percentage) must compound with an existing fixed
+  // credit already on the line, exactly like a catalog pick already does
+  // — the inserted row must show the compounded $7, never the raw $10
+  // getCustomDiscountValue alone would give.
+  it("a custom percentage pick compounds with an existing fixed credit on the same line", async () => {
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "thirty-fixed", name: "Thirty Dollars", discount_type: "fixed_amount", amount: 30, is_active: true, show_in_invoices: true },
+      { id: "custom-pct", name: "Custom Percent", discount_type: "variable_percentage", amount: 0, is_active: true, show_in_invoices: true },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    vi.stubGlobal("prompt", vi.fn(() => "10"));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Quarterly pest control" } });
+    fireEvent.change(screen.getByLabelText("Price ($)"), { target: { value: "100" } });
+    fireEvent.change(await screen.findByLabelText("Add a discount"), { target: { value: "Thirty" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Thirty Dollars/ }));
+    fireEvent.change(await screen.findByLabelText("Add a discount"), { target: { value: "Custom" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Custom Percent/ }));
+    const creditValues = await waitFor(() => {
+      const inputs = screen.getAllByLabelText("Credit ($)");
+      expect(inputs).toHaveLength(2);
+      return inputs.map((el) => el.value);
+    });
+    expect(creditValues).toContain("-30");
+    expect(creditValues).toContain("-7");
+    expect(creditValues).not.toContain("-10");
+  });
+
+  // GitHub Codex round 3 on PR #4655, P2 (:6089 in that head): a preset
+  // that conflicts with a non-stackable group already on the invoice must
+  // be filtered out of the picker BEFORE save, not just refused at Save.
+  it("hides a non-stackable-group preset once its group is already chosen on the invoice", async () => {
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "silver-id", name: "WaveGuard Silver", discount_type: "percentage", amount: 10, is_active: true, show_in_invoices: true, stack_group: "tier", is_stackable: false },
+      { id: "gold-id", name: "WaveGuard Gold", discount_type: "percentage", amount: 15, is_active: true, show_in_invoices: true, stack_group: "tier", is_stackable: false },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Quarterly pest control" } });
+    fireEvent.change(screen.getByLabelText("Price ($)"), { target: { value: "100" } });
+    fireEvent.change(await screen.findByLabelText("Add a discount"), { target: { value: "Wave" } });
+    fireEvent.click(await screen.findByRole("button", { name: /WaveGuard Silver/ }));
+    fireEvent.change(await screen.findByLabelText("Add a discount"), { target: { value: "Wave" } });
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /WaveGuard Gold/ })).not.toBeInTheDocument();
+    });
+  });
+
+  // Codex pre-push audit P1 (round 4 on PR #4655, LAST patch round): the
+  // write binds the CONFIRMED gate state the preview ran under — the
+  // server rejects a mismatch, so the client must actually send it.
+  it("a create carrying a discount pick sends expected_discount_stacking bound to the confirmed probe value", async () => {
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "ten-pct", name: "Ten Percent", discount_type: "percentage", amount: 10, is_active: true, show_in_invoices: true },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Quarterly pest control" } });
+    fireEvent.change(screen.getByLabelText("Price ($)"), { target: { value: "120" } });
+    fireEvent.change(screen.getByLabelText("Send", { exact: true }), { target: { value: "draft" } });
+    fireEvent.change(await screen.findByLabelText("Add a discount"), { target: { value: "Ten" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Ten Percent/ }));
+    const key = "POST /api/admin/invoices";
+    overrides.set(key, () => response({ id: "new-invoice-1", invoice_number: "WPC-2026-0100", status: "draft" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create draft", exact: true }));
+    await waitFor(() => expect(requests.some(request => request.key === key)).toBe(true));
+    expect(requests.find(request => request.key === key).body.expected_discount_stacking).toBe(true);
+  });
+
+  // A discount-FREE create never even probes the gate (established round-2
+  // ruling) — expected_discount_stacking must therefore be entirely absent
+  // from the body, not sent as a stale/undefined value the server would
+  // still have to special-case.
+  it("a discount-free create omits expected_discount_stacking entirely", async () => {
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Quarterly pest control" } });
+    fireEvent.change(screen.getByLabelText("Price ($)"), { target: { value: "120" } });
+    fireEvent.change(screen.getByLabelText("Send", { exact: true }), { target: { value: "draft" } });
+    const key = "POST /api/admin/invoices";
+    overrides.set(key, () => response({ id: "new-invoice-2", invoice_number: "WPC-2026-0101", status: "draft" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create draft", exact: true }));
+    await waitFor(() => expect(requests.some(request => request.key === key)).toBe(true));
+    expect(requests.find(request => request.key === key).body).not.toHaveProperty("expected_discount_stacking");
+  });
+
+  // Same binding on the EDIT path — a save whose line_items changed and
+  // carries a discount pick must also bind the confirmed gate state.
+  it("an edit save that changes discounted line items sends expected_discount_stacking too", async () => {
+    rows = [{ ...invoice, status: "draft" }];
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "ten-pct", name: "Ten Percent", discount_type: "percentage", amount: 10, is_active: true, show_in_invoices: true },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    await openPage(); await expand();
+    fireEvent.click(screen.getByRole("button", { name: "Edit", exact: true }));
+    fireEvent.change(await screen.findByLabelText("Add a discount"), { target: { value: "Ten" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Ten Percent/ }));
+    const key = `PUT /api/admin/invoices/${invoice.id}`;
+    overrides.set(key, () => response({ ...rows[0], status: "draft" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(requests.some(request => request.key === key)).toBe(true));
+    expect(requests.find(request => request.key === key).body.expected_discount_stacking).toBe(true);
+  });
+
+  // Codex pre-push audit P1 (round 5 on PR #4655, addendum): the SUBMIT-time
+  // freshness probe stackingStillFresh() issues must run ONLY when this
+  // save actually changes line_items — a due-date/notes-only edit on an
+  // invoice that already carries a discount line must succeed even while
+  // /api/admin/discounts/stacking is failing (the component's own mount-time
+  // poll for the preview still calls it once, fails closed, and is
+  // unrelated to this submit-time gate — this pins that the SAVE itself
+  // never depends on that endpoint when line_items isn't being sent).
+  it("a notes-only edit on an already-discounted invoice still saves while the probe is down", async () => {
+    const discountedInvoice = {
+      ...invoice,
+      status: "draft",
+      line_items: [
+        { client_id: "line-1", description: "Quarterly pest control", quantity: 1, unit_price: 120, amount: 120 },
+        { client_id: "d1", _kind: "discount", discount_id: "ten-pct", discount_for: "line-1", description: "Ten Percent", quantity: 1, unit_price: -12, amount: -12 },
+      ],
+    };
+    rows = [discountedInvoice];
+    overrides.set(`GET /api/admin/invoices/${invoice.id}`, () => response(discountedInvoice));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ error: "stacking probe down" }, 503));
+    await openPage(); await expand();
+    fireEvent.click(screen.getByRole("button", { name: "Edit", exact: true }));
+    fireEvent.change(await screen.findByLabelText("Notes (optional)"), { target: { value: "Notes-only edit" } });
+    const key = `PUT /api/admin/invoices/${invoice.id}`;
+    overrides.set(key, () => response({ ...discountedInvoice, status: "draft" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(requests.some(request => request.key === key)).toBe(true));
+    expect(screen.queryByText(/Discount rules just changed/)).not.toBeInTheDocument();
+    const saved = requests.find(request => request.key === key).body;
+    expect(saved).not.toHaveProperty("line_items");
+    expect(saved).not.toHaveProperty("expected_discount_stacking");
+  });
+
+  // Same discounted invoice, same failing probe — but this save DOES
+  // change line_items (adds another discount pick), so the probe is
+  // required and its failure must still refuse the save.
+  it("an edit that changes discounted line items on the same invoice is still refused while the probe is down", async () => {
+    const discountedInvoice = {
+      ...invoice,
+      status: "draft",
+      line_items: [
+        { client_id: "line-1", description: "Quarterly pest control", quantity: 1, unit_price: 120, amount: 120 },
+        { client_id: "d1", _kind: "discount", discount_id: "ten-pct", discount_for: "line-1", description: "Ten Percent", quantity: 1, unit_price: -12, amount: -12 },
+      ],
+    };
+    rows = [discountedInvoice];
+    overrides.set(`GET /api/admin/invoices/${invoice.id}`, () => response(discountedInvoice));
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "twenty-fixed", name: "Twenty Dollars", discount_type: "fixed_amount", amount: 20, is_active: true, show_in_invoices: true },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ error: "stacking probe down" }, 503));
+    await openPage(); await expand();
+    fireEvent.click(screen.getByRole("button", { name: "Edit", exact: true }));
+    fireEvent.change(screen.getAllByLabelText("Price ($)")[0], { target: { value: "150" } });
+    const key = `PUT /api/admin/invoices/${invoice.id}`;
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(await screen.findAllByText(/Discount rules just changed/)).not.toHaveLength(0);
+    expect(requests.some(request => request.key === key)).toBe(false);
+  });
+
+  // Codex pre-push audit P1 (round 6 on PR #4655): freeze only client_ids
+  // that were ACTUALLY persisted — a legacy catalog-backed discount item
+  // saved with NO client_id of its own gets one synthesized purely for
+  // React/reprice bookkeeping; that synthetic id must never be treated as
+  // persisted, or the preview would keep a $10 discount frozen after its
+  // $100 parent line is edited to $200, while the server (which never
+  // sees the synthetic id) correctly recomputes $20 — client and server
+  // must agree.
+  it("a legacy discount item with no stored client_id recomputes live on a price edit, matching the server", async () => {
+    const legacyInvoice = {
+      ...invoice,
+      status: "draft",
+      line_items: [
+        { client_id: "line-1", description: "Quarterly pest control", quantity: 1, unit_price: 100, amount: 100 },
+        // No client_id at all — a legacy row from before this field existed.
+        { _kind: "discount", discount_id: "ten-pct", discount_for: "line-1", description: "Ten Percent", quantity: 1, unit_price: -10, amount: -10 },
+      ],
+    };
+    rows = [legacyInvoice];
+    overrides.set(`GET /api/admin/invoices/${invoice.id}`, () => response(legacyInvoice));
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "ten-pct", name: "Ten Percent", discount_type: "percentage", amount: 10, is_active: true, show_in_invoices: true },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    await openPage(); await expand();
+    fireEvent.click(screen.getByRole("button", { name: "Edit", exact: true }));
+    const priceInputs = await screen.findAllByLabelText("Price ($)");
+    fireEvent.change(priceInputs[0], { target: { value: "200" } });
+    // Before this fix the aggregate (and, since round 6, the row's own
+    // Credit ($) field too — repriceAllFreshDiscounts now resyncs a fresh
+    // sibling on ANY price edit) stayed frozen at $10 (10% of the OLD
+    // $100), disagreeing with the server, which never sees the synthetic
+    // client_id and always recomputes to $20 (10% of the new $200). Both
+    // surfaces now show -$20.00, so at least one match is the proof.
+    await waitFor(() => {
+      expect(screen.getAllByText("-$20.00").length).toBeGreaterThan(0);
+    });
+  });
+
+  // Codex pre-push audit P2 (round 6 on PR #4655): the picker's own
+  // conflict check must include a PERSISTED discount whose catalog row is
+  // now retired/hidden — not only active rows — or an operator could pick
+  // a second same-group discount that previews fine and only 400s on Save.
+  it("a retired persisted Silver still hides Gold in the picker (not just at Save)", async () => {
+    const tieredInvoice = {
+      ...invoice,
+      status: "draft",
+      line_items: [
+        { client_id: "line-1", description: "Quarterly pest control", quantity: 1, unit_price: 100, amount: 100 },
+        { client_id: "d1", _kind: "discount", discount_id: "silver-id", discount_for: "line-1", description: "WaveGuard Silver", quantity: 1, unit_price: -10, amount: -10 },
+      ],
+    };
+    rows = [tieredInvoice];
+    overrides.set(`GET /api/admin/invoices/${invoice.id}`, () => response(tieredInvoice));
+    // The server's own GET /api/admin/discounts returns EVERY row,
+    // retired included — only the picker's SELECTABLE list narrows it.
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "silver-id", name: "WaveGuard Silver", discount_type: "percentage", amount: 10, is_active: false, show_in_invoices: false, stack_group: "tier", is_stackable: false },
+      { id: "gold-id", name: "WaveGuard Gold", discount_type: "percentage", amount: 15, is_active: true, show_in_invoices: true, stack_group: "tier", is_stackable: false },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    await openPage(); await expand();
+    fireEvent.click(screen.getByRole("button", { name: "Edit", exact: true }));
+    fireEvent.change(await screen.findByLabelText("Add a discount"), { target: { value: "Wave" } });
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /WaveGuard Gold/ })).not.toBeInTheDocument();
+    });
+  });
+
+  // Codex pre-push audit P0 (round 6 on PR #4655, post-push — Codex
+  // itself, not the Claude fallback): removing a discount that was
+  // clamping a sibling to $0 must reprice that sibling back up before
+  // submit — not leave it at its stale $0 (which the submit filter would
+  // then silently drop from the POST entirely).
+  it("removing a $100 credit reprices a clamped 10% sibling back to $10, and the POST carries it", async () => {
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "ten-pct", name: "Ten Percent", discount_type: "percentage", amount: 10, is_active: true, show_in_invoices: true },
+      { id: "hundred-fixed", name: "Hundred Dollars", discount_type: "fixed_amount", amount: 100, is_active: true, show_in_invoices: true },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Quarterly pest control" } });
+    fireEvent.change(screen.getByLabelText("Price ($)"), { target: { value: "100" } });
+    fireEvent.change(await screen.findByLabelText("Add a discount"), { target: { value: "Ten" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Ten Percent/ }));
+    fireEvent.change(await screen.findByLabelText("Add a discount"), { target: { value: "Hundred" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Hundred Dollars/ }));
+    // The $100 fixed credit (canonical: fixed credits first) fully
+    // consumes the line, clamping the 10% row to $0.
+    await waitFor(() => {
+      const creditValues = screen.getAllByLabelText("Credit ($)").map((el) => el.value);
+      expect(creditValues).toContain("-100");
+      // The clamped-to-$0 row's own field renders blank (value={item.unit_price
+      // || ""} treats -0 as falsy) — a separate, pre-existing display quirk,
+      // not this fix's concern. The aggregate total below is the proof this
+      // row is genuinely clamped to $0 right now.
+      expect(creditValues).toContain("");
+    });
+    // Remove the $100 fixed credit — the 10% row must reprice back to $10.
+    const removeButtons = screen.getAllByRole("button", { name: "Remove line item" });
+    fireEvent.click(removeButtons[removeButtons.length - 1]);
+    await waitFor(() => {
+      expect(screen.getByLabelText("Credit ($)").value).toBe("-10");
+    });
+    fireEvent.change(screen.getByLabelText("Send", { exact: true }), { target: { value: "draft" } });
+    const key = "POST /api/admin/invoices";
+    overrides.set(key, () => response({ id: "new-invoice-3", invoice_number: "WPC-2026-0102", status: "draft" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create draft", exact: true }));
+    await waitFor(() => expect(requests.some(request => request.key === key)).toBe(true));
+    const posted = requests.find(request => request.key === key).body;
+    const discountLine = posted.lineItems.find((i) => i._kind === "discount");
+    expect(discountLine).toBeDefined();
+    expect(discountLine.amount).toBe(-10);
   });
 });

@@ -2,6 +2,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { isMembershipCustomerRow } = require('./waveguard-existing-services');
 const { stackDiscounts } = require('./discount-stack');
+const { discountStackingLive } = require('../config/feature-gates');
 
 // The /api/admin/discounts/calculate preview used to compute each
 // percentage independently against the untouched subtotal (additive) while
@@ -9,20 +10,17 @@ const { stackDiscounts } = require('./discount-stack');
 // the same "how do several discounts combine" question (CLAUDE.md rule 15
 // / AGENTS.md "extend the existing mechanism"). Delegating here makes this
 // ONE engine instead of two, and fixes a real bug as a side effect (see
-// below) — but it does NOT yet make the preview compound. calculateDiscounts
-// below always calls this with compound:false, regardless of
-// GATE_DISCOUNT_STACKING: server/services/invoice.js's InvoiceService.create
-// (the thing this preview is a preview OF) still computes each manual
-// percentage against the untouched subtotal unconditionally — it doesn't
-// read the gate at all yet. Compounding the preview while the save stays
-// additive would make them disagree WORSE than before this consolidation,
-// not better (Codex pre-push audit P1: $111 at 10%+5% previewed $94.90
-// compounded against a $94.35 additive save). discountStackingLive()
-// (server/config/feature-gates.js) stays reserved for the stacking
-// endpoint alone until slice 5 (invoice/document calculation) changes
-// invoice.js and this call site TOGETHER, in the same PR, with its own
-// preview/save parity test — flipping one side alone is exactly the
-// half-migrated state that caused this finding.
+// below).
+//
+// compound now reads discountStackingLive() (slice 5 of #4405): invoice.js's
+// InvoiceService.create — the thing this preview is a preview OF — flips to
+// the SAME read in the SAME change, so preview and save move together. Gate
+// off, both stay additive (byte-identical to before this lane, aside from
+// the rounding fix below). Gate on, both compound (owner ruling 2026-09-11,
+// "the lesser of the two" — $111 at 10%+5% previews AND saves $16.10, never
+// the additive $16.65, and never the half-migrated $94.90-preview /
+// $94.35-save disagreement an earlier round of this lane produced by
+// compounding only the preview).
 //
 // `applied` is already priority-ordered and already eligibility-filtered
 // by the caller; this only does the per-discount dollar math, mapping the
@@ -324,12 +322,12 @@ const DiscountEngine = {
     }
 
     // Calculate dollar amounts — delegated to discount-stack.js, the
-    // single arithmetic core (rule 15). compound:false, UNCONDITIONALLY —
-    // see this file's header for why the gate isn't read here yet
-    // (invoice.js's save path doesn't compound either, so previewing a
-    // compounded total would disagree with the save, not match it).
+    // single arithmetic core (rule 15). compound reads discountStackingLive()
+    // — see this file's header: invoice.js's InvoiceService.create reads the
+    // same gate in the same change, so this preview always matches what the
+    // save will do.
     const { discounts, totalDiscount, afterDiscount } = applyDiscountArithmetic(subtotal, applied, {
-      compound: false,
+      compound: discountStackingLive(),
     });
 
     return { discounts, totalDiscount, afterDiscount, subtotal };

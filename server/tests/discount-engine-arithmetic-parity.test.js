@@ -306,23 +306,20 @@ describe('DiscountEngine.calculateDiscounts (full function, DB mocked) — addit
     expect(result.totalDiscount).toBe(16.65);
   });
 
-  // Codex pre-push audit P1: with GATE_DISCOUNT_STACKING=true, the preview
-  // used to compound while InvoiceService.create (invoice.js:1503) still
-  // computed each manual percentage against the untouched subtotal
-  // unconditionally — $111 at 10%+5% previewed $94.90 while the save
-  // yielded $94.35. This slice does not fix that by flipping the save; it
-  // fixes it by NOT compounding the preview either, so both sides stay
-  // additive and agreeing until slice 5 changes them together. The gate is
-  // therefore inert here on purpose — this test is what pins that down and
-  // must keep failing (on purpose) once slice 5 flips the call site to
-  // discountStackingLive(), as a reminder to update this test alongside it.
-  test('the gate stays inert here: GATE_DISCOUNT_STACKING=true does NOT make the preview compound', async () => {
+  // Slice 5 of #4405: GATE_DISCOUNT_STACKING=true now makes the preview
+  // compound — invoice.js's InvoiceService.create reads the SAME
+  // discountStackingLive() gate in the same change (see
+  // invoice-create-discount-stacking-parity.test.js for the preview==saved
+  // proof), so the two can never again disagree the way an earlier round of
+  // this lane did ($111 at 10%+5% previewed $94.90 while the save still
+  // computed the additive $94.35).
+  test('gate on: GATE_DISCOUNT_STACKING=true makes the preview compound', async () => {
     process.env.GATE_DISCOUNT_STACKING = 'true';
     mockDiscounts([activeDiscount({ discount_type: 'percentage', amount: 10 }), activeDiscount({ id: 'd2', discount_type: 'percentage', amount: 5 })]);
     const result = await DiscountEngine.calculateDiscounts(null, { subtotal: 111 });
-    // Still additive: 10% + 5% of the SAME $111 = $11.10 + $5.55 = $16.65,
-    // never the compounded $16.10 a stacking-aware save (slice 5) would
-    // produce.
-    expect(result.totalDiscount).toBe(16.65);
+    // Compounded: 10% then 5% on what's left = $11.10 + $5.00 = $16.10
+    // (owner ruling 2026-09-11, "the lesser of the two"), never the
+    // additive $16.65.
+    expect(result.totalDiscount).toBe(16.1);
   });
 });
