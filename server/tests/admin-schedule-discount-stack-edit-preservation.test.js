@@ -374,6 +374,88 @@ describe('legacyEconomicsPreservationDecision — pure decision (slice 4 of #440
       expect(result.legacyEconomicsPreserved).toBe(false);
     });
   });
+
+  // Codex pre-push audit P1 (round 4, confirmed real): the AGGREGATE total
+  // was preserved verbatim, but nothing protected the individual
+  // scheduled_service_addons ROW writes from the same cap-ignorant
+  // applyDiscount() recompute this PR already distrusts for the aggregate.
+  // insertScheduledServiceAddons deletes and re-inserts every addon row on
+  // EVERY save with an `addons` array, using `replaceAddons` — which was
+  // `normalizedAddons` unconditionally, even when legacyEconomicsPreserved
+  // is true. A capped-discount addon's row would silently corrupt to its
+  // naive uncapped figure while the (correctly preserved) aggregate stayed
+  // right — and that corrupted row becomes the STORED baseline the NEXT
+  // save's own existingAddonRows comparison trusts, defeating this whole
+  // mechanism one save late.
+  //
+  // Fix: when preserved, the decision also returns `preservedAddonLines` —
+  // each matched posted line with its MONEY fields (base/price/discount)
+  // overridden from the STORED row, while every other field (duration,
+  // recurring cadence, …) still comes from what THIS save posted, so a
+  // save that legitimately changes a non-money addon field alongside an
+  // otherwise-unchanged price still applies it.
+  describe('preservedAddonLines — the addon ROW write, not just the aggregate (Codex P1, round 4)', () => {
+    const cappedAddonDiscountId = 'disc-addon-50pct-cap10';
+    const cappedStoredRow = {
+      service_id: 'svc-1', service_name: 'Addon', base_price: 100, estimated_price: 90, // the REAL, capped stored net
+      discount_id: cappedAddonDiscountId, discount_name: 'Fixture 50% Off Capped $10',
+      discount_type: 'percentage', discount_amount: 50, discount_dollars: 10,
+    };
+    const cappedPostedLine = {
+      serviceId: 'svc-1', serviceName: 'Addon', base: 100, price: 50, // applyDiscount(100,'percentage',50) — cap-ignorant, deliberately wrong
+      discount: { discountId: cappedAddonDiscountId, discountType: 'percentage', discountAmount: 50 },
+      estimatedDuration: 30, recurringPattern: null,
+    };
+
+    test('a preserved save returns preservedAddonLines with the TRUE stored $90 net, never the naive $50', () => {
+      const result = legacyEconomicsPreservationDecision({
+        ...baseArgsFor(cappedPostedLine, cappedStoredRow),
+      });
+      expect(result.legacyEconomicsPreserved).toBe(true);
+      expect(result.preservedAddonLines).toHaveLength(1);
+      const [line] = result.preservedAddonLines;
+      expect(line.price).toBe(90); // NEVER the naive $50
+      expect(line.base).toBe(100);
+      expect(line.discount).toMatchObject({
+        discountId: cappedAddonDiscountId, discountType: 'percentage', discountAmount: 50, discountDollars: 10,
+      });
+    });
+
+    test('a legitimate NON-MONEY field change (estimatedDuration) on an otherwise money-unchanged addon still applies, alongside the preserved money', () => {
+      const result = legacyEconomicsPreservationDecision({
+        ...baseArgsFor({ ...cappedPostedLine, estimatedDuration: 45 }, cappedStoredRow), // operator changed duration 30 -> 45
+      });
+      expect(result.legacyEconomicsPreserved).toBe(true);
+      const [line] = result.preservedAddonLines;
+      expect(line.estimatedDuration).toBe(45); // the NEW, legitimate duration edit lands
+      expect(line.price).toBe(90); // money still preserved, untouched by the duration edit
+      expect(line.base).toBe(100);
+    });
+
+    test('preservedAddonLines is null when NOT preserved (a genuine price/discount edit) — the route must fall through to normalizedAddons unchanged', () => {
+      const result = legacyEconomicsPreservationDecision({
+        ...baseArgsFor({ ...cappedPostedLine, base: 999 }, cappedStoredRow), // a genuine GROSS change — the field this STAMPED line's comparison actually reads
+      });
+      expect(result.legacyEconomicsPreserved).toBe(false);
+      expect(result.preservedAddonLines).toBeNull();
+    });
+
+    // Helper: a minimal, self-contained legacyEconomicsPreservationDecision
+    // argument set for exactly one addon line + its stored row, isolating
+    // this describe block from baseArgs()'s own (unrelated) fixture shape.
+    function baseArgsFor(postedLine, storedRow) {
+      return {
+        legacyPreservationCandidate: true,
+        discountInputsPosted: false,
+        primaryServiceChanged: false,
+        primaryGross: 100,
+        existingPrimaryLinePrice: 100,
+        normalizedAddons: [postedLine],
+        existingAddonRows: [storedRow],
+        existingEstimatedPrice: 160,
+      };
+    }
+  });
 });
 
 // The round-7 P0 itself, reproduced against the CURRENT (post-slice-3)

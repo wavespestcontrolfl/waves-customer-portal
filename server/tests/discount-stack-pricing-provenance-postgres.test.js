@@ -26,6 +26,7 @@ const { discountStackingLive } = require('../config/feature-gates');
 const {
   restackStoredVisitFinancials, freezeLegacySeriesRootCaps, calculateStoredVisitFinancials, occurrenceFloorPrice,
   resolveUpdateDetailsAddonFinancials, legacyEconomicsPreservationDecision, calculateVisitFinancialsForAddons,
+  insertScheduledServiceAddons,
 } = adminScheduleRouter._test;
 
 const connection = process.env.DISCOUNT_STACK_PROVENANCE_TEST_DATABASE_URL;
@@ -695,6 +696,102 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
       await mockPg('scheduled_services').where({ id }).update({ estimated_price: decision.storedTotal });
       const rowAfterSave = await mockPg('scheduled_services').where({ id }).first('estimated_price');
       expect(Number(rowAfterSave.estimated_price)).toBe(160); // preserved through a real round trip, never $120
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
+
+  // Codex pre-push audit P1 (round 4): the AGGREGATE fix above (round 3)
+  // preserves scheduled_services.estimated_price, but insertScheduledServiceAddons
+  // (the SAME writer create/extension use) deletes and re-inserts every
+  // scheduled_service_addons ROW on every save with an `addons` array — a
+  // SEPARATE call site the aggregate fix never touched. Full round trip,
+  // sourced from a REAL Postgres addon row: preservedAddonLines is threaded
+  // through that SAME writer, and the row it re-inserts must carry the
+  // TRUE, capped $90 — never the naive $50 applyDiscount() would produce —
+  // so a SECOND save's own existingAddonRows read (the next notes-only
+  // save's baseline) still sees the row this mechanism is supposed to
+  // protect, not one already corrupted by the first save.
+  test('PUT /:id/update-details: preservedAddonLines threaded through insertScheduledServiceAddons re-inserts the addon row at its TRUE capped $90, never the naive $50 — and a SECOND save\'s baseline read confirms it', async () => {
+    const id = randomUUID();
+    const cappedDiscountId = randomUUID();
+    await mockPg('discounts').insert({
+      id: cappedDiscountId, discount_key: `fixture_capped_row_${cappedDiscountId.slice(0, 8)}`,
+      name: 'Fixture 50% Off Capped $10', discount_type: 'percentage', amount: 50, max_discount_dollars: 10, is_active: true,
+    });
+    await mockPg('scheduled_services').insert({
+      id, scheduled_date: '2099-11-18', service_type: 'Fixture Legacy Capped Row Service',
+      primary_line_price: 100,
+      discount_type: 'fixed_amount', discount_amount: 30, discount_dollars: 30,
+      estimated_price: 160,
+    });
+    await mockPg('scheduled_service_addons').insert({
+      id: randomUUID(), scheduled_service_id: id, service_name: 'Fixture Capped Add-On',
+      base_price: 100, estimated_price: 90, // the REAL, capped net
+      discount_type: 'percentage', discount_amount: 50, discount_dollars: 10, discount_id: cappedDiscountId,
+    });
+
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      // --- Save 1: notes-only, round-tripping the addon's exact terms. ---
+      const existing = await mockPg('scheduled_services').where({ id }).first(
+        'primary_line_price', 'discount_type', 'discount_amount', 'discount_dollars', 'estimated_price', 'pricing_provenance',
+      );
+      const existingAddonRows = await mockPg('scheduled_service_addons')
+        .where({ scheduled_service_id: id })
+        .select('service_id', 'service_name', 'base_price', 'estimated_price', 'discount_id', 'discount_name', 'discount_type', 'discount_amount', 'discount_dollars');
+      const normalizedAddons = [{
+        serviceId: null, serviceName: 'Fixture Capped Add-On', base: 100, price: 50, // applyDiscount(100,'percentage',50) — cap-ignorant
+        discount: { discountId: cappedDiscountId, discountType: 'percentage', discountAmount: 50 },
+      }];
+      const decision = legacyEconomicsPreservationDecision({
+        legacyPreservationCandidate: discountStackingLive() && !hasPricingRegimeMarker(existing),
+        discountInputsPosted: false,
+        primaryServiceChanged: false,
+        primaryGross: 100,
+        existingPrimaryLinePrice: Number(existing.primary_line_price),
+        normalizedAddons,
+        existingAddonRows,
+        existingEstimatedPrice: existing.estimated_price,
+      });
+      expect(decision.legacyEconomicsPreserved).toBe(true);
+      expect(decision.preservedAddonLines).toHaveLength(1);
+      expect(decision.preservedAddonLines[0].price).toBe(90); // never the naive 50
+
+      // The route's own write: aggregate from storedTotal (round 3's own
+      // fix), addon rows replaced via insertScheduledServiceAddons fed
+      // preservedAddonLines (round 4's fix) — the SAME writer create/
+      // extension use, exercised here through a real Postgres transaction.
+      await mockPg('scheduled_services').where({ id }).update({ estimated_price: decision.storedTotal });
+      const addonCols = await mockPg('scheduled_service_addons').columnInfo();
+      await mockPg('scheduled_service_addons').where({ scheduled_service_id: id }).del();
+      await insertScheduledServiceAddons(mockPg, id, decision.preservedAddonLines, addonCols, null);
+
+      const addonRowAfterSave1 = await mockPg('scheduled_service_addons').where({ scheduled_service_id: id }).first();
+      expect(Number(addonRowAfterSave1.estimated_price)).toBe(90); // NEVER 50 — the row itself, not just the aggregate
+      expect(Number(addonRowAfterSave1.base_price)).toBe(100);
+      expect(Number(addonRowAfterSave1.discount_dollars)).toBe(10);
+      const aggregateAfterSave1 = await mockPg('scheduled_services').where({ id }).first('estimated_price');
+      expect(Number(aggregateAfterSave1.estimated_price)).toBe(160);
+
+      // --- Save 2: the baseline this second save reads must be the ORIGINAL,
+      // uncorrupted $90 — proving save 1 never poisoned it. ---
+      const existingAddonRows2 = await mockPg('scheduled_service_addons')
+        .where({ scheduled_service_id: id })
+        .select('service_id', 'service_name', 'base_price', 'estimated_price', 'discount_id', 'discount_name', 'discount_type', 'discount_amount', 'discount_dollars');
+      expect(Number(existingAddonRows2[0].estimated_price)).toBe(90); // the baseline a corrupted row (round 4's own bug) would have moved to 50
+      const decision2 = legacyEconomicsPreservationDecision({
+        legacyPreservationCandidate: true,
+        discountInputsPosted: false,
+        primaryServiceChanged: false,
+        primaryGross: 100,
+        existingPrimaryLinePrice: 100,
+        normalizedAddons, // the SAME notes-only payload the editor would resend again
+        existingAddonRows: existingAddonRows2,
+        existingEstimatedPrice: 160,
+      });
+      expect(decision2.legacyEconomicsPreserved).toBe(true); // still preserves — the mechanism holds across saves
+      expect(decision2.storedTotal).toBe(160);
     } finally {
       delete process.env.GATE_DISCOUNT_STACKING;
     }

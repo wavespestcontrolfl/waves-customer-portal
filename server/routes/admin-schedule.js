@@ -2701,12 +2701,14 @@ function legacyEconomicsPreservationDecision({
   normalizedAddons, existingAddonRows, existingEstimatedPrice,
 }) {
   const remainingStored = existingAddonRows.slice();
+  const matchedPairs = [];
   const addonsUnchanged = normalizedAddons.every((l) => {
     const idx = remainingStored.findIndex((row) => (
       l.serviceId ? String(row.service_id || '') === String(l.serviceId) : String(row.service_name || '').trim() === l.serviceName
     ));
     if (idx === -1) return false;
     const [stored] = remainingStored.splice(idx, 1); // consume — never re-matchable
+    matchedPairs.push({ line: l, stored });
     // Discount identity/terms — ALWAYS compared, not only when an id is
     // present: a custom (no catalog id) discount's type/amount can still
     // change without ever gaining or losing an id, and comparing only when
@@ -2747,10 +2749,45 @@ function legacyEconomicsPreservationDecision({
     && addonsUnchanged
     && remainingStored.length === 0; // every stored row accounted for — explicit, though implied once lengths match and nothing re-matched
   const storedTotal = Number(existingEstimatedPrice);
+  const legacyEconomicsPreserved = moneyInputsUnchanged && Number.isFinite(storedTotal) && storedTotal > 0;
+  // Codex pre-push audit P1 (round 4): the aggregate total above is
+  // preserved verbatim, but the individual scheduled_service_addons ROW
+  // writes are a SEPARATE call site (insertScheduledServiceAddons, via
+  // replaceAddons) that this decision does not otherwise reach — and
+  // `normalizedAddons` itself carries the SAME cap-ignorant base/price the
+  // gross-vs-gross branch above already distrusts for the aggregate. Left
+  // alone, a preserved capped-discount line's ROW would still be rewritten
+  // to its naive figure (the $170-vs-$90 gap from round 3, one call site
+  // over) — correct aggregate, corrupted line item, and that corrupted row
+  // becomes the STORED baseline the NEXT save's own existingAddonRows read
+  // trusts, defeating this whole mechanism one save late. When preserved,
+  // each matched line is returned with its MONEY fields (base/price/
+  // discount) overridden from the row's OWN stored values — never
+  // recomputed — while every other field (duration, recurring cadence, …)
+  // still comes from what THIS save posted, so a save that legitimately
+  // changes a non-money addon field alongside an otherwise-unchanged price
+  // still applies it. The caller uses this in place of `normalizedAddons`
+  // for the addon-row write ONLY on this branch; null otherwise (the
+  // caller keeps normalizedAddons unchanged, exactly as before this fix).
+  const preservedAddonLines = legacyEconomicsPreserved
+    ? matchedPairs.map(({ line, stored }) => ({
+      ...line,
+      base: stored.base_price != null ? Number(stored.base_price) : null,
+      price: stored.estimated_price != null ? Number(stored.estimated_price) : null,
+      discount: (stored.discount_id || stored.discount_type) ? {
+        discountId: stored.discount_id || null,
+        discountName: stored.discount_name || null,
+        discountType: stored.discount_type || null,
+        discountAmount: stored.discount_amount != null ? Number(stored.discount_amount) : null,
+        discountDollars: stored.discount_dollars != null ? Number(stored.discount_dollars) : null,
+      } : null,
+    }))
+    : null;
   return {
     moneyInputsUnchanged,
     storedTotal,
-    legacyEconomicsPreserved: moneyInputsUnchanged && Number.isFinite(storedTotal) && storedTotal > 0,
+    legacyEconomicsPreserved,
+    preservedAddonLines,
   };
 }
 
@@ -9622,7 +9659,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const existingAddonRows = legacyPreservationCandidate
           ? await db('scheduled_service_addons')
             .where({ scheduled_service_id: req.params.id })
-            .select('service_id', 'service_name', 'base_price', 'estimated_price', 'discount_id', 'discount_type', 'discount_amount')
+            .select('service_id', 'service_name', 'base_price', 'estimated_price', 'discount_id', 'discount_name', 'discount_type', 'discount_amount', 'discount_dollars')
             .catch(() => [])
           : [];
         // Codex pre-push audit P1 (this slice): the appointment-level
@@ -9650,7 +9687,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             && String(updates.service_key_snapshot ?? '') !== String(existing?.service_key_snapshot ?? ''))
           || (updates.service_category_snapshot !== undefined
             && String(updates.service_category_snapshot ?? '') !== String(existing?.service_category_snapshot ?? ''));
-        const { legacyEconomicsPreserved, storedTotal } = legacyEconomicsPreservationDecision({
+        const { legacyEconomicsPreserved, storedTotal, preservedAddonLines } = legacyEconomicsPreservationDecision({
           legacyPreservationCandidate,
           discountInputsPosted,
           primaryServiceChanged,
@@ -9660,6 +9697,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           existingAddonRows,
           existingEstimatedPrice: existing?.estimated_price,
         });
+        // Codex pre-push audit P1 (round 4): the addon ROW write
+        // (insertScheduledServiceAddons, via replaceAddons — set to
+        // normalizedAddons unconditionally above) is a SEPARATE call site
+        // from the aggregate estimated_price/discount_dollars writes below
+        // — left alone, a preserved capped-discount line's ROW would still
+        // be rewritten to its cap-ignorant figure even though the
+        // aggregate stayed correct. Swap in the preserved (money-from-
+        // storage, everything-else-from-this-save) lines on this branch
+        // only; every other path keeps normalizedAddons exactly as before.
+        if (legacyEconomicsPreserved && preservedAddonLines) {
+          replaceAddons = preservedAddonLines;
+        }
 
         // Appointment-level discount: the editor only sends discountType/
         // discountAmount when one is actively selected; an omitted value means
