@@ -703,7 +703,7 @@ function creditPersistenceDb({ creditApplied = 10, accountCredits = 25, unresolv
       query[method] = jest.fn(() => query);
     });
     query.first = jest.fn(async () => {
-      if (table === 'invoices') return { id: 'inv-1', credit_applied: state.creditApplied };
+          if (table === 'invoices') return { id: 'inv-1', customer_id: 'cust-1', credit_applied: state.creditApplied };
       if (table === 'customers') return { id: 'cust-1', account_credits: state.accountCredits };
       if (table === 'stripe_invoice_charge_attempts') return unresolvedAttempt ? { id: 'attempt-1' } : null;
       return null;
