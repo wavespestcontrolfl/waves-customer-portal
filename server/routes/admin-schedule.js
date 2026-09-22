@@ -2898,6 +2898,34 @@ function applyDiscountStackRestack(target, cols, parent, addonRows, discountScop
   return restacked.addonDollars;
 }
 
+// The occurrence's REAL floor price for the recurring-EXTENSION billable-
+// amount guard (seriesExtensionUnbillable, below) — the stored-row sibling
+// of occurrenceFloorPrice (the CREATE-time gate's own fix, above). Routes
+// through restackStoredVisitFinancials — the same engine + real catalog
+// caps every extension write site's own applyDiscountStackRestack already
+// stamps rows with — so validation and persistence can never disagree.
+// Deferred fast-follow (Codex pre-push audit P1, flagged after
+// occurrenceFloorPrice's own fix landed): the guard used to size its floor
+// with calculateStoredVisitFinancials alone (the stored path's legacy,
+// non-restacked computation), so once a line discount and a large
+// appointment credit interact, the guard could compute LESS than an
+// extension will actually restack to and wrongly 409 a legitimately
+// billable extension — Codex's repro: a $100 primary at 50% off, an $80
+// appointment credit, and a $100 anchor-only add-on; the anchor freezes a
+// $30 line discount, and an add-on-free extension floored at the legacy
+// $0 (100 − 30 − 80) when the canonical, restacked figure is $10. Falls
+// back to calculateStoredVisitFinancials's own price when the gate is off,
+// or when restackStoredVisitFinancials itself defers (a null
+// primary_line_price — the anchored-split marker, or an ordinary legacy/
+// unstructured row — see that function's own comment).
+function storedOccurrenceFloorPrice(parent, dueAddons, allParentAddons, discountScope, discountCaps) {
+  const restacked = discountStackingLive()
+    ? restackStoredVisitFinancials(parent, dueAddons, discountScope, discountCaps)
+    : null;
+  const price = restacked ? restacked.price : calculateStoredVisitFinancials(parent, dueAddons, allParentAddons, discountScope).price;
+  return Number(price) > 0 ? Number(price) : 0;
+}
+
 async function loadStoredDiscountScope(_database, parent, addonRows = []) {
   const serviceKeyFilter = parent?.discount_service_key_filter || null;
   const serviceCategoryFilter = parent?.discount_service_category_filter || null;
@@ -4058,11 +4086,22 @@ async function seriesExtensionUnbillable(conn, {
   const gateCustomer = await conn('customers').where({ id: parent.customer_id }).first().catch(() => null);
   if (!gateCustomer) return null;
   const gatePriceParent = await resolveSeriesExtensionPriceTemplate(conn, parent.id, parent);
-  const floor = dates.reduce((min, d) => {
+  // Codex pre-push audit P1 (deferred fast-follow): routed through
+  // storedOccurrenceFloorPrice so this guard reads the SAME restacked
+  // pricing + real catalog caps every extension write site's own
+  // applyDiscountStackRestack already stamps rows with — see that
+  // function's own comment for the concrete under-count this fixes.
+  // discountCaps is fetched fresh per date (mirroring every write site),
+  // gated so the gate-off path makes no extra query.
+  let floor = Infinity;
+  for (const d of dates) {
     const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, d, blackoutDates, skipParent);
-    const f = calculateStoredVisitFinancials(gatePriceParent, dueAddons, parentAddons, storedDiscountScope);
-    return Math.min(min, Number(f.price) > 0 ? Number(f.price) : 0);
-  }, Infinity);
+    const discountCaps = discountStackingLive()
+      ? await loadDiscountCapsById(conn, [gatePriceParent.line_discount_id, ...dueAddons.map((a) => a.discount_id)])
+      : null;
+    const price = storedOccurrenceFloorPrice(gatePriceParent, dueAddons, parentAddons, storedDiscountScope, discountCaps);
+    floor = Math.min(floor, price);
+  }
   const extendProfile = await resolveCompletionProfileForScheduledService(parent, conn).catch(() => null);
   // The PARENT's own label — asks whether the series' service is always-free;
   // children still resolve the live catalog identity at insert (same
@@ -18994,6 +19033,7 @@ router._test = {
   applyStoredVisitFinancials,
   restackStoredVisitFinancials,
   applyDiscountStackRestack,
+  storedOccurrenceFloorPrice,
   loadDiscountCapsById,
   insertRecurringChildAddons,
   insertScheduledServiceAddons,

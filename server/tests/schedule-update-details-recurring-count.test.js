@@ -624,10 +624,17 @@ describe('reconcileRecurringSeriesVisitCount — billable-amount gate on extend 
     const loop = fn.indexOf('for (const nd of extendDates) {');
     expect(gate).toBeGreaterThan(-1);
     expect(loop).toBeGreaterThan(gate);
-    // The helper prices exactly as the insert loops stamp (same financials call).
+    // The helper prices exactly as the insert loops stamp — storedOccurrenceFloorPrice
+    // routes through the SAME restacked pricing + real catalog caps every
+    // write site's own applyDiscountStackRestack stamps rows with
+    // (restackStoredVisitFinancials when the gate is live), falling back to
+    // calculateStoredVisitFinancials only when that restack itself defers.
     const helper = src.slice(src.indexOf('async function seriesExtensionUnbillable('), src.indexOf("router.get('/', async (req, res, next) => {"));
-    expect(helper).toContain('calculateStoredVisitFinancials(gatePriceParent, dueAddons, parentAddons, storedDiscountScope)');
+    expect(helper).toContain('storedOccurrenceFloorPrice(gatePriceParent, dueAddons, parentAddons, storedDiscountScope, discountCaps)');
     expect(helper).toContain('resolveSeriesExtensionPriceTemplate(conn, parent.id, parent)');
+    const floorHelper = src.slice(src.indexOf('function storedOccurrenceFloorPrice('), src.indexOf('\nasync function loadStoredDiscountScope('));
+    expect(floorHelper).toContain('restackStoredVisitFinancials(parent, dueAddons, discountScope, discountCaps)');
+    expect(floorHelper).toContain('calculateStoredVisitFinancials(parent, dueAddons, allParentAddons, discountScope)');
   });
 
   test('every OFFICE series writer consults the shared verdict; the completion auto-extend deliberately does not (owner ruling: warn at completion)', () => {

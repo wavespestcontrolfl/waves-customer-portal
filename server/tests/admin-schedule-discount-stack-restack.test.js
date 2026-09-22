@@ -50,6 +50,8 @@ const {
   insertScheduledServiceAddons,
   occurrenceFloorPrice,
   calculateVisitFinancialsForAddons,
+  storedOccurrenceFloorPrice,
+  calculateStoredVisitFinancials,
 } = require('../routes/admin-schedule')._test;
 
 function discountQuery(discount) {
@@ -983,6 +985,78 @@ describe('CREATE-time billable-amount gate — occurrenceFloorPrice', () => {
       const floor = occurrenceFloorPrice(pricing, [], {
         memberSeriesCovered: true, isBoosterDate: true, addonOnlyTotal,
       });
+      expect(floor).toBe(100);
+    });
+  });
+});
+
+// Second deferred fast-follow (round 12 of the original push's Codex
+// history, flagged AFTER occurrenceFloorPrice's own fix landed):
+// seriesExtensionUnbillable — the shared billable-amount guard for the
+// visit-count top-up and both recurring-alert extend/convert actions —
+// still sized its floor with calculateStoredVisitFinancials alone, the
+// STORED-path's own legacy, non-restacked computation. Once a capped (or
+// even uncapped, per Codex's own repro) line discount and a large
+// appointment credit interact, the guard could compute LESS than what an
+// extension will actually restack to and wrongly 409 a legitimately
+// billable extension. storedOccurrenceFloorPrice is the stored-path
+// sibling of occurrenceFloorPrice above: it restacks via
+// restackStoredVisitFinancials (the same engine + real catalog caps every
+// extension write site already stamps rows with) when the gate is live,
+// falling back to calculateStoredVisitFinancials's own price otherwise —
+// gate off, or the one combination restackStoredVisitFinancials itself
+// defers on (a null primary_line_price: the anchored-split marker, or an
+// ordinary legacy/unstructured row).
+describe('recurring extension — storedOccurrenceFloorPrice (seriesExtensionUnbillable’s own floor)', () => {
+  afterEach(() => { delete process.env.GATE_DISCOUNT_STACKING; });
+
+  // Codex's own worked example: a $100 primary at 50% off, an $80
+  // appointment credit, and a $100 anchor-only add-on. The anchor (add-on
+  // present) restacks its primary to a $30 line discount — the FROZEN
+  // figure every extension caller's copyLineDiscountFields already writes.
+  const parentTemplate = {
+    primary_line_price: 100,
+    line_discount_id: 'line-disc-round12',
+    line_discount_type: 'percentage',
+    line_discount_amount: 50,
+    line_discount_dollars: 30, // the anchor's own frozen figure, with the add-on present
+    discount_type: 'fixed_amount',
+    discount_amount: 80,
+  };
+  const uncappedCaps = new Map([['line-disc-round12', null]]);
+
+  test('gate off: byte-identical to calling calculateStoredVisitFinancials directly', () => {
+    const dueAddons = [];
+    const legacy = calculateStoredVisitFinancials(parentTemplate, dueAddons, dueAddons, null);
+    const legacyFloor = Number(legacy.price) > 0 ? Number(legacy.price) : 0;
+    const floor = storedOccurrenceFloorPrice(parentTemplate, dueAddons, dueAddons, null, uncappedCaps);
+    expect(floor).toBe(legacyFloor);
+    // The legacy bug's own $0 (max(0, 100 − 30 − 80)) — unchanged off.
+    expect(floor).toBe(0);
+  });
+
+  test('gate on: an add-on-free extension floors at the canonical $10, never the legacy $0/409', async () => {
+    await withGateLive(() => {
+      const floor = storedOccurrenceFloorPrice(parentTemplate, [], [], null, uncappedCaps);
+      expect(floor).toBe(10);
+    });
+  });
+
+  test('gate on: the anchor date (add-on present) still floors at its own $90', async () => {
+    await withGateLive(() => {
+      const anchorAddons = [{ base_price: 100, estimated_price: 100, discount_type: null, service_id: 'addon-svc' }];
+      const floor = storedOccurrenceFloorPrice(parentTemplate, anchorAddons, anchorAddons, null, uncappedCaps);
+      expect(floor).toBe(90);
+    });
+  });
+
+  test('gate on but restackStoredVisitFinancials defers (null primary_line_price): falls back to calculateStoredVisitFinancials', async () => {
+    await withGateLive(() => {
+      const markerParent = { primary_line_price: null, estimated_price: 100, discount_type: null };
+      const legacy = calculateStoredVisitFinancials(markerParent, [], [], null);
+      const legacyFloor = Number(legacy.price) > 0 ? Number(legacy.price) : 0;
+      const floor = storedOccurrenceFloorPrice(markerParent, [], [], null, new Map());
+      expect(floor).toBe(legacyFloor);
       expect(floor).toBe(100);
     });
   });
