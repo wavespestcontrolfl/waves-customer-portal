@@ -513,11 +513,19 @@ function lineItemDiscountTerm(row, item) {
 
 // Classify one negative invoice line item for the document stack: does its
 // discount_for name a specific service line (a fresh pick or a stored
-// per-line stamp), or does it reach the WHOLE document (spansAll — only true
-// for an appointment-level stamp built by buildDiscountLineItem's no-
-// parentClientId branch, which is the only source of document_discount:true
-// on a freshly-built invoice; create() only ever classifies items it just
-// built, so there is no legacy-shape fallback to reproduce here).
+// per-line stamp), or does it reach the WHOLE document (spansAll)? ANY
+// unparented negative item spans the whole document — not only an
+// appointment-level stamp flagged document_discount:true (Codex pre-push
+// audit P0: a validated_checkout stamp, the builder's own "Scheduled price
+// adjustment" reconciliation row, and an ordinary literal credit like
+// "Referral Credit" all have discount_for:null too, and all were being
+// subtracted OUTSIDE the stack — invisible to it, so a fresh percentage
+// compounded against the untouched base instead of what the credit left:
+// $100 with a $30 unparented credit plus a 10% line pick saved $60, not the
+// specified $63). document_discount / the scope fields stay meaningful only
+// for WHICH stored stamps carry a service-key/category scope to honor
+// (buildDiscountLineItem is the only source of those two fields) — they no
+// longer decide whether an item spans the document at all.
 function classifyInvoiceDiscountItem(item, serviceLineByClientId) {
   if (item.discount_for) {
     return {
@@ -525,7 +533,7 @@ function classifyInvoiceDiscountItem(item, serviceLineByClientId) {
       spansAll: false,
     };
   }
-  return { parent: null, spansAll: !!item.document_discount };
+  return { parent: null, spansAll: true };
 }
 
 // The document-wide interleave (owner ruling 2026-09-11): a fixed invoice-
@@ -535,27 +543,46 @@ function classifyInvoiceDiscountItem(item, serviceLineByClientId) {
 // stacking ORDER is stackDocumentDiscounts (discount-stack.js) — the same
 // four-step mechanism stackVisitDiscounts runs, so this file doesn't grow a
 // second copy of it. What stays here is invoice-specific: grouping negative
-// line items by their parent line, narrowing a scoped appointment stamp's
-// document term to the lines it actually reaches (or leaving it unscoped
-// when this invoice carries no service-key snapshots at all — a pre-lane
-// invoice, see invoiceCarriesServiceScope below), and turning a stored stamp
-// or a catalog row into the generic {discountType, amount, maxDiscountDollars}
-// terms that module understands.
+// line items by their parent line, narrowing a scoped stamp's document term
+// to the lines it actually reaches (or leaving it unscoped when this
+// invoice carries no service-key snapshots at all — a pre-lane invoice, see
+// invoiceCarriesServiceScope below), and turning a stored stamp / a plain
+// literal credit / a catalog row into the generic {discountType, amount,
+// maxDiscountDollars} terms that module understands.
 //
 // serviceLines: EVERY positive line (keyed or not) — a line with no discount
 // of its own still occupies a pool slot and gets its pro-rata share of a
 // document-wide fixed credit like every other line.
-// lineEntries: classified negative items WITH a parent line.
+// lineEntries: classified negative items WITH a parent line — a fresh
+// catalog pick OR a stored per-line stamp.
 // manualDiscountRows: the admin's discountIds picks — reach every line.
-// documentDiscountEntries: classified negative items with NO parent that
-// span the whole document (a stored appointment-level stamp).
-// Returns { lineItemMap: Map(item -> {amount, dollars}) for FRESH per-line
-// picks only, manualDiscounts: [{row, dollars}],
-// documentStoredDollarsByItem: Map(item -> dollars) for every stored
-// document-wide stamp, honoring its scope — a scoped stamp whose target
-// line was removed resolves an empty pool here and so gets 0 (the lane rule:
-// keys present but unmatched ⇒ orphaned ⇒ $0 credit, never a silent
-// overcharge replay of a frozen amount the invoice no longer earns). }
+// documentDiscountEntries: classified negative items with NO parent
+// (spansAll) — EVERY unparented credit, not only a stored one: a stored
+// stamp (scheduled_service / validated_checkout / the builder's own
+// "Scheduled price adjustment" reconciliation row) contributes its frozen
+// face value, and a plain literal credit (no discount_id, e.g. "Referral
+// Credit") contributes its own |amount| — an unparented item with a
+// discount_id that is NEITHER stored NOR resolvable is not a valid entry
+// here (the caller's own "Invalid line-item discount" check catches it by
+// omission — see computeStackedDocumentDiscountLines). Every one of these
+// reduces the base OTHER document terms compound against exactly like a
+// fresh manual pick does (Codex pre-push audit P0: excluding them let a
+// fresh percentage compound against the untouched base instead of what the
+// credit already took — a $30 unparented credit plus a 10% line pick on
+// $100 saved $60, not the specified $63).
+// Returns { lineItemMap: Map(item -> {amount, dollars}) for EVERY line
+// entry, stored or fresh (Codex pre-push audit P0: a stored line credit
+// used to reply with its own frozen face value even when a competing
+// document credit's canonical-order allocation had already clamped its
+// line's remaining balance below that — $50/$100 lines, a frozen $50 credit
+// on line one plus an $80 document credit resolves $103.33 in the engine
+// but recorded $130, silently driving that line's net negative), the
+// manualDiscounts: [{row, dollars}] the caller already had, and
+// documentDollarsByItem: Map(item -> dollars) for EVERY document entry
+// (stored or plain), honoring scope — a scoped stamp whose target line was
+// removed resolves an empty pool here and so gets 0 (the lane rule: keys
+// present but unmatched ⇒ orphaned ⇒ $0 credit, never a silent overcharge
+// replay of a frozen amount the invoice no longer earns). }
 function stackInvoiceDocumentDiscounts(serviceLines, lineEntries, manualDiscountRows, documentDiscountEntries) {
   const entriesByParent = new Map();
   for (const entry of lineEntries) {
@@ -595,11 +622,20 @@ function stackInvoiceDocumentDiscounts(serviceLines, lineEntries, manualDiscount
       ))
       .filter((i) => i >= 0);
   };
-  const documentStoredTerms = documentDiscountEntries.map(({ item }) => {
-    const eligibleLines = scopeEligibleLines(item.document_scope_service_key, item.document_scope_service_category);
+  // A plain literal credit (no discount_id) has no scope concept of its own
+  // — only a stored stamp's document_scope_service_key/_category, set
+  // exclusively by buildDiscountLineItem's appointment-level branch, can
+  // narrow a document term.
+  const documentEntryTerms = documentDiscountEntries.map((entry) => {
+    const faceValue = entry.stored
+      ? storedDiscountDollars(entry.item)
+      : Math.abs(Number(entry.item.amount) || 0);
+    const eligibleLines = entry.stored
+      ? scopeEligibleLines(entry.item.document_scope_service_key, entry.item.document_scope_service_category)
+      : null;
     return {
       discountType: "fixed_amount",
-      amount: storedDiscountDollars(item),
+      amount: faceValue,
       ...(eligibleLines ? { eligibleLines } : {}),
     };
   });
@@ -611,14 +647,13 @@ function stackInvoiceDocumentDiscounts(serviceLines, lineEntries, manualDiscount
 
   const stacked = stackDocumentDiscounts({
     lines: groups.map((group) => ({ gross: group.parentAmount, terms: group.terms })),
-    documentTerms: [...documentStoredTerms, ...documentManualTerms],
+    documentTerms: [...documentEntryTerms, ...documentManualTerms],
   });
 
   const lineItemMap = new Map();
   groups.forEach((group, groupIdx) => {
     const termDollars = stacked.lines[groupIdx].termDollars;
-    group.ordered.forEach(({ item, stored }, i) => {
-      if (stored) return; // stored items reply with their OWN frozen dollars — see below.
+    group.ordered.forEach(({ item }, i) => {
       const term = group.terms[i];
       lineItemMap.set(item, {
         amount: term.discountType === "free_service" ? group.parentAmount : term.amount,
@@ -628,12 +663,133 @@ function stackInvoiceDocumentDiscounts(serviceLines, lineEntries, manualDiscount
   });
   const manualDiscounts = manualDiscountRows.map((d, i) => ({
     row: d,
-    dollars: stacked.documentTerms[documentStoredTerms.length + i].dollars,
+    dollars: stacked.documentTerms[documentEntryTerms.length + i].dollars,
   }));
-  const documentStoredDollarsByItem = new Map(
-    documentDiscountEntries.map(({ item }, i) => [item, stacked.documentTerms[i].dollars]),
+  const documentDollarsByItem = new Map(
+    documentDiscountEntries.map((entry, i) => [entry.item, stacked.documentTerms[i].dollars]),
   );
-  return { lineItemMap, manualDiscounts, documentStoredDollarsByItem };
+  return { lineItemMap, manualDiscounts, documentDollarsByItem };
+}
+
+// Shared by create() and calculateUpdateFinancials (Codex pre-push audit
+// P0: an earlier version of this delegation lived ONLY in create(), so an
+// unchanged edit resubmit of a $111/10%+5% invoice recomputed the additive
+// $16.65 over the compounded $16.10 the create just saved — an invoice's
+// total could change on a no-op save). ONE implementation, called from
+// both write paths, so they can no longer independently drift the way that
+// finding — and the ORIGINAL rule-15 finding this whole slice exists to fix
+// (discount-engine.js's preview vs. this file's additive save) — both did.
+//
+// items: normalized line items (both callers already have this shape).
+// serviceLineByClientId: Map(client_id -> positive line item), both callers
+// already build this for their own parent lookups.
+// lineItemDiscountRowById: Map(discount_id -> catalog row), both callers
+// already load this via loadInvoiceDiscountRows.
+// manualDiscountRows: create()'s discountIds picks; calculateUpdateFinancials
+// has none (edits carry no invoice-level discountIds) — pass [].
+// trustedStoredSources: the Set isStoredDiscountLineItem checks against.
+// Returns { manualDiscounts, lineItemDiscounts } in the exact shape both
+// callers already consume downstream (labels, discount_amount, the
+// invoice_discounts audit rows) — mutates each negative item's quantity/
+// unit_price/amount to its resolved dollars, same contract both callers
+// relied on before this extraction.
+function computeStackedDocumentDiscountLines({
+  items,
+  serviceLineByClientId,
+  lineItemDiscountRowById,
+  manualDiscountRows,
+  trustedStoredSources,
+}) {
+  const positiveServiceLines = items.filter((item) => Number(item.amount) > 0);
+  const negativeItems = items.filter(
+    (item) => Number(item.amount) < 0 && item.category !== "deposit_credit",
+  );
+  const classifiedNegativeItems = negativeItems.map((item) => {
+    const { parent, spansAll } = classifyInvoiceDiscountItem(item, serviceLineByClientId);
+    return {
+      item,
+      stored: isStoredDiscountLineItem(item, trustedStoredSources),
+      row: item.discount_id
+        ? lineItemDiscountRowById.get(String(item.discount_id))
+        : null,
+      parent,
+      spansAll,
+    };
+  });
+  // A stamp needs only its parent (or spansAll); a fresh pick needs its
+  // catalog row too — same validity rule as the "Invalid line-item
+  // discount" throw below.
+  const lineEntries = classifiedNegativeItems.filter(
+    (entry) => entry.parent && (entry.stored || entry.row),
+  );
+  // Every unparented credit joins the document stack — stored, OR a plain
+  // literal with no discount_id at all. An unparented item with a
+  // discount_id that resolves to neither is deliberately excluded (falls
+  // through to the throw below, unchanged from the pre-lane validation).
+  const documentEntries = classifiedNegativeItems.filter(
+    (entry) => entry.spansAll && (entry.stored || !entry.item.discount_id),
+  );
+  const stacked = stackInvoiceDocumentDiscounts(
+    positiveServiceLines,
+    lineEntries,
+    manualDiscountRows,
+    documentEntries,
+  );
+  const lineItemDiscounts = negativeItems.map((item) => {
+    const row = item.discount_id
+      ? lineItemDiscountRowById.get(String(item.discount_id))
+      : null;
+    const lineResolved = stacked.lineItemMap.get(item);
+    const documentDollars = stacked.documentDollarsByItem.get(item);
+    const resolvedDollars = lineResolved ? lineResolved.dollars : documentDollars;
+
+    if (isStoredDiscountLineItem(item, trustedStoredSources)) {
+      return resolveStoredDiscountLineItem(item, row, resolvedDollars);
+    }
+    if (lineResolved) {
+      const dollars = lineResolved.dollars;
+      item.quantity = 1;
+      item.unit_price = -dollars;
+      item.amount = -dollars;
+      return {
+        id: row.id,
+        row,
+        name: row.name,
+        discount_type: row.discount_type,
+        amount: lineResolved.amount,
+        dollars,
+      };
+    }
+    if (documentDollars != null) {
+      const dollars = documentDollars;
+      item.quantity = 1;
+      item.unit_price = -dollars;
+      item.amount = -dollars;
+      return {
+        id: null,
+        row: null,
+        name: item.description || "Line item discount",
+        discount_type: "fixed_amount",
+        amount: dollars,
+        dollars,
+      };
+    }
+    if (item.discount_id || item.discount_for) {
+      throw new Error("Invalid line-item discount");
+    }
+    // Unreachable in practice — every unparented, id-less credit joins
+    // documentEntries above — kept as a defensive literal fallback.
+    const dollars = Math.round(Math.abs(Number(item.amount) || 0) * 100) / 100;
+    return {
+      id: null,
+      row: null,
+      name: item.description || "Line item discount",
+      discount_type: "fixed_amount",
+      amount: dollars,
+      dollars,
+    };
+  });
+  return { manualDiscounts: stacked.manualDiscounts, lineItemDiscounts };
 }
 
 function buildDiscountLineItem({
@@ -933,33 +1089,72 @@ async function calculateUpdateFinancials({
         .reduce((sum, item) => sum + Math.abs(Number(item.amount) || 0), 0) *
         100,
     ) / 100;
-  const lineItemDiscountAmount = items
-    .filter(
-      (item) => Number(item.amount) < 0 && item.category !== "deposit_credit",
-    )
-    .reduce((sum, item) => {
-      const row = item.discount_id
-        ? lineItemDiscountRowById.get(String(item.discount_id))
-        : null;
-      if (isStoredDiscountLineItem(item, EDIT_TRUSTED_DISCOUNT_SOURCES)) {
-        return sum + resolveStoredDiscountLineItem(item, row).dollars;
-      }
-      const parent = item.discount_for
-        ? serviceLineByClientId.get(String(item.discount_for))
-        : null;
-      if (!row || !parent) {
-        if (item.discount_id || item.discount_for)
-          throw new Error("Invalid line-item discount");
-        return sum + Math.round(Math.abs(Number(item.amount) || 0) * 100) / 100;
-      }
+  // GATE_DISCOUNT_STACKING (slice 5 of #4405): the SAME compounding engine
+  // create() uses (computeStackedDocumentDiscountLines, above) — not a
+  // second, independently-drifting copy. Codex pre-push audit P0: an
+  // earlier version of this fix lived ONLY in create(), so re-saving an
+  // UNCHANGED $111/10%+5% invoice through this edit path recomputed the
+  // additive $16.65 instead of the compounded $16.10 the create just
+  // saved — a no-op save silently changed the invoice's total. Gate off
+  // keeps the exact pre-lane per-item reduce in its own untouched branch.
+  let lineItemDiscounts;
+  if (discountStackingLive()) {
+    ({ lineItemDiscounts } = computeStackedDocumentDiscountLines({
+      items,
+      serviceLineByClientId,
+      lineItemDiscountRowById,
+      manualDiscountRows: [], // the edit path carries no invoice-level discountIds
+      trustedStoredSources: EDIT_TRUSTED_DISCOUNT_SOURCES,
+    }));
+  } else {
+    lineItemDiscounts = items
+      .filter(
+        (item) => Number(item.amount) < 0 && item.category !== "deposit_credit",
+      )
+      .map((item) => {
+        const row = item.discount_id
+          ? lineItemDiscountRowById.get(String(item.discount_id))
+          : null;
+        if (isStoredDiscountLineItem(item, EDIT_TRUSTED_DISCOUNT_SOURCES)) {
+          return resolveStoredDiscountLineItem(item, row);
+        }
+        const parent = item.discount_for
+          ? serviceLineByClientId.get(String(item.discount_for))
+          : null;
+        if (!row || !parent) {
+          if (item.discount_id || item.discount_for)
+            throw new Error("Invalid line-item discount");
+          const dollars = Math.round(Math.abs(Number(item.amount) || 0) * 100) / 100;
+          return {
+            id: null,
+            row: null,
+            name: item.description || "Line item discount",
+            discount_type: "fixed_amount",
+            amount: dollars,
+            dollars,
+          };
+        }
 
-      const parentAmount = Math.max(0, Number(parent.amount) || 0);
-      const { dollars } = resolveLineItemDiscount(row, item, parentAmount);
-      item.quantity = 1;
-      item.unit_price = -dollars;
-      item.amount = -dollars;
-      return sum + dollars;
-    }, 0);
+        const parentAmount = Math.max(0, Number(parent.amount) || 0);
+        const resolved = resolveLineItemDiscount(row, item, parentAmount);
+        const dollars = resolved.dollars;
+        item.quantity = 1;
+        item.unit_price = -dollars;
+        item.amount = -dollars;
+        return {
+          id: row.id,
+          row,
+          name: row.name,
+          discount_type: row.discount_type,
+          amount: resolved.amount,
+          dollars,
+        };
+      });
+  }
+  const lineItemDiscountAmount = lineItemDiscounts.reduce(
+    (sum, item) => sum + item.dollars,
+    0,
+  );
 
   const discountAmount = Math.min(
     subtotal,
@@ -2775,74 +2970,13 @@ const InvoiceService = {
     let manualDiscounts;
     let lineItemDiscounts;
     if (discountStackingLive()) {
-      // The client_id map above exists only for line-parent lookups; the
-      // document pool must see every positive line, keyed or not.
-      const positiveServiceLines = items.filter((item) => Number(item.amount) > 0);
-      const negativeItems = items.filter(
-        (item) => Number(item.amount) < 0 && item.category !== "deposit_credit",
-      );
-      const classifiedNegativeItems = negativeItems.map((item) => {
-        const { parent, spansAll } = classifyInvoiceDiscountItem(item, serviceLineByClientId);
-        return {
-          item,
-          stored: isStoredDiscountLineItem(item, trustedStoredSources),
-          row: item.discount_id
-            ? lineItemDiscountRowById.get(String(item.discount_id))
-            : null,
-          parent,
-          spansAll,
-        };
-      });
-      // Same validity rule as the gate-off "Invalid line-item discount"
-      // throw below: a stamp needs only its parent (or spansAll); a fresh
-      // pick needs its catalog row too.
-      const lineEntries = classifiedNegativeItems.filter(
-        (entry) => entry.parent && (entry.stored || entry.row),
-      );
-      const documentStoredEntries = classifiedNegativeItems.filter(
-        (entry) => entry.spansAll && entry.stored,
-      );
-      const stacked = stackInvoiceDocumentDiscounts(
-        positiveServiceLines,
-        lineEntries,
+      ({ manualDiscounts, lineItemDiscounts } = computeStackedDocumentDiscountLines({
+        items,
+        serviceLineByClientId,
+        lineItemDiscountRowById,
         manualDiscountRows,
-        documentStoredEntries,
-      );
-      manualDiscounts = stacked.manualDiscounts;
-      lineItemDiscounts = negativeItems.map((item) => {
-        const row = item.discount_id
-          ? lineItemDiscountRowById.get(String(item.discount_id))
-          : null;
-        if (isStoredDiscountLineItem(item, trustedStoredSources)) {
-          return resolveStoredDiscountLineItem(item, row, stacked.documentStoredDollarsByItem.get(item));
-        }
-        const resolved = stacked.lineItemMap.get(item);
-        if (!resolved) {
-          if (item.discount_id || item.discount_for) {
-            throw new Error("Invalid line-item discount");
-          }
-          return {
-            id: null,
-            row: null,
-            name: item.description || "Line item discount",
-            discount_type: "fixed_amount",
-            amount: Math.round(Math.abs(Number(item.amount) || 0) * 100) / 100,
-            dollars: Math.round(Math.abs(Number(item.amount) || 0) * 100) / 100,
-          };
-        }
-        const dollars = resolved.dollars;
-        item.quantity = 1;
-        item.unit_price = -dollars;
-        item.amount = -dollars;
-        return {
-          id: row.id,
-          row,
-          name: row.name,
-          discount_type: row.discount_type,
-          amount: resolved.amount,
-          dollars,
-        };
-      });
+        trustedStoredSources,
+      }));
     } else {
       manualDiscounts = manualDiscountRows.map((d) => {
         const amt = Number(d.amount) || 0;
