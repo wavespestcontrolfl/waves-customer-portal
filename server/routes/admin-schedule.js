@@ -6016,6 +6016,68 @@ function duplicateSeriesConflictBody(existingSeries) {
 // below — server/routes/admin-schedule.js is shared with another
 // concurrently-developed lane (an update-details preview endpoint); this
 // block is scoped to creation only and does not touch anything above it.
+// Shared by /preview (advisory verdict) and the creation route itself
+// (hard 400, added below): buildAppointmentPricing's own returned
+// discount shape (discountId/discountName) carries no stack_group/
+// is_stackable -- that catalog metadata is fetched here, once, for
+// exactly the discount ids this pricing result references, and folded
+// into the id/name/stack_group/is_stackable/scope/spansAll row shape
+// stackGroupConflict (server/services/discount-stack.js) reads. Kept as
+// a fetch here rather than widening buildAppointmentPricing's own return
+// contract, which several other callers already depend on unchanged.
+async function discountStackGroupRowsForPricing(pricing) {
+  const discountIdsInPricing = [
+    pricing.primaryDiscount?.discountId,
+    ...(pricing.addonLines || []).map((l) => l.discount?.discountId),
+    pricing.appointmentDiscount?.discountId,
+  ].filter(Boolean);
+  let stackGroupById = new Map();
+  if (discountIdsInPricing.length) {
+    try {
+      const rows = await db('discounts').whereIn('id', [...new Set(discountIdsInPricing)]).select('id', 'stack_group', 'is_stackable');
+      stackGroupById = new Map(rows.map((r) => [String(r.id), r]));
+    } catch (e) {
+      logger.warn(`[schedule] stack_group lookup failed: ${e.message}`);
+    }
+  }
+  const conflictRow = (discount, lane) => {
+    if (!discount) return null;
+    const catalog = stackGroupById.get(String(discount.discountId)) || {};
+    return {
+      id: discount.discountId, name: discount.discountName,
+      stack_group: catalog.stack_group, is_stackable: catalog.is_stackable,
+      ...lane,
+    };
+  };
+  return [
+    conflictRow(pricing.primaryDiscount, { scope: 'line:primary' }),
+    ...(pricing.addonLines || []).map((line, i) => conflictRow(line.discount, { scope: `line:addon:${i}` })),
+    conflictRow(pricing.appointmentDiscount, { spansAll: true }),
+  ].filter(Boolean);
+}
+
+// GitHub round 5 P1 follow-up (Codex, on 3c7214fa45): the creation route
+// used to leave non-stackable-tier enforcement entirely client-side
+// (existingSelectionConflict in CreateAppointmentModal.jsx) with no
+// server backstop -- a client bypass, or simply the gate being off (which
+// already skips that client check), let two conflicting tiers actually
+// persist together. A same-group conflict needs 2+ discount rows to ever
+// fire, and a gate-off request carries at most one discount by this
+// slice's own pre-existing contract (the appointment-level slot doesn't
+// even render), so this is unconditional -- never gated on
+// discountStackingLive() -- and provably a no-op for every existing
+// gate-off caller (pinned: gate-off single-discount response is
+// byte-identical to before this check existed).
+function assertNoDiscountStackGroupConflict(rows) {
+  const conflict = discountStackGroupConflict(rows);
+  if (!conflict) return;
+  const label = conflict.group === 'tier' ? 'WaveGuard tier discount' : `${conflict.group} discount`;
+  throw Object.assign(
+    httpError(400, `Only one ${label} can apply: ${conflict.names.join(' and ')} cannot be combined`),
+    { code: 'DISCOUNT_STACK_GROUP_CONFLICT' },
+  );
+}
+
 router.post('/preview', requireAdmin, async (req, res, next) => {
   try {
     const groups = Array.isArray(req.body?.groups) ? req.body.groups : [];
@@ -6063,52 +6125,13 @@ router.post('/preview', requireAdmin, async (req, res, next) => {
         results.push({ key: key ?? null, error: e.message || 'pricing failed' });
         continue;
       }
-      // Stack-group verdict: the creation route itself does not enforce
-      // this today (buildAppointmentPricing never calls assertStackGroups)
-      // — surfaced here as a reviewed advisory alongside the price, not a
-      // hard block, matching the creation route's own current (unenforced)
-      // behavior exactly; a future slice can wire this into an actual 400.
-      //
-      // Codex pre-push audit P1 (push 1): buildAppointmentPricing's own
-      // returned discount shape (discountId/discountName, no stack_group)
-      // is a load-bearing contract several other callers already depend
-      // on — widening it there risked an unrelated regression outside
-      // this route's own scope. Fetched independently here instead: one
-      // extra query for exactly the catalog rows this preview's own
-      // discounts reference, keyed by id, so the conflict check reads the
-      // REAL stack_group/is_stackable rather than silently matching
-      // nothing (the shape mismatch this finding reported — conflictRows
-      // used to carry discountId/discountName, but stackGroupConflict
-      // reads row.id/row.name/row.stack_group, none of which the spread
-      // pricing object actually had).
-      const discountIdsInPricing = [
-        pricing.primaryDiscount?.discountId,
-        ...(pricing.addonLines || []).map((l) => l.discount?.discountId),
-        pricing.appointmentDiscount?.discountId,
-      ].filter(Boolean);
-      let stackGroupById = new Map();
-      if (discountIdsInPricing.length) {
-        try {
-          const rows = await db('discounts').whereIn('id', [...new Set(discountIdsInPricing)]).select('id', 'stack_group', 'is_stackable');
-          stackGroupById = new Map(rows.map((r) => [String(r.id), r]));
-        } catch (e) {
-          logger.warn(`[schedule/preview] stack_group lookup failed: ${e.message}`);
-        }
-      }
-      const conflictRow = (discount, lane) => {
-        if (!discount) return null;
-        const catalog = stackGroupById.get(String(discount.discountId)) || {};
-        return {
-          id: discount.discountId, name: discount.discountName,
-          stack_group: catalog.stack_group, is_stackable: catalog.is_stackable,
-          ...lane,
-        };
-      };
-      const conflictRows = [
-        conflictRow(pricing.primaryDiscount, { scope: 'line:primary' }),
-        ...(pricing.addonLines || []).map((line, i) => conflictRow(line.discount, { scope: `line:addon:${i}` })),
-        conflictRow(pricing.appointmentDiscount, { spansAll: true }),
-      ].filter(Boolean);
+      // Stack-group verdict: advisory here (a dry run reports, never
+      // blocks) — the creation route (below) now runs the SAME check
+      // (discountStackGroupRowsForPricing + assertNoDiscountStackGroupConflict)
+      // as a hard 400, so the client sees the exact conflict it would hit
+      // on save before ever submitting (GitHub round 5 P1 follow-up on
+      // 3c7214fa45).
+      const conflictRows = await discountStackGroupRowsForPricing(pricing);
       let stackGroupConflictVerdict = null;
       try { stackGroupConflictVerdict = discountStackGroupConflict(conflictRows); } catch { stackGroupConflictVerdict = null; }
 
@@ -6728,6 +6751,20 @@ router.post('/', requireAdmin, async (req, res, next) => {
       customer,
       recurringMembershipBooking,
     });
+
+    // GitHub round 5 P1 (Codex, on 3c7214fa45): two picks in the same
+    // non-stackable stack_group (the WaveGuard tiers, promo, relationship)
+    // — one on a line, one on the appointment-level slot spanning onto
+    // that same line, or two different lines each carrying one — must
+    // never both actually persist. Before this, enforcement was entirely
+    // client-side (existingSelectionConflict in CreateAppointmentModal.jsx),
+    // with no server backstop: a client bypass, or the gate simply being
+    // off (which already skips that client check), let two conflicting
+    // tiers both save. Checked here, before ANY write (the transaction
+    // below has not opened yet) — a conflict throws a plain operational
+    // 400, not the transaction's own rollback path, since nothing has
+    // been written for it to roll back.
+    assertNoDiscountStackGroupConflict(await discountStackGroupRowsForPricing(pricing));
 
     // Re-service callbacks default to $0 for WaveGuard customers, but an operator
     // can still enter an explicit charge (e.g. a re-service that also handled a
@@ -20210,6 +20247,8 @@ router._test = {
   bookingCreatesWaveGuardCoverage,
   buildAppointmentPricing,
   assertPrepayTotalMatchesPricing,
+  discountStackGroupRowsForPricing,
+  assertNoDiscountStackGroupConflict,
   lineExcludedFromPercentDiscount,
   buildPercentExclusionCatalog,
   appointmentDiscountIdentityChanged,
