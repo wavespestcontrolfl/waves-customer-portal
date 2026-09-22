@@ -2,15 +2,15 @@
 import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { MemoryRouter } from "react-router-dom";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import DashboardPageV2 from "../DashboardPageV2";
 import { adminFetch } from "../../../utils/admin-fetch";
 
 vi.mock("../../../utils/admin-fetch", () => ({
   adminFetch: vi.fn(),
-  isForbiddenError: () => false,
-  isRateLimitError: () => false,
+  isForbiddenError: (error) => error?.status === 403,
+  isRateLimitError: (error) => error?.status === 429 || error?.code === "RATE_LIMITED",
 }));
 vi.mock("../../../hooks/useIsMobile", () => ({ default: () => false }));
 vi.mock("../../../hooks/useFeatureFlag", () => ({
@@ -73,6 +73,8 @@ const CORE_KPIS = {
 };
 
 const FIXTURES = {
+  "/admin/kpi-targets": { targets: [] },
+  "/admin/command-center/stale-visits": { visits: [] },
   "/admin/dashboard": {
     kpis: {
       revenueMTD: 497,
@@ -419,4 +421,93 @@ describe("DashboardPageV2 sections", () => {
       ).toBe(true);
     });
   });
+
+  it("shows the dedicated admin-only state for a forbidden feed without retry controls", async () => {
+    const fetchFixture = adminFetch.getMockImplementation();
+    const forbidden = Object.assign(new Error("Forbidden"), { status: 403 });
+    adminFetch.mockImplementation((path, options) => path.split("?")[0] === "/admin/dashboard"
+      ? Promise.reject(forbidden) : fetchFixture(path, options));
+
+    renderPage();
+
+    expect(await screen.findByText("Dashboard access requires an admin account.")).toBeInTheDocument();
+    expect(screen.queryAllByRole("button", { name: "Try again" })).toHaveLength(0);
+    expect(screen.queryByRole("navigation", { name: "Dashboard sections" })).not.toBeInTheDocument();
+  });
+
+  it("suppresses every retry control while a retry batch is already running", async () => {
+    const fetchFixture = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options) => path.includes("/ebitda-bridge")
+      ? Promise.reject(new Error("Unavailable")) : fetchFixture(path, options));
+    renderPage();
+    await screen.findByText("profitability is unavailable.");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Refresh", exact: true })).toBeEnabled());
+    const retry = screen.getAllByRole("button", { name: "Try again" })[0];
+    const completedCalls = adminFetch.mock.calls.length;
+    adminFetch.mockImplementation(() => new Promise(() => {}));
+
+    fireEvent.click(retry);
+
+    await waitFor(() => expect(screen.queryAllByRole("button", { name: "Try again" })).toHaveLength(0));
+    expect(screen.getByRole("button", { name: "Refreshing", exact: true })).toBeDisabled();
+    expect(adminFetch).toHaveBeenCalledTimes(completedCalls + 4);
+    fireEvent.click(retry);
+    expect(adminFetch).toHaveBeenCalledTimes(completedCalls + 4);
+  });
+
+  it.each(["/admin/dashboard", "/admin/dashboard/today-completion"])("gives wait guidance for exhausted rate limits on %s", async (limitedPath) => {
+    const fetchFixture = adminFetch.getMockImplementation();
+    const error = Object.assign(new Error("Slow down"), { status: 429, code: "RATE_LIMITED" });
+    adminFetch.mockImplementation((path, options) => path.split("?")[0] === limitedPath
+      ? Promise.reject(error) : fetchFixture(path, options));
+    renderPage();
+    await screen.findByText("Too many requests. Wait a few seconds, then use Refresh.");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Refresh", exact: true })).toBeEnabled());
+    expect(screen.queryAllByRole("button", { name: "Try again" })).toHaveLength(0);
+    expect(screen.queryByText(/Some dashboard data could not be refreshed/)).not.toBeInTheDocument();
+
+    adminFetch.mockImplementation(fetchFixture);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh", exact: true }));
+    await waitFor(() => expect(screen.queryByText(/Too many requests/)).not.toBeInTheDocument());
+  });
+
+  it("keeps current-period KPI values visible after a failed refresh", async () => {
+    renderPage();
+    await screen.findByText("3/6 jobs");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Refresh", exact: true })).toBeEnabled());
+    const fetchFixture = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options) => path.includes("/core-kpis")
+      ? Promise.reject(new Error("Unavailable")) : fetchFixture(path, options));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh", exact: true }));
+    await screen.findByText(/Previously loaded values may be out of date/);
+    expect(screen.getByText("3/6 jobs")).toBeInTheDocument();
+    expect(screen.queryByText("Failed to load KPIs for this period")).not.toBeInTheDocument();
+  });
+
+  it("keeps attribution visible when optional channel ROI is unavailable", async () => {
+    const fetchFixture = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options) => {
+      if (path.includes("/channel-roi")) return Promise.reject(new Error("Unavailable"));
+      if (path.includes("/leads-by-source")) return Promise.resolve({ sources: [{ name: "Fixture source", sourceType: "organic", leads: 2, booked: 1, revenue: 100 }] });
+      return fetchFixture(path, options);
+    });
+    renderPage();
+    await screen.findByText("Where leads & revenue come from");
+    await screen.findByText("Failed to load channel ROI for this period");
+    expect(screen.queryByText("Failed to load attribution")).not.toBeInTheDocument();
+    expect(screen.getByText("Where leads & revenue come from")).toBeInTheDocument();
+  });
+
+  it("renders KPI history sparklines from the history response and removes them outside MTD", async () => {
+    const fetchFixture = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options) => path.includes("/kpi-history")
+      ? Promise.resolve({ days: 90, series: { completion_rate: [{ value: 40 }, { value: 50 }] } })
+      : fetchFixture(path, options));
+    renderPage();
+    const label = await screen.findByText("Service Completion");
+    await waitFor(() => expect(label.parentElement.querySelector("polyline")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "7D" }));
+    await waitFor(() => expect(within(document.getElementById("today")).getByText("Service Completion").parentElement.querySelector("polyline")).toBeNull());
+  });
+
 });

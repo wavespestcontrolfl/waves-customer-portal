@@ -1,3 +1,4 @@
+import DashboardFeed from "../DashboardFeed";
 import {
   AgingBar,
   ChartCard,
@@ -21,6 +22,8 @@ export default function CashSection({
   aging,
   billing,
   isMobile,
+  pending = {},
+  onRetry,
 }) {
   return (
     <DashboardSection
@@ -112,27 +115,30 @@ export default function CashSection({
               : ""
           }
         >
-          <AgingBar
-            aging={aging?.aging || {}}
-            totalOutstanding={aging?.total_outstanding}
-            totalOverdue={aging?.total_overdue}
-          />
+          <DashboardFeed value={aging} pending={pending.aging} label="accounts receivable" onRetry={onRetry}>
+            <AgingBar
+              aging={aging?.aging || {}}
+              totalOutstanding={aging?.total_outstanding}
+              totalOverdue={aging?.total_overdue}
+            />
+          </DashboardFeed>
           <Verdict verdict={agingVerdict(aging)} />
         </ChartCard>
       </div>
 
       {/* Billing Health — autopay coverage + won't-bill states */}
-      {billing &&
-        (isMobile ? (
-          <MobileFold
-            title="Billing Health"
-            sub={`${billing.total_billable} billable`}
-          >
-            <BillingHealthPanel summary={billing} embedded />
-          </MobileFold>
-        ) : (
-          <BillingHealthPanel summary={billing} />
-        ))}
+      <DashboardFeed value={billing} pending={pending.billing} label="billing health" onRetry={onRetry}>
+        {billing && (isMobile ? (
+            <MobileFold
+              title="Billing Health"
+              sub={`${billing.total_billable} billable`}
+            >
+              <BillingHealthPanel summary={billing} embedded />
+            </MobileFold>
+          ) : (
+            <BillingHealthPanel summary={billing} />
+          ))}
+      </DashboardFeed>
     </DashboardSection>
   );
 }

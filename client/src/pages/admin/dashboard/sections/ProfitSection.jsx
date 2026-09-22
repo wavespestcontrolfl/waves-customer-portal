@@ -1,3 +1,4 @@
+import DashboardFeed from "../DashboardFeed";
 import {
   ChartCard,
   ServiceMixDonut,
@@ -24,6 +25,8 @@ export default function ProfitSection({
   ebitda,
   revenueOverview,
   isMobile,
+  pending = {},
+  onRetry,
 }) {
   // Company target margin drives the tick on the by-line bars — the owner's
   // kpi_targets store first, the seeded 55% default otherwise.
@@ -102,13 +105,17 @@ export default function ProfitSection({
               : "month to date"
           }
         >
-          <EbitdaBridgeCard bridge={ebitda} />
+          <DashboardFeed value={ebitda} pending={pending.ebitda} label="profitability" onRetry={onRetry}>
+            <EbitdaBridgeCard bridge={ebitda} />
+          </DashboardFeed>
         </ChartCard>
         <ChartCard
           title="Service mix"
-          sub={`${mix?.total_services || 0} completed services this month`}
+          sub={mix ? `${mix.total_services || 0} completed services this month` : undefined}
         >
-          <ServiceMixDonut mix={mix?.mix || []} />
+          <DashboardFeed value={mix} pending={pending.mix} label="service mix" onRetry={onRetry}>
+            <ServiceMixDonut mix={mix?.mix || []} />
+          </DashboardFeed>
         </ChartCard>
       </div>
 
@@ -117,10 +124,12 @@ export default function ProfitSection({
       {isMobile ? (
         <MobileFold title="Margin by Service Line" sub="job-costed · this month">
           <div className="px-1 pt-1">
-            <MarginByLineBars
-              byServiceLine={revenueOverview?.byServiceLine}
-              targetPct={targetMarginPct}
-            />
+            <DashboardFeed value={revenueOverview} pending={pending.revenueOverview} label="margin by service line" onRetry={onRetry}>
+              <MarginByLineBars
+                byServiceLine={revenueOverview?.byServiceLine}
+                targetPct={targetMarginPct}
+              />
+            </DashboardFeed>
           </div>
         </MobileFold>
       ) : (
@@ -129,10 +138,12 @@ export default function ProfitSection({
             title="Margin by service line"
             sub={revenueOverview?.period?.label ? `job-costed · ${revenueOverview.period.label}` : "job-costed · this month"}
           >
-            <MarginByLineBars
-              byServiceLine={revenueOverview?.byServiceLine}
-              targetPct={targetMarginPct}
-            />
+            <DashboardFeed value={revenueOverview} pending={pending.revenueOverview} label="margin by service line" onRetry={onRetry}>
+              <MarginByLineBars
+                byServiceLine={revenueOverview?.byServiceLine}
+                targetPct={targetMarginPct}
+              />
+            </DashboardFeed>
           </ChartCard>
         </div>
       )}

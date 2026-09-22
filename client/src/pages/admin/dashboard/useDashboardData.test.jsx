@@ -11,9 +11,11 @@ const deferred = () => {
   return { promise, resolve };
 };
 const response = (path) => {
+  if (path === '/admin/kpi-targets') return { targets: [] };
   if (path.endsWith('/alerts')) return { alerts: [] };
   if (path.endsWith('/stale-visits')) return { visits: [] };
   if (path.endsWith('/today-completion')) return { total: 2, completed: 1 };
+  if (path === '/admin/dashboard') return { path, kpis: { revenue: 100 } };
   return { path };
 };
 const settle = async () => { await act(async () => {}); };
@@ -22,9 +24,26 @@ beforeEach(() => {
   adminFetch.mockImplementation(async (path) => response(path));
   Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
 });
-afterEach(() => { cleanup(); vi.useRealTimers(); vi.resetAllMocks(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.resetAllMocks(); });
 
 describe('dashboard request recovery', () => {
+  it('retains valid KPI targets when a malformed refresh cannot be mapped', async () => {
+    const good = { targets: [{ metric: 'gross_margin', target: 60 }] };
+    let targets = good;
+    adminFetch.mockImplementation(async (path) => path === '/admin/kpi-targets' ? targets : response(path));
+    const { result } = renderHook(() => useDashboardData('today', 'period=mtd'));
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+    expect(result.current.values.kpiTargets).toBe(good);
+    targets = { targets: {} };
+    await act(async () => result.current.refresh());
+    expect(result.current.errors.kpiTargets).toBeInstanceOf(Error);
+    expect(result.current.values.kpiTargets).toBe(good);
+    targets = { targets: [] };
+    await act(async () => result.current.refresh());
+    expect(result.current.errors.kpiTargets).toBeNull();
+    expect(result.current.values.kpiTargets).toEqual({ targets: [] });
+  });
+
   it('publishes overdue visits and completion while analytics is stalled', async () => {
     const stalled = deferred();
     adminFetch.mockImplementation((path) => path.endsWith('/funnel') ? stalled.promise : Promise.resolve(response(path)));
@@ -43,10 +62,100 @@ describe('dashboard request recovery', () => {
     expect(paths).toHaveLength(6);
     expect(paths).not.toContain('/admin/dashboard/funnel');
     expect(paths).not.toContain('/admin/dashboard/ebitda-bridge');
+    const retainedKpis = result.current.values.kpis;
     rerender({ tab: 'profit' });
     await waitFor(() => expect(result.current.values.ebitda).toBeTruthy());
+    expect(adminFetch.mock.calls.slice(6).map(([path]) => path)).toEqual([
+      '/admin/dashboard/service-mix',
+      '/admin/dashboard/ebitda-bridge',
+      '/admin/revenue/overview?period=month',
+    ]);
+    expect(result.current.values.kpis).toBe(retainedKpis);
     expect(adminFetch.mock.calls.some(([path]) => path.includes('/calls-by-source'))).toBe(false);
     expect(result.current.values.staleVisits).toBeUndefined();
+    rerender({ tab: 'today' });
+    expect(result.current.values.staleVisits).toEqual({ visits: [] });
+    expect(adminFetch).toHaveBeenCalledTimes(9);
+    rerender({ tab: 'profit' });
+    expect(result.current.values.ebitda).toBeTruthy();
+    expect(result.current.values.kpis).toBe(retainedKpis);
+    expect(adminFetch).toHaveBeenCalledTimes(9);
+  });
+
+  it('refreshes a stale hidden section while reusing shared feeds refreshed more recently', async () => {
+    let now = 2_000_000_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    let alertLoads = 0;
+    adminFetch.mockImplementation(async (path) => {
+      if (path.endsWith('/alerts')) {
+        alertLoads += 1;
+        return { alerts: alertLoads === 1 ? [] : [{ id: 'new-alert' }] };
+      }
+      return response(path);
+    });
+    const { result, rerender } = renderHook(({ tab }) => useDashboardData(tab, 'period=mtd'), {
+      initialProps: { tab: 'today' },
+    });
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+    rerender({ tab: 'profit' });
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+
+    now += 9 * 60 * 1000;
+    await act(async () => result.current.refresh());
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+    const freshSharedKpis = result.current.values.kpis;
+    adminFetch.mockClear();
+
+    now += 60 * 1000;
+    rerender({ tab: 'today' });
+
+    expect(result.current.values.alerts).toEqual({ alerts: [] });
+    expect(result.current.pending.alerts).toBe(true);
+    expect(result.current.values.kpis).toBe(freshSharedKpis);
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+    expect(adminFetch.mock.calls.map(([path]) => path)).toEqual([
+      '/admin/dashboard/alerts',
+      '/admin/dashboard/today-completion',
+      '/admin/command-center/stale-visits',
+    ]);
+    expect(result.current.values.alerts).toEqual({ alerts: [{ id: 'new-alert' }] });
+    expect(result.current.values.kpis).toBe(freshSharedKpis);
+  });
+
+  it('requeues unfinished shared feeds when a section switch aborts their first cycle', async () => {
+    const oldCycle = deferred();
+    const newCycle = deferred();
+    let switched = false;
+    adminFetch.mockImplementation((path) => (switched
+      ? newCycle.promise.then(() => response(path))
+      : oldCycle.promise));
+    const { result, rerender } = renderHook(({ tab }) => useDashboardData(tab, 'period=mtd'), {
+      initialProps: { tab: 'today' },
+    });
+    expect(adminFetch).toHaveBeenCalledTimes(4);
+    const oldSignals = adminFetch.mock.calls.map(([, options]) => options.signal);
+
+    switched = true;
+    rerender({ tab: 'profit' });
+
+    expect(oldSignals.every((signal) => signal.aborted)).toBe(true);
+    expect(adminFetch).toHaveBeenCalledTimes(8);
+    expect(adminFetch.mock.calls.slice(4).map(([path]) => path)).toEqual([
+      '/admin/dashboard/core-kpis?period=mtd',
+      '/admin/kpi-targets',
+      '/admin/dashboard/kpi-history?days=90',
+      '/admin/dashboard/service-mix',
+    ]);
+
+    await act(async () => newCycle.resolve());
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+    expect(adminFetch).toHaveBeenCalledTimes(10);
+    expect(result.current.values.kpis.path).toContain('period=mtd');
+    expect(result.current.values.ebitda).toBeTruthy();
+    expect(result.current.pending.kpis).toBe(false);
+
+    await act(async () => oldCycle.resolve({ path: 'old-shared' }));
+    expect(result.current.values.kpis.path).toContain('period=mtd');
   });
 
   it('limits simultaneous requests to four and aborts them on unmount', async () => {
@@ -94,6 +203,110 @@ describe('dashboard request recovery', () => {
     expect(result.current.values.staleVisits).toEqual({ visits: [] });
     expect(result.current.errors.staleVisits.message).toBe('Unavailable');
     expect(result.current.pending.staleVisits).toBe(false);
+  });
+
+  it('rejects a root dashboard response without kpis, retains prior data, and recovers on refresh', async () => {
+    let rootAttempt = 0;
+    adminFetch.mockImplementation(async (path) => {
+      if (path !== '/admin/dashboard') return response(path);
+      rootAttempt += 1;
+      if (rootAttempt === 1) return { kpis: { revenue: 100 } };
+      if (rootAttempt === 2) return { summary: 'missing required KPI payload' };
+      return { kpis: { revenue: 125 } };
+    });
+    const { result } = renderHook(() => useDashboardData('growth', 'period=mtd'));
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+    const retained = result.current.values.data;
+
+    await act(async () => result.current.refresh());
+    await waitFor(() => expect(result.current.errors.data).toBeInstanceOf(Error));
+    expect(result.current.values.data).toBe(retained);
+    expect(result.current.pending.data).toBe(false);
+
+    await act(async () => result.current.refresh());
+    await waitFor(() => expect(result.current.errors.data).toBeNull());
+    expect(result.current.values.data).toEqual({ kpis: { revenue: 125 } });
+  });
+
+  it('refetches only period-driven feeds after a completed desktop cycle', async () => {
+    const { result, rerender } = renderHook(({ period }) => useDashboardData('all', period), {
+      initialProps: { period: 'period=mtd' },
+    });
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+    const retainedAlerts = result.current.values.alerts;
+    adminFetch.mockClear();
+
+    rerender({ period: 'period=qtd' });
+
+    expect(result.current.values.alerts).toBe(retainedAlerts);
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+    expect(adminFetch.mock.calls.map(([path]) => path)).toEqual([
+      '/admin/dashboard/core-kpis?period=qtd',
+      '/admin/dashboard/calls-by-source?period=qtd',
+      '/admin/dashboard/leads-by-source?period=qtd',
+      '/admin/dashboard/channel-mix?period=qtd',
+      '/admin/dashboard/lead-funnel?period=qtd',
+      '/admin/dashboard/channel-roi?period=qtd',
+    ]);
+    expect(result.current.values.alerts).toBe(retainedAlerts);
+    expect(result.current.values.kpis.path).toContain('period=qtd');
+  });
+
+  it('prioritizes the new period and requeues fixed feeds aborted mid-cycle', async () => {
+    const oldCycle = deferred();
+    const newCycle = deferred();
+    let switched = false;
+    adminFetch.mockImplementation((path) => {
+      if (!switched) return oldCycle.promise;
+      const changedPeriod = path.includes('period=qtd');
+      const operational = path.endsWith('/alerts') || path.endsWith('/today-completion') || path.endsWith('/stale-visits');
+      if (changedPeriod || operational) {
+        return newCycle.promise.then(() => (changedPeriod ? { path: 'new-period' } : response(path)));
+      }
+      return Promise.resolve(response(path));
+    });
+    const { result, rerender } = renderHook(({ period }) => useDashboardData('all', period), {
+      initialProps: { period: 'period=mtd' },
+    });
+    expect(adminFetch).toHaveBeenCalledTimes(4);
+    const oldSignals = adminFetch.mock.calls.map(([, options]) => options.signal);
+
+    switched = true;
+    rerender({ period: 'period=qtd' });
+
+    expect(oldSignals.every((signal) => signal.aborted)).toBe(true);
+    expect(adminFetch).toHaveBeenCalledTimes(8);
+    expect(adminFetch.mock.calls.slice(4).map(([path]) => path)).toEqual([
+      '/admin/dashboard/alerts',
+      '/admin/dashboard/today-completion',
+      '/admin/command-center/stale-visits',
+      '/admin/dashboard/core-kpis?period=qtd',
+    ]);
+    expect(result.current.pending.alerts).toBe(true);
+
+    await act(async () => newCycle.resolve());
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+    expect(adminFetch).toHaveBeenCalledTimes(31);
+    expect(adminFetch.mock.calls.slice(4, 13).map(([path]) => path)).toEqual([
+      '/admin/dashboard/alerts',
+      '/admin/dashboard/today-completion',
+      '/admin/command-center/stale-visits',
+      '/admin/dashboard/core-kpis?period=qtd',
+      '/admin/dashboard/calls-by-source?period=qtd',
+      '/admin/dashboard/leads-by-source?period=qtd',
+      '/admin/dashboard/channel-mix?period=qtd',
+      '/admin/dashboard/lead-funnel?period=qtd',
+      '/admin/dashboard/channel-roi?period=qtd',
+    ]);
+    expect(result.current.values.kpis).toEqual({ path: 'new-period' });
+    expect(result.current.values.alerts).toEqual({ alerts: [] });
+    expect(result.current.pending.alerts).toBe(false);
+
+    await act(async () => oldCycle.resolve({
+      path: 'old-period', alerts: [{ id: 'late' }], visits: [{ id: 'late' }], total: 99,
+    }));
+    expect(result.current.values.kpis).toEqual({ path: 'new-period' });
+    expect(result.current.values.alerts).toEqual({ alerts: [] });
   });
 
   it('does not show old-period KPIs or accept late results after a period switch', async () => {

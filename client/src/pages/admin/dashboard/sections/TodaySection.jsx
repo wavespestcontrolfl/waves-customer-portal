@@ -1,3 +1,4 @@
+import { ActionFeedback } from "../../../../components/ui";
 import {
   ChartCard,
   CompletionGauge,
@@ -15,6 +16,10 @@ import { completionVerdict } from "../scorecard-metrics";
 export default function TodaySection({
   alerts,
   alertsStale,
+  alertsLoading,
+  errors = {},
+  pending = {},
+  onRetry,
   today,
   staleVisits,
   kpis,
@@ -30,8 +35,12 @@ export default function TodaySection({
       caption="What needs attention right now"
       about="Live operations for the current day: the Action Inbox ranks what to fix first (stale leads, expiring estimates, at-risk recurring revenue), Today's Completion tracks the schedule as it happens, and the tiles show service execution for the selected period. Start here each morning — clear the inbox, then check the other tabs."
     >
-      <ActionInbox alerts={alerts} stale={alertsStale} />
-      <StaleVisitsCard data={staleVisits} />
+      {alertsLoading ? <ActionFeedback className="mb-4">Loading action inbox…</ActionFeedback>
+        : <ActionInbox alerts={alerts} stale={alertsStale} />}
+      {errors.alerts && <ActionFeedback error onRetry={pending.alerts ? undefined : onRetry} className="mb-4">
+        {pending.alerts ? "Retrying action inbox…" : "Action inbox is out of date."}
+      </ActionFeedback>}
+      <StaleVisitsCard data={staleVisits} error={errors.staleVisits} pending={pending.staleVisits} onRetry={onRetry} />
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         <ChartCard
           title="Today's Completion"
@@ -47,6 +56,9 @@ export default function TodaySection({
               : ""
           }
         >
+          {errors.today && <ActionFeedback error onRetry={pending.today ? undefined : onRetry} className="mb-3">
+            {today ? "Completion could not be refreshed. Showing last loaded data." : "Today's completion could not be loaded."}
+          </ActionFeedback>}
           {today ? (
             <>
               <CompletionGauge
@@ -58,9 +70,9 @@ export default function TodaySection({
               />
               <Verdict verdict={completionVerdict(today)} />
             </>
-          ) : (
+          ) : !errors.today ? (
             <EmptyState>Loading…</EmptyState>
-          )}
+          ) : null}
         </ChartCard>
         <div className="md:col-span-2">
           {/* 2-up even at 390px — full-width tiles for two small numbers read

@@ -1,3 +1,4 @@
+import DashboardFeed from "../DashboardFeed";
 import { ActionFeedback } from "../../../../components/ui";
 import {
   AttributionScorecard,
@@ -62,6 +63,7 @@ export default function GrowthSection({
   channelRoiError,
   onDrillSource,
   isMobile,
+  pending = {},
 }) {
   const k = data?.kpis || {};
   const dailySpark = sparkSeries(data?.revenueChart?.daily);
@@ -246,12 +248,14 @@ export default function GrowthSection({
             funnel?.period ? `${funnel.period.from} → ${funnel.period.to}` : ""
           }
         >
-          <EstimateFunnel
-            funnel={funnel?.funnel || {}}
-            rates={funnel?.rates || {}}
-            totalAcceptedValue={funnel?.total_accepted_value}
-            byService={funnel?.by_service}
-          />
+          <DashboardFeed value={funnel} pending={pending.funnel} label="estimate funnel" onRetry={onRetry}>
+            <EstimateFunnel
+              funnel={funnel?.funnel || {}}
+              rates={funnel?.rates || {}}
+              totalAcceptedValue={funnel?.total_accepted_value}
+              byService={funnel?.by_service}
+            />
+          </DashboardFeed>
           <Verdict verdict={funnelVerdict(funnel)} />
         </ChartCard>
         {revenueByCity ? (
@@ -281,7 +285,9 @@ export default function GrowthSection({
           {/* No inner ChartCard — the fold's summary already carries the
               title/sub, and repeating them read as a rendering bug. */}
           <div className="px-1 pt-1">
-            <CapitalAllocationCard data={capAlloc} />
+            <DashboardFeed value={capAlloc} pending={pending.capAlloc} label="ad spend" onRetry={onRetry}>
+              <CapitalAllocationCard data={capAlloc} />
+            </DashboardFeed>
             <Verdict verdict={capitalVerdict(capAlloc)} />
           </div>
         </MobileFold>
@@ -291,7 +297,9 @@ export default function GrowthSection({
             title="Where to put ad dollars"
             sub="acquisition channels by gross-profit LTV : all-in CAC · last 90 days"
           >
-            <CapitalAllocationCard data={capAlloc} />
+            <DashboardFeed value={capAlloc} pending={pending.capAlloc} label="ad spend" onRetry={onRetry}>
+              <CapitalAllocationCard data={capAlloc} />
+            </DashboardFeed>
             <Verdict verdict={capitalVerdict(capAlloc)} />
           </ChartCard>
         </div>

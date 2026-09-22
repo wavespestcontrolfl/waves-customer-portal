@@ -10,6 +10,8 @@ beforeEach(() => vi.stubGlobal('ResizeObserver', class { observe() {} unobserve(
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 const data = { kpis: { revenueMTD: 123, activeCustomers: 10, newCustomersThisMonth: 1 }, mrr: 456, revenueChart: { daily: [] } };
 const props = {
+  funnel: { funnel: {}, rates: {} },
+  capAlloc: { channels: [] },
   kpis: { sales: { conversion: 50, booked: 1, leads: 2 }, membershipsSold: 3 },
   salesCapture: { captured: 100, missed: 100, captureRate: 50, wonCount: 1, lostCount: 1 },
 };

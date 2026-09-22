@@ -1,3 +1,4 @@
+import DashboardFeed from "../DashboardFeed";
 import {
   ChartCard,
   MrrTrendChart,
@@ -30,6 +31,8 @@ export default function RetentionSection({
   cohort,
   reviewTrend,
   isMobile,
+  pending = {},
+  onRetry,
 }) {
   const mrrTrendSub =
     mrrTrend?.avg_growth_pct != null
@@ -128,24 +131,32 @@ export default function RetentionSection({
         <>
           <MobileFold title="MRR Trend" sub={mrrTrendSub}>
             <div className="px-1 pt-1">
-              <MrrTrendChart trend={mrrTrend?.trend || []} />
+              <DashboardFeed value={mrrTrend} pending={pending.mrrTrend} label="recurring revenue trend" onRetry={onRetry}>
+                <MrrTrendChart trend={mrrTrend?.trend || []} />
+              </DashboardFeed>
               <Verdict verdict={mrrVerdict(kpis?.momentum?.mrr)} />
             </div>
           </MobileFold>
           <MobileFold title="MRR Bridge" sub="why recurring revenue moved">
             <div className="px-1 pt-1">
-              <MrrBridgeCard bridge={mrrBridge} />
+              <DashboardFeed value={mrrBridge} pending={pending.mrrBridge} label="recurring revenue bridge" onRetry={onRetry}>
+                <MrrBridgeCard bridge={mrrBridge} />
+              </DashboardFeed>
             </div>
           </MobileFold>
         </>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-5">
           <ChartCard title="MRR trend" sub={mrrTrendSub}>
-            <MrrTrendChart trend={mrrTrend?.trend || []} />
+            <DashboardFeed value={mrrTrend} pending={pending.mrrTrend} label="recurring revenue trend" onRetry={onRetry}>
+              <MrrTrendChart trend={mrrTrend?.trend || []} />
+            </DashboardFeed>
             <Verdict verdict={mrrVerdict(kpis?.momentum?.mrr)} />
           </ChartCard>
           <ChartCard title="MRR bridge" sub="why recurring revenue moved · month by month">
-            <MrrBridgeCard bridge={mrrBridge} />
+            <DashboardFeed value={mrrBridge} pending={pending.mrrBridge} label="recurring revenue bridge" onRetry={onRetry}>
+              <MrrBridgeCard bridge={mrrBridge} />
+            </DashboardFeed>
           </ChartCard>
         </div>
       )}
@@ -158,10 +169,12 @@ export default function RetentionSection({
           sub="% still active by signup month"
         >
           <div className="px-1 pt-1">
-            <RetentionCohortGrid
-              cohorts={cohort?.cohorts || []}
-              maxOffset={cohort?.maxOffset || 0}
-            />
+            <DashboardFeed value={cohort} pending={pending.cohort} label="retention cohorts" onRetry={onRetry}>
+              <RetentionCohortGrid
+                cohorts={cohort?.cohorts || []}
+                maxOffset={cohort?.maxOffset || 0}
+              />
+            </DashboardFeed>
           </div>
         </MobileFold>
       ) : (
@@ -170,10 +183,12 @@ export default function RetentionSection({
             title="Retention by cohort"
             sub="% of each signup month still active"
           >
-            <RetentionCohortGrid
-              cohorts={cohort?.cohorts || []}
-              maxOffset={cohort?.maxOffset || 0}
-            />
+            <DashboardFeed value={cohort} pending={pending.cohort} label="retention cohorts" onRetry={onRetry}>
+              <RetentionCohortGrid
+                cohorts={cohort?.cohorts || []}
+                maxOffset={cohort?.maxOffset || 0}
+              />
+            </DashboardFeed>
           </ChartCard>
         </div>
       )}
@@ -183,13 +198,17 @@ export default function RetentionSection({
       {isMobile ? (
         <MobileFold title="Why Customers Leave" sub="churn reasons · last 12 months">
           <div className="px-1 pt-1">
-            <ChurnParetoCard data={churnReasons} />
+            <DashboardFeed value={churnReasons} pending={pending.churnReasons} label="churn reasons" onRetry={onRetry}>
+              <ChurnParetoCard data={churnReasons} />
+            </DashboardFeed>
           </div>
         </MobileFold>
       ) : (
         <div className="mb-5">
           <ChartCard title="Why customers leave" sub="churn reasons by lost MRR · last 12 months">
-            <ChurnParetoCard data={churnReasons} />
+            <DashboardFeed value={churnReasons} pending={pending.churnReasons} label="churn reasons" onRetry={onRetry}>
+              <ChurnParetoCard data={churnReasons} />
+            </DashboardFeed>
           </ChartCard>
         </div>
       )}
@@ -197,7 +216,7 @@ export default function RetentionSection({
       {/* Reviews trend — reputation compounds retention and referrals */}
       <ChartCard
         title="Reviews"
-        sub={`${reviewTrend?.total ?? 0} reviews · ${reviewTrend?.avgRating ?? "—"}★ avg`}
+        sub={reviewTrend ? `${reviewTrend.total ?? 0} reviews · ${reviewTrend.avgRating ?? "—"}★ avg` : undefined}
         action={
           kpis?.quality?.nps != null ? (
             <span className="text-ui-caption text-ink-secondary">
@@ -209,7 +228,9 @@ export default function RetentionSection({
           ) : null
         }
       >
-        <ReviewTrendChart trend={reviewTrend?.trend || []} />
+        <DashboardFeed value={reviewTrend} pending={pending.reviewTrend} label="reviews" onRetry={onRetry}>
+          <ReviewTrendChart trend={reviewTrend?.trend || []} />
+        </DashboardFeed>
       </ChartCard>
     </DashboardSection>
   );
