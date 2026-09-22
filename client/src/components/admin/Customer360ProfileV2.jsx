@@ -46,6 +46,7 @@
  *   Switching filter should clear stale rows / not mix categories.
  */
 
+import useCustomerHistory from "../../hooks/useCustomerHistory";
 import { useState, useEffect, useRef, useId, useCallback, lazy, Suspense } from "react";
 import { useIntelligenceBarActions, usePublishIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
 import { createPortal } from "react-dom";
@@ -8129,6 +8130,13 @@ function CustomerRecipientDetails({
 
 function CustomerConversation({
   customerId,
+  composerComms,
+  composerReadScope,
+  commsChannel,
+  setCommsChannel,
+  commsHasMore,
+  loadOlderComms,
+  retryComms,
   comms,
   commsLoading,
   commsErr,
@@ -8139,7 +8147,6 @@ function CustomerConversation({
   isAdmin,
   messageOpen,
   linkRequest,
-  commsReadScope,
   setCommsLoaded,
   reloadCustomer,
   retryTimeline,
@@ -8160,7 +8167,15 @@ function CustomerConversation({
       {!embedded && (
         <OwedCommitmentsSummary customerId={customerId} source="sms" />
       )}
-      <SectionTitle>Thread ({comms.length})</SectionTitle>{" "}
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <SectionTitle>Thread ({comms.length} loaded)</SectionTitle>
+        <Select aria-label="Filter communication history" value={commsChannel} onChange={(event) => setCommsChannel(event.target.value)} className="!w-auto">
+          <option value="all">Texts & calls</option>
+          <option value="sms">Texts</option>
+          <option value="voice">Calls</option>
+        </Select>
+      </div>
+      {commsHasMore && !commsErr && <Button variant="secondary" onClick={loadOlderComms} disabled={commsLoading} className="mb-3">Load older messages</Button>}
       <div className="flex flex-col gap-1.5 mb-3">
         {commsLoading && (
           <div className="text-ink-secondary text-ui-body text-center py-5">
@@ -8168,8 +8183,9 @@ function CustomerConversation({
           </div>
         )}
         {commsErr && (
-          <div className="text-alert-fg text-ui-body text-center py-5">
-            {commsErr}
+          <div className="flex flex-col items-center gap-3 py-5">
+            <p role="alert" className="text-alert-fg text-14">{commsErr}</p>
+            <Button variant="secondary" onClick={retryComms} disabled={commsLoading}>Retry messages</Button>
           </div>
         )}
         {[...comms].reverse().map((message, i) => {
@@ -8185,7 +8201,7 @@ function CustomerConversation({
             />
           );
         })}
-        {!commsLoading && !commsErr && commsLoaded && comms.length === 0 && (
+        {commsLoaded && comms.length === 0 && (
           <div className="text-ink-secondary text-ui-body text-center py-5">
             No messages
           </div>
@@ -8204,8 +8220,8 @@ function CustomerConversation({
             active={messageOpen}
             linkRequest={linkRequest}
             customer={c}
-            customerMessages={comms}
-            customerReadScope={commsReadScope}
+            customerMessages={composerComms}
+            customerReadScope={composerReadScope}
             onSent={async () => {
               setCommsLoaded(false);
               // reloadCustomer refreshes the timeline with the record; a failed
@@ -9092,75 +9108,43 @@ function useCustomerMessages({
   data,
   setData,
 }) {
-  const [comms, setComms] = useState([]);
-  const [commsReadScope, setCommsReadScope] = useState(null);
-  const [commsLoaded, setCommsLoaded] = useState(false);
+  const [commsChannel, setCommsChannel] = useState("all");
+  const [commsRevision, setCommsRevision] = useState(0);
+  const [composerContext, setComposerContext] = useState(null);
+  const history = useCustomerHistory({
+    customerId, kind: "comms", enabled: !loading && isAdmin && (embedded || activeTab === "comms"),
+    query: new URLSearchParams({ channel: commsChannel }).toString(),
+    revision: `${profileReloadKey}:${commsRevision}`,
+  });
+  const comms = history.items;
+  const commsLoaded = history.loaded && !history.loading && !history.error;
   const [commsComposerReady, setCommsComposerReady] = useState(false);
-  const [commsLoading, setCommsLoading] = useState(false);
-  const [commsErr, setCommsErr] = useState("");
+  const commsLoading = history.loading;
+  const commsErr = history.error;
+  const setCommsLoaded = (loaded) => { if (!loaded) setCommsRevision((value) => value + 1); };
   const [smsReply, setSmsReply] = useState("");
   const [sendingSms, setSendingSms] = useState(false);
   const [smsErr, setSmsErr] = useState("");
   const [messageOpen, setMessageOpen] = useState(false);
   const [messageOpened, setMessageOpened] = useState(false);
+  // Mount the composer with a loaded thread so its initial sending number is
+  // derived from this customer's messages. Keep it mounted on later refreshes
+  // so filters and reopening the sheet cannot discard the operator's draft.
+  useEffect(() => {
+    if (history.loaded && !history.error && commsChannel === "all") {
+      setComposerContext({ customerId, messages: history.items, readScope: history.meta.readScope });
+    }
+    if (history.loaded && (messageOpened || !embedded)) setCommsComposerReady(true);
+  }, [history.loaded, history.error, history.items, history.meta.readScope, commsChannel, customerId, messageOpened, embedded]);
   const [linkRequest, setLinkRequest] = useState(0);
   const openMessages = () => {
+    setCommsChannel("all");
     setCommsLoaded(false);
     setMessageOpened(true);
     setMessageOpen(true);
   };
-  const commsSeqRef = useRef(0);
-  const commsAbortRef = useRef(null);
   const smsSeqRef = useRef(0);
-  useEffect(() => {
-    if (
-      loading ||
-      !isAdmin ||
-      (!embedded && activeTab !== "comms") ||
-      commsLoaded ||
-      commsLoading
-    )
-      return;
-    const seq = commsSeqRef.current + 1;
-    commsSeqRef.current = seq;
-    if (commsAbortRef.current) commsAbortRef.current.abort();
-    const ctrl = new AbortController();
-    commsAbortRef.current = ctrl;
-    setCommsLoading(true);
-    setCommsErr("");
-    adminFetch(`/admin/customers/${customerId}/comms`, { signal: ctrl.signal })
-      .then((data) => {
-        if (seq !== commsSeqRef.current) return;
-        setComms(data.comms || []);
-        setCommsReadScope(data.readScope || null);
-        setCommsLoaded(true);
-        setCommsComposerReady(true);
-      })
-      .catch((err) => {
-        if (err.name === "AbortError" || seq !== commsSeqRef.current) return;
-        setCommsErr(err.message || "Failed to load messages");
-        setCommsLoaded(true);
-        setCommsComposerReady(true);
-      })
-      .finally(() => {
-        if (seq === commsSeqRef.current) setCommsLoading(false);
-      });
-  }, [
-    activeTab,
-    customerId,
-    commsLoaded,
-    commsLoading,
-    embedded,
-    isAdmin,
-    loading,
-  ]);
-  useEffect(
-    () => () => {
-      if (commsAbortRef.current) commsAbortRef.current.abort();
-      smsSeqRef.current += 1;
-    },
-    [],
-  );
+  useEffect(() => () => { smsSeqRef.current += 1; }, []);
   const sendSms = async () => {
     const c = data.customer;
     if (sendingSms || !smsReply.trim() || !c.phone) return;
@@ -9182,17 +9166,9 @@ function useCustomerMessages({
       });
       if (!stillViewing()) return;
       setSmsReply("");
-      const [fresh, freshComms] = await Promise.all([
-        adminFetch(`/admin/customers/${customerId}`),
-        adminFetch(`/admin/customers/${customerId}/comms`).catch(() => ({
-          comms: [],
-        })),
-      ]);
+      const [fresh] = await Promise.all([adminFetch(`/admin/customers/${customerId}`), history.reload()]);
       if (!stillViewing()) return;
       setData(fresh);
-      setComms(freshComms.comms || []);
-      setCommsReadScope(freshComms.readScope || null);
-      setCommsLoaded(true);
     } catch (err) {
       if (stillViewing()) setSmsErr(err.message || "SMS failed to send");
     } finally {
@@ -9203,15 +9179,10 @@ function useCustomerMessages({
     setMessageOpen(false);
     setMessageOpened(false);
     setLinkRequest(0);
-    commsSeqRef.current += 1;
     smsSeqRef.current += 1;
-    if (commsAbortRef.current) commsAbortRef.current.abort();
-    setCommsLoading(false);
-    setCommsReadScope(null);
-    setComms([]);
-    setCommsLoaded(false);
+    setCommsChannel("all");
+    setComposerContext(null);
     setCommsComposerReady(false);
-    setCommsErr("");
     setSendingSms(false);
     setSmsErr("");
   }, [customerId, profileReloadKey, isAdmin]);
@@ -9219,6 +9190,13 @@ function useCustomerMessages({
     setSmsReply("");
   }, [customerId]);
   return {
+    composerComms: composerContext?.customerId === customerId ? composerContext.messages : [],
+    composerReadScope: composerContext?.customerId === customerId ? composerContext.readScope : null,
+    commsChannel,
+    setCommsChannel,
+    commsHasMore: history.hasMore,
+    loadOlderComms: history.loadOlder,
+    retryComms: history.retry,
     comms,
     commsLoading,
     commsErr,
@@ -9226,7 +9204,6 @@ function useCustomerMessages({
     commsComposerReady,
     messageOpen,
     linkRequest,
-    commsReadScope,
     setCommsLoaded,
     smsReply,
     setSmsReply,
@@ -9750,6 +9727,13 @@ export default function Customer360ProfileV2({
     customerId,
   });
   const {
+    composerComms,
+    composerReadScope,
+    commsChannel,
+    setCommsChannel,
+    commsHasMore,
+    loadOlderComms,
+    retryComms,
     comms,
     commsLoading,
     commsErr,
@@ -9757,7 +9741,6 @@ export default function Customer360ProfileV2({
     commsComposerReady,
     messageOpen,
     linkRequest,
-    commsReadScope,
     setCommsLoaded,
     smsReply,
     setSmsReply,
@@ -9885,6 +9868,13 @@ export default function Customer360ProfileV2({
   const conversation = (
     <CustomerConversation
       customerId={customerId}
+      composerComms={composerComms}
+      composerReadScope={composerReadScope}
+      commsChannel={commsChannel}
+      setCommsChannel={setCommsChannel}
+      commsHasMore={commsHasMore}
+      loadOlderComms={loadOlderComms}
+      retryComms={retryComms}
       comms={comms}
       commsLoading={commsLoading}
       commsErr={commsErr}
@@ -9895,7 +9885,6 @@ export default function Customer360ProfileV2({
       isAdmin={isAdmin}
       messageOpen={messageOpen}
       linkRequest={linkRequest}
-      commsReadScope={commsReadScope}
       setCommsLoaded={setCommsLoaded}
       reloadCustomer={reloadCustomer}
       retryTimeline={retryTimeline}

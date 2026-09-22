@@ -66,6 +66,40 @@ async function read(path, query = {}, extra = {}) {
 }
 
 postgres('Customer 360 migrated PostgreSQL reads', () => {
+  test('communication pages preserve microseconds, channel filters, and the first-page read boundary', async () => {
+    const conversationId = randomUUID();
+    const messageIds = [randomUUID(), randomUUID(), randomUUID(), randomUUID(), randomUUID()];
+    try {
+      await mockPg('conversations').insert({ id: conversationId, customer_id: ids[3], channel: 'sms', contact_phone: '+19415550103', our_endpoint_id: '+19415550190' });
+      await mockPg('messages').insert([
+        { id: messageIds[0], conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'customer', body: 'Older microsecond', created_at: mockPg.raw("?::timestamp", ['2026-01-02 12:00:00.123001']) },
+        { id: messageIds[1], conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'customer', body: 'Newer microsecond', created_at: mockPg.raw("?::timestamp", ['2026-01-02 12:00:00.123999']) },
+        { id: messageIds[2], conversation_id: conversationId, channel: 'voice', direction: 'inbound', author_type: 'customer', body: 'Voice event', created_at: mockPg.raw("?::timestamp", ['2026-01-01 12:00:00']) },
+        { id: messageIds[4], conversation_id: conversationId, channel: 'sms', direction: 'outbound', author_type: 'admin', body: 'Fallback status search', delivery_status: null, created_at: mockPg.raw("?::timestamp", ['2025-12-31 12:00:00']) },
+      ]);
+      const first = await read('/:id/comms', { limit: '1', channel: 'sms' }, { params: { id: ids[3] } });
+      expect(first.comms.map(row => row.id)).toEqual([messageIds[1]]);
+      expect(first).toMatchObject({ hasMore: true, channel: 'sms' });
+      const readBefore = new Date(first.readScope.readBefore);
+      await mockPg('messages').insert({
+        id: messageIds[3], conversation_id: conversationId, channel: 'sms', direction: 'inbound',
+        author_type: 'customer', body: 'After read boundary', created_at: new Date(readBefore.getTime() + 1000),
+      });
+      const second = await read('/:id/comms', { limit: '1', channel: 'sms', cursor: first.nextCursor }, { params: { id: ids[3] } });
+      expect(second.comms.map(row => row.id)).toEqual([messageIds[0]]);
+      expect(second).toMatchObject({ hasMore: true, readScope: { readBefore: first.readScope.readBefore } });
+      const third = await read('/:id/comms', { limit: '1', channel: 'sms', cursor: second.nextCursor }, { params: { id: ids[3] } });
+      expect(third.comms.map(row => row.id)).toEqual([messageIds[4]]);
+      expect(third).toMatchObject({ hasMore: false, nextCursor: null, readScope: { readBefore: first.readScope.readBefore } });
+      expect((await read('/:id/comms', { channel: 'voice' }, { params: { id: ids[3] } })).comms.map(row => row.id)).toEqual([messageIds[2]]);
+      const fallback = await require('../services/customer-history').listCustomerTimeline(mockPg, ids[3], { type: 'sms', search: 'delivery not recorded' });
+      expect(fallback.timeline.map(row => row.id)).toEqual([`sms:${messageIds[4]}`]);
+    } finally {
+      await mockPg('messages').whereIn('id', messageIds).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
   test('SMS sender claims converge across pooled connections and stale owners cannot mutate a replacement', async () => {
     const phone = `+1202${randomBytes(4).readUInt32BE().toString().padStart(10, '0').slice(-7)}`;
     try {

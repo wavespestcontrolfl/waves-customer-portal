@@ -2687,65 +2687,15 @@ router.get('/:id/timeline', requireAdmin, async (req, res, next) => {
 // fed the Comms tab from `data.smsLog`. Email lands in PR 5.
 router.get('/:id/comms', requireAdmin, async (req, res, next) => {
   try {
-    const readBefore = new Date();
     const customerId = req.params.id;
-    const limit = Math.min(parseInt(req.query.limit) || 100, 500);
-
     const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
-
-    const rows = await db('messages')
-      .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
-      .where('conversations.customer_id', customerId)
-      .whereIn('messages.channel', ['sms', 'voice'])
-      .where('messages.created_at', '<=', readBefore)
-      .select(
-        'messages.id', 'messages.conversation_id', 'messages.channel', 'messages.direction', 'messages.body',
-        'messages.ai_summary', 'messages.message_type', 'messages.duration_seconds',
-        'messages.media', 'messages.answered_by', 'messages.is_read',
-        'messages.delivery_status', 'messages.recording_sid', 'messages.created_at',
-        'conversations.our_endpoint_id', 'conversations.contact_phone'
-      )
-      .orderBy('messages.created_at', 'desc')
-      .limit(limit);
-
-    // The drawer reads the whole customer thread even when its display page
-    // contains only recent/read messages. Reuse the existing bounded writer.
-    const conversationIds = await db('conversations').where({ customer_id: customerId }).pluck('id');
-
-    // Resolve the friendly label (location / domain) for each Waves number
-    // hit by this customer, so the UI can show e.g. "Lakewood Ranch — HQ"
-    // instead of a raw E.164.
-    let TWILIO_NUMBERS;
-    try { TWILIO_NUMBERS = require('../config/twilio-numbers'); } catch { TWILIO_NUMBERS = null; }
-
-    const comms = rows.map(m => {
-      const numberCfg = TWILIO_NUMBERS?.findByNumber?.(m.our_endpoint_id) || null;
-      let media = [];
-      try { media = typeof m.media === 'string' ? JSON.parse(m.media) : (m.media || []); } catch { media = []; }
-      return {
-        id: m.id,
-        conversationId: m.conversation_id,
-        channel: m.channel,
-        direction: m.direction,
-        body: m.body,
-        aiSummary: m.ai_summary,
-        messageType: m.message_type,
-        durationSeconds: m.duration_seconds,
-        media,
-        answeredBy: m.answered_by,
-        isRead: !!m.is_read,
-        deliveryStatus: m.delivery_status,
-        recordingSid: m.recording_sid,
-        createdAt: m.created_at,
-        ourEndpointId: m.our_endpoint_id,
-        ourEndpointLabel: numberCfg?.label || null,
-        contactPhone: m.contact_phone || customer.phone || null,
-      };
-    });
-
-    res.json({ comms, total: comms.length, readScope: { conversationIds, readBefore } });
-  } catch (err) { next(err); }
+    const history = require('../services/customer-history');
+    res.json(await history.listCustomerComms(db, customer, req.query || {}));
+  } catch (err) {
+    if (err?.status === 400) return res.status(400).json({ error: err.message });
+    next(err);
+  }
 });
 
 // GET /api/admin/customers/:id/schedule-estimates — bookable estimates
