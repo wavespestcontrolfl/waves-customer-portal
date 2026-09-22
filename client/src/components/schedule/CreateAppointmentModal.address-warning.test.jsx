@@ -2413,3 +2413,41 @@ describe('GitHub round 5 P1 follow-up (Codex, on a80ec67565) — manualPrepayPla
     expect(latestPrice()).not.toBe('19.66');
   });
 });
+
+describe('GitHub round 5 P0 (Codex, blocked push 6 on PR #4656) — the main Total (and Discounts) read the confirmed server preview, not the stale local one', () => {
+  // "If a $10 catalog discount changes to $5 after the catalog loads, a
+  // $100 booking continues showing $90 even after /preview confirms $95.
+  // Save becomes enabled and the server persists $95; without
+  // prepayment, no amount comparison rejects it." -- a plain ONE-TIME,
+  // non-prepay booking (no assertPrepayTotalMatchesPricing backstop at
+  // all for this case) with a line discount whose server-confirmed price
+  // disagrees with the client engine's own $90 figure. Total must show
+  // the server's number, not the stale local one, the moment the preview
+  // lands -- with nothing to do with prepayment at all.
+  it('a fresh preview landing updates the displayed Total to the server-confirmed price, never the stale local one', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    installModalFetch({
+      basePrice: 100,
+      discounts: [{ id: 'ten-pct', name: 'Ten Percent', discount_type: 'percentage', amount: 10, is_active: true, show_in_invoices: true }],
+      previewResponses: [
+        // The server's OWN authoritative price -- deliberately different
+        // from what $100 at a flat 10% off would locally compute ($90),
+        // simulating the catalog value having changed since page load.
+        (groups) => ({ regime: true, results: groups.map((g) => ({ key: g.key, price: 95 })) }),
+      ],
+    });
+    renderBooking();
+    await addOneSeasonalService();
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for First seasonal service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Ten Percent/ }));
+
+    // The server-confirmed $95 lands and replaces the stale local $90 --
+    // never collectPrepay, never billAsAnnualPrepay/billAsManualPrepay,
+    // nothing prepay-related at all in this test.
+    await screen.findByText((_, node) => node?.textContent === 'Total: $95.00');
+    expect(screen.queryByText((_, node) => node?.textContent === 'Total: $90.00')).toBeNull();
+    // Discounts is derived FROM the same confirmed total (subtotal -
+    // displayedTotal), so the two figures never disagree with each other.
+    await screen.findByText((_, node) => node?.textContent === 'Discounts: -$5.00');
+  });
+});

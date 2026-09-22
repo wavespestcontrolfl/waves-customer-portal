@@ -2289,9 +2289,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       return sum + lineEffectiveBaseAmount(s);
     }, 0);
   }, [services, selectedCustomer, mosquitoQuote]);
-  const lineDiscountTotal = useMemo(() => {
-    return services.reduce((sum, s) => sum + lineDiscountAmount(s), 0);
-  }, [services, selectedCustomer, mosquitoQuote]);
   const netSubtotal = useMemo(() => {
     return services.reduce((sum, s) => sum + lineEffectiveNetAmount(s), 0);
   }, [services, selectedCustomer, mosquitoQuote]);
@@ -3057,9 +3054,22 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const restated = appointmentDiscountPreview.lines?.[i];
     return restated ? restated.lineDiscountDollars : lineDiscountAmount(svc);
   };
-  const stackedLineDiscountTotal = appointmentDiscountPreview.lines
-    ? appointmentDiscountPreview.lines.reduce((sum, l) => sum + l.lineDiscountDollars, 0)
-    : lineDiscountTotal;
+  // GitHub round 5 P0 (Codex, blocked push 6 on PR #4656): "Total" (and
+  // "Discounts", derived from it below so the two always agree) used to
+  // read appointmentDiscountPreview.total — the LOCAL client engine,
+  // never the server preview — so a catalog discount changing mid-session
+  // could leave the displayed Total stale (still $90) even after a fresh
+  // /preview confirmed the server would actually persist $95, with
+  // nothing to stop Save. groupStackedPerVisitTotal already does the
+  // fresh-preview-or-local-fallback read per group (used by the "N
+  // visits × $X" prepay text and the real POST body already) — summed
+  // across every submit group, it's the SAME authoritative figure for
+  // the overall booking Total too. Discounts is derived FROM this total
+  // (subtotal minus it), not independently re-computed, so Total and
+  // Discounts can never disagree with each other the way an
+  // independently-stale Discounts figure could.
+  const displayedTotal = appointmentSubmitGroups.reduce((sum, g) => sum + groupStackedPerVisitTotal(g), 0);
+  const displayedDiscounts = Math.max(0, Math.round((subtotal - displayedTotal) * 100) / 100);
 
   // Tracks cadence-group keys already POSTed during this modal session.
   // If the loop fails partway (e.g. quarterly succeeded, monthly errored),
@@ -4461,10 +4471,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             </div>
             {services.length > 0 && subtotal > 0 && (
               <div style={{ fontSize: 13, fontWeight: 500, color: '#18181B', textAlign: 'right' }}>
-                <div>Total: ${appointmentDiscountPreview.total.toFixed(2)}</div>
-                {(stackedLineDiscountTotal > 0 || appointmentDiscountPreview.dollars > 0) && (
+                <div>Total: ${displayedTotal.toFixed(2)}</div>
+                {displayedDiscounts > 0 && (
                   <div style={{ fontSize: 11, fontWeight: 500, color: D.muted }}>
-                    Discounts: -${(stackedLineDiscountTotal + appointmentDiscountPreview.dollars).toFixed(2)}
+                    Discounts: -${displayedDiscounts.toFixed(2)}
                   </div>
                 )}
               </div>
