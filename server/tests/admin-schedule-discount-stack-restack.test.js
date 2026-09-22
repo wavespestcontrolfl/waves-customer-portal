@@ -309,114 +309,101 @@ describe('recurring extension — restackStoredVisitFinancials', () => {
     delete process.env.GATE_DISCOUNT_STACKING;
   });
 
-  // The Codex #4405 r7 P1 shape: a $100 primary line at 15% plus an
-  // unscoped $30 FIXED appointment credit, pro-rated across every eligible
-  // line. A due add-on changes which lines share that pool, so the SAME
-  // typed primary discount must land on a DIFFERENT dollar figure depending
-  // on the occurrence's own add-on mix — never a frozen number copied from
-  // a different occurrence's mix.
-  const parentTemplate = {
-    primary_line_price: 100,
-    line_discount_type: 'percentage',
-    line_discount_amount: 15,
-    discount_type: 'fixed_amount',
-    discount_amount: 30,
-    discount_max_dollars: null,
-    service_key_snapshot: 'general_pest',
-  };
-
-  test('an occurrence WITH a due add-on shares the fixed credit’s pool, shrinking the line’s own remainder', () => {
-    const withAddon = restackStoredVisitFinancials(parentTemplate, [
-      { base_price: 50, estimated_price: 50, discount_type: null, discount_amount: null, service_id: 'addon-svc' },
-    ], null);
-
-    // Pool = 100 + 50 = 150. $30 credit pro-rated: primary's share =
-    // 30 * 100/150 = 20, leaving $80. 15% of $80 = $12.
-    expect(withAddon.primaryLineDiscountDollars).toBe(12);
-    expect(withAddon.appointmentDiscountDollars).toBe(30);
-  });
-
-  test('the SAME primary discount on an occurrence with NO due add-on resolves a DIFFERENT dollar figure', () => {
-    const withoutAddon = restackStoredVisitFinancials(parentTemplate, [], null);
-
-    // Pool = 100 only. The full $30 credit lands on the primary line,
-    // leaving $70. 15% of $70 = $10.50 — not the $12 the other occurrence's
-    // add-on mix produced, and NOT a frozen copy of either figure.
-    expect(withoutAddon.primaryLineDiscountDollars).toBe(10.5);
-    expect(withoutAddon.appointmentDiscountDollars).toBe(30);
-  });
-
   test('returns null when there is no structured primary gross to restack (anchored-split marker template)', () => {
-    expect(restackStoredVisitFinancials({ ...parentTemplate, primary_line_price: null }, [], null)).toBeNull();
+    expect(restackStoredVisitFinancials({ primary_line_price: null, discount_type: 'fixed_amount', discount_amount: 10 }, [], null)).toBeNull();
   });
 
-  test('restacks a due add-on’s OWN percentage discount against its own pool share, not its frozen (full-base) dollar figure', () => {
-    // Production writes an add-on's own discount_dollars against its OWN
-    // full base_price (10% of $80 = $8, consistent — never from a different
-    // row). What the frozen figure canNOT reflect is an unscoped $20 FIXED
-    // appointment credit sharing the SAME pool as this add-on: the credit's
-    // pro-rata share shrinks the add-on's remaining BEFORE its own 10%
-    // computes, so the correct restacked figure is smaller than the frozen
-    // $8 — proving the add-on's own dollars are recomputed, not replayed.
+  // Codex pre-push audit P0 (round 5): a FIXED appointment-level credit
+  // pro-rates across every eligible line BEFORE any line's own percentage
+  // computes (Steps 1-2 precede Step 3 in the engine), so a percentage-type
+  // line/add-on discount's dollar figure becomes sensitive to what that
+  // credit reduced its remaining to. Neither line_discount_* nor an add-on's
+  // own discount_* columns persist that percentage's real CAP, and the
+  // credit's own AMOUNT can change later through an edit (a different
+  // slice) — so a frozen dollar figure captured before that edit is not a
+  // sound cap across TIME (the round-1 surrogate-cap fix used the frozen
+  // figure as a ceiling; Codex's repro: a $100 primary at 20% under a $30
+  // credit freezes $14, then the credit drops to $10 — the true canonical
+  // share should rise to $18, but the stale $14 surrogate held it down).
+  // With no persisted per-line cap column (a schema change outside this
+  // slice's file scope), the only sound choice is to NOT restack this
+  // combination at all — the caller's existing
+  // calculateStoredVisitFinancials/applyStoredVisitFinancials computation
+  // (unaffected by this function, unchanged from before this slice) is what
+  // runs instead.
+  test('bails out (returns null) when a FIXED appointment credit would share a pool with a percentage PRIMARY discount', () => {
+    const result = restackStoredVisitFinancials({
+      primary_line_price: 100,
+      line_discount_type: 'percentage',
+      line_discount_amount: 15,
+      discount_type: 'fixed_amount',
+      discount_amount: 30,
+    }, [], null);
+    expect(result).toBeNull();
+  });
+
+  test('bails out (returns null) when a FIXED appointment credit would share a pool with a percentage ADD-ON discount', () => {
     const result = restackStoredVisitFinancials({
       primary_line_price: 100,
       line_discount_type: null,
-      line_discount_amount: null,
       discount_type: 'fixed_amount',
       discount_amount: 20,
     }, [
       { base_price: 80, estimated_price: 72, discount_type: 'percentage', discount_amount: 10, discount_dollars: 8, service_id: 'addon-svc' },
     ], null);
-
-    // Pool = 100 (primary, no own discount) + 80 (addon) = 180. $20 credit
-    // pro-rated: addon's share = 20 * 80/180 = $8.89, leaving $71.11. 10% of
-    // that (cent-exact) is $7.11 — never the frozen $8, and well under the
-    // $8 surrogate cap (see the capped-primary test below for when that cap
-    // actually binds).
-    expect(result.addonDollars[0].discountDollars).toBe(7.11);
-    expect(result.addonDollars[0].netPrice).toBe(72.89);
+    expect(result).toBeNull();
   });
 
-  test('falls back to a derived gross (net + frozen dollars) when an addon row predates base_price', () => {
+  // The bail-out is narrow: a percentage LINE term never shares its
+  // remaining with a NON-fixed appointment discount (Step 3, the line's own
+  // percentage, always precedes Step 4, the appointment percentage) — no
+  // stale-cap risk, so this combination restacks fully and correctly.
+  test('does NOT bail out when the shared appointment credit is percentage-typed — Step 3 always precedes Step 4', () => {
     const result = restackStoredVisitFinancials({
       primary_line_price: 100,
-      line_discount_type: null,
-      discount_type: 'fixed_amount',
-      discount_amount: 20,
-    }, [
-      // No base_price column value at all — gross is reconstructed as
-      // estimated_price(45) + discount_dollars(5) = 50 (a legacy row's own
-      // consistent net + frozen dollars, not a different row's), then
-      // restacked the same way the test above does.
-      { base_price: null, estimated_price: 45, discount_type: 'percentage', discount_amount: 10, discount_dollars: 5, service_id: 'addon-svc' },
-    ], null);
-
-    // Pool = 100 + 50 = 150. $20 credit pro-rated: addon's share =
-    // 20 * 50/150 = $6.67, leaving $43.33. 10% of that is $4.33 — recomputed
-    // against the derived $50 gross, not the frozen $5.
-    expect(result.addonDollars[0].discountDollars).toBe(4.33);
+      line_discount_type: 'percentage',
+      line_discount_amount: 15,
+      line_discount_dollars: 15, // consistent, uncapped — unaffected either way
+      discount_type: 'percentage',
+      discount_amount: 10,
+    }, [], null);
+    expect(result.primaryLineDiscountDollars).toBe(15);
+    expect(result.appointmentDiscountDollars).toBe(8.5); // 10% of the $85 remainder
+    expect(result.price).toBe(76.5);
   });
 
-  // Codex pre-push audit P0 (round 1), stored-row counterpart of the
-  // buildAppointmentPricing cap test above: line_discount_type/amount carry
-  // no persisted cap at all, so the ORIGINAL frozen line_discount_dollars —
-  // itself already correctly capped when it was written — is used as a safe
-  // surrogate ceiling (see the comment on restackStoredVisitFinancials).
-  test('a capped primary line discount keeps its cap through a stored restack (frozen figure as surrogate ceiling)', () => {
+  // The shared APPOINTMENT-LEVEL scalar was ALREADY correct before this
+  // slice (calculateStoredVisitFinancials already recomputes it fresh per
+  // occurrence's own add-on mix) — this pins that the bail-out above
+  // doesn't regress that when no percentage line term is present at all.
+  test('a due add-on still changes a FIXED appointment credit’s own pro-rata split when no percentage line term is present', () => {
+    const parent = { primary_line_price: 100, line_discount_type: null, discount_type: 'fixed_amount', discount_amount: 20 };
+    const withAddon = restackStoredVisitFinancials(parent, [
+      { base_price: 50, estimated_price: 50, discount_type: null, service_id: 'addon-svc' },
+    ], null);
+    expect(withAddon.appointmentDiscountDollars).toBe(20);
+    expect(withAddon.price).toBe(130);
+
+    const withoutAddon = restackStoredVisitFinancials(parent, [], null);
+    expect(withoutAddon.appointmentDiscountDollars).toBe(20);
+    expect(withoutAddon.price).toBe(80);
+  });
+
+  // Round-1's cap-preservation concern, in the one combination it can still
+  // be soundly checked: no FIXED appointment credit shares the pool, so a
+  // percentage line discount's own remaining is NEVER reduced by anything
+  // else — restacking it reproduces EXACTLY its original (already-capped)
+  // frozen figure, never an uncapped recompute.
+  test('a capped primary percentage discount is unaffected when nothing shares its pool (no fixed appointment credit)', () => {
     const result = restackStoredVisitFinancials({
       primary_line_price: 100,
       line_discount_type: 'percentage',
       line_discount_amount: 50,
       line_discount_dollars: 10, // the ORIGINAL 50%-capped-$10 result
-      discount_type: 'fixed_amount',
-      discount_amount: 10,
+      discount_type: null,
     }, [], null);
-
-    // $10 fixed credit off $100 first = $90 remaining. Uncapped, 50% of $90
-    // would be $45 — the surrogate ceiling holds it to the original $10,
-    // never the $45 a dropped cap would give.
     expect(result.primaryLineDiscountDollars).toBe(10);
-    expect(result.price).toBe(80);
+    expect(result.price).toBe(90);
   });
 
   // Codex pre-push audit P0 (round 2) — stored-row counterpart of the same
@@ -435,55 +422,27 @@ describe('recurring extension — restackStoredVisitFinancials', () => {
   });
 
   // Codex pre-push audit P0 (round 3), stored-row counterpart of the
-  // identical fix in restackLiveVisitFinancials above — same worked example
-  // Codex used: a $0 primary, a $100 recurring add-on at 20% off, a $50
-  // one-time add-on, and a $30 appointment credit.
-  test('a $0 primary_line_price still restacks its OWN priced/discounted due add-ons and the shared appointment credit', () => {
+  // identical fix in restackLiveVisitFinancials above. Uses a FIXED-type
+  // (not percentage) recurring add-on discount deliberately: a fixed
+  // discount is self-limiting to its own face value regardless of pool
+  // size, so it never trips the round-5 bail-out, letting this stay focused
+  // on the $0-primary-gross guard specifically.
+  test('a $0 primary_line_price still restacks its OWN priced add-ons and the shared appointment credit', () => {
     const parent = { primary_line_price: 0, line_discount_type: null, discount_type: 'fixed_amount', discount_amount: 30 };
-    const recurringAddon = { base_price: 100, estimated_price: 84, discount_type: 'percentage', discount_amount: 20, discount_dollars: 16, service_id: 'recurring-addon' };
+    const recurringAddon = { base_price: 100, estimated_price: 90, discount_type: 'fixed_amount', discount_amount: 10, discount_dollars: 10, service_id: 'recurring-addon' };
     const oneTimeAddon = { base_price: 50, estimated_price: 50, discount_type: null, service_id: 'one-time-addon' };
 
+    // Pool = 100 + 50 = 150; $30 credit pro-rated across both.
     const anchor = restackStoredVisitFinancials(parent, [recurringAddon, oneTimeAddon], null);
-    expect(anchor.addonDollars[0].discountDollars).toBe(16);
+    expect(anchor.addonDollars[0].discountDollars).toBe(10); // the fixed discount's own face value, unaffected by pool size
+    expect(anchor.price).toBe(110);
 
-    // A later extension occurrence where the one-time add-on isn't due.
+    // A later extension occurrence where the one-time add-on isn't due —
+    // the recurring add-on's OWN discount stays $10 (self-limiting), but
+    // the shared credit's split (and so the total) changes correctly.
     const later = restackStoredVisitFinancials(parent, [recurringAddon], null);
-    expect(later.addonDollars[0].discountDollars).toBe(14);
-    expect(later.price).toBe(56);
-  });
-
-  // Codex pre-push audit P0 (round 4): the round-1 surrogate-cap fix read
-  // "present frozen dollars" as `> 0`, so a discount EXPLICITLY capped to
-  // $0 (calculateDiscountDollars honors an explicit $0 max_discount_dollars
-  // — admin-discounts.js accepts it, same as any other cap) restacked as if
-  // it had no cap at all. Codex's own worked example: a $100 primary at 50%
-  // capped $0 plus a $10 appointment credit correctly costs $90 — the
-  // uncapped bug stamped $45.
-  test('a primary line discount explicitly capped to $0 restacks as $0, never as uncapped', () => {
-    const result = restackStoredVisitFinancials({
-      primary_line_price: 100,
-      line_discount_type: 'percentage',
-      line_discount_amount: 50,
-      line_discount_dollars: 0, // the ORIGINAL 50%-capped-$0 result — present, not missing
-      discount_type: 'fixed_amount',
-      discount_amount: 10,
-    }, [], null);
-
-    expect(result.primaryLineDiscountDollars).toBeNull(); // 0 dollars reports as null, same convention as every other zero discount
-    expect(result.price).toBe(90);
-  });
-
-  test('an add-on discount explicitly capped to $0 restacks as $0, never as uncapped', () => {
-    const result = restackStoredVisitFinancials({
-      primary_line_price: 100,
-      line_discount_type: null,
-      discount_type: 'fixed_amount',
-      discount_amount: 10,
-    }, [
-      { base_price: 100, estimated_price: 100, discount_type: 'percentage', discount_amount: 50, discount_dollars: 0, service_id: 'addon-svc' },
-    ], null);
-
-    expect(result.addonDollars[0].discountDollars).toBe(0);
+    expect(later.addonDollars[0].discountDollars).toBe(10);
+    expect(later.price).toBe(60);
   });
 });
 
@@ -507,13 +466,28 @@ describe('recurring extension — applyDiscountStackRestack (no-op contract)', (
     expect(target).toEqual({ estimated_price: 999, discount_dollars: 999, line_discount_dollars: 999 });
   });
 
-  test('gate on: overrides the frozen fields with the restacked figures', async () => {
+  // A FIXED appointment credit sharing a pool with a percentage PRIMARY
+  // discount is the one combination restackStoredVisitFinancials bails out
+  // of (Codex pre-push audit P0, round 5 — see that function's own tests
+  // for the full rationale): the wrapper's no-op contract covers this
+  // exactly like the gate being off — the target is left exactly as
+  // applyStoredVisitFinancials (called before this) already stamped it.
+  test('gate on but the combination is unsafe to restack (fixed credit + percentage primary): no-op, target untouched', async () => {
     await withGateLive(() => {
       const target = { estimated_price: 999, discount_dollars: 999, line_discount_dollars: 999 };
-      const addonDollars = applyDiscountStackRestack(target, cols, parentTemplate, [], null);
-      expect(target.line_discount_dollars).toBe(10.5); // 15% of (100 - 30)
-      expect(target.discount_dollars).toBe(30);
-      expect(target.estimated_price).toBe(59.5); // 100 - 10.5 - 30
+      const result = applyDiscountStackRestack(target, cols, parentTemplate, [], null);
+      expect(result).toBeNull();
+      expect(target).toEqual({ estimated_price: 999, discount_dollars: 999, line_discount_dollars: 999 });
+    });
+  });
+
+  test('gate on: overrides the frozen fields with the restacked figures (safe combination — percentage appointment credit)', async () => {
+    await withGateLive(() => {
+      const target = { estimated_price: 999, discount_dollars: 999, line_discount_dollars: 999 };
+      const addonDollars = applyDiscountStackRestack(target, cols, { ...parentTemplate, discount_type: 'percentage', discount_amount: 10 }, [], null);
+      expect(target.line_discount_dollars).toBe(15); // 15% of the untouched $100 — Step 3 precedes Step 4
+      expect(target.discount_dollars).toBe(8.5); // 10% of the $85 remainder
+      expect(target.estimated_price).toBe(76.5);
       expect(addonDollars).toEqual([]);
     });
   });

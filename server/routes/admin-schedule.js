@@ -2682,6 +2682,35 @@ function restackStoredVisitFinancials(parent, addonRows, discountScope) {
   if (!Number.isFinite(primaryGross) || primaryGross < 0) return null;
   const addons = Array.isArray(addonRows) ? addonRows : [];
 
+  // A FIXED-amount appointment-level credit pro-rates across every eligible
+  // line BEFORE any line's own percentage computes (the canonical SLOT
+  // order — Steps 1-2 precede Step 3 in the engine), so a percentage-type
+  // line/add-on discount's dollar figure becomes sensitive to what that
+  // credit reduced its remaining to. Neither line_discount_* nor an add-on's
+  // own discount_* columns persist that percentage's real CAP (the
+  // catalog's max_discount_dollars is applied once at creation and never
+  // stored), and the credit's own AMOUNT can change later through an edit
+  // (a different slice) — so a frozen dollar figure captured before that
+  // edit is not a sound surrogate cap ACROSS TIME (Codex pre-push audit P0,
+  // round 5: a stale $14 surrogate captured under a $30 credit wrongly
+  // ceilinged a later restack under a reduced $10 credit, which should have
+  // raised the line's own share to $18 — not held it at $14). Falling back
+  // to the existing calculateStoredVisitFinancials/applyStoredVisitFinancials
+  // computation (already correct on its own terms: it recomputes the shared
+  // appointment discount fresh against the CURRENT add-on mix, just without
+  // this engine's canonical fixed-before-percent SLOT order) is the only
+  // sound choice here without a persisted per-line cap column — a schema
+  // change outside this slice's file scope. Every OTHER combination still
+  // restacks fully below: a FIXED- or free_service-type line/add-on term is
+  // self-limiting (no cap concept), and a non-fixed appointment discount
+  // never reduces a line's remaining before that line's own percentage
+  // computes (Step 3 always precedes Step 4), so nothing else here is
+  // stale-cap-sensitive.
+  const appointmentIsFixedCredit = parent?.discount_type === 'fixed_amount' || parent?.discount_type === 'variable_amount';
+  const linePercentageExists = isPercentDiscountType(parent?.line_discount_type)
+    || addons.some((addon) => isPercentDiscountType(addon?.discount_type));
+  if (appointmentIsFixedCredit && linePercentageExists) return null;
+
   const pctType = isPercentDiscountType(parent?.discount_type);
   if (pctType) assertPercentExclusionCatalogReady();
   const parentPctExcluded = pctType && lineExcludedFromPercentDiscount(parent?.service_key_snapshot);
