@@ -10357,9 +10357,11 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
     if (requesting) return;
     setRequesting(true);
     try {
-      const subject = selected?.requestSubject || `Review WaveGuard ${selectedTier} plan`;
-      const description = selected?.requestDescription || `Customer selected WaveGuard ${selectedTier} in the portal tier explorer.`;
-      await api.createRequest?.({ category: 'upgrade', subject, description });
+      const category = canPriceTier ? 'upgrade' : 'other';
+      const subject = `WaveGuard plan ${canPriceTier ? 'upgrade' : 'review'}: ${currentTier} to ${selectedTier}`;
+      const details = selected?.requestDescription || 'Manual account review requested from the portal tier explorer.';
+      const description = `Current tier: WaveGuard ${currentTier}. Requested tier: WaveGuard ${selectedTier}. ${details}`.slice(0, 500);
+      await api.createRequest?.({ category, subject, description });
       setRequested(true);
     } catch (err) {
       showCustomerAlert(`Couldn't send request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
