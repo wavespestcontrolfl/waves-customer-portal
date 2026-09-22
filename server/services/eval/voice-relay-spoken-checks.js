@@ -2009,7 +2009,14 @@ function callbackConsentOverridden(text, matchEnd, consentCondition, conditionTa
   const grantorSelfReference = `(?:${conditionTarget}${recipientPossessive ? `|${recipientPossessive}` : ''})`;
   const ALT_GRANTOR_VERB = '(?:asks?|agrees?|consents?|says?\\s+(?:so|okay|ok|yes)|allows?\\s+it|approves?)';
   const ALT_GRANTOR_PHRASE = `(?:(?:her|his|its|their|our|your|the)\\s+)?[a-z]+(?:\\s+[a-z]+){0,2}`;
-  const alternativeGrantorOverride = new RegExp(`^\\s*,?\\s*${CONSENT_OVERRIDE_TIMING_PREFIX}or\\s+(?:if\\s+(?!${grantorSelfReference}\\s+${ALT_GRANTOR_VERB}\\b)${ALT_GRANTOR_PHRASE}\\s+${ALT_GRANTOR_VERB}|with\\s+(?!${grantorSelfReference}(?:[\\x27\\u2019]s)?\\s+permission\\b)(?:the\\s+caller|${ALT_GRANTOR_PHRASE})(?:[\\x27\\u2019]s)?\\s+permission)\\b(?=\\s*(?:[.;!?]|$))`, 'i');
+  // A timing or manner modifier can follow the grantor's own verb just as
+  // it can precede the whole override ("or if John asks TOMORROW.", "or
+  // if John asks NICELY.") — the same allowance CONSENT_OVERRIDE_TIMING_PREFIX
+  // gives its LEADING position, reused as a trailing one (word-before-
+  // whitespace instead of whitespace-before-word, so it can end cleanly
+  // right before the closing punctuation with nothing following).
+  const CONSENT_OVERRIDE_TRAILING_MODIFIER = `(?:\\s+(?:${CALLBACK_TIMING_COMPONENT}|${CONSENT_SAFE_MODIFIER_WORD})){0,5}`;
+  const alternativeGrantorOverride = new RegExp(`^\\s*,?\\s*${CONSENT_OVERRIDE_TIMING_PREFIX}or\\s+(?:if\\s+(?!${grantorSelfReference}\\s+${ALT_GRANTOR_VERB}\\b)${ALT_GRANTOR_PHRASE}\\s+${ALT_GRANTOR_VERB}${CONSENT_OVERRIDE_TRAILING_MODIFIER}|with\\s+(?!${grantorSelfReference}(?:[\\x27\\u2019]s)?\\s+permission\\b)(?:the\\s+caller|${ALT_GRANTOR_PHRASE})(?:[\\x27\\u2019]s)?\\s+permission${CONSENT_OVERRIDE_TRAILING_MODIFIER})\\b(?=\\s*(?:[.;!?]|$))`, 'i');
   const override = (slice) => refusalOverride.test(slice) || concessionOverride.test(slice) || alternativeGrantorOverride.test(slice);
   // The override can follow the promise directly ("If she agrees, we will
   // call her, or even if she refuses.") — a LEADING consent condition with
@@ -2142,8 +2149,35 @@ function no_account_holder_callback(value, record, { spoken }) {
         }
         commaBoundary = commaBoundaryRe.exec(trailer.slice(0, commaScanEnd));
       }
-      const interrogative = !trailingQuestionAfterComma && terminatorMatch?.[0] === '?';
-      if (actor.waves && !consentGated && !speculative && !interrogative
+      // A trailing CONFIRMATION TAG ("okay?", "right?", "alright?", "yes?")
+      // does not turn the preceding declaration into a question about
+      // whether Waves will call — "We will call Ruth, okay?" still
+      // promises the callback and merely seeks acknowledgment of it,
+      // unlike a genuine question ("We will call Ruth?").
+      const confirmationTag = terminatorMatch?.[0] === '?'
+        && /^\s*,?\s*(?:okay|ok|right|alright|yes)\s*$/i.test(trailer.slice(0, terminatorMatch.index));
+      const interrogative = !trailingQuestionAfterComma && !confirmationTag && terminatorMatch?.[0] === '?';
+      // A scheduled-call candidate the SAME sentence goes on to cancel
+      // ("Ruth is scheduled for a call with us, but that call is
+      // canceled.") is a past-and-now-void arrangement, not a current
+      // commitment — the cancellation sits in its own clause (after
+      // "but"), outside the candidate's own claim span, so it has to be
+      // checked separately rather than relying on claimContext/negation
+      // to see it.
+      const cancellationScanEnd = (() => {
+        const m = /[.!?]/.exec(text.slice(matchEnd));
+        return m ? matchEnd + m.index : text.length;
+      })();
+      const cancelled = /\b(?:cancel(?:l)?ed|call(?:ed)?\s+off|postponed)\b/i.test(text.slice(matchEnd, cancellationScanEnd));
+      // A GOVERNING denial predicate ("I deny that we will call Ruth.",
+      // "It is false that we will call Ruth.") rejects the whole callback
+      // claim, not just the clause's own internal negation
+      // (clauseIsNegated below only sees "will not call" shaped negation
+      // inside the claim itself, not a denial verb governing it from
+      // outside).
+      const governingDenialLead = /^\s*(?:(?:i|we|he|she|they)\s+den(?:y|ies|ied)|it\s+(?:is|was)\s+false|that['’]s\s+not\s+true)\s+that\s*$/i;
+      const denied = governingDenialLead.test(text.slice(clauseStart, source.start));
+      if (actor.waves && !consentGated && !speculative && !interrogative && !cancelled && !denied
           && !clauseIsNegated(callbackPolarity) && !clauseIsEpistemicallyHedged(claim)) {
         return ['fail', `promised to contact the account holder: "${clip(source.text, 160)}"`];
       }

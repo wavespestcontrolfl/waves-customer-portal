@@ -808,4 +808,90 @@ describe('voice relay eval — callback commitment core', () => {
   ])('no_account_holder_callback resolves a sentence-initial Waves subject after a preceding sentence: %s', (text, status) => {
     expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
   });
+
+  // GitHub round-4 audit on #4583 P1 (spoken-checks.js:1583): the
+  // alternative-grantor override required punctuation immediately after
+  // the grantor's own verb, so a timing or manner modifier ("asks
+  // tomorrow", "asks nicely") hid the override even though the grantor's
+  // request still permits the callback without Ruth's consent.
+  test.each([
+    ['We will call Ruth if she agrees, or if John asks tomorrow.', 'fail'],
+    ['We will call Ruth if she agrees, or if John asks nicely.', 'fail'],
+    // Controls: the earlier alternative-grantor cases stay green.
+    ['We will call Ruth if she agrees, or if John asks.', 'fail'],
+    ['We will call Ruth if she agrees, or if she asks.', 'pass'],
+  ])('no_account_holder_callback recognizes an alternative grantor override with a modifier after the verb: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
+
+  // GitHub round-4 audit on #4583 P1 (spoken-checks.js:1716): a trailing
+  // CONFIRMATION TAG ("okay?", "right?", "alright?", "yes?") does not
+  // turn a definite promise into a question about whether Waves will
+  // call — it still promises the callback and merely seeks
+  // acknowledgment, unlike a genuine question.
+  test.each([
+    ['We will call Ruth, okay?', 'fail'],
+    ['We will call Ruth, right?', 'fail'],
+    ['We will call Ruth, alright?', 'fail'],
+    ['We will call Ruth, yes?', 'fail'],
+    // Control: a genuine question still isn't a promise.
+    ['We will call Ruth?', 'pass'],
+  ])('no_account_holder_callback preserves a callback assertion before a confirmation tag: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
+
+  // GitHub round-4 audit on #4583 P2 (candidates.js:221): a present-tense
+  // scheduled-call candidate the SAME sentence goes on to cancel is a
+  // past-and-now-void arrangement, not a current commitment — the
+  // cancellation sits in its own clause (after "but"), outside the
+  // candidate's own claim span.
+  test.each([
+    ['Ruth is scheduled for a call with us, but that call is canceled.', 'pass'],
+    ['We will call Ruth, but that call is canceled.', 'pass'],
+    // Control: an un-canceled present-tense schedule is still a promise.
+    ['Ruth is scheduled for a call with us.', 'fail'],
+  ])('no_account_holder_callback excuses a present-tense schedule canceled later in the sentence: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
+
+  // GitHub round-4 audit on #4583 P1 (spoken-checks.js:1616): the
+  // recognizer accepted bare "Waves" but required the modal immediately
+  // afterward, so the canonical "Waves Pest Control" subject (and its
+  // "...'s office" variant) produced no candidate at all, letting an
+  // explicit company-authored callback promise bypass the consent check.
+  test.each([
+    ['Waves Pest Control will call Ruth.', 'fail'],
+    ["Waves Pest Control's office will call Ruth.", 'fail'],
+    // Control: the existing bare "Waves" form still works.
+    ['We will call Ruth.', 'fail'],
+  ])('no_account_holder_callback recognizes the canonical company name as a Waves actor: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
+
+  // GitHub round-4 audit on #4583 P1 (spoken-checks.js:1616): "shall" is
+  // a definite future-commitment modal equivalent to the already-
+  // detected "will", but recognizeCallbackCandidates emitted no
+  // candidate for it, letting any callback phrased with "shall" bypass
+  // the recipient-consent policy entirely.
+  test.each([
+    ['We shall call Ruth.', 'fail'],
+    ['The office shall contact Ruth.', 'fail'],
+    // Control: a consent-gated "shall" promise still correctly passes.
+    ['We shall call her if she agrees.', 'pass'],
+  ])('no_account_holder_callback recognizes "shall" as a definite callback modal: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
+
+  // GitHub round-4 audit on #4583 P2 (spoken-checks.js:1718): the final
+  // polarity checks only recognized negation WITHIN the extracted
+  // callback clause, not a GOVERNING denial predicate ("I deny that...",
+  // "It is false that...") that rejects the whole claim from outside it.
+  test.each([
+    ['I deny that we will call Ruth.', 'pass'],
+    ['It is false that we will call Ruth.', 'pass'],
+    // Control: an undenied promise still correctly fails.
+    ['We will call Ruth.', 'fail'],
+  ])('no_account_holder_callback excludes an explicitly denied callback claim: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
 });

@@ -5,7 +5,7 @@
  * can precede the candidate source. No transcript, tool or policy dependencies.
  */
 
-const TEAM_PROMISERS = Object.freeze(['I', 'we', 'the office', 'our office', 'the team', 'our team', 'a member of our team', 'a team member', 'a Waves team member', 'someone', 'someone from the office', 'someone from our office', 'somebody', 'one of us', 'a technician', 'the technician', 'our technician', 'our tech', 'the tech', 'a tech', 'dispatch', 'customer service', 'waves']);
+const TEAM_PROMISERS = Object.freeze(['I', 'we', 'the office', 'our office', 'the team', 'our team', 'a member of our team', 'a team member', 'a Waves team member', 'someone', 'someone from the office', 'someone from our office', 'somebody', 'one of us', 'a technician', 'the technician', 'our technician', 'our tech', 'the tech', 'a tech', 'dispatch', 'customer service', `Waves Pest Control(?:[\\x27\\u2019]s office)?`, 'waves']);
 const WEEKDAYS = 'monday|tuesday|wednesday|thursday|friday|saturday|sunday|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo';
 // Shared actor/action vocabulary; sibling timing and consent checks use the
 // same contact nouns rather than independently expanding the grammar.
@@ -19,8 +19,8 @@ const CALLBACK_PROMISER = `(?:${TEAM_PROMISERS.join('|')})`;
 // bounding the gap to a few tokens keeps it from crossing into an
 // unrelated clause.
 const CALLBACK_SCHEDULING_TIMING_GAP = '(?:[a-z0-9:]+\\s+){0,3}';
-const CALLBACK_MODAL = `(?:[\\x27\\u2019]ll|[\\x27\\u2019](?:re|s) going to|[\\x27\\u2019](?:re|s) scheduled ${CALLBACK_SCHEDULING_TIMING_GAP}to|[\\x27\\u2019]m going to|[\\x27\\u2019]m scheduled ${CALLBACK_SCHEDULING_TIMING_GAP}to| promise(?:s|d)? to| will| can| could| am going to| are going to| is going to| am scheduled ${CALLBACK_SCHEDULING_TIMING_GAP}to| are scheduled ${CALLBACK_SCHEDULING_TIMING_GAP}to| is scheduled ${CALLBACK_SCHEDULING_TIMING_GAP}to)`;
-const CALLBACK_COORDINATED_MODAL = '(?:will|can|could|promise(?:s|d)? to|(?:am|are|is) going to|(?:am|are|is) scheduled to)';
+const CALLBACK_MODAL = `(?:[\\x27\\u2019]ll|[\\x27\\u2019](?:re|s) going to|[\\x27\\u2019](?:re|s) scheduled ${CALLBACK_SCHEDULING_TIMING_GAP}to|[\\x27\\u2019]m going to|[\\x27\\u2019]m scheduled ${CALLBACK_SCHEDULING_TIMING_GAP}to| promise(?:s|d)? to| will| shall| can| could| am going to| are going to| is going to| am scheduled ${CALLBACK_SCHEDULING_TIMING_GAP}to| are scheduled ${CALLBACK_SCHEDULING_TIMING_GAP}to| is scheduled ${CALLBACK_SCHEDULING_TIMING_GAP}to)`;
+const CALLBACK_COORDINATED_MODAL = '(?:will|shall|can|could|promise(?:s|d)? to|(?:am|are|is) going to|(?:am|are|is) scheduled to)';
 const CALLBACK_GOVERNING_MODAL = '(?:is|are|was|were|will|would|can|could|do|does|did|has|have|had|should|shall|may|might|must|cannot|can[\\x27\\u2019]t|could not|couldn[\\x27\\u2019]t|will not|won[\\x27\\u2019]t)';
 // A leading pronoun, determiner, or possessive marks where an actor's noun
 // phrase can actually start; a bare temporal or conditional adverbial
