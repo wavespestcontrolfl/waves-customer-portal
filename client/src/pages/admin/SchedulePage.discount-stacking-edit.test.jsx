@@ -1,0 +1,287 @@
+// @vitest-environment jsdom
+//
+// GATE_DISCOUNT_STACKING (slice 7 of #4405): the Edit appointment modal's
+// per-add-on-line discount picker, its compound preview, non-stackable
+// group filtering, save-lock, the submit-time freshness guard, and
+// VISIT_CHANGED_RETRY handling. Gate-off parity (byte-identical to before
+// this slice) is pinned first — every other test builds on top of it.
+import React from 'react';
+import '@testing-library/jest-dom/vitest';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { EditServiceModal, verifiedLineDiscountCap, lineDiscountSaveBlocked } from './SchedulePage';
+import { __resetDiscountStackingCache } from '../../hooks/useDiscountStacking';
+
+vi.mock('../../components/schedule/useSlotConflicts', () => ({ useSlotConflicts: () => ({ conflicts: [] }) }));
+vi.mock('../../components/schedule/useBestTimes', () => ({ useBestTimes: () => ({ bestTimes: [], picked: null, bestInRange: [] }) }));
+
+const MILITARY = {
+  id: 'disc-military', name: 'Military Discount', discount_type: 'fixed_amount', amount: 5,
+  max_discount_dollars: null, stack_group: null, is_stackable: true,
+  is_active: true, is_auto_apply: false, show_in_invoices: true,
+};
+const SILVER = {
+  id: 'disc-silver', name: 'WaveGuard Silver', discount_type: 'percentage', amount: 10,
+  max_discount_dollars: null, stack_group: 'waveguard', is_stackable: false,
+  is_active: true, is_auto_apply: false, show_in_invoices: true,
+};
+const GOLD = {
+  id: 'disc-gold', name: 'WaveGuard Gold', discount_type: 'percentage', amount: 15,
+  max_discount_dollars: null, stack_group: 'waveguard', is_stackable: false,
+  is_active: true, is_auto_apply: false, show_in_invoices: true,
+};
+const DISCOUNTS = [MILITARY, SILVER, GOLD];
+
+// A legacy row: the mosquito add-on already carries a STORED Military stamp
+// (base_price 60, discount_amount 5, net 55) — exactly mapAddonRow's shape.
+// The fertilization add-on carries no discount at all, so its Line discount
+// picker renders in "None" state.
+const baseService = {
+  id: 'fixture-visit', customerId: 'fixture-account', customerName: 'Fixture account',
+  serviceType: 'Quarterly Pest', scheduledDate: '2035-01-02', windowStart: '08:00', windowEnd: '09:00',
+  status: 'confirmed', notes: 'Existing note', estimatedPrice: 195, primaryLinePrice: 100,
+  serviceAddons: [
+    {
+      id: 'addon-1', serviceId: 'svc-mosquito', serviceName: 'Monthly Mosquito', serviceKey: 'mosquito_monthly',
+      serviceCategory: 'mosquito', basePrice: 60, estimatedPrice: 55, discountId: 'disc-military',
+      discountName: 'Military Discount', discountType: 'fixed_amount', discountAmount: 5, discountDollars: 5,
+      estimatedDuration: 30,
+    },
+    {
+      id: 'addon-2', serviceId: 'svc-fert', serviceName: 'Quarterly Fertilization', serviceKey: 'lawn_fert',
+      serviceCategory: 'lawn', basePrice: 40, estimatedPrice: 40, estimatedDuration: 20,
+    },
+  ],
+};
+
+function mockFetch({ stackingEnabled, discounts = DISCOUNTS, onUpdateDetails } = {}) {
+  return vi.fn(async (url, options) => {
+    if (url.endsWith('/admin/discounts/stacking')) {
+      return { ok: true, json: async () => ({ enabled: stackingEnabled }) };
+    }
+    if (url.endsWith('/admin/discounts')) {
+      return { ok: true, json: async () => discounts };
+    }
+    if (url.includes('/update-details')) {
+      if (onUpdateDetails) return onUpdateDetails(JSON.parse(options.body));
+      return { ok: true, json: async () => ({}) };
+    }
+    return { ok: true, json: async () => ({}) };
+  });
+}
+
+function Harness({ onSaved = vi.fn(), service = baseService }) {
+  const [open, setOpen] = React.useState(false);
+  return <>
+    <button onClick={(event) => { event.currentTarget.focus(); setOpen(true); }}>Edit visit</button>
+    {open && <EditServiceModal service={service} technicians={[]} onClose={() => setOpen(false)} onSaved={onSaved} />}
+  </>;
+}
+
+const writes = () => fetch.mock.calls.filter(([, options]) => options?.method && options.method !== 'GET');
+// This modal's <label>s are visual-only siblings of their control (no
+// htmlFor/id pair, no wrapping) — getByLabelText can't associate them.
+function labeledControl(text) {
+  return screen.getByText(text, { selector: 'label' }).parentElement.querySelector('select, input');
+}
+const apptDiscountSelect = () => labeledControl('Discount');
+
+beforeEach(() => {
+  __resetDiscountStackingCache();
+  localStorage.setItem('waves_admin_token', 'test-token');
+  vi.stubGlobal('scrollTo', vi.fn());
+});
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.resetAllMocks(); localStorage.clear(); });
+
+describe('lineDiscountSaveBlocked / verifiedLineDiscountCap', () => {
+  it('blocks only when the gate is unconfirmed AND both an appointment pick and a line discount are in play', () => {
+    expect(lineDiscountSaveBlocked({ known: false, appointmentDiscountSelected: true, lines: [{ _origDiscountType: 'fixed_amount' }] })).toBe(true);
+    expect(lineDiscountSaveBlocked({ known: true, appointmentDiscountSelected: true, lines: [{ _origDiscountType: 'fixed_amount' }] })).toBe(false);
+    expect(lineDiscountSaveBlocked({ known: false, appointmentDiscountSelected: false, lines: [{ _origDiscountType: 'fixed_amount' }] })).toBe(false);
+    expect(lineDiscountSaveBlocked({ known: false, appointmentDiscountSelected: true, lines: [{}] })).toBe(false);
+    // An explicitly REMOVED line discount is no longer "in play" even though
+    // _origDiscountType is still on the row.
+    expect(lineDiscountSaveBlocked({
+      known: false, appointmentDiscountSelected: true,
+      lines: [{ _origDiscountType: 'fixed_amount', lineDiscountTouched: true, lineDiscount: null }],
+    })).toBe(false);
+  });
+
+  it('trusts a stamp\'s own cap only when the catalog row still confirms its type/amount', () => {
+    const stamp = { discount_type: 'percentage', amount: 10, id: 'disc-silver' };
+    expect(verifiedLineDiscountCap(stamp, { discount_type: 'percentage', amount: 10, max_discount_dollars: 20 }))
+      .toMatchObject({ max_discount_dollars: 20 });
+    // Catalog amount now disagrees (preset edited since) — cap withheld, stamp unchanged.
+    expect(verifiedLineDiscountCap(stamp, { discount_type: 'percentage', amount: 15, max_discount_dollars: 20 }))
+      .toBe(stamp);
+    // No catalog row loaded yet — stamp unchanged.
+    expect(verifiedLineDiscountCap(stamp, null)).toBe(stamp);
+    expect(verifiedLineDiscountCap(null, {})).toBeNull();
+  });
+});
+
+it('gate off: no Line discount control renders, and a notes-only save posts the exact pre-lane payload', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: false }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(screen.getAllByText('$195.00').length).toBeGreaterThan(0));
+  expect(screen.queryByText('Line discount')).not.toBeInTheDocument();
+  const notes = screen.getByDisplayValue('Existing note');
+  fireEvent.change(notes, { target: { value: 'Updated note' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  const body = JSON.parse(writes()[0][1].body);
+  expect(body.addons).toMatchObject([
+    { serviceId: 'svc-mosquito', basePrice: 60, discountType: 'fixed_amount', discountAmount: 5, discountId: 'disc-military', discountName: 'Military Discount' },
+    { serviceId: 'svc-fert', price: 40 },
+  ]);
+});
+
+it('gate on but untouched: the same notes-only save posts the identical addons payload (parity)', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(screen.getAllByText('Line discount').length).toBeGreaterThan(0));
+  const notes = screen.getByDisplayValue('Existing note');
+  fireEvent.change(notes, { target: { value: 'Updated note' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  const body = JSON.parse(writes()[0][1].body);
+  expect(body.addons).toMatchObject([
+    { serviceId: 'svc-mosquito', basePrice: 60, discountType: 'fixed_amount', discountAmount: 5, discountId: 'disc-military', discountName: 'Military Discount' },
+    { serviceId: 'svc-fert', price: 40 },
+  ]);
+});
+
+it('gate on: picking a fresh line discount previews compound math and posts the gross+slot', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  const fertPicker = await screen.findByRole('combobox', { name: 'Line discount for Quarterly Fertilization' });
+  fireEvent.change(fertPicker, { target: { value: 'disc-silver' } });
+  // Silver: 10% of the $40 fertilization line = $4.00, shown as its own row.
+  await waitFor(() => expect(screen.getAllByText('WaveGuard Silver').length).toBeGreaterThan(0));
+  expect(screen.getByText('($4.00)')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  const body = JSON.parse(writes()[0][1].body);
+  const fertLine = body.addons.find((a) => a.serviceId === 'svc-fert');
+  expect(fertLine).toMatchObject({ basePrice: 40, discountType: 'percentage', discountAmount: 10, discountId: 'disc-silver', discountName: 'WaveGuard Silver' });
+});
+
+it('gate on: a non-stackable tier chosen on a line hides its WHOLE group from the appointment select (it spans every line, including that one)', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  const fertPicker = await screen.findByRole('combobox', { name: 'Line discount for Quarterly Fertilization' });
+  fireEvent.change(fertPicker, { target: { value: 'disc-silver' } });
+  await waitFor(() => expect(screen.getAllByText('WaveGuard Silver').length).toBeGreaterThan(0));
+  // The appointment-level slot reaches every line, including the one that
+  // already carries Silver — offering EITHER waveguard tier there would let
+  // the operator create exactly the forbidden combination (a line's own
+  // tier plus the document-wide slot compounding on that same line).
+  const apptOptionNames = [...apptDiscountSelect().options].map((o) => o.textContent);
+  expect(apptOptionNames.some((t) => t.includes('WaveGuard Gold'))).toBe(false);
+  expect(apptOptionNames.some((t) => t.includes('WaveGuard Silver'))).toBe(false);
+  expect(apptOptionNames.some((t) => t.includes('Military Discount'))).toBe(true);
+});
+
+it('gate on: the same non-stackable tier stays offered on a DIFFERENT line (one tier on two lines is fine)', async () => {
+  const twoUndiscountedLines = {
+    ...baseService,
+    serviceAddons: [
+      { id: 'addon-2', serviceId: 'svc-fert', serviceName: 'Quarterly Fertilization', serviceKey: 'lawn_fert', serviceCategory: 'lawn', basePrice: 40, estimatedPrice: 40, estimatedDuration: 20 },
+      { id: 'addon-3', serviceId: 'svc-tree', serviceName: 'Tree & Shrub', serviceKey: 'tree_shrub', serviceCategory: 'tree_shrub', basePrice: 30, estimatedPrice: 30, estimatedDuration: 15 },
+    ],
+  };
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true }));
+  render(<Harness service={twoUndiscountedLines} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  const fertPicker = await screen.findByRole('combobox', { name: 'Line discount for Quarterly Fertilization' });
+  fireEvent.change(fertPicker, { target: { value: 'disc-silver' } });
+  await waitFor(() => expect(screen.getAllByText('WaveGuard Silver').length).toBeGreaterThan(0));
+  const treePicker = screen.getByRole('combobox', { name: 'Line discount for Tree & Shrub' });
+  const treeOptionNames = [...treePicker.options].map((o) => o.textContent);
+  expect(treeOptionNames.some((t) => t.includes('WaveGuard Silver'))).toBe(true);
+  expect(treeOptionNames.some((t) => t.includes('WaveGuard Gold'))).toBe(false);
+});
+
+it('gate on: Remove clears a fresh line pick back to the picker and drops its row from the totals', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  const fertPicker = await screen.findByRole('combobox', { name: 'Line discount for Quarterly Fertilization' });
+  fireEvent.change(fertPicker, { target: { value: 'disc-silver' } });
+  await waitFor(() => expect(screen.getAllByText('WaveGuard Silver').length).toBeGreaterThan(0));
+  // Both the fresh Silver pick AND the mosquito line's own frozen Military
+  // stamp render a Remove control; the fert line (added second) is last.
+  const removeButtons = screen.getAllByRole('button', { name: 'Remove line discount' });
+  fireEvent.click(removeButtons[removeButtons.length - 1]);
+  // Only the appointment select's own option text may still say "WaveGuard
+  // Silver" (the catalog row itself is untouched) — the per-line display box
+  // and the totals summary row are both gone.
+  expect(screen.queryByText('WaveGuard Silver', { selector: 'div' })).not.toBeInTheDocument();
+  expect(screen.queryByText('WaveGuard Silver', { selector: 'span' })).not.toBeInTheDocument();
+  expect(await screen.findByRole('combobox', { name: 'Line discount for Quarterly Fertilization' })).toBeInTheDocument();
+});
+
+it('retryable gate availability: an unconfirmed probe with an interacting appointment+line discount refuses the submit', async () => {
+  let resolveStacking;
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
+    if (url.endsWith('/admin/discounts/stacking')) return new Promise((resolve) => { resolveStacking = resolve; });
+    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => DISCOUNTS };
+    return { ok: true, json: async () => ({}) };
+  }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  // The mosquito line's stored Military stamp already counts as a line
+  // discount in play; select an appointment-level discount to create the
+  // ambiguous (unconfirmed gate) interaction.
+  await waitFor(() => expect(apptDiscountSelect()).toBeInTheDocument());
+  fireEvent.change(apptDiscountSelect(), { target: { value: 'custom' } });
+  fireEvent.change(labeledControl('Discount type'), { target: { value: 'fixed_amount' } });
+  fireEvent.change(labeledControl('Amount ($)'), { target: { value: '10' } });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeDisabled());
+  expect(screen.getByText(/Could not confirm how multiple discounts combine/)).toBeInTheDocument();
+  await act(async () => { resolveStacking({ ok: true, json: async () => ({ enabled: true }) }); });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeEnabled());
+});
+
+it('VISIT_CHANGED_RETRY: the save is refused with a clear message and nothing silently overwrites', async () => {
+  vi.stubGlobal('fetch', mockFetch({
+    stackingEnabled: true,
+    onUpdateDetails: async () => ({
+      ok: false, status: 409, json: async () => ({ code: 'VISIT_CHANGED_RETRY', error: 'stale' }),
+    }),
+  }));
+  const onSaved = vi.fn();
+  render(<Harness onSaved={onSaved} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  const notes = await screen.findByDisplayValue('Existing note');
+  fireEvent.change(notes, { target: { value: 'Updated note' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  expect(await screen.findByRole('alert')).toHaveTextContent(/changed since it opened/);
+  expect(onSaved).not.toHaveBeenCalled();
+  // The modal stays open with the edit intact — nothing was silently lost.
+  expect(screen.getByDisplayValue('Updated note')).toBeInTheDocument();
+});
+
+it('save-lock: a double click while a discounted save is in flight posts exactly once', async () => {
+  let resolveSave;
+  vi.stubGlobal('fetch', mockFetch({
+    stackingEnabled: true,
+    onUpdateDetails: async () => new Promise((resolve) => { resolveSave = () => resolve({ ok: true, json: async () => ({}) }); }),
+  }));
+  const onSaved = vi.fn();
+  render(<Harness onSaved={onSaved} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  const fertPicker = await screen.findByRole('combobox', { name: 'Line discount for Quarterly Fertilization' });
+  fireEvent.change(fertPicker, { target: { value: 'disc-silver' } });
+  await waitFor(() => expect(screen.getAllByText('WaveGuard Silver').length).toBeGreaterThan(0));
+  const save = screen.getByRole('button', { name: 'Save', exact: true });
+  fireEvent.click(save);
+  fireEvent.click(save);
+  await act(async () => { resolveSave(); });
+  await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+  expect(writes().filter(([url]) => url.includes('/update-details'))).toHaveLength(1);
+});
