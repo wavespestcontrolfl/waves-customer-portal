@@ -593,11 +593,26 @@ export function invoiceDocumentTerms(items, serviceLineItems, discountRowById, p
     .filter((i) => i._kind === "discount" && !i.discount_for)
     .map((i) => {
       const term = { ...invoiceDiscountItemTerm(i, discountRowById, persistedClientIds), id: i.discount_id };
-      if (!isStoredInvoiceDiscountItem(i, persistedClientIds)) return term;
+      if (isStoredInvoiceDiscountItem(i, persistedClientIds)) {
+        const eligibleLines = invoiceServiceScopeEligibleLines(
+          serviceLineItems,
+          i.document_scope_service_key,
+          i.document_scope_service_category,
+        );
+        return eligibleLines ? { ...term, eligibleLines } : term;
+      }
+      // GitHub review round 1 P1 (PR #4659): a FRESH catalog-backed pick's
+      // OWN service_key_filter/_category_filter scopes it exactly like a
+      // stored stamp's document_scope_service_key/_category does — the
+      // SAME invoiceServiceScopeEligibleLines helper, reading the catalog
+      // row's own filter columns (server mirror: invoice.js's
+      // documentEntryTerms / scopeEligibleLines).
+      const row = i.discount_id ? discountRowById?.get(String(i.discount_id)) : null;
+      if (!row || (!row.service_key_filter && !row.service_category_filter)) return term;
       const eligibleLines = invoiceServiceScopeEligibleLines(
         serviceLineItems,
-        i.document_scope_service_key,
-        i.document_scope_service_category,
+        row.service_key_filter,
+        row.service_category_filter,
       );
       return eligibleLines ? { ...term, eligibleLines } : term;
     });
@@ -6158,6 +6173,16 @@ function CreateInvoice({
       clearTimeout(timer);
     };
   }, [serviceSearchIdx, lineItems, serviceSearchAttempt]);
+  // GitHub review round 1 P1 (PR #4659): stamps service_key/service_category
+  // onto the picked line — the SAME two fields a scheduled-service
+  // invoice line already snapshots (buildScheduledServiceInvoiceLines,
+  // server-side) — so a document-wide catalog pick's OWN
+  // service_key_filter/_category_filter (e.g. the waveguard_member_wdo
+  // seed, restricted to wdo_inspection) has real per-line data to scope
+  // against on a hand-built admin invoice too, not just an
+  // auto-generated one. GET /admin/services already returns both
+  // (service-library.js's SERVICE_COLS) — this just carries them onto
+  // the line the operator actually picked.
   const pickService = (i, svc) => {
     const updated = [...lineItems];
     updated[i] = {
@@ -6165,6 +6190,8 @@ function CreateInvoice({
       _kind: "service",
       description: svc.name,
       unit_price: Number(svc.base_price) || updated[i].unit_price || 0,
+      service_key: svc.service_key || null,
+      service_category: svc.category || null,
     };
     setLineItems(updated);
     setServiceSearchIdx(null);
@@ -6446,10 +6473,23 @@ function CreateInvoice({
   // dollars, so its canonical-order position never moves across a
   // replay — see that file's own module header), so every type this
   // form's math already models correctly is safe to offer here again.
-  // free_service stays the one exclusion: a document-wide free_service
-  // term would zero out every eligible line's remaining balance at
-  // once — untested and unrequested here, unrelated to replay
-  // stability.
+  // free_service stays excluded: a document-wide free_service term would
+  // zero out every eligible line's remaining balance at once —
+  // untested and unrequested here, unrelated to replay stability.
+  //
+  // GitHub review round 1 P1 (PR #4659): a catalog row carrying its own
+  // service_key_filter / service_category_filter (e.g. the active
+  // waveguard_member_wdo seed — 100% off, restricted to wdo_inspection)
+  // used to be offered here the SAME as an unscoped row, discarding that
+  // restriction and applying it to the WHOLE invoice. Fixed below
+  // (invoiceDocumentTerms) by scoping such a pick's own eligibleLines
+  // from the row's filter — pickService now stamps service_key/
+  // service_category onto a picked line (matching what a scheduled-
+  // service invoice line already snapshots), so the SAME
+  // invoiceServiceScopeEligibleLines a stored stamp's document scope
+  // already uses can resolve a fresh pick's scope too. A scoped row is
+  // therefore safe to offer here — worst case (no line matches its
+  // filter) resolves to $0, never a silent full-invoice replay.
   const matchingDocumentDiscounts = () => {
     const q = (discountQueries.__document__ || "").trim().toLowerCase();
     const nameFiltered = availableDiscounts.filter((d) => (

@@ -189,6 +189,48 @@ describe("invoiceDocumentTerms — carries each item's discount_id as the term's
   });
 });
 
+// GitHub review round 1 P1 (PR #4659): a FRESH document-wide pick's
+// catalog row can carry its own service_key_filter/_category_filter
+// (e.g. the active waveguard_member_wdo seed, restricted to
+// wdo_inspection) — invoiceDocumentTerms must scope the term to just the
+// matching line(s), the same way it already does for a STORED item's
+// document_scope_service_key/_category, or the preview would show the
+// discount hitting every line instead of just the WDO one.
+describe("invoiceDocumentTerms — a FRESH pick with a scoped catalog row is scoped, not applied invoice-wide (client mirror of the server fix)", () => {
+  const serviceLineItems = [
+    { client_id: "l-wdo", description: "WDO Inspection", service_key: "wdo_inspection" },
+    { client_id: "l-pest", description: "Quarterly Pest", service_key: "pest_control" },
+  ];
+
+  test("a scoped catalog row resolves eligibleLines to just the matching line", () => {
+    const items = [{ client_id: "d1", _kind: "discount", discount_for: null, discount_id: "wdo-row" }];
+    const discountRowById = new Map([["wdo-row", { id: "wdo-row", discount_type: "percentage", amount: 100, service_key_filter: "wdo_inspection" }]]);
+    const terms = invoiceDocumentTerms(items, serviceLineItems, discountRowById, new Set());
+    expect(terms[0].eligibleLines).toEqual([0]);
+  });
+
+  test("an unscoped catalog row (no filter) carries no eligibleLines at all", () => {
+    const items = [{ client_id: "d1", _kind: "discount", discount_for: null, discount_id: "plain-row" }];
+    const discountRowById = new Map([["plain-row", { id: "plain-row", discount_type: "percentage", amount: 10 }]]);
+    const terms = invoiceDocumentTerms(items, serviceLineItems, discountRowById, new Set());
+    expect(terms[0]).not.toHaveProperty("eligibleLines");
+  });
+
+  test("a scoped row matching no line resolves an EMPTY eligibleLines (orphaned, $0), not undefined (unscoped)", () => {
+    const items = [{ client_id: "d1", _kind: "discount", discount_for: null, discount_id: "termite-row" }];
+    const discountRowById = new Map([["termite-row", { id: "termite-row", discount_type: "percentage", amount: 100, service_key_filter: "termite" }]]);
+    const terms = invoiceDocumentTerms(items, serviceLineItems, discountRowById, new Set());
+    expect(terms[0].eligibleLines).toEqual([]);
+  });
+
+  test("no service_key anywhere on the invoice (no pickService use) leaves a scoped row unscoped — same fallback a stored stamp's own scope already uses", () => {
+    const items = [{ client_id: "d1", _kind: "discount", discount_for: null, discount_id: "wdo-row" }];
+    const discountRowById = new Map([["wdo-row", { id: "wdo-row", discount_type: "percentage", amount: 100, service_key_filter: "wdo_inspection" }]]);
+    const terms = invoiceDocumentTerms(items, [{ client_id: "l1", description: "Hand-typed line" }], discountRowById, new Set());
+    expect(terms[0]).not.toHaveProperty("eligibleLines");
+  });
+});
+
 // Pre-push audit P0 (coordinator scope extension, round 3): a STORED
 // item's term must replay its ORIGINAL sort key (stack_sort_kind/_value/
 // _cap, persisted server-side onto the saved line item) — without this,

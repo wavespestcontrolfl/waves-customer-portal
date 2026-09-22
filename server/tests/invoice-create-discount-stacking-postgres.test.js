@@ -591,4 +591,36 @@ postgres('InvoiceService.create discount stacking — real Postgres round trip',
     const rows = await trx('invoices').where({ title: 'Document-wide free_service pick, rejected' });
     expect(rows).toHaveLength(0);
   });
+
+  // GitHub review round 1 P1 (PR #4659): a fresh catalog row's OWN
+  // service_key_filter scopes a document-wide pick to only the matching
+  // line — real catalog row (the waveguard_member_wdo shape), real
+  // round trip — never the whole invoice.
+  test('waveguard_member_wdo (100% off, scoped to wdo_inspection) on a mixed invoice discounts ONLY the WDO line, real catalog row, real round trip', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const wdoDiscountId = randomUUID();
+    await trx('discounts').insert([{
+      id: wdoDiscountId,
+      discount_key: `wdo_${wdoDiscountId.slice(0, 8)}`,
+      name: 'WaveGuard Member WDO',
+      discount_type: 'percentage',
+      amount: 100,
+      service_key_filter: 'wdo_inspection',
+      is_active: true,
+      show_in_invoices: true,
+    }]);
+    const invoice = await InvoiceService.create({
+      customerId: await insertCustomer(),
+      title: 'Mixed invoice, WDO-scoped pick',
+      lineItems: [
+        { client_id: 'l-wdo', description: 'WDO Inspection', quantity: 1, unit_price: 200, amount: 200, service_key: 'wdo_inspection' },
+        { client_id: 'l-pest', description: 'Quarterly Pest', quantity: 1, unit_price: 100, amount: 100, service_key: 'pest_control' },
+        { client_id: 'd-doc', discount_id: wdoDiscountId, discount_for: null, description: 'WaveGuard Member WDO', quantity: 1, unit_price: -1, amount: -1 },
+      ],
+    });
+    // Only the $200 WDO line is discounted — the $100 pest line survives
+    // untouched, never the $300 combined total.
+    expect(Number(invoice.discount_amount)).toBe(200);
+    expect(Number(invoice.total)).toBe(100);
+  });
 });

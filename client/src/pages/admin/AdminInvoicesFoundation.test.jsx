@@ -549,6 +549,66 @@ describe("Invoice foundation workflow preservation", () => {
     expect(posted.unit_price).toBe(-25);
   });
 
+  // GitHub review round 1 P1 (PR #4659): waveguard_member_wdo (100% off,
+  // scoped to wdo_inspection) on a mixed invoice (a WDO line and a pest
+  // line) must discount ONLY the WDO line — real search-and-pick flow
+  // through pickService (which now stamps service_key/service_category
+  // onto the picked line), through the invoice-wide picker, into both
+  // the live preview AND the submitted payload.
+  it("a service-scoped invoice-wide pick (waveguard_member_wdo shape) discounts only the matching line, real pick-a-service flow", async () => {
+    overrides.set("GET /api/admin/services", () => response({ services: [
+      { id: "svc-wdo", name: "WDO Inspection", service_key: "wdo_inspection", category: "wdo", base_price: 200 },
+      { id: "svc-pest", name: "Quarterly Pest Control", service_key: "pest_control", category: "pest", base_price: 100 },
+    ] }));
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "wdo-discount", name: "WaveGuard Member WDO", discount_type: "percentage", amount: 100, is_active: true, show_in_invoices: true, service_key_filter: "wdo_inspection" },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+
+    // Line 1: search for and PICK the WDO service (not just typed text —
+    // this is what actually runs pickService).
+    const serviceField = screen.getByLabelText("Service", { exact: true });
+    fireEvent.focus(serviceField);
+    fireEvent.change(serviceField, { target: { value: "WDO" } });
+    fireEvent.mouseDown(await screen.findByRole("button", { name: /WDO Inspection/ }));
+
+    // Line 2: add a service line and pick Quarterly Pest Control.
+    fireEvent.click(screen.getByRole("button", { name: "+ Add service" }));
+    const serviceFields = screen.getAllByLabelText("Service", { exact: true });
+    const secondServiceField = serviceFields[serviceFields.length - 1];
+    fireEvent.focus(secondServiceField);
+    fireEvent.change(secondServiceField, { target: { value: "Pest" } });
+    fireEvent.mouseDown(await screen.findByRole("button", { name: /Quarterly Pest Control/ }));
+
+    // Pick the WDO-scoped invoice-wide discount.
+    fireEvent.change(await screen.findByLabelText("Add an invoice-wide discount"), { target: { value: "WaveGuard" } });
+    fireEvent.click(await screen.findByRole("button", { name: /WaveGuard Member WDO/ }));
+
+    // Preview: the invoice-wide credit resolves to $200 (the WDO line's
+    // own gross), never $300 (both lines combined).
+    await waitFor(() => {
+      const credits = screen.getAllByLabelText("Credit ($)").map((el) => el.value);
+      expect(credits).toContain("-200");
+      expect(credits).not.toContain("-300");
+    });
+
+    fireEvent.change(screen.getByLabelText("Send", { exact: true }), { target: { value: "draft" } });
+    const key = "POST /api/admin/invoices";
+    overrides.set(key, () => response({ id: "new-invoice-wdo", invoice_number: "WPC-2026-0102", status: "draft" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create draft", exact: true }));
+    await waitFor(() => expect(requests.some((request) => request.key === key)).toBe(true));
+    const body = requests.find((request) => request.key === key).body;
+    const wdoLine = body.lineItems.find((i) => i.description === "WDO Inspection");
+    const pestLine = body.lineItems.find((i) => i.description === "Quarterly Pest Control");
+    const discountLine = body.lineItems.find((i) => i.discount_id === "wdo-discount");
+    expect(wdoLine.service_key).toBe("wdo_inspection");
+    expect(pestLine.service_key).toBe("pest_control");
+    expect(discountLine.unit_price).toBe(-200);
+  });
+
   // Pre-push audit P1 (coordinator scope extension, round 2):
   // repriceLineWithNewDiscountPick only rewrote siblings on the SAME
   // line — a fresh invoice-wide row's own displayed dollars could go

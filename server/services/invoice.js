@@ -775,9 +775,16 @@ function stackInvoiceDocumentDiscounts(serviceLines, lineEntries, manualDiscount
   // all; frozenSortKeyFields returns {} for it, so it keeps sorting by
   // its own flat frozen dollars exactly as it always has.
   const documentEntryTerms = documentDiscountEntries.map((entry) => {
+    // GitHub review round 1 P1 (PR #4659): a FRESH catalog-backed pick's
+    // OWN service_key_filter/_category_filter scopes it exactly like a
+    // stored stamp's document_scope_service_key/_category does — the
+    // SAME scopeEligibleLines call, just reading the catalog row's own
+    // filter columns instead of a stamp's snapshotted ones. A row with
+    // neither filter set (the common case) resolves eligibleLines to
+    // null (unscoped) here exactly as before.
     const eligibleLines = entry.stored
       ? scopeEligibleLines(entry.item.document_scope_service_key, entry.item.document_scope_service_category)
-      : null;
+      : (entry.row ? scopeEligibleLines(entry.row.service_key_filter, entry.row.service_category_filter) : null);
     if (entry.stored) {
       return {
         discountType: "fixed_amount",
@@ -794,7 +801,11 @@ function stackInvoiceDocumentDiscounts(serviceLines, lineEntries, manualDiscount
       };
     }
     if (entry.row) {
-      return { ...lineItemDiscountTerm(entry.row, entry.item), id: entry.row.id };
+      return {
+        ...lineItemDiscountTerm(entry.row, entry.item),
+        id: entry.row.id,
+        ...(eligibleLines ? { eligibleLines } : {}),
+      };
     }
     return {
       discountType: "fixed_amount",
@@ -980,6 +991,22 @@ function computeStackedDocumentDiscountLines({
   // (a genuine scheduled_service/validated_checkout stamp) is a
   // completely different, already-existing pathway (visit-side
   // stacking) this check does not touch.
+  //
+  // GitHub review round 1 P1 (PR #4659): a catalog row carrying its OWN
+  // service_key_filter / service_category_filter (e.g. the active
+  // waveguard_member_wdo seed — 100% off, restricted to wdo_inspection)
+  // used to be admitted the SAME way as an unscoped row, discarding that
+  // restriction entirely and applying it to the WHOLE invoice — a mixed
+  // invoice with a WDO line and other services could have every line
+  // zeroed by a discount the catalog itself says should touch only one.
+  // Fixed below (stackInvoiceDocumentDiscounts' own documentEntryTerms):
+  // a fresh catalog-backed document-wide pick now carries the SAME
+  // service_key_filter/_category_filter into its own eligibleLines,
+  // AND-matched against this invoice's line items exactly like a stored
+  // stamp's document_scope_service_key/_category already is
+  // (scopeEligibleLines) — never the whole invoice, and $0 when no line
+  // matches (the orphaned-scope rule every stored stamp already
+  // follows), not a silent full-invoice replay.
   const DOCUMENT_WIDE_UNSUPPORTED_TYPES = new Set(["free_service"]);
   for (const entry of classifiedNegativeItems) {
     if (

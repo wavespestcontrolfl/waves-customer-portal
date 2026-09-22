@@ -227,6 +227,79 @@ describe('a FRESH document-wide catalog pick (fixed OR percentage) is admitted a
   });
 });
 
+// GitHub review round 1 P1 (PR #4659): a fresh catalog row carrying its
+// OWN service_key_filter / service_category_filter must scope a
+// document-wide pick to only the matching line(s) — never the whole
+// invoice, and $0 when no line matches (the orphaned-scope rule a
+// stored stamp already follows). Pinned with the active
+// waveguard_member_wdo seed shape: 100% off, restricted to
+// wdo_inspection.
+describe('a FRESH document-wide catalog pick with service_key_filter/_category_filter is scoped, not applied invoice-wide', () => {
+  test('waveguard_member_wdo (100% off, scoped to wdo_inspection) on a mixed invoice discounts ONLY the WDO line, never the whole invoice', () => {
+    const wdoLine = positiveLine({ client_id: 'l-wdo', description: 'WDO Inspection', unit_price: 200, amount: 200, service_key: 'wdo_inspection' });
+    const pestLine = positiveLine({ client_id: 'l-pest', description: 'Quarterly Pest', unit_price: 100, amount: 100, service_key: 'pest_control' });
+    const pick = freshDocPick({ discount_id: 'waveguard-wdo' });
+    const rowById = new Map([[
+      'waveguard-wdo',
+      catalogRow({ id: 'waveguard-wdo', name: 'WaveGuard Member WDO', discount_type: 'percentage', amount: 100, service_key_filter: 'wdo_inspection' }),
+    ]]);
+    const { lineItemDiscounts } = run({ items: [wdoLine, pestLine, pick], lineItemDiscountRowById: rowById });
+    // Only the WDO line's own $200 is discounted — the pest line's $100
+    // is completely untouched, not zeroed alongside it.
+    expect(lineItemDiscounts[0].dollars).toBe(200);
+    expect(wdoLine.amount).toBe(200); // positive line items are never mutated
+    expect(pestLine.unit_price).toBe(100);
+  });
+
+  test('a service_category_filter (no key) scopes the same way, AND-matched — a line matching only the key is not enough when a category is also set', () => {
+    const wdoLine = positiveLine({ client_id: 'l-wdo', description: 'WDO Inspection', unit_price: 200, amount: 200, service_key: 'wdo_inspection', service_category: 'wdo' });
+    const otherLine = positiveLine({ client_id: 'l-other', description: 'Other', unit_price: 100, amount: 100, service_key: 'other_service', service_category: 'pest' });
+    const pick = freshDocPick({ discount_id: 'waveguard-wdo-cat' });
+    const rowById = new Map([[
+      'waveguard-wdo-cat',
+      catalogRow({ id: 'waveguard-wdo-cat', name: 'WaveGuard Member WDO', discount_type: 'percentage', amount: 100, service_category_filter: 'wdo' }),
+    ]]);
+    const { lineItemDiscounts } = run({ items: [wdoLine, otherLine, pick], lineItemDiscountRowById: rowById });
+    expect(lineItemDiscounts[0].dollars).toBe(200);
+  });
+
+  test('a scoped pick whose filter matches NO line on this invoice resolves to $0 — orphaned, never a silent full-invoice replay', () => {
+    const pestLine = positiveLine({ client_id: 'l-pest', description: 'Quarterly Pest', unit_price: 100, amount: 100, service_key: 'pest_control' });
+    const otherLine = positiveLine({ client_id: 'l-lawn', description: 'Lawn', unit_price: 100, amount: 100, service_key: 'lawn_care' });
+    const pick = freshDocPick({ discount_id: 'waveguard-wdo' });
+    const rowById = new Map([[
+      'waveguard-wdo',
+      catalogRow({ id: 'waveguard-wdo', name: 'WaveGuard Member WDO', discount_type: 'percentage', amount: 100, service_key_filter: 'wdo_inspection' }),
+    ]]);
+    const { lineItemDiscounts } = run({ items: [pestLine, otherLine, pick], lineItemDiscountRowById: rowById });
+    expect(lineItemDiscounts[0].dollars).toBe(0);
+  });
+
+  test('a scoped row on an invoice with NO service_key data anywhere (a hand-typed line, no pickService) stays unscoped — same "no keys ⇒ unscoped" rule a stored stamp already follows, not a NEW gap', () => {
+    const line = positiveLine({ client_id: 'l1', unit_price: 100, amount: 100 }); // no service_key at all
+    const pick = freshDocPick({ discount_id: 'waveguard-wdo' });
+    const rowById = new Map([[
+      'waveguard-wdo',
+      catalogRow({ id: 'waveguard-wdo', name: 'WaveGuard Member WDO', discount_type: 'percentage', amount: 100, service_key_filter: 'wdo_inspection' }),
+    ]]);
+    const { lineItemDiscounts } = run({ items: [line, pick], lineItemDiscountRowById: rowById });
+    // Pre-existing "invoiceCarriesServiceScope" gate (scopeEligibleLines):
+    // with no service_key snapshot anywhere on the invoice, there is no
+    // per-line signal to scope against at all, so this resolves unscoped
+    // — exactly the same behavior a stored stamp's own scope already
+    // falls back to on a pre-lane/hand-built invoice.
+    expect(lineItemDiscounts[0].dollars).toBe(100);
+  });
+
+  test('an UNSCOPED catalog row (no filter set) is unaffected — this only changes rows that actually carry a filter', () => {
+    const line = positiveLine({ client_id: 'l1', unit_price: 100, amount: 100, service_key: 'pest_control' });
+    const pick = freshDocPick({ discount_id: 'ten-pct-doc' });
+    const rowById = new Map([['ten-pct-doc', catalogRow()]]);
+    const { lineItemDiscounts } = run({ items: [line, pick], lineItemDiscountRowById: rowById });
+    expect(lineItemDiscounts[0].dollars).toBe(10);
+  });
+});
+
 // No-op-resave invariant — the property discount-stack.js's own replay-
 // invariance test proves in general (9000+ random trials); these are the
 // exact scenarios that broke it, driven through the ACTUAL invoice.js
