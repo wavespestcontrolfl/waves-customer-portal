@@ -90,6 +90,16 @@ const layer = adminScheduleRouter.stack.find(
 );
 const handler = layer.route.stack[layer.route.stack.length - 1].handle;
 
+// AGENTS.md near-today-literal rule (Codex pre-push audit P1, round 4 on
+// PR #4656): a hardcoded near-term date goes red the night the ET
+// calendar passes it (see the 2026-07-23 schedule-confirm-race.test.js
+// incident). Computed relative to Date.now() instead.
+const FUTURE_SCHEDULE_DATE = (() => {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + 30);
+  return d.toISOString().slice(0, 10);
+})();
+
 function makeReqRes(body) {
   const req = { body, headers: {} };
   const res = {
@@ -148,7 +158,7 @@ describe('assertNoDiscountStackGroupConflict / discountStackGroupRowsForPricing 
 describe('POST /api/admin/schedule — stack_group conflict (end to end, one-time booking)', () => {
   test('Silver (primary line) + Gold (appointment-level) -> 400, DISCOUNT_STACK_GROUP_CONFLICT, before any write', async () => {
     const { req, res, next } = makeReqRes({
-      customerId: 'cust-1', scheduledDate: '2026-10-01', serviceType: 'Quarterly Pest Control',
+      customerId: 'cust-1', scheduledDate: FUTURE_SCHEDULE_DATE, serviceType: 'Quarterly Pest Control',
       primaryLinePrice: 100,
       primaryLineDiscount: { discountId: 'silver', discountType: 'percentage', discountAmount: 10 },
       discountId: 'gold', discountType: 'percentage', discountAmount: 15,
@@ -165,7 +175,7 @@ describe('POST /api/admin/schedule — stack_group conflict (end to end, one-tim
 
   test('Silver (primary line) + a different-group fixed credit (appointment-level) -> not rejected by the stack-group check, proceeds past it', async () => {
     const { req, res, next } = makeReqRes({
-      customerId: 'cust-1', scheduledDate: '2026-10-01', serviceType: 'Quarterly Pest Control',
+      customerId: 'cust-1', scheduledDate: FUTURE_SCHEDULE_DATE, serviceType: 'Quarterly Pest Control',
       primaryLinePrice: 100,
       primaryLineDiscount: { discountId: 'silver', discountType: 'percentage', discountAmount: 10 },
       discountId: 'credit', discountType: 'fixed_amount', discountAmount: 10,
@@ -182,7 +192,7 @@ describe('POST /api/admin/schedule — stack_group conflict (end to end, one-tim
   test('gate OFF, a single discount -> unchanged (the stack-group check never fires; a lone discount can never conflict with itself)', async () => {
     mockGateEnabled = false;
     const { req, res, next } = makeReqRes({
-      customerId: 'cust-1', scheduledDate: '2026-10-01', serviceType: 'Quarterly Pest Control',
+      customerId: 'cust-1', scheduledDate: FUTURE_SCHEDULE_DATE, serviceType: 'Quarterly Pest Control',
       primaryLinePrice: 100,
       primaryLineDiscount: { discountId: 'silver', discountType: 'percentage', discountAmount: 10 },
     });
@@ -193,7 +203,7 @@ describe('POST /api/admin/schedule — stack_group conflict (end to end, one-tim
   test('gate OFF, the SAME Silver+Gold conflict as the gate-ON case -> byte-identical: still rejected (the check is unconditional, never gated on discountStackingLive)', async () => {
     mockGateEnabled = false;
     const { req, res, next } = makeReqRes({
-      customerId: 'cust-1', scheduledDate: '2026-10-01', serviceType: 'Quarterly Pest Control',
+      customerId: 'cust-1', scheduledDate: FUTURE_SCHEDULE_DATE, serviceType: 'Quarterly Pest Control',
       primaryLinePrice: 100,
       primaryLineDiscount: { discountId: 'silver', discountType: 'percentage', discountAmount: 10 },
       discountId: 'gold', discountType: 'percentage', discountAmount: 15,
@@ -226,7 +236,7 @@ describe('GitHub round 5 P1 follow-up (Codex, blocked push 5) — fail closed on
   test('end to end (creation route): a lookup failure rejects with a retryable error, never silently proceeding as conflict-free', async () => {
     mockDb.__discountsSelectThrows = true;
     const { req, res, next } = makeReqRes({
-      customerId: 'cust-1', scheduledDate: '2026-10-01', serviceType: 'Quarterly Pest Control',
+      customerId: 'cust-1', scheduledDate: FUTURE_SCHEDULE_DATE, serviceType: 'Quarterly Pest Control',
       primaryLinePrice: 100,
       primaryLineDiscount: { discountId: 'silver', discountType: 'percentage', discountAmount: 10 },
       discountId: 'gold', discountType: 'percentage', discountAmount: 15,

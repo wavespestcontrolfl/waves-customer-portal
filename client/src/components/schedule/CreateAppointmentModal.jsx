@@ -2790,6 +2790,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // projection, which otherwise multiplies a subtotal that never had the
   // appointment discount taken off it (Codex #4405 r3 P1).
   const groupStackedPerVisitTotal = (group) => {
+    // Codex pre-push audit P1 (round 5, blocked push 9 on PR #4656): a
+    // group already committed this modal session (createdGroupKeysRef,
+    // declared below with committedGroupPricesRef's own fuller comment)
+    // has an ALREADY-SAVED total — nothing that happens to a sibling
+    // group later in this session (a discount catalog edit, a gate flip,
+    // a fresh preview landing for group B) may move it. Checked FIRST,
+    // ahead of the fresh-preview and local-computation paths below, both
+    // of which are for a group still being priced, not one already on
+    // the books.
+    const frozenPrice = committedGroupPricesRef.current.get(groupKey(group));
+    if (frozenPrice != null) return frozenPrice;
     // GitHub round 5 P0 (Codex, blocked push 5 on PR #4656): the group's
     // POSTED prepay total already sources from serverPreview (round 4
     // item 1) — reading it HERE too, the one function every DISPLAY of a
@@ -2878,6 +2889,37 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // a round-trip. Subsumes the old collectPrepay/manual-prepay-specific
   // check too — groupStackedPerVisitTotal (the prepay total's own input)
   // depends on the exact same two conditions.
+  //
+  // Tracks cadence-group keys already POSTed during this modal session.
+  // If the loop fails partway (e.g. quarterly succeeded, monthly errored),
+  // a retry click skips the keys that landed so we don't double-book the
+  // customer. Reset on successful close. Moved up from just above
+  // recurringPreview (declared much later in this component) to here —
+  // previewGroupRequests below needs to read it, and hook declarations
+  // don't care about surrounding variable order, only call-order
+  // stability across renders, which a plain useRef move preserves.
+  const createdGroupKeysRef = useRef(new Set());
+  // Codex pre-push audit P1 (round 5): previewGroupRequests used to
+  // include groups already recorded in createdGroupKeysRef — a preview
+  // refresh after a PARTIAL multi-group save re-requested the already-
+  // committed group's own (possibly since-deactivated) discount, which
+  // could block the remaining groups on it indefinitely even though
+  // submit itself already skips a committed group (line ~3408 above), and
+  // could reprice the committed group's own DISPLAYED total out from
+  // under its already-saved figure. committedGroupPricesRef freezes each
+  // group's displayed total at the exact moment it commits (read via
+  // groupStackedPerVisitTotal(group) — whatever result actually shaped
+  // that POST — right before createdGroupKeysRef.current.add(key), both
+  // success-path call sites below); groupStackedPerVisitTotal checks this
+  // FIRST, ahead of the fresh-preview and local-computation fallbacks, so
+  // a committed group's own total can never move again for the rest of
+  // this modal session. committedGroupKeysVersion is bumped alongside
+  // each add() — createdGroupKeysRef alone is a ref (no re-render), and
+  // previewGroupRequests is a useMemo, so something reactive has to be in
+  // its dependency array for the exclusion below to actually take effect
+  // the next render after a commit.
+  const committedGroupPricesRef = useRef(new Map());
+  const [committedGroupKeysVersion, setCommittedGroupKeysVersion] = useState(0);
   const groupRegimeDependent = (group, carriesDiscount) => (
     carriesDiscount || group.lines.some((s) => s.lineDiscount)
   );
@@ -2898,6 +2940,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     return appointmentSubmitGroups
       .map((group) => {
         const key = groupKey(group);
+        // Codex pre-push audit P1 (round 5): a group already committed
+        // this modal session (see createdGroupKeysRef's own comment,
+        // above groupRegimeDependent) has nothing left to verify — submit
+        // itself skips it (line ~3408), so re-requesting it here only
+        // risks blocking the REMAINING groups on its own discount (which
+        // may since be deactivated/changed) and repricing its already-
+        // saved total out from under it.
+        if (createdGroupKeysRef.current.has(key)) return null;
         const carriesDiscount = !!appointmentDiscount && !!appointmentDiscountGroup && key === appointmentDiscountGroup.key;
         if (!groupRegimeDependent(group, carriesDiscount)) return null;
         const [primary, ...extras] = group.lines;
@@ -2960,7 +3010,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // `services`, so listing it (not just services) is what actually
     // catches a cadence-only edit with no discount change at all — same
     // reasoning as existingSelectionConflict's own dependency list above.
-  }, [appointmentSubmitGroups, services, selectedCustomer, apptDate, appointmentDiscount, appointmentDiscountGroup, recurringCount, collectPrepay]);
+  }, [appointmentSubmitGroups, services, selectedCustomer, apptDate, appointmentDiscount, appointmentDiscountGroup, recurringCount, collectPrepay, committedGroupKeysVersion]);
   const previewRequestKey = previewGroupRequests.length ? JSON.stringify(previewGroupRequests) : '';
   const [serverPreview, setServerPreview] = useState({ status: 'idle', forKey: '', regime: null, byKey: new Map() });
   // Bumping this forces the effect below to re-run even when
@@ -3077,11 +3127,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const displayedTotal = appointmentSubmitGroups.reduce((sum, g) => sum + groupStackedPerVisitTotal(g), 0);
   const displayedDiscounts = Math.max(0, Math.round((subtotal - displayedTotal) * 100) / 100);
 
-  // Tracks cadence-group keys already POSTed during this modal session.
-  // If the loop fails partway (e.g. quarterly succeeded, monthly errored),
-  // a retry click skips the keys that landed so we don't double-book the
-  // customer. Reset on successful close.
-  const createdGroupKeysRef = useRef(new Set());
   // Recurring preview — for each cadence group, produce up to 4 future
   // dates Virginia will land on. Honors skip-weekends shift so what's
   // shown matches what gets saved. Renders below the Visits input.
@@ -3205,7 +3250,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         windowStart,
       },
     };
-  }, [services, selectedCustomer, mosquitoQuote, apptDate, windowStart, skipWeekends, recurringCount, appointmentDiscount, appointmentDiscountGroup, appointmentDiscountCompound, percentExcludedKeys, stackingEnabled, serverPreview, previewRequestKey]);
+    // committedGroupKeysVersion (round 5 P1 follow-up, PR #4656): the SAME
+    // sibling-dependency fix as previewGroupRequests above — this group's
+    // price now also freezes at commit via groupStackedPerVisitTotal's own
+    // committedGroupPricesRef check, and nothing else in this list changes
+    // on a bare commit, so this memo would otherwise keep the pre-commit
+    // (possibly now-stale) price until an unrelated edit forced a recompute.
+  }, [services, selectedCustomer, mosquitoQuote, apptDate, windowStart, skipWeekends, recurringCount, appointmentDiscount, appointmentDiscountGroup, appointmentDiscountCompound, percentExcludedKeys, stackingEnabled, serverPreview, previewRequestKey, committedGroupKeysVersion]);
   const manualPrepayQuery = manualPrepayPlan.query;
 
   // Preview fetch. Runs whenever the control is on screen — NOT only once
@@ -3661,7 +3712,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           }
           bookingPostAttempted = true;
           const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
+          // Codex pre-push audit P1 (round 5, blocked push 9): freeze THIS
+          // group's displayed total to whatever groupStackedPerVisitTotal
+          // just produced (the same number that shaped this POST) before
+          // marking it committed — groupStackedPerVisitTotal's own frozen-
+          // price check (above) then returns this exact figure forever,
+          // regardless of what happens to a sibling group's preview later
+          // in this same modal session.
+          committedGroupPricesRef.current.set(key, groupStackedPerVisitTotal(group));
           createdGroupKeysRef.current.add(key);
+          setCommittedGroupKeysVersion((v) => v + 1);
           // Codex review round 2 P0: lock the discount to the group that
           // ACTUALLY carried it in a successful POST -- a later edit
           // (removing a different service, changing a cadence) that
@@ -3683,7 +3743,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             carriesAppointmentDiscount,
           });
           if (decision.recoverable) {
+            // Same freeze as the success path above — a recoverable
+            // duplicate-series outcome still means this group already
+            // saved (from an earlier attempt) at whatever total is
+            // currently displayed for it.
+            committedGroupPricesRef.current.set(key, groupStackedPerVisitTotal(group));
             createdGroupKeysRef.current.add(key);
+            setCommittedGroupKeysVersion((v) => v + 1);
             // Same lock as the success path above — a recoverable
             // duplicate-series outcome still means this group's own save
             // (from an earlier attempt) already carries the discount.
@@ -3782,6 +3848,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           return;
         }
         createdGroupKeysRef.current = new Set();
+        committedGroupPricesRef.current = new Map();
         appointmentDiscountCommittedGroupKeyRef.current = null;
         onCreated?.({ id: results[0]?.id, scheduledDate: apptDate });
         onChange?.({ id: results[0]?.id, scheduledDate: apptDate });

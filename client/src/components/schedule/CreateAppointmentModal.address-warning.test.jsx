@@ -2592,3 +2592,84 @@ describe('GitHub round 5 P0 (Codex, blocked push 6 on PR #4656) — the main Tot
     await screen.findByText((_, node) => node?.textContent === 'Discounts: -$5.00');
   });
 });
+
+describe('GitHub round 6 P1 (Codex, blocked push 9 on PR #4656) — a committed group is excluded from preview refreshes', () => {
+  // previewGroupRequests used to include groups already recorded in
+  // createdGroupKeysRef -- a preview refresh after a PARTIAL multi-group
+  // save re-requested the already-committed group's own discount (which
+  // submit itself already skips, per the "re-checks the gate freshness"
+  // describe block above), risking blocking the REMAINING group on it and
+  // repricing the committed group's own DISPLAYED total. groupStackedPerVisitTotal
+  // now freezes a group's total the moment it commits (committedGroupPricesRef),
+  // and previewGroupRequests excludes a committed group's key outright.
+  it("after group A commits, a preview refresh requests only group B, and A's displayed total is unchanged", async () => {
+    vi.spyOn(window, 'alert').mockImplementation(() => {});
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    const secondScheduleRequest = deferred();
+    const previewGroupsSeen = [];
+    const { fetcher } = installModalFetch({
+      basePrice: 100,
+      secondScheduleRequest,
+      discounts: [
+        { id: 'first-ten', name: 'First Ten', discount_type: 'fixed_amount', amount: 10, is_active: true, show_in_invoices: true },
+        { id: 'second-ten', name: 'Second Ten', discount_type: 'fixed_amount', amount: 10, is_active: true, show_in_invoices: true },
+      ],
+      previewResponses: [
+        // Round 1 (pre-submit, both groups): A=$77, B=$88 -- distinct
+        // figures so a later mix-up between them is visible.
+        (groups) => {
+          previewGroupsSeen.push(groups.map((g) => g.serviceType));
+          return { regime: true, results: groups.map((g) => ({ key: g.key, price: g.serviceType === 'First seasonal service' ? 77 : 88 })) };
+        },
+        // Round 2 (after A commits, forced by A dropping out of
+        // previewGroupRequests changing previewRequestKey): must be ONLY
+        // B. Deliberately prices EVERY requested group $999 -- if A were
+        // wrongly still included, Total would read $999+$999=$1998.00;
+        // correctly excluded and frozen at $77, it reads $77+$999=$1076.00.
+        (groups) => {
+          previewGroupsSeen.push(groups.map((g) => g.serviceType));
+          return { regime: true, results: groups.map((g) => ({ key: g.key, price: 999 })) };
+        },
+      ],
+    });
+    renderBooking();
+    const submit = await addTwoSeasonalServices();
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for First seasonal service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /First Ten/ }));
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for Second seasonal service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Second Ten/ }));
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    // Round-1 preview landed: A=$77 + B=$88.
+    await screen.findByText((_, node) => node?.textContent === 'Total: $165.00');
+
+    fireEvent.click(submit);
+    // First (no scoping needed -- it's simply first in submit order)
+    // commits; Second is held in flight by the deferred response.
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(2));
+    expect(JSON.parse(schedulePosts(fetcher)[0][1].body).primaryLineDiscount?.discountId).toBe('first-ten');
+
+    // Round 2 lands on its own (A dropping out of previewGroupRequests
+    // changed previewRequestKey, re-arming the debounced fetch) while
+    // Second's own POST is STILL pending -- exactly the "partial save,
+    // preview refresh" window this fix targets.
+    await waitFor(() => expect(previewGroupsSeen.length).toBe(2));
+    expect(previewGroupsSeen[1]).toEqual(['Second seasonal service']);
+    // A's total is frozen at its committed $77, not the round-2 $999 a
+    // wrongly-still-included request would have produced for it.
+    // getAllByText (not getByText/findByText): the "Total: $X" div and its
+    // own text-only wrapper (no Discounts line showing here) both match
+    // the same exact string -- a real, previously-documented ambiguity in
+    // this file (see the "exact string, not a substring/function
+    // predicate" comment elsewhere), not something to special-case away.
+    await waitFor(() => expect(
+      screen.getAllByText((_, node) => node?.textContent === 'Total: $1076.00').length,
+    ).toBeGreaterThan(0));
+    expect(screen.queryAllByText((_, node) => node?.textContent === 'Total: $1998.00')).toHaveLength(0);
+
+    await act(async () => {
+      secondScheduleRequest.resolve(jsonResponse({ id: 'appointment-second' }));
+      await secondScheduleRequest.promise;
+    });
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(2));
+  });
+});

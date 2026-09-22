@@ -37,6 +37,16 @@ jest.mock('../config/feature-gates', () => ({
 
 const adminScheduleRouter = require('../routes/admin-schedule');
 
+// AGENTS.md near-today-literal rule (Codex pre-push audit P1, round 4 on
+// PR #4656): a hardcoded near-term date goes red the night the ET
+// calendar passes it (see the 2026-07-23 schedule-confirm-race.test.js
+// incident). Computed relative to Date.now() instead.
+const FUTURE_SCHEDULE_DATE = (() => {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + 30);
+  return d.toISOString().slice(0, 10);
+})();
+
 const layer = adminScheduleRouter.stack.find(
   (l) => l.route && l.route.path === '/' && l.route.methods.post,
 );
@@ -55,7 +65,7 @@ function makeReqRes(body) {
 }
 
 const BASE_BODY = {
-  customerId: 'cust-1', scheduledDate: '2026-10-01', serviceType: 'Quarterly Pest Control',
+  customerId: 'cust-1', scheduledDate: FUTURE_SCHEDULE_DATE, serviceType: 'Quarterly Pest Control',
   isRecurring: true, recurringCount: 4,
   prepaid: { totalAmount: 180, method: 'cash' },
 };
