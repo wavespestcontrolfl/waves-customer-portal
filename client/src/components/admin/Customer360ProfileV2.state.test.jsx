@@ -1228,6 +1228,41 @@ describe('Customer360ProfileV2 profile state', () => {
       expect(onDone).toHaveBeenCalledTimes(1);
     });
   });
+  it('waits for a successful history retry before choosing the composer sending line', async () => {
+    await import('../../pages/admin/CommunicationsPageV2');
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    let failHistory = true;
+    let reads = 0;
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const parsed = new URL(String(url), 'https://fixture.invalid');
+      if (parsed.pathname.endsWith('/customer-a')) {
+        const detail = customerDetail('customer-a', 'Avery');
+        detail.customer.phone = '+12025550100';
+        return response(detail);
+      }
+      if (parsed.pathname.endsWith('/comms')) {
+        reads += 1;
+        return failHistory ? response({ error: 'Messages unavailable' }, 503) : response({ comms: [
+          { id: 'recovered-line', channel: 'sms', direction: 'inbound', body: 'Recovered context',
+            contactPhone: '+12025550100', ourEndpointId: '+12025550199', ourEndpointLabel: 'Fixture service line' },
+        ] });
+      }
+      return response({ timeline: [], commitments: [], enabled: true, has_more: false });
+    }));
+    const { container } = render(<MemoryRouter><Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} embedded /></MemoryRouter>);
+    await screen.findByRole('heading', { name: 'Avery Customer' });
+    await waitFor(() => expect(reads).toBe(1));
+    container.querySelector('.c360-panel').scrollTo = vi.fn();
+    fireEvent.click(screen.getByRole('button', { name: 'Message', exact: true }));
+    await waitFor(() => expect(reads).toBe(2));
+    await screen.findByText('Messages unavailable');
+    await act(async () => {});
+    expect(screen.queryByRole('combobox', { name: 'Send from' })).not.toBeInTheDocument();
+    failHistory = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry messages' }));
+    expect(await screen.findByRole('combobox', { name: 'Send from' })).toHaveValue('+12025550199');
+  });
+
   it('opens the composer with the customer sending line after a deferred history refresh and retains it through filtering', async () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
     const refreshed = deferred();

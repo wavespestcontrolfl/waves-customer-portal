@@ -44,6 +44,9 @@ export default function useCustomerHistory({ customerId, kind, enabled, query = 
       if (sequence === tracker.sequence) tracker.pending = false;
     }
   }, [customerId, enabled, key, kind, query]);
+  const latestRequest = useRef(request);
+  latestRequest.current = request;
+  const reload = useCallback(() => latestRequest.current(), []);
 
   useEffect(() => {
     setState({ ...empty, key });
@@ -56,7 +59,7 @@ export default function useCustomerHistory({ customerId, kind, enabled, query = 
     ...visible,
     loading: visible.loading || (enabled && !visible.loaded),
     hasMore: Boolean(visible.meta.hasMore && visible.meta.nextCursor),
-    reload: () => request(),
+    reload,
     retry: () => request(visible.failedCursor),
     loadOlder: () => visible.meta.nextCursor && request(visible.meta.nextCursor),
   };

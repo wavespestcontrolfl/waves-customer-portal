@@ -9133,8 +9133,8 @@ function useCustomerMessages({
   useEffect(() => {
     if (history.loaded && !history.error && commsChannel === "all") {
       setComposerContext({ customerId, messages: history.items, readScope: history.meta.readScope });
+      if (messageOpened || !embedded) setCommsComposerReady(true);
     }
-    if (history.loaded && (messageOpened || !embedded)) setCommsComposerReady(true);
   }, [history.loaded, history.error, history.items, history.meta.readScope, commsChannel, customerId, messageOpened, embedded]);
   const [linkRequest, setLinkRequest] = useState(0);
   const openMessages = () => {

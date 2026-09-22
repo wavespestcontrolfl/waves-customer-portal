@@ -10,6 +10,27 @@ const deferred = () => { let resolve; const promise = new Promise((done) => { re
 const params = { customerId: "synthetic-a", kind: "comms", enabled: true, query: "channel=all" };
 
 describe("customer history pagination", () => {
+  it("reloads the active filter when an earlier send retains the previous reload callback", async () => {
+    const firstVoicePage = deferred();
+    adminFetch.mockResolvedValueOnce({ comms: [{ id: "sms" }] })
+      .mockReturnValueOnce(firstVoicePage.promise)
+      .mockResolvedValueOnce({ comms: [{ id: "fresh-call" }] });
+    const { result, rerender } = renderHook(({ query }) => useCustomerHistory({ ...params, query }),
+      { initialProps: { query: "channel=all" } });
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    const reloadAfterSend = result.current.reload;
+    rerender({ query: "channel=voice" });
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledTimes(2));
+
+    await act(async () => reloadAfterSend());
+
+    expect(adminFetch.mock.calls[2][0]).toContain("channel=voice");
+    expect(result.current.items).toEqual([{ id: "fresh-call" }]);
+    expect(result.current.loading).toBe(false);
+    await act(async () => firstVoicePage.resolve({ comms: [{ id: "stale-call" }] }));
+    expect(result.current.items).toEqual([{ id: "fresh-call" }]);
+  });
+
   it("appends older messages once and preserves the first page read boundary", async () => {
     const readScope = { conversationIds: ["conversation-a"], readBefore: "2024-01-01T00:00:00.000Z" };
     const older = deferred();
