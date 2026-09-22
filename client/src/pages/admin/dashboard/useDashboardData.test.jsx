@@ -96,6 +96,87 @@ describe('dashboard request recovery', () => {
     expect(result.current.pending.staleVisits).toBe(false);
   });
 
+  it('refetches only period-driven feeds after a completed desktop cycle', async () => {
+    const { result, rerender } = renderHook(({ period }) => useDashboardData('all', period), {
+      initialProps: { period: 'period=mtd' },
+    });
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+    const retainedAlerts = result.current.values.alerts;
+    adminFetch.mockClear();
+
+    rerender({ period: 'period=qtd' });
+
+    expect(result.current.values.alerts).toBe(retainedAlerts);
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+    expect(adminFetch.mock.calls.map(([path]) => path)).toEqual([
+      '/admin/dashboard/core-kpis?period=qtd',
+      '/admin/dashboard/calls-by-source?period=qtd',
+      '/admin/dashboard/leads-by-source?period=qtd',
+      '/admin/dashboard/channel-mix?period=qtd',
+      '/admin/dashboard/lead-funnel?period=qtd',
+      '/admin/dashboard/channel-roi?period=qtd',
+    ]);
+    expect(result.current.values.alerts).toBe(retainedAlerts);
+    expect(result.current.values.kpis.path).toContain('period=qtd');
+  });
+
+  it('prioritizes the new period and requeues fixed feeds aborted mid-cycle', async () => {
+    const oldCycle = deferred();
+    const newCycle = deferred();
+    let switched = false;
+    adminFetch.mockImplementation((path) => {
+      if (!switched) return oldCycle.promise;
+      const changedPeriod = path.includes('period=qtd');
+      const operational = path.endsWith('/alerts') || path.endsWith('/today-completion') || path.endsWith('/stale-visits');
+      if (changedPeriod || operational) {
+        return newCycle.promise.then(() => (changedPeriod ? { path: 'new-period' } : response(path)));
+      }
+      return Promise.resolve(response(path));
+    });
+    const { result, rerender } = renderHook(({ period }) => useDashboardData('all', period), {
+      initialProps: { period: 'period=mtd' },
+    });
+    expect(adminFetch).toHaveBeenCalledTimes(4);
+    const oldSignals = adminFetch.mock.calls.map(([, options]) => options.signal);
+
+    switched = true;
+    rerender({ period: 'period=qtd' });
+
+    expect(oldSignals.every((signal) => signal.aborted)).toBe(true);
+    expect(adminFetch).toHaveBeenCalledTimes(8);
+    expect(adminFetch.mock.calls.slice(4).map(([path]) => path)).toEqual([
+      '/admin/dashboard/alerts',
+      '/admin/dashboard/today-completion',
+      '/admin/command-center/stale-visits',
+      '/admin/dashboard/core-kpis?period=qtd',
+    ]);
+    expect(result.current.pending.alerts).toBe(true);
+
+    await act(async () => newCycle.resolve());
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+    expect(adminFetch).toHaveBeenCalledTimes(31);
+    expect(adminFetch.mock.calls.slice(4, 13).map(([path]) => path)).toEqual([
+      '/admin/dashboard/alerts',
+      '/admin/dashboard/today-completion',
+      '/admin/command-center/stale-visits',
+      '/admin/dashboard/core-kpis?period=qtd',
+      '/admin/dashboard/calls-by-source?period=qtd',
+      '/admin/dashboard/leads-by-source?period=qtd',
+      '/admin/dashboard/channel-mix?period=qtd',
+      '/admin/dashboard/lead-funnel?period=qtd',
+      '/admin/dashboard/channel-roi?period=qtd',
+    ]);
+    expect(result.current.values.kpis).toEqual({ path: 'new-period' });
+    expect(result.current.values.alerts).toEqual({ alerts: [] });
+    expect(result.current.pending.alerts).toBe(false);
+
+    await act(async () => oldCycle.resolve({
+      path: 'old-period', alerts: [{ id: 'late' }], visits: [{ id: 'late' }], total: 99,
+    }));
+    expect(result.current.values.kpis).toEqual({ path: 'new-period' });
+    expect(result.current.values.alerts).toEqual({ alerts: [] });
+  });
+
   it('does not show old-period KPIs or accept late results after a period switch', async () => {
     const oldPeriod = deferred();
     adminFetch.mockImplementation((path) => path.includes('core-kpis?period=mtd') ? oldPeriod.promise : Promise.resolve(response(path)));

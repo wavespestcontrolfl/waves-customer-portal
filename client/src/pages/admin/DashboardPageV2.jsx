@@ -5,6 +5,7 @@ import useIsMobile from "../../hooks/useIsMobile";
 import { useFeatureFlag } from "../../hooks/useFeatureFlag";
 import AiChartsPanel from "../../components/dashboard/AiChartsPanel";
 import useDashboardData from "./dashboard/useDashboardData";
+import { isRateLimitError } from "../../utils/admin-fetch";
 import DashboardJumpNav from "./dashboard/DashboardJumpNav";
 import TodaySection from "./dashboard/sections/TodaySection";
 import GrowthSection from "./dashboard/sections/GrowthSection";
@@ -104,6 +105,8 @@ export default function DashboardPageV2() {
   const attributionLoading = !attributionReady && attributionKeys.some((key) => pending[key] && !values[key]);
   const attributionError = attributionReady ? null : attributionKeys.map((key) => errors[key]).find(Boolean);
   const hasErrors = Object.values(errors).some(Boolean);
+  const rateLimited = Object.values(errors).some(isRateLimitError);
+  const retryFeed = rateLimited ? undefined : refresh;
   const hasMetricErrors = Object.entries(errors).some(([key, error]) => error && !["alerts", "today", "staleVisits"].includes(key));
 
   useEffect(() => {
@@ -189,11 +192,15 @@ export default function DashboardPageV2() {
         onSelectSection={isMobile ? selectMobileTab : undefined}
       />
 
+      {rateLimited && <ActionFeedback error className="mb-4">
+        Too many requests. Wait a few seconds, then use Refresh.
+      </ActionFeedback>}
+
       {/* Alerts stay the first dashboard content, even with AI charts pinned. */}
       {sectionVisible("today") && (
         <TodaySection alerts={alerts?.alerts ?? null} alertsStale={!!errors.alerts}
           alertsLoading={pending.alerts && !alerts} today={today} staleVisits={staleVisits}
-          errors={errors} pending={pending} onRetry={refresh} {...kpiStripProps} />
+          errors={errors} pending={pending} onRetry={retryFeed} {...kpiStripProps} />
       )}
 
       {/* AI chart builder — describe a metric, the AI builds + pins it. Gated off
@@ -205,8 +212,8 @@ export default function DashboardPageV2() {
       )}
 
 
-      {hasMetricErrors && (
-        <ActionFeedback error onRetry={refresh} className="mb-4">
+      {hasMetricErrors && !rateLimited && (
+        <ActionFeedback error onRetry={retryFeed} className="mb-4">
           Some dashboard data could not be refreshed. Previously loaded values may be out of date.
         </ActionFeedback>
       )}
@@ -215,7 +222,7 @@ export default function DashboardPageV2() {
         <GrowthSection
           data={data}
           loadError={errors.data}
-          onRetry={refresh}
+          onRetry={retryFeed}
           compare={compare}
           salesCapture={salesCapture}
           funnel={funnel}

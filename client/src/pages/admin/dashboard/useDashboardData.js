@@ -33,6 +33,7 @@ const REQUESTS = [
   ["aging", "/admin/dashboard/aging", "cash"],
   ["billing", "/admin/billing-health", "cash"],
 ];
+const OPERATIONAL_KEYS = new Set(["alerts", "today", "staleVisits"]);
 
 async function fetchDashboard(path, signal) {
   const controller = new AbortController();
@@ -62,18 +63,32 @@ export default function useDashboardData(section, periodQS) {
   const [revision, setRevision] = useState(0);
   const refresh = useCallback(() => setRevision((value) => value + 1), []);
   const running = useRef(false);
+  const recordsRef = useRef(records);
+  const previousCycle = useRef(null);
+  recordsRef.current = records;
   const requests = useMemo(() => REQUESTS
     .filter(([, , group]) => section === "all" || group === "shared" || group === section)
-    .map(([key, path, , periodDriven]) => [key, periodDriven ? `${path}?${periodQS}` : path]),
+    .map(([key, path, , periodDriven]) => [key, periodDriven ? `${path}?${periodQS}` : path, !!periodDriven]),
   [section, periodQS]);
 
   useEffect(() => {
+    const prior = previousCycle.current;
+    const periodOnly = prior && prior.section === section && prior.revision === revision
+      && prior.periodQS !== periodQS;
+    previousCycle.current = { section, periodQS, revision };
+    const unfinishedFixed = periodOnly ? requests.filter(([key, path, periodDriven]) => !periodDriven
+      && (recordsRef.current[key]?.path !== path || recordsRef.current[key]?.pending)) : [];
+    const cycleRequests = periodOnly ? [
+      ...unfinishedFixed.filter(([key]) => OPERATIONAL_KEYS.has(key)),
+      ...requests.filter(([, , periodDriven]) => periodDriven),
+      ...unfinishedFixed.filter(([key]) => !OPERATIONAL_KEYS.has(key)),
+    ] : requests;
     const controller = new AbortController();
     const { signal } = controller;
     running.current = true;
     setRecords((previous) => {
       const next = { ...previous };
-      for (const [key, path] of requests) {
+      for (const [key, path] of cycleRequests) {
         const retained = previous[key]?.path === path ? previous[key] : {};
         next[key] = { ...retained, path, pending: true };
       }
@@ -81,8 +96,8 @@ export default function useDashboardData(section, periodQS) {
     });
     let nextIndex = 0;
     async function worker() {
-      while (!signal.aborted && nextIndex < requests.length) {
-        const [key, path] = requests[nextIndex++];
+      while (!signal.aborted && nextIndex < cycleRequests.length) {
+        const [key, path] = cycleRequests[nextIndex++];
         try {
           const value = await fetchDashboard(path, signal);
           // These operational feeds may only claim an empty backlog after a
@@ -105,10 +120,10 @@ export default function useDashboardData(section, periodQS) {
         }
       }
     }
-    void Promise.all(Array.from({ length: Math.min(4, requests.length) }, worker))
+    void Promise.all(Array.from({ length: Math.min(4, cycleRequests.length) }, worker))
       .finally(() => { if (!signal.aborted) running.current = false; });
     return () => { controller.abort(); running.current = false; };
-  }, [requests, revision]);
+  }, [requests, revision, section, periodQS]);
 
   useEffect(() => {
     const autoRefresh = () => {

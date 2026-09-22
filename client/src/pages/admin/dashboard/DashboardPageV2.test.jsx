@@ -10,7 +10,7 @@ import { adminFetch } from "../../../utils/admin-fetch";
 vi.mock("../../../utils/admin-fetch", () => ({
   adminFetch: vi.fn(),
   isForbiddenError: () => false,
-  isRateLimitError: () => false,
+  isRateLimitError: (error) => error?.status === 429 || error?.code === "RATE_LIMITED",
 }));
 vi.mock("../../../hooks/useIsMobile", () => ({ default: () => false }));
 vi.mock("../../../hooks/useFeatureFlag", () => ({
@@ -420,6 +420,22 @@ describe("DashboardPageV2 sections", () => {
       ).toBe(true);
     });
   });
+  it.each(["/admin/dashboard", "/admin/dashboard/today-completion"])("gives wait guidance for exhausted rate limits on %s", async (limitedPath) => {
+    const fetchFixture = adminFetch.getMockImplementation();
+    const error = Object.assign(new Error("Slow down"), { status: 429, code: "RATE_LIMITED" });
+    adminFetch.mockImplementation((path, options) => path.split("?")[0] === limitedPath
+      ? Promise.reject(error) : fetchFixture(path, options));
+    renderPage();
+    await screen.findByText("Too many requests. Wait a few seconds, then use Refresh.");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Refresh", exact: true })).toBeEnabled());
+    expect(screen.queryAllByRole("button", { name: "Try again" })).toHaveLength(0);
+    expect(screen.queryByText(/Some dashboard data could not be refreshed/)).not.toBeInTheDocument();
+
+    adminFetch.mockImplementation(fetchFixture);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh", exact: true }));
+    await waitFor(() => expect(screen.queryByText(/Too many requests/)).not.toBeInTheDocument());
+  });
+
   it("keeps current-period KPI values visible after a failed refresh", async () => {
     renderPage();
     await screen.findByText("3/6 jobs");
