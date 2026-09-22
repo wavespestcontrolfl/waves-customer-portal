@@ -397,4 +397,21 @@ describe('voice relay eval — callback commitment core', () => {
   ])('no_account_holder_callback catches a refusal override carrying its own contact complement: %s', (text, status) => {
     expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
   });
+
+  // Fallback-audit finding (round 3): refusalOverride only recognized
+  // "even if"/"even when" overrides. A trailing "whether she agrees or
+  // not" / "regardless of whether she agrees" / "irrespective of ...
+  // consent" — the same CALLBACK_CONCESSION forms candidate recognition
+  // already treats as unconditional — must override a leading consent
+  // condition the same way.
+  test.each([
+    ['If she agrees, we will call her whether she agrees or not.', 'fail'],
+    ['If she agrees, we will call her whether or not she agrees.', 'fail'],
+    ['If she agrees, we will call her regardless of whether she agrees.', 'fail'],
+    ['If she agrees, we will call her irrespective of whether she agrees or not.', 'fail'],
+    ['If she agrees, we will call her regardless of her consent.', 'fail'],
+    ['If she agrees, we will call her.', 'pass'],
+  ])('no_account_holder_callback catches a whether/regardless concession override on a leading consent condition: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
 });

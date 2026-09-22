@@ -1474,14 +1474,27 @@ function callbackConsentOverridden(text, matchEnd, consentCondition, conditionTa
   // to be contacted"); requiring bare end-of-clause punctuation right after
   // the verb missed "even if she refuses to be contacted."
   const refusalOverride = new RegExp(`^\\s*,?\\s*(?:(?:or|and|but)\\s+(?:even\\s+)?|even\\s+)(?:if|when)\\s+${conditionTarget}\\s+(?:does(?:\\s+not|n[\\x27\\u2019]t)(?:\\s+(?:agree|consent))?|declines?|refuses?)(?:\\s+to\\s+${CALLBACK_RECEIVED_CONTACT})?\\b(?=\\s*(?:[.;!?]|$))`, 'i');
+  // Mirrors CALLBACK_CONCESSION from voice-relay-callback-candidates.js: a
+  // trailing "whether she agrees or not" / "regardless of whether she
+  // agrees" / "irrespective of ... consent" is the same kind of override as
+  // "even if she refuses" — it makes the promise unconditional regardless
+  // of a leading "if she agrees" gate elsewhere in the sentence.
+  // A bare agreement verb, not callbackAgreementAction()'s own — that one's
+  // consent-boundary lookahead requires end-of-clause punctuation right
+  // after "agrees"/its complement, which "agrees OR NOT" never has; the
+  // outer boundary below (after "not", or after a bare "agrees") covers it
+  // instead, for every alternative uniformly.
+  const bareAgree = '(?:agrees?|consents?)';
+  const concessionOverride = new RegExp(`^\\s*,?\\s*(?:(?:or|and|but)\\s+)?(?:whether\\s+(?:${conditionTarget}\\s+${bareAgree}\\s+or\\s+not|or\\s+not\\s+${conditionTarget}\\s+${bareAgree})|(?:regardless|irrespective)(?:\\s+of)?\\s+(?:whether\\s+${conditionTarget}\\s+${bareAgree}(?:\\s+or\\s+not)?|${conditionTarget}(?:[\\x27\\u2019]s)?\\s+(?:consent|agreement)))\\b(?=\\s*(?:[.;!?]|$))`, 'i');
+  const override = (slice) => refusalOverride.test(slice) || concessionOverride.test(slice);
   // The override can follow the promise directly ("If she agrees, we will
   // call her, or even if she refuses.") — a LEADING consent condition with
   // no repeated trailing one to attach to — or, as before, follow a
   // repeated TRAILING consent condition ("we will call her if she agrees,
   // or even if she refuses.").
-  if (refusalOverride.test(text.slice(matchEnd))) return true;
+  if (override(text.slice(matchEnd))) return true;
   const rawConsent = consentCondition.exec(text.slice(matchEnd));
-  return Boolean(rawConsent && refusalOverride.test(text.slice(matchEnd + rawConsent.index + rawConsent[0].length)));
+  return Boolean(rawConsent && override(text.slice(matchEnd + rawConsent.index + rawConsent[0].length)));
 }
 
 function callbackConsentSuffix(text, matchEnd) {
