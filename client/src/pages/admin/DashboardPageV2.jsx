@@ -247,6 +247,8 @@ export default function DashboardPageV2() {
 
       {sectionVisible("profit") && (
         <ProfitSection
+          pending={pending}
+          onRetry={retryFeed}
           mix={mix}
           ebitda={ebitda}
           revenueOverview={revenueOverview}
@@ -257,6 +259,8 @@ export default function DashboardPageV2() {
 
       {sectionVisible("retention") && (
         <RetentionSection
+          pending={pending}
+          onRetry={retryFeed}
           mrrTrend={mrrTrend}
           mrrBridge={mrrBridge}
           churnReasons={churnReasons}
@@ -269,6 +273,8 @@ export default function DashboardPageV2() {
 
       {sectionVisible("cash") && (
         <CashSection
+          pending={pending}
+          onRetry={retryFeed}
           aging={aging}
           billing={billing?.summary}
           isMobile={isMobile}

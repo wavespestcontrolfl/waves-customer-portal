@@ -7,7 +7,7 @@
 import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { MemoryRouter } from "react-router-dom";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import DashboardPageV2 from "../DashboardPageV2";
 import { adminFetch } from "../../../utils/admin-fetch";
@@ -97,6 +97,34 @@ describe("DashboardPageV2 mobile scorecard tabs", () => {
     cleanup();
     vi.clearAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it.each([
+    ["Profit", "/admin/dashboard/service-mix", "service mix", "0 completed services this month", { mix: [], total_services: 8 }, "8 completed services this month"],
+    ["Retention", "/admin/dashboard/review-trend", "reviews", "0 reviews · —★ avg", { trend: [], total: 12, avgRating: 5 }, "12 reviews · 5★ avg"],
+    ["Cash", "/admin/dashboard/aging", "accounts receivable", "No outstanding invoices", { aging: {}, invoice_count: 4 }, "4 open invoices"],
+    ["Cash", "/admin/billing-health", "billing health", "0 billable", { summary: { total_billable: 7 } }, "7 billable"],
+  ])("shows loading and recovery for deferred %s feed %s", async (tab, path, label, falseEmpty, value, loadedText) => {
+    const fetchFixture = adminFetch.getMockImplementation();
+    let fail;
+    const held = new Promise((_, reject) => { fail = reject; });
+    adminFetch.mockImplementation((url) => String(url).split("?")[0] === path ? held : fetchFixture(url));
+    render(<MemoryRouter><DashboardPageV2 /></MemoryRouter>);
+    await screen.findAllByText(/Good (morning|afternoon|evening), Waves/);
+    fireEvent.click(navButton(tab));
+    await screen.findByText(`Loading ${label}…`);
+    expect(screen.queryByText(falseEmpty)).not.toBeInTheDocument();
+    // Shared, already-loaded KPI tiles remain available beside the held feed.
+    expect(screen.queryByText("Loading metrics…")).not.toBeInTheDocument();
+    await act(async () => fail(new Error("Offline")));
+    await screen.findByText(`${label} is unavailable.`);
+    expect(screen.queryByText(falseEmpty)).not.toBeInTheDocument();
+    adminFetch.mockImplementation((url) => String(url).split("?")[0] === path
+      ? Promise.resolve(value) : fetchFixture(url));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Refresh", exact: true })).toBeEnabled());
+    fireEvent.click(screen.getAllByRole("button", { name: "Try again" })[0]);
+    await screen.findByText(loadedText);
+    expect(screen.queryByText(`${label} is unavailable.`)).not.toBeInTheDocument();
   });
 
   it("mounts ONLY the active tab's section (Today first)", async () => {

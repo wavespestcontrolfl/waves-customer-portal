@@ -75,6 +75,8 @@ export default function useDashboardData(section, periodQS) {
     const prior = previousCycle.current;
     const periodOnly = prior && prior.section === section && prior.revision === revision
       && prior.periodQS !== periodQS;
+    const sectionOnly = prior && prior.section !== section && prior.revision === revision
+      && prior.periodQS === periodQS;
     previousCycle.current = { section, periodQS, revision };
     const unfinishedFixed = periodOnly ? requests.filter(([key, path, periodDriven]) => !periodDriven
       && (recordsRef.current[key]?.path !== path || recordsRef.current[key]?.pending)) : [];
@@ -82,7 +84,8 @@ export default function useDashboardData(section, periodQS) {
       ...unfinishedFixed.filter(([key]) => OPERATIONAL_KEYS.has(key)),
       ...requests.filter(([, , periodDriven]) => periodDriven),
       ...unfinishedFixed.filter(([key]) => !OPERATIONAL_KEYS.has(key)),
-    ] : requests;
+    ] : sectionOnly ? requests.filter(([key, path]) => recordsRef.current[key]?.path !== path
+      || recordsRef.current[key]?.pending) : requests;
     const controller = new AbortController();
     const { signal } = controller;
     running.current = true;
@@ -105,7 +108,8 @@ export default function useDashboardData(section, periodQS) {
           if (!value || value.error
             || (key === "alerts" && !Array.isArray(value.alerts))
             || (key === "staleVisits" && !Array.isArray(value.visits))
-            || (key === "today" && typeof value.total !== "number")) {
+            || (key === "today" && typeof value.total !== "number")
+            || (key === "data" && (!value.kpis || typeof value.kpis !== "object" || Array.isArray(value.kpis)))) {
             throw new Error("Dashboard data is unavailable.");
           }
           if (signal.aborted) return;
