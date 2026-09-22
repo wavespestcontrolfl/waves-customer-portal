@@ -13,7 +13,7 @@
  * function under the gate is the parity guarantee, not a branch inside it.
  */
 import { describe, expect, test } from "vitest";
-import { discountRowCaption } from "./AdminInvoicesPage.jsx";
+import { discountRowCaption, invoiceDiscountItemTerm, invoiceDocumentTerms } from "./AdminInvoicesPage.jsx";
 import { stackDocumentDiscounts } from "../../lib/discountStack";
 
 describe("discountRowCaption — origin", () => {
@@ -157,6 +157,62 @@ describe("why the server preserves a fresh document-wide pick's own type — num
     expect(resolvedDollars).toBe(9);
     expect(forcedToFixedLiteral).toBe(81.9);
     expect(forcedToFixedLiteral).not.toBe(preservedAsPercentage);
+  });
+});
+
+// Pre-push audit P1 (coordinator scope extension, round 3): server/
+// services/invoice.js's documentEntryTerms tags both its fresh AND
+// stored branches with `id: <discount_id>` — the client mirror must
+// match, or two document-wide terms tied on rank/value/cap/scope break
+// the tie by ARRAY POSITION here but by catalog id there, so the
+// PREVIEW's per-row split can disagree with what the SAVE actually
+// records (same total either way — this is a display/attribution bug,
+// not a money one).
+describe("invoiceDocumentTerms — carries each item's discount_id as the term's id (client/server identity-tiebreak parity)", () => {
+  test("a fresh document-wide pick's term carries its discount_id", () => {
+    const items = [{ client_id: "d1", _kind: "discount", discount_for: null, discount_id: "row-1" }];
+    const discountRowById = new Map([["row-1", { id: "row-1", discount_type: "fixed_amount", amount: 20 }]]);
+    const terms = invoiceDocumentTerms(items, [], discountRowById, new Set());
+    expect(terms[0].id).toBe("row-1");
+  });
+
+  test("a STORED document-wide item's term also carries its discount_id", () => {
+    const items = [{ client_id: "d1", _kind: "discount", discount_for: null, discount_id: "row-1", discount_dollars: 20 }];
+    const terms = invoiceDocumentTerms(items, [], new Map(), new Set(["d1"]));
+    expect(terms[0].id).toBe("row-1");
+  });
+
+  test("a plain id-less literal credit's term carries id: undefined — no fabricated identity", () => {
+    const items = [{ client_id: "d1", _kind: "discount", discount_for: null, description: "Referral Credit" }];
+    const terms = invoiceDocumentTerms(items, [], new Map(), new Set());
+    expect(terms[0].id).toBeUndefined();
+  });
+});
+
+// Pre-push audit P0 (coordinator scope extension, round 3): a STORED
+// item's term must replay its ORIGINAL sort key (stack_sort_kind/_value/
+// _cap, persisted server-side onto the saved line item) — without this,
+// the EDIT-mode preview of an existing document-wide percentage term
+// would use the pre-fix unstable canonical-order position even though
+// the server now saves it correctly, a preview/save mismatch.
+describe("invoiceDiscountItemTerm — a STORED item replays its persisted sort key for canonical-order stability", () => {
+  test("a stored item carrying stack_sort_kind/_value/_cap includes them on its term, alongside the frozen fixed_amount/dollars", () => {
+    const item = {
+      client_id: "d1", discount_for: null, discount_dollars: 12,
+      stack_sort_kind: "percentage", stack_sort_value: 50, stack_sort_cap: 30,
+    };
+    const term = invoiceDiscountItemTerm(item, new Map(), new Set(["d1"]));
+    expect(term).toMatchObject({
+      discountType: "fixed_amount", amount: 12,
+      sortKind: "percentage", sortValue: 50, sortCap: 30,
+    });
+  });
+
+  test("a stored item saved BEFORE this fix existed (no stack_sort_kind at all) omits the sort-key override — unchanged fallback behavior", () => {
+    const item = { client_id: "d1", discount_for: null, discount_dollars: 12 };
+    const term = invoiceDiscountItemTerm(item, new Map(), new Set(["d1"]));
+    expect(term).toEqual({ discountType: "fixed_amount", amount: 12 });
+    expect(term).not.toHaveProperty("sortKind");
   });
 });
 

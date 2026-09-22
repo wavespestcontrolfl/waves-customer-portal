@@ -555,6 +555,29 @@ function storedDiscountDollars(item) {
   );
 }
 
+// REPLAY STABILITY (coordinator scope extension, round 3): the persisted
+// sort key — {sortKind, sortValue, sortCap} — a FROZEN item's term needs
+// so discount-stack.js's resolveSortKind/Value/Cap can place it in the
+// SAME canonical-order rank/value/cap position it held the first time it
+// resolved, instead of the flat {fixed_amount, <its own clamped dollars>}
+// shape every stored term still uses for RESOLUTION (storedDiscountDollars
+// above, unaffected by this). lineItemDiscountTerm stamps stack_sort_kind/
+// _value/_cap onto an item the FIRST time it resolves fresh; an item that
+// has never gone through that (a genuine scheduled_service/
+// validated_checkout STAMP — never fresh in THIS invoice's own stack to
+// begin with, or a row saved before this fix existed) has none of these
+// fields, and this returns {} — discount-stack.js's own fallback then
+// reads the flat {fixed_amount, dollars} shape exactly as it always has,
+// unchanged for both of those cases.
+function frozenSortKeyFields(item) {
+  if (item?.stack_sort_kind == null) return {};
+  return {
+    sortKind: item.stack_sort_kind,
+    sortValue: item.stack_sort_value,
+    sortCap: item.stack_sort_cap,
+  };
+}
+
 // The (type, amount, cap) a FRESH (non-stored) line-item discount row
 // contributes to its parent line's stack: a catalog row carries its own
 // amount; a variable/custom preset (custom_percent, custom_dollar, or the
@@ -562,6 +585,20 @@ function storedDiscountDollars(item) {
 // item — same resolution resolveLineItemDiscount uses for the gate-off path,
 // minus the dollar computation itself (the engine does that once the term
 // reaches its line's remaining balance).
+//
+// REPLAY STABILITY (coordinator scope extension, round 3): also stamps
+// the resolved (discountType, amount, maxDiscountDollars) onto the ITEM
+// itself as stack_sort_kind / stack_sort_value / stack_sort_cap — a no-op
+// for THIS resolve (a fresh term's own canonical-order position is still
+// governed by the returned term's discountType/amount/maxDiscountDollars,
+// unchanged), but these three fields ride into the saved line_items JSON,
+// so a LATER edit — where this same item is now frozen/stored, replaying
+// its own CLAMPED dollars instead of this rate — can still sort it by the
+// ORIGINAL rate/value/cap it resolved with the first time
+// (discount-stack.js's resolveSortKind/Value/Cap), not by whatever a
+// prior clamp happened to leave it with. Every caller of this function
+// (line-scoped AND, since the document-wide catalog-attribution slice,
+// document-wide fresh picks) gets this stamped the same way.
 function lineItemDiscountTerm(row, item) {
   let amount = Number(row.amount) || 0;
   const isVariablePreset = isVariableOrCustomDiscountPreset(row);
@@ -578,11 +615,17 @@ function lineItemDiscountTerm(row, item) {
       row.amount,
     );
   }
-  return {
+  const term = {
     discountType: row.discount_type,
     amount: roundMoney(amount),
     maxDiscountDollars: row.max_discount_dollars,
   };
+  if (item) {
+    item.stack_sort_kind = term.discountType;
+    item.stack_sort_value = term.amount;
+    item.stack_sort_cap = term.maxDiscountDollars ?? null;
+  }
+  return term;
 }
 
 // Classify one negative invoice line item for the document stack: does its
@@ -673,7 +716,7 @@ function stackInvoiceDocumentDiscounts(serviceLines, lineEntries, manualDiscount
       ...group.filter((entry) => !entry.stored),
     ];
     const terms = ordered.map(({ row, item, stored }) => (stored
-      ? { discountType: "fixed_amount", amount: storedDiscountDollars(item) }
+      ? { discountType: "fixed_amount", amount: storedDiscountDollars(item), ...frozenSortKeyFields(item) }
       : lineItemDiscountTerm(row, item)));
     return { ordered, terms, parentAmount: Math.max(0, Number(line.amount) || 0) };
   });
@@ -708,19 +751,29 @@ function stackInvoiceDocumentDiscounts(serviceLines, lineEntries, manualDiscount
   // narrow a document term.
   //
   // Scope extension (2026-09): a FRESH, catalog-backed document-wide pick
-  // (entry.row resolved, not yet stored/persisted) must preserve its OWN
-  // type — a document PERCENTAGE term occupies a DIFFERENT canonical-order
+  // (entry.row resolved, not yet stored/persisted) preserves its OWN type
+  // — a document PERCENTAGE term occupies a DIFFERENT canonical-order
   // bucket than a fixed credit (percentages compound LAST; fixed credits
-  // compound FIRST, discount-stack.js's stackOrder), so forcing it to
-  // fixed_amount here would silently save a different total than the one
-  // just previewed whenever the invoice carries any other term ($100 line
-  // at 10% line + 10% invoice previews $81 either way ONLY if the
-  // invoice term stays a genuine percentage; forced-fixed saves $81.90).
-  // lineItemDiscountTerm already resolves a variable/custom preset's
-  // operator-entered rate the same way a per-line pick does — id carried
-  // through (same reason a manual pick's id rides its term below) so two
-  // distinct same-rate/same-cap document terms don't fall through to
-  // array-order tie-breaking.
+  // compound FIRST), so forcing it to fixed_amount here would silently
+  // save a different total than the one just previewed whenever the
+  // invoice carries any other term. lineItemDiscountTerm already resolves
+  // a variable/custom preset's operator-entered rate the same way a
+  // per-line pick does — id carried through (same reason a manual pick's
+  // id rides its term below) so two distinct same-rate/same-cap document
+  // terms don't fall through to array-order tie-breaking.
+  //
+  // A STORED entry spreads frozenSortKeyFields(entry.item) — the sort
+  // key (kind/value/cap) it resolved with the FIRST time, persisted onto
+  // the item by lineItemDiscountTerm — alongside its flat
+  // {fixed_amount, frozen dollars} resolution shape, so
+  // discount-stack.js's resolveSortKind/Value/Cap keep it in the SAME
+  // canonical-order position across every later edit (round 3: this is
+  // what makes a percentage-origin document pick safe to accept fresh
+  // again — see the round-2 comment this replaces, now stale, in git
+  // history). A genuine stamp (scheduled_service/validated_checkout —
+  // never fresh in this invoice's own stack) has no stamped sort key at
+  // all; frozenSortKeyFields returns {} for it, so it keeps sorting by
+  // its own flat frozen dollars exactly as it always has.
   const documentEntryTerms = documentDiscountEntries.map((entry) => {
     const eligibleLines = entry.stored
       ? scopeEligibleLines(entry.item.document_scope_service_key, entry.item.document_scope_service_category)
@@ -730,6 +783,14 @@ function stackInvoiceDocumentDiscounts(serviceLines, lineEntries, manualDiscount
         discountType: "fixed_amount",
         amount: storedDiscountDollars(entry.item),
         ...(eligibleLines ? { eligibleLines } : {}),
+        ...frozenSortKeyFields(entry.item),
+        // IDENTITY (Codex pre-push audit P2, round 1 on PR #4655, the
+        // same reasoning applied here): a stable id beats input position
+        // whenever two terms tie on rank/value/cap/scope — a stored
+        // stamp/persisted pick's own discount_id, when it has one
+        // (undefined for a plain literal credit, same as every other
+        // identity-less term).
+        id: entry.item.discount_id,
       };
     }
     if (entry.row) {
@@ -961,37 +1022,34 @@ function computeStackedDocumentDiscountLines({
     (entry) => entry.parent && (entry.stored || entry.row),
   );
   // Every unparented credit joins the document stack — stored, a FRESH
-  // FIXED-type catalog-backed pick that resolves to a real row (scope
-  // extension, 2026-09: a document-wide discountIds-style pick made
-  // through a line item instead of the top-level discountIds array — see
+  // catalog-backed pick that resolves to a real row (scope extension,
+  // 2026-09: a document-wide discountIds-style pick made through a line
+  // item instead of the top-level discountIds array — see
   // stackInvoiceDocumentDiscounts' own documentEntryTerms), OR a plain
-  // literal with no discount_id at all. A FRESH PERCENTAGE (or
-  // free_service) catalog row is deliberately excluded here too — pinned
-  // pre-push audit P0: once such a pick is SAVED, it freezes and is
-  // replayed on any later edit as a fixed_amount term (every frozen
-  // discount is, by design — resolveStoredDiscountLineItem /
-  // storedDiscountDollars), but a document-wide fixed term sorts BEFORE
-  // (wider scope) a narrower line-scoped fixed credit in the SAME pass a
-  // genuine live percentage term never even competed in (percentages
-  // resolve strictly after every fixed credit) — so the SAME invoice
-  // totals differently on a no-op resubmit ($50 → $66.67 in the
-  // auditor's own fixture) purely from that bucket transition. Fixing it
-  // needs a new term category in discount-stack.js (the SHARED engine
-  // — visit/checkout callers too), outside this round's authorized file
-  // (this scope extension is server/services/invoice.js only); the
-  // client's invoice-wide picker mirrors this same fixed-type-only
-  // restriction. An unparented item with a discount_id that resolves to
-  // NEITHER a stored stamp NOR a live FIXED-type catalog row is excluded
-  // (falls through to the throw below, unchanged from the pre-lane
-  // validation) — the client can never fabricate a discount by posting
-  // an id that names nothing, or sidestep this restriction by omitting
-  // the type check client-side.
+  // literal with no discount_id at all. An unparented item with a
+  // discount_id that resolves to NEITHER a stored stamp NOR a live
+  // catalog row is deliberately excluded (falls through to the throw
+  // below, unchanged from the pre-lane validation) — the client can
+  // never fabricate a discount by posting an id that names nothing.
+  //
+  // Round 2 of this scope extension restricted this to FIXED-type rows
+  // only — a document PERCENTAGE pick, once frozen, used to be forced
+  // into the FIXED canonical-order bucket on every later replay (a
+  // document percent term never competed there when fresh), silently
+  // changing an invoice's total on a plain unchanged resave (pinned
+  // pre-push audit P0, auditor's own reproduction: a $50/$100 two-line
+  // invoice with a $50 line-1 credit and a 50% invoice-wide discount
+  // totaled $50 on save, $66.67 on resubmit). Round 3 (this round) fixes
+  // the ROOT cause in discount-stack.js instead — a term's canonical-
+  // order KIND/VALUE/CAP are now a persisted sort key
+  // (lineItemDiscountTerm stamps stack_sort_kind/_value/_cap onto the
+  // item; stackInvoiceDocumentDiscounts and documentEntryTerms above
+  // replay it via frozenSortKeyFields), stable across every later edit
+  // regardless of how the term's own dollars get clamped — so every
+  // catalog type is safe to admit here again, fixed and percentage
+  // alike.
   const documentEntries = classifiedNegativeItems.filter(
-    (entry) => entry.spansAll && (
-      entry.stored
-      || (entry.row && isFixedDiscountType(entry.row.discount_type))
-      || !entry.item.discount_id
-    ),
+    (entry) => entry.spansAll && (entry.stored || entry.row || !entry.item.discount_id),
   );
   const stacked = stackInvoiceDocumentDiscounts(
     positiveServiceLines,

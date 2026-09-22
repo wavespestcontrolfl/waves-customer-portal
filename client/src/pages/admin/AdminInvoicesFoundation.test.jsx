@@ -441,19 +441,18 @@ describe("Invoice foundation workflow preservation", () => {
     expect(screen.getByText("Applies to: entire invoice")).toBeInTheDocument();
   });
 
-  // Pre-push audit P0 (coordinator scope extension, round 2): a PERCENTAGE
-  // (or free_service) document-wide pick is excluded here, deliberately —
-  // once saved, every frozen discount replays on the next edit as a fixed
-  // credit (by design), but a document-wide fixed credit sorts BEFORE a
-  // narrower line-scoped one in that same pass, a competition a genuine
-  // live percentage term never faced — so a saved invoice can total
-  // DIFFERENTLY on a plain no-op resubmit purely from that bucket
-  // transition (reproduced: $50 → $66.67). Fixing it needs a new term
-  // category in the SHARED discount-stack.js engine (visit/checkout
-  // callers too) — outside this round's authorized file. A stack-grouped
-  // FIXED row has no such problem (fixed stays fixed across saves) and
-  // is offered here.
-  it("the invoice-wide picker offers fixed and stack-grouped-fixed rows, but excludes percentage and free_service", async () => {
+  // Round 2 of this scope extension excluded a PERCENTAGE (or
+  // free_service) document-wide pick here — once saved, every frozen
+  // discount replays on the next edit as a fixed credit, which used to
+  // ALSO decide its canonical-order position, silently changing the
+  // invoice's total on a no-op resubmit (reproduced: $50 → $66.67).
+  // Round 3 fixes the ROOT cause in discount-stack.js (a persisted sort
+  // key rides along with a frozen term's dollars — see that file's own
+  // module header), so every type this form's math already models is
+  // offered here again. free_service is the one exclusion left — a
+  // document-wide free_service term would zero out every eligible
+  // line's remaining balance at once, untested and unrequested here.
+  it("the invoice-wide picker offers fixed, percentage and stack-grouped rows, but excludes free_service", async () => {
     overrides.set("GET /api/admin/discounts", () => response({ discounts: [
       { id: "free-svc", name: "Free Service", discount_type: "free_service", amount: 0, is_active: true, show_in_invoices: true },
       { id: "ten-pct-doc", name: "Ten Percent Invoice-Wide", discount_type: "percentage", amount: 10, is_active: true, show_in_invoices: true },
@@ -469,25 +468,16 @@ describe("Invoice foundation workflow preservation", () => {
     fireEvent.focus(await screen.findByLabelText("Add an invoice-wide discount"));
     expect(await screen.findByRole("button", { name: /Twenty Five Dollars/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Grouped Fixed/ })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Ten Percent Invoice-Wide/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Ten Percent Invoice-Wide/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Free Service/ })).not.toBeInTheDocument();
-    // The per-line picker is untouched — percentage types are still
-    // offered there.
-    fireEvent.change(await screen.findByLabelText("Add a discount"), { target: { value: "Ten" } });
-    expect(await screen.findByRole("button", { name: /Ten Percent Invoice-Wide/ })).toBeInTheDocument();
   });
 
-  // One-tier / stack-group enforcement (assertNewStackGroupConflicts
-  // server-side, stackablePresets here) reaches across scopes: a FIXED
-  // grouped row already picked on a LINE must hide the rest of its
-  // stack_group in the invoice-wide picker too, not just within that
-  // same line's own picker. Uses fixed-type rows (not WaveGuard tiers,
-  // which are percentage and excluded from this picker outright) so the
-  // group check itself is what's under test, not the type filter above.
-  it("one-tier/stack-group enforcement reaches across scopes: a line-scoped grouped-fixed pick hides its group in the invoice-wide picker", async () => {
+  // Coordinator scope extension round 3: picking a PERCENTAGE discount
+  // from the invoice-wide picker previews the correct compounded
+  // amount — round 2 could not offer this at all.
+  it("gate on: picking a PERCENTAGE discount from the invoice-wide picker previews the correct compounded amount", async () => {
     overrides.set("GET /api/admin/discounts", () => response({ discounts: [
-      { id: "promo-a", name: "Promo A", discount_type: "fixed_amount", amount: 20, is_active: true, show_in_invoices: true, stack_group: "promo", is_stackable: false },
-      { id: "promo-b", name: "Promo B", discount_type: "fixed_amount", amount: 15, is_active: true, show_in_invoices: true, stack_group: "promo", is_stackable: false },
+      { id: "ten-pct-doc", name: "Ten Percent Invoice-Wide", discount_type: "percentage", amount: 10, is_active: true, show_in_invoices: true },
     ] }));
     overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
     await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
@@ -495,11 +485,35 @@ describe("Invoice foundation workflow preservation", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
     fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Quarterly pest control" } });
     fireEvent.change(screen.getByLabelText("Price ($)"), { target: { value: "100" } });
-    fireEvent.change(await screen.findByLabelText("Add a discount"), { target: { value: "Promo" } });
-    fireEvent.click(await screen.findByRole("button", { name: /Promo A/ }));
+    fireEvent.change(await screen.findByLabelText("Add an invoice-wide discount"), { target: { value: "Ten" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Ten Percent Invoice-Wide/ }));
+    await waitFor(() => {
+      expect(screen.getByLabelText("Credit ($)")).toHaveValue(-10);
+    });
+  });
+
+  // One-tier / stack-group enforcement (assertNewStackGroupConflicts
+  // server-side, stackablePresets here) reaches across scopes: a tier
+  // already picked on a LINE must hide the rest of its stack_group in
+  // the invoice-wide picker too, not just within that same line's own
+  // picker — using WaveGuard tiers themselves (percentage-typed), now
+  // that the invoice-wide picker offers percentage rows again.
+  it("one-tier enforcement reaches across scopes: a line-scoped WaveGuard tier hides its group in the invoice-wide picker", async () => {
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "silver-id", name: "WaveGuard Silver", discount_type: "percentage", amount: 10, is_active: true, show_in_invoices: true, stack_group: "tier", is_stackable: false },
+      { id: "gold-id", name: "WaveGuard Gold", discount_type: "percentage", amount: 15, is_active: true, show_in_invoices: true, stack_group: "tier", is_stackable: false },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Quarterly pest control" } });
+    fireEvent.change(screen.getByLabelText("Price ($)"), { target: { value: "100" } });
+    fireEvent.change(await screen.findByLabelText("Add a discount"), { target: { value: "Wave" } });
+    fireEvent.click(await screen.findByRole("button", { name: /WaveGuard Silver/ }));
     fireEvent.focus(await screen.findByLabelText("Add an invoice-wide discount"));
     await waitFor(() => {
-      expect(screen.queryByRole("button", { name: /Promo B/ })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /WaveGuard Gold/ })).not.toBeInTheDocument();
     });
   });
 

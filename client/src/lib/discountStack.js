@@ -121,12 +121,43 @@ function resolveDiscountCap(discount) {
 // +Infinity) are a genuine tie (0), never NaN — plain subtraction of two
 // Infinitys is NaN, which breaks sort's total-order contract.
 function compareDiscountCap(a, b) {
-  const capA = resolveDiscountCap(a);
-  const capB = resolveDiscountCap(b);
+  const capA = resolveSortCap(a);
+  const capB = resolveSortCap(b);
   if (capA === capB) return 0;
   if (capA === Infinity) return 1;
   if (capB === Infinity) return -1;
   return capA - capB;
+}
+
+// REPLAY STABILITY (coordinator scope extension, round 3) — server mirror
+// of server/services/discount-stack.js's own resolveSortKind/Value/Cap;
+// keep the two in step. A FROZEN term — one already resolved and saved,
+// now replaying its own frozen dollar figure via discountType:
+// 'fixed_amount' for resolution purposes — must keep the SAME canonical-
+// order position it had the FIRST time it resolved, even though its
+// discountType/amount have collapsed to a flat clamp. sortKind/sortValue/
+// sortCap, when a term carries them (AdminInvoicesPage.jsx reads a
+// persisted stack_sort_kind/_value/_cap off a stored line item), override
+// discountType/amount/maxDiscountDollars for ORDERING ONLY — discountStepDollars
+// (the actual dollars-off computation) always reads discountType/amount/
+// maxDiscountDollars directly, never these. A term with no sortKind/
+// sortValue at all — every FRESH term, and any already-frozen row saved
+// before this fix existed — falls straight through to the plain reads,
+// unchanged from before these three functions existed. camelCase-only,
+// like id/slot/eligibleLines — no raw-catalog-row equivalent, so no
+// normalize() pass needed for the override itself.
+function resolveSortKind(discount) {
+  return discount?.sortKind ?? normalize(discount)?.discountType;
+}
+
+function resolveSortValue(discount) {
+  return discount?.sortValue != null ? Number(discount.sortValue) || 0 : resolveDiscountAmount(discount);
+}
+
+function resolveSortCap(discount) {
+  if (discount?.sortCap === undefined) return resolveDiscountCap(discount);
+  const cap = Number(discount.sortCap);
+  return discount.sortCap == null || discount.sortCap === '' || !Number.isFinite(cap) ? Infinity : cap;
 }
 
 // A discount's SCOPE: how many lines it reaches, and which ones.
@@ -210,10 +241,10 @@ function discountStepDollars(raw, remaining) {
 // fixed-then-percent-then-free_service.
 function stackOrder(discounts) {
   const rank = (d) => {
-    const type = normalize(d)?.discountType;
-    if (isFixedDiscountType(type)) return 0;
+    const kind = resolveSortKind(d);
+    if (isFixedDiscountType(kind)) return 0;
     const slotBase = resolveDiscountSlot(d) === 'document' ? 3 : 1;
-    return isPercentDiscountType(type) ? slotBase : slotBase + 1;
+    return isPercentDiscountType(kind) ? slotBase : slotBase + 1;
   };
   const isPercentRank = (r) => r === 1 || r === 3;
   return discounts
@@ -222,7 +253,7 @@ function stackOrder(discounts) {
       const rankA = rank(a.discount);
       const rankDiff = rankA - rank(b.discount);
       if (rankDiff !== 0) return rankDiff;
-      const valueDiff = resolveDiscountAmount(b.discount) - resolveDiscountAmount(a.discount);
+      const valueDiff = resolveSortValue(b.discount) - resolveSortValue(a.discount);
       if (valueDiff !== 0) return valueDiff;
       if (isPercentRank(rankA)) {
         const capDiff = compareDiscountCap(a.discount, b.discount);
@@ -322,7 +353,7 @@ export function stackVisitDiscounts({ lines, appointmentDiscount, compound = tru
   }));
   const apptNormalized = normalize(appointmentDiscount);
   const appt = apptNormalized && apptNormalized.discountType ? apptNormalized : null;
-  const apptInFixedPass = compound && !!appt && isFixedDiscountType(appt.discountType);
+  const apptInFixedPass = compound && !!appt && isFixedDiscountType(resolveSortKind(appt));
 
   // 1 & 2. Fixed credits. Legacy: every line's own discount resolves here
   // unconditionally, in given order. Compounding: ALL fixed credits, line
@@ -339,7 +370,7 @@ export function stackVisitDiscounts({ lines, appointmentDiscount, compound = tru
   } else {
     const fixedOps = [];
     state.forEach((line, lineIdx) => {
-      if (isFixedDiscountType(line.lineDiscount?.discountType)) {
+      if (isFixedDiscountType(resolveSortKind(line.lineDiscount))) {
         fixedOps.push({ kind: 'line', lineIdx, discount: { ...line.lineDiscount, eligibleLines: [lineIdx] } });
       }
     });
@@ -364,7 +395,7 @@ export function stackVisitDiscounts({ lines, appointmentDiscount, compound = tru
 
   // 3. Line percentages / free service, each on what its line still carries.
   for (const line of state) {
-    const type = line.lineDiscount?.discountType;
+    const type = resolveSortKind(line.lineDiscount);
     if (compound && (isPercentDiscountType(type) || type === 'free_service')) {
       line.lineDiscountDollars = discountStepDollars(line.lineDiscount, line.remaining);
       line.remaining = cents(line.remaining - line.lineDiscountDollars);
@@ -433,13 +464,13 @@ export function stackDocumentDiscounts({ lines, documentTerms }) {
   const fixedOps = [];
   state.forEach((line, lineIdx) => {
     line.terms.forEach((term, termIdx) => {
-      if (isFixedDiscountType(term?.discountType)) {
+      if (isFixedDiscountType(resolveSortKind(term))) {
         fixedOps.push({ kind: 'line', lineIdx, termIdx, discount: { ...term, eligibleLines: [lineIdx] } });
       }
     });
   });
   docTerms.forEach((term, termIdx) => {
-    if (isFixedDiscountType(term?.discountType)) {
+    if (isFixedDiscountType(resolveSortKind(term))) {
       fixedOps.push({ kind: 'document', termIdx, discount: term });
     }
   });
@@ -466,7 +497,7 @@ export function stackDocumentDiscounts({ lines, documentTerms }) {
   // 2. LINE percent/free_service terms, on what's left after step 1.
   for (const line of state) {
     const nonFixedIdx = line.terms
-      .map((t, i) => (!isFixedDiscountType(t?.discountType) ? i : -1))
+      .map((t, i) => (!isFixedDiscountType(resolveSortKind(t)) ? i : -1))
       .filter((i) => i >= 0);
     const stacked = stackDiscounts(line.remaining, nonFixedIdx.map((i) => line.terms[i]), { compound: true });
     nonFixedIdx.forEach((termIdx, i) => { line.termDollars[termIdx] = stacked.items[i].dollars; });
@@ -478,7 +509,7 @@ export function stackDocumentDiscounts({ lines, documentTerms }) {
   // term still reaches every line still carrying a balance, and a scoped
   // term only ever consumes the balance of the lines it actually reaches.
   const docNonFixedIdx = docTerms
-    .map((t, i) => (!isFixedDiscountType(t?.discountType) ? i : -1))
+    .map((t, i) => (!isFixedDiscountType(resolveSortKind(t)) ? i : -1))
     .filter((i) => i >= 0);
   const docNonFixedOrder = stackOrder(docNonFixedIdx.map((i) => docTerms[i]));
   for (const { index: subIdx } of docNonFixedOrder) {

@@ -488,22 +488,73 @@ postgres('InvoiceService.create discount stacking — real Postgres round trip',
     expect(result.discount_amount).toBe(32.5);
   });
 
-  // Pre-push audit P0 (round 2): a document-wide PERCENTAGE pick must
-  // never reach create() at all — real catalog row, real round trip —
-  // matching the pre-lane "Invalid line-item discount" rejection exactly.
-  test('a document-wide PERCENTAGE catalog pick is rejected by create(), not silently saved to drift on the next edit', async () => {
+  // Round 2 of this scope extension rejected a document-wide PERCENTAGE
+  // pick outright (a real, then-necessary guard against the exact
+  // replay-drift bug the next test below reproduces). Round 3 fixes the
+  // ROOT cause in discount-stack.js (persisted sortKind/sortValue/sortCap
+  // — see that file's own module header and
+  // discount-stack-replay-invariance-property.test.js) instead of
+  // excluding the type, so this now SAVES correctly — real catalog row,
+  // real round trip.
+  test('a document-wide 10% PERCENTAGE catalog pick alongside a 10% line pick on the same $100 line saves $81, real catalog rows, real round trip', async () => {
     process.env.GATE_DISCOUNT_STACKING = 'true';
+    const linePctId = randomUUID();
     const docPctId = randomUUID();
     await trx('discounts').insert([
+      { id: linePctId, discount_key: `linepct_${linePctId.slice(0, 8)}`, name: 'Ten Percent', discount_type: 'percentage', amount: 10, is_active: true, show_in_invoices: true },
       { id: docPctId, discount_key: `docpct_${docPctId.slice(0, 8)}`, name: 'Ten Percent Invoice-Wide', discount_type: 'percentage', amount: 10, is_active: true, show_in_invoices: true },
     ]);
-    await expect(InvoiceService.create({
+    const invoice = await InvoiceService.create({
       customerId: await insertCustomer(),
-      title: 'Document-wide percentage pick, rejected',
+      title: 'Document-wide percentage pick',
       lineItems: [
         { client_id: 'line-1', description: 'Quarterly Pest', quantity: 1, unit_price: 100, amount: 100 },
+        { client_id: 'd-line', discount_id: linePctId, discount_for: 'line-1', description: 'Ten Percent', quantity: 1, unit_price: -1, amount: -1 },
         { client_id: 'd-doc', discount_id: docPctId, discount_for: null, description: 'Ten Percent Invoice-Wide', quantity: 1, unit_price: -1, amount: -1 },
       ],
-    })).rejects.toThrow('Invalid line-item discount');
+    });
+    expect(Number(invoice.discount_amount)).toBe(19);
+    expect(Number(invoice.total)).toBe(81);
+    const auditRows = await trx('invoice_discounts').where({ invoice_id: invoice.id });
+    const docRow = auditRows.find((r) => r.discount_id === docPctId);
+    expect(docRow).toBeTruthy();
+    expect(Number(docRow.discount_dollars)).toBe(9);
+  });
+
+  // The auditor's OWN round-1 reproduction, end to end through a REAL
+  // create() save followed by a REAL calculateUpdateFinancials resubmit
+  // of the saved line_items unchanged — real catalog rows, real
+  // Postgres round trip. Pre-fix, this totaled $50 on save and $66.67 on
+  // the unchanged resubmit.
+  test("round-1 auditor repro, real round trip: a $50 line-1 credit + a 50% invoice-wide discount on $50/$100 lines totals $50 on save AND on an unchanged resubmit, never $66.67", async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const fixedId = randomUUID();
+    const docPctId = randomUUID();
+    await trx('discounts').insert([
+      { id: fixedId, discount_key: `fifty_${fixedId.slice(0, 8)}`, name: 'Fifty Dollars', discount_type: 'fixed_amount', amount: 50, is_active: true, show_in_invoices: true },
+      { id: docPctId, discount_key: `fiftypct_${docPctId.slice(0, 8)}`, name: 'Fifty Percent Invoice-Wide', discount_type: 'percentage', amount: 50, is_active: true, show_in_invoices: true },
+    ]);
+    const invoice = await InvoiceService.create({
+      customerId: await insertCustomer(),
+      title: 'Round-1 auditor repro',
+      lineItems: [
+        { client_id: 'line-1', description: 'Pest', quantity: 1, unit_price: 50, amount: 50 },
+        { client_id: 'line-2', description: 'Lawn', quantity: 1, unit_price: 100, amount: 100 },
+        { client_id: 'd-line', discount_id: fixedId, discount_for: 'line-1', description: 'Fifty Dollars', quantity: 1, unit_price: -1, amount: -1 },
+        { client_id: 'd-doc', discount_id: docPctId, discount_for: null, description: 'Fifty Percent Invoice-Wide', quantity: 1, unit_price: -1, amount: -1 },
+      ],
+    });
+    expect(Number(invoice.total)).toBe(50);
+
+    // Resubmit the SAVED line_items (as persisted, straight off the
+    // invoice row) completely unchanged through the edit path.
+    const savedLineItems = typeof invoice.line_items === 'string' ? JSON.parse(invoice.line_items) : invoice.line_items;
+    const resaved = await InvoiceService._internals.calculateUpdateFinancials({
+      lineItems: savedLineItems,
+      customer: { property_type: 'residential' },
+      invoice: { id: invoice.id, line_items: JSON.stringify(savedLineItems) },
+    });
+    expect(resaved.total).toBe(50);
+    expect(resaved.total).not.toBeCloseTo(66.67, 2);
   });
 });

@@ -104,7 +104,7 @@ import DictationButton from "../../components/tech/DictationButton";
 import MobileCardOnFileSheet from "../../components/schedule/MobileCardOnFileSheet";
 import { getAdminUser } from "../../lib/adminAuth";
 import { useDiscountStackingState, ensureStackingFresh } from "../../hooks/useDiscountStacking";
-import { isFixedDiscountType, stackDocumentDiscounts, stackablePresets } from "../../lib/discountStack";
+import { stackDocumentDiscounts, stackablePresets } from "../../lib/discountStack";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
 // STATUS_COLORS folds cleanly — sent/viewed were both #0A7EC2 in V1, stay identical post-fold.
@@ -450,6 +450,21 @@ export function invoiceDiscountItemTerm(item, discountRowById, persistedClientId
     return {
       discountType: "fixed_amount",
       amount: Math.max(0, Math.abs(dollars)),
+      // REPLAY STABILITY (coordinator scope extension, round 3): mirrors
+      // server/services/invoice.js's frozenSortKeyFields exactly — a
+      // STORED item this invoice already carries (loaded from a saved
+      // invoice's line_items) may have stack_sort_kind/_value/_cap
+      // persisted on it from the resolve that first saved it. Without
+      // this, the EDIT-mode preview of an existing document-wide
+      // percentage term would still use the pre-fix unstable canonical-
+      // order position even though the server now saves it correctly —
+      // a preview/save mismatch of exactly the class this whole slice
+      // exists to close. Undefined (every item saved before this fix
+      // existed) falls straight through to discount-stack.js's own
+      // fallback — unchanged from before these fields existed.
+      ...(item?.stack_sort_kind != null
+        ? { sortKind: item.stack_sort_kind, sortValue: item.stack_sort_value, sortCap: item.stack_sort_cap }
+        : {}),
     };
   }
   const row = item?.discount_id
@@ -560,11 +575,24 @@ export function discountRowCaption({ item, serviceLineItems, discountRowById, pe
 // computeInvoiceLineDiscountTotal and repriceLineWithNewDiscountPick, so
 // they can't independently drift on this rule the way the aggregate and
 // the per-pick sizing already once did (round 1).
-function invoiceDocumentTerms(items, serviceLineItems, discountRowById, persistedClientIds) {
+//
+// Pre-push audit P1 (coordinator scope extension, round 3): every term
+// now carries `id: i.discount_id` (undefined for a plain literal credit,
+// same as every other identity-less term) — server/services/invoice.js's
+// own documentEntryTerms already tags both its fresh and stored branches
+// this way, so two document-wide terms tied on rank/value/cap/scope
+// broke the tie by ARRAY POSITION here but by catalog id there: two
+// stackable $80 document discounts added in id order b-then-a could
+// preview b=$80/a=$20 while the save recorded b=$20/a=$80 — the TOTAL
+// agreed either way, but the displayed per-row split (and which catalog
+// row's usage stats the save rolled up) disagreed with what the
+// operator saw. discount-stack.js's compareDiscountIdentity is the tie-
+// break this now reaches on both sides identically.
+export function invoiceDocumentTerms(items, serviceLineItems, discountRowById, persistedClientIds) {
   return items
     .filter((i) => i._kind === "discount" && !i.discount_for)
     .map((i) => {
-      const term = invoiceDiscountItemTerm(i, discountRowById, persistedClientIds);
+      const term = { ...invoiceDiscountItemTerm(i, discountRowById, persistedClientIds), id: i.discount_id };
       if (!isStoredInvoiceDiscountItem(i, persistedClientIds)) return term;
       const eligibleLines = invoiceServiceScopeEligibleLines(
         serviceLineItems,
@@ -6399,35 +6427,33 @@ function CreateInvoice({
   // assertNewStackGroupConflicts server-side (invoice.js).
   //
   // Coordinator scope extension (2026-09, after server/services/invoice.js
-  // came free of its prior lane): a fresh document-wide FIXED catalog
-  // pick's discount_id now survives to save — invoice_discounts.discount_id
-  // and discounts.times_applied / total_discount_given are recorded
+  // came free of its prior lane): a fresh document-wide catalog pick's
+  // discount_id now survives to save — invoice_discounts.discount_id and
+  // discounts.times_applied / total_discount_given are recorded
   // correctly, and a saved pick's stack_group membership survives reload
-  // (assertNewStackGroupConflicts, server-side), so a stack-grouped FIXED
-  // row (a flat-dollar promo sharing a group with something else) is safe
-  // to offer here again — mirrored by stackablePresets below, same as the
-  // per-line picker.
+  // (assertNewStackGroupConflicts, server-side) — so a stack-grouped row
+  // is safe to offer here again, mirrored by stackablePresets below, same
+  // as the per-line picker.
   //
-  // Pre-push audit P0 (round 2 of this extension): PERCENTAGE stays
-  // EXCLUDED here — once saved, EVERY frozen discount replays as a fixed
-  // credit on the next edit (resolveStoredDiscountLineItem, by design),
-  // but a document-wide fixed credit sorts BEFORE a narrower line-scoped
-  // one in that same pass, a competition a genuine live percentage term
-  // never faced (percentages always resolve after every fixed credit) —
-  // so a saved invoice can total DIFFERENTLY on a plain no-op resubmit
-  // purely from that bucket transition (reproduced: $50 → $66.67).
-  // Fixing it needs a new term category in discount-stack.js — the
-  // SHARED engine (visit/checkout callers too) — outside this round's
-  // authorized file (server/services/invoice.js only); documentEntries
-  // there enforces the identical fixed-type-only rule server-side, so
-  // this is a UX narrowing, not the only guard. free_service is excluded
-  // for the same reason isFixedDiscountType already excludes it (it
-  // isn't fixed), and would additionally zero out every eligible line's
-  // balance at once — untested and unrequested here either way.
+  // Round 2 of this extension additionally restricted this picker to
+  // FIXED-type rows only — once a document-wide PERCENTAGE pick was
+  // saved, it replayed on the next edit as a flat fixed credit
+  // (resolveStoredDiscountLineItem, by design) that ALSO used to decide
+  // its canonical-order position, jumping it into the wrong pass and
+  // silently changing the invoice's total (reproduced: $50 → $66.67).
+  // Round 3 fixes the ROOT cause in discount-stack.js instead (a
+  // persisted sortKind/sortValue/sortCap ride along with a frozen term's
+  // dollars, so its canonical-order position never moves across a
+  // replay — see that file's own module header), so every type this
+  // form's math already models correctly is safe to offer here again.
+  // free_service stays the one exclusion: a document-wide free_service
+  // term would zero out every eligible line's remaining balance at
+  // once — untested and unrequested here, unrelated to replay
+  // stability.
   const matchingDocumentDiscounts = () => {
     const q = (discountQueries.__document__ || "").trim().toLowerCase();
     const nameFiltered = availableDiscounts.filter((d) => (
-      isFixedDiscountType(d.discount_type) &&
+      d.discount_type !== "free_service" &&
       (!q || `${d.name || ""} ${d.description || ""} ${formatDiscountLabel(d)}`
         .toLowerCase()
         .includes(q))
