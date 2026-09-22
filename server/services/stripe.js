@@ -460,6 +460,14 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
   if (!attemptId || !invoiceId || !customerId || !stripePaymentIntentId) return false;
 
   return database.transaction(async (trx) => {
+    // Codex pre-push P2 (round 2 of the owner's audit): lock the customer
+    // row before the invoice row — postCreditMovement below also locks the
+    // customer, and this function's old invoice-then-customer order could
+    // deadlock against settleZeroBalance's now customer-first order
+    // (server/services/invoice.js). customerId is already known from the
+    // caller (a function parameter, no extra read needed); the mismatch
+    // check right below still refuses if the locked invoice disagrees.
+    await trx('customers').where({ id: customerId }).forUpdate().first('id');
     const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
     if (!invoice || String(invoice.customer_id) !== String(customerId)) return false;
     const invoiceStatus = String(invoice.status || '').toLowerCase();
@@ -558,8 +566,21 @@ async function persistSavedCardChargeCreditDelta({
   if (!(Number(creditDelta) > 0)) return true;
   const { postCreditMovement, round2 } = require('./customer-credit');
   return database.transaction(async (trx) => {
+    // Codex pre-push P2 (round 2 of the owner's audit): lock the customer
+    // row before the invoice row — postCreditMovement below also locks the
+    // customer, and this function's old invoice-then-customer order could
+    // deadlock against settleZeroBalance's now customer-first order
+    // (server/services/invoice.js). customerId is already known from the
+    // caller (a function parameter, no extra read needed).
+    await trx('customers').where({ id: customerId }).forUpdate().first('id');
     const locked = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
     if (!locked) return false;
+    // Codex pre-push P1 (round 2 fallback audit): a customer merge could
+    // repoint invoices.customer_id between the caller's own read of
+    // customerId and this lock — re-verify under the invoice's own lock
+    // before spending it, the same owner-changed guard settleZeroBalance
+    // (server/services/invoice.js) and this file's sibling fix below use.
+    if (String(locked.customer_id) !== String(customerId)) return false;
     if (attemptId) {
       const unresolvedAttempt = await trx('stripe_invoice_charge_attempts')
         .where({ id: attemptId, invoice_id: invoiceId })

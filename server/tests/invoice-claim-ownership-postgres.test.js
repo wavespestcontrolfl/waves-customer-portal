@@ -155,6 +155,27 @@ postgres('invoice send episode ownership', () => {
     expect((await read()).sms_sent_at).toBeTruthy();
   });
 
+  test('markDeliverySent with a passed claimToken finalizes and releases that exact claim atomically, in the SAME update (#4131 slice 5, Codex pre-push P1)', async () => {
+    const token = randomUUID();
+    await trx('invoices').where({ id: invoiceId }).update({ status: 'sending', send_claim_token: token });
+    const result = await Invoice.markDeliverySent(invoiceId, { sms: true, source: 'payment_failed_notice', claimToken: token });
+    expect(result).toMatchObject({ status: 'sent', send_claim_token: null });
+    expect(await read()).toMatchObject({ status: 'sent', send_claim_token: null });
+    expect((await read()).sms_sent_at).toBeTruthy();
+  });
+
+  test('markDeliverySent with a claimToken that no longer owns the row refuses to finalize — a replacement episode is never clobbered', async () => {
+    const original = randomUUID();
+    const replacement = randomUUID();
+    await trx('invoices').where({ id: invoiceId }).update({ status: 'sending', send_claim_token: replacement });
+    // A stale (superseded) episode calling back in with its OWN now-dead
+    // token must not finalize the row a replacement claim currently owns —
+    // no partial UPDATE, no send_claim_token erased out from under it.
+    const result = await Invoice.markDeliverySent(invoiceId, { sms: true, source: 'payment_failed_notice', claimToken: original });
+    expect(result).toMatchObject({ status: 'sending', send_claim_token: replacement });
+    expect(await read()).toMatchObject({ status: 'sending', send_claim_token: replacement, sent_at: null, sms_sent_at: null });
+  });
+
   test('scheduled retry cannot restore a replacement claim', async () => {
     await trx('invoices').where({ id: invoiceId }).update({ status: 'scheduled', scheduled_send_at: new Date(Date.now() - 60000) });
     const replacement = randomUUID();
@@ -247,6 +268,240 @@ postgres('invoice send episode ownership', () => {
     });
     expect(await Invoice.sendViaSMSAndEmail(invoiceId)).toMatchObject({ ok: true });
     expect(await read()).toMatchObject({ status: 'sent', send_claim_token: null });
+  });
+
+  // Ported from #4131's own invoice-send-claim-chokepoint-postgres.test.js
+  // (round 16/17), against the CURRENT claim shape — deferred by #4632 r2
+  // ("packet-invoice queue adoption remains deferred to slice 5") and by
+  // #4634's slice-4 body ("The two adoption-specific PostgreSQL cases from
+  // #4131's invoice-send-claim-chokepoint-postgres suite are not ported").
+  // #4632 added a durable per-episode handoff fence
+  // (fenceAdoptedRowsBeforeHandoff / QUEUE_ADOPTION_HANDOFF_KEY) that did not
+  // exist when #4131's originals were written: only the SAME episode that
+  // fenced a row may ever RESTORE it; any other episode may only RESOLVE it
+  // (a delivered send) or leave it pending. The assertions below reflect
+  // that — a genuine restore failure or a stale-sender race now leaves the
+  // queued row safely stuck cancelled+pending (never silently re-scheduled,
+  // never silently lost) rather than the pre-fence "scheduled again" shape
+  // #4131's originals asserted.
+  describe('queued pay-link adoption survives failure and supersession (ported from #4131, current claim shape)', () => {
+    async function queuedPayLinkFixture(customerIdForRow = null) {
+      const queueId = randomUUID();
+      const originalSchedule = new Date('2040-03-04T12:00:00.000Z');
+      await trx('sms_log').insert({
+        id: queueId,
+        customer_id: customerIdForRow,
+        direction: 'outbound',
+        from_phone: '+19415550100',
+        to_phone: '+12025550123',
+        message_type: 'invoice',
+        message_body: 'Fixture deferred pay link',
+        status: 'scheduled',
+        scheduled_for: originalSchedule,
+        metadata: { entry_point: 'invoice_send_deferred', invoice_id: invoiceId },
+      });
+      return { queueId, originalSchedule };
+    }
+
+    // Wraps the mocked `../models/db` connection so exactly ONE 'sms_log'
+    // table access, from the moment `armed` flips true, fails transiently —
+    // mirroring #4131's own mockFault.smsRestoreOnce fault injector, but
+    // scoped to a real Postgres nested transaction (knex savepoint) instead
+    // of the fully-mocked db #4131 used. `armed` is flipped true from
+    // INSIDE the sendInvoiceEmail mock below so the injected fault lands on
+    // the LATER restore attempt, never on the claim's own earlier adoption.
+    function armSmsRestoreFault(realConnection, faultState) {
+      const wrapTrx = (real) => {
+        const wrapped = (table, ...args) => {
+          if (table === 'sms_log' && faultState.armed) {
+            faultState.armed = false;
+            const failing = {};
+            for (const m of ['whereIn', 'where', 'whereRaw', 'update']) failing[m] = () => failing;
+            failing.returning = () => Promise.reject(new Error('transient queued-SMS restore failure (injected)'));
+            return failing;
+          }
+          return real(table, ...args);
+        };
+        for (const name of ['raw', 'queryBuilder', 'ref']) wrapped[name] = (...a) => real[name](...a);
+        wrapped.transaction = (cb, ...a) => real.transaction((nested) => cb(wrapTrx(nested)), ...a);
+        for (const name of ['schema', 'fn']) Object.defineProperty(wrapped, name, { get: () => real[name] });
+        return wrapped;
+      };
+      return wrapTrx(realConnection);
+    }
+
+    test('a failed queue restore leaves the row safely stuck (cancelled, pending) and survives stale-claim parking', async () => {
+      const { queueId, originalSchedule } = await queuedPayLinkFixture();
+      const { sendInvoiceEmail } = require('../services/invoice-email');
+      const faultState = { armed: false };
+      const realConnection = mockConnection;
+      mockConnection = armSmsRestoreFault(realConnection, faultState);
+      // The SMS leg fails definitively (never uncertain) — a plain refusal
+      // with no held/deferred shape, so it does NOT get requeued onto the
+      // scheduled rail itself.
+      sendCustomerMessage.mockImplementationOnce(({ withProviderHandoff }) => withProviderHandoff(
+        async () => ({ sent: false, code: 'fixture_refusal', deliveryOutcome: 'not_sent' }),
+      ));
+      sendInvoiceEmail.mockImplementationOnce(async () => {
+        // Arm the fault only now: the claim's own earlier adoption (which
+        // also touches sms_log) must succeed normally.
+        faultState.armed = true;
+        return { ok: true, messageId: 'email-first-attempt' };
+      });
+
+      const result = await Invoice.sendViaSMSAndEmail(invoiceId);
+      expect(result).toMatchObject({ ok: true, code: 'ADOPTED_QUEUE_RESTORE_FAILED', deliveryHeld: true,
+        sms: { ok: false }, email: { ok: true } });
+      mockConnection = realConnection;
+
+      let queued = await trx('sms_log').where({ id: queueId }).first();
+      expect(queued.status).toBe('cancelled');
+      expect(queued.metadata.invoice_send_adoption_pending).toBe(true);
+      // Not finalized — the claim is retained for review, exactly like any
+      // other post-delivery bookkeeping failure.
+      expect(await read()).toMatchObject({ status: 'sending' });
+
+      // The ordinary stale-claim sweep parks the ambiguous attempt. It must
+      // not erase the row-level evidence an operator retry re-adopts.
+      await trx('invoices').where({ id: invoiceId }).update({ updated_at: new Date(Date.now() - 11 * 60 * 1000) });
+      await Invoice.processScheduledSends({ limit: 5 });
+      expect(await read()).toMatchObject({ status: 'scheduled', scheduled_send_at: null });
+      queued = await trx('sms_log').where({ id: queueId }).first();
+      expect(queued.metadata.invoice_send_adoption_pending).toBe(true);
+
+      // A later authorized retry (parked rows need overridesReviewHold) re-
+      // adopts the same unresolved cancelled row — its scheduled_for is
+      // untouched — and this time the SMS leg succeeds, which resolves
+      // (not restores) the row: the fence never blocks a resolution.
+      sendCustomerMessage.mockImplementationOnce(({ withProviderHandoff }) => withProviderHandoff(
+        async () => ({ sent: true, deliveryOutcome: 'provider_accepted' }),
+      ));
+      sendInvoiceEmail.mockResolvedValueOnce({ ok: true, messageId: 'email-retry' });
+      const retried = await Invoice.sendViaSMSAndEmail(invoiceId, { overridesReviewHold: true });
+      expect(retried).toMatchObject({ ok: true, sms: { ok: true }, email: { ok: true } });
+      queued = await trx('sms_log').where({ id: queueId }).first();
+      expect(queued).toMatchObject({ status: 'cancelled', scheduled_for: originalSchedule });
+      expect(queued.metadata.invoice_send_adoption_pending).toBeUndefined();
+      expect(queued.metadata.adoption_resolved_at).toBeTruthy();
+      expect(await read()).toMatchObject({ status: 'sent' });
+    });
+
+    test.each(['accepted', 'held'])('a stale superseded sender (mode=%s) cannot mutate the invoice a replacement claim now owns, and the replacement can still restore its own re-adoption', async (mode) => {
+      const { queueId } = await queuedPayLinkFixture();
+      let originalToken;
+      let replacement;
+      sendCustomerMessage.mockImplementationOnce(async () => {
+        // The race: this sender's own fence already ran (it happens right
+        // before this dispatch call), so by the time this callback fires the
+        // row is already stamped for THIS episode. Simulate staleness +
+        // an authorized replacement claim landing while this attempt is
+        // still in flight.
+        originalToken = (await read()).send_claim_token;
+        await trx('invoices').where({ id: invoiceId }).update({ updated_at: new Date(Date.now() - 11 * 60 * 1000) });
+        await Invoice.processScheduledSends({ limit: 1 });
+        replacement = await Invoice.claimInvoiceForSend(invoiceId, {
+          overridesReviewHold: true,
+          adoptsQueuedInvoiceSend: true,
+        });
+        expect(replacement.invoice.send_claim_token).not.toBe(originalToken);
+        if (mode === 'accepted') return { sent: true, deliveryOutcome: 'provider_accepted' };
+        const err = new Error('held in fixture');
+        err.code = 'QUIET_HOURS_HOLD';
+        err.deferred = true;
+        err.nextAllowedAt = new Date(Date.now() + 3600000).toISOString();
+        throw err;
+      });
+
+      if (mode === 'accepted') {
+        await expect(Invoice.sendViaSMS(invoiceId)).resolves.toMatchObject({ sent: true, claimLost: true });
+      } else {
+        await expect(Invoice.sendViaSMS(invoiceId)).rejects.toMatchObject({ code: 'QUIET_HOURS_HOLD' });
+      }
+      // The stale (superseded) episode's own recovery path could not touch
+      // the row — its restore/finalize both require ITS OWN token, which no
+      // longer owns the invoice.
+      expect(await read()).toMatchObject({
+        status: 'sending', send_claim_token: replacement.invoice.send_claim_token,
+      });
+
+      // The replacement can still give back its OWN claim — the invoice
+      // ownership check in restoreSendClaim is keyed on the invoice row,
+      // not on the queued-row fence, so this always succeeds.
+      const restored = await Invoice.restoreSendClaim(
+        invoiceId,
+        replacement.previousStatus,
+        replacement.claimed,
+        replacement.consumedQueuedSendRows,
+        trx,
+        replacement.invoice.send_claim_token,
+      );
+      expect(restored).toBe(true);
+      expect(await read()).toMatchObject({ status: 'scheduled', send_claim_token: null });
+      // The queued row itself stays fenced by the ORIGINAL (now-dead)
+      // episode's token — restore is scoped to the fencing episode, so the
+      // replacement's restore cannot un-cancel a row it never fenced. It
+      // stays exactly where the replacement's own re-adoption left it:
+      // cancelled, pending, re-adoptable by a future retry whose own send
+      // resolves it. It is deliberately NEVER silently put back on the
+      // schedule by a different episode.
+      const pending = await trx('sms_log').where({ id: queueId }).first();
+      expect(pending).toMatchObject({ status: 'cancelled' });
+      expect(pending.metadata.invoice_send_adoption_pending).toBe(true);
+    });
+  });
+
+  // Slice 5 of #4131 (#4632 r2 P2 deferral): claimPacketInvoiceForSend now
+  // threads adoptsQueuedInvoiceSend through to its own claimInvoiceForSend
+  // call, exactly like the ordinary (non-packet) claim already does — an
+  // operator retry of a packet-backed invoice whose earlier combined send
+  // queued its SMS leg adopts (cancels) that row instead of being refused
+  // with queued_pay_link until the window.
+  describe('packet-invoice queue adoption (#4131 slice 5, deferred by #4632 r2 P2)', () => {
+    async function packetInvoiceFixture() {
+      const packetCustomerId = randomUUID();
+      const packetInvoiceId = randomUUID();
+      const packetVisitId = randomUUID();
+      const packetId = randomUUID();
+      await trx('customers').insert({ id: packetCustomerId, first_name: 'Packet', last_name: 'Claim', phone: '+12025550199', email: `${packetCustomerId}@example.invalid` });
+      await trx('service_visits').insert({ id: packetVisitId, customer_id: packetCustomerId, scheduled_date: '2040-03-04', stop_base_key: `pkt-${packetVisitId.slice(0, 8)}`, created_by: 'fixture' });
+      // Self-pay packet: an empty billedServiceIds snapshot resolves no
+      // third-party payer (no scheduled_services / payer rows needed).
+      await trx('visit_completion_packets').insert({
+        id: packetId, visit_id: packetVisitId, idempotency_key: `pkt-${packetId}`, request_hash: 'fixture',
+        status: 'processing', payload: JSON.stringify({ billingSnapshot: { billedServiceIds: [] } }),
+      });
+      await trx('invoices').insert({
+        id: packetInvoiceId, customer_id: packetCustomerId, visit_completion_packet_id: packetId,
+        invoice_number: `TEST-PKT-${packetInvoiceId.slice(0, 8)}`, token: randomUUID(), status: 'draft',
+        total: 117, subtotal: 117, line_items: '[]',
+      });
+      return { packetCustomerId, packetInvoiceId };
+    }
+
+    test('an operator retry adopts a packet invoice’s own earlier queued pay-link SMS instead of refusing queued_pay_link', async () => {
+      const { packetCustomerId, packetInvoiceId } = await packetInvoiceFixture();
+      const queueId = randomUUID();
+      await trx('sms_log').insert({
+        id: queueId, customer_id: packetCustomerId, direction: 'outbound', from_phone: '+19415550100',
+        to_phone: '+12025550199', message_type: 'invoice', message_body: 'Fixture deferred pay link',
+        status: 'scheduled', scheduled_for: new Date(Date.now() + 3600000),
+        metadata: { entry_point: 'invoice_send_deferred', invoice_id: packetInvoiceId },
+      });
+      sendCustomerMessage.mockImplementationOnce(({ withProviderHandoff }) => withProviderHandoff(
+        async () => ({ sent: true, deliveryOutcome: 'provider_accepted' }),
+      ));
+      require('../services/invoice-email').sendInvoiceEmail.mockResolvedValueOnce({ ok: true, messageId: 'email-1' });
+
+      const result = await Invoice.sendViaSMSAndEmail(packetInvoiceId, { operatorInitiated: true });
+
+      expect(result).toMatchObject({ ok: true, sms: { ok: true }, email: { ok: true } });
+      const queued = await trx('sms_log').where({ id: queueId }).first();
+      expect(queued.status).toBe('cancelled');
+      expect(queued.metadata.cancelled_reason).toBe('superseded_by_live_send');
+      expect(queued.metadata.invoice_send_adoption_pending).toBeUndefined();
+      expect(queued.metadata.adoption_resolved_at).toBeTruthy();
+      expect(await trx('invoices').where({ id: packetInvoiceId }).first('status')).toMatchObject({ status: 'sent' });
+    });
   });
 
 });

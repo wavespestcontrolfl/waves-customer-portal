@@ -283,10 +283,33 @@ async function collectVisitCompletionInvoice(packetId, database = db) {
   let reason = 'payment_needed';
   try {
     const settlement = await database.transaction(async (trx) => {
+      // Codex pre-push P1 (round 1, sibling-caller lock-order sweep,
+      // server/services/invoice.js settleZeroBalance): lock the customer
+      // row before the invoice row here too — THIS caller's own lock order
+      // is what PostgreSQL sees, regardless of settleZeroBalance's own
+      // internal order, since it passes this SAME trx in with the invoice
+      // already locked. The old invoice-then-customer order here could
+      // deadlock against a concurrent Bill-To edit (customer-then-invoice).
+      // `invoice.customer_id` is already known from the unlocked read at
+      // the top of collectVisitCompletionInvoice (this file, ~line 226) —
+      // an EARLIER caller reordering attempt added its own extra unlocked
+      // pre-read + a second invoice query inside this transaction, which
+      // regressed several visit-completion-packets-postgres lock-timing
+      // tests that assert on this transaction's FIRST query being the
+      // invoice FOR UPDATE. Using the already-known id keeps this
+      // transaction's shape — one customer lock, one invoice lock, same
+      // statement count as before the reorder — identical in every way
+      // except which row is locked first.
+      await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
       const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
       if (!locked) refuse('invoice_missing');
+      // A customer merge repointing this invoice between the outer
+      // (pre-transaction) read and this lock would mean the customer row
+      // just locked is the wrong (retired) one. Fail closed and retryable
+      // (same posture as the settlement.retryable throw just below) —
+      // rare, and this transaction has made no writes yet.
+      if (locked.customer_id !== invoice.customer_id) throw new Error('Visit invoice owner changed; retry');
       if (invoiceAmountDue(locked) > 0) return { reason: 'balance_due' };
-      await trx('customers').where({ id: locked.customer_id }).forUpdate().first('id');
       await assertVisitCompletionCharge(trx, locked, packet.id);
       return require('./invoice').settleZeroBalance(invoice.id, trx);
     });

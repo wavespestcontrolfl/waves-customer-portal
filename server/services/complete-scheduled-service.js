@@ -11325,133 +11325,247 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // parks on the admin payment-failed bell instead of texting the
       // customer about a visit from days/weeks ago.
       && !isBackfillCompletion) {
+      // Claim acquisition (#4131 slice 5, deferred by #4632 r2): this notice
+      // carries the SAME pay link the ordinary invoice-send path delivers,
+      // but used to send with no send_claim_token interaction at all — a
+      // concurrent operator resend or worker due-send could text the same
+      // link twice. Acquire the shared claim first; any refusal (another
+      // sender already owns this delivery, a live queued row, zero-due,
+      // not sendable) skips the notice outright — the completion SMS below
+      // still carries the pay link as a fallback either way.
+      const DeclineNoticeInvoiceService = require('../services/invoice');
+      let declineSendClaim = null;
       try {
-        const { formatCardLine, invoiceAmountDue } = require('../services/invoice-helpers');
-        const attempted = Number(paymentFailedSmsContext.attemptedAmount);
-        const paymentFailedBody = await renderTemplate('payment_failed', {
-          first_name: svc.first_name || '',
-          service_type: normalizeServiceTypeForTemplate(svc.service_type),
-          service_date: new Date().toLocaleDateString('en-US', {
-            weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York',
-          }),
-          pay_url: payUrl,
-          // Surcharge-inclusive attempted total from the charge itself; the
-          // amount-due fallback only covers a decline that somehow carried
-          // no amount — never advertise $0.00.
-          amount: (Number.isFinite(attempted) && attempted > 0 ? attempted : invoiceAmountDue(invoice)).toFixed(2),
-          card_line: formatCardLine(paymentFailedSmsContext.cardBrand, paymentFailedSmsContext.cardLast4),
-          card_last4: paymentFailedSmsContext.cardLast4 || '',
-        }, {
-          workflow: 'dispatch_service_complete',
-          entity_type: 'service_record',
-          entity_id: record.id,
-        });
-        if (paymentFailedBody) {
-          // Durable 'sending' marker BEFORE the send — the resume-dedupe
-          // above keys off it. Mutate the in-memory notes too so the later
-          // completion-SMS writes (which spread recordStructuredNotes)
-          // carry the marker forward instead of clobbering it.
-          recordStructuredNotes.paymentFailedNoticeStatus = 'sending';
-          recordStructuredNotes.paymentFailedNoticeAttemptedAt = new Date().toISOString();
-          await mergeRecordNotesKeys(record.id, {
-            paymentFailedNoticeStatus: recordStructuredNotes.paymentFailedNoticeStatus,
-            paymentFailedNoticeAttemptedAt: recordStructuredNotes.paymentFailedNoticeAttemptedAt,
-          });
-          const failResult = await sendCustomerMessage({
-            to: svc.cust_phone,
-            body: paymentFailedBody,
-            channel: 'sms',
-            audience: 'customer',
-            purpose: 'payment_failure',
-            customerId: svc.customer_id,
-            invoiceId: invoice.id,
-            entryPoint: 'autopay_completion_decline',
-            identityTrustLevel: 'phone_matches_customer',
-            // billing_mode_at_send: the owner autopay digest (#3607) classifies
-            // the text against the lane that authorized it.
-            metadata: { original_message_type: 'payment_failed', notificationEventKey: `payment-problem:service:${record.id}`, service_record_id: record.id, invoice_id: invoice.id, billing_mode_at_send: resolveBillingLane({ billing_mode: svc.cust_billing_mode, waveguard_tier: svc.cust_waveguard_tier, monthly_rate: svc.cust_monthly_rate }).mode },
-          });
-          paymentFailedNoticeSent = !!failResult.sent;
-          // Send-window hold: the decline is deliberately independent of
-          // completion messaging — when the operator skipped the separate
-          // completion SMS, this notice is the ONLY carrier of the failure
-          // + pay link, and an unqueued 'failed' silently commits an unpaid
-          // invoice with no customer-facing collection path. Queue the
-          // exact rendered notice on the scheduled rail; the registry's
-          // recheck suppresses a meanwhile-paid/payer-billed invoice, its
-          // finalize runs the same markDeliverySent + notes flip as the
-          // inline success below, and its onTerminal restores 'failed'.
-          // The completion SMS keeps its pay link either way (only a
-          // confirmed 'sent' drops it) — a morning double-link is coherent
-          // copy; a night with no link is not.
-          let paymentFailedNoticeDeferred = false;
-          if (!failResult.sent && ['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'].includes(failResult.code) && failResult.deferred && failResult.nextAllowedAt) {
-            try {
-              const TWILIO_NUMBERS = require('../config/twilio-numbers');
-              await db('sms_log').insert({
-                customer_id: svc.customer_id,
-                direction: 'outbound',
-                from_phone: TWILIO_NUMBERS.getOutboundNumber(),
-                to_phone: svc.cust_phone,
-                message_body: paymentFailedBody,
-                status: 'scheduled',
-                scheduled_for: new Date(failResult.nextAllowedAt),
-                message_type: 'payment_failed',
-                metadata: JSON.stringify({
-                  entry_point: 'autopay_completion_decline_deferred',
-                  notificationEventKey: `payment-problem:service:${record.id}`,
-                  service_record_id: record.id,
-                  invoice_id: invoice.id,
-                  pay_url: payUrl,
-                  original_message_type: 'payment_failed',
-                  // Lane that authorized the decline notice — the replay
-                  // forwards it so the owner autopay digest (#3607)
-                  // classifies the morning send against it.
-                  billing_mode_at_send: resolveBillingLane({ billing_mode: svc.cust_billing_mode, waveguard_tier: svc.cust_waveguard_tier, monthly_rate: svc.cust_monthly_rate }).mode,
-                  original_block_code: failResult.code,
-                  replay_purpose: 'payment_failure',
-                  refresh_customer_phone: true,
-                  resolve_from_by_customer: true,
-                }),
-              });
-              paymentFailedNoticeDeferred = true;
-            } catch (queueErr) {
-              logger.error(`[dispatch] held payment-failed notice requeue failed for invoice ${invoice.id} — recording failed (completion SMS keeps the pay link): ${queueErr.message}`);
-            }
-          }
-          recordStructuredNotes.paymentFailedNoticeStatus = failResult.sent ? 'sent' : (paymentFailedNoticeDeferred ? 'deferred' : 'failed');
-          if (failResult.sent) recordStructuredNotes.paymentFailedNoticeSentAt = new Date().toISOString();
-          else if (!paymentFailedNoticeDeferred) recordStructuredNotes.paymentFailedNoticeError = failResult.code || failResult.reason || 'unknown';
-          await mergeRecordNotesKeys(record.id, {
-            paymentFailedNoticeStatus: recordStructuredNotes.paymentFailedNoticeStatus,
-            ...(failResult.sent
-              ? { paymentFailedNoticeSentAt: recordStructuredNotes.paymentFailedNoticeSentAt }
-              : (paymentFailedNoticeDeferred ? {} : { paymentFailedNoticeError: recordStructuredNotes.paymentFailedNoticeError })),
-          }).catch((noteErr) => logger.warn(`[dispatch] payment-failed notice status write failed: ${noteErr.message}`));
-          record.structured_notes = recordStructuredNotes;
-          if (paymentFailedNoticeDeferred) {
-            logger.info(`[dispatch] payment-failed notice for invoice ${invoice.id} held outside the 8AM-8PM ET send window — queued for ${failResult.nextAllowedAt}`);
-          } else if (!failResult.sent) {
-            logger.warn(`[dispatch] payment-failed notice not sent for invoice ${invoice.id} (completion SMS keeps the pay link): ${failResult.code || failResult.reason || 'unknown'}`);
-          } else {
-            // The notice DELIVERED the pay link — the invoice must finalize
-            // exactly as if the completion SMS had carried it (draft →
-            // sent, sent_at/sms_sent_at, lead-conversion updates), because
-            // the completion SMS below now goes report-only.
-            try {
-              const InvoiceService = require('../services/invoice');
-              invoice = await InvoiceService.markDeliverySent(invoice.id, {
-                sms: true,
-                source: 'payment_failed_notice',
-                payUrl,
-              });
-            } catch (statusErr) {
-              logger.warn(`[dispatch] invoice delivery status sync after payment-failed notice failed for ${invoice?.id}: ${statusErr.message}`);
-            }
-          }
+        declineSendClaim = await DeclineNoticeInvoiceService.claimInvoiceForSend(invoice.id);
+      } catch (claimErr) {
+        logger.info(`[dispatch] payment-failed notice for invoice ${invoice.id} skipped — send claim unavailable (${claimErr.code || claimErr.message})`);
+      }
+      // Codex pre-push P1 (round 1 of the owner's audit): restoreSendClaim
+      // catches its OWN database errors and resolves false rather than
+      // throwing — every one of the four call sites below used to await it
+      // without checking, so a transient restore failure was silently
+      // treated as a release. Checking the boolean alone (round 1's own
+      // fix) still only logged — every caller kept completing the visit
+      // with the invoice left 'sending' until the 10-minute stale-claim
+      // sweep parked it for manual review, blocking an ordinary retry in
+      // the meantime (Codex pre-push P1, round 2).
+      //
+      // Second-chance path, not a thrown/retryable completion outcome: the
+      // decline notice's own consumedQueuedSendRows is ALWAYS [] (this
+      // caller never adopts a queued row), so restoreSendClaim's real work
+      // for it is exactly ONE update — `status = previousStatus,
+      // send_claim_token = NULL WHERE id=? AND status='sending' AND
+      // send_claim_token=?` — wrapped in a transaction this caller never
+      // needed for atomicity. A bare retry of that SAME update, outside
+      // the failed transaction, is a well-justified fallback: if the first
+      // failure was transient (a connection blip), this one succeeds and
+      // the invoice is immediately back in its ordinary claimable state —
+      // no operator involvement, no review hold, nothing left 'sending'
+      // on the very next tick. Throwing to make the whole completion
+      // attempt retryable was the other option #4634's own precedent
+      // offered; rejected because this decline notice runs after the
+      // completion's core record already committed (side-effects phase),
+      // so aborting the attempt would not undo anything and would also
+      // discard the completion SMS's own already-decided pay-link
+      // fallback for no benefit over a scoped, in-place recovery.
+      const restoreDeclineSendClaim = async () => {
+        const restored = await DeclineNoticeInvoiceService.restoreSendClaim(
+          invoice.id, declineSendClaim.previousStatus, declineSendClaim.claimed,
+          [], db, declineSendClaim.invoice.send_claim_token,
+        );
+        if (restored) return true;
+        logger.error(`[dispatch] payment-failed notice claim restore FAILED for invoice ${invoice.id} — attempting a second-chance release before falling back to stale-claim recovery`);
+        let secondChance = 0;
+        try {
+          secondChance = await db('invoices')
+            .where({ id: invoice.id, status: 'sending', send_claim_token: declineSendClaim.invoice.send_claim_token })
+            .update({ status: declineSendClaim.previousStatus, send_claim_token: null, updated_at: new Date() });
+        } catch (secondChanceErr) {
+          logger.error(`[dispatch] payment-failed notice second-chance claim release errored for invoice ${invoice.id}: ${secondChanceErr.message} — left for stale-claim recovery`);
         }
-      } catch (failErr) {
-        logger.warn(`[dispatch] payment-failed notice errored for invoice ${invoice?.id} (completion SMS keeps the pay link): ${failErr.message}`);
+        if (!secondChance) {
+          logger.error(`[dispatch] payment-failed notice claim second-chance release ALSO failed for invoice ${invoice.id} — the claim stays 'sending' until stale-claim recovery parks it for operator review; an ordinary resend is blocked until then`);
+        }
+        return !!secondChance;
+      };
+      if (declineSendClaim) {
+        try {
+          const { formatCardLine, invoiceAmountDue } = require('../services/invoice-helpers');
+          const attempted = Number(paymentFailedSmsContext.attemptedAmount);
+          const paymentFailedBody = await renderTemplate('payment_failed', {
+            first_name: svc.first_name || '',
+            service_type: normalizeServiceTypeForTemplate(svc.service_type),
+            service_date: new Date().toLocaleDateString('en-US', {
+              weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York',
+            }),
+            pay_url: payUrl,
+            // Surcharge-inclusive attempted total from the charge itself; the
+            // amount-due fallback only covers a decline that somehow carried
+            // no amount — never advertise $0.00.
+            amount: (Number.isFinite(attempted) && attempted > 0 ? attempted : invoiceAmountDue(invoice)).toFixed(2),
+            card_line: formatCardLine(paymentFailedSmsContext.cardBrand, paymentFailedSmsContext.cardLast4),
+            card_last4: paymentFailedSmsContext.cardLast4 || '',
+          }, {
+            workflow: 'dispatch_service_complete',
+            entity_type: 'service_record',
+            entity_id: record.id,
+          });
+          if (paymentFailedBody) {
+            // Durable 'sending' marker BEFORE the send — the resume-dedupe
+            // above keys off it. Mutate the in-memory notes too so the later
+            // completion-SMS writes (which spread recordStructuredNotes)
+            // carry the marker forward instead of clobbering it.
+            recordStructuredNotes.paymentFailedNoticeStatus = 'sending';
+            recordStructuredNotes.paymentFailedNoticeAttemptedAt = new Date().toISOString();
+            await mergeRecordNotesKeys(record.id, {
+              paymentFailedNoticeStatus: recordStructuredNotes.paymentFailedNoticeStatus,
+              paymentFailedNoticeAttemptedAt: recordStructuredNotes.paymentFailedNoticeAttemptedAt,
+            });
+            // throwIfDeliveryUnverified (#4131 slice 5): an uncertain provider
+            // outcome must not be read as an ordinary failure — that would
+            // restore the claim below and let a retry re-text a message that
+            // may have already reached the customer. Thrown here, it escapes
+            // straight to the outer catch, which swallows it WITHOUT
+            // restoring the claim — the same "retained for review" posture
+            // every other sender in this codebase gives an unverified send.
+            const failResult = throwIfDeliveryUnverified(await sendCustomerMessage({
+              to: svc.cust_phone,
+              body: paymentFailedBody,
+              channel: 'sms',
+              audience: 'customer',
+              purpose: 'payment_failure',
+              customerId: svc.customer_id,
+              invoiceId: invoice.id,
+              entryPoint: 'autopay_completion_decline',
+              identityTrustLevel: 'phone_matches_customer',
+              // billing_mode_at_send: the owner autopay digest (#3607) classifies
+              // the text against the lane that authorized it.
+              metadata: { original_message_type: 'payment_failed', notificationEventKey: `payment-problem:service:${record.id}`, service_record_id: record.id, invoice_id: invoice.id, billing_mode_at_send: resolveBillingLane({ billing_mode: svc.cust_billing_mode, waveguard_tier: svc.cust_waveguard_tier, monthly_rate: svc.cust_monthly_rate }).mode },
+            }));
+            paymentFailedNoticeSent = !!failResult.sent;
+            // Send-window hold: the decline is deliberately independent of
+            // completion messaging — when the operator skipped the separate
+            // completion SMS, this notice is the ONLY carrier of the failure
+            // + pay link, and an unqueued 'failed' silently commits an unpaid
+            // invoice with no customer-facing collection path. Queue the
+            // exact rendered notice on the scheduled rail; the registry's
+            // recheck suppresses a meanwhile-paid/payer-billed invoice, its
+            // finalize runs the same markDeliverySent + notes flip as the
+            // inline success below, and its onTerminal restores 'failed'.
+            // The completion SMS keeps its pay link either way (only a
+            // confirmed 'sent' drops it) — a morning double-link is coherent
+            // copy; a night with no link is not.
+            let paymentFailedNoticeDeferred = false;
+            if (!failResult.sent && ['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'].includes(failResult.code) && failResult.deferred && failResult.nextAllowedAt) {
+              try {
+                const TWILIO_NUMBERS = require('../config/twilio-numbers');
+                await db('sms_log').insert({
+                  customer_id: svc.customer_id,
+                  direction: 'outbound',
+                  from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+                  to_phone: svc.cust_phone,
+                  message_body: paymentFailedBody,
+                  status: 'scheduled',
+                  scheduled_for: new Date(failResult.nextAllowedAt),
+                  message_type: 'payment_failed',
+                  metadata: JSON.stringify({
+                    entry_point: 'autopay_completion_decline_deferred',
+                    notificationEventKey: `payment-problem:service:${record.id}`,
+                    service_record_id: record.id,
+                    invoice_id: invoice.id,
+                    pay_url: payUrl,
+                    original_message_type: 'payment_failed',
+                    // Lane that authorized the decline notice — the replay
+                    // forwards it so the owner autopay digest (#3607)
+                    // classifies the morning send against it.
+                    billing_mode_at_send: resolveBillingLane({ billing_mode: svc.cust_billing_mode, waveguard_tier: svc.cust_waveguard_tier, monthly_rate: svc.cust_monthly_rate }).mode,
+                    original_block_code: failResult.code,
+                    replay_purpose: 'payment_failure',
+                    refresh_customer_phone: true,
+                    resolve_from_by_customer: true,
+                  }),
+                });
+                paymentFailedNoticeDeferred = true;
+              } catch (queueErr) {
+                logger.error(`[dispatch] held payment-failed notice requeue failed for invoice ${invoice.id} — recording failed (completion SMS keeps the pay link): ${queueErr.message}`);
+              }
+            }
+            recordStructuredNotes.paymentFailedNoticeStatus = failResult.sent ? 'sent' : (paymentFailedNoticeDeferred ? 'deferred' : 'failed');
+            if (failResult.sent) recordStructuredNotes.paymentFailedNoticeSentAt = new Date().toISOString();
+            else if (!paymentFailedNoticeDeferred) recordStructuredNotes.paymentFailedNoticeError = failResult.code || failResult.reason || 'unknown';
+            await mergeRecordNotesKeys(record.id, {
+              paymentFailedNoticeStatus: recordStructuredNotes.paymentFailedNoticeStatus,
+              ...(failResult.sent
+                ? { paymentFailedNoticeSentAt: recordStructuredNotes.paymentFailedNoticeSentAt }
+                : (paymentFailedNoticeDeferred ? {} : { paymentFailedNoticeError: recordStructuredNotes.paymentFailedNoticeError })),
+            }).catch((noteErr) => logger.warn(`[dispatch] payment-failed notice status write failed: ${noteErr.message}`));
+            record.structured_notes = recordStructuredNotes;
+            if (paymentFailedNoticeDeferred) {
+              // The queued row's own entry point (autopay_completion_decline_deferred,
+              // one of PAY_LINK_QUEUE_ENTRY_POINTS) already guards against a
+              // second sender delivering this same pay link, so the invoice
+              // claim itself is no longer needed to protect it — give it back.
+              await restoreDeclineSendClaim();
+              logger.info(`[dispatch] payment-failed notice for invoice ${invoice.id} held outside the 8AM-8PM ET send window — queued for ${failResult.nextAllowedAt}`);
+            } else if (!failResult.sent) {
+              await restoreDeclineSendClaim();
+              logger.warn(`[dispatch] payment-failed notice not sent for invoice ${invoice.id} (completion SMS keeps the pay link): ${failResult.code || failResult.reason || 'unknown'}`);
+            } else {
+              // The notice DELIVERED the pay link — the invoice must finalize
+              // exactly as if the completion SMS had carried it (draft →
+              // sent, sent_at/sms_sent_at, lead-conversion updates), because
+              // the completion SMS below now goes report-only. Pass this
+              // episode's own claim token straight into markDeliverySent
+              // (Codex pre-push P1, #4131 slice 5) so the finalize both
+              // requires and releases the exact claim atomically in ONE
+              // UPDATE — restoring the claim first, as a separate step,
+              // would expose an unclaimed draft/scheduled row in the gap
+              // for a concurrent sender to claim and re-send.
+              try {
+                invoice = await DeclineNoticeInvoiceService.markDeliverySent(invoice.id, {
+                  sms: true,
+                  source: 'payment_failed_notice',
+                  payUrl,
+                  claimToken: declineSendClaim.invoice.send_claim_token,
+                });
+              } catch (statusErr) {
+                logger.warn(`[dispatch] invoice delivery status sync after payment-failed notice failed for ${invoice?.id}: ${statusErr.message}`);
+              }
+            }
+          } else {
+            // No renderable body (Codex pre-push P1, #4131 slice 5): the
+            // template is missing/disabled, or the lookup itself failed —
+            // either way this is a definite pre-provider non-send. The
+            // claim was already acquired above; give it back or the
+            // invoice is left 'sending' until stale-claim recovery parks
+            // it for manual review, blocking every ordinary retry in the
+            // meantime.
+            await restoreDeclineSendClaim();
+          }
+        } catch (failErr) {
+          // Every branch above that resolves (deferred / not-sent /
+          // delivered / no body) already gives the claim back or finalizes
+          // it. The remaining gap is a THROW reaching here. The messaging
+          // layer's own three-state contract (see the deliveryOutcome doc
+          // comment in services/messaging/send-customer-message.js) makes
+          // 'accepted' / 'not_sent' / 'uncertain' mutually exclusive, so
+          // one direct read decides restorability: no providerOutcome at
+          // all (still pre-provider — template render, the pre-send notes
+          // write) or an explicit 'not_sent' (a definite rejection the send
+          // layer threw rather than returned) both restore; 'uncertain'
+          // (Codex pre-push P1 round 2 — checking mere presence wrongly
+          // restored a definite rejection too) and 'accepted' (round 3 —
+          // the provider took the text and the throw came from bookkeeping
+          // after that, e.g. the audit-row insert; restoring here would
+          // re-text an already-delivered pay link) do not — the same
+          // "retained for review" posture sendViaSMS's own catch
+          // (smsDelivered) gives that exact accepted-then-failed shape.
+          const outcome = failErr?.providerOutcome?.deliveryOutcome;
+          if (declineSendClaim && (!outcome || outcome === 'not_sent')) {
+            await restoreDeclineSendClaim();
+          }
+          logger.warn(`[dispatch] payment-failed notice errored for invoice ${invoice?.id} (completion SMS keeps the pay link): ${failErr.message}`);
+        }
       }
     }
 

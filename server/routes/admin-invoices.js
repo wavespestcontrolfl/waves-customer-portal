@@ -2632,9 +2632,31 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
     let outcome;
     try {
       outcome = await db.transaction(async (trx) => {
+        // Codex pre-push P2 (round 2 of the owner's audit): lock the
+        // customer row before the invoice row — postCreditMovement below
+        // also locks the customer, and this route's old invoice-then-
+        // customer order could deadlock against the customer-first order
+        // settleZeroBalance now uses (server/services/invoice.js). The
+        // pre-transaction `invoice` read above already carries customer_id.
+        await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
         const locked = await trx('invoices').where({ id }).forUpdate().first();
         if (!locked) {
           const err = new Error('Invoice not found'); err.statusCode = 404; err.isOperational = true; throw err;
+        }
+        // Local pre-push audit P1 (round 2, Claude fallback): the customer
+        // lock above is sourced from the UNLOCKED pre-transaction `invoice`
+        // read — the removed invoice-first code used to lock the customer
+        // off `locked.customer_id`, read fresh under the invoice's own
+        // lock, which was merge-safe. A customer merge repointing this
+        // invoice's owner between that outer read and this lock would
+        // otherwise hold the WRONG (retired) customer while
+        // postCreditMovement below posts against the invoice's CURRENT
+        // (survivor) customer with no lock on it — the exact race
+        // settleZeroBalance's own owner-changed guard
+        // (server/services/invoice.js) exists to close. Re-verify here too.
+        if (locked.customer_id !== invoice.customer_id) {
+          const err = new Error('This invoice\'s owner changed — retry applying credit');
+          err.statusCode = 409; err.isOperational = true; throw err;
         }
         try {
           assertInvoiceCollectible(locked);
@@ -2661,10 +2683,9 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
         // the cancel voids it (restoring credit); consuming credit against
         // it here would race that void (#3878 r2).
         // Lock order customer → visit (same as recordManualPayment and the
-        // rest of the repo): postCreditMovement locks the customer below, so
-        // fencing the visit first would invert the order and deadlock against
-        // a customer→visit transaction (Codex r2 P2).
-        await trx('customers').where({ id: locked.customer_id }).forUpdate().first('id');
+        // rest of the repo): the customer row is already locked above (moved
+        // ahead of the invoice lock for the Codex P2 fix), so this fence
+        // still runs strictly after it.
         {
           const neverRan = await visitRefusesSettlement(trx, locked.scheduled_service_id);
           if (neverRan) {
@@ -2790,10 +2811,29 @@ router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
 
     let outcome;
     try {
+      // Codex pre-push P2 (round 2 of the owner's audit): an unlocked
+      // pre-read of customer_id, so the customer row can be locked before
+      // the invoice row inside the transaction — postCreditMovement below
+      // also locks the customer, and this route's old invoice-then-
+      // customer order could deadlock against settleZeroBalance's now
+      // customer-first order (server/services/invoice.js).
+      const preCustomer = await db('invoices').where({ id }).first('customer_id');
       outcome = await db.transaction(async (trx) => {
+        if (preCustomer) await trx('customers').where({ id: preCustomer.customer_id }).forUpdate().first('id');
         const locked = await trx('invoices').where({ id }).forUpdate().first();
         if (!locked) {
           const err = new Error('Invoice not found'); err.statusCode = 404; err.isOperational = true; throw err;
+        }
+        // Local pre-push audit P1 (round 2, Claude fallback): the pre-read
+        // above is unlocked and can go stale — a customer merge repointing
+        // this invoice's owner in that window would otherwise hold the
+        // WRONG (retired) customer while postCreditMovement below posts
+        // against the invoice's CURRENT (survivor) customer with no lock
+        // on it. Re-verify under the invoice's own lock, same guard as
+        // settleZeroBalance's own owner-changed check.
+        if (preCustomer && locked.customer_id !== preCustomer.customer_id) {
+          const err = new Error('This invoice\'s owner changed — retry reversing the applied credit');
+          err.statusCode = 409; err.isOperational = true; throw err;
         }
         // Reversible: a fully-covered prepaid invoice, OR a still-collectible
         // invoice carrying a PARTIAL auto-applied credit. The latter is otherwise

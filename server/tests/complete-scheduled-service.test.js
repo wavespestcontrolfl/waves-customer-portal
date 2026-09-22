@@ -241,6 +241,35 @@ describe('completion SMS delivery-unverified classifiers', () => {
     expect(deliveryUnverifiedProviderOutcome(undefined)).toBeNull();
   });
 
+  test('deliveryUnverifiedProviderOutcome returns null for a THROWN definite rejection — the exact shape sendCustomerMessageCore raises for a pre-dispatch failure or a definite not_sent, which carries providerOutcome on every exception (Codex pre-push P1, round 2)', () => {
+    // A bare `if (err.providerOutcome)` truthiness check — the round-1
+    // shape this test guards against regressing to — would wrongly treat
+    // this as uncertain: the messaging layer attaches providerOutcome to
+    // EVERY exception it raises, definite rejections included.
+    const definiteRejection = Object.assign(new Error('carrier rejected'), {
+      providerOutcome: { sent: false, deliveryOutcome: 'not_sent', code: 'CARRIER_REJECTED' },
+    });
+    expect(deliveryUnverifiedProviderOutcome(definiteRejection)).toBeNull();
+    const preDispatchFailure = Object.assign(new Error('no route to customer'), {
+      providerOutcome: { sent: false, deliveryOutcome: 'not_sent', code: 'NO_ROUTE' },
+    });
+    expect(deliveryUnverifiedProviderOutcome(preDispatchFailure)).toBeNull();
+  });
+
+  test('deliveryUnverifiedProviderOutcome ALSO returns null for a THROWN ACCEPTED delivery (sent: true) — a post-acceptance bookkeeping failure, not an uncertain outcome, and a caller must check .sent separately before treating "not uncertain" as "safe to restore" (Codex pre-push P1, round 3)', () => {
+    // e.g. the provider accepted the text but the audit-row insert then
+    // threw. deliveryUnverifiedProviderOutcome correctly says "not
+    // uncertain" here too — it is NOT the uncertain classifier's job to
+    // catch this class; a caller deciding whether to restore a send claim
+    // must check providerOutcome.sent === true on its own, exactly like the
+    // payment-failed decline notice's outer catch now does.
+    const acceptedThenBookkeepingFailed = Object.assign(new Error('audit insert failed'), {
+      providerOutcome: { sent: true, deliveryOutcome: 'provider_accepted' },
+    });
+    expect(deliveryUnverifiedProviderOutcome(acceptedThenBookkeepingFailed)).toBeNull();
+    expect(acceptedThenBookkeepingFailed.providerOutcome.sent).toBe(true);
+  });
+
   test('throwIfDeliveryUnverified passes a definite result through untouched', () => {
     const result = { sent: true, deliveryOutcome: 'provider_accepted' };
     expect(throwIfDeliveryUnverified(result)).toBe(result);
@@ -315,5 +344,177 @@ describe('quiet-hours completion SMS deferral clears the pre-send uncertainty ma
     expect(deferredDeltaAt).toBeGreaterThan(-1);
     expect(txAt).toBeGreaterThan(deferredDeltaAt);
     expect(mergeAt).toBeGreaterThan(txAt);
+  });
+});
+
+describe('payment-failed decline notice claim acquisition (#4131 slice 5, deferred by #4632 r2 P2)', () => {
+  // Same "source contract" convention as the quiet-hours deferral test above
+  // (invoice-issued-closeout-completion-postgres.test.js's own precedent,
+  // cited there): no existing harness in this repo drives
+  // completeScheduledService's own autopay-decline branch to a real
+  // sendCustomerMessage call (it needs a declined saved-card charge inside a
+  // full packet/visit completion — the nearest fixture,
+  // visit-completion-packets-postgres.test.js's enableFixtureAutopay, tests
+  // the retention/collection lane, not this notice). Pinned structurally: the
+  // notice must acquire the shared invoice send claim before it can send,
+  // must wrap the provider call with throwIfDeliveryUnverified (an uncertain
+  // outcome must escape to the outer catch WITHOUT restoring the claim), and
+  // must give the claim back — checking restoreSendClaim's own boolean —
+  // on every outcome that resolves without it (deferred / not-sent / no
+  // body) before the delivered branch finalizes through markDeliverySent.
+  const fs = require('fs');
+  const path = require('path');
+  const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+  // Anchored on the unique `const DeclineNoticeInvoiceService = require(...)`
+  // line (Codex pre-push P1, round 1 — a prior anchor, "&& !isBackfillCompletion) {",
+  // was not unique: it also matches an unrelated packetDurationAllocation
+  // guard earlier in this file, silently widening noticeBlock to cover
+  // thousands of unrelated lines in between — every assertion below still
+  // happened to find its target inside that oversized slice, so it never
+  // surfaced as a failure, but the block was not scoped the way its own
+  // comments claimed).
+  const noticeStart = source.indexOf('const DeclineNoticeInvoiceService = require(');
+  const noticeEnd = source.indexOf('// Report EMAIL enqueue', noticeStart);
+  const noticeBlock = noticeStart > -1 && noticeEnd > noticeStart ? source.slice(noticeStart, noticeEnd) : '';
+
+  test('the notice block is found exactly once, precisely scoped (not a substring match on an unrelated guard elsewhere in the file)', () => {
+    expect(noticeStart).toBeGreaterThan(-1);
+    expect(noticeEnd).toBeGreaterThan(noticeStart);
+    // A precise scope is materially smaller than the file itself — guards
+    // against the anchor silently widening again the way the old one did.
+    expect(noticeEnd - noticeStart).toBeLessThan(20000);
+    expect((source.match(/const DeclineNoticeInvoiceService = require\(/g) || []).length).toBe(1);
+  });
+
+  test('claims the shared invoice send claim before rendering or sending the notice', () => {
+    const claimAt = noticeBlock.indexOf('.claimInvoiceForSend(invoice.id)');
+    const sendAt = noticeBlock.indexOf('await sendCustomerMessage({');
+    expect(claimAt).toBeGreaterThan(-1);
+    expect(sendAt).toBeGreaterThan(claimAt);
+  });
+
+  test('a claim refusal is caught and logged rather than thrown out of the completion', () => {
+    expect(noticeBlock).toMatch(/let declineSendClaim = null;\s*\n\s*try \{\s*\n\s*declineSendClaim = await \w+\.claimInvoiceForSend\(invoice\.id\);\s*\n\s*\} catch \(claimErr\) \{/);
+  });
+
+  test('the send itself is wrapped with throwIfDeliveryUnverified', () => {
+    expect(noticeBlock).toMatch(/const failResult = throwIfDeliveryUnverified\(await sendCustomerMessage\(\{/);
+  });
+
+  test('restoreSendClaim is called through ONE shared, checked helper — never an unchecked bare await (Codex pre-push P1, round 1 of the owner\'s audit)', () => {
+    // restoreSendClaim catches its own DB errors and resolves false rather
+    // than throwing — an unchecked await would silently treat a transient
+    // restore failure as a release, leaving the invoice 'sending' until
+    // stale-claim recovery parks it, blocking an ordinary resend with no
+    // signal. One shared helper used at every call site closes that gap in
+    // one place instead of repeating (and risking missing) the check four
+    // times.
+    expect(noticeBlock).toMatch(/const restoreDeclineSendClaim = async \(\) => \{/);
+    const helperAt = noticeBlock.indexOf('const restoreDeclineSendClaim = async () => {');
+    const helperBody = noticeBlock.slice(helperAt, helperAt + 2200);
+    expect(helperBody).toMatch(/const restored = await DeclineNoticeInvoiceService\.restoreSendClaim\(/);
+    expect(helperBody).toMatch(/if \(restored\) return true;/);
+    // No OTHER (bare, unchecked) call to restoreSendClaim anywhere else in
+    // the notice block — every call site goes through the checked helper.
+    const bareRestoreCalls = (noticeBlock.match(/DeclineNoticeInvoiceService\.restoreSendClaim\(/g) || []).length;
+    expect(bareRestoreCalls).toBe(1); // only inside the helper itself
+  });
+
+  test('a false restore attempts a second-chance DIRECT release before falling back to stale-claim recovery — never just logged and left (Codex pre-push P1, round 2)', () => {
+    // Round 1's own fix (the shared helper above) checked the boolean but
+    // only logged on failure — every caller still kept completing the
+    // visit with the invoice left \'sending\' until the 10-minute
+    // stale-claim sweep parked it, blocking an ordinary resend in the
+    // meantime. The decline notice\'s own consumedQueuedSendRows is ALWAYS
+    // [] (this caller never adopts a queued row), so restoreSendClaim\'s
+    // real work for it is exactly one status-flip UPDATE wrapped in a
+    // transaction this caller never needed — a bare retry of that SAME
+    // update, outside the failed transaction, is the second-chance path.
+    const helperAt = noticeBlock.indexOf('const restoreDeclineSendClaim = async () => {');
+    expect(helperAt).toBeGreaterThan(-1);
+    const helperBody = noticeBlock.slice(helperAt, helperAt + 2200);
+    expect(helperBody).toMatch(
+      /secondChance = await db\('invoices'\)\s*\n\s*\.where\(\{ id: invoice\.id, status: 'sending', send_claim_token: declineSendClaim\.invoice\.send_claim_token \}\)\s*\n\s*\.update\(\{ status: declineSendClaim\.previousStatus, send_claim_token: null, updated_at: new Date\(\) \}\);/,
+    );
+    // The second attempt is a bare UPDATE, not routed back through
+    // restoreSendClaim itself (which just failed) or through the checked
+    // helper recursively.
+    const secondChanceRegion = helperBody.slice(helperBody.indexOf('let secondChance'));
+    expect(secondChanceRegion).not.toMatch(/restoreDeclineSendClaim\(\)/);
+    expect(secondChanceRegion).not.toMatch(/DeclineNoticeInvoiceService\.restoreSendClaim\(/);
+    // Still checked — a failed second attempt logs rather than silently
+    // proceeding, and the helper reports its final true/false honestly.
+    expect(helperBody).toMatch(/if \(!secondChance\) \{/);
+    expect(helperBody).toMatch(/return !!secondChance;/);
+  });
+
+  test('every resolved outcome that does NOT finalize (deferred, not-sent, no renderable body) gives the claim back through the checked helper', () => {
+    const callSites = (noticeBlock.match(/await restoreDeclineSendClaim\(\);/g) || []).length;
+    // Deferred, not-sent, and no-renderable-body (an empty/disabled
+    // template) each restore the claim outright via the shared helper —
+    // none of them go on to deliver anything. The outer-catch call is a
+    // fourth, conditional use of the SAME helper, checked in its own test
+    // below.
+    expect(callSites).toBe(4);
+  });
+
+  test('the delivered branch does NOT restore-then-finalize as two steps — it passes its own claim token into markDeliverySent so the finalize and the claim release are ONE atomic UPDATE (Codex pre-push P1)', () => {
+    const deliveredAt = noticeBlock.indexOf('// The notice DELIVERED the pay link');
+    expect(deliveredAt).toBeGreaterThan(-1);
+    const restoreBetween = noticeBlock.indexOf('restoreDeclineSendClaim()', deliveredAt);
+    const markDeliveredAt = noticeBlock.indexOf('.markDeliverySent(invoice.id', deliveredAt);
+    expect(markDeliveredAt).toBeGreaterThan(deliveredAt);
+    // No restore call between the DELIVERED comment and its own
+    // markDeliverySent call — a separate restore-then-finalize would
+    // expose an unclaimed row in the gap for a concurrent sender to grab.
+    expect(restoreBetween === -1 || restoreBetween > markDeliveredAt).toBe(true);
+    expect(noticeBlock.slice(deliveredAt, markDeliveredAt + 400)).toMatch(
+      /claimToken: declineSendClaim\.invoice\.send_claim_token/,
+    );
+  });
+
+  test('markDeliverySent itself requires and releases a passed claimToken atomically, in ONE merged decision, and never finalizes a row it does not own', () => {
+    const invoiceSource = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');
+    const fnAt = invoiceSource.indexOf('async markDeliverySent(');
+    expect(fnAt).toBeGreaterThan(-1);
+    const fnBody = invoiceSource.slice(fnAt, fnAt + 4500);
+    // Codex pre-push P1 (round 1, complexity simplification): the early
+    // claimToken-mismatch pre-check was removed as genuinely redundant —
+    // the finalize UPDATE's own token predicate plus the post-update fresh
+    // re-read below give the identical correctness guarantee with one
+    // fewer decision point.
+    expect(fnBody).not.toMatch(/if \(claimToken && invoice\.send_claim_token !== claimToken\) return invoice;/);
+    // The require-and-release pair is ONE merged `if`, not two separate
+    // ones.
+    expect(fnBody).toMatch(/if \(claimToken\) \{\s*\n\s*finalizeQuery\.where\(\{ send_claim_token: claimToken \}\);\s*\n\s*updates\.send_claim_token = null;\s*\n\s*\}/);
+    // The post-update fresh re-read on a lost race is still there — this
+    // is the one piece that stays load-bearing (a claimed caller must
+    // never report a delivery it did not actually perform).
+    expect(fnBody).toMatch(/if \(claimToken && !updated\) return db\("invoices"\)\.where\(\{ id: invoiceId \}\)\.first\(\);/);
+  });
+
+  test('a throw reaching the outer catch restores the claim ONLY when it is neither uncertain NOR provider-accepted, via ONE direct deliveryOutcome read (Codex pre-push P1, rounds 2 and 3)', () => {
+    // Round 2: the messaging layer attaches providerOutcome to EVERY
+    // exception it raises, including a DEFINITE rejection (deliveryOutcome:
+    // 'not_sent') — checking mere presence (the round-1 shape) wrongly
+    // retained those claims too.
+    // Round 3: "not uncertain" alone is still not "safe to restore" — an
+    // ACCEPTED delivery whose throw came from post-acceptance bookkeeping
+    // (e.g. the audit-row insert) is ALSO not 'uncertain', so it must be
+    // excluded too, or a customer who already has the pay link gets it
+    // re-texted by the next retry.
+    // Complexity simplification (this round): the messaging layer's own
+    // three-state deliveryOutcome contract ('accepted' / 'not_sent' /
+    // 'uncertain' — mutually exclusive, see services/messaging/send-
+    // customer-message.js) collapses both checks into ONE direct read
+    // instead of two derived booleans joined by &&.
+    const catchAt = noticeBlock.lastIndexOf('} catch (failErr) {');
+    expect(catchAt).toBeGreaterThan(-1);
+    const catchBody = noticeBlock.slice(catchAt, catchAt + 2200);
+    expect(catchBody).toMatch(/const outcome = failErr\?\.providerOutcome\?\.deliveryOutcome;/);
+    expect(catchBody).toMatch(/if \(declineSendClaim && \(!outcome \|\| outcome === 'not_sent'\)\) \{/);
+    expect(catchBody).not.toMatch(/providerAccepted/);
+    expect(catchBody).not.toMatch(/deliveryUnverifiedProviderOutcome\(failErr\)/);
+    expect(catchBody).toMatch(/restoreDeclineSendClaim\(\)/);
   });
 });
