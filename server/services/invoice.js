@@ -842,7 +842,24 @@ function computeStackedDocumentDiscountLines({
       : null;
     const lineResolved = stacked.lineItemMap.get(item);
     const documentDollars = stacked.documentDollarsByItem.get(item);
-    const resolvedDollars = lineResolved ? lineResolved.dollars : documentDollars;
+    // Codex pre-push audit P1 (round 4 on PR #4655): a LINE-scoped item
+    // (discount_for set) whose target line is gone gets parent:null from
+    // classifyInvoiceDiscountItem, so it joins neither lineEntries (needs
+    // a parent) nor documentEntries (spansAll is only ever true for an
+    // UNPARENTED item) — it never reaches the engine at all, and both
+    // lineResolved and documentDollars stay undefined. resolveStoredDiscountLineItem's
+    // own override check (`overrideDollars != null`) treats undefined the
+    // same as "no override," so a TRUSTED item here fell through to its
+    // raw frozen face value — replaying the exact "silent overcharge of an
+    // orphaned stamp" this slice already forbids for document-wide
+    // credits (scopeEligibleLines), just not for this per-line case. An
+    // orphaned line-scoped item resolves to $0 explicitly, the same
+    // orphaned ⇒ $0 rule, instead of falling through to "no override."
+    const isOrphanedLineScopedItem = !!item.discount_for
+      && !serviceLineByClientId.has(String(item.discount_for));
+    const resolvedDollars = isOrphanedLineScopedItem
+      ? 0
+      : (lineResolved ? lineResolved.dollars : documentDollars);
 
     if (isTrusted(item)) {
       return resolveStoredDiscountLineItem(item, row, resolvedDollars);
@@ -1235,7 +1252,14 @@ async function calculateUpdateFinancials({
           ? lineItemDiscountRowById.get(String(item.discount_id))
           : null;
         if (isStoredDiscountLineItem(item, EDIT_TRUSTED_DISCOUNT_SOURCES) || isFrozenByPosition(item)) {
-          return resolveStoredDiscountLineItem(item, row);
+          // Codex pre-push audit P1 (round 4 on PR #4655), applied here
+          // too for gate-transition consistency: a line-scoped trusted
+          // item whose target line is gone must resolve to $0, not its
+          // raw frozen face value — same orphaned ⇒ $0 rule the gate-on
+          // branch above now enforces.
+          const isOrphanedLineScopedItem = !!item.discount_for
+            && !serviceLineByClientId.has(String(item.discount_for));
+          return resolveStoredDiscountLineItem(item, row, isOrphanedLineScopedItem ? 0 : undefined);
         }
         const parent = item.discount_for
           ? serviceLineByClientId.get(String(item.discount_for))

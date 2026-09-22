@@ -297,4 +297,37 @@ postgres('InvoiceService.create discount stacking — real Postgres round trip',
     });
     expect(result.discount_amount).toBe(14.5);
   });
+
+  // Codex pre-push audit P1, round 4 ("the gate-transition class",
+  // continued): a line-scoped trusted stamp whose target line was removed
+  // resolves to $0, never a silent replay of its frozen face value — real
+  // round trip through calculateUpdateFinancials.
+  test('a line-scoped frozen stamp whose target line was removed resolves to $0, not its frozen $30', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const persisted = [
+      { client_id: 'line-1', description: 'Pest (about to be removed)', quantity: 1, unit_price: 100, amount: 100 },
+      { client_id: 'line-2', description: 'Lawn', quantity: 1, unit_price: 50, amount: 50 },
+      {
+        client_id: 'd1', discount_id: null, discount_for: 'line-1', description: 'Frozen Stamp',
+        quantity: 1, unit_price: -30, amount: -30,
+        use_stored_discount: true, stored_discount_source: 'scheduled_service', discount_dollars: 30,
+      },
+    ];
+    const submitted = [
+      { client_id: 'line-2', description: 'Lawn', quantity: 1, unit_price: 50, amount: 50 },
+      {
+        client_id: 'd1', discount_id: null, discount_for: 'line-1', description: 'Frozen Stamp',
+        quantity: 1, unit_price: -30, amount: -30,
+        use_stored_discount: true, stored_discount_source: 'scheduled_service', discount_dollars: 30,
+      },
+    ];
+    const result = await InvoiceService._internals.calculateUpdateFinancials({
+      lineItems: submitted,
+      customer: { property_type: 'residential' },
+      invoice: { id: 'invoice-1', line_items: JSON.stringify(persisted) },
+    });
+    expect(result.subtotal).toBe(50);
+    expect(result.discount_amount).toBe(0);
+    expect(result.total).toBe(50);
+  });
 });
