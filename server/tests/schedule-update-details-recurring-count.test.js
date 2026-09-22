@@ -531,6 +531,68 @@ describe('reconcileRecurringSeriesVisitCount — extending a plan', () => {
   });
 });
 
+// Slice 4 of #4405: resolveSeriesExtensionPriceTemplate + loadDiscountCapsById
+// were both read once PER DATE inside this function's own extend loop — the
+// visit-count top-up's own per-date `discounts` read that round 14's fix
+// (the alert-route's post-loop spawned-row restack) never reached ("a
+// different, unauthorized seam" — see recurring-series-maintenance.test.js's
+// identical comment for that OTHER call site). Both are loop-invariant (same
+// parent, same id) for every date a single reconcile call places, so a
+// 3-date top-up now reads the discounts table ONCE, not 3 times.
+function withDiscountCapture(conn, discountRows) {
+  const discountCalls = [];
+  const wrapped = (table) => {
+    if (table === 'discounts') {
+      return {
+        whereIn: (_col, ids) => ({
+          select: () => {
+            discountCalls.push(ids);
+            return Promise.resolve(discountRows.filter((r) => ids.includes(r.id)));
+          },
+        }),
+      };
+    }
+    return conn(table);
+  };
+  wrapped.isTransaction = conn.isTransaction;
+  wrapped.raw = conn.raw;
+  wrapped.fn = conn.fn;
+  wrapped.schema = conn.schema;
+  wrapped.transaction = (cb) => Promise.resolve().then(() => cb(wrapped));
+  return { conn: wrapped, discountCalls };
+}
+
+describe('reconcileRecurringSeriesVisitCount — discount-cap read count (slice 4 of #4405)', () => {
+  beforeEach(() => {
+    delete process.env.GATE_DISCOUNT_STACKING;
+    jest.clearAllMocks();
+  });
+
+  test('gate off: no discounts table reads at all', async () => {
+    const { conn, parent, inserted } = scenario({ upcoming: 1, parentOverrides: { line_discount_id: 'ld1' } });
+    const { conn: wrapped, discountCalls } = withDiscountCapture(conn, [{ id: 'ld1', max_discount_dollars: null }]);
+    const result = await reconcile(wrapped, parent, 4); // 3 dates placed
+    expect(result.added).toHaveLength(3);
+    expect(inserted).toHaveLength(3);
+    expect(discountCalls).toHaveLength(0);
+  });
+
+  test('gate on: a 3-date top-up reads the discount-cap set ONCE, not once per date', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      const { conn, parent, inserted } = scenario({ upcoming: 1, parentOverrides: { line_discount_id: 'ld1' } });
+      const { conn: wrapped, discountCalls } = withDiscountCapture(conn, [{ id: 'ld1', max_discount_dollars: null }]);
+      const result = await reconcile(wrapped, parent, 4); // 3 dates placed
+      expect(result.added).toHaveLength(3);
+      expect(inserted).toHaveLength(3);
+      expect(discountCalls).toHaveLength(1);
+      expect(discountCalls[0]).toEqual(['ld1']);
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
+});
+
 describe('reconcileRecurringSeriesVisitCount — billable-amount gate on extend (Codex P1)', () => {
   beforeEach(() => jest.clearAllMocks());
 

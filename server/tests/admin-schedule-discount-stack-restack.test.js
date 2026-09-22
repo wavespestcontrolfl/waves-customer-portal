@@ -46,6 +46,7 @@ const {
   restackStoredVisitFinancials,
   applyDiscountStackRestack,
   loadDiscountCapsById,
+  assertDueAddonsWithinDiscountCapUniverse,
   insertRecurringChildAddons,
   insertScheduledServiceAddons,
   occurrenceFloorPrice,
@@ -802,6 +803,75 @@ describe('recurring extension — loadDiscountCapsById', () => {
     expect(caps.get('d3')).toBeNull();
     const table = conn.mock.results[0].value;
     expect(table.whereIn).toHaveBeenCalledWith('id', ['d1', 'd2', 'd3']);
+  });
+});
+
+// GitHub round 2 on PR #4654 (P1): reconcileRecurringSeriesVisitCount and
+// both runRecurringAlertAction loops (slice 4 of #4405) hoist their own
+// per-date loadDiscountCapsById read to ONCE per call, keyed off
+// parentAddons rather than each date's own dueAddons. Safe today because
+// filterAddonLinesForDate is a pure `.filter()` — dueAddons is always a
+// subset of whatever array it filtered — but that invariant is easy to
+// break silently in a future edit. assertDueAddonsWithinDiscountCapUniverse
+// is the safety net each of those three loops now calls right after
+// computing dueAddons: a no-op when the invariant holds (always, today,
+// so the cap still resolves normally) and a loud, safe throw the instant
+// it does not, rather than a silent "missing Map entry reads as uncapped".
+describe('assertDueAddonsWithinDiscountCapUniverse — the dueAddons ⊆ QUERIED-id-universe safety net (GitHub round 2 P1; round 5 P0)', () => {
+  test('every due add-on\'s discount id WAS queried (the ordinary case, since parentAddons is a superset by construction): no-op', () => {
+    const queriedIds = ['d1', 'd2'];
+    const dueAddons = [{ discount_id: 'd1' }, { discount_id: 'd2' }, { discount_id: null }];
+    expect(() => assertDueAddonsWithinDiscountCapUniverse(dueAddons, queriedIds, 'test')).not.toThrow();
+  });
+
+  test('a due add-on\'s discount id was NEVER QUERIED (the invariant this safety net exists for, manufactured directly — dueAddons cannot actually diverge from parentAddons through the real filterAddonLinesForDate today): throws, never silently proceeds as uncapped', () => {
+    const queriedIds = ['d1']; // built from parentAddons alone — 'd2' never made it in
+    const dueAddons = [{ discount_id: 'd1' }, { discount_id: 'd2' }]; // a hypothetically-diverged dueAddons
+    expect(() => assertDueAddonsWithinDiscountCapUniverse(dueAddons, queriedIds, 'test-context'))
+      .toThrow(/d2.*test-context/);
+  });
+
+  // GitHub review round 5 (P0, confirmation pass): scheduled_service_addons.
+  // discount_id is a nullable UUID with NO foreign key to `discounts` — an
+  // add-on can legitimately keep a discount_id whose catalog row was later
+  // deleted. That id WAS queried (it is in the id list handed to
+  // loadDiscountCapsById) but has no Map entry, because loadDiscountCapsById
+  // only `.set()`s ids that matched a real row. This must NEVER throw — an
+  // orphaned-but-queried id is a valid, already-supported legacy shape that
+  // restackStoredVisitFinancials's own uncapped-legacy fallback already
+  // handles (see loadDiscountCapsById's own "reads every percentage term as
+  // uncapped" test) — confusing it with "never queried" would abort every
+  // visit-count/alert extension touching such a row.
+  test('an ORPHANED discount id (queried, but no matching `discounts` row) is a valid legacy input — no-op, never thrown', () => {
+    const queriedIds = ['d1', 'd-orphaned']; // both WERE queried; 'd-orphaned' just has no catalog row
+    const dueAddons = [{ discount_id: 'd1' }, { discount_id: 'd-orphaned' }];
+    expect(() => assertDueAddonsWithinDiscountCapUniverse(dueAddons, queriedIds, 'test-orphaned')).not.toThrow();
+  });
+
+  test('a queriedDiscountIds Set works identically to an array', () => {
+    const queriedIds = new Set(['d1', 'd2']);
+    const dueAddons = [{ discount_id: 'd1' }, { discount_id: 'd2' }];
+    expect(() => assertDueAddonsWithinDiscountCapUniverse(dueAddons, queriedIds, 'test')).not.toThrow();
+  });
+
+  test('gate off (queriedDiscountIds null): no-op — nothing was queried either way', () => {
+    expect(() => assertDueAddonsWithinDiscountCapUniverse([{ discount_id: 'd1' }], null, 'test')).not.toThrow();
+  });
+
+  test('a due add-on with no discount at all is never flagged, regardless of what was queried', () => {
+    expect(() => assertDueAddonsWithinDiscountCapUniverse([{ discount_id: null }], [], 'test')).not.toThrow();
+  });
+
+  test('source guard: all three loops call this right after computing dueAddons, threading the SAME dueAddons/discountCapIds universe the restack itself uses', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    const calls = [...src.matchAll(/const dueAddons = filterAddonLinesForDate\(parentAddons,[^\n]*\);\n\s*assertDueAddonsWithinDiscountCapUniverse\(dueAddons, discountStackingLive\(\) \? discountCapIds : null, '([^']+)'\);/g)];
+    const contexts = calls.map((m) => m[1]);
+    expect(contexts).toEqual(expect.arrayContaining([
+      'reconcileRecurringSeriesVisitCount', 'runRecurringAlertAction:extend', 'runRecurringAlertAction:convert_ongoing',
+    ]));
+    expect(contexts).toHaveLength(3); // exactly these three loops — not the already-hoisted, already-tested spawned-row loop
   });
 });
 
@@ -1824,6 +1894,58 @@ describe('freezeLegacySeriesRootCaps — the root parent itself gets marked on t
       expect(result.addonDollars[0].discountDollars).toBe(10); // frozen, never the raised $20
       expect(result.addonDollars[0].netPrice).toBe(90);
       expect(result.price).toBe(190); // 100 (undiscounted primary) + 90 — NEVER $180
+    });
+  });
+
+  // Slice 4 of #4405: an office edit can swap the root's OWN line_discount_id
+  // to a DIFFERENT catalog discount without ever clearing pricing_provenance
+  // (resolveStoredDiscountCaps' own round-4 comment documents exactly this —
+  // it reads live for the id mismatch rather than trusting a stale frozen
+  // line, so PRICING is never wrong either way). But the guard here used to
+  // check ONLY for a new ADD-ON id; with none to report, it returned before
+  // ever re-freezing the NEW line id's own cap — so that id was never frozen
+  // at all, and a LATER catalog edit on it would silently reprice this
+  // "contracted" series. Extension 2 (the id swap) must write; extension 3
+  // (nothing further changed) must not.
+  test('Codex slice 4: a root discount id swap on the line re-freezes the NEW id — a later catalog raise on it does not reach extension 3', async () => {
+    await withGateLive(async () => {
+      const discountRows = [
+        { id: 'ld-old', max_discount_dollars: 10 },
+        { id: 'ld-new', max_discount_dollars: 15 },
+      ];
+      const { conn, updates } = makeRootFreezeConn(discountRows);
+      const parent = {
+        id: 'root-7', primary_line_price: 100, line_discount_id: 'ld-old',
+        line_discount_type: 'percentage', line_discount_amount: 50, // uncapped would be $50 off
+      };
+
+      // Extension 1: freezes the OLD id's cap.
+      await freezeLegacySeriesRootCaps(conn, parent, { pricing_provenance: true }, []);
+      expect(updates).toHaveLength(1);
+      expect(frozenCapsFromRow(parent).line).toEqual({ id: 'ld-old', cap: 10 });
+
+      // An office edit (outside this function) swaps the row's own discount
+      // to a DIFFERENT catalog id, without touching pricing_provenance.
+      parent.line_discount_id = 'ld-new';
+
+      // Extension 2: no NEW add-on id appeared, but the LINE's own id did —
+      // this must still write, freezing ld-new's cap ($15) onto the root.
+      await freezeLegacySeriesRootCaps(conn, parent, { pricing_provenance: true }, []);
+      expect(updates).toHaveLength(2);
+      expect(updates[1].data.pricing_provenance.caps.line).toEqual({ id: 'ld-new', cap: 15 });
+      expect(frozenCapsFromRow(parent).line).toEqual({ id: 'ld-new', cap: 15 });
+
+      // The catalog cap on ld-new is raised to $30 after extension 2 froze $15.
+      discountRows[1] = { id: 'ld-new', max_discount_dollars: 30 };
+
+      // Extension 3: the id is unchanged and already frozen — no further write.
+      await freezeLegacySeriesRootCaps(conn, parent, { pricing_provenance: true }, []);
+      expect(updates).toHaveLength(2); // unchanged
+
+      // The actual stored restack must use the frozen $15, never the raised $30.
+      const result = restackStoredVisitFinancials(parent, [], null, new Map([['ld-new', 30]]));
+      expect(result.primaryLineDiscountDollars).toBe(15); // frozen, never the raised $30
+      expect(result.price).toBe(85);
     });
   });
 

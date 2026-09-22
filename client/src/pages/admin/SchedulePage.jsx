@@ -1,5 +1,6 @@
 import LawnVisitReview, { createVisitReview, visitReviewPayload } from "../../components/lawn/LawnVisitReview";
 import lawnScores from '@lawn-scores';
+import { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } from '@legacy-visit-money-submission';
 // client/src/pages/admin/SchedulePage.jsx
 //
 // Shared-utility module for the V2 dispatch surface. The V1 page
@@ -1700,30 +1701,23 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       // list payload that omits serviceAddons can't distinguish primary from
       // total, so we must fall back to the full visit total (the legacy save
       // path preserves it correctly) instead of rebasing the visit down to the
-      // primary line.
+      // primary line. Delegated to the shared module (slice 4 of #4405,
+      // GitHub round 3 structural fix) — the server calls the SAME function
+      // against the stored row to decide whether a save is money-unchanged,
+      // so this derivation can never drift from what the server expects.
       const addonsKnown = Array.isArray(service.serviceAddons);
-      const addons = addonsKnown ? service.serviceAddons : [];
-      if (addonsKnown && service.primaryLinePrice != null) return String(service.primaryLinePrice);
       const total =
         service.estimatedPrice != null
           ? service.estimatedPrice
           : service.estimated_price != null
             ? service.estimated_price
             : null;
-      if (total == null) return "";
-      if (addonsKnown && addons.length > 0) {
-        const addonGross = addons.reduce((sum, a) => {
-          const v =
-            a.basePrice != null
-              ? a.basePrice
-              : a.estimatedPrice != null
-                ? a.estimatedPrice
-                : 0;
-          return sum + (Number(v) || 0);
-        }, 0);
-        return String(Math.max(0, Math.round((Number(total) - addonGross) * 100) / 100));
-      }
-      return String(total);
+      const derived = deriveLegacyPrimarySubmission({
+        primaryLinePrice: service.primaryLinePrice,
+        estimatedPrice: total,
+        addons: addonsKnown ? service.serviceAddons : null,
+      });
+      return derived != null ? String(derived) : "";
     })(),
   });
   const [saving, setSaving] = useState(false);
@@ -2561,20 +2555,27 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             };
             const priceUnchanged =
               !!l.id && String(l.price) === String(l._seededPrice ?? "");
-            // Unchanged existing line that has a real gross + line discount:
-            // round-trip its original breakdown so the server reconstructs the
-            // same line ($100 − $10), preserving the discount audit. We require
-            // _origBasePrice so the server re-derives net from the true gross —
-            // a legacy row with a discount but no base_price would otherwise be
-            // double-discounted, so it falls through to the flat-net path below.
-            if (priceUnchanged && l._origDiscountType && l._origBasePrice != null) {
+            // Unchanged existing line: derive its submission the SAME way
+            // the server expects (shared module, slice 4 of #4405 GitHub
+            // round 3 structural fix) — a real gross + line discount
+            // round-trips the full stamp so the server reconstructs the
+            // same line ($100 − $10), preserving the discount audit; a
+            // discount whose gross was never recorded (a legacy row
+            // predating the base_price column) sends only the flat net,
+            // because this editor cannot reconstruct a gross it never had
+            // and must not guess one (re-applying a stored discount to a
+            // price it can't verify would double-discount the row).
+            if (priceUnchanged) {
               return {
                 ...common,
-                basePrice: l._origBasePrice,
-                discountType: l._origDiscountType,
-                discountAmount: l._origDiscountAmount != null ? l._origDiscountAmount : null,
-                discountId: l._origDiscountId || null,
-                discountName: l._origDiscountName || null,
+                ...deriveLegacyAddonSubmission({
+                  basePrice: l._origBasePrice,
+                  netPrice: l._seededPrice,
+                  discountType: l._origDiscountType,
+                  discountAmount: l._origDiscountAmount,
+                  discountId: l._origDiscountId,
+                  discountName: l._origDiscountName,
+                }),
               };
             }
             // New or price-edited line: the editor has no per-line discount UI,
