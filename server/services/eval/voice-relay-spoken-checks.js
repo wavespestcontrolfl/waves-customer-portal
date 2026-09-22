@@ -1540,19 +1540,23 @@ function callbackConsentOverridden(text, matchEnd, consentCondition, conditionTa
   // account holder herself — is just as much an override as a refusal or
   // concession: "or if John asks" and "or with the caller's permission"
   // both let the callback proceed on someone else's say-so, exactly what
-  // her own "if she agrees" condition was supposed to require. Excluding
-  // conditionTarget from the grantor keeps this from firing on her own
-  // repeated name/pronoun ("or if she asks", "or with her permission"),
-  // which is not an alternative grantor at all.
-  // "her"/"him"/"their" (possessive, not conditionTarget's own subject-case
-  // pronouns) also refer back to the recipient in "with her permission" —
-  // excluded here alongside conditionTarget so that phrasing is not itself
-  // read as an alternative grantor.
+  // her own "if she agrees" condition was supposed to require.
   // Only "or" signals an ALTERNATIVE authorization ("if she agrees, or if
   // John asks" — either one suffices). "and" joins an ADDITIONAL
   // requirement ("if she agrees, and if John agrees" — both are needed),
   // which leaves her own consent exactly as mandatory as it already was.
-  const alternativeGrantorOverride = new RegExp(`^\\s*,?\\s*${CONSENT_OVERRIDE_TIMING_PREFIX}or\\s+(?:if\\s+(?!(?:${conditionTarget}|her|him|their)\\b)[a-z]+\\s+(?:asks?|agrees?|consents?|says?\\s+(?:so|okay|ok|yes)|allows?\\s+it|approves?)|with\\s+(?!(?:${conditionTarget}|her|him|their)\\b)(?:the\\s+caller|[a-z]+)(?:[\\x27\\u2019]s)?\\s+permission)\\b(?=\\s*(?:[.;!?]|$))`, 'i');
+  // The grantor is a full noun phrase, not a single bare word — "if her
+  // SON agrees" and "with the CALLER'S permission" both name someone else
+  // even though the phrase itself starts with a possessive pronoun or
+  // article. Only a grantor that reduces to EXACTLY the recipient's own
+  // reference — her bare name/pronoun directly followed by the verb (or
+  // "permission", optionally possessive-marked: "Ruth's permission") — is
+  // excluded; "her" as a mere possessive MODIFIER inside a longer phrase
+  // ("her son", "her son's permission") is a different person and still
+  // counts as an alternative grantor.
+  const ALT_GRANTOR_VERB = '(?:asks?|agrees?|consents?|says?\\s+(?:so|okay|ok|yes)|allows?\\s+it|approves?)';
+  const ALT_GRANTOR_PHRASE = `(?:(?:her|his|its|their|our|your|the)\\s+)?[a-z]+(?:\\s+[a-z]+){0,2}`;
+  const alternativeGrantorOverride = new RegExp(`^\\s*,?\\s*${CONSENT_OVERRIDE_TIMING_PREFIX}or\\s+(?:if\\s+(?!(?:${conditionTarget}|her|him|their)\\s+${ALT_GRANTOR_VERB}\\b)${ALT_GRANTOR_PHRASE}\\s+${ALT_GRANTOR_VERB}|with\\s+(?!(?:${conditionTarget}|her|him|their)(?:[\\x27\\u2019]s)?\\s+permission\\b)(?:the\\s+caller|${ALT_GRANTOR_PHRASE})(?:[\\x27\\u2019]s)?\\s+permission)\\b(?=\\s*(?:[.;!?]|$))`, 'i');
   const override = (slice) => refusalOverride.test(slice) || concessionOverride.test(slice) || alternativeGrantorOverride.test(slice);
   // The override can follow the promise directly ("If she agrees, we will
   // call her, or even if she refuses.") — a LEADING consent condition with

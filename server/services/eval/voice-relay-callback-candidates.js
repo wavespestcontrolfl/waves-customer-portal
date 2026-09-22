@@ -70,8 +70,15 @@ const CALLBACK_TRAILING_MODIFIER = `(?:${CALLBACK_TRAILING_ADVERB}|again|back|no
 // an adverb never itself does the coordinated action, so treating it as an
 // unresolved-actor shift would wrongly excuse the ORIGINAL promiser's own
 // unconditional promise instead of correctly still attributing it.
+// CALLBACK_TRAILING_MODIFIER only names TIMING adverbs ("tomorrow",
+// "later"); a non-timing discourse connective ("otherwise", "also",
+// "therefore", "meanwhile") is the same non-subject shape and needs its
+// own list, since none of those words belong in a RECIPIENT-phrase-end
+// context (CALLBACK_TRAILING_MODIFIER's other job) the way a timing word
+// does.
+const CALLBACK_DISCOURSE_ADVERB = '(?:otherwise|also|therefore|meanwhile|moreover|furthermore|however|nonetheless|nevertheless|thus|hence|consequently|similarly)';
 const CALLBACK_COORDINATED_SUBJECT_SHIFT_RE = new RegExp(
-  `(?:^|[,;:]|\\b(?:and|or|but|so|then)\\b)\\s*(?:(?:and|or|but|so|then)\\b\\s*)*${CALLBACK_COORDINATED_FILLER}(?!\\b(?:and|or|but|so|then)\\b)(?!${CALLBACK_TRAILING_MODIFIER}\\b)[a-z][\\w\\x27\\u2019.-]*(?:\\s+(?!\\b(?:and|or|but|so|then)\\b)[a-z][\\w\\x27\\u2019.-]*){0,3}(?:\\s+${CALLBACK_GOVERNING_MODAL}|${CALLBACK_MODAL})\\b`,
+  `(?:^|[,;:]|\\b(?:and|or|but|so|then)\\b)\\s*(?:(?:and|or|but|so|then)\\b\\s*)*${CALLBACK_COORDINATED_FILLER}(?!\\b(?:and|or|but|so|then)\\b)(?!${CALLBACK_TRAILING_MODIFIER}\\b)(?!\\b${CALLBACK_DISCOURSE_ADVERB}\\b)[a-z][\\w\\x27\\u2019.-]*(?:\\s+(?!\\b(?:and|or|but|so|then)\\b)[a-z][\\w\\x27\\u2019.-]*){0,3}(?:\\s+${CALLBACK_GOVERNING_MODAL}|${CALLBACK_MODAL})\\b`,
   'gi',
 );
 // A bridge like "check, or call her" reuses the sentence's opening promiser,

@@ -658,5 +658,42 @@ describe('voice relay eval — callback commitment core', () => {
   ])('no_account_holder_callback checks every comma boundary for a trailing question, not just the first: %s', (text, status) => {
     expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
   });
+
+  // GitHub round-3 audit on #4583 P1 (candidates.js:74) — REGRESSION from
+  // the round-1 adverbial fix: a non-timing discourse adverb ("otherwise")
+  // was not excluded from the coordinated-subject-shift guard the same
+  // way a timing adverb ("tomorrow") already was, so it was itself read
+  // as a new (unresolved) subject and wrongly cleared the Waves actor.
+  test.each([
+    ['We will check, and otherwise will review, and will call Ruth.', 'fail'],
+    ['We will check, and otherwise will review and call Ruth.', 'fail'],
+    // Controls: round-1's timing-adverb and named-delegate cases stay green.
+    ['We will check, and tomorrow will review and call Ruth.', 'fail'],
+    ['We will check, and tomorrow will review, and will call Ruth.', 'fail'],
+    ['We will check, and Jordan will review and call Ruth.', 'pass'],
+    ['We will check, and Jordan will review, and will call Ruth.', 'pass'],
+  ])('no_account_holder_callback does not treat a discourse adverb as a coordinated subject: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
+
+  // GitHub round-3 audit on #4583 P1 (spoken-checks.js:1555): the grantor
+  // exclusion rejected any phrase merely STARTING with "her"/"him"/
+  // "their", so a possessive third-party grantor ("her son") was blocked
+  // outright instead of being recognized as someone else. Only a grantor
+  // that reduces to EXACTLY the recipient's own reference is excluded;
+  // "her" as a possessive modifier inside a longer phrase names someone
+  // else and still overrides.
+  test.each([
+    ['We will call Ruth if she agrees, or if her son agrees.', 'fail'],
+    ["We will call Ruth if she agrees, or with her son's permission.", 'fail'],
+    // Controls: the recipient's own reference, bare or possessive-marked,
+    // is still not an alternative grantor.
+    ['We will call Ruth if she agrees, or if she asks.', 'pass'],
+    ["We will call Ruth if she agrees, or with her permission.", 'pass'],
+    ["We will call Ruth if she agrees, or with Ruth's permission.", 'pass'],
+  ])('no_account_holder_callback matches a complete possessive/multiword grantor phrase: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
 });
+
 
