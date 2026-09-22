@@ -41,6 +41,19 @@ const CALLBACK_COORDINATED_SUBJECT_RE = new RegExp(
   `(?:^|[,;:]|\\b(?:and|or|but|so|then)\\b)\\s*(?:(?:and|or|but|so|then)\\b\\s*)*${CALLBACK_COORDINATED_FILLER}(?<subject>${CALLBACK_PROMISER}|${CALLBACK_ACTOR_HEAD}(?:\\s+[a-z][\\w\\x27\\u2019.-]*){0,3})(?:\\s+${CALLBACK_GOVERNING_MODAL}|${CALLBACK_MODAL})\\b`,
   'gi',
 );
+// A coordinator introducing ANY other apparent subject before a modal —
+// including a bare name with no leading pronoun or determiner ("and Jordan
+// will review...") — signals the original promiser may no longer govern
+// what follows, even when that subject is not itself recognized as a
+// candidate actor by CALLBACK_COORDINATED_SUBJECT_RE above (whose
+// ACTOR_HEAD restriction exists for actor ATTRIBUTION, not for this guard).
+// Used only to exclude a bare-coordinated match from wrongly inheriting the
+// original promiser — never to attribute the shifted subject itself, since
+// this widened alternative is not anchored to a real actor phrase shape.
+const CALLBACK_COORDINATED_SUBJECT_SHIFT_RE = new RegExp(
+  `(?:^|[,;:]|\\b(?:and|or|but|so|then)\\b)\\s*(?:(?:and|or|but|so|then)\\b\\s*)*${CALLBACK_COORDINATED_FILLER}[a-z][\\w\\x27\\u2019.-]*(?:\\s+[a-z][\\w\\x27\\u2019.-]*){0,3}(?:\\s+${CALLBACK_GOVERNING_MODAL}|${CALLBACK_MODAL})\\b`,
+  'gi',
+);
 // A bridge like "check, or call her" reuses the sentence's opening promiser,
 // but an intervening subject with its own bare verb that directly abuts the
 // coordinator (no punctuation break) governs the coordinated action instead:
@@ -193,7 +206,7 @@ function recognizeCallbackCandidates(text, valueTargets) {
   const barePromisedContact = `(?:${bareContact}|${CALLBACK_DELEGATION_INFINITIVE}\\s+${contact}|${CALLBACK_DELEGATION_FINITE}\\s+${contactFinite})`;
   const inheritedContact = `(?:and|or|but|so|then)\\s+${CALLBACK_COORDINATED_MODAL}\\s+${promisedContact}`;
   const shiftedRecipient = '(?:you|me|us|him|her|them|(?:your|my|our|his|their)\\s+[a-z][\\w\\x27\\u2019-]*)';
-  const inheritedBareContact = `${CALLBACK_UNICODE_WORD_START}(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+(?:(?![.!?;]|\\b${CALLBACK_ACTOR_SHIFT}\\s+${shiftedRecipient}\\b|${CALLBACK_COORDINATED_SUBJECT_RE.source}|${CALLBACK_SUBORDINATE_BRIDGE}).){1,120}?\\b(?:and|or|but|so|then)\\s+${barePromisedContact}`;
+  const inheritedBareContact = `${CALLBACK_UNICODE_WORD_START}(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+(?:(?![.!?;]|\\b${CALLBACK_ACTOR_SHIFT}\\s+${shiftedRecipient}\\b|${CALLBACK_COORDINATED_SUBJECT_SHIFT_RE.source}|${CALLBACK_SUBORDINATE_BRIDGE}).){1,120}?\\b(?:and|or|but|so|then)\\s+${barePromisedContact}`;
   const wavesActor = `(?:${CALLBACK_PROMISER}|me|us)\\b(?![\\x27\\u2019]s\\b)${CALLBACK_PHRASE_END}`;
   const recipientFirst = `${recipientTargets}${CALLBACK_MODAL}\\s+${CALLBACK_ADVERB}${CALLBACK_RECIPIENT_ACTION}\\s+${wavesActor}`;
   const scheduledCallDirect = `${CALLBACK_PROMISER}\\s+${CALLBACK_SCHEDULED_CALL_NOUN}\\s+(?:${targets})${CALLBACK_UNICODE_WORD_END}${CALLBACK_PHRASE_END}`;

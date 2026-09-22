@@ -1499,8 +1499,17 @@ function no_account_holder_callback(value, record, { spoken }) {
         `\\b(?:(?:(?:only\\s+)?(?:if|after)|when|once|provided(?:\\s+that)?)\\s+${conditionTarget}\\s+${callbackAgreementAction()})`,
         'i',
       );
-      const leadingConsent = new RegExp(`^\\s*${consentCondition.source}\\s*,?\\s*$`, 'i');
-      const introductoryConsent = new RegExp(`(?:^|[.;!?])\\s*${consentCondition.source}\\s*,?\\s*${escapeRegexLiteral(actor.text)}\\b(?:(?![.;!?]|\\b(?:but|so|then)\\b).)*\\b(?:and|or)\\s*$`, 'i');
+      // A short discourse aside ("actually", "honestly,", "of course,") can
+      // sit between the consent condition and the actor's (re)mention, or
+      // between the coordinator and that mention, without breaking the link
+      // between them — the same allowance CALLBACK_COORDINATED_FILLER gives
+      // candidate recognition itself, bounded the same way (at most two
+      // words) and barred from ever consuming the actor's own repeated
+      // mention or a fresh coordinator.
+      const CONSENT_ASIDE_WORD = `(?!\\b(?:${escapeRegexLiteral(actor.text)}|and|or|but|so|then)\\b)[a-z][\\w\\x27\\u2019]*`;
+      const CONSENT_INTRODUCTORY_ASIDE = `(?:${CONSENT_ASIDE_WORD}\\s*,?\\s+){0,2}`;
+      const leadingConsent = new RegExp(`^\\s*${consentCondition.source}\\s*,?\\s*${CONSENT_INTRODUCTORY_ASIDE}$`, 'i');
+      const introductoryConsent = new RegExp(`(?:^|[.;!?])\\s*${consentCondition.source}\\s*,?\\s*${CONSENT_INTRODUCTORY_ASIDE}${escapeRegexLiteral(actor.text)}\\b(?:(?![.;!?]|\\b(?:but|so|then)\\b).)*\\b(?:and|or)\\s*${CONSENT_INTRODUCTORY_ASIDE}$`, 'i');
       // Additive/alternative actions sharing a subject retain its leading
       // condition; contrast and sequential actions retain their own scope.
       const leadingConsentStart = inherited && /^(?:and|or)\b/i.test(source.text) ? actor.start : source.start;

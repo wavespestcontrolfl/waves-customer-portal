@@ -339,4 +339,29 @@ describe('voice relay eval — callback commitment core', () => {
     const { SPOKEN_CHECK_VALUE_RULES } = require('../services/eval/voice-relay-spoken-checks');
     expect(SPOKEN_CHECK_VALUE_RULES.no_account_holder_callback()(value)).toBe(error);
   });
+
+  // P1 class: a short discourse aside between the consent condition and the
+  // Waves actor's (re)mention — "actually,", "honestly,", "of course," —
+  // used to make the check miss the leading consent entirely and flag the
+  // promise as ungated even though a real "if she agrees" governs it.
+  test.each([
+    ['If she agrees, actually, we will call her.', 'pass'],
+    ['If she agrees, honestly, we will call her.', 'pass'],
+    ['If she agrees, of course, we will call her.', 'pass'],
+    ['If she agrees, we will check, and honestly we will call her.', 'pass'],
+  ])('no_account_holder_callback keeps a leading consent condition linked across an introductory aside: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
+
+  // P1 class: a named delegate with no leading pronoun or determiner
+  // ("Jordan", not "your brother") coordinating a second action off a bare
+  // verb used to fall through to the ORIGINAL Waves promiser instead of
+  // being recognized as its own (non-Waves) actor, wrongly flagging the
+  // delegate's own callback as a Waves promise.
+  test.each([
+    ['We will check, and Jordan will call her.', 'pass'],
+    ['We will check, and Jordan will review and call her.', 'pass'],
+  ])('no_account_holder_callback does not attribute a named delegate\'s coordinated action to Waves: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
 });
