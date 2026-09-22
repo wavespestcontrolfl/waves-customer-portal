@@ -1833,6 +1833,15 @@ async function resolveLineDiscount(input, baseAmount, customer, serviceContext =
     discountType: row.discount_type,
     discountAmount: resolved.amount,
     discountDollars: resolved.dollars,
+    // Carried so a canonical restack (GATE_DISCOUNT_STACKING) can re-cap a
+    // percentage line discount the same way calculateDiscountDollars just
+    // did above — this object previously dropped the cap once resolved.dollars
+    // was computed, so restacking a line discount elsewhere silently lost
+    // it (Codex pre-push audit P0).
+    maxDiscountDollars: row.max_discount_dollars != null && row.max_discount_dollars !== ''
+      && Number.isFinite(Number(row.max_discount_dollars))
+      ? Number(row.max_discount_dollars)
+      : null,
   };
 }
 
@@ -2086,11 +2095,15 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
       const eligibleSet = new Set(eligibleLines);
       const stacked = restackOccurrenceDiscounts({
         primaryGross: primaryBase || 0,
-        primaryDiscount: primaryDiscount ? typedDiscountSlot(primaryDiscount.discountType, primaryDiscount.discountAmount) : null,
+        primaryDiscount: primaryDiscount
+          ? typedDiscountSlot(primaryDiscount.discountType, primaryDiscount.discountAmount, primaryDiscount.maxDiscountDollars)
+          : null,
         primaryEligible: eligibleSet.has(appointmentServiceLines[0]),
         addonLines: addonLines.map((line, i) => ({
           gross: line.base || 0,
-          lineDiscount: line.discount ? typedDiscountSlot(line.discount.discountType, line.discount.discountAmount) : null,
+          lineDiscount: line.discount
+            ? typedDiscountSlot(line.discount.discountType, line.discount.discountAmount, line.discount.maxDiscountDollars)
+            : null,
           eligible: eligibleSet.has(appointmentServiceLines[i + 1]),
         })),
         appointmentDiscount: typedDiscountSlot(
@@ -2149,9 +2162,18 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
   };
 }
 
-async function insertScheduledServiceAddons(trx, scheduledServiceId, addonLines, addonCols) {
+// `restackedAddonDollars`, when passed, is restackLiveVisitFinancials'
+// returned array — 1:1 with `addonLines` — so a seeded child/booster's own
+// due add-on is restated against ITS OWN gross and due-add-on pool instead
+// of the anchor date's frozen dollars (see restackLiveVisitFinancials).
+// Omitted/null (GATE_DISCOUNT_STACKING off, or the parent's own anchor-date
+// insert, which needs no restack) leaves every addon row exactly as before
+// this parameter existed — including every EDIT-route caller of this
+// function, which never passes it.
+async function insertScheduledServiceAddons(trx, scheduledServiceId, addonLines, addonCols, restackedAddonDollars = null) {
   if (!Array.isArray(addonLines) || addonLines.length === 0) return;
-  for (const addon of addonLines) {
+  for (let addonIdx = 0; addonIdx < addonLines.length; addonIdx++) {
+    const addon = addonLines[addonIdx];
     const addonData = {
       scheduled_service_id: scheduledServiceId,
       service_id: addon.serviceId || null,
@@ -2176,6 +2198,11 @@ async function insertScheduledServiceAddons(trx, scheduledServiceId, addonLines,
     if (discount && addonCols.discount_type && discount.discountType) addonData.discount_type = String(discount.discountType).slice(0, 30);
     if (discount && addonCols.discount_amount && discount.discountAmount != null) addonData.discount_amount = Number(discount.discountAmount);
     if (discount && addonCols.discount_dollars && discount.discountDollars != null) addonData.discount_dollars = Number(discount.discountDollars);
+    const restack = restackedAddonDollars ? restackedAddonDollars[addonIdx] : null;
+    if (restack) {
+      if (addonCols.discount_dollars) addonData.discount_dollars = restack.discountDollars;
+      if (addonCols.estimated_price) addonData.estimated_price = restack.netPrice;
+    }
     await trx('scheduled_service_addons').insert(addonData);
   }
 }
@@ -2374,6 +2401,74 @@ function calculateVisitFinancialsForAddons(pricing, addonLines) {
   return {
     price: Math.max(0, Math.round((subtotal - appointmentDiscountDollars) * 100) / 100),
     appointmentDiscountDollars: appointmentDiscountDollars > 0 ? appointmentDiscountDollars : null,
+  };
+}
+
+// Canonical restack (GATE_DISCOUNT_STACKING) for a SEEDED occurrence within
+// the SAME booking request — an initial recurring child or booster, whose
+// own due add-ons (childAddonLines/boosterAddonLines) can already differ
+// from the anchor date's (Codex pre-push audit P0: a $100 primary at 15%
+// restacked against the anchor's own add-on mix stamps a $12 primary line
+// discount on EVERY seeded child regardless of whether that child's own due
+// add-ons match — a child missing the anchor's add-on must cost $59.50
+// (restacked against ITS OWN, smaller pool), never a copied $12/$58, and
+// never disagree with what a bare extension of the same series computes).
+// calculateVisitFinancialsForAddons (immediately above — also the EDIT
+// route's own reader, untouched here) stays the gate-off / no-restack
+// contract for both callers; this is its gate-on sibling, called only from
+// the CREATE-time seeding loops below. Returns null off, or when there's no
+// primary gross to anchor on.
+function restackLiveVisitFinancials(pricing, addonLines) {
+  if (!discountStackingLive()) return null;
+  const primaryGross = Number(pricing?.primaryBase);
+  if (!Number.isFinite(primaryGross) || primaryGross <= 0) return null;
+  const addons = Array.isArray(addonLines) ? addonLines : [];
+  const discount = pricing.appointmentDiscount;
+  if (!discount && !pricing.primaryDiscount && !addons.some((line) => line.discount)) return null;
+
+  const matchesScope = (serviceKey, serviceCategory) => (
+    (!discount?.serviceKeyFilter || discount.serviceKeyFilter === serviceKey)
+    && (!discount?.serviceCategoryFilter || discount.serviceCategoryFilter === serviceCategory)
+  );
+  if (isPercentDiscountType(discount?.discountType)) assertPercentExclusionCatalogReady();
+  const pctExcluded = (serviceKey) => isPercentDiscountType(discount?.discountType)
+    && lineExcludedFromPercentDiscount(serviceKey);
+  const lineEligible = (serviceKey, serviceCategory) => matchesScope(serviceKey, serviceCategory)
+    && !pctExcluded(serviceKey);
+
+  const primaryDiscount = pricing.primaryDiscount
+    ? typedDiscountSlot(pricing.primaryDiscount.discountType, pricing.primaryDiscount.discountAmount, pricing.primaryDiscount.maxDiscountDollars)
+    : null;
+  const addonSlots = addons.map((line) => ({
+    gross: line.base || 0,
+    lineDiscount: line.discount
+      ? typedDiscountSlot(line.discount.discountType, line.discount.discountAmount, line.discount.maxDiscountDollars)
+      : null,
+    eligible: lineEligible(line.serviceKey, line.serviceCategory),
+  }));
+  const appointmentDiscount = discount
+    ? typedDiscountSlot(discount.discountType, discount.discountAmount, discount.maxDiscountDollars)
+    : null;
+
+  const stacked = restackOccurrenceDiscounts({
+    primaryGross,
+    primaryDiscount,
+    primaryEligible: lineEligible(pricing.primaryServiceKey, pricing.primaryServiceCategory),
+    addonLines: addonSlots,
+    appointmentDiscount,
+    compound: true,
+  });
+  if (!(stacked.subtotal > 0)) {
+    return { price: null, appointmentDiscountDollars: null, primaryDiscountDollars: null, addonDollars: addons.map(() => null) };
+  }
+  return {
+    price: stacked.total,
+    appointmentDiscountDollars: stacked.appointmentDiscountDollars > 0 ? stacked.appointmentDiscountDollars : null,
+    primaryDiscountDollars: stacked.lines[0].lineDiscountDollars > 0 ? stacked.lines[0].lineDiscountDollars : null,
+    addonDollars: addons.map((_, i) => ({
+      discountDollars: stacked.lines[i + 1].lineDiscountDollars,
+      netPrice: stacked.lines[i + 1].net,
+    })),
   };
 }
 
@@ -2577,7 +2672,24 @@ function restackStoredVisitFinancials(parent, addonRows, discountScope) {
       && (!discountScope.serviceCategoryFilter || discountScope.serviceCategoryFilter === service.category);
   };
 
-  const primaryDiscount = typedDiscountSlot(parent?.line_discount_type, parent?.line_discount_amount);
+  // Neither line_discount_* nor an add-on's own discount_* columns persist a
+  // CAP — the catalog's max_discount_dollars is applied once at creation and
+  // never stored (Codex pre-push audit P0, round 1: reconstructing a capped
+  // percentage line discount with no cap at all let the restack ignore it —
+  // a $100 line at 50% capped $10 restacked to $45 instead of $10). The
+  // ORIGINAL frozen dollar figure is a SOUND surrogate cap here: restacking
+  // can only ever SHRINK a line's own remaining balance (an appointment-
+  // level fixed credit's pro-rata share comes out first), so the same rate
+  // against a smaller base can only produce a SMALLER OR EQUAL raw amount
+  // than it did against the full original gross — capping the restack to
+  // the frozen figure is therefore a no-op whenever the term was never
+  // capped (the frozen figure already ceilings every possible restack), and
+  // is exactly the missing protection whenever it was.
+  const primaryDiscount = typedDiscountSlot(
+    parent?.line_discount_type,
+    parent?.line_discount_amount,
+    Number(parent?.line_discount_dollars) > 0 ? Number(parent.line_discount_dollars) : null,
+  );
   const addonSlots = addons.map((addon) => {
     // scheduled_service_addons.base_price is the addon's own GROSS —
     // stored alongside estimated_price (its net) since insertScheduledServiceAddons
@@ -2588,7 +2700,11 @@ function restackStoredVisitFinancials(parent, addonRows, discountScope) {
     const derivedGross = (Number(addon?.estimated_price) || 0) + (Number(addon?.discount_dollars) || 0);
     return {
       gross: Number.isFinite(storedGross) && storedGross > 0 ? storedGross : derivedGross,
-      lineDiscount: typedDiscountSlot(addon?.discount_type, addon?.discount_amount),
+      lineDiscount: typedDiscountSlot(
+        addon?.discount_type,
+        addon?.discount_amount,
+        Number(addon?.discount_dollars) > 0 ? Number(addon.discount_dollars) : null,
+      ),
       eligible: matchesScope(addon?.service_id) && !addonPctExcluded(addon),
     };
   });
@@ -6059,6 +6175,13 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (!propertyOwnedByEstimateLinkage) await anchorSoleProperty(childData, cols, trx);
         const childAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, nextDateStr, seriesBlackoutDates, skipWeekendsEffective);
         const childFinancials = calculateVisitFinancialsForAddons(pricing, childAddonLines);
+        // Canonical restack (GATE_DISCOUNT_STACKING): this child's own due
+        // add-ons can already differ from the anchor date's — restack fresh
+        // against ITS OWN pool rather than copying the anchor's dollars (see
+        // restackLiveVisitFinancials). null off, or when there's nothing to
+        // restack — every read below then falls back to the values already
+        // computed above, unchanged.
+        const childRestack = restackLiveVisitFinancials(pricing, childAddonLines);
         // Carry callback status + suppression onto recurring children: if an
         // operator turns a re-service into a repeating cadence, every future
         // visit must stay free and report as a callback (not bill monthly dues).
@@ -6068,14 +6191,15 @@ router.post('/', requireAdmin, async (req, res, next) => {
           else if (memberSeriesCovered) {
             const addonStamp = addonOnlyTotal(childAddonLines);
             if (addonStamp > 0) childData.estimated_price = addonStamp;
-          } else if (childFinancials.price != null) childData.estimated_price = childFinancials.price;
+          } else if (childRestack) { if (childRestack.price != null) childData.estimated_price = childRestack.price; }
+          else if (childFinancials.price != null) childData.estimated_price = childFinancials.price;
         }
         if (cols.primary_line_price && pricing.primaryBase != null) childData.primary_line_price = pricing.primaryBase;
         if (pricing.appointmentDiscount && cols.discount_id && pricing.appointmentDiscount.discountId) childData.discount_id = pricing.appointmentDiscount.discountId;
         if (pricing.appointmentDiscount && cols.discount_name && pricing.appointmentDiscount.discountName) childData.discount_name = String(pricing.appointmentDiscount.discountName).slice(0, 200);
         if (cols.discount_type && appointmentDiscountType) childData.discount_type = appointmentDiscountType;
         if (cols.discount_amount && appointmentDiscountAmount != null) childData.discount_amount = Number(appointmentDiscountAmount);
-        if (pricing.appointmentDiscount && cols.discount_dollars) childData.discount_dollars = childFinancials.appointmentDiscountDollars;
+        if (pricing.appointmentDiscount && cols.discount_dollars) childData.discount_dollars = childRestack ? childRestack.appointmentDiscountDollars : childFinancials.appointmentDiscountDollars;
         if (pricing.appointmentDiscount && cols.discount_service_key_filter) childData.discount_service_key_filter = pricing.appointmentDiscount.serviceKeyFilter || null;
         if (pricing.appointmentDiscount && cols.discount_service_category_filter) childData.discount_service_category_filter = pricing.appointmentDiscount.serviceCategoryFilter || null;
         if (pricing.appointmentDiscount && cols.discount_max_dollars) childData.discount_max_dollars = pricing.appointmentDiscount.maxDiscountDollars ?? null;
@@ -6083,7 +6207,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) childData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
         if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) childData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
         if (pricing.primaryDiscount && cols.line_discount_amount && pricing.primaryDiscount.discountAmount != null) childData.line_discount_amount = Number(pricing.primaryDiscount.discountAmount);
-        if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) childData.line_discount_dollars = Number(pricing.primaryDiscount.discountDollars);
+        if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) {
+          childData.line_discount_dollars = childRestack ? (childRestack.primaryDiscountDollars || 0) : Number(pricing.primaryDiscount.discountDollars);
+        }
         if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = createInvoiceStamp;
         // Same global probe as the parent, under this child's own date lock.
         if (childData.window_start && childData.window_end) {
@@ -6105,7 +6231,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         // Mirror only add-on lines due on this child date. Mixed-cadence
         // bundles stay one visit on overlap months, but slower lines do
         // not ride every faster-cadence child.
-        if (childRow?.id) await insertScheduledServiceAddons(trx, childRow.id, childAddonLines, addonCols);
+        if (childRow?.id) await insertScheduledServiceAddons(trx, childRow.id, childAddonLines, addonCols, childRestack ? childRestack.addonDollars : null);
         createdAppointments.push({ id: childRow.id, date: nextDateStr, confirmation: false });
       }
 
@@ -6133,6 +6259,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (!propertyOwnedByEstimateLinkage) await anchorSoleProperty(boosterData, cols, trx);
           const boosterAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, boosterDate, seriesBlackoutDates, skipWeekendsEffective);
           const boosterFinancials = calculateVisitFinancialsForAddons(pricing, boosterAddonLines);
+          // Canonical restack (GATE_DISCOUNT_STACKING) — see the child loop
+          // above for the full rationale; null off, or nothing to restack.
+          const boosterRestack = restackLiveVisitFinancials(pricing, boosterAddonLines);
           // Boosters off a re-service line inherit the same callback suppression.
           if (cols.is_callback) boosterData.is_callback = resolvedIsCallback || false;
           // Booster rows are is_recurring:false — completion treats them as
@@ -6143,6 +6272,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
           // booster's real price (Codex r6).
           if (cols.estimated_price) {
             if (zeroCallbackPrice) boosterData.estimated_price = 0;
+            else if (boosterRestack) { if (boosterRestack.price != null) boosterData.estimated_price = boosterRestack.price; }
             else if (boosterFinancials.price != null) boosterData.estimated_price = boosterFinancials.price;
           }
           if (cols.primary_line_price && pricing.primaryBase != null) boosterData.primary_line_price = pricing.primaryBase;
@@ -6155,7 +6285,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (pricing.appointmentDiscount && cols.discount_name && pricing.appointmentDiscount.discountName) boosterData.discount_name = String(pricing.appointmentDiscount.discountName).slice(0, 200);
           if (cols.discount_type && appointmentDiscountType) boosterData.discount_type = appointmentDiscountType;
           if (cols.discount_amount && appointmentDiscountAmount != null) boosterData.discount_amount = Number(appointmentDiscountAmount);
-          if (pricing.appointmentDiscount && cols.discount_dollars) boosterData.discount_dollars = boosterFinancials.appointmentDiscountDollars;
+          if (pricing.appointmentDiscount && cols.discount_dollars) boosterData.discount_dollars = boosterRestack ? boosterRestack.appointmentDiscountDollars : boosterFinancials.appointmentDiscountDollars;
           if (pricing.appointmentDiscount && cols.discount_service_key_filter) boosterData.discount_service_key_filter = pricing.appointmentDiscount.serviceKeyFilter || null;
           if (pricing.appointmentDiscount && cols.discount_service_category_filter) boosterData.discount_service_category_filter = pricing.appointmentDiscount.serviceCategoryFilter || null;
           if (pricing.appointmentDiscount && cols.discount_max_dollars) boosterData.discount_max_dollars = pricing.appointmentDiscount.maxDiscountDollars ?? null;
@@ -6163,7 +6293,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) boosterData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
           if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) boosterData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
           if (pricing.primaryDiscount && cols.line_discount_amount && pricing.primaryDiscount.discountAmount != null) boosterData.line_discount_amount = Number(pricing.primaryDiscount.discountAmount);
-          if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) boosterData.line_discount_dollars = Number(pricing.primaryDiscount.discountDollars);
+          if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) {
+            boosterData.line_discount_dollars = boosterRestack ? (boosterRestack.primaryDiscountDollars || 0) : Number(pricing.primaryDiscount.discountDollars);
+          }
           // Same reasoning: boosters keep the modal's invoice intent even on
           // a covered member series (identical to createInvoiceStamp for
           // every non-member booking).
@@ -6187,7 +6319,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
           // Mirror only add-ons due on this booster date; one-time and
           // off-cadence recurring lines stay off future generated visits.
-          if (boosterRow?.id) await insertScheduledServiceAddons(trx, boosterRow.id, boosterAddonLines, addonCols);
+          if (boosterRow?.id) await insertScheduledServiceAddons(trx, boosterRow.id, boosterAddonLines, addonCols, boosterRestack ? boosterRestack.addonDollars : null);
           createdAppointments.push({ id: boosterRow.id, date: boosterDate, confirmation: false });
         }
       }
@@ -18685,11 +18817,13 @@ router._test = {
   appointmentDiscountIdentityChanged,
   isPercentDiscountType,
   calculateVisitFinancialsForAddons,
+  restackLiveVisitFinancials,
   calculateStoredVisitFinancials,
   applyStoredVisitFinancials,
   restackStoredVisitFinancials,
   applyDiscountStackRestack,
   insertRecurringChildAddons,
+  insertScheduledServiceAddons,
   loadStoredDiscountScope,
   clearAppointmentDiscountCatalogFields,
   appointmentDiscountInputChanged,
