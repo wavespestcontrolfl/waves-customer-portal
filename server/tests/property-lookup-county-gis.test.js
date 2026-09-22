@@ -518,8 +518,38 @@ describe('lookupSubdivisionMedianLivingSqft — plat median with range', () => {
       .mockResolvedValueOnce(living([1558, 1678, 1920, 1920, 2277, 2421, 2421, 3070, 3101]));
     const result = await lookupSubdivisionMedianLivingSqft({ county: 'Manatee', subdivision: 'EXAMPLE ESPLANADE PH VI SUBPH A & B PB80/131' });
     expect(global.fetch).toHaveBeenCalledTimes(2);
-    expect(decodeURIComponent(String(global.fetch.mock.calls[1][0])).replace(/\+/g, ' ')).toContain("LIKE 'EXAMPLE ESPLANADE%'");
+    // Exact phase first, then a delimiter-aware base match — never a bare prefix wildcard.
+    expect(decodeURIComponent(String(global.fetch.mock.calls[0][0])).replace(/\+/g, ' ')).toContain("UPPER(PAR_SUBDIV_NAME) = 'EXAMPLE ESPLANADE PH VI SUBPH A & B PB80/131'");
+    expect(decodeURIComponent(String(global.fetch.mock.calls[1][0])).replace(/\+/g, ' ')).toContain("(UPPER(PAR_SUBDIV_NAME) = 'EXAMPLE ESPLANADE' OR UPPER(PAR_SUBDIV_NAME) LIKE 'EXAMPLE ESPLANADE %')");
+    expect(decodeURIComponent(String(global.fetch.mock.calls[1][0]))).not.toContain("ESPLANADE%'");
     expect(result).toMatchObject({ medianSqft: 2277, sampleCount: 9, minSqft: 1558, maxSqft: 3101, subdivisionQueried: 'EXAMPLE ESPLANADE' });
+  });
+
+  const rowsWithLots = (pairs) => ({
+    ok: true,
+    json: async () => ({ features: pairs.map(([living, lot]) => ({ attributes: { BLDGS_SQFT_LIVING: living, LAND_SQFT_CAMA: lot } })) }),
+  });
+
+  test('narrows to neighbors on similar-size lots when enough of them exist', async () => {
+    // Nine ~9,500 sq ft lots carry the large plans; seven ~6,000 sq ft lots the small ones.
+    global.fetch = jest.fn().mockResolvedValue(rowsWithLots([
+      [3242, 9600], [3100, 9400], [2980, 9500], [3050, 9700], [3180, 9300], [2650, 9550], [3120, 9450], [3071, 9650], [3000, 9500],
+      [1558, 6000], [1678, 6100], [1920, 5900], [1920, 6050], [2101, 6200], [1800, 5950], [1750, 6000],
+    ]));
+    const result = await lookupSubdivisionMedianLivingSqft({ county: 'Manatee', subdivision: 'EXAMPLE PLAT PH I', lotSqft: 9541 });
+    expect(result).toMatchObject({ medianSqft: 3071, sampleCount: 9, minSqft: 2650, maxSqft: 3242, lotBanded: true, platSampleCount: 16 });
+    // The lot field rides the same query.
+    expect(decodeURIComponent(String(global.fetch.mock.calls[0][0]))).toContain('outFields=BLDGS_SQFT_LIVING,LAND_SQFT_CAMA');
+  });
+
+  test('falls back to the whole plat when the lot band is too thin, and without a lot size', async () => {
+    const pairs = [[3242, 9600], [3100, 9400], [2980, 9500], [1558, 6000], [1678, 6100], [1920, 5900], [1920, 6050], [2101, 6200], [1800, 5950]];
+    global.fetch = jest.fn().mockResolvedValue(rowsWithLots(pairs));
+    const thin = await lookupSubdivisionMedianLivingSqft({ county: 'Manatee', subdivision: 'EXAMPLE PLAT PH I', lotSqft: 9541 });
+    expect(thin).toMatchObject({ sampleCount: 9, lotBanded: false, platSampleCount: 9, medianSqft: 1920 });
+    global.fetch = jest.fn().mockResolvedValue(rowsWithLots(pairs));
+    const noLot = await lookupSubdivisionMedianLivingSqft({ county: 'Manatee', subdivision: 'EXAMPLE PLAT PH I' });
+    expect(noLot).toMatchObject({ sampleCount: 9, lotBanded: false });
   });
 
   test('follows ArcGIS pages when the first is cut off, then reports the full population', async () => {
@@ -575,6 +605,17 @@ describe('lookupSubdivisionMedianLivingSqft — plat median with range', () => {
     const diag = {};
     await expect(lookupSubdivisionMedianLivingSqft({ county: 'Manatee', subdivision: 'ANY PLAT' }, { diag })).resolves.toBeNull();
     expect(diag.failed).toBe(true);
+  });
+
+  test('a recorded name with no phase suffix still widens (delimiter-aware) when its exact rows are thin', async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce(living([2101, 2200]))
+      .mockResolvedValueOnce(living([1558, 1678, 1920, 1920, 2277, 2421, 2421, 3070, 3101]));
+    const result = await lookupSubdivisionMedianLivingSqft({ county: 'Manatee', subdivision: 'EXAMPLE PLAT' });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(decodeURIComponent(String(global.fetch.mock.calls[0][0])).replace(/\+/g, ' ')).toContain("UPPER(PAR_SUBDIV_NAME) = 'EXAMPLE PLAT'");
+    expect(decodeURIComponent(String(global.fetch.mock.calls[1][0])).replace(/\+/g, ' ')).toContain("(UPPER(PAR_SUBDIV_NAME) = 'EXAMPLE PLAT' OR UPPER(PAR_SUBDIV_NAME) LIKE 'EXAMPLE PLAT %')");
+    expect(result).toMatchObject({ medianSqft: 2277, sampleCount: 9, subdivisionQueried: 'EXAMPLE PLAT' });
   });
 
   test('null below the sample floor, on layer failure, and for an unsupported county', async () => {

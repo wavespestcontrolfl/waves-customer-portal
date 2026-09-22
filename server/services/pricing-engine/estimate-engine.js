@@ -576,6 +576,9 @@ function generateEstimate(input) {
     livingAreaSqFt: input.livingAreaSqFt,
     lawnSqFt: input.lawnSqFt,
     measuredTurfSf: input.measuredTurfSf,
+    // Explicit outdoor treatable area (unobservable-imagery profiles) — see
+    // calculatePropertyProfile; undefined lets the lot-geometry derivation run.
+    mosquitoTreatableSqFt: input.mosquitoTreatableSqFt,
     estimatedTurfSf: input.estimatedTurfSf,
     turfSource: input.turfSource,
     countyTurfPriorSf: input.countyTurfPriorSf,

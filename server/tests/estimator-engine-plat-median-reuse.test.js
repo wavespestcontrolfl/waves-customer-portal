@@ -83,7 +83,7 @@ describe('gatherPropertySignals — plat median reuse', () => {
     lookupResult.current = { propertyRecord: vacantRecord(), enriched: null };
     const signals = await gatherPropertySignals(CONTEXT, { persistLookup: false });
     expect(lookupSubdivisionMedianLivingSqft).toHaveBeenCalledTimes(1);
-    expect(lookupSubdivisionMedianLivingSqft).toHaveBeenCalledWith({ county: 'Manatee', subdivision: PLAT });
+    expect(lookupSubdivisionMedianLivingSqft).toHaveBeenCalledWith({ county: 'Manatee', subdivision: PLAT, lotSqft: 9541 });
     expect(signals.subdivisionMedian).toMatchObject({ medianSqft: 2277, sampleCount: 9 });
   });
 

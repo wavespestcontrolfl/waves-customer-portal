@@ -1286,11 +1286,12 @@ function mobileHomeParkSignalFromParcel(parcel) {
   };
 }
 
-function detectUnassessedVacantParcel(record) {
+// The COUNTY ROLL's own vacancy verdict, read from the parcel/raw evidence
+// alone — independent of the merged dimension fields, which a listing, an
+// AI provider, or a tech-verified override can fill while the roll still
+// carries no building. Returns the vacant evidence or null.
+function countyRollVacant(record) {
   if (!record) return null;
-  // Any building fact means the roll (or a stronger source, incl. a tech
-  // verified override) knows the home — not the pending-roll window.
-  if (record.squareFootage || record.yearBuilt) return null;
   const parcel = record._parcel || {};
   const raw = record._raw || {};
   // _raw.landUse joins the read: preserveCountyGisLandUse parks the county
@@ -1316,6 +1317,14 @@ function detectUnassessedVacantParcel(record) {
     dorUseCode: parcel.dorUseCode ?? raw.dorUseCode ?? null,
     subdivision: raw.subdivision || null,
   };
+}
+
+function detectUnassessedVacantParcel(record) {
+  if (!record) return null;
+  // Any building fact means the roll (or a stronger source, incl. a tech
+  // verified override) knows the home — not the pending-roll window.
+  if (record.squareFootage || record.yearBuilt) return null;
+  return countyRollVacant(record);
 }
 
 // Sanitization is restricted to builds this recent — see the demolition
@@ -1388,6 +1397,45 @@ function detectStaleImageryTurfConflict(record, ai) {
     countySqFt,
     yearBuilt,
   };
+}
+
+// The vacant-roll twin of detectStaleImageryTurfConflict: the county roll
+// carries NO building (unassessed vacant parcel — the new-construction
+// window) and the satellite pass measured bare land (explicit 0 turf AND 0
+// impervious). Whether the lot is truly unbuilt or the tiles predate a
+// finished home, nobody prices lawn or mosquito work on a dirt reading:
+// the zeros are the IMAGERY's state, not a measurement of a lawn a customer
+// is asking to treat. Same explicit-zero rule as the stale-imagery guard —
+// null/undefined is "not measured" — and a bare-land reading with the roll
+// showing a home stays with that guard (this one only fires when it can't).
+// Returns the vacant evidence (drives the profile sanitization + HIGH verify
+// flag in buildEnrichedProfile) or null.
+function detectVacantRollBareLandImagery(record, ai) {
+  if (!record || !ai) return null;
+  // The ROLL's verdict, not the merged record's: a listing/AI square footage
+  // or a tech-verified size can fill the dimensions while the county still
+  // carries no building — and the stale-imagery guard refuses those
+  // non-authoritative / year-less cases, so the zeros would otherwise stay
+  // trusted (Codex r2 P1 on #4639).
+  const vacant = countyRollVacant(record);
+  if (!vacant) return null;
+  // A COUNTY-assessed building beside a vacant classification is a teardown
+  // / demolition, not the new-construction window: the bare-land zeros are
+  // then the correct reading (the stale-imagery guard declines that old-
+  // building case on purpose). Listing / AI / verified dimensions stay
+  // ignored, as intended (Codex r4 P2 #4639).
+  const countySourced = (field) => {
+    const entry = record._fieldEvidence?.[field];
+    const sourceType = Array.isArray(entry) ? entry[0]?.sourceType : entry?.sourceType;
+    return ['county', 'cadastral'].includes(String(sourceType || '').toLowerCase());
+  };
+  if ((Number(record.squareFootage) > 0 && countySourced('squareFootage'))
+      || (Number(record.yearBuilt) > 0 && countySourced('yearBuilt'))) return null;
+  const explicitZero = (value) => value === 0 || value === '0';
+  if (!explicitZero(ai.estimatedTurfSf)) return null;
+  const impervious = ai.imperviousSurfacePercent ?? ai.imperviosSurfacePercent;
+  if (!explicitZero(impervious)) return null;
+  return { landUseDescription: vacant.landUseDescription || null };
 }
 
 // Non-detached residential types the county land-use description captures but
@@ -5246,6 +5294,8 @@ module.exports = {
   hasUnconfirmedCountyEvidence,
   buildPropertyDataQuality,
   detectUnassessedVacantParcel,
+  countyRollVacant,
+  detectVacantRollBareLandImagery,
   detectStaleImageryTurfConflict,
   detectMultiSitusMasterParcel,
   isPreMarkerParkRecord,
