@@ -542,17 +542,45 @@ function freshPickEligibleLines(serviceLineItems, scopeKey, scopeCategory) {
     .filter((i) => i >= 0);
 }
 
+// Coordinator design call (round 3 on PR #4659, GitHub review P0 on
+// invoice.js:807) — client mirror of server/services/invoice.js's
+// strictScopeEligibleLines, and the ONE place both invoiceDocumentTerms
+// (pricing) and discountRowScopeLabel (caption) resolve a document-wide
+// item's eligibleLines, so preview text and the actual computed discount
+// can never disagree. Splits the same way the server does:
+//   - a FRESH (unsaved) pick resolves from its OWN catalog row's
+//     service_key_filter/_category_filter via freshPickEligibleLines
+//     (fail-closed) — it has no document_scope_* of its own yet.
+//   - a STORED item marked item.stacking_regime === "compound" (priced
+//     under this engine at least once — the SAME marker
+//     computeStackedDocumentDiscountLines stamps server-side) resolves
+//     its PERSISTED document_scope_* strictly, same as a fresh pick —
+//     both being null/absent means unscoped BY CHOICE, not "no data."
+//   - an UNMARKED stored item (genuine pre-gate history) keeps the
+//     legacy invoiceServiceScopeEligibleLines "no service_key anywhere
+//     on this invoice ⇒ unscoped" fallback.
+function resolveDocumentEligibleLines(item, serviceLineItems, discountRowById, persistedClientIds) {
+  const lines = serviceLineItems || [];
+  if (isStoredInvoiceDiscountItem(item, persistedClientIds)) {
+    if (item?.stacking_regime === "compound") {
+      const scopeKey = item?.document_scope_service_key;
+      const scopeCategory = item?.document_scope_service_category;
+      return scopeKey || scopeCategory ? freshPickEligibleLines(lines, scopeKey, scopeCategory) : null;
+    }
+    return invoiceServiceScopeEligibleLines(lines, item?.document_scope_service_key, item?.document_scope_service_category);
+  }
+  const row = item?.discount_id ? discountRowById?.get(String(item.discount_id)) : null;
+  if (!row || (!row.service_key_filter && !row.service_category_filter)) return null;
+  return freshPickEligibleLines(lines, row.service_key_filter, row.service_category_filter);
+}
+
 // A document-wide/scoped discount item's own "Applies to" fragment — a
 // per-line pick's row already sits nested under its own line, so this is
 // only ever called for one with discount_for: null (see discountRowCaption
 // below). Split out of that function so each stays under the file's
 // complexity ceiling and reads as one job apiece.
-function discountRowScopeLabel(item, serviceLineItems) {
-  const eligibleLines = invoiceServiceScopeEligibleLines(
-    serviceLineItems || [],
-    item?.document_scope_service_key,
-    item?.document_scope_service_category,
-  );
+function discountRowScopeLabel(item, serviceLineItems, discountRowById, persistedClientIds) {
+  const eligibleLines = resolveDocumentEligibleLines(item, serviceLineItems, discountRowById, persistedClientIds);
   if (eligibleLines == null) return "Applies to: entire invoice";
   if (eligibleLines.length === 0) return "Applies to: no matching line (resolves to $0)";
   const names = eligibleLines
@@ -584,7 +612,7 @@ export function discountRowCaption({ item, serviceLineItems, discountRowById, pe
   const cap = row?.max_discount_dollars;
   const parts = [
     discountRowOriginLabel(item, persistedClientIds),
-    !item?.discount_for ? discountRowScopeLabel(item, serviceLineItems) : null,
+    !item?.discount_for ? discountRowScopeLabel(item, serviceLineItems, discountRowById, persistedClientIds) : null,
     item?.custom_discount_amount == null && cap != null && Number(cap) > 0
       ? `capped at $${Number(cap).toFixed(2)}`
       : null,
@@ -615,29 +643,15 @@ export function invoiceDocumentTerms(items, serviceLineItems, discountRowById, p
     .filter((i) => i._kind === "discount" && !i.discount_for)
     .map((i) => {
       const term = { ...invoiceDiscountItemTerm(i, discountRowById, persistedClientIds), id: i.discount_id };
-      if (isStoredInvoiceDiscountItem(i, persistedClientIds)) {
-        const eligibleLines = invoiceServiceScopeEligibleLines(
-          serviceLineItems,
-          i.document_scope_service_key,
-          i.document_scope_service_category,
-        );
-        return eligibleLines ? { ...term, eligibleLines } : term;
-      }
-      // GitHub review round 1 P1 (PR #4659): a FRESH catalog-backed pick's
-      // OWN service_key_filter/_category_filter scopes it exactly like a
-      // stored stamp's document_scope_service_key/_category does — but
-      // via freshPickEligibleLines (fail-closed — see its own comment),
-      // never invoiceServiceScopeEligibleLines' stored-stamp "no keys
-      // anywhere ⇒ unscoped" fallback, or the preview could disagree
-      // with the server's own fail-closed save.
-      const row = i.discount_id ? discountRowById?.get(String(i.discount_id)) : null;
-      if (!row || (!row.service_key_filter && !row.service_category_filter)) return term;
-      const eligibleLines = freshPickEligibleLines(
-        serviceLineItems,
-        row.service_key_filter,
-        row.service_category_filter,
-      );
-      return { ...term, eligibleLines };
+      // Round 3: both a fresh pick's own catalog scope AND a stored
+      // item's persisted scope now resolve through the ONE shared
+      // resolveDocumentEligibleLines (see its own comment) — a STORED
+      // item marked stacking_regime === "compound" resolves strictly
+      // (fail-closed), matching invoice.js's own round-3 fix, so the
+      // preview never disagrees with what a marked stamp actually saves
+      // once its scoped line is gone.
+      const eligibleLines = resolveDocumentEligibleLines(i, serviceLineItems, discountRowById, persistedClientIds);
+      return eligibleLines ? { ...term, eligibleLines } : term;
     });
 }
 

@@ -767,6 +767,33 @@ function stackInvoiceDocumentDiscounts(serviceLines, lineEntries, manualDiscount
       .map((line, i) => (matchesKey(line) && matchesCategory(line) ? i : -1))
       .filter((i) => i >= 0);
   };
+  // GitHub review round 1 P0, THIRD finding (PR #4659, round 3): the
+  // "no service_key anywhere ⇒ unscoped" fallback scopeEligibleLines
+  // still applies to EVERY stored stamp is a legacy-data carve-out — it
+  // exists for a stamp that predates service_key tracking entirely, with
+  // no scope concept to verify against. It was never meant to cover a
+  // stamp that DOES carry a real, operator-chosen scope (a persisted
+  // fresh pick, replayed) whose scoped line later disappears from the
+  // invoice — that stamp's scope is authoritative and verifiable; losing
+  // its line means $0, not a silent widen to the whole invoice.
+  // Reproduced: save a WDO-only $50 discount alongside an unkeyed $100
+  // service, then remove the WDO line — scopeEligibleLines' invoice-wide
+  // "no keys anywhere" check now sees only the unkeyed line and falls
+  // back to unscoped, so the $50 stamp discounts the unrelated $100
+  // line instead of resolving orphaned.
+  //
+  // item.stacking_regime === "compound" is the same marker
+  // computeStackedDocumentDiscountLines stamps on every discount line IT
+  // resolves (see its own comment below) — a row carrying it was priced
+  // under this engine at least once, so its document_scope_* fields
+  // (including both being null/absent, meaning "unscoped by the
+  // operator's own choice," not "no data to check") are authoritative
+  // and get STRICT, fail-closed matching, same as a fresh pick. Only an
+  // UNMARKED stamp (no stacking_regime at all — genuine pre-gate
+  // history) keeps scopeEligibleLines' legacy fallback.
+  const strictScopeEligibleLines = (scopeKey, scopeCategory) => (
+    scopeKey || scopeCategory ? freshPickEligibleLines(scopeKey, scopeCategory) : null
+  );
   // A plain literal credit (no discount_id) has no scope concept of its own
   // — only a stored stamp's document_scope_service_key/_category, set
   // exclusively by buildDiscountLineItem's appointment-level branch, can
@@ -804,8 +831,17 @@ function stackInvoiceDocumentDiscounts(serviceLines, lineEntries, manualDiscount
     // to null (unscoped) here exactly as before. A FRESH pick's own
     // resolution uses freshPickEligibleLines (fail-closed — see its own
     // comment), never scopeEligibleLines' stored-stamp fallback.
+    //
+    // Round 3: a STORED entry itself splits on entry.item.stacking_regime
+    // — see strictScopeEligibleLines' own comment. A stamp marked
+    // "compound" (priced under this engine at least once) resolves
+    // strictly, same as a fresh pick; only an unmarked (genuine pre-gate)
+    // stamp still falls through to scopeEligibleLines' legacy "no
+    // service_key anywhere ⇒ unscoped" behavior.
     const eligibleLines = entry.stored
-      ? scopeEligibleLines(entry.item.document_scope_service_key, entry.item.document_scope_service_category)
+      ? (entry.item.stacking_regime === "compound"
+        ? strictScopeEligibleLines(entry.item.document_scope_service_key, entry.item.document_scope_service_category)
+        : scopeEligibleLines(entry.item.document_scope_service_key, entry.item.document_scope_service_category))
       : (entry.row && (entry.row.service_key_filter || entry.row.service_category_filter)
         ? freshPickEligibleLines(entry.row.service_key_filter, entry.row.service_category_filter)
         : null);

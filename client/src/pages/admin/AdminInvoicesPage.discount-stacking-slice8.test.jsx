@@ -77,6 +77,28 @@ describe("discountRowCaption — applies-to, document-wide/scoped credits only",
     expect(discountRowCaption({ item, serviceLineItems: lines, discountRowById: new Map() }))
       .toBe("Frozen — from visit");
   });
+
+  // GitHub review round 1 P1 (PR #4659, round 3): discountRowScopeLabel
+  // only ever read item.document_scope_service_key/_category — a FRESH
+  // (unsaved) pick has neither yet, only its catalog row's OWN
+  // service_key_filter/_category_filter, so a WDO-only fresh pick always
+  // read as "Applies to: entire invoice" in the preview even though it
+  // would only ever discount the WDO line. Now derived from the SAME
+  // fresh-vs-stored resolveDocumentEligibleLines logic invoiceDocumentTerms
+  // uses for pricing, so the caption and the actual computed discount can
+  // never disagree.
+  test("a FRESH (unsaved) catalog pick with a scoped row names the line it reaches, not 'entire invoice'", () => {
+    const item = { client_id: "d1", discount_for: null, discount_id: "wdo-row" };
+    const discountRowById = new Map([["wdo-row", { id: "wdo-row", discount_type: "percentage", amount: 100, service_key_filter: "pest" }]]);
+    expect(discountRowCaption({ item, serviceLineItems: lines, discountRowById }))
+      .toBe("Applies to: Quarterly Pest");
+  });
+
+  test("a FRESH catalog pick with an unscoped row (no filter) still reads as the entire invoice", () => {
+    const item = { client_id: "d1", discount_for: null, discount_id: "plain-row" };
+    const discountRowById = new Map([["plain-row", { id: "plain-row", discount_type: "percentage", amount: 10 }]]);
+    expect(discountRowCaption({ item, serviceLineItems: lines, discountRowById })).toBe("Applies to: entire invoice");
+  });
 });
 
 describe("discountRowCaption — cap", () => {
@@ -237,6 +259,37 @@ describe("invoiceDocumentTerms — a FRESH pick with a scoped catalog row is sco
     const discountRowById = new Map([["wdo-row", { id: "wdo-row", discount_type: "percentage", amount: 100, service_key_filter: "wdo_inspection" }]]);
     const terms = invoiceDocumentTerms(items, [{ client_id: "l1", description: "Hand-typed line" }], discountRowById, new Set());
     expect(terms[0].eligibleLines).toEqual([]);
+  });
+});
+
+// Coordinator design call (round 3 on PR #4659, GitHub review P0 on
+// invoice.js:807) — client mirror. A STORED item's persisted scope used
+// to always resolve via invoiceServiceScopeEligibleLines' legacy "no
+// service_key anywhere ⇒ unscoped" fallback, even when the item was
+// itself priced under this engine (marked stacking_regime === "compound"
+// server-side and carried straight through in the invoice's line_items
+// JSON). Now a marked item resolves STRICTLY (fail-closed), matching the
+// server; only a genuinely unmarked stamp keeps the legacy fallback.
+describe("invoiceDocumentTerms — a STORED item marked stacking_regime 'compound' resolves its scope STRICTLY, never the legacy fallback", () => {
+  test("a marked stored item whose scoped line is gone resolves an EMPTY eligibleLines ($0), never unscoped", () => {
+    const items = [{
+      client_id: "d1", _kind: "discount", discount_for: null, discount_id: "wdo-row",
+      discount_dollars: 50, stacking_regime: "compound", document_scope_service_key: "wdo_inspection",
+    }];
+    // Only a hand-typed, unkeyed line remains — the WDO line that this
+    // stamp's own scope names has been removed from the invoice.
+    const terms = invoiceDocumentTerms(items, [{ client_id: "l1", description: "Hand-typed line" }], new Map(), new Set(["d1"]));
+    expect(terms[0].eligibleLines).toEqual([]);
+  });
+
+  test("an UNMARKED stored item (no stacking_regime — genuine pre-gate history) still falls back to unscoped in the same situation", () => {
+    const items = [{
+      client_id: "d1", _kind: "discount", discount_for: null, discount_id: "wdo-row",
+      discount_dollars: 50, document_scope_service_key: "wdo_inspection",
+      // deliberately NO stacking_regime — this is the whole point
+    }];
+    const terms = invoiceDocumentTerms(items, [{ client_id: "l1", description: "Hand-typed line" }], new Map(), new Set(["d1"]));
+    expect(terms[0]).not.toHaveProperty("eligibleLines");
   });
 });
 

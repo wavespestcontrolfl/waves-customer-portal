@@ -400,6 +400,109 @@ describe('replay stability: a saved document-wide pick totals identically on an 
   });
 });
 
+// Coordinator design call (round 3 on PR #4659, GitHub review P0 on
+// invoice.js:807): the round-1-P0-repro fix above (persisting scope onto
+// a fresh pick's item) still resolved a STORED replay through
+// scopeEligibleLines — which keeps its own "no service_key anywhere on
+// this invoice ⇒ unscoped" fallback for EVERY stored item, including one
+// carrying a real, operator-chosen, PERSISTED scope. That let a saved
+// scoped pick silently widen to the whole invoice the moment its own
+// scoped line was removed (the invoice's remaining lines then carry no
+// service_key at all, so scopeEligibleLines' legacy check reads
+// "no keys anywhere" and falls back to unscoped) — reproduced by the
+// GitHub auditor directly. Fixed by reusing the SAME "compound" marker
+// computeStackedDocumentDiscountLines already stamps on every discount
+// line it resolves (item.stacking_regime = "compound", the same marker
+// calculateUpdateFinancials's gate-OFF branch already reads to freeze a
+// gate-priced row) — a stored item carrying it resolves STRICTLY
+// (freshPickEligibleLines-style, fail-closed) instead of through
+// scopeEligibleLines' legacy fallback; only a genuinely UNMARKED stamp
+// (pre-gate history, never priced under this engine) keeps the old
+// behavior.
+describe('a STORED scoped pick marked "compound" (priced under this engine) resolves STRICTLY, never the legacy "no keys anywhere" fallback', () => {
+  test('GitHub auditor repro verbatim: a WDO-only $50 document credit saved alongside an unkeyed $100 service resolves to $0 once the WDO line is removed on resubmit, never $50', () => {
+    const rowById = new Map([
+      ['wdo-fifty-doc', catalogRow({ id: 'wdo-fifty-doc', discount_type: 'fixed_amount', amount: 50, service_key_filter: 'wdo_inspection' })],
+    ]);
+    // First save: a WDO line + an unkeyed line (never ran through
+    // pickService — no service_key at all), the WDO-only $50 pick fresh.
+    const wdoLine = positiveLine({ client_id: 'l-wdo', description: 'WDO Inspection', unit_price: 50, amount: 50, service_key: 'wdo_inspection' });
+    const unkeyedLine = positiveLine({ client_id: 'l-unkeyed', description: 'Hand-typed line', unit_price: 100, amount: 100 });
+    const pick = freshDocPick({ discount_id: 'wdo-fifty-doc' });
+    const firstSave = run({ items: [wdoLine, unkeyedLine, pick], lineItemDiscountRowById: rowById });
+    expect(totalOf(firstSave.lineItemDiscounts)).toBe(50);
+    expect(pick.document_scope_service_key).toBe('wdo_inspection');
+    expect(pick.stacking_regime).toBe('compound');
+
+    // Resubmit: the operator removed the WDO line entirely. Only the
+    // unkeyed $100 line and the now-STORED discount item remain — the
+    // invoice as a whole carries NO service_key data anywhere, which is
+    // exactly the condition scopeEligibleLines' legacy fallback treats
+    // as "unscoped." The marked stamp must resolve strictly instead:
+    // its own persisted scope names a line that no longer exists, so it
+    // resolves orphaned ($0), never widening onto the unrelated line.
+    const resubmitted = run({
+      items: [unkeyedLine, pick],
+      lineItemDiscountRowById: rowById,
+      persistedClientIds: new Set([pick.client_id]),
+    });
+    expect(totalOf(resubmitted.lineItemDiscounts)).toBe(0);
+    expect(unkeyedLine.unit_price).toBe(100); // untouched — never absorbed the orphaned credit
+  });
+
+  test('category-only scope (no key) stays $20 on an unchanged resubmit — the strict path does not disturb the ordinary, still-matching case', () => {
+    const rowById = new Map([
+      ['ninety-fixed', catalogRow({ id: 'ninety-fixed', discount_type: 'fixed_amount', amount: 90 })],
+      ['eighty-fixed-pest-cat-doc', catalogRow({ id: 'eighty-fixed-pest-cat-doc', discount_type: 'fixed_amount', amount: 80, service_category_filter: 'pest' })],
+    ]);
+    const items = [
+      positiveLine({ client_id: 'l1', unit_price: 50, amount: 50, service_key: 'wdo_inspection', service_category: 'wdo' }),
+      positiveLine({ client_id: 'l2', unit_price: 100, amount: 100, service_key: 'pest_control', service_category: 'pest' }),
+      { client_id: 'd-line', _kind: 'discount', discount_for: 'l1', discount_id: 'ninety-fixed', description: 'Ninety Dollars', quantity: 1, unit_price: -1, amount: -1 },
+      freshDocPick({ discount_id: 'eighty-fixed-pest-cat-doc' }),
+    ];
+    const { fresh, resubmitted } = saveThenResubmitUnchanged(items, rowById);
+    expect(netOf(150, fresh.lineItemDiscounts)).toBe(20);
+    expect(netOf(150, resubmitted.lineItemDiscounts)).toBe(20);
+    const docItem = items.find((i) => i.client_id === 'd-doc');
+    expect(docItem.document_scope_service_category).toBe('pest');
+    expect(docItem.stacking_regime).toBe('compound');
+  });
+
+  test('an UNMARKED stamp (no stacking_regime — genuine pre-gate history) still falls back to unscoped when this invoice carries no service_key data anywhere', () => {
+    // A real scheduled_service/validated_checkout stamp minted before
+    // this lane ever ran computeStackedDocumentDiscountLines on this
+    // invoice has NO stacking_regime field at all — trusted purely by
+    // its stored_discount_source, exactly like buildDiscountLineItem's
+    // appointment-level branch has always produced. Its
+    // document_scope_service_key may still be set (a scoped visit-time
+    // discount), but with the scoped line since removed and no
+    // service_key data left anywhere on the invoice, the OLD "no keys
+    // anywhere ⇒ unscoped" rule must still govern it — this stamp
+    // predates the compounding engine; there is nothing to verify
+    // strictly against.
+    const unkeyedLine = positiveLine({ client_id: 'l-unkeyed', description: 'Hand-typed line', unit_price: 100, amount: 100 });
+    const legacyStamp = {
+      client_id: 'd-legacy',
+      _kind: 'discount',
+      discount_for: null,
+      discount_id: null,
+      stored_discount_source: 'scheduled_service',
+      discount_dollars: 50,
+      document_scope_service_key: 'wdo_inspection',
+      unit_price: -50,
+      amount: -50,
+      // deliberately NO stacking_regime — this is the whole point
+    };
+    const { lineItemDiscounts } = run({ items: [unkeyedLine, legacyStamp], lineItemDiscountRowById: new Map() });
+    // Unscoped (null eligibleLines) — the pre-existing, intentional
+    // fallback for a genuinely unmarked stamp — resolves its full $50
+    // face value, not $0 (which strict/fail-closed matching would give
+    // this same scope now that its line is gone).
+    expect(totalOf(lineItemDiscounts)).toBe(50);
+  });
+});
+
 describe('a PERSISTED document-wide catalog pick is grandfathered (frozen by position, attribution still preserved)', () => {
   test('a positionally-persisted document-wide pick resolves through the stored/frozen path and keeps its id', () => {
     const line = positiveLine();
