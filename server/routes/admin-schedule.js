@@ -2721,11 +2721,46 @@ function legacyEconomicsPreservationDecision({
   legacyPreservationCandidate, discountInputsPosted, primaryServiceChanged, primaryGross, existingPrimaryLinePrice,
   normalizedAddons, existingAddonRows, existingEstimatedPrice,
 }) {
+  // GitHub round 2 on PR #4654 (P0): a row that predates the
+  // primary_line_price column (its migration never backfilled it) stores
+  // it as null — but SchedulePage does not know or care about that split;
+  // it derives a numeric primary from the stored TOTAL minus the stored
+  // add-on NETS and resubmits that derived number on every save, notes-
+  // only included. Comparing the posted (derived) primaryGross against a
+  // raw null always "differs" (moneyValuesDiffer treats null vs a number
+  // as a difference by construction), so every save on such a row looked
+  // like a price edit no matter what. Reconstruct the SAME way the client
+  // derives it — total minus the stored add-ons' own nets — and compare
+  // against THAT instead, only when the column itself is null (a populated
+  // primary_line_price is trusted as-is, unconditionally).
+  const reconstructedPrimaryLinePrice = existingPrimaryLinePrice == null
+    ? (() => {
+      const total = Number(existingEstimatedPrice);
+      if (!Number.isFinite(total)) return null;
+      const addonNetSum = existingAddonRows.reduce((sum, row) => {
+        const net = Number(row.estimated_price);
+        return sum + (Number.isFinite(net) ? net : 0);
+      }, 0);
+      return Math.max(0, Math.round((total - addonNetSum) * 100) / 100);
+    })()
+    : existingPrimaryLinePrice;
   const remainingStored = existingAddonRows.slice();
   const matchedPairs = [];
   const addonsUnchanged = normalizedAddons.every((l) => {
+    // GitHub round 2 on PR #4654 (P0): a stored add-on row with a null
+    // service_id (never linked to the catalog) whose NAME/KEY now resolves
+    // to an ACTIVE catalog entry has that id INFERRED onto the posted line
+    // by this route's own (pre-slice-4) normalization — `serviceId:
+    // a.serviceId || catalogService?.id || null` — purely for pricing/
+    // eligibility, never because the client actually submitted one.
+    // Matching by that inferred id can then never pair with the
+    // still-unlinked ($null) stored row. `submittedServiceId` (when the
+    // caller provides it) is the RAW client-posted value, distinct from
+    // the possibly-inferred `serviceId` — undefined falls back to the old
+    // `serviceId`-only behavior unchanged, for every existing caller shape.
+    const matchId = l.submittedServiceId !== undefined ? l.submittedServiceId : l.serviceId;
     const idx = remainingStored.findIndex((row) => (
-      l.serviceId ? String(row.service_id || '') === String(l.serviceId) : String(row.service_name || '').trim() === l.serviceName
+      matchId ? String(row.service_id || '') === String(matchId) : String(row.service_name || '').trim() === l.serviceName
     ));
     if (idx === -1) return false;
     const [stored] = remainingStored.splice(idx, 1); // consume — never re-matchable
@@ -2765,12 +2800,18 @@ function legacyEconomicsPreservationDecision({
   const moneyInputsUnchanged = legacyPreservationCandidate
     && !discountInputsPosted
     && !primaryServiceChanged
-    && !moneyValuesDiffer(primaryGross, existingPrimaryLinePrice)
+    && !moneyValuesDiffer(primaryGross, reconstructedPrimaryLinePrice)
     && normalizedAddons.length === existingAddonRows.length
     && addonsUnchanged
     && remainingStored.length === 0; // every stored row accounted for — explicit, though implied once lengths match and nothing re-matched
   const storedTotal = Number(existingEstimatedPrice);
-  const legacyEconomicsPreserved = moneyInputsUnchanged && Number.isFinite(storedTotal) && storedTotal > 0;
+  // GitHub round 2 on PR #4654 (P0): a legitimately FREE unmarked visit
+  // (fully covered by an appointment credit) must be preservable too —
+  // `storedTotal > 0` excluded a real, finite $0 total from the exact
+  // protection this mechanism exists to provide. `Number.isFinite` alone
+  // already excludes null/undefined/NaN (an unpriced or missing total);
+  // `>= 0` is the only change needed to also accept a genuine zero.
+  const legacyEconomicsPreserved = moneyInputsUnchanged && Number.isFinite(storedTotal) && storedTotal >= 0;
   // Codex pre-push audit P1 (round 4): the aggregate total above is
   // preserved verbatim, but the individual scheduled_service_addons ROW
   // writes are a SEPARATE call site (insertScheduledServiceAddons, via
@@ -2810,6 +2851,40 @@ function legacyEconomicsPreservationDecision({
     legacyEconomicsPreserved,
     preservedAddonLines,
   };
+}
+
+// GitHub round 2 on PR #4654 (P1, TOCTOU): legacyEconomicsPreservationDecision's
+// own reads (`existing`, `existingAddonRows`) run on the base `db` handle
+// BEFORE the write transaction opens — a concurrent edit to the same row
+// between that read and this save's own later write could be silently
+// reverted by an unrelated notes-only save computed from a stale snapshot.
+// The route re-reads both under `trx` (locked) immediately before applying
+// a preserved write and calls this pure compare-and-swap: any mismatch —
+// the aggregate moved, an add-on's own money/discount identity moved, or
+// the add-on SET itself changed shape — means the snapshot this decision
+// was built from is stale, and the preserved write must be refused rather
+// than silently clobbering whatever committed in between. Row order is
+// irrelevant (both sides are sorted by the same stable key first).
+function legacyPreservationSnapshotStale({
+  freshEstimatedPrice, existingEstimatedPrice, freshAddonRows, existingAddonRows,
+}) {
+  if (moneyValuesDiffer(freshEstimatedPrice, existingEstimatedPrice)) return true;
+  if (freshAddonRows.length !== existingAddonRows.length) return true;
+  const keyOf = (row) => String(row.service_id || '') || String(row.service_name || '').trim();
+  const sortByKey = (rows) => [...rows].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
+  const sortedFresh = sortByKey(freshAddonRows);
+  const sortedExisting = sortByKey(existingAddonRows);
+  for (let i = 0; i < sortedFresh.length; i++) {
+    const fresh = sortedFresh[i];
+    const stored = sortedExisting[i];
+    if (keyOf(fresh) !== keyOf(stored)) return true;
+    if (moneyValuesDiffer(fresh.base_price, stored.base_price)) return true;
+    if (moneyValuesDiffer(fresh.estimated_price, stored.estimated_price)) return true;
+    if (String(fresh.discount_id || '') !== String(stored.discount_id || '')) return true;
+    if ((fresh.discount_type || null) !== (stored.discount_type || null)) return true;
+    if (moneyValuesDiffer(fresh.discount_amount, stored.discount_amount)) return true;
+  }
+  return false;
 }
 
 // Canonical restack (GATE_DISCOUNT_STACKING) for a SEEDED occurrence within
@@ -9109,6 +9184,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // row isn't canonically marked) — the legacy per-line dollars already
     // baked into replaceAddons[i] are used as-is, unchanged.
     let canonicalRestackedAddonDollars = null;
+    // GitHub round 2 on PR #4654 (P1, TOCTOU): the legacy-preservation
+    // decision's own reads run on the base `db` handle before the write
+    // transaction opens (see loadExistingAddonRowsForLegacyPreservation's
+    // own comment) — these carry the snapshot forward so the trx below can
+    // re-verify it, under lock, immediately before applying a preserved
+    // write (legacyPreservationSnapshotStale). null/false everywhere the
+    // decision never ran or never preserved — no-op there.
+    let legacyPreservationCasSnapshot = null;
     if (serviceType !== undefined) updates.service_type = serviceType;
     // Re-service reclassification on edit. Callers post a service switch two
     // ways:
@@ -9586,6 +9669,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         }
         normalizedAddons.push({
           serviceId: a.serviceId || catalogService?.id || null,
+          // GitHub round 2 on PR #4654 (P0): the RAW client-submitted id,
+          // distinct from `serviceId` above (which can be INFERRED via a
+          // catalog name/key match even when the client posted none) — see
+          // legacyEconomicsPreservationDecision's own comment for why
+          // matching must trust only what was actually submitted.
+          submittedServiceId: a.serviceId || null,
           serviceKey: catalogService?.service_key || null,
           serviceCategory: catalogService?.category || null,
           serviceName: serviceName.slice(0, 200),
@@ -9728,6 +9817,16 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // only; every other path keeps normalizedAddons exactly as before.
         if (legacyEconomicsPreserved && preservedAddonLines) {
           replaceAddons = preservedAddonLines;
+        }
+        // GitHub round 2 on PR #4654 (P1, TOCTOU): capture the exact
+        // snapshot this decision preserved FROM, so the trx below can
+        // re-verify — under lock — that nothing committed in between
+        // before actually applying the preserved write.
+        if (legacyEconomicsPreserved) {
+          legacyPreservationCasSnapshot = {
+            estimatedPrice: existing?.estimated_price,
+            addonRows: existingAddonRows,
+          };
         }
 
         // Appointment-level discount: the editor only sends discountType/
@@ -10712,6 +10811,30 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const makeRecurringPreRow = updates.is_recurring === true
           ? await trx('scheduled_services').where({ id: req.params.id }).first('id', 'customer_id', 'is_recurring', 'recurring_parent_id')
           : null;
+        // GitHub round 2 on PR #4654 (P1, TOCTOU): re-verify — UNDER THE
+        // TRX, locked — that the row/add-ons this save decided to PRESERVE
+        // still match what was read before the transaction opened. A
+        // concurrent edit landing in that window (the decision's own reads
+        // run on the base `db` handle) must never be silently reverted by
+        // this save's stale "unchanged" conclusion; refuse with the same
+        // 409 VISIT_CHANGED_RETRY the rest of this route already uses for
+        // an equivalent drift, rolling back this transaction with NO writes
+        // committed, rather than clobbering whatever committed in between.
+        if (legacyPreservationCasSnapshot) {
+          const freshRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first('estimated_price');
+          const freshAddonRows = await trx('scheduled_service_addons').where({ scheduled_service_id: req.params.id })
+            .select('service_id', 'service_name', 'base_price', 'estimated_price', 'discount_id', 'discount_type', 'discount_amount');
+          if (legacyPreservationSnapshotStale({
+            freshEstimatedPrice: freshRow?.estimated_price,
+            existingEstimatedPrice: legacyPreservationCasSnapshot.estimatedPrice,
+            freshAddonRows,
+            existingAddonRows: legacyPreservationCasSnapshot.addonRows,
+          })) {
+            throw Object.assign(new Error('This appointment changed while saving — reload and save again.'), {
+              statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY',
+            });
+          }
+        }
         // (The Bill-To send-in-flight refusal ran above, under this
         // transaction's row lock and before any Stripe cancellation: the
         // combined-visit send claim holds the billed member rows FOR SHARE
@@ -19790,6 +19913,7 @@ router._test = {
   resolveUpdateDetailsAddonFinancials,
   legacyEconomicsPreservationDecision,
   loadExistingAddonRowsForLegacyPreservation,
+  legacyPreservationSnapshotStale,
   restackLiveVisitFinancials,
   capsSnapshotFromPricing,
   occurrenceFloorPrice,

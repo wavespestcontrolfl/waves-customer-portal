@@ -62,6 +62,7 @@ jest.mock('../services/discount-engine', () => ({
 const {
   legacyEconomicsPreservationDecision,
   loadExistingAddonRowsForLegacyPreservation,
+  legacyPreservationSnapshotStale,
   calculateVisitFinancialsForAddons,
   resolveUpdateDetailsAddonFinancials,
   hasPricingRegimeMarker,
@@ -235,9 +236,17 @@ describe('legacyEconomicsPreservationDecision — pure decision (slice 4 of #440
     expect(result.storedTotal).toBeNaN(); // Number(undefined) is NaN, not 0 — never confused with a real $0
   });
 
-  test('the stored estimated_price is exactly 0 — never preserved (an explicit $0 total needs no protecting, and a genuinely blank row must still recompute)', () => {
+  // GitHub round 2 on PR #4654 (P0): a legitimately FREE unmarked visit
+  // (fully covered by an appointment credit) must still be preservable —
+  // `storedTotal > 0` wrongly excluded a real, finite $0 total from the
+  // exact protection this mechanism exists to provide, so a notes-only
+  // save on such a row fell through to the cap-blind fallback and rewrote
+  // the addon/discount audit even though the AGGREGATE stayed $0 either
+  // way (see the "explicitly free" describe block below for the full
+  // pinned repro).
+  test('the stored estimated_price is exactly 0 — STILL preserved (a genuinely free visit needs the SAME protection any other total gets)', () => {
     const result = legacyEconomicsPreservationDecision({ ...baseArgs(), existingEstimatedPrice: 0 });
-    expect(result.legacyEconomicsPreserved).toBe(false);
+    expect(result.legacyEconomicsPreserved).toBe(true);
     expect(result.storedTotal).toBe(0);
   });
 
@@ -506,6 +515,211 @@ describe('legacyEconomicsPreservationDecision — pure decision (slice 4 of #440
         existingEstimatedPrice: 160,
       };
     }
+  });
+});
+
+// GitHub round 2 on PR #4654 (P0): a visit that predates the
+// `primary_line_price` column (never backfilled) stores it as null.
+// SchedulePage does not know or care about that column split — it derives
+// a numeric primary from the stored TOTAL minus the stored add-on nets and
+// resubmits that derived number on every save, notes-only included.
+// Comparing the posted (derived) primaryGross against a raw null
+// `existingPrimaryLinePrice` always "differs" (moneyValuesDiffer treats
+// null vs a number as a difference by construction), so EVERY save on
+// such a row — however unchanged — looked like a price edit and fell
+// through to the cap-blind fallback recompute.
+describe('null legacy primary_line_price: reconstruct the SAME way the client derives it (GitHub round 2, P0)', () => {
+  // Codex's own pinned combination: a stored $160 total, one $100-gross
+  // (undiscounted) add-on, so the reconstructed primary is $160-$100=$60 —
+  // exactly the number SchedulePage itself would derive and resubmit.
+  const nullPrimaryArgs = () => ({
+    legacyPreservationCandidate: true,
+    discountInputsPosted: false,
+    primaryServiceChanged: false,
+    primaryGross: 60, // the CLIENT's own derived primary — stored total (160) minus addon net (100)
+    existingPrimaryLinePrice: null, // never backfilled
+    normalizedAddons: [{ serviceId: 'svc-1', serviceName: 'Addon', base: 100, price: 100, discount: null }],
+    existingAddonRows: [{ service_id: 'svc-1', service_name: 'Addon', base_price: 100, estimated_price: 100, discount_id: null }],
+    existingEstimatedPrice: 160,
+  });
+
+  test('a notes-only save on a null-primary legacy row preserves — the derived $60 matches the reconstructed stored primary', () => {
+    const result = legacyEconomicsPreservationDecision(nullPrimaryArgs());
+    expect(result.legacyEconomicsPreserved).toBe(true);
+    expect(result.storedTotal).toBe(160);
+  });
+
+  test('control: a GENUINE price edit on a null-primary row (derived primary does not match total-minus-addons) is still correctly detected as changed', () => {
+    const result = legacyEconomicsPreservationDecision({ ...nullPrimaryArgs(), primaryGross: 75 }); // operator actually raised it
+    expect(result.legacyEconomicsPreserved).toBe(false);
+  });
+
+  test('a null primary with an UNRECONSTRUCTABLE stored total (also null/non-finite) never preserves — nothing real to reconstruct against', () => {
+    const result = legacyEconomicsPreservationDecision({ ...nullPrimaryArgs(), existingEstimatedPrice: undefined });
+    expect(result.legacyEconomicsPreserved).toBe(false);
+  });
+
+  test('a populated primary_line_price is used as-is — the reconstruction only ever applies when it is null', () => {
+    // Same total/addon shape, but the row DOES carry a structured primary —
+    // must compare against THAT, never the derived fallback.
+    const result = legacyEconomicsPreservationDecision({
+      ...nullPrimaryArgs(), existingPrimaryLinePrice: 60, primaryGross: 60,
+    });
+    expect(result.legacyEconomicsPreserved).toBe(true);
+  });
+});
+
+// GitHub round 2 on PR #4654 (P0): a legitimately FREE unmarked visit must
+// be preservable too. Codex's own pinned combination: $100 primary (no
+// line discount) + a $100 add-on at 50% off CAPPED AT $10 (true net $90) +
+// a $190 fixed appointment credit — 100 + 90 - 190 = 0. The broken
+// fallback keeps the AGGREGATE at $0 too (by coincidence: its own
+// cap-blind recompute of the add-on nets to $50, subtotal $150, and the
+// $190 credit clamps to the $150 subtotal — still $0) but corrupts the
+// addon row to $50/$50-off and the appointment stamp to $150, not $190.
+describe('explicitly-free ($0) legacy visits are preservable (GitHub round 2, P0)', () => {
+  const freeCappedDiscountId = 'disc-addon-50pct-cap10-free';
+
+  test('a $0 visit with a capped add-on discount preserves — the addon stays $90 (never the naive $50), never treated as "nothing to protect"', () => {
+    const result = legacyEconomicsPreservationDecision({
+      legacyPreservationCandidate: true,
+      discountInputsPosted: false,
+      primaryServiceChanged: false,
+      primaryGross: 100,
+      existingPrimaryLinePrice: 100,
+      normalizedAddons: [{
+        serviceId: 'svc-1', serviceName: 'Addon', base: 100, price: 50, // applyDiscount(100,'percentage',50) — cap-ignorant
+        discount: { discountId: freeCappedDiscountId, discountType: 'percentage', discountAmount: 50 },
+      }],
+      existingAddonRows: [{
+        service_id: 'svc-1', service_name: 'Addon', base_price: 100, estimated_price: 90, // the REAL, capped net
+        discount_id: freeCappedDiscountId, discount_name: null, discount_type: 'percentage', discount_amount: 50, discount_dollars: 10,
+      }],
+      existingEstimatedPrice: 0, // the real, finite $0 total
+    });
+    expect(result.legacyEconomicsPreserved).toBe(true);
+    expect(result.storedTotal).toBe(0);
+    expect(result.preservedAddonLines).toHaveLength(1);
+    expect(result.preservedAddonLines[0].price).toBe(90); // never the naive $50
+    // The route writes updates.discount_dollars = existing.discount_dollars
+    // (the real $190 credit) on this branch — never a live recompute that
+    // would clamp it to $150 against the cap-blind $150 subtotal.
+  });
+});
+
+// GitHub round 2 on PR #4654 (P0): a stored add-on row with a null
+// service_id (never linked to the catalog) whose NAME/KEY now happens to
+// resolve to an ACTIVE catalog service. The route's own (pre-slice-4)
+// normalization infers that catalog id onto the posted line even though
+// the CLIENT submitted none — `serviceId: a.serviceId || catalogService?.id
+// || null` — so matching by `l.serviceId` alone can never pair that
+// inferred id with the still-unlinked ($null) stored row, and a notes-only
+// save on such a row bypassed preservation even with a populated
+// primary_line_price.
+describe('a stored row with an INFERRED (not submitted) service id still matches by name (GitHub round 2, P0)', () => {
+  test('submittedServiceId undefined + an inferred serviceId: falls back to matching the null-service_id stored row by name', () => {
+    const result = legacyEconomicsPreservationDecision({
+      legacyPreservationCandidate: true,
+      discountInputsPosted: false,
+      primaryServiceChanged: false,
+      primaryGross: 100,
+      existingPrimaryLinePrice: 100,
+      normalizedAddons: [{
+        // The client posted NO id (submittedServiceId reflects that); the
+        // route's own catalog-name resolution inferred `serviceId: 'catalog-42'`
+        // for pricing purposes ONLY — matching must not trust it as "submitted".
+        serviceId: 'catalog-42', submittedServiceId: null, serviceName: 'Legacy Add-On', base: 100, price: 100, discount: null,
+      }],
+      existingAddonRows: [{ service_id: null, service_name: 'Legacy Add-On', base_price: 100, estimated_price: 100, discount_id: null }],
+      existingEstimatedPrice: 200,
+    });
+    expect(result.legacyEconomicsPreserved).toBe(true);
+  });
+
+  test('control: an id the client DID submit still matches by id, even if it disagrees with the stored (unlinked) row\'s null service_id — never preserved, since that stored row genuinely cannot be confirmed unchanged', () => {
+    const result = legacyEconomicsPreservationDecision({
+      legacyPreservationCandidate: true,
+      discountInputsPosted: false,
+      primaryServiceChanged: false,
+      primaryGross: 100,
+      existingPrimaryLinePrice: 100,
+      normalizedAddons: [{
+        serviceId: 'catalog-42', submittedServiceId: 'catalog-42', serviceName: 'Legacy Add-On', base: 100, price: 100, discount: null,
+      }],
+      existingAddonRows: [{ service_id: null, service_name: 'Legacy Add-On', base_price: 100, estimated_price: 100, discount_id: null }],
+      existingEstimatedPrice: 200,
+    });
+    expect(result.legacyEconomicsPreserved).toBe(false);
+  });
+
+  test('backward compatibility: a fixture with NO submittedServiceId field at all falls back to matching by the (old) serviceId field, unchanged from before this fix', () => {
+    const result = legacyEconomicsPreservationDecision({
+      legacyPreservationCandidate: true,
+      discountInputsPosted: false,
+      primaryServiceChanged: false,
+      primaryGross: 100,
+      existingPrimaryLinePrice: 100,
+      normalizedAddons: [{ serviceId: 'svc-1', serviceName: 'Addon', base: 100, price: 100, discount: null }], // no submittedServiceId key
+      existingAddonRows: [{ service_id: 'svc-1', service_name: 'Addon', base_price: 100, estimated_price: 100, discount_id: null }],
+      existingEstimatedPrice: 200,
+    });
+    expect(result.legacyEconomicsPreserved).toBe(true);
+  });
+});
+
+// GitHub round 2 on PR #4654 (P1, disclosed, addressed alongside the P0s
+// above): the reads that drive this decision (`existing`, `existingAddonRows`)
+// run on the base `db` handle before the write transaction opens — a
+// concurrent edit to the SAME row between that read and the later write
+// could be silently reverted by an unrelated notes-only save computed from
+// a stale snapshot. legacyPreservationSnapshotStale is the pure
+// compare-and-swap check the route re-runs, under `trx`, immediately
+// before applying a preserved write.
+describe('legacyPreservationSnapshotStale — TOCTOU compare-and-swap before a preserved write (GitHub round 2 P1)', () => {
+  const snapshotArgs = () => ({
+    freshEstimatedPrice: 160,
+    existingEstimatedPrice: 160,
+    freshAddonRows: [{ service_id: 'svc-1', service_name: 'Addon', base_price: 100, estimated_price: 90, discount_id: 'd1', discount_type: 'percentage', discount_amount: 10 }],
+    existingAddonRows: [{ service_id: 'svc-1', service_name: 'Addon', base_price: 100, estimated_price: 90, discount_id: 'd1', discount_type: 'percentage', discount_amount: 10 }],
+  });
+
+  test('nothing changed since the read: not stale', () => {
+    expect(legacyPreservationSnapshotStale(snapshotArgs())).toBe(false);
+  });
+
+  test('the aggregate estimated_price moved under us: stale', () => {
+    expect(legacyPreservationSnapshotStale({ ...snapshotArgs(), freshEstimatedPrice: 175 })).toBe(true);
+  });
+
+  test('an add-on row\'s net moved under us (a concurrent edit): stale', () => {
+    const args = snapshotArgs();
+    expect(legacyPreservationSnapshotStale({
+      ...args,
+      freshAddonRows: [{ ...args.freshAddonRows[0], estimated_price: 999 }],
+    })).toBe(true);
+  });
+
+  test('an add-on was added or removed under us (count mismatch): stale', () => {
+    const args = snapshotArgs();
+    expect(legacyPreservationSnapshotStale({ ...args, freshAddonRows: [...args.freshAddonRows, { ...args.freshAddonRows[0], service_id: 'svc-2' }] })).toBe(true);
+  });
+
+  test('a discount id changed on an add-on under us: stale', () => {
+    const args = snapshotArgs();
+    expect(legacyPreservationSnapshotStale({
+      ...args,
+      freshAddonRows: [{ ...args.freshAddonRows[0], discount_id: 'd-different' }],
+    })).toBe(true);
+  });
+
+  test('row order does not matter — the same rows in a different order are NOT stale', () => {
+    const args = snapshotArgs();
+    const rowB = { service_id: 'svc-2', service_name: 'B', base_price: 20, estimated_price: 20, discount_id: null };
+    expect(legacyPreservationSnapshotStale({
+      ...args,
+      freshAddonRows: [rowB, args.freshAddonRows[0]],
+      existingAddonRows: [args.existingAddonRows[0], rowB],
+    })).toBe(false);
   });
 });
 
