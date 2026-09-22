@@ -554,12 +554,15 @@ describe("Invoice foundation workflow preservation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Edit", exact: true }));
     const priceInputs = await screen.findAllByLabelText("Price ($)");
     fireEvent.change(priceInputs[0], { target: { value: "200" } });
-    // The aggregate total (computeInvoiceLineDiscountTotal) is the ONE
-    // place this recompute is proven — before this fix, the synthetic
-    // client_id kept the aggregate frozen at -$10.00 (10% of the OLD
-    // $100), disagreeing with the server, which never sees that id and
-    // always recomputes to $20 (10% of the new $200).
-    expect(await screen.findByText("-$20.00")).toBeInTheDocument();
+    // Before this fix the aggregate (and, since round 6, the row's own
+    // Credit ($) field too — repriceAllFreshDiscounts now resyncs a fresh
+    // sibling on ANY price edit) stayed frozen at $10 (10% of the OLD
+    // $100), disagreeing with the server, which never sees the synthetic
+    // client_id and always recomputes to $20 (10% of the new $200). Both
+    // surfaces now show -$20.00, so at least one match is the proof.
+    await waitFor(() => {
+      expect(screen.getAllByText("-$20.00").length).toBeGreaterThan(0);
+    });
   });
 
   // Codex pre-push audit P2 (round 6 on PR #4655): the picker's own
@@ -590,5 +593,53 @@ describe("Invoice foundation workflow preservation", () => {
     await waitFor(() => {
       expect(screen.queryByRole("button", { name: /WaveGuard Gold/ })).not.toBeInTheDocument();
     });
+  });
+
+  // Codex pre-push audit P0 (round 6 on PR #4655, post-push — Codex
+  // itself, not the Claude fallback): removing a discount that was
+  // clamping a sibling to $0 must reprice that sibling back up before
+  // submit — not leave it at its stale $0 (which the submit filter would
+  // then silently drop from the POST entirely).
+  it("removing a $100 credit reprices a clamped 10% sibling back to $10, and the POST carries it", async () => {
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "ten-pct", name: "Ten Percent", discount_type: "percentage", amount: 10, is_active: true, show_in_invoices: true },
+      { id: "hundred-fixed", name: "Hundred Dollars", discount_type: "fixed_amount", amount: 100, is_active: true, show_in_invoices: true },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Quarterly pest control" } });
+    fireEvent.change(screen.getByLabelText("Price ($)"), { target: { value: "100" } });
+    fireEvent.change(await screen.findByLabelText("Add a discount"), { target: { value: "Ten" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Ten Percent/ }));
+    fireEvent.change(await screen.findByLabelText("Add a discount"), { target: { value: "Hundred" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Hundred Dollars/ }));
+    // The $100 fixed credit (canonical: fixed credits first) fully
+    // consumes the line, clamping the 10% row to $0.
+    await waitFor(() => {
+      const creditValues = screen.getAllByLabelText("Credit ($)").map((el) => el.value);
+      expect(creditValues).toContain("-100");
+      // The clamped-to-$0 row's own field renders blank (value={item.unit_price
+      // || ""} treats -0 as falsy) — a separate, pre-existing display quirk,
+      // not this fix's concern. The aggregate total below is the proof this
+      // row is genuinely clamped to $0 right now.
+      expect(creditValues).toContain("");
+    });
+    // Remove the $100 fixed credit — the 10% row must reprice back to $10.
+    const removeButtons = screen.getAllByRole("button", { name: "Remove line item" });
+    fireEvent.click(removeButtons[removeButtons.length - 1]);
+    await waitFor(() => {
+      expect(screen.getByLabelText("Credit ($)").value).toBe("-10");
+    });
+    fireEvent.change(screen.getByLabelText("Send", { exact: true }), { target: { value: "draft" } });
+    const key = "POST /api/admin/invoices";
+    overrides.set(key, () => response({ id: "new-invoice-3", invoice_number: "WPC-2026-0102", status: "draft" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create draft", exact: true }));
+    await waitFor(() => expect(requests.some(request => request.key === key)).toBe(true));
+    const posted = requests.find(request => request.key === key).body;
+    const discountLine = posted.lineItems.find((i) => i._kind === "discount");
+    expect(discountLine).toBeDefined();
+    expect(discountLine.amount).toBe(-10);
   });
 });

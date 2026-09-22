@@ -139,3 +139,69 @@ describe('P1 (round 6): gate-OFF freeze-by-position is gated on the stacking_reg
     expect(discountItem.stacking_regime).toBe('compound');
   });
 });
+
+describe('P0 (post-push, Codex): a compounding-clamped trusted stamp persists its RESOLVED amount, not a stale face value', () => {
+  test('a $50 line stamp clamped to $23.33 by an $80 document credit ($150 subtotal, $46.67 total) persists discount_dollars: 23.33 and discount_face_value: 50', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    setupDb({ discounts: [] });
+    const lineItems = [
+      { client_id: 'line-a', description: 'A', quantity: 1, unit_price: 50, amount: 50 },
+      { client_id: 'line-b', description: 'B', quantity: 1, unit_price: 100, amount: 100 },
+      {
+        client_id: 'd1', discount_id: null, discount_for: 'line-a', description: 'Line stamp',
+        quantity: 1, unit_price: -50, amount: -50,
+        use_stored_discount: true, stored_discount_source: 'scheduled_service', discount_dollars: 50,
+      },
+      {
+        client_id: 'd2', discount_id: null, discount_for: null, description: 'Doc stamp',
+        quantity: 1, unit_price: -80, amount: -80,
+        use_stored_discount: true, stored_discount_source: 'scheduled_service', discount_dollars: 80,
+      },
+    ];
+    const result = await calculateUpdateFinancials({
+      lineItems,
+      customer: { property_type: 'residential' },
+      invoice: { id: 'invoice-1', line_items: '[]' },
+    });
+    expect(result.subtotal).toBe(150);
+    expect(result.discount_amount).toBe(103.33);
+    expect(result.total).toBe(46.67);
+    const items = JSON.parse(result.line_items);
+    const stamp = items.find((i) => i.client_id === 'd1');
+    expect(stamp.discount_dollars).toBe(23.33);
+    expect(stamp.discount_face_value).toBe(50);
+  });
+
+  test('gate rollback, unchanged resubmit: total STAYS $46.67 (not the stale-face-value $20)', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    setupDb({ discounts: [] });
+    const lineItems = [
+      { client_id: 'line-a', description: 'A', quantity: 1, unit_price: 50, amount: 50 },
+      { client_id: 'line-b', description: 'B', quantity: 1, unit_price: 100, amount: 100 },
+      {
+        client_id: 'd1', discount_id: null, discount_for: 'line-a', description: 'Line stamp',
+        quantity: 1, unit_price: -50, amount: -50,
+        use_stored_discount: true, stored_discount_source: 'scheduled_service', discount_dollars: 50,
+      },
+      {
+        client_id: 'd2', discount_id: null, discount_for: null, description: 'Doc stamp',
+        quantity: 1, unit_price: -80, amount: -80,
+        use_stored_discount: true, stored_discount_source: 'scheduled_service', discount_dollars: 80,
+      },
+    ];
+    const gateOnResult = await calculateUpdateFinancials({
+      lineItems,
+      customer: { property_type: 'residential' },
+      invoice: { id: 'invoice-1', line_items: '[]' },
+    });
+    const persisted = JSON.parse(gateOnResult.line_items);
+    delete process.env.GATE_DISCOUNT_STACKING;
+    const gateOffResult = await calculateUpdateFinancials({
+      lineItems: persisted,
+      customer: { property_type: 'residential' },
+      invoice: { id: 'invoice-1', line_items: JSON.stringify(persisted) },
+    });
+    expect(gateOffResult.total).toBe(46.67);
+    expect(gateOffResult.discount_amount).toBe(103.33);
+  });
+});

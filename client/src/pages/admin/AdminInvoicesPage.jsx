@@ -642,6 +642,67 @@ export function repriceLineWithNewDiscountPick({
   return { lineItems: repriced, dollars };
 }
 
+// Codex pre-push audit P0 (round 6 on PR #4655, post-push — Codex itself,
+// not the Claude fallback): REMOVING a discount, or editing a LINE's
+// price, can change canonical order/remaining-balance the same way ADDING
+// a pick does (repriceLineWithNewDiscountPick's own reason for existing)
+// — but neither action ran ANY reprice at all, so a surviving fresh
+// sibling's displayed unit_price stayed whatever it was computed against
+// the OLD set of competitors. Concretely: 10% + a $100 fixed credit on a
+// $100 line, then removing the credit — the 10% row was clamped to $0
+// while the credit was present and NEVER got repriced back up to $10 once
+// it left; the aggregate preview (computeInvoiceLineDiscountTotal, which
+// always recomputes fresh) correctly showed $90, but the zeroed row's own
+// unit_price stayed 0, so BOTH submit handlers' `Number(i.unit_price) !==
+// 0` filter dropped it from the POST body entirely — a $100 invoice saved
+// with NO discount at all, silently disagreeing with the $90 preview.
+// Re-runs the SAME full-document stackDocumentDiscounts pass
+// computeInvoiceLineDiscountTotal itself runs — every line, every
+// document-wide credit — and syncs every FRESH (non-stored) discount
+// item's unit_price/amount to its freshly resolved dollars; a
+// stored/frozen item (isStoredInvoiceDiscountItem) is never rewritten,
+// same invariant every other reprice function here honors. Call this
+// after ANY edit that could change what a fresh discount resolves to —
+// removing a line item, changing a price — not just after adding a pick.
+export function repriceAllFreshDiscounts({
+  lineItems,
+  availableDiscounts,
+  stackingEnabled,
+  persistedClientIds,
+}) {
+  const items = Array.isArray(lineItems) ? lineItems : [];
+  if (!stackingEnabled) return items;
+  const discountRowById = new Map(
+    (availableDiscounts || []).map((d) => [String(d.id), d]),
+  );
+  const serviceLineItems = items.filter((i) => i._kind !== "discount");
+  const lineDiscountItemsByLine = serviceLineItems.map((line) => (
+    items.filter((i) => i._kind === "discount" && i.discount_for === line.client_id)
+  ));
+  const lines = serviceLineItems.map((line, lineIdx) => ({
+    gross: Math.max(0, invoiceLineAmount(line)),
+    terms: lineDiscountItemsByLine[lineIdx].map((i) => invoiceDiscountItemTerm(i, discountRowById, persistedClientIds)),
+  }));
+  const documentItems = items.filter((i) => i._kind === "discount" && !i.discount_for);
+  const documentTerms = invoiceDocumentTerms(items, serviceLineItems, discountRowById, persistedClientIds);
+  const stacked = stackDocumentDiscounts({ lines, documentTerms });
+  const resolvedDollarsByItem = new Map();
+  lineDiscountItemsByLine.forEach((siblings, lineIdx) => {
+    const termDollars = stacked.lines[lineIdx].termDollars;
+    siblings.forEach((item, i) => resolvedDollarsByItem.set(item, termDollars[i]));
+  });
+  documentItems.forEach((item, i) => {
+    resolvedDollarsByItem.set(item, stacked.documentTerms[i]?.dollars);
+  });
+  return items.map((item) => {
+    if (item._kind !== "discount" || isStoredInvoiceDiscountItem(item, persistedClientIds)) return item;
+    const newDollars = resolvedDollarsByItem.get(item);
+    if (newDollars == null) return item;
+    if (Math.abs(newDollars - Math.abs(invoiceLineAmount(item))) < 0.005) return item;
+    return { ...item, unit_price: -newDollars, amount: -newDollars };
+  });
+}
+
 // A first-delivery request (firstDelivery: true) whose claim finds the
 // invoice already owned by another live delivery — the completion, or a
 // concurrent send — is a no-op SUCCESS, not a failure: sms.ok/email.ok are
@@ -6258,11 +6319,22 @@ function CreateInvoice({
     }));
   };
   const addLineItem = () => setLineItems([...lineItems, newLineItem()]);
+  // Codex pre-push audit P0 (round 6 on PR #4655, post-push): removing a
+  // discount (or, below, editing a line's price) can leave a SURVIVING
+  // fresh sibling's own unit_price stale — repriceAllFreshDiscounts
+  // re-syncs every fresh discount to what the full document stack
+  // resolves it to NOW, the same engine the aggregate preview already
+  // uses, so the read-only rows and the number about to be submitted
+  // never disagree with what's on screen.
   const removeLineItem = (i) => {
     const id = lineItems[i]?.client_id;
-    setLineItems(
-      lineItems.filter((item, idx) => idx !== i && item.discount_for !== id),
-    );
+    const remaining = lineItems.filter((item, idx) => idx !== i && item.discount_for !== id);
+    setLineItems(repriceAllFreshDiscounts({
+      lineItems: remaining,
+      availableDiscounts,
+      stackingEnabled,
+      persistedClientIds: persistedClientIdsRef.current,
+    }));
     setDiscountSearchIdx((prev) => (prev === i ? null : prev));
   };
   const updateLineItem = (i, field, value) => {
@@ -6271,7 +6343,16 @@ function CreateInvoice({
       ...updated[i],
       [field]: field === "description" ? value : parseFloat(value) || 0,
     };
-    setLineItems(updated);
+    setLineItems(
+      field === "unit_price" || field === "quantity"
+        ? repriceAllFreshDiscounts({
+          lineItems: updated,
+          availableDiscounts,
+          stackingEnabled,
+          persistedClientIds: persistedClientIdsRef.current,
+        })
+        : updated,
+    );
   };
   const lineAmount = invoiceLineAmount;
   const serviceLineItems = lineItems.filter((i) => i._kind !== "discount");
@@ -6517,11 +6598,22 @@ function CreateInvoice({
       return;
     }
     try {
+      // Codex pre-push audit P0 (round 6 on PR #4655, post-push): submit
+      // MUST post the same resolved rows the preview shows — reprice once
+      // more, right here, rather than trust that every prior state update
+      // already did (repriceAllFreshDiscounts is a no-op when nothing
+      // actually changed, so this costs nothing on the common path).
+      const repricedLineItems = repriceAllFreshDiscounts({
+        lineItems,
+        availableDiscounts,
+        stackingEnabled,
+        persistedClientIds: persistedClientIdsRef.current,
+      });
       const body = {
         customerId: selectedCustomer.id,
         serviceRecordId: selectedService?.id || null,
         serviceDate,
-        lineItems: lineItems
+        lineItems: repricedLineItems
           .filter((i) => i.description && Number(i.unit_price) !== 0)
           .map((i) => ({
             ...i,
@@ -6739,7 +6831,16 @@ function CreateInvoice({
         if (stackingCheck.expectedStacking !== undefined) {
           body.expected_discount_stacking = stackingCheck.expectedStacking;
         }
-        body.line_items = lineItems
+        // Codex pre-push audit P0 (round 6 on PR #4655, post-push):
+        // submit MUST post the same resolved rows the preview shows —
+        // reprice once more, right here, same as handleCreate.
+        const repricedLineItems = repriceAllFreshDiscounts({
+          lineItems,
+          availableDiscounts,
+          stackingEnabled,
+          persistedClientIds: persistedClientIdsRef.current,
+        });
+        body.line_items = repricedLineItems
           .filter((i) => i.description && Number(i.unit_price) !== 0)
           .map((i) => ({
             ...i,

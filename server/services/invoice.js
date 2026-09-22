@@ -392,6 +392,30 @@ function isStoredDiscountLineItem(
 // frozen dollars exactly as before this lane.
 function resolveStoredDiscountLineItem(item, row, overrideDollars) {
   const dollars = overrideDollars != null ? overrideDollars : storedDiscountDollars(item);
+  // Codex pre-push audit P0 (round 6 on PR #4655, post-push): overrideDollars
+  // is the DOCUMENT-STACK-RESOLVED amount (computeStackedDocumentDiscountLines,
+  // gate ON) — it can be LESS than the stamp's original face value when a
+  // competing document-wide credit clamps what's left for it (a $50 line
+  // credit resolved to $23.33 by an $80 document credit already ahead of
+  // it in canonical order). Before this fix, only item.unit_price/.amount
+  // (the invoice's own display/total fields) picked up the clamped
+  // number — item.discount_dollars, the field storedDiscountDollars()
+  // falls back to for the NEXT resolve with no override (every gate-OFF
+  // edit, and any gate-ON resolve of an item the stack doesn't touch),
+  // stayed at its stale, larger original value. An unrelated LATER edit —
+  // even under gate OFF, even with this exact item unchanged — silently
+  // replayed the stale $50 instead of the $23.33 this invoice was ACTUALLY
+  // saved with, changing the total out from under the operator. Now
+  // persists the resolved amount as the row's own discount_dollars (the
+  // field every future resolve reads), preserving the pre-clamp face
+  // value ONCE under discount_face_value for audit — never overwritten on
+  // a later resolve, so it always reads the ORIGINAL stamped amount.
+  if (overrideDollars != null) {
+    if (item.discount_face_value == null && hasNumericValue(item.discount_dollars)) {
+      item.discount_face_value = item.discount_dollars;
+    }
+    item.discount_dollars = dollars;
+  }
   item.quantity = 1;
   item.unit_price = -dollars;
   item.amount = -dollars;

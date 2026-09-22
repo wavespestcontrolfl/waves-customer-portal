@@ -25,6 +25,7 @@ import {
   computeInvoiceLineDiscountTotal,
   invoiceDiscountItemTerm,
   isStoredInvoiceDiscountItem,
+  repriceAllFreshDiscounts,
   repriceLineWithNewDiscountPick,
 } from "./AdminInvoicesPage.jsx";
 
@@ -166,5 +167,59 @@ describe("computeInvoiceLineDiscountTotal — gate OFF ignores persistedClientId
     // recompute (that's a SAVE-time server concern under gate off) and
     // never anything persistedClientIds-gated.
     expect(total).toBe(10);
+  });
+});
+
+describe("repriceAllFreshDiscounts — a surviving fresh sibling is resynced to what the full stack resolves it to NOW", () => {
+  test("10% clamped to $0 by a $100 fixed credit is repriced back to $10 once the credit is removed", () => {
+    const lineItems = [
+      { client_id: "line-1", _kind: "service", description: "Service", quantity: 1, unit_price: 100, amount: 100 },
+      {
+        client_id: "d1", _kind: "discount", discount_id: "ten-pct", discount_for: "line-1",
+        quantity: 1, unit_price: 0, amount: 0, // clamped to $0 while the $100 credit was present
+      },
+      // The $100 fixed credit has already been removed from lineItems —
+      // simulating the state right after removeLineItem.
+    ];
+    const repriced = repriceAllFreshDiscounts({
+      lineItems,
+      availableDiscounts: [discountRow({ id: "ten-pct", discount_type: "percentage", amount: 10 })],
+      stackingEnabled: true,
+      persistedClientIds: new Set(),
+    });
+    const tenPct = repriced.find((i) => i.client_id === "d1");
+    expect(tenPct.unit_price).toBe(-10);
+    expect(tenPct.amount).toBe(-10);
+  });
+
+  test("a STORED/frozen sibling is never rewritten, even when a competing credit is removed", () => {
+    const lineItems = [
+      { client_id: "line-1", _kind: "service", description: "Service", quantity: 1, unit_price: 100, amount: 100 },
+      {
+        client_id: "d1", _kind: "discount", stored_discount_source: "scheduled_service", discount_dollars: 5,
+        quantity: 1, unit_price: -5, amount: -5,
+      },
+    ];
+    const repriced = repriceAllFreshDiscounts({
+      lineItems,
+      availableDiscounts: [],
+      stackingEnabled: true,
+      persistedClientIds: new Set(),
+    });
+    expect(repriced.find((i) => i.client_id === "d1").unit_price).toBe(-5);
+  });
+
+  test("gate OFF is a no-op — returns lineItems unchanged", () => {
+    const lineItems = [
+      { client_id: "line-1", _kind: "service", description: "Service", quantity: 1, unit_price: 100, amount: 100 },
+      { client_id: "d1", _kind: "discount", discount_id: "ten-pct", discount_for: "line-1", quantity: 1, unit_price: 0, amount: 0 },
+    ];
+    const repriced = repriceAllFreshDiscounts({
+      lineItems,
+      availableDiscounts: [discountRow({ id: "ten-pct", discount_type: "percentage", amount: 10 })],
+      stackingEnabled: false,
+      persistedClientIds: new Set(),
+    });
+    expect(repriced).toBe(lineItems);
   });
 });
