@@ -107,6 +107,8 @@ import {
 } from "../../components/ui";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
+import useSmsDraft from "../../hooks/useSmsDraft";
+import { ActionFeedback } from "../../components/ui/ActionFeedback";
 import { notifyUnreadChanged } from "../../hooks/useUnreadConversations";
 import {
   MMS_TOTAL_BUDGET_BYTES,
@@ -306,8 +308,7 @@ function smsMessageMatchesLine(message, lineNumber) {
 }
 
 function mergeSmsMessages(existing, incoming) {
-  const seen = new Set(existing.map((m) => m.id));
-  return [...existing, ...incoming.filter((m) => !seen.has(m.id))];
+  return [...new Map([...existing, ...incoming].map((message) => [message.id, message])).values()];
 }
 
 function StatCardV2({ label, value, sub, active, alert, onClick }) {
@@ -804,24 +805,41 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const [messages, setMessages] = useState([]);
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(!customer);
+  const [smsLoadError, setSmsLoadError] = useState("");
+  const [smsStatsError, setSmsStatsError] = useState(false);
+  const [smsRefreshing, setSmsRefreshing] = useState(false);
   const [smsFilter, setSmsFilter] = useState("all");
 
   const [aiAutoReply, setAiAutoReply] = useState(false);
   const [togglingAi, setTogglingAi] = useState(false);
 
   // Compose
-  const [toNumber, setToNumber] = useState(customer?.phone || "");
+  const [toNumber, setToNumber] = useState(() => customer ? customer.phone || "" : new URLSearchParams(window.location.search).get("phone") || "");
   const [toSearch, setToSearch] = useState("");
   const [toResults, setToResults] = useState([]);
-  const [selectedCustomerId, setSelectedCustomerId] = useState(customer?.id || null);
+  const previousSenderRef = useRef(null);
   // The inbox row a "Text back" answers — sent as replyToMessageId so the
   // server routes a recruiting reply onto the recruiting rail (Codex r25 P1).
   // Carries the recipient (normalized phone) and customerId it was minted
   // for; a divergence between them and the live compose target invalidates
   // it (Codex #4623 P1) rather than riding along onto a different send.
-  const [replyContext, setReplyContext] = useState(null);
-  const [fromNumber, setFromNumber] = useState("+19413187612");
-  const [msgBody, setMsgBody] = useState("");
+  const customerLine = customerMessages.find((message) => message.channel === "sms" && phoneKey(message.contactPhone) === phoneKey(customer?.phone));
+  const {
+    selectedCustomerId, setSelectedCustomerId, fromNumber, setFromNumber, threadLock, setThreadLock,
+    msgBody, setMsgBody, attachments, setAttachments,
+    insertedResched, setInsertedResched, insertedReservice, setInsertedReservice,
+    insertedCustomerLinks, setInsertedCustomerLinks,
+    loadedMessageDraft, setLoadedMessageDraft, selectedAgentDraft, setSelectedAgentDraft,
+    replyContext, setReplyContext, sendTiming, setSendTiming, sendCustomAt, setSendCustomAt,
+    clearDraft, setDraftForRecipient, recoveryWarning, draftRevision,
+  } = useSmsDraft({
+    ownerId: smsOutletContext?.user?.id,
+    // A fixed customer-profile composer cannot inherit another record's
+    // identity from the phone-only inbox (contacts can share a phone).
+    recipientKey: customer ? JSON.stringify([customer.id, smsThreadKey(toNumber)]) : toNumber.trim() ? smsThreadKey(toNumber) : "",
+    initialDraft: customer ? { selectedCustomerId: customer.id, ...(customerLine?.ourEndpointId ? { fromNumber: customerLine.ourEndpointId } : {}) } : previousSenderRef.current ? { fromNumber: previousSenderRef.current } : undefined,
+  });
+  previousSenderRef.current = fromNumber;
   const [sending, setSending] = useState(false);
   // Mirrors `sending` for async code that must not act mid-send: canceling
   // a review row while its /sms is in flight can land before the server's
@@ -833,18 +851,13 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // The last inserted reschedule link and the recipient it was minted for:
   // { url, recipientKey, customerId }. The bearer link must not outlive its
   // recipient — the effect below strips it from the body if To changes.
-  const [insertedResched, setInsertedResched] = useState(null);
   const [insertingReservice, setInsertingReservice] = useState(false);
   // Same contract for the standing re-service link (free between-visit
   // callback booking) — a bearer credential tracked per recipient.
-  const [insertedReservice, setInsertedReservice] = useState(null);
   const [rewritingSms, setRewritingSms] = useState(false);
   const [agentDraft, setAgentDraft] = useState(null);
   const [agentDraftLoading, setAgentDraftLoading] = useState(false);
-  const [selectedAgentDraft, setSelectedAgentDraft] = useState(null);
-  const [loadedMessageDraft, setLoadedMessageDraft] = useState(null);
   // MMS attachments: [{ url, key, fileName, size, mimeType, previewUrl }, ...]
-  const [attachments, setAttachments] = useState([]);
   const [uploading, setUploading] = useState(false);
   // Purely a label distinction — `uploading` gates the controls for the whole
   // compress-then-upload span. Downscaling several phone photos takes a beat,
@@ -853,8 +866,6 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // Delayed send: 'now' | 'tomorrow_8' | 'custom'. Mirrors invoice builder pattern.
   // Scheduled rows land in sms_log with status='scheduled' and are picked up by
   // the /5min cron in server/services/scheduler.js.
-  const [sendTiming, setSendTiming] = useState("now");
-  const [sendCustomAt, setSendCustomAt] = useState("");
   const dictation = useSpeechDictation((text) => {
     setMsgBody((b) => (b ? `${b} ${text}` : text));
   });
@@ -876,7 +887,6 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // kind: { url, recipientKey, customerId, requestId?, contractId? }. Same bearer-link
   // strip contract as insertedResched/insertedReservice above.
   const [insertingCustomerLink, setInsertingCustomerLink] = useState(null);
-  const [insertedCustomerLinks, setInsertedCustomerLinks] = useState({});
 
   // Filters
   const [dirFilter, setDirFilter] = useState("all");
@@ -898,13 +908,15 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   };
   // PR 4 — status filter chips, reply-from lock.
   const [statusFilter, setStatusFilter] = useState("all");
-  const [threadLock, setThreadLock] = useState(null);
   const [selected360Id, setSelected360Id] = useState(null);
   const [smsPage, setSmsPage] = useState(1);
   const [smsHasMore, setSmsHasMore] = useState(false);
   const [smsLoadingMore, setSmsLoadingMore] = useState(false);
   const smsSearchRef = useRef("");
   const smsLoadSeqRef = useRef(0);
+  const smsRequestRef = useRef(null);
+  const smsPageRef = useRef(1);
+  const smsLoadedSearchRef = useRef(null);
   const rewriteContextRef = useRef({
     toNumber: "",
     selectedCustomerId: null,
@@ -918,10 +930,27 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     activeThreadKey: activeThread?.contactPhone ? smsThreadKey(activeThread.contactPhone) : "",
   };
 
+  const selectSmsRecipient = (contactPhone, ourNumber, customerId, replyTo) => {
+    if (sending || uploading || listening) return;
+    setDraftForRecipient(contactPhone ? smsThreadKey(contactPhone) : "", (draft) => {
+      const hasDraft = draft.msgBody.trim() || draft.attachments.length || draft.loadedMessageDraft;
+      const line = hasDraft ? draft.fromNumber : ourNumber || fromNumber;
+      return {
+        selectedCustomerId: draft.loadedMessageDraft ? draft.selectedCustomerId : (customerId || null),
+        fromNumber: line,
+        threadLock: line ? { contactPhone, ourNumber: line, label: NUMBER_LABEL_MAP[line] || line } : null,
+        ...(replyTo === undefined ? {} : { replyContext: replyTo ? { ...replyTo, phone: phoneKey(contactPhone), customerId: customerId || null } : null }),
+      };
+    });
+    setToNumber(contactPhone);
+    setToSearch("");
+  };
+
   useEffect(() => {
     if (!customer) return;
+    if (!loadedMessageDraft) setSelectedCustomerId(customer.id);
     const latest = customerMessages.find((message) => message.channel === "sms" && phoneKey(message.contactPhone) === phoneKey(customer.phone));
-    if (latest?.ourEndpointId) {
+    if (latest?.ourEndpointId && !loadedMessageDraft) {
       setFromNumber(latest.ourEndpointId);
       setThreadLock({ contactPhone: customer.phone, ourNumber: latest.ourEndpointId, label: latest.ourEndpointLabel || latest.ourEndpointId });
     }
@@ -932,6 +961,11 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     const normalizedSearch = search.trim();
     const page = options.page || 1;
     const append = !!options.append;
+    if (options.background && smsRequestRef.current) return Promise.resolve();
+    smsRequestRef.current?.abort();
+    const controller = new AbortController();
+    smsRequestRef.current = controller;
+    setSmsRefreshing(true);
     const requestSeq = ++smsLoadSeqRef.current;
     const params = new URLSearchParams({
       limit: String(SMS_LOG_PAGE_SIZE),
@@ -939,28 +973,44 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     });
     if (normalizedSearch) params.set("search", normalizedSearch);
     const logUrl = `/admin/communications/log?${params.toString()}`;
-    return Promise.all([
-      adminFetch(logUrl).catch(() => ({ messages: [] })),
-      adminFetch("/admin/communications/stats").catch(() => null),
-      adminFetch("/admin/communications/blocked-numbers").catch(() => null),
-    ]).then(([logData, statsData, blockedData]) => {
+    return Promise.allSettled([
+      adminFetch(logUrl, { signal: controller.signal }),
+      adminFetch("/admin/communications/stats", { signal: controller.signal }),
+      adminFetch("/admin/communications/blocked-numbers", { signal: controller.signal }),
+    ]).then(([logResult, statsResult, blockedResult]) => {
       if (
+        controller.signal.aborted ||
         requestSeq !== smsLoadSeqRef.current ||
         normalizedSearch !== smsSearchRef.current
       ) {
         return;
       }
-      const nextMessages = logData.messages || [];
-      setMessages((prev) =>
-        append ? mergeSmsMessages(prev, nextMessages) : nextMessages,
-      );
-      setSmsPage(logData.page || page);
-      setSmsHasMore(!!logData.hasMore);
-      setStats(statsData);
+      const logData = logResult.status === "fulfilled" ? logResult.value : null;
+      if (Array.isArray(logData?.messages) && !logData.error) {
+        const retainHistory = options.refresh && smsLoadedSearchRef.current === normalizedSearch;
+        setMessages((prev) => append || retainHistory ? mergeSmsMessages(prev, logData.messages) : logData.messages);
+        if (!retainHistory || smsPageRef.current === 1) {
+          smsPageRef.current = logData.page || page;
+          setSmsPage(smsPageRef.current);
+          setSmsHasMore(!!logData.hasMore);
+        }
+        smsLoadedSearchRef.current = normalizedSearch;
+        setSmsLoadError("");
+      } else {
+        setSmsLoadError("Messages could not be refreshed. Any messages shown are from the last successful load.");
+      }
+      const statsData = statsResult.status === "fulfilled" ? statsResult.value : null;
+      setSmsStatsError(!statsData || !!statsData.error);
+      if (statsData && !statsData.error) setStats(statsData);
+      const blockedData = blockedResult.status === "fulfilled" ? blockedResult.value : null;
       if (blockedData && Array.isArray(blockedData.numbers)) {
         setBlocked(blockedFromNumbers(blockedData.numbers.map((b) => b.number)));
       }
       setLoading(false);
+    }).finally(() => {
+      if (smsRequestRef.current !== controller) return;
+      smsRequestRef.current = null;
+      setSmsRefreshing(false);
     });
   }, [customer?.id]);
 
@@ -968,10 +1018,25 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     smsSearchRef.current = smsSearch.trim();
     if (!active || customer) return;
     const t = setTimeout(() => {
-      loadData(smsSearch.trim());
+      loadData(smsSearch.trim(), { refresh: true });
     }, 300);
     return () => clearTimeout(t);
   }, [active, smsSearch, loadData]);
+
+  useEffect(() => {
+    if (!active || customer) return undefined;
+    const refresh = () => {
+      if (document.visibilityState === "hidden") return;
+      void loadData(smsSearchRef.current, { refresh: true, background: true });
+    };
+    const timer = window.setInterval(refresh, 30000);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+      smsRequestRef.current?.abort();
+    };
+  }, [active, customer?.id, loadData]);
 
   const markMessagesRead = useCallback(
     async (thread, { throwOnError = false } = {}) => {
@@ -1068,7 +1133,10 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       setAgentDraftLoading(true);
       adminFetch(`/admin/communications/agent-draft?${params.toString()}`)
         .then((d) => {
-          if (!cancelled) setAgentDraft(d?.draft || null);
+          if (!cancelled) {
+            setAgentDraft(d?.draft || null);
+            setSelectedAgentDraft((current) => current?.decisionId === d?.draft?.decisionId ? current : null);
+          }
         })
         .catch(() => {
           if (!cancelled) setAgentDraft(null);
@@ -1084,17 +1152,6 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     };
   }, [active, toNumber, selectedCustomerId]);
 
-  useEffect(() => {
-    setSelectedAgentDraft(null);
-  }, [toNumber, selectedCustomerId]);
-
-  useEffect(() => {
-    setSelectedAgentDraft((current) => {
-      if (!current) return null;
-      return current.decisionId === agentDraft?.decisionId ? current : null;
-    });
-  }, [agentDraft?.decisionId]);
-
   // Prefill compose from deep links (Estimates/Customers SMS button, Agent Ops drafts).
   useEffect(() => {
     if (customer) return;
@@ -1104,8 +1161,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     if (phone) {
       setToNumber(phone);
       setToSearch("");
-      setSelectedCustomerId(null);
-      if (queryFromNumber) {
+      if (queryFromNumber && !loadedMessageDraft) {
         setFromNumber(queryFromNumber);
         setThreadLock({
           contactPhone: phone,
@@ -1116,9 +1172,10 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     }
     const draftId = params.get("draftId");
     if (draftId) {
+      let cancelled = false;
       adminFetch(`/admin/drafts/${encodeURIComponent(draftId)}`)
         .then((draft) => {
-          if (draft?.draftResponse) setMsgBody(draft.draftResponse.slice(0, 1000));
+          if (cancelled || phoneKey(rewriteContextRef.current.toNumber) !== phoneKey(phone)) return;
           const draftPhone = draft?.recipientPhone || draft?.customerPhone || "";
           let finalPhone = phone || draftPhone;
           if (draftPhone && (!phone || phoneKey(phone) !== phoneKey(draftPhone))) {
@@ -1136,39 +1193,27 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           // capture would trip the mismatch effect below and silently
           // detach the draft (r2 P1).
           const draftFrom = draft?.resolvedFromNumber || queryFromNumber || null;
-          if (draftFrom) {
-            // Lock UNCONDITIONALLY when a resolved From exists — even when
-            // it equals the composer default, an editable selector would
-            // let a From change clear loadedMessageDraft and quietly turn
-            // the approval into a manual send (Codex r7 P1). Only the
-            // state write is guarded on inequality.
-            if (draftFrom !== fromNumber) setFromNumber(draftFrom);
-            setThreadLock({
-              contactPhone: finalPhone,
-              ourNumber: draftFrom,
-              label: draft?.resolvedFromLabel || NUMBER_LABEL_MAP[draftFrom] || draftFrom,
-            });
-          }
-          setLoadedMessageDraft(smsIsAdminRole && draft?.id ? {
-            id: draft.id,
-            draftResponse: draft.draftResponse || "",
-            recipientPhone: finalPhone,
-            fromNumber: draftFrom || fromNumber,
-          } : null);
-          if (draft?.customerId && draft?.customerPhone && phoneKey(finalPhone) === phoneKey(draft.customerPhone)) {
-            setSelectedCustomerId(draft.customerId);
-          } else {
-            setSelectedCustomerId(null);
-          }
+          const draftCustomerId = draft?.customerId && draft?.customerPhone && phoneKey(finalPhone) === phoneKey(draft.customerPhone) ? draft.customerId : null;
+          setDraftForRecipient(finalPhone ? smsThreadKey(finalPhone) : "", (saved) => ({
+            msgBody: saved.loadedMessageDraft?.id === draft?.id ? saved.msgBody : (draft?.draftResponse || "").slice(0, 1000),
+            fromNumber: draftFrom || saved.fromNumber,
+            selectedCustomerId: draftCustomerId,
+            threadLock: draftFrom ? { contactPhone: finalPhone, ourNumber: draftFrom, label: draft?.resolvedFromLabel || NUMBER_LABEL_MAP[draftFrom] || draftFrom } : saved.threadLock,
+            loadedMessageDraft: smsIsAdminRole && draft?.id ? {
+              id: draft.id,
+              draftResponse: draft.draftResponse || "",
+              recipientPhone: finalPhone,
+              fromNumber: draftFrom || saved.fromNumber,
+            } : null,
+          }));
         })
         .catch(() => {
-          setLoadedMessageDraft(null);
+          if (!cancelled) setSendResult({ ok: false, text: "The approval draft could not be refreshed. Your saved text is retained." });
         });
-      return;
+      return () => { cancelled = true; };
     }
     const draft = params.get("draft");
-    if (draft) setMsgBody(draft.slice(0, 1000));
-    setLoadedMessageDraft(null);
+    if (draft && !msgBody && !loadedMessageDraft) setMsgBody(draft.slice(0, 1000));
   }, []);
 
   useEffect(() => {
@@ -1258,6 +1303,10 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   };
 
   const handleSend = async () => {
+    if (customer && selectedCustomerId !== customer.id) {
+      setSendResult({ ok: false, text: "This saved draft belongs to a different customer. Reopen the correct customer before sending." });
+      return;
+    }
     // The inbox row this send answers — only when the retained "Text back"
     // context still matches the live compose target (Codex #4623 P1); a
     // diverged recipient/customer sends `undefined`, never a stale id. The
@@ -1346,6 +1395,10 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         return;
       }
     }
+    if (!fromNumber.trim()) {
+      setSendResult({ ok: false, text: "Choose a sending number before sending this message." });
+      return;
+    }
     setSending(true);
     sendInFlightRef.current = true;
     setSendResult(null);
@@ -1425,25 +1478,20 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         }
         setSendResult({ ok: true, text: `Provider accepted; delivery is not yet confirmed.${reviewEmailNote(sent?.reviewEmail)}` });
       }
-      setToNumber(customer?.phone || "");
-      setToSearch("");
-      setSelectedCustomerId(customer?.id || null);
-      setReplyContext(null);
-      setMsgBody("");
-      // Cleared in the same batch as the body: the strip effect must see the
-      // sent links as already forgotten, not as operator-withdrawn (which
-      // would cancel a review ask that just went out).
-      setInsertedCustomerLinks({});
+      const { cleared, persisted } = clearDraft(draftRevision);
+      if (cleared && persisted) {
+        setToNumber(customer?.phone || "");
+        setToSearch("");
+        if (customer) setSelectedCustomerId(customer.id);
+      }
+      if (!persisted) {
+        setSendResult((result) => ({ ...result, text: `${result.text} Recovery storage could not be cleared. Check message history before resending any draft recovered after a reload.` }));
+      }
       setAgentDraft(null);
-      setSelectedAgentDraft(null);
-      setLoadedMessageDraft(null);
       // Release blob preview URLs before clearing so we don't leak them.
-      for (const a of attachments) {
+      for (const a of cleared ? attachments : []) {
         if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
       }
-      setAttachments([]);
-      setSendTiming("now");
-      setSendCustomAt("");
       if (customer) await onSent?.();
       else await loadData(smsSearch.trim());
     } catch (e) {
@@ -2205,10 +2253,10 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     const nextThread = threads.find(
       (t) => smsThreadKey(t.contactPhone) === smsThreadKey(activeThread.contactPhone),
     );
-    if (nextThread && nextThread.messages.length !== activeThread.messages.length) {
+    if (nextThread && nextThread !== activeThread) {
       setActiveThread(nextThread);
     }
-  }, [threads, activeThread?.contactPhone, activeThread?.messages?.length]);
+  }, [threads, activeThread?.contactPhone]);
 
   // Deep-link from a notification: /admin/communications?thread=<customerId>
   // opens that customer's SMS conversation. The sms_reply notification carries
@@ -2233,17 +2281,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     const openedThread = { ...match };
     setActiveThread(openedThread);
     setSmsView("conversation");
-    setToNumber(match.contactPhone);
-    setToSearch("");
-    setSelectedCustomerId(match.customerId || null);
-    if (match.ourNumber) {
-      setFromNumber(match.ourNumber);
-      setThreadLock({
-        contactPhone: match.contactPhone,
-        ourNumber: match.ourNumber,
-        label: NUMBER_LABEL_MAP[match.ourNumber] || match.ourNumber,
-      });
-    }
+    selectSmsRecipient(match.contactPhone, match.ourNumber, match.customerId);
     markMessagesRead(openedThread);
   }, [active, threads, markMessagesRead]);
 
@@ -2327,18 +2365,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   };
 
   const handleThreadReply = (contactPhone, ourNumber, customerId = null, replyTo = null) => {
-    setToNumber(contactPhone);
-    setToSearch("");
-    setSelectedCustomerId(customerId || null);
-    setReplyContext(replyTo ? { ...replyTo, phone: phoneKey(contactPhone), customerId: customerId || null } : null);
-    if (ourNumber) {
-      setFromNumber(ourNumber);
-      setThreadLock({
-        contactPhone,
-        ourNumber,
-        label: NUMBER_LABEL_MAP[ourNumber] || ourNumber,
-      });
-    }
+    if (sending || uploading || listening) return;
+    selectSmsRecipient(contactPhone, ourNumber, customerId, replyTo);
     setSmsView("threads");
     setActiveThread(null);
     setTimeout(() => {
@@ -2401,8 +2429,16 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
 
   return (
     <div>
+      {!customer && <div className="mb-3 flex flex-wrap items-center gap-3">
+        <Button variant="secondary" disabled={smsRefreshing} onClick={() => loadData(smsSearchRef.current, { refresh: true })}>
+          {smsRefreshing ? "Refreshing…" : "Refresh messages"}
+        </Button>
+        <span className="text-14 text-ink-secondary">Updates automatically while this inbox is open.</span>
+        {smsLoadError && <ActionFeedback error onRetry={() => loadData(smsSearchRef.current, { refresh: true })}>{smsLoadError}</ActionFeedback>}
+        {smsStatsError && <ActionFeedback error>Activity counts are unavailable. Previously loaded counts may be out of date.</ActionFeedback>}
+      </div>}
       {/* Stats + auto-reply */}
-      {!customer && <div className="hidden md:flex items-center gap-2 mb-4 flex-wrap">
+      {!customer && !smsStatsError && <div className="hidden md:flex items-center gap-2 mb-4 flex-wrap">
         {" "}
         <StatCardV2
           label="Sent This Month"
@@ -2464,6 +2500,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       </div>}
       {/* Compose */}
       <Card id="sms-compose-v2" className="p-5 mb-5">
+        {recoveryWarning && <ActionFeedback error>{recoveryWarning}</ActionFeedback>}
+        <fieldset disabled={sending} className="m-0 min-w-0 border-0 p-0">
         {" "}
         {!customer && <div className="flex items-center justify-end mb-3 flex-wrap gap-2">
           <button
@@ -2519,7 +2557,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           aria-label="Send from"
           value={fromNumber}
           onChange={(e) => setFromNumber(e.target.value)}
-          disabled={!!threadLock}
+          disabled={!!threadLock || sending || uploading || listening}
           className={cn(
             "w-full bg-white border-hairline rounded-sm py-2 px-3 text-16 md:text-ui-body text-zinc-900 min-h-[44px] md:min-h-0",
             "focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900",
@@ -2528,6 +2566,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
               : "border-zinc-300",
           )}
         >
+          <option value="" disabled>Choose a sending number</option>
           {ALL_NUMBERS.map((group) => (
             <optgroup key={group.group} label={group.group}>
               {group.numbers.map((n) => (
@@ -2551,18 +2590,17 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         <Input
           type="text"
           placeholder="Search by name or enter phone number…"
+          disabled={sending || uploading || listening}
           value={toSearch || toNumber}
           onChange={async (e) => {
             const val = e.target.value;
             if (/^[\d\s()\-+]+$/.test(val)) {
               setToNumber(val);
-              setSelectedCustomerId(null);
               setToSearch("");
               setToResults([]);
             } else {
               setToSearch(val);
               setToNumber("");
-              setSelectedCustomerId(null);
               if (val.length >= 2) {
                 try {
                   const r = await fetch(
@@ -2598,9 +2636,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
               <div
                 key={c.id}
                 onClick={() => {
+                  if (sending || uploading || listening) return;
                   const name = getCustomerOptionName(c);
-                  setToNumber(c.phone || "");
-                  setSelectedCustomerId(c.id || null);
+                  selectSmsRecipient(c.phone || "", null, c.id);
                   setToSearch(`${name} — ${c.phone || ""}`);
                   setToResults([]);
                 }}
@@ -2705,7 +2743,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             placeholder={listening ? "Listening…" : "Type your message…"}
             value={msgBody}
             onChange={(e) => setMsgBody(e.target.value)}
-            readOnly={rewritingSms}
+            readOnly={rewritingSms || sending}
             rows={3}
             className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-ui-body text-zinc-900 resize-y focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
           />
@@ -2995,6 +3033,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             {sendResult.text}
           </div>
         )}
+        </fieldset>
       </Card>
       {!customer && <>
       {/* View toggle — desktop power-user feature; mobile just shows Conversations */}
@@ -3107,7 +3146,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           <div className="md:max-h-[600px] md:overflow-y-auto">
             {filteredThreads.length === 0 ? (
               <div className="p-5 text-center text-13 text-ink-secondary">
-                No conversations found.
+                {smsLoadError ? "Messages are unavailable. Try refreshing the inbox." : "No conversations found."}
               </div>
             ) : (
               filteredThreads.map((t, i) => {
@@ -3123,20 +3162,11 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                   <div
                     key={i}
                     onClick={() => {
+                      if (sending || uploading || listening) return;
                       const openedThread = { ...t };
                       setActiveThread(openedThread);
                       setSmsView("conversation");
-                      setToNumber(t.contactPhone);
-                      setToSearch("");
-                      setSelectedCustomerId(t.customerId || null);
-                      if (t.ourNumber) {
-                        setFromNumber(t.ourNumber);
-                        setThreadLock({
-                          contactPhone: t.contactPhone,
-                          ourNumber: t.ourNumber,
-                          label: NUMBER_LABEL_MAP[t.ourNumber] || t.ourNumber,
-                        });
-                      }
+                      selectSmsRecipient(t.contactPhone, t.ourNumber, t.customerId);
                       markMessagesRead(openedThread);
                     }}
                     className={cn(
@@ -3261,11 +3291,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                   key={m.id}
                   msg={m}
                   onReply={(phone, from, customerId, replyTo) => {
-                    setToNumber(phone);
-                    setToSearch("");
-                    setSelectedCustomerId(customerId || null);
-                    setReplyContext(replyTo ? { ...replyTo, phone: phoneKey(phone), customerId: customerId || null } : null);
-                    setFromNumber(from);
+                    if (sending || uploading || listening) return;
+                    selectSmsRecipient(phone, from, customerId, replyTo);
                     // The admin shell scrolls .admin-main, not the window —
                     // window.scrollTo() is a no-op here.
                     document

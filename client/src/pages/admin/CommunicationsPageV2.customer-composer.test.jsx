@@ -65,6 +65,8 @@ it("keeps the profile recipient and thread line, sends once, and clears only on 
   expect(onSent).toHaveBeenCalledOnce();
   expect(requests("/admin/drafts/unrelated")).toHaveLength(0);
   expect(requests("/admin/communications/stats")).toHaveLength(0);
+  expect(screen.getByRole("combobox", { name: "Send from" })).toHaveValue(line);
+  expect(screen.getByRole("combobox", { name: "Send from" })).toBeDisabled();
 });
 
 it("retains a suppressed message and does not report it as sent", async () => {
@@ -193,8 +195,8 @@ it("the IMMEDIATE composer send carries replyToMessageId (the answered inbox row
   // recipient (phone) and customer it was minted for.
   expect(src).toMatch(/onReply\(contactPhone, ourNumber, m\.customerId, \{ messageId: m\.id, messageType: m\.messageType \}\)/);
   expect(src).toMatch(/onReply\(contactPhone, thread\.ourNumber, thread\.customerId, latestInboundContext\(thread\.messages\)\)/);
-  expect(src).toMatch(/setReplyContext\(replyTo \? \{ \.\.\.replyTo, phone: phoneKey\(contactPhone\), customerId: customerId \|\| null \} : null\)/);
-  expect(src).toMatch(/setReplyContext\(replyTo \? \{ \.\.\.replyTo, phone: phoneKey\(phone\), customerId: customerId \|\| null \} : null\)/);
+  expect(src).toContain("selectSmsRecipient(contactPhone, ourNumber, customerId, replyTo)");
+  expect(src).toContain("selectSmsRecipient(phone, from, customerId, replyTo)");
 });
 
 it("clears a stale reply context when the compose target diverges, and always on a completed send (Codex #4623 P1)", async () => {
@@ -217,9 +219,6 @@ it("clears a stale reply context when the compose target diverges, and always on
   // The post-send reset block (shared by draft-approve, scheduled, and
   // immediate sends) unconditionally forgets the context too, so the next
   // compose session never inherits it from a completed one.
-  const resetBlock = src.slice(
-    src.indexOf('setToNumber(customer?.phone || "");'),
-    src.indexOf('setMsgBody("");') + 'setMsgBody("");'.length,
-  );
-  expect(resetBlock).toMatch(/setReplyContext\(null\);/);
+  // The conversation-scoped draft now owns both body and reply context.
+  expect(src).toContain("clearDraft(draftRevision)");
 });
