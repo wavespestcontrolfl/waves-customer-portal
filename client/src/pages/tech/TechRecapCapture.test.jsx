@@ -266,42 +266,72 @@ describe('TechRecapCapture upload recovery', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
-  it('stops an in-flight file when the selected service changes', async () => {
+  it('finishes confirmation for the original service when the selected service changes during PUT', async () => {
+    let finishPut;
+    const put = new Promise((resolve) => { finishPut = resolve; });
+    fetch.mockReturnValueOnce(put);
+    const request = vi.fn(async (path, options) => {
+      if (isListRequest(path, options)) return { items: [] };
+      if (path === '/tech/services/service-one/recap-media/presign') return { mediaId: 'old-media', uploadUrl: 'https://upload.test/old-media' };
+      if (path === '/tech/services/service-one/recap-media/old-media/confirm') return { ok: true, id: 'old-media', status: 'ready' };
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    const view = render(<TechRecapCapture service={SERVICE_ONE} request={request} />);
+    await tagPerimeter('old-visit.jpg');
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+      'https://upload.test/old-media',
+      expect.objectContaining({ method: 'PUT' }),
+    ));
+
+    view.rerender(<TechRecapCapture service={SERVICE_TWO} request={request} />);
+    await act(async () => finishPut({ ok: true, status: 200 }));
+
+    await waitFor(() => expect(pathsMatching(request, '/service-one/recap-media/old-media/confirm')).toHaveLength(1));
+    expect(pathsMatching(request, '/service-two/recap-media/old-media/confirm')).toHaveLength(0);
+    expect(screen.queryByText(/old-visit\.jpg/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Uploaded')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '+ Capture recap clip' })).toBeEnabled();
+  });
+
+  it('finishes the original service pipeline when navigation occurs during presign', async () => {
     let finishPresign;
     const presign = new Promise((resolve) => { finishPresign = resolve; });
     const request = vi.fn(async (path, options) => {
       if (isListRequest(path, options)) return { items: [] };
       if (path === '/tech/services/service-one/recap-media/presign') return presign;
+      if (path === '/tech/services/service-one/recap-media/presigned-media/confirm') return { ok: true, id: 'presigned-media', status: 'ready' };
       throw new Error(`Unexpected request: ${path}`);
     });
     const view = render(<TechRecapCapture service={SERVICE_ONE} request={request} />);
-    await tagPerimeter('old-visit.jpg');
+    await tagPerimeter('presign-navigation.jpg');
     await waitFor(() => expect(pathsMatching(request, '/service-one/recap-media/presign')).toHaveLength(1));
 
     view.rerender(<TechRecapCapture service={SERVICE_TWO} request={request} />);
-    await act(async () => finishPresign({ mediaId: 'old-media', uploadUrl: 'https://upload.test/old-media' }));
+    await act(async () => finishPresign({ mediaId: 'presigned-media', uploadUrl: 'https://upload.test/presigned-media' }));
 
-    expect(fetch).not.toHaveBeenCalled();
-    expect(screen.queryByText(/old-visit\.jpg/)).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '+ Capture recap clip' })).toBeEnabled();
+    await waitFor(() => expect(pathsMatching(request, '/service-one/recap-media/presigned-media/confirm')).toHaveLength(1));
+    expect(fetch).toHaveBeenCalledWith('https://upload.test/presigned-media', expect.objectContaining({ method: 'PUT' }));
+    expect(pathsMatching(request, '/service-two/recap-media/presigned-media')).toHaveLength(0);
+    expect(screen.queryByText('Uploaded')).not.toBeInTheDocument();
   });
 
-  it('does not continue an in-flight upload after unmount', async () => {
-    let finishPresign;
-    const presign = new Promise((resolve) => { finishPresign = resolve; });
+  it('finishes confirmation for the original service after unmount during PUT', async () => {
+    let finishPut;
+    const put = new Promise((resolve) => { finishPut = resolve; });
+    fetch.mockReturnValueOnce(put);
     const request = vi.fn(async (path, options) => {
       if (isListRequest(path, options)) return { items: [] };
-      if (path.endsWith('/presign')) return presign;
+      if (path.endsWith('/presign')) return { mediaId: 'unmounted-media', uploadUrl: 'https://upload.test/unmounted-media' };
+      if (path.endsWith('/unmounted-media/confirm')) return { ok: true, id: 'unmounted-media', status: 'ready' };
       throw new Error(`Unexpected request: ${path}`);
     });
     const view = render(<TechRecapCapture service={SERVICE_ONE} request={request} />);
     await tagPerimeter('unmounted.jpg');
-    await waitFor(() => expect(pathsMatching(request, '/presign')).toHaveLength(1));
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
 
     view.unmount();
-    await act(async () => finishPresign({ mediaId: 'unmounted-media', uploadUrl: 'https://upload.test/unmounted-media' }));
+    await act(async () => finishPut({ ok: true, status: 200 }));
 
-    expect(fetch).not.toHaveBeenCalled();
-    expect(pathsMatching(request, '/confirm')).toHaveLength(0);
+    await waitFor(() => expect(pathsMatching(request, '/service-one/recap-media/unmounted-media/confirm')).toHaveLength(1));
   });
 });

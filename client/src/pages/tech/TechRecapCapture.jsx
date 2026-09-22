@@ -34,7 +34,6 @@ const CHIPS_MORE = [
 ];
 const ROLE_LABELS = new Map([...CHIPS_TOP, ...CHIPS_MORE].map(({ role, label }) => [role, label]));
 const TERMINAL_CONFIRM_STATUSES = new Set([413, 422]);
-const CANCELLED_UPLOAD = Symbol('cancelled-upload');
 
 function readVideoDurationMs(file) {
   return new Promise((resolve) => {
@@ -137,9 +136,6 @@ export default function TechRecapCapture({ service, request }) {
     let draft = uploadDraft;
     const targetServiceId = draft.serviceId;
     const generation = serviceGenerationRef.current;
-    const assertCurrent = () => {
-      if (!isCurrentService(targetServiceId, generation)) throw CANCELLED_UPLOAD;
-    };
     if (!isCurrentService(targetServiceId, generation)) return;
     setPendingFile(null);
     setFailedUpload(null);
@@ -151,14 +147,14 @@ export default function TechRecapCapture({ service, request }) {
         const durationMs = draft.mediaType === 'video' ? await readVideoDurationMs(draft.file) : null;
         draft = { ...draft, durationMs };
       }
-      assertCurrent();
 
       if (draft.needsReconcile && draft.mediaId) {
         const reconciled = await reconcileConfirmDraft(draft, request);
-        assertCurrent();
         draft = reconciled.draft;
         if (reconciled.readyItems) {
-          setItemState({ serviceId: targetServiceId, items: reconciled.readyItems });
+          if (isCurrentService(targetServiceId, generation)) {
+            setItemState({ serviceId: targetServiceId, items: reconciled.readyItems });
+          }
           return;
         }
       }
@@ -170,7 +166,6 @@ export default function TechRecapCapture({ service, request }) {
         });
         draft = { ...draft, mediaId: presigned.mediaId, uploadUrl: presigned.uploadUrl };
       }
-      assertCurrent();
 
       if (!draft.uploaded) {
         const put = await fetch(draft.uploadUrl, { method: 'PUT', headers: { 'Content-Type': draft.contentType }, body: draft.file });
@@ -181,18 +176,16 @@ export default function TechRecapCapture({ service, request }) {
         }
         draft = { ...draft, uploaded: true };
       }
-      assertCurrent();
 
-      // Confirm is repeatable for one mediaId. Keeping that id means a lost
-      // response retries the same row instead of presigning a duplicate.
+      // Once PUT starts, finish confirmation against the captured original
+      // service even if the tech navigates away. The generation guard below
+      // still suppresses every stale UI update in the newly selected visit.
       draft = { ...draft, needsReconcile: true };
       await request(`/tech/services/${targetServiceId}/recap-media/${draft.mediaId}/confirm`, {
         method: 'POST', body: JSON.stringify({ durationMs: draft.durationMs }),
       });
-      assertCurrent();
-      await refresh(targetServiceId, generation);
+      if (isCurrentService(targetServiceId, generation)) await refresh(targetServiceId, generation);
     } catch (e) {
-      if (e === CANCELLED_UPLOAD || !isCurrentService(targetServiceId, generation)) return;
       const { retainedDraft, message } = await recoverUploadFailure(e, draft, request);
       if (isCurrentService(targetServiceId, generation)) {
         // Keep the in-memory File, role, and any completed upload stages so Retry
