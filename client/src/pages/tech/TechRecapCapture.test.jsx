@@ -337,6 +337,7 @@ describe('TechRecapCapture upload recovery', () => {
     expect(screen.queryByText(/discard-ready\.jpg/)).not.toBeInTheDocument();
     view.rerender(<TechRecapCapture service={SERVICE_ONE} request={request} />);
     expect(await screen.findByRole('button', { name: 'Discarding…' })).toBeDisabled();
+    expect(await screen.findByText('Uploaded')).toBeInTheDocument();
     view.rerender(<TechRecapCapture service={SERVICE_TWO} request={request} />);
     await act(async () => rejectFirstDelete(new Error('Delete unavailable')));
     expect(screen.queryByText(/Couldn’t discard/)).not.toBeInTheDocument();
@@ -351,6 +352,7 @@ describe('TechRecapCapture upload recovery', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Retry discard' }));
     await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+    expect(screen.queryByText('Uploaded')).not.toBeInTheDocument();
     expect(deleteAttempts).toBe(2);
     expect(pathsMatching(request, '/presign')).toHaveLength(1);
     expect(pathsMatching(request, '/confirm')).toHaveLength(1);

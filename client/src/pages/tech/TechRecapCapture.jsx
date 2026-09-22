@@ -103,12 +103,28 @@ function rememberFailedDraft(map, serviceId, draft, message) {
   map.set(serviceId, { draft, message });
 }
 
-function forgetFailedDraft(map, serviceId, attemptId) {
+function forgetFailedDraft(map, serviceId, attemptId, onChange = () => {}) {
   const retained = map.get(serviceId);
-  if (!retained || attemptId === undefined || retained.draft.attemptId === attemptId) map.delete(serviceId);
+  if (!retained || attemptId === undefined || retained.draft.attemptId === attemptId) {
+    const changed = map.delete(serviceId);
+    if (changed) onChange();
+    return changed;
+  }
+  return false;
 }
 
-export default function TechRecapCapture({ service, request }) {
+const mediaKey = (serviceId, mediaId) => `${serviceId}:${mediaId}`;
+const createRecoveryStore = () => ({ failedDrafts: new Map(), latestAttempts: new Map(), discardedMedia: new Set(), refreshServices: new Set(), nextAttempt: 0 });
+const captureButtonLabel = (uploading, failedUpload) => (
+  uploading ? `Uploading… (${uploading})` : failedUpload ? 'Resolve pending clip' : '+ Capture recap clip'
+);
+function requestRecoveryRefresh(ownedStore, recoveryStore, serviceId, notify) {
+  if (!ownedStore) return;
+  recoveryStore.refreshServices.add(serviceId);
+  notify();
+}
+
+export default function TechRecapCapture({ service, request, recoveryStore: ownedRecoveryStore = null, recoveryRevision = 0, onRecoveryChange = () => {} }) {
   const serviceId = service?.id;
   const [itemState, setItemState] = useState({ serviceId: null, items: [] });
   const [pendingFile, setPendingFile] = useState(null);
@@ -120,9 +136,8 @@ export default function TechRecapCapture({ service, request }) {
   const serviceIdRef = useRef(serviceId);
   const serviceGenerationRef = useRef(0);
   const mountedRef = useRef(false);
-  const uploadAttemptRef = useRef(0);
-  const latestUploadByServiceRef = useRef(new Map());
-  const failedDraftsRef = useRef(new Map());
+  const [localRecoveryStore] = useState(createRecoveryStore);
+  const recoveryStore = ownedRecoveryStore || localRecoveryStore;
   serviceIdRef.current = serviceId;
 
   const isCurrentService = (targetServiceId, generation) => (
@@ -133,7 +148,8 @@ export default function TechRecapCapture({ service, request }) {
     try {
       const data = await request(`/tech/services/${targetServiceId}/recap-media`);
       if (isCurrentService(targetServiceId, generation)) {
-        setItemState({ serviceId: targetServiceId, items: data?.items || [] });
+        const items = (data?.items || []).filter((item) => !recoveryStore.discardedMedia.has(mediaKey(targetServiceId, item.id)));
+        setItemState({ serviceId: targetServiceId, items });
       }
     } catch { /* keep the last confirmed list for this visit */ }
   };
@@ -142,7 +158,7 @@ export default function TechRecapCapture({ service, request }) {
     serviceIdRef.current = serviceId;
     const generation = serviceGenerationRef.current + 1;
     serviceGenerationRef.current = generation;
-    const retained = failedDraftsRef.current.get(serviceId);
+    const retained = recoveryStore.failedDrafts.get(serviceId);
     setPendingFile(null);
     setFailedUpload(retained?.draft || null);
     setShowMore(false);
@@ -154,6 +170,19 @@ export default function TechRecapCapture({ service, request }) {
       if (serviceGenerationRef.current === generation) serviceGenerationRef.current += 1;
     };
   }, [serviceId]); // eslint: react-hooks plugin is not configured in this repo;
+
+  useEffect(() => {
+    if (!ownedRecoveryStore) return;
+    const retained = recoveryStore.failedDrafts.get(serviceId);
+    setFailedUpload(retained?.draft || null);
+    setErr(retained?.message || null);
+    setItemState((current) => current.serviceId === serviceId
+      ? { ...current, items: current.items.filter((item) => !recoveryStore.discardedMedia.has(mediaKey(serviceId, item.id))) }
+      : current);
+    if (recoveryStore.refreshServices.delete(serviceId)) {
+      refresh(serviceId, serviceGenerationRef.current);
+    }
+  }, [ownedRecoveryStore, recoveryRevision, serviceId]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -171,14 +200,13 @@ export default function TechRecapCapture({ service, request }) {
     const targetServiceId = draft.serviceId;
     const generation = serviceGenerationRef.current;
     if (!isCurrentService(targetServiceId, generation)) return;
-    const attemptId = uploadAttemptRef.current + 1;
-    uploadAttemptRef.current = attemptId;
-    latestUploadByServiceRef.current.set(targetServiceId, attemptId);
-    forgetFailedDraft(failedDraftsRef.current, targetServiceId);
+    const attemptId = recoveryStore.nextAttempt + 1;
+    recoveryStore.nextAttempt = attemptId;
+    recoveryStore.latestAttempts.set(targetServiceId, attemptId);
+    forgetFailedDraft(recoveryStore.failedDrafts, targetServiceId, undefined, onRecoveryChange);
     draft = { ...draft, attemptId };
-    const canRetainAttempt = () => mountedRef.current
-      && latestUploadByServiceRef.current.get(targetServiceId) === attemptId;
-    const canApplyAttempt = () => canRetainAttempt() && serviceIdRef.current === targetServiceId;
+    const canRetainAttempt = () => recoveryStore.latestAttempts.get(targetServiceId) === attemptId;
+    const canApplyAttempt = () => mountedRef.current && canRetainAttempt() && serviceIdRef.current === targetServiceId;
     setPendingFile(null);
     setFailedUpload(null);
     setShowMore(false);
@@ -207,6 +235,8 @@ export default function TechRecapCapture({ service, request }) {
         if (reconciled.readyItems) {
           if (isCurrentService(targetServiceId, generation)) {
             setItemState({ serviceId: targetServiceId, items: reconciled.readyItems });
+          } else {
+            requestRecoveryRefresh(ownedRecoveryStore, recoveryStore, targetServiceId, onRecoveryChange);
           }
           return;
         }
@@ -240,11 +270,14 @@ export default function TechRecapCapture({ service, request }) {
       });
       if (serviceIdRef.current === targetServiceId) {
         await refresh(targetServiceId, serviceGenerationRef.current);
+      } else {
+        requestRecoveryRefresh(ownedRecoveryStore, recoveryStore, targetServiceId, onRecoveryChange);
       }
     } catch (e) {
       const { retainedDraft, message } = await recoverUploadFailure(e, draft, request);
       if (canRetainAttempt()) {
-        rememberFailedDraft(failedDraftsRef.current, targetServiceId, retainedDraft, message);
+        rememberFailedDraft(recoveryStore.failedDrafts, targetServiceId, retainedDraft, message);
+        onRecoveryChange();
       }
       if (canApplyAttempt()) {
         // Keep the in-memory File, role, and any completed upload stages so Retry
@@ -272,27 +305,36 @@ export default function TechRecapCapture({ service, request }) {
     const discarded = failedUpload;
     if (!discarded) return;
     if (!discarded.mediaId) {
-      forgetFailedDraft(failedDraftsRef.current, discarded.serviceId, discarded.attemptId);
+      forgetFailedDraft(recoveryStore.failedDrafts, discarded.serviceId, discarded.attemptId, onRecoveryChange);
       setFailedUpload(null);
       setErr(null);
       return;
     }
     const cleanupDraft = { ...discarded, retryable: false, discardRequested: true, discardPending: true };
-    rememberFailedDraft(failedDraftsRef.current, discarded.serviceId, cleanupDraft, err);
+    rememberFailedDraft(recoveryStore.failedDrafts, discarded.serviceId, cleanupDraft, err);
+    onRecoveryChange();
     setFailedUpload(cleanupDraft);
     try {
       await deleteKnownDraft(discarded, request);
-      const latest = latestUploadByServiceRef.current.get(discarded.serviceId) === discarded.attemptId;
-      if (latest) forgetFailedDraft(failedDraftsRef.current, discarded.serviceId, discarded.attemptId);
+      const latest = recoveryStore.latestAttempts.get(discarded.serviceId) === discarded.attemptId;
+      recoveryStore.discardedMedia.add(mediaKey(discarded.serviceId, discarded.mediaId));
+      if (latest) forgetFailedDraft(recoveryStore.failedDrafts, discarded.serviceId, discarded.attemptId);
+      onRecoveryChange();
       if (latest && mountedRef.current && serviceIdRef.current === discarded.serviceId) {
+        setItemState((current) => current.serviceId === discarded.serviceId
+          ? { ...current, items: current.items.filter((item) => item.id !== discarded.mediaId) }
+          : current);
         setFailedUpload(null);
         setErr(null);
       }
     } catch {
-      const latest = latestUploadByServiceRef.current.get(discarded.serviceId) === discarded.attemptId;
+      const latest = recoveryStore.latestAttempts.get(discarded.serviceId) === discarded.attemptId;
       const failedCleanup = { ...cleanupDraft, discardPending: false };
       const message = 'Couldn’t discard this clip from the visit. Retry discard.';
-      if (latest && mountedRef.current) rememberFailedDraft(failedDraftsRef.current, discarded.serviceId, failedCleanup, message);
+      if (latest) {
+        rememberFailedDraft(recoveryStore.failedDrafts, discarded.serviceId, failedCleanup, message);
+        onRecoveryChange();
+      }
       if (latest && mountedRef.current && serviceIdRef.current === discarded.serviceId) {
         setFailedUpload(failedCleanup);
         setErr(message);
@@ -358,7 +400,7 @@ export default function TechRecapCapture({ service, request }) {
         </div>
       )}
       <button type="button" disabled={captureDisabled} onClick={() => fileRef.current && fileRef.current.click()} style={{ width: '100%', padding: 12, borderRadius: 10, border: 'none', background: C.teal, color: '#04240f', fontWeight: 800, fontSize: 14, cursor: captureDisabled ? 'default' : 'pointer', opacity: captureDisabled ? 0.65 : 1 }}>
-        {uploading ? `Uploading… (${uploading})` : failedUpload ? 'Resolve pending clip' : '+ Capture recap clip'}
+        {captureButtonLabel(uploading, failedUpload)}
       </button>
 
       {/* zIndex 1000 like the other tech sheets: the bottom nav is fixed at 50 and later in the DOM, so at 50 it painted over the sheet's last rows. */}
