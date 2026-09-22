@@ -538,7 +538,7 @@ const PAYMENT_PERFORMATIVE_PROMISE_RE = new RegExp(
 // subject ("you were/have been charged") or active object ("we charged
 // you") — not only the transaction noun.
 const PAYMENT_CUSTOMER_TARGET_OUTCOME_RE = new RegExp(
-  `\\byou\\s+(?:(?:were|are|(?:have|has|had)\\s+been)\\s+)?(?:not(?:\\s+only)?\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:charged|billed|invoiced)\\b(?:\\s+${PAYMENT_AMOUNT})?`
+  `\\byou\\s+(?:were|are|(?:have|has|had)\\s+been)\\s+(?:not(?:\\s+only)?\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:charged|billed|invoiced)\\b(?:\\s+${PAYMENT_AMOUNT})?`
   + `|\\b${PAYMENT_ACTOR}(?:(?:\\s+(?:have|has|had)(?:n[\\x27\\u2019]t)?)\\s+|\\s+)(?:not(?:\\s+only)?\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:charged|billed|invoiced)\\s+you\\b(?:\\s+${PAYMENT_AMOUNT})?`,
   'gi',
 );
@@ -611,17 +611,16 @@ function paymentOutcomeIsConditional(text, claimStart, claim, outcome, outcomeSt
 }
 // Success that is only one unresolved side of an or-disjunction with a
 // failure outcome ("either approved or declined", "processed or
-// rejected") is not an assertion that it happened.
+// rejected") is not an assertion that it happened — a genuine failure
+// alternative is required; "either" alone does not exempt a claim whose
+// only alternative is a different success ("either approved or processed").
 const PAYMENT_FAILURE_OUTCOME_WORD_SOURCE = '(?:declined|denied|rejected|failed|unsuccessful|refused)';
-function paymentOutcomeIsDisjunctiveAlternative(text, claimStart, outcomeStart, matchEnd) {
+function paymentOutcomeIsDisjunctiveAlternative(text, matchEnd) {
   // "Or" is itself a clause-boundary token, so the disjunct's failure word
   // sits past the claim's own clause bound — scan the raw text after the
   // match, not the clause-scoped trailingClaim.
-  const clauseIntroduction = text.slice(claimStart, outcomeStart);
-  const leadingEither = /\beither\s+(?:(?:your|the|that|this|a|both|all|these|those)\s+)?$/i.test(clauseIntroduction);
   const afterMatch = text.slice(matchEnd, matchEnd + 80);
-  const trailingDisjunctFailure = new RegExp(`^\\s*(?:,\\s*)?or\\s+(?:it\\s+)?(?:was\\s+|is\\s+|has\\s+been\\s+)?${PAYMENT_FAILURE_OUTCOME_WORD_SOURCE}\\b`, 'i').test(afterMatch);
-  return leadingEither || trailingDisjunctFailure;
+  return new RegExp(`^\\s*(?:,\\s*)?or\\s+(?:it\\s+)?(?:was\\s+|is\\s+|has\\s+been\\s+)?${PAYMENT_FAILURE_OUTCOME_WORD_SOURCE}\\b`, 'i').test(afterMatch);
 }
 function paymentOutcomeIsInterrogative(text, claim, matchEnd, claimEnd) {
   const trailingClaim = text.slice(matchEnd, claimEnd);
@@ -844,7 +843,7 @@ function no_payment_outcome(value, record, { spoken }) {
         paymentOutcomeIsInterrogative(text, claim, matchEnd, claimEnd),
         !qualifierRefusal && paymentOutcomeHasTemporalCondition(text, claim, claimStart, match[0], match.index, trailingClaim),
         paymentOutcomeIsConditional(text, claimStart, claim, match[0], match.index, trailingClaim),
-        paymentOutcomeIsDisjunctiveAlternative(text, claimStart, match.index, matchEnd),
+        paymentOutcomeIsDisjunctiveAlternative(text, matchEnd),
         paymentOutcomeIsNegated(text, claim, match), !qualifierRefusal && clauseIsEpistemicallyHedged(claim),
         paymentOutcomeHasSpanishRefusal(claim, claim.lastIndexOf(match[0])),
         paymentOutcomeHasSpanishHedge(claim, claim.lastIndexOf(match[0])),

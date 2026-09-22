@@ -1071,6 +1071,7 @@ test.each([
   ['Either your card was charged or it was declined.', 'pass'],
   ['Your payment was approved.', 'fail'],
   ['Your payment was approved or your card was charged.', 'fail'],
+  ['Either your payment was approved or processed.', 'fail'],
 ])('disjunctive payment alternatives are unresolved: %s', (text, expected) => {
   expect(outcome(text)).toBe(expected);
 });
@@ -1084,6 +1085,7 @@ test.each([
   ['You were billed $129.', 'fail'],
   ['You have not been charged $129.', 'pass'],
   ['We did not charge you $129.', 'pass'],
+  ['You charged your phone before calling us.', 'pass'],
 ])('customer-as-target charges: %s', (text, expected) => {
   expect(outcome(text)).toBe(expected);
 });
