@@ -28,3 +28,8 @@ it('distinguishes initial loading from failed initial load', () => {
   expect(screen.getByRole('alert')).toHaveTextContent('could not be loaded');
   expect(screen.queryByText('Loading overdue visits…')).not.toBeInTheDocument();
 });
+
+it('keeps an unrequested feed hidden until loading or failure is reported', () => {
+  render(<StaleVisitsCard data={null} />);
+  expect(screen.queryByText('Stale visits')).not.toBeInTheDocument();
+});

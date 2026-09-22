@@ -9,6 +9,8 @@ import { RowLink } from "./RowLink";
 // operator lands on the day that still shows the visit as open. Only a
 // successfully loaded empty backlog hides the card; failures remain visible.
 export default function StaleVisitsCard({ data, error, pending = false, onRetry }) {
+  // A caller that has not requested the feed has no state to display yet.
+  if (!data && !pending && !error) return null;
   const visits = Array.isArray(data?.visits) ? data.visits : [];
   if (data && !visits.length && !error) return null;
   const total = Number(data?.total || visits.length);
