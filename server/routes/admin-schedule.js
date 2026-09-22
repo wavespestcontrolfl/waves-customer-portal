@@ -6186,6 +6186,31 @@ router.post('/', requireAdmin, async (req, res, next) => {
     void windowStartRaw; void windowEndRaw;
     if (!customerId || !scheduledDate || !serviceType) return res.status(400).json({ error: 'customerId, scheduledDate, serviceType required' });
 
+    // GitHub round 4 P0 (PR #4656): mirrors calculateUpdateFinancials
+    // (server/services/invoice.js, #4655) and InvoiceService.create's own
+    // gate check (#4658) — same field name, same error shape/code, so the
+    // client's existing generic POST-failure handling (surfacing e.message)
+    // already covers it with no special-casing needed. The freshness probe
+    // the client runs before submit only confirms the gate FOR THAT PROBE
+    // REQUEST; nothing bound the pricing/prepaid regime this WRITE actually
+    // saves under to what was previewed. A gate flip (or a rolling deploy
+    // routing the probe and this POST to pods reading different values)
+    // between the two requests let the probe pass while this route would
+    // have saved (and, for req.body.prepaid.totalAmount below, STAMPED
+    // VERBATIM with no server-side recomputation against the actual
+    // per-visit price) under the OPPOSITE regime — a booking whose prepaid
+    // total silently disagreed with what the visits actually bill.
+    // undefined (no field sent) skips the check entirely — every existing
+    // caller, and any client older than this slice, stays byte-identical.
+    // Checked before ANY read or write below.
+    const expectedDiscountStacking = req.body?.expected_discount_stacking;
+    if (expectedDiscountStacking !== undefined && expectedDiscountStacking !== discountStackingLive()) {
+      return res.status(409).json({
+        error: 'Discount rules changed since this was previewed — reload and try again',
+        code: 'DISCOUNT_STACKING_GATE_DIVERGED',
+      });
+    }
+
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 

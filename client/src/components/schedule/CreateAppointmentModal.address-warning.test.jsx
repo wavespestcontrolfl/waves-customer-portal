@@ -149,6 +149,14 @@ function installModalFetch({
       return Promise.resolve(jsonResponse({ ok: true, results: [{ conflicts: [] }] }));
     }
     if (url.includes('/admin/schedule/find-time')) return Promise.resolve(jsonResponse({ gated: true }));
+    // GitHub round 4 item 2 (Codex, blocked push 2 on PR #4656): the
+    // debounced server-preview verification fetch — not asserted on by
+    // most tests in this file, just needs a valid, non-throwing response
+    // so an in-flight 350ms timer from an EARLIER test never leaks a
+    // synchronous throw into a LATER one's execution window.
+    if (url.endsWith('/admin/schedule/preview') && options.method === 'POST') {
+      return Promise.resolve(jsonResponse({ regime: true, results: [] }));
+    }
     throw new Error(`Unhandled fetch in CreateAppointmentModal test: ${url}`);
   });
   vi.stubGlobal('fetch', fetcher);
@@ -1025,28 +1033,108 @@ describe('GitHub review round 1 on PR #4656', () => {
   // group's own POST, re-run per group in a multi-group (split seasonal)
   // save — not just once up front, before mosquito/address-ask awaits and
   // any earlier groups' own POSTs.
+  //
+  // UPDATED per the round 4 structural fix (Codex, blocked push 2 on PR
+  // #4656): the check now fires only for the group whose OWN pricing
+  // depends on the live gate (groupRegimeDependent), not for every group
+  // merely because a discount is selected somewhere. A SOLO fixed
+  // appointment discount with no line discount on either group is
+  // provably gate-invariant for BOTH groups (this engine's fixed-credit
+  // pool and cent-exact rounding produce the identical total either way —
+  // only a line discount actually interacting with the appointment
+  // discount in the SAME group can move the total), so scoping the
+  // discount to svc_first alone no longer exercises "checked per group,
+  // not just once" the way the original (unscoped) fixture did. Scoped to
+  // svc_second instead: the FIRST group (no discount at all) now legitimately
+  // skips the check and posts with no probe call, and the SECOND group's
+  // own check is the one that fires and catches the drift — still proving
+  // the check runs at EACH group's own turn, on the group that actually
+  // needs it, not once up front for the whole booking.
   it('re-checks the gate freshness before EVERY group\'s POST in a multi-group save, not only once up front', async () => {
     vi.spyOn(window, 'alert').mockImplementation(() => {});
     vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
-    // First group's own pre-POST probe still agrees with the pick-time
-    // snapshot; the SECOND group's probe finds the gate has since moved.
-    vi.mocked(ensureStackingFresh)
-      .mockResolvedValueOnce({ enabled: true, known: true })
-      .mockResolvedValueOnce({ enabled: false, known: true });
+    // The FIRST group carries no discount at all, so its own submit never
+    // calls ensureStackingFresh — this single mocked resolution is
+    // consumed by the SECOND group's own check, which finds the gate has
+    // since moved.
+    vi.mocked(ensureStackingFresh).mockResolvedValueOnce({ enabled: false, known: true });
     const { fetcher } = installModalFetch({ discounts: [{
       id: 'mil', name: 'Military Discount', discount_type: 'fixed_amount',
-      amount: 10, is_active: true, show_in_invoices: true,
+      amount: 10, is_active: true, show_in_invoices: true, service_key_filter: 'svc_second',
     }] });
     renderBooking();
     const submit = await addTwoSeasonalServices();
     const picker = await screen.findByLabelText('Appointment discount');
     fireEvent.change(picker, { target: { value: 'mil' } });
+    // GitHub round 4 item 2 (Codex, blocked push 2): a discount pick
+    // starts a new debounced server-preview verification round; Submit is
+    // held until it lands (previewConfirming) — wait for that here,
+    // exactly as the operator would.
+    await waitFor(() => expect(submit.disabled).toBe(false));
     fireEvent.click(submit);
-    // The first (unscoped -> first) group's POST lands; the second group's
-    // own pre-POST check catches the drift and refuses to post it.
+    // The first group (no discount, gate-invariant) posts with no probe;
+    // the second group's (scoped, discount-bearing) own pre-POST check
+    // catches the drift and refuses to post it.
     await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    expect(JSON.parse(schedulePosts(fetcher)[0][1].body).discountId).toBeUndefined();
     await screen.findByText('Could not confirm the discount-stacking status — retry before saving.');
     expect(schedulePosts(fetcher)).toHaveLength(1);
+    expect(ensureStackingFresh).toHaveBeenCalledTimes(1);
+  });
+
+  // Companion to the above: proves the NARROWING itself — a discount-free
+  // group in a multi-group save must not get stuck behind an unrelated
+  // group's own committed-then-drifted discount (the exact Codex P1: "the
+  // remaining group carries no discount... the booking cannot finish in
+  // this session").
+  it('a discount-free group still saves cleanly even after the OTHER group committed a discount and the gate then drifted', async () => {
+    vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const retry = vi.fn();
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry });
+    const secondScheduleRequest = deferred();
+    const { fetcher } = installModalFetch({
+      secondScheduleRequest,
+      discounts: [{
+        id: 'mil', name: 'Military Discount', discount_type: 'fixed_amount', amount: 10,
+        is_active: true, show_in_invoices: true, service_key_filter: 'svc_first',
+      }],
+    });
+    const booking = renderBooking();
+    const submit = await addTwoSeasonalServices();
+    const picker = await screen.findByLabelText('Appointment discount');
+    fireEvent.change(picker, { target: { value: 'mil' } });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+    // First (discount-bearing, scoped) commits; Second (no discount at
+    // all) is still in flight.
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(2));
+    expect(JSON.parse(schedulePosts(fetcher)[0][1].body).discountId).toBe('mil');
+    await act(async () => {
+      secondScheduleRequest.resolve(jsonResponse({ error: 'failed' }, { ok: false, status: 500 }));
+      await secondScheduleRequest.promise;
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Schedule appointment' }).disabled).toBe(false));
+
+    // The gate drifts off AFTER the discount-bearing group already
+    // committed. Per the round-4 :3513 fix, the frozen snapshot never
+    // updates again — but the SECOND group carries no discount at all, so
+    // its own retry must not get stuck behind that permanently-diverged
+    // snapshot.
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: false, known: true, retry });
+    booking.view.rerender(<CreateAppointmentModal
+      defaultCustomer={CUSTOMER}
+      defaultDate={booking.scheduledDate}
+      defaultWindowStart="09:00"
+      onClose={booking.onClose}
+      onCreated={booking.onCreated}
+      onChange={booking.onChange}
+    />);
+    const submit2 = screen.getByRole('button', { name: 'Schedule appointment' });
+    expect(submit2.disabled).toBe(false);
+    fireEvent.click(submit2);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(3));
+    expect(JSON.parse(schedulePosts(fetcher)[2][1].body).discountId).toBeUndefined();
+    expect(JSON.parse(schedulePosts(fetcher)[2][1].body).expected_discount_stacking).toBeUndefined();
   });
 
   // P2 (:2021): the custom fixed-amount prompt only checked `amount > 0`,
@@ -1198,6 +1286,7 @@ describe('GitHub review round 2 on PR #4656', () => {
     const submit = await addTwoSeasonalServices();
     const picker = await screen.findByLabelText('Appointment discount');
     fireEvent.change(picker, { target: { value: 'mil' } });
+    await waitFor(() => expect(submit.disabled).toBe(false));
     fireEvent.click(submit);
     // First group's POST lands; the second is still in flight.
     await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(2));
@@ -1324,6 +1413,7 @@ describe('GitHub review round 2 follow-up on PR #4656 (P0 :2571, P1 :4483)', () 
     const submit = await addTwoSeasonalServices();
     const picker = await screen.findByLabelText('Appointment discount');
     fireEvent.change(picker, { target: { value: 'mil' } });
+    await waitFor(() => expect(submit.disabled).toBe(false));
     fireEvent.click(submit);
     // First (unscoped -> group[0], "First seasonal service") group's POST
     // lands carrying the discount; the second is still in flight.
@@ -1381,6 +1471,7 @@ describe('GitHub review round 2 follow-up on PR #4656 (P0 :2571, P1 :4483)', () 
     await screen.findByText('Military Discount: -$10.00');
 
     const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    await waitFor(() => expect(submit.disabled).toBe(false));
     fireEvent.click(submit);
     // Now inside the pre-POST address-ask recheck await -- no group has
     // committed yet (createdGroupKeysRef is still empty), but the
@@ -1428,6 +1519,7 @@ describe('GitHub review round 3 on PR #4656', () => {
     const submit = await addTwoSeasonalServices();
     const picker = await screen.findByLabelText('Appointment discount');
     fireEvent.change(picker, { target: { value: 'mil' } });
+    await waitFor(() => expect(submit.disabled).toBe(false));
     fireEvent.click(submit);
     await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(2));
     expect(JSON.parse(schedulePosts(fetcher)[0][1].body).discountId).toBe('mil');
@@ -1492,6 +1584,7 @@ describe('GitHub review round 3 on PR #4656', () => {
     const submit = await addTwoSeasonalServices();
     const picker = await screen.findByLabelText('Appointment discount');
     fireEvent.change(picker, { target: { value: 'mil' } });
+    await waitFor(() => expect(submit.disabled).toBe(false));
     fireEvent.click(submit);
     // "First seasonal service" (unrelated to the discount's own scope)
     // commits; "Second seasonal service" (the discount's OWN group) is
@@ -1644,6 +1737,7 @@ describe('GitHub review round 3 disclosed audit item on PR #4656', () => {
 
     const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
     const submitBtn = screen.getByRole('button', { name: 'Schedule appointment' });
+    await waitFor(() => expect(submitBtn.disabled).toBe(false));
     fireEvent.click(submitBtn);
     // With zero groups committed (created: 0), submitFailureNotice routes
     // the block through the blocking alert, not a persistent on-screen
@@ -1729,6 +1823,7 @@ describe('GitHub review round 4 on PR #4656', () => {
     // -- $55.01 net for First, $100 untouched for Second -- $144.98 total.
     await screen.findByText((_, node) => node?.textContent === 'Total: $144.98');
 
+    await waitFor(() => expect(submit.disabled).toBe(false));
     fireEvent.click(submit);
     await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(2));
     // First (the discount's own, scoped group) committed; Second is still
@@ -1760,5 +1855,98 @@ describe('GitHub review round 4 on PR #4656', () => {
     // compound=false total would show for the ALREADY-SAVED First group.
     expect(screen.getByText((_, node) => node?.textContent === 'Total: $144.98')).toBeTruthy();
     expect(screen.queryByText((_, node) => node?.textContent === 'Total: $139.97')).toBeNull();
+  });
+});
+
+describe('GitHub round 4 item 2: the preview request matches the real POST body (PR #4656)', () => {
+  const previewPost = (fetcher) => fetcher.mock.calls.filter(
+    ([url, options]) => String(url).endsWith('/admin/schedule/preview') && options?.method === 'POST',
+  );
+  const groupFromPreview = (fetcher, matchName) => {
+    const [, options] = previewPost(fetcher).at(-1);
+    const groups = JSON.parse(options.body).groups;
+    return groups.find((g) => g.serviceType === matchName);
+  };
+
+  // The $142.47 case (fixed appointment credit + line percentage,
+  // cadence-sorted): previewGroupRequests is built from the SAME
+  // lineBaseAmount/lineDiscountFields/lineDiscountAmount closures the real
+  // submit loop itself uses, so the preview request and the real POST
+  // describe the identical group by construction — proven here by
+  // comparing the two request bodies directly, not re-deriving the price.
+  it('the $142.47 fixed-credit + line-percentage preview request matches the real POST for the same group', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    const { fetcher } = installModalFetch({
+      basePrice: 100,
+      discounts: [
+        { id: 'half-off', name: 'Half Off', discount_type: 'percentage', amount: 50, is_active: true, show_in_invoices: true },
+        { id: 'credit', name: 'Ten Oh Three', discount_type: 'fixed_amount', amount: 10.03, is_active: true, show_in_invoices: true },
+      ],
+    });
+    renderBooking();
+    fireEvent.change(screen.getByPlaceholderText('Search services'), { target: { value: 'Quarterly' } });
+    fireEvent.click(await screen.findByRole('button', { name: /Quarterly recurring service/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Add service/ }));
+    fireEvent.change(screen.getByPlaceholderText('Search to add service'), { target: { value: 'Monthly' } });
+    fireEvent.click(await screen.findByRole('button', { name: /Monthly recurring service/ }));
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for Quarterly recurring service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Half Off/ }));
+    const apptPicker = await screen.findByLabelText('Appointment discount');
+    fireEvent.change(apptPicker, { target: { value: 'credit' } });
+    await screen.findByText((_, node) => node?.textContent === 'Total: $142.47');
+
+    await waitFor(() => expect(previewPost(fetcher).length).toBeGreaterThan(0));
+    const previewGroup = groupFromPreview(fetcher, 'Monthly recurring service');
+    expect(previewGroup).toMatchObject({
+      discountId: 'credit', discountType: 'fixed_amount', discountAmount: 10.03,
+      serviceAddons: [expect.objectContaining({ discountId: 'half-off', discountType: 'percentage', discountAmount: 50 })],
+    });
+
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    const realBody = JSON.parse(schedulePosts(fetcher)[0][1].body);
+    // The SAME group, addressed by the SAME server-side field names,
+    // carries the SAME discount identity/amounts either way. 'half-off'
+    // rides the Quarterly line, which is the ADDON in server (monthly-
+    // first) order — same as previewGroup.serviceAddons[0] above.
+    expect(realBody.discountId).toBe(previewGroup.discountId);
+    expect(realBody.discountAmount).toBe(previewGroup.discountAmount);
+    expect(realBody.serviceAddons[0].discountId).toBe(previewGroup.serviceAddons[0].discountId);
+    expect(realBody.serviceAddons[0].discountAmount).toBe(previewGroup.serviceAddons[0].discountAmount);
+  });
+
+  // The $39.32 case (line-only, collectPrepay): same parity proof for a
+  // group with no appointment-level discount at all.
+  it('the $39.32 line-only prepay preview request matches the real POST for the same group', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    const { fetcher } = installModalFetch({
+      basePrice: 20.70,
+      discounts: [{ id: 'five-pct', name: 'Five Percent', discount_type: 'percentage', amount: 5, is_active: true, show_in_invoices: true }],
+    });
+    renderBooking();
+    await addOneSeasonalService();
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for First seasonal service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Five Percent/ }));
+    fireEvent.change(screen.getByPlaceholderText('Ongoing'), { target: { value: '2' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Collect prepayment' }));
+    await screen.findByText((_, node) => node?.textContent === '2 visits × $19.66 = $39.32');
+
+    await waitFor(() => expect(previewPost(fetcher).length).toBeGreaterThan(0));
+    const previewGroup = groupFromPreview(fetcher, 'First seasonal service');
+    expect(previewGroup).toMatchObject({
+      primaryLinePrice: 20.70,
+      primaryLineDiscount: expect.objectContaining({ discountId: 'five-pct', discountType: 'percentage', discountAmount: 5 }),
+      isRecurring: true, collectPrepay: true,
+    });
+
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    const realBody = JSON.parse(schedulePosts(fetcher)[0][1].body);
+    expect(realBody.primaryLineDiscount?.discountId).toBe(previewGroup.primaryLineDiscount.discountId);
+    expect(realBody.primaryLineDiscount?.discountAmount).toBe(previewGroup.primaryLineDiscount.discountAmount);
   });
 });

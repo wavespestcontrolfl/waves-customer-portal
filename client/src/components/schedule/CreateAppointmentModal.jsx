@@ -2786,6 +2786,122 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     });
     return stacked.total;
   };
+  // GitHub round 4 P1 (Codex, blocked push 2 on PR #4656): the submit-time
+  // freshness check used to fire for EVERY group whenever
+  // appointmentDiscountState was truthy at all — not whether THIS group's
+  // own pricing depends on the live gate. Combined with the round-4 :3513
+  // fix (appointmentDiscountGateSnapshot freezes permanently once the
+  // discount's own group commits), a later live drift then made
+  // appointmentDiscountCompound disagree with the live gate FOREVER — so
+  // every remaining group's submit, even one carrying no discount at all,
+  // kept re-entering this check and failing it, and Retry could never fix
+  // it (there is nothing left to reconcile for an unrelated group).
+  //
+  // Deliberately the SIMPLE, conservative bar the coordinator specified —
+  // carries the appointment discount, OR carries a line discount — rather
+  // than a cleverer "compute both regimes and compare" derivation. That
+  // empirical compare was tried first and correctly found that a LONE line
+  // discount with no appointment discount at all produces the identical
+  // total either way under this engine's current math (confirmed both by
+  // hand-tracing stackVisitDiscounts and by running it directly — a
+  // regression introduced by slice 9's own cent-exact fix landing in
+  // calculateDiscountDollars unconditionally). But trusting a derivation
+  // of exactly which combinations can and cannot differ is precisely the
+  // class of subtle bug this file has chased for 13+ rounds — a
+  // max_discount_dollars cap, a percent-exclusion interaction, or a
+  // combination not yet exercised could still diverge, and a missed
+  // revalidation here is a real money bug while an unneeded one just costs
+  // a round-trip. Subsumes the old collectPrepay/manual-prepay-specific
+  // check too — groupStackedPerVisitTotal (the prepay total's own input)
+  // depends on the exact same two conditions.
+  const groupRegimeDependent = (group, carriesDiscount) => (
+    carriesDiscount || group.lines.some((s) => s.lineDiscount)
+  );
+  // GitHub round 4 item 2 (Codex, blocked push 2 on PR #4656):
+  // server-authoritative preview verification. Built with the SAME fields
+  // the submit loop itself posts (appointmentGroupRequestBody /
+  // recurringGroupRequestFields / lineDiscountFields all read from these
+  // same closures) so the request this sends and the request
+  // submitAppointments actually posts describe the identical booking —
+  // preview==create parity by construction against POST /admin/schedule/preview,
+  // the literal same buildAppointmentPricing the create route calls,
+  // rather than a second hand-derivation. Built ONLY for groups whose own
+  // pricing depends on the live gate (groupRegimeDependent) — a plain,
+  // discount-free booking has nothing here to verify and this array stays
+  // empty, so previewConfirming below never blocks it.
+  const previewGroupRequests = useMemo(() => {
+    if (!selectedCustomer) return [];
+    return appointmentSubmitGroups
+      .map((group) => {
+        const key = groupKey(group);
+        const carriesDiscount = !!appointmentDiscount && !!appointmentDiscountGroup && key === appointmentDiscountGroup.key;
+        if (!groupRegimeDependent(group, carriesDiscount)) return null;
+        const [primary, ...extras] = group.lines;
+        const groupIsRecurring = group.cadence !== 'one_time';
+        const primaryPreserveZero = isOneTimeMosquitoLine(primary) && lineHasEnteredPrice(primary);
+        return {
+          key,
+          customerId: selectedCustomer.id,
+          scheduledDate: apptDate,
+          serviceType: primary?.name,
+          serviceId: primary?.id || null,
+          primaryLinePrice: amountOrNull(lineBaseAmount(primary), primaryPreserveZero),
+          primaryLineDiscount: primary?.lineDiscount ? lineDiscountFields(primary.lineDiscount, lineDiscountAmount(primary)) : undefined,
+          serviceAddons: extras.map((s) => {
+            const preserveZero = isOneTimeMosquitoLine(s) && lineHasEnteredPrice(s);
+            return {
+              name: s.name,
+              basePrice: amountOrNull(lineBaseAmount(s), preserveZero),
+              ...lineDiscountFields(s.lineDiscount, lineDiscountAmount(s)),
+            };
+          }),
+          ...(carriesDiscount ? {
+            discountId: appointmentDiscount.id,
+            discountType: appointmentDiscount.discount_type,
+            discountAmount: appointmentDiscount.amount,
+          } : {}),
+          isRecurring: groupIsRecurring,
+          recurringCount: groupIsRecurring ? (plannedRecurringCount(recurringCount) ?? undefined) : undefined,
+          collectPrepay: groupIsRecurring ? !!collectPrepay : undefined,
+        };
+      })
+      .filter(Boolean);
+    // appointmentSubmitGroups is recomputed fresh every render from
+    // `services`, so listing it (not just services) is what actually
+    // catches a cadence-only edit with no discount change at all — same
+    // reasoning as existingSelectionConflict's own dependency list above.
+  }, [appointmentSubmitGroups, services, selectedCustomer, apptDate, appointmentDiscount, appointmentDiscountGroup, recurringCount, collectPrepay]);
+  const previewRequestKey = previewGroupRequests.length ? JSON.stringify(previewGroupRequests) : '';
+  const [serverPreview, setServerPreview] = useState({ status: 'idle', forKey: '', regime: null, byKey: new Map() });
+  useEffect(() => {
+    if (!previewRequestKey) {
+      setServerPreview({ status: 'idle', forKey: '', regime: null, byKey: new Map() });
+      return undefined;
+    }
+    setServerPreview((prev) => (prev.forKey === previewRequestKey ? prev : { ...prev, status: 'loading' }));
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const groups = JSON.parse(previewRequestKey);
+        const r = await adminFetch('/admin/schedule/preview', { method: 'POST', body: JSON.stringify({ groups }) });
+        if (cancelled) return;
+        const byKey = new Map((Array.isArray(r?.results) ? r.results : []).map((row) => [row.key, row]));
+        setServerPreview({ status: 'ready', forKey: previewRequestKey, regime: r?.regime ?? null, byKey });
+      } catch (_e) {
+        // A failed probe must not read as "confirmed" — Submit stays
+        // gated (previewConfirming below), matching manualPrepayPlan's
+        // own "fail toward unavailable" contract for its preview fetch.
+        if (!cancelled) setServerPreview({ status: 'error', forKey: previewRequestKey, regime: null, byKey: new Map() });
+      }
+    }, 350);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [previewRequestKey]);
+  // Submit is held while ANY regime-dependent group's server-confirmed
+  // preview hasn't landed for the CURRENT inputs yet — the button reads
+  // "Confirming…" during this window (below) rather than a plain
+  // disabled state with no explanation.
+  const previewConfirming = previewGroupRequests.length > 0
+    && !(serverPreview.status === 'ready' && serverPreview.forKey === previewRequestKey);
   const stackedLineDiscountAmount = (svc) => {
     const i = services.indexOf(svc);
     const restated = appointmentDiscountPreview.lines?.[i];
@@ -3228,36 +3344,35 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           // GitHub review round 3 disclosed audit item: this used to gate
           // on appointmentDiscountState alone, but groupStackedPerVisitTotal
           // has used the stacking gate for its ROUNDING regime since round 1
-          // even with NO appointment discount selected at all (a $20.70
-          // line at 5% off previews/posts $39.32 for two visits stacked,
-          // $39.34 legacy) — a gate flip before submit for a LINE-only
-          // prepay-collecting booking reached the server with no
-          // revalidation at all. Now also fires whenever this group's own
-          // prepaid.totalAmount payload (isRecurring && collectPrepay)
-          // depends on that rounding, i.e. it carries any line discount.
-          // GitHub review round 4 P1 (PR #4656, :3185): manualPrepayPlan
-          // (the "Bill annual prepay" control) prices its preview through
-          // this SAME groupStackedPerVisitTotal/regime — a line-discounted
-          // recurring booking with billAsManualPrepay armed depends on the
-          // gate exactly like a collectPrepay booking does, but this check
-          // only ever covered collectPrepay. A gate flip after the
-          // displayed annual-prepay preview but before THIS group's POST
-          // went undetected here: the appointment still booked, the server
-          // committed the other rounding regime for the visit price, and
-          // the post-booking assertManualPrepayMintEligible comparison
-          // (which re-fetches and compares against what the operator
-          // approved) then rejected the changed total — the appointment
-          // booked but the annual-prepay invoice was never created, a
-          // silent-to-the-operator-until-then loss of the sale. Matched by
-          // group identity (manualPrepayPlan.targetKey), the same way the
-          // mint path itself identifies which created series the prepay
-          // covers — a stray OTHER group's line discount must not force
-          // this revalidation on a booking that was never going to mint.
-          const groupPrepayDependsOnRounding = group.lines.some((s) => s.lineDiscount) && (
-            (isRecurring && collectPrepay)
-            || (billAsManualPrepay && manualPrepayPlan.targetKey === key)
-          );
-          if (appointmentDiscountState || groupPrepayDependsOnRounding) {
+          // even with NO appointment discount selected at all — a gate flip
+          // before submit for a LINE-only prepay-collecting booking reached
+          // the server with no revalidation at all.
+          //
+          // GitHub round 4 P1 (Codex, blocked push 2): REPLACED the
+          // appointmentDiscountState-or-collectPrepay/manualPrepay OR-chain
+          // above with groupRegimeDependent(group, carriesAppointmentDiscount)
+          // (defined near groupStackedPerVisitTotal) — it fires only when
+          // THIS group's own pricing can actually differ between regimes
+          // (carries the appointment discount, or a line discount whose
+          // combination with it moves the total; a group with no discount
+          // at all, or a line discount that provably can't move, never
+          // enters this check), and subsumes the prepay-specific cases
+          // since groupStackedPerVisitTotal is the same computation.
+          // Un-narrowed, this used to fire for EVERY group purely because
+          // appointmentDiscountState was truthy globally — combined with
+          // the round-4 :3513 fix (the frozen snapshot never updates again
+          // once the discount's own group commits), a later live drift made
+          // every REMAINING group's own submit permanently fail this check,
+          // even one carrying no discount at all, with no way to Retry past
+          // it (there is nothing left to reconcile for an unrelated group).
+          const groupOwnPricingRegimeDependent = groupRegimeDependent(group, carriesAppointmentDiscount);
+          // The CONFIRMED live regime this group's write is bound to —
+          // undefined (field omitted) whenever nothing about this group's
+          // own total can move with the gate, matching #4655/#4658's own
+          // "a write whose total can't move with the regime omits the
+          // field entirely" contract exactly.
+          let confirmedGroupRegime;
+          if (groupOwnPricingRegimeDependent) {
             const fresh = await ensureStackingFresh();
             assertSubmitCurrent();
             if (!fresh.known || fresh.enabled !== appointmentDiscountCompound) {
@@ -3269,6 +3384,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               };
               break;
             }
+            // The LIVE value this freshness check just confirmed (already
+            // proven equal to appointmentDiscountCompound above) — the
+            // server's own POST /admin/schedule refuses a mismatch against
+            // its live discountStackingLive() with a retryable 409
+            // (GitHub round 4 P0) rather than silently saving the other
+            // regime's math, mirroring #4655/#4658's identical contract.
+            confirmedGroupRegime = fresh.enabled;
+            body.expected_discount_stacking = confirmedGroupRegime;
           }
           bookingPostAttempted = true;
           const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
@@ -3716,7 +3839,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     bookingPropertyState,
     alreadySubmitting: saving,
     addressAskPending,
-  }) && !discountSaveBlockedReason;
+  }) && !discountSaveBlockedReason && !previewConfirming;
   const hasRecurringServices = services.some((s) => s.cadence && s.cadence !== 'one_time');
   const firstCustomRecurringIndex = services.findIndex((s) => s.cadence === 'custom');
   const weekendRuleValue = skipWeekends ? weekendShift : 'allow';
