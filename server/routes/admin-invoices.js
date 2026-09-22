@@ -1067,7 +1067,7 @@ function resolvedSendOutcome(result) {
 // POST / — create invoice manually
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
-    const { customerId, serviceRecordId, title, lineItems, notes, emailMessage, dueDate, taxRate, discountIds, serviceDate } = req.body;
+    const { customerId, serviceRecordId, title, lineItems, notes, emailMessage, dueDate, taxRate, discountIds, serviceDate, expected_discount_stacking: expectedDiscountStacking } = req.body;
     if (!customerId) return res.status(400).json({ error: 'customerId required' });
     if (!lineItems?.length) return res.status(400).json({ error: 'lineItems required' });
     if (serviceDate && !/^\d{4}-\d{2}-\d{2}$/.test(String(serviceDate))) {
@@ -1104,6 +1104,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // invoice to a SECONDARY parked visit only via scheduled_service_id.
       ...(linkedScheduledServiceId ? { scheduledServiceId: linkedScheduledServiceId } : {}),
       title, lineItems, notes, emailMessage, dueDate, taxRate, discountIds, serviceDate,
+      ...(expectedDiscountStacking !== undefined ? { expectedDiscountStacking } : {}),
     };
     const invoice = (linkedScheduledServiceId || stampedEstimateId)
       ? await db.transaction(async (trx) => {
@@ -1725,6 +1726,14 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     if (!invoice) return res.status(404).json({ error: 'Not found' });
     res.json(invoice);
   } catch (err) {
+    // Codex pre-push audit P1 (round 4 on PR #4655): the discount-stacking
+    // gate-divergence check (calculateUpdateFinancials) throws a plain
+    // isOperational/statusCode error, same shape POST / already surfaces —
+    // never matches the editability-guard message regex below, so it must
+    // be checked first or it would fall through to the generic next(err).
+    if (err?.isOperational && err.statusCode) {
+      return res.status(err.statusCode).json({ error: err.message, code: err.code });
+    }
     // Editability guards (status race, live PaymentIntent, payment plan,
     // annual prepay, deposit/account credit, applied-money/dispute fence)
     // are operator-actionable conflicts, not server faults — surface them
