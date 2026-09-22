@@ -922,17 +922,24 @@ test.each([
   expect(outcome(text)).toBe(expected);
 });
 
-// A negating adverb (un-/wrongly/incorrectly/etc.) denies success outright
-// and must not be treated as a benign filler adverb.
+// A true failure adverb ("unsuccessfully") denies that the action
+// succeeded and must not be treated as benign filler — but a mistake
+// modifier (wrongly/incorrectly/mistakenly/erroneously/improperly) still
+// asserts the charge/approval occurred; it disputes correctness, not
+// occurrence, and must not be excluded from the filler-adverb group.
 test.each([
   ['Your payment was unsuccessfully processed.', 'pass'],
   ['We unsuccessfully processed your payment.', 'pass'],
-  ['Your payment was wrongly charged.', 'pass'],
-  ['Your payment was incorrectly approved.', 'pass'],
-  ['Your payment was mistakenly approved.', 'pass'],
-  ['Your payment was falsely approved.', 'pass'],
+  ['Your payment was wrongly charged.', 'fail'],
+  ['Your payment was incorrectly approved.', 'fail'],
+  ['Your payment was mistakenly approved.', 'fail'],
+  ['We mistakenly charged your card.', 'fail'],
+  ['Your card was incorrectly charged.', 'fail'],
+  ['Your payment was falsely approved.', 'fail'],
+  ['Your payment was erroneously approved.', 'fail'],
+  ['Your card was improperly charged.', 'fail'],
   ['Your payment was already approved.', 'fail'],
-])('negating adverbs deny success: %s', (text, expected) => {
+])('failure adverbs deny success, mistake modifiers do not: %s', (text, expected) => {
   expect(outcome(text)).toBe(expected);
 });
 
