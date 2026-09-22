@@ -35,7 +35,18 @@
 // derivation means for its own purposes.
 function deriveLegacyPrimarySubmission({ primaryLinePrice, estimatedPrice, addons }) {
   const addonsKnown = Array.isArray(addons);
-  if (addonsKnown && primaryLinePrice != null && primaryLinePrice !== '') {
+  // Codex pre-push audit P1 (round 5 on #4657, :6083): primaryLinePrice is
+  // the primary line's own GROSS (before any appointment-level discount —
+  // see the PUT route's own `updates.primary_line_price = primaryGross`)
+  // and estimatedPrice is the visit's stored NET total; they only need
+  // telling apart when there's at least one add-on line to separate the
+  // primary FROM. A zero-add-on visit has nothing to separate — trusting
+  // the structured (gross) column there fed the GROSS into a field whose
+  // whole contract is "what an unchanged save resubmits," discarding a
+  // stored appointment-level discount on the very next save (a Month-view
+  // row supplies primaryLinePrice + serviceAddons: [] as of the month-view
+  // parity fix, so this stopped being an unreachable combination).
+  if (addonsKnown && addons.length > 0 && primaryLinePrice != null && primaryLinePrice !== '') {
     const structured = Number(primaryLinePrice);
     return Number.isFinite(structured) ? structured : null;
   }

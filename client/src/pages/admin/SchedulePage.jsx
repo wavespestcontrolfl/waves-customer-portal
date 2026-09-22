@@ -2438,7 +2438,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         // flat-net (Remove) or fresh-pick (new discount) branch post that
         // net figure as the line's new permanent basePrice — silently
         // erasing the true gross and, on Remove, the discount's own record.
-        const firstTouch = !l.lineDiscountTouched && l._origDiscountType && l._origBasePrice != null;
+        // Codex pre-push audit P2 (round 5 on #4657, :2441): but ONLY when
+        // Price still holds the seeded NET — an operator who already
+        // retyped Price (e.g. $55 -> $70) before ever touching the discount
+        // control has nothing here to snap FROM; overwriting that edit with
+        // _origBasePrice ($60) would silently discard it.
+        const firstTouch = !l.lineDiscountTouched && l._origDiscountType && l._origBasePrice != null
+          && !priceEditedFromSeed(l);
         return {
           ...l,
           lineDiscount: picked,
@@ -2943,17 +2949,27 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     // Revalidate right before POSTING money — the hook polls, but a gate
     // flip between the last probe and this click would still save under the
     // semantics the preview used. Codex pre-push audit P1 (round 4 on
-    // #4657, :2936): this used to scope to "appointment discount + a line
-    // discount on the same visit" — a MARKED visit with only a single
-    // capped line stamp also changes semantics across the gate (canonical
-    // frozen-cap restack on, cap-unaware applyDiscount off), so scoping by
-    // "which discounts are visibly in play" can't tell which saves are
-    // actually gate-sensitive. The server preview is unconditional now
-    // (every save has some total to confirm), so this re-probe runs for
-    // every save too — ordered AFTER setSaving so the await cannot widen
-    // the double-click window; alert() is how this handler already reports
-    // a blocking validation failure (see the time-on-site check below).
-    {
+    // #4657, :2936): running this ONLY for "appointment discount + a line
+    // discount together" missed a MARKED visit with just a single capped
+    // line stamp (canonical frozen-cap restack on, cap-unaware applyDiscount
+    // off) — round 4 made it unconditional instead. Codex pre-push audit P2
+    // (round 5 on #4657, :2958): unconditional went too far the OTHER way —
+    // an ordinary notes/scheduling-only save on an undiscounted visit has
+    // no money that changes across the gate at all, so it should not
+    // depend on this endpoint's own uptime (a 15s stacking-probe failure
+    // backoff would otherwise block an unrelated edit). Re-scoped to every
+    // save whose economics genuinely ARE gate-sensitive: any appointment
+    // discount, any line discount at all (a fresh pick OR an untouched
+    // stored stamp — effectiveLineDiscount already covers both — capped or
+    // not, which is exactly what round 4's own repro needed), or an
+    // existing prepay balance (its reconciliation depends on the exact
+    // total the gate itself changes). Ordered AFTER setSaving so the await
+    // cannot widen the double-click window; alert() is how this handler
+    // already reports a blocking validation failure (see the time-on-site
+    // check below).
+    const lineDiscountGateSensitive = serviceLines.some((l) => !!effectiveLineDiscount(l));
+    const prepayGateSensitive = service.prepaidAmount != null && Number(service.prepaidAmount) > 0;
+    if (appointmentDiscountSelected || lineDiscountGateSensitive || prepayGateSensitive) {
       const fresh = await ensureStackingFresh();
       if (!fresh.known || fresh.enabled !== stackingEnabled) {
         savingRef.current = false;

@@ -1106,3 +1106,73 @@ it('round 4 (:2850): a line preset picked while Price is blank blocks Save inste
   // Blocked at the client — no save attempt reaches the wire at all.
   expect(writes().filter(([url]) => url.includes('/update-details') && !url.includes('/preview'))).toHaveLength(0);
 });
+
+// ---------------------------------------------------------------------
+// Round 5 on #4657 (GitHub review): two bounded edge cases in the
+// per-line reprice/remove flow and the submit-time gate re-probe's own
+// scope.
+// ---------------------------------------------------------------------
+
+it('round 5 (:2441): repricing a stamped line BEFORE touching its discount control survives a subsequent fresh pick', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(screen.getAllByText('Military Discount').length).toBeGreaterThan(0));
+  const priceInputs = screen.getAllByPlaceholderText('0.00');
+  const mosquitoPrice = priceInputs.find((i) => Number(i.value) === 55);
+  expect(mosquitoPrice).toBeTruthy();
+  // Independent price edit FIRST — the discount control is still untouched,
+  // so there is nothing here for the discount control's own net->gross
+  // snap to have caused. Editing Price away from its seed already drops
+  // the stale discount from the PREVIEW (:2306/:1678's own fix) — the
+  // "chosen" display (and its Remove button) is replaced by the picker,
+  // still showing "None" selected, exactly like a line that never had a
+  // discount.
+  fireEvent.change(mosquitoPrice, { target: { value: '70' } });
+  expect(screen.queryByText('Military Discount', { selector: 'div' })).not.toBeInTheDocument();
+  const mosquitoPicker = screen.getByRole('combobox', { name: 'Line discount for Monthly Mosquito' });
+  // A fresh pick from that picker is the FIRST touch of the discount
+  // control this session — setLineDiscount's own firstTouch snap must see
+  // Price no longer holds the seeded net ($55) and leave it alone.
+  fireEvent.change(mosquitoPicker, { target: { value: 'disc-silver' } });
+  await waitFor(() => expect(screen.getAllByText('WaveGuard Silver').length).toBeGreaterThan(0));
+  // The operator's own $70 survives — never reset to $60 (_origBasePrice).
+  const priceInputsAfter = screen.getAllByPlaceholderText('0.00');
+  expect(priceInputsAfter.find((i) => i.value === '70')).toBeTruthy();
+  expect(priceInputsAfter.find((i) => Number(i.value) === 60)).toBeFalsy();
+});
+
+it('round 5 (:2958): a notes-only save on an UNDISCOUNTED visit skips the submit-time gate probe — an unrelated stacking-endpoint outage never blocks it', async () => {
+  let stackingCalls = 0;
+  const undiscountedLine = {
+    ...baseService,
+    serviceAddons: [
+      { id: 'addon-2', serviceId: 'svc-fert', serviceName: 'Quarterly Fertilization', serviceKey: 'lawn_fert', serviceCategory: 'lawn', basePrice: 40, estimatedPrice: 40, estimatedDuration: 20 },
+    ],
+  };
+  vi.stubGlobal('fetch', vi.fn(async (url, options) => {
+    if (url.endsWith('/admin/discounts/stacking')) {
+      stackingCalls += 1;
+      // The mount-time probe is allowed through; a submit-time re-probe
+      // would hit this same rejection and block the save — the point
+      // pinned is that a gate-insensitive save never calls it a second
+      // time at all.
+      if (stackingCalls > 1) return { ok: false, status: 500 };
+      return { ok: true, json: async () => ({ enabled: true }) };
+    }
+    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => DISCOUNTS };
+    if (url.includes('/update-details/preview')) {
+      return { ok: true, json: async () => computeMockPreview(JSON.parse(options.body), undiscountedLine, DISCOUNTS) };
+    }
+    return { ok: true, json: async () => ({}) };
+  }));
+  render(<Harness service={undiscountedLine} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  const notes = await screen.findByDisplayValue('Existing note');
+  fireEvent.change(notes, { target: { value: 'Updated note' } });
+  await waitForMoneyReady();
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  // Exactly one stacking-probe call (the mount) — no submit-time re-probe.
+  expect(stackingCalls).toBe(1);
+});

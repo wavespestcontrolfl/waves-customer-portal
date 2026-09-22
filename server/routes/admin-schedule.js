@@ -9370,7 +9370,8 @@ async function computeSingleServiceEstimatedPricePlan({
           .first('estimated_price', 'discount_type', 'discount_amount',
             ...(cols.discount_max_dollars ? ['discount_max_dollars'] : []),
             ...(cols.service_key_snapshot ? ['service_key_snapshot'] : []),
-            ...(cols.service_category_snapshot ? ['service_category_snapshot'] : []))
+            ...(cols.service_category_snapshot ? ['service_category_snapshot'] : []),
+            ...(cols.primary_line_price ? ['primary_line_price'] : []))
           .catch(() => null);
         // A service change in the SAME save already placed the new identity
         // in `updates` — price/scope/validate against that, not the stored
@@ -9382,8 +9383,23 @@ async function computeSingleServiceEstimatedPricePlan({
           ? (updates.service_category_snapshot || null)
           : (existingPrice?.service_category_snapshot || null);
         const existingEstimatedPrice = Number(existingPrice?.estimated_price);
+        // Codex pre-push audit P1 (round 5 on #4657, :6083): estimatedPrice
+        // here is meant to be the visit's stored NET total resubmitted
+        // unchanged — but a caller can echo the stored primary GROSS
+        // instead (primary_line_price, set BEFORE any appointment
+        // discount — a Month-view row supplies primaryLinePrice +
+        // serviceAddons: [], which the client form seed now avoids
+        // trusting for a zero-add-on visit, but this is the server's own
+        // backstop for any other caller doing the same). That echo is not
+        // a genuine price edit either, even though it numerically differs
+        // from the stored net by exactly the stored discount.
+        const existingPrimaryGross = existingPrice?.primary_line_price != null
+          ? Number(existingPrice.primary_line_price) : null;
+        const isUnchangedGrossEcho = existingPrimaryGross != null
+          && Number.isFinite(existingPrimaryGross)
+          && Math.abs(existingPrimaryGross - basePrice) < 0.005;
         const priceChanged = !Number.isFinite(existingEstimatedPrice)
-          || Math.abs(existingEstimatedPrice - basePrice) >= 0.005;
+          || (Math.abs(existingEstimatedPrice - basePrice) >= 0.005 && !isUnchangedGrossEcho);
         const discountTypeChanged = discountType !== undefined
           && (discountType || null) !== (existingPrice?.discount_type || null);
         const nextDiscountAmount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
@@ -9398,7 +9414,11 @@ async function computeSingleServiceEstimatedPricePlan({
         // filters persist (Codex #3531 r6 P1).
         const shouldRebaseStoredDiscounts = priceChanged || discountTypeChanged || discountAmountChanged || appointmentDiscountChanged;
         if (!shouldRebaseStoredDiscounts) {
-          if (cols.estimated_price) updates.estimated_price = basePrice;
+          // The gross-echo case must write back the STORED NET, never the
+          // echoed gross itself — writing basePrice ($100) here would
+          // silently overwrite the correct stored $90 even though this
+          // save decided nothing actually changed.
+          if (cols.estimated_price) updates.estimated_price = isUnchangedGrossEcho ? existingEstimatedPrice : basePrice;
           throw new Error('noop-price-save');
         }
         let finalPrice = basePrice;
@@ -9530,7 +9550,7 @@ async function normalizeUpdateDetailsAddons({
       // reuses isNewAddonDiscount again).
       const existingAddonDiscountRows = await db('scheduled_service_addons')
         .where({ scheduled_service_id: id })
-        .select('id', 'discount_id', 'discount_type', 'discount_amount', 'base_price');
+        .select('id', 'discount_id', 'discount_type', 'discount_amount', 'base_price', 'service_id');
       const existingAddonDiscountById = new Map(existingAddonDiscountRows.map((r) => [r.id, r]));
       // Codex pre-push audit P1 (round 4 on #4657, :9542): the terms alone
       // (id/type/amount) are not enough — removing and reselecting the
@@ -9539,7 +9559,15 @@ async function normalizeUpdateDetailsAddons({
       // is optional (the stack-group conflict check below reuses this
       // function on an already-normalized line with no gross handy) —
       // only checked when the caller actually has it to compare.
-      const isNewAddonDiscount = (submittedAddonId, discount, submittedGross) => {
+      // Codex pre-push audit P1 (round 5 on #4657, :9533): neither is the
+      // service identity — the prior row's discount terms/gross alone
+      // can't tell "same discount, same line" from "same discount, now
+      // stamped onto a DIFFERENT service" (the operator swapped this
+      // line's service at the same price). `submittedServiceId` is the
+      // RESOLVED catalog id (never the raw client-posted one, which can be
+      // absent for a fallback name/key match) — only checked when the
+      // caller has it.
+      const isNewAddonDiscount = (submittedAddonId, discount, submittedGross, submittedServiceId) => {
         if (!discount) return false;
         if (!submittedAddonId) return true;
         const priorRow = existingAddonDiscountById.get(submittedAddonId);
@@ -9548,6 +9576,8 @@ async function normalizeUpdateDetailsAddons({
           const priorGross = priorRow.base_price != null ? Number(priorRow.base_price) : null;
           if (priorGross == null || Math.abs(priorGross - Number(submittedGross)) >= 0.005) return true;
         }
+        if (submittedServiceId !== undefined
+          && String(priorRow.service_id || '') !== String(submittedServiceId || '')) return true;
         return String(priorRow.discount_id) !== String(discount.discountId || '')
           || priorRow.discount_type !== discount.discountType
           || Number(priorRow.discount_amount) !== Number(discount.discountAmount);
@@ -9593,7 +9623,7 @@ async function normalizeUpdateDetailsAddons({
         if (gross != null && lineType && lineAmount != null && !isNaN(lineAmount)) {
           const freshCatalogPick = !!a.discountId && isNewAddonDiscount(a.id || null, {
             discountId: a.discountId, discountType: lineType, discountAmount: lineAmount,
-          }, gross);
+          }, gross, catalogService?.id || null);
           if (freshCatalogPick) {
             const { customerRow, recurringMembershipBooking } = await getMembershipContext();
             const resolved = await resolveLineDiscount(a, gross, customerRow || {}, {

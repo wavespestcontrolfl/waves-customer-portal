@@ -834,9 +834,24 @@ describe('deriveLegacyPrimarySubmission — the shared module itself (GitHub rou
     expect(result).toBe(70); // 160 - 90, the only figure this addon has
   });
 
-  test('a populated primaryLinePrice is trusted as-is, never re-derived from the total', () => {
-    const result = deriveLegacyPrimarySubmission({ primaryLinePrice: 60, estimatedPrice: 999, addons: [] });
+  test('a populated primaryLinePrice is trusted as-is (WITH add-ons present), never re-derived from the total', () => {
+    const result = deriveLegacyPrimarySubmission({
+      primaryLinePrice: 60, estimatedPrice: 999, addons: [{ basePrice: 40, estimatedPrice: 40 }],
+    });
     expect(result).toBe(60);
+  });
+
+  test(':6083 (round 5 on #4657) — a ZERO-add-on visit derives from the stored TOTAL, never the structured (gross) primaryLinePrice', () => {
+    // primaryLinePrice is the primary line's own GROSS (pre appointment-
+    // discount); estimatedPrice is the stored NET total. With no add-on
+    // lines to separate primary from total, there is nothing gross-vs-net
+    // needs disambiguating for — the Month-view row shape (primaryLinePrice
+    // + serviceAddons: []) made this a reachable combination, and trusting
+    // the gross here fed it into a field whose contract is "what an
+    // unchanged save resubmits," discarding a stored appointment discount
+    // on the very next save ($100 gross vs $90 stored net).
+    const result = deriveLegacyPrimarySubmission({ primaryLinePrice: 100, estimatedPrice: 90, addons: [] });
+    expect(result).toBe(90);
   });
 
   test('null total, null primary, no addons: nothing derivable — returns null', () => {
