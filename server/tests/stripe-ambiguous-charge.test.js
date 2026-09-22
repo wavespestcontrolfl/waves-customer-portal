@@ -695,7 +695,7 @@ describe('saved-card invoice parking', () => {
 
 });
 
-function creditPersistenceDb({ creditApplied = 10, accountCredits = 25, unresolvedAttempt = true } = {}) {
+function creditPersistenceDb({ creditApplied = 10, accountCredits = 25, unresolvedAttempt = true, invoiceCustomerId = 'cust-1' } = {}) {
   const state = { creditApplied, accountCredits, ledger: [] };
   const trx = jest.fn((table) => {
     const query = {};
@@ -703,7 +703,7 @@ function creditPersistenceDb({ creditApplied = 10, accountCredits = 25, unresolv
       query[method] = jest.fn(() => query);
     });
     query.first = jest.fn(async () => {
-          if (table === 'invoices') return { id: 'inv-1', customer_id: 'cust-1', credit_applied: state.creditApplied };
+      if (table === 'invoices') return { id: 'inv-1', customer_id: invoiceCustomerId, credit_applied: state.creditApplied };
       if (table === 'customers') return { id: 'cust-1', account_credits: state.accountCredits };
       if (table === 'stripe_invoice_charge_attempts') return unresolvedAttempt ? { id: 'attempt-1' } : null;
       return null;
@@ -726,6 +726,23 @@ function creditPersistenceDb({ creditApplied = 10, accountCredits = 25, unresolv
 }
 
 describe('saved-card ambiguity credit persistence', () => {
+  test('does not spend the former customer’s credit after invoice ownership changes', async () => {
+    const { database, state } = creditPersistenceDb({ invoiceCustomerId: 'cust-2' });
+
+    await expect(persistSavedCardChargeCreditDelta({
+      invoiceId: 'inv-1',
+      customerId: 'cust-1',
+      originalCreditApplied: 10,
+      creditDelta: 15,
+      reference: 'attempt attempt-1',
+      database,
+    })).resolves.toBe(false);
+
+    expect(state.creditApplied).toBe(10);
+    expect(state.accountCredits).toBe(25);
+    expect(state.ledger).toHaveLength(0);
+  });
+
   test('commits the charged credit delta exactly once before reconciliation', async () => {
     const { database, state } = creditPersistenceDb();
     const args = {
