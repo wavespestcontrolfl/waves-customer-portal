@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ActionFeedback, UiSurface } from "../../components/ui";
+import { ActionFeedback, Card, CardBody, UiSurface } from "../../components/ui";
 import useIsMobile from "../../hooks/useIsMobile";
 import { useFeatureFlag } from "../../hooks/useFeatureFlag";
 import AiChartsPanel from "../../components/dashboard/AiChartsPanel";
 import useDashboardData from "./dashboard/useDashboardData";
-import { isRateLimitError } from "../../utils/admin-fetch";
+import { isForbiddenError, isRateLimitError } from "../../utils/admin-fetch";
 import DashboardJumpNav from "./dashboard/DashboardJumpNav";
 import TodaySection from "./dashboard/sections/TodaySection";
 import GrowthSection from "./dashboard/sections/GrowthSection";
@@ -61,6 +61,21 @@ function adminFirstName() {
   }
 }
 
+function DashboardAccessState({ forbidden, children }) {
+  if (!forbidden) return children;
+  return (
+    <UiSurface density="comfortable" className="mx-auto max-w-[1300px] text-ui-body">
+      <Card>
+        <CardBody>
+          <ActionFeedback error>
+            Dashboard access requires an admin account.
+          </ActionFeedback>
+        </CardBody>
+      </Card>
+    </UiSurface>
+  );
+}
+
 export default function DashboardPageV2() {
   const isMobile = useIsMobile();
   const aiChartsEnabled = useFeatureFlag("dashboard-ai-charts");
@@ -105,8 +120,9 @@ export default function DashboardPageV2() {
   const attributionLoading = !attributionReady && attributionKeys.some((key) => pending[key] && !values[key]);
   const attributionError = attributionReady ? null : attributionKeys.map((key) => errors[key]).find(Boolean);
   const hasErrors = Object.values(errors).some(Boolean);
+  const forbidden = Object.values(errors).some(isForbiddenError);
   const rateLimited = Object.values(errors).some(isRateLimitError);
-  const retryFeed = rateLimited ? undefined : refresh;
+  const retryFeed = rateLimited || refreshing ? undefined : refresh;
   const hasMetricErrors = Object.entries(errors).some(([key, error]) => error && !["alerts", "today", "staleVisits"].includes(key));
 
   useEffect(() => {
@@ -171,7 +187,8 @@ export default function DashboardPageV2() {
   };
 
   return (
-    <UiSurface density="comfortable" className="dashboard-blackout mx-auto min-h-full max-w-[1300px] text-ui-body text-zinc-900">
+    <DashboardAccessState forbidden={forbidden}>
+      <UiSurface density="comfortable" className="dashboard-blackout mx-auto min-h-full max-w-[1300px] text-ui-body text-zinc-900">
       {/* Sticky jump-nav + period selector. The period drives the KPI tiles
           (distributed across sections) and the Marketing Attribution panels;
           everything else keeps its fixed window (labeled per card). */}
@@ -222,6 +239,7 @@ export default function DashboardPageV2() {
         <GrowthSection
           data={data}
           loadError={errors.data}
+          pending={pending}
           onRetry={retryFeed}
           compare={compare}
           salesCapture={salesCapture}
@@ -281,6 +299,7 @@ export default function DashboardPageV2() {
           {...kpiStripProps}
         />
       )}
-    </UiSurface>
+      </UiSurface>
+    </DashboardAccessState>
   );
 }

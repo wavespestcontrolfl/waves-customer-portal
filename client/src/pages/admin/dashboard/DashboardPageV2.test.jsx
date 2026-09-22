@@ -9,7 +9,7 @@ import { adminFetch } from "../../../utils/admin-fetch";
 
 vi.mock("../../../utils/admin-fetch", () => ({
   adminFetch: vi.fn(),
-  isForbiddenError: () => false,
+  isForbiddenError: (error) => error?.status === 403,
   isRateLimitError: (error) => error?.status === 429 || error?.code === "RATE_LIMITED",
 }));
 vi.mock("../../../hooks/useIsMobile", () => ({ default: () => false }));
@@ -420,6 +420,40 @@ describe("DashboardPageV2 sections", () => {
       ).toBe(true);
     });
   });
+
+  it("shows the dedicated admin-only state for a forbidden feed without retry controls", async () => {
+    const fetchFixture = adminFetch.getMockImplementation();
+    const forbidden = Object.assign(new Error("Forbidden"), { status: 403 });
+    adminFetch.mockImplementation((path, options) => path.split("?")[0] === "/admin/dashboard"
+      ? Promise.reject(forbidden) : fetchFixture(path, options));
+
+    renderPage();
+
+    expect(await screen.findByText("Dashboard access requires an admin account.")).toBeInTheDocument();
+    expect(screen.queryAllByRole("button", { name: "Try again" })).toHaveLength(0);
+    expect(screen.queryByRole("navigation", { name: "Dashboard sections" })).not.toBeInTheDocument();
+  });
+
+  it("suppresses every retry control while a retry batch is already running", async () => {
+    const fetchFixture = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options) => path.includes("/ebitda-bridge")
+      ? Promise.reject(new Error("Unavailable")) : fetchFixture(path, options));
+    renderPage();
+    await screen.findByText("profitability is unavailable.");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Refresh", exact: true })).toBeEnabled());
+    const retry = screen.getAllByRole("button", { name: "Try again" })[0];
+    const completedCalls = adminFetch.mock.calls.length;
+    adminFetch.mockImplementation(() => new Promise(() => {}));
+
+    fireEvent.click(retry);
+
+    await waitFor(() => expect(screen.queryAllByRole("button", { name: "Try again" })).toHaveLength(0));
+    expect(screen.getByRole("button", { name: "Refreshing", exact: true })).toBeDisabled();
+    expect(adminFetch).toHaveBeenCalledTimes(completedCalls + 4);
+    fireEvent.click(retry);
+    expect(adminFetch).toHaveBeenCalledTimes(completedCalls + 4);
+  });
+
   it.each(["/admin/dashboard", "/admin/dashboard/today-completion"])("gives wait guidance for exhausted rate limits on %s", async (limitedPath) => {
     const fetchFixture = adminFetch.getMockImplementation();
     const error = Object.assign(new Error("Slow down"), { status: 429, code: "RATE_LIMITED" });

@@ -100,6 +100,8 @@ describe("DashboardPageV2 mobile scorecard tabs", () => {
   });
 
   it.each([
+    ["Growth", "/admin/dashboard/funnel", "estimate funnel", "No estimates sent this period", { funnel: {}, rates: {} }, "No estimates sent this period"],
+    ["Growth", "/admin/ads/capital-allocation", "ad spend", "No ad spend tracked yet", { channels: [] }, "No ad spend tracked yet"],
     ["Profit", "/admin/dashboard/service-mix", "service mix", "0 completed services this month", { mix: [], total_services: 8 }, "8 completed services this month"],
     ["Retention", "/admin/dashboard/review-trend", "reviews", "0 reviews · —★ avg", { trend: [], total: 12, avgRating: 5 }, "12 reviews · 5★ avg"],
     ["Cash", "/admin/dashboard/aging", "accounts receivable", "No outstanding invoices", { aging: {}, invoice_count: 4 }, "4 open invoices"],
@@ -112,6 +114,7 @@ describe("DashboardPageV2 mobile scorecard tabs", () => {
     render(<MemoryRouter><DashboardPageV2 /></MemoryRouter>);
     await screen.findAllByText(/Good (morning|afternoon|evening), Waves/);
     fireEvent.click(navButton(tab));
+    if (label === "ad spend") fireEvent.click(screen.getByText("Where to Put Ad Dollars"));
     await screen.findByText(`Loading ${label}…`);
     expect(screen.queryByText(falseEmpty)).not.toBeInTheDocument();
     // Shared, already-loaded KPI tiles remain available beside the held feed.
