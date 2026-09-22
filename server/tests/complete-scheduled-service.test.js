@@ -241,6 +241,21 @@ describe('completion SMS delivery-unverified classifiers', () => {
     expect(deliveryUnverifiedProviderOutcome(undefined)).toBeNull();
   });
 
+  test('deliveryUnverifiedProviderOutcome returns null for a THROWN definite rejection — the exact shape sendCustomerMessageCore raises for a pre-dispatch failure or a definite not_sent, which carries providerOutcome on every exception (Codex pre-push P1, round 2)', () => {
+    // A bare `if (err.providerOutcome)` truthiness check — the round-1
+    // shape this test guards against regressing to — would wrongly treat
+    // this as uncertain: the messaging layer attaches providerOutcome to
+    // EVERY exception it raises, definite rejections included.
+    const definiteRejection = Object.assign(new Error('carrier rejected'), {
+      providerOutcome: { sent: false, deliveryOutcome: 'not_sent', code: 'CARRIER_REJECTED' },
+    });
+    expect(deliveryUnverifiedProviderOutcome(definiteRejection)).toBeNull();
+    const preDispatchFailure = Object.assign(new Error('no route to customer'), {
+      providerOutcome: { sent: false, deliveryOutcome: 'not_sent', code: 'NO_ROUTE' },
+    });
+    expect(deliveryUnverifiedProviderOutcome(preDispatchFailure)).toBeNull();
+  });
+
   test('throwIfDeliveryUnverified passes a definite result through untouched', () => {
     const result = { sent: true, deliveryOutcome: 'provider_accepted' };
     expect(throwIfDeliveryUnverified(result)).toBe(result);
@@ -396,11 +411,21 @@ describe('payment-failed decline notice claim acquisition (#4131 slice 5, deferr
     expect(fnBody).toMatch(/if \(claimToken\) finalizeQuery\.where\(\{ send_claim_token: claimToken \}\);/);
   });
 
-  test('a throw reaching the outer catch restores the claim UNLESS it carries a providerOutcome (an uncertain send — retained for review, never auto-restored)', () => {
+  test('a throw reaching the outer catch restores the claim UNLESS it is genuinely uncertain — never a bare providerOutcome presence check (Codex pre-push P1, round 2)', () => {
+    // The messaging layer attaches providerOutcome to EVERY exception it
+    // raises, including a DEFINITE rejection (deliveryOutcome: 'not_sent')
+    // — checking mere presence (the round-1 shape) wrongly retained those
+    // claims too. deliveryUnverifiedProviderOutcome (used by every other
+    // completion-SMS sender in this file) is the one classifier that
+    // actually distinguishes "genuinely uncertain" from "definite" —
+    // exercised directly in the "delivery-unverified classifiers" describe
+    // above; this test pins that the notice's catch calls THAT classifier,
+    // not a hand-rolled truthiness check on the raw error shape.
     const catchAt = noticeBlock.lastIndexOf('} catch (failErr) {');
     expect(catchAt).toBeGreaterThan(-1);
-    const catchBody = noticeBlock.slice(catchAt, catchAt + 1200);
-    expect(catchBody).toMatch(/if \(declineSendClaim && !failErr\?\.providerOutcome\) \{/);
+    const catchBody = noticeBlock.slice(catchAt, catchAt + 1400);
+    expect(catchBody).toMatch(/if \(declineSendClaim && !deliveryUnverifiedProviderOutcome\(failErr\)\) \{/);
+    expect(catchBody).not.toMatch(/failErr\?\.providerOutcome\)/);
     expect(catchBody).toMatch(/\.restoreSendClaim\(/);
   });
 });

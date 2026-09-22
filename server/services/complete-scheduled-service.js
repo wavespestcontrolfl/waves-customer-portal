@@ -11506,13 +11506,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
         } catch (failErr) {
           // Every branch above that resolves (deferred / not-sent /
           // delivered / no body) already gives the claim back or finalizes
-          // it. The remaining gap is a THROW reaching here from somewhere
-          // still pre-provider (template render, the pre-send notes write)
-          // — a genuinely uncertain provider outcome (throwIfDeliveryUnverified)
-          // carries its providerOutcome and must NOT be restored here, the
-          // same "retained for review" posture every other sender in this
-          // codebase gives an unverified send.
-          if (declineSendClaim && !failErr?.providerOutcome) {
+          // it. The remaining gap is a THROW reaching here — from somewhere
+          // still pre-provider (template render, the pre-send notes write),
+          // or a DEFINITE rejection (deliveryOutcome: 'not_sent') the send
+          // layer still throws rather than returns. Codex pre-push P1: the
+          // messaging layer attaches providerOutcome to every exception it
+          // raises, not only uncertain ones, so checking its mere presence
+          // wrongly retained definite non-deliveries too — the SAME
+          // deliveryUnverifiedProviderOutcome classifier every completion
+          // SMS sender in this file already uses is the correct test: only
+          // a genuinely uncertain outcome (throwIfDeliveryUnverified's own
+          // throw) must NOT be restored here, the "retained for review"
+          // posture every other sender in this codebase gives an
+          // unverified send.
+          if (declineSendClaim && !deliveryUnverifiedProviderOutcome(failErr)) {
             await DeclineNoticeInvoiceService.restoreSendClaim(
               invoice.id, declineSendClaim.previousStatus, declineSendClaim.claimed,
               [], db, declineSendClaim.invoice.send_claim_token,
