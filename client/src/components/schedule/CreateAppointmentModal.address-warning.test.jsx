@@ -2,6 +2,11 @@
 import React from 'react';
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { useDiscountStackingState } from '../../hooks/useDiscountStacking';
+vi.mock('../../hooks/useDiscountStacking', () => ({
+  useDiscountStackingState: vi.fn(() => ({ enabled: false, known: true, retry: vi.fn() })),
+  ensureStackingFresh: vi.fn(async () => ({ enabled: true, known: true })),
+}));
 import CreateAppointmentModal, {
   ADDRESS_ASK_LOOKUP_TIMEOUT_MS,
   addressAskNoticesMatch,
@@ -11,6 +16,7 @@ import CreateAppointmentModal, {
 
 afterEach(() => {
   cleanup();
+  vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: false, known: true, retry: vi.fn() });
   vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -62,6 +68,7 @@ function installModalFetch({
   freshPrepayRequest,
   prepayInvoiceRequest,
   enablePrepay = false,
+  discounts = [],
 } = {}) {
   let addressRequests = 0;
   let prepayPreviews = 0;
@@ -101,7 +108,7 @@ function installModalFetch({
     }
     if (url.includes('/schedule-estimates')) return Promise.resolve(jsonResponse({ estimates: [] }));
     if (url.endsWith('/admin/technicians')) return Promise.resolve(jsonResponse({ technicians: [] }));
-    if (url.endsWith('/admin/discounts')) return Promise.resolve(jsonResponse([]));
+    if (url.endsWith('/admin/discounts')) return Promise.resolve(jsonResponse(discounts));
     if (url.endsWith('/annual-prepay-availability')) {
       return Promise.resolve(jsonResponse({ enabled: enablePrepay }));
     }
@@ -645,5 +652,30 @@ describe('CreateAppointmentModal submit cancellation', () => {
     expect(state.onCreated).not.toHaveBeenCalled();
     expect(state.onChange).not.toHaveBeenCalled();
     expect(schedulePosts(fetcher)).toHaveLength(0);
+  });
+});
+
+
+describe('appointment discount submission eligibility', () => {
+  it('requires removing an unmatched scoped discount before booking', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    const { fetcher } = installModalFetch({ discounts: [{
+      id: 'termite-only', name: 'Termite only', discount_type: 'fixed_amount',
+      amount: 10, is_active: true, show_in_invoices: true, service_key_filter: 'termite_bond',
+    }] });
+    renderBooking();
+    await addOneSeasonalService();
+    const picker = await screen.findByLabelText('Appointment discount');
+    fireEvent.change(picker, { target: { value: 'termite-only' } });
+    await screen.findByText('This appointment discount does not match any selected service. Change or remove it before saving.');
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    expect(submit.disabled).toBe(true);
+    fireEvent.click(submit);
+    expect(schedulePosts(fetcher)).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Remove discount' }));
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    expect(JSON.parse(schedulePosts(fetcher)[0][1].body).discountId).toBeUndefined();
   });
 });
