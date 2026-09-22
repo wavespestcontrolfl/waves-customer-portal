@@ -834,6 +834,10 @@ describe('voice relay eval — callback commitment core', () => {
     ['We will call Ruth, right?', 'fail'],
     ['We will call Ruth, alright?', 'fail'],
     ['We will call Ruth, yes?', 'fail'],
+    // GitHub round-5 audit: a timing or topic modifier before the tag
+    // must not hide it either.
+    ['We will call Ruth tomorrow, okay?', 'fail'],
+    ['We will call Ruth about the appointment, okay?', 'fail'],
     // Control: a genuine question still isn't a promise.
     ['We will call Ruth?', 'pass'],
   ])('no_account_holder_callback preserves a callback assertion before a confirmation tag: %s', (text, status) => {
@@ -850,6 +854,11 @@ describe('voice relay eval — callback commitment core', () => {
     ['We will call Ruth, but that call is canceled.', 'pass'],
     // Control: an un-canceled present-tense schedule is still a promise.
     ['Ruth is scheduled for a call with us.', 'fail'],
+    // GitHub round-5 audit: cancellation must be an AFFIRMATIVE claim
+    // that THIS call is canceled, not any cancellation-shaped word
+    // anywhere in the remaining sentence.
+    ['We will call Ruth about the canceled appointment.', 'fail'],
+    ['We will call Ruth, and that call will not be canceled.', 'fail'],
   ])('no_account_holder_callback excuses a present-tense schedule canceled later in the sentence: %s', (text, status) => {
     expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
   });

@@ -2153,9 +2153,15 @@ function no_account_holder_callback(value, record, { spoken }) {
       // does not turn the preceding declaration into a question about
       // whether Waves will call — "We will call Ruth, okay?" still
       // promises the callback and merely seeks acknowledgment of it,
-      // unlike a genuine question ("We will call Ruth?").
+      // unlike a genuine question ("We will call Ruth?"). A timing or
+      // topic modifier can sit BEFORE the tag just as it can before a
+      // consent override ("We will call Ruth tomorrow, okay?", "...about
+      // the appointment, okay?") — the tag itself decides, not its
+      // distance from the recipient.
+      const CONFIRMATION_TAG_MODIFIER_WORD = `(?!\\b(?:okay|ok|right|alright|yes|and|or|but)\\b)[a-z][\\w\\x27\\u2019]*`;
       const confirmationTag = terminatorMatch?.[0] === '?'
-        && /^\s*,?\s*(?:okay|ok|right|alright|yes)\s*$/i.test(trailer.slice(0, terminatorMatch.index));
+        && new RegExp(`^\\s*,?\\s*(?:(?:${CALLBACK_TIMING_COMPONENT}|${CONFIRMATION_TAG_MODIFIER_WORD})\\s*,?\\s*){0,5}(?:okay|ok|right|alright|yes)\\s*$`, 'i')
+          .test(trailer.slice(0, terminatorMatch.index));
       const interrogative = !trailingQuestionAfterComma && !confirmationTag && terminatorMatch?.[0] === '?';
       // A scheduled-call candidate the SAME sentence goes on to cancel
       // ("Ruth is scheduled for a call with us, but that call is
@@ -2168,7 +2174,13 @@ function no_account_holder_callback(value, record, { spoken }) {
         const m = /[.!?]/.exec(text.slice(matchEnd));
         return m ? matchEnd + m.index : text.length;
       })();
-      const cancelled = /\b(?:cancel(?:l)?ed|call(?:ed)?\s+off|postponed)\b/i.test(text.slice(matchEnd, cancellationScanEnd));
+      // An AFFIRMATIVE cancellation predicate ("it/that/this call is/was
+      // canceled") is required, not any cancellation-shaped word
+      // anywhere in the remaining sentence — "about the canceled
+      // appointment" is an attributive adjective naming the appointment,
+      // not a claim that THIS call is canceled, and "will not be
+      // canceled" is a negated one; neither excuses a real promise.
+      const cancelled = /\b(?:it|(?:that|this)(?:\s+(?:call|callback))?|the\s+(?:call|callback))\s+(?:is|was|has\s+been|had\s+been)\s+(?:cancel(?:l)?ed|called\s+off|postponed)\b/i.test(text.slice(matchEnd, cancellationScanEnd));
       // A GOVERNING denial predicate ("I deny that we will call Ruth.",
       // "It is false that we will call Ruth.") rejects the whole callback
       // claim, not just the clause's own internal negation
