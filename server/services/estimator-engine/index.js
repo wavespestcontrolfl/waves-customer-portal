@@ -547,6 +547,9 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
         subdivisionMedian = await lookupSubdivisionMedianLivingSqft({
           county: parcelView.county,
           subdivision: parcelView.subdivision,
+          // Same lot-series banding the fresh lookup applies, so the draft
+          // doesn't price differently on a legacy cache hit (Codex r1 P2 #4639).
+          lotSqft: parcelView.lotSqft || null,
         });
       } catch (err) {
         logger.warn(`[estimator-engine] subdivision median failed (continuing without): ${err.message}`);

@@ -66,6 +66,11 @@ describe("PropertyLookupResult — plat-median estimate for an unassessed parcel
     expect(screen.getByRole("button", { name: /Verify home living area: 3,000 sq ft/ })).toBeInTheDocument();
   });
 
+  it("names a lot-series sample when the server banded the neighbors by lot size", () => {
+    renderPanel({ profile: { ...VACANT_PROFILE, subdivisionMedian: { medianSqft: 3070, sampleCount: 118, minSqft: 2373, maxSqft: 3125, lotBanded: true } }, form: { homeSqFt: "3070" } });
+    expect(screen.getByText(/Median of 118 assessed homes on similar-size lots in this plat \(2,373–3,125 sq ft\)/)).toBeInTheDocument();
+  });
+
   it("falls back to Not found when the server sends no median", () => {
     renderPanel({ profile: { ...VACANT_PROFILE, subdivisionMedian: null }, form: { homeSqFt: "" } });
     expect(screen.getByText("Not found")).toBeInTheDocument();

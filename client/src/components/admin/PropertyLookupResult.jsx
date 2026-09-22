@@ -52,7 +52,8 @@ function platMedianSourceLine(median) {
   const min = Number(median?.minSqft) || 0;
   const max = Number(median?.maxSqft) || 0;
   const range = min > 0 && max > 0 ? ` (${min.toLocaleString("en-US")}–${max.toLocaleString("en-US")} sq ft)` : "";
-  return `Median of ${count.toLocaleString("en-US")} assessed homes in this plat${range} — not a record for this address; confirm with the customer`;
+  const sample = median?.lotBanded ? "assessed homes on similar-size lots in this plat" : "assessed homes in this plat";
+  return `Median of ${count.toLocaleString("en-US")} ${sample}${range} — not a record for this address; confirm with the customer`;
 }
 
 export default function PropertyLookupResult({ profile, form, meta, refreshing, onRefresh, onEditAddress, onVerify, verification }) {

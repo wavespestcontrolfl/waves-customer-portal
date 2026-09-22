@@ -16,7 +16,7 @@ const router = express.Router();
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
-const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality, detectUnassessedVacantParcel, detectMultiSitusMasterParcel, detectStaleImageryTurfConflict, COUNTY_LOT_SQFT_MAX } = require('../services/property-lookup/ai-property-lookup');
+const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality, detectUnassessedVacantParcel, detectVacantRollBareLandImagery, detectMultiSitusMasterParcel, detectStaleImageryTurfConflict, COUNTY_LOT_SQFT_MAX } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
 const { isInServiceAreaBox } = require('../services/service-area');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
@@ -581,7 +581,14 @@ async function performPropertyLookupCore(address, options = {}) {
         // result, the way the construction-permit read above does.
         const diag = {};
         const median = await lookupSubdivisionMedianLivingSqft(
-          { county: parcelMeta.county, subdivision: platName },
+          // Lot area narrows the sample to the parcel's lot series when
+          // enough neighbors share it (plats mix 40'/52'/62' lots, each
+          // with its own plans).
+          // The PHYSICAL area (parcel roll / polygon) only — never the
+          // pricing-capped lotSize (LOT_SQFT_MAX): a huge parcel would band
+          // against the cap instead of its neighbors (Codex r2 P2). No
+          // physical area → no band (whole plat).
+          { county: parcelMeta.county, subdivision: platName, lotSqft: parcelMeta.lotSqft || parcelMeta.polygonAreaSqft || null },
           { timeoutMs: options.prioritizeAccuracy ? SUBDIVISION_MEDIAN_TIMEOUT_MS : Math.min(medianBudgetMs, SUBDIVISION_MEDIAN_TIMEOUT_MS), diag },
         ).catch((err) => {
           diag.failed = true;
@@ -1782,7 +1789,9 @@ function subdivisionMedianEstimate(rc) {
     maxSqft: positive(stamped.maxSqft),
     subdivision: stamped.subdivisionQueried || null,
     county: stamped.county || null,
-    sourceLabel: `median of ${sampleCount.toLocaleString('en-US')} assessed homes in this plat`,
+    // Sample narrowed to the parcel's lot series (see county-parcel-gis).
+    lotBanded: stamped.lotBanded === true,
+    sourceLabel: `median of ${sampleCount.toLocaleString('en-US')} assessed homes ${stamped.lotBanded === true ? 'on similar-size lots ' : ''}in this plat`,
   };
 }
 
@@ -1831,6 +1840,17 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // Running here (not in the lookup pipeline) means cache-hit rebuilds
   // sanitize rows poisoned before this shipped, no backfill needed.
   const staleImageryConflict = detectStaleImageryTurfConflict(rc, ai);
+  // Vacant-roll twin: no building on the roll AND bare-land vision zeros —
+  // the dirt reading must not become the lawn's measurement either.
+  const vacantBareLandImagery = staleImageryConflict ? null : detectVacantRollBareLandImagery(rc, ai);
+  const imageryUnobservable = Boolean(staleImageryConflict || vacantBareLandImagery);
+  if (vacantBareLandImagery) {
+    ai = discardVisionAreaFields(ai);
+    logger.info('[property-lookup] vacant-roll bare-land imagery — vision area fields discarded', {
+      county: rc?.county || null,
+      lotSqFt: rc?.lotSize || null,
+    });
+  }
   if (staleImageryConflict) {
     ai = discardVisionAreaFields(ai);
     // Fires on every profile build for a conflicted address (fresh + cache
@@ -2010,7 +2030,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // ratio prior would just trade one unsupported point estimate for
     // another — the default lot ladder (with its verify flag) is the
     // documented fallback there.
-    && !staleImageryConflict
+    && !imageryUnobservable
     && !turfCountyPriorDisabled()
     && countyCeiling
     && countyCeiling.turfSf >= TURF_COUNTY_PRIOR_MIN_CEILING_SF
@@ -2038,6 +2058,13 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     fieldVerifyFlags.push({
       field: 'estimatedTurfSf',
       reason: `Satellite analysis conflicts with county records — the imagery shows undeveloped land but the county assesses a ${staleImageryConflict.countySqFt.toLocaleString()} sq ft home${staleImageryConflict.yearBuilt ? ` (built ${staleImageryConflict.yearBuilt})` : ''}. Imagery is likely stale or misaligned; its turf/hardscape estimates were discarded. Confirm treatable lawn area before pricing.`,
+      priority: 'HIGH',
+    });
+  }
+  if (vacantBareLandImagery) {
+    fieldVerifyFlags.push({
+      field: 'estimatedTurfSf',
+      reason: `Satellite imagery shows bare land and the county roll shows ${vacantBareLandImagery.landUseDescription || 'vacant land'} with no building. If a home is standing, the imagery predates it — its turf/hardscape estimates were discarded rather than priced as a no-lawn property. Confirm treatable lawn area before pricing.`,
       priority: 'HIGH',
     });
   }
@@ -2317,8 +2344,10 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // confirm-before-pricing posture. Absent on normal profiles; an explicit
     // vision 0 with the structure visible is a real measurement and never
     // carries this.
-    turfObservation: staleImageryConflict ? 'unobservable' : undefined,
-    turfReason: staleImageryConflict ? 'county_structure_vision_bare_land_conflict' : undefined,
+    turfObservation: imageryUnobservable ? 'unobservable' : undefined,
+    turfReason: staleImageryConflict
+      ? 'county_structure_vision_bare_land_conflict'
+      : (vacantBareLandImagery ? 'vacant_roll_bare_land_imagery' : undefined),
     countyTurfPriorSf,
     // TRUSTED ceiling (county-complete + county-sourced dims) — feeds the
     // exceeds-ceiling review reason AND rides into the pricing engine, where
@@ -2506,7 +2535,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // guard fired, and re-asks /turf-preview (same computation) as the form
   // is edited. Fail-open: a preview miss leaves the client on its own
   // heuristic rather than breaking the profile.
-  if (staleImageryConflict) {
+  if (imageryUnobservable) {
     try {
       const previewProfile = {
         ...profile,
@@ -2782,11 +2811,40 @@ function turfRiskReasons(source = {}) {
   return reasons;
 }
 
+// Mosquito prices its treatable area off lot − footprint − hardscape; with
+// the vision fields discarded (turfObservation 'unobservable') that is
+// default lot geometry, so an unobservable profile gates mosquito on the
+// same measured outdoor entry as the turf services (Codex r2 P1 on #4639).
+const MOSQUITO_SERVICES = new Set(['MOSQUITO', 'OT_MOSQUITO']);
+
+// The confirmed OUTDOOR area on an unobservable-imagery profile: the
+// measured turf entry plus the operator-entered bed area (the vision bed
+// reading was discarded with the rest). Coerced — request bodies and saved
+// replays carry these as strings, and "4000" + "300" must never be
+// "4000300" (Codex r4 P1 #4639). undefined when no turf measurement exists;
+// 0 when the operator entered zero turf and no beds. ONE helper feeds both
+// the confirmation gate and the pricing translator so they can't disagree.
+function confirmedOutdoorAreaSf(p = {}) {
+  const turf = firstNonNegativeNumber(p.measuredTurfSf, p.lawnSqFt);
+  if (turf === undefined) return undefined;
+  const bed = Number(p.estimatedBedAreaSf);
+  return turf + (Number.isFinite(bed) && bed > 0 ? bed : 0);
+}
+
 function needsTurfManualConfirmation(profile = {}, selectedServices = [], options = {}) {
   const allTurfServices = selectedTurfPricedServices(selectedServices);
-  if (allTurfServices.length === 0) return null;
+  const unobservable = profile.turfObservation === 'unobservable';
+  const mosquitoSelected = (selectedServices || [])
+    .some((service) => MOSQUITO_SERVICES.has(String(service || '').toUpperCase()));
+  if (allTurfServices.length === 0 && !(unobservable && mosquitoSelected)) return null;
   const manualTurfSf = firstNonNegativeNumber(profile.measuredTurfSf, profile.lawnSqFt);
-  if (manualTurfSf !== undefined) return null;
+  if (manualTurfSf !== undefined) {
+    // A zero turf entry is a real no-lawn answer for the turf services, but
+    // mosquito needs a POSITIVE outdoor area on an unobservable profile: the
+    // calculator ignores zero and would silently fall back to lot geometry
+    // (Codex r4 P1 #4639). Beds count — a no-lawn yard can still have them.
+    if (!(unobservable && mosquitoSelected) || confirmedOutdoorAreaSf(profile) > 0) return null;
+  }
   // Services whose treated area is entered directly (front/back-yard scope)
   // don't need whole-lawn turf confirmation when an explicit area is given.
   // Exempt only when EVERY selected turf service is such a bounded add-on, so a
@@ -2798,7 +2856,12 @@ function needsTurfManualConfirmation(profile = {}, selectedServices = [], option
     PLUGGING: plugArea > 0,
     TOPDRESS: topDressArea > 0,
   };
-  if (allTurfServices.every((service) => areaBoundedExempt[service])) return null;
+  // (An empty turf list here means the unobservable mosquito case — never
+  // vacuously exempt; and a bounded add-on's own area says nothing about the
+  // mosquito yard, so the exemption never clears an unobservable mosquito
+  // selection either.)
+  if (allTurfServices.length > 0 && allTurfServices.every((service) => areaBoundedExempt[service])
+      && !(unobservable && mosquitoSelected)) return null;
 
   // Stale-imagery conflict profiles (turfObservation 'unobservable') have
   // NO trustworthy turf basis — the vision zeros were discarded and the
@@ -2817,7 +2880,9 @@ function needsTurfManualConfirmation(profile = {}, selectedServices = [], option
       turfObservation: 'unobservable',
       estimatedTurfSf: 0,
       reasons: turfRiskReasons(profile),
-      message: 'Satellite imagery conflicts with county records for this property, so there is no reliable turf estimate. Confirm treatable lawn area before generating lawn pricing.',
+      message: profile.turfReason === 'vacant_roll_bare_land_imagery'
+        ? 'Satellite imagery shows bare land and the county roll shows no building yet, so there is no reliable outdoor-area estimate. Confirm treatable lawn area (or bed area) before generating lawn or mosquito pricing.'
+        : 'Satellite imagery conflicts with county records for this property, so there is no reliable outdoor-area estimate. Confirm treatable lawn area (or bed area) before generating lawn or mosquito pricing.',
     };
   }
 
@@ -3864,7 +3929,7 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
       field: 'homeSqFt',
       reason: vacantParcel
         ? (platMedian
-          ? `Home sq ft not on the county roll (vacant parcel — possibly new construction). Prefilled with the median of ${platMedian.sampleCount.toLocaleString('en-US')} assessed homes in this plat, ${platMedian.medianSqft.toLocaleString('en-US')} sq ft${platMedian.minSqft && platMedian.maxSqft ? ` (range ${platMedian.minSqft.toLocaleString('en-US')}–${platMedian.maxSqft.toLocaleString('en-US')})` : ''} — confirm the size with the customer before pricing`
+          ? `Home sq ft not on the county roll (vacant parcel — possibly new construction). Prefilled with the median of ${platMedian.sampleCount.toLocaleString('en-US')} assessed homes ${platMedian.lotBanded ? 'on similar-size lots ' : ''}in this plat, ${platMedian.medianSqft.toLocaleString('en-US')} sq ft${platMedian.minSqft && platMedian.maxSqft ? ` (range ${platMedian.minSqft.toLocaleString('en-US')}–${platMedian.maxSqft.toLocaleString('en-US')})` : ''} — confirm the size with the customer before pricing`
           : VACANT_SQFT_FLAG_COPY)
         : 'Home sq ft missing from records — estimator defaults to 2,000 sq ft; verify before pricing',
       priority: 'HIGH'
@@ -4762,6 +4827,16 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     treeShrubDensity,
     mosquitoPressure,
     measuredTurfSf: p.measuredTurfSf,
+    // Unobservable-imagery profiles (vacant-roll bare land / stale tiles):
+    // the confirmed outdoor entry that clears needsTurfManualConfirmation
+    // must also be what MOSQUITO prices on — otherwise the calculator
+    // rebuilds treatable area from lot − footprint − hardscape, the exact
+    // default geometry the gate exists to block (Codex r3 P1 #4639).
+    // Confirmed turf plus the operator-entered bed area (the vision bed
+    // reading was discarded with the rest).
+    ...(p.turfObservation === 'unobservable' && confirmedOutdoorAreaSf(p) > 0
+      ? { mosquitoTreatableSqFt: confirmedOutdoorAreaSf(p) }
+      : {}),
     estimatedTurfSf: p.estimatedTurfSf,
     // Turf provenance — a county-prior seed or a parcel-clamped vision number
     // must stay distinguishable from a real satellite measurement all the way
