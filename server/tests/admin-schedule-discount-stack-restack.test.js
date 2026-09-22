@@ -282,9 +282,34 @@ describe('seeded recurring children/boosters — restackLiveVisitFinancials', ()
     });
   });
 
-  test('gate on but no primary gross: returns null (nothing to restack)', async () => {
+  test('gate on but genuinely nothing to restack (no primary gross, no discount of any kind): returns null', async () => {
     await withGateLive(() => {
-      expect(restackLiveVisitFinancials({ ...pricingFixture, primaryBase: null }, [])).toBeNull();
+      expect(restackLiveVisitFinancials({ primaryBase: null, primaryDiscount: null, appointmentDiscount: null }, [])).toBeNull();
+    });
+  });
+
+  // Codex pre-push audit P0 (round 8): a MISSING (not just explicit-$0)
+  // primary used to bail out of restacking entirely, even with priced/
+  // discounted add-ons and a shared appointment credit present — the exact
+  // class round 3 fixed for an explicit $0, just for `null`/`undefined`
+  // instead. Same worked example as round 3, primaryBase simply omitted.
+  test('gate on: a MISSING primary (not explicit $0) still restacks its own priced/discounted add-ons and the shared appointment credit', async () => {
+    await withGateLive(() => {
+      const pricing = {
+        primaryServiceKey: 'general_pest',
+        primaryServiceCategory: 'pest_control',
+        primaryDiscount: null,
+        appointmentDiscount: { discountType: 'fixed_amount', discountAmount: 30, discountDollars: 30, maxDiscountDollars: null, serviceKeyFilter: null, serviceCategoryFilter: null },
+      };
+      const recurringAddon = { base: 100, price: 84, serviceKey: 'recurring_addon', serviceCategory: 'addon', discount: { discountType: 'percentage', discountAmount: 20, discountDollars: 16, maxDiscountDollars: null } };
+      const oneTimeAddon = { base: 50, price: 50, serviceKey: 'one_time_addon', serviceCategory: 'addon', discount: null };
+
+      const anchor = restackLiveVisitFinancials(pricing, [recurringAddon, oneTimeAddon]);
+      expect(anchor.addonDollars[0].discountDollars).toBe(16);
+
+      const later = restackLiveVisitFinancials(pricing, [recurringAddon]);
+      expect(later.addonDollars[0].discountDollars).toBe(14);
+      expect(later.price).toBe(56);
     });
   });
 
@@ -460,8 +485,33 @@ describe('recurring extension — restackStoredVisitFinancials', () => {
     expect(withoutAddon.appointmentDiscountDollars).toBe(30);
   });
 
-  test('returns null when there is no structured primary gross to restack (anchored-split marker template)', () => {
-    expect(restackStoredVisitFinancials({ ...parentTemplate, primary_line_price: null }, [], null, uncappedCaps)).toBeNull();
+  test('returns null for the anchored-split marker template (discountStackMarkerOnly) — its own total already folds in the primary’s implied share', () => {
+    expect(restackStoredVisitFinancials(
+      { ...parentTemplate, primary_line_price: null, line_discount_type: null, discountStackMarkerOnly: true },
+      [], null, uncappedCaps,
+    )).toBeNull();
+  });
+
+  // Codex pre-push audit P0 (round 8): a MISSING (not the anchored-split
+  // marker) primary_line_price used to bail out entirely, even with a
+  // priced/discounted due add-on and a shared appointment credit present —
+  // the exact class round 3 fixed for an explicit $0, just for `null`
+  // without the marker flag (an add-on-only or re-service/callback row that
+  // never had a structured primary at all).
+  test('a MISSING (non-marker) primary_line_price still restacks its due add-ons and the shared appointment credit', () => {
+    const result = restackStoredVisitFinancials({
+      primary_line_price: null,
+      line_discount_type: null,
+      discount_type: 'fixed_amount',
+      discount_amount: 30,
+    }, [
+      { base_price: 100, estimated_price: 84, discount_type: 'percentage', discount_amount: 20, discount_dollars: 16, discount_id: 'recurring-disc-8', service_id: 'recurring-addon' },
+    ], null, new Map([['recurring-disc-8', null]]));
+
+    // Pool = 100 (the addon alone, primary contributes $0). The full $30
+    // credit lands on it, leaving $70; 20% of $70 = $14.
+    expect(result.addonDollars[0].discountDollars).toBe(14);
+    expect(result.price).toBe(56);
   });
 
   test('restacks a due add-on’s OWN percentage discount against its own pool share, not its frozen (full-base) dollar figure', () => {
@@ -714,10 +764,10 @@ describe('recurring extension — applyDiscountStackRestack (no-op contract)', (
     });
   });
 
-  test('gate on but nothing to restack (no primary gross): returns null and leaves target untouched', async () => {
+  test('gate on but the anchored-split marker template: returns null and leaves target untouched', async () => {
     await withGateLive(() => {
       const target = { estimated_price: 999, discount_dollars: 999, line_discount_dollars: 999 };
-      const result = applyDiscountStackRestack(target, cols, { ...parentTemplate, primary_line_price: null }, [], null, uncappedCaps);
+      const result = applyDiscountStackRestack(target, cols, { ...parentTemplate, primary_line_price: null, line_discount_type: null, discountStackMarkerOnly: true }, [], null, uncappedCaps);
       expect(result).toBeNull();
       expect(target).toEqual({ estimated_price: 999, discount_dollars: 999, line_discount_dollars: 999 });
     });

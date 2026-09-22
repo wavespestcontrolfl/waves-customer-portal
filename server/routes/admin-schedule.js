@@ -2459,16 +2459,24 @@ function calculateVisitFinancialsForAddons(pricing, addonLines) {
 // primary gross to anchor on.
 function restackLiveVisitFinancials(pricing, addonLines) {
   if (!discountStackingLive()) return null;
-  // An explicit $0 primary (a member-covered series stamps exactly this —
-  // dues cover the primary line, priced add-ons still bill) is a REAL gross
-  // to restack against, not "no primary at all": only a genuinely missing
-  // primaryBase (null/undefined — no structured line to anchor on) bails
-  // out here (Codex pre-push audit P0, round 3: this guard used to also
-  // reject 0, so a $0-primary booking with priced/discounted add-ons and an
-  // appointment credit skipped restacking entirely — the next seeded visit
-  // then read the anchor's frozen dollars instead of its own).
-  if (pricing?.primaryBase == null || pricing.primaryBase === '') return null;
-  const primaryGross = Number(pricing.primaryBase);
+  // A missing OR explicit-$0 primary (a member-covered series stamps
+  // exactly $0 — dues cover the primary line, priced add-ons still bill;
+  // a re-service/callback line can carry priced add-ons with no primary at
+  // all) is a REAL $0 contribution to restack around, not a reason to skip
+  // restacking altogether: buildAppointmentPricing's own restack (above)
+  // never special-cased this either, using primaryBase || 0 directly
+  // (Codex pre-push audit P0, round 3 fixed the $0 half of this; round 8
+  // found the null half still bailed out entirely — a $0-recurring-add-on-
+  // discount booking with NO primary price fell back to the anchor's
+  // frozen add-on dollars on every seeded child, exactly the class round 3
+  // fixed for an explicit $0). Only a genuinely invalid value (a non-numeric
+  // string, or negative) bails out; matchesScope/lineEligible below already
+  // treat a $0/absent primary as ineligible-for-nothing — there is simply
+  // no primary line term to restack, so primaryDiscount stays whatever
+  // pricing.primaryDiscount already is (structurally null whenever there is
+  // no real primary gross, since resolveLineDiscount never resolves a
+  // discount against a $0 base).
+  const primaryGross = Number(pricing?.primaryBase) || 0;
   if (!Number.isFinite(primaryGross) || primaryGross < 0) return null;
   const addons = Array.isArray(addonLines) ? addonLines : [];
   const discount = pricing.appointmentDiscount;
@@ -2647,6 +2655,17 @@ async function resolveSeriesExtensionPriceTemplate(conn, parentId, parent) {
       template.line_discount_type = null;
       template.line_discount_amount = null;
       template.line_discount_dollars = null;
+      // Synthetic, never spread into an insert (every caller reads named
+      // fields off this template, never the whole object) — the ONE marker
+      // restackStoredVisitFinancials needs to tell "the primary was
+      // genuinely cleared to fold into the marker total" apart from "this
+      // row never had a structured primary at all" (e.g. an add-on-only
+      // booking, a re-service/callback line): both read identically as
+      // primary_line_price === null otherwise, but only the FIRST must
+      // refuse to let a restack recompute estimated_price/discount_dollars
+      // — the marker's own total already accounts for the primary's
+      // implied share, which a restack starting from gross:0 cannot.
+      template.discountStackMarkerOnly = true;
     }
     return template;
   } catch {
@@ -2722,15 +2741,22 @@ function applyStoredVisitFinancials(target, cols, parent, addonRows, allParentAd
 // it gets every percentage term treated as uncapped (see the header note
 // below for why that is the honest degraded state, not a silent regression).
 function restackStoredVisitFinancials(parent, addonRows, discountScope, discountCaps) {
-  // An explicit $0 primary_line_price (a member-covered series stamps
-  // exactly this) is a REAL gross to restack due add-ons against, not "no
-  // structured primary at all" — only a genuinely missing value (null —
-  // resolveSeriesExtensionPriceTemplate's anchored-split clear, or a row
-  // that never had one) bails out (Codex pre-push audit P0, round 3: this
-  // guard used to also reject 0, so a $0-primary occurrence with priced/
-  // discounted add-ons and an appointment credit never restacked at all).
-  if (parent?.primary_line_price == null || parent.primary_line_price === '') return null;
-  const primaryGross = Number(parent.primary_line_price);
+  // The ONE case that truly bails out: resolveSeriesExtensionPriceTemplate's
+  // anchored-split marker clear (discountStackMarkerOnly) — the marker's own
+  // estimated_price is already the visit TOTAL with the primary's implied
+  // share folded in, which a restack starting the primary from gross:0
+  // cannot reconstruct (it would silently drop that share). A missing OR
+  // explicit-$0 primary_line_price in every OTHER case (a member-covered
+  // series stamps exactly $0; an add-on-only or re-service/callback booking
+  // never had a structured primary at all) is a REAL $0 contribution to
+  // restack around, not a reason to skip restacking due add-ons and the
+  // shared appointment credit (Codex pre-push audit P0: round 3 fixed the
+  // explicit-$0 half of this; round 8 found the null half still bailed out
+  // completely — a null-primary booking with a discounted recurring add-on
+  // fell back to the anchor's frozen add-on dollars on every extension,
+  // exactly the class round 3 fixed for an explicit $0).
+  if (parent?.discountStackMarkerOnly) return null;
+  const primaryGross = Number(parent?.primary_line_price) || 0;
   if (!Number.isFinite(primaryGross) || primaryGross < 0) return null;
   const addons = Array.isArray(addonRows) ? addonRows : [];
 
