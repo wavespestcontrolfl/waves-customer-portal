@@ -50,8 +50,8 @@ function isActionableInbound(message) {
   return !NON_ACTIONABLE_INBOUND_TYPES.has(messageType) && !messageType.startsWith("job_");
 }
 
-export function needsSmsReply(messages) {
-  if (!Array.isArray(messages)) return false;
+export function unansweredSmsLine(messages) {
+  if (!Array.isArray(messages)) return null;
 
   const latestInboundByLine = new Map();
   let latestOptOutAt = -Infinity;
@@ -64,13 +64,19 @@ export function needsSmsReply(messages) {
     }
     if (!isActionableInbound(message)) return;
     const line = businessLineKey(message);
-    latestInboundByLine.set(line, Math.max(latestInboundByLine.get(line) ?? -Infinity, createdAt));
+    if (createdAt > (latestInboundByLine.get(line)?.createdAt ?? -Infinity)) {
+      latestInboundByLine.set(line, {
+        createdAt,
+        businessLine: message.to || null,
+      });
+    }
   });
 
-  return [...latestInboundByLine].some(([line, latestInboundAt]) => {
+  let latestUnanswered = null;
+  latestInboundByLine.forEach(({ createdAt: latestInboundAt, businessLine }, line) => {
     // STOP applies to the contact, not one endpoint, and closes any older ask.
-    if (latestOptOutAt > latestInboundAt) return false;
-    return !messages.some((message) => {
+    if (latestOptOutAt > latestInboundAt) return;
+    const answered = messages.some((message) => {
       if (message?.direction !== "outbound") return false;
       if (businessLineKey(message) !== line) return false;
       if (!HUMAN_REPLY_TYPES.has(message.messageType)) return false;
@@ -78,5 +84,10 @@ export function needsSmsReply(messages) {
       const createdAt = messageTime(message);
       return !Number.isNaN(createdAt) && createdAt > latestInboundAt;
     });
+    if (!answered && latestInboundAt > (latestUnanswered?.createdAt ?? -Infinity)) {
+      latestUnanswered = { createdAt: latestInboundAt, businessLine };
+    }
   });
+
+  return latestUnanswered?.businessLine || null;
 }
