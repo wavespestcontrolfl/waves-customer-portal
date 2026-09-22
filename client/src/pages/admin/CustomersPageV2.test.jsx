@@ -191,6 +191,37 @@ describe('CustomersPageV2 workflow state', () => {
     expect(requests.at(-1).has('retention')).toBe(false);
   });
 
+  it('preserves server relevance order while a name search is active', async () => {
+    const requests = [];
+    const ranked = {
+      customers: [
+        { id: 'customer-exact', firstName: 'Zed', lastName: 'Exact', address: '1 Fixture Way' },
+        { id: 'customer-broad', firstName: 'Aaron', lastName: 'Broad', address: '2 Fixture Way' },
+      ],
+      total: 2,
+      totalPages: 1,
+    };
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const parsed = new URL(String(url), 'http://fixture.invalid');
+      requests.push(parsed.searchParams);
+      return response(parsed.searchParams.get('search') === 'Exact' ? ranked : list);
+    }));
+    render(<MemoryRouter initialEntries={['/admin/customers']}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+
+    fireEvent.change(screen.getByPlaceholderText('Search customers...'), {
+      target: { value: 'Exact' },
+    });
+
+    await screen.findByRole('button', { name: 'Open Zed Exact customer profile' });
+    const resultButtons = screen.getAllByRole('button', { name: /customer profile$/ });
+    expect(resultButtons.map((button) => button.getAttribute('aria-label'))).toEqual([
+      'Open Zed Exact customer profile',
+      'Open Aaron Broad customer profile',
+    ]);
+    expect(requests.at(-1).get('sort')).toBe('name');
+  });
+
   it.each([null, 0])('opens old health links in the Directory and preserves a recorded score of %s', async (healthScore) => {
     vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response({ ...list, customers: [{ ...list.customers[0], healthScore }] }) : response({})));
     render(<MemoryRouter initialEntries={['/admin/customers?customer360=workspace&view=health']}><CustomersPageV2 /></MemoryRouter>);
