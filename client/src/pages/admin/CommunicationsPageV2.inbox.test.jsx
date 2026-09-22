@@ -92,6 +92,21 @@ it("pauses polling while hidden or on another channel and refreshes on return", 
   expect(logRequests()).toHaveLength(initialCalls + 2);
 });
 
+it("keeps refreshed arrivals first in the log and uses the latest inbound for AI Draft", async () => {
+  setup(); await tick();
+  fireEvent.click(screen.getByText("Please check the gate"));
+  fireEvent.click(screen.getByRole("button", { name: "Text back" }));
+  messages = [{ ...inbound("new", "The gate is now open"), createdAt: "2024-07-01T12:02:00Z" }, ...messages];
+  await tick(30000);
+  fireEvent.click(screen.getByRole("button", { name: "Log View" }));
+  const latest = screen.getByText("The gate is now open");
+  const older = screen.getByText("Please check the gate");
+  expect(latest.compareDocumentPosition(older) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "AI Draft", exact: true })); await tick();
+  const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/communications/ai-draft"));
+  expect(JSON.parse(request[1].body)).toMatchObject({ lastMessage: "The gate is now open" });
+});
+
 it("updates the open conversation when a delivery receipt changes without a new message", async () => {
   messages.push({ id: "reply", direction: "outbound", from: line, to: "+19415550100", body: "We will check", status: "sent", messageType: "manual", createdAt: "2024-07-01T12:01:00Z" });
   setup(); await tick();

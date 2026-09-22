@@ -308,7 +308,8 @@ function smsMessageMatchesLine(message, lineNumber) {
 }
 
 function mergeSmsMessages(existing, incoming) {
-  return [...new Map([...existing, ...incoming].map((message) => [message.id, message])).values()];
+  return [...new Map([...existing, ...incoming].map((message) => [message.id, message])).values()]
+    .sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0));
 }
 
 function StatCardV2({ label, value, sub, active, alert, onClick }) {
