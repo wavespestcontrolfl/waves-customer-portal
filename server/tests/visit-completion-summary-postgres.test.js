@@ -2294,9 +2294,9 @@ postgres('visit summary recipient recovery', () => {
     // in exactly that gap is invisible to a fence check that already ran
     // and returned payerBilled:false (no live payer existed yet). The
     // withdrawal is run here as a REAL second fenceOnly call, for real,
-    // right as settleZeroBalance is about to lock the invoice row — the
-    // same _query interception point the operator-reschedule test below
-    // uses for its own gap.
+    // at settleZeroBalance's customer-id pre-read, before it acquires
+    // its first (customer) lock. Waiting until the invoice lock would
+    // make this writer wait on the customer lock held by our own hook.
     const invoiceId = randomUUID();
     await mockPg('invoices').insert({
       id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
@@ -2311,11 +2311,12 @@ postgres('visit summary recipient recovery', () => {
     const execute = mockPg.client.constructor.prototype._query;
     let withdrawnInGap = false;
     jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(async function withdrawBeforeLock(connection, query) {
-      if (!withdrawnInGap && query.sql.includes('"invoices"') && query.sql.toLowerCase().includes('for update')) {
+      const sql = query.sql.toLowerCase();
+      if (!withdrawnInGap && sql.startsWith('select "customer_id" from "invoices"') && !sql.includes('for update')) {
         withdrawnInGap = true;
         // The concurrent Bill-To writer: a live payer gets attached and a
         // REAL fenceOnly withdrawal commits, all before the intercepted
-        // FOR UPDATE below is even sent.
+        // pre-read below is sent and either settlement lock is acquired.
         await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
         const fence = await Invoice.claimPacketInvoiceForSend(invoiceId, fixture.packetId, { fenceOnly: true });
         expect(fence).toMatchObject({ payerBilled: true, payerId: payer.id });
