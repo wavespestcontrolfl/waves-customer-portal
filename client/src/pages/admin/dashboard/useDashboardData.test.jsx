@@ -11,6 +11,7 @@ const deferred = () => {
   return { promise, resolve };
 };
 const response = (path) => {
+  if (path === '/admin/kpi-targets') return { targets: [] };
   if (path.endsWith('/alerts')) return { alerts: [] };
   if (path.endsWith('/stale-visits')) return { visits: [] };
   if (path.endsWith('/today-completion')) return { total: 2, completed: 1 };
@@ -26,6 +27,23 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.resetAllMocks(); });
 
 describe('dashboard request recovery', () => {
+  it('retains valid KPI targets when a malformed refresh cannot be mapped', async () => {
+    const good = { targets: [{ metric: 'gross_margin', target: 60 }] };
+    let targets = good;
+    adminFetch.mockImplementation(async (path) => path === '/admin/kpi-targets' ? targets : response(path));
+    const { result } = renderHook(() => useDashboardData('today', 'period=mtd'));
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+    expect(result.current.values.kpiTargets).toBe(good);
+    targets = { targets: {} };
+    await act(async () => result.current.refresh());
+    expect(result.current.errors.kpiTargets).toBeInstanceOf(Error);
+    expect(result.current.values.kpiTargets).toBe(good);
+    targets = { targets: [] };
+    await act(async () => result.current.refresh());
+    expect(result.current.errors.kpiTargets).toBeNull();
+    expect(result.current.values.kpiTargets).toEqual({ targets: [] });
+  });
+
   it('publishes overdue visits and completion while analytics is stalled', async () => {
     const stalled = deferred();
     adminFetch.mockImplementation((path) => path.endsWith('/funnel') ? stalled.promise : Promise.resolve(response(path)));

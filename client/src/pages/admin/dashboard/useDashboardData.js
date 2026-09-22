@@ -112,6 +112,7 @@ export default function useDashboardData(section, periodQS) {
           // valid response. An error-shaped/malformed payload is unavailable.
           if (!value || value.error
             || (key === "alerts" && !Array.isArray(value.alerts))
+            || (key === "kpiTargets" && !Array.isArray(value.targets))
             || (key === "staleVisits" && !Array.isArray(value.visits))
             || (key === "today" && typeof value.total !== "number")
             || (key === "data" && (!value.kpis || typeof value.kpis !== "object" || Array.isArray(value.kpis)))) {

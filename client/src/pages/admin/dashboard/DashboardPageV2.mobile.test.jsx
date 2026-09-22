@@ -33,6 +33,7 @@ class FakeResizeObserver {
 
 // Minimal fixtures — enough for every section to mount without errors.
 const FIXTURES = {
+  "/admin/kpi-targets": { targets: [] },
   "/admin/dashboard": {
     kpis: {
       revenueMTD: 497,

@@ -73,6 +73,7 @@ const CORE_KPIS = {
 };
 
 const FIXTURES = {
+  "/admin/kpi-targets": { targets: [] },
   "/admin/command-center/stale-visits": { visits: [] },
   "/admin/dashboard": {
     kpis: {
