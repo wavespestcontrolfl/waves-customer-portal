@@ -261,7 +261,7 @@ export default function useSmsDraft({ ownerId, recipientKey, initialDraft = null
       },
       clearDraft(expectedRevision = entry.revision) {
         const current = entryFor(store, owner, recipient);
-        if (current.revision !== expectedRevision) return { cleared: false, persisted: true };
+        if (current.revision !== expectedRevision) return { cleared: false, persisted: current.recoveryWarning === null };
         const recoveryWarning = owner === null ? null : persist(owner, recipient, null);
         if (draftContentIsEmpty(current.draft)) {
           if (current.recoveryWarning !== recoveryWarning) {
