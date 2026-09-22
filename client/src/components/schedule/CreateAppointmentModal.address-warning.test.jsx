@@ -868,4 +868,27 @@ describe('appointment discount gate-drift protection (Codex pre-push audit P1, r
     await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
     expect(JSON.parse(schedulePosts(fetcher)[0][1].body).discountId).toBeUndefined();
   });
+
+  // Codex pre-push audit P1 (round 5): the picker <select> was never
+  // disabled during an active drift/unconfirmed banner, so an operator
+  // re-picking (instead of clicking Retry) froze
+  // appointmentDiscountGateSnapshot to the then-LIVE (still-drifted) value
+  // via the ordinary pickAppointmentDiscount path — discarding the fresh
+  // pick with zero feedback the moment the drift check re-evaluated, a
+  // path none of the Retry-focused tests above covered.
+  it('disables the picker while a drift/unconfirmed banner is showing, so a re-pick cannot silently discard itself', async () => {
+    await pickThenFlipGateTo(false);
+    await screen.findByText('Could not confirm the discount-stacking status — retry before saving.');
+    const picker = screen.getByLabelText('Appointment discount');
+    expect(picker.disabled).toBe(true);
+    // The DOM `disabled` attribute stops genuine user interaction; the
+    // handler ALSO refuses a re-pick directly (pickAppointmentDiscount's
+    // own discountSaveBlockedReason guard) so a change event delivered by
+    // any other means still cannot re-freeze the snapshot to the live,
+    // still-drifted value. Re-selecting the SAME tier is enough to exercise
+    // this — any non-empty presetId hits the guarded branch.
+    fireEvent.change(picker, { target: { value: 'mil' } });
+    expect(picker.value).toBe('mil');
+    expect(screen.getByText('Military Discount: -$10.00')).toBeTruthy();
+  });
 });

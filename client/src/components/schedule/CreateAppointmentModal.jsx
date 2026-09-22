@@ -1629,8 +1629,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // selected — the live gate no longer decides this directly; only an
   // explicit Retry can change appointmentDiscountGateSnapshot, so a
   // background poll flip can never silently null this out from under an
-  // active selection.
-  const appointmentDiscount = appointmentDiscountState && appointmentDiscountGateSnapshot
+  // active selection. Codex pre-push audit P1 (round 5): checked against
+  // `!== null`, matching appointmentDiscountCompound below — a plain
+  // truthy check treats a snapshot of `false` (confirmed OFF) exactly like
+  // `null` (never frozen), which reopened the silent-drop class this whole
+  // mechanism exists to prevent via a re-pick made WHILE a drift banner is
+  // showing (pickAppointmentDiscount freezes the snapshot to the then-LIVE,
+  // still-drifted value). The `<select>` below is now also disabled for
+  // the whole discountSaveBlockedReason window, so that specific re-pick
+  // path can no longer happen at all — this check is the second,
+  // independent layer, not the only one.
+  const appointmentDiscount = appointmentDiscountState && appointmentDiscountGateSnapshot !== null
     ? appointmentDiscountState
     : null;
   // Which "compound" regime to preview/stack under: the FROZEN gate a
@@ -2011,6 +2020,19 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // A custom preset takes the operator's amount, like a line pick.
   const pickAppointmentDiscount = (presetId) => {
     if (!presetId) { setAppointmentDiscount(null); setAppointmentDiscountGateSnapshot(null); return; }
+    // Codex pre-push audit P1 (round 5): the <select>'s own `disabled`
+    // attribute (below, JSX) only stops genuine USER interaction — it does
+    // not stop a programmatically dispatched change event from still
+    // reaching this handler. Matching the same defense-in-depth principle
+    // handleSubmit's own guard follows (the disabled attribute is never
+    // trusted as the SOLE guard against an action this file treats as
+    // money-sensitive): picking a NEW discount is refused outright while
+    // ANY save-blocking reason is active, so a re-pick can never freeze
+    // appointmentDiscountGateSnapshot to a live value the operator has not
+    // actually acknowledged via Retry. Clearing (the branch above) is
+    // always allowed — it can only ever help, and is the "Remove discount"
+    // banner button's own recovery path for the unmatched-group case.
+    if (discountSaveBlockedReason) return;
     const discount = discountPresets.find((d) => String(d.id) === String(presetId));
     if (!discount) return;
     let amount = discount.amount;
@@ -4258,6 +4280,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 id="appointment-discount"
                 value={appointmentDiscount?.id || ''}
                 onChange={(e) => pickAppointmentDiscount(e.target.value)}
+                // Codex pre-push audit P1 (round 5): disabled for the same
+                // window the Save button is blocked for — a re-pick made
+                // while a drift/unconfirmed/percent-exclusion banner is up
+                // would freeze appointmentDiscountGateSnapshot to whatever
+                // the LIVE (possibly still-wrong) gate reads at that
+                // instant, discarding the fresh pick with no feedback the
+                // moment the drift check re-evaluates. The banner's own
+                // "Retry"/"Remove discount" button is a separate element,
+                // unaffected by this.
+                disabled={!!discountSaveBlockedReason}
                 style={inputStyle}
               >
                 <option value="">None</option>
