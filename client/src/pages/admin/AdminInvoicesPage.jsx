@@ -6671,11 +6671,26 @@ function CreateInvoice({
     savingRef.current = true;
     setActionError("");
     setSaving(true);
-    const stackingCheck = await stackingStillFresh();
-    if (!stackingCheck.ok) {
-      savingRef.current = false;
-      setSaving(false);
-      return;
+    // Codex pre-push audit P1 (round 5 on PR #4655, addendum): the
+    // freshness probe must run ONLY when this save actually changes
+    // line_items — the field the probe exists to protect. Checking
+    // editLineItemsBaselineRef FIRST (not stackingStillFresh
+    // unconditionally, as before) means a due-date/notes-only edit on an
+    // invoice that merely HAPPENS to already carry a discount line never
+    // touches /api/admin/discounts/stacking at all, matching this same
+    // save's own line_items gate a few lines below and the file's
+    // documented goal (editLineItemsBaselineRef comment above: "a draft
+    // ... stays editable for those fields").
+    const lineItemsChanged =
+      JSON.stringify(lineItems) !== editLineItemsBaselineRef.current;
+    let stackingCheck = { ok: true, expectedStacking: undefined };
+    if (lineItemsChanged) {
+      stackingCheck = await stackingStillFresh();
+      if (!stackingCheck.ok) {
+        savingRef.current = false;
+        setSaving(false);
+        return;
+      }
     }
     try {
       const body = {
@@ -6687,7 +6702,7 @@ function CreateInvoice({
       // Only send line_items when they actually changed. An unchanged save
       // (e.g. due-date only) skips the server retotal, so a draft that carries
       // a since-retired discount stays editable for those fields.
-      if (JSON.stringify(lineItems) !== editLineItemsBaselineRef.current) {
+      if (lineItemsChanged) {
         // Codex pre-push audit P1 (round 4 on PR #4655): bind the
         // CONFIRMED gate state this preview ran under to the write — only
         // meaningful when line_items is actually sent (the only case the

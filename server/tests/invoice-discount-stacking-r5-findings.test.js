@@ -74,10 +74,15 @@ function discountRow(overrides) {
 // from loadDiscountStackMetaRows' bare `.whereIn` (no `.where` at all), so a
 // retired row is invisible to the first and visible to the second, exactly
 // like real Postgres.
-function setupDb({ customer = null, discounts = [] } = {}) {
+// Factory (not tied to the global `db` mock) so a test can build a SECOND,
+// independent connection (e.g. a fake trx) with its own discounts rows —
+// used by the round-5 P1 transaction-scoping test below to prove a
+// retired-metadata read lands on the CALLER'S connection, not the pool.
+function makeDbImpl({ customer = null, discounts = [], tableCalls = null } = {}) {
   let insertedInvoice = null;
   const byId = new Map(discounts.map((d) => [String(d.id), d]));
-  db.mockImplementation((table) => {
+  const impl = (table) => {
+    if (tableCalls) tableCalls.push(table);
     if (table === 'customers') {
       return { where: jest.fn(() => ({ first: jest.fn(async () => customer) })) };
     }
@@ -130,8 +135,15 @@ function setupDb({ customer = null, discounts = [] } = {}) {
       then: (resolve, reject) => Promise.resolve([]).then(resolve, reject),
     };
     return q;
-  });
-  return { getInsertedInvoice: () => insertedInvoice };
+  };
+  impl.getInsertedInvoice = () => insertedInvoice;
+  return impl;
+}
+
+function setupDb(opts = {}) {
+  const impl = makeDbImpl(opts);
+  db.mockImplementation(impl);
+  return { getInsertedInvoice: impl.getInsertedInvoice };
 }
 
 const CUSTOMER = { id: 'customer-1', property_type: 'residential' };
@@ -457,5 +469,118 @@ describe('P1 (post-push): the group-conflict error carries isOperational/statusC
     expect(caught.statusCode).toBe(400);
     expect(caught.isOperational).toBe(true);
     expect(caught.code).toBe('DISCOUNT_STACK_GROUP_CONFLICT');
+  });
+});
+
+describe('P1 (GitHub round 5): retired-discount metadata reads through the caller\'s transaction, never a second pooled connection', () => {
+  test('create() called with a trx database reads retired metadata off THAT trx, not the global pool', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const silverId = 'trx-silver';
+    const goldId = 'trx-gold';
+    // Global pool: missing the retired Silver row entirely. If the
+    // retired-metadata lookup ever fell back to this instead of the
+    // supplied trx, Silver's stack_group would be invisible to the
+    // conflict check and this would resolve instead of rejecting.
+    setupDb({
+      customer: CUSTOMER,
+      discounts: [
+        discountRow({ id: goldId, name: 'WaveGuard Gold', discount_type: 'percentage', amount: 15, stack_group: 'tier', is_stackable: false }),
+      ],
+    });
+    const trxTableCalls = [];
+    const trx = jest.fn(makeDbImpl({
+      customer: CUSTOMER,
+      tableCalls: trxTableCalls,
+      discounts: [
+        discountRow({ id: silverId, name: 'WaveGuard Silver', discount_type: 'percentage', amount: 10, is_active: false, show_in_invoices: false, stack_group: 'tier', is_stackable: false }),
+        discountRow({ id: goldId, name: 'WaveGuard Gold', discount_type: 'percentage', amount: 15, stack_group: 'tier', is_stackable: false }),
+      ],
+    }));
+    trx.isTransaction = true;
+
+    await expect(InvoiceService.create({
+      database: trx,
+      customerId: 'customer-1',
+      title: 'Trx-scoped conflict invoice',
+      lineItems: [
+        { client_id: 'line-1', description: 'Pest', quantity: 1, unit_price: 100, amount: 100 },
+        { client_id: 'line-2', description: 'Lawn', quantity: 1, unit_price: 100, amount: 100 },
+        {
+          client_id: 'd1', discount_id: silverId, discount_for: 'line-1', description: 'WaveGuard Silver',
+          quantity: 1, unit_price: -10, amount: -10,
+          use_stored_discount: true, stored_discount_source: 'scheduled_service', discount_dollars: 10,
+        },
+        { client_id: 'd2', discount_id: goldId, discount_for: 'line-2', description: 'WaveGuard Gold', quantity: 1, unit_price: -1, amount: -1 },
+      ],
+      trustedStoredDiscountSources: ['scheduled_service'],
+    })).rejects.toThrow(/Only one WaveGuard tier discount can apply/);
+
+    // The retired-metadata read (and everything else create() does) went
+    // through the supplied trx — proving the connection was actually used,
+    // not merely accepted and ignored.
+    expect(trxTableCalls).toContain('discounts');
+  });
+});
+
+describe('P2 x2 (GitHub round 5): widened retired-discount metadata is scoped to the item that caused the lookup, never a fresh item sharing the same discount_id', () => {
+  test('a FRESH line reusing a retired discount_id already trusted elsewhere on the invoice still fails "Invalid line-item discount"', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const retiredId = 'shared-retired-id';
+    setupDb({
+      discounts: [
+        // Retired — loadInvoiceDiscountRows (active-filtered) won't return
+        // it; only the trusted item's own group-check lookup should ever
+        // see its metadata.
+        discountRow({ id: retiredId, name: 'Old Promo', discount_type: 'fixed_amount', amount: 5, is_active: false, show_in_invoices: false }),
+      ],
+    });
+    const persisted = [
+      { client_id: 'line-1', description: 'Pest', quantity: 1, unit_price: 100, amount: 100 },
+      {
+        client_id: 'd1', discount_id: retiredId, discount_for: 'line-1', description: 'Old Promo',
+        quantity: 1, unit_price: -5, amount: -5,
+        use_stored_discount: true, stored_discount_source: 'scheduled_service', discount_dollars: 5,
+      },
+    ];
+    // A brand-new line item (new client_id) reusing the SAME retired
+    // discount_id — a stale picker cache or a direct API call, never
+    // legitimately trusted itself.
+    const submitted = [
+      ...persisted,
+      { client_id: 'line-2', description: 'Lawn', quantity: 1, unit_price: 100, amount: 100 },
+      { client_id: 'd2', discount_id: retiredId, discount_for: 'line-2', description: 'Old Promo (fresh)', quantity: 1, unit_price: -5, amount: -5 },
+    ];
+    await expect(calculateUpdateFinancials({
+      lineItems: submitted,
+      customer: { property_type: 'residential' },
+      invoice: { id: 'invoice-1', line_items: JSON.stringify(persisted) },
+    })).rejects.toThrow('Invalid line-item discount');
+  });
+
+  test('the SAME fresh-reuse case in create() (empty persistedClientIds) also refuses, never silently re-applying the retired discount', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const retiredId = 'shared-retired-id-2';
+    setupDb({
+      customer: CUSTOMER,
+      discounts: [
+        discountRow({ id: retiredId, name: 'Old Promo', discount_type: 'fixed_amount', amount: 5, is_active: false, show_in_invoices: false }),
+      ],
+    });
+    await expect(InvoiceService.create({
+      customerId: 'customer-1',
+      title: 'Fresh reuse of a retired id',
+      lineItems: [
+        { client_id: 'line-1', description: 'Pest', quantity: 1, unit_price: 100, amount: 100 },
+        { client_id: 'line-2', description: 'Lawn', quantity: 1, unit_price: 100, amount: 100 },
+        {
+          client_id: 'd1', discount_id: retiredId, discount_for: 'line-1', description: 'Old Promo',
+          quantity: 1, unit_price: -5, amount: -5,
+          use_stored_discount: true, stored_discount_source: 'scheduled_service', discount_dollars: 5,
+        },
+        // Fresh — no stored source — reuses the same retired id on a different line.
+        { client_id: 'd2', discount_id: retiredId, discount_for: 'line-2', description: 'Old Promo (fresh)', quantity: 1, unit_price: -1, amount: -1 },
+      ],
+      trustedStoredDiscountSources: ['scheduled_service'],
+    })).rejects.toThrow('Invalid line-item discount');
   });
 });

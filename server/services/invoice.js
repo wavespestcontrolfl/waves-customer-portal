@@ -475,15 +475,21 @@ async function loadDiscountStackMetaRows(ids = [], database = db) {
   return database("discounts").whereIn("id", uniqueIds);
 }
 
-// Widens an already-loaded (active-only) discount row map with retired/
-// hidden catalog metadata for ids that belong to an item already TRUSTED
-// (source-stamped) or POSITIONALLY PERSISTED (already on the invoice
-// before this write) — so computeStackedDocumentDiscountLines's
-// non-stackable-group check still sees that row's stack_group even after
-// it's retired. A fresh (non-trusted, non-persisted) item's discount_id is
-// deliberately never widened here — it must keep failing "Invalid
-// line-item discount" if it points at a retired row.
-async function widenDiscountRowsForTrustedItems({
+// Codex pre-push audit P2 x2 (round 5 on PR #4655): the earlier version of
+// this helper merged retired metadata straight into the SAME id-keyed map
+// every negative item's `row` is looked up from — so a brand-new, FRESH
+// line item that merely happened to reuse a retired discount_id (a stale
+// picker cache, or a direct API call) got that retired row back too, was
+// treated as a valid pick, and applied the retired discount again,
+// bypassing the "Invalid line-item discount" refusal a fresh item pointing
+// at a missing/retired row must always hit. This now returns ONLY the
+// newly-fetched metadata, in its OWN separate map — never merged into
+// rowById, so nothing downstream that resolves a row generically (pricing,
+// lineEntries admission) can see it. computeStackedDocumentDiscountLines
+// below reads this map ONLY as a per-entry fallback, and ONLY for an entry
+// whose OWN item is already trusted/persisted (entry.stored) — a fresh
+// item can never reach it regardless of which discount_id it names.
+async function loadTrustedGroupConflictMeta({
   items,
   rowById,
   trustedStoredSources,
@@ -498,12 +504,9 @@ async function widenDiscountRowsForTrustedItems({
         && isTrusted(item) && !rowById.has(String(item.discount_id)))
       .map((item) => String(item.discount_id)),
   )];
-  if (!missingIds.length) return rowById;
+  if (!missingIds.length) return new Map();
   const metaRows = await loadDiscountStackMetaRows(missingIds, database);
-  if (!metaRows.length) return rowById;
-  const widened = new Map(rowById);
-  for (const row of metaRows) widened.set(String(row.id), row);
-  return widened;
+  return new Map(metaRows.map((row) => [String(row.id), row]));
 }
 
 // --- GATE_DISCOUNT_STACKING document-wide compounding (slice 5 of #4405) ---
@@ -830,6 +833,13 @@ function computeStackedDocumentDiscountLines({
   manualDiscountRows,
   trustedStoredSources,
   persistedClientIds = new Set(),
+  // Codex pre-push audit P2 x2 (round 5 on PR #4655): retired-catalog
+  // metadata for trusted/persisted discount_ids, loaded separately by
+  // loadTrustedGroupConflictMeta — read ONLY below, as a fallback for an
+  // entry whose OWN item is already trusted (entry.stored), never merged
+  // into lineItemDiscountRowById itself. A fresh item sharing that same
+  // discount_id must never resolve a row from here.
+  groupConflictMetaById = new Map(),
 }) {
   const positiveServiceLines = items.filter((item) => Number(item.amount) > 0);
   const negativeItems = items.filter(
@@ -879,9 +889,19 @@ function computeStackedDocumentDiscountLines({
   // edits.
   assertNewStackGroupConflicts([
     ...classifiedNegativeItems
-      .filter((entry) => entry.row)
       .map((entry) => ({
-        ...entry.row,
+        ...entry,
+        // Codex pre-push audit P2 x2 (round 5): the retired-metadata
+        // fallback is gated on entry.stored — a FRESH item can never
+        // pull a group-check row from groupConflictMetaById, regardless
+        // of whether some OTHER trusted item shares its discount_id.
+        groupRow: entry.row || (entry.stored && entry.item.discount_id
+          ? groupConflictMetaById.get(String(entry.item.discount_id))
+          : null),
+      }))
+      .filter((entry) => entry.groupRow)
+      .map((entry) => ({
+        ...entry.groupRow,
         _isNew: !entry.stored,
         ...(entry.spansAll
           ? { spansAll: true }
@@ -1305,22 +1325,22 @@ async function calculateUpdateFinancials({
       )
       .map((item) => String(item.discount_id)),
   );
-  let lineItemDiscountRowById = new Map(
+  const lineItemDiscountRowById = new Map(
     lineItemDiscountRows.map((row) => [String(row.id), row]),
   );
   // Codex pre-push audit P1 (round 4 on PR #4655): a persisted discount
   // retired/hidden since it was applied must still count in its
-  // non-stackable group — widen with its bare catalog metadata (never
-  // making it a valid FRESH pick; only a trusted/persisted item's id is
-  // ever widened).
-  if (discountStackingLive()) {
-    lineItemDiscountRowById = await widenDiscountRowsForTrustedItems({
+  // non-stackable group — separate, SCOPED metadata (never merged into
+  // lineItemDiscountRowById itself — round 5 P2 x2: a shared merged map
+  // let a FRESH item sharing that same retired id apply it too).
+  const groupConflictMetaById = discountStackingLive()
+    ? await loadTrustedGroupConflictMeta({
       items,
       rowById: lineItemDiscountRowById,
       trustedStoredSources: EDIT_TRUSTED_DISCOUNT_SOURCES,
       persistedClientIds,
-    });
-  }
+    })
+    : new Map();
   // Deposit credits are prior payment, not discounts — keep them out of the
   // discount/tax base on edits too, or an admin save would silently convert
   // an after-tax credit into a pre-tax discount. Mirrors create().
@@ -1348,6 +1368,7 @@ async function calculateUpdateFinancials({
       manualDiscountRows: [], // the edit path carries no invoice-level discountIds
       trustedStoredSources: EDIT_TRUSTED_DISCOUNT_SOURCES,
       persistedClientIds,
+      groupConflictMetaById,
     }));
   } else {
     lineItemDiscounts = items
@@ -3225,7 +3246,7 @@ const InvoiceService = {
         )
         .map((item) => String(item.discount_id)),
     );
-    let lineItemDiscountRowById = new Map(
+    const lineItemDiscountRowById = new Map(
       lineItemDiscountRows.map((row) => [String(row.id), row]),
     );
 
@@ -3242,12 +3263,19 @@ const InvoiceService = {
     let lineItemDiscounts;
     if (discountStackingLive()) {
       // Codex pre-push audit P1 (round 4 on PR #4655): a stored visit
-      // stamp's discount_id can point at a now-retired/hidden row — widen
-      // before the group check runs so its stack_group still counts.
-      lineItemDiscountRowById = await widenDiscountRowsForTrustedItems({
+      // stamp's discount_id can point at a now-retired/hidden row — load
+      // its bare metadata separately (round 5 P1: on the SAME `database`
+      // — the caller's transaction when create() is running inside one,
+      // e.g. a linked scheduled-service mint — never a second, independent
+      // pooled connection that could starve the pool while this trx still
+      // holds its own; round 5 P2 x2: a SEPARATE map, never merged into
+      // lineItemDiscountRowById, so a fresh item sharing that discount_id
+      // can never resolve a row from it) before the group check runs.
+      const groupConflictMetaById = await loadTrustedGroupConflictMeta({
         items,
         rowById: lineItemDiscountRowById,
         trustedStoredSources,
+        database,
       });
       ({ manualDiscounts, lineItemDiscounts } = computeStackedDocumentDiscountLines({
         items,
@@ -3255,6 +3283,7 @@ const InvoiceService = {
         lineItemDiscountRowById,
         manualDiscountRows,
         trustedStoredSources,
+        groupConflictMetaById,
       }));
     } else {
       manualDiscounts = manualDiscountRows.map((d) => {
@@ -3874,18 +3903,24 @@ const InvoiceService = {
       const lineItemDiscountIds = resolvedItems
         .filter((item) => Number(item.amount) < 0 && item.discount_id)
         .map((item) => item.discount_id);
-      let lineItemDiscountRowById = new Map(
+      const lineItemDiscountRowById = new Map(
         (await loadInvoiceDiscountRows(lineItemDiscountIds, dbh)).map((row) => [String(row.id), row]),
       );
       // Codex pre-push audit P1 (round 4 on PR #4655): the retention-sizing
       // pass runs its OWN group check (same shared function) — a persisted
       // stamp pointing at a retired discount must count there too, or a
       // conflict would slip through this earlier call only to be caught
-      // (or missed) again by create()'s own later, identical pass.
-      lineItemDiscountRowById = await widenDiscountRowsForTrustedItems({
+      // (or missed) again by create()'s own later, identical pass. Round 5
+      // P1: on `dbh` — this runs inside the mint's own transaction, and a
+      // second call through the global pool here could starve it while dbh
+      // still holds its own connection. Round 5 P2 x2: a SEPARATE map,
+      // never merged into lineItemDiscountRowById, so a fresh item sharing
+      // that discount_id can never resolve a row from it.
+      const groupConflictMetaById = await loadTrustedGroupConflictMeta({
         items: resolvedItems,
         rowById: lineItemDiscountRowById,
         trustedStoredSources: EDIT_TRUSTED_DISCOUNT_SOURCES,
+        database: dbh,
       });
       // Codex pre-push audit P1 (round 2 on PR #4655): reuse the file's
       // own EDIT_TRUSTED_DISCOUNT_SOURCES (scheduled_service AND
@@ -3903,6 +3938,7 @@ const InvoiceService = {
         lineItemDiscountRowById,
         manualDiscountRows: [],
         trustedStoredSources: EDIT_TRUSTED_DISCOUNT_SOURCES,
+        groupConflictMetaById,
       });
       resolvedLineItems = resolvedItems;
     }
