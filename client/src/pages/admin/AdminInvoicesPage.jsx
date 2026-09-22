@@ -753,6 +753,38 @@ export function repriceAllFreshDiscounts({
   });
 }
 
+// GATE_DISCOUNT_STACKING (slice 8 pre-push audit P1): server/services/
+// invoice.js — owned by another lane in this split, out of scope here —
+// only admits an UNPARENTED (document-wide) negative item into its
+// document stack when it is a trusted/persisted stamp OR carries NO
+// discount_id at all (a plain literal credit); a FRESH catalog-referenced
+// document-wide pick (discount_id set, discount_for: null — exactly what
+// addDocumentDiscount below creates) falls through to its own "Invalid
+// line-item discount" throw on save. This form's engine
+// (repriceAllFreshDiscounts, stackDocumentDiscounts) already resolves
+// that pick's correct compounded dollar amount for the live preview —
+// this strips the catalog reference ONLY at the submit boundary, turning
+// a fresh document-wide pick into the plain literal-credit shape the
+// server already accepts, at its own (already client-verified-correct)
+// face value — the same shape an ad hoc "Referral Credit" always has. A
+// STORED stamp or an already-PERSISTED row is untouched (isStoredInvoiceDiscountItem
+// true) — only a fresh, not-yet-saved, catalog-identified, unparented
+// item is affected; a per-line pick (discount_for set) is untouched
+// either way, since the server DOES validate those against the live
+// catalog row and this form must not defeat that check.
+export function sanitizeInvoiceLineItemsForSubmit(lineItems, persistedClientIds) {
+  return (Array.isArray(lineItems) ? lineItems : []).map((item) => {
+    const isFreshDocumentCatalogPick =
+      item?._kind === "discount" &&
+      !item.discount_for &&
+      !!item.discount_id &&
+      !isStoredInvoiceDiscountItem(item, persistedClientIds);
+    if (!isFreshDocumentCatalogPick) return item;
+    const { discount_id: _discount_id, discount_key: _discount_key, ...rest } = item;
+    return rest;
+  });
+}
+
 // A first-delivery request (firstDelivery: true) whose claim finds the
 // invoice already owned by another live delivery — the completion, or a
 // concurrent send — is a no-op SUCCESS, not a failure: sms.ok/email.ok are
@@ -6751,7 +6783,10 @@ function CreateInvoice({
         customerId: selectedCustomer.id,
         serviceRecordId: selectedService?.id || null,
         serviceDate,
-        lineItems: repricedLineItems
+        lineItems: sanitizeInvoiceLineItemsForSubmit(
+          repricedLineItems,
+          persistedClientIdsRef.current,
+        )
           .filter((i) => i.description && Number(i.unit_price) !== 0)
           .map((i) => ({
             ...i,
@@ -6978,7 +7013,10 @@ function CreateInvoice({
           stackingEnabled,
           persistedClientIds: persistedClientIdsRef.current,
         });
-        body.line_items = repricedLineItems
+        body.line_items = sanitizeInvoiceLineItemsForSubmit(
+          repricedLineItems,
+          persistedClientIdsRef.current,
+        )
           .filter((i) => i.description && Number(i.unit_price) !== 0)
           .map((i) => ({
             ...i,

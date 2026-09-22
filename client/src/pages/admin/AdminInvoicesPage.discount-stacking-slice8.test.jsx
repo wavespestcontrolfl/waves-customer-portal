@@ -13,7 +13,7 @@
  * function under the gate is the parity guarantee, not a branch inside it.
  */
 import { describe, expect, test } from "vitest";
-import { discountRowCaption } from "./AdminInvoicesPage.jsx";
+import { discountRowCaption, sanitizeInvoiceLineItemsForSubmit } from "./AdminInvoicesPage.jsx";
 
 describe("discountRowCaption — origin", () => {
   test("a scheduled_service stamp reads as frozen, from a visit", () => {
@@ -105,6 +105,59 @@ describe("discountRowCaption — cap", () => {
     const discountRowById = new Map([["row-1", { id: "row-1", discount_type: "percentage", amount: 10, max_discount_dollars: 15 }]]);
     expect(discountRowCaption({ item, serviceLineItems: sampleLines(), discountRowById }))
       .toBe("Frozen — from visit · Applies to: Quarterly Pest · capped at $15.00");
+  });
+});
+
+// Pre-push audit P1 (this slice, round 1): server/services/invoice.js
+// only admits an unparented (document-wide) item into its document stack
+// when it is trusted/persisted OR carries NO discount_id — a fresh
+// catalog-referenced document-wide pick (discount_id set, discount_for:
+// null — exactly what the new invoice-wide picker creates) otherwise
+// throws "Invalid line-item discount" on save. invoice.js itself is owned
+// by another lane in this split; this is the client-only accommodation.
+describe("sanitizeInvoiceLineItemsForSubmit — the server's actual accepted shape for a fresh document-wide pick", () => {
+  test("a FRESH document-wide catalog pick (discount_for: null, discount_id set) loses its catalog reference at the submit boundary", () => {
+    const items = [
+      { client_id: "d1", _kind: "discount", discount_for: null, discount_id: "silver-id", discount_key: "wg_silver", description: "WaveGuard Silver (the whole invoice)", unit_price: -10, amount: -10 },
+    ];
+    const sanitized = sanitizeInvoiceLineItemsForSubmit(items, new Set());
+    expect(sanitized[0]).not.toHaveProperty("discount_id");
+    expect(sanitized[0]).not.toHaveProperty("discount_key");
+    expect(sanitized[0].unit_price).toBe(-10);
+    expect(sanitized[0].description).toBe("WaveGuard Silver (the whole invoice)");
+  });
+
+  test("a PERSISTED document-wide item (its client_id already saved) keeps its discount_id — it's already frozen, and re-sending it unchanged is a no-op read either way", () => {
+    const items = [
+      { client_id: "d1", _kind: "discount", discount_for: null, discount_id: "silver-id", unit_price: -10, amount: -10 },
+    ];
+    const sanitized = sanitizeInvoiceLineItemsForSubmit(items, new Set(["d1"]));
+    expect(sanitized[0].discount_id).toBe("silver-id");
+  });
+
+  test("a STORED stamp (trusted source) keeps its discount_id regardless of persistedClientIds", () => {
+    const items = [
+      { client_id: "d1", _kind: "discount", discount_for: null, discount_id: "silver-id", stored_discount_source: "scheduled_service", discount_dollars: 10, unit_price: -10, amount: -10 },
+    ];
+    const sanitized = sanitizeInvoiceLineItemsForSubmit(items, new Set());
+    expect(sanitized[0].discount_id).toBe("silver-id");
+  });
+
+  test("a fresh PER-LINE pick (discount_for set) is untouched — the server DOES validate those against the live catalog row, and this must never defeat that check", () => {
+    const items = [
+      { client_id: "d1", _kind: "discount", discount_for: "line-1", discount_id: "ten-pct", unit_price: -10, amount: -10 },
+    ];
+    const sanitized = sanitizeInvoiceLineItemsForSubmit(items, new Set());
+    expect(sanitized[0].discount_id).toBe("ten-pct");
+  });
+
+  test("an id-less document-wide credit (already the server's accepted shape) and every service line pass through unchanged", () => {
+    const items = [
+      { client_id: "l1", _kind: "service", description: "Service", quantity: 1, unit_price: 100 },
+      { client_id: "d1", _kind: "discount", discount_for: null, description: "Referral Credit", unit_price: -25, amount: -25 },
+    ];
+    const sanitized = sanitizeInvoiceLineItemsForSubmit(items, new Set());
+    expect(sanitized).toEqual(items);
   });
 });
 

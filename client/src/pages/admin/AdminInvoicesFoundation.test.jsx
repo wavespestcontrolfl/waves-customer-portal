@@ -441,6 +441,36 @@ describe("Invoice foundation workflow preservation", () => {
     expect(screen.getByText("Applies to: entire invoice")).toBeInTheDocument();
   });
 
+  // Pre-push audit P1 (slice 8, round 1): the POST body for a fresh
+  // document-wide catalog pick must carry no discount_id — invoice.js
+  // only admits an unparented item without one (or a trusted/persisted
+  // one) into its document stack; the client already resolved the
+  // correct dollar amount, so this strips just the catalog reference at
+  // the submit boundary (sanitizeInvoiceLineItemsForSubmit).
+  it("a create carrying a fresh invoice-wide pick posts it with no discount_id (the shape the server actually accepts)", async () => {
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "ten-pct", name: "Ten Percent", discount_type: "percentage", amount: 10, is_active: true, show_in_invoices: true },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Quarterly pest control" } });
+    fireEvent.change(screen.getByLabelText("Price ($)"), { target: { value: "100" } });
+    fireEvent.change(await screen.findByLabelText("Add an invoice-wide discount"), { target: { value: "Ten" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Ten Percent/ }));
+    await waitFor(() => expect(screen.getByLabelText("Credit ($)")).toHaveValue(-10));
+    fireEvent.change(screen.getByLabelText("Send", { exact: true }), { target: { value: "draft" } });
+    const key = "POST /api/admin/invoices";
+    overrides.set(key, () => response({ id: "new-invoice-2", invoice_number: "WPC-2026-0101", status: "draft" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create draft", exact: true }));
+    await waitFor(() => expect(requests.some(request => request.key === key)).toBe(true));
+    const posted = requests.find(request => request.key === key).body.lineItems.find(i => i.description === "Ten Percent");
+    expect(posted).toBeTruthy();
+    expect(posted).not.toHaveProperty("discount_id");
+    expect(posted.unit_price).toBe(-10);
+  });
+
   // The one-tier rule (assertNewStackGroupConflicts server-side,
   // stackablePresets here) reaches across scopes: a tier already picked on
   // a LINE must hide the rest of its stack_group in the document-wide
