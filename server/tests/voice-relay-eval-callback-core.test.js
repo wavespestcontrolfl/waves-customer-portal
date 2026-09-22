@@ -629,4 +629,34 @@ describe('voice relay eval — callback commitment core', () => {
   ])('no_account_holder_callback recognizes a refusal override after a compound timing phrase: %s', (text, status) => {
     expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
   });
+
+  // GitHub round-2 audit on #4583 P1 (spoken-checks.js:1512): the override
+  // prefix accepted only timing phrases, missing the same manner/topic
+  // modifiers consentModifierIsSafe already allows before a TRAILING
+  // consent condition — "directly", "about the appointment" hid the
+  // override just as a timing word once did.
+  test.each([
+    ['If she agrees, we will call her directly even if she refuses.', 'fail'],
+    ['If she agrees, we will call her about the appointment even if she refuses.', 'fail'],
+    // Control: no modifier at all, already covered, still correct.
+    ['If she agrees, we will call her even if she refuses.', 'fail'],
+  ])('no_account_holder_callback recognizes a refusal override after an ordinary manner/topic modifier: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
+
+  // GitHub round-2 audit on #4583 P1 (spoken-checks.js:1658): only the
+  // FIRST comma after the callback was inspected for a trailing question
+  // lead. An intervening comma-joined aside of its own ("tomorrow, as
+  // promised, can I help...?") sits before the real question's comma, so
+  // checking only the first one missed it entirely.
+  test.each([
+    ['We will call Ruth tomorrow, as promised, can I help with anything else?', 'fail'],
+    // Control: an aside with no separate question after it — the
+    // interrogative lead is already BEFORE the candidate, so the aside's
+    // own comma must not be mistaken for introducing a new question.
+    ['Did you say we will call Ruth, as promised?', 'pass'],
+  ])('no_account_holder_callback checks every comma boundary for a trailing question, not just the first: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
 });
+

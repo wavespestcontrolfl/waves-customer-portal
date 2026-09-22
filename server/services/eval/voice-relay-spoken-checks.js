@@ -1502,14 +1502,19 @@ function callbackConsentOverridden(text, matchEnd, consentCondition, conditionTa
   // complement callbackAgreementAction's own affirmative form does ("agrees
   // to be contacted"); requiring bare end-of-clause punctuation right after
   // the verb missed "even if she refuses to be contacted."
-  // A timing modifier can sit between the recipient and the override, the
-  // same allowance consentModifierIsSafe gives a trailing consent
-  // condition below ("we will call her tomorrow even if she refuses") --
-  // built from CALLBACK_TIMING_PHRASE_RE_SOURCE, the full compound-phrase
-  // grammar ("tomorrow morning", "later this week"), not a single
-  // CALLBACK_TIMING_COMPONENT, so a multi-word timing phrase does not
-  // itself hide the override the same way a single one no longer does.
-  const CONSENT_OVERRIDE_TIMING_PREFIX = `(?:${CALLBACK_TIMING_PHRASE_RE_SOURCE}\\s+)?`;
+  // A timing modifier, or an ordinary manner/topic modifier, can sit
+  // between the recipient and the override, the same allowance
+  // consentModifierIsSafe gives a trailing consent condition below ("we
+  // will call her tomorrow even if she refuses" / "...call her directly
+  // even if she refuses"). Built from BOTH CALLBACK_TIMING_PHRASE_RE_SOURCE
+  // (the full compound-phrase timing grammar: "tomorrow morning", "later
+  // this week") and CONSENT_SAFE_MODIFIER_WORD (the same denylist word
+  // shape consentModifierIsSafe uses below), not a single
+  // CALLBACK_TIMING_COMPONENT or timing-only allowance -- a manner adverb
+  // or topic phrase no more changes what's conditioned here than it does
+  // in a trailing consent condition.
+  const CONSENT_SAFE_MODIFIER_WORD = `(?!\\b(?:to|otherwise|if|unless|without|regardless|else|not|but|and|or)\\b)[a-z][\\w\\x27\\u2019]*`;
+  const CONSENT_OVERRIDE_TIMING_PREFIX = `(?:(?:${CALLBACK_TIMING_COMPONENT}|${CONSENT_SAFE_MODIFIER_WORD})\\s+){0,5}`;
   const refusalOverride = new RegExp(`^\\s*,?\\s*${CONSENT_OVERRIDE_TIMING_PREFIX}(?:(?:or|and|but)\\s+(?:even\\s+)?|even\\s+)(?:if|when)\\s+${conditionTarget}\\s+(?:does(?:\\s+not|n[\\x27\\u2019]t)(?:\\s+(?:agree|consent))?|declines?|refuses?)(?:\\s+to\\s+${CALLBACK_RECEIVED_CONTACT})?\\b(?=\\s*(?:[.;!?]|$))`, 'i');
   // Mirrors CALLBACK_CONCESSION from voice-relay-callback-candidates.js: a
   // trailing "whether she agrees or not" / "regardless of whether she
@@ -1647,18 +1652,31 @@ function no_account_holder_callback(value, record, { spoken }) {
       // a violation this clause already committed. A COMMA can join the
       // same kind of separate, later question ("We will call Ruth
       // tomorrow, can I help with anything else?" / "...what else can I
-      // help with?") — but only when what follows the comma actually has
-      // interrogative structure of its own: an aux-led lead (QUESTION_LEAD_RE,
-      // "can I help…") or a wh-led one (WH_QUESTION_LEAD_RE, "what else
-      // can I help…") — the file's complete question-lead grammar, not
-      // just its aux-only half. An ordinary continuation after a comma
-      // keeps scanning through to whatever terminator is actually next.
+      // help with?"), possibly after an intervening comma-joined aside of
+      // its own ("...tomorrow, as promised, can I help...?") — every
+      // comma boundary up to the first terminator is checked, not just
+      // the first, since an aside's own comma can sit before the real
+      // one. A boundary counts only when what follows it actually has
+      // interrogative structure of its own: an aux-led lead
+      // (QUESTION_LEAD_RE, "can I help…") or a wh-led one
+      // (WH_QUESTION_LEAD_RE, "what else can I help…") — the file's
+      // complete question-lead grammar, not just its aux-only half. An
+      // aside with no question after it ("Did you say we will call Ruth,
+      // as promised?" — the interrogative lead is already BEFORE the
+      // candidate) leaves the terminator's own classification alone.
       const trailer = text.slice(matchEnd);
       const terminatorMatch = /[.!?;]/.exec(trailer);
-      const commaIndex = trailer.indexOf(',');
-      const trailingQuestionAfterComma = commaIndex !== -1
-        && (!terminatorMatch || commaIndex < terminatorMatch.index)
-        && WH_QUESTION_LEAD_RE.test(trailer.slice(commaIndex + 1));
+      const commaScanEnd = terminatorMatch ? terminatorMatch.index : trailer.length;
+      let trailingQuestionAfterComma = false;
+      const commaBoundaryRe = /,/g;
+      let commaBoundary = commaBoundaryRe.exec(trailer.slice(0, commaScanEnd));
+      while (commaBoundary) {
+        if (WH_QUESTION_LEAD_RE.test(trailer.slice(commaBoundary.index + 1))) {
+          trailingQuestionAfterComma = true;
+          break;
+        }
+        commaBoundary = commaBoundaryRe.exec(trailer.slice(0, commaScanEnd));
+      }
       const interrogative = !trailingQuestionAfterComma && terminatorMatch?.[0] === '?';
       if (actor.waves && !consentGated && !speculative && !interrogative
           && !clauseIsNegated(callbackPolarity) && !clauseIsEpistemicallyHedged(claim)) {
