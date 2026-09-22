@@ -152,15 +152,26 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.resetAllMocks(); localSto
 
 describe('lineDiscountSaveBlocked / verifiedLineDiscountCap', () => {
   it('blocks only when the gate is unconfirmed AND both an appointment pick and a line discount are in play', () => {
-    expect(lineDiscountSaveBlocked({ known: false, appointmentDiscountSelected: true, lines: [{ _origDiscountType: 'fixed_amount' }] })).toBe(true);
-    expect(lineDiscountSaveBlocked({ known: true, appointmentDiscountSelected: true, lines: [{ _origDiscountType: 'fixed_amount' }] })).toBe(false);
-    expect(lineDiscountSaveBlocked({ known: false, appointmentDiscountSelected: false, lines: [{ _origDiscountType: 'fixed_amount' }] })).toBe(false);
+    // An untouched stamp counts only while its Price still matches its
+    // seed — round 2's own :1678 fix.
+    const stamped = { _origDiscountType: 'fixed_amount', price: '55', _seededPrice: '55' };
+    expect(lineDiscountSaveBlocked({ known: false, appointmentDiscountSelected: true, lines: [stamped] })).toBe(true);
+    expect(lineDiscountSaveBlocked({ known: true, appointmentDiscountSelected: true, lines: [stamped] })).toBe(false);
+    expect(lineDiscountSaveBlocked({ known: false, appointmentDiscountSelected: false, lines: [stamped] })).toBe(false);
     expect(lineDiscountSaveBlocked({ known: false, appointmentDiscountSelected: true, lines: [{}] })).toBe(false);
     // An explicitly REMOVED line discount is no longer "in play" even though
     // _origDiscountType is still on the row.
     expect(lineDiscountSaveBlocked({
       known: false, appointmentDiscountSelected: true,
       lines: [{ _origDiscountType: 'fixed_amount', lineDiscountTouched: true, lineDiscount: null }],
+    })).toBe(false);
+    // :1678 (GitHub review round 2 on #4657, P2): a stamp whose Price was
+    // edited without touching its discount control is no longer "in play"
+    // either — the preview/payload already drop it (origStampOf's own
+    // priceEditedFromSeed guard).
+    expect(lineDiscountSaveBlocked({
+      known: false, appointmentDiscountSelected: true,
+      lines: [{ _origDiscountType: 'fixed_amount', price: '70', _seededPrice: '55' }],
     })).toBe(false);
   });
 
@@ -590,4 +601,52 @@ it('P1 (:2380) — a gate flip after SWAPPING an already-stamped line\'s discoun
   expect(mosquitoLine).toMatchObject({
     basePrice: 60, discountType: 'fixed_amount', discountAmount: 5, discountId: 'disc-military',
   });
+});
+
+// ---------------------------------------------------------------------
+// GitHub review round 2 on PR #4657 (github.com/wavespestcontrolfl/
+// waves-customer-portal/pull/4657, /tmp/t4657-r2.txt): 5 P1 + 1 P2 against
+// f107bd2f48. :2386 was already covered by 97f9efa348's own test (same
+// applyDiscount-without-a-cap code path, a different repro number); the
+// rest are pinned here.
+// ---------------------------------------------------------------------
+
+it(':3445 — the PRIMARY line\'s own stored discount (never editable in this slice) is included in the preview total on a MARKED row', async () => {
+  const service = {
+    ...baseService,
+    serviceAddons: [],
+    primaryLinePrice: 100,
+    estimatedPrice: 100,
+    lineDiscountType: 'fixed_amount', lineDiscountAmount: 10, lineDiscountId: 'disc-military',
+    pricingProvenance: {
+      pricing_regime: 'discount_stack_v1', engine_version: 1,
+      caps: { line: { id: 'disc-military', cap: null }, addons: {} },
+    },
+  };
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true }));
+  render(<Harness service={service} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  // $100 gross primary minus the stored $10 fixed credit — never $100 flat.
+  await waitFor(() => expect(totalText()).toBe('$90.00'));
+  expect(screen.getByText('Primary line discount')).toBeInTheDocument();
+});
+
+it(':3421 — a stored appointment discount scoped to ONE service key previews against only that line\'s base, not the whole visit', async () => {
+  const service = {
+    ...baseService,
+    primaryLinePrice: 100,
+    estimatedPrice: 200,
+    serviceAddons: [
+      { id: 'addon-1', serviceId: 'svc-mosquito', serviceName: 'Monthly Mosquito', serviceKey: 'mosquito_monthly', serviceCategory: 'mosquito', basePrice: 60, estimatedPrice: 60, estimatedDuration: 30 },
+      { id: 'addon-2', serviceId: 'svc-fert', serviceName: 'Quarterly Fertilization', serviceKey: 'lawn_fert', serviceCategory: 'lawn', basePrice: 40, estimatedPrice: 40, estimatedDuration: 20 },
+    ],
+    discountType: 'percentage', discountAmount: 10, discountId: 'disc-military',
+    discountServiceKeyFilter: 'mosquito_monthly', discountServiceCategoryFilter: null,
+  };
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true }));
+  render(<Harness service={service} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  // 10% of the mosquito line's own $60 ($6) — never 10% of the full $200
+  // subtotal ($20), which is what an unscoped preview would show.
+  await waitFor(() => expect(totalText()).toBe('$194.00'));
 });

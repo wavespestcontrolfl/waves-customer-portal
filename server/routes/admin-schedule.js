@@ -362,25 +362,32 @@ function scopeToAssignedTech(req, q) {
 // process's schema is stable); a failed introspection (a mocked db in
 // tests) is never cached, so the next call re-checks instead of latching
 // a wrong guess.
+// Widened (GitHub review round 2 on #4657): the appointment discount's OWN
+// scope filters (:3421 — a stored, untouched discount's eligible-line
+// scope must preview the same way resolveUpdateDetailsAddonFinancials
+// applies it, not the empty current-selection state) and the PRIMARY
+// line's own discount slot (:3445 — a marked row's stored line_discount_*
+// is restacked server-side and must not preview as "no discount" just
+// because this editor has no picker for it).
+const DISCOUNT_PROVENANCE_COLUMNS = [
+  'discount_type', 'discount_amount', 'discount_id', 'discount_max_dollars',
+  'discount_service_key_filter', 'discount_service_category_filter',
+  'line_discount_type', 'line_discount_amount', 'line_discount_id',
+  'pricing_provenance',
+];
 let discountProvenanceColumnCache = null;
 async function scheduledServicesDiscountProvenanceColumns(database) {
   if (discountProvenanceColumnCache !== null) return discountProvenanceColumnCache;
   try {
     const cols = await database('scheduled_services').columnInfo();
-    const present = {
-      discount_type: !!cols.discount_type,
-      discount_amount: !!cols.discount_amount,
-      discount_id: !!cols.discount_id,
-      discount_max_dollars: !!cols.discount_max_dollars,
-      pricing_provenance: !!cols.pricing_provenance,
-    };
+    const present = {};
+    for (const col of DISCOUNT_PROVENANCE_COLUMNS) present[col] = !!cols[col];
     discountProvenanceColumnCache = present;
     return present;
   } catch {
-    return {
-      discount_type: true, discount_amount: true, discount_id: true,
-      discount_max_dollars: true, pricing_provenance: true,
-    };
+    const present = {};
+    for (const col of DISCOUNT_PROVENANCE_COLUMNS) present[col] = true;
+    return present;
   }
 }
 
@@ -1876,6 +1883,75 @@ async function loadDiscountCapsById(conn, ids) {
     caps.set(row.id, row.max_discount_dollars != null && row.max_discount_dollars !== '' && Number.isFinite(cap) ? cap : null);
   }
   return caps;
+}
+
+// Unfiltered discount catalog metadata (id/name/stack_group/is_stackable)
+// for group-conflict resolution — deliberately NOT gated on active/
+// show_in_invoices: a retired-since discount still needs its group known
+// to correctly grandfather (or still catch) a conflict against it (GitHub
+// review round 2 on #4657, :2513's own repro: a stored appointment preset
+// deactivated since it was applied must not silently drop out of this
+// check just because /admin/discounts would no longer offer it). A FRESH
+// pick's existence/activity is validated elsewhere (loadInvoiceDiscount
+// for the appointment level; :2186's own still-open per-line gap) — this
+// helper only ever resolves GROUPING for an id already known to be in
+// play, never authorizes picking one.
+async function loadDiscountStackMetaById(conn, ids) {
+  const uniqueIds = [...new Set((Array.isArray(ids) ? ids : []).filter(Boolean).map(String))];
+  const byId = new Map();
+  if (!uniqueIds.length) return byId;
+  const rows = await conn('discounts').whereIn('id', uniqueIds)
+    .select('id', 'name', 'stack_group', 'is_stackable');
+  for (const row of rows) byId.set(String(row.id), row);
+  return byId;
+}
+
+// GitHub review round 2 on #4657 (:2513): PUT /:id/update-details never
+// enforced the non-stackable stack_group rule at all — the picker's own
+// stackablePresets filtering (SchedulePage.jsx) is a client-side warning,
+// not the boundary, and a stale-catalog case (a conflicting tier
+// deactivated since the visit was priced) bypasses it entirely, letting
+// the route persist two same-group discounts together.
+//
+// Local, admin-schedule-only variant of discount-stack.js's own
+// assertStackGroups — mirrors server/services/invoice.js's
+// assertNewStackGroupConflicts (slice 5 of #4405, #4655) rather than the
+// shared module's unconditional throw: a price/notes/description-only
+// resave of a visit an operator booked years before this lane existed,
+// carrying two same-group stamps nobody ever meant to combine (or a
+// stamp that predates the group's own creation), must not suddenly start
+// throwing 400 the moment this route learns to check. Only a conflict
+// that involves at least one row NOT already on the visit before this
+// save (`_isNew`) is rejected; two purely-persisted stamps in the same
+// group are grandfathered exactly like #4655 grandfathers an invoice's
+// own pre-existing lines. Duplicated locally rather than widening
+// discount-stack.js's shared signature, which the CLIENT preview mirror
+// also consumes and must not have its behavior changed by this concern.
+function assertNewStackGroupConflicts(rows) {
+  const byGroup = new Map();
+  for (const row of rows) {
+    if (!row || !row.stack_group || row.is_stackable === true) continue;
+    const group = String(row.stack_group);
+    if (!byGroup.has(group)) byGroup.set(group, []);
+    byGroup.get(group).push(row);
+  }
+  for (const [group, groupRows] of byGroup) {
+    if (!groupRows.some((row) => row._isNew)) continue;
+    const seen = [];
+    for (const row of groupRows) {
+      const clash = seen.find((first) => (
+        String(first.id || first.name) !== String(row.id || row.name)
+        || first.spansAll === true
+        || row.spansAll === true
+        || String(first.scope ?? '') === String(row.scope ?? '')
+      ));
+      if (clash && (row._isNew || clash._isNew)) {
+        const label = group === 'tier' ? 'WaveGuard tier discount' : `${group} discount`;
+        throw httpError(400, `Only one ${label} can apply: ${(clash.name || 'discount')} and ${(row.name || 'discount')} cannot be combined`);
+      }
+      seen.push(row);
+    }
+  }
 }
 
 async function resolveLineDiscount(input, baseAmount, customer, serviceContext = {}) {
@@ -5195,6 +5271,11 @@ router.get('/', async (req, res, next) => {
         discountId: s.discount_id || null,
         discountMaxDollars: s.discount_max_dollars != null ? Number(s.discount_max_dollars) : null,
         pricingProvenance: s.pricing_provenance ?? null,
+        discountServiceKeyFilter: s.discount_service_key_filter || null,
+        discountServiceCategoryFilter: s.discount_service_category_filter || null,
+        lineDiscountType: s.line_discount_type || null,
+        lineDiscountAmount: s.line_discount_amount != null ? Number(s.line_discount_amount) : null,
+        lineDiscountId: s.line_discount_id || null,
         prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
         prepaidMethod: s.prepaid_method || null,
         prepaidAt: s.prepaid_at || null,
@@ -5479,6 +5560,11 @@ router.get('/week', async (req, res, next) => {
           ...(discountProvenanceCols.discount_id ? ['scheduled_services.discount_id'] : []),
           ...(discountProvenanceCols.discount_max_dollars ? ['scheduled_services.discount_max_dollars'] : []),
           ...(discountProvenanceCols.pricing_provenance ? ['scheduled_services.pricing_provenance'] : []),
+          ...(discountProvenanceCols.discount_service_key_filter ? ['scheduled_services.discount_service_key_filter'] : []),
+          ...(discountProvenanceCols.discount_service_category_filter ? ['scheduled_services.discount_service_category_filter'] : []),
+          ...(discountProvenanceCols.line_discount_type ? ['scheduled_services.line_discount_type'] : []),
+          ...(discountProvenanceCols.line_discount_amount ? ['scheduled_services.line_discount_amount'] : []),
+          ...(discountProvenanceCols.line_discount_id ? ['scheduled_services.line_discount_id'] : []),
           'scheduled_services.technician_id',
           'scheduled_services.zone', 'scheduled_services.route_order',
           'scheduled_services.is_recurring',
@@ -5760,6 +5846,11 @@ router.get('/week', async (req, res, next) => {
           discountId: s.discount_id || null,
           discountMaxDollars: s.discount_max_dollars != null ? Number(s.discount_max_dollars) : null,
           pricingProvenance: s.pricing_provenance ?? null,
+          discountServiceKeyFilter: s.discount_service_key_filter || null,
+          discountServiceCategoryFilter: s.discount_service_category_filter || null,
+          lineDiscountType: s.line_discount_type || null,
+          lineDiscountAmount: s.line_discount_amount != null ? Number(s.line_discount_amount) : null,
+          lineDiscountId: s.line_discount_id || null,
           prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
           prepaidMethod: s.prepaid_method || null,
           prepaidAt: s.prepaid_at || null,
@@ -5866,6 +5957,7 @@ router.get('/month', async (req, res, next) => {
     gridEnd.setDate(gridEnd.getDate() + (6 - lastDay.getDay())); // Forward to Saturday
 
     // Fetch all services for the full grid range
+    const discountProvenanceCols = await scheduledServicesDiscountProvenanceColumns(db);
     const services = await db('scheduled_services')
       .whereBetween('scheduled_services.scheduled_date', [
         gridStart.toISOString().split('T')[0],
@@ -5894,6 +5986,24 @@ router.get('/month', async (req, res, next) => {
         'scheduled_services.weekend_shift',
         'scheduled_services.source_estimate_id',
         'scheduled_services.prepaid_amount',
+        // GitHub review round 2 on #4657 (:2302): MonthServiceChip passes
+        // this row straight into EditServiceModal too — every field the
+        // day/week/list mappers already project (financials + discount/
+        // provenance) has to project here too, or the modal misclassifies
+        // a marked, discounted visit as plain unmarked the moment it's
+        // opened from Month.
+        'scheduled_services.estimated_price',
+        'scheduled_services.primary_line_price',
+        ...(discountProvenanceCols.discount_type ? ['scheduled_services.discount_type'] : []),
+        ...(discountProvenanceCols.discount_amount ? ['scheduled_services.discount_amount'] : []),
+        ...(discountProvenanceCols.discount_id ? ['scheduled_services.discount_id'] : []),
+        ...(discountProvenanceCols.discount_max_dollars ? ['scheduled_services.discount_max_dollars'] : []),
+        ...(discountProvenanceCols.discount_service_key_filter ? ['scheduled_services.discount_service_key_filter'] : []),
+        ...(discountProvenanceCols.discount_service_category_filter ? ['scheduled_services.discount_service_category_filter'] : []),
+        ...(discountProvenanceCols.line_discount_type ? ['scheduled_services.line_discount_type'] : []),
+        ...(discountProvenanceCols.line_discount_amount ? ['scheduled_services.line_discount_amount'] : []),
+        ...(discountProvenanceCols.line_discount_id ? ['scheduled_services.line_discount_id'] : []),
+        ...(discountProvenanceCols.pricing_provenance ? ['scheduled_services.pricing_provenance'] : []),
         'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
         'customers.city', 'customers.zip',
         'technicians.name as tech_name'
@@ -5928,6 +6038,18 @@ router.get('/month', async (req, res, next) => {
         serviceKey: s.service_key_snapshot || null,
         serviceCategorySnapshot: s.service_category_snapshot || null,
         excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
+        estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+        primaryLinePrice: s.primary_line_price != null ? Number(s.primary_line_price) : null,
+        discountType: s.discount_type || null,
+        discountAmount: s.discount_amount != null ? Number(s.discount_amount) : null,
+        discountId: s.discount_id || null,
+        discountMaxDollars: s.discount_max_dollars != null ? Number(s.discount_max_dollars) : null,
+        discountServiceKeyFilter: s.discount_service_key_filter || null,
+        discountServiceCategoryFilter: s.discount_service_category_filter || null,
+        lineDiscountType: s.line_discount_type || null,
+        lineDiscountAmount: s.line_discount_amount != null ? Number(s.line_discount_amount) : null,
+        lineDiscountId: s.line_discount_id || null,
+        pricingProvenance: s.pricing_provenance ?? null,
         status: s.status,
         techName: s.tech_name,
         technicianId: s.technician_id,
@@ -8051,6 +8173,11 @@ router.get('/list', async (req, res, next) => {
         ...(discountProvenanceCols.discount_id ? ['scheduled_services.discount_id'] : []),
         ...(discountProvenanceCols.discount_max_dollars ? ['scheduled_services.discount_max_dollars'] : []),
         ...(discountProvenanceCols.pricing_provenance ? ['scheduled_services.pricing_provenance'] : []),
+        ...(discountProvenanceCols.discount_service_key_filter ? ['scheduled_services.discount_service_key_filter'] : []),
+        ...(discountProvenanceCols.discount_service_category_filter ? ['scheduled_services.discount_service_category_filter'] : []),
+        ...(discountProvenanceCols.line_discount_type ? ['scheduled_services.line_discount_type'] : []),
+        ...(discountProvenanceCols.line_discount_amount ? ['scheduled_services.line_discount_amount'] : []),
+        ...(discountProvenanceCols.line_discount_id ? ['scheduled_services.line_discount_id'] : []),
         'customers.first_name', 'customers.last_name',
         // Stamped visit-specific address wins over the primary mirror here
         // too — this list is a display surface for the booked property. The
@@ -8103,6 +8230,11 @@ router.get('/list', async (req, res, next) => {
       discountId: s.discount_id || null,
       discountMaxDollars: s.discount_max_dollars != null ? Number(s.discount_max_dollars) : null,
       pricingProvenance: s.pricing_provenance ?? null,
+      discountServiceKeyFilter: s.discount_service_key_filter || null,
+      discountServiceCategoryFilter: s.discount_service_category_filter || null,
+      lineDiscountType: s.line_discount_type || null,
+      lineDiscountAmount: s.line_discount_amount != null ? Number(s.line_discount_amount) : null,
+      lineDiscountId: s.line_discount_id || null,
       serviceAddons: listAddonsByServiceId.get(s.id) || [],
       prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
       prepaidMethod: s.prepaid_method || null,
@@ -9815,6 +9947,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           };
         }
         normalizedAddons.push({
+          // GitHub review round 2 on #4657 (:2513): the addon ROW's own id
+          // (scheduled_service_addons.id), when this line already existed
+          // — needed to match it back to its OWN prior stored discount for
+          // the stack-group "is this genuinely new" determination, never
+          // the catalog serviceId below.
+          submittedAddonId: a.id || null,
           serviceId: a.serviceId || catalogService?.id || null,
           // GitHub round 2 on PR #4654 (P0): the RAW client-submitted id,
           // distinct from `serviceId` above (which can be INFERRED via a
@@ -9882,6 +10020,61 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           .where({ id: req.params.id })
           .first(...existingFields)
           .catch(() => null);
+
+        // GitHub review round 2 on #4657 (:2513): enforce non-stackable
+        // stack_group the same way #4655 does for invoices — a conflict
+        // rejected ONLY when it involves at least one row NOT already on
+        // this visit before this save (assertNewStackGroupConflicts' own
+        // comment). "Already on this visit" for an add-on line means ITS
+        // OWN stored discount_id/type/amount, by row id — unconditional
+        // (unlike loadExistingAddonRowsForLegacyPreservation just below,
+        // which only loads for a legacy-preservation candidate); a MARKED
+        // row's pre-existing stamps need grandfathering exactly as much as
+        // an unmarked one's.
+        const existingAddonDiscountRows = await db('scheduled_service_addons')
+          .where({ scheduled_service_id: req.params.id })
+          .select('id', 'discount_id', 'discount_type', 'discount_amount');
+        const existingAddonDiscountById = new Map(existingAddonDiscountRows.map((r) => [r.id, r]));
+        const isNewAddonDiscount = (submittedAddonId, discount) => {
+          if (!discount) return false;
+          if (!submittedAddonId) return true;
+          const priorRow = existingAddonDiscountById.get(submittedAddonId);
+          if (!priorRow || !priorRow.discount_id) return true;
+          return String(priorRow.discount_id) !== String(discount.discountId || '')
+            || priorRow.discount_type !== discount.discountType
+            || Number(priorRow.discount_amount) !== Number(discount.discountAmount);
+        };
+        const appointmentDiscountIsNew = discountType !== undefined && appointmentDiscountChanged;
+        const groupMetaIds = [
+          appointmentDiscountPreset?.id, existing?.discount_id,
+          ...normalizedAddons.map((l) => l.discount?.discountId),
+          ...existingAddonDiscountRows.map((r) => r.discount_id),
+        ].filter(Boolean);
+        const groupMetaById = await loadDiscountStackMetaById(db, groupMetaIds);
+        const groupConflictRows = [
+          // The appointment-level term — the operator's own fresh pick if
+          // one was posted, else the row's own stored discount_id (still
+          // needs its group known, even round-tripped, to correctly catch
+          // — or grandfather — a conflict against a fresh line pick).
+          ...(() => {
+            const id = appointmentDiscountPreset?.id || existing?.discount_id || null;
+            const meta = id ? groupMetaById.get(String(id)) : null;
+            return meta ? [{ ...meta, spansAll: true, _isNew: appointmentDiscountIsNew }] : [];
+          })(),
+          ...normalizedAddons
+            .map((l, i) => {
+              const id = l.discount?.discountId;
+              const meta = id ? groupMetaById.get(String(id)) : null;
+              if (!meta) return null;
+              return {
+                ...meta,
+                scope: l.submittedAddonId || l.submittedServiceId || `addon-${i}`,
+                _isNew: isNewAddonDiscount(l.submittedAddonId, l.discount),
+              };
+            })
+            .filter(Boolean),
+        ];
+        assertNewStackGroupConflicts(groupConflictRows);
 
         // GATE-FLIP SAFETY (carried from #4405 round 7's P0; AGENTS.md
         // "existing DB rows must keep working") for an UNMARKED (legacy, or

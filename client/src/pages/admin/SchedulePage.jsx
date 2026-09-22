@@ -1674,8 +1674,16 @@ export function verifiedLineDiscountCap(stamp, catalogRow) {
 // unaffected — a plain single (appointment-only) discount stays byte-
 // identical to main regardless of gate confirmation.
 export function lineDiscountSaveBlocked({ known, appointmentDiscountSelected, lines }) {
+  // GitHub review round 2 on #4657 (P2, :1678): a stamp whose Price was
+  // edited without touching its own discount control is no longer "in
+  // play" — the preview and the save payload both already drop it (see
+  // origStampOf's own priceEditedFromSeed guard) — so this predicate must
+  // agree, or an appointment-only save can be refused (or stay disabled)
+  // purely because a NOW-STALE stamp still counts here.
   const lineDiscountInPlay = Array.isArray(lines)
-    && lines.some((l) => !!l?.lineDiscount || (!l?.lineDiscountTouched && !!l?._origDiscountType));
+    && lines.some((l) => !!l?.lineDiscount || (
+      !l?.lineDiscountTouched && !!l?._origDiscountType && String(l?.price) === String(l?._seededPrice ?? '')
+    ));
   return !known && !!appointmentDiscountSelected && lineDiscountInPlay;
 }
 
@@ -2385,6 +2393,33 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     }
     return verifiedLineDiscountCap(ld, linePresetById(ld?.id));
   };
+  // :3445 (GitHub review round 2 on #4657): the PRIMARY line's own stored
+  // discount slot (line_discount_*) — read-only, like storedAppointmentDiscount
+  // above; this slice has no picker for it, so it's ALWAYS whatever the row
+  // itself carries, never gated on "untouched this session" (there is no
+  // session state to touch). resolveUpdateDetailsAddonFinancials restacks a
+  // MARKED row from this exact slot, so previewing it as "no discount"
+  // understates the total and can distort how much of an appointment-wide
+  // discount the primary line actually gets.
+  const storedPrimaryLineDiscount = service.lineDiscountType && service.lineDiscountAmount != null
+    ? { id: service.lineDiscountId || null, discount_type: service.lineDiscountType, amount: service.lineDiscountAmount }
+    : null;
+  // The primary's frozen cap lives at pricing_provenance.caps.line — a
+  // single { id, cap } entry (not a map keyed by id, unlike the addons
+  // side) — matching resolveStoredDiscountCaps' own frozenLineMatches
+  // check: it counts only when that entry's OWN id still matches the row's
+  // CURRENT line_discount_id (a discount swap without a fresh save must
+  // never inherit a DIFFERENT discount's frozen cap).
+  const previewPrimarySlot = (ld) => {
+    if (!ld) return null;
+    if (rowIsMarked) {
+      const line = service.pricingProvenance?.caps?.line;
+      if (line && typeof line === 'object' && String(line.id ?? '') === String(ld.id ?? '')) {
+        return { ...ld, max_discount_dollars: line.cap };
+      }
+    }
+    return verifiedLineDiscountCap(ld, linePresetById(ld?.id));
+  };
   const presetOptionLabel = (d) => {
     if (isCustomPercentagePreset(d)) return `${d.name} - custom %`;
     if (isCustomAmountPreset(d)) return `${d.name} - custom $`;
@@ -2467,6 +2502,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         discount_type: service.discountType,
         amount: service.discountAmount,
         max_discount_dollars: service.discountMaxDollars ?? null,
+        // :3421 — the stamp's OWN scope, read straight from the row (never
+        // re-derived from a catalog lookup, which could drift from what
+        // was actually true when this was saved).
+        service_key_filter: service.discountServiceKeyFilter ?? null,
+        service_category_filter: service.discountServiceCategoryFilter ?? null,
       }
     : null;
   // The stored discount's OWN catalog row (stack_group/is_stackable) —
@@ -2799,9 +2839,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // stored discount with a fresh line pick exactly the same way, so the
   // guard/preview must see it too.
   const appointmentDiscountSelected = !!(discountType && discountAmount !== "") || !!storedAppointmentDiscount;
-  const lineDiscountInPlay = serviceLines.some(
-    (l) => !!l?.lineDiscount || (!l?.lineDiscountTouched && !!l?._origDiscountType),
-  );
+  // GitHub review round 2 on #4657 (P2, :1678): reuse effectiveLineDiscount
+  // (which already knows a price-edited stamp is no longer "in play") so
+  // this stays consistent with the exported lineDiscountSaveBlocked's own
+  // fix, and with the preview/payload themselves.
+  const lineDiscountInPlay = serviceLines.some((l) => !!effectiveLineDiscount(l));
   const stackingUnconfirmedBlocksSave = lineDiscountSaveBlocked({
     known: stackingKnown,
     appointmentDiscountSelected,
@@ -3343,20 +3385,33 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // percent-excluded lines (termite bond, rodent bait, ...). The primary
   // line's identity comes from the list payload or a catalog pick in this
   // session; the server is authoritative either way.
-  const presetKeyFilter = selectedDiscountPreset?.service_key_filter || null;
-  const presetCategoryFilter =
-    selectedDiscountPreset?.service_category_filter || null;
+  // :3421 (GitHub review round 2 on #4657): a STORED, untouched appointment
+  // discount has its OWN scope/type — resolveUpdateDetailsAddonFinancials
+  // saves using the row's stored discount_service_key_filter/
+  // discount_service_category_filter and discount_type, never the (empty)
+  // current-selection state, so the preview must fall back to them too
+  // whenever the operator hasn't picked something THIS session.
+  const effectivePresetKeyFilter =
+    selectedDiscountPreset?.service_key_filter
+    || (!discountType ? storedAppointmentDiscount?.service_key_filter : null)
+    || null;
+  const effectivePresetCategoryFilter =
+    selectedDiscountPreset?.service_category_filter
+    || (!discountType ? storedAppointmentDiscount?.service_category_filter : null)
+    || null;
+  const effectiveDiscountTypeForExclusion =
+    discountType || storedAppointmentDiscount?.discount_type || "";
   const lineInDiscountScope = (line) =>
-    (!presetKeyFilter || presetKeyFilter === (line.serviceKey || null)) &&
-    (!presetCategoryFilter ||
-      presetCategoryFilter === (line.serviceCategory || null));
+    (!effectivePresetKeyFilter || effectivePresetKeyFilter === (line.serviceKey || null)) &&
+    (!effectivePresetCategoryFilter ||
+      effectivePresetCategoryFilter === (line.serviceCategory || null));
   // excludedFromPercentDiscount === null means UNKNOWN (static fallback
   // row while the live catalog is unavailable): a percentage preview must
   // not assume eligibility the server may refuse on save (codex #3591 r24
   // P2) — the row is withheld from the percentage base.
   const lineTakesDiscount = (line) =>
     lineInDiscountScope(line) &&
-    !(discountType === "percentage"
+    !(effectiveDiscountTypeForExclusion === "percentage"
       && (line.excludedFromPercentDiscount === true || line.excludedFromPercentDiscount === null));
   const primaryLineForDiscount = {
     serviceKey: form.serviceKey,
@@ -3442,7 +3497,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const stackedPreview = stackingEnabled
     ? stackVisitDiscounts({
         lines: [
-          { gross: primaryPrice, lineDiscount: null, eligible: lineTakesDiscount(primaryLineForDiscount) },
+          { gross: primaryPrice, lineDiscount: previewPrimarySlot(storedPrimaryLineDiscount), eligible: lineTakesDiscount(primaryLineForDiscount) },
           ...serviceLines.map((l) => ({
             gross: lineGrossFor(l),
             lineDiscount: previewSlot(effectiveLineDiscount(l)),
@@ -3458,12 +3513,16 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const lineDiscountDollarsAt = (idx) =>
     stackingEnabled ? stackedPreview.lines[idx + 1].lineDiscountDollars : 0;
   const lineDiscountRows = stackingEnabled
-    ? serviceLines
-        .map((l, i) => ({
+    ? [
+        // :3445 — the primary line's own stored discount, surfaced with the
+        // same transparency an add-on's gets, even though this slice has no
+        // picker for it.
+        { name: "Primary line discount", dollars: stackedPreview.lines[0].lineDiscountDollars },
+        ...serviceLines.map((l, i) => ({
           name: effectiveLineDiscount(l)?.name || "Line discount",
           dollars: lineDiscountDollarsAt(i),
-        }))
-        .filter((row) => row.dollars > 0)
+        })),
+      ].filter((row) => row.dollars > 0)
     : [];
   const manualDiscount = stackingEnabled ? stackedPreview.appointmentDiscountDollars : legacyManualDiscount;
   const appointmentTotal = stackingEnabled ? stackedPreview.total : legacyAppointmentTotal;
