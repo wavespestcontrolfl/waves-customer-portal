@@ -360,12 +360,47 @@ describe('payment-failed decline notice claim acquisition (#4131 slice 5, deferr
     expect(noticeBlock).toMatch(/const failResult = throwIfDeliveryUnverified\(await sendCustomerMessage\(\{/);
   });
 
-  test('every resolved outcome (deferred, not-sent, delivered) gives the claim back exactly once, before the delivered branch finalizes', () => {
-    const restoreCount = (noticeBlock.match(/\.restoreSendClaim\(\s*\n\s*invoice\.id, declineSendClaim\.previousStatus, declineSendClaim\.claimed,\s*\n\s*\[\], db, declineSendClaim\.invoice\.send_claim_token,\s*\n\s*\);/g) || []).length;
+  test('every resolved outcome that does NOT finalize (deferred, not-sent, no renderable body) gives the claim back with a plain restoreSendClaim call', () => {
+    const restorePattern = /\.restoreSendClaim\(\s*\n\s*invoice\.id, declineSendClaim\.previousStatus, declineSendClaim\.claimed,\s*\n\s*\[\], db, declineSendClaim\.invoice\.send_claim_token,\s*\n\s*\);/g;
+    const restoreCount = (noticeBlock.match(restorePattern) || []).length;
+    // Deferred, not-sent, and no-renderable-body (an empty/disabled template)
+    // each restore the claim outright — none of them go on to deliver
+    // anything. The outer-catch fallback restore is deliberately excluded
+    // from this count: it chains `.catch(() => {})` onto the same call, a
+    // different shape, checked in its own test below.
     expect(restoreCount).toBe(3);
-    const restoreInSentBranch = noticeBlock.indexOf('.restoreSendClaim(', noticeBlock.indexOf('} else {\n            // The notice DELIVERED the pay link'));
-    const markDeliveredAt = noticeBlock.indexOf('.markDeliverySent(invoice.id', restoreInSentBranch);
-    expect(restoreInSentBranch).toBeGreaterThan(-1);
-    expect(markDeliveredAt).toBeGreaterThan(restoreInSentBranch);
+  });
+
+  test('the delivered branch does NOT restore-then-finalize as two steps — it passes its own claim token into markDeliverySent so the finalize and the claim release are ONE atomic UPDATE (Codex pre-push P1)', () => {
+    const deliveredAt = noticeBlock.indexOf('// The notice DELIVERED the pay link');
+    expect(deliveredAt).toBeGreaterThan(-1);
+    const restoreBetween = noticeBlock.indexOf('.restoreSendClaim(', deliveredAt);
+    const markDeliveredAt = noticeBlock.indexOf('.markDeliverySent(invoice.id', deliveredAt);
+    expect(markDeliveredAt).toBeGreaterThan(deliveredAt);
+    // No plain restoreSendClaim call between the DELIVERED comment and its
+    // own markDeliverySent call — a separate restore-then-finalize would
+    // expose an unclaimed row in the gap for a concurrent sender to grab.
+    expect(restoreBetween === -1 || restoreBetween > markDeliveredAt).toBe(true);
+    expect(noticeBlock.slice(deliveredAt, markDeliveredAt + 400)).toMatch(
+      /claimToken: declineSendClaim\.invoice\.send_claim_token/,
+    );
+  });
+
+  test('markDeliverySent itself requires and releases a passed claimToken atomically, and never finalizes a row it does not own', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');
+    const fnAt = source.indexOf('async markDeliverySent(');
+    expect(fnAt).toBeGreaterThan(-1);
+    const fnBody = source.slice(fnAt, fnAt + 4000);
+    expect(fnBody).toMatch(/if \(claimToken && invoice\.send_claim_token !== claimToken\) return invoice;/);
+    expect(fnBody).toMatch(/if \(claimToken\) updates\.send_claim_token = null;/);
+    expect(fnBody).toMatch(/if \(claimToken\) finalizeQuery\.where\(\{ send_claim_token: claimToken \}\);/);
+  });
+
+  test('a throw reaching the outer catch restores the claim UNLESS it carries a providerOutcome (an uncertain send — retained for review, never auto-restored)', () => {
+    const catchAt = noticeBlock.lastIndexOf('} catch (failErr) {');
+    expect(catchAt).toBeGreaterThan(-1);
+    const catchBody = noticeBlock.slice(catchAt, catchAt + 1200);
+    expect(catchBody).toMatch(/if \(declineSendClaim && !failErr\?\.providerOutcome\) \{/);
+    expect(catchBody).toMatch(/\.restoreSendClaim\(/);
   });
 });

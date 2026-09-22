@@ -4812,11 +4812,23 @@ const InvoiceService = {
       // invoice-issued closeout below writes them up as the actor of the
       // visit transition; null = an automated finalization (the system).
       actorTechnicianId = null,
+      // Claim-scoped finalize (#4131 slice 5, Codex pre-push P1): a caller
+      // that took claimInvoiceForSend's ordinary send_claim_token claim for
+      // this exact delivery (the payment-failed decline notice) passes its
+      // own token here so the finalize UPDATE both requires and releases it
+      // atomically — never a separate restore-then-finalize pair, which
+      // exposes an unclaimed row in the gap and lets a concurrent sender
+      // claim and re-send it, and never a finalize with no token predicate
+      // at all, which could otherwise clear a DIFFERENT episode's live
+      // claim out from under it. Callers with no claim to release (the
+      // deferred-queue rails, project reports) omit it — unchanged.
+      claimToken = null,
     } = {},
   ) {
     const invoice = await db("invoices").where({ id: invoiceId }).first();
     if (!invoice) return null;
     if (!SEND_FINALIZABLE_STATUSES.includes(invoice.status)) return invoice;
+    if (claimToken && invoice.send_claim_token !== claimToken) return invoice;
 
     // Same contract as sendViaSMSAndEmail (the #1604 fix): callers that take
     // no review decision inherit the review request configured at schedule
@@ -4846,12 +4858,19 @@ const InvoiceService = {
       updated_at: now,
     };
     if (sms) updates.sms_sent_at = db.raw("COALESCE(sms_sent_at, ?)", [now]);
+    if (claimToken) updates.send_claim_token = null;
 
-    const [updated] = await db("invoices")
+    const finalizeQuery = db("invoices")
       .where({ id: invoiceId })
-      .whereIn("status", SEND_FINALIZABLE_STATUSES)
-      .update(updates)
-      .returning("*");
+      .whereIn("status", SEND_FINALIZABLE_STATUSES);
+    if (claimToken) finalizeQuery.where({ send_claim_token: claimToken });
+    const [updated] = await finalizeQuery.update(updates).returning("*");
+    // A claimed caller that loses the race (another episode already
+    // restored/re-claimed/finalized this exact token's row between the
+    // pre-check above and this UPDATE) gets the CURRENT row back rather
+    // than the stale pre-update snapshot, so it never reports a delivery
+    // this call did not actually perform.
+    if (claimToken && !updated) return db("invoices").where({ id: invoiceId }).first();
     const finalInvoice = updated || invoice;
 
     // First delivery via this path (combined project send / completion-with-

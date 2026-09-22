@@ -155,6 +155,27 @@ postgres('invoice send episode ownership', () => {
     expect((await read()).sms_sent_at).toBeTruthy();
   });
 
+  test('markDeliverySent with a passed claimToken finalizes and releases that exact claim atomically, in the SAME update (#4131 slice 5, Codex pre-push P1)', async () => {
+    const token = randomUUID();
+    await trx('invoices').where({ id: invoiceId }).update({ status: 'sending', send_claim_token: token });
+    const result = await Invoice.markDeliverySent(invoiceId, { sms: true, source: 'payment_failed_notice', claimToken: token });
+    expect(result).toMatchObject({ status: 'sent', send_claim_token: null });
+    expect(await read()).toMatchObject({ status: 'sent', send_claim_token: null });
+    expect((await read()).sms_sent_at).toBeTruthy();
+  });
+
+  test('markDeliverySent with a claimToken that no longer owns the row refuses to finalize — a replacement episode is never clobbered', async () => {
+    const original = randomUUID();
+    const replacement = randomUUID();
+    await trx('invoices').where({ id: invoiceId }).update({ status: 'sending', send_claim_token: replacement });
+    // A stale (superseded) episode calling back in with its OWN now-dead
+    // token must not finalize the row a replacement claim currently owns —
+    // no partial UPDATE, no send_claim_token erased out from under it.
+    const result = await Invoice.markDeliverySent(invoiceId, { sms: true, source: 'payment_failed_notice', claimToken: original });
+    expect(result).toMatchObject({ status: 'sending', send_claim_token: replacement });
+    expect(await read()).toMatchObject({ status: 'sending', send_claim_token: replacement, sent_at: null, sms_sent_at: null });
+  });
+
   test('scheduled retry cannot restore a replacement claim', async () => {
     await trx('invoices').where({ id: invoiceId }).update({ status: 'scheduled', scheduled_send_at: new Date(Date.now() - 60000) });
     const replacement = randomUUID();

@@ -11472,25 +11472,52 @@ async function completeScheduledService(completionInput, packetContext = null) {
               // The notice DELIVERED the pay link — the invoice must finalize
               // exactly as if the completion SMS had carried it (draft →
               // sent, sent_at/sms_sent_at, lead-conversion updates), because
-              // the completion SMS below now goes report-only. Give the claim
-              // back first — markDeliverySent doesn't touch send_claim_token —
-              // so the finalize below has a clean draft/scheduled row to flip.
+              // the completion SMS below now goes report-only. Pass this
+              // episode's own claim token straight into markDeliverySent
+              // (Codex pre-push P1, #4131 slice 5) so the finalize both
+              // requires and releases the exact claim atomically in ONE
+              // UPDATE — restoring the claim first, as a separate step,
+              // would expose an unclaimed draft/scheduled row in the gap
+              // for a concurrent sender to claim and re-send.
               try {
-                await DeclineNoticeInvoiceService.restoreSendClaim(
-                  invoice.id, declineSendClaim.previousStatus, declineSendClaim.claimed,
-                  [], db, declineSendClaim.invoice.send_claim_token,
-                );
                 invoice = await DeclineNoticeInvoiceService.markDeliverySent(invoice.id, {
                   sms: true,
                   source: 'payment_failed_notice',
                   payUrl,
+                  claimToken: declineSendClaim.invoice.send_claim_token,
                 });
               } catch (statusErr) {
                 logger.warn(`[dispatch] invoice delivery status sync after payment-failed notice failed for ${invoice?.id}: ${statusErr.message}`);
               }
             }
+          } else {
+            // No renderable body (Codex pre-push P1, #4131 slice 5): the
+            // template is missing/disabled, or the lookup itself failed —
+            // either way this is a definite pre-provider non-send. The
+            // claim was already acquired above; give it back or the
+            // invoice is left 'sending' until stale-claim recovery parks
+            // it for manual review, blocking every ordinary retry in the
+            // meantime.
+            await DeclineNoticeInvoiceService.restoreSendClaim(
+              invoice.id, declineSendClaim.previousStatus, declineSendClaim.claimed,
+              [], db, declineSendClaim.invoice.send_claim_token,
+            );
           }
         } catch (failErr) {
+          // Every branch above that resolves (deferred / not-sent /
+          // delivered / no body) already gives the claim back or finalizes
+          // it. The remaining gap is a THROW reaching here from somewhere
+          // still pre-provider (template render, the pre-send notes write)
+          // — a genuinely uncertain provider outcome (throwIfDeliveryUnverified)
+          // carries its providerOutcome and must NOT be restored here, the
+          // same "retained for review" posture every other sender in this
+          // codebase gives an unverified send.
+          if (declineSendClaim && !failErr?.providerOutcome) {
+            await DeclineNoticeInvoiceService.restoreSendClaim(
+              invoice.id, declineSendClaim.previousStatus, declineSendClaim.claimed,
+              [], db, declineSendClaim.invoice.send_claim_token,
+            ).catch(() => {});
+          }
           logger.warn(`[dispatch] payment-failed notice errored for invoice ${invoice?.id} (completion SMS keeps the pay link): ${failErr.message}`);
         }
       }
