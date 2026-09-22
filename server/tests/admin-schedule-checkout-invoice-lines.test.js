@@ -70,3 +70,47 @@ describe('compactCheckoutInvoiceLines (schedule payload invoice summary)', () =>
     expect(out[0].description.length).toBeLessThanOrEqual(160);
   });
 });
+
+describe('calculateDiscountDollars percentage rounding (checkout mint cap-check)', () => {
+  const { calculateDiscountDollars } = adminScheduleRouter._test;
+
+  // Codex pre-push audit P0 (slice 9 of #4405): the mobile checkout sheet's
+  // preview now runs every discount through lib/discountStack's cent-exact
+  // percentageDiscountDollars (5% of $20.70 = $1.04, per CLAUDE.md's
+  // "regardless of the gate" rounding rule), but this cap-check still used
+  // baseAmount * (amount/100) then Math.round(dollars*100)/100 — plain
+  // IEEE754 float division, which lands 5% of $20.70 at $1.03
+  // (20.70 * 0.05 === 1.0349999999999999). The server's
+  // Math.min(submittedDollars, resolved.dollars) then clamped the sheet's
+  // correct $1.04 preview down to the old $1.03, minting a total the
+  // technician never saw on screen.
+  test('5% of $20.70 clamps at the cent-exact $1.04, never the float-rounded $1.03', () => {
+    const row = { discount_type: 'percentage', amount: 5, max_discount_dollars: null };
+    expect(calculateDiscountDollars(row, 20.70, 5).dollars).toBe(1.04);
+  });
+
+  test('a max_discount_dollars cap still clamps below the cent-exact amount', () => {
+    const row = { discount_type: 'percentage', amount: 5, max_discount_dollars: 0.5 };
+    expect(calculateDiscountDollars(row, 20.70, 5).dollars).toBe(0.5);
+  });
+
+  // Not itself behind GATE_DISCOUNT_STACKING — this cap-check runs on every
+  // checkout mint whether or not the gate is live, so the corrected rounding
+  // must be identical either way (CLAUDE.md: "regardless of the gate").
+  test('gate-off parity — the same cent-exact rounding applies with GATE_DISCOUNT_STACKING unset', () => {
+    const prior = process.env.GATE_DISCOUNT_STACKING;
+    delete process.env.GATE_DISCOUNT_STACKING;
+    try {
+      const row = { discount_type: 'percentage', amount: 5, max_discount_dollars: null };
+      expect(calculateDiscountDollars(row, 20.70, 5).dollars).toBe(1.04);
+    } finally {
+      if (prior === undefined) delete process.env.GATE_DISCOUNT_STACKING;
+      else process.env.GATE_DISCOUNT_STACKING = prior;
+    }
+  });
+
+  test('fixed and free_service types are unaffected by the percentage-path fix', () => {
+    expect(calculateDiscountDollars({ discount_type: 'fixed_amount', amount: 15 }, 100, 15).dollars).toBe(15);
+    expect(calculateDiscountDollars({ discount_type: 'free_service', amount: 0 }, 42.5, 0).dollars).toBe(42.5);
+  });
+});

@@ -14,6 +14,12 @@ vi.mock('../../hooks/useCustomerCards', () => ({
   cardOnFileTitle: () => '',
   isCardExpired: () => false,
 }));
+// None of these tests add a discount — stub the gate confirmed-off so the
+// added stacking wiring stays inert here (its own behavior is covered by
+// MobileCheckoutSheet.discount-stack.test.jsx).
+vi.mock('../../hooks/useDiscountStacking', () => ({
+  useDiscountStackingState: () => ({ enabled: false, known: true, retry: vi.fn() }),
+}));
 
 afterEach(cleanup);
 

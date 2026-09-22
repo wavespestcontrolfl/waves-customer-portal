@@ -25,6 +25,8 @@
 //   leak focus.
 
 import { createPortal } from 'react-dom';
+import { stackDiscounts, percentageDiscountDollars, stackGroupConflict } from '../../lib/discountStack';
+import { useDiscountStackingState, ensureStackingFresh } from '../../hooks/useDiscountStacking';
 import { X, Tag } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import MobileServicePickerSheet from './MobileServicePickerSheet';
@@ -79,6 +81,9 @@ export default function MobileCheckoutSheet({
   // (loading / fetch failed) and renders nothing: a false "No card on file"
   // would send the tech chasing cash from an autopay customer.
   const { cards: cardsOnFile } = useCustomerCards(service?.customerId || service?.customer_id);
+  // Deploy-wide release gate (GATE_DISCOUNT_STACKING); fails closed to the
+  // pre-lane preview, which is what the mint endpoint then stores.
+  const { enabled: stackingEnabled, known: stackingKnown, retry: retryStackingProbe } = useDiscountStackingState();
 
   if (!service) return null;
 
@@ -102,17 +107,96 @@ export default function MobileCheckoutSheet({
     : (service.serviceTypeDisplay || service.serviceType || 'General Service');
 
   // Separate extras: positive-amount services vs negative-amount discounts.
-  // All discounts are manual rows added by the operator.
-  const { extraServicesTotal, extraDiscountsTotal } = useMemo(() => {
-    let s = 0, d = 0;
-    for (const e of extras) {
-      if (Number(e.amount) >= 0) s += Number(e.amount);
-      else d += Number(e.amount);
-    }
-    return { extraServicesTotal: s, extraDiscountsTotal: d };
-  }, [extras]);
-
+  // All discounts are manual rows added by the operator. Every discount
+  // stacks on the services base the way the mint endpoint does
+  // (lib/discountStack mirrors services/discount-stack): fixed credits
+  // first, then percentages compounding on what is left — re-derived on
+  // every change so the rows always show what will be charged.
+  const extraServicesTotal = useMemo(() => extras.reduce(
+    (sum, e) => (Number(e.amount) >= 0 ? sum + Number(e.amount) : sum), 0,
+  ), [extras]);
   const servicesSubtotal = price + extraServicesTotal;
+  // Codex GitHub round 1 P1 (PR #4658): gate dark (or its probe unresolved —
+  // stackingEnabled already fails closed to false) must stay BYTE-IDENTICAL
+  // to before this lane: each row keeps the dollar amount SNAPSHOTTED at
+  // selection time (handleAddItem) and is never recomputed as services are
+  // added or removed afterward — compound:false was only ever additive vs.
+  // sequential math, not a snapshot, so it still recomputed against a
+  // moving servicesSubtotal. Only the gate-ON path re-derives live through
+  // the shared engine.
+  const { stackedDiscountRows, extraDiscountsTotal, discountRegimeDependent } = useMemo(() => {
+    // Codex GitHub round 2 P1 (PR #4658): select discount ROWS by _kind,
+    // never by their (possibly stale, possibly -0) stored dollar amount —
+    // a percentage picked while the base is $0 (a free callback, before
+    // any paid service is added) snapshots a provisional -0 that a
+    // Number(e.amount) < 0 filter drops from the stack FOREVER, since
+    // nothing ever writes a recomputed value back into e.amount itself.
+    // That silently excluded the row from every later live recompute too,
+    // so adding a paid service afterward left it out of both the preview
+    // and the submitted payload.
+    const discountExtras = extras.filter((e) => e._kind === 'discount');
+    if (discountExtras.length === 0) {
+      return { stackedDiscountRows: new Map(), extraDiscountsTotal: 0, discountRegimeDependent: false };
+    }
+    const snapshotTotal = discountExtras.reduce((sum, e) => sum + Number(e.amount), 0);
+    const stacked = stackDiscounts(servicesSubtotal, discountExtras.map((e) => (
+      e.discount_type
+        ? {
+          discountType: e.discount_type,
+          amount: e.discount_amount,
+          maxDiscountDollars: e.max_discount_dollars,
+          // Codex GitHub round 1 P2 (PR #4658): the stable catalog identity
+          // rides along so stackOrder's identity tiebreak — not click
+          // order / array position — decides which of two otherwise-tying
+          // discounts (same type/value/cap/scope) resolves first.
+          id: e.discount_id ?? e.discount_key ?? undefined,
+        }
+        : { discountType: 'fixed_amount', amount: Math.abs(Number(e.amount) || 0) }
+    )), { compound: true });
+    const liveTotal = -stacked.totalDollars;
+    // Codex GitHub round 3 P1 (PR #4658): a SINGLE percentage discount's
+    // resolved amount can also diverge between regimes whenever the base
+    // moved after selection — gate-off keeps the selection-time snapshot,
+    // gate-on recomputes against whatever the base is NOW — so "2+ rows"
+    // was never the right bar for revalidating before Charge. Compare what
+    // gate-off would post (the snapshot total) against what gate-on would
+    // post (the live recompute) directly: any difference at the cent means
+    // the submitted amount depends on which regime the server is actually
+    // running right now, independent of row count.
+    const regimeDependent = Math.round(snapshotTotal * 100) !== Math.round(liveTotal * 100);
+    if (!stackingEnabled) {
+      return { stackedDiscountRows: new Map(), extraDiscountsTotal: snapshotTotal, discountRegimeDependent: regimeDependent };
+    }
+    const rows = new Map();
+    discountExtras.forEach((e, i) => rows.set(e.id, stacked.items[i].dollars));
+    return { stackedDiscountRows: rows, extraDiscountsTotal: liveTotal, discountRegimeDependent: regimeDependent };
+  }, [extras, servicesSubtotal, stackingEnabled]);
+  const extraAmount = (e) => (stackedDiscountRows.has(e.id) ? -stackedDiscountRows.get(e.id) : Number(e.amount));
+  // Codex #4405 P1, generalized by GitHub round 3 P1 (PR #4658): Charge
+  // must not fire while the stacking gate's real state is unconfirmed AND
+  // the submitted amount actually depends on which regime is live —
+  // discountRegimeDependent (not a bare row count) is the right bar: a
+  // SINGLE percentage discount is exactly as exposed as two once its base
+  // has moved since selection (round 3), while two rows that happen to
+  // total the same either way need no gate at all.
+  const stackingUnconfirmedBlocksCharge = !stackingKnown && discountRegimeDependent;
+  // Codex GitHub round 3 P1 (PR #4658): the picker's OWN non-stackable-
+  // group hiding is suppressed whenever chosenDiscounts is empty — which
+  // is every row picked while the probe was still unknown (chosenDiscounts
+  // fails closed to stackingEnabled:false, i.e. []). A technician can
+  // therefore add two non-stackable tiers (WaveGuard Silver AND Gold)
+  // before the probe resolves, and nothing re-validated the ALREADY-PICKED
+  // rows afterward — the route would record both as separate
+  // validated_checkout stamps. Runs UNCONDITIONALLY (not gated on
+  // stackingEnabled/stackingKnown): one non-stackable tier per checkout is
+  // a baseline invariant the server enforces regardless of
+  // GATE_DISCOUNT_STACKING, so there is nothing to wait on here.
+  const discountGroupConflict = useMemo(() => stackGroupConflict(
+    extras.filter((e) => e._kind === 'discount').map((e) => ({
+      id: e.discount_id, name: e.description, stack_group: e.stack_group, is_stackable: e.is_stackable,
+    })),
+  ), [extras]);
+
   const prepaidAmount = service.prepaidAmount != null ? Math.max(0, Number(service.prepaidAmount) || 0) : 0;
   // An open invoice already attached to this visit (accept-minted setup +
   // first-application invoice, or an earlier Charge-now mint) is what the
@@ -218,10 +302,15 @@ export default function MobileCheckoutSheet({
     const amt = Number(d.amount || 0);
     if (!amt) return;
     const isPercent = d.discount_type === 'percentage' || d.discount_type === 'variable_percentage';
-    // Percentage applies to the current services subtotal (base + positive extras).
-    // Snapshot at add-time so edits after feel deterministic.
+    // Codex GitHub round 2 P1 (PR #4658): this snapshot is what gate-off
+    // posts verbatim (never recomputed — round 1's fix) AND what a
+    // gate-on row shows before the live memo below takes over, so it must
+    // already be cent-exact — plain float division rounds 5% of $20.70
+    // down to $1.03 instead of $1.04, which the route's
+    // Math.min(submittedDollars, resolved.dollars) then preserves even
+    // though the server's own cap-check resolves the correct $1.04.
     const dollarOff = isPercent
-      ? Math.round(servicesSubtotal * (amt / 100) * 100) / 100
+      ? percentageDiscountDollars(servicesSubtotal, amt, d.max_discount_dollars)
       : amt;
     const label = payload.kind === 'custom_discount'
       ? (isPercent ? `Custom Discount (${amt}%)` : 'Custom Discount')
@@ -233,6 +322,9 @@ export default function MobileCheckoutSheet({
       discount_key: d.discount_key || null,
       discount_type: d.discount_type || null,
       discount_amount: amt,
+      max_discount_dollars: d.max_discount_dollars ?? null,
+      stack_group: d.stack_group || null,
+      is_stackable: d.is_stackable,
       is_waveguard_tier_discount: !!d.is_waveguard_tier_discount,
       description: isPercent ? `${label} (${amt}%)` : label,
       quantity: 1,
@@ -244,12 +336,56 @@ export default function MobileCheckoutSheet({
   const removeExtra = (id) => setExtras((prev) => prev.filter((e) => e.id !== id));
 
   async function handleCharge() {
-    if (minting || nothingToCharge) return;
+    if (minting || nothingToCharge || stackingUnconfirmedBlocksCharge || discountGroupConflict) return;
     setMinting(true);
     setMintError(null);
+    // Revalidate right before posting money: polling narrows the window after a
+    // mid-session gate flip but cannot close it, and the preview on screen was
+    // computed under `stackingEnabled`. Ordered AFTER setMinting so the await
+    // cannot widen the double-tap window into a double charge. Codex GitHub
+    // round 3 P1 (PR #4658): gated on discountRegimeDependent, not a bare
+    // "2+ discounts" row count — a single percentage discount is exactly as
+    // exposed as two once its base has moved since selection, and that's
+    // also the bar for sending expected_discount_stacking below (mirrors
+    // #4655's own client contract: a write whose total can't move with the
+    // regime omits the field entirely).
+    let confirmedStackingRegime = stackingEnabled;
+    if (discountRegimeDependent) {
+      const fresh = await ensureStackingFresh();
+      if (!fresh.known || fresh.enabled !== stackingEnabled) {
+        setMinting(false);
+        setMintError('The discount-stacking setting changed while this was open. Reload before charging so the total matches what will be billed.');
+        return;
+      }
+      // The LIVE value this freshness check just confirmed, not the
+      // (already-equal, but one render older) value the preview used —
+      // this is what actually goes on the wire.
+      confirmedStackingRegime = fresh.enabled;
+    }
     try {
       const body = {
-        extraLineItems: extras.map(({ _kind: _k, id: _i, ...rest }) => rest),  
+        // Discount rows post their STACKED dollars (what the sheet showed);
+        // the mint endpoint re-resolves and clamps either way. Service rows
+        // post verbatim. Catalog-only fields stay client-side.
+        extraLineItems: extras.flatMap((e) => {
+          const { _kind, id: _id, max_discount_dollars: _maxDiscountDollars, stack_group: _stackGroup, is_stackable: _isStackable, ...rest } = e;
+          if (_kind !== 'discount') return [rest];
+          const dollars = extraAmount(e);
+          // A row the stack resolved to nothing is dropped, not posted as a
+          // -0 that the mint endpoint would read as a $0 SERVICE line.
+          if (!(dollars < 0)) return [];
+          return [{ ...rest, quantity: 1, unit_price: dollars, amount: dollars }];
+        }),
+        // The gate state this charge was previewed/revalidated under — the
+        // server refuses a mismatch with its own retryable 409 rather than
+        // silently minting the other regime's total (server/routes/
+        // admin-schedule.js, mirroring #4655's InvoiceService.create /
+        // calculateUpdateFinancials pattern). Omitted whenever
+        // discountRegimeDependent is false: the submitted total can't move
+        // with the regime, so there's nothing to bind (round 3: this is no
+        // longer just "0-1 discounts" — a single discount whose base never
+        // moved also has nothing to bind).
+        ...(discountRegimeDependent ? { expected_discount_stacking: confirmedStackingRegime } : {}),
       };
       const r = await fetch(`${API_BASE}/admin/schedule/${service.id}/invoice`, {
         method: 'POST',
@@ -311,9 +447,9 @@ export default function MobileCheckoutSheet({
         <button
           type="button"
           onClick={handleCharge}
-          disabled={minting || nothingToCharge}
+          disabled={minting || nothingToCharge || stackingUnconfirmedBlocksCharge || !!discountGroupConflict}
           className="w-full bg-zinc-900 text-white font-medium rounded-xs u-focus-ring"
-          style={{ padding: '16px 20px', fontSize: 16, opacity: (minting || nothingToCharge) ? 0.6 : 1 }}
+          style={{ padding: '16px 20px', fontSize: 16, opacity: (minting || nothingToCharge || stackingUnconfirmedBlocksCharge || !!discountGroupConflict) ? 0.6 : 1 }}
         >
           {minting
             ? 'Opening payment…'
@@ -321,8 +457,48 @@ export default function MobileCheckoutSheet({
               ? 'Payment processing — nothing to collect'
               : nothingToCharge
                 ? 'No charge — complete from job'
-                : `Charge $${total.toFixed(2)}`}
+                : discountGroupConflict
+                  ? 'Resolve discount conflict to charge'
+                  : stackingUnconfirmedBlocksCharge
+                    ? 'Confirm discount stacking to charge'
+                    : `Charge $${total.toFixed(2)}`}
         </button>
+        {discountGroupConflict && (
+          <div
+            role="alert"
+            className="flex items-center justify-between gap-2 bg-alert-bg border border-alert-fg/30 rounded-sm px-3 py-2"
+            style={{ marginTop: 8 }}
+          >
+            {/* Codex GitHub round 3 P1 (PR #4658): no Retry here — unlike an
+                unconfirmed probe, there is nothing to re-poll. The fix is
+                removing one of the two conflicting rows below. */}
+            <span className="text-alert-fg" style={{ fontSize: 14 }}>
+              {discountGroupConflict.names[0]} and {discountGroupConflict.names[1]} can't both apply — remove one before charging.
+            </span>
+          </div>
+        )}
+        {!discountGroupConflict && stackingUnconfirmedBlocksCharge && (
+          <div
+            role="alert"
+            className="flex items-center justify-between gap-2 bg-alert-bg border border-alert-fg/30 rounded-sm px-3 py-2"
+            style={{ marginTop: 8 }}
+          >
+            {/* Codex GitHub round 3 P2 (PR #4658): 12px was under the portal
+                design system's 14px readability floor — this is the ONLY
+                guidance the tech gets when the probe fails. */}
+            <span className="text-alert-fg" style={{ fontSize: 14 }}>
+              Could not confirm how multiple discounts combine — retry before charging.
+            </span>
+            <button
+              type="button"
+              onClick={retryStackingProbe}
+              className="text-alert-fg border border-alert-fg rounded-sm u-focus-ring"
+              style={{ padding: '4px 10px', fontSize: 14, fontWeight: 500, flex: '0 0 auto', background: 'none' }}
+            >
+              Retry
+            </button>
+          </div>
+        )}
         {mintError && (
           <div role="alert" className="text-center text-alert-fg" style={{ fontSize: 12, marginTop: 6 }}>
             {mintError}
@@ -456,7 +632,7 @@ export default function MobileCheckoutSheet({
                   </div>
                 </div>
                 <div className="u-nums text-zinc-900 font-medium shrink-0" style={{ fontSize: 15 }}>
-                  {isDiscount ? '−' : ''}${Math.abs(Number(e.amount)).toFixed(2)}
+                  {isDiscount ? '−' : ''}${Math.abs(extraAmount(e)).toFixed(2)}
                 </div>
                 <button
                   type="button"
@@ -533,6 +709,7 @@ export default function MobileCheckoutSheet({
       )}
       {showItemPicker && (
         <MobileItemDiscountPickerSheet
+          chosenDiscounts={stackingEnabled ? extras.filter((e) => e._kind === 'discount' && e.discount_id) : []}
           desktopVisible={desktopVisible}
           onClose={() => setShowItemPicker(false)}
           onSelect={handleAddItem}
