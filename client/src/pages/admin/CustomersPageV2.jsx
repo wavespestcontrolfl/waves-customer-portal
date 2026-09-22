@@ -998,6 +998,15 @@ const NUMBER_SORT_KEYS = new Set([
   "monthlyRate",
   "lifetimeRevenue",
 ]);
+const SERVER_SORT_KEYS = {
+  name: "name",
+  lastName: "name",
+  firstName: "name",
+  lifetimeRevenue: "revenue",
+  leadScore: "lead_score",
+  monthlyRate: "rate",
+  lastContactDate: "last_contact",
+};
 
 function customerSortValue(customer, key) {
   // First name only; missing names sort last, matching the server reader.
@@ -1875,7 +1884,7 @@ export default function CustomersPageV2() {
         if (value !== "") params.set(key, value);
       }
     }
-    params.set("sort", sortBy);
+    params.set("sort", SERVER_SORT_KEYS[sortBy] || "name");
     params.set("order", sortDir);
     params.set("page", String(pg));
     // Load up to the server's max so the full customer list lands in a
@@ -1980,14 +1989,19 @@ export default function CustomersPageV2() {
     }
   };
 
-  const sorted = [...customers].sort((a, b) => {
-    const aVal = customerSortValue(a, sortBy);
-    const bVal = customerSortValue(b, sortBy);
-    const direction = sortDir === "asc" ? 1 : -1;
-    if (aVal < bVal) return -direction;
-    if (aVal > bVal) return direction;
-    return 0;
-  });
+  // Search-name ordering is relevance-ranked before the server applies its
+  // limit, so keep that order intact. Local sorting here used to turn an exact
+  // match back into ordinary alphabetical order within each returned page.
+  const sorted = search.trim() && NAME_SORT_KEYS.has(sortBy)
+    ? [...customers]
+    : [...customers].sort((a, b) => {
+        const aVal = customerSortValue(a, sortBy);
+        const bVal = customerSortValue(b, sortBy);
+        const direction = sortDir === "asc" ? 1 : -1;
+        if (aVal < bVal) return -direction;
+        if (aVal > bVal) return direction;
+        return 0;
+      });
 
   const daysSince = (iso) => {
     if (!iso) return null;
