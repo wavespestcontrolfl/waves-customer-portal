@@ -2706,11 +2706,21 @@ function restackStoredVisitFinancials(parent, addonRows, discountScope) {
   // than it did against the full original gross — capping the restack to
   // the frozen figure is therefore a no-op whenever the term was never
   // capped (the frozen figure already ceilings every possible restack), and
-  // is exactly the missing protection whenever it was.
+  // is exactly the missing protection whenever it was. A PRESENT frozen
+  // figure of exactly $0 is itself a real, explicit cap (calculateDiscountDollars
+  // honors an explicit $0 max_discount_dollars the same as any other —
+  // Codex pre-push audit P0, round 4: a `> 0` read treated that $0 as "no
+  // cap at all," restacking a 50%-capped-$0 discount as if uncapped), so
+  // this reads "present and numeric," never "present and positive."
+  const frozenDollarsAsCap = (value) => {
+    if (value === null || value === undefined || value === '') return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  };
   const primaryDiscount = typedDiscountSlot(
     parent?.line_discount_type,
     parent?.line_discount_amount,
-    Number(parent?.line_discount_dollars) > 0 ? Number(parent.line_discount_dollars) : null,
+    frozenDollarsAsCap(parent?.line_discount_dollars),
   );
   const addonSlots = addons.map((addon) => {
     // scheduled_service_addons.base_price is the addon's own GROSS —
@@ -2725,7 +2735,7 @@ function restackStoredVisitFinancials(parent, addonRows, discountScope) {
       lineDiscount: typedDiscountSlot(
         addon?.discount_type,
         addon?.discount_amount,
-        Number(addon?.discount_dollars) > 0 ? Number(addon.discount_dollars) : null,
+        frozenDollarsAsCap(addon?.discount_dollars),
       ),
       eligible: matchesScope(addon?.service_id) && !addonPctExcluded(addon),
     };

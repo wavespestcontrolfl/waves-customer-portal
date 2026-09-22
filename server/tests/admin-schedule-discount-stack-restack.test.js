@@ -451,6 +451,40 @@ describe('recurring extension — restackStoredVisitFinancials', () => {
     expect(later.addonDollars[0].discountDollars).toBe(14);
     expect(later.price).toBe(56);
   });
+
+  // Codex pre-push audit P0 (round 4): the round-1 surrogate-cap fix read
+  // "present frozen dollars" as `> 0`, so a discount EXPLICITLY capped to
+  // $0 (calculateDiscountDollars honors an explicit $0 max_discount_dollars
+  // — admin-discounts.js accepts it, same as any other cap) restacked as if
+  // it had no cap at all. Codex's own worked example: a $100 primary at 50%
+  // capped $0 plus a $10 appointment credit correctly costs $90 — the
+  // uncapped bug stamped $45.
+  test('a primary line discount explicitly capped to $0 restacks as $0, never as uncapped', () => {
+    const result = restackStoredVisitFinancials({
+      primary_line_price: 100,
+      line_discount_type: 'percentage',
+      line_discount_amount: 50,
+      line_discount_dollars: 0, // the ORIGINAL 50%-capped-$0 result — present, not missing
+      discount_type: 'fixed_amount',
+      discount_amount: 10,
+    }, [], null);
+
+    expect(result.primaryLineDiscountDollars).toBeNull(); // 0 dollars reports as null, same convention as every other zero discount
+    expect(result.price).toBe(90);
+  });
+
+  test('an add-on discount explicitly capped to $0 restacks as $0, never as uncapped', () => {
+    const result = restackStoredVisitFinancials({
+      primary_line_price: 100,
+      line_discount_type: null,
+      discount_type: 'fixed_amount',
+      discount_amount: 10,
+    }, [
+      { base_price: 100, estimated_price: 100, discount_type: 'percentage', discount_amount: 50, discount_dollars: 0, service_id: 'addon-svc' },
+    ], null);
+
+    expect(result.addonDollars[0].discountDollars).toBe(0);
+  });
 });
 
 describe('recurring extension — applyDiscountStackRestack (no-op contract)', () => {
