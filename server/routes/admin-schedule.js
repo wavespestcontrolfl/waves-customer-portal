@@ -2479,7 +2479,8 @@ function restackLiveVisitFinancials(pricing, addonLines) {
   // pricing.primaryDiscount already is (structurally null whenever there is
   // no real primary gross, since resolveLineDiscount never resolves a
   // discount against a $0 base).
-  const primaryGross = Number(pricing?.primaryBase) || 0;
+  const primaryBaseMissing = pricing?.primaryBase == null;
+  const primaryGross = primaryBaseMissing ? 0 : Number(pricing.primaryBase);
   if (!Number.isFinite(primaryGross) || primaryGross < 0) return null;
   const addons = Array.isArray(addonLines) ? addonLines : [];
   const discount = pricing.appointmentDiscount;
@@ -2525,8 +2526,15 @@ function restackLiveVisitFinancials(pricing, addonLines) {
   // primary_line_price stayed at its full gross, so invoice.js — which
   // omits a discount line with zero/null dollars — billed the full price
   // for a visit this restack itself says should be free.
+  // A whole occurrence with no known price anywhere (round 13 P1): once a
+  // missing primaryBase can reach gross:0 (just above), a booking with NO
+  // priced add-ons either has no known price at all — a quote-pending
+  // appointment, which must stay NULL, not an explicit $0 (the same
+  // waves-billing null-price invariant addonDollars already honors
+  // per-line, applied here at the occurrence level).
+  const wholeOccurrenceUnpriced = primaryBaseMissing && !addons.some((line) => line.base != null);
   return {
-    price: stacked.total,
+    price: wholeOccurrenceUnpriced ? null : stacked.total,
     appointmentDiscountDollars: stacked.appointmentDiscountDollars > 0 ? stacked.appointmentDiscountDollars : null,
     primaryDiscountDollars: stacked.lines[0].lineDiscountDollars > 0 ? stacked.lines[0].lineDiscountDollars : null,
     // A blank-priced add-on (base == null — a service still awaiting a
@@ -2875,8 +2883,21 @@ function restackStoredVisitFinancials(parent, addonRows, discountScope, discount
   // discount dollars here dropped the stamp while primary_line_price stayed
   // at its full gross, so invoice.js billed the full price for a visit this
   // restack itself computed as free.
+  //
+  // A DIFFERENT case (Codex pre-push audit P1, round 13): the primary can
+  // now reach gross:0 because it's genuinely MISSING on a marked row (the
+  // round-13 fix just above), not because anything discounted it — and if
+  // every due add-on is ALSO blank-priced (or there are none), there is no
+  // known price anywhere on this occurrence at all: a quote-pending
+  // appointment, which the waves-billing null-price invariant requires
+  // stays NULL, never an explicit $0 an extension writer would then
+  // persist as "this visit is free." Distinct from the fully-discounted
+  // case above: THAT has a real gross somewhere that a discount reduced to
+  // 0; this has no gross ANYWHERE to discount in the first place.
+  const addonHasKnownPrice = (addon) => addon?.base_price != null || addon?.estimated_price != null;
+  const wholeOccurrenceUnpriced = primaryPriceMissing && !addons.some(addonHasKnownPrice);
   return {
-    price: stacked.total,
+    price: wholeOccurrenceUnpriced ? null : stacked.total,
     appointmentDiscountDollars: stacked.appointmentDiscountDollars > 0 ? stacked.appointmentDiscountDollars : null,
     primaryLineDiscountDollars: stacked.lines[0].lineDiscountDollars > 0 ? stacked.lines[0].lineDiscountDollars : null,
     // A blank-priced add-on row (no base_price AND no estimated_price at
@@ -2887,12 +2908,12 @@ function restackStoredVisitFinancials(parent, addonRows, discountScope, discount
     // above reads a missing value as 0), so that distinction has to be
     // restored here, at the one place that still knows which add-on rows
     // came in with no price at all.
-    addonDollars: addons.map((addon, i) => (addon?.base_price == null && addon?.estimated_price == null
-      ? { discountDollars: null, netPrice: null }
-      : {
+    addonDollars: addons.map((addon, i) => (addonHasKnownPrice(addon)
+      ? {
         discountDollars: stacked.lines[i + 1].lineDiscountDollars,
         netPrice: stacked.lines[i + 1].net,
-      })),
+      }
+      : { discountDollars: null, netPrice: null })),
   };
 }
 

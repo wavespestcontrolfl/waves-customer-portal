@@ -1206,3 +1206,64 @@ describe('pricing-regime marker (round 13)', () => {
     expect(target.metadata).toEqual({ pricing_regime: 'discount_stack_v1' });
   });
 });
+
+// Round 13 P1 (found alongside the P0 above, on the SAME push): once a
+// marked row's missing primary can reach gross:0, a booking with NO known
+// price anywhere (no primary, no priced add-ons) restacked to price: 0 —
+// changing a quote-pending appointment into an explicitly FREE one once an
+// extension writer persisted it. The waves-billing null-price invariant
+// (already honored per-add-on by the blank-priced-add-on fix) now also
+// covers the WHOLE occurrence: no known price anywhere stays null.
+describe('pricing-regime marker — unpriced (quote-pending) occurrences stay null, never $0 (round 13 P1)', () => {
+  afterEach(() => { delete process.env.GATE_DISCOUNT_STACKING; });
+
+  test('restackStoredVisitFinancials: a marked, wholly-unpriced row returns price: null, not 0', () => {
+    const markedUnpriced = {
+      primary_line_price: null,
+      metadata: { pricing_regime: 'discount_stack_v1' },
+      line_discount_type: null,
+      discount_type: null,
+    };
+    const result = restackStoredVisitFinancials(markedUnpriced, [], null, new Map());
+    expect(result).not.toBeNull();
+    expect(result.price).toBeNull();
+  });
+
+  test('restackStoredVisitFinancials: a marked row with even ONE priced add-on restacks normally (not treated as unpriced)', () => {
+    const markedParent = {
+      primary_line_price: null,
+      metadata: { pricing_regime: 'discount_stack_v1' },
+      line_discount_type: null,
+      discount_type: null,
+    };
+    const pricedAddon = { base_price: 50, estimated_price: 50, discount_type: null, service_id: 'addon-svc' };
+    const result = restackStoredVisitFinancials(markedParent, [pricedAddon], null, new Map());
+    expect(result.price).toBe(50);
+  });
+
+  test('restackStoredVisitFinancials: a marked, EXPLICITLY $0 primary is still a real, known zero (not treated as unpriced)', () => {
+    const markedZeroPrimary = {
+      primary_line_price: 0,
+      metadata: { pricing_regime: 'discount_stack_v1' },
+      line_discount_type: null,
+      discount_type: null,
+    };
+    const result = restackStoredVisitFinancials(markedZeroPrimary, [], null, new Map());
+    expect(result.price).toBe(0); // a real, known zero — never null
+  });
+
+  test('restackLiveVisitFinancials: a wholly-unpriced booking (only an appointment discount selected) returns price: null, not 0', async () => {
+    await withGateLive(() => {
+      const unpriced = {
+        primaryBase: null,
+        primaryServiceKey: 'general_pest',
+        primaryServiceCategory: 'pest_control',
+        primaryDiscount: null,
+        appointmentDiscount: { discountType: 'fixed_amount', discountAmount: 30, discountDollars: 30, maxDiscountDollars: null, serviceKeyFilter: null, serviceCategoryFilter: null },
+      };
+      const result = restackLiveVisitFinancials(unpriced, []);
+      expect(result).not.toBeNull();
+      expect(result.price).toBeNull();
+    });
+  });
+});
