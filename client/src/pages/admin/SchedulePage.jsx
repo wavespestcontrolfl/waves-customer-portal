@@ -2292,6 +2292,48 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // untouched/legacy behavior for both the preview AND the save payload —
   // never silently posted with no way for the operator to see it.
   const lineDiscountActive = (l) => stackingEnabled && !!l.lineDiscountTouched;
+  // Coordinator-approved scope extension on PR #4657 (#4654 merged): the
+  // day/week/list GET mappers now project the row's own pricing_provenance
+  // (regime marker + frozen caps) read-only. hasPricingRegimeMarker's OWN
+  // rule (server/services/booking/visit-financial-stamps.js), mirrored here
+  // rather than imported (server code, different bundle): only a value of
+  // literally "discount_stack_v1" counts — a caps-only stamp (no regime
+  // field, see stampFrozenCapsOnly server-side) must NOT read as marked.
+  const rowIsMarked = service.pricingProvenance?.pricing_regime === 'discount_stack_v1';
+  // A row's own frozen per-discount cap — resolveStoredDiscountCaps' client
+  // mirror, addons side only (this slice never edits the primary line's own
+  // slot). `undefined` means "this id was never frozen" (a fresh pick this
+  // session, or a row whose snapshot predates this discount) — the caller
+  // falls back to the live catalog for that case; `null` is a real, frozen
+  // "uncapped" answer, never treated as "unknown".
+  const frozenAddonCap = (discountId) => {
+    const addons = service.pricingProvenance?.caps?.addons;
+    return addons && discountId != null && String(discountId) in addons ? addons[String(discountId)] : undefined;
+  };
+  // GATE_DISCOUNT_STACKING (:2803 follow-up, Codex pre-push audit P1 round
+  // 2 on #4657, PRRT_kwDOR3YQi86krxFI's own fix-suggestion): a fresh pick
+  // (or explicit removal) leaves `lineDiscountTouched` set in React state
+  // for the rest of the session; `lineDiscountActive` above already gates
+  // every READER on `stackingEnabled` so a hidden pick can never reach the
+  // preview or the save. But setLineDiscount's own firstTouch also snapped
+  // Price from the seeded net to the true gross as a SIDE EFFECT of the
+  // pick — reverting the read-side gate alone leaves that mutation in
+  // place, so priceUnchanged (keyed on the now-stale `_seededPrice`) reads
+  // false and a SWAP (Military -> a fresh Silver pick, gate closes before
+  // Save) degrades to a silent full-gross, no-discount save instead of
+  // restoring the original stamp. This fully resets any touched line back
+  // to pristine — lineDiscountTouched, lineDiscount, AND Price — the moment
+  // the gate reads anything other than confirmed-on, so the line's next
+  // read is indistinguishable from "never touched this session" and
+  // round-trips its true original stamp exactly like #2306/#2803 already do.
+  useEffect(() => {
+    if (stackingEnabled) return;
+    setServiceLines((lines) => lines.map((l) => (
+      l.lineDiscountTouched
+        ? { ...l, lineDiscountTouched: false, lineDiscount: null, price: l._seededPrice ?? l.price }
+        : l
+    )));
+  }, [stackingEnabled]);
   // Codex pre-push audit P1 (round 2, #4657): a Price edit on an untouched
   // stamped line (the discount CONTROL itself never touched) must also
   // stop trusting the frozen stamp — handleSave's own priceUnchanged check
@@ -2328,7 +2370,21 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const linePresetById = (id) =>
     id ? lineDiscountPresets.find((d) => String(d.id) === String(id)) || null : null;
   const lineDiscountCatalogRow = (ld) => (ld ? { ...(linePresetById(ld.id) || {}), ...ld } : null);
-  const previewSlot = (ld) => verifiedLineDiscountCap(ld, linePresetById(ld?.id));
+  // :1662 (Codex pre-push audit P1 on #4657): a MARKED row's existing stamp
+  // priced against a FROZEN cap (pricing_provenance.caps.addons), never the
+  // live catalog — a later PUT /admin/discounts/:id cap edit must not
+  // silently reprice this preview differently from what an unrelated save
+  // would actually preserve. Frozen-first; live-catalog-verify (the
+  // existing, still-correct fallback for a fresh pick, or any id the row
+  // has never frozen) only when the id has no frozen entry at all.
+  const previewSlot = (ld) => {
+    if (!ld) return null;
+    if (rowIsMarked) {
+      const frozen = frozenAddonCap(ld.id);
+      if (frozen !== undefined) return { ...ld, max_discount_dollars: frozen };
+    }
+    return verifiedLineDiscountCap(ld, linePresetById(ld?.id));
+  };
   const presetOptionLabel = (d) => {
     if (isCustomPercentagePreset(d)) return `${d.name} - custom %`;
     if (isCustomAmountPreset(d)) return `${d.name} - custom $`;
@@ -2398,6 +2454,30 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       }),
     );
   };
+  // :3293 (Codex pre-push audit P1 on #4657): the row's OWN stored
+  // appointment-level discount — read-only, from the new GET field, never
+  // the operator's own selection state (discountType/discountAmount/
+  // discountPresetId stay untouched: "leave alone" on Save is unaffected).
+  // Only relevant while the operator hasn't overridden it THIS session —
+  // once they pick something in the Discount control, THEIR pick is what
+  // will actually save, and the stored value is being replaced.
+  const storedAppointmentDiscount = !discountType && service.discountType && service.discountAmount != null
+    ? {
+        id: service.discountId || null,
+        discount_type: service.discountType,
+        amount: service.discountAmount,
+        max_discount_dollars: service.discountMaxDollars ?? null,
+      }
+    : null;
+  // The stored discount's OWN catalog row (stack_group/is_stackable) —
+  // needed only for line-picker conflict filtering below; the stamp itself
+  // carries no group/stackable info (that lives on the catalog id it
+  // names). Unresolvable (id null, or presets not loaded yet) still counts
+  // as "an appointment discount exists" for the interaction guard, just
+  // with no group to conflict on.
+  const storedAppointmentDiscountRow = storedAppointmentDiscount
+    ? { ...(linePresetById(storedAppointmentDiscount.id) || {}), spansAll: true }
+    : null;
   // Every OTHER line's chosen discount row, in the shape stackablePresets
   // reads (stack_group/is_stackable/scope) — one WaveGuard tier per visit:
   // a tier already on another line is hidden here, though the same tier may
@@ -2433,10 +2513,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         ...chosenLineDiscountRows(ownKey),
         // The appointment-level pick spans every line it reaches — never
         // offer the same non-stackable tier again on a line it already
-        // compounds with.
+        // compounds with. Either the operator's OWN pick this session, or
+        // (:3293) the row's stored one when they haven't overridden it —
+        // both reach every line exactly the same way.
         discountType && discountPresetId && discountPresetId !== "custom" && selectedDiscountPreset
           ? { ...selectedDiscountPreset, spansAll: true }
-          : null,
+          : storedAppointmentDiscountRow,
       ].filter(Boolean),
       { scope: ownKey },
     );
@@ -2711,7 +2793,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // this guards against. Also the ONE condition (interaction between the
   // appointment-level pick and a line's own slot) that needs a submit-time
   // freshness probe below — a save touching neither never depends on it.
-  const appointmentDiscountSelected = !!(discountType && discountAmount !== "");
+  // :3293 — "an appointment discount exists" now includes the row's OWN
+  // stored one (never the operator's own touched state), not just an
+  // active selection this session: the server compounds a preserved
+  // stored discount with a fresh line pick exactly the same way, so the
+  // guard/preview must see it too.
+  const appointmentDiscountSelected = !!(discountType && discountAmount !== "") || !!storedAppointmentDiscount;
   const lineDiscountInPlay = serviceLines.some(
     (l) => !!l?.lineDiscount || (!l?.lineDiscountTouched && !!l?._origDiscountType),
   );
@@ -3320,12 +3407,38 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         : Math.min(percentDiscountBase, Number(discountAmount))
       : 0;
   const legacyAppointmentTotal = Math.max(0, servicePrice - legacyManualDiscount);
+  // :3293 — the term this preview (and, on save, the server) actually
+  // applies: the operator's OWN pick this session when they've made one,
+  // else the row's stored one (its own discount_max_dollars column is
+  // already the frozen cap — a real stored value, never a live lookup).
+  const effectiveAppointmentDiscount = (discountType && discountAmount !== "")
+    ? { discountType, amount: Number(discountAmount), maxDiscountDollars: presetMaxDiscountDollars }
+    : storedAppointmentDiscount
+      ? {
+          discountType: storedAppointmentDiscount.discount_type,
+          amount: Number(storedAppointmentDiscount.amount),
+          maxDiscountDollars: storedAppointmentDiscount.max_discount_dollars,
+        }
+      : null;
   // GATE_DISCOUNT_STACKING (slice 7): the SAME stack the server saves for a
   // marked row (lib/discountStack mirrors services/discount-stack) — each
   // line's own slot first, then the appointment discount on the lines it
   // reaches, dollar credits before percentages, each compounding on what
   // the prior step left. Computed ONLY when the gate previews as on, so a
   // gate-off/unconfirmed save never depends on this engine at all.
+  // :3295 (Codex pre-push audit P1 on #4657) — `compound` is NOT the gate
+  // alone: resolveUpdateDetailsAddonFinancials only takes the canonical
+  // (compound) branch for a row discountStackingLive() has ALSO marked
+  // (hasPricingRegimeMarker) — an unmarked row (created/last saved before
+  // the marker existed, or while the gate was off) still falls through to
+  // calculateVisitFinancialsForAddons, additive, even with the gate on
+  // now. `compound: false` here is mathematically that SAME additive model
+  // — each line's own discount resolves against its own gross
+  // independently (never compounding with a sibling), then the appointment
+  // term resolves on the aggregate net — so an unmarked row's preview
+  // still correctly reflects an active line discount's true GROSS (via
+  // lineGrossFor) without assuming a canonical restack the server will
+  // never actually run for it.
   const stackedPreview = stackingEnabled
     ? stackVisitDiscounts({
         lines: [
@@ -3336,10 +3449,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             eligible: lineTakesDiscount(l),
           })),
         ],
-        appointmentDiscount: appointmentDiscountSelected
-          ? { discountType, amount: Number(discountAmount), maxDiscountDollars: presetMaxDiscountDollars }
-          : null,
-        compound: true,
+        appointmentDiscount: effectiveAppointmentDiscount,
+        compound: rowIsMarked,
       })
     : null;
   // Per-line dollars for renderServiceLine's own display box (index-aligned
@@ -4674,7 +4785,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     }}
                   >
                     {" "}
-                    <span>{selectedDiscountPreset?.name || "Custom Discount"}</span>
+                    <span>{selectedDiscountPreset?.name || storedAppointmentDiscountRow?.name || "Custom Discount"}</span>
                     <strong>(${manualDiscount.toFixed(2)})</strong>{" "}
                   </div>
                 )}

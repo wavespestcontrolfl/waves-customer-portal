@@ -44,6 +44,51 @@ const TERMITE_ONLY = {
 const DISCOUNTS = [MILITARY, SILVER, GOLD];
 const DISCOUNTS_R2 = [...DISCOUNTS, CUSTOM_DOLLAR, TERMITE_ONLY];
 
+const BIG_CREDIT = {
+  id: 'disc-bigcredit', name: 'Big Credit', discount_type: 'fixed_amount', amount: 12,
+  max_discount_dollars: null, stack_group: null, is_stackable: true,
+  is_active: true, is_auto_apply: false, show_in_invoices: true,
+};
+const DISCOUNTS_R3 = [...DISCOUNTS, BIG_CREDIT];
+
+// A row marked under the canonical engine (pricing_provenance.pricing_regime
+// === 'discount_stack_v1') — its Military stamp on the mosquito line was
+// frozen against a $20 cap that no longer matches the LIVE catalog row
+// (SILVER's own max_discount_dollars, used below, stays null/uncapped —
+// the frozen-cap test below uses a SEPARATE percentage stamp for that).
+const MARKED_PROVENANCE = {
+  pricing_regime: 'discount_stack_v1', engine_version: 1,
+  caps: { line: null, addons: { 'disc-military': null } },
+};
+
+// Small, hand-verified numbers (see the lane report) chosen specifically so
+// canonical (compound) fixed-credit REORDERING clamps the line's own $5
+// credit down to $2 while additive leaves it at its full $5 — proving the
+// two engines are NOT interchangeable, not just a smoke test.
+// primary $5 + fert gross $10 = $15 subtotal.
+// Compound: BigCredit($12) sorts BEFORE Military($5) by value, pro-rates
+//   across both lines (primary share $4, fert share $8), leaving fert only
+//   $2 for Military to clamp against → total discount $12+$2=$14 → Total $1.
+// Additive: Military($5) resolves first, full, against fert's own $10 →
+//   fert remaining $5; BigCredit(12) then clamps to the $10 aggregate left
+//   (primary $5 + fert $5) → total discount $5+$10=$15 → Total $0.
+function orderingSensitiveService(pricingProvenance) {
+  return {
+    ...baseService,
+    primaryLinePrice: 5,
+    estimatedPrice: 10,
+    serviceAddons: [
+      {
+        id: 'addon-1', serviceId: 'svc-mosquito', serviceName: 'Monthly Mosquito', serviceKey: 'mosquito_monthly',
+        serviceCategory: 'mosquito', basePrice: 10, estimatedPrice: 5, discountId: 'disc-military',
+        discountName: 'Military Discount', discountType: 'fixed_amount', discountAmount: 5, discountDollars: 5,
+        estimatedDuration: 30,
+      },
+    ],
+    pricingProvenance: pricingProvenance ?? null,
+  };
+}
+
 // A legacy row: the mosquito add-on already carries a STORED Military stamp
 // (base_price 60, discount_amount 5, net 55) — exactly mapAddonRow's shape.
 // The fertilization add-on carries no discount at all, so its Line discount
@@ -424,4 +469,125 @@ it('P1 (:2186, partial): a line-scoped catalog preset only appears on a matching
   // fertilization line (lawn_fert) must never be offered it.
   expect(fertOptionNames.some((t) => t.includes('Termite Special'))).toBe(false);
   expect(fertOptionNames.some((t) => t.includes('WaveGuard Silver'))).toBe(true);
+});
+
+// ---------------------------------------------------------------------
+// Coordinator-approved scope extension on PR #4657 (#4654 merged, server/
+// routes/admin-schedule.js free): :3293 (hydrate the stored appointment
+// discount), :3295 (choose compound-vs-additive by the row's own
+// provenance, not the gate alone), :1662 (preview an existing stamp's
+// FROZEN cap, never the live catalog), and the new :2380 (a gate-flip
+// mid-edit must fully reset a touched line, not just hide it).
+// ---------------------------------------------------------------------
+
+function totalText() {
+  return screen.getByText('Total').parentElement.querySelector('strong').textContent;
+}
+
+it(':3295 — a MARKED row previews the canonical (compound) engine: fixed-credit reordering clamps the line credit to $2, Total $1.00', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, discounts: DISCOUNTS_R3 }));
+  render(<Harness service={orderingSensitiveService(MARKED_PROVENANCE)} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(screen.getAllByText('Military Discount').length).toBeGreaterThan(0));
+  fireEvent.change(apptDiscountSelect(), { target: { value: 'custom' } });
+  fireEvent.change(labeledControl('Discount type'), { target: { value: 'fixed_amount' } });
+  fireEvent.change(labeledControl('Amount ($)'), { target: { value: '12' } });
+  await waitFor(() => expect(totalText()).toBe('$1.00'));
+});
+
+it(':3295 — the SAME numbers on an UNMARKED row preview the additive engine instead: the line credit stays full ($5), Total $0.00', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, discounts: DISCOUNTS_R3 }));
+  render(<Harness service={orderingSensitiveService(null)} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(screen.getAllByText('Military Discount').length).toBeGreaterThan(0));
+  fireEvent.change(apptDiscountSelect(), { target: { value: 'custom' } });
+  fireEvent.change(labeledControl('Discount type'), { target: { value: 'fixed_amount' } });
+  fireEvent.change(labeledControl('Amount ($)'), { target: { value: '12' } });
+  await waitFor(() => expect(totalText()).toBe('$0.00'));
+});
+
+it(':1662 — a MARKED row previews an existing stamped PERCENTAGE line discount at its FROZEN cap, never the live (lower) catalog cap', async () => {
+  const frozenUncapped = {
+    pricing_regime: 'discount_stack_v1', engine_version: 1,
+    caps: { line: null, addons: { 'disc-silver': null } }, // null = frozen UNCAPPED
+  };
+  const service = {
+    ...baseService,
+    pricingProvenance: frozenUncapped,
+    serviceAddons: [
+      {
+        id: 'addon-1', serviceId: 'svc-mosquito', serviceName: 'Monthly Mosquito', serviceKey: 'mosquito_monthly',
+        serviceCategory: 'mosquito', basePrice: 100, estimatedPrice: 90, discountId: 'disc-silver',
+        discountName: 'WaveGuard Silver', discountType: 'percentage', discountAmount: 10, discountDollars: 10,
+        estimatedDuration: 30,
+      },
+    ],
+  };
+  // The LIVE catalog cap ($5) would wrongly clamp a 10%-of-$100 ($10) line
+  // discount down to $5 if the preview trusted it instead of the frozen
+  // (uncapped) snapshot above.
+  const discountsWithLiveCap = DISCOUNTS.map((d) => (
+    d.id === 'disc-silver' ? { ...d, max_discount_dollars: 5 } : d
+  ));
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, discounts: discountsWithLiveCap }));
+  render(<Harness service={service} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  // $10.00 off (frozen, uncapped) — never $5.00 (the live catalog cap).
+  await waitFor(() => expect(screen.getByText(/10%.*\$10\.00/)).toBeInTheDocument());
+});
+
+it(':3293 — the row\'s STORED appointment discount (never touched this session) is included in the compound preview and the line picker\'s group-conflict filtering', async () => {
+  const service = {
+    ...baseService,
+    discountType: 'percentage', discountAmount: 10, discountId: 'disc-silver', discountMaxDollars: null,
+  };
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, discounts: DISCOUNTS }));
+  render(<Harness service={service} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  // The appointment Discount control itself is still untouched (shows "None").
+  await waitFor(() => expect(apptDiscountSelect().value).toBe(''));
+  // Its stored 10% already reaches the untouched primary+addon lines, so
+  // the Total must already be lower than the raw subtotal even though the
+  // operator picked nothing this session.
+  await waitFor(() => expect(totalText()).not.toBe('$195.00'));
+  // Gold shares Silver's waveguard group — hidden from the fert line's
+  // picker because the STORED (invisible-until-now) Silver already holds it.
+  const fertPicker = screen.getByRole('combobox', { name: 'Line discount for Quarterly Fertilization' });
+  const fertOptionNames = [...fertPicker.options].map((o) => o.textContent);
+  expect(fertOptionNames.some((t) => t.includes('WaveGuard Gold'))).toBe(false);
+});
+
+it('P1 (:2380) — a gate flip after SWAPPING an already-stamped line\'s discount restores the ORIGINAL stamp, not a flat erasure', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
+    if (url.endsWith('/admin/discounts/stacking')) return { ok: true, json: async () => ({ enabled: true }) };
+    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => DISCOUNTS };
+    return { ok: true, json: async () => ({}) };
+  }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  // Swap the mosquito line's stamped Military credit for a fresh Silver pick.
+  const removeButtons = await screen.findAllByRole('button', { name: 'Remove line discount' });
+  fireEvent.click(removeButtons[0]);
+  const mosquitoPicker = screen.getByRole('combobox', { name: 'Line discount for Monthly Mosquito' });
+  fireEvent.change(mosquitoPicker, { target: { value: 'disc-silver' } });
+  await waitFor(() => expect(screen.getAllByText('WaveGuard Silver').length).toBeGreaterThan(0));
+  // Gate closes before Save.
+  __resetDiscountStackingCache();
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
+    if (url.endsWith('/admin/discounts/stacking')) return { ok: true, json: async () => ({ enabled: false }) };
+    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => DISCOUNTS };
+    return { ok: true, json: async () => ({}) };
+  }));
+  await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+  await waitFor(() => expect(screen.queryByText('Line discount')).not.toBeInTheDocument());
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  const body = JSON.parse(writes()[0][1].body);
+  const mosquitoLine = body.addons.find((a) => a.serviceId === 'svc-mosquito');
+  // The ORIGINAL Military stamp round-trips verbatim — never a flat $60
+  // (the gross, with the discount silently dropped), and never Silver
+  // (the swap the gate never confirmed).
+  expect(mosquitoLine).toMatchObject({
+    basePrice: 60, discountType: 'fixed_amount', discountAmount: 5, discountId: 'disc-military',
+  });
 });

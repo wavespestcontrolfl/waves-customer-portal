@@ -5147,6 +5147,18 @@ router.get('/', async (req, res, next) => {
         serviceCategorySnapshot: s.service_category_snapshot || null,
         excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
         primaryLinePrice: s.primary_line_price != null ? Number(s.primary_line_price) : null,
+        // Read-only additive fields (Codex-directed scope extension on PR #4657,
+        // coordinator-approved 2026-09-22): the stored appointment-level discount
+        // and the marked/unmarked pricing regime + frozen caps, so the Edit
+        // appointment modal can hydrate an existing discount into its preview and
+        // choose compound-vs-additive math the same way resolveUpdateDetailsAddonFinancials
+        // does server-side, instead of guessing. No write path reads these — pure
+        // additive projection.
+        discountType: s.discount_type || null,
+        discountAmount: s.discount_amount != null ? Number(s.discount_amount) : null,
+        discountId: s.discount_id || null,
+        discountMaxDollars: s.discount_max_dollars != null ? Number(s.discount_max_dollars) : null,
+        pricingProvenance: s.pricing_provenance ?? null,
         prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
         prepaidMethod: s.prepaid_method || null,
         prepaidAt: s.prepaid_at || null,
@@ -5379,6 +5391,10 @@ router.get('/week', async (req, res, next) => {
     // Column-guarded (cached) — an unguarded explicit select would 500 this
     // whole endpoint on a pre-migration database.
     const hasSelfPayCol = await require('../services/payer').scheduledServicesHasSelfPay(db);
+    // Codex-directed scope extension on PR #4657: guard the new discount/
+    // provenance columns the same way self_pay_override already is above —
+    // a DB mid-migration must not 500 the whole feed.
+    const cols = await db('scheduled_services').columnInfo();
     // Server-resolved Bill-To, same resolution as the day view (per-job payer,
     // else the customer default unless pinned self-pay, ACTIVE payers only).
     // The week payload needs it for the same reason: the checkout sheet must
@@ -5421,6 +5437,11 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.followup_included',
           'scheduled_services.payer_id', 'scheduled_services.po_number',
           ...(hasSelfPayCol ? ['scheduled_services.self_pay_override'] : []),
+          ...(cols.discount_type ? ['scheduled_services.discount_type'] : []),
+          ...(cols.discount_amount ? ['scheduled_services.discount_amount'] : []),
+          ...(cols.discount_id ? ['scheduled_services.discount_id'] : []),
+          ...(cols.discount_max_dollars ? ['scheduled_services.discount_max_dollars'] : []),
+          ...(cols.pricing_provenance ? ['scheduled_services.pricing_provenance'] : []),
           'scheduled_services.technician_id',
           'scheduled_services.zone', 'scheduled_services.route_order',
           'scheduled_services.is_recurring',
@@ -5690,6 +5711,18 @@ router.get('/week', async (req, res, next) => {
           serviceCategorySnapshot: s.service_category_snapshot || null,
           excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
           primaryLinePrice: s.primary_line_price != null ? Number(s.primary_line_price) : null,
+          // Read-only additive fields (Codex-directed scope extension on PR #4657,
+          // coordinator-approved 2026-09-22): the stored appointment-level discount
+          // and the marked/unmarked pricing regime + frozen caps, so the Edit
+          // appointment modal can hydrate an existing discount into its preview and
+          // choose compound-vs-additive math the same way resolveUpdateDetailsAddonFinancials
+          // does server-side, instead of guessing. No write path reads these — pure
+          // additive projection.
+          discountType: s.discount_type || null,
+          discountAmount: s.discount_amount != null ? Number(s.discount_amount) : null,
+          discountId: s.discount_id || null,
+          discountMaxDollars: s.discount_max_dollars != null ? Number(s.discount_max_dollars) : null,
+          pricingProvenance: s.pricing_provenance ?? null,
           prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
           prepaidMethod: s.prepaid_method || null,
           prepaidAt: s.prepaid_at || null,
@@ -7896,6 +7929,10 @@ router.get('/list', async (req, res, next) => {
     // Column-guarded (cached) — an unguarded explicit select would 500 this
     // whole endpoint on a pre-migration database.
     const hasSelfPayCol = await require('../services/payer').scheduledServicesHasSelfPay(db);
+    // Codex-directed scope extension on PR #4657: guard the new discount/
+    // provenance columns the same way self_pay_override already is above —
+    // a DB mid-migration must not 500 the whole feed.
+    const cols = await db('scheduled_services').columnInfo();
 
     let q = db('scheduled_services')
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -7971,6 +8008,11 @@ router.get('/list', async (req, res, next) => {
         // (and trips the admin-only actual-change 403 for techs).
         'scheduled_services.payer_id', 'scheduled_services.po_number',
         ...(hasSelfPayCol ? ['scheduled_services.self_pay_override'] : []),
+        ...(cols.discount_type ? ['scheduled_services.discount_type'] : []),
+        ...(cols.discount_amount ? ['scheduled_services.discount_amount'] : []),
+        ...(cols.discount_id ? ['scheduled_services.discount_id'] : []),
+        ...(cols.discount_max_dollars ? ['scheduled_services.discount_max_dollars'] : []),
+        ...(cols.pricing_provenance ? ['scheduled_services.pricing_provenance'] : []),
         'customers.first_name', 'customers.last_name',
         // Stamped visit-specific address wins over the primary mirror here
         // too — this list is a display surface for the booked property. The
@@ -8011,6 +8053,18 @@ router.get('/list', async (req, res, next) => {
       serviceCategorySnapshot: s.service_category_snapshot || null,
       excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
       primaryLinePrice: s.primary_line_price != null ? Number(s.primary_line_price) : null,
+      // Read-only additive fields (Codex-directed scope extension on PR #4657,
+      // coordinator-approved 2026-09-22): the stored appointment-level discount
+      // and the marked/unmarked pricing regime + frozen caps, so the Edit
+      // appointment modal can hydrate an existing discount into its preview and
+      // choose compound-vs-additive math the same way resolveUpdateDetailsAddonFinancials
+      // does server-side, instead of guessing. No write path reads these — pure
+      // additive projection.
+      discountType: s.discount_type || null,
+      discountAmount: s.discount_amount != null ? Number(s.discount_amount) : null,
+      discountId: s.discount_id || null,
+      discountMaxDollars: s.discount_max_dollars != null ? Number(s.discount_max_dollars) : null,
+      pricingProvenance: s.pricing_provenance ?? null,
       serviceAddons: listAddonsByServiceId.get(s.id) || [],
       prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
       prepaidMethod: s.prepaid_method || null,
