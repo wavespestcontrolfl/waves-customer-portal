@@ -639,6 +639,10 @@ export default function DashboardPageV2() {
           channelRoi={channelRoi}
           attributionLoading={attributionLoading}
           attributionError={attributionError}
+          leadFunnelLoading={attributionLoading}
+          leadFunnelError={attributionError}
+          channelRoiLoading={attributionLoading}
+          channelRoiError={attributionError}
           onDrillSource={drillToSource}
           isMobile={isMobile}
           {...kpiStripProps}

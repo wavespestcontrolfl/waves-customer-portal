@@ -1,4 +1,4 @@
-import { Badge, Card, CardBody, CardHeader, CardTitle, UiSurface } from "../../../components/ui";
+import { ActionFeedback, Badge, Card, CardBody, CardHeader, CardTitle, UiSurface } from "../../../components/ui";
 import { ArrowRight } from "lucide-react";
 import { RowLink } from "./RowLink";
 
@@ -6,12 +6,13 @@ import { RowLink } from "./RowLink";
 // status (pending/confirmed/en_route/on_site) — the backlog the day-scoped
 // Action Inbox alerts never see. Fed by /admin/command-center/stale-visits;
 // each row deep-links to the dispatch Day view for its scheduled date so the
-// operator lands on the day that still shows the visit as open. Hides itself
-// entirely when the backlog is empty (or the feed hasn't loaded) — an
-// all-clear needs no card, matching the dashboard's exception surfaces.
-export default function StaleVisitsCard({ data }) {
+// operator lands on the day that still shows the visit as open. Only a
+// successfully loaded empty backlog hides the card; failures remain visible.
+export default function StaleVisitsCard({ data, error, pending = false, onRetry }) {
+  // A caller that has not requested the feed has no state to display yet.
+  if (!data && !pending && !error) return null;
   const visits = Array.isArray(data?.visits) ? data.visits : [];
-  if (!visits.length) return null;
+  if (data && !visits.length && !error) return null;
   const total = Number(data?.total || visits.length);
 
   return (
@@ -23,9 +24,12 @@ export default function StaleVisitsCard({ data }) {
             past their date, still open
           </span>
         </div>
-        <Badge tone="neutral">{total}</Badge>
+        <Badge tone="neutral">{data ? total : pending ? "loading" : "unavailable"}</Badge>
       </CardHeader>
       <CardBody>
+        {error ? <ActionFeedback error onRetry={pending ? undefined : onRetry} className="mb-3">
+          {data ? "Overdue visits could not be refreshed. Showing last loaded data." : "Overdue visits could not be loaded."}
+        </ActionFeedback> : !data ? <ActionFeedback>Loading overdue visits…</ActionFeedback> : null}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
           {visits.map((item) => (
             <RowLink
