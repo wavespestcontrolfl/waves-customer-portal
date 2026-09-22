@@ -406,6 +406,64 @@ describe("Invoice foundation workflow preservation", () => {
     });
   });
 
+  // Slice 8 of #4405: this form gains its own document-wide (invoice-wide)
+  // discount/credit picker — #4655 shipped the math (computeInvoiceLineDiscountTotal
+  // etc. already interleave a document-wide credit) but had "no document-level
+  // picker of its own" (its own words). Gated behind stackingEnabled so gate-off
+  // rendering stays byte-identical to before this slice.
+  it("gate off: no invoice-wide discount picker renders at all (byte-identical to before this slice)", async () => {
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "ten-pct", name: "Ten Percent", discount_type: "percentage", amount: 10, is_active: true, show_in_invoices: true },
+    ] }));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Quarterly pest control" } });
+    fireEvent.change(screen.getByLabelText("Price ($)"), { target: { value: "100" } });
+    expect(screen.queryByLabelText("Add an invoice-wide discount")).not.toBeInTheDocument();
+  });
+
+  it("gate on: picking a discount from the invoice-wide picker adds a document-wide credit sized by the shared stacking engine", async () => {
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "ten-pct", name: "Ten Percent", discount_type: "percentage", amount: 10, is_active: true, show_in_invoices: true },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Quarterly pest control" } });
+    fireEvent.change(screen.getByLabelText("Price ($)"), { target: { value: "100" } });
+    fireEvent.change(await screen.findByLabelText("Add an invoice-wide discount"), { target: { value: "Ten" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Ten Percent/ }));
+    await waitFor(() => {
+      expect(screen.getByLabelText("Credit ($)")).toHaveValue(-10);
+    });
+    expect(screen.getByText("Applies to: entire invoice")).toBeInTheDocument();
+  });
+
+  // The one-tier rule (assertNewStackGroupConflicts server-side,
+  // stackablePresets here) reaches across scopes: a tier already picked on
+  // a LINE must hide the rest of its stack_group in the document-wide
+  // picker too, not just within that same line's own picker.
+  it("one-tier enforcement reaches across scopes: a line-scoped tier hides its group in the invoice-wide picker", async () => {
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "silver-id", name: "WaveGuard Silver", discount_type: "percentage", amount: 10, is_active: true, show_in_invoices: true, stack_group: "tier", is_stackable: false },
+      { id: "gold-id", name: "WaveGuard Gold", discount_type: "percentage", amount: 15, is_active: true, show_in_invoices: true, stack_group: "tier", is_stackable: false },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Quarterly pest control" } });
+    fireEvent.change(screen.getByLabelText("Price ($)"), { target: { value: "100" } });
+    fireEvent.change(await screen.findByLabelText("Add a discount"), { target: { value: "Wave" } });
+    fireEvent.click(await screen.findByRole("button", { name: /WaveGuard Silver/ }));
+    fireEvent.change(await screen.findByLabelText("Add an invoice-wide discount"), { target: { value: "Wave" } });
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /WaveGuard Gold/ })).not.toBeInTheDocument();
+    });
+  });
+
   // Codex pre-push audit P1 (round 4 on PR #4655, LAST patch round): the
   // write binds the CONFIRMED gate state the preview ran under — the
   // server rejects a mismatch, so the client must actually send it.
@@ -627,7 +685,9 @@ describe("Invoice foundation workflow preservation", () => {
       expect(creditValues).toContain("");
     });
     // Remove the $100 fixed credit — the 10% row must reprice back to $10.
-    const removeButtons = screen.getAllByRole("button", { name: "Remove line item" });
+    // Slice 8 of #4405: a discount row's own remove button now reads
+    // "Remove discount" (was "Remove line item" for every row alike).
+    const removeButtons = screen.getAllByRole("button", { name: /^Remove (line item|discount)$/ });
     fireEvent.click(removeButtons[removeButtons.length - 1]);
     await waitFor(() => {
       expect(screen.getByLabelText("Credit ($)").value).toBe("-10");

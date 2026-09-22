@@ -505,6 +505,56 @@ function invoiceServiceScopeEligibleLines(serviceLineItems, scopeKey, scopeCateg
     .filter((i) => i >= 0);
 }
 
+// A document-wide/scoped discount item's own "Applies to" fragment — a
+// per-line pick's row already sits nested under its own line, so this is
+// only ever called for one with discount_for: null (see discountRowCaption
+// below). Split out of that function so each stays under the file's
+// complexity ceiling and reads as one job apiece.
+function discountRowScopeLabel(item, serviceLineItems) {
+  const eligibleLines = invoiceServiceScopeEligibleLines(
+    serviceLineItems || [],
+    item?.document_scope_service_key,
+    item?.document_scope_service_category,
+  );
+  if (eligibleLines == null) return "Applies to: entire invoice";
+  if (eligibleLines.length === 0) return "Applies to: no matching line (resolves to $0)";
+  const names = eligibleLines
+    .map((i) => (serviceLineItems || [])[i]?.description)
+    .filter(Boolean);
+  return names.length ? `Applies to: ${names.join(", ")}` : "Applies to: entire invoice";
+}
+
+// A discount item's own origin fragment: a trusted stored stamp names its
+// source; an ordinary row grandfathered frozen by persistedClientIds reads
+// generically; a fresh (unsaved) pick has no origin to report.
+function discountRowOriginLabel(item, persistedClientIds) {
+  if (item?.stored_discount_source === "scheduled_service") return "Frozen — from visit";
+  if (item?.stored_discount_source === "validated_checkout") return "Frozen — from checkout";
+  if (isStoredInvoiceDiscountItem(item, persistedClientIds)) return "Frozen — saved";
+  return null;
+}
+
+// GATE_DISCOUNT_STACKING (slice 8 of #4405 — the preview-display gaps
+// slice 5 left open): a short caption under a read-only discount row —
+// whether it's a FROZEN stored stamp or a fresh catalog pick, the cap on
+// its catalog row (never shown for a custom/operator-typed amount, which
+// has no catalog cap to report), and, for a document-wide or scoped
+// credit only, which line(s) it actually reaches. Display only; never
+// changes what is charged. Returns null when there is nothing worth
+// saying (an ordinary fresh per-line pick with no cap).
+export function discountRowCaption({ item, serviceLineItems, discountRowById, persistedClientIds }) {
+  const row = item?.discount_id ? discountRowById?.get(String(item.discount_id)) : null;
+  const cap = row?.max_discount_dollars;
+  const parts = [
+    discountRowOriginLabel(item, persistedClientIds),
+    !item?.discount_for ? discountRowScopeLabel(item, serviceLineItems) : null,
+    item?.custom_discount_amount == null && cap != null && Number(cap) > 0
+      ? `capped at $${Number(cap).toFixed(2)}`
+      : null,
+  ].filter(Boolean);
+  return parts.length ? parts.join(" · ") : null;
+}
+
 // The document-wide terms every stacked computation below feeds to
 // stackDocumentDiscounts — ONE builder, shared by
 // computeInvoiceLineDiscountTotal and repriceLineWithNewDiscountPick, so
@@ -5858,6 +5908,11 @@ function CreateInvoice({
   const [allDiscountRowById, setAllDiscountRowById] = useState(new Map());
   const [discountSearchIdx, setDiscountSearchIdx] = useState(null);
   const [discountQueries, setDiscountQueries] = useState({});
+  // Slice 8 of #4405: the invoice-wide (document-scope) discount/credit
+  // picker — its own open/closed flag, since it isn't tied to a line
+  // index like discountSearchIdx. discountQueries.__document__ holds its
+  // search text, reusing the same query-state map as every per-line field.
+  const [documentDiscountSearchOpen, setDocumentDiscountSearchOpen] = useState(false);
   const [aiNotesLoading, setAiNotesLoading] = useState(false);
   const [aiSources, setAiSources] = useState({
     jobSummary: true,
@@ -6317,6 +6372,89 @@ function CreateInvoice({
       ...prev,
       [parent.client_id || lineIdx]: "",
     }));
+  };
+  // Slice 8 of #4405 ("Invoice UI"): the invoice-wide picker's own
+  // candidate list — same name search + one-tier stack-group filter as
+  // matchingDiscounts above, but scoped as a document-wide (spansAll)
+  // pick, so a tier already chosen on ANY line — or already document-wide
+  // — hides the rest of its group here too, matching
+  // assertNewStackGroupConflicts server-side (invoice.js).
+  const matchingDocumentDiscounts = () => {
+    const q = (discountQueries.__document__ || "").trim().toLowerCase();
+    const nameFiltered = q
+      ? availableDiscounts.filter((d) =>
+          `${d.name || ""} ${d.description || ""} ${formatDiscountLabel(d)}`
+            .toLowerCase()
+            .includes(q),
+        )
+      : availableDiscounts;
+    const groupFiltered = stackingEnabled
+      ? stackablePresets(nameFiltered, chosenDiscountRowsForGroupCheck(), {
+          spansAll: true,
+        })
+      : nameFiltered;
+    return groupFiltered.slice(0, 10);
+  };
+  // Slice 8: adds a NEW document-wide (unparented, discount_for: null)
+  // discount/credit. #4655 already interleaves an EXISTING one into every
+  // stacked computation (computeInvoiceLineDiscountTotal,
+  // repriceAllFreshDiscounts, ...) but this form had no picker of its own
+  // to add one — "no document-level picker of its own" in its own words.
+  // Sizes the new pick by running the SAME repriceAllFreshDiscounts pass
+  // every other edit (remove, price change) already runs, over lineItems
+  // plus this one placeholder item, instead of a second sizing path that
+  // could independently drift from the engine every other picker here
+  // already defers to. Rendered only while stackingEnabled (see the JSX
+  // below), so there is no gate-off counterpart to this function.
+  const addDocumentDiscount = (discount) => {
+    if (!(subtotal > 0)) {
+      showToast(
+        "Enter at least one service line with a price before applying an invoice-wide discount",
+      );
+      return;
+    }
+    const custom = getCustomDiscountValue(
+      discount,
+      { description: "the whole invoice" },
+      subtotal,
+    );
+    if (
+      (isCustomAmountDiscount(discount) || isCustomPercentageDiscount(discount)) &&
+      !custom
+    )
+      return;
+    const discountItem = {
+      client_id: `li_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      _kind: "discount",
+      discount_id: discount.id,
+      discount_key: discount.discount_key || null,
+      discount_for: null,
+      description: discount.name,
+      quantity: 1,
+      unit_price: 0,
+      amount: 0,
+      is_waveguard_tier_discount: !!discount.is_waveguard_tier_discount,
+      ...(custom?.custom_discount_amount
+        ? { custom_discount_amount: custom.custom_discount_amount }
+        : {}),
+      ...(custom?.custom_discount_percentage
+        ? { custom_discount_percentage: custom.custom_discount_percentage }
+        : {}),
+    };
+    const repriced = repriceAllFreshDiscounts({
+      lineItems: [...lineItems, discountItem],
+      availableDiscounts,
+      stackingEnabled,
+      persistedClientIds: persistedClientIdsRef.current,
+    });
+    const added = repriced.find((i) => i.client_id === discountItem.client_id);
+    if (!(Math.abs(added ? invoiceLineAmount(added) : 0) > 0)) {
+      showToast("Discount has no amount for this invoice");
+      return;
+    }
+    setLineItems(repriced);
+    setDocumentDiscountSearchOpen(false);
+    setDiscountQueries((prev) => ({ ...prev, __document__: "" }));
   };
   const addLineItem = () => setLineItems([...lineItems, newLineItem()]);
   // Codex pre-push audit P0 (round 6 on PR #4655, post-push): removing a
@@ -7687,7 +7825,9 @@ function CreateInvoice({
               {lineItems.length > 1 && (
                 <Button
                   onClick={() => removeLineItem(i)}
-                  aria-label="Remove line item"
+                  aria-label={
+                    item._kind === "discount" ? "Remove discount" : "Remove line item"
+                  }
                   variant={"secondary"}
                   onClickCapture={(event) =>
                     event.currentTarget.focus({
@@ -7700,6 +7840,26 @@ function CreateInvoice({
                   x
                 </Button>
               )}
+              {/* Slice 8: the frozen-origin / applies-to / cap caption below
+                  a read-only discount row — gated to stackingEnabled so
+                  gate-off rendering of a legacy discount row stays exactly
+                  what it was before this slice. */}
+              {stackingEnabled && item._kind === "discount" && (() => {
+                const caption = discountRowCaption({
+                  item,
+                  serviceLineItems,
+                  discountRowById,
+                  persistedClientIds: persistedClientIdsRef.current,
+                });
+                return caption ? (
+                  <div
+                    style={{ gridColumn: "1 / -1", padding: "0 0 4px 18px" }}
+                    className="text-ink-secondary text-ui-body"
+                  >
+                    {caption}
+                  </div>
+                ) : null;
+              })()}
               {item._kind !== "discount" && (
                 <div
                   style={{
@@ -7844,6 +8004,127 @@ function CreateInvoice({
           >
             + Add service
           </Button>{" "}
+          {/* Slice 8 of #4405: the invoice-wide (document-scope) discount/
+              credit picker — every discount before this slice was a
+              per-line pick. Gated to stackingEnabled: gate off keeps this
+              form's rendering byte-identical to before this slice. */}
+          {stackingEnabled && (
+            <div
+              style={{
+                position: "relative",
+                marginTop: 14,
+              }}
+            >
+              <Field className="min-w-0" label="Add an invoice-wide discount">
+                <Input
+                  value={discountQueries.__document__ || ""}
+                  onChange={(e) => {
+                    setDiscountQueries((prev) => ({
+                      ...prev,
+                      __document__: e.target.value,
+                    }));
+                    if (availableDiscounts.length > 0)
+                      setDocumentDiscountSearchOpen(true);
+                  }}
+                  onFocus={() => {
+                    if (availableDiscounts.length > 0)
+                      setDocumentDiscountSearchOpen(true);
+                  }}
+                  onBlur={() =>
+                    setTimeout(() => setDocumentDiscountSearchOpen(false), 150)
+                  }
+                  placeholder={
+                    discountsLoading
+                      ? "Loading discounts…"
+                      : discountsError
+                        ? "Discounts unavailable"
+                        : availableDiscounts.length === 0
+                          ? "No invoice discounts are available"
+                          : "Search discounts for the whole invoice..."
+                  }
+                  disabled={
+                    builderBusy ||
+                    discountsLoading ||
+                    !!discountsError ||
+                    availableDiscounts.length === 0
+                  }
+                />
+              </Field>
+              {documentDiscountSearchOpen && (
+                <div
+                  style={{
+                    position: "absolute",
+                    top: "100%",
+                    left: 0,
+                    right: 0,
+                    border: "1px solid #E4E4E7",
+                    zIndex: 18,
+                    maxHeight: 220,
+                    overflow: "auto",
+                    marginTop: 4,
+                  }}
+                  className="bg-white rounded-md"
+                >
+                  {matchingDocumentDiscounts().length === 0 ? (
+                    <div
+                      style={{ padding: "10px 12px" }}
+                      className="text-ink-secondary text-ui-body"
+                    >
+                      No discounts match.
+                    </div>
+                  ) : (
+                    matchingDocumentDiscounts().map((d) => (
+                      <Button
+                        key={d.id}
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          addDocumentDiscount(d);
+                        }}
+                        style={{
+                          padding: "10px 12px",
+                          cursor: "pointer",
+                          borderBottom: "1px solid #E4E4E7",
+                          display: "flex",
+                          justifyContent: "space-between",
+                          gap: 8,
+                          alignItems: "center",
+                        }}
+                        variant="ghost"
+                        className="w-full justify-start text-left whitespace-normal"
+                        onClick={(event) => {
+                          if (event.detail === 0)
+                            ((e) => {
+                              e.preventDefault();
+                              addDocumentDiscount(d);
+                            })(event);
+                        }}
+                        disabled={builderBusy}
+                      >
+                        {" "}
+                        <span
+                          style={{
+                            minWidth: 0,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                          className="text-zinc-900 font-medium"
+                        >
+                          {d.name}
+                        </span>{" "}
+                        <span
+                          style={{ whiteSpace: "nowrap" }}
+                          className="text-zinc-900 text-ui-body"
+                        >
+                          {formatDiscountLabel(d)}
+                        </span>{" "}
+                      </Button>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </Card>{" "}
         {!editMode && (
           <Card className="p-4">

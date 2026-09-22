@@ -15,13 +15,16 @@
  * way discountStack.server-parity.test.js duplicates its own worked
  * examples against the server module it imports directly.
  *
- * This form has no document-level (invoice-wide) discount picker — every
- * discount is a per-line pick — so a fixture with N discounts against one
- * subtotal models as N per-line picks on a single line whose gross equals
- * that subtotal; stacking N document-wide terms on a one-line document and
- * stacking N line-scoped terms on that same line's own gross are the
- * identical computation, so the server fixture's expected totals apply
- * unchanged.
+ * At the time this file was written, this form had no document-level
+ * (invoice-wide) discount picker — every discount was a per-line pick —
+ * so a fixture with N discounts against one subtotal models as N per-line
+ * picks on a single line whose gross equals that subtotal; stacking N
+ * document-wide terms on a one-line document and stacking N line-scoped
+ * terms on that same line's own gross are the identical computation, so
+ * the server fixture's expected totals apply unchanged. Slice 8 of #4405
+ * later added the invoice-wide picker itself (computeInvoiceLineDiscountTotal
+ * already handled a document-wide credit either way); this file is left
+ * as originally written since the equivalence above still holds.
  */
 import { describe, expect, test } from "vitest";
 import {
