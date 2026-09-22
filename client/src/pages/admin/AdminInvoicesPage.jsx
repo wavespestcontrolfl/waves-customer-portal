@@ -103,6 +103,8 @@ import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import DictationButton from "../../components/tech/DictationButton";
 import MobileCardOnFileSheet from "../../components/schedule/MobileCardOnFileSheet";
 import { getAdminUser } from "../../lib/adminAuth";
+import { useDiscountStackingState, ensureStackingFresh } from "../../hooks/useDiscountStacking";
+import { stackDiscounts } from "../../lib/discountStack";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
 // STATUS_COLORS folds cleanly — sent/viewed were both #0A7EC2 in V1, stay identical post-fold.
@@ -344,6 +346,87 @@ export function invoiceDepositCreditTotal(lineItems) {
   return lineItems
     .filter((li) => li && li.category === "deposit_credit")
     .reduce((sum, li) => sum + Math.abs(Number(li.amount) || 0), 0);
+}
+
+// GATE_DISCOUNT_STACKING (slice 5 of #4405): the CreateInvoice form's own
+// discount-total math, extracted as pure functions so a parity test can
+// drive them directly with the SAME fixture matrix
+// invoice-create-discount-stacking-parity.test.js (server) uses — proving
+// the form's preview equals what InvoiceService.create actually saves.
+// Mirrors server/services/invoice.js's per-line stacking; this form has no
+// document-level discount picker, so there is no document term to add.
+export function invoiceLineAmount(item) {
+  return (
+    Math.round(
+      (Number(item?.quantity) || 1) * (Number(item?.unit_price) || 0) * 100,
+    ) / 100
+  );
+}
+
+// The (type, amount, cap) term one discount LINE ITEM contributes to its
+// parent line's stack — client mirror of invoice.js's lineItemDiscountTerm.
+// Falls back to a fixed_amount term at the item's OWN already-resolved
+// dollars when its catalog row can't be found (deactivated since it was
+// added), so a stale pick never breaks the preview.
+export function invoiceDiscountItemTerm(item, discountRowById) {
+  const row = item?.discount_id
+    ? discountRowById.get(String(item.discount_id))
+    : null;
+  if (!row) {
+    return { discountType: "fixed_amount", amount: Math.abs(invoiceLineAmount(item)) };
+  }
+  if (item.custom_discount_percentage != null) {
+    return {
+      discountType: "percentage",
+      amount: Number(item.custom_discount_percentage) || 0,
+      maxDiscountDollars: row.max_discount_dollars,
+    };
+  }
+  if (item.custom_discount_amount != null) {
+    return { discountType: "fixed_amount", amount: Number(item.custom_discount_amount) || 0 };
+  }
+  return {
+    discountType: row.discount_type,
+    amount: Number(row.amount) || 0,
+    maxDiscountDollars: row.max_discount_dollars,
+  };
+}
+
+// The form's discount total: additive (pre-lane, byte-identical) when the
+// gate is off; per-line compounded (client/src/lib/discountStack.js — the
+// parity-tested mirror of the server engine) when it is on. A document-
+// wide item (discount_for: null — only ever loaded from an existing
+// invoice in edit mode; this form has no document-level picker of its
+// own) counts at its own already-resolved face value either way, same as
+// the pre-lane additive path always did for that category.
+export function computeInvoiceLineDiscountTotal({
+  lineItems,
+  availableDiscounts,
+  stackingEnabled,
+}) {
+  const items = Array.isArray(lineItems) ? lineItems : [];
+  const additive = Math.abs(
+    items
+      .filter((i) => i._kind === "discount")
+      .reduce((sum, i) => sum + Math.min(0, invoiceLineAmount(i)), 0),
+  );
+  if (!stackingEnabled) return additive;
+  const discountRowById = new Map(
+    (availableDiscounts || []).map((d) => [String(d.id), d]),
+  );
+  const serviceLineItems = items.filter((i) => i._kind !== "discount");
+  const perLine = serviceLineItems.reduce((sum, line) => {
+    const gross = Math.max(0, invoiceLineAmount(line));
+    const terms = items
+      .filter((i) => i._kind === "discount" && i.discount_for === line.client_id)
+      .map((i) => invoiceDiscountItemTerm(i, discountRowById));
+    if (!terms.length) return sum;
+    return sum + stackDiscounts(gross, terms, { compound: true }).totalDollars;
+  }, 0);
+  const unparented = items
+    .filter((i) => i._kind === "discount" && !i.discount_for)
+    .reduce((sum, i) => sum + Math.abs(invoiceLineAmount(i)), 0);
+  return perLine + unparented;
 }
 
 // A first-delivery request (firstDelivery: true) whose claim finds the
@@ -5389,6 +5472,34 @@ function CreateInvoice({
     editMode && ["sent", "viewed", "overdue"].includes(editInvoice.status);
   // One-tap AI summary (pulls context from the linked visit + source toggles).
   // Off by default; the base "Write with AI" still works from typed input + lines.
+  // GATE_DISCOUNT_STACKING (slice 5 of #4405): the same gate
+  // InvoiceService.create/calculateUpdateFinancials read server-side. The
+  // form's own two discount previews (addDiscountToLine's per-pick sizing,
+  // and the aggregate discount total below) compound through
+  // client/src/lib/discountStack.js — the parity-tested mirror of the
+  // server engine — ONLY when this reads true; otherwise they keep the
+  // exact pre-lane additive math, byte-identical. `known` is deliberately
+  // unused here: the hook's own fail-closed default (enabled:false while
+  // unconfirmed) is exactly the right preview behavior — never show a
+  // compounded (lower) discount the server might not actually honor yet.
+  const { enabled: stackingEnabled } = useDiscountStackingState();
+  // GATE_DISCOUNT_STACKING: revalidate the gate immediately before any
+  // money POST (useDiscountStacking.js's own documented contract) — the
+  // polling behind stackingEnabled above narrows the window but cannot
+  // close it. If the live answer has moved since the preview above ran,
+  // the totals on screen are not what the server will save, so the
+  // submission must stop rather than silently bill the other regime.
+  const stackingStillFresh = async () => {
+    const fresh = await ensureStackingFresh();
+    if (fresh.enabled !== stackingEnabled) {
+      showToast(
+        "Discount rules just changed — refresh this form and re-apply any discounts before saving",
+        "error",
+      );
+      return false;
+    }
+    return true;
+  };
   const aiSummaryEnabled = useFeatureFlag("ff_invoice_ai_summary");
   // Optional AI-assisted personal thank-you message in the invoice email body
   // (separate from the service summary). Off by default.
@@ -5723,6 +5834,14 @@ function CreateInvoice({
       )
       .slice(0, 10);
   };
+  // GATE_DISCOUNT_STACKING: the (type, amount, cap) term a discount LINE
+  // ITEM contributes to its line's stack — client mirror of invoice.js's
+  // lineItemDiscountTerm. Falls back to a fixed_amount term at the item's
+  // OWN already-resolved dollars when its catalog row is no longer
+  // available (deactivated since it was added), so a stale pick never
+  // breaks the preview.
+  const discountRowById = new Map(availableDiscounts.map((d) => [String(d.id), d]));
+  const discountItemTerm = (item) => invoiceDiscountItemTerm(item, discountRowById);
   const addDiscountToLine = (lineIdx, discount) => {
     const parent = lineItems[lineIdx];
     if (!parent || parent._kind === "discount") return;
@@ -5740,9 +5859,32 @@ function CreateInvoice({
       !custom
     )
       return;
+    // GATE_DISCOUNT_STACKING: a fresh pick compounds on what this line's
+    // OTHER picks already left (owner ruling 2026-09-11, "the lesser of the
+    // two") instead of resolving against the line's full gross — the exact
+    // canonical order server/services/invoice.js's stackInvoiceDocumentDiscounts
+    // will apply once this saves. Gate off (or a custom preset, handled by
+    // getCustomDiscountValue above) keeps the pre-lane per-item sizing.
     const dollars =
       custom?.dollars ??
-      Math.min(baseAmount, roundMoney(previewDiscount(discount, baseAmount)));
+      (stackingEnabled
+        ? (() => {
+            const siblingTerms = lineItems
+              .filter(
+                (i) => i._kind === "discount" && i.discount_for === parent.client_id,
+              )
+              .map(discountItemTerm);
+            const newTerm = {
+              discountType: discount.discount_type,
+              amount: Number(discount.amount) || 0,
+              maxDiscountDollars: discount.max_discount_dollars,
+            };
+            const stacked = stackDiscounts(baseAmount, [...siblingTerms, newTerm], {
+              compound: true,
+            });
+            return stacked.items[stacked.items.length - 1].dollars;
+          })()
+        : Math.min(baseAmount, roundMoney(previewDiscount(discount, baseAmount))));
     if (dollars <= 0) {
       showToast("Discount has no amount for this line");
       return;
@@ -5800,20 +5942,21 @@ function CreateInvoice({
     };
     setLineItems(updated);
   };
-  const lineAmount = (item) =>
-    Math.round(
-      (Number(item.quantity) || 1) * (Number(item.unit_price) || 0) * 100,
-    ) / 100;
+  const lineAmount = invoiceLineAmount;
   const serviceLineItems = lineItems.filter((i) => i._kind !== "discount");
   const subtotal = serviceLineItems.reduce(
     (sum, i) => sum + Math.max(0, lineAmount(i)),
     0,
   );
-  const lineDiscountAmt = Math.abs(
-    lineItems
-      .filter((i) => i._kind === "discount")
-      .reduce((sum, i) => sum + Math.min(0, lineAmount(i)), 0),
-  );
+  // GATE_DISCOUNT_STACKING: computeInvoiceLineDiscountTotal (module scope,
+  // above) is the ONE place this form's discount total is computed — used
+  // here AND directly by AdminInvoicesPage.discount-stacking-parity.test.jsx
+  // so the render and the parity test can never independently drift.
+  const lineDiscountAmt = computeInvoiceLineDiscountTotal({
+    lineItems,
+    availableDiscounts,
+    stackingEnabled,
+  });
 
   // Mirror server discount-engine math so the preview matches stored totals.
   const previewDiscount = (disc, baseAmount) => {
@@ -6027,9 +6170,19 @@ function CreateInvoice({
       showToast("Choose a review request time");
       return;
     }
+    // Disable the form SYNCHRONOUSLY on click (the existing double-submit
+    // guard's own contract — see the two-click test in
+    // AdminInvoicesFoundation.test.jsx) before the freshness check's own
+    // await point; a stale gate resets this same state and returns instead
+    // of proceeding to the POST.
     savingRef.current = true;
     setActionError("");
     setSaving(true);
+    if (!(await stackingStillFresh())) {
+      savingRef.current = false;
+      setSaving(false);
+      return;
+    }
     try {
       const body = {
         customerId: selectedCustomer.id,
@@ -6199,9 +6352,16 @@ function CreateInvoice({
       showToast("Choose a due date");
       return;
     }
+    // Disable the form SYNCHRONOUSLY on click (same contract as
+    // handleCreate above) before the freshness check's own await point.
     savingRef.current = true;
     setActionError("");
     setSaving(true);
+    if (!(await stackingStillFresh())) {
+      savingRef.current = false;
+      setSaving(false);
+      return;
+    }
     try {
       const body = {
         title: title || null,
