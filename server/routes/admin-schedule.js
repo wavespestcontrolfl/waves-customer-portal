@@ -2058,10 +2058,21 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
   }
 
   const hasAnyPrice = primaryBase != null || addonLines.some((line) => line.price != null);
+  // ONE result-assembly path (Codex pre-push audit P2, GitHub round 2 on
+  // #4642): every field below defaults to "nothing priced / no appointment
+  // discount at all" and the hasAnyPrice block below only ever ASSIGNS
+  // into these same bindings — never builds a second, parallel set of
+  // result fields — so there is exactly one return statement, not two
+  // near-identical ~20-line blocks that had to be kept in sync by hand.
   let finalPrice = null;
+  let finalPrimaryDiscount = primaryDiscount;
+  let finalAddonLines = addonLines;
+  let appointmentDiscount = null;
+  let finalAppointmentDollars = 0;
+  let resolvedAppointmentDiscount = null;
   if (hasAnyPrice) {
     const subtotal = (primaryNet || 0) + addonLines.reduce((sum, line) => sum + (line.price || 0), 0);
-    const appointmentDiscount = await loadInvoiceDiscount(discountId);
+    appointmentDiscount = await loadInvoiceDiscount(discountId);
     let appointmentDiscountBase = subtotal;
     // Hoisted so the canonical-restack block below (after the appointment
     // discount's own dollars are resolved) can read which lines this
@@ -2100,10 +2111,11 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
         throw httpError(400, `${appointmentDiscount.name} is not eligible: ${failures.join(', ')}`);
       }
     }
-    const resolvedAppointmentDiscount = appointmentDiscount
+    resolvedAppointmentDiscount = appointmentDiscount
       ? calculateDiscountDollars(appointmentDiscount, appointmentDiscountBase, discountAmount)
       : null;
     finalPrice = Math.max(0, Math.round((subtotal - (resolvedAppointmentDiscount?.dollars || 0)) * 100) / 100);
+    finalAppointmentDollars = resolvedAppointmentDiscount?.dollars || 0;
 
     // Canonical restack (GATE_DISCOUNT_STACKING) — see
     // restackStoredVisitFinancials for the shared rationale. This data
@@ -2115,9 +2127,7 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
     // (eligibility, the tier-conflict / manualEligibilityFailures checks)
     // is unaffected either way; only the FINAL dollar figures below can
     // change, and only when the gate is live.
-    let finalPrimaryDiscount = primaryDiscount;
-    let finalAddonLines = addonLines;
-    let finalAppointmentDollars = resolvedAppointmentDiscount?.dollars || 0;
+    //
     // Restacks whenever there is ANY discount to restate — not only when an
     // appointment-level discount exists (Codex pre-push audit P0, round 7):
     // a primary/add-on percentage discount with NO appointment discount at
@@ -2168,40 +2178,29 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
       finalAppointmentDollars = stacked.appointmentDiscountDollars;
       finalPrice = stacked.total;
     }
-    const finalPrimaryNet = primaryBase == null
-      ? null
-      : Math.max(0, Math.round((primaryBase - (finalPrimaryDiscount?.discountDollars || 0)) * 100) / 100);
-
-    return {
-      finalPrice,
-      primaryBase,
-      primaryNet: finalPrimaryNet,
-      primaryServiceKey: serviceRecord?.service_key || null,
-      primaryServiceCategory: serviceRecord?.category || null,
-      primaryDiscount: finalPrimaryDiscount,
-      addonLines: finalAddonLines,
-      appointmentDiscount: appointmentDiscount ? {
-        discountId: appointmentDiscount.id,
-        discountName: appointmentDiscount.name,
-        discountType: appointmentDiscount.discount_type,
-        discountAmount: resolvedAppointmentDiscount.amount,
-        discountDollars: finalAppointmentDollars,
-        serviceKeyFilter: appointmentDiscount.service_key_filter || null,
-        serviceCategoryFilter: appointmentDiscount.service_category_filter || null,
-        maxDiscountDollars: appointmentDiscount.max_discount_dollars != null ? Number(appointmentDiscount.max_discount_dollars) : null,
-      } : null,
-    };
   }
+  const finalPrimaryNet = primaryBase == null
+    ? null
+    : Math.max(0, Math.round((primaryBase - (finalPrimaryDiscount?.discountDollars || 0)) * 100) / 100);
 
   return {
     finalPrice,
     primaryBase,
-    primaryNet,
+    primaryNet: finalPrimaryNet,
     primaryServiceKey: serviceRecord?.service_key || null,
     primaryServiceCategory: serviceRecord?.category || null,
-    primaryDiscount,
-    addonLines,
-    appointmentDiscount: null,
+    primaryDiscount: finalPrimaryDiscount,
+    addonLines: finalAddonLines,
+    appointmentDiscount: appointmentDiscount ? {
+      discountId: appointmentDiscount.id,
+      discountName: appointmentDiscount.name,
+      discountType: appointmentDiscount.discount_type,
+      discountAmount: resolvedAppointmentDiscount.amount,
+      discountDollars: finalAppointmentDollars,
+      serviceKeyFilter: appointmentDiscount.service_key_filter || null,
+      serviceCategoryFilter: appointmentDiscount.service_category_filter || null,
+      maxDiscountDollars: appointmentDiscount.max_discount_dollars != null ? Number(appointmentDiscount.max_discount_dollars) : null,
+    } : null,
   };
 }
 
@@ -2976,6 +2975,46 @@ function applyDiscountStackRestack(target, cols, parent, addonRows, discountScop
   if (cols.discount_dollars && parent?.discount_type) target.discount_dollars = restacked.appointmentDiscountDollars;
   if (cols.line_discount_dollars && parent?.line_discount_type) target.line_discount_dollars = restacked.primaryLineDiscountDollars;
   return restacked.addonDollars;
+}
+
+// GitHub Codex round 2 on #4642 (PRRT_kwDOR3YQi86kl-X6): a series created
+// BEFORE pricing_provenance existed (or before the gate was ever live) has
+// an UNMARKED ROOT parent row — every extension call site reads pricing
+// FROM that root (resolveSeriesExtensionPriceTemplate(conn, parent.id,
+// parent)), so stamping only the newly-inserted CHILD left the root
+// itself unmarked forever: the NEXT extension re-fetches that same
+// unmarked root, resolveStoredDiscountCaps finds no frozen snapshot, and
+// re-reads the (possibly since-edited) live catalog cap all over again —
+// changing a cap after one extension still changed the next contracted
+// visit. Freezing the FIRST gate-on extension's own resolved caps onto
+// the root itself — in the SAME transaction as its insert — means every
+// LATER extension's fresh read of that root already carries the marker,
+// and resolveStoredDiscountCaps then correctly refuses to re-read the
+// catalog for anything already frozen.
+//
+// Computed from the RAW parent's own line_discount_id, never the
+// anchored-split template's nulled-out clone (resolveSeriesExtensionPriceTemplate
+// strips line_discount_* there for a different reason — the marker total
+// already folds the primary's share in) — freezing THAT would persist a
+// wrong null line cap onto a root whose own discount fields are still
+// intact for whenever the override is later removed.
+//
+// A no-op once the root is already marked, the gate is off, or the
+// column doesn't exist. Call ONCE per extension episode, before its own
+// per-date loop — not once per date — and update the in-memory `parent`
+// object too, so a later date in the SAME loop sees it as already marked
+// instead of redundantly re-freezing.
+async function freezeLegacySeriesRootCaps(trx, parent, cols, parentAddons) {
+  if (!discountStackingLive() || !cols?.pricing_provenance || hasPricingRegimeMarker(parent)) return;
+  const rootDiscountCaps = await loadDiscountCapsById(
+    trx,
+    [parent?.line_discount_id, ...(Array.isArray(parentAddons) ? parentAddons : []).map((a) => a.discount_id)],
+  );
+  const rootSnapshot = resolveStoredDiscountCaps(parent, rootDiscountCaps).snapshot;
+  const rootStamp = {};
+  stampPricingRegimeMarker(rootStamp, cols, rootSnapshot);
+  await trx('scheduled_services').where({ id: parent.id }).update({ pricing_provenance: rootStamp.pricing_provenance });
+  parent.pricing_provenance = rootStamp.pricing_provenance;
 }
 
 // The occurrence's REAL floor price for the recurring-EXTENSION billable-
@@ -13102,6 +13141,9 @@ async function reconcileRecurringSeriesVisitCount(trx, {
   if (unbillableExtend) {
     throw Object.assign(httpError(409, unbillableExtend.error), { code: unbillableExtend.code });
   }
+  // Legacy-series root freeze (Codex round 2 P1) — once per call, before
+  // the per-date loop; see freezeLegacySeriesRootCaps's own comment.
+  await freezeLegacySeriesRootCaps(trx, parent, cols, parentAddons);
   for (const nd of extendDates) {
     const childIdentity = await resolveSeriesChildIdentity(trx, parent);
     const data = {
@@ -13427,6 +13469,11 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
           await anchorSoleProperty(nextData, cols, conn);
           // Required scope must be readable before creating any child.
           const parentAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: parentId });
+          // Legacy-series root freeze (Codex round 2 P1) — see
+          // freezeLegacySeriesRootCaps's own comment. Only one date is
+          // ever placed per auto-extend call, so no per-date loop to hoist
+          // this out of.
+          await freezeLegacySeriesRootCaps(conn, parent, cols, parentAddons);
           const storedDiscountScope = await loadStoredDiscountScope(conn, parent, parentAddons);
           const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextStr, autoExtendBlackoutDates, skipParent);
           // Anchored-split series (self-booked funnels, wizard plans): the
@@ -18508,6 +18555,10 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
     // row spawned by extend / convert_ongoing — multi-service recurring
     // appointments would otherwise lose their secondary services here.
     const parentAddons = await trx('scheduled_service_addons').where({ scheduled_service_id: parentId });
+    // Legacy-series root freeze (Codex round 2 P1) — once, shared by both
+    // the extend and convert_ongoing branches below; see
+    // freezeLegacySeriesRootCaps's own comment.
+    await freezeLegacySeriesRootCaps(trx, parent, cols, parentAddons);
     const storedDiscountScope = await loadStoredDiscountScope(trx, parent, parentAddons);
     // Extension rows keep invoice-on-complete stamping (fix: extended visits
     // of a pay-per-visit plan completed uninvoiced) — resolved once here,
@@ -19150,6 +19201,7 @@ router._test = {
   applyStoredVisitFinancials,
   restackStoredVisitFinancials,
   applyDiscountStackRestack,
+  freezeLegacySeriesRootCaps,
   storedOccurrenceFloorPrice,
   seriesExtensionUnbillable,
   loadDiscountCapsById,

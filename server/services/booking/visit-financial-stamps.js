@@ -238,12 +238,20 @@ function resolveStoredDiscountCaps(parent, liveDiscountCaps) {
   const frozen = hasPricingRegimeMarker(parent) ? frozenCapsFromRow(parent) : null;
   const addons = { ...(frozen?.addons || {}) };
   if (liveDiscountCaps) {
+    // GitHub Codex round 2 on #4642 (PRRT_kwDOR3YQi86kl-X3): an EARLIER
+    // version of this loop skipped any discount id equal to
+    // parent.line_discount_id, reasoning the line's own cap already lives
+    // in `caps.line` and shouldn't be duplicated into `caps.addons`. That
+    // skip was wrong the moment the SAME catalog discount is reused on
+    // BOTH the primary line and an add-on (a real, supported shape —
+    // liveDiscountCaps has only ONE entry for that shared id either way):
+    // it silently dropped the add-on's own cap entry too, so addonCap()
+    // read it as uncapped and froze that wrong (uncapped) value into the
+    // very first gate-on extension's snapshot. Each slot's cap is kept
+    // independently, keyed only by discount id — never deduped against
+    // the line's own id — even though this means a genuinely line-only id
+    // also lands (harmlessly, unread) in `addons`.
     for (const [discountId, cap] of liveDiscountCaps) {
-      // The line's own cap lives in `caps.line`, never duplicated into
-      // `caps.addons` — liveDiscountCaps is a single Map built from
-      // [line_discount_id, ...addon discount ids] at every call site, so
-      // without this guard the line's id would land in both places.
-      if (discountId === parent?.line_discount_id) continue;
       if (!(discountId in addons)) addons[discountId] = cap ?? null;
     }
   }

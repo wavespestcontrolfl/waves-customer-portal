@@ -21,7 +21,7 @@ const {
   hasPricingRegimeMarker,
 } = require('../services/booking/visit-financial-stamps');
 const adminScheduleRouter = require('../routes/admin-schedule');
-const { restackStoredVisitFinancials } = adminScheduleRouter._test;
+const { restackStoredVisitFinancials, freezeLegacySeriesRootCaps } = adminScheduleRouter._test;
 
 const connection = process.env.DISCOUNT_STACK_PROVENANCE_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -128,5 +128,103 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
     });
     const row = await mockPg('scheduled_services').where({ id }).first();
     expect(row.pricing_provenance).toBeNull();
+  });
+
+  // GitHub Codex round 2 on #4642 (PRRT_kwDOR3YQi86kl-X3): the SAME
+  // catalog discount reused on both the primary line and an add-on — a
+  // real, supported shape — through a real Postgres round trip (the
+  // addon row lives in scheduled_service_addons, a real FK-linked table).
+  // GitHub Codex round 2 on #4642 (PRRT_kwDOR3YQi86kl-X3): the row is
+  // deliberately UNMARKED (no pre-existing frozen caps) — the exact
+  // scenario the bug lived in. resolveStoredDiscountCaps must derive BOTH
+  // slots' caps from the SAME single, real `discounts` catalog row
+  // (loadDiscountCapsById dedupes by id, so a shared id yields ONE Map
+  // entry either way) rather than the primary silently absorbing it and
+  // the add-on reading null.
+  test('a discount id shared between the primary line and an add-on keeps its cap on BOTH slots (unmarked row, real catalog lookup, real Postgres round trip)', async () => {
+    const id = randomUUID();
+    const sharedDiscountId = randomUUID();
+    await mockPg('discounts').insert({
+      id: sharedDiscountId, discount_key: `fixture_shared_${sharedDiscountId.slice(0, 8)}`,
+      name: 'Fixture Shared Cap', discount_type: 'percentage', amount: 50, max_discount_dollars: 10, is_active: true,
+    });
+    await mockPg('scheduled_services').insert({
+      id,
+      scheduled_date: '2099-05-15',
+      service_type: 'Fixture Shared-Discount Service',
+      primary_line_price: 100,
+      line_discount_id: sharedDiscountId,
+      line_discount_type: 'percentage',
+      line_discount_amount: 50, // uncapped, 50% of $100 would be $50 off
+      // no pricing_provenance — unmarked, exactly the bug's scenario
+    });
+    await mockPg('scheduled_service_addons').insert({
+      id: randomUUID(), scheduled_service_id: id, service_name: 'Fixture Add-On', base_price: 100, estimated_price: 90,
+      discount_type: 'percentage', discount_amount: 50, discount_id: sharedDiscountId, // the SAME shared id
+    });
+
+    const row = await mockPg('scheduled_services').where({ id }).first();
+    expect(hasPricingRegimeMarker(row)).toBe(false);
+    const addonRows = await mockPg('scheduled_service_addons').where({ scheduled_service_id: id });
+    // loadDiscountCapsById's real shape: dedupes by id, so a shared id
+    // yields exactly ONE Map entry.
+    const discountCaps = new Map([[sharedDiscountId, 10]]);
+    const result = restackStoredVisitFinancials(row, addonRows, null, discountCaps);
+    expect(result.primaryLineDiscountDollars).toBe(10);
+    expect(result.addonDollars[0].discountDollars).toBe(10); // never null/uncapped
+    // The persisted snapshot must freeze BOTH slots — the next extension
+    // reading this frozen snapshot must not silently uncap the add-on.
+    expect(result.capsSnapshot).toEqual({ line: 10, addons: { [sharedDiscountId]: 10 } });
+  });
+
+  // The coordinator's exact pinned combination for the ROOT-freeze fix,
+  // end to end through a real database: a LEGACY (unmarked) series' root
+  // row is frozen by freezeLegacySeriesRootCaps on its first gate-on
+  // extension, persists through a real Postgres round trip, and a SECOND
+  // extension's fresh read of that now-marked root still uses the frozen
+  // cap after the catalog is raised.
+  test('legacy series: freezeLegacySeriesRootCaps persists onto the root row through a real Postgres round trip; a later catalog raise does not reach extension 2', async () => {
+    const rootId = randomUUID();
+    const lineDiscountId = randomUUID();
+    // "Series created before pricing_provenance existed": no marker, just
+    // the ordinary discount columns a real legacy row would carry.
+    await mockPg('scheduled_services').insert({
+      id: rootId,
+      scheduled_date: '2099-06-15',
+      service_type: 'Fixture Legacy Series Root',
+      primary_line_price: 100,
+      line_discount_id: lineDiscountId,
+      line_discount_type: 'percentage',
+      line_discount_amount: 50,
+    });
+    const cols = await mockPg('scheduled_services').columnInfo();
+    const rootBeforeExtension1 = await mockPg('scheduled_services').where({ id: rootId }).first();
+    expect(hasPricingRegimeMarker(rootBeforeExtension1)).toBe(false);
+
+    // "Extension 1": the catalog currently caps this discount at $10.
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      await mockPg('discounts').insert({ id: lineDiscountId, discount_key: `fixture_shared_cap_${lineDiscountId.slice(0, 8)}`, name: 'Fixture Shared Cap', discount_type: 'percentage', amount: 50, max_discount_dollars: 10, is_active: true });
+      await freezeLegacySeriesRootCaps(mockPg, rootBeforeExtension1, cols, []);
+
+      // The freeze persisted for real — read the root back fresh, exactly
+      // as extension 2's own top-of-function fetch would.
+      const rootAfterExtension1 = await mockPg('scheduled_services').where({ id: rootId }).first();
+      expect(hasPricingRegimeMarker(rootAfterExtension1)).toBe(true);
+      expect(rootAfterExtension1.pricing_provenance.caps.line).toBe(10);
+
+      // The catalog cap is raised to $20 between extension 1 and 2.
+      await mockPg('discounts').where({ id: lineDiscountId }).update({ max_discount_dollars: 20 });
+
+      // "Extension 2": a fresh live catalog read (what loadDiscountCapsById
+      // would fetch now) alongside the already-marked root.
+      const catalogRow = await mockPg('discounts').where({ id: lineDiscountId }).first('max_discount_dollars');
+      const liveCatalogCapsAtExtension2 = new Map([[lineDiscountId, Number(catalogRow.max_discount_dollars)]]);
+      const result = restackStoredVisitFinancials(rootAfterExtension1, [], null, liveCatalogCapsAtExtension2);
+      expect(result.primaryLineDiscountDollars).toBe(10); // frozen at extension 1, never the raised $20
+      expect(result.price).toBe(90);
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
   });
 });

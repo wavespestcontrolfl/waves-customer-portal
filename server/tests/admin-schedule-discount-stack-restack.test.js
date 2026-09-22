@@ -59,6 +59,7 @@ const {
   seriesExtensionUnbillable,
   resolveStoredDiscountCaps,
   capsSnapshotFromPricing,
+  freezeLegacySeriesRootCaps,
 } = require('../routes/admin-schedule')._test;
 
 function discountQuery(discount) {
@@ -1522,7 +1523,53 @@ describe('frozen caps snapshot — a later catalog cap edit does not reprice a c
     const unmarkedLegacyRow = { line_discount_id: 'ld-1' }; // no pricing_provenance — same row, before its first stamp
     const liveCapsAtCreation = new Map([['ld-1', 10], ['addon-1', 25]]);
     const resolved = resolveStoredDiscountCaps(unmarkedLegacyRow, liveCapsAtCreation);
-    expect(resolved.snapshot).toEqual(createdSnapshot);
+    // Agreement on every key capsSnapshotFromPricing itself reports (the
+    // line cap, and each genuine add-on's own cap) — not exact object
+    // equality: resolveStoredDiscountCaps' addons also carries the line's
+    // OWN id (round 2 P1 fix, below) whenever liveDiscountCaps included
+    // it, which capsSnapshotFromPricing never does (it only ever iterates
+    // pricing.addonLines) — a harmless, unread extra key, not a
+    // disagreement.
+    expect(resolved.snapshot.line).toBe(createdSnapshot.line);
+    for (const [id, cap] of Object.entries(createdSnapshot.addons)) {
+      expect(resolved.snapshot.addons[id]).toBe(cap);
+    }
+  });
+
+  // Codex pre-push audit P1 (GitHub round 2, PRRT_kwDOR3YQi86kl-X3): the
+  // SAME catalog discount reused on both the primary line and an add-on
+  // (a real, supported shape) — liveDiscountCaps has only ONE entry for
+  // that shared id, since loadDiscountCapsById dedupes by id. An earlier
+  // version of resolveStoredDiscountCaps skipped populating `addons` for
+  // any id matching line_discount_id, so the add-on's OWN cap silently
+  // read as uncapped and froze that wrong value into the first gate-on
+  // extension's snapshot.
+  test('a discount id shared between the primary line AND an add-on keeps its cap on BOTH slots independently', () => {
+    const sharedId = 'shared-disc-1';
+    const parent = {
+      primary_line_price: 100,
+      line_discount_id: sharedId,
+      line_discount_type: 'percentage',
+      line_discount_amount: 50, // uncapped, 50% of $100 would be $50 off
+      discount_type: null,
+      // unmarked — the first gate-on extension of a legacy row
+    };
+    const addon = {
+      base_price: 100, estimated_price: 100, discount_type: 'percentage', discount_amount: 50,
+      discount_id: sharedId, service_id: 'addon-svc',
+    }; // uncapped, 50% of $100 would ALSO be $50 off
+    const liveCaps = new Map([[sharedId, 10]]); // ONE entry — dedup by id, exactly as loadDiscountCapsById returns it
+    const resolved = resolveStoredDiscountCaps(parent, liveCaps);
+    expect(resolved.lineCap).toBe(10);
+    expect(resolved.addonCap(sharedId)).toBe(10); // never null/uncapped
+
+    const result = restackStoredVisitFinancials(parent, [addon], null, liveCaps);
+    expect(result.primaryLineDiscountDollars).toBe(10);
+    expect(result.addonDollars[0].discountDollars).toBe(10);
+    // The persisted snapshot must freeze BOTH slots at $10 — a LATER
+    // extension reading this frozen snapshot must not silently uncap the
+    // add-on even though it shares the primary's own discount id.
+    expect(result.capsSnapshot).toEqual({ line: 10, addons: { [sharedId]: 10 } });
   });
 
   // Gate-off parity: with the gate off, no caller ever builds or passes a
@@ -1534,5 +1581,107 @@ describe('frozen caps snapshot — a later catalog cap edit does not reprice a c
     const target = {};
     stampPricingRegimeMarker(target, { pricing_provenance: true });
     expect(target.pricing_provenance.caps).toEqual({ line: null, addons: {} });
+  });
+});
+
+// GitHub Codex round 2 on #4642 (PRRT_kwDOR3YQi86kl-X6): every extension
+// call site stamped the caps snapshot onto its own INSERT payload (the new
+// child row) but never updated the ROOT parent row every extension reads
+// its pricing FROM — so a legacy (unmarked) series' SECOND extension still
+// read the unmarked root and re-resolved live catalog caps all over
+// again, defeating the freeze the FIRST extension's own child row got.
+describe('freezeLegacySeriesRootCaps — the root parent itself gets marked on the first gate-on extension (round 2 P1)', () => {
+  afterEach(() => { delete process.env.GATE_DISCOUNT_STACKING; });
+
+  // A minimal fake conn: 'discounts' serves loadDiscountCapsById's read;
+  // 'scheduled_services' records every UPDATE so the test can assert
+  // exactly what got written to the root row, without a real database.
+  function makeRootFreezeConn(discountRows) {
+    const updates = [];
+    const conn = (table) => {
+      let whereInIds = null;
+      let whereId = null;
+      const chain = {
+        where: (arg) => { if (arg && arg.id) whereId = arg.id; return chain; },
+        whereIn: (_col, ids) => { whereInIds = ids; return chain; },
+        select: () => chain,
+        update: (data) => {
+          updates.push({ table, id: whereId, data });
+          return Promise.resolve(1);
+        },
+        then: (resolve, reject) => {
+          if (table === 'discounts') {
+            return Promise.resolve(discountRows.filter((r) => whereInIds.includes(r.id))).then(resolve, reject);
+          }
+          return Promise.resolve([]).then(resolve, reject);
+        },
+      };
+      return chain;
+    };
+    return { conn, updates };
+  }
+
+  test('gate off: no-op — no discounts read, no update issued', async () => {
+    const { conn, updates } = makeRootFreezeConn([{ id: 'ld-1', max_discount_dollars: 10 }]);
+    const parent = { id: 'root-1', line_discount_id: 'ld-1' };
+    await freezeLegacySeriesRootCaps(conn, parent, { pricing_provenance: true }, []);
+    expect(updates).toHaveLength(0);
+  });
+
+  test('an ALREADY-marked root is left alone — no redundant re-freeze, no catalog re-read', async () => {
+    await withGateLive(async () => {
+      const { conn, updates } = makeRootFreezeConn([{ id: 'ld-1', max_discount_dollars: 999 }]);
+      const parent = {
+        id: 'root-2', line_discount_id: 'ld-1',
+        pricing_provenance: { pricing_regime: 'discount_stack_v1', engine_version: 1, caps: { line: 10, addons: {} } },
+      };
+      await freezeLegacySeriesRootCaps(conn, parent, { pricing_provenance: true }, []);
+      expect(updates).toHaveLength(0);
+      expect(parent.pricing_provenance.caps.line).toBe(10); // unchanged
+    });
+  });
+
+  // The coordinator's exact pinned combination: a legacy (unmarked) series
+  // freezes its root on the first gate-on extension; the catalog cap is
+  // raised afterward; a SECOND extension's fresh read of that now-marked
+  // root must still use the frozen $10, never the raised value.
+  test('legacy series: the first gate-on extension freezes the ROOT row; a later catalog raise does not reach a second extension', async () => {
+    await withGateLive(async () => {
+      const { conn, updates } = makeRootFreezeConn([{ id: 'ld-1', max_discount_dollars: 10 }]);
+      const parent = { id: 'root-3', primary_line_price: 100, line_discount_id: 'ld-1', line_discount_type: 'percentage', line_discount_amount: 50 };
+      await freezeLegacySeriesRootCaps(conn, parent, { pricing_provenance: true }, []);
+
+      // The root row's own UPDATE, exactly as a real DB write would see it.
+      expect(updates).toHaveLength(1);
+      expect(updates[0].table).toBe('scheduled_services');
+      expect(updates[0].id).toBe('root-3');
+      expect(updates[0].data.pricing_provenance.caps.line).toBe(10);
+      // addons also carries ld-1 (round 2 P1: no longer deduped against the
+      // line's own id) — harmless here since nothing due reads it, and
+      // correct when the SAME id is later reused on an add-on.
+
+      // The in-memory `parent` object is updated too (same-call multi-date
+      // loops must not redundantly re-freeze on their next iteration).
+      expect(hasPricingRegimeMarker(parent)).toBe(true);
+
+      // "Extension 2": a FRESH re-fetch of this now-marked root (as a real
+      // second, separate extension call would do), against a catalog
+      // raised to $20 since extension 1 ran.
+      const freshRootRead = { ...parent }; // simulates SELECT * FROM scheduled_services WHERE id = root-3
+      const catalogRaisedTo20 = new Map([['ld-1', 20]]);
+      const result = restackStoredVisitFinancials(freshRootRead, [], null, catalogRaisedTo20);
+      expect(result.primaryLineDiscountDollars).toBe(10); // frozen at extension 1, never the raised $20
+      expect(result.price).toBe(90);
+    });
+  });
+
+  test('a root whose primary line has NO discount at all still gets marked (an empty, correct snapshot) — future add-ons still freeze correctly from it', async () => {
+    await withGateLive(async () => {
+      const { conn, updates } = makeRootFreezeConn([]);
+      const parent = { id: 'root-4', primary_line_price: 100, line_discount_id: null };
+      await freezeLegacySeriesRootCaps(conn, parent, { pricing_provenance: true }, []);
+      expect(updates).toHaveLength(1);
+      expect(updates[0].data.pricing_provenance.caps).toEqual({ line: null, addons: {} });
+    });
   });
 });
