@@ -2352,7 +2352,25 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     const picked = presetId ? pickLineDiscount(presetId) : null;
     if (picked === undefined) return;
     setServiceLines((lines) =>
-      lines.map((l) => (l._key === key ? { ...l, lineDiscount: picked, lineDiscountTouched: true } : l)),
+      lines.map((l) => {
+        if (l._key !== key) return l;
+        // Codex pre-push audit P1 (round 1): the FIRST touch this session of
+        // an already-stamped line's discount control — a fresh pick that
+        // replaces the stamp, or an explicit Remove — must snap Price to the
+        // line's true GROSS. Price was showing this line's normal (net)
+        // seed; lineGrossFor only reads the frozen _origBasePrice for an
+        // UNTOUCHED line, so leaving Price at net here would have the save's
+        // flat-net (Remove) or fresh-pick (new discount) branch post that
+        // net figure as the line's new permanent basePrice — silently
+        // erasing the true gross and, on Remove, the discount's own record.
+        const firstTouch = !l.lineDiscountTouched && l._origDiscountType && l._origBasePrice != null;
+        return {
+          ...l,
+          lineDiscount: picked,
+          lineDiscountTouched: true,
+          price: firstTouch ? String(l._origBasePrice) : l.price,
+        };
+      }),
     );
   };
   // Every OTHER line's chosen discount row, in the shape stackablePresets
@@ -2811,8 +2829,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 }),
               };
             }
-            // New or price-edited line: the editor has no per-line discount UI,
-            // so treat the Price as the final (net) charge with no discount.
+            // New line, price-edited line, or a line whose discount slot was
+            // explicitly cleared this session (lineDiscountTouched with
+            // lineDiscount null — setLineDiscount already restored Price to
+            // the true gross when there was an original stamp to clear):
+            // treat Price as the final (net) charge with no discount.
             // (Re-applying a stored discount here would double-discount rows
             // whose seeded price was already net.)
             return {

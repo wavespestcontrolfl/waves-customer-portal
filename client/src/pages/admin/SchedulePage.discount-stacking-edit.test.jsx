@@ -186,6 +186,32 @@ it('gate on: a non-stackable tier chosen on a line hides its WHOLE group from th
   expect(apptOptionNames.some((t) => t.includes('Military Discount'))).toBe(true);
 });
 
+it('gate on: Remove on an ALREADY-STAMPED line restores its true gross and posts a clean, discount-free line (Codex pre-push audit P1, round 1)', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  // The mosquito line's Price box shows its seeded NET ($55, base $60 minus
+  // the stored $5 Military credit) until its discount control is touched.
+  await waitFor(() => expect(screen.getAllByText('Military Discount').length).toBeGreaterThan(0));
+  const priceInputs = screen.getAllByPlaceholderText('0.00');
+  const mosquitoPriceBefore = priceInputs.find((i) => Number(i.value) === 55);
+  expect(mosquitoPriceBefore).toBeTruthy();
+  const removeButtons = screen.getAllByRole('button', { name: 'Remove line discount' });
+  fireEvent.click(removeButtons[0]); // mosquito is the first (and, before this click, only) chosen display
+  expect(screen.queryByText('Military Discount', { selector: 'div' })).not.toBeInTheDocument();
+  // Price snapped to the true gross ($60), not left at the discounted net.
+  expect(priceInputs.find((i) => Number(i.value) === 60)).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  const body = JSON.parse(writes()[0][1].body);
+  const mosquitoLine = body.addons.find((a) => a.serviceId === 'svc-mosquito');
+  // Full gross, no discount fields at all — never the stale $55 masquerading
+  // as a full price with the discount's own record erased.
+  expect(mosquitoLine).toMatchObject({ price: 60 });
+  expect(mosquitoLine.discountType).toBeUndefined();
+  expect(mosquitoLine.basePrice).toBeUndefined();
+});
+
 it('gate on: the same non-stackable tier stays offered on a DIFFERENT line (one tier on two lines is fine)', async () => {
   const twoUndiscountedLines = {
     ...baseService,
