@@ -485,33 +485,26 @@ describe('recurring extension — restackStoredVisitFinancials', () => {
     expect(withoutAddon.appointmentDiscountDollars).toBe(30);
   });
 
-  test('returns null for the anchored-split marker template (discountStackMarkerOnly) — its own total already folds in the primary’s implied share', () => {
-    expect(restackStoredVisitFinancials(
-      { ...parentTemplate, primary_line_price: null, line_discount_type: null, discountStackMarkerOnly: true },
-      [], null, uncappedCaps,
-    )).toBeNull();
-  });
-
-  // Codex pre-push audit P0 (round 8): a MISSING (not the anchored-split
-  // marker) primary_line_price used to bail out entirely, even with a
-  // priced/discounted due add-on and a shared appointment credit present —
-  // the exact class round 3 fixed for an explicit $0, just for `null`
-  // without the marker flag (an add-on-only or re-service/callback row that
-  // never had a structured primary at all).
-  test('a MISSING (non-marker) primary_line_price still restacks its due add-ons and the shared appointment credit', () => {
-    const result = restackStoredVisitFinancials({
-      primary_line_price: null,
-      line_discount_type: null,
-      discount_type: 'fixed_amount',
-      discount_amount: 30,
-    }, [
-      { base_price: 100, estimated_price: 84, discount_type: 'percentage', discount_amount: 20, discount_dollars: 16, discount_id: 'recurring-disc-8', service_id: 'recurring-addon' },
-    ], null, new Map([['recurring-disc-8', null]]));
-
-    // Pool = 100 (the addon alone, primary contributes $0). The full $30
-    // credit lands on it, leaving $70; 20% of $70 = $14.
-    expect(result.addonDollars[0].discountDollars).toBe(14);
-    expect(result.price).toBe(56);
+  // Codex pre-push audit P0, round 10 (reverting a round-8 attempt to treat
+  // this the same as restackLiveVisitFinancials' identical-looking guard):
+  // a STORED row's null primary_line_price does NOT mean "no primary
+  // charge" the way a fresh, in-memory pricing.primaryBase does —
+  // calculateStoredVisitFinancials (unmodified, sitting right alongside
+  // this restack) already reconstructs a REAL implied primary contribution
+  // for that case, from estimated_price minus the parent's full add-on
+  // total. That covers BOTH the anchored-split marker (the visit's TOTAL,
+  // primary share folded in) AND an ordinary legacy/unstructured row (a
+  // flat estimated_price with no line-item breakdown ever recorded) —
+  // restacking from gross:0 in either case would silently overwrite that
+  // reconstructed charge with a hard $0. Every null primary_line_price
+  // therefore defers entirely; only an EXPLICIT $0 (round 3 — a member-
+  // covered series stamps exactly this) is a real, known-zero gross safe to
+  // restack around.
+  test('returns null for ANY null primary_line_price — defers to calculateStoredVisitFinancials’ own reconstruction', () => {
+    expect(restackStoredVisitFinancials({ ...parentTemplate, primary_line_price: null }, [], null, uncappedCaps)).toBeNull();
+    // Codex's own repro: a legacy/unstructured row with a real $100 total
+    // and no add-ons must not restack to price: 0.
+    expect(restackStoredVisitFinancials({ primary_line_price: null, estimated_price: 100, discount_type: null }, [], null, new Map())).toBeNull();
   });
 
   test('restacks a due add-on’s OWN percentage discount against its own pool share, not its frozen (full-base) dollar figure', () => {
@@ -764,10 +757,10 @@ describe('recurring extension — applyDiscountStackRestack (no-op contract)', (
     });
   });
 
-  test('gate on but the anchored-split marker template: returns null and leaves target untouched', async () => {
+  test('gate on but nothing to restack (null primary_line_price — anchored-split marker or legacy/unstructured row): returns null and leaves target untouched', async () => {
     await withGateLive(() => {
       const target = { estimated_price: 999, discount_dollars: 999, line_discount_dollars: 999 };
-      const result = applyDiscountStackRestack(target, cols, { ...parentTemplate, primary_line_price: null, line_discount_type: null, discountStackMarkerOnly: true }, [], null, uncappedCaps);
+      const result = applyDiscountStackRestack(target, cols, { ...parentTemplate, primary_line_price: null }, [], null, uncappedCaps);
       expect(result).toBeNull();
       expect(target).toEqual({ estimated_price: 999, discount_dollars: 999, line_discount_dollars: 999 });
     });

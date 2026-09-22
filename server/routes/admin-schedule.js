@@ -2655,17 +2655,6 @@ async function resolveSeriesExtensionPriceTemplate(conn, parentId, parent) {
       template.line_discount_type = null;
       template.line_discount_amount = null;
       template.line_discount_dollars = null;
-      // Synthetic, never spread into an insert (every caller reads named
-      // fields off this template, never the whole object) — the ONE marker
-      // restackStoredVisitFinancials needs to tell "the primary was
-      // genuinely cleared to fold into the marker total" apart from "this
-      // row never had a structured primary at all" (e.g. an add-on-only
-      // booking, a re-service/callback line): both read identically as
-      // primary_line_price === null otherwise, but only the FIRST must
-      // refuse to let a restack recompute estimated_price/discount_dollars
-      // — the marker's own total already accounts for the primary's
-      // implied share, which a restack starting from gross:0 cannot.
-      template.discountStackMarkerOnly = true;
     }
     return template;
   } catch {
@@ -2741,22 +2730,25 @@ function applyStoredVisitFinancials(target, cols, parent, addonRows, allParentAd
 // it gets every percentage term treated as uncapped (see the header note
 // below for why that is the honest degraded state, not a silent regression).
 function restackStoredVisitFinancials(parent, addonRows, discountScope, discountCaps) {
-  // The ONE case that truly bails out: resolveSeriesExtensionPriceTemplate's
-  // anchored-split marker clear (discountStackMarkerOnly) — the marker's own
-  // estimated_price is already the visit TOTAL with the primary's implied
-  // share folded in, which a restack starting the primary from gross:0
-  // cannot reconstruct (it would silently drop that share). A missing OR
-  // explicit-$0 primary_line_price in every OTHER case (a member-covered
-  // series stamps exactly $0; an add-on-only or re-service/callback booking
-  // never had a structured primary at all) is a REAL $0 contribution to
-  // restack around, not a reason to skip restacking due add-ons and the
-  // shared appointment credit (Codex pre-push audit P0: round 3 fixed the
-  // explicit-$0 half of this; round 8 found the null half still bailed out
-  // completely — a null-primary booking with a discounted recurring add-on
-  // fell back to the anchor's frozen add-on dollars on every extension,
-  // exactly the class round 3 fixed for an explicit $0).
-  if (parent?.discountStackMarkerOnly) return null;
-  const primaryGross = Number(parent?.primary_line_price) || 0;
+  // A MISSING primary_line_price bails out here — unlike restackLiveVisitFinancials's
+  // identical-looking guard above, this one is NOT safe to collapse to
+  // gross:0 (Codex pre-push audit P0, round 10, reverting round 8's
+  // attempt at exactly that): a stored row's null primary_line_price does
+  // not mean "no primary charge" — calculateStoredVisitFinancials (the
+  // existing, unmodified computation this restack sits alongside) already
+  // reconstructs a REAL implied primary contribution for that case, from
+  // estimated_price minus the parent's full add-on total — covering BOTH
+  // the anchored-split marker (the visit's TOTAL, primary share folded in)
+  // AND an ordinary legacy/unstructured row (a flat estimated_price with no
+  // line-item breakdown ever recorded). Starting this restack's primary
+  // from gross:0 in either case would overwrite that reconstructed charge
+  // with a hard $0 — Codex's repro: `{ primary_line_price: null,
+  // estimated_price: 100 }`, no add-ons, restacked to price: 0. Only an
+  // EXPLICIT $0 primary_line_price (round 3 — a member-covered series
+  // stamps exactly this) is a real, known-zero gross safe to restack
+  // around; a missing one defers entirely to the existing fallback.
+  if (parent?.primary_line_price == null || parent.primary_line_price === '') return null;
+  const primaryGross = Number(parent.primary_line_price);
   if (!Number.isFinite(primaryGross) || primaryGross < 0) return null;
   const addons = Array.isArray(addonRows) ? addonRows : [];
 
