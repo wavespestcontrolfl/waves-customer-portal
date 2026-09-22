@@ -9,7 +9,7 @@ const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, discountStackingLive } = require('../config/feature-gates');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
 const { collectiveMoveGateOn, dateExceptionStamp } = require('../services/rebooker');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
@@ -1399,6 +1399,8 @@ const {
   copyAppointmentDiscountFields,
   copyBillToFields,
   copyStampedServiceAddressFields,
+  typedDiscountSlot,
+  restackOccurrenceDiscounts,
 } = require('../services/booking/visit-financial-stamps');
 const { anchorSoleProperty } = require('../services/customer-properties');
 
@@ -1446,10 +1448,19 @@ function copyAddonDiscountFields(target, source, cols) {
 
 // Required child scope belongs to the visit's transaction. A failed copy must
 // roll back the extension so a retry cannot mistake a partial visit for a refill.
-async function insertRecurringChildAddons(conn, scheduledServiceId, dueAddons) {
+// `restackedAddonDollars`, when passed, is applyDiscountStackRestack's
+// returned array — 1:1 with `dueAddons` — so a due add-on's OWN discount is
+// restated against THIS occurrence's typed slots instead of the frozen
+// dollars copyAddonDiscountFields just copied (see
+// restackStoredVisitFinancials). Omitted/null (GATE_DISCOUNT_STACKING off,
+// or a caller that hasn't computed it) leaves every addon row exactly as
+// copyAddonDiscountFields wrote it — unchanged from before this parameter
+// existed.
+async function insertRecurringChildAddons(conn, scheduledServiceId, dueAddons, restackedAddonDollars = null) {
   if (dueAddons.length === 0) return;
   const cols = await conn('scheduled_service_addons').columnInfo();
-  for (const addon of dueAddons) {
+  for (let i = 0; i < dueAddons.length; i++) {
+    const addon = dueAddons[i];
     const data = {
       scheduled_service_id: scheduledServiceId,
       service_id: addon.service_id || null,
@@ -1464,6 +1475,11 @@ async function insertRecurringChildAddons(conn, scheduledServiceId, dueAddons) {
     }
     if (cols.skip_weekends && addon.skip_weekends !== undefined) data.skip_weekends = addon.skip_weekends;
     copyAddonDiscountFields(data, addon, cols);
+    const restack = restackedAddonDollars ? restackedAddonDollars[i] : null;
+    if (restack) {
+      if (cols.discount_dollars) data.discount_dollars = restack.discountDollars;
+      if (cols.estimated_price) data.estimated_price = restack.netPrice;
+    }
     await conn('scheduled_service_addons').insert(data);
   }
 }
@@ -2011,6 +2027,11 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
     const subtotal = (primaryNet || 0) + addonLines.reduce((sum, line) => sum + (line.price || 0), 0);
     const appointmentDiscount = await loadInvoiceDiscount(discountId);
     let appointmentDiscountBase = subtotal;
+    // Hoisted so the canonical-restack block below (after the appointment
+    // discount's own dollars are resolved) can read which lines this
+    // discount actually reaches — the exact membership test already used
+    // above to build appointmentDiscountBase, not a second computation of it.
+    let eligibleLines = appointmentServiceLines;
     if (appointmentDiscount) {
       const isServiceScoped = Boolean(
         appointmentDiscount.service_key_filter || appointmentDiscount.service_category_filter
@@ -2026,7 +2047,7 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
       // calculateVisitFinancialsForAddons, so the parent visit and its
       // spawned children agree (Codex #3531 r1 P1).
       if (isPercentDiscountType(appointmentDiscount.discount_type)) assertPercentExclusionCatalogReady();
-      const eligibleLines = isPercentDiscountType(appointmentDiscount.discount_type)
+      eligibleLines = isPercentDiscountType(appointmentDiscount.discount_type)
         ? matchingLines.filter((line) => !lineExcludedFromPercentDiscount(line.serviceKey))
         : matchingLines;
       const eligibilityContext = eligibleLines[0] || matchingLines[0] || {};
@@ -2047,20 +2068,68 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
       ? calculateDiscountDollars(appointmentDiscount, appointmentDiscountBase, discountAmount)
       : null;
     finalPrice = Math.max(0, Math.round((subtotal - (resolvedAppointmentDiscount?.dollars || 0)) * 100) / 100);
+
+    // Canonical restack (GATE_DISCOUNT_STACKING) — see
+    // restackStoredVisitFinancials for the shared rationale. This data
+    // model still carries one discount per line + one per appointment (the
+    // multi-discount-per-line UI is a later slice), so "stacking" here
+    // means the canonical SLOT order between a FIXED appointment credit and
+    // the line percentages it must precede, plus cent-exact rounding — not
+    // several discounts compounding on one line. Everything above
+    // (eligibility, the tier-conflict / manualEligibilityFailures checks)
+    // is unaffected either way; only the FINAL dollar figures below can
+    // change, and only when the gate is live.
+    let finalPrimaryDiscount = primaryDiscount;
+    let finalAddonLines = addonLines;
+    let finalAppointmentDollars = resolvedAppointmentDiscount?.dollars || 0;
+    if (discountStackingLive() && appointmentDiscount && (primaryDiscount || addonLines.some((line) => line.discount))) {
+      const eligibleSet = new Set(eligibleLines);
+      const stacked = restackOccurrenceDiscounts({
+        primaryGross: primaryBase || 0,
+        primaryDiscount: primaryDiscount ? typedDiscountSlot(primaryDiscount.discountType, primaryDiscount.discountAmount) : null,
+        primaryEligible: eligibleSet.has(appointmentServiceLines[0]),
+        addonLines: addonLines.map((line, i) => ({
+          gross: line.base || 0,
+          lineDiscount: line.discount ? typedDiscountSlot(line.discount.discountType, line.discount.discountAmount) : null,
+          eligible: eligibleSet.has(appointmentServiceLines[i + 1]),
+        })),
+        appointmentDiscount: typedDiscountSlot(
+          appointmentDiscount.discount_type,
+          resolvedAppointmentDiscount.amount,
+          appointmentDiscount.max_discount_dollars != null ? Number(appointmentDiscount.max_discount_dollars) : null,
+        ),
+        compound: true,
+      });
+      finalPrimaryDiscount = primaryDiscount
+        ? { ...primaryDiscount, discountDollars: stacked.lines[0].lineDiscountDollars }
+        : primaryDiscount;
+      finalAddonLines = addonLines.map((line, i) => {
+        const restated = stacked.lines[i + 1];
+        return line.discount
+          ? { ...line, price: restated.net, discount: { ...line.discount, discountDollars: restated.lineDiscountDollars } }
+          : { ...line, price: restated.net };
+      });
+      finalAppointmentDollars = stacked.appointmentDiscountDollars;
+      finalPrice = stacked.total;
+    }
+    const finalPrimaryNet = primaryBase == null
+      ? null
+      : Math.max(0, Math.round((primaryBase - (finalPrimaryDiscount?.discountDollars || 0)) * 100) / 100);
+
     return {
       finalPrice,
       primaryBase,
-      primaryNet,
+      primaryNet: finalPrimaryNet,
       primaryServiceKey: serviceRecord?.service_key || null,
       primaryServiceCategory: serviceRecord?.category || null,
-      primaryDiscount,
-      addonLines,
+      primaryDiscount: finalPrimaryDiscount,
+      addonLines: finalAddonLines,
       appointmentDiscount: appointmentDiscount ? {
         discountId: appointmentDiscount.id,
         discountName: appointmentDiscount.name,
         discountType: appointmentDiscount.discount_type,
         discountAmount: resolvedAppointmentDiscount.amount,
-        discountDollars: resolvedAppointmentDiscount.dollars,
+        discountDollars: finalAppointmentDollars,
         serviceKeyFilter: appointmentDiscount.service_key_filter || null,
         serviceCategoryFilter: appointmentDiscount.service_category_filter || null,
         maxDiscountDollars: appointmentDiscount.max_discount_dollars != null ? Number(appointmentDiscount.max_discount_dollars) : null,
@@ -2466,6 +2535,108 @@ function applyStoredVisitFinancials(target, cols, parent, addonRows, allParentAd
     && parent?.create_invoice_on_complete != null) {
     target.create_invoice_on_complete = parent.create_invoice_on_complete;
   }
+}
+
+// Canonical restack for a stored recurring occurrence (GATE_DISCOUNT_STACKING
+// on). Every recurring-extension caller (auto-extend, visit-count top-up,
+// alert extend/convert) shares this instead of trusting
+// copyLineDiscountFields' frozen line_discount_dollars / a due add-on's own
+// frozen discount_dollars, which replay a dollar figure computed against a
+// DIFFERENT occurrence's add-on mix (Codex #4405 r7 P1: an extension copied
+// a percentage line's frozen dollar amount from a different add-on mix — a
+// later visit computed $61.50 instead of $63.00). Reconstructs each TYPED
+// slot (discountType + amount, never the frozen dollars) from the stored
+// template row and its DUE add-ons, then restacks them together through the
+// one canonical engine (discount-stack.js) exactly as a fresh booking would
+// (restackOccurrenceDiscounts, shared with buildAppointmentPricing below).
+//
+// `parent` must be the SAME extensionPriceParent template every caller
+// already resolves through resolveSeriesExtensionPriceTemplate — the
+// anchored-split marker case clears its own primary_line_price/
+// line_discount_* there, so this returns null and the caller keeps
+// calculateStoredVisitFinancials's existing estimated_price-only fallback;
+// this function restacks a STRUCTURED primary line, not the marker total.
+// `addonRows` are the occurrence's DUE add-ons (filterAddonLinesForDate's
+// output) — the exact set whose gross an add-on's own percentage discount
+// must be resized against, and whose combined balance an appointment-level
+// FIXED credit's pro-rata share depends on.
+function restackStoredVisitFinancials(parent, addonRows, discountScope) {
+  const primaryGross = Number(parent?.primary_line_price);
+  if (!Number.isFinite(primaryGross) || primaryGross <= 0) return null;
+  const addons = Array.isArray(addonRows) ? addonRows : [];
+
+  const pctType = isPercentDiscountType(parent?.discount_type);
+  if (pctType) assertPercentExclusionCatalogReady();
+  const parentPctExcluded = pctType && lineExcludedFromPercentDiscount(parent?.service_key_snapshot);
+  const addonPctExcluded = (addon) => pctType && lineExcludedFromPercentDiscount(addon?.service_key_snapshot);
+  const servicesById = discountScope?.servicesById || new Map();
+  const matchesScope = (serviceId) => {
+    if (!discountScope?.isScoped) return true;
+    const service = servicesById.get(serviceId) || {};
+    return (!discountScope.serviceKeyFilter || discountScope.serviceKeyFilter === service.service_key)
+      && (!discountScope.serviceCategoryFilter || discountScope.serviceCategoryFilter === service.category);
+  };
+
+  const primaryDiscount = typedDiscountSlot(parent?.line_discount_type, parent?.line_discount_amount);
+  const addonSlots = addons.map((addon) => {
+    // scheduled_service_addons.base_price is the addon's own GROSS —
+    // stored alongside estimated_price (its net) since insertScheduledServiceAddons
+    // first wrote it. A pre-column legacy row reconstructs it from its own
+    // stored net + frozen dollars (gross = net + dollars, the same relation
+    // the original computation ran in reverse), never from a different row.
+    const storedGross = Number(addon?.base_price);
+    const derivedGross = (Number(addon?.estimated_price) || 0) + (Number(addon?.discount_dollars) || 0);
+    return {
+      gross: Number.isFinite(storedGross) && storedGross > 0 ? storedGross : derivedGross,
+      lineDiscount: typedDiscountSlot(addon?.discount_type, addon?.discount_amount),
+      eligible: matchesScope(addon?.service_id) && !addonPctExcluded(addon),
+    };
+  });
+  const appointmentDiscount = typedDiscountSlot(
+    parent?.discount_type,
+    parent?.discount_amount,
+    parent?.discount_max_dollars,
+  );
+
+  const stacked = restackOccurrenceDiscounts({
+    primaryGross,
+    primaryDiscount,
+    primaryEligible: matchesScope(parent?.service_id) && !parentPctExcluded,
+    addonLines: addonSlots,
+    appointmentDiscount,
+    compound: true,
+  });
+  if (!(stacked.subtotal > 0)) {
+    return { price: null, appointmentDiscountDollars: null, primaryLineDiscountDollars: null, addonDollars: addons.map(() => null) };
+  }
+  return {
+    price: stacked.total,
+    appointmentDiscountDollars: stacked.appointmentDiscountDollars > 0 ? stacked.appointmentDiscountDollars : null,
+    primaryLineDiscountDollars: stacked.lines[0].lineDiscountDollars > 0 ? stacked.lines[0].lineDiscountDollars : null,
+    addonDollars: addons.map((_, i) => ({
+      discountDollars: stacked.lines[i + 1].lineDiscountDollars,
+      netPrice: stacked.lines[i + 1].net,
+    })),
+  };
+}
+
+// Overrides the frozen-dollar fields applyStoredVisitFinancials already
+// stamped on `target`, IN PLACE, when GATE_DISCOUNT_STACKING is live — a
+// pure no-op (returns null, touches nothing) off, so every existing
+// extension caller stays byte-identical to before this function existed.
+// Callers run this immediately after their own applyStoredVisitFinancials
+// call, passing the exact same (parent-template, dueAddons, discountScope)
+// triple; the returned per-add-on array lines up 1:1 with `addonRows` for
+// insertRecurringChildAddons (or an inline addon-mirror loop) to restate
+// each due add-on's own discount_dollars/estimated_price the same way.
+function applyDiscountStackRestack(target, cols, parent, addonRows, discountScope) {
+  if (!discountStackingLive() || !target || !cols) return null;
+  const restacked = restackStoredVisitFinancials(parent, addonRows, discountScope);
+  if (!restacked) return null;
+  if (cols.estimated_price && restacked.price != null) target.estimated_price = restacked.price;
+  if (cols.discount_dollars && parent?.discount_type) target.discount_dollars = restacked.appointmentDiscountDollars;
+  if (cols.line_discount_dollars && parent?.line_discount_type) target.line_discount_dollars = restacked.primaryLineDiscountDollars;
+  return restacked.addonDollars;
 }
 
 async function loadStoredDiscountScope(_database, parent, addonRows = []) {
@@ -12551,6 +12722,9 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
     // plans renew through these office paths, not the auto-extend.
     applyStoredVisitFinancials(data, cols, extensionPriceParent, dueAddons, parentAddons, storedDiscountScope);
+    // Canonical restack (GATE_DISCOUNT_STACKING) — see runRecurringSeriesMaintenanceLocked's
+    // identical call for the full rationale; no-op off.
+    const restackedAddonDollars = applyDiscountStackRestack(data, cols, extensionPriceParent, dueAddons, storedDiscountScope);
     if (occupancyGuard) {
       await guardRecurrenceDestination(trx, {
         lockedDates: occupancyGuard.lockedDates,
@@ -12576,7 +12750,8 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     try {
       await trx.transaction(async (sp) => {
       const addonCols = await sp('scheduled_service_addons').columnInfo();
-      for (const addon of dueAddons) {
+      for (let i = 0; i < dueAddons.length; i++) {
+        const addon = dueAddons[i];
         const addonData = {
           scheduled_service_id: row.id,
           service_id: addon.service_id || null,
@@ -12592,6 +12767,12 @@ async function reconcileRecurringSeriesVisitCount(trx, {
         if (addonCols.skip_weekends && addon.skip_weekends !== undefined) addonData.skip_weekends = addon.skip_weekends;
         if (addonCols.weekend_shift && addon.weekend_shift) addonData.weekend_shift = addon.weekend_shift;
         copyAddonDiscountFields(addonData, addon, addonCols);
+        // Canonical restack, mirroring insertRecurringChildAddons.
+        const restack = restackedAddonDollars ? restackedAddonDollars[i] : null;
+        if (restack) {
+          if (addonCols.discount_dollars) addonData.discount_dollars = restack.discountDollars;
+          if (addonCols.estimated_price) addonData.estimated_price = restack.netPrice;
+        }
         await sp('scheduled_service_addons').insert(addonData);
       }
       });
@@ -12826,6 +13007,14 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
           // per-visit amount instead when the parent is a remainder-bearing
           // anchor — an existing follow-up priced within $1 below it.
           applyStoredVisitFinancials(nextData, cols, extensionPriceParent, dueAddons, parentAddons, storedDiscountScope);
+          // Canonical restack (GATE_DISCOUNT_STACKING): restates the frozen
+          // fields the two copy* calls and applyStoredVisitFinancials just
+          // wrote — line_discount_dollars, discount_dollars, estimated_price
+          // — against THIS occurrence's own due add-ons; no-op off (see
+          // applyDiscountStackRestack). The returned array threads through
+          // to insertRecurringChildAddons below so each due add-on's own
+          // discount restates the same way.
+          const restackedAddonDollars = applyDiscountStackRestack(nextData, cols, extensionPriceParent, dueAddons, storedDiscountScope);
           // Extension rows keep invoice-on-complete stamping — sibling-
           // resolved so the freshest office billing intent wins (see
           // resolveSeriesCreateInvoiceOnComplete). Without it a
@@ -12881,7 +13070,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
           // Persist all due scope before the wrapper can observe a committed
           // extension or register its reminder.
           if (autoExtLive && autoExtRow?.id) {
-            await insertRecurringChildAddons(conn, autoExtRow.id, dueAddons);
+            await insertRecurringChildAddons(conn, autoExtRow.id, dueAddons, restackedAddonDollars);
             // Visit groups: stamp ONLY after the post-insert cancellation
             // re-check passes — stamping earlier could mint a visit whose
             // member this same transaction compensating-deletes.
@@ -17952,6 +18141,9 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
         // plans renew through these office paths, not the auto-extend.
         applyStoredVisitFinancials(data, cols, extensionPriceParent, dueAddons, parentAddons, storedDiscountScope);
+        // Canonical restack (GATE_DISCOUNT_STACKING) — see
+        // runRecurringSeriesMaintenanceLocked's identical call; no-op off.
+        applyDiscountStackRestack(data, cols, extensionPriceParent, dueAddons, storedDiscountScope);
         if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(childIdentity.service_type);
         if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
         if (cols.skip_weekends) data.skip_weekends = skipParentStamp;
@@ -18043,6 +18235,9 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
         // plans renew through these office paths, not the auto-extend.
         applyStoredVisitFinancials(data, cols, extensionPriceParent, dueAddons, parentAddons, storedDiscountScope);
+        // Canonical restack (GATE_DISCOUNT_STACKING) — see
+        // runRecurringSeriesMaintenanceLocked's identical call; no-op off.
+        applyDiscountStackRestack(data, cols, extensionPriceParent, dueAddons, storedDiscountScope);
         if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(childIdentity.service_type);
         if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
         if (cols.skip_weekends) data.skip_weekends = skipParentStamp;
@@ -18106,7 +18301,17 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
     }
     for (const row of spawned) {
       const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, row.date, alertBlackoutDates, skipParent);
-      await insertRecurringChildAddons(trx, row.id, dueAddons);
+      // Canonical restack (GATE_DISCOUNT_STACKING): recomputed fresh per
+      // spawned row's own due add-ons — see restackStoredVisitFinancials;
+      // no-op off.
+      const restackedAddonDollars = discountStackingLive()
+        ? restackStoredVisitFinancials(
+          await resolveSeriesExtensionPriceTemplate(trx, parent.id, parent),
+          dueAddons,
+          storedDiscountScope,
+        )?.addonDollars
+        : null;
+      await insertRecurringChildAddons(trx, row.id, dueAddons, restackedAddonDollars);
     }
     // Resolve/insert the alert row in the SAME transaction — the resolution
     // IS the idempotency claim a concurrent click's in-lock re-read checks.
@@ -18482,6 +18687,9 @@ router._test = {
   calculateVisitFinancialsForAddons,
   calculateStoredVisitFinancials,
   applyStoredVisitFinancials,
+  restackStoredVisitFinancials,
+  applyDiscountStackRestack,
+  insertRecurringChildAddons,
   loadStoredDiscountScope,
   clearAppointmentDiscountCatalogFields,
   appointmentDiscountInputChanged,

@@ -10,6 +10,46 @@
  * in place; none reads the DB.
  */
 
+const { stackVisitDiscounts } = require('../discount-stack');
+
+// A discount slot for stackVisitDiscounts — { discountType, amount,
+// maxDiscountDollars } — built from a stored row's own TYPED columns
+// (line_discount_type/amount, discount_type/amount/max_dollars) or a live
+// pricing object's (discountType/discountAmount/maxDiscountDollars), never
+// from the row's frozen dollar figure. `null` when there's no discount at
+// all — the "no slot" contract stackVisitDiscounts' lineDiscount /
+// appointmentDiscount already expect.
+function typedDiscountSlot(discountType, amount, maxDiscountDollars = null) {
+  if (!discountType) return null;
+  const amt = Number(amount);
+  if (!Number.isFinite(amt)) return null;
+  return { discountType, amount: amt, maxDiscountDollars: maxDiscountDollars ?? null };
+}
+
+// Restack a primary line + its due add-ons + one appointment-level slot
+// through the canonical engine (server/services/discount-stack.js) — the ONE
+// reconstruction every recurring-extension caller (auto-extend, visit-count
+// top-up, alert extend/convert) shares instead of copyLineDiscountFields'
+// frozen line_discount_dollars / copyAddonDiscountFields' frozen
+// discount_dollars, which replay a dollar figure computed against a
+// DIFFERENT occurrence's add-on mix (Codex #4405 r7 P1: a later visit
+// computed $61.50 instead of $63.00). `lines[0]` is always the primary;
+// `lines[1..]` mirror `addonLines`' own order, so a caller can map
+// `stacked.lines[i + 1]` straight back to `addonLines[i]`. Eligibility
+// (percent-exclusion catalog, "Applies to" scope) is the caller's own — this
+// helper only restacks the slots it's handed.
+function restackOccurrenceDiscounts({ primaryGross, primaryDiscount, primaryEligible = true, addonLines, appointmentDiscount, compound }) {
+  const lines = [
+    { gross: primaryGross || 0, lineDiscount: primaryDiscount || null, eligible: primaryEligible !== false },
+    ...(Array.isArray(addonLines) ? addonLines : []).map((line) => ({
+      gross: line.gross || 0,
+      lineDiscount: line.lineDiscount || null,
+      eligible: line.eligible !== false,
+    })),
+  ];
+  return stackVisitDiscounts({ lines, appointmentDiscount: appointmentDiscount || null, compound });
+}
+
 // Apply a discount to a price. Returns the discounted price (>= 0).
 function applyDiscount(price, type, amount) {
   if (price == null || !type || amount == null || amount === '' || isNaN(Number(amount))) return price;
@@ -100,4 +140,6 @@ module.exports = {
   copyBillToFields,
   copyStampedServiceAddressFields,
   recurringServiceAddress,
+  typedDiscountSlot,
+  restackOccurrenceDiscounts,
 };
