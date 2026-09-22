@@ -234,6 +234,21 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
     }
   }, 30000);
 
+  test('timeline payment search accepts a raw amount without display punctuation', async () => {
+    const paymentId = randomUUID();
+    try {
+      await mockPg('payments').insert({
+        id: paymentId, customer_id: ids[3], payment_date: '2026-01-04',
+        amount: '1250.00', status: 'paid', description: 'Synthetic payment search',
+      });
+      const result = await read('/:id/timeline', { type: 'payment', search: '1250.00' }, { params: { id: ids[3] } });
+      expect(result.timeline.map(row => row.id)).toEqual([`payment:${paymentId}`]);
+      expect(result.timeline[0].title).toContain('$1,250.00');
+    } finally {
+      await mockPg('payments').where({ id: paymentId }).delete();
+    }
+  }, 30000);
+
   test('timeline deduplicates mirrored voice calls and retains unmatched legacy calls', async () => {
     const conversationId = randomUUID();
     const messageId = randomUUID();

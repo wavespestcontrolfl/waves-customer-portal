@@ -107,6 +107,30 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(requests.at(-1).get('search')).toBe('gate');
   });
 
+  it('waits for the selected profile before requesting its timeline after an earlier load failed', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const nextProfile = deferred();
+    let nextTimelineReads = 0;
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url).split('?')[0];
+      if (path.endsWith('/customer-b/timeline')) {
+        nextTimelineReads += 1;
+        return response({ timeline: [{ id: 'beta-history', type: 'interaction', title: 'Beta history' }] });
+      }
+      if (path.endsWith('/customer-a')) return response({ error: 'Profile unavailable' }, 503);
+      if (path.endsWith('/customer-b')) return nextProfile.promise;
+      return response({});
+    }));
+    const view = render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findByText('Failed to load customer');
+    view.rerender(<Customer360ProfileV2 customerId="customer-b" onClose={vi.fn()} />);
+    await waitFor(() => expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/customer-b'))).toBe(true));
+    expect(nextTimelineReads).toBe(0);
+    await act(async () => nextProfile.resolve(await response(customerDetail('customer-b', 'Blair'))));
+    expect(await screen.findByText('Beta history')).toBeInTheDocument();
+    expect(nextTimelineReads).toBe(1);
+  });
+
   it('opens the shell bar and refreshes only a matching customer after its verified property change', async () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
     let name = 'Before';

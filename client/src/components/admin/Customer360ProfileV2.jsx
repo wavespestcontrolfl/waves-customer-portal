@@ -8572,6 +8572,7 @@ function useCustomerProfileRecord({ customerId, customerIdRef, isAdmin, lastMuta
     profileLoadError,
     setProfileReloadKey,
     setData,
+    profileCustomerId: data?.customer?.id,
     profileVersion,
     profileActionErr,
   };
@@ -9600,6 +9601,7 @@ export default function Customer360ProfileV2({
     profileLoadError,
     setProfileReloadKey,
     setData,
+    profileCustomerId,
     profileVersion,
     profileActionErr,
   } = useCustomerProfileRecord({ customerId, customerIdRef, isAdmin, lastMutation });
@@ -9700,7 +9702,7 @@ export default function Customer360ProfileV2({
     setHistorySearch("");
   }, [customerId, setTimelineFilter, setTimelineSearch]);
   const history = useCustomerHistory({
-    customerId, kind: "timeline", enabled: isAdmin && !loading,
+    customerId, kind: "timeline", enabled: [isAdmin, !loading, String(profileCustomerId) === String(customerId)].every(Boolean),
     query: new URLSearchParams({ type: timelineFilter === "notes" ? "interaction" : timelineFilter, search: historySearch }).toString(),
     revision: profileVersion,
   });
