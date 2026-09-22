@@ -611,15 +611,21 @@ function stackInvoiceDocumentDiscounts(serviceLines, lineEntries, manualDiscount
   const invoiceCarriesServiceScope = serviceLines.some(
     (line) => line && line.service_key != null && String(line.service_key) !== "",
   );
+  // Codex pre-push audit P1 (round 1 on PR #4655): when a stamp carries
+  // BOTH a key and a category filter, a line must satisfy EVERY configured
+  // predicate — the same AND admin-schedule.js's own booking calculation
+  // requires (admin-schedule.js:2088-2092) — not just one. The old `||`
+  // let a line match on category alone even when the stamp also named a
+  // specific key, so a line sharing only the CATEGORY of a removed keyed
+  // service could still absorb the frozen credit instead of the stamp
+  // correctly resolving orphaned ($0). A filter that is absent (null)
+  // never constrains — only a filter the stamp actually set has to match.
   const scopeEligibleLines = (scopeKey, scopeCategory) => {
     if (!invoiceCarriesServiceScope || (!scopeKey && !scopeCategory)) return null;
+    const matchesKey = (line) => !scopeKey || String(line.service_key || "") === String(scopeKey);
+    const matchesCategory = (line) => !scopeCategory || String(line.service_category || "") === String(scopeCategory);
     return serviceLines
-      .map((line, i) => (
-        (scopeKey && String(line.service_key || "") === String(scopeKey)) ||
-        (scopeCategory && String(line.service_category || "") === String(scopeCategory))
-          ? i
-          : -1
-      ))
+      .map((line, i) => (matchesKey(line) && matchesCategory(line) ? i : -1))
       .filter((i) => i >= 0);
   };
   // A plain literal credit (no discount_id) has no scope concept of its own
@@ -639,7 +645,18 @@ function stackInvoiceDocumentDiscounts(serviceLines, lineEntries, manualDiscount
       ...(eligibleLines ? { eligibleLines } : {}),
     };
   });
+  // Codex pre-push audit P2 (round 1 on PR #4655): carry each manual pick's
+  // stable id into its term — stackOrder's canonical key falls back to a
+  // term's `id` (identified before anonymous) ONLY when two terms tie on
+  // slot/kind/value/cap/scope; omitting it here meant two DISTINCT same-
+  // rate/same-cap manual discounts fell through to raw array/query order
+  // instead, so which one got credited with the larger, earlier-compounded
+  // share could swap between the preview and the save (a different DB
+  // return order) even though the invoice TOTAL stayed the same —
+  // recordInvoiceDiscounts then rolled the wrong per-discount dollar figure
+  // into discounts.total_discount_given for each id.
   const documentManualTerms = manualDiscountRows.map((d) => ({
+    id: d.id,
     discountType: d.discount_type,
     amount: Number(d.amount) || 0,
     maxDiscountDollars: d.max_discount_dollars,

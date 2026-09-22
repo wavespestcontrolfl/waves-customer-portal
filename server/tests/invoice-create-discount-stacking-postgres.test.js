@@ -204,4 +204,47 @@ postgres('InvoiceService.create discount stacking — real Postgres round trip',
     expect(Number(invoice.discount_amount)).toBe(12);
     expect(Number(invoice.total)).toBe(138);
   });
+
+  // Codex pre-push audit P1, round 1 on PR #4655: a stamp scoped by BOTH
+  // key AND category must require BOTH to match (AND) — real columns,
+  // real round trip.
+  test('a stamp scoped by BOTH key and category does not match a line sharing only the category', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const customerId = await insertCustomer();
+    const schedId = randomUUID();
+    await trx('scheduled_services').insert({
+      id: schedId,
+      customer_id: customerId,
+      service_type: 'Pest Control',
+      scheduled_date: '2099-01-15',
+      status: 'confirmed',
+      estimated_price: 100,
+      primary_line_price: 100,
+      service_key_snapshot: 'mosquito_lawn_addon',
+      service_category_snapshot: 'lawn',
+      discount_id: randomUUID(),
+      discount_name: 'Lawn Add-on Credit',
+      discount_type: 'fixed_amount',
+      discount_amount: 30,
+      discount_dollars: 30,
+      discount_service_key_filter: 'lawn_care',
+      discount_service_category_filter: 'lawn',
+    });
+
+    const scheduledInvoice = await InvoiceService.buildLineItemsForScheduledService(schedId, {
+      fallbackAmount: 100,
+      fallbackDescription: 'Service visit',
+    });
+    const invoice = await InvoiceService.create({
+      customerId,
+      scheduledServiceId: schedId,
+      title: 'Pest Control',
+      lineItems: scheduledInvoice.lineItems,
+      trustedStoredDiscountSources: ['scheduled_service'],
+    });
+
+    expect(Number(invoice.subtotal)).toBe(100);
+    expect(Number(invoice.discount_amount)).toBe(0);
+    expect(Number(invoice.total)).toBe(100);
+  });
 });

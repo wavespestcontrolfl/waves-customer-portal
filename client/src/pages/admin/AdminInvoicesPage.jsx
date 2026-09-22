@@ -104,7 +104,7 @@ import DictationButton from "../../components/tech/DictationButton";
 import MobileCardOnFileSheet from "../../components/schedule/MobileCardOnFileSheet";
 import { getAdminUser } from "../../lib/adminAuth";
 import { useDiscountStackingState, ensureStackingFresh } from "../../hooks/useDiscountStacking";
-import { stackDiscounts } from "../../lib/discountStack";
+import { stackDiscounts, stackDocumentDiscounts } from "../../lib/discountStack";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
 // STATUS_COLORS folds cleanly — sent/viewed were both #0A7EC2 in V1, stay identical post-fold.
@@ -363,12 +363,56 @@ export function invoiceLineAmount(item) {
   );
 }
 
+// GATE_DISCOUNT_STACKING (Codex pre-push audit P1, round 1 on PR #4655):
+// which stored sources this form trusts as FROZEN — mirrors invoice.js's
+// EDIT_TRUSTED_DISCOUNT_SOURCES (calculateUpdateFinancials), since this
+// form's edit mode is the one place a client-loaded line item can carry
+// one of these stamps. A trusted item's dollars are never recomputed from
+// the live catalog, on this form or the server.
+const TRUSTED_STORED_DISCOUNT_SOURCES = new Set(["scheduled_service", "validated_checkout"]);
+
+// GATE_DISCOUNT_STACKING (Codex pre-push audit P1, round 1 on PR #4655):
+// the ONE rule for whether a submit-time ensureStackingFresh() probe still
+// backs the preview a money POST is about to submit. `fresh.known` false
+// (the hook's own fail-closed shape on an unreachable probe) always
+// refuses — a preview computed under the fail-closed assumption can never
+// be trusted to match an UNCONFIRMED live answer, even one that happens to
+// read enabled:false. Exported so this exact contract is tested directly,
+// without rendering the form.
+export function stackingProbeMatchesPreview(fresh, stackingEnabledAtPreview) {
+  return !!fresh?.known && fresh.enabled === stackingEnabledAtPreview;
+}
+
+// Mirrors invoice.js's isStoredDiscountLineItem: a trusted source PLUS a
+// real discount_dollars figure — never inferred from the source alone.
+export function isStoredInvoiceDiscountItem(item) {
+  return (
+    TRUSTED_STORED_DISCOUNT_SOURCES.has(item?.stored_discount_source) &&
+    item?.discount_dollars != null &&
+    Number.isFinite(Number(item.discount_dollars))
+  );
+}
+
 // The (type, amount, cap) term one discount LINE ITEM contributes to its
-// parent line's stack — client mirror of invoice.js's lineItemDiscountTerm.
-// Falls back to a fixed_amount term at the item's OWN already-resolved
-// dollars when its catalog row can't be found (deactivated since it was
-// added), so a stale pick never breaks the preview.
+// stack — client mirror of invoice.js's lineItemDiscountTerm /
+// resolveStoredDiscountLineItem. A TRUSTED STORED stamp (scheduled_service
+// / validated_checkout) is checked FIRST and always contributes its own
+// FROZEN dollars as a fixed_amount term — never recomputed from the live
+// catalog row, even when that row is still active and even when the
+// line's own gross has since changed (Codex pre-push audit P1: editing a
+// $100 line carrying a frozen $10 10%-stamp to $200 must still preview
+// $10 off, never a live-recomputed $20 — the server always saves the
+// frozen $10). A FRESH (non-stored) pick still resolves against the
+// current catalog row, falling back to its own already-resolved dollars
+// when that row can't be found (deactivated since it was added), so a
+// stale pick never breaks the preview.
 export function invoiceDiscountItemTerm(item, discountRowById) {
+  if (isStoredInvoiceDiscountItem(item)) {
+    return {
+      discountType: "fixed_amount",
+      amount: Math.max(0, Math.abs(Number(item.discount_dollars))),
+    };
+  }
   const row = item?.discount_id
     ? discountRowById.get(String(item.discount_id))
     : null;
@@ -393,12 +437,20 @@ export function invoiceDiscountItemTerm(item, discountRowById) {
 }
 
 // The form's discount total: additive (pre-lane, byte-identical) when the
-// gate is off; per-line compounded (client/src/lib/discountStack.js — the
-// parity-tested mirror of the server engine) when it is on. A document-
-// wide item (discount_for: null — only ever loaded from an existing
+// gate is off; compounded (client/src/lib/discountStack.js — the parity-
+// tested mirror of the server engine) when it is on. GATE_DISCOUNT_STACKING
+// (Codex pre-push audit P1, round 1 on PR #4655): a document-wide
+// (unparented, discount_for: null — only ever loaded from an existing
 // invoice in edit mode; this form has no document-level picker of its
-// own) counts at its own already-resolved face value either way, same as
-// the pre-lane additive path always did for that category.
+// own) credit is now interleaved with every line's OWN terms through
+// stackDocumentDiscounts — the SAME per-line/document engine
+// server/services/invoice.js's stackInvoiceDocumentDiscounts saves
+// through — instead of being summed independently at face value outside
+// the stack. Summing it separately let a fresh line percentage compound
+// against the line's untouched gross instead of what the document credit
+// already took: a $30 unparented credit plus a 10% line pick on $100 used
+// to preview a $40 discount ($60 total) here while the save (correctly
+// interleaving them) recomputed $37 ($63 total).
 export function computeInvoiceLineDiscountTotal({
   lineItems,
   availableDiscounts,
@@ -415,18 +467,68 @@ export function computeInvoiceLineDiscountTotal({
     (availableDiscounts || []).map((d) => [String(d.id), d]),
   );
   const serviceLineItems = items.filter((i) => i._kind !== "discount");
-  const perLine = serviceLineItems.reduce((sum, line) => {
-    const gross = Math.max(0, invoiceLineAmount(line));
-    const terms = items
+  const lines = serviceLineItems.map((line) => ({
+    gross: Math.max(0, invoiceLineAmount(line)),
+    terms: items
       .filter((i) => i._kind === "discount" && i.discount_for === line.client_id)
-      .map((i) => invoiceDiscountItemTerm(i, discountRowById));
-    if (!terms.length) return sum;
-    return sum + stackDiscounts(gross, terms, { compound: true }).totalDollars;
-  }, 0);
-  const unparented = items
+      .map((i) => invoiceDiscountItemTerm(i, discountRowById)),
+  }));
+  const documentTerms = items
     .filter((i) => i._kind === "discount" && !i.discount_for)
-    .reduce((sum, i) => sum + Math.abs(invoiceLineAmount(i)), 0);
-  return perLine + unparented;
+    .map((i) => invoiceDiscountItemTerm(i, discountRowById));
+  const stacked = stackDocumentDiscounts({ lines, documentTerms });
+  // Each line's `net` already folds in its pro-rata share of the document
+  // terms above (stackDocumentDiscounts interleaves both in one canonical
+  // pass) — so the total taken off a line is simply gross - net; summing
+  // documentTerms[].dollars again on top would double-count. Rounded per
+  // line (not just the final sum) so IEEE754 subtraction noise (111 - 94.9
+  // === 16.099999999999994) can never surface even on a single-line
+  // invoice, matching the engine's own cents() discipline throughout.
+  return Math.round(
+    lines.reduce((sum, line, idx) => sum + (line.gross - stacked.lines[idx].net), 0) * 100,
+  ) / 100;
+}
+
+// GATE_DISCOUNT_STACKING (Codex pre-push audit P2, round 1 on PR #4655):
+// adding a discount pick to a line can change canonical order — a NEW
+// fixed credit can sort AHEAD of an existing percentage pick (fixed
+// credits, any slot, first), shrinking what that existing pick actually
+// takes. The aggregate total (computeInvoiceLineDiscountTotal) always
+// recomputes every term fresh, so it was already correct — but each
+// EXISTING sibling row's own stored dollars (its displayed line-item
+// amount) stayed whatever they were the moment THEY were added, stale
+// until the next save. Recomputes and rewrites every FRESH (non-stored)
+// sibling on the line from the SAME stackDiscounts() call the new pick's
+// own sizing already runs — one allocation, not two independent ones — so
+// the read-only rows the operator sees match the total before Save, not
+// only after it. A stored/frozen sibling (isStoredInvoiceDiscountItem) is
+// NEVER rewritten — its displayed dollars stay its own frozen face value,
+// exactly like create()'s save.
+// Returns { lineItems: <copy with siblings repriced>, dollars: <the new
+// pick's own resolved dollars> }.
+export function repriceLineWithNewDiscountPick({
+  lineItems,
+  parentClientId,
+  newTerm,
+  discountRowById,
+}) {
+  const items = Array.isArray(lineItems) ? lineItems : [];
+  const parent = items.find((i) => i.client_id === parentClientId);
+  const baseAmount = Math.max(0, invoiceLineAmount(parent));
+  const siblingItems = items.filter(
+    (i) => i._kind === "discount" && i.discount_for === parentClientId,
+  );
+  const siblingTerms = siblingItems.map((i) => invoiceDiscountItemTerm(i, discountRowById));
+  const stacked = stackDiscounts(baseAmount, [...siblingTerms, newTerm], { compound: true });
+  const dollars = stacked.items[stacked.items.length - 1].dollars;
+  const repriced = items.map((item) => {
+    const siblingIdx = siblingItems.indexOf(item);
+    if (siblingIdx === -1 || isStoredInvoiceDiscountItem(item)) return item;
+    const newDollars = stacked.items[siblingIdx].dollars;
+    if (Math.abs(newDollars - Math.abs(invoiceLineAmount(item))) < 0.005) return item;
+    return { ...item, unit_price: -newDollars, amount: -newDollars };
+  });
+  return { lineItems: repriced, dollars };
 }
 
 // A first-delivery request (firstDelivery: true) whose claim finds the
@@ -5489,9 +5591,19 @@ function CreateInvoice({
   // close it. If the live answer has moved since the preview above ran,
   // the totals on screen are not what the server will save, so the
   // submission must stop rather than silently bill the other regime.
+  // Codex pre-push audit P1 (round 1 on PR #4655): a submit-time probe
+  // FAILURE also has to refuse — ensureStackingFresh() fails closed to
+  // {enabled:false, known:false} on an unreachable API (exactly right for
+  // the PREVIEW above, which must never show a compounded discount the
+  // server hasn't confirmed), but a bare enabled-equality check here would
+  // let that same false-while-unknown answer match an already-additive
+  // preview and let the submit through — even though the LIVE gate could
+  // genuinely be on, in which case the server compounds while this just
+  // posted additive totals. known:false must always refuse, independent
+  // of whether enabled happens to equal stackingEnabled.
   const stackingStillFresh = async () => {
     const fresh = await ensureStackingFresh();
-    if (fresh.enabled !== stackingEnabled) {
+    if (!stackingProbeMatchesPreview(fresh, stackingEnabled)) {
       showToast(
         "Discount rules just changed — refresh this form and re-apply any discounts before saving",
         "error",
@@ -5841,7 +5953,6 @@ function CreateInvoice({
   // available (deactivated since it was added), so a stale pick never
   // breaks the preview.
   const discountRowById = new Map(availableDiscounts.map((d) => [String(d.id), d]));
-  const discountItemTerm = (item) => invoiceDiscountItemTerm(item, discountRowById);
   const addDiscountToLine = (lineIdx, discount) => {
     const parent = lineItems[lineIdx];
     if (!parent || parent._kind === "discount") return;
@@ -5865,24 +5976,30 @@ function CreateInvoice({
     // canonical order server/services/invoice.js's stackInvoiceDocumentDiscounts
     // will apply once this saves. Gate off (or a custom preset, handled by
     // getCustomDiscountValue above) keeps the pre-lane per-item sizing.
+    // Codex pre-push audit P2, round 1 on PR #4655: canonical reordering
+    // can also change an EXISTING sibling's own share (a new fixed credit
+    // sorting ahead of an existing percentage) — repriceLineWithNewDiscountPick
+    // recomputes the WHOLE line's picks together and rewrites every
+    // FRESH sibling row, not just this new one, so the visible per-row
+    // breakdown agrees with the total immediately, not only after Save.
+    let repricedLineItems = lineItems;
     const dollars =
       custom?.dollars ??
       (stackingEnabled
         ? (() => {
-            const siblingTerms = lineItems
-              .filter(
-                (i) => i._kind === "discount" && i.discount_for === parent.client_id,
-              )
-              .map(discountItemTerm);
             const newTerm = {
               discountType: discount.discount_type,
               amount: Number(discount.amount) || 0,
               maxDiscountDollars: discount.max_discount_dollars,
             };
-            const stacked = stackDiscounts(baseAmount, [...siblingTerms, newTerm], {
-              compound: true,
+            const result = repriceLineWithNewDiscountPick({
+              lineItems,
+              parentClientId: parent.client_id,
+              newTerm,
+              discountRowById,
             });
-            return stacked.items[stacked.items.length - 1].dollars;
+            repricedLineItems = result.lineItems;
+            return result.dollars;
           })()
         : Math.min(baseAmount, roundMoney(previewDiscount(discount, baseAmount))));
     if (dollars <= 0) {
@@ -5911,7 +6028,7 @@ function CreateInvoice({
           }
         : {}),
     };
-    const updated = [...lineItems];
+    const updated = [...repricedLineItems];
     let insertAt = lineIdx + 1;
     while (
       updated[insertAt]?._kind === "discount" &&
