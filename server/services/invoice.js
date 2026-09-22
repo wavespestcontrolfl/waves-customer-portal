@@ -1380,14 +1380,19 @@ async function calculateUpdateFinancials({
           ? lineItemDiscountRowById.get(String(item.discount_id))
           : null;
         if (isStoredDiscountLineItem(item, EDIT_TRUSTED_DISCOUNT_SOURCES) || isFrozenByPosition(item)) {
-          // Codex pre-push audit P1 (round 4 on PR #4655), applied here
-          // too for gate-transition consistency: a line-scoped trusted
-          // item whose target line is gone must resolve to $0, not its
-          // raw frozen face value — same orphaned ⇒ $0 rule the gate-on
-          // branch above now enforces.
-          const isOrphanedLineScopedItem = !!item.discount_for
-            && !serviceLineByClientId.has(String(item.discount_for));
-          return resolveStoredDiscountLineItem(item, row, isOrphanedLineScopedItem ? 0 : undefined);
+          // Codex pre-push audit P1 (round 5 on PR #4655, revert): gate OFF
+          // stays BYTE-IDENTICAL to main's pre-lane replay — main never
+          // checked whether an orphaned stamp's target line still exists
+          // here, and the dark-ship contract this gate ships under
+          // (GATE_DISCOUNT_STACKING off ⇒ every document-stack path
+          // unchanged) depends on that staying true. The orphaned ⇒ $0
+          // rule is a GATE_DISCOUNT_STACKING behavior, confined to
+          // computeStackedDocumentDiscountLines above (the gate-ON
+          // branch) — never applied here. See "Not in this slice" in the
+          // PR body for the pre-existing gate-off quirk this leaves in
+          // place (an orphaned line-scoped stamp replays its frozen face
+          // value under gate off, same as before this lane).
+          return resolveStoredDiscountLineItem(item, row);
         }
         const parent = item.discount_for
           ? serviceLineByClientId.get(String(item.discount_for))

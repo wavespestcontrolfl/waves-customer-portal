@@ -8,9 +8,20 @@
  * NEITHER lineEntries nor documentEntries and never reached the engine;
  * resolveStoredDiscountLineItem's override check (`overrideDollars !=
  * null`) treated the resulting `undefined` the same as "no override" and
- * fell back to the frozen value. Fixed in both the gate-on
- * (computeStackedDocumentDiscountLines) and gate-off (calculateUpdateFinancials's
- * own per-item branch) paths, for gate-transition consistency.
+ * fell back to the frozen value.
+ *
+ * Round 5 revert (Claude-fallback P1, post-push on this lane): the fix
+ * is confined to computeStackedDocumentDiscountLines — the GATE-ON path
+ * — only. GATE_DISCOUNT_STACKING ships dark, and this PR's whole
+ * ship-safety argument rests on "gate off = every document-stack path
+ * byte-identical to main" (CLAUDE.md). The gate-OFF branch of
+ * calculateUpdateFinancials was briefly given the SAME $0 override too,
+ * which broke that contract — reverted back to main's unconditional
+ * frozen-value replay. Gate OFF now keeps the pre-existing quirk this
+ * fix was originally written to close (an orphaned line-scoped stamp
+ * still replays its frozen face value there) — tracked in the PR body
+ * under "Not in this slice" as something the gate's eventual activation
+ * fixes, not this dark-shipped diff.
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -91,7 +102,13 @@ describe('orphaned line-scoped trusted item resolves to $0, never its frozen fac
     expect(result.total).toBe(50);
   });
 
-  test('gate OFF: the same orphaned stamp also contributes $0 — gate-transition consistency', async () => {
+  // Round 5 revert: gate OFF stays byte-identical to main — an orphaned
+  // line-scoped stamp still replays its frozen $30 face value there, the
+  // SAME pre-existing behavior this fix only closes under
+  // GATE_DISCOUNT_STACKING. Not a money-safety regression: this dark-ships
+  // false by default, and activation is tracked as the fix for it (PR
+  // body, "Not in this slice").
+  test('gate OFF: the same orphaned stamp still replays its frozen $30 — byte-identical to main, unaffected by this lane', async () => {
     const { persisted, submitted } = orphanFixture();
     const result = await calculateUpdateFinancials({
       lineItems: submitted,
@@ -99,8 +116,8 @@ describe('orphaned line-scoped trusted item resolves to $0, never its frozen fac
       invoice: { id: 'invoice-1', line_items: JSON.stringify(persisted) },
     });
     expect(result.subtotal).toBe(50);
-    expect(result.discount_amount).toBe(0);
-    expect(result.total).toBe(50);
+    expect(result.discount_amount).toBe(30);
+    expect(result.total).toBe(20);
   });
 
   test('gate ON: a NON-orphaned line-scoped stamp (its line still present) keeps replaying its frozen $30 unaffected', async () => {
