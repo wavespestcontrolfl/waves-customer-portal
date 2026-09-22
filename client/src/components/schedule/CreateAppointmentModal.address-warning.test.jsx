@@ -841,4 +841,31 @@ describe('appointment discount gate-drift protection (Codex pre-push audit P1, r
     await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
     expect(JSON.parse(schedulePosts(fetcher)[0][1].body).discountId).toBe('mil');
   });
+
+  // Codex pre-push audit P0 (round 4): retryAppointmentDiscountGate used to
+  // re-freeze appointmentDiscountGateSnapshot to a CONFIRMED-off answer and
+  // fall through — appointmentDiscount then read null on the very next
+  // render (discounts never apply under a confirmed-off gate), silently
+  // dropping the banner AND the discount's dollars in the same render with
+  // nothing telling the operator it happened. The fix explicitly clears the
+  // selection and raises a toast so the removal is always an ANNOUNCED
+  // consequence of the operator's own Retry click.
+  it('Retry resolving to a confirmed-off gate clears the discount with a visible toast, never silently', async () => {
+    const { fetcher } = await pickThenFlipGateTo(false);
+    await screen.findByText('Could not confirm the discount-stacking status — retry before saving.');
+    vi.mocked(ensureStackingFresh).mockResolvedValueOnce({ enabled: false, known: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await screen.findByText('Discount stacking is now off — the appointment discount was removed. Add it again if stacking comes back on.');
+    // The picker honestly reflects the removal — never a silent revert. The
+    // gate reads confirmed-off now with nothing selected, so the whole
+    // appointment-discount section correctly disappears (same as any other
+    // gate-off render that never had a pick at all).
+    await waitFor(() => expect(screen.queryByLabelText('Appointment discount')).toBeNull());
+    expect(screen.queryByText('Military Discount: -$10.00')).toBeNull();
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    expect(JSON.parse(schedulePosts(fetcher)[0][1].body).discountId).toBeUndefined();
+  });
 });

@@ -3075,7 +3075,15 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Header, footer and second-program CTA share one synchronous lock. React
   // state alone can admit two taps before the first render marks us saving.
   const handleSubmit = async (separateProgram) => {
-    if (appointmentDiscountHasNoGroup || appointmentDiscountGateDrifted) return;
+    // Codex pre-push audit P1 (round 4): the disabled attribute on the
+    // primary Save button is not the only path to this handler (the
+    // header/footer/second-program CTA share this one lock, and a form
+    // Enter-key submission is a real bypass of a merely-disabled button) —
+    // so every discount-save-blocking condition canSubmit ANDs in below
+    // must ALSO be checked here directly, not just the two that happened
+    // to be added first.
+    if (appointmentDiscountHasNoGroup || appointmentDiscountGateDrifted
+      || stackingUnconfirmedBlocksSave || percentExclusionsBlockSave) return;
     if (!canSubmitAppointments({
       selectedCustomer,
       services,
@@ -3203,9 +3211,32 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // section's stackingEnabled-gated render and this snapshot never disagree
   // for long. If the probe fails (known: false), nothing is reconciled —
   // stackingUnconfirmedBlocksSave (below) already covers that case.
+  //
+  // Codex pre-push audit P0 (round 4): a probe that confirms the gate is
+  // genuinely OFF cannot just re-freeze the snapshot to false and fall
+  // through — appointmentDiscount (a few dozen lines up) reads null once
+  // the snapshot is false (discounts do not apply under a confirmed-off
+  // gate, matching the pre-lane contract), so that alone would drop both
+  // the blocking banner AND the discount's dollars in the SAME render with
+  // nothing distinguishing "reconciled to off" from an ordinary silent
+  // revert — a real-money bug of the exact class this whole mechanism
+  // exists to prevent. A confirmed-OFF resolution now explicitly CLEARS
+  // the selection (never leaves it in a state where the UI shows "no
+  // discount" while some stale internal pick still lingers) and raises a
+  // visible toast — so the removal is always an announced consequence of
+  // the operator's own Retry click, never a silent side effect of it.
   const retryAppointmentDiscountGate = async () => {
     const fresh = await ensureStackingFresh();
-    if (fresh.known) setAppointmentDiscountGateSnapshot(fresh.enabled);
+    if (fresh.known) {
+      if (fresh.enabled === false && appointmentDiscountState) {
+        setAppointmentDiscount(null);
+        setAppointmentDiscountGateSnapshot(null);
+        setToast('Discount stacking is now off — the appointment discount was removed. Add it again if stacking comes back on.');
+        setTimeout(() => setToast(''), 4000);
+      } else {
+        setAppointmentDiscountGateSnapshot(fresh.enabled);
+      }
+    }
     retryStackingProbe();
   };
   // A percentage/variable_percentage appointment discount previews against
