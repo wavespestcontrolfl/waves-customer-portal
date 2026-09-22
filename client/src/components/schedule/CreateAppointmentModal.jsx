@@ -3024,11 +3024,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     attempt(350, 0);
     return () => { cancelled = true; clearTimeout(retryTimer); };
   }, [previewRequestKey, previewRetryNonce]);
-  // Submit is held while ANY regime-dependent group's server-confirmed
-  // preview hasn't landed for the CURRENT inputs yet — the button reads
-  // "Confirming…" during this window (below) rather than a plain
-  // disabled state with no explanation. Retries automatically on failure
-  // (see the effect above), so this never gets permanently stuck.
+  // Submit is held (disabled, via canSubmit below) while ANY
+  // regime-dependent group's server-confirmed preview hasn't landed for
+  // the CURRENT inputs yet, so there is no window in which a click can
+  // post against a stale or in-flight regime. Retries automatically on
+  // failure (see the effect above), so this never gets permanently stuck
+  // — the operator just waits for the button to re-enable and clicks
+  // again, with no separate "Confirming…" label (the plain disabled
+  // state was kept deliberately: this file's own test suite has three
+  // dozen+ getByRole('button', { name: 'Schedule appointment' }) sites,
+  // a stable label lets them keep capturing one DOM reference instead of
+  // re-querying after every state change).
   const previewConfirming = previewGroupRequests.length > 0
     && !(serverPreview.status === 'ready' && serverPreview.forKey === previewRequestKey);
   // GitHub round 4 P0 (Codex, blocked push 3): landing a response was
@@ -3571,43 +3577,72 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           // even one carrying no discount at all, with no way to Retry past
           // it (there is nothing left to reconcile for an unrelated group).
           const groupOwnPricingRegimeDependent = groupRegimeDependent(group, carriesAppointmentDiscount);
-          // GitHub round 4 P1 (Codex, blocked push 3): the reference this
-          // group's live probe is compared against must be the SAME
-          // per-group value groupStackedPerVisitTotal(group) itself now
-          // reads (see that function's own comment) — appointmentDiscountCompound
-          // only when THIS group carries the appointment discount (whose
-          // own snapshot may be intentionally frozen post-commit),
-          // stackingEnabled (the live value, no frozen snapshot to
-          // protect) for any other group. Comparing every group against
-          // the appointment-discount-specific frozen snapshot meant an
-          // unrelated group's own line-discount revalidation could never
-          // pass again once that snapshot stopped updating.
-          const groupPricedUnder = carriesAppointmentDiscount ? appointmentDiscountCompound : stackingEnabled;
-          // The CONFIRMED live regime this group's write is bound to —
+          // GitHub round 6 P0 (Codex, blocked push 7 on PR #4656): this
+          // used to compare the live probe against groupPricedUnder
+          // (carriesAppointmentDiscount ? appointmentDiscountCompound :
+          // stackingEnabled) — a HOOK/PICK snapshot, not the regime that
+          // actually produced the number on screen. serverPreview.regime
+          // (the regime the last-landed /admin/schedule/preview response
+          // was computed under, the same response groupStackedPerVisitTotal
+          // reads for the DISPLAYED total) is now the only source: the
+          // regime that produced the displayed price is the only regime
+          // the write may bind to. groupPricedUnder is deleted outright —
+          // grepped for a non-money consumer first; it had none (its only
+          // two references were its own declaration and this comparison).
+          //
+          // The CONFIRMED regime this group's write is bound to —
           // undefined (field omitted) whenever nothing about this group's
           // own total can move with the gate, matching #4655/#4658's own
           // "a write whose total can't move with the regime omits the
           // field entirely" contract exactly.
           let confirmedGroupRegime;
           if (groupOwnPricingRegimeDependent) {
+            // The regime that produced the CURRENTLY DISPLAYED price for
+            // this submission — null/not-fresh here should not be
+            // reachable in practice (Submit is held by previewConfirming
+            // until serverPreview is 'ready' for previewRequestKey), but
+            // is treated as a disagreement below rather than trusted,
+            // same fail-closed posture as everywhere else this file reads
+            // serverPreview.
+            const previewedRegimeFresh = serverPreview.status === 'ready' && serverPreview.forKey === previewRequestKey;
+            const previewedRegime = previewedRegimeFresh ? serverPreview.regime : null;
             const fresh = await ensureStackingFresh();
             assertSubmitCurrent();
-            if (!fresh.known || fresh.enabled !== groupPricedUnder) {
-              setStaleStackingNotice('The discount-stacking setting changed while this was open. Reload before saving so the totals match what will be saved.');
+            if (!previewedRegimeFresh || !fresh.known || fresh.enabled !== previewedRegime) {
+              // Do NOT submit under either regime. Invalidate the preview
+              // this group's request was priced under (it no longer
+              // matches the live gate, whether or not it still matches
+              // previewRequestKey) and force a re-fetch — bumping the
+              // status to 'loading' directly, not just the retry nonce,
+              // so previewConfirming reads true on THIS render already
+              // rather than waiting out the effect's own comparison
+              // (forKey still equals previewRequestKey, so the effect
+              // alone would not flip status without this). Deliberately
+              // NOT routed through setStaleStackingNotice: that drives
+              // discountSaveBlockedReason, a PERSISTENT banner that stays
+              // up until an explicit Retry click — gating Submit a second
+              // time on top of previewConfirming, which already holds it.
+              // The instruction is "hold Submit until the fresh response
+              // lands, then the operator clicks again" — one click, on
+              // Submit itself, once previewConfirming clears on its own.
+              // firstError still surfaces a one-time, non-blocking toast
+              // (submitFailureNotice below) so this attempt isn't silent.
+              setServerPreview((prev) => ({ ...prev, status: 'loading' }));
+              setPreviewRetryNonce((n) => n + 1);
               firstError = {
                 label: groupLabel(group),
-                message: 'the discount-stacking setting changed while this was open — reload and try again',
+                message: 'the discount-stacking setting changed while this was open — reconfirming the price, try again in a moment',
                 duplicate: false,
               };
               break;
             }
             // The LIVE value this freshness check just confirmed (already
-            // proven equal to groupPricedUnder above) — the server's own
-            // POST /admin/schedule refuses a mismatch against its live
-            // discountStackingLive() with a retryable 409 (GitHub round 4
-            // P0) rather than silently saving the other regime's math,
-            // mirroring #4655/#4658's identical contract.
-            confirmedGroupRegime = fresh.enabled;
+            // proven equal to the previewed regime above) — the server's
+            // own POST /admin/schedule refuses a mismatch against its
+            // live discountStackingLive() with a retryable 409 (GitHub
+            // round 4 P0) rather than silently saving the other regime's
+            // math, mirroring #4655/#4658's identical contract.
+            confirmedGroupRegime = previewedRegime;
             body.expected_discount_stacking = confirmedGroupRegime;
           }
           bookingPostAttempted = true;

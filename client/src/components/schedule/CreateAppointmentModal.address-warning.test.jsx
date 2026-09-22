@@ -77,6 +77,14 @@ function installModalFetch({
   // a function (groups) => { regime, results } (or throws, for a fetch
   // failure). Once exhausted, falls back to the default no-error echo.
   previewResponses,
+  // GitHub round 6 P0 follow-up (PR #4656): the default no-error echo
+  // used to hardcode regime: true always — fine for every test that
+  // never compares the previewed regime against a LATER-flipped live
+  // gate, but a test that DOES needs the re-fetched preview to reflect
+  // the CURRENT live value, same as the real server (which recomputes
+  // discountStackingLive() on every /preview call). Optional and unused
+  // by default so every other test's fixed regime: true is unchanged.
+  previewRegime,
 } = {}) {
   let addressRequests = 0;
   let prepayPreviews = 0;
@@ -176,7 +184,8 @@ function installModalFetch({
       // computed display/prepay assertions once the debounce resolves.
       // Omitting it makes that same read fall through to the local
       // computation, unchanged, exactly as before this fix existed.
-      return Promise.resolve(jsonResponse({ regime: true, results: groups.map((g) => ({ key: g.key })) }));
+      const regime = typeof previewRegime === 'function' ? previewRegime() : true;
+      return Promise.resolve(jsonResponse({ regime, results: groups.map((g) => ({ key: g.key })) }));
     }
     throw new Error(`Unhandled fetch in CreateAppointmentModal test: ${url}`);
   });
@@ -786,16 +795,23 @@ describe('recurring prepay preview scoping (Codex pre-push audit P1, round 2)', 
 });
 
 describe('appointment discount stale-gate retry (Codex pre-push audit P1)', () => {
-  // ensureStackingFresh() can disagree with the preview (or fail) at
-  // submit time while the POLLING hook's own `known` flag is still true —
-  // that leaves staleStackingNotice set with stackingUnconfirmedBlocksSave
-  // false. The banner's Retry button used to fall through to
-  // pickAppointmentDiscount(''), silently discarding the operator's
-  // selection instead of retrying.
-  it('retries the gate probe instead of removing the discount when only the submit-time check went stale', async () => {
-    vi.spyOn(window, 'alert').mockImplementation(() => {});
-    const retry = vi.fn();
-    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry });
+  // GitHub round 6 P0 (Codex, blocked push 7 on PR #4656): a submit-time
+  // disagreement between the live gate probe and the regime that produced
+  // the DISPLAYED price (serverPreview.regime — never the pick/hook
+  // snapshot) must not post under either regime. This replaces the
+  // earlier persistent-banner/Retry-button design this test previously
+  // covered (staleStackingNotice) with a self-healing path: invalidate
+  // the stale preview, force a re-fetch, and hold Submit
+  // (previewConfirming already does this — see that const's own comment)
+  // until a fresh response lands. No extra click on a banner; the
+  // operator just clicks Submit again once it re-enables.
+  it('a live-probe/previewed-regime disagreement at submit blocks the POST, invalidates the preview, and a second click through once a fresh one lands', async () => {
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    // Only the FIRST call disagrees with the previewed regime (true) —
+    // every later call (the mock's own default from the top of this
+    // file) resolves enabled:true again, letting the self-heal actually
+    // land instead of looping forever.
     vi.mocked(ensureStackingFresh).mockResolvedValueOnce({ enabled: false, known: true });
     const { fetcher } = installModalFetch({ discounts: [{
       id: 'mil', name: 'Military Discount', discount_type: 'fixed_amount',
@@ -808,12 +824,57 @@ describe('appointment discount stale-gate retry (Codex pre-push audit P1)', () =
     const submit = await screen.findByRole('button', { name: 'Schedule appointment' });
     await waitFor(() => expect(submit.disabled).toBe(false));
     fireEvent.click(submit);
-    await screen.findByText('Could not confirm the discount-stacking status — retry before saving.');
+    // No POST under either regime, and the operator is told why via the
+    // ordinary submit-failure toast/alert path (submitFailureNotice), not
+    // a second persistent gate.
+    await waitFor(() => expect(alertSpy).toHaveBeenCalledWith(
+      'Failed: the discount-stacking setting changed while this was open — reconfirming the price, try again in a moment',
+    ));
     expect(schedulePosts(fetcher)).toHaveLength(0);
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
-    // The selection survives the retry — never silently removed.
+    // The stale preview was invalidated — Submit is held again with no
+    // further operator action...
+    await waitFor(() => expect(submit.disabled).toBe(true));
+    // ...and clears on its own once the re-fetched preview lands.
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    // The selection survived the whole episode — never silently removed.
     expect(picker.value).toBe('mil');
-    expect(retry).toHaveBeenCalled();
+  });
+});
+
+describe('GitHub round 6 P0 item 3b (Codex, blocked push 7 on PR #4656) — expected_discount_stacking equals the previewed regime', () => {
+  // Uses a LINE discount (not the appointment-level picker, which is
+  // only reachable while the gate reads confirmed-on) so the SAME helper
+  // exercises both an ON and an OFF previewed regime — a group with just
+  // its own line discount is regime-dependent (groupRegimeDependent)
+  // regardless of whether stacking itself is on.
+  async function submitLineDiscountUnderRegime(regime) {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: regime, known: true, retry: vi.fn() });
+    vi.mocked(ensureStackingFresh).mockResolvedValue({ enabled: regime, known: true });
+    const { fetcher } = installModalFetch({
+      discounts: [{ id: 'five-pct', name: 'Five Percent', discount_type: 'percentage', amount: 5, is_active: true, show_in_invoices: true }],
+      previewResponses: [(groups) => ({ regime, results: groups.map((g) => ({ key: g.key })) })],
+    });
+    renderBooking();
+    await addOneSeasonalService();
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for First seasonal service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Five Percent/ }));
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    return JSON.parse(schedulePosts(fetcher)[0][1].body);
+  }
+
+  it('posts expected_discount_stacking: true when the previewed regime is ON', async () => {
+    const body = await submitLineDiscountUnderRegime(true);
+    expect(body.expected_discount_stacking).toBe(true);
+  });
+
+  it('posts expected_discount_stacking: false when the previewed regime is OFF', async () => {
+    const body = await submitLineDiscountUnderRegime(false);
+    expect(body.expected_discount_stacking).toBe(false);
   });
 });
 
@@ -1072,7 +1133,7 @@ describe('GitHub review round 1 on PR #4656', () => {
   // the check runs at EACH group's own turn, on the group that actually
   // needs it, not once up front for the whole booking.
   it('re-checks the gate freshness before EVERY group\'s POST in a multi-group save, not only once up front', async () => {
-    vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
     vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
     // The FIRST group carries no discount at all, so its own submit never
     // calls ensureStackingFresh — this single mocked resolution is
@@ -1098,7 +1159,15 @@ describe('GitHub review round 1 on PR #4656', () => {
     // catches the drift and refuses to post it.
     await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
     expect(JSON.parse(schedulePosts(fetcher)[0][1].body).discountId).toBeUndefined();
-    await screen.findByText('Could not confirm the discount-stacking status — retry before saving.');
+    // GitHub round 6 P0 (Codex, blocked push 7 on PR #4656): the SECOND
+    // group's mismatch no longer raises the persistent staleStackingNotice
+    // banner — it invalidates the preview and surfaces a one-time alert
+    // via the ordinary submit-failure path instead (same as the dedicated
+    // "appointment discount stale-gate retry" describe block's own test
+    // above), so this asserts on THAT alert rather than a banner.
+    await waitFor(() => expect(alertSpy).toHaveBeenCalledWith(expect.stringContaining(
+      'the discount-stacking setting changed while this was open — reconfirming the price, try again in a moment',
+    )));
     expect(schedulePosts(fetcher)).toHaveLength(1);
     expect(ensureStackingFresh).toHaveBeenCalledTimes(1);
   });
@@ -2033,12 +2102,19 @@ describe('GitHub round 4 item 3 follow-up (Codex, blocked push 3 on PR #4656)', 
   // genuinely matches what its OWN (never-frozen) total was computed
   // under.
   it("a remaining group's own line discount revalidates against the LIVE gate, not the committed group's frozen appointment-discount snapshot", async () => {
-    vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
     const retry = vi.fn();
     vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry });
     const secondScheduleRequest = deferred();
+    // GitHub round 6 P0 follow-up (PR #4656): Second's own regime binding
+    // now sources from the previewed regime, not the live hook snapshot —
+    // its re-fetched preview after the rerender below must reflect the
+    // SAME flipped gate ensureStackingFresh confirms, exactly as the real
+    // server's /preview route (which reads discountStackingLive() itself)
+    // would.
     const { fetcher } = installModalFetch({
       secondScheduleRequest,
+      previewRegime: () => useDiscountStackingState().enabled,
       discounts: [
         {
           id: 'credit', name: 'Ten Oh Three', discount_type: 'fixed_amount', amount: 10.03,
@@ -2069,10 +2145,7 @@ describe('GitHub round 4 item 3 follow-up (Codex, blocked push 3 on PR #4656)', 
     // The gate drifts off AFTER First committed -- appointmentDiscountCompound
     // freezes at true (round 4's :3513 fix) and never updates again. The
     // NEW live value (false) is what ensureStackingFresh will confirm on
-    // retry, and it's also what stackingEnabled (live) now reads --
-    // Second's OWN revalidation must compare against THAT, not the frozen
-    // snapshot, so a probe confirming the ALREADY-CURRENT live value must
-    // not read as a mismatch.
+    // retry, and it's also what stackingEnabled (live) now reads.
     vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: false, known: true, retry });
     booking.view.rerender(<CreateAppointmentModal
       defaultCustomer={CUSTOMER}
@@ -2084,6 +2157,24 @@ describe('GitHub round 4 item 3 follow-up (Codex, blocked push 3 on PR #4656)', 
     />);
     vi.mocked(ensureStackingFresh).mockResolvedValue({ enabled: false, known: true });
     const submit2 = screen.getByRole('button', { name: 'Schedule appointment' });
+    await waitFor(() => expect(submit2.disabled).toBe(false));
+    // GitHub round 6 P0 (Codex, blocked push 7 on PR #4656): Second's own
+    // revalidation now compares the live probe against serverPreview.regime
+    // (the regime that produced the DISPLAYED price) -- not the live hook
+    // snapshot directly. The gate flip above did not itself change
+    // previewRequestKey (none of its own inputs moved), so the landed
+    // preview still reads regime: true from before the flip -- a real,
+    // meaningful staleness (the display has not caught up to the new live
+    // truth yet), which this first click correctly refuses to post under.
+    fireEvent.click(submit2);
+    await waitFor(() => expect(alertSpy).toHaveBeenCalledWith(expect.stringContaining(
+      'the discount-stacking setting changed while this was open — reconfirming the price, try again in a moment',
+    )));
+    expect(schedulePosts(fetcher)).toHaveLength(2);
+    // The stale preview self-heals: invalidated and re-fetched, this time
+    // reflecting the now-current live gate (previewRegime, wired above, to
+    // read the flipped useDiscountStackingState mock) -- Submit re-enables
+    // on its own once that fresh regime: false response lands.
     await waitFor(() => expect(submit2.disabled).toBe(false));
     fireEvent.click(submit2);
     await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(3));
