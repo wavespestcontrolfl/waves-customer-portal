@@ -925,14 +925,16 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     activeThreadKey: activeThread?.contactPhone ? smsThreadKey(activeThread.contactPhone) : "",
   };
 
+  const customerSender = customer && customerMessages.find((message) => message.channel === "sms"
+    && message.ourEndpointId?.trim()
+    && smsThreadKey(message.contactPhone) === smsThreadKey(customer.phone));
+  const customerSenderNumber = customerSender?.ourEndpointId;
+  const customerSenderLabel = customerSender?.ourEndpointLabel || customerSenderNumber;
   useEffect(() => {
-    if (!customer) return;
-    const latest = customerMessages.find((message) => message.channel === "sms" && phoneKey(message.contactPhone) === phoneKey(customer.phone));
-    if (latest?.ourEndpointId) {
-      setFromNumber(latest.ourEndpointId);
-      setThreadLock({ contactPhone: customer.phone, ourNumber: latest.ourEndpointId, label: latest.ourEndpointLabel || latest.ourEndpointId });
-    }
-  }, [customer?.id, customer?.phone]);
+    if (!customer || !customerSenderNumber) return;
+    setFromNumber(customerSenderNumber);
+    setThreadLock({ contactPhone: customer.phone, ourNumber: customerSenderNumber, label: customerSenderLabel });
+  }, [customer?.id, customer?.phone, customerSenderNumber, customerSenderLabel]);
 
   const loadData = useCallback((search = "", options = {}) => {
     if (customer) return Promise.resolve();

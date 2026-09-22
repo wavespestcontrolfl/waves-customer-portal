@@ -38,6 +38,9 @@ function deferred() {
 }
 
 function response(body, status = 200) {
+  if (Array.isArray(body?.comms) && !Object.hasOwn(body, 'composerComms')) {
+    body = { ...body, composerComms: body.comms.filter(message => message.channel === 'sms').slice(0, 1) };
+  }
   return Promise.resolve(new Response(JSON.stringify(body), {
     status,
     headers: { 'Content-Type': 'application/json' },
@@ -220,7 +223,7 @@ describe('Customer360ProfileV2 profile state', () => {
         detail.customer.phone = '+19415550100';
         return response(detail);
       }
-      if (path.endsWith('/comms')) return response({ error: 'Admin access required' }, 403);
+      if (path.split('?')[0].endsWith('/comms')) return response({ error: 'Admin access required' }, 403);
       if (path.endsWith('/communications/sms')) return response({ sent: true, providerMessageId: 'SMaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' });
       return response({});
     }));
@@ -283,11 +286,11 @@ describe('Customer360ProfileV2 profile state', () => {
     const fetchMock = vi.fn((url) => {
       const path = String(url);
       if (path.endsWith('/communications/sms')) return response({ sent: true });
-      if (path.endsWith('/customer-a/comms')) {
+      if (path.split('?')[0].endsWith('/customer-a/comms')) {
         aCommsReads += 1;
         return aCommsReads === 1 ? response({ comms: [] }) : aRefreshComms.promise;
       }
-      if (path.endsWith('/customer-b/comms')) {
+      if (path.split('?')[0].endsWith('/customer-b/comms')) {
         return response({ comms: [{ id: 'b-message', channel: 'sms', direction: 'inbound', body: 'Current B message' }] });
       }
       if (path.endsWith('/customer-a')) {
@@ -444,7 +447,7 @@ describe('Customer360ProfileV2 profile state', () => {
         detail.customer.phone = '+19415550100';
         return response(detail);
       }
-      if (path.endsWith('/comms')) return response({ readScope, comms: [{ id: 'message-a', conversationId: 'conversation-a', channel: 'sms', direction: 'inbound', body: 'Service update', contactPhone: '+19415550100', createdAt: '2024-08-01T16:00:00Z', isRead: read }] });
+      if (path.split('?')[0].endsWith('/comms')) return response({ readScope, comms: [{ id: 'message-a', conversationId: 'conversation-a', channel: 'sms', direction: 'inbound', body: 'Service update', contactPhone: '+19415550100', createdAt: '2024-08-01T16:00:00Z', isRead: read }] });
       if (path.endsWith('/messages/read')) { read = true; return response({ success: true }); }
       return response({});
     }));
@@ -767,7 +770,7 @@ describe('Customer360ProfileV2 profile state', () => {
     ];
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);
-      if (path.endsWith('/comms')) return response({ comms });
+      if (path.split('?')[0].endsWith('/comms')) return response({ comms });
       if (path.endsWith('/customer-a')) return response(customerDetail('customer-a', 'Avery'));
       return response({});
     }));
@@ -785,14 +788,14 @@ describe('Customer360ProfileV2 profile state', () => {
     const oldComms = deferred();
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);
-      if (path.endsWith('/customer-a/comms')) return oldComms.promise;
-      if (path.endsWith('/customer-b/comms')) return response({ comms: [{ id: 'new-message', channel: 'sms', direction: 'inbound', body: 'Current customer message' }] });
+      if (path.split('?')[0].endsWith('/customer-a/comms')) return oldComms.promise;
+      if (path.split('?')[0].endsWith('/customer-b/comms')) return response({ comms: [{ id: 'new-message', channel: 'sms', direction: 'inbound', body: 'Current customer message' }] });
       if (path.endsWith('/customer-a')) return response(customerDetail('customer-a', 'Avery'));
       if (path.endsWith('/customer-b')) return response(customerDetail('customer-b', 'Blair'));
       return response({});
     }));
     const { rerender } = render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} initialTab="comms" />);
-    await waitFor(() => expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/customer-a/comms'))).toBe(true));
+    await waitFor(() => expect(fetch.mock.calls.some(([url]) => String(url).split('?')[0].endsWith('/customer-a/comms'))).toBe(true));
     rerender(<Customer360ProfileV2 customerId="customer-b" onClose={vi.fn()} initialTab="comms" />);
     expect(await screen.findByText('Current customer message')).toBeInTheDocument();
     await act(async () => {
@@ -1280,4 +1283,118 @@ describe('Customer360ProfileV2 profile state', () => {
       expect(onDone).toHaveBeenCalledTimes(1);
     });
   });
+  it('waits for a successful history retry before choosing the composer sending line', async () => {
+    await import('../../pages/admin/CommunicationsPageV2');
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    let failHistory = true;
+    let reads = 0;
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const parsed = new URL(String(url), 'https://fixture.invalid');
+      if (parsed.pathname.endsWith('/customer-a')) {
+        const detail = customerDetail('customer-a', 'Avery');
+        detail.customer.phone = '+12025550100';
+        return response(detail);
+      }
+      if (parsed.pathname.endsWith('/comms')) {
+        reads += 1;
+        return failHistory ? response({ error: 'Messages unavailable' }, 503) : response({ comms: [
+          { id: 'recovered-line', channel: 'sms', direction: 'inbound', body: 'Recovered context',
+            contactPhone: '+12025550100', ourEndpointId: '+12025550199', ourEndpointLabel: 'Fixture service line' },
+        ] });
+      }
+      return response({ timeline: [], commitments: [], enabled: true, has_more: false });
+    }));
+    const { container } = render(<MemoryRouter><Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} embedded /></MemoryRouter>);
+    await screen.findByRole('heading', { name: 'Avery Customer' });
+    await waitFor(() => expect(reads).toBe(1));
+    container.querySelector('.c360-panel').scrollTo = vi.fn();
+    fireEvent.click(screen.getByRole('button', { name: 'Message', exact: true }));
+    await waitFor(() => expect(reads).toBe(2));
+    await screen.findByText('Messages unavailable');
+    await act(async () => {});
+    expect(screen.queryByRole('combobox', { name: 'Send from' })).not.toBeInTheDocument();
+    failHistory = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry messages' }));
+    expect(await screen.findByRole('combobox', { name: 'Send from' })).toHaveValue('+12025550199');
+  });
+
+  it('uses prefetched SMS context beyond a call-only page when the opening refresh fails', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const refreshed = deferred();
+    let reads = 0;
+    const thread = {
+      comms: Array.from({ length: 50 }, (_, i) => ({ id: `call-${i}`, channel: 'voice', direction: 'inbound', body: `Newer call ${i}` })),
+      composerComms: [{ id: 'line-message', channel: 'sms', direction: 'inbound', body: 'Use this sending line', contactPhone: '+12025550100', ourEndpointId: '+12025550199', ourEndpointLabel: 'Fixture service line' }],
+    };
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const parsed = new URL(String(url), 'https://fixture.invalid');
+      if (parsed.pathname.endsWith('/customer-a')) {
+        const detail = customerDetail('customer-a', 'Avery');
+        detail.customer.phone = '+12025550100';
+        return response(detail);
+      }
+      if (parsed.pathname.endsWith('/comms')) {
+        if (parsed.searchParams.get('channel') === 'voice') return response({ comms: [] });
+        reads += 1;
+        return reads === 2 ? refreshed.promise : response(thread);
+      }
+      return response({ timeline: [], commitments: [], enabled: true, has_more: false });
+    }));
+    const { container } = render(<MemoryRouter><Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} embedded /></MemoryRouter>);
+    await screen.findByRole('heading', { name: 'Avery Customer' });
+    await waitFor(() => expect(reads).toBe(1));
+    container.querySelector('.c360-panel').scrollTo = vi.fn();
+    fireEvent.click(screen.getByRole('button', { name: 'Message', exact: true }));
+    await waitFor(() => expect(reads).toBe(2));
+    expect(await screen.findByRole('combobox', { name: 'Send from' })).toHaveValue('+12025550199');
+    fireEvent.change(screen.getByRole('textbox', { name: 'Text message' }), { target: { value: 'Keep this draft and sender' } });
+    await act(async () => refreshed.resolve(await response({ error: 'Refresh unavailable' }, 503)));
+    expect(await screen.findByText('Refresh unavailable')).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Send from' })).toHaveValue('+12025550199');
+    expect(screen.getByRole('textbox', { name: 'Text message' })).toHaveValue('Keep this draft and sender');
+    fireEvent.change(screen.getByRole('combobox', { name: 'Filter communication history' }), { target: { value: 'voice' } });
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Send from' })).toHaveValue('+12025550199'));
+    expect(screen.getByRole('textbox', { name: 'Text message' })).toHaveValue('Keep this draft and sender');
+    fireEvent.click(screen.getByRole('button', { name: 'Back to customer' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Message', exact: true }));
+    await waitFor(() => expect(reads).toBe(3));
+    expect(screen.getByRole('combobox', { name: 'Filter communication history' })).toHaveValue('all');
+    expect(screen.getByRole('textbox', { name: 'Text message' })).toHaveValue('Keep this draft and sender');
+  });
+
+  it('loads messages beyond 100, retries an older page, and resets the cursor for channel filters', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    let failOlder = true;
+    const requests = [];
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const parsed = new URL(String(url), 'https://fixture.invalid');
+      if (parsed.pathname.endsWith('/customer-a')) return response(customerDetail('customer-a', 'Avery'));
+      if (parsed.pathname.endsWith('/comms')) {
+        requests.push(parsed.searchParams);
+        const cursor = parsed.searchParams.get('cursor');
+        if (cursor === '50' && failOlder) { failOlder = false; return response({ error: 'Older messages unavailable' }, 503); }
+        if (parsed.searchParams.get('channel') === 'voice') return response({ comms: [{ id: 'call-older', channel: 'voice', body: 'Older call context' }], hasMore: false });
+        const offset = Number(cursor || 0);
+        const count = Math.min(50, 105 - offset);
+        return response({ comms: Array.from({ length: count }, (_, i) => ({ id: `message-${offset + i}`, channel: 'sms', direction: 'inbound', body: `Historical text ${offset + i + 1}` })), hasMore: offset + count < 105, nextCursor: offset + count < 105 ? String(offset + count) : null });
+      }
+      return response({ timeline: [], commitments: [], enabled: true, has_more: false });
+    }));
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} initialTab="comms" />);
+    await screen.findByText('Historical text 50');
+    fireEvent.click(screen.getByRole('button', { name: 'Load older messages' }));
+    await screen.findByText('Older messages unavailable');
+    expect(screen.getByText('Historical text 50')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry messages' }));
+    await screen.findByText('Historical text 100');
+    fireEvent.click(screen.getByRole('button', { name: 'Load older messages' }));
+    await screen.findByText('Historical text 105');
+    expect(screen.queryByRole('button', { name: 'Load older messages' })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole('combobox', { name: 'Filter communication history' }), { target: { value: 'voice' } });
+    await screen.findByText('Older call context');
+    expect(screen.queryByText('Historical text 105')).not.toBeInTheDocument();
+    expect(requests.at(-1).has('cursor')).toBe(false);
+  });
+
+
 });
