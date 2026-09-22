@@ -101,11 +101,12 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
   }, 30000);
 
   test('composer context stays on the latest primary-phone SMS across voice pages and the read boundary', async () => {
-    const conversationIds = Array.from({ length: 5 }, () => randomUUID());
+    const conversationIds = Array.from({ length: 7 }, () => randomUUID());
     const primarySmsIds = [randomUUID(), randomUUID()];
     const otherContactSmsId = randomUUID();
     const otherCustomerSmsId = randomUUID();
     const unusableEndpointSmsIds = [randomUUID(), randomUUID()];
+    const internationalSmsIds = [randomUUID(), randomUUID()];
     const afterBoundarySmsId = randomUUID();
     const voiceIds = Array.from({ length: 51 }, () => randomUUID());
     const base = new Date('2025-01-01T12:00:00.000Z');
@@ -116,6 +117,8 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
         { id: conversationIds[2], customer_id: ids[2], channel: 'sms', contact_phone: '+19415550103', our_endpoint_id: '+19415550192' },
         { id: conversationIds[3], customer_id: ids[3], channel: 'sms', contact_phone: '+19415550103', our_endpoint_id: null },
         { id: conversationIds[4], customer_id: ids[3], channel: 'sms', contact_phone: '+19415550103', our_endpoint_id: '' },
+        { id: conversationIds[5], customer_id: ids[3], channel: 'sms', contact_phone: '+44 20 7946 0958', our_endpoint_id: '+19415550193' },
+        { id: conversationIds[6], customer_id: ids[3], channel: 'sms', contact_phone: '+1 207 946 0958', our_endpoint_id: '+19415550194' },
       ]);
       await mockPg('messages').insert([
         { id: primarySmsIds[0], conversation_id: conversationIds[0], channel: 'sms', direction: 'outbound', author_type: 'admin', body: 'Earlier primary SMS', created_at: base },
@@ -124,6 +127,8 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
         { id: otherCustomerSmsId, conversation_id: conversationIds[2], channel: 'sms', direction: 'outbound', author_type: 'admin', body: 'Newer other-customer SMS', created_at: new Date(base.getTime() + 3000) },
         { id: unusableEndpointSmsIds[0], conversation_id: conversationIds[3], channel: 'sms', direction: 'outbound', author_type: 'admin', body: 'Newer SMS without a sending line', created_at: new Date(base.getTime() + 4000) },
         { id: unusableEndpointSmsIds[1], conversation_id: conversationIds[4], channel: 'sms', direction: 'outbound', author_type: 'admin', body: 'Newer SMS with an empty sending line', created_at: new Date(base.getTime() + 5000) },
+        { id: internationalSmsIds[0], conversation_id: conversationIds[5], channel: 'sms', direction: 'outbound', author_type: 'admin', body: 'International primary SMS', created_at: new Date(base.getTime() + 6000) },
+        { id: internationalSmsIds[1], conversation_id: conversationIds[6], channel: 'sms', direction: 'outbound', author_type: 'admin', body: 'Newer NANP suffix collision', created_at: new Date(base.getTime() + 7000) },
         ...voiceIds.map((id, index) => ({
           id, conversation_id: conversationIds[0], channel: 'voice', direction: 'inbound',
           author_type: 'customer', body: `Newer synthetic call ${index}`, created_at: new Date(base.getTime() + 60000 + index * 1000),
@@ -148,8 +153,10 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
 
       const { listCustomerComms } = require('../services/customer-history');
       expect((await listCustomerComms(mockPg, { id: ids[3], phone: null }, { channel: 'voice' })).composerComms).toEqual([]);
+      const international = await listCustomerComms(mockPg, { id: ids[3], phone: '+442079460958' }, { channel: 'voice' });
+      expect(international.composerComms.map(message => message.id)).toEqual([internationalSmsIds[0]]);
     } finally {
-      await mockPg('messages').whereIn('id', [...primarySmsIds, otherContactSmsId, otherCustomerSmsId, ...unusableEndpointSmsIds, afterBoundarySmsId, ...voiceIds]).delete();
+      await mockPg('messages').whereIn('id', [...primarySmsIds, otherContactSmsId, otherCustomerSmsId, ...unusableEndpointSmsIds, ...internationalSmsIds, afterBoundarySmsId, ...voiceIds]).delete();
       await mockPg('conversations').whereIn('id', conversationIds).delete();
     }
   }, 30000);

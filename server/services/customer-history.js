@@ -1,3 +1,5 @@
+const { phoneIdentityKey } = require('../utils/phone');
+
 const TIMELINE_TYPES = new Set([
   'all', 'interaction', 'sms', 'call', 'service', 'invoice', 'estimate',
   'payment', 'scheduled_service', 'review', 'activity',
@@ -395,19 +397,31 @@ async function listCustomerComms(db, customer, query = {}) {
   let twilioNumbers;
   try { twilioNumbers = require('../config/twilio-numbers'); } catch { twilioNumbers = null; }
   const comms = pageRows.map(message => mapCommsMessage(message, customer, twilioNumbers));
-  const primaryPhoneKey = String(customer.phone || '').replace(/\D/g, '').slice(-10);
+  const primaryPhoneKey = phoneIdentityKey(customer.phone);
   let composerComms = [];
   if (primaryPhoneKey) {
     const composerRows = await selectCommsColumns(db('messages as m')
       .join('conversations as c', 'm.conversation_id', 'c.id')
+      .joinRaw(`CROSS JOIN LATERAL (
+        SELECT btrim(CASE WHEN c.contact_phone IS NULL OR c.contact_phone = '' THEN ? ELSE c.contact_phone END) AS phone_text
+      ) AS composer_contact`, [customer.phone])
+      .joinRaw(`CROSS JOIN LATERAL (
+        SELECT regexp_replace(composer_contact.phone_text, '[^0-9]', '', 'g') AS phone_digits
+      ) AS composer_phone`)
       .where('c.customer_id', customerId)
       .where('m.channel', 'sms')
       .where('m.created_at', '<=', readBefore)
       .whereNotNull('c.our_endpoint_id')
       .whereRaw("btrim(c.our_endpoint_id) <> ''")
       .whereRaw(
-        "right(regexp_replace(CASE WHEN c.contact_phone IS NULL OR c.contact_phone = '' THEN ? ELSE c.contact_phone END, '[^0-9]', '', 'g'), 10) = ?",
-        [customer.phone, primaryPhoneKey],
+        `CASE
+          WHEN composer_phone.phone_digits = '' THEN NULL
+          WHEN composer_phone.phone_digits ~ '^1[0-9]{10}$'
+            OR (left(composer_contact.phone_text, 1) <> '+' AND composer_phone.phone_digits ~ '^[0-9]{10}$')
+            THEN right(composer_phone.phone_digits, 10)
+          ELSE '+' || composer_phone.phone_digits
+        END = ?`,
+        [primaryPhoneKey],
       ))
       .orderBy('m.created_at', 'desc')
       .orderBy('m.id', 'desc')
