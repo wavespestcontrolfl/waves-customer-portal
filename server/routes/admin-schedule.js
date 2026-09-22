@@ -2609,26 +2609,26 @@ async function resolveUpdateDetailsAddonFinancials({
 // actually produced the row's stored numbers. This editor resends every
 // price field on EVERY save (notes-only included), so that recompute still
 // runs on a save that touches nothing about the money — and can silently
-// reprice a legacy $160 visit to $161.50 the moment the gate flips live,
-// just from saving notes. Whether a stored row was written under the
-// legacy or the compound regime is not recorded anywhere for an unmarked
-// row, so it cannot be known here — but a save that changes NEITHER the
-// prices NOR any discount must not change the money either way: the stored
-// numbers are that row's economics under whichever regime produced them,
-// so preserving them verbatim is correct regardless. A save that DOES
-// touch a price or a discount still recomputes live on an unmarked row
-// (unchanged): per the #4405 notes, uniform economics for an edited
-// unmarked row would need its own persisted regime marker on write, which
-// resolveUpdateDetailsAddonFinancials's canonical branch already IS for a
-// MARKED row — an unmarked row simply has none to restack from.
+// reprice a legacy $160 visit off its real stored total. Whether a stored
+// row was written under the legacy or the compound regime is not recorded
+// anywhere for an unmarked row, so it cannot be known here — but a save
+// that changes NEITHER the prices NOR any discount NOR the primary service
+// must not change the money either way: the stored numbers are that row's
+// economics under whichever regime produced them, so preserving them
+// verbatim is correct regardless. A save that DOES touch a price or a
+// discount still recomputes live on an unmarked row (unchanged): per the
+// #4405 notes, uniform economics for an edited unmarked row would need its
+// own persisted regime marker on write, which resolveUpdateDetailsAddonFinancials's
+// canonical branch already IS for a MARKED row — an unmarked row simply
+// has none to restack from.
 //
 // Pure decision function: `existingAddonRows` (the row's stored add-on NET
-// prices) MUST be loaded by the caller before this runs — an add-on's own
-// stored price is unknowable here otherwise, and "unchanged" could never
-// be confirmed (this is the round-7 P0 itself: the ORIGINAL bug never
-// loaded them at all for this check).
+// prices AND discount identities) MUST be loaded by the caller before this
+// runs — an add-on's own stored price is unknowable here otherwise, and
+// "unchanged" could never be confirmed (this is the round-7 P0 itself: the
+// ORIGINAL bug never loaded them at all for this check).
 //
-// Two callsite-shaped guards, both from real Codex findings on this exact
+// Three callsite-shaped guards, all from real Codex findings on this exact
 // function (pre-push audit, this slice):
 //
 // Add-on comparison is NET vs NET, never gross vs gross. This editor has
@@ -2648,6 +2648,26 @@ async function resolveUpdateDetailsAddonFinancials({
 // correct for both shapes: unchanged only when the money on this line
 // truly has not moved.
 //
+// Per-line DISCOUNT comparison is by TERMS, never by presence. The
+// editor's round-trip DOES resend `basePrice` + the full discount stamp
+// (id/type/amount) for an UNCHANGED discounted line (SchedulePage.jsx) —
+// so treating "a discount field was posted at all" as disqualifying would
+// disable preservation on the ordinary notes-only save of any row that has
+// an add-on discount at all, defeating the point for exactly the rows the
+// round-7 P0 is about. Only a discount id/type/amount that DIFFERS from
+// what is actually stored on that line — added, removed, or changed — is a
+// genuine edit.
+//
+// Each stored row is matched AT MOST ONCE. An independent `.find()` per
+// posted line lets two posted lines match the SAME stored row while a
+// DIFFERENT stored row goes unaccounted for — primary $100 + add-ons A=$20
+// and B=$50 (total $170): replacing B with a second, unrelated $20 line
+// that happens to share A's identity would let BOTH posted lines match the
+// single stored A row under independent `.find()`s, "confirming" $170
+// unchanged when the real new total is $140. Matched stored rows are
+// consumed (spliced out) so a later posted line can never re-match one
+// already claimed.
+//
 // A primary SERVICE identity change (service_id / service_key_snapshot /
 // service_category_snapshot) never counts as money-unchanged even when the
 // raw price is identical: a same-priced switch to a service outside the
@@ -2658,20 +2678,37 @@ async function resolveUpdateDetailsAddonFinancials({
 // unmarked row's price edit already uses, never keep a discount stamped
 // for a service that no longer qualifies for it.
 function legacyEconomicsPreservationDecision({
+  // Appointment-level only (never the per-addon signal — see the per-line
+  // TERMS comparison above): "the editor only sends discountType/
+  // discountAmount when one is actively selected; an omitted value means
+  // leave it alone" (this route's own long-standing contract, unchanged).
   legacyPreservationCandidate, discountInputsPosted, primaryServiceChanged, primaryGross, existingPrimaryLinePrice,
   normalizedAddons, existingAddonRows, existingEstimatedPrice,
 }) {
+  const remainingStored = existingAddonRows.slice();
+  const addonsUnchanged = normalizedAddons.every((l) => {
+    const idx = remainingStored.findIndex((row) => (
+      l.serviceId ? String(row.service_id || '') === String(l.serviceId) : String(row.service_name || '').trim() === l.serviceName
+    ));
+    if (idx === -1) return false;
+    const [stored] = remainingStored.splice(idx, 1); // consume — never re-matchable
+    if (moneyValuesDiffer(l.price, stored.estimated_price)) return false;
+    // Discount identity/terms — ALWAYS compared, not only when an id is
+    // present: a custom (no catalog id) discount's type/amount can still
+    // change without ever gaining or losing an id, and comparing only when
+    // `postedDiscountId` is truthy would silently skip that case.
+    if (String(l.discount?.discountId || '') !== String(stored.discount_id || '')) return false;
+    if ((l.discount?.discountType || null) !== (stored.discount_type || null)) return false;
+    if (moneyValuesDiffer(l.discount?.discountAmount, stored.discount_amount)) return false;
+    return true;
+  });
   const moneyInputsUnchanged = legacyPreservationCandidate
     && !discountInputsPosted
     && !primaryServiceChanged
     && !moneyValuesDiffer(primaryGross, existingPrimaryLinePrice)
     && normalizedAddons.length === existingAddonRows.length
-    && normalizedAddons.every((l) => {
-      const stored = existingAddonRows.find((row) => (
-        l.serviceId ? String(row.service_id || '') === String(l.serviceId) : String(row.service_name || '').trim() === l.serviceName
-      ));
-      return stored && !moneyValuesDiffer(l.price, stored.estimated_price);
-    });
+    && addonsUnchanged
+    && remainingStored.length === 0; // every stored row accounted for — explicit, though implied once lengths match and nothing re-matched
   const storedTotal = Number(existingEstimatedPrice);
   return {
     moneyInputsUnchanged,
@@ -9548,11 +9585,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const existingAddonRows = legacyPreservationCandidate
           ? await db('scheduled_service_addons')
             .where({ scheduled_service_id: req.params.id })
-            .select('service_id', 'service_name', 'base_price', 'estimated_price')
+            .select('service_id', 'service_name', 'base_price', 'estimated_price', 'discount_id', 'discount_type', 'discount_amount')
             .catch(() => [])
           : [];
-        const discountInputsPosted = discountType !== undefined
-          || addons.some((a) => a?.discountId || a?.discountType);
+        // Codex pre-push audit P1 (this slice): the appointment-level
+        // discountType posted here means "actively selected" (this route's
+        // own long-standing contract — an omitted value means leave it
+        // alone), NOT an echo. Per-addon discount fields are a DIFFERENT
+        // story — the editor round-trips them verbatim for an unchanged
+        // discounted line — so that comparison lives per-line, BY TERMS,
+        // inside legacyEconomicsPreservationDecision itself; presence alone
+        // must never disqualify a genuinely unchanged addon-level discount.
+        const discountInputsPosted = discountType !== undefined;
         // Codex pre-push audit P0 (this slice): a primary SERVICE swap can
         // move the row out of (or into) the stored appointment discount's
         // scope even at an identical raw price — resolveUpdateDetailsAddonFinancials's

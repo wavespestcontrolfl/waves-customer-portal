@@ -486,8 +486,21 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
   // is unchanged, and must then preserve the stored $160 verbatim rather
   // than let calculateVisitFinancialsForAddons recompute against the wrong
   // figure.
+  // Slice 4 of #4405 (round-7 P0 carried forward, hardened after two
+  // rounds of pre-push Codex audit): a real, previously-created UNMARKED
+  // (legacy) row — $100 primary, a $100 add-on stored at a 10% discount
+  // (net $90), a $30 fixed appointment credit — stored total
+  // 100 + 90 - 30 = $160, exactly the round-7 report's own pinned figure.
+  // A genuinely notes-only save resends every price field (per this
+  // editor's own contract) — round 2's own P1 finding: the editor DOES
+  // resend the add-on's full discount stamp (id/type/amount) verbatim for
+  // an unchanged discounted line (SchedulePage.jsx) — the route must load
+  // the REAL stored add-on row (base price, net, AND discount identity) via
+  // a genuine Postgres query, confirm the posted terms match it exactly,
+  // and only then preserve the stored $160 verbatim.
   test('PUT /:id/update-details: a genuinely notes-only save on an UNMARKED row preserves the real stored $160', async () => {
     const id = randomUUID();
+    const addonDiscountId = randomUUID();
     const target = {
       scheduled_date: '2099-11-15', service_type: 'Fixture Legacy Notes-Only Service',
       primary_line_price: 100,
@@ -499,6 +512,7 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
     await mockPg('scheduled_service_addons').insert({
       id: randomUUID(), scheduled_service_id: id, service_name: 'Fixture Legacy Add-On',
       base_price: 100, estimated_price: 90, discount_type: 'percentage', discount_amount: 10, discount_dollars: 10,
+      discount_id: addonDiscountId,
     });
 
     process.env.GATE_DISCOUNT_STACKING = 'true';
@@ -510,19 +524,20 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
       expect(hasPricingRegimeMarker(existing)).toBe(false);
 
       // The route's own load (round-7 P0's fix): the real stored add-on
-      // rows, fetched via a genuine query BEFORE testing legacy preservation.
-      // estimated_price (the NET) is the field the decision actually
-      // compares against — see legacyEconomicsPreservationDecision's own
-      // comment for why gross is the wrong comparison.
+      // row, fetched via a genuine query BEFORE testing legacy preservation
+      // — every field the decision actually compares (NET price AND the
+      // full discount identity, per round 2's own fix; never just gross).
       const existingAddonRows = await mockPg('scheduled_service_addons')
         .where({ scheduled_service_id: id })
-        .select('service_id', 'service_name', 'estimated_price');
+        .select('service_id', 'service_name', 'base_price', 'estimated_price', 'discount_id', 'discount_type', 'discount_amount');
 
-      // Genuinely notes-only save: this editor has no per-addon discount UI
-      // (SchedulePage.jsx), so an UNTOUCHED add-on line is resent as a flat
-      // `price` at its DISPLAYED (net) figure — $90, never the $100 gross —
-      // with no discount fields and no separate basePrice at all.
-      const normalizedAddons = [{ serviceId: null, serviceName: 'Fixture Legacy Add-On', base: 90, price: 90, discount: null }];
+      // Genuinely notes-only save: an UNCHANGED discounted line round-trips
+      // its full discount stamp verbatim (SchedulePage.jsx's own Case A
+      // shape) — the SAME id/type/amount this row was actually stored with.
+      const normalizedAddons = [{
+        serviceId: null, serviceName: 'Fixture Legacy Add-On', base: 100, price: 90,
+        discount: { discountId: addonDiscountId, discountType: 'percentage', discountAmount: 10 },
+      }];
 
       const decision = legacyEconomicsPreservationDecision({
         legacyPreservationCandidate: discountStackingLive() && !hasPricingRegimeMarker(existing),
@@ -549,7 +564,7 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
     }
   });
 
-  // Codex pre-push audit P0 (this slice): the editor sends an EDITED add-on
+  // Codex pre-push audit P0 (round 1): the editor sends an EDITED add-on
   // price as a flat NET with no discount fields at all — comparing that
   // posted figure against the row's stored GROSS (base_price) can match by
   // coincidence and silently keep a stale total. Same fixture as the
@@ -560,6 +575,7 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
   // (100 + 100 - 30), never silently keep the stale $160.
   test('PUT /:id/update-details: an add-on raised from its discounted $90 net to $100 is detected as changed, never silently kept at the stale $160', async () => {
     const id = randomUUID();
+    const addonDiscountId = randomUUID();
     const target = {
       scheduled_date: '2099-11-16', service_type: 'Fixture Legacy Price-Edit Service',
       primary_line_price: 100,
@@ -570,6 +586,7 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
     await mockPg('scheduled_service_addons').insert({
       id: randomUUID(), scheduled_service_id: id, service_name: 'Fixture Legacy Add-On',
       base_price: 100, estimated_price: 90, discount_type: 'percentage', discount_amount: 10, discount_dollars: 10,
+      discount_id: addonDiscountId,
     });
 
     process.env.GATE_DISCOUNT_STACKING = 'true';
@@ -579,10 +596,11 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
       );
       const existingAddonRows = await mockPg('scheduled_service_addons')
         .where({ scheduled_service_id: id })
-        .select('service_id', 'service_name', 'base_price', 'estimated_price');
+        .select('service_id', 'service_name', 'base_price', 'estimated_price', 'discount_id', 'discount_type', 'discount_amount');
 
       // The operator raises the add-on's displayed price from 90 to 100 —
-      // the client sends a flat `price: 100`, no discount, no basePrice.
+      // the client sends a flat `price: 100`, no discount, no basePrice
+      // (a genuinely EDITED line never round-trips the old discount).
       const normalizedAddons = [{ serviceId: null, serviceName: 'Fixture Legacy Add-On', base: 100, price: 100, discount: null }];
 
       const decision = legacyEconomicsPreservationDecision({
@@ -595,9 +613,9 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
         existingAddonRows,
         existingEstimatedPrice: existing.estimated_price,
       });
-      // NEVER true: 100 (posted) === 100 (stored GROSS) would have matched
-      // under the pre-fix comparison; 100 (posted NET) !== 90 (stored NET)
-      // correctly does not.
+      // NEVER true: 100 (posted NET) !== 90 (stored NET) — a real edit; the
+      // dropped discount stamp (posted has none, stored has one) would ALSO
+      // disqualify this on its own (round 2's own per-line terms check).
       expect(decision.legacyEconomicsPreserved).toBe(false);
 
       // The live recompute this save correctly falls through to.
