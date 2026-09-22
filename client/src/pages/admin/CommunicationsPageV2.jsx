@@ -845,7 +845,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     // A fixed customer-profile composer cannot inherit another record's
     // identity from the phone-only inbox (contacts can share a phone).
     recipientKey: customer ? JSON.stringify([customer.id, smsThreadKey(toNumber)]) : toNumber.trim() ? smsThreadKey(toNumber) : "",
-    initialDraft: customer ? { selectedCustomerId: customer.id, ...(customerLine?.ourEndpointId ? { fromNumber: customerLine.ourEndpointId } : {}) } : previousSenderRef.current ? { fromNumber: previousSenderRef.current } : undefined,
+    initialDraft: customer ? { selectedCustomerId: customer.id } : previousSenderRef.current ? { fromNumber: previousSenderRef.current } : undefined,
   });
   previousSenderRef.current = fromNumber;
   const [sending, setSending] = useState(false);
@@ -957,12 +957,11 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   useEffect(() => {
     if (!customer) return;
     if (!loadedMessageDraft) setSelectedCustomerId(customer.id);
-    const latest = customerMessages.find((message) => message.channel === "sms" && phoneKey(message.contactPhone) === phoneKey(customer.phone));
-    if (latest?.ourEndpointId && !loadedMessageDraft) {
-      setFromNumber(latest.ourEndpointId);
-      setThreadLock({ contactPhone: customer.phone, ourNumber: latest.ourEndpointId, label: latest.ourEndpointLabel || latest.ourEndpointId });
+    if (customerLine?.ourEndpointId && !loadedMessageDraft && !fromNumber) {
+      setFromNumber(customerLine.ourEndpointId);
+      setThreadLock({ contactPhone: customer.phone, ourNumber: customerLine.ourEndpointId, label: customerLine.ourEndpointLabel || customerLine.ourEndpointId });
     }
-  }, [customer?.id, customer?.phone]);
+  }, [customer?.id, customer?.phone, customerLine?.ourEndpointId, fromNumber, loadedMessageDraft]);
 
   const loadData = useCallback((search = "", options = {}) => {
     if (customer) return Promise.resolve();

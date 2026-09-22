@@ -262,6 +262,26 @@ it("keeps a manually selected sending line when entering a new recipient", async
   expect(JSON.parse(request[1].body)).toMatchObject({ to: "+19415550108", fromNumber: chosenLine });
 });
 
+it.each([true, false])("preserves a recovered profile sender and its lock state (locked: %s)", async (locked) => {
+  const owner = `profile-sender-${locked}`;
+  const profile = { id: "profile-customer", phone: "+19415550100" };
+  const chosenLine = "+19412972606";
+  const profileKey = JSON.stringify([profile.id, "9415550100"]);
+  sessionStorage.setItem(SMS_DRAFT_STORAGE_KEY, JSON.stringify({ owners: { [owner]: { [profileKey]: {
+    msgBody: "Recovered profile reply", fromNumber: chosenLine, selectedCustomerId: profile.id,
+    threadLock: locked ? { contactPhone: profile.phone, ourNumber: chosenLine, label: "Saved line" } : null,
+  } } } }));
+  setupWithOwner(owner, { customer: profile, customerMessages: [{ channel: "sms", contactPhone: profile.phone, ourEndpointId: line }] });
+  await tick();
+  const sender = screen.getByRole("combobox", { name: "Send from" });
+  expect(sender).toHaveValue(chosenLine);
+  expect(sender.disabled).toBe(locked);
+  expect(screen.getByRole("textbox", { name: "Text message" })).toHaveValue("Recovered profile reply");
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
+  const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/communications/sms"));
+  expect(JSON.parse(request[1].body)).toMatchObject({ fromNumber: chosenLine, customerId: profile.id });
+});
+
 it("requires an explicit sender for a new message without a saved line", async () => {
   setup(); await tick();
   fireEvent.change(screen.getByPlaceholderText("Search by name or enter phone number…"), { target: { value: "+19415550101" } });
