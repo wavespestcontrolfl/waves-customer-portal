@@ -131,7 +131,7 @@ export default defineConfig({
   // Rollup's static analysis to fail with "X is not exported by …" errors.
   // See: https://vitejs.dev/config/dep-optimization-options#optimizedeps-include
   optimizeDeps: {
-    include: ['@proposal-bid', '@lawn-scores', '@waves/irrigation-runtime', '@waves/lawn-cost-floor', '@waves/report-redaction'],
+    include: ['@proposal-bid', '@lawn-scores', '@legacy-visit-money-submission', '@waves/irrigation-runtime', '@waves/lawn-cost-floor', '@waves/report-redaction'],
   },
   build: {
     outDir: 'dist',
@@ -143,7 +143,7 @@ export default defineConfig({
     // Ensure @rollup/plugin-commonjs also processes the linked CJS package
     // during production builds, complementing the optimizeDeps.include above.
     commonjsOptions: {
-      include: [/shared\/proposal-bid\.cjs$/, /shared\/lawn-scores\.cjs$/, /irrigation-runtime/, /lawn-cost-floor/, /report-redaction/, /node_modules/],
+      include: [/shared\/proposal-bid\.cjs$/, /shared\/lawn-scores\.cjs$/, /shared\/legacy-visit-money-submission\.cjs$/, /irrigation-runtime/, /lawn-cost-floor/, /report-redaction/, /node_modules/],
     },
   },
 });

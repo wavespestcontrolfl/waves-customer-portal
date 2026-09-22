@@ -2344,13 +2344,34 @@ function filterAddonLinesForDate(addons, baseDateStr, targetDateStr, blackoutDat
 // discount silently loses its ceiling instead of loudly failing. Called
 // right after `dueAddons` is computed in each of those three loops: a
 // no-op when the invariant holds (always, today) and a loud, safe failure
-// the instant it does not, rather than a silent uncap. `discountCaps` null
-// (gate off) is itself a no-op — nothing would read the Map either way.
-function assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountCaps, context) {
-  if (!discountCaps) return;
+// the instant it does not, rather than a silent uncap.
+//
+// GitHub review round 5 (P0, post-round-4 confirmation pass): this must
+// compare against the SET OF IDS QUERIED (what was actually handed to
+// loadDiscountCapsById), never against `discountCaps.has()` itself.
+// `scheduled_service_addons.discount_id` is a nullable UUID with NO
+// foreign key to `discounts` — an add-on can legitimately keep a
+// discount_id whose catalog row was later deleted (an orphaned legacy
+// id). `loadDiscountCapsById` queries every id it is given but only
+// `.set()`s a Map entry for ids that actually matched a `discounts` row,
+// so an orphaned id is a real, valid, ALREADY-QUERIED id with simply no
+// Map entry — restackStoredVisitFinancials (via resolveStoredDiscountCaps)
+// already and correctly treats that as its own documented uncapped-legacy
+// fallback (see loadDiscountCapsById's own tests: "a missing discountCaps
+// argument reads every percentage term as uncapped rather than failing").
+// Confusing "never queried" (the genuine invariant violation this
+// assertion exists to catch) with "queried, no catalog row" (a normal,
+// supported legacy shape) would abort every visit-count/alert extension
+// touching an orphaned discount id — `queriedDiscountIds` is the id
+// UNIVERSE the caller actually asked loadDiscountCapsById about (a Set,
+// or an array coerced to one here), not the caps it got back; null (gate
+// off) is itself a no-op — nothing was queried either way.
+function assertDueAddonsWithinDiscountCapUniverse(dueAddons, queriedDiscountIds, context) {
+  if (!queriedDiscountIds) return;
+  const queried = queriedDiscountIds instanceof Set ? queriedDiscountIds : new Set(queriedDiscountIds);
   for (const addon of (Array.isArray(dueAddons) ? dueAddons : [])) {
     const discountId = addon?.discount_id;
-    if (discountId && !discountCaps.has(discountId)) {
+    if (discountId && !queried.has(discountId)) {
       throw new Error(`Discount cap universe missing a due add-on's own discount id (${discountId}, ${context}) — refusing to silently treat it as uncapped.`);
     }
   }
@@ -13896,8 +13917,9 @@ async function reconcileRecurringSeriesVisitCount(trx, {
   // full superset of any single date's own due add-ons, exactly like that
   // precedent's `spawnedDiscountCaps`.
   const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(trx, parent.id, parent);
+  const discountCapIds = [extensionPriceParent.line_discount_id, ...parentAddons.map((a) => a.discount_id)];
   const discountCaps = discountStackingLive()
-    ? await loadDiscountCapsById(trx, [extensionPriceParent.line_discount_id, ...parentAddons.map((a) => a.discount_id)])
+    ? await loadDiscountCapsById(trx, discountCapIds)
     : null;
   for (const nd of extendDates) {
     const childIdentity = await resolveSeriesChildIdentity(trx, parent);
@@ -13935,7 +13957,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     copyStampedServiceAddressFields(data, parent, cols);
     await anchorSoleProperty(data, cols, trx);
     const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, extendBlackoutDates, skipParent);
-    assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountCaps, 'reconcileRecurringSeriesVisitCount');
+    assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountStackingLive() ? discountCapIds : null, 'reconcileRecurringSeriesVisitCount');
     // Anchored-split provenance governs the per-visit amount on EVERY
     // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
     // plans renew through these office paths, not the auto-extend.
@@ -19325,8 +19347,9 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
     // template resolve, `trx` for the cap read — matching exactly which
     // connection each per-iteration call used before this hoist.
     const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(conn, parent.id, parent);
+    const discountCapIds = [extensionPriceParent.line_discount_id, ...parentAddons.map((a) => a.discount_id)];
     const discountCaps = discountStackingLive()
-      ? await loadDiscountCapsById(trx, [extensionPriceParent.line_discount_id, ...parentAddons.map((a) => a.discount_id)])
+      ? await loadDiscountCapsById(trx, discountCapIds)
       : null;
     // Extension rows keep invoice-on-complete stamping (fix: extended visits
     // of a pay-per-visit plan completed uninvoiced) — resolved once here,
@@ -19392,7 +19415,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         copyStampedServiceAddressFields(data, parent, cols);
         await anchorSoleProperty(data, cols, conn);
         const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, alertBlackoutDates, skipParent);
-        assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountCaps, 'runRecurringAlertAction:extend');
+        assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountStackingLive() ? discountCapIds : null, 'runRecurringAlertAction:extend');
         // Anchored-split provenance governs the per-visit amount on EVERY
         // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
         // plans renew through these office paths, not the auto-extend.
@@ -19492,7 +19515,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         copyStampedServiceAddressFields(data, parent, cols);
         await anchorSoleProperty(data, cols, conn);
         const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, alertBlackoutDates, skipParent);
-        assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountCaps, 'runRecurringAlertAction:convert_ongoing');
+        assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountStackingLive() ? discountCapIds : null, 'runRecurringAlertAction:convert_ongoing');
         // Anchored-split provenance governs the per-visit amount on EVERY
         // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
         // plans renew through these office paths, not the auto-extend.

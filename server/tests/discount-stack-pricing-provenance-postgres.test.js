@@ -26,7 +26,8 @@ const { discountStackingLive } = require('../config/feature-gates');
 const {
   restackStoredVisitFinancials, freezeLegacySeriesRootCaps, calculateStoredVisitFinancials, occurrenceFloorPrice,
   resolveUpdateDetailsAddonFinancials, legacyEconomicsPreservationDecision, calculateVisitFinancialsForAddons,
-  insertScheduledServiceAddons, legacyPreservationSnapshotStale,
+  insertScheduledServiceAddons, legacyPreservationSnapshotStale, loadDiscountCapsById,
+  assertDueAddonsWithinDiscountCapUniverse,
 } = adminScheduleRouter._test;
 
 const connection = process.env.DISCOUNT_STACK_PROVENANCE_TEST_DATABASE_URL;
@@ -181,6 +182,54 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
     // The persisted snapshot must freeze BOTH slots — the next extension
     // reading this frozen snapshot must not silently uncap the add-on.
     expect(result.capsSnapshot).toEqual({ line: { id: sharedDiscountId, cap: 10 }, addons: { [sharedDiscountId]: 10 } });
+  });
+
+  // GitHub review round 5 (P0, confirmation pass): scheduled_service_addons
+  // .discount_id is a nullable UUID with NO foreign key to `discounts` —
+  // this proves that at the database level (no FK error on insert) and
+  // end to end through the real functions the extension loops call:
+  // loadDiscountCapsById queries the id (it IS in the universe) but sets
+  // no Map entry for it (no matching row), and
+  // assertDueAddonsWithinDiscountCapUniverse must not confuse that with
+  // an id that was never queried at all.
+  test('an orphaned discount_id (real Postgres row, no matching `discounts` row, no FK blocks the insert) is queried but capless — the assertion passes it through, never throws', async () => {
+    const id = randomUUID();
+    const orphanedDiscountId = randomUUID(); // deliberately never inserted into `discounts`
+    await mockPg('scheduled_services').insert({
+      id, scheduled_date: '2099-05-16', service_type: 'Fixture Orphaned-Discount Service', primary_line_price: 100,
+    });
+    await mockPg('scheduled_service_addons').insert({
+      id: randomUUID(), scheduled_service_id: id, service_name: 'Fixture Orphaned Add-On',
+      base_price: 40, estimated_price: 40, discount_type: 'percentage', discount_amount: 20,
+      discount_id: orphanedDiscountId, // legacy: catalog row since deleted, column has no FK
+    });
+    const addonRows = await mockPg('scheduled_service_addons').where({ scheduled_service_id: id });
+    expect(addonRows[0].discount_id).toBe(orphanedDiscountId); // the insert succeeded — no FK
+
+    // loadDiscountCapsById queried it, but the id matches no `discounts`
+    // row: no Map entry, exactly like never having queried it at all —
+    // the distinction the assertion must NOT collapse.
+    const discountCaps = await loadDiscountCapsById(mockPg, [orphanedDiscountId]);
+    expect(discountCaps.has(orphanedDiscountId)).toBe(false);
+
+    const dueAddons = addonRows;
+    // Queried (present in the id universe handed to loadDiscountCapsById):
+    // no throw — a valid, already-supported legacy shape.
+    expect(() => assertDueAddonsWithinDiscountCapUniverse(dueAddons, [orphanedDiscountId], 'orphaned-fixture'))
+      .not.toThrow();
+    // Never queried at all (the real invariant violation): throws, using
+    // the SAME real id, proving the assertion is discriminating on
+    // "was it queried" and not merely on the id's shape.
+    expect(() => assertDueAddonsWithinDiscountCapUniverse(dueAddons, [], 'orphaned-fixture'))
+      .toThrow(new RegExp(orphanedDiscountId));
+
+    // And the downstream restack itself: an orphaned id with no cap Map
+    // entry takes the existing, already-tested uncapped-legacy fallback —
+    // the full $8 (20% of $40) discount applies, never silently zeroed
+    // and never thrown.
+    const row = await mockPg('scheduled_services').where({ id }).first();
+    const result = restackStoredVisitFinancials(row, addonRows, null, discountCaps);
+    expect(result.addonDollars[0].discountDollars).toBe(8);
   });
 
   // The coordinator's exact pinned combination for the ROOT-freeze fix,

@@ -817,34 +817,56 @@ describe('recurring extension — loadDiscountCapsById', () => {
 // computing dueAddons: a no-op when the invariant holds (always, today,
 // so the cap still resolves normally) and a loud, safe throw the instant
 // it does not, rather than a silent "missing Map entry reads as uncapped".
-describe('assertDueAddonsWithinDiscountCapUniverse — the dueAddons ⊆ discount-cap-universe safety net (GitHub round 2 P1)', () => {
-  test('every due add-on\'s discount id IS present in the caps universe (the ordinary case, since parentAddons is a superset by construction): no-op — the cap resolves normally, never silently missing', () => {
-    const discountCaps = new Map([['d1', 10], ['d2', null]]);
+describe('assertDueAddonsWithinDiscountCapUniverse — the dueAddons ⊆ QUERIED-id-universe safety net (GitHub round 2 P1; round 5 P0)', () => {
+  test('every due add-on\'s discount id WAS queried (the ordinary case, since parentAddons is a superset by construction): no-op', () => {
+    const queriedIds = ['d1', 'd2'];
     const dueAddons = [{ discount_id: 'd1' }, { discount_id: 'd2' }, { discount_id: null }];
-    expect(() => assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountCaps, 'test')).not.toThrow();
+    expect(() => assertDueAddonsWithinDiscountCapUniverse(dueAddons, queriedIds, 'test')).not.toThrow();
   });
 
-  test('a due add-on\'s discount id is ABSENT from the caps universe (the invariant this safety net exists for, manufactured directly — dueAddons cannot actually diverge from parentAddons through the real filterAddonLinesForDate today): throws, never silently proceeds as uncapped', () => {
-    const discountCaps = new Map([['d1', 10]]); // built from parentAddons alone — 'd2' never made it in
+  test('a due add-on\'s discount id was NEVER QUERIED (the invariant this safety net exists for, manufactured directly — dueAddons cannot actually diverge from parentAddons through the real filterAddonLinesForDate today): throws, never silently proceeds as uncapped', () => {
+    const queriedIds = ['d1']; // built from parentAddons alone — 'd2' never made it in
     const dueAddons = [{ discount_id: 'd1' }, { discount_id: 'd2' }]; // a hypothetically-diverged dueAddons
-    expect(() => assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountCaps, 'test-context'))
+    expect(() => assertDueAddonsWithinDiscountCapUniverse(dueAddons, queriedIds, 'test-context'))
       .toThrow(/d2.*test-context/);
   });
 
-  test('gate off (discountCaps null): no-op — nothing would read the Map either way', () => {
+  // GitHub review round 5 (P0, confirmation pass): scheduled_service_addons.
+  // discount_id is a nullable UUID with NO foreign key to `discounts` — an
+  // add-on can legitimately keep a discount_id whose catalog row was later
+  // deleted. That id WAS queried (it is in the id list handed to
+  // loadDiscountCapsById) but has no Map entry, because loadDiscountCapsById
+  // only `.set()`s ids that matched a real row. This must NEVER throw — an
+  // orphaned-but-queried id is a valid, already-supported legacy shape that
+  // restackStoredVisitFinancials's own uncapped-legacy fallback already
+  // handles (see loadDiscountCapsById's own "reads every percentage term as
+  // uncapped" test) — confusing it with "never queried" would abort every
+  // visit-count/alert extension touching such a row.
+  test('an ORPHANED discount id (queried, but no matching `discounts` row) is a valid legacy input — no-op, never thrown', () => {
+    const queriedIds = ['d1', 'd-orphaned']; // both WERE queried; 'd-orphaned' just has no catalog row
+    const dueAddons = [{ discount_id: 'd1' }, { discount_id: 'd-orphaned' }];
+    expect(() => assertDueAddonsWithinDiscountCapUniverse(dueAddons, queriedIds, 'test-orphaned')).not.toThrow();
+  });
+
+  test('a queriedDiscountIds Set works identically to an array', () => {
+    const queriedIds = new Set(['d1', 'd2']);
+    const dueAddons = [{ discount_id: 'd1' }, { discount_id: 'd2' }];
+    expect(() => assertDueAddonsWithinDiscountCapUniverse(dueAddons, queriedIds, 'test')).not.toThrow();
+  });
+
+  test('gate off (queriedDiscountIds null): no-op — nothing was queried either way', () => {
     expect(() => assertDueAddonsWithinDiscountCapUniverse([{ discount_id: 'd1' }], null, 'test')).not.toThrow();
   });
 
-  test('a due add-on with no discount at all is never flagged, regardless of the caps universe', () => {
-    const discountCaps = new Map();
-    expect(() => assertDueAddonsWithinDiscountCapUniverse([{ discount_id: null }], discountCaps, 'test')).not.toThrow();
+  test('a due add-on with no discount at all is never flagged, regardless of what was queried', () => {
+    expect(() => assertDueAddonsWithinDiscountCapUniverse([{ discount_id: null }], [], 'test')).not.toThrow();
   });
 
-  test('source guard: all three loops call this right after computing dueAddons, threading the SAME dueAddons/discountCaps the restack itself uses', () => {
+  test('source guard: all three loops call this right after computing dueAddons, threading the SAME dueAddons/discountCapIds universe the restack itself uses', () => {
     const fs = require('fs');
     const path = require('path');
     const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
-    const calls = [...src.matchAll(/const dueAddons = filterAddonLinesForDate\(parentAddons,[^\n]*\);\n\s*assertDueAddonsWithinDiscountCapUniverse\(dueAddons, discountCaps, '([^']+)'\);/g)];
+    const calls = [...src.matchAll(/const dueAddons = filterAddonLinesForDate\(parentAddons,[^\n]*\);\n\s*assertDueAddonsWithinDiscountCapUniverse\(dueAddons, discountStackingLive\(\) \? discountCapIds : null, '([^']+)'\);/g)];
     const contexts = calls.map((m) => m[1]);
     expect(contexts).toEqual(expect.arrayContaining([
       'reconcileRecurringSeriesVisitCount', 'runRecurringAlertAction:extend', 'runRecurringAlertAction:convert_ongoing',
