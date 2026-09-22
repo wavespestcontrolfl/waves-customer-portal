@@ -207,6 +207,31 @@ describe('appointment creation — canonical restack (buildAppointmentPricing)',
     expect(pricing.appointmentDiscount.discountDollars).toBe(10);
     expect(pricing.finalPrice).toBe(80);
   });
+
+  // Codex pre-push audit P1: a blank-priced add-on (no basePrice/grossPrice/
+  // price and no catalog base_price to fall back on — a service still
+  // awaiting a quote) must stay unpriced through the restack. The engine
+  // only ever sees a numeric gross (line.base || 0), so that distinction
+  // has to be restored at the one place that still knows which line came
+  // in with no base at all.
+  test('gate on: a blank-priced (awaiting-quote) add-on line stays unpriced, never becomes an explicit $0', async () => {
+    const { lineDiscountRow, appointmentDiscountRow } = fixtures();
+    db.mockReturnValueOnce(discountQuery(lineDiscountRow))
+      .mockReturnValueOnce(discountQuery(appointmentDiscountRow));
+
+    const pricing = await withGateLive(() => buildAppointmentPricing({
+      serviceRecord: { service_key: 'general_pest', category: 'pest_control', base_price: 100 },
+      estimatedPrice: 100,
+      primaryLinePrice: 100,
+      primaryLineDiscount: { discountId: 'line-disc-1' },
+      serviceAddons: [{ name: 'Quote pending add-on' }],
+      discountId: 'appt-fixed-1',
+      discountType: 'fixed_amount',
+      customer: { id: 'customer-1' },
+    }));
+
+    expect(pricing.addonLines[0].price).toBeNull();
+  });
 });
 
 describe('seeded recurring children/boosters — restackLiveVisitFinancials', () => {
@@ -308,11 +333,37 @@ describe('seeded recurring children/boosters — restackLiveVisitFinancials', ()
 
       const anchor = restackLiveVisitFinancials(pricing, [recurringAddon, oneTimeAddon]);
       expect(anchor.addonDollars[0].discountDollars).toBe(16);
+      // Codex pre-push audit P1: the covered-member creation loop's OWN
+      // addon-only total must read THIS netPrice (not the addon's original,
+      // pre-restack .price) — $84, not the frozen $86 a stale read would
+      // give when this occurrence's own add-on mix differs from another's.
+      expect(anchor.addonDollars[0].netPrice).toBe(84);
 
       // A later occurrence where the one-time add-on isn't due.
       const later = restackLiveVisitFinancials(pricing, [recurringAddon]);
       expect(later.addonDollars[0].discountDollars).toBe(14);
+      expect(later.addonDollars[0].netPrice).toBe(86);
       expect(later.price).toBe(56);
+    });
+  });
+
+  // Codex pre-push audit P1: a blank-priced add-on (base == null — a
+  // service still awaiting a quote) must stay unpriced through the
+  // restack, never become an explicit $0 the engine's numeric-only gross
+  // would otherwise produce.
+  test('gate on: a blank-priced (awaiting-quote) add-on stays unpriced, never becomes an explicit $0', async () => {
+    await withGateLive(() => {
+      const pricing = {
+        primaryBase: 100,
+        primaryServiceKey: 'general_pest',
+        primaryServiceCategory: 'pest_control',
+        primaryDiscount: { discountType: 'percentage', discountAmount: 15, discountDollars: 15, maxDiscountDollars: null },
+        appointmentDiscount: { discountType: 'fixed_amount', discountAmount: 30, discountDollars: 30, maxDiscountDollars: null, serviceKeyFilter: null, serviceCategoryFilter: null },
+      };
+      const unpricedAddon = { base: null, price: null, serviceKey: 'quote_pending_addon', serviceCategory: 'addon', discount: null };
+      const result = restackLiveVisitFinancials(pricing, [unpricedAddon]);
+      expect(result.addonDollars[0].netPrice).toBeNull();
+      expect(result.addonDollars[0].discountDollars).toBeNull();
     });
   });
 
@@ -520,6 +571,25 @@ describe('recurring extension — restackStoredVisitFinancials', () => {
     const later = restackStoredVisitFinancials(parent, [recurringAddon], null, caps);
     expect(later.addonDollars[0].discountDollars).toBe(14);
     expect(later.price).toBe(56);
+  });
+
+  // Codex pre-push audit P1: a stored add-on row with neither base_price
+  // NOR estimated_price at all (a service still awaiting a quote) must
+  // stay unpriced through the restack, never become an explicit $0.
+  test('a blank stored add-on row (no base_price, no estimated_price) stays unpriced through the restack', () => {
+    const result = restackStoredVisitFinancials({
+      primary_line_price: 100,
+      line_discount_id: 'line-disc-blank',
+      line_discount_type: 'percentage',
+      line_discount_amount: 15,
+      discount_type: 'fixed_amount',
+      discount_amount: 30,
+    }, [
+      { base_price: null, estimated_price: null, discount_type: null, service_id: 'quote-pending-addon' },
+    ], null, new Map([['line-disc-blank', null]]));
+
+    expect(result.addonDollars[0].netPrice).toBeNull();
+    expect(result.addonDollars[0].discountDollars).toBeNull();
   });
 
   // Codex pre-push audit P0 (round 5): reading the ORIGINAL frozen dollars

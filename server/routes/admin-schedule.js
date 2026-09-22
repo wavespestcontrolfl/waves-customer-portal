@@ -2149,6 +2149,13 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
         ? { ...primaryDiscount, discountDollars: stacked.lines[0].lineDiscountDollars }
         : primaryDiscount;
       finalAddonLines = addonLines.map((line, i) => {
+        // Codex pre-push audit P1: a blank-priced add-on (base == null — a
+        // service still awaiting a quote) must stay unpriced through the
+        // restack, never become an explicit $0. The engine only ever sees
+        // a numeric gross (line.base || 0 fed the input above), so that
+        // distinction is restored here, the one place that still knows
+        // which line came in with no base at all.
+        if (line.price == null) return line;
         const restated = stacked.lines[i + 1];
         return line.discount
           ? { ...line, price: restated.net, discount: { ...line.discount, discountDollars: restated.lineDiscountDollars } }
@@ -2511,10 +2518,18 @@ function restackLiveVisitFinancials(pricing, addonLines) {
     price: stacked.total,
     appointmentDiscountDollars: stacked.appointmentDiscountDollars > 0 ? stacked.appointmentDiscountDollars : null,
     primaryDiscountDollars: stacked.lines[0].lineDiscountDollars > 0 ? stacked.lines[0].lineDiscountDollars : null,
-    addonDollars: addons.map((_, i) => ({
-      discountDollars: stacked.lines[i + 1].lineDiscountDollars,
-      netPrice: stacked.lines[i + 1].net,
-    })),
+    // A blank-priced add-on (base == null — a service still awaiting a
+    // quote) must stay unpriced, never become an explicit $0 (Codex
+    // pre-push audit P1): the engine only ever sees numeric gross
+    // (line.base || 0), so it cannot itself distinguish "genuinely $0" from
+    // "not priced yet" — that distinction is restored here, at the one
+    // place that still knows which add-ons came in with no base at all.
+    addonDollars: addons.map((line, i) => (line.base == null
+      ? { discountDollars: null, netPrice: null }
+      : {
+        discountDollars: stacked.lines[i + 1].lineDiscountDollars,
+        netPrice: stacked.lines[i + 1].net,
+      })),
   };
 }
 
@@ -2800,10 +2815,20 @@ function restackStoredVisitFinancials(parent, addonRows, discountScope, discount
     price: stacked.total,
     appointmentDiscountDollars: stacked.appointmentDiscountDollars > 0 ? stacked.appointmentDiscountDollars : null,
     primaryLineDiscountDollars: stacked.lines[0].lineDiscountDollars > 0 ? stacked.lines[0].lineDiscountDollars : null,
-    addonDollars: addons.map((_, i) => ({
-      discountDollars: stacked.lines[i + 1].lineDiscountDollars,
-      netPrice: stacked.lines[i + 1].net,
-    })),
+    // A blank-priced add-on row (no base_price AND no estimated_price at
+    // all — a service still awaiting a quote) must stay unpriced, never
+    // become an explicit $0 (Codex pre-push audit P1 — the
+    // restackLiveVisitFinancials counterpart above has the identical fix):
+    // the engine only ever sees a numeric gross (the derivedGross fallback
+    // above reads a missing value as 0), so that distinction has to be
+    // restored here, at the one place that still knows which add-on rows
+    // came in with no price at all.
+    addonDollars: addons.map((addon, i) => (addon?.base_price == null && addon?.estimated_price == null
+      ? { discountDollars: null, netPrice: null }
+      : {
+        discountDollars: stacked.lines[i + 1].lineDiscountDollars,
+        netPrice: stacked.lines[i + 1].net,
+      })),
   };
 }
 
@@ -6262,7 +6287,17 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (cols.estimated_price) {
           if (zeroCallbackPrice) childData.estimated_price = 0;
           else if (memberSeriesCovered) {
-            const addonStamp = addonOnlyTotal(childAddonLines);
+            // Codex pre-push audit P1: sum the RESTACKED add-on nets when
+            // available, not the anchor-date prices addonOnlyTotal(childAddonLines)
+            // would otherwise read — a $0 primary + a discounted recurring
+            // add-on + a shared appointment credit nets differently for a
+            // child whose own due add-ons differ from the anchor's (see
+            // restackLiveVisitFinancials), and insertScheduledServiceAddons
+            // below already writes each addon row's OWN restacked net —
+            // this total must agree with what actually got stamped on them.
+            const addonStamp = addonOnlyTotal(childRestack
+              ? childAddonLines.map((line, i) => ({ ...line, price: childRestack.addonDollars[i]?.netPrice ?? line.price }))
+              : childAddonLines);
             if (addonStamp > 0) childData.estimated_price = addonStamp;
           } else if (childRestack) { if (childRestack.price != null) childData.estimated_price = childRestack.price; }
           else if (childFinancials.price != null) childData.estimated_price = childFinancials.price;
