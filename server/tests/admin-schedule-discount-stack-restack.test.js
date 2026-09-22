@@ -240,6 +240,38 @@ describe('seeded recurring children/boosters — restackLiveVisitFinancials', ()
       expect(result.primaryDiscountDollars).toBe(100);
     });
   });
+
+  // Codex pre-push audit P0 (round 3): an explicit $0 primary (a member-
+  // covered series stamps exactly this — dues cover the primary line,
+  // priced add-ons still bill) used to be treated as "no primary gross at
+  // all," so a booking with a $0 primary, a discounted recurring add-on, a
+  // priced one-time add-on, and an appointment credit skipped restacking
+  // entirely. Codex's own worked example: a $100 recurring add-on at 20%
+  // off, a $50 one-time add-on, a $30 appointment credit — the anchor
+  // stamps a $16 add-on discount; a later occurrence without the one-time
+  // add-on must restack to $14 (canonical $56 total), never the anchor's
+  // frozen $16 (which would total $54).
+  test('gate on: a $0 primary still restacks its OWN priced/discounted add-ons and the shared appointment credit', async () => {
+    await withGateLive(() => {
+      const pricing = {
+        primaryBase: 0,
+        primaryServiceKey: 'general_pest',
+        primaryServiceCategory: 'pest_control',
+        primaryDiscount: null,
+        appointmentDiscount: { discountType: 'fixed_amount', discountAmount: 30, discountDollars: 30, maxDiscountDollars: null, serviceKeyFilter: null, serviceCategoryFilter: null },
+      };
+      const recurringAddon = { base: 100, price: 84, serviceKey: 'recurring_addon', serviceCategory: 'addon', discount: { discountType: 'percentage', discountAmount: 20, discountDollars: 16 } };
+      const oneTimeAddon = { base: 50, price: 50, serviceKey: 'one_time_addon', serviceCategory: 'addon', discount: null };
+
+      const anchor = restackLiveVisitFinancials(pricing, [recurringAddon, oneTimeAddon]);
+      expect(anchor.addonDollars[0].discountDollars).toBe(16);
+
+      // A later occurrence where the one-time add-on isn't due.
+      const later = restackLiveVisitFinancials(pricing, [recurringAddon]);
+      expect(later.addonDollars[0].discountDollars).toBe(14);
+      expect(later.price).toBe(56);
+    });
+  });
 });
 
 describe('seeded recurring children/boosters — insertScheduledServiceAddons restack threading', () => {
@@ -400,6 +432,24 @@ describe('recurring extension — restackStoredVisitFinancials', () => {
 
     expect(result.price).toBe(0);
     expect(result.primaryLineDiscountDollars).toBe(100);
+  });
+
+  // Codex pre-push audit P0 (round 3), stored-row counterpart of the
+  // identical fix in restackLiveVisitFinancials above — same worked example
+  // Codex used: a $0 primary, a $100 recurring add-on at 20% off, a $50
+  // one-time add-on, and a $30 appointment credit.
+  test('a $0 primary_line_price still restacks its OWN priced/discounted due add-ons and the shared appointment credit', () => {
+    const parent = { primary_line_price: 0, line_discount_type: null, discount_type: 'fixed_amount', discount_amount: 30 };
+    const recurringAddon = { base_price: 100, estimated_price: 84, discount_type: 'percentage', discount_amount: 20, discount_dollars: 16, service_id: 'recurring-addon' };
+    const oneTimeAddon = { base_price: 50, estimated_price: 50, discount_type: null, service_id: 'one-time-addon' };
+
+    const anchor = restackStoredVisitFinancials(parent, [recurringAddon, oneTimeAddon], null);
+    expect(anchor.addonDollars[0].discountDollars).toBe(16);
+
+    // A later extension occurrence where the one-time add-on isn't due.
+    const later = restackStoredVisitFinancials(parent, [recurringAddon], null);
+    expect(later.addonDollars[0].discountDollars).toBe(14);
+    expect(later.price).toBe(56);
   });
 });
 

@@ -2420,8 +2420,17 @@ function calculateVisitFinancialsForAddons(pricing, addonLines) {
 // primary gross to anchor on.
 function restackLiveVisitFinancials(pricing, addonLines) {
   if (!discountStackingLive()) return null;
-  const primaryGross = Number(pricing?.primaryBase);
-  if (!Number.isFinite(primaryGross) || primaryGross <= 0) return null;
+  // An explicit $0 primary (a member-covered series stamps exactly this —
+  // dues cover the primary line, priced add-ons still bill) is a REAL gross
+  // to restack against, not "no primary at all": only a genuinely missing
+  // primaryBase (null/undefined — no structured line to anchor on) bails
+  // out here (Codex pre-push audit P0, round 3: this guard used to also
+  // reject 0, so a $0-primary booking with priced/discounted add-ons and an
+  // appointment credit skipped restacking entirely — the next seeded visit
+  // then read the anchor's frozen dollars instead of its own).
+  if (pricing?.primaryBase == null || pricing.primaryBase === '') return null;
+  const primaryGross = Number(pricing.primaryBase);
+  if (!Number.isFinite(primaryGross) || primaryGross < 0) return null;
   const addons = Array.isArray(addonLines) ? addonLines : [];
   const discount = pricing.appointmentDiscount;
   if (!discount && !pricing.primaryDiscount && !addons.some((line) => line.discount)) return null;
@@ -2661,8 +2670,16 @@ function applyStoredVisitFinancials(target, cols, parent, addonRows, allParentAd
 // must be resized against, and whose combined balance an appointment-level
 // FIXED credit's pro-rata share depends on.
 function restackStoredVisitFinancials(parent, addonRows, discountScope) {
-  const primaryGross = Number(parent?.primary_line_price);
-  if (!Number.isFinite(primaryGross) || primaryGross <= 0) return null;
+  // An explicit $0 primary_line_price (a member-covered series stamps
+  // exactly this) is a REAL gross to restack due add-ons against, not "no
+  // structured primary at all" — only a genuinely missing value (null —
+  // resolveSeriesExtensionPriceTemplate's anchored-split clear, or a row
+  // that never had one) bails out (Codex pre-push audit P0, round 3: this
+  // guard used to also reject 0, so a $0-primary occurrence with priced/
+  // discounted add-ons and an appointment credit never restacked at all).
+  if (parent?.primary_line_price == null || parent.primary_line_price === '') return null;
+  const primaryGross = Number(parent.primary_line_price);
+  if (!Number.isFinite(primaryGross) || primaryGross < 0) return null;
   const addons = Array.isArray(addonRows) ? addonRows : [];
 
   const pctType = isPercentDiscountType(parent?.discount_type);
