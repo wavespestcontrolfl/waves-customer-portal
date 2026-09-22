@@ -10,7 +10,9 @@ afterEach(cleanup);
 function History({ timeline }) {
   const [filter, onFilter] = useState("all");
   const [search, onSearch] = useState("");
-  return <Customer360Activity search={search} onSearch={onSearch} timeline={timeline} filter={filter} onFilter={onFilter} error={false} retrying={false} onRetry={() => {}} />;
+  const terms = search.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const selected = timeline.filter((item) => (filter === "all" || item.type === filter) && terms.every((term) => `${item.title || ""} ${item.description || ""}`.toLowerCase().includes(term)));
+  return <Customer360Activity search={search} onSearch={onSearch} timeline={selected} filter={filter} onFilter={onFilter} error={false} retrying={false} onRetry={() => {}} />;
 }
 
 describe("Customer 360 activity", () => {
@@ -44,6 +46,12 @@ describe("Customer 360 activity", () => {
     fireEvent.change(screen.getByRole("searchbox", { name: "Search activity" }), { target: { value: "" } });
     fireEvent.change(screen.getByRole("combobox", { name: "Filter activity" }), { target: { value: "all" } });
     expect(history.getByText("Application completed")).toBeInTheDocument();
+  });
+
+  it("renders server search matches even when formatting changes the searchable text", () => {
+    render(<Customer360Activity timeline={[{ id: "payment-a", type: "payment", title: "Payment: $1,250.00", date: "2024-07-02" }]} filter="payment" onFilter={vi.fn()} search="1250.00" onSearch={vi.fn()} error={false} />);
+    expect(screen.getByText("Payment: $1,250.00")).toBeInTheDocument();
+    expect(screen.queryByText("No matching activity.")).not.toBeInTheDocument();
   });
 
   it("uses Eastern dates for instants and preserves the calendar date of services", () => {

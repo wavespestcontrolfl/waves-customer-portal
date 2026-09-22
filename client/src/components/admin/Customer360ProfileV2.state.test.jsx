@@ -79,6 +79,34 @@ describe('Customer360ProfileV2 profile state', () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
   });
 
+  it('queries full activity history when filters or search change and loads older matching pages', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const requests = [];
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const parsed = new URL(String(url), 'https://fixture.invalid');
+      if (parsed.pathname.endsWith('/customer-a')) return response(customerDetail('customer-a', 'Avery'));
+      if (parsed.pathname.endsWith('/timeline')) {
+        requests.push(parsed.searchParams);
+        if (parsed.searchParams.get('search') === 'gate') return response({ timeline: [{ id: 'search-result', type: 'interaction', title: 'Older gate note' }], hasMore: false });
+        if (parsed.searchParams.get('type') === 'interaction') return response({ timeline: [{ id: 'older-note', type: 'interaction', title: 'Note beyond initial page' }], hasMore: false });
+        if (parsed.searchParams.has('cursor')) return response({ timeline: [{ id: 'oldest', type: 'sms', title: 'Oldest activity page' }], hasMore: false });
+        return response({ timeline: [{ id: 'recent', type: 'sms', title: 'Recent activity page' }], hasMore: true, nextCursor: 'older-activity' });
+      }
+      return response({ comms: [], commitments: [], enabled: true, has_more: false });
+    }));
+    render(<MemoryRouter><Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} embedded initialTab="comms" /></MemoryRouter>);
+    await screen.findByText('Recent activity page');
+    fireEvent.click(screen.getByRole('button', { name: 'Load older activity' }));
+    await screen.findByText('Oldest activity page');
+    fireEvent.change(screen.getByRole('combobox', { name: 'Filter activity' }), { target: { value: 'interaction' } });
+    await screen.findByText('Note beyond initial page');
+    expect(requests.at(-1).has('cursor')).toBe(false);
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search activity' }), { target: { value: 'gate' } });
+    await screen.findByText('Older gate note');
+    expect(requests.at(-1).get('type')).toBe('interaction');
+    expect(requests.at(-1).get('search')).toBe('gate');
+  });
+
   it('opens the shell bar and refreshes only a matching customer after its verified property change', async () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
     let name = 'Before';
@@ -183,7 +211,7 @@ describe('Customer360ProfileV2 profile state', () => {
     const sends = fetch.mock.calls.filter(([url]) => String(url).endsWith('/communications/sms'));
     expect(sends).toHaveLength(1);
     expect(JSON.parse(sends[0][1].body)).toMatchObject({ customerId: 'customer-a', to: '+19415550100', body: 'Service update' });
-    expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/timeline'))).toBe(false);
+    expect(fetch.mock.calls.some(([url]) => String(url).split('?')[0].endsWith('/timeline'))).toBe(false);
     expect(fetch.mock.calls.some(([url]) => String(url).includes('/unread-count'))).toBe(false);
   });
 
@@ -197,7 +225,7 @@ describe('Customer360ProfileV2 profile state', () => {
         detail.customer.phone = '+19415550100';
         return response(detail);
       }
-      if (path.endsWith('/timeline')) return response({ timeline: [{ type: 'interaction', title: sent ? 'Saved message activity' : 'Existing activity', date: '2024-08-01T16:00:00Z' }] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [{ type: 'interaction', title: sent ? 'Saved message activity' : 'Existing activity', date: '2024-08-01T16:00:00Z' }] });
       if (path.endsWith('/communications/sms')) {
         sent = true;
         return response({ sent: true, providerMessageId: 'SMaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' });
@@ -217,7 +245,7 @@ describe('Customer360ProfileV2 profile state', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Back to customer' }));
     fireEvent.click(screen.getByRole('tab', { name: 'Activity', exact: true }));
     expect(await screen.findByText('Saved message activity')).toBeInTheDocument();
-    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/timeline'))).toHaveLength(2);
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).split('?')[0].endsWith('/timeline'))).toHaveLength(2);
     expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/customer-a'))).toHaveLength(2);
   });
 
@@ -422,7 +450,7 @@ describe('Customer360ProfileV2 profile state', () => {
       : response({ error: 'Forbidden' }, 403)));
     render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
     expect(await screen.findAllByText('Avery Customer')).toHaveLength(2);
-    expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/timeline'))).toBe(false);
+    expect(fetch.mock.calls.some(([url]) => String(url).split('?')[0].endsWith('/timeline'))).toBe(false);
     expect(screen.queryByText('Could not load customer history.')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Retry customer history' })).not.toBeInTheDocument();
     expect(screen.queryByText('Timeline (0)')).not.toBeInTheDocument();
@@ -491,7 +519,7 @@ describe('Customer360ProfileV2 profile state', () => {
     const timeline = Array.from({ length: 46 }, (_, index) => ({ type: 'interaction', title: `History entry ${index + 1}`, date: '2024-07-02T16:00:00Z' }));
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);
-      if (path.endsWith('/timeline')) return response({ timeline });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline });
       if (path.endsWith('/customer-a')) return response(customerDetail('customer-a', 'Avery'));
       return response({});
     }));
@@ -540,7 +568,7 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(screen.queryByRole('button', { name: 'Edit customer' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Prepay invoice' })).not.toBeInTheDocument();
     expect(screen.queryByRole('region', { name: 'Customer activity history' })).not.toBeInTheDocument();
-    expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/timeline'))).toBe(false);
+    expect(fetch.mock.calls.some(([url]) => String(url).split('?')[0].endsWith('/timeline'))).toBe(false);
   });
 
   it('shows SMS follow-up to technicians in the workspace Activity section without the admin history', async () => {
@@ -557,7 +585,7 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(await screen.findByTestId('sms-followup-summary')).toHaveTextContent('Send the estimate');
     expect(screen.getByRole('button', { name: 'Mark done' })).toBeInTheDocument();
     expect(screen.queryByRole('region', { name: 'Customer activity history' })).not.toBeInTheDocument();
-    expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/timeline'))).toBe(false);
+    expect(fetch.mock.calls.some(([url]) => String(url).split('?')[0].endsWith('/timeline'))).toBe(false);
   });
 
   it.each([{ events: [] }, { events: [{ type: 'interaction', title: 'Recovered fixture note' }] }])(
@@ -567,7 +595,7 @@ describe('Customer360ProfileV2 profile state', () => {
       let failTimeline = true;
       vi.stubGlobal('fetch', vi.fn((url) => {
         const path = String(url);
-        if (path.endsWith('/timeline')) return failTimeline
+        if (path.split('?')[0].endsWith('/timeline')) return failTimeline
           ? response({ error: 'Unavailable' }, 503)
           : response({ timeline: events });
         if (path.endsWith('/customer-a')) return failTimeline ? response(customerDetail('customer-a', 'Avery')) : response({ error: 'Profile unavailable' }, 503);
@@ -594,11 +622,11 @@ describe('Customer360ProfileV2 profile state', () => {
     let attempts = 0;
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);
-      if (path.endsWith('/customer-a/timeline')) {
+      if (path.split('?')[0].endsWith('/customer-a/timeline')) {
         attempts += 1;
         return attempts === 1 ? response({ error: 'Unavailable' }, 503) : oldHistory.promise;
       }
-      if (path.endsWith('/customer-b/timeline')) return response({ timeline: [{ title: 'Beta fixture note' }] });
+      if (path.split('?')[0].endsWith('/customer-b/timeline')) return response({ timeline: [{ title: 'Beta fixture note' }] });
       if (path.endsWith('/customer-a')) return response(customerDetail('customer-a', 'Avery'));
       if (path.endsWith('/customer-b')) return response(customerDetail('customer-b', 'Blake'));
       return response({});
@@ -624,7 +652,7 @@ describe('Customer360ProfileV2 profile state', () => {
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);
       if (path.endsWith('/admin/payers')) return response({ payers: [] });
-      if (path.endsWith('/admin/customers/customer-a/timeline')) return response({ timeline: [] });
+      if (path.split('?')[0].endsWith('/admin/customers/customer-a/timeline')) return response({ timeline: [] });
       if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail('customer-a', 'Avery'));
       return response({});
     }));
@@ -754,7 +782,7 @@ describe('Customer360ProfileV2 profile state', () => {
     const fetchFor = () => vi.fn((url) => {
       const path = String(url);
       if (path.endsWith('/admin/payers')) return response({ payers: [] });
-      if (path.endsWith('/admin/customers/customer-a/timeline')) return response({ timeline: [] });
+      if (path.split('?')[0].endsWith('/admin/customers/customer-a/timeline')) return response({ timeline: [] });
       if (path.endsWith('/admin/customers/customer-a/properties')) return response({ properties: [] });
       if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail('customer-a', 'Avery'));
       return response({});
@@ -787,7 +815,7 @@ describe('Customer360ProfileV2 profile state', () => {
     const fetchMock = vi.fn((url, options = {}) => {
       const path = String(url);
       if (path.endsWith('/admin/payers')) return response({ payers: [] });
-      if (path.endsWith('/admin/customers/customer-a/timeline')) return response({ timeline: [] });
+      if (path.split('?')[0].endsWith('/admin/customers/customer-a/timeline')) return response({ timeline: [] });
       if (path.endsWith('/admin/customers/customer-a/properties')) return response({ properties: [] });
       if (path.endsWith('/admin/customers/customer-a') && options.method === 'PUT') return response({ success: true });
       if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail('customer-a', 'Avery'));
@@ -856,7 +884,7 @@ describe('Customer360ProfileV2 profile state', () => {
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);
       if (path.endsWith('/admin/payers')) return response({ payers: [] });
-      if (path.endsWith('/admin/customers/customer-a/timeline')) return response({ timeline: [] });
+      if (path.split('?')[0].endsWith('/admin/customers/customer-a/timeline')) return response({ timeline: [] });
       if (path.endsWith('/admin/customers/customer-a')) return response(detail);
       return response({});
     }));
@@ -870,8 +898,8 @@ describe('Customer360ProfileV2 profile state', () => {
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);
       if (path.endsWith('/admin/payers')) return response({ payers: [] });
-      if (path.endsWith('/admin/customers/customer-a/timeline')) return response({ timeline: [] });
-      if (path.endsWith('/admin/customers/customer-b/timeline')) return response({ timeline: [] });
+      if (path.split('?')[0].endsWith('/admin/customers/customer-a/timeline')) return response({ timeline: [] });
+      if (path.split('?')[0].endsWith('/admin/customers/customer-b/timeline')) return response({ timeline: [] });
       if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail('customer-a', 'Avery'));
       if (path.endsWith('/admin/customers/customer-b')) {
         return failSecond
@@ -906,7 +934,7 @@ describe('Customer360ProfileV2 profile state', () => {
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);
       if (path.endsWith('/admin/payers')) return response({ payers: [] });
-      if (path.endsWith('/timeline')) return response({ timeline: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
       if (path.endsWith('/admin/customers/customer-a')) return first.promise;
       if (path.endsWith('/admin/customers/customer-b')) return response(customerDetail('customer-b', 'Blair'));
       return response({});
@@ -939,7 +967,7 @@ describe('Customer360ProfileV2 profile state', () => {
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);
       if (path.endsWith('/admin/payers')) return response({ payers: [] });
-      if (path.endsWith('/timeline')) return response({ timeline: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
       if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail('customer-a', 'Avery'));
       if (path.endsWith('/admin/customers/customer-b')) return response(customerDetail('customer-b', 'Blair'));
       return response({});
