@@ -1167,3 +1167,33 @@ test.each([
 ])('multiword certainty modifiers in outcome predicates: %s', (text, expected) => {
   expect(outcome(text)).toBe(expected);
 });
+
+// Fallback pre-push audit: whitespace variation, apostrophe contractions,
+// and compound "card payment X" artifact mentions must not slip past the
+// checks that already handle their canonical forms.
+test.each([
+  ['Your payment was  approved.', 'fail'],
+  ['Your payment was\nprocessed.', 'fail'],
+  ['Your payment was not approved.', 'pass'],
+])('variable whitespace in passive outcome claims: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
+
+test.each([
+  ["You've been charged $129.", 'fail'],
+  ['You’ve been charged $129.', 'fail'],
+  ['You have been charged $129.', 'fail'],
+  ["You've not been charged $129.", 'pass'],
+])('contracted customer-target charges: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
+
+test.each([
+  ['We received your card payment confirmation email.', 'pass'],
+  ['We received your card payment instructions.', 'pass'],
+  ['We received your card payment method.', 'pass'],
+  ['We received your card.', 'fail'],
+  ['Your payment was approved.', 'fail'],
+])('compound card-payment artifact mentions: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
