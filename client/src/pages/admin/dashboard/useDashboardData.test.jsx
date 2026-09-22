@@ -23,7 +23,7 @@ beforeEach(() => {
   adminFetch.mockImplementation(async (path) => response(path));
   Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
 });
-afterEach(() => { cleanup(); vi.useRealTimers(); vi.resetAllMocks(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.resetAllMocks(); });
 
 describe('dashboard request recovery', () => {
   it('publishes overdue visits and completion while analytics is stalled', async () => {
@@ -62,6 +62,46 @@ describe('dashboard request recovery', () => {
     expect(result.current.values.ebitda).toBeTruthy();
     expect(result.current.values.kpis).toBe(retainedKpis);
     expect(adminFetch).toHaveBeenCalledTimes(9);
+  });
+
+  it('refreshes a stale hidden section while reusing shared feeds refreshed more recently', async () => {
+    let now = 2_000_000_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    let alertLoads = 0;
+    adminFetch.mockImplementation(async (path) => {
+      if (path.endsWith('/alerts')) {
+        alertLoads += 1;
+        return { alerts: alertLoads === 1 ? [] : [{ id: 'new-alert' }] };
+      }
+      return response(path);
+    });
+    const { result, rerender } = renderHook(({ tab }) => useDashboardData(tab, 'period=mtd'), {
+      initialProps: { tab: 'today' },
+    });
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+    rerender({ tab: 'profit' });
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+
+    now += 9 * 60 * 1000;
+    await act(async () => result.current.refresh());
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+    const freshSharedKpis = result.current.values.kpis;
+    adminFetch.mockClear();
+
+    now += 60 * 1000;
+    rerender({ tab: 'today' });
+
+    expect(result.current.values.alerts).toEqual({ alerts: [] });
+    expect(result.current.pending.alerts).toBe(true);
+    expect(result.current.values.kpis).toBe(freshSharedKpis);
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+    expect(adminFetch.mock.calls.map(([path]) => path)).toEqual([
+      '/admin/dashboard/alerts',
+      '/admin/dashboard/today-completion',
+      '/admin/command-center/stale-visits',
+    ]);
+    expect(result.current.values.alerts).toEqual({ alerts: [{ id: 'new-alert' }] });
+    expect(result.current.values.kpis).toBe(freshSharedKpis);
   });
 
   it('requeues unfinished shared feeds when a section switch aborts their first cycle', async () => {

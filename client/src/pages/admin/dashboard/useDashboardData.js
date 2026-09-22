@@ -34,6 +34,7 @@ const REQUESTS = [
   ["billing", "/admin/billing-health", "cash"],
 ];
 const OPERATIONAL_KEYS = new Set(["alerts", "today", "staleVisits"]);
+const DASHBOARD_REFRESH_MS = 180000;
 
 async function fetchDashboard(path, signal) {
   const controller = new AbortController();
@@ -78,14 +79,18 @@ export default function useDashboardData(section, periodQS) {
     const sectionOnly = prior && prior.section !== section && prior.revision === revision
       && prior.periodQS === periodQS;
     previousCycle.current = { section, periodQS, revision };
+    const sectionCacheCutoff = Date.now() - DASHBOARD_REFRESH_MS;
     const unfinishedFixed = periodOnly ? requests.filter(([key, path, periodDriven]) => !periodDriven
       && (recordsRef.current[key]?.path !== path || recordsRef.current[key]?.pending)) : [];
     const cycleRequests = periodOnly ? [
       ...unfinishedFixed.filter(([key]) => OPERATIONAL_KEYS.has(key)),
       ...requests.filter(([, , periodDriven]) => periodDriven),
       ...unfinishedFixed.filter(([key]) => !OPERATIONAL_KEYS.has(key)),
-    ] : sectionOnly ? requests.filter(([key, path]) => recordsRef.current[key]?.path !== path
-      || recordsRef.current[key]?.pending) : requests;
+    ] : sectionOnly ? requests.filter(([key, path]) => {
+      const record = recordsRef.current[key];
+      return record?.path !== path || record.pending || record.error || record.updatedAt == null
+        || record.updatedAt <= sectionCacheCutoff;
+    }) : requests;
     const controller = new AbortController();
     const { signal } = controller;
     running.current = true;
@@ -133,7 +138,7 @@ export default function useDashboardData(section, periodQS) {
     const autoRefresh = () => {
       if (document.visibilityState !== "hidden" && !running.current) refresh();
     };
-    const interval = setInterval(autoRefresh, 180000);
+    const interval = setInterval(autoRefresh, DASHBOARD_REFRESH_MS);
     document.addEventListener("visibilitychange", autoRefresh);
     return () => {
       clearInterval(interval);
