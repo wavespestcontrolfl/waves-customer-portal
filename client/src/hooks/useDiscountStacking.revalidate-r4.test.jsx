@@ -126,4 +126,27 @@ describe('ensureStackingFresh guards the money submission itself', () => {
     expect(await ensureStackingFresh()).toEqual({ enabled: false, known: false });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  // Codex pre-push audit P1: the no-token branch returns with no `await`
+  // before it, so the whole probe used to run synchronously and its finally
+  // cleared `inflight` to null BEFORE the outer `inflight = (async () =>
+  // {...})()` assignment had happened — that assignment then overwrote the
+  // null right back to the already-resolved no-token promise, and nothing
+  // ever cleared it again. Every later probe, even one made after an
+  // operator logs in and a real token appears, joined that same stale
+  // result forever with zero fetches.
+  it('does not permanently latch the no-token result — a later probe (e.g. after login) still fetches', async () => {
+    localStorage.removeItem('waves_admin_token');
+    const fetchMock = mockGate(true);
+    vi.stubGlobal('fetch', fetchMock);
+
+    const beforeLogin = await ensureStackingFresh();
+    expect(beforeLogin).toEqual({ enabled: false, known: true });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    localStorage.setItem('waves_admin_token', 'now-logged-in');
+    const afterLogin = await ensureStackingFresh();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(afterLogin).toEqual({ enabled: true, known: true });
+  });
 });

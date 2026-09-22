@@ -74,6 +74,17 @@ function probeStacking() {
     return Promise.resolve(snapshot());
   }
   inflight = (async () => {
+    // Codex pre-push audit P1: the no-token branch below returns with no
+    // `await` before it, so without this yield the whole try/finally runs
+    // SYNCHRONOUSLY inside the `(async () => {...})()` call — including the
+    // finally's `inflight = null` — before the `inflight = ...` assignment
+    // around this IIFE has even happened. That assignment then overwrites
+    // the null right back to this (already-resolved) promise, and nothing
+    // ever clears it again: every later probe, even after a login sets a
+    // real token, joins this same stale no-token result forever. Yielding
+    // one microtask first guarantees the outer assignment completes before
+    // any return path inside can run its finally.
+    await Promise.resolve();
     try {
       const token = localStorage.getItem('waves_admin_token');
       if (!token) {
