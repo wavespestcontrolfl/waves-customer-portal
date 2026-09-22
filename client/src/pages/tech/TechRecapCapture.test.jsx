@@ -194,6 +194,26 @@ describe('TechRecapCapture upload recovery', () => {
     await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
   });
 
+  it('makes an unsupported picker MIME rejected by presign discard-only', async () => {
+    const request = vi.fn(async (path, options) => {
+      if (isListRequest(path, options)) return { items: [] };
+      if (path.endsWith('/presign')) {
+        const error = new Error('Photo must be JPEG, PNG, WebP, or HEIC.');
+        error.status = 400;
+        throw error;
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+
+    render(<TechRecapCapture service={SERVICE_ONE} request={request} />);
+    await tagPerimeter('unsupported.gif');
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Photo must be JPEG');
+    expect(screen.queryByRole('button', { name: 'Retry upload' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Discard' })).toBeEnabled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it('retains the selected file and role after a PUT failure and resumes with the same presign', async () => {
     fetch.mockRejectedValueOnce(new Error('Network unavailable')).mockResolvedValueOnce({ ok: true, status: 200 });
     const request = vi.fn(async (path, options) => {
@@ -312,6 +332,53 @@ describe('TechRecapCapture upload recovery', () => {
     expect(pathsMatching(request, '/service-two/recap-media/old-media/confirm')).toHaveLength(0);
     expect(await screen.findByText('Uploaded')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '+ Capture recap clip' })).toBeEnabled();
+  });
+
+  it('shows the original upload failure after returning to its service', async () => {
+    let failPut;
+    fetch.mockReturnValueOnce(new Promise((_resolve, reject) => { failPut = reject; }));
+    const request = vi.fn(async (path, options) => {
+      if (isListRequest(path, options)) return { items: [] };
+      if (path.endsWith('/presign')) return { mediaId: 'return-failure', uploadUrl: 'https://upload.test/return-failure' };
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    const view = render(<TechRecapCapture service={SERVICE_ONE} request={request} />);
+    await tagPerimeter('return-failure.jpg');
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+
+    view.rerender(<TechRecapCapture service={SERVICE_TWO} request={request} />);
+    view.rerender(<TechRecapCapture service={SERVICE_ONE} request={request} />);
+    await act(async () => failPut(new Error('Original upload failed')));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Original upload failed');
+    expect(screen.getByRole('alert')).toHaveTextContent('return-failure.jpg');
+  });
+
+  it('does not let an older returned-service failure override a newer upload attempt', async () => {
+    let failOldPut;
+    fetch.mockReturnValueOnce(new Promise((_resolve, reject) => { failOldPut = reject; }));
+    let presignCount = 0;
+    const request = vi.fn(async (path, options) => {
+      if (isListRequest(path, options)) return { items: [] };
+      if (path.endsWith('/presign')) {
+        presignCount += 1;
+        return { mediaId: `attempt-${presignCount}`, uploadUrl: `https://upload.test/attempt-${presignCount}` };
+      }
+      if (path.endsWith('/attempt-2/confirm')) return { ok: true, id: 'attempt-2', status: 'ready' };
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    const view = render(<TechRecapCapture service={SERVICE_ONE} request={request} />);
+    await tagPerimeter('old-attempt.jpg');
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    view.rerender(<TechRecapCapture service={SERVICE_TWO} request={request} />);
+    view.rerender(<TechRecapCapture service={SERVICE_ONE} request={request} />);
+
+    await tagPerimeter('new-attempt.jpg');
+    await waitFor(() => expect(pathsMatching(request, '/attempt-2/confirm')).toHaveLength(1));
+    await act(async () => failOldPut(new Error('Old upload failed')));
+
+    expect(screen.queryByText('Old upload failed')).not.toBeInTheDocument();
+    expect(screen.queryByText(/old-attempt\.jpg/)).not.toBeInTheDocument();
   });
 
   it('finishes the original service pipeline when navigation occurs during presign', async () => {

@@ -87,6 +87,9 @@ async function recoverUploadFailure(error, draft, request) {
   if (draft.needsReconcile && TERMINAL_CONFIRM_STATUSES.has(error?.status)) {
     retainedDraft = { ...draft, retryable: false };
   }
+  if (draft.presignAttempted && !draft.mediaId && error?.status === 400) {
+    retainedDraft = { ...draft, retryable: false };
+  }
   return { retainedDraft, message };
 }
 
@@ -106,6 +109,9 @@ export default function TechRecapCapture({ service, request }) {
   const fileRef = useRef(null);
   const serviceIdRef = useRef(serviceId);
   const serviceGenerationRef = useRef(0);
+  const mountedRef = useRef(false);
+  const uploadAttemptRef = useRef(0);
+  const latestUploadByServiceRef = useRef(new Map());
   serviceIdRef.current = serviceId;
 
   const isCurrentService = (targetServiceId, generation) => (
@@ -137,6 +143,11 @@ export default function TechRecapCapture({ service, request }) {
     };
   }, [serviceId]); // eslint: react-hooks plugin is not configured in this repo;
 
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
   const onPick = (e) => {
     const file = e.target.files && e.target.files[0];
     if (fileRef.current) fileRef.current.value = '';
@@ -148,6 +159,12 @@ export default function TechRecapCapture({ service, request }) {
     const targetServiceId = draft.serviceId;
     const generation = serviceGenerationRef.current;
     if (!isCurrentService(targetServiceId, generation)) return;
+    const attemptId = uploadAttemptRef.current + 1;
+    uploadAttemptRef.current = attemptId;
+    latestUploadByServiceRef.current.set(targetServiceId, attemptId);
+    const canApplyAttempt = () => mountedRef.current
+      && serviceIdRef.current === targetServiceId
+      && latestUploadByServiceRef.current.get(targetServiceId) === attemptId;
     setPendingFile(null);
     setFailedUpload(null);
     setShowMore(false);
@@ -182,6 +199,7 @@ export default function TechRecapCapture({ service, request }) {
       }
 
       if (!draft.mediaId || !draft.uploadUrl) {
+        draft = { ...draft, presignAttempted: true };
         const presigned = await request(`/tech/services/${targetServiceId}/recap-media/presign`, {
           method: 'POST',
           body: JSON.stringify({ role: draft.role, mediaType: draft.mediaType, contentType: draft.contentType }),
@@ -211,7 +229,7 @@ export default function TechRecapCapture({ service, request }) {
       }
     } catch (e) {
       const { retainedDraft, message } = await recoverUploadFailure(e, draft, request);
-      if (isCurrentService(targetServiceId, generation)) {
+      if (canApplyAttempt()) {
         // Keep the in-memory File, role, and any completed upload stages so Retry
         // can resume without asking the tech to capture or tag the clip again.
         setFailedUpload(retainedDraft);
@@ -230,7 +248,7 @@ export default function TechRecapCapture({ service, request }) {
     if (!file || !targetServiceId || targetServiceId !== serviceId) return;
     const mediaType = file.type.startsWith('image/') ? 'image' : 'video';
     const contentType = file.type || (mediaType === 'image' ? 'image/jpeg' : 'video/mp4');
-    upload({ file, role, serviceId: targetServiceId, mediaType, contentType, durationMs: undefined, mediaId: null, uploadUrl: null, uploaded: false, needsReconcile: false, retryable: true, cleanupBeforeRetry: false });
+    upload({ file, role, serviceId: targetServiceId, mediaType, contentType, durationMs: undefined, mediaId: null, uploadUrl: null, uploaded: false, needsReconcile: false, retryable: true, cleanupBeforeRetry: false, presignAttempted: false });
   };
 
   const discardFailedUpload = async () => {
