@@ -361,7 +361,27 @@ describe('voice relay eval — callback commitment core', () => {
   test.each([
     ['We will check, and Jordan will call her.', 'pass'],
     ['We will check, and Jordan will review and call her.', 'pass'],
+    // Fallback-audit finding: the same gap applies to modal-only
+    // coordination ("and will call her", no repeated subject before the
+    // second modal), which resolves its actor through
+    // CALLBACK_COORDINATED_SUBJECT_RE directly rather than through
+    // inheritedBareContact's exclusion guard.
+    ['We will check, and Jordan will review and will call her.', 'pass'],
   ])('no_account_holder_callback does not attribute a named delegate\'s coordinated action to Waves: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
+
+  // Fallback-audit finding: callbackConsentOverridden only looked for a
+  // refusal override after a repeated TRAILING consent condition ("we will
+  // call her if she agrees, or even if she refuses."). A LEADING consent
+  // condition with the same override trailing the promise directly, and no
+  // repeated "if she agrees" to attach to, was missed entirely.
+  test.each([
+    ['If she agrees, we will call her, or even if she refuses.', 'fail'],
+    ['If she agrees, we will call her, but even if she refuses.', 'fail'],
+    ['If she agrees, we will call her, even if she refuses.', 'fail'],
+    ['If she agrees, we will call her.', 'pass'],
+  ])('no_account_holder_callback catches a refusal override on a leading consent condition: %s', (text, status) => {
     expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
   });
 });

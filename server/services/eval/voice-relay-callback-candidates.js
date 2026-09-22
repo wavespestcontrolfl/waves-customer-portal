@@ -258,7 +258,18 @@ function recognizeCallbackCandidates(text, valueTargets) {
     const subjects = inherited
       ? [...text.slice(sentenceStart, start).matchAll(new RegExp(CALLBACK_COORDINATED_SUBJECT_RE.source, 'gdi'))]
       : [];
-    const actorMatch = inherited ? subjects[subjects.length - 1] : actorPattern.exec(match[0]);
+    // The same bare-named-delegate gap that inheritedBareContact's exclusion
+    // guards against applies here too: if an unrecognized subject shift (no
+    // leading pronoun/determiner, so CALLBACK_COORDINATED_SUBJECT_RE never
+    // captures it) happened AFTER the last actor-head/promiser subject this
+    // scan found, that later, unknown subject — not the stale earlier one —
+    // governs the coordinated action. Treat the actor as unresolved rather
+    // than defaulting to it, so downstream policy checks it as non-Waves.
+    const lastSubject = subjects[subjects.length - 1];
+    const shiftedPastLastSubject = inherited && [...text.slice(sentenceStart, start)
+      .matchAll(new RegExp(CALLBACK_COORDINATED_SUBJECT_SHIFT_RE.source, 'gi'))]
+      .some((shift) => !lastSubject || shift.index > lastSubject.index);
+    const actorMatch = inherited ? (shiftedPastLastSubject ? null : lastSubject) : actorPattern.exec(match[0]);
     const actorOffset = inherited ? sentenceStart : start;
     const actorIndices = actorMatch?.indices.groups.subject;
     const actorText = actorMatch?.groups.subject || '';

@@ -1467,11 +1467,17 @@ function callbackAgreementAction(additionalComplement = '') {
 }
 
 function callbackConsentOverridden(text, matchEnd, consentCondition, conditionTarget) {
-  const rawConsent = consentCondition.exec(text.slice(matchEnd));
   // A standalone refusal alternative inherits this contact. An alternative
   // with its own consequent is graded through its own callback candidates.
-  return rawConsent && new RegExp(`^\\s*,?\\s*(?:(?:or|and|but)\\s+(?:even\\s+)?|even\\s+)(?:if|when)\\s+${conditionTarget}\\s+(?:does(?:\\s+not|n[\\x27\\u2019]t)(?:\\s+(?:agree|consent))?|declines?|refuses?)\\b(?=\\s*(?:[.;!?]|$))`, 'i')
-    .test(text.slice(matchEnd + rawConsent.index + rawConsent[0].length));
+  const refusalOverride = new RegExp(`^\\s*,?\\s*(?:(?:or|and|but)\\s+(?:even\\s+)?|even\\s+)(?:if|when)\\s+${conditionTarget}\\s+(?:does(?:\\s+not|n[\\x27\\u2019]t)(?:\\s+(?:agree|consent))?|declines?|refuses?)\\b(?=\\s*(?:[.;!?]|$))`, 'i');
+  // The override can follow the promise directly ("If she agrees, we will
+  // call her, or even if she refuses.") — a LEADING consent condition with
+  // no repeated trailing one to attach to — or, as before, follow a
+  // repeated TRAILING consent condition ("we will call her if she agrees,
+  // or even if she refuses.").
+  if (refusalOverride.test(text.slice(matchEnd))) return true;
+  const rawConsent = consentCondition.exec(text.slice(matchEnd));
+  return Boolean(rawConsent && refusalOverride.test(text.slice(matchEnd + rawConsent.index + rawConsent[0].length)));
 }
 
 function callbackConsentSuffix(text, matchEnd) {
