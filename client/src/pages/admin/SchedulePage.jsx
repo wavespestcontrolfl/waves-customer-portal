@@ -3391,13 +3391,6 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     lineInDiscountScope(line) &&
     !(effectiveDiscountTypeForExclusion === "percentage"
       && (line.excludedFromPercentDiscount === true || line.excludedFromPercentDiscount === null));
-  const primaryLineForDiscount = {
-    serviceKey: form.serviceKey,
-    serviceCategory: form.serviceCategory,
-    excludedFromPercentDiscount: form.excludedFromPercentDiscount === null
-      ? null
-      : form.excludedFromPercentDiscount === true,
-  };
   const percentExcludedLines = serviceLines.filter(
     (l) => !lineTakesDiscount(l),
   );

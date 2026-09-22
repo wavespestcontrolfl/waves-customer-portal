@@ -9671,7 +9671,7 @@ async function computeUpdateDetailsFinancialPlan({
   let clearAddonDiscountsOnPriceEdit = false;
     if (Array.isArray(addons)) {
       const {
-        cols, normalizedAddons, existingAddonDiscountRows, existingAddonDiscountById, isNewAddonDiscount,
+        cols, normalizedAddons, existingAddonDiscountRows, isNewAddonDiscount,
       } = await normalizeUpdateDetailsAddons({
         db, id, addons, updates, isRecurring, serviceType, scheduledDate,
       });
@@ -9736,10 +9736,10 @@ async function computeUpdateDetailsFinancialPlan({
         // (unlike loadExistingAddonRowsForLegacyPreservation just below,
         // which only loads for a legacy-preservation candidate); a MARKED
         // row's pre-existing stamps need grandfathering exactly as much as
-        // an unmarked one's. existingAddonDiscountRows/existingAddonDiscountById/
-        // isNewAddonDiscount are now computed BEFORE the normalization loop
-        // above (P0 :9965 fix) so the cap-clamp can consult freshness too —
-        // reused here as-is.
+        // an unmarked one's. existingAddonDiscountRows/isNewAddonDiscount
+        // are now computed inside normalizeUpdateDetailsAddons, BEFORE the
+        // normalization loop (P0 :9965 fix) so the cap-clamp can consult
+        // freshness too — reused here as-is.
         const appointmentDiscountIsNew = discountType !== undefined && appointmentDiscountChanged;
         const groupMetaIds = [
           appointmentDiscountPreset?.id, existing?.discount_id, existing?.line_discount_id,
