@@ -400,6 +400,8 @@ postgres('scheduled_services PUT /:id/update-details — structural round (P0 :9
   let visitId;
   let silverId;
   let militaryId;
+  let forgeableId;
+  let minSubtotalId;
 
   beforeAll(() => {
     const connection = process.env.DATABASE_URL;
@@ -428,6 +430,8 @@ postgres('scheduled_services PUT /:id/update-details — structural round (P0 :9
     });
     silverId = randomUUID();
     militaryId = randomUUID();
+    forgeableId = randomUUID();
+    minSubtotalId = randomUUID();
     await trx('discounts').insert([
       {
         id: silverId, discount_key: 'wg_silver_' + silverId.slice(0, 8), name: 'WaveGuard Silver',
@@ -438,6 +442,15 @@ postgres('scheduled_services PUT /:id/update-details — structural round (P0 :9
         id: militaryId, discount_key: 'military_' + militaryId.slice(0, 8), name: 'Military Discount',
         discount_type: 'fixed_amount', amount: 10, is_active: true, is_auto_apply: false,
         show_in_invoices: true, requires_military: true,
+      },
+      {
+        id: forgeableId, discount_key: 'small_percent_' + forgeableId.slice(0, 8), name: 'Small Percent Discount',
+        discount_type: 'percentage', amount: 5, is_active: true, is_auto_apply: false, show_in_invoices: true,
+      },
+      {
+        id: minSubtotalId, discount_key: 'min_subtotal_' + minSubtotalId.slice(0, 8), name: 'Min Subtotal Discount',
+        discount_type: 'percentage', amount: 10, min_subtotal: 100, is_active: true,
+        is_auto_apply: false, show_in_invoices: true,
       },
     ]);
     const [row] = await trx('scheduled_services').insert({
@@ -542,6 +555,46 @@ postgres('scheduled_services PUT /:id/update-details — structural round (P0 :9
     });
     expect(err).toBeFalsy();
     expect(statusCode).toBe(200);
+  });
+
+  test('P1 :9413 — a fresh catalog-backed pick is resolved from the discount ROW, never a forged client-posted type/amount (no lineDiscountFresh sent, either)', async () => {
+    // forgeableId is really a 5%-off discount with no eligibility
+    // requirements. A caller attaches its real, active id but forges the
+    // type/amount to an uncapped 90% off, and deliberately omits
+    // lineDiscountFresh (the earlier partial fix's own bypass).
+    const { statusCode, err } = await put(visitId, {
+      primaryLinePrice: 100,
+      addons: [{
+        serviceName: 'Mosquito Add-on', basePrice: 100,
+        discountType: 'percentage', discountAmount: 90, discountId: forgeableId, discountName: 'Small Percent Discount',
+      }],
+    });
+    expect(err).toBeFalsy();
+    expect(statusCode).toBe(200);
+    const addonRow = await trx('scheduled_service_addons').where({ scheduled_service_id: visitId }).first();
+    // The catalog's REAL 5% ($5 off, net $95) — never the forged 90% ($90
+    // off, net $10).
+    expect(Number(addonRow.discount_dollars)).toBe(5);
+    expect(Number(addonRow.estimated_price)).toBe(95);
+  });
+
+  test('P2 :9631 — minimum subtotal is checked against the GROSS line amount, not the post-discount net', async () => {
+    // minSubtotalId: 10% off, min_subtotal $100. A $100 gross line nets $90
+    // after this discount — the OLD bug checked $90 against the $100
+    // minimum and wrongly rejected a genuinely eligible boundary case.
+    const { statusCode, payload, err } = await put(visitId, {
+      primaryLinePrice: 100,
+      addons: [{
+        serviceName: 'Mosquito Add-on', basePrice: 100,
+        discountType: 'percentage', discountAmount: 10, discountId: minSubtotalId, discountName: 'Min Subtotal Discount',
+      }],
+    });
+    expect(payload?.error).toBeFalsy();
+    expect(err).toBeFalsy();
+    expect(statusCode).toBe(200);
+    const addonRow = await trx('scheduled_service_addons').where({ scheduled_service_id: visitId }).first();
+    expect(Number(addonRow.discount_dollars)).toBe(10);
+    expect(Number(addonRow.estimated_price)).toBe(90);
   });
 });
 

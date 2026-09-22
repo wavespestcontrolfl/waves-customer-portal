@@ -46,7 +46,6 @@ import RescheduleDialogView from "../../components/schedule/RescheduleDialogView
 import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateOnly, formatETDateTime } from "../../lib/timezone";
 import { completionDraftKey } from "../../lib/completion-drafts";
 import {
-  stackVisitDiscounts,
   stackablePresets,
   isCustomAmountPreset,
   isCustomPercentagePreset,
@@ -2300,24 +2299,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // untouched/legacy behavior for both the preview AND the save payload —
   // never silently posted with no way for the operator to see it.
   const lineDiscountActive = (l) => stackingEnabled && !!l.lineDiscountTouched;
-  // Coordinator-approved scope extension on PR #4657 (#4654 merged): the
-  // day/week/list GET mappers now project the row's own pricing_provenance
-  // (regime marker + frozen caps) read-only. hasPricingRegimeMarker's OWN
-  // rule (server/services/booking/visit-financial-stamps.js), mirrored here
-  // rather than imported (server code, different bundle): only a value of
-  // literally "discount_stack_v1" counts — a caps-only stamp (no regime
-  // field, see stampFrozenCapsOnly server-side) must NOT read as marked.
-  const rowIsMarked = service.pricingProvenance?.pricing_regime === 'discount_stack_v1';
-  // A row's own frozen per-discount cap — resolveStoredDiscountCaps' client
-  // mirror, addons side only (this slice never edits the primary line's own
-  // slot). `undefined` means "this id was never frozen" (a fresh pick this
-  // session, or a row whose snapshot predates this discount) — the caller
-  // falls back to the live catalog for that case; `null` is a real, frozen
-  // "uncapped" answer, never treated as "unknown".
-  const frozenAddonCap = (discountId) => {
-    const addons = service.pricingProvenance?.caps?.addons;
-    return addons && discountId != null && String(discountId) in addons ? addons[String(discountId)] : undefined;
-  };
+  // Structural round 3 on #4657: rowIsMarked/frozenAddonCap/previewSlot/
+  // storedPrimaryLineDiscount/previewPrimarySlot (the client-side
+  // discount-stacking ENGINE's own input builders) are gone from this
+  // component entirely — every money figure this modal shows now comes
+  // from the server's own POST .../update-details/preview dry-run
+  // (moneyPreview, below), never a client re-derivation of the frozen-cap/
+  // marked-row rules those functions used to encode.
   // GATE_DISCOUNT_STACKING (:2803 follow-up, Codex pre-push audit P1 round
   // 2 on #4657, PRRT_kwDOR3YQi86krxFI's own fix-suggestion): a fresh pick
   // (or explicit removal) leaves `lineDiscountTouched` set in React state
@@ -2378,61 +2366,6 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const linePresetById = (id) =>
     id ? lineDiscountPresets.find((d) => String(d.id) === String(id)) || null : null;
   const lineDiscountCatalogRow = (ld) => (ld ? { ...(linePresetById(ld.id) || {}), ...ld } : null);
-  // :1662 (Codex pre-push audit P1 on #4657): a MARKED row's existing stamp
-  // priced against a FROZEN cap (pricing_provenance.caps.addons), never the
-  // live catalog — a later PUT /admin/discounts/:id cap edit must not
-  // silently reprice this preview differently from what an unrelated save
-  // would actually preserve. Frozen-first; live-catalog-verify (the
-  // existing, still-correct fallback for a fresh pick, or any id the row
-  // has never frozen) only when the id has no frozen entry at all.
-  const previewSlot = (ld) => {
-    if (!ld) return null;
-    if (rowIsMarked) {
-      const frozen = frozenAddonCap(ld.id);
-      if (frozen !== undefined) return { ...ld, max_discount_dollars: frozen };
-    }
-    return verifiedLineDiscountCap(ld, linePresetById(ld?.id));
-  };
-  // :3445 (GitHub review round 2 on #4657): the PRIMARY line's own stored
-  // discount slot (line_discount_*) — read-only, like storedAppointmentDiscount
-  // above; this slice has no picker for it, so it's ALWAYS whatever the row
-  // itself carries, never gated on "untouched this session" (there is no
-  // session state to touch). resolveUpdateDetailsAddonFinancials restacks a
-  // MARKED row from this exact slot, so previewing it as "no discount"
-  // understates the total and can distort how much of an appointment-wide
-  // discount the primary line actually gets.
-  const storedPrimaryLineDiscount = service.lineDiscountType && service.lineDiscountAmount != null
-    ? { id: service.lineDiscountId || null, discount_type: service.lineDiscountType, amount: service.lineDiscountAmount }
-    : null;
-  // The primary's frozen cap lives at pricing_provenance.caps.line — a
-  // single { id, cap } entry (not a map keyed by id, unlike the addons
-  // side) — matching resolveStoredDiscountCaps' own frozenLineMatches
-  // check: it counts only when that entry's OWN id still matches the row's
-  // CURRENT line_discount_id (a discount swap without a fresh save must
-  // never inherit a DIFFERENT discount's frozen cap).
-  const previewPrimarySlot = (ld) => {
-    if (!ld) return null;
-    if (rowIsMarked) {
-      const line = service.pricingProvenance?.caps?.line;
-      if (line && typeof line === 'object' && String(line.id ?? '') === String(ld.id ?? '')) {
-        return { ...ld, max_discount_dollars: line.cap };
-      }
-      return verifiedLineDiscountCap(ld, linePresetById(ld?.id));
-    }
-    // Codex pre-push audit P1 (round 3 on #4657): an UNMARKED row's
-    // primary discount is NEVER recomputed by ANY save this editor makes
-    // — it "can't resend" line_discount_* at all (see storedPrimaryLineDiscount's
-    // own comment), so the server always preserves exactly the stored
-    // dollar figure, whatever produced it. Representing it here as a
-    // FIXED credit at that SAME stored number (never re-derived from
-    // type/amount, which can drift from what was actually saved — a
-    // catalog rate changed since, or a cap that applied only at save
-    // time) is the only way the preview can match what an unrelated save
-    // would actually preserve.
-    const frozenDollars = service.lineDiscountDollars;
-    if (frozenDollars == null) return null;
-    return { id: ld.id, discount_type: 'fixed_amount', amount: Number(frozenDollars) };
-  };
   const presetOptionLabel = (d) => {
     if (isCustomPercentagePreset(d)) return `${d.name} - custom %`;
     if (isCustomAmountPreset(d)) return `${d.name} - custom $`;
@@ -3468,151 +3401,42 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const percentExcludedLines = serviceLines.filter(
     (l) => !lineTakesDiscount(l),
   );
-  const percentDiscountBase =
-    (lineTakesDiscount(primaryLineForDiscount) ? primaryPrice : 0) +
-    serviceLines.reduce(
-      (sum, l) =>
-        !lineTakesDiscount(l) || l.price === "" || isNaN(parseFloat(l.price))
-          ? sum
-          : sum + parseFloat(l.price),
-      0,
-    );
-  // Clamped the way calculateAppointmentDiscountDollars clamps on the server:
-  // never more than the lines the discount can reach.
-  // A catalog preset's max_discount_dollars caps a percentage the same way
-  // calculateDiscountDollars / calculateAppointmentDiscountDollars do.
-  // Any non-null cap counts — an explicit $0 cap saves a $0 discount.
-  const presetMaxDiscountDollars =
-    selectedDiscountPreset?.max_discount_dollars != null &&
-    selectedDiscountPreset.max_discount_dollars !== "" &&
-    !isNaN(Number(selectedDiscountPreset.max_discount_dollars))
-      ? Math.max(0, Number(selectedDiscountPreset.max_discount_dollars))
-      : null;
-  // Pre-lane formula — kept EXACTLY as before this slice, and the only path
-  // taken while the gate is off or unconfirmed: no per-line discount exists
-  // to interact with, so this stays the source of truth for both preview
-  // and (via the server's own additive fallback) what saves.
-  const legacyManualDiscount =
-    discountType && discountAmount !== ""
-      ? discountType === "percentage"
-        ? Math.min(
-            percentDiscountBase,
-            presetMaxDiscountDollars != null
-              ? Math.min(
-                  presetMaxDiscountDollars,
-                  percentDiscountBase * (Number(discountAmount) / 100),
-                )
-              : percentDiscountBase * (Number(discountAmount) / 100),
-          )
-        : Math.min(percentDiscountBase, Number(discountAmount))
-      : 0;
-  const legacyAppointmentTotal = Math.max(0, servicePrice - legacyManualDiscount);
-  // :3293 — the term this preview (and, on save, the server) actually
-  // applies: the operator's OWN pick this session when they've made one,
-  // else the row's stored one (its own discount_max_dollars column is
-  // already the frozen cap — a real stored value, never a live lookup).
-  const effectiveAppointmentDiscount = (discountType && discountAmount !== "")
-    ? { discountType, amount: Number(discountAmount), maxDiscountDollars: presetMaxDiscountDollars }
-    : storedAppointmentDiscount
-      ? {
-          discountType: storedAppointmentDiscount.discount_type,
-          amount: Number(storedAppointmentDiscount.amount),
-          maxDiscountDollars: storedAppointmentDiscount.max_discount_dollars,
-        }
-      : null;
-  // GATE_DISCOUNT_STACKING (slice 7): the SAME stack the server saves for a
-  // marked row (lib/discountStack mirrors services/discount-stack) — each
-  // line's own slot first, then the appointment discount on the lines it
-  // reaches, dollar credits before percentages, each compounding on what
-  // the prior step left. Computed ONLY when the gate previews as on, so a
-  // gate-off/unconfirmed save never depends on this engine at all.
-  // :3295 (Codex pre-push audit P1 on #4657) — `compound` is NOT the gate
-  // alone: resolveUpdateDetailsAddonFinancials only takes the canonical
-  // (compound) branch for a row discountStackingLive() has ALSO marked
-  // (hasPricingRegimeMarker) — an unmarked row (created/last saved before
-  // the marker existed, or while the gate was off) still falls through to
-  // calculateVisitFinancialsForAddons, additive, even with the gate on
-  // now. `compound: false` here is mathematically that SAME additive model
-  // — each line's own discount resolves against its own gross
-  // independently (never compounding with a sibling), then the appointment
-  // term resolves on the aggregate net — so an unmarked row's preview
-  // still correctly reflects an active line discount's true GROSS (via
-  // lineGrossFor) without assuming a canonical restack the server will
-  // never actually run for it.
-  const stackedPreview = stackingEnabled
-    ? stackVisitDiscounts({
-        lines: [
-          { gross: primaryPrice, lineDiscount: previewPrimarySlot(storedPrimaryLineDiscount), eligible: lineTakesDiscount(primaryLineForDiscount) },
-          ...serviceLines.map((l) => ({
-            gross: lineGrossFor(l),
-            lineDiscount: previewSlot(effectiveLineDiscount(l)),
-            eligible: lineTakesDiscount(l),
-          })),
-        ],
-        appointmentDiscount: effectiveAppointmentDiscount,
-        compound: rowIsMarked,
-      })
-    : null;
-  // Per-line dollars for renderServiceLine's own display box (index-aligned
-  // to serviceLines; index 0 of stackedPreview.lines is the primary).
-  const lineDiscountDollarsAt = (idx) =>
-    stackingEnabled ? stackedPreview.lines[idx + 1].lineDiscountDollars : 0;
-  const lineDiscountRows = stackingEnabled
-    ? [
-        // :3445 — the primary line's own stored discount, surfaced with the
-        // same transparency an add-on's gets, even though this slice has no
-        // picker for it.
-        { name: "Primary line discount", dollars: stackedPreview.lines[0].lineDiscountDollars },
-        ...serviceLines.map((l, i) => ({
-          name: effectiveLineDiscount(l)?.name || "Line discount",
-          dollars: lineDiscountDollarsAt(i),
-        })),
-      ].filter((row) => row.dollars > 0)
-    : [];
-  const manualDiscount = stackingEnabled ? stackedPreview.appointmentDiscountDollars : legacyManualDiscount;
-  // Codex pre-push audit structural round on #4657 (replaces the recurring
-  // "mirror the server" P1s :3526/:2394): stackedPreview/legacyAppointmentTotal
-  // above stay as the INSTANT, optimistic figure while a preview request is
-  // in flight or hasn't fired yet — clientAppointmentTotal below, never
-  // renamed away. The actual displayed total prefers the server's own
-  // dry-run (moneyPreview, from POST .../update-details/preview) the
-  // moment a fresh one is back, so the summary is never a client
-  // re-derivation of what the server will actually persist.
-  const clientAppointmentTotal = stackingEnabled ? stackedPreview.total : legacyAppointmentTotal;
-
-  // Debounced server preview (structural round on #4657) — scoped like
-  // ensureStackingFresh's own re-probe in handleSave, above: a save with no
-  // appointment-level discount selected and no line discount in play never
-  // depends on this endpoint at all, matching the existing "discount-free
-  // save never depends on this probe's uptime" doctrine.
+  // Structural round 3 on #4657: the server preview is now the ONLY money
+  // source this modal shows — no client engine (stackVisitDiscounts is no
+  // longer called anywhere in this component), no "is a discount even in
+  // play" gate on whether to ask it (every save has SOME total, so the
+  // debounce below always runs). The request body mirrors handleSave's own
+  // PUT body (the identical `...form` spread, `isRecurring`, and
+  // addons/discount construction) so a primary-service change, a cadence
+  // change, or a fresh line pick can never diverge between what this shows
+  // and what Save actually persists — closing :3606 (service changes),
+  // :2859 (the primary line's own discount no longer needs a special
+  // "count it as in play" carve-out — the preview isn't gated on that
+  // concept at all any more), :3659 (the stacking gate/probe state is in
+  // the dependency key below, so a flip invalidates any cached response),
+  // and :2394 (an unmarked add-on's preserved stored dollars come back
+  // from the server's own legacyEconomicsPreservationDecision, never a
+  // client guess at its catalog cap) by construction — there is no
+  // separate client computation left that could drift from the server.
   const previewRequestRef = useRef(0);
   const previewAbortRef = useRef(null);
   const [moneyPreview, setMoneyPreview] = useState(null);
   const [moneyPreviewLoading, setMoneyPreviewLoading] = useState(false);
-  // Same conjunction stackingUnconfirmedBlocksSave already gates on
-  // (lineDiscountSaveBlocked, above) — an appointment-level pick stacking
-  // with a line discount is exactly the scenario whose combined total can
-  // genuinely diverge from a client re-derivation (cap clamps, eligibility,
-  // compound-vs-additive engine choice); a single discount alone, or an
-  // untouched stamp merely round-tripping unchanged (P0 :9965's own
-  // guarantee), needs no live round-trip to stay correct.
-  const moneyPreviewRelevant = appointmentDiscountSelected && lineDiscountInPlay;
   const moneyPreviewInputsKey = JSON.stringify({
-    price: form.price,
+    form,
+    isRecurring, recurringOngoing,
     discountType, discountAmount, discountPresetId,
     lines: serviceLines.map((l) => [
       l.id || null, l.serviceType, l.price, l.serviceId || null,
       !!l.lineDiscountTouched, l.lineDiscount, l._seededPrice ?? null,
     ]),
+    // The stacking gate/probe state is itself an input to what the save
+    // resolves against (compound-vs-additive engine choice, which cap
+    // source wins) — a transition here must invalidate any cached preview
+    // even when nothing else on the form changed (:3659).
+    stackingEnabled, stackingKnown,
   });
   useEffect(() => {
-    if (!moneyPreviewRelevant) {
-      previewRequestRef.current += 1;
-      if (previewAbortRef.current) previewAbortRef.current.abort();
-      setMoneyPreview(null);
-      setMoneyPreviewLoading(false);
-      return;
-    }
     const requestId = ++previewRequestRef.current;
     if (previewAbortRef.current) previewAbortRef.current.abort();
     const controller = new AbortController();
@@ -3625,6 +3449,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           method: "POST",
           signal: controller.signal,
           body: JSON.stringify({
+            ...form,
+            isRecurring,
             ...(sendAddons ? { addons: addonsPayload } : {}),
             primaryLinePrice:
               form.price !== "" && !isNaN(parseFloat(form.price)) ? parseFloat(form.price) : undefined,
@@ -3651,18 +3477,68 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       clearTimeout(timer);
       controller.abort();
     };
-  }, [moneyPreviewInputsKey, moneyPreviewRelevant, service.id]);
+  }, [moneyPreviewInputsKey, service.id]);
   const moneyPreviewFresh =
-    moneyPreviewRelevant &&
-    !!moneyPreview &&
-    moneyPreview.forRequestId === previewRequestRef.current &&
-    !moneyPreview.error;
-  // Save stays enabled for anything discount-free; once a discount is in
-  // play, Save is blocked until the server's own dry-run has confirmed what
-  // this exact form would persist — never the client engine's own guess.
-  const moneyPreviewBlocksSave = moneyPreviewRelevant && (moneyPreviewLoading || !moneyPreviewFresh);
+    !!moneyPreview && moneyPreview.forRequestId === previewRequestRef.current && !moneyPreview.error;
+  // Save is held until the server's own dry-run has confirmed what THIS
+  // exact form would persist — never a client guess, and never a stale
+  // response (moneyPreviewFresh requires it be for the LATEST request).
+  const moneyPreviewBlocksSave = moneyPreviewLoading || !moneyPreviewFresh;
+  // null (not 0, not a stale figure) while unconfirmed — the render below
+  // shows "Confirming…" rather than ever displaying a client-computed
+  // guess as if it were the real total.
   const appointmentTotal =
-    moneyPreviewFresh && moneyPreview.total != null ? Number(moneyPreview.total) : clientAppointmentTotal;
+    moneyPreviewFresh && moneyPreview.total != null ? Number(moneyPreview.total) : null;
+  const manualDiscount =
+    moneyPreviewFresh && moneyPreview.appointmentDiscountDollars != null
+      ? Number(moneyPreview.appointmentDiscountDollars)
+      : 0;
+  // cleanServiceLines mirrors buildAddonsPayload's own filter exactly (the
+  // same "trimmed serviceType" test) — the server's addons[] is ordered
+  // and filtered identically, so a brand-new (id-less) line correlates by
+  // its position among OTHER id-less lines, and an existing line by its
+  // own stored id, never by raw index into the full serviceLines array.
+  const cleanServiceLines = serviceLines.filter((l) => (l.serviceType || "").trim());
+  const previewAddonAt = (idx) => {
+    if (!moneyPreviewFresh || !Array.isArray(moneyPreview.addons)) return null;
+    const line = serviceLines[idx];
+    if (!line) return null;
+    if (line.id) {
+      return moneyPreview.addons.find((row) => row.submittedAddonId === line.id) || null;
+    }
+    const cleanIdx = cleanServiceLines.indexOf(line);
+    if (cleanIdx === -1) return null;
+    const idLessBefore = cleanServiceLines.slice(0, cleanIdx).filter((l) => !l.id).length;
+    const idLessRows = moneyPreview.addons.filter((row) => !row.submittedAddonId);
+    return idLessRows[idLessBefore] || null;
+  };
+  // Per-line dollars for renderServiceLine's own display box (index-aligned
+  // to serviceLines).
+  const lineDiscountDollarsAt = (idx) => {
+    const row = previewAddonAt(idx);
+    return row?.discountDollars != null ? Number(row.discountDollars) : 0;
+  };
+  const lineDiscountRows = moneyPreviewFresh
+    ? [
+        // The primary line's own stored discount — read directly off the
+        // server's response (primaryLineDiscountDollars/Name), never
+        // re-derived; this slice has no picker for it, so it's always
+        // whatever the row itself carries.
+        ...(moneyPreview.primaryLineDiscountDollars > 0
+          ? [{
+              name: moneyPreview.primaryLineDiscountName || "Primary line discount",
+              dollars: Number(moneyPreview.primaryLineDiscountDollars),
+            }]
+          : []),
+        ...serviceLines.map((l, i) => {
+          const row = previewAddonAt(i);
+          return {
+            name: row?.discountName || "Line discount",
+            dollars: row?.discountDollars != null ? Number(row.discountDollars) : 0,
+          };
+        }),
+      ].filter((row) => row.dollars > 0)
+    : [];
   const appointmentHistory = customerPanelHistory(customerData, service?.id);
   const cards = Array.isArray(customerData?.cards) ? customerData.cards : [];
 
@@ -5056,7 +4932,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 >
                   {" "}
                   <span>Total</span>
-                  <strong>${appointmentTotal.toFixed(2)}</strong>{" "}
+                  <strong>
+                    {appointmentTotal != null
+                      ? `$${appointmentTotal.toFixed(2)}`
+                      : moneyPreview?.error
+                        ? "—"
+                        : "Confirming…"}
+                  </strong>{" "}
                 </div>{" "}
               </div>{" "}
             </section>{" "}

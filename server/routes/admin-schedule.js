@@ -1852,6 +1852,16 @@ function normalizeDiscountAmount(row, clientAmount) {
   return Number.isFinite(num) ? num : 0;
 }
 
+// Codex pre-push audit P2 (structural round 3 on #4657, :9310): hoisted to
+// module scope when normalizeUpdateDetailsAddons was extracted — used both
+// there and by computeUpdateDetailsFinancialPlan's own primaryGross
+// fallback immediately after it returns.
+function toMoney(v) {
+  if (v == null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : null;
+}
+
 function calculateDiscountDollars(row, baseAmount, clientAmount) {
   if (!row || !(baseAmount > 0)) return { amount: 0, dollars: 0 };
   const amount = normalizeDiscountAmount(row, clientAmount);
@@ -9308,29 +9318,178 @@ async function planCollectiveEditDateMove(req) {
   };
 }
 
-async function computeUpdateDetailsFinancialPlan({
-  db, id, updates, discountType, discountAmount, isRecurring,
-  primaryLinePrice, estimatedPrice, addons,
-  appointmentDiscountPreset, appointmentDiscountChanged, appointmentDiscountCols,
-  presetEligibilityCheck,
+// Codex pre-push audit P1/P2 (structural round 3 on #4657, :9413/:9310):
+// shared by presetEligibilityCheck (appointment-level, both the real save
+// and the preview route) AND computeUpdateDetailsFinancialPlan's own
+// fresh-catalog-pick resolution (line-level) — the SAME membership-sale
+// context buildAppointmentPricing passes on create (a save that makes this
+// visit recurring WaveGuard coverage IS the membership sale, so a
+// member-tier requirement must see it before the tier sync stamps the
+// customer row), computed via one shared helper instead of three separate
+// inline copies.
+async function resolveMembershipBookingContext({
+  db, id, updates, isRecurring, serviceType, scheduledDate,
 }) {
-  // Extracted verbatim (structural round on #4657 — the preview endpoint
-  // below, :2994/:9965/:10095/:3526/:2394) from the PUT /:id/update-details
-  // handler's own addons-block + single-service estimatedPrice branch +
-  // trailing appointment-discount-catalog block — this function IS the
-  // save path's financial resolution, not a re-derivation of it. It never
-  // writes to the database: it only reads (via `db`) and computes,
-  // mutating the caller's own `updates` object and returning the handful
-  // of outer `let`s the original inline code used to assign directly. The
-  // real route calls this and then proceeds to its transaction exactly as
-  // before; the new POST .../preview route calls the SAME function and
-  // simply reports what it computed — never reaching a transaction or a
-  // write at all.
-  let replaceAddons = null;
-  let canonicalRestackedAddonDollars = null;
-  let legacyPreservationCasSnapshot = null;
+  const visitRow = await db('scheduled_services').where({ id })
+    .first('customer_id', 'is_recurring', 'is_callback', 'service_type', 'scheduled_date', 'service_id');
+  const customerRow = visitRow?.customer_id
+    ? await db('customers').where({ id: visitRow.customer_id }).first()
+    : null;
+  const effectiveServiceId = updates.service_id !== undefined ? updates.service_id : (visitRow?.service_id || null);
+  const effectiveServiceRecord = effectiveServiceId
+    ? await db('services').where({ id: effectiveServiceId }).first('service_key', 'name').catch(() => null)
+    : null;
+  const recurringMembershipBooking = bookingCreatesWaveGuardCoverage({
+    isRecurring: isRecurring !== undefined ? !!isRecurring : !!visitRow?.is_recurring,
+    isCallback: updates.is_callback !== undefined ? !!updates.is_callback : !!visitRow?.is_callback,
+    serviceType: serviceType !== undefined ? serviceType : visitRow?.service_type,
+    serviceRecord: effectiveServiceRecord,
+    customer: customerRow,
+    scheduledDate: scheduledDate !== undefined ? scheduledDate : visitRow?.scheduled_date,
+  });
+  return { visitRow, customerRow, recurringMembershipBooking };
+}
+
+async function computeSingleServiceEstimatedPricePlan({
+  db, id, updates, discountType, discountAmount, estimatedPrice,
+  appointmentDiscountPreset, appointmentDiscountChanged, presetEligibilityCheck,
+}) {
+  // Codex pre-push audit P2 (structural round 3 on #4657, :9310): the
+  // single-service (no addons array) estimatedPrice branch of
+  // computeUpdateDetailsFinancialPlan, extracted verbatim as its own
+  // coherent phase — a real, independently-reasoned-about decision tree
+  // (is this a genuine rebase, replay the legacy discount math, run
+  // eligibility, write the replay figures), not a one-use wrapper around
+  // a few lines.
   let clearAddonDiscountsOnPriceEdit = false;
-    if (Array.isArray(addons)) {
+      try {
+        const cols = await db('scheduled_services').columnInfo();
+        const basePrice = Number(estimatedPrice);
+        const existingPrice = await db('scheduled_services')
+          .where({ id: id })
+          .first('estimated_price', 'discount_type', 'discount_amount',
+            ...(cols.discount_max_dollars ? ['discount_max_dollars'] : []),
+            ...(cols.service_key_snapshot ? ['service_key_snapshot'] : []),
+            ...(cols.service_category_snapshot ? ['service_category_snapshot'] : []))
+          .catch(() => null);
+        // A service change in the SAME save already placed the new identity
+        // in `updates` — price/scope/validate against that, not the stored
+        // row (Codex #3531 r10 P1).
+        const legacyPrimaryKey = updates.service_key_snapshot !== undefined
+          ? (updates.service_key_snapshot || null)
+          : (existingPrice?.service_key_snapshot || null);
+        const legacyPrimaryCategory = updates.service_category_snapshot !== undefined
+          ? (updates.service_category_snapshot || null)
+          : (existingPrice?.service_category_snapshot || null);
+        const existingEstimatedPrice = Number(existingPrice?.estimated_price);
+        const priceChanged = !Number.isFinite(existingEstimatedPrice)
+          || Math.abs(existingEstimatedPrice - basePrice) >= 0.005;
+        const discountTypeChanged = discountType !== undefined
+          && (discountType || null) !== (existingPrice?.discount_type || null);
+        const nextDiscountAmount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
+        const existingDiscountAmount = (existingPrice?.discount_amount != null && existingPrice.discount_amount !== '')
+          ? Number(existingPrice.discount_amount)
+          : null;
+        const discountAmountChanged = discountAmount !== undefined
+          && Math.abs((nextDiscountAmount || 0) - (existingDiscountAmount || 0)) >= 0.005;
+        // appointmentDiscountChanged folds in the preset identity (a
+        // same-valued preset switch): the replacement preset must still run
+        // eligibility and the scope-aware recomputation before its id/name/
+        // filters persist (Codex #3531 r6 P1).
+        const shouldRebaseStoredDiscounts = priceChanged || discountTypeChanged || discountAmountChanged || appointmentDiscountChanged;
+        if (!shouldRebaseStoredDiscounts) {
+          if (cols.estimated_price) updates.estimated_price = basePrice;
+          throw new Error('noop-price-save');
+        }
+        let finalPrice = basePrice;
+        if (discountType && discountAmount != null && discountAmount !== '') {
+          finalPrice = applyDiscount(finalPrice, discountType, discountAmount);
+        }
+        const addonRows = cols.primary_line_price
+          ? await db('scheduled_service_addons')
+              .where({ scheduled_service_id: id })
+              .catch(() => [])
+          : [];
+        const addonBaseTotal = addonRows.reduce((sum, addon) => {
+          const value = Number(addon.base_price != null ? addon.base_price : addon.estimated_price);
+          return Number.isFinite(value) && value > 0 ? sum + value : sum;
+        }, 0);
+        const primaryGross = Math.max(0, Math.round((basePrice - addonBaseTotal) * 100) / 100);
+        // Percent-excluded lines stay out of a percentage discount here too —
+        // this branch runs for add-on-less saves (Codex #3531 r1 P1), and a
+        // catalog PRESET always goes through the canonical calculator so its
+        // scope and max_discount_dollars cap hold (pre-push Codex P0). Only a
+        // custom discount with no excluded line keeps the applyDiscount math
+        // verbatim.
+        const legacyLines = addonRows.map((addon) => ({
+          price: Number(addon.base_price != null ? addon.base_price : addon.estimated_price) || 0,
+          serviceKey: addon.service_key_snapshot || null,
+          serviceCategory: addon.service_category_snapshot || null,
+        }));
+        const legacyExclusionApplies = isPercentDiscountType(discountType)
+          && (assertPercentExclusionCatalogReady() || lineExcludedFromPercentDiscount(legacyPrimaryKey)
+            || legacyLines.some((line) => lineExcludedFromPercentDiscount(line.serviceKey)));
+        if (discountType && discountAmount != null && discountAmount !== ''
+          && (appointmentDiscountPreset || legacyExclusionApplies)) {
+          const exclusionAware = calculateVisitFinancialsForAddons({
+            primaryNet: primaryGross,
+            primaryServiceKey: legacyPrimaryKey,
+            primaryServiceCategory: legacyPrimaryCategory,
+            appointmentDiscount: {
+              discountType,
+              discountAmount: Number(discountAmount),
+              maxDiscountDollars: appointmentDiscountPreset
+                ? (appointmentDiscountPreset.max_discount_dollars ?? null)
+                : (appointmentDiscountChanged ? null : (existingPrice?.discount_max_dollars ?? null)),
+              serviceKeyFilter: appointmentDiscountPreset?.service_key_filter || null,
+              serviceCategoryFilter: appointmentDiscountPreset?.service_category_filter || null,
+            },
+          }, legacyLines);
+          if (exclusionAware.price != null) finalPrice = exclusionAware.price;
+        }
+        await presetEligibilityCheck([
+          {
+            amount: primaryGross,
+            serviceKey: legacyPrimaryKey,
+            serviceCategory: legacyPrimaryCategory,
+          },
+          ...legacyLines.map((l) => ({ amount: l.price, serviceKey: l.serviceKey, serviceCategory: l.serviceCategory })),
+        ]);
+        const replayGross = Math.round((primaryGross + addonBaseTotal) * 100) / 100;
+        const replayDiscountDollars = Math.max(0, Math.round((replayGross - finalPrice) * 100) / 100);
+        if (cols.estimated_price) updates.estimated_price = finalPrice;
+        if (cols.primary_line_price) updates.primary_line_price = primaryGross;
+        clearAppointmentDiscountCatalogFields(updates, cols);
+        if (cols.discount_type) updates.discount_type = discountType || (replayDiscountDollars > 0 ? 'fixed_amount' : null);
+        if (cols.discount_amount) {
+          updates.discount_amount = (discountAmount != null && discountAmount !== '')
+            ? Number(discountAmount)
+            : (replayDiscountDollars > 0 ? replayDiscountDollars : null);
+        }
+        if (cols.discount_dollars) updates.discount_dollars = replayDiscountDollars > 0 ? replayDiscountDollars : null;
+        if (cols.line_discount_id) updates.line_discount_id = null;
+        if (cols.line_discount_name) updates.line_discount_name = null;
+        if (cols.line_discount_type) updates.line_discount_type = null;
+        if (cols.line_discount_amount) updates.line_discount_amount = null;
+        if (cols.line_discount_dollars) updates.line_discount_dollars = null;
+        clearAddonDiscountsOnPriceEdit = true;
+      } catch (err) {
+        if (err?.message !== 'noop-price-save') throw err;
+      }
+
+  return clearAddonDiscountsOnPriceEdit;
+}
+
+async function normalizeUpdateDetailsAddons({
+  db, id, addons, updates, isRecurring, serviceType, scheduledDate,
+}) {
+  // Codex pre-push audit P2 (structural round 3 on #4657, :9310): the
+  // service-identity resolution + per-addon normalization phase of
+  // computeUpdateDetailsFinancialPlan, extracted verbatim as its own
+  // coherent phase — resolving every add-on's catalog identity, prior
+  // stored discount, and this save's own (catalog-authoritative for a
+  // fresh pick, legacy-preserving for an unchanged one) net price is a
+  // real, independently-reasoned-about unit, not a one-use wrapper.
       const cols = await db('scheduled_services').columnInfo();
       const addonServiceIds = Array.from(new Set(addons
         .map((addon) => addon?.serviceId)
@@ -9362,32 +9521,13 @@ async function computeUpdateDetailsFinancialPlan({
       if (addonServices.length !== addonServiceIds.length) {
         throw httpError(400, 'One or more add-on services no longer exist');
       }
-      const toMoney = (v) => {
-        if (v == null || v === '') return null;
-        const n = Number(v);
-        return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : null;
-      };
-      // Codex pre-push audit P0 (round 4 on #4657): applyDiscount below has
-      // no notion of a discount's catalog CAP — an unmarked (legacy) row's
-      // add-on discount has no frozen cap of its own to fall back to (only
-      // a MARKED row's pricing_provenance.caps carries one; see
-      // resolveStoredDiscountCaps), so the only available ceiling is the
-      // LIVE catalog row, read once here for every discount id this save
-      // actually touches. reuses loadDiscountCapsById (already the ONE
-      // place a discount id's cap resolves from — restackStoredVisitFinancials's
-      // own callers use it too) rather than a new query. Deactivated-since
-      // ids still resolve (no active filter), matching every other cap
-      // read in this route.
-      const addonDiscountCaps = await loadDiscountCapsById(
-        db, addons.map((a) => a?.discountId).filter(Boolean),
-      );
-      // Codex pre-push audit P0 (structural round on #4657, :9965): the
-      // live-catalog cap above must NEVER clamp an untouched, round-tripped
-      // stamp — only a genuinely new or changed pick. Moved up from inside
-      // the (formerly hasAnyPrice-gated) stack-group check below so the
-      // normalization loop itself can consult it; this now runs
+      // Codex pre-push audit P0 (structural round on #4657, :9965): a cap
+      // (live catalog OR resolveLineDiscount below) must NEVER reprice an
+      // untouched, round-tripped stamp — only a genuinely new or changed
+      // pick. existingAddonDiscountRows/isNewAddonDiscount runs
       // unconditionally whenever addons is an array, matching the
-      // stack-group check's own "unconditional" contract just below.
+      // stack-group check's own "unconditional" contract just below (which
+      // reuses isNewAddonDiscount again).
       const existingAddonDiscountRows = await db('scheduled_service_addons')
         .where({ scheduled_service_id: id })
         .select('id', 'discount_id', 'discount_type', 'discount_amount');
@@ -9400,6 +9540,30 @@ async function computeUpdateDetailsFinancialPlan({
         return String(priorRow.discount_id) !== String(discount.discountId || '')
           || priorRow.discount_type !== discount.discountType
           || Number(priorRow.discount_amount) !== Number(discount.discountAmount);
+      };
+      // Codex pre-push audit P1 (structural round 3 on #4657, :9413): a
+      // fresh CATALOG-BACKED pick (a.discountId set AND isNewAddonDiscount
+      // says it's genuinely new/changed — server-computed, never the
+      // client's own claim) resolves through resolveLineDiscount, the SAME
+      // helper the creation path already uses: it loads the row from the
+      // discounts table itself (never trusting the client-posted
+      // discountType/discountAmount for an id-linked discount, which a
+      // forged request could set to an arbitrary uncapped type/amount
+      // while attaching a legitimate active id), re-runs
+      // manualEligibilityFailures unconditionally against this line's own
+      // GROSS amount (P2 :9631 — never the post-discount net), and honors
+      // a submitted amount only for a variable preset
+      // (normalizeDiscountAmount) — every other type's dollar figure and
+      // cap come from the catalog row, never the client. A CUSTOM pick (no
+      // discountId — nothing in the catalog to resolve against) and an
+      // UNCHANGED catalog-backed stamp both keep the prior applyDiscount
+      // arithmetic, verbatim.
+      let membershipContextPromise = null;
+      const getMembershipContext = () => {
+        if (!membershipContextPromise) {
+          membershipContextPromise = resolveMembershipBookingContext({ db, id, updates, isRecurring, serviceType, scheduledDate });
+        }
+        return membershipContextPromise;
       };
       const normalizedAddons = [];
       for (const a of addons) {
@@ -9416,34 +9580,29 @@ async function computeUpdateDetailsFinancialPlan({
         let net = gross;
         let lineDiscount = null;
         if (gross != null && lineType && lineAmount != null && !isNaN(lineAmount)) {
-          net = applyDiscount(gross, lineType, lineAmount);
-          let dollars = Math.max(0, Math.round((gross - net) * 100) / 100);
-          // P0 fix (:9965): the cap is a live-catalog ceiling with no
-          // memory of what this SAME line was stamped at before — clamping
-          // it unconditionally silently re-prices an untouched stamp the
-          // moment the catalog cap moves under it, on ANY save (gate on or
-          // off; legacyEconomicsPreservationDecision below only guards a
-          // gate-ON unmarked row, never a gate-OFF one — see its own
-          // legacyPreservationCandidate condition). Only a line whose
-          // discount identity/type/amount actually changed THIS save (a
-          // fresh pick) may be clamped against the live cap.
-          const freshPick = isNewAddonDiscount(a.id || null, {
-            discountId: a.discountId || null,
-            discountType: lineType,
-            discountAmount: lineAmount,
+          const freshCatalogPick = !!a.discountId && isNewAddonDiscount(a.id || null, {
+            discountId: a.discountId, discountType: lineType, discountAmount: lineAmount,
           });
-          const cap = a.discountId ? addonDiscountCaps.get(a.discountId) : null;
-          if (freshPick && cap != null && dollars > cap) {
-            dollars = Math.max(0, Math.round(cap * 100) / 100);
-            net = Math.max(0, Math.round((gross - dollars) * 100) / 100);
+          if (freshCatalogPick) {
+            const { customerRow, recurringMembershipBooking } = await getMembershipContext();
+            const resolved = await resolveLineDiscount(a, gross, customerRow || {}, {
+              serviceKey: catalogService?.service_key || null,
+              serviceCategory: catalogService?.category || null,
+              recurringMembershipBooking,
+            });
+            lineDiscount = resolved;
+            net = resolved ? Math.max(0, Math.round((gross - resolved.discountDollars) * 100) / 100) : gross;
+          } else {
+            net = applyDiscount(gross, lineType, lineAmount);
+            const dollars = Math.max(0, Math.round((gross - net) * 100) / 100);
+            lineDiscount = {
+              discountId: a.discountId || null,
+              discountName: a.discountName || null,
+              discountType: lineType,
+              discountAmount: lineAmount,
+              discountDollars: dollars > 0 ? dollars : null,
+            };
           }
-          lineDiscount = {
-            discountId: a.discountId || null,
-            discountName: a.discountName || null,
-            discountType: lineType,
-            discountAmount: lineAmount,
-            discountDollars: dollars > 0 ? dollars : null,
-          };
         }
         normalizedAddons.push({
           // GitHub review round 2 on #4657 (:2513): the addon ROW's own id
@@ -9452,12 +9611,15 @@ async function computeUpdateDetailsFinancialPlan({
           // the stack-group "is this genuinely new" determination, never
           // the catalog serviceId below.
           submittedAddonId: a.id || null,
-          // GitHub review round (:2994/:2186 on #4657): the client's OWN
-          // claim that this line's discount pick just changed this save —
-          // paired with isNewAddonDiscount's independent stored-row
-          // comparison below (never trusted alone) so a client bug can only
-          // ever ADD scrutiny, never skip it, and an untouched stamp is
-          // never re-validated even if this flag is wrongly set.
+          // GitHub review round (:2994/:2186, superseded by :9413 on
+          // #4657): the client's own claim that this pick just changed —
+          // kept for observability, but no longer a gate. :9413 found that
+          // trusting this flag as the ELIGIBILITY gate let a caller dodge
+          // manualEligibilityFailures entirely by simply not sending it;
+          // freshness (and therefore whether resolveLineDiscount/its
+          // eligibility check runs) is now determined solely by
+          // isNewAddonDiscount's own stored-row comparison, above — a
+          // client bug here can no longer skip scrutiny.
           lineDiscountFresh: !!a.lineDiscountFresh,
           serviceId: a.serviceId || catalogService?.id || null,
           // GitHub round 2 on PR #4654 (P0): the RAW client-submitted id,
@@ -9481,6 +9643,38 @@ async function computeUpdateDetailsFinancialPlan({
           discount: lineDiscount,
         });
       }
+
+  return { cols, normalizedAddons, existingAddonDiscountRows, existingAddonDiscountById, isNewAddonDiscount };
+}
+
+async function computeUpdateDetailsFinancialPlan({
+  db, id, updates, discountType, discountAmount, isRecurring, serviceType, scheduledDate,
+  primaryLinePrice, estimatedPrice, addons,
+  appointmentDiscountPreset, appointmentDiscountChanged, appointmentDiscountCols,
+  presetEligibilityCheck,
+}) {
+  // Extracted verbatim (structural round on #4657 — the preview endpoint
+  // below, :2994/:9965/:10095/:3526/:2394) from the PUT /:id/update-details
+  // handler's own addons-block + single-service estimatedPrice branch +
+  // trailing appointment-discount-catalog block — this function IS the
+  // save path's financial resolution, not a re-derivation of it. It never
+  // writes to the database: it only reads (via `db`) and computes,
+  // mutating the caller's own `updates` object and returning the handful
+  // of outer `let`s the original inline code used to assign directly. The
+  // real route calls this and then proceeds to its transaction exactly as
+  // before; the new POST .../preview route calls the SAME function and
+  // simply reports what it computed — never reaching a transaction or a
+  // write at all.
+  let replaceAddons = null;
+  let canonicalRestackedAddonDollars = null;
+  let legacyPreservationCasSnapshot = null;
+  let clearAddonDiscountsOnPriceEdit = false;
+    if (Array.isArray(addons)) {
+      const {
+        cols, normalizedAddons, existingAddonDiscountRows, existingAddonDiscountById, isNewAddonDiscount,
+      } = await normalizeUpdateDetailsAddons({
+        db, id, addons, updates, isRecurring, serviceType, scheduledDate,
+      });
       replaceAddons = normalizedAddons;
 
       let primaryGross = toMoney(primaryLinePrice);
@@ -9604,43 +9798,17 @@ async function computeUpdateDetailsFinancialPlan({
         ];
         assertNewStackGroupConflicts(groupConflictRows);
 
-        // Codex pre-push audit P1 (structural round on #4657, :2994, closes
-        // :2186): per-line eligibility. A fresh add-on discount pick (both
-        // the client's own lineDiscountFresh claim AND an independent
-        // isNewAddonDiscount comparison against the line's own stored
-        // discount_id/type/amount — never either alone, see the field's own
-        // comment above) must pass the SAME manualEligibilityFailures gate
-        // the appointment-level and creation-time line picks already do
-        // (resolveLineDiscount, above) before it can persist — an operator
-        // combining a member-only or minimum-subtotal discount with a line
-        // it doesn't actually qualify for is rejected here, not silently
-        // saved. An UNTOUCHED, round-tripped stamp is deliberately never
-        // re-run through this check, even if the customer's own eligibility
-        // has since changed (a tier downgrade, say) — that stamp is this
-        // row's own frozen economics, not a fresh decision this save is
-        // making.
-        const freshLineDiscountChecks = normalizedAddons.filter((l) => (
-          l.lineDiscountFresh && l.discount?.discountId && isNewAddonDiscount(l.submittedAddonId, l.discount)
-        ));
-        if (freshLineDiscountChecks.length) {
-          const visitRowForEligibility = await db('scheduled_services')
-            .where({ id: id })
-            .first('customer_id');
-          const customerRowForEligibility = visitRowForEligibility?.customer_id
-            ? await db('customers').where({ id: visitRowForEligibility.customer_id }).first().catch(() => ({}))
-            : {};
-          for (const line of freshLineDiscountChecks) {
-            const discountRow = await loadInvoiceDiscount(line.discount.discountId);
-            const failures = await DiscountEngine.manualEligibilityFailures(discountRow, customerRowForEligibility || {}, {
-              subtotal: line.price || 0,
-              serviceKey: line.serviceKey || null,
-              serviceCategory: line.serviceCategory || null,
-            });
-            if (failures.length) {
-              throw httpError(400, `${discountRow.name} is not eligible: ${failures.join(', ')}`);
-            }
-          }
-        }
+        // Codex pre-push audit P1 (:2994/:2186, superseded by :9413):
+        // per-line eligibility now lives INSIDE the normalization loop
+        // above — resolveLineDiscount runs manualEligibilityFailures for
+        // every genuinely fresh catalog-backed pick unconditionally
+        // (isNewAddonDiscount alone decides "fresh," never the client's
+        // lineDiscountFresh claim), so a separate pass here would be
+        // redundant. An UNTOUCHED, round-tripped stamp still never reaches
+        // that check at all (the loop's freshCatalogPick guard), even if
+        // the customer's own eligibility has since changed — that stamp is
+        // this row's own frozen economics, not a fresh decision this save
+        // is making.
 
         // GATE-FLIP SAFETY (carried from #4405 round 7's P0; AGENTS.md
         // "existing DB rows must keep working") for an UNMARKED (legacy, or
@@ -9841,120 +10009,10 @@ async function computeUpdateDetailsFinancialPlan({
         }
       }
     } else if (estimatedPrice !== undefined && estimatedPrice !== '' && !isNaN(Number(estimatedPrice))) {
-      try {
-        const cols = await db('scheduled_services').columnInfo();
-        const basePrice = Number(estimatedPrice);
-        const existingPrice = await db('scheduled_services')
-          .where({ id: id })
-          .first('estimated_price', 'discount_type', 'discount_amount',
-            ...(cols.discount_max_dollars ? ['discount_max_dollars'] : []),
-            ...(cols.service_key_snapshot ? ['service_key_snapshot'] : []),
-            ...(cols.service_category_snapshot ? ['service_category_snapshot'] : []))
-          .catch(() => null);
-        // A service change in the SAME save already placed the new identity
-        // in `updates` — price/scope/validate against that, not the stored
-        // row (Codex #3531 r10 P1).
-        const legacyPrimaryKey = updates.service_key_snapshot !== undefined
-          ? (updates.service_key_snapshot || null)
-          : (existingPrice?.service_key_snapshot || null);
-        const legacyPrimaryCategory = updates.service_category_snapshot !== undefined
-          ? (updates.service_category_snapshot || null)
-          : (existingPrice?.service_category_snapshot || null);
-        const existingEstimatedPrice = Number(existingPrice?.estimated_price);
-        const priceChanged = !Number.isFinite(existingEstimatedPrice)
-          || Math.abs(existingEstimatedPrice - basePrice) >= 0.005;
-        const discountTypeChanged = discountType !== undefined
-          && (discountType || null) !== (existingPrice?.discount_type || null);
-        const nextDiscountAmount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
-        const existingDiscountAmount = (existingPrice?.discount_amount != null && existingPrice.discount_amount !== '')
-          ? Number(existingPrice.discount_amount)
-          : null;
-        const discountAmountChanged = discountAmount !== undefined
-          && Math.abs((nextDiscountAmount || 0) - (existingDiscountAmount || 0)) >= 0.005;
-        // appointmentDiscountChanged folds in the preset identity (a
-        // same-valued preset switch): the replacement preset must still run
-        // eligibility and the scope-aware recomputation before its id/name/
-        // filters persist (Codex #3531 r6 P1).
-        const shouldRebaseStoredDiscounts = priceChanged || discountTypeChanged || discountAmountChanged || appointmentDiscountChanged;
-        if (!shouldRebaseStoredDiscounts) {
-          if (cols.estimated_price) updates.estimated_price = basePrice;
-          throw new Error('noop-price-save');
-        }
-        let finalPrice = basePrice;
-        if (discountType && discountAmount != null && discountAmount !== '') {
-          finalPrice = applyDiscount(finalPrice, discountType, discountAmount);
-        }
-        const addonRows = cols.primary_line_price
-          ? await db('scheduled_service_addons')
-              .where({ scheduled_service_id: id })
-              .catch(() => [])
-          : [];
-        const addonBaseTotal = addonRows.reduce((sum, addon) => {
-          const value = Number(addon.base_price != null ? addon.base_price : addon.estimated_price);
-          return Number.isFinite(value) && value > 0 ? sum + value : sum;
-        }, 0);
-        const primaryGross = Math.max(0, Math.round((basePrice - addonBaseTotal) * 100) / 100);
-        // Percent-excluded lines stay out of a percentage discount here too —
-        // this branch runs for add-on-less saves (Codex #3531 r1 P1), and a
-        // catalog PRESET always goes through the canonical calculator so its
-        // scope and max_discount_dollars cap hold (pre-push Codex P0). Only a
-        // custom discount with no excluded line keeps the applyDiscount math
-        // verbatim.
-        const legacyLines = addonRows.map((addon) => ({
-          price: Number(addon.base_price != null ? addon.base_price : addon.estimated_price) || 0,
-          serviceKey: addon.service_key_snapshot || null,
-          serviceCategory: addon.service_category_snapshot || null,
-        }));
-        const legacyExclusionApplies = isPercentDiscountType(discountType)
-          && (assertPercentExclusionCatalogReady() || lineExcludedFromPercentDiscount(legacyPrimaryKey)
-            || legacyLines.some((line) => lineExcludedFromPercentDiscount(line.serviceKey)));
-        if (discountType && discountAmount != null && discountAmount !== ''
-          && (appointmentDiscountPreset || legacyExclusionApplies)) {
-          const exclusionAware = calculateVisitFinancialsForAddons({
-            primaryNet: primaryGross,
-            primaryServiceKey: legacyPrimaryKey,
-            primaryServiceCategory: legacyPrimaryCategory,
-            appointmentDiscount: {
-              discountType,
-              discountAmount: Number(discountAmount),
-              maxDiscountDollars: appointmentDiscountPreset
-                ? (appointmentDiscountPreset.max_discount_dollars ?? null)
-                : (appointmentDiscountChanged ? null : (existingPrice?.discount_max_dollars ?? null)),
-              serviceKeyFilter: appointmentDiscountPreset?.service_key_filter || null,
-              serviceCategoryFilter: appointmentDiscountPreset?.service_category_filter || null,
-            },
-          }, legacyLines);
-          if (exclusionAware.price != null) finalPrice = exclusionAware.price;
-        }
-        await presetEligibilityCheck([
-          {
-            amount: primaryGross,
-            serviceKey: legacyPrimaryKey,
-            serviceCategory: legacyPrimaryCategory,
-          },
-          ...legacyLines.map((l) => ({ amount: l.price, serviceKey: l.serviceKey, serviceCategory: l.serviceCategory })),
-        ]);
-        const replayGross = Math.round((primaryGross + addonBaseTotal) * 100) / 100;
-        const replayDiscountDollars = Math.max(0, Math.round((replayGross - finalPrice) * 100) / 100);
-        if (cols.estimated_price) updates.estimated_price = finalPrice;
-        if (cols.primary_line_price) updates.primary_line_price = primaryGross;
-        clearAppointmentDiscountCatalogFields(updates, cols);
-        if (cols.discount_type) updates.discount_type = discountType || (replayDiscountDollars > 0 ? 'fixed_amount' : null);
-        if (cols.discount_amount) {
-          updates.discount_amount = (discountAmount != null && discountAmount !== '')
-            ? Number(discountAmount)
-            : (replayDiscountDollars > 0 ? replayDiscountDollars : null);
-        }
-        if (cols.discount_dollars) updates.discount_dollars = replayDiscountDollars > 0 ? replayDiscountDollars : null;
-        if (cols.line_discount_id) updates.line_discount_id = null;
-        if (cols.line_discount_name) updates.line_discount_name = null;
-        if (cols.line_discount_type) updates.line_discount_type = null;
-        if (cols.line_discount_amount) updates.line_discount_amount = null;
-        if (cols.line_discount_dollars) updates.line_discount_dollars = null;
-        clearAddonDiscountsOnPriceEdit = true;
-      } catch (err) {
-        if (err?.message !== 'noop-price-save') throw err;
-      }
+      clearAddonDiscountsOnPriceEdit = await computeSingleServiceEstimatedPricePlan({
+        db, id, updates, discountType, discountAmount, estimatedPrice,
+        appointmentDiscountPreset, appointmentDiscountChanged, presetEligibilityCheck,
+      });
     } else if (!isRecurring && (discountType !== undefined || discountAmount !== undefined)) {
       try {
         const cols = await db('scheduled_services').columnInfo();
@@ -10088,28 +10146,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       const subtotal = Math.round(eligible.reduce((sum, line) => sum + (Number(line.amount) || 0), 0) * 100) / 100;
       const serviceKey = context.serviceKey || null;
       const serviceCategory = context.serviceCategory || null;
-      const visitRow = await db('scheduled_services').where({ id: req.params.id })
-        .first('customer_id', 'is_recurring', 'is_callback', 'service_type', 'scheduled_date', 'service_id');
-      const customerRow = visitRow?.customer_id
-        ? await db('customers').where({ id: visitRow.customer_id }).first()
-        : null;
-      // Same membership-sale context buildAppointmentPricing passes on create
-      // (pre-push Codex P1): a save that makes this visit recurring WaveGuard
-      // coverage IS the membership sale, so a member-tier requirement must
-      // see it before the tier sync stamps the customer row. Evaluated on
-      // the EDITED state — posted values, then the pending `updates`, then
-      // the stored row.
-      const effectiveServiceId = updates.service_id !== undefined ? updates.service_id : (visitRow?.service_id || null);
-      const effectiveServiceRecord = effectiveServiceId
-        ? await db('services').where({ id: effectiveServiceId }).first('service_key', 'name').catch(() => null)
-        : null;
-      const recurringMembershipBooking = bookingCreatesWaveGuardCoverage({
-        isRecurring: isRecurring !== undefined ? !!isRecurring : !!visitRow?.is_recurring,
-        isCallback: updates.is_callback !== undefined ? !!updates.is_callback : !!visitRow?.is_callback,
-        serviceType: serviceType !== undefined ? serviceType : visitRow?.service_type,
-        serviceRecord: effectiveServiceRecord,
-        customer: customerRow,
-        scheduledDate: req.body.scheduledDate !== undefined ? req.body.scheduledDate : visitRow?.scheduled_date,
+      // Codex pre-push audit P2 (structural round 3, :9310): shared with
+      // computeUpdateDetailsFinancialPlan's own line-level resolution and
+      // this route's sibling preview copy — resolveMembershipBookingContext,
+      // above. Evaluated on the EDITED state — posted values, then the
+      // pending `updates`, then the stored row.
+      const { customerRow, recurringMembershipBooking } = await resolveMembershipBookingContext({
+        db, id: req.params.id, updates, isRecurring, serviceType, scheduledDate: req.body.scheduledDate,
       });
       const failures = await DiscountEngine.manualEligibilityFailures(appointmentDiscountPreset, customerRow || {}, {
         subtotal,
@@ -10573,7 +10616,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // primary line + add-on lines, then replace add-on rows in the transaction.
     {
       const financialPlan = await computeUpdateDetailsFinancialPlan({
-        db, id: req.params.id, updates, discountType, discountAmount, isRecurring,
+        db, id: req.params.id, updates, discountType, discountAmount, isRecurring, serviceType, scheduledDate,
         primaryLinePrice, estimatedPrice, addons,
         appointmentDiscountPreset, appointmentDiscountChanged, appointmentDiscountCols,
         presetEligibilityCheck,
@@ -13116,7 +13159,7 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
     const cols = await db('scheduled_services').columnInfo();
     const {
       estimatedPrice, primaryLinePrice, addons, serviceId,
-      serviceKey: postedServiceKey, serviceType, isRecurring, discountId,
+      serviceKey: postedServiceKey, serviceType, isRecurring, discountId, scheduledDate,
     } = req.body;
     let { discountType, discountAmount } = req.body;
 
@@ -13188,22 +13231,8 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
       const subtotal = Math.round(eligible.reduce((sum, line) => sum + (Number(line.amount) || 0), 0) * 100) / 100;
       const serviceKeyCtx = context.serviceKey || null;
       const serviceCategoryCtx = context.serviceCategory || null;
-      const visitRow = await db('scheduled_services').where({ id })
-        .first('customer_id', 'is_recurring', 'is_callback', 'service_type', 'scheduled_date', 'service_id');
-      const customerRow = visitRow?.customer_id
-        ? await db('customers').where({ id: visitRow.customer_id }).first()
-        : null;
-      const effectiveServiceId = updates.service_id !== undefined ? updates.service_id : (visitRow?.service_id || null);
-      const effectiveServiceRecord = effectiveServiceId
-        ? await db('services').where({ id: effectiveServiceId }).first('service_key', 'name').catch(() => null)
-        : null;
-      const recurringMembershipBooking = bookingCreatesWaveGuardCoverage({
-        isRecurring: isRecurring !== undefined ? !!isRecurring : !!visitRow?.is_recurring,
-        isCallback: updates.is_callback !== undefined ? !!updates.is_callback : !!visitRow?.is_callback,
-        serviceType: serviceType !== undefined ? serviceType : visitRow?.service_type,
-        serviceRecord: effectiveServiceRecord,
-        customer: customerRow,
-        scheduledDate: req.body.scheduledDate !== undefined ? req.body.scheduledDate : visitRow?.scheduled_date,
+      const { customerRow, recurringMembershipBooking } = await resolveMembershipBookingContext({
+        db, id, updates, isRecurring, serviceType, scheduledDate,
       });
       const failures = await DiscountEngine.manualEligibilityFailures(appointmentDiscountPreset, customerRow || {}, {
         subtotal,
@@ -13217,16 +13246,33 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
     };
 
     const plan = await computeUpdateDetailsFinancialPlan({
-      db, id, updates, discountType, discountAmount, isRecurring,
+      db, id, updates, discountType, discountAmount, isRecurring, serviceType, scheduledDate,
       primaryLinePrice, estimatedPrice, addons,
       appointmentDiscountPreset, appointmentDiscountChanged, appointmentDiscountCols,
       presetEligibilityCheck,
     });
 
+    // Client rearchitecture (structural round 3 on #4657): the primary
+    // line's own discount is FROZEN — this editor never displays or edits
+    // it, and computeUpdateDetailsFinancialPlan never writes it either (see
+    // "can't resend them" on the real save's own primary-line comment) — so
+    // it is read directly, verbatim, rather than re-derived: nothing this
+    // save does can change it.
+    const primaryLineDiscountRow = (cols.line_discount_dollars || cols.line_discount_name)
+      ? await db('scheduled_services').where({ id })
+          .first(
+            ...(cols.line_discount_dollars ? ['line_discount_dollars'] : []),
+            ...(cols.line_discount_name ? ['line_discount_name'] : []),
+          )
+          .catch(() => null)
+      : null;
     res.json({
       total: updates.estimated_price !== undefined ? updates.estimated_price : null,
       primaryLinePrice: updates.primary_line_price !== undefined ? updates.primary_line_price : null,
       appointmentDiscountDollars: updates.discount_dollars !== undefined ? updates.discount_dollars : null,
+      primaryLineDiscountDollars: primaryLineDiscountRow?.line_discount_dollars != null
+        ? Number(primaryLineDiscountRow.line_discount_dollars) : null,
+      primaryLineDiscountName: primaryLineDiscountRow?.line_discount_name || null,
       // Ordered exactly like the save path's own replaceAddons — a line the
       // client already has a row id for correlates by submittedAddonId; a
       // brand-new (id-less) line correlates by array position against the
@@ -13237,6 +13283,7 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
         serviceName: l.serviceName,
         price: l.price,
         discountDollars: l.discount?.discountDollars ?? null,
+        discountName: l.discount?.discountName ?? null,
       })),
       canonicalRestackedAddonDollars: plan.canonicalRestackedAddonDollars ?? null,
     });

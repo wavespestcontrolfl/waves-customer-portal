@@ -11,6 +11,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EditServiceModal, verifiedLineDiscountCap, lineDiscountSaveBlocked } from './SchedulePage';
 import { __resetDiscountStackingCache } from '../../hooks/useDiscountStacking';
+import { stackVisitDiscounts } from '../../lib/discountStack';
 
 vi.mock('../../components/schedule/useSlotConflicts', () => ({ useSlotConflicts: () => ({ conflicts: [] }) }));
 vi.mock('../../components/schedule/useBestTimes', () => ({ useBestTimes: () => ({ bestTimes: [], picked: null, bestInRange: [] }) }));
@@ -111,13 +112,133 @@ const baseService = {
   ],
 };
 
-function mockFetch({ stackingEnabled, discounts = DISCOUNTS, onUpdateDetails } = {}) {
+// Structural round 3 on #4657: the component now sources EVERY money
+// figure from POST .../update-details/preview — these tests drive it
+// through a test-only "fake server" (computeMockPreview) built on the SAME
+// lib/discountStack.js math the real server mirrors, rather than each test
+// hand-asserting a client-computed number the component no longer produces.
+// Mirrors the shape (not the full nuance) of
+// computeUpdateDetailsFinancialPlan: resolves a fresh vs. unchanged addon
+// pick by comparing against the fixture's own stored serviceAddons, prefers
+// a MARKED row's frozen cap (pricingProvenance.caps), and preserves an
+// UNMARKED unchanged stamp's stored dollars verbatim — the same three
+// rules the server itself applies.
+function computeMockPreview(body, service, discounts) {
+  const discountById = new Map(discounts.map((d) => [d.id, d]));
+  const compound = service.pricingProvenance?.pricing_regime === 'discount_stack_v1';
+  const resolveFreshDiscount = (type, amount, id) => {
+    if (!type || amount == null || amount === '') return null;
+    const catalogRow = id ? discountById.get(id) : null;
+    return {
+      id: id || null,
+      name: catalogRow?.name || null,
+      discount_type: type,
+      amount: Number(amount),
+      max_discount_dollars: catalogRow?.max_discount_dollars ?? null,
+    };
+  };
+  let primaryLineDiscount = null;
+  if (service.lineDiscountType && service.lineDiscountAmount != null) {
+    if (compound) {
+      const capEntry = service.pricingProvenance?.caps?.line;
+      const cap = capEntry && String(capEntry.id ?? '') === String(service.lineDiscountId ?? '') ? capEntry.cap : null;
+      primaryLineDiscount = {
+        id: service.lineDiscountId || null, name: service.lineDiscountName || null,
+        discount_type: service.lineDiscountType, amount: Number(service.lineDiscountAmount),
+        max_discount_dollars: cap,
+      };
+    } else if (service.lineDiscountDollars != null) {
+      primaryLineDiscount = {
+        id: service.lineDiscountId || null, name: service.lineDiscountName || null,
+        discount_type: 'fixed_amount', amount: Number(service.lineDiscountDollars),
+      };
+    }
+  }
+  const primaryGross = body.primaryLinePrice != null ? Number(body.primaryLinePrice) : Number(service.primaryLinePrice ?? 0);
+  const existingAddonsById = new Map((service.serviceAddons || []).map((a) => [a.id, a]));
+  const addonsIn = Array.isArray(body.addons) ? body.addons : [];
+  const addonLines = addonsIn.map((a) => {
+    const gross = Number(a.basePrice ?? a.price ?? 0);
+    const existing = a.id ? existingAddonsById.get(a.id) : null;
+    const serviceKey = a.serviceKey || existing?.serviceKey || null;
+    const serviceCategory = a.serviceCategory || existing?.serviceCategory || null;
+    let ld = null;
+    if (a.discountType && a.discountAmount != null && a.discountAmount !== '') {
+      const isFresh = !existing || String(existing.discountId || '') !== String(a.discountId || '')
+        || existing.discountType !== a.discountType || Number(existing.discountAmount) !== Number(a.discountAmount);
+      if (!isFresh && compound) {
+        const capsAddons = service.pricingProvenance?.caps?.addons || {};
+        const cap = a.discountId && String(a.discountId) in capsAddons
+          ? capsAddons[String(a.discountId)]
+          : (discountById.get(a.discountId)?.max_discount_dollars ?? null);
+        ld = {
+          id: a.discountId || null, name: a.discountName || null, discount_type: a.discountType,
+          amount: Number(a.discountAmount), max_discount_dollars: cap,
+        };
+      } else if (!isFresh && !compound && existing?.discountDollars != null) {
+        ld = { id: a.discountId || null, name: a.discountName || null, discount_type: 'fixed_amount', amount: Number(existing.discountDollars) };
+      } else {
+        ld = resolveFreshDiscount(a.discountType, a.discountAmount, a.discountId);
+      }
+    }
+    return { gross, lineDiscount: ld, submittedAddonId: a.id || null, serviceName: a.serviceName || a.name || '', serviceKey, serviceCategory };
+  });
+  let appointmentDiscount = null;
+  let keyFilter = null;
+  let categoryFilter = null;
+  if (body.discountType && body.discountAmount != null && body.discountAmount !== '') {
+    const presetRow = body.discountId ? discountById.get(body.discountId) : null;
+    appointmentDiscount = resolveFreshDiscount(body.discountType, body.discountAmount, body.discountId);
+    keyFilter = presetRow?.service_key_filter || null;
+    categoryFilter = presetRow?.service_category_filter || null;
+  } else if (service.discountType && service.discountAmount != null) {
+    appointmentDiscount = resolveFreshDiscount(service.discountType, service.discountAmount, service.discountId);
+    keyFilter = service.discountServiceKeyFilter || null;
+    categoryFilter = service.discountServiceCategoryFilter || null;
+  }
+  // Scope the appointment credit to the lines it actually reaches — the
+  // same service_key_filter/service_category_filter matching
+  // presetEligibilityCheck/resolveUpdateDetailsAddonFinancials apply
+  // server-side.
+  const inScope = (lineServiceKey, lineServiceCategory) => (
+    (!keyFilter || keyFilter === lineServiceKey) && (!categoryFilter || categoryFilter === lineServiceCategory)
+  );
+  const primaryServiceKey = body.serviceKey !== undefined ? body.serviceKey : (service.serviceKey || null);
+  const primaryServiceCategory = body.serviceCategory !== undefined ? body.serviceCategory : (service.serviceCategorySnapshot || null);
+  const stacked = stackVisitDiscounts({
+    lines: [
+      { gross: primaryGross, lineDiscount: primaryLineDiscount, eligible: inScope(primaryServiceKey, primaryServiceCategory) },
+      ...addonLines.map((l) => ({ gross: l.gross, lineDiscount: l.lineDiscount, eligible: inScope(l.serviceKey, l.serviceCategory) })),
+    ],
+    appointmentDiscount,
+    compound,
+  });
+  return {
+    total: stacked.total,
+    primaryLinePrice: primaryGross,
+    appointmentDiscountDollars: stacked.appointmentDiscountDollars,
+    primaryLineDiscountDollars: stacked.lines[0]?.lineDiscountDollars ?? null,
+    primaryLineDiscountName: primaryLineDiscount?.name || null,
+    addons: addonLines.map((l, i) => ({
+      submittedAddonId: l.submittedAddonId,
+      serviceName: l.serviceName,
+      price: stacked.lines[i + 1]?.net,
+      discountDollars: stacked.lines[i + 1]?.lineDiscountDollars || null,
+      discountName: l.lineDiscount?.name || null,
+    })),
+  };
+}
+
+function mockFetch({ stackingEnabled, discounts = DISCOUNTS, onUpdateDetails, service = baseService } = {}) {
   return vi.fn(async (url, options) => {
     if (url.endsWith('/admin/discounts/stacking')) {
       return { ok: true, json: async () => ({ enabled: stackingEnabled }) };
     }
     if (url.endsWith('/admin/discounts')) {
       return { ok: true, json: async () => discounts };
+    }
+    if (url.includes('/update-details/preview')) {
+      return { ok: true, json: async () => computeMockPreview(JSON.parse(options.body), service, discounts) };
     }
     if (url.includes('/update-details')) {
       if (onUpdateDetails) return onUpdateDetails(JSON.parse(options.body));
@@ -135,7 +256,13 @@ function Harness({ onSaved = vi.fn(), service = baseService }) {
   </>;
 }
 
-const writes = () => fetch.mock.calls.filter(([, options]) => options?.method && options.method !== 'GET');
+// Structural round 3 on #4657: the debounced money preview is now a
+// non-GET call too (POST .../update-details/preview) but it never
+// persists anything — excluded here so "a write happened" still means
+// what it always meant: the real PUT save.
+const writes = () => fetch.mock.calls.filter(([url, options]) => (
+  options?.method && options.method !== 'GET' && !url.includes('/update-details/preview')
+));
 // This modal's <label>s are visual-only siblings of their control (no
 // htmlFor/id pair, no wrapping) — getByLabelText can't associate them.
 function labeledControl(text) {
@@ -196,6 +323,7 @@ it('gate off: no Line discount control renders, and a notes-only save posts the 
   expect(screen.queryByText('Line discount')).not.toBeInTheDocument();
   const notes = screen.getByDisplayValue('Existing note');
   fireEvent.change(notes, { target: { value: 'Updated note' } });
+  await waitForMoneyReady();
   fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
   await waitFor(() => expect(writes()).toHaveLength(1));
   const body = JSON.parse(writes()[0][1].body);
@@ -212,6 +340,7 @@ it('gate on but untouched: the same notes-only save posts the identical addons p
   await waitFor(() => expect(screen.getAllByText('Line discount').length).toBeGreaterThan(0));
   const notes = screen.getByDisplayValue('Existing note');
   fireEvent.change(notes, { target: { value: 'Updated note' } });
+  await waitForMoneyReady();
   fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
   await waitFor(() => expect(writes()).toHaveLength(1));
   const body = JSON.parse(writes()[0][1].body);
@@ -229,7 +358,8 @@ it('gate on: picking a fresh line discount previews compound math and posts the 
   fireEvent.change(fertPicker, { target: { value: 'disc-silver' } });
   // Silver: 10% of the $40 fertilization line = $4.00, shown as its own row.
   await waitFor(() => expect(screen.getAllByText('WaveGuard Silver').length).toBeGreaterThan(0));
-  expect(screen.getByText('($4.00)')).toBeInTheDocument();
+  await waitForMoneyReady();
+  await waitFor(() => expect(screen.getByText('($4.00)')).toBeInTheDocument());
   fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
   await waitFor(() => expect(writes()).toHaveLength(1));
   const body = JSON.parse(writes()[0][1].body);
@@ -269,6 +399,7 @@ it('gate on: Remove on an ALREADY-STAMPED line restores its true gross and posts
   expect(screen.queryByText('Military Discount', { selector: 'div' })).not.toBeInTheDocument();
   // Price snapped to the true gross ($60), not left at the discounted net.
   expect(priceInputs.find((i) => Number(i.value) === 60)).toBeTruthy();
+  await waitForMoneyReady();
   fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
   await waitFor(() => expect(writes()).toHaveLength(1));
   const body = JSON.parse(writes()[0][1].body);
@@ -405,6 +536,7 @@ it('VISIT_CHANGED_RETRY: the save is refused with a clear message and nothing si
   fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
   const notes = await screen.findByDisplayValue('Existing note');
   fireEvent.change(notes, { target: { value: 'Updated note' } });
+  await waitForMoneyReady();
   fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
   expect(await screen.findByRole('alert')).toHaveTextContent(/changed since it opened/);
   expect(onSaved).not.toHaveBeenCalled();
@@ -424,12 +556,13 @@ it('save-lock: a double click while a discounted save is in flight posts exactly
   const fertPicker = await screen.findByRole('combobox', { name: 'Line discount for Quarterly Fertilization' });
   fireEvent.change(fertPicker, { target: { value: 'disc-silver' } });
   await waitFor(() => expect(screen.getAllByText('WaveGuard Silver').length).toBeGreaterThan(0));
+  await waitForMoneyReady();
   const save = screen.getByRole('button', { name: 'Save', exact: true });
   fireEvent.click(save);
   fireEvent.click(save);
   await act(async () => { resolveSave(); });
   await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
-  expect(writes().filter(([url]) => url.includes('/update-details'))).toHaveLength(1);
+  expect(writes().filter(([url]) => url.includes('/update-details'))).toHaveLength(1); // preview already excluded by writes() itself
 });
 
 // ---------------------------------------------------------------------
@@ -455,6 +588,7 @@ it('P1 (:2306): editing Price on an already-stamped line without touching its di
   // The stale discount must be gone from the preview — never $55-with-
   // discount shown while $70 is what will actually save.
   await waitFor(() => expect(screen.queryByText('Military Discount', { selector: 'div' })).not.toBeInTheDocument());
+  await waitForMoneyReady();
   fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
   await waitFor(() => expect(writes()).toHaveLength(1));
   const body = JSON.parse(writes()[0][1].body);
@@ -488,6 +622,7 @@ it('P1 (:2803): a line discount picked while the gate is on is dropped from prev
   // React state still holds the hidden pick underneath.
   await waitFor(() => expect(screen.queryByText('WaveGuard Silver')).not.toBeInTheDocument());
   await waitFor(() => expect(screen.queryByRole('combobox', { name: 'Line discount for Quarterly Fertilization' })).not.toBeInTheDocument());
+  await waitForMoneyReady();
   fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
   await waitFor(() => expect(writes()).toHaveLength(1));
   const body = JSON.parse(writes()[0][1].body);
@@ -547,8 +682,16 @@ function totalText() {
   return screen.getByText('Total').parentElement.querySelector('strong').textContent;
 }
 
+// Structural round 3 on #4657: every money figure now comes from a
+// debounced server round trip, so Save stays disabled (and the totals
+// section still reads "Confirming…") until that response lands — tests
+// that assert on a dollar figure, or that click Save, wait for it first.
+async function waitForMoneyReady() {
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeEnabled(), { timeout: 2000 });
+}
+
 it(':3295 — a MARKED row previews the canonical (compound) engine: fixed-credit reordering clamps the line credit to $2, Total $1.00', async () => {
-  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, discounts: DISCOUNTS_R3 }));
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, discounts: DISCOUNTS_R3, service: orderingSensitiveService(MARKED_PROVENANCE) }));
   render(<Harness service={orderingSensitiveService(MARKED_PROVENANCE)} />);
   fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
   await waitFor(() => expect(screen.getAllByText('Military Discount').length).toBeGreaterThan(0));
@@ -559,7 +702,7 @@ it(':3295 — a MARKED row previews the canonical (compound) engine: fixed-credi
 });
 
 it(':3295 — the SAME numbers on an UNMARKED row preview the additive engine instead: the line credit stays full ($5), Total $0.00', async () => {
-  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, discounts: DISCOUNTS_R3 }));
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, discounts: DISCOUNTS_R3, service: orderingSensitiveService(null) }));
   render(<Harness service={orderingSensitiveService(null)} />);
   fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
   await waitFor(() => expect(screen.getAllByText('Military Discount').length).toBeGreaterThan(0));
@@ -592,7 +735,7 @@ it(':1662 — a MARKED row previews an existing stamped PERCENTAGE line discount
   const discountsWithLiveCap = DISCOUNTS.map((d) => (
     d.id === 'disc-silver' ? { ...d, max_discount_dollars: 5 } : d
   ));
-  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, discounts: discountsWithLiveCap }));
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, discounts: discountsWithLiveCap, service }));
   render(<Harness service={service} />);
   fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
   // $10.00 off (frozen, uncapped) — never $5.00 (the live catalog cap).
@@ -604,7 +747,7 @@ it(':3293 — the row\'s STORED appointment discount (never touched this session
     ...baseService,
     discountType: 'percentage', discountAmount: 10, discountId: 'disc-silver', discountMaxDollars: null,
   };
-  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, discounts: DISCOUNTS }));
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, discounts: DISCOUNTS, service }));
   render(<Harness service={service} />);
   fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
   // The appointment Discount control itself is still untouched (shows "None").
@@ -643,6 +786,7 @@ it('P1 (:2380) — a gate flip after SWAPPING an already-stamped line\'s discoun
   }));
   await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
   await waitFor(() => expect(screen.queryByText('Line discount')).not.toBeInTheDocument());
+  await waitForMoneyReady();
   fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
   await waitFor(() => expect(writes()).toHaveLength(1));
   const body = JSON.parse(writes()[0][1].body);
@@ -675,7 +819,7 @@ it(':3445 — the PRIMARY line\'s own stored discount (never editable in this sl
       caps: { line: { id: 'disc-military', cap: null }, addons: {} },
     },
   };
-  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true }));
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service }));
   render(<Harness service={service} />);
   fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
   // $100 gross primary minus the stored $10 fixed credit — never $100 flat.
@@ -695,7 +839,7 @@ it(':3421 — a stored appointment discount scoped to ONE service key previews a
     discountType: 'percentage', discountAmount: 10, discountId: 'disc-military',
     discountServiceKeyFilter: 'mosquito_monthly', discountServiceCategoryFilter: null,
   };
-  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true }));
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service }));
   render(<Harness service={service} />);
   fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
   // 10% of the mosquito line's own $60 ($6) — never 10% of the full $200
@@ -724,7 +868,7 @@ it('P1 (round 3): an UNMARKED row\'s primary discount previews at its FROZEN dol
     lineDiscountDollars: 10,
     // Unmarked: no pricingProvenance at all.
   };
-  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true }));
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service }));
   render(<Harness service={service} />);
   fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
   // Edit the primary Price to $200 — a genuine price change. If the
@@ -735,4 +879,122 @@ it('P1 (round 3): an UNMARKED row\'s primary discount previews at its FROZEN dol
   const primaryPriceInput = priceInputs.find((i) => Number(i.value) === 100);
   fireEvent.change(primaryPriceInput, { target: { value: '200' } });
   await waitFor(() => expect(totalText()).toBe('$240.00'));
+});
+
+// ---------------------------------------------------------------------
+// Structural round 3 on #4657: the server preview is the ONLY money
+// source now (no client engine, no "is a discount in play" gating on
+// whether to ask it) — these four pin the exact repros GitHub round 3
+// found, each closed by construction rather than a targeted patch.
+// ---------------------------------------------------------------------
+
+it('structural round 3 on #4657 (:2859): a stored PRIMARY-line discount stacking with a fresh appointment discount is previewed even on a visit with NO add-on lines at all', async () => {
+  const service = {
+    ...baseService,
+    serviceAddons: [],
+    primaryLinePrice: 100,
+    estimatedPrice: 100,
+    lineDiscountType: 'percentage', lineDiscountAmount: 10, lineDiscountId: 'disc-military',
+    lineDiscountDollars: 10,
+  };
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service }));
+  render(<Harness service={service} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(apptDiscountSelect()).toBeInTheDocument());
+  // Picking a fresh appointment discount on a visit with only a stored
+  // PRIMARY-line discount (no add-ons at all) used to never even ask the
+  // server — lineDiscountInPlay only ever looked at add-on serviceLines,
+  // so moneyPreviewRelevant (appointmentDiscountSelected && lineDiscountInPlay)
+  // stayed false and the client's own stale/optimistic number stood. The
+  // preview is unconditional now, so this combination is covered too.
+  fireEvent.change(apptDiscountSelect(), { target: { value: 'custom' } });
+  fireEvent.change(labeledControl('Discount type'), { target: { value: 'fixed_amount' } });
+  fireEvent.change(labeledControl('Amount ($)'), { target: { value: '5' } });
+  await waitForMoneyReady();
+  // Both discounts actually reached the server and reduced the total —
+  // the exact combined figure is the server's own engine choice (additive
+  // here, this row is unmarked); the point pinned is that a round trip
+  // happened AT ALL for this previously-uncovered combination.
+  await waitFor(() => expect(totalText()).not.toBe('$100.00'));
+});
+
+it('structural round 3 on #4657 (:3659): a stacking-gate flip invalidates any cached preview even when the discounts are UNTOUCHED (stored, not a fresh pick this session)', async () => {
+  // The gate-flip full-reset effect (setServiceLines on stackingEnabled)
+  // only has something to reset for a line TOUCHED this session
+  // (lineDiscountTouched) — an untouched, merely STORED stamp is exactly
+  // the repro GitHub round 3 found: nothing else about the form changes on
+  // a gate flip here, so only stackingEnabled/stackingKnown actually being
+  // IN the preview's own dependency key can catch it.
+  const service = {
+    ...baseService,
+    discountType: 'percentage', discountAmount: 10, discountId: 'disc-silver', discountMaxDollars: null,
+  };
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service }));
+  render(<Harness service={service} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  // Gate flips off with NOTHING else on the form changing — a fresh
+  // vi.fn() fetch, so its own call history starts empty; ANY call to it
+  // proves the debounce effect re-ran purely off the gate transition (the
+  // OLD dependency key — form/discount/lines only — would never have
+  // re-run this effect for an untouched stamp, silently leaving the
+  // gate-ON response on screen under the gate-OFF regime).
+  __resetDiscountStackingCache();
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: false, service }));
+  await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+  await waitFor(() => {
+    const previewCallsAfterFlip = fetch.mock.calls.filter(([url]) => url.includes('/update-details/preview'));
+    expect(previewCallsAfterFlip.length).toBeGreaterThan(0);
+  });
+});
+
+it('structural round 3 on #4657 (:2394): an unmarked add-on stamp previews its stored dollars even with NO appointment discount in play at all', async () => {
+  const service = {
+    ...baseService,
+    serviceAddons: [
+      {
+        id: 'addon-1', serviceId: 'svc-mosquito', serviceName: 'Monthly Mosquito', serviceKey: 'mosquito_monthly',
+        serviceCategory: 'mosquito', basePrice: 100, estimatedPrice: 90, discountId: 'disc-silver',
+        discountName: 'WaveGuard Silver', discountType: 'percentage', discountAmount: 50, discountDollars: 10,
+        estimatedDuration: 30,
+      },
+    ],
+    primaryLinePrice: 0,
+    estimatedPrice: 90,
+    // Unmarked — no pricingProvenance.
+  };
+  // The LIVE catalog cap has since dropped to $2 — an unmarked, untouched
+  // stamp must still preview at its stored $10, never re-derived against
+  // the NEW (lower) live cap, and — the :2394 repro specifically — even
+  // though NO appointment discount is anywhere in play this save (the OLD
+  // gating required BOTH an appointment pick and a line discount before
+  // asking the server at all).
+  const discountsWithLoweredCap = DISCOUNTS.map((d) => (
+    d.id === 'disc-silver' ? { ...d, max_discount_dollars: 2 } : d
+  ));
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, discounts: discountsWithLoweredCap, service }));
+  render(<Harness service={service} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(apptDiscountSelect().value).toBe(''));
+  // $90 (stored, preserved) — never $98 (the raw $100 minus the
+  // now-live-capped $2).
+  await waitFor(() => expect(totalText()).toBe('$90.00'));
+});
+
+it('structural round 3 on #4657 (:3606): the preview request carries the primary service identity (serviceType), not just price and discount fields', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  const fertPicker = await screen.findByRole('combobox', { name: 'Line discount for Quarterly Fertilization' });
+  fireEvent.change(fertPicker, { target: { value: 'disc-silver' } });
+  await waitFor(() => expect(screen.getAllByText('WaveGuard Silver').length).toBeGreaterThan(0));
+  await waitForMoneyReady();
+  const previewCall = fetch.mock.calls.find(([url]) => url.includes('/update-details/preview'));
+  expect(previewCall).toBeTruthy();
+  const body = JSON.parse(previewCall[1].body);
+  // The primary-service identity is IN the request (the same `...form`
+  // spread the real save sends) — a primary-service change is therefore
+  // always priced/validated against what THIS save would actually
+  // resolve, never a stale identity the OLD narrower preview body omitted.
+  expect(body.serviceType).toBe(baseService.serviceType);
 });
