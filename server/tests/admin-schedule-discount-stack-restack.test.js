@@ -90,7 +90,17 @@ describe('appointment creation — canonical restack (buildAppointmentPricing)',
     expect(pricing.finalPrice).toBe(50);
   });
 
-  test('gate on: fixed appointment credit resolves before the line percentage (canonical SLOT order)', async () => {
+  // Codex pre-push audit P0 (round 6): a FIXED appointment credit sharing a
+  // pool with a percentage LINE discount is the one combination
+  // restackStoredVisitFinancials (the extension path) cannot restack
+  // soundly (round 5 — no persisted per-line cap survives an edit to the
+  // credit's own amount). Restacking it HERE at creation while extension
+  // can't would let a seeded child/extension of the SAME series disagree
+  // with its own anchor (Codex's repro: the anchor stacks to $12, a later
+  // extension without the add-on falls back to legacy and costs $58 instead
+  // of the canonical $59.50) — so creation defers here too, byte-identical
+  // to the legacy order every other caller already gets.
+  test('gate on: defers (legacy line-then-appointment order) when a fixed credit shares a pool with a percentage line discount', async () => {
     const { lineDiscountRow, appointmentDiscountRow } = fixtures();
     db.mockReturnValueOnce(discountQuery(lineDiscountRow))
       .mockReturnValueOnce(discountQuery(appointmentDiscountRow));
@@ -106,12 +116,37 @@ describe('appointment creation — canonical restack (buildAppointmentPricing)',
       customer: { id: 'customer-1' },
     }));
 
-    // $30 fixed credit off $100 first = $70 remaining, THEN 20% of $70 = $14
-    // — never the legacy $20 (20% of the untouched $100).
+    // Byte-identical to the gate-off test above: 20% of the untouched $100,
+    // then the $30 fixed credit off the $80 net.
+    expect(pricing.primaryDiscount.discountDollars).toBe(20);
+    expect(pricing.primaryNet).toBe(80);
     expect(pricing.appointmentDiscount.discountDollars).toBe(30);
-    expect(pricing.primaryDiscount.discountDollars).toBe(14);
-    expect(pricing.primaryNet).toBe(86);
-    expect(pricing.finalPrice).toBe(56);
+    expect(pricing.finalPrice).toBe(50);
+  });
+
+  test('gate on: a fixed appointment credit resolves before a NON-percentage (fixed) line discount — the safe combination', async () => {
+    const lineDiscountRow = { id: 'line-disc-fixed', name: 'Line $20 off', discount_type: 'fixed_amount', amount: 20 };
+    const appointmentDiscountRow = { id: 'appt-fixed-1', name: 'Fixed $30', discount_type: 'fixed_amount', amount: 30 };
+    db.mockReturnValueOnce(discountQuery(lineDiscountRow))
+      .mockReturnValueOnce(discountQuery(appointmentDiscountRow));
+
+    const pricing = await withGateLive(() => buildAppointmentPricing({
+      serviceRecord: { service_key: 'general_pest', category: 'pest_control', base_price: 100 },
+      estimatedPrice: 100,
+      primaryLinePrice: 100,
+      primaryLineDiscount: { discountId: 'line-disc-fixed' },
+      serviceAddons: [],
+      discountId: 'appt-fixed-1',
+      discountType: 'fixed_amount',
+      customer: { id: 'customer-1' },
+    }));
+
+    // A fixed line discount is self-limiting to its own face value
+    // regardless of order or pool size — no cap concept, so this
+    // combination restacks fully. $20 (line) + $30 (appointment) = $50 off.
+    expect(pricing.primaryDiscount.discountDollars).toBe(20);
+    expect(pricing.appointmentDiscount.discountDollars).toBe(30);
+    expect(pricing.finalPrice).toBe(50);
   });
 
   test('gate on, no appointment discount: single line discount is unaffected by the restack branch', async () => {
@@ -133,12 +168,12 @@ describe('appointment creation — canonical restack (buildAppointmentPricing)',
     expect(pricing.appointmentDiscount).toBeNull();
   });
 
-  // Codex pre-push audit P0 (round 1): reconstructing a line discount's
-  // typed slot without its cap let the restack ignore a cap
-  // calculateDiscountDollars would otherwise have enforced — a $100 line at
-  // 50% capped $10 plus a $10 fixed appointment credit restacked to $45 net
-  // instead of the correct $80.
-  test('gate on: a capped percentage line discount keeps its cap through the restack', async () => {
+  // A percentage line discount + a fixed appointment credit is the
+  // deferred combination (round 6, above) — this pins that a CAPPED one
+  // still lands on the correct, cap-safe figure through the legacy
+  // fallback (calculateDiscountDollars enforces the cap independently of
+  // stacking order): 50% of the untouched $100 is $50, capped to $10.
+  test('gate on: a capped percentage line discount + a fixed appointment credit (deferred) still honors its cap', async () => {
     const lineDiscountRow = { id: 'line-disc-2', name: 'Capped 50%', discount_type: 'percentage', amount: 50, max_discount_dollars: 10 };
     const appointmentDiscountRow = { id: 'appt-fixed-2', name: 'Fixed $10', discount_type: 'fixed_amount', amount: 10 };
     db.mockReturnValueOnce(discountQuery(lineDiscountRow))
@@ -155,9 +190,6 @@ describe('appointment creation — canonical restack (buildAppointmentPricing)',
       customer: { id: 'customer-1' },
     }));
 
-    // $10 fixed credit off $100 first = $90 remaining. Uncapped, 50% of $90
-    // would be $45 — the cap holds it to $10, netting $80, never the $45 a
-    // dropped cap would give.
     expect(pricing.primaryDiscount.discountDollars).toBe(10);
     expect(pricing.primaryNet).toBe(90);
     expect(pricing.appointmentDiscount.discountDollars).toBe(10);
@@ -175,14 +207,19 @@ describe('seeded recurring children/boosters — restackLiveVisitFinancials', ()
   // whose own due add-ons differ. This mirrors restackStoredVisitFinancials'
   // extension-side fix, sourced from the LIVE pricing object instead of a
   // stored row, so a series stays internally consistent whether a visit was
-  // seeded at booking time or produced later by auto-extend.
+  // seeded at booking time or produced later by auto-extend. A FIXED
+  // appointment credit sharing a pool with a percentage line/add-on
+  // discount is the ONE combination this defers (round 6, below, mirrors
+  // buildAppointmentPricing's identical deferral) — this fixture therefore
+  // uses a percentage APPOINTMENT discount (Step 3 always precedes Step 4,
+  // so no cap-staleness risk exists there).
   const pricingFixture = {
     primaryBase: 100,
     primaryNet: 68, // legacy value from the anchor's OWN restack — irrelevant to this function, which re-derives everything from primaryDiscount + primaryBase
     primaryServiceKey: 'general_pest',
     primaryServiceCategory: 'pest_control',
-    primaryDiscount: { discountType: 'percentage', discountAmount: 15, discountDollars: 12, maxDiscountDollars: null },
-    appointmentDiscount: { discountType: 'fixed_amount', discountAmount: 30, discountDollars: 30, maxDiscountDollars: null, serviceKeyFilter: null, serviceCategoryFilter: null },
+    primaryDiscount: { discountType: 'percentage', discountAmount: 15, discountDollars: 15, maxDiscountDollars: null },
+    appointmentDiscount: { discountType: 'percentage', discountAmount: 10, discountDollars: 8.5, maxDiscountDollars: null, serviceKeyFilter: null, serviceCategoryFilter: null },
   };
 
   test('gate off: returns null — the caller keeps calculateVisitFinancialsForAddons unchanged', () => {
@@ -191,32 +228,61 @@ describe('seeded recurring children/boosters — restackLiveVisitFinancials', ()
     ])).toBeNull();
   });
 
-  test('gate on: the anchor’s own add-on mix restacks to the anchor’s $12 primary discount', async () => {
+  test('gate on: the anchor’s own add-on mix restacks its own appointment-discount share', async () => {
     await withGateLive(() => {
       const result = restackLiveVisitFinancials(pricingFixture, [
         { base: 50, price: 40, serviceKey: 'termite_addon', serviceCategory: 'termite' },
       ]);
-      expect(result.primaryDiscountDollars).toBe(12);
-      expect(result.appointmentDiscountDollars).toBe(30);
+      // Primary's own 15% is unaffected by pool size (Step 3 precedes Step
+      // 4); the 10% appointment discount spans the primary's $85 net PLUS
+      // the $50 add-on = $135, giving $13.50.
+      expect(result.primaryDiscountDollars).toBe(15);
+      expect(result.appointmentDiscountDollars).toBe(13.5);
     });
   });
 
-  test('gate on: a child WITHOUT that add-on restacks its OWN, different primary discount — never a copy of the anchor’s', async () => {
+  test('gate on: a child WITHOUT that add-on restacks a DIFFERENT appointment-discount share — never a copy of the anchor’s', async () => {
     await withGateLive(() => {
       const result = restackLiveVisitFinancials(pricingFixture, []);
-      // Matches restackStoredVisitFinancials' identical shape (same primary
-      // gross/type/amount, same fixed appointment credit, no addon pool):
-      // $30 credit takes the whole primary line, leaving $70; 15% of $70 =
-      // $10.50 — not the anchor's $12, and not a stale copy of either.
-      expect(result.primaryDiscountDollars).toBe(10.5);
-      expect(result.appointmentDiscountDollars).toBe(30);
-      expect(result.price).toBe(59.5);
+      // Same primary (unaffected either way); the 10% appointment discount
+      // now spans only the primary's $85 net = $8.50 — not the anchor's
+      // $13.50, and not a stale copy of either.
+      expect(result.primaryDiscountDollars).toBe(15);
+      expect(result.appointmentDiscountDollars).toBe(8.5);
+      expect(result.price).toBe(76.5);
     });
   });
 
   test('gate on but no primary gross: returns null (nothing to restack)', async () => {
     await withGateLive(() => {
       expect(restackLiveVisitFinancials({ ...pricingFixture, primaryBase: null }, [])).toBeNull();
+    });
+  });
+
+  // Codex pre-push audit P0 (round 6): deferred consistently with
+  // buildAppointmentPricing's own restack and restackStoredVisitFinancials
+  // (round 5) — a FIXED appointment credit sharing a pool with a percentage
+  // line/add-on discount cannot restack soundly at EXTENSION time (no
+  // persisted per-line cap survives a later edit to the credit's amount),
+  // so it must not restack HERE either — otherwise a seeded child would
+  // disagree with its own later extension (Codex's repro: the anchor
+  // stacks a percentage add-on to $12, a bare extension without that
+  // add-on falls back to legacy math and costs $58 instead of the
+  // canonical $59.50 both paths would give if BOTH deferred).
+  test('gate on: defers (returns null) when a FIXED appointment credit would share a pool with a percentage discount', async () => {
+    await withGateLive(() => {
+      const pricing = {
+        primaryBase: 100,
+        primaryServiceKey: 'general_pest',
+        primaryServiceCategory: 'pest_control',
+        primaryDiscount: { discountType: 'percentage', discountAmount: 15, discountDollars: 15, maxDiscountDollars: null },
+        appointmentDiscount: { discountType: 'fixed_amount', discountAmount: 30, discountDollars: 30, maxDiscountDollars: null, serviceKeyFilter: null, serviceCategoryFilter: null },
+      };
+      expect(restackLiveVisitFinancials(pricing, [])).toBeNull();
+      // ...and equally for a percentage ADD-ON discount sharing that pool.
+      const addonPricing = { ...pricing, primaryDiscount: null };
+      const recurringAddon = { base: 100, price: 80, serviceKey: 'recurring_addon', serviceCategory: 'addon', discount: { discountType: 'percentage', discountAmount: 20, discountDollars: 20 } };
+      expect(restackLiveVisitFinancials(addonPricing, [recurringAddon])).toBeNull();
     });
   });
 
@@ -244,14 +310,13 @@ describe('seeded recurring children/boosters — restackLiveVisitFinancials', ()
   // Codex pre-push audit P0 (round 3): an explicit $0 primary (a member-
   // covered series stamps exactly this — dues cover the primary line,
   // priced add-ons still bill) used to be treated as "no primary gross at
-  // all," so a booking with a $0 primary, a discounted recurring add-on, a
+  // all," so a booking with a $0 primary, a priced recurring add-on, a
   // priced one-time add-on, and an appointment credit skipped restacking
-  // entirely. Codex's own worked example: a $100 recurring add-on at 20%
-  // off, a $50 one-time add-on, a $30 appointment credit — the anchor
-  // stamps a $16 add-on discount; a later occurrence without the one-time
-  // add-on must restack to $14 (canonical $56 total), never the anchor's
-  // frozen $16 (which would total $54).
-  test('gate on: a $0 primary still restacks its OWN priced/discounted add-ons and the shared appointment credit', async () => {
+  // entirely. Uses a FIXED-type (not percentage) recurring add-on discount
+  // deliberately: a fixed discount is self-limiting to its own face value
+  // regardless of pool size, so it never trips the round-6 deferral,
+  // letting this stay focused on the $0-primary-gross guard specifically.
+  test('gate on: a $0 primary still restacks its OWN priced add-ons and the shared appointment credit', async () => {
     await withGateLive(() => {
       const pricing = {
         primaryBase: 0,
@@ -260,16 +325,20 @@ describe('seeded recurring children/boosters — restackLiveVisitFinancials', ()
         primaryDiscount: null,
         appointmentDiscount: { discountType: 'fixed_amount', discountAmount: 30, discountDollars: 30, maxDiscountDollars: null, serviceKeyFilter: null, serviceCategoryFilter: null },
       };
-      const recurringAddon = { base: 100, price: 84, serviceKey: 'recurring_addon', serviceCategory: 'addon', discount: { discountType: 'percentage', discountAmount: 20, discountDollars: 16 } };
+      const recurringAddon = { base: 100, price: 90, serviceKey: 'recurring_addon', serviceCategory: 'addon', discount: { discountType: 'fixed_amount', discountAmount: 10, discountDollars: 10 } };
       const oneTimeAddon = { base: 50, price: 50, serviceKey: 'one_time_addon', serviceCategory: 'addon', discount: null };
 
+      // Pool = 100 + 50 = 150; $30 credit pro-rated across both.
       const anchor = restackLiveVisitFinancials(pricing, [recurringAddon, oneTimeAddon]);
-      expect(anchor.addonDollars[0].discountDollars).toBe(16);
+      expect(anchor.addonDollars[0].discountDollars).toBe(10); // the fixed discount's own face value, unaffected by pool size
+      expect(anchor.price).toBe(110);
 
-      // A later occurrence where the one-time add-on isn't due.
+      // A later occurrence where the one-time add-on isn't due — the
+      // recurring add-on's OWN discount stays $10 (self-limiting), but the
+      // shared credit's split (and so the total) changes correctly.
       const later = restackLiveVisitFinancials(pricing, [recurringAddon]);
-      expect(later.addonDollars[0].discountDollars).toBe(14);
-      expect(later.price).toBe(56);
+      expect(later.addonDollars[0].discountDollars).toBe(10);
+      expect(later.price).toBe(60);
     });
   });
 });
@@ -563,5 +632,67 @@ describe('recurring extension — insertRecurringChildAddons restack threading',
     expect(inserted[0].discount_dollars).toBe(8);
     expect(inserted[1].estimated_price).toBe(20);
     expect(inserted[1].discount_dollars).toBeUndefined();
+  });
+});
+
+// Codex pre-push audit P0 (round 6), the requested creation-to-extension
+// parity regression: a seeded child (restackLiveVisitFinancials) and a
+// later bare extension of the SAME series (restackStoredVisitFinancials)
+// must agree, never disagree, for every combination — including the
+// deferred one. This exercises both functions against the SAME logical
+// scenario (a $100 primary at 15%, a $50 add-on, a $30 fixed appointment
+// credit) and asserts they land on the identical outcome.
+describe('creation-to-extension parity (the round-6 regression)', () => {
+  afterEach(() => { delete process.env.GATE_DISCOUNT_STACKING; });
+
+  test('both defer identically for a fixed credit sharing a pool with a percentage primary discount', async () => {
+    await withGateLive(() => {
+      const seededChildResult = restackLiveVisitFinancials({
+        primaryBase: 100,
+        primaryServiceKey: 'general_pest',
+        primaryServiceCategory: 'pest_control',
+        primaryDiscount: { discountType: 'percentage', discountAmount: 15, discountDollars: 15, maxDiscountDollars: null },
+        appointmentDiscount: { discountType: 'fixed_amount', discountAmount: 30, discountDollars: 30, maxDiscountDollars: null, serviceKeyFilter: null, serviceCategoryFilter: null },
+      }, []);
+      const extensionResult = restackStoredVisitFinancials({
+        primary_line_price: 100,
+        line_discount_type: 'percentage',
+        line_discount_amount: 15,
+        line_discount_dollars: 15,
+        discount_type: 'fixed_amount',
+        discount_amount: 30,
+      }, [], null);
+
+      // Both defer (null) — neither restacks canonically while the other
+      // cannot, so both fall back to their own already-consistent legacy
+      // math instead of disagreeing.
+      expect(seededChildResult).toBeNull();
+      expect(extensionResult).toBeNull();
+    });
+  });
+
+  test('both restack identically for a safe combination (percentage appointment credit)', async () => {
+    await withGateLive(() => {
+      const seededChild = restackLiveVisitFinancials({
+        primaryBase: 100,
+        primaryServiceKey: 'general_pest',
+        primaryServiceCategory: 'pest_control',
+        primaryDiscount: { discountType: 'percentage', discountAmount: 15, discountDollars: 15, maxDiscountDollars: null },
+        appointmentDiscount: { discountType: 'percentage', discountAmount: 10, discountDollars: 8.5, maxDiscountDollars: null, serviceKeyFilter: null, serviceCategoryFilter: null },
+      }, []);
+      const extension = restackStoredVisitFinancials({
+        primary_line_price: 100,
+        line_discount_type: 'percentage',
+        line_discount_amount: 15,
+        line_discount_dollars: 15,
+        discount_type: 'percentage',
+        discount_amount: 10,
+      }, [], null);
+
+      expect(seededChild.primaryDiscountDollars).toBe(extension.primaryLineDiscountDollars);
+      expect(seededChild.appointmentDiscountDollars).toBe(extension.appointmentDiscountDollars);
+      expect(seededChild.price).toBe(extension.price);
+      expect(seededChild.price).toBe(76.5);
+    });
   });
 });

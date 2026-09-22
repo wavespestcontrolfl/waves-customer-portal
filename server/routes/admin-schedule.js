@@ -2091,7 +2091,22 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
     let finalPrimaryDiscount = primaryDiscount;
     let finalAddonLines = addonLines;
     let finalAppointmentDollars = resolvedAppointmentDiscount?.dollars || 0;
-    if (discountStackingLive() && appointmentDiscount && (primaryDiscount || addonLines.some((line) => line.discount))) {
+    // Deferred consistently with restackStoredVisitFinancials/
+    // restackLiveVisitFinancials (Codex pre-push audit P0, round 6): a
+    // FIXED appointment credit sharing a pool with a percentage-type line/
+    // add-on discount is the ONE combination the extension path cannot
+    // restack soundly without a persisted per-line cap (round 5) — so it
+    // must not restack HERE either, or a seeded child/extension of the same
+    // series would disagree with what its own anchor stamped (round 6's
+    // finding: an anchor stacked to $12 while its own later extension fell
+    // back to a legacy $15, a real $58-vs-$59.50 disagreement within one
+    // series). Every other combination still restacks below exactly as
+    // before.
+    const appointmentIsFixedCredit = appointmentDiscount?.discount_type === 'fixed_amount' || appointmentDiscount?.discount_type === 'variable_amount';
+    const linePercentageExists = isPercentDiscountType(primaryDiscount?.discountType)
+      || addonLines.some((line) => isPercentDiscountType(line.discount?.discountType));
+    const restackUnsafe = appointmentIsFixedCredit && linePercentageExists;
+    if (discountStackingLive() && !restackUnsafe && appointmentDiscount && (primaryDiscount || addonLines.some((line) => line.discount))) {
       const eligibleSet = new Set(eligibleLines);
       const stacked = restackOccurrenceDiscounts({
         primaryGross: primaryBase || 0,
@@ -2434,6 +2449,22 @@ function restackLiveVisitFinancials(pricing, addonLines) {
   const addons = Array.isArray(addonLines) ? addonLines : [];
   const discount = pricing.appointmentDiscount;
   if (!discount && !pricing.primaryDiscount && !addons.some((line) => line.discount)) return null;
+
+  // Deferred consistently with buildAppointmentPricing's own restack and
+  // restackStoredVisitFinancials (Codex pre-push audit P0, rounds 5-6): a
+  // FIXED appointment credit sharing a pool with a percentage-type primary/
+  // add-on discount is the one combination the EXTENSION path cannot
+  // restack soundly without a persisted per-line cap (no time-of-edit
+  // staleness risk exists HERE — this runs once within a single booking
+  // request with the real, in-memory catalog cap available — but restacking
+  // it anyway would make a seeded child disagree with its own later
+  // extension, which cannot restack it). Falls back to
+  // calculateVisitFinancialsForAddons, identical to this function never
+  // having existed for that one combination.
+  const appointmentIsFixedCredit = discount?.discountType === 'fixed_amount' || discount?.discountType === 'variable_amount';
+  const linePercentageExists = isPercentDiscountType(pricing.primaryDiscount?.discountType)
+    || addons.some((line) => isPercentDiscountType(line.discount?.discountType));
+  if (appointmentIsFixedCredit && linePercentageExists) return null;
 
   const matchesScope = (serviceKey, serviceCategory) => (
     (!discount?.serviceKeyFilter || discount.serviceKeyFilter === serviceKey)
