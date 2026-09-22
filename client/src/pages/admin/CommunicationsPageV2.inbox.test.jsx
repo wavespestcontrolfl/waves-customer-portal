@@ -352,6 +352,22 @@ it("requires an explicit sender for a new message without a saved line", async (
   expect(fetch.mock.calls.filter(([url]) => String(url).endsWith("/communications/sms"))).toHaveLength(0);
 });
 
+it.each([line, "+19412972606"])("keeps recovered sender, reply target, and override state on a call-log deep link from %s", async (queryLine) => {
+  const owner = `call-log-draft-${queryLine}`;
+  saveDraft(owner, { msgBody: "Saved reply", fromNumber: line, threadLock: null, attachments: [attachment], replyContext: { messageId: "a", messageType: "inbound", phone: "9415550100", customerId: null } });
+  window.history.replaceState({}, "", `/?phone=%2B19415550100&fromNumber=${encodeURIComponent(queryLine)}`);
+  setupWithOwner(owner); await tick();
+  const sender = screen.getByRole("combobox", { name: "Send from" });
+  expect(sender).toHaveValue(line);
+  expect(sender).toBeEnabled();
+  expect(screen.getByRole("textbox", { name: "Text message" })).toHaveValue("Saved reply");
+  expect(screen.getByRole("button", { name: "Remove gate.png" })).toBeInTheDocument();
+  if (queryLine !== line) expect(screen.getByText(/Saved draft kept on its original sending number and reply target/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
+  const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/communications/sms"));
+  expect(JSON.parse(request[1].body)).toMatchObject({ fromNumber: line, replyToMessageId: "a", mediaUrls: [attachment.url] });
+});
+
 it.each([23, 24])("checks restored attachment expiry at send time (%s hours old)", async (ageHours) => {
   const owner = `attachment-owner-${ageHours}`;
   const media = { ...attachment, key: `sms-attachments/${Date.now() - ageHours * 60 * 60 * 1000}-fixture-gate.png` };

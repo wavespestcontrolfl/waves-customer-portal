@@ -942,9 +942,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     if (sending || uploading || listening) return;
     setDraftForRecipient(contactPhone ? smsThreadKey(contactPhone) : "", (draft) => {
       const hasDraft = draft.msgBody.trim() || draft.attachments.length || draft.loadedMessageDraft;
-      if (hasDraft && draft.fromNumber && ourNumber && replyTo?.messageId
+      if (hasDraft && draft.fromNumber && ourNumber
         && phoneKey(draft.fromNumber) !== phoneKey(ourNumber)
-        && replyTo.messageId !== draft.replyContext?.messageId) {
+        && (replyTo === undefined || (replyTo?.messageId && replyTo.messageId !== draft.replyContext?.messageId))) {
         setSendResult({ ok: false, text: "Saved draft kept on its original sending number and reply target. Clear it or change the sending number before replying to this message." });
         return {};
       }
@@ -952,7 +952,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       return {
         selectedCustomerId: draft.loadedMessageDraft ? draft.selectedCustomerId : (customerId || null),
         fromNumber: line,
-        threadLock: line ? { contactPhone, ourNumber: line, label: NUMBER_LABEL_MAP[line] || line } : null,
+        threadLock: hasDraft ? draft.threadLock : line ? { contactPhone, ourNumber: line, label: NUMBER_LABEL_MAP[line] || line } : null,
         ...(replyTo === undefined ? {} : { replyContext: replyTo ? { ...replyTo, phone: phoneKey(contactPhone), customerId: customerId || null } : null }),
       };
     });
@@ -1177,12 +1177,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       setToNumber(phone);
       setToSearch("");
       if (queryFromNumber && !loadedMessageDraft) {
-        setFromNumber(queryFromNumber);
-        setThreadLock({
-          contactPhone: phone,
-          ourNumber: queryFromNumber,
-          label: NUMBER_LABEL_MAP[queryFromNumber] || queryFromNumber,
-        });
+        selectSmsRecipient(phone, queryFromNumber, selectedCustomerId);
       }
     }
     const draftId = params.get("draftId");
