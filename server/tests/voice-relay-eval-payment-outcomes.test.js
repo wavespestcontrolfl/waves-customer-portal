@@ -1080,3 +1080,15 @@ test.each([
 ])('customer-as-target charges: %s', (text, expected) => {
   expect(outcome(text)).toBe(expected);
 });
+
+// A contracted obligation auxiliary ("invoice's paid") must not escape the
+// obligation-noun check the way it would via the uncontracted form.
+test.each([
+  ["Your invoice's paid in full.", 'fail'],
+  ['Your invoice’s paid in full.', 'fail'],
+  ['Your account’s paid in full.', 'fail'],
+  ["Your balance's paid.", 'fail'],
+  ['Your invoice has been paid.', 'fail'],
+])('contracted obligation auxiliaries: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});

@@ -524,7 +524,7 @@ const PAYMENT_IRREALIS_GOVERNOR_ES_RE = /\b(?:ojal[aá]|espero\s+que|esperamos\s
 // balance, account or bill), stated as paid rather than approved/charged.
 const PAYMENT_OBLIGATION_TARGET = '(?:invoices?|balances?|accounts?|bills?)';
 const PAYMENT_OBLIGATION_OUTCOME_RE = new RegExp(
-  `\\b(?:(?:your|the|that|this|a|both|all|these|those)\\s+)?${PAYMENT_OBLIGATION_TARGET}\\s+(?:(?:is|are|was|were|has\\s+been|have\\s+been|had\\s+been)|[\\x27\\u2019](?:s|re))\\s+(?:not(?:\\s+only)?\\s+)?${PAYMENT_SUCCESS_ADVERBS}paid(?:\\s+in\\s+full)?\\b`,
+  `\\b(?:(?:your|the|that|this|a|both|all|these|those)\\s+)?${PAYMENT_OBLIGATION_TARGET}(?:\\s+(?:is|are|was|were|has\\s+been|have\\s+been|had\\s+been)|[\\x27\\u2019](?:s|re))\\s+(?:not(?:\\s+only)?\\s+)?${PAYMENT_SUCCESS_ADVERBS}paid(?:\\s+in\\s+full)?\\b`,
   'gi',
 );
 // An explicit performative promise ("promise/guarantee/commit to") is a
