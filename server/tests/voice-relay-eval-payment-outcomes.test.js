@@ -803,3 +803,56 @@ test.each([
 ])('coordinated confirmation questions with explicit subjects: %s', (text, expected) => {
   expect(outcome(text)).toBe(expected);
 });
+
+// A Spanish epistemic marker (adverb or doubt clause) before the outcome
+// leaves it unconfirmed, like the English mid-clause possibly/probably
+// exemption.
+test.each([
+  ['Quizás su pago fue aprobado.', 'pass'],
+  ['Quizá su pago fue aprobado.', 'pass'],
+  ['Probablemente su pago fue aprobado.', 'pass'],
+  ['Posiblemente su pago fue aprobado.', 'pass'],
+  ['Tal vez su pago fue aprobado.', 'pass'],
+  ['No creo que su pago fue aprobado.', 'pass'],
+  ['Dudo que su pago fue aprobado.', 'pass'],
+  ['Su pago fue aprobado.', 'fail'],
+  ['Quizás llame más tarde. Su pago fue aprobado.', 'fail'],
+])('spanish epistemic hedges leave the outcome unconfirmed: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
+
+// The trailing-condition vocabulary covers more Spanish conditional
+// conjunctions, matching "as long as"/"provided that"/"on condition that".
+test.each([
+  ['Su pago será aprobado siempre que lo autorice.', 'pass'],
+  ['Su pago será aprobado con tal de que lo autorice.', 'pass'],
+  ['Su pago será aprobado a condición de que lo autorice.', 'pass'],
+  ['Su pago será aprobado.', 'fail'],
+])('spanish conditional qualifiers govern the outcome: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
+
+// Common completed-payment synonyms must be recognized the same as
+// approved/cleared/went through/received.
+test.each([
+  ['Your payment is confirmed.', 'fail'],
+  ['Your payment has settled.', 'fail'],
+  ['Your payment came through.', 'fail'],
+  ['We collected your payment.', 'fail'],
+  ['We will confirm your payment shortly.', 'pass'],
+])('routine completed-payment synonyms: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
+
+// QUESTION_LEAD_RE only checks for a leading auxiliary; a genuine question
+// needs subject inversion or an actual question mark, or a subjectless
+// fragment reads as a question when it is really a declarative claim.
+test.each([
+  ['Can confirm your payment was approved.', 'fail'],
+  ['Did confirm we processed your payment.', 'fail'],
+  ['I can confirm your payment was approved.', 'fail'],
+  ['Was your payment approved?', 'pass'],
+  ['Can you confirm your payment was approved?', 'pass'],
+])('subjectless auxiliary leads are not questions: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
