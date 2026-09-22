@@ -275,12 +275,54 @@ function resolveDiscountCap(discount) {
 // equality first, before ever subtracting, is what keeps two uncapped
 // percentages falling through to the scope check instead.
 function compareDiscountCap(a, b) {
-  const capA = resolveDiscountCap(a);
-  const capB = resolveDiscountCap(b);
+  const capA = resolveSortCap(a);
+  const capB = resolveSortCap(b);
   if (capA === capB) return 0;
   if (capA === Infinity) return 1;
   if (capB === Infinity) return -1;
   return capA - capB;
+}
+
+// REPLAY STABILITY (coordinator scope extension, round 3): a FROZEN term
+// — one already resolved and saved, now replaying its own frozen dollar
+// figure via discountType: 'fixed_amount' for resolution purposes (every
+// caller's existing "stored" branch) — must keep the SAME canonical-order
+// position it had the FIRST time it resolved, even though its
+// discountType/amount have collapsed to a flat clamp. Freezing conflates
+// two different numbers into one field otherwise: the RATE (or original
+// fixed face value) that decided where in the sequence this term ran, and
+// the CLAMPED DOLLARS that sequence actually left it with — using the
+// clamped figure as the sort value on a LATER replay can silently swap
+// two terms' relative order (Codex pre-push audit P0: a $90 line credit
+// clamped to $50 on its first save sorted BEFORE an unrelated $80
+// document credit by its $90 rate; replaying the same two terms by their
+// frozen $50/$80 dollars instead reversed that order, reclamping the line
+// credit to $23.33 and silently changing the invoice's total on a plain
+// unchanged resave).
+//
+// sortKind/sortValue/sortCap, when a caller sets them on a term, override
+// discountType/amount/maxDiscountDollars for ORDERING ONLY (rank bucket,
+// VALUE, CAP) — discountStepDollars (the actual dollars-off computation)
+// always reads discountType/amount/maxDiscountDollars directly, never
+// these. A caller persists the sort key a term resolved with THE FIRST
+// TIME (server/services/invoice.js's stack_sort_kind/_value/_cap on the
+// saved line item) and replays it on every later edit; a term with no
+// sortKind/sortValue at all — every FRESH term, and any already-frozen
+// row saved before this replay-stability fix existed — falls straight
+// through to the plain discountType/amount/maxDiscountDollars reads,
+// unchanged from before these three functions existed.
+function resolveSortKind(discount) {
+  return discount?.sortKind ?? discount?.discountType;
+}
+
+function resolveSortValue(discount) {
+  return discount?.sortValue != null ? Number(discount.sortValue) || 0 : resolveDiscountAmount(discount);
+}
+
+function resolveSortCap(discount) {
+  if (discount?.sortCap === undefined) return resolveDiscountCap(discount);
+  const cap = Number(discount.sortCap);
+  return discount.sortCap == null || discount.sortCap === '' || !Number.isFinite(cap) ? Infinity : cap;
 }
 
 // A discount's SCOPE for the final tie-break: how many lines it reaches,
@@ -417,9 +459,10 @@ function discountStepDollars(discount, remaining) {
 // direction was verified.
 function stackOrder(discounts) {
   const rank = (d) => {
-    if (isFixedDiscountType(d?.discountType)) return 0;
+    const kind = resolveSortKind(d);
+    if (isFixedDiscountType(kind)) return 0;
     const slotBase = resolveDiscountSlot(d) === 'document' ? 3 : 1;
-    return isPercentDiscountType(d?.discountType) ? slotBase : slotBase + 1;
+    return isPercentDiscountType(kind) ? slotBase : slotBase + 1;
   };
   const isPercentRank = (r) => r === 1 || r === 3;
   return discounts
@@ -428,11 +471,13 @@ function stackOrder(discounts) {
       const rankA = rank(a.discount);
       const rankDiff = rankA - rank(b.discount);
       if (rankDiff !== 0) return rankDiff;
-      // VALUE: largest first — resolveDiscountAmount reads the same
-      // `amount` field for every kind, so this is "rate descending" for a
-      // percentage and "amount descending" for a fixed credit alike (one
-      // comparator, not two). A free_service's amount is always 0, so
-      // this is a no-op tie for it, falling straight through to scope.
+      // VALUE: largest first — resolveSortValue reads the same value
+      // for every kind (a caller's persisted sortValue when a term is
+      // FROZEN and replaying, else the live amount/rate — see
+      // resolveSortValue's own comment), so this is "rate descending" for
+      // a percentage and "amount descending" for a fixed credit alike
+      // (one comparator, not two). A free_service's amount is always 0,
+      // so this is a no-op tie for it, falling straight through to scope.
       // Two same-scope FIXED terms with different face values never had
       // ANY tiebreak before this (round 5): the AGGREGATE they produce is
       // provably the same regardless of which one runs first (each still
@@ -443,7 +488,7 @@ function stackOrder(discounts) {
       // needs a deterministic direction even though no total is at stake;
       // largest-first was picked for symmetry with the rate rule, not
       // because either direction is "the lesser of the two" here.
-      const valueDiff = resolveDiscountAmount(b.discount) - resolveDiscountAmount(a.discount);
+      const valueDiff = resolveSortValue(b.discount) - resolveSortValue(a.discount);
       if (valueDiff !== 0) return valueDiff;
       if (isPercentRank(rankA)) {
         const capDiff = compareDiscountCap(a.discount, b.discount);
@@ -631,7 +676,14 @@ function stackVisitDiscounts({ lines, appointmentDiscount, compound = true }) {
   // once here and reusing it (negated) in step 4's own condition removes
   // the duplicated `compound` / `isFixedDiscountType(appt...)` logic that
   // used to appear, inverted, in both conditions separately.
-  const apptInFixedPass = compound && !!appt && isFixedDiscountType(appt.discountType);
+  // resolveSortKind (not appt.discountType directly) so a FROZEN
+  // percentage-origin appointment credit — discountType collapsed to
+  // 'fixed_amount' for resolution purposes, replaying its own clamped
+  // dollars — still lands in the SAME pass it resolved in the first
+  // time, instead of unconditionally jumping into the fixed pass just
+  // because its resolution shape now looks fixed. See resolveSortKind's
+  // own comment (replay stability, coordinator scope extension round 3).
+  const apptInFixedPass = compound && !!appt && isFixedDiscountType(resolveSortKind(appt));
 
   // 1 & 2. Fixed credits. Legacy (compound:false): every line's own
   // discount, whatever its type, resolves here unconditionally, in given
@@ -663,7 +715,7 @@ function stackVisitDiscounts({ lines, appointmentDiscount, compound = true }) {
   } else {
     const fixedOps = [];
     state.forEach((line, lineIdx) => {
-      if (isFixedDiscountType(line.lineDiscount?.discountType)) {
+      if (isFixedDiscountType(resolveSortKind(line.lineDiscount))) {
         fixedOps.push({ kind: 'line', lineIdx, discount: { ...line.lineDiscount, eligibleLines: [lineIdx] } });
       }
     });
@@ -688,7 +740,7 @@ function stackVisitDiscounts({ lines, appointmentDiscount, compound = true }) {
 
   // 3. Line percentages / free service, each on what its line still carries.
   for (const line of state) {
-    const type = line.lineDiscount?.discountType;
+    const type = resolveSortKind(line.lineDiscount);
     if (compound && (isPercentDiscountType(type) || type === 'free_service')) {
       line.lineDiscountDollars = discountStepDollars(line.lineDiscount, line.remaining);
       line.remaining = cents(line.remaining - line.lineDiscountDollars);
@@ -800,16 +852,25 @@ function stackDocumentDiscounts({ lines, documentTerms }) {
   const termReachesLine = (term, lineIdx) => (
     !Array.isArray(term?.eligibleLines) || term.eligibleLines.includes(lineIdx)
   );
+  // Every fixed/non-fixed split below reads resolveSortKind, not
+  // term.discountType directly — a FROZEN term's discountType always
+  // collapses to 'fixed_amount' for resolution (its own clamped dollars,
+  // read by discountStepDollars further down, unaffected by this), but
+  // its PASS membership (fixed pass vs line/document percent pass) must
+  // stay the kind it resolved as the first time, or a replayed
+  // percentage-origin term jumps into the fixed pass on every later
+  // edit and can silently change the invoice's total (see
+  // resolveSortKind's own comment).
   const fixedOps = [];
   state.forEach((line, lineIdx) => {
     line.terms.forEach((term, termIdx) => {
-      if (isFixedDiscountType(term?.discountType)) {
+      if (isFixedDiscountType(resolveSortKind(term))) {
         fixedOps.push({ kind: 'line', lineIdx, termIdx, discount: { ...term, eligibleLines: [lineIdx] } });
       }
     });
   });
   docTerms.forEach((term, termIdx) => {
-    if (isFixedDiscountType(term?.discountType)) {
+    if (isFixedDiscountType(resolveSortKind(term))) {
       fixedOps.push({ kind: 'document', termIdx, discount: term });
     }
   });
@@ -836,7 +897,7 @@ function stackDocumentDiscounts({ lines, documentTerms }) {
   // 3. LINE percent/free_service terms, on what's left after steps 1-2.
   for (const line of state) {
     const nonFixedIdx = line.terms
-      .map((t, i) => (!isFixedDiscountType(t?.discountType) ? i : -1))
+      .map((t, i) => (!isFixedDiscountType(resolveSortKind(t)) ? i : -1))
       .filter((i) => i >= 0);
     const stacked = stackDiscounts(line.remaining, nonFixedIdx.map((i) => line.terms[i]), { compound: true });
     nonFixedIdx.forEach((termIdx, i) => { line.termDollars[termIdx] = stacked.items[i].dollars; });
@@ -876,7 +937,7 @@ function stackDocumentDiscounts({ lines, documentTerms }) {
   // every term's own eligibleLines and its docDollars/result slot exactly
   // where the caller put it — only the ORDER they're resolved in changes.
   const docNonFixedIdx = docTerms
-    .map((t, i) => (!isFixedDiscountType(t?.discountType) ? i : -1))
+    .map((t, i) => (!isFixedDiscountType(resolveSortKind(t)) ? i : -1))
     .filter((i) => i >= 0);
   const docNonFixedOrder = stackOrder(docNonFixedIdx.map((i) => docTerms[i]));
   for (const { index: subIdx } of docNonFixedOrder) {

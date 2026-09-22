@@ -428,4 +428,199 @@ postgres('InvoiceService.create discount stacking — real Postgres round trip',
       invoice: { id: 'invoice-1', line_items: JSON.stringify(persisted) },
     })).rejects.toThrow(/Only one WaveGuard tier discount can apply/);
   });
+
+  // Coordinator scope extension (2026-09, slice 8 of #4405 / PR #4659):
+  // a FRESH document-wide (unparented) FIXED-type catalog pick — real
+  // catalog row, real round trip — must SAVE and must record its
+  // catalog attribution in invoice_discounts for discounts.times_applied
+  // / total_discount_given to roll up.
+  test('a document-wide $25 FIXED catalog pick alongside a 10% line pick on the same $100 line saves correctly and records real catalog attribution', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const linePctId = randomUUID();
+    const docFixedId = randomUUID();
+    await trx('discounts').insert([
+      { id: linePctId, discount_key: `line10_${linePctId.slice(0, 8)}`, name: 'Ten Percent', discount_type: 'percentage', amount: 10, is_active: true, show_in_invoices: true },
+      { id: docFixedId, discount_key: `doc25_${docFixedId.slice(0, 8)}`, name: 'Twenty Five Invoice-Wide', discount_type: 'fixed_amount', amount: 25, is_active: true, show_in_invoices: true },
+    ]);
+    const invoice = await InvoiceService.create({
+      customerId: await insertCustomer(),
+      title: 'Document-wide catalog pick',
+      lineItems: [
+        { client_id: 'line-1', description: 'Quarterly Pest', quantity: 1, unit_price: 100, amount: 100 },
+        { client_id: 'd-line', discount_id: linePctId, discount_for: 'line-1', description: 'Ten Percent', quantity: 1, unit_price: -1, amount: -1 },
+        { client_id: 'd-doc', discount_id: docFixedId, discount_for: null, description: 'Twenty Five Invoice-Wide', quantity: 1, unit_price: -1, amount: -1 },
+      ],
+    });
+    // Fixed credit ($25) resolves first against the $100 line, leaving
+    // $75; the 10% line pick then takes $7.50 off that remainder.
+    expect(Number(invoice.discount_amount)).toBe(32.5);
+    expect(Number(invoice.total)).toBe(67.5);
+    const auditRows = await trx('invoice_discounts').where({ invoice_id: invoice.id });
+    const docRow = auditRows.find((r) => r.discount_id === docFixedId);
+    expect(docRow).toBeTruthy();
+    expect(Number(docRow.discount_dollars)).toBe(25);
+  });
+
+  // Same fixture, through the EDIT save path — calculateUpdateFinancials
+  // shares computeStackedDocumentDiscountLines with create(), so a
+  // no-op resubmit of the same document-wide pick must retotal to the
+  // identical figure, not silently drift on a later, unrelated edit —
+  // the exact invariant a document-wide PERCENTAGE pick would have
+  // broken (see the rejection test below).
+  test('the same document-wide fixed pick resubmitted unchanged through calculateUpdateFinancials still totals the same $32.50', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const linePctId = randomUUID();
+    const docFixedId = randomUUID();
+    await trx('discounts').insert([
+      { id: linePctId, discount_key: `line10b_${linePctId.slice(0, 8)}`, name: 'Ten Percent', discount_type: 'percentage', amount: 10, is_active: true, show_in_invoices: true },
+      { id: docFixedId, discount_key: `doc25b_${docFixedId.slice(0, 8)}`, name: 'Twenty Five Invoice-Wide', discount_type: 'fixed_amount', amount: 25, is_active: true, show_in_invoices: true },
+    ]);
+    const items = [
+      { client_id: 'line-1', description: 'Quarterly Pest', quantity: 1, unit_price: 100, amount: 100 },
+      { client_id: 'd-line', discount_id: linePctId, discount_for: 'line-1', description: 'Ten Percent', quantity: 1, unit_price: -1, amount: -1 },
+      { client_id: 'd-doc', discount_id: docFixedId, discount_for: null, description: 'Twenty Five Invoice-Wide', quantity: 1, unit_price: -1, amount: -1 },
+    ];
+    const result = await InvoiceService._internals.calculateUpdateFinancials({
+      lineItems: items,
+      customer: { property_type: 'residential' },
+      invoice: { id: 'invoice-1', line_items: JSON.stringify([]) },
+    });
+    expect(result.discount_amount).toBe(32.5);
+  });
+
+  // Round 2 of this scope extension rejected a document-wide PERCENTAGE
+  // pick outright (a real, then-necessary guard against the exact
+  // replay-drift bug the next test below reproduces). Round 3 fixes the
+  // ROOT cause in discount-stack.js (persisted sortKind/sortValue/sortCap
+  // — see that file's own module header and
+  // discount-stack-replay-invariance-property.test.js) instead of
+  // excluding the type, so this now SAVES correctly — real catalog row,
+  // real round trip.
+  test('a document-wide 10% PERCENTAGE catalog pick alongside a 10% line pick on the same $100 line saves $81, real catalog rows, real round trip', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const linePctId = randomUUID();
+    const docPctId = randomUUID();
+    await trx('discounts').insert([
+      { id: linePctId, discount_key: `linepct_${linePctId.slice(0, 8)}`, name: 'Ten Percent', discount_type: 'percentage', amount: 10, is_active: true, show_in_invoices: true },
+      { id: docPctId, discount_key: `docpct_${docPctId.slice(0, 8)}`, name: 'Ten Percent Invoice-Wide', discount_type: 'percentage', amount: 10, is_active: true, show_in_invoices: true },
+    ]);
+    const invoice = await InvoiceService.create({
+      customerId: await insertCustomer(),
+      title: 'Document-wide percentage pick',
+      lineItems: [
+        { client_id: 'line-1', description: 'Quarterly Pest', quantity: 1, unit_price: 100, amount: 100 },
+        { client_id: 'd-line', discount_id: linePctId, discount_for: 'line-1', description: 'Ten Percent', quantity: 1, unit_price: -1, amount: -1 },
+        { client_id: 'd-doc', discount_id: docPctId, discount_for: null, description: 'Ten Percent Invoice-Wide', quantity: 1, unit_price: -1, amount: -1 },
+      ],
+    });
+    expect(Number(invoice.discount_amount)).toBe(19);
+    expect(Number(invoice.total)).toBe(81);
+    const auditRows = await trx('invoice_discounts').where({ invoice_id: invoice.id });
+    const docRow = auditRows.find((r) => r.discount_id === docPctId);
+    expect(docRow).toBeTruthy();
+    expect(Number(docRow.discount_dollars)).toBe(9);
+  });
+
+  // The auditor's OWN round-1 reproduction, end to end through a REAL
+  // create() save followed by a REAL calculateUpdateFinancials resubmit
+  // of the saved line_items unchanged — real catalog rows, real
+  // Postgres round trip. Pre-fix, this totaled $50 on save and $66.67 on
+  // the unchanged resubmit.
+  test("round-1 auditor repro, real round trip: a $50 line-1 credit + a 50% invoice-wide discount on $50/$100 lines totals $50 on save AND on an unchanged resubmit, never $66.67", async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const fixedId = randomUUID();
+    const docPctId = randomUUID();
+    await trx('discounts').insert([
+      { id: fixedId, discount_key: `fifty_${fixedId.slice(0, 8)}`, name: 'Fifty Dollars', discount_type: 'fixed_amount', amount: 50, is_active: true, show_in_invoices: true },
+      { id: docPctId, discount_key: `fiftypct_${docPctId.slice(0, 8)}`, name: 'Fifty Percent Invoice-Wide', discount_type: 'percentage', amount: 50, is_active: true, show_in_invoices: true },
+    ]);
+    const invoice = await InvoiceService.create({
+      customerId: await insertCustomer(),
+      title: 'Round-1 auditor repro',
+      lineItems: [
+        { client_id: 'line-1', description: 'Pest', quantity: 1, unit_price: 50, amount: 50 },
+        { client_id: 'line-2', description: 'Lawn', quantity: 1, unit_price: 100, amount: 100 },
+        { client_id: 'd-line', discount_id: fixedId, discount_for: 'line-1', description: 'Fifty Dollars', quantity: 1, unit_price: -1, amount: -1 },
+        { client_id: 'd-doc', discount_id: docPctId, discount_for: null, description: 'Fifty Percent Invoice-Wide', quantity: 1, unit_price: -1, amount: -1 },
+      ],
+    });
+    expect(Number(invoice.total)).toBe(50);
+
+    // Resubmit the SAVED line_items (as persisted, straight off the
+    // invoice row) completely unchanged through the edit path.
+    const savedLineItems = typeof invoice.line_items === 'string' ? JSON.parse(invoice.line_items) : invoice.line_items;
+    const resaved = await InvoiceService._internals.calculateUpdateFinancials({
+      lineItems: savedLineItems,
+      customer: { property_type: 'residential' },
+      invoice: { id: invoice.id, line_items: JSON.stringify(savedLineItems) },
+    });
+    expect(resaved.total).toBe(50);
+    expect(resaved.total).not.toBeCloseTo(66.67, 2);
+  });
+
+  // Pre-push audit P1 (coordinator scope extension, round 4): a direct
+  // API request (bypassing the client picker, which never offers
+  // free_service invoice-wide) must not be able to zero out every line —
+  // real catalog row, real create() round trip.
+  test('a document-wide free_service catalog pick is REJECTED by create() with a clean operational 400 — real catalog row, real round trip', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const freeSvcId = randomUUID();
+    await trx('discounts').insert([
+      { id: freeSvcId, discount_key: `freesvc_${freeSvcId.slice(0, 8)}`, name: 'Free Service', discount_type: 'free_service', amount: 0, is_active: true, show_in_invoices: true },
+    ]);
+    let caught;
+    try {
+      await InvoiceService.create({
+        customerId: await insertCustomer(),
+        title: 'Document-wide free_service pick, rejected',
+        lineItems: [
+          { client_id: 'line-1', description: 'Pest', quantity: 1, unit_price: 100, amount: 100 },
+          { client_id: 'line-2', description: 'Lawn', quantity: 1, unit_price: 100, amount: 100 },
+          { client_id: 'd-doc', discount_id: freeSvcId, discount_for: null, description: 'Free Service', quantity: 1, unit_price: -1, amount: -1 },
+        ],
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeTruthy();
+    expect(caught.message).toMatch(/free_service discounts cannot be applied invoice-wide/);
+    expect(caught.statusCode).toBe(400);
+    expect(caught.code).toBe('DISCOUNT_DOCUMENT_WIDE_TYPE_UNSUPPORTED');
+    // Nothing was minted — the rejection happens before any invoice row
+    // is inserted.
+    const rows = await trx('invoices').where({ title: 'Document-wide free_service pick, rejected' });
+    expect(rows).toHaveLength(0);
+  });
+
+  // GitHub review round 1 P1 (PR #4659): a fresh catalog row's OWN
+  // service_key_filter scopes a document-wide pick to only the matching
+  // line — real catalog row (the waveguard_member_wdo shape), real
+  // round trip — never the whole invoice.
+  test('waveguard_member_wdo (100% off, scoped to wdo_inspection) on a mixed invoice discounts ONLY the WDO line, real catalog row, real round trip', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const wdoDiscountId = randomUUID();
+    await trx('discounts').insert([{
+      id: wdoDiscountId,
+      discount_key: `wdo_${wdoDiscountId.slice(0, 8)}`,
+      name: 'WaveGuard Member WDO',
+      discount_type: 'percentage',
+      amount: 100,
+      service_key_filter: 'wdo_inspection',
+      is_active: true,
+      show_in_invoices: true,
+    }]);
+    const invoice = await InvoiceService.create({
+      customerId: await insertCustomer(),
+      title: 'Mixed invoice, WDO-scoped pick',
+      lineItems: [
+        { client_id: 'l-wdo', description: 'WDO Inspection', quantity: 1, unit_price: 200, amount: 200, service_key: 'wdo_inspection' },
+        { client_id: 'l-pest', description: 'Quarterly Pest', quantity: 1, unit_price: 100, amount: 100, service_key: 'pest_control' },
+        { client_id: 'd-doc', discount_id: wdoDiscountId, discount_for: null, description: 'WaveGuard Member WDO', quantity: 1, unit_price: -1, amount: -1 },
+      ],
+    });
+    // Only the $200 WDO line is discounted — the $100 pest line survives
+    // untouched, never the $300 combined total.
+    expect(Number(invoice.discount_amount)).toBe(200);
+    expect(Number(invoice.total)).toBe(100);
+  });
 });

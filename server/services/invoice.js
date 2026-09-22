@@ -555,6 +555,29 @@ function storedDiscountDollars(item) {
   );
 }
 
+// REPLAY STABILITY (coordinator scope extension, round 3): the persisted
+// sort key — {sortKind, sortValue, sortCap} — a FROZEN item's term needs
+// so discount-stack.js's resolveSortKind/Value/Cap can place it in the
+// SAME canonical-order rank/value/cap position it held the first time it
+// resolved, instead of the flat {fixed_amount, <its own clamped dollars>}
+// shape every stored term still uses for RESOLUTION (storedDiscountDollars
+// above, unaffected by this). lineItemDiscountTerm stamps stack_sort_kind/
+// _value/_cap onto an item the FIRST time it resolves fresh; an item that
+// has never gone through that (a genuine scheduled_service/
+// validated_checkout STAMP — never fresh in THIS invoice's own stack to
+// begin with, or a row saved before this fix existed) has none of these
+// fields, and this returns {} — discount-stack.js's own fallback then
+// reads the flat {fixed_amount, dollars} shape exactly as it always has,
+// unchanged for both of those cases.
+function frozenSortKeyFields(item) {
+  if (item?.stack_sort_kind == null) return {};
+  return {
+    sortKind: item.stack_sort_kind,
+    sortValue: item.stack_sort_value,
+    sortCap: item.stack_sort_cap,
+  };
+}
+
 // The (type, amount, cap) a FRESH (non-stored) line-item discount row
 // contributes to its parent line's stack: a catalog row carries its own
 // amount; a variable/custom preset (custom_percent, custom_dollar, or the
@@ -562,6 +585,20 @@ function storedDiscountDollars(item) {
 // item — same resolution resolveLineItemDiscount uses for the gate-off path,
 // minus the dollar computation itself (the engine does that once the term
 // reaches its line's remaining balance).
+//
+// REPLAY STABILITY (coordinator scope extension, round 3): also stamps
+// the resolved (discountType, amount, maxDiscountDollars) onto the ITEM
+// itself as stack_sort_kind / stack_sort_value / stack_sort_cap — a no-op
+// for THIS resolve (a fresh term's own canonical-order position is still
+// governed by the returned term's discountType/amount/maxDiscountDollars,
+// unchanged), but these three fields ride into the saved line_items JSON,
+// so a LATER edit — where this same item is now frozen/stored, replaying
+// its own CLAMPED dollars instead of this rate — can still sort it by the
+// ORIGINAL rate/value/cap it resolved with the first time
+// (discount-stack.js's resolveSortKind/Value/Cap), not by whatever a
+// prior clamp happened to leave it with. Every caller of this function
+// (line-scoped AND, since the document-wide catalog-attribution slice,
+// document-wide fresh picks) gets this stamped the same way.
 function lineItemDiscountTerm(row, item) {
   let amount = Number(row.amount) || 0;
   const isVariablePreset = isVariableOrCustomDiscountPreset(row);
@@ -578,11 +615,17 @@ function lineItemDiscountTerm(row, item) {
       row.amount,
     );
   }
-  return {
+  const term = {
     discountType: row.discount_type,
     amount: roundMoney(amount),
     maxDiscountDollars: row.max_discount_dollars,
   };
+  if (item) {
+    item.stack_sort_kind = term.discountType;
+    item.stack_sort_value = term.amount;
+    item.stack_sort_cap = term.maxDiscountDollars ?? null;
+  }
+  return term;
 }
 
 // Classify one negative invoice line item for the document stack: does its
@@ -673,7 +716,7 @@ function stackInvoiceDocumentDiscounts(serviceLines, lineEntries, manualDiscount
       ...group.filter((entry) => !entry.stored),
     ];
     const terms = ordered.map(({ row, item, stored }) => (stored
-      ? { discountType: "fixed_amount", amount: storedDiscountDollars(item) }
+      ? { discountType: "fixed_amount", amount: storedDiscountDollars(item), ...frozenSortKeyFields(item) }
       : lineItemDiscountTerm(row, item)));
     return { ordered, terms, parentAmount: Math.max(0, Number(line.amount) || 0) };
   });
@@ -702,21 +745,177 @@ function stackInvoiceDocumentDiscounts(serviceLines, lineEntries, manualDiscount
       .map((line, i) => (matchesKey(line) && matchesCategory(line) ? i : -1))
       .filter((i) => i >= 0);
   };
+  // GitHub review round 1 P0, second finding (PR #4659, round 2): unlike
+  // scopeEligibleLines above — which intentionally falls back to
+  // UNSCOPED when this invoice carries no service_key data anywhere at
+  // all, preserving "a pre-lane invoice never scopes a STAMP" for
+  // genuine historical data with no scope concept to begin with — a
+  // FRESH catalog pick the operator just chose, whose row explicitly
+  // names a scope, must never silently widen to the whole invoice just
+  // because this invoice's lines happen to carry no service_key
+  // snapshot. Reproduced: a hand-typed $100 line (no pickService use)
+  // took the FULL $100 off a 100%-off, WDO-only pick with this fallback
+  // shared. FAILS CLOSED instead — no service_key data to verify against
+  // means no line can be confirmed eligible, so this returns an EMPTY
+  // array (every configured filter, $0), never null (unscoped, every
+  // line). The only real "unscoped" case left is a row with neither
+  // filter set at all (checked by the caller before this is invoked).
+  const freshPickEligibleLines = (scopeKey, scopeCategory) => {
+    const matchesKey = (line) => !scopeKey || String(line.service_key || "") === String(scopeKey);
+    const matchesCategory = (line) => !scopeCategory || String(line.service_category || "") === String(scopeCategory);
+    return serviceLines
+      .map((line, i) => (matchesKey(line) && matchesCategory(line) ? i : -1))
+      .filter((i) => i >= 0);
+  };
+  // GitHub review round 1 P0, THIRD finding (PR #4659, round 3): the
+  // "no service_key anywhere ⇒ unscoped" fallback scopeEligibleLines
+  // still applies to EVERY stored stamp is a legacy-data carve-out — it
+  // exists for a stamp that predates service_key tracking entirely, with
+  // no scope concept to verify against. It was never meant to cover a
+  // stamp that DOES carry a real, operator-chosen scope (a persisted
+  // fresh pick, replayed) whose scoped line later disappears from the
+  // invoice — that stamp's scope is authoritative and verifiable; losing
+  // its line means $0, not a silent widen to the whole invoice.
+  // Reproduced: save a WDO-only $50 discount alongside an unkeyed $100
+  // service, then remove the WDO line — scopeEligibleLines' invoice-wide
+  // "no keys anywhere" check now sees only the unkeyed line and falls
+  // back to unscoped, so the $50 stamp discounts the unrelated $100
+  // line instead of resolving orphaned.
+  //
+  // item.document_scope_strict === true is a DEDICATED provenance flag
+  // (NOT item.stacking_regime — see the correction below) set ONLY when
+  // THIS engine itself resolved a fresh catalog pick's scope via
+  // freshPickEligibleLines (the entry.row branch below persists it
+  // alongside document_scope_service_key/_category). A row carrying it
+  // had its scope actually, verifiably resolved strictly at least once,
+  // so replaying it strictly again is safe and correct. Every OTHER
+  // stored stamp — including a genuine scheduled_service/
+  // validated_checkout stamp that already carries a real
+  // document_scope_service_key of its own — keeps scopeEligibleLines'
+  // legacy "no service_key anywhere ⇒ unscoped" fallback, unchanged.
+  //
+  // CORRECTION (GitHub review round 1 P0, FOURTH finding — PR #4659,
+  // round 4): the first attempt at this fix read item.stacking_regime
+  // instead, on the theory that "priced under this engine at least
+  // once" was the right provenance signal. It is not:
+  // computeStackedDocumentDiscountLines' own per-item loop below stamps
+  // stacking_regime = "compound" on EVERY discount line it touches,
+  // unconditionally — including a legacy stamp that resolved through
+  // the ordinary UNSCOPED fallback, not strict matching. That stamped a
+  // legacy item as "compound" on its very first pass through this
+  // engine (which needs no scope change of its own to trigger — simply
+  // being on an invoice that gets saved once is enough), so its very
+  // NEXT save read stacking_regime === "compound" and switched a
+  // never-strictly-verified scope to strict matching, silently
+  // DROPPING a legitimate legacy credit the moment the invoice's
+  // service_key data didn't happen to cover it. Reproduced: an unkeyed
+  // $100 service plus a legacy WDO-scoped $50 credit totaled $50 on the
+  // first save (legacy fallback, unscoped) but $100 (credit dropped
+  // entirely) on a second, otherwise UNCHANGED save. document_scope_strict
+  // is scoped far more narrowly — set only by the code that actually
+  // performs strict resolution, never by unrelated compounding-engine
+  // bookkeeping — so it cannot make this mistake.
+  const strictScopeEligibleLines = (scopeKey, scopeCategory) => (
+    scopeKey || scopeCategory ? freshPickEligibleLines(scopeKey, scopeCategory) : null
+  );
   // A plain literal credit (no discount_id) has no scope concept of its own
   // — only a stored stamp's document_scope_service_key/_category, set
   // exclusively by buildDiscountLineItem's appointment-level branch, can
   // narrow a document term.
+  //
+  // Scope extension (2026-09): a FRESH, catalog-backed document-wide pick
+  // (entry.row resolved, not yet stored/persisted) preserves its OWN type
+  // — a document PERCENTAGE term occupies a DIFFERENT canonical-order
+  // bucket than a fixed credit (percentages compound LAST; fixed credits
+  // compound FIRST), so forcing it to fixed_amount here would silently
+  // save a different total than the one just previewed whenever the
+  // invoice carries any other term. lineItemDiscountTerm already resolves
+  // a variable/custom preset's operator-entered rate the same way a
+  // per-line pick does — id carried through (same reason a manual pick's
+  // id rides its term below) so two distinct same-rate/same-cap document
+  // terms don't fall through to array-order tie-breaking.
+  //
+  // A STORED entry spreads frozenSortKeyFields(entry.item) — the sort
+  // key (kind/value/cap) it resolved with the FIRST time, persisted onto
+  // the item by lineItemDiscountTerm — alongside its flat
+  // {fixed_amount, frozen dollars} resolution shape, so
+  // discount-stack.js's resolveSortKind/Value/Cap keep it in the SAME
+  // canonical-order position across every later edit (round 3: this is
+  // what makes a percentage-origin document pick safe to accept fresh
+  // again — see the round-2 comment this replaces, now stale, in git
+  // history). A genuine stamp (scheduled_service/validated_checkout —
+  // never fresh in this invoice's own stack) has no stamped sort key at
+  // all; frozenSortKeyFields returns {} for it, so it keeps sorting by
+  // its own flat frozen dollars exactly as it always has.
   const documentEntryTerms = documentDiscountEntries.map((entry) => {
-    const faceValue = entry.stored
-      ? storedDiscountDollars(entry.item)
-      : Math.abs(Number(entry.item.amount) || 0);
+    // GitHub review round 1 P1 (PR #4659): a FRESH catalog-backed pick's
+    // OWN service_key_filter/_category_filter scopes it exactly like a
+    // stored stamp's document_scope_service_key/_category does. A row
+    // with neither filter set (the common case) resolves eligibleLines
+    // to null (unscoped) here exactly as before. A FRESH pick's own
+    // resolution uses freshPickEligibleLines (fail-closed — see its own
+    // comment), never scopeEligibleLines' stored-stamp fallback.
+    //
+    // Round 3/4: a STORED entry itself splits on
+    // entry.item.document_scope_strict — see strictScopeEligibleLines'
+    // own comment for why this is NOT stacking_regime. A stamp this
+    // engine itself strictly resolved at least once (a persisted fresh
+    // pick, replayed) resolves strictly again; every other stamp —
+    // including a genuine, real-scoped scheduled_service/
+    // validated_checkout stamp — still falls through to
+    // scopeEligibleLines' legacy "no service_key anywhere ⇒ unscoped"
+    // behavior, unchanged from before this whole scope-enforcement lane.
     const eligibleLines = entry.stored
-      ? scopeEligibleLines(entry.item.document_scope_service_key, entry.item.document_scope_service_category)
-      : null;
+      ? (entry.item.document_scope_strict === true
+        ? strictScopeEligibleLines(entry.item.document_scope_service_key, entry.item.document_scope_service_category)
+        : scopeEligibleLines(entry.item.document_scope_service_key, entry.item.document_scope_service_category))
+      : (entry.row && (entry.row.service_key_filter || entry.row.service_category_filter)
+        ? freshPickEligibleLines(entry.row.service_key_filter, entry.row.service_category_filter)
+        : null);
+    if (entry.stored) {
+      return {
+        discountType: "fixed_amount",
+        amount: storedDiscountDollars(entry.item),
+        ...(eligibleLines ? { eligibleLines } : {}),
+        ...frozenSortKeyFields(entry.item),
+        // IDENTITY (Codex pre-push audit P2, round 1 on PR #4655, the
+        // same reasoning applied here): a stable id beats input position
+        // whenever two terms tie on rank/value/cap/scope — a stored
+        // stamp/persisted pick's own discount_id, when it has one
+        // (undefined for a plain literal credit, same as every other
+        // identity-less term).
+        id: entry.item.discount_id,
+      };
+    }
+    if (entry.row) {
+      // GitHub review round 1 P0, first finding (PR #4659, round 2): a
+      // FRESH pick's scope must be PERSISTED onto the item, the same way
+      // lineItemDiscountTerm persists its sort key — otherwise, once
+      // this item is SAVED and this same resolve runs again on the next
+      // edit (entry.stored === true this time), the entry.stored branch
+      // above reads document_scope_service_key/_category straight off
+      // the item, finds nothing, and silently reverts to unscoped —
+      // reproduced: a WDO-only $90 document credit plus an $80 line
+      // credit totaled $20 fresh, $33.33 on a plain unchanged resave.
+      if (entry.row.service_key_filter || entry.row.service_category_filter) {
+        entry.item.document_scope_service_key = entry.row.service_key_filter || null;
+        entry.item.document_scope_service_category = entry.row.service_category_filter || null;
+        // Round 4: stamp the dedicated strict-provenance flag ONLY here
+        // — this branch is the ONE place a scope is actually, verifiably
+        // resolved via freshPickEligibleLines. Never stacking_regime
+        // (see strictScopeEligibleLines' own comment on why that marker
+        // is unsafe for this).
+        entry.item.document_scope_strict = true;
+      }
+      return {
+        ...lineItemDiscountTerm(entry.row, entry.item),
+        id: entry.row.id,
+        ...(eligibleLines ? { eligibleLines } : {}),
+      };
+    }
     return {
       discountType: "fixed_amount",
-      amount: faceValue,
-      ...(eligibleLines ? { eligibleLines } : {}),
+      amount: Math.abs(Number(entry.item.amount) || 0),
     };
   });
   // Codex pre-push audit P2 (round 1 on PR #4655): carry each manual pick's
@@ -883,6 +1082,55 @@ function computeStackedDocumentDiscountLines({
       spansAll,
     };
   });
+  // Codex pre-push audit P1 (coordinator scope extension, round 4): a
+  // FRESH (not yet saved) document-wide pick whose catalog row is a type
+  // the client's own invoice-wide picker refuses to offer — free_service
+  // is the one so far (matchingDocumentDiscounts, AdminInvoicesPage.jsx:
+  // a document-wide free_service term would zero out every eligible
+  // line's remaining balance at once) — is rejected here too, with a
+  // clean operational 400, not admitted into documentEntries below. The
+  // UI can never reach this path (it never offers the type to pick), but
+  // a request built directly against the create/update API, bypassing
+  // the picker, otherwise could: entry.row resolves — and would have
+  // been admitted — for ANY catalog discount_type, with no check at all.
+  // Only a FRESH pick is checked; a STORED/trusted document-wide item
+  // (a genuine scheduled_service/validated_checkout stamp) is a
+  // completely different, already-existing pathway (visit-side
+  // stacking) this check does not touch.
+  //
+  // GitHub review round 1 P1 (PR #4659): a catalog row carrying its OWN
+  // service_key_filter / service_category_filter (e.g. the active
+  // waveguard_member_wdo seed — 100% off, restricted to wdo_inspection)
+  // used to be admitted the SAME way as an unscoped row, discarding that
+  // restriction entirely and applying it to the WHOLE invoice — a mixed
+  // invoice with a WDO line and other services could have every line
+  // zeroed by a discount the catalog itself says should touch only one.
+  // Fixed below (stackInvoiceDocumentDiscounts' own documentEntryTerms):
+  // a fresh catalog-backed document-wide pick now carries the SAME
+  // service_key_filter/_category_filter into its own eligibleLines,
+  // AND-matched against this invoice's line items exactly like a stored
+  // stamp's document_scope_service_key/_category already is
+  // (scopeEligibleLines) — never the whole invoice, and $0 when no line
+  // matches (the orphaned-scope rule every stored stamp already
+  // follows), not a silent full-invoice replay.
+  const DOCUMENT_WIDE_UNSUPPORTED_TYPES = new Set(["free_service"]);
+  for (const entry of classifiedNegativeItems) {
+    if (
+      entry.spansAll &&
+      !entry.stored &&
+      entry.row &&
+      DOCUMENT_WIDE_UNSUPPORTED_TYPES.has(entry.row.discount_type)
+    ) {
+      const err = new Error(
+        `${entry.row.discount_type} discounts cannot be applied invoice-wide — apply "${entry.row.name || "this discount"}" to a specific line instead`,
+      );
+      err.statusCode = 400;
+      err.status = 400;
+      err.isOperational = true;
+      err.code = "DISCOUNT_DOCUMENT_WIDE_TYPE_UNSUPPORTED";
+      throw err;
+    }
+  }
   // Codex pre-push audit P1 (round 2 on PR #4655): the same non-stackable
   // stack_group enforcement DiscountEngine.calculateDiscounts applies to
   // its own eligible list must also run here — without it, the invoice
@@ -939,12 +1187,35 @@ function computeStackedDocumentDiscountLines({
   const lineEntries = classifiedNegativeItems.filter(
     (entry) => entry.parent && (entry.stored || entry.row),
   );
-  // Every unparented credit joins the document stack — stored, OR a plain
+  // Every unparented credit joins the document stack — stored, a FRESH
+  // catalog-backed pick that resolves to a real row (scope extension,
+  // 2026-09: a document-wide discountIds-style pick made through a line
+  // item instead of the top-level discountIds array — see
+  // stackInvoiceDocumentDiscounts' own documentEntryTerms), OR a plain
   // literal with no discount_id at all. An unparented item with a
-  // discount_id that resolves to neither is deliberately excluded (falls
-  // through to the throw below, unchanged from the pre-lane validation).
+  // discount_id that resolves to NEITHER a stored stamp NOR a live
+  // catalog row is deliberately excluded (falls through to the throw
+  // below, unchanged from the pre-lane validation) — the client can
+  // never fabricate a discount by posting an id that names nothing.
+  //
+  // Round 2 of this scope extension restricted this to FIXED-type rows
+  // only — a document PERCENTAGE pick, once frozen, used to be forced
+  // into the FIXED canonical-order bucket on every later replay (a
+  // document percent term never competed there when fresh), silently
+  // changing an invoice's total on a plain unchanged resave (pinned
+  // pre-push audit P0, auditor's own reproduction: a $50/$100 two-line
+  // invoice with a $50 line-1 credit and a 50% invoice-wide discount
+  // totaled $50 on save, $66.67 on resubmit). Round 3 (this round) fixes
+  // the ROOT cause in discount-stack.js instead — a term's canonical-
+  // order KIND/VALUE/CAP are now a persisted sort key
+  // (lineItemDiscountTerm stamps stack_sort_kind/_value/_cap onto the
+  // item; stackInvoiceDocumentDiscounts and documentEntryTerms above
+  // replay it via frozenSortKeyFields), stable across every later edit
+  // regardless of how the term's own dollars get clamped — so every
+  // catalog type is safe to admit here again, fixed and percentage
+  // alike.
   const documentEntries = classifiedNegativeItems.filter(
-    (entry) => entry.spansAll && (entry.stored || !entry.item.discount_id),
+    (entry) => entry.spansAll && (entry.stored || entry.row || !entry.item.discount_id),
   );
   const stacked = stackInvoiceDocumentDiscounts(
     positiveServiceLines,
@@ -1009,6 +1280,25 @@ function computeStackedDocumentDiscountLines({
       item.quantity = 1;
       item.unit_price = -dollars;
       item.amount = -dollars;
+      // Scope extension (2026-09): a FRESH document-wide pick with a
+      // resolvable catalog row (documentEntryTerms above already sized it
+      // under its OWN type, not a forced fixed_amount) keeps its catalog
+      // attribution — the same {id, row, discount_type, amount} shape the
+      // LINE-scoped branch above returns — so invoice_discounts.discount_id
+      // is recorded and discounts.times_applied / total_discount_given
+      // roll up correctly (DiscountEngine.recordInvoiceDiscounts reads
+      // d.id). A plain literal credit (no row at all) keeps the pre-lane
+      // anonymous shape unchanged.
+      if (row) {
+        return {
+          id: row.id,
+          row,
+          name: row.name,
+          discount_type: row.discount_type,
+          amount: lineItemDiscountTerm(row, item).amount,
+          dollars,
+        };
+      }
       return {
         id: null,
         row: null,
@@ -9697,6 +9987,11 @@ InvoiceService._internals = {
   insertInvoiceRow,
   isInvoiceNumberCollision,
   calculateUpdateFinancials,
+  // Exposed for unit tests (scope extension, 2026-09): the shared
+  // create()/calculateUpdateFinancials engine, driven directly with no DB
+  // mocking — every input it needs (items, the two row/id maps) is a
+  // plain in-memory value.
+  computeStackedDocumentDiscountLines,
 };
 
 // Invoice statuses that need NO further money handling when their linked
