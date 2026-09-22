@@ -10,6 +10,7 @@ const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../midd
 const logger = require('../services/logger');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive } = require('../config/feature-gates');
+const { percentageDiscountDollars } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
 const { collectiveMoveGateOn, dateExceptionStamp } = require('../services/rebooker');
@@ -1791,14 +1792,18 @@ function calculateDiscountDollars(row, baseAmount, clientAmount) {
   const amount = normalizeDiscountAmount(row, clientAmount);
   let dollars = 0;
   if (row.discount_type === 'percentage' || row.discount_type === 'variable_percentage') {
-    dollars = baseAmount * (amount / 100);
-    // Any non-null cap counts, including an explicit $0 (admin-discounts.js
-    // accepts it) — same clamp calculateAppointmentDiscountDollars applies to
-    // children/edits, so the parent visit and its series agree (Codex #3531
-    // r11 P1: a truthy check read a numeric 0 cap as "uncapped").
-    if (row.max_discount_dollars != null && row.max_discount_dollars !== '' && Number.isFinite(Number(row.max_discount_dollars))) {
-      dollars = Math.min(dollars, Math.max(0, Number(row.max_discount_dollars)));
-    }
+    // Codex pre-push audit P0 (slice 9 of #4405): this used to be
+    // baseAmount * (amount / 100) — plain IEEE754 float division, which
+    // rounds 5% of $20.70 down to $1.03 (20.70 * 0.05 ===
+    // 1.0349999999999999). The mobile checkout preview (and every other
+    // discount surface, per CLAUDE.md's "regardless of the gate" rounding
+    // rule) now shows the cent-exact $1.04 through
+    // lib/discountStack.percentageDiscountDollars — sharing that same
+    // integer-cents helper here keeps this cap-check from clamping the
+    // preview back down to the old float-rounded figure. Not itself gated:
+    // this cap-check runs on every checkout mint whether or not
+    // GATE_DISCOUNT_STACKING is live.
+    dollars = percentageDiscountDollars(baseAmount, amount, row.max_discount_dollars);
   } else if (row.discount_type === 'fixed_amount' || row.discount_type === 'variable_amount') {
     dollars = amount;
   } else if (row.discount_type === 'free_service') {
@@ -13371,6 +13376,15 @@ router.post('/:id/invoice', async (req, res, next) => {
     // a matching `unit_price`, the line slips past the extrasTotal guard
     // below but mints with subtotal = 0. Reconcile here: when unit_price
     // is missing/zero but amount is set, derive unit_price from amount.
+    // The gate state MobileCheckoutSheet's preview ran under, bound to this
+    // write the same way #4655 already binds it for InvoiceService.create /
+    // calculateUpdateFinancials — mirrored here, not reimplemented: this
+    // route never checks discountStackingLive() itself, it only forwards
+    // what the sheet sends so the create() call below can refuse a
+    // mismatch with its own retryable 409. Absent (every non-checkout
+    // caller of this endpoint, and any client older than this slice) skips
+    // the check entirely — byte-identical to before.
+    const expectedDiscountStacking = req.body?.expected_discount_stacking;
     const extras = Array.isArray(req.body?.extraLineItems) ? req.body.extraLineItems : [];
     const extraLines = extras
       .map((e) => {
@@ -13469,6 +13483,7 @@ router.post('/:id/invoice', async (req, res, next) => {
         // TaxCalculator (exemptions / service taxability / county rates).
         trustedStoredDiscountSources: ['scheduled_service', 'validated_checkout'],
         dueDate: etDateString(),
+        ...(expectedDiscountStacking !== undefined ? { expectedDiscountStacking } : {}),
       }),
     });
 
@@ -19964,6 +19979,7 @@ router._test = {
   buildAssignedScheduleEtaQuery,
   buildTechStatusQuery,
   compactCheckoutInvoiceLines,
+  calculateDiscountDollars,
   formatAssignedVehicleLocation,
   calculateAssignedScheduleEta,
   normalizeAssignmentScope,

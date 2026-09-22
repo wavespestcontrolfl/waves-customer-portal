@@ -278,7 +278,12 @@ export default function MobileCheckoutSheet({
     // Revalidate right before posting money: polling narrows the window after a
     // mid-session gate flip but cannot close it, and the preview on screen was
     // computed under `stackingEnabled`. Ordered AFTER setMinting so the await
-    // cannot widen the double-tap window into a double charge.
+    // cannot widen the double-tap window into a double charge. Only matters
+    // with 2+ discounts on this sheet — compounding vs. additive is the same
+    // number for exactly one, so that's also the bar for sending
+    // expected_discount_stacking below (mirrors #4655's own client contract:
+    // a discount-free/single-discount write omits the field entirely).
+    let confirmedStackingRegime = stackingEnabled;
     if (discountExtrasCount > 1) {
       const fresh = await ensureStackingFresh();
       if (!fresh.known || fresh.enabled !== stackingEnabled) {
@@ -286,6 +291,10 @@ export default function MobileCheckoutSheet({
         setMintError('The discount-stacking setting changed while this was open. Reload before charging so the total matches what will be billed.');
         return;
       }
+      // The LIVE value this freshness check just confirmed, not the
+      // (already-equal, but one render older) value the preview used —
+      // this is what actually goes on the wire.
+      confirmedStackingRegime = fresh.enabled;
     }
     try {
       const body = {
@@ -301,6 +310,13 @@ export default function MobileCheckoutSheet({
           if (!(dollars < 0)) return [];
           return [{ ...rest, quantity: 1, unit_price: dollars, amount: dollars }];
         }),
+        // The gate state this charge was previewed/revalidated under — the
+        // server refuses a mismatch with its own retryable 409 rather than
+        // silently minting the other regime's total (server/routes/
+        // admin-schedule.js, mirroring #4655's InvoiceService.create /
+        // calculateUpdateFinancials pattern). Omitted for 0-1 discounts:
+        // compounding can't change that total, so there's nothing to bind.
+        ...(discountExtrasCount > 1 ? { expected_discount_stacking: confirmedStackingRegime } : {}),
       };
       const r = await fetch(`${API_BASE}/admin/schedule/${service.id}/invoice`, {
         method: 'POST',

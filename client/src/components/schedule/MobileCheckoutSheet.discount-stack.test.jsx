@@ -5,7 +5,7 @@
 // what is left — never each percentage off the full services subtotal.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import MobileCheckoutSheet from './MobileCheckoutSheet';
 
@@ -13,6 +13,10 @@ import MobileCheckoutSheet from './MobileCheckoutSheet';
 const stacking = vi.hoisted(() => ({ enabled: true, known: true, retry: vi.fn() }));
 vi.mock('../../hooks/useDiscountStacking', () => ({
   useDiscountStackingState: () => ({ enabled: stacking.enabled, known: stacking.known, retry: stacking.retry }),
+  // Real contract: always issues a live probe (never trusts the render-time
+  // snapshot) and returns { enabled, known }. Charge's submit-time
+  // revalidation awaits this directly.
+  ensureStackingFresh: () => Promise.resolve({ enabled: stacking.enabled, known: stacking.known }),
 }));
 
 const SILVER = {
@@ -155,5 +159,69 @@ describe('MobileCheckoutSheet with the stacking probe unconfirmed', () => {
     expect(screen.getByText(/Could not confirm how multiple discounts combine/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     expect(stacking.retry).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Codex pre-push audit P1 (slice 9 scope extension): mirrors the server
+// pattern #4655 already shipped for InvoiceService.create /
+// calculateUpdateFinancials — a client that previewed under one gate regime
+// must bind that CONFIRMED regime to the write itself, not just to its own
+// disabled-Charge guard, so the server (server/routes/admin-schedule.js) can
+// refuse a mismatch with a retryable 409 instead of silently minting the
+// other regime's total.
+describe('MobileCheckoutSheet — expected_discount_stacking on the wire', () => {
+  let fetchMock;
+  beforeEach(() => {
+    fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ invoiceId: 'inv-1', token: 'tok-1', total: 94.90 }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+  });
+
+  it('sends the confirmed gate state when the charge carries 2+ discounts', async () => {
+    render(<MobileCheckoutSheet service={SERVICE} onClose={() => {}} />);
+    addDiscount('WaveGuard Silver');
+    addDiscount('Military Discount');
+    fireEvent.click(screen.getByRole('button', { name: 'Charge $94.90' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const [, options] = fetchMock.mock.calls[0];
+    const body = JSON.parse(options.body);
+    expect(body.expected_discount_stacking).toBe(true);
+  });
+
+  it('omits expected_discount_stacking for a single discount — compounding cannot change that total', async () => {
+    render(<MobileCheckoutSheet service={SERVICE} onClose={() => {}} />);
+    addDiscount('WaveGuard Silver');
+    fireEvent.click(screen.getByRole('button', { name: 'Charge $99.90' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const [, options] = fetchMock.mock.calls[0];
+    const body = JSON.parse(options.body);
+    expect('expected_discount_stacking' in body).toBe(false);
+  });
+
+  it('omits expected_discount_stacking when no discounts are on the sheet at all', async () => {
+    render(<MobileCheckoutSheet service={SERVICE} onClose={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Charge $111.00' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const [, options] = fetchMock.mock.calls[0];
+    const body = JSON.parse(options.body);
+    expect('expected_discount_stacking' in body).toBe(false);
+  });
+
+  it('sends false (not omitted) when the confirmed gate is off with 2+ discounts', async () => {
+    stacking.enabled = false;
+    render(<MobileCheckoutSheet service={SERVICE} onClose={() => {}} />);
+    addDiscount('WaveGuard Silver');
+    addDiscount('Military Discount');
+    fireEvent.click(screen.getByRole('button', { name: 'Charge $94.35' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const [, options] = fetchMock.mock.calls[0];
+    const body = JSON.parse(options.body);
+    expect(body.expected_discount_stacking).toBe(false);
   });
 });
