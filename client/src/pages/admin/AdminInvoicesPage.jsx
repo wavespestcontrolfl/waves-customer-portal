@@ -403,12 +403,25 @@ export function invoiceSubmitNeedsStackingCheck(lineItems, stackingEnabledAtPrev
 
 // Mirrors invoice.js's isStoredDiscountLineItem: a trusted source PLUS a
 // real discount_dollars figure — never inferred from the source alone.
-export function isStoredInvoiceDiscountItem(item) {
-  return (
+// persistedClientIds (Codex pre-push audit P1, round 4 on PR #4655):
+// mirrors invoice.js's isFrozenByPosition — an ORDINARY discount row this
+// form itself created (no trusted stored_discount_source at all) is also
+// frozen once it's SAVED: the server freezes every discount whose
+// client_id already existed on the original invoice, regardless of
+// source, so re-previewing a $100 line carrying a saved $10 percentage
+// discount after changing it to $200 must still show $10 off, matching
+// what Save will actually bill ($190), not a live-recomputed $20.
+// Optional (undefined ⇒ only the source check applies) so every existing
+// caller that doesn't pass it keeps its exact prior behavior.
+export function isStoredInvoiceDiscountItem(item, persistedClientIds) {
+  if (
     TRUSTED_STORED_DISCOUNT_SOURCES.has(item?.stored_discount_source) &&
     item?.discount_dollars != null &&
     Number.isFinite(Number(item.discount_dollars))
-  );
+  ) {
+    return true;
+  }
+  return !!(persistedClientIds && item?.client_id && persistedClientIds.has(item.client_id));
 }
 
 // The (type, amount, cap) term one discount LINE ITEM contributes to its
@@ -424,11 +437,19 @@ export function isStoredInvoiceDiscountItem(item) {
 // current catalog row, falling back to its own already-resolved dollars
 // when that row can't be found (deactivated since it was added), so a
 // stale pick never breaks the preview.
-export function invoiceDiscountItemTerm(item, discountRowById) {
-  if (isStoredInvoiceDiscountItem(item)) {
+export function invoiceDiscountItemTerm(item, discountRowById, persistedClientIds) {
+  if (isStoredInvoiceDiscountItem(item, persistedClientIds)) {
+    // Codex pre-push audit P1 (round 4 on PR #4655): a PERSISTED plain
+    // discount row (frozen by client_id, not by a trusted
+    // stored_discount_source) carries no discount_dollars at all — its
+    // frozen face value is its own line amount, same fallback
+    // storedDiscountDollars uses server-side.
+    const dollars = item?.discount_dollars != null && Number.isFinite(Number(item.discount_dollars))
+      ? Number(item.discount_dollars)
+      : Math.abs(invoiceLineAmount(item));
     return {
       discountType: "fixed_amount",
-      amount: Math.max(0, Math.abs(Number(item.discount_dollars))),
+      amount: Math.max(0, Math.abs(dollars)),
     };
   }
   const row = item?.discount_id
@@ -489,12 +510,12 @@ function invoiceServiceScopeEligibleLines(serviceLineItems, scopeKey, scopeCateg
 // computeInvoiceLineDiscountTotal and repriceLineWithNewDiscountPick, so
 // they can't independently drift on this rule the way the aggregate and
 // the per-pick sizing already once did (round 1).
-function invoiceDocumentTerms(items, serviceLineItems, discountRowById) {
+function invoiceDocumentTerms(items, serviceLineItems, discountRowById, persistedClientIds) {
   return items
     .filter((i) => i._kind === "discount" && !i.discount_for)
     .map((i) => {
-      const term = invoiceDiscountItemTerm(i, discountRowById);
-      if (!isStoredInvoiceDiscountItem(i)) return term;
+      const term = invoiceDiscountItemTerm(i, discountRowById, persistedClientIds);
+      if (!isStoredInvoiceDiscountItem(i, persistedClientIds)) return term;
       const eligibleLines = invoiceServiceScopeEligibleLines(
         serviceLineItems,
         i.document_scope_service_key,
@@ -523,6 +544,7 @@ export function computeInvoiceLineDiscountTotal({
   lineItems,
   availableDiscounts,
   stackingEnabled,
+  persistedClientIds,
 }) {
   const items = Array.isArray(lineItems) ? lineItems : [];
   const additive = Math.abs(
@@ -539,9 +561,9 @@ export function computeInvoiceLineDiscountTotal({
     gross: Math.max(0, invoiceLineAmount(line)),
     terms: items
       .filter((i) => i._kind === "discount" && i.discount_for === line.client_id)
-      .map((i) => invoiceDiscountItemTerm(i, discountRowById)),
+      .map((i) => invoiceDiscountItemTerm(i, discountRowById, persistedClientIds)),
   }));
-  const documentTerms = invoiceDocumentTerms(items, serviceLineItems, discountRowById);
+  const documentTerms = invoiceDocumentTerms(items, serviceLineItems, discountRowById, persistedClientIds);
   const stacked = stackDocumentDiscounts({ lines, documentTerms });
   // Each line's `net` already folds in its pro-rata share of the document
   // terms above (stackDocumentDiscounts interleaves both in one canonical
@@ -587,6 +609,7 @@ export function repriceLineWithNewDiscountPick({
   parentClientId,
   newTerm,
   discountRowById,
+  persistedClientIds,
 }) {
   const items = Array.isArray(lineItems) ? lineItems : [];
   const serviceLineItems = items.filter((i) => i._kind !== "discount");
@@ -594,13 +617,13 @@ export function repriceLineWithNewDiscountPick({
   const lines = serviceLineItems.map((line) => {
     const terms = items
       .filter((i) => i._kind === "discount" && i.discount_for === line.client_id)
-      .map((i) => invoiceDiscountItemTerm(i, discountRowById));
+      .map((i) => invoiceDiscountItemTerm(i, discountRowById, persistedClientIds));
     return {
       gross: Math.max(0, invoiceLineAmount(line)),
       terms: line.client_id === parentClientId ? [...terms, newTerm] : terms,
     };
   });
-  const documentTerms = invoiceDocumentTerms(items, serviceLineItems, discountRowById);
+  const documentTerms = invoiceDocumentTerms(items, serviceLineItems, discountRowById, persistedClientIds);
   const stacked = stackDocumentDiscounts({ lines, documentTerms });
   const parentTermDollars = parentIdx >= 0 ? stacked.lines[parentIdx].termDollars : [];
   const dollars = parentTermDollars.length
@@ -611,7 +634,7 @@ export function repriceLineWithNewDiscountPick({
   );
   const repriced = items.map((item) => {
     const siblingIdx = siblingItems.indexOf(item);
-    if (siblingIdx === -1 || isStoredInvoiceDiscountItem(item)) return item;
+    if (siblingIdx === -1 || isStoredInvoiceDiscountItem(item, persistedClientIds)) return item;
     const newDollars = parentTermDollars[siblingIdx];
     if (Math.abs(newDollars - Math.abs(invoiceLineAmount(item))) < 0.005) return item;
     return { ...item, unit_price: -newDollars, amount: -newDollars };
@@ -5694,17 +5717,30 @@ function CreateInvoice({
   // never even calls the probe, so a transient failure or outage on
   // /admin/discounts/stacking can never block an ordinary, discount-free
   // invoice save.
+  // Codex pre-push audit P1 (round 4 on PR #4655): this probe only confirms
+  // the gate value for THIS request — the write that follows carried no
+  // expected value of its own, so a gate flip (or a rolling deploy routing
+  // the probe and the write to pods with different values) between the two
+  // requests let this check pass while the server saved under the OPPOSITE
+  // arithmetic regime. Returns the CONFIRMED gate value this preview ran
+  // under ({ ok: true, expectedStacking }) so the caller can bind it to the
+  // write body — undefined when the check didn't run at all (an ordinary
+  // discount-free save, same invoiceSubmitNeedsStackingCheck gating as
+  // before), so the server's own check stays backward-compatible (no field
+  // ⇒ no check) for that submission.
   const stackingStillFresh = async () => {
-    if (!invoiceSubmitNeedsStackingCheck(lineItems, stackingEnabled)) return true;
+    if (!invoiceSubmitNeedsStackingCheck(lineItems, stackingEnabled)) {
+      return { ok: true, expectedStacking: undefined };
+    }
     const fresh = await ensureStackingFresh();
     if (!stackingProbeMatchesPreview(fresh, stackingEnabled)) {
       showToast(
         "Discount rules just changed — refresh this form and re-apply any discounts before saving",
         "error",
       );
-      return false;
+      return { ok: false, expectedStacking: undefined };
     }
-    return true;
+    return { ok: true, expectedStacking: fresh.enabled };
   };
   const aiSummaryEnabled = useFeatureFlag("ff_invoice_ai_summary");
   // Optional AI-assisted personal thank-you message in the invoice email body
@@ -5763,6 +5799,13 @@ function CreateInvoice({
   // which would otherwise revalidate (and reject) discounts that have since
   // been disabled/hidden on an otherwise-valid open draft.
   const editLineItemsBaselineRef = useRef(null);
+  // Codex pre-push audit P1 (round 4 on PR #4655): client_ids that existed
+  // on the invoice AS LOADED (edit mode only — stays empty on create, same
+  // as the server's own persistedClientIds default) — mirrors
+  // server/services/invoice.js's calculateUpdateFinancials exactly, so a
+  // discount row this form itself created previews frozen at its SAVED
+  // dollars once it's persisted, not live-recomputed from the catalog.
+  const persistedClientIdsRef = useRef(new Set());
 
   // Load active, invoice-visible discounts once. Tier discounts are included here
   // for explicit line-level selection; customer tier never applies a hidden discount.
@@ -5833,6 +5876,9 @@ function CreateInvoice({
     const initialLineItems = prefilled.length ? prefilled : [newLineItem()];
     setLineItems(initialLineItems);
     editLineItemsBaselineRef.current = JSON.stringify(initialLineItems);
+    persistedClientIdsRef.current = new Set(
+      initialLineItems.map((item) => item?.client_id).filter(Boolean),
+    );
     setNotes(editInvoice.notes || "");
     setEmailMessage(editInvoice.email_message || "");
     setTitle(editInvoice.title || "");
@@ -6135,6 +6181,7 @@ function CreateInvoice({
         parentClientId: parent.client_id,
         newTerm,
         discountRowById,
+        persistedClientIds: persistedClientIdsRef.current,
       });
       repricedLineItems = result.lineItems;
       dollars = result.dollars;
@@ -6212,6 +6259,7 @@ function CreateInvoice({
     lineItems,
     availableDiscounts,
     stackingEnabled,
+    persistedClientIds: persistedClientIdsRef.current,
   });
 
   // Mirror server discount-engine math so the preview matches stored totals.
@@ -6434,7 +6482,8 @@ function CreateInvoice({
     savingRef.current = true;
     setActionError("");
     setSaving(true);
-    if (!(await stackingStillFresh())) {
+    const stackingCheck = await stackingStillFresh();
+    if (!stackingCheck.ok) {
       savingRef.current = false;
       setSaving(false);
       return;
@@ -6453,6 +6502,15 @@ function CreateInvoice({
         notes: notes || null,
         emailMessage: emailMessage || null,
         dueDate,
+        // Codex pre-push audit P1 (round 4 on PR #4655): bind the
+        // CONFIRMED gate state this preview ran under to the write itself
+        // — the server rejects with a retryable 409 if it differs from
+        // its own live read at save time. Omitted entirely when the
+        // freshness check never ran (a discount-free save), so the server
+        // check stays backward-compatible for it.
+        ...(stackingCheck.expectedStacking !== undefined
+          ? { expected_discount_stacking: stackingCheck.expectedStacking }
+          : {}),
       };
       const invoice = await adminFetch("/admin/invoices", {
         method: "POST",
@@ -6613,7 +6671,8 @@ function CreateInvoice({
     savingRef.current = true;
     setActionError("");
     setSaving(true);
-    if (!(await stackingStillFresh())) {
+    const stackingCheck = await stackingStillFresh();
+    if (!stackingCheck.ok) {
       savingRef.current = false;
       setSaving(false);
       return;
@@ -6629,6 +6688,14 @@ function CreateInvoice({
       // (e.g. due-date only) skips the server retotal, so a draft that carries
       // a since-retired discount stays editable for those fields.
       if (JSON.stringify(lineItems) !== editLineItemsBaselineRef.current) {
+        // Codex pre-push audit P1 (round 4 on PR #4655): bind the
+        // CONFIRMED gate state this preview ran under to the write — only
+        // meaningful when line_items is actually sent (the only case the
+        // server retotals under either regime); the server rejects with a
+        // retryable 409 on a mismatch.
+        if (stackingCheck.expectedStacking !== undefined) {
+          body.expected_discount_stacking = stackingCheck.expectedStacking;
+        }
         body.line_items = lineItems
           .filter((i) => i.description && Number(i.unit_price) !== 0)
           .map((i) => ({

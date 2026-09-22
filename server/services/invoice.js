@@ -459,6 +459,53 @@ async function loadInvoiceDiscountRows(ids = [], database = db) {
     .where({ is_active: true, show_in_invoices: true });
 }
 
+// Codex pre-push audit P1 (round 4 on PR #4655): loadInvoiceDiscountRows'
+// active/visible filter is correct for a FRESH pick (a retired row must
+// never become newly selectable) but wrong for a non-stackable-group
+// CONFLICT check against a row that is already trusted/persisted on this
+// invoice — a discount disabled or hidden after being applied silently
+// dropped out of assertNewStackGroupConflicts's input entirely, so a fresh
+// same-group pick next to it compounded instead of being rejected. Bare,
+// UNFILTERED catalog metadata (id/name/stack_group/is_stackable) for
+// specific ids — used ONLY to widen the row map the conflict check reads,
+// never to make a retired row a valid fresh pick.
+async function loadDiscountStackMetaRows(ids = [], database = db) {
+  const uniqueIds = [...new Set((ids || []).filter(Boolean).map(String))];
+  if (!uniqueIds.length) return [];
+  return database("discounts").whereIn("id", uniqueIds);
+}
+
+// Widens an already-loaded (active-only) discount row map with retired/
+// hidden catalog metadata for ids that belong to an item already TRUSTED
+// (source-stamped) or POSITIONALLY PERSISTED (already on the invoice
+// before this write) — so computeStackedDocumentDiscountLines's
+// non-stackable-group check still sees that row's stack_group even after
+// it's retired. A fresh (non-trusted, non-persisted) item's discount_id is
+// deliberately never widened here — it must keep failing "Invalid
+// line-item discount" if it points at a retired row.
+async function widenDiscountRowsForTrustedItems({
+  items,
+  rowById,
+  trustedStoredSources,
+  persistedClientIds = new Set(),
+  database = db,
+}) {
+  const isFrozenByPosition = (item) => !!(item?.client_id && persistedClientIds.has(item.client_id));
+  const isTrusted = (item) => isStoredDiscountLineItem(item, trustedStoredSources) || isFrozenByPosition(item);
+  const missingIds = [...new Set(
+    (items || [])
+      .filter((item) => Number(item.amount) < 0 && item.discount_id
+        && isTrusted(item) && !rowById.has(String(item.discount_id)))
+      .map((item) => String(item.discount_id)),
+  )];
+  if (!missingIds.length) return rowById;
+  const metaRows = await loadDiscountStackMetaRows(missingIds, database);
+  if (!metaRows.length) return rowById;
+  const widened = new Map(rowById);
+  for (const row of metaRows) widened.set(String(row.id), row);
+  return widened;
+}
+
 // --- GATE_DISCOUNT_STACKING document-wide compounding (slice 5 of #4405) ---
 //
 // Below is reached ONLY when discountStackingLive() — create()'s own branch
@@ -805,12 +852,25 @@ function computeStackedDocumentDiscountLines({
   // DIFFERENT same-group rows across lines are not. assertNewStackGroupConflicts
   // (round 3) only enforces a clash that involves a row NOT already
   // persisted on the invoice — see its own comment above.
+  // Codex pre-push audit P0 (round 4 on PR #4655): "new" for this check
+  // must mean "the admin just picked this in this request," not merely
+  // "not positionally persisted on a prior save." create() (mint,
+  // create-and-send, completion) always passes an empty persistedClientIds
+  // (nothing IS persisted yet — the invoice doesn't exist), so
+  // isFrozenByPosition alone marked every booking-time scheduled_service/
+  // validated_checkout stamp as new — a visit legitimately booked before
+  // the gate existed, with conflicting non-stackable tier stamps on
+  // separate lines, threw at completion mint even though neither discount
+  // was newly added to the request. entry.stored already IS isTrusted(item)
+  // (source-trusted OR positionally-frozen) — a trusted stamp was
+  // committed at booking time, never "new," in EVERY create path, not just
+  // edits.
   assertNewStackGroupConflicts([
     ...classifiedNegativeItems
       .filter((entry) => entry.row)
       .map((entry) => ({
         ...entry.row,
-        _isNew: !isFrozenByPosition(entry.item),
+        _isNew: !entry.stored,
         ...(entry.spansAll
           ? { spansAll: true }
           : { scope: entry.parent ? String(entry.parent.client_id) : undefined }),
@@ -1161,7 +1221,29 @@ async function calculateUpdateFinancials({
   customer,
   invoice,
   taxRate,
+  // Codex pre-push audit P1 (round 4 on PR #4655): the client's submit-time
+  // freshness probe only confirms the gate value FOR THAT PROBE REQUEST —
+  // nothing bound the arithmetic regime this write actually saves under to
+  // what the client previewed. A gate flip (or a rolling deploy routing
+  // the probe and this write to pods reading different values) between
+  // the two requests let the probe pass while the server retotaled under
+  // the OPPOSITE regime. undefined (no field sent) skips the check
+  // entirely — every existing caller stays byte-identical.
+  expectedDiscountStacking,
 }) {
+  if (
+    expectedDiscountStacking !== undefined &&
+    expectedDiscountStacking !== discountStackingLive()
+  ) {
+    const err = new Error(
+      "Discount rules changed since this was previewed — reload the invoice and try again",
+    );
+    err.statusCode = 409;
+    err.status = 409;
+    err.isOperational = true;
+    err.code = "DISCOUNT_STACKING_GATE_DIVERGED";
+    throw err;
+  }
   const items = normalizeInvoiceLineItems(lineItems);
   const subtotal =
     Math.round(
@@ -1211,9 +1293,22 @@ async function calculateUpdateFinancials({
       )
       .map((item) => String(item.discount_id)),
   );
-  const lineItemDiscountRowById = new Map(
+  let lineItemDiscountRowById = new Map(
     lineItemDiscountRows.map((row) => [String(row.id), row]),
   );
+  // Codex pre-push audit P1 (round 4 on PR #4655): a persisted discount
+  // retired/hidden since it was applied must still count in its
+  // non-stackable group — widen with its bare catalog metadata (never
+  // making it a valid FRESH pick; only a trusted/persisted item's id is
+  // ever widened).
+  if (discountStackingLive()) {
+    lineItemDiscountRowById = await widenDiscountRowsForTrustedItems({
+      items,
+      rowById: lineItemDiscountRowById,
+      trustedStoredSources: EDIT_TRUSTED_DISCOUNT_SOURCES,
+      persistedClientIds,
+    });
+  }
   // Deposit credits are prior payment, not discounts — keep them out of the
   // discount/tax base on edits too, or an admin save would silently convert
   // an after-tax credit into a pre-tax discount. Mirrors create().
@@ -2683,7 +2778,28 @@ const InvoiceService = {
       // a party it was never derived for (e.g. a self-pay exempt 0% onto a
       // newly assigned non-exempt payer's AP invoice).
       frozenPayerId = undefined,
+      // Codex pre-push audit P1 (round 4 on PR #4655): mirrors
+      // calculateUpdateFinancials' own check — the admin form's submit-time
+      // freshness probe only confirms the gate for that probe request; this
+      // binds the CONFIRMED value it previewed under to the write itself.
+      // undefined (no caller passes it — every internal mint/batch/retry
+      // caller included) skips the check, byte-identical to before.
+      expectedDiscountStacking = undefined,
     } = createArgs;
+
+    if (
+      expectedDiscountStacking !== undefined &&
+      expectedDiscountStacking !== discountStackingLive()
+    ) {
+      const gateDivergedErr = new Error(
+        "Discount rules changed since this was previewed — reload and try again",
+      );
+      gateDivergedErr.statusCode = 409;
+      gateDivergedErr.status = 409;
+      gateDivergedErr.isOperational = true;
+      gateDivergedErr.code = "DISCOUNT_STACKING_GATE_DIVERGED";
+      throw gateDivergedErr;
+    }
 
     // Only the packet coordinator passes the second argument. Never accept
     // shared ownership from route line items or other customer-supplied fields.
@@ -3097,7 +3213,7 @@ const InvoiceService = {
         )
         .map((item) => String(item.discount_id)),
     );
-    const lineItemDiscountRowById = new Map(
+    let lineItemDiscountRowById = new Map(
       lineItemDiscountRows.map((row) => [String(row.id), row]),
     );
 
@@ -3113,6 +3229,14 @@ const InvoiceService = {
     let manualDiscounts;
     let lineItemDiscounts;
     if (discountStackingLive()) {
+      // Codex pre-push audit P1 (round 4 on PR #4655): a stored visit
+      // stamp's discount_id can point at a now-retired/hidden row — widen
+      // before the group check runs so its stack_group still counts.
+      lineItemDiscountRowById = await widenDiscountRowsForTrustedItems({
+        items,
+        rowById: lineItemDiscountRowById,
+        trustedStoredSources,
+      });
       ({ manualDiscounts, lineItemDiscounts } = computeStackedDocumentDiscountLines({
         items,
         serviceLineByClientId,
@@ -3271,11 +3395,21 @@ const InvoiceService = {
     // the invoice shows the same discount label the estimate promised —
     // "Referral Credit", not the generic "Line-item discounts"). The literal
     // survives only as the fallback for a nameless line.
+    // Codex pre-push audit P2 (round 4 on PR #4655): a document term can
+    // legitimately resolve to $0 (an earlier credit already exhausted its
+    // eligible balance) — this mapping used to retain every term's name
+    // regardless, so two $100 fixed discounts on a $100 invoice printed
+    // BOTH names though only the first actually applied. Build labels only
+    // from terms whose resolved dollars are positive, matching the
+    // dollars > 0 filter recordInvoiceDiscounts' audit rows already use.
     const lineItemDiscountNames = [...new Set(
-      lineItemDiscounts.map((m) => String(m.name || "").trim()).filter(Boolean),
+      lineItemDiscounts
+        .filter((m) => m.dollars > 0)
+        .map((m) => String(m.name || "").trim())
+        .filter(Boolean),
     )];
     const labelParts = [
-      ...manualDiscounts.map((m) => m.row.name),
+      ...manualDiscounts.filter((m) => m.dollars > 0).map((m) => m.row.name),
       ...(lineItemDiscountAmount > 0
         ? (lineItemDiscountNames.length ? lineItemDiscountNames : ["Line-item discounts"])
         : []),
@@ -3728,9 +3862,19 @@ const InvoiceService = {
       const lineItemDiscountIds = resolvedItems
         .filter((item) => Number(item.amount) < 0 && item.discount_id)
         .map((item) => item.discount_id);
-      const lineItemDiscountRowById = new Map(
+      let lineItemDiscountRowById = new Map(
         (await loadInvoiceDiscountRows(lineItemDiscountIds, dbh)).map((row) => [String(row.id), row]),
       );
+      // Codex pre-push audit P1 (round 4 on PR #4655): the retention-sizing
+      // pass runs its OWN group check (same shared function) — a persisted
+      // stamp pointing at a retired discount must count there too, or a
+      // conflict would slip through this earlier call only to be caught
+      // (or missed) again by create()'s own later, identical pass.
+      lineItemDiscountRowById = await widenDiscountRowsForTrustedItems({
+        items: resolvedItems,
+        rowById: lineItemDiscountRowById,
+        trustedStoredSources: EDIT_TRUSTED_DISCOUNT_SOURCES,
+      });
       // Codex pre-push audit P1 (round 2 on PR #4655): reuse the file's
       // own EDIT_TRUSTED_DISCOUNT_SOURCES (scheduled_service AND
       // validated_checkout) instead of a narrower ad-hoc literal — an
@@ -6743,6 +6887,7 @@ const InvoiceService = {
           customer,
           invoice,
           taxRate: updates.tax_rate,
+          expectedDiscountStacking: updates.expected_discount_stacking,
         }),
       );
       // KNOWN LIMITATION (accepted): a line-item retotal here updates

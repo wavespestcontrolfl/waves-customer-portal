@@ -330,4 +330,73 @@ postgres('InvoiceService.create discount stacking — real Postgres round trip',
     expect(result.discount_amount).toBe(0);
     expect(result.total).toBe(50);
   });
+
+  // Codex pre-push audit P0, round 4 (LAST patch round on this lane): a
+  // visit booked before the gate existed, carrying two conflicting
+  // non-stackable tier stamps on separate lines, mints cleanly at
+  // create() — real catalog rows, real round trip. Before this fix,
+  // create() always calls computeStackedDocumentDiscountLines with an
+  // empty persistedClientIds (nothing IS persisted yet — the invoice
+  // doesn't exist), so both booking-time stamps were marked "new" and the
+  // group check threw at mint even though neither was newly added.
+  test('two conflicting WaveGuard tier stamps booked before the gate existed mint cleanly — real catalog rows, real round trip', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const customerId = await insertCustomer();
+    const silverId = randomUUID();
+    const goldId = randomUUID();
+    await trx('discounts').insert([
+      { id: silverId, discount_key: `silver_${silverId.slice(0, 8)}`, name: 'WaveGuard Silver', discount_type: 'percentage', amount: 10, is_active: true, show_in_invoices: true, stack_group: 'tier', is_stackable: false },
+      { id: goldId, discount_key: `gold_${goldId.slice(0, 8)}`, name: 'WaveGuard Gold', discount_type: 'percentage', amount: 15, is_active: true, show_in_invoices: true, stack_group: 'tier', is_stackable: false },
+    ]);
+    const invoice = await InvoiceService.create({
+      customerId,
+      title: 'Booked-before-gate two-tier invoice',
+      lineItems: [
+        { client_id: 'line-1', description: 'Pest', quantity: 1, unit_price: 100, amount: 100 },
+        { client_id: 'line-2', description: 'Lawn', quantity: 1, unit_price: 100, amount: 100 },
+        {
+          client_id: 'd1', discount_id: silverId, discount_for: 'line-1', description: 'WaveGuard Silver',
+          quantity: 1, unit_price: -10, amount: -10,
+          use_stored_discount: true, stored_discount_source: 'scheduled_service', discount_dollars: 10,
+        },
+        {
+          client_id: 'd2', discount_id: goldId, discount_for: 'line-2', description: 'WaveGuard Gold',
+          quantity: 1, unit_price: -15, amount: -15,
+          use_stored_discount: true, stored_discount_source: 'scheduled_service', discount_dollars: 15,
+        },
+      ],
+      trustedStoredDiscountSources: ['scheduled_service'],
+    });
+    expect(Number(invoice.subtotal)).toBe(200);
+    expect(Number(invoice.discount_amount)).toBe(25);
+    expect(Number(invoice.total)).toBe(175);
+  });
+
+  // Codex pre-push audit P1, round 4: a persisted discount retired since
+  // it was applied still blocks a fresh same-group pick — real catalog
+  // rows (one flipped inactive after insert, mirroring a real retirement),
+  // real round trip through calculateUpdateFinancials.
+  test('a persisted-but-retired Silver still blocks a fresh same-group Gold pick on edit — real catalog rows, real round trip', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const silverId = randomUUID();
+    const goldId = randomUUID();
+    await trx('discounts').insert([
+      { id: silverId, discount_key: `silver_${silverId.slice(0, 8)}`, name: 'WaveGuard Silver', discount_type: 'percentage', amount: 10, is_active: false, show_in_invoices: false, stack_group: 'tier', is_stackable: false },
+      { id: goldId, discount_key: `gold_${goldId.slice(0, 8)}`, name: 'WaveGuard Gold', discount_type: 'percentage', amount: 15, is_active: true, show_in_invoices: true, stack_group: 'tier', is_stackable: false },
+    ]);
+    const persisted = [
+      { client_id: 'line-1', description: 'Pest', quantity: 1, unit_price: 100, amount: 100 },
+      { client_id: 'd1', discount_id: silverId, discount_for: 'line-1', description: 'WaveGuard Silver', quantity: 1, unit_price: -10, amount: -10 },
+    ];
+    const submitted = [
+      ...persisted,
+      { client_id: 'line-2', description: 'Lawn', quantity: 1, unit_price: 100, amount: 100 },
+      { client_id: 'd2', discount_id: goldId, discount_for: 'line-2', description: 'WaveGuard Gold', quantity: 1, unit_price: -1, amount: -1 },
+    ];
+    await expect(InvoiceService._internals.calculateUpdateFinancials({
+      lineItems: submitted,
+      customer: { property_type: 'residential' },
+      invoice: { id: 'invoice-1', line_items: JSON.stringify(persisted) },
+    })).rejects.toThrow(/Only one WaveGuard tier discount can apply/);
+  });
 });
