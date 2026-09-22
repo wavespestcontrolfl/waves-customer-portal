@@ -13,7 +13,7 @@ The communications reliability lane covers conversation-specific drafts, recover
 
 ## Verification
 
-- 177 targeted tests across nine suites passed, including draft storage, account/conversation isolation, approval restoration, contract metadata, attachments, fixed customer identity, consecutive profile sends, sender selection, polling, retry, search ordering, delivery receipts, existing spam/link behavior, and Email draft preservation.
+- 178 targeted tests across nine suites passed, including draft storage, account/conversation isolation, approval restoration, contract metadata, attachments, fixed customer identity, consecutive profile sends, sender selection, polling, retry, search ordering, delivery receipts, existing spam/link behavior, and Email draft preservation.
 - `npm run build` passed, including its schema/registry, portal-brand, and domain-rule prerequisites.
 - `npm run check:ib-coverage` passed with no new/changed unmapped sites. The three existing GET sites record their added cancellation signal and retained read-only scope; no new Intelligence Bar parity is claimed.
 - Targeted ESLint passed with no errors. The existing large `SmsTab` and send handler still produce complexity warnings.
