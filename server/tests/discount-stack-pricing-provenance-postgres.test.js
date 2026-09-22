@@ -19,9 +19,12 @@ const { randomUUID } = require('crypto');
 const {
   stampPricingRegimeMarker,
   hasPricingRegimeMarker,
+  frozenCapsFromRow,
 } = require('../services/booking/visit-financial-stamps');
 const adminScheduleRouter = require('../routes/admin-schedule');
-const { restackStoredVisitFinancials, freezeLegacySeriesRootCaps } = adminScheduleRouter._test;
+const {
+  restackStoredVisitFinancials, freezeLegacySeriesRootCaps, calculateStoredVisitFinancials, occurrenceFloorPrice,
+} = adminScheduleRouter._test;
 
 const connection = process.env.DISCOUNT_STACK_PROVENANCE_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -210,8 +213,11 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
       // The freeze persisted for real — read the root back fresh, exactly
       // as extension 2's own top-of-function fetch would.
       const rootAfterExtension1 = await mockPg('scheduled_services').where({ id: rootId }).first();
-      expect(hasPricingRegimeMarker(rootAfterExtension1)).toBe(true);
-      expect(rootAfterExtension1.pricing_provenance.caps.line).toBe(10);
+      // Round 3 P0 fix: freezing a legacy root's caps must NEVER flip
+      // hasPricingRegimeMarker — stays false so a null-primary root still
+      // defers to calculateStoredVisitFinancials' own reconstruction.
+      expect(hasPricingRegimeMarker(rootAfterExtension1)).toBe(false);
+      expect(frozenCapsFromRow(rootAfterExtension1).line).toBe(10);
 
       // The catalog cap is raised to $20 between extension 1 and 2.
       await mockPg('discounts').where({ id: lineDiscountId }).update({ max_discount_dollars: 20 });
@@ -223,6 +229,133 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
       const result = restackStoredVisitFinancials(rootAfterExtension1, [], null, liveCatalogCapsAtExtension2);
       expect(result.primaryLineDiscountDollars).toBe(10); // frozen at extension 1, never the raised $20
       expect(result.price).toBe(90);
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
+
+  // GitHub Codex round 3 on #4642 (PRRT_kwDOR3YQi86kmS5J, P0): the
+  // coordinator's exact pinned scenario, through a real Postgres round
+  // trip — a legacy series root with primary_line_price NULL and an
+  // unstructured estimated_price ($120) containing a $20 due add-on.
+  // Freezing this root's caps must NOT make hasPricingRegimeMarker true —
+  // the null primary stays ambiguous, restackStoredVisitFinancials still
+  // defers, and the real stored total ($120) survives instead of being
+  // silently overwritten with just the add-on's own $20.
+  test('legacy root with NULL primary_line_price + unstructured estimated_price: freezing caps never flips hasPricingRegimeMarker, $120 total survives (never becomes $20)', async () => {
+    const rootId = randomUUID();
+    const lineDiscountId = randomUUID();
+    const addonId = randomUUID();
+    await mockPg('scheduled_services').insert({
+      id: rootId,
+      scheduled_date: '2099-07-15',
+      service_type: 'Fixture Legacy Unstructured Root',
+      primary_line_price: null, // ambiguous — no structured primary ever recorded
+      estimated_price: 120, // the real, known total
+      line_discount_id: lineDiscountId, // on file even though it predates the structured columns
+    });
+    await mockPg('scheduled_service_addons').insert({
+      id: addonId, scheduled_service_id: rootId, service_name: 'Fixture Add-On',
+      base_price: 20, estimated_price: 20,
+    });
+    const cols = await mockPg('scheduled_services').columnInfo();
+
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      await mockPg('discounts').insert({
+        id: lineDiscountId, discount_key: `fixture_legacy_${lineDiscountId.slice(0, 8)}`,
+        name: 'Fixture Legacy Cap', discount_type: 'percentage', amount: 10, max_discount_dollars: 10, is_active: true,
+      });
+      const rootBefore = await mockPg('scheduled_services').where({ id: rootId }).first();
+      expect(hasPricingRegimeMarker(rootBefore)).toBe(false);
+
+      // The first gate-on extension freezes this root's caps.
+      await freezeLegacySeriesRootCaps(mockPg, rootBefore, cols, []);
+
+      // Read the root back for real — the mechanism this bug lived in
+      // (stamping the FULL canonical-pricing marker alongside the caps)
+      // only shows up once the write has actually round-tripped through
+      // Postgres and back.
+      const rootAfterFreeze = await mockPg('scheduled_services').where({ id: rootId }).first();
+      expect(hasPricingRegimeMarker(rootAfterFreeze)).toBe(false); // NEVER flips true
+      expect(frozenCapsFromRow(rootAfterFreeze)).not.toBeNull(); // but the caps ARE frozen
+
+      const dueAddon = await mockPg('scheduled_service_addons').where({ id: addonId }).first();
+      // restackStoredVisitFinancials must defer (return null) — the
+      // canonical engine must not treat this null primary as a real $0.
+      const restacked = restackStoredVisitFinancials(rootAfterFreeze, [dueAddon], null, new Map([[lineDiscountId, 10]]));
+      expect(restacked).toBeNull();
+
+      // The caller's actual fallback: the legacy reconstruction, landing
+      // on the real $120 (the addon's own $20 is already folded into that
+      // $120, exactly as calculateStoredVisitFinancials always derives an
+      // implied primary from parentAddons) — never the wrong $20 a
+      // false-positive canonical restack would have produced.
+      const legacy = calculateStoredVisitFinancials(rootAfterFreeze, [dueAddon], [dueAddon], null);
+      expect(legacy.price).toBe(120); // NEVER $20
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
+
+  // GitHub Codex round 3 on #4642 (PRRT_kwDOR3YQi86kmS5M, P1): the
+  // coordinator's exact pinned combination, sourced from a REAL Postgres
+  // row (proving the fix holds against DB-shaped numeric values, not just
+  // hand-typed JS numbers) — a $100 add-on at a 20% catalog line discount
+  // with a $15 fixed appointment credit allocated entirely to it (the
+  // sole eligible line) must total $68 through occurrenceFloorPrice's
+  // covered-member branch, never the pre-fix $83 (net alone).
+  test('covered-member add-on-only total subtracts its own allocated appointment-credit share, sourced from a real Postgres addon row', async () => {
+    const addonDiscountId = randomUUID();
+    await mockPg('discounts').insert({
+      id: addonDiscountId, discount_key: `fixture_addon_pct_${addonDiscountId.slice(0, 8)}`,
+      name: 'Fixture Add-On 20%', discount_type: 'percentage', amount: 20, is_active: true,
+    });
+    const scheduledServiceId = randomUUID();
+    await mockPg('scheduled_services').insert({
+      id: scheduledServiceId, scheduled_date: '2099-08-15', service_type: 'Fixture Covered Member Visit', primary_line_price: 0,
+    });
+    const addonRowId = randomUUID();
+    await mockPg('scheduled_service_addons').insert({
+      id: addonRowId, scheduled_service_id: scheduledServiceId, service_name: 'Fixture Covered Add-On',
+      base_price: 100, estimated_price: 100, discount_type: 'percentage', discount_amount: 20, discount_id: addonDiscountId,
+    });
+    const storedAddon = await mockPg('scheduled_service_addons').where({ id: addonRowId }).first();
+
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      // The live (in-memory) pricing shape occurrenceFloorPrice/
+      // restackLiveVisitFinancials take — Number()-coerced from the real
+      // Postgres row exactly as a caller assembling `lines` from it would.
+      const pricing = {
+        primaryBase: 0,
+        primaryServiceKey: 'general_pest',
+        primaryServiceCategory: 'pest_control',
+        primaryDiscount: null,
+        appointmentDiscount: {
+          discountType: 'fixed_amount', discountAmount: 15, discountDollars: 15,
+          maxDiscountDollars: null, serviceKeyFilter: null, serviceCategoryFilter: null,
+        },
+      };
+      const addonLine = {
+        base: Number(storedAddon.base_price),
+        price: Number(storedAddon.estimated_price),
+        serviceKey: 'addon_svc',
+        serviceCategory: 'addon',
+        discount: {
+          discountType: storedAddon.discount_type, discountAmount: Number(storedAddon.discount_amount), maxDiscountDollars: null,
+        },
+      };
+      const addonOnlyTotal = (lines) => (lines || []).reduce((sum, a) => {
+        const price = Number(a?.price);
+        if (!(price > 0)) return sum;
+        const share = Number(a?.appointmentCreditDollars) || 0;
+        return sum + Math.max(0, price - share);
+      }, 0);
+      const floor = occurrenceFloorPrice(pricing, [addonLine], {
+        memberSeriesCovered: true, isBoosterDate: false, addonOnlyTotal,
+      });
+      expect(floor).toBe(68); // NEVER $83
     } finally {
       delete process.env.GATE_DISCOUNT_STACKING;
     }

@@ -60,6 +60,8 @@ const {
   resolveStoredDiscountCaps,
   capsSnapshotFromPricing,
   freezeLegacySeriesRootCaps,
+  stampFrozenCapsOnly,
+  frozenCapsFromRow,
 } = require('../routes/admin-schedule')._test;
 
 function discountQuery(discount) {
@@ -140,6 +142,40 @@ describe('appointment creation — canonical restack (buildAppointmentPricing)',
     expect(pricing.primaryDiscount.discountDollars).toBe(14);
     expect(pricing.primaryNet).toBe(86);
     expect(pricing.finalPrice).toBe(56);
+  });
+
+  // GitHub Codex round 3 on #4642 (PRRT_kwDOR3YQi86kmS5M): the coordinator's
+  // exact pinned combination — a $100 add-on at 20% line discount, with a
+  // $15 fixed appointment credit allocated entirely to it (no primary
+  // priced, so it is the only line with anything to allocate against).
+  // net (restated.net) is the line's own gross minus ONLY its line
+  // discount ($100 - $17 = $83, since the 20% applies to the $85 left
+  // after the $15 credit) — its allocated appointmentCreditDollars share
+  // ($15) is carried SEPARATELY, never folded into price/net, for
+  // addonOnlyTotal (occurrenceFloorPrice / the covered-member creation
+  // sites) to subtract on its own.
+  test('gate on: an add-on line carries its own allocated appointment-credit share separately from its net (Codex round 3 P1)', async () => {
+    const addonDiscountRow = { id: 'addon-disc-1', name: 'Add-on 20%', discount_type: 'percentage', amount: 20 };
+    const appointmentDiscountRow = { id: 'appt-fixed-15', name: 'Fixed $15', discount_type: 'fixed_amount', amount: 15 };
+    db.mockReturnValueOnce(discountQuery(addonDiscountRow))
+      .mockReturnValueOnce(discountQuery(appointmentDiscountRow));
+
+    const pricing = await withGateLive(() => buildAppointmentPricing({
+      serviceRecord: null,
+      estimatedPrice: null,
+      primaryLinePrice: null,
+      primaryLineDiscount: null,
+      serviceAddons: [{ name: 'Fixture Add-On', price: 100, discountId: 'addon-disc-1' }],
+      discountId: 'appt-fixed-15',
+      discountType: 'fixed_amount',
+      customer: { id: 'customer-1' },
+    }));
+
+    expect(pricing.addonLines[0].price).toBe(83); // its OWN net — unchanged meaning
+    expect(pricing.addonLines[0].appointmentCreditDollars).toBe(15); // its allocated share, carried separately
+    // 83 (net) - 15 (allocated share) = 68 is what addonOnlyTotal computes
+    // for a covered member — pinned end to end via occurrenceFloorPrice
+    // in the "CREATE-time billable-amount gate" describe block below.
   });
 
   test('gate on, no appointment discount: still restacks (for cent-exact rounding), same total here since nothing shares the pool', async () => {
@@ -945,7 +981,15 @@ describe('creation-to-extension parity', () => {
 describe('CREATE-time billable-amount gate — occurrenceFloorPrice', () => {
   afterEach(() => { delete process.env.GATE_DISCOUNT_STACKING; });
 
-  const addonOnlyTotal = (lines) => (lines || []).reduce((sum, a) => sum + (Number(a?.price) > 0 ? Number(a.price) : 0), 0);
+  // Mirrors the route's own addonOnlyTotal exactly (Codex round 3 P1 fix:
+  // subtracts each line's own allocated appointmentCreditDollars share,
+  // never just its net).
+  const addonOnlyTotal = (lines) => (lines || []).reduce((sum, a) => {
+    const price = Number(a?.price);
+    if (!(price > 0)) return sum;
+    const share = Number(a?.appointmentCreditDollars) || 0;
+    return sum + Math.max(0, price - share);
+  }, 0);
 
   // Codex's own worked example: a $100 primary at 50% off, a $100 one-time
   // add-on, and an $80 appointment credit. The anchor (add-on present)
@@ -1003,12 +1047,64 @@ describe('CREATE-time billable-amount gate — occurrenceFloorPrice', () => {
       const anchorFloor = occurrenceFloorPrice(pricing, [recurringAddon, oneTimeAddon], {
         memberSeriesCovered: true, isBoosterDate: false, addonOnlyTotal,
       });
-      expect(anchorFloor).toBe(134); // 84 (restacked recurring add-on net) + 50
+      // Codex round 3 P1: addonOnlyTotal now subtracts each line's own
+      // allocated share of the $30 credit too, not just its net — pool =
+      // 100 + 50 = 150; recurringAddon's share = 30*100/150 = $20 (net 100-16=84,
+      // 84-20=64); oneTimeAddon's share = 30*50/150 = $10 (net 50-0=50, 50-10=40).
+      expect(anchorFloor).toBe(104); // 64 + 40 — never the pre-fix 134 (net alone)
 
       const laterFloor = occurrenceFloorPrice(pricing, [recurringAddon], {
         memberSeriesCovered: true, isBoosterDate: false, addonOnlyTotal,
       });
-      expect(laterFloor).toBe(86); // restacked to $14 off, not the frozen $16
+      // Solo line: the WHOLE $30 credit allocates to it. Net = 100 - 14 = 86
+      // (20% of the $70 left after the $30 credit); its own share (30)
+      // subtracts too: 86 - 30 = 56 — never the pre-fix 86 (net alone).
+      expect(laterFloor).toBe(56);
+    });
+  });
+
+  // GitHub Codex round 3 on #4642 (PRRT_kwDOR3YQi86kmS5M): the
+  // coordinator's exact pinned combination end to end through
+  // occurrenceFloorPrice (the same restackLiveVisitFinancials +
+  // addonOnlyTotal pairing the covered-member CREATE-time stamping sites
+  // use) — a $100 add-on at 20% line discount with a $15 fixed
+  // appointment credit allocated entirely to it (the sole eligible line)
+  // must total $68, never the pre-fix $83 (net alone, dropping its
+  // allocated credit share).
+  test('Codex round 3: a covered-member add-on-only total subtracts its own allocated appointment-credit share ($68, not $83)', async () => {
+    await withGateLive(() => {
+      const pricing = {
+        primaryBase: 0,
+        primaryServiceKey: 'general_pest',
+        primaryServiceCategory: 'pest_control',
+        primaryDiscount: null,
+        appointmentDiscount: { discountType: 'fixed_amount', discountAmount: 15, discountDollars: 15, maxDiscountDollars: null, serviceKeyFilter: null, serviceCategoryFilter: null },
+      };
+      const addon = { base: 100, price: 100, serviceKey: 'addon_svc', serviceCategory: 'addon', discount: { discountType: 'percentage', discountAmount: 20, discountDollars: 20, maxDiscountDollars: null } };
+      const floor = occurrenceFloorPrice(pricing, [addon], {
+        memberSeriesCovered: true, isBoosterDate: false, addonOnlyTotal,
+      });
+      expect(floor).toBe(68); // NEVER $83
+    });
+  });
+
+  // Control: no appointment-level discount at all — nothing to subtract,
+  // so the total is unaffected (matches the line's own net exactly, as it
+  // always has).
+  test('control: no appointment credit exists — the add-on-only total is unaffected (matches its own net)', async () => {
+    await withGateLive(() => {
+      const pricing = {
+        primaryBase: 0,
+        primaryServiceKey: 'general_pest',
+        primaryServiceCategory: 'pest_control',
+        primaryDiscount: null,
+        appointmentDiscount: null,
+      };
+      const addon = { base: 100, price: 100, serviceKey: 'addon_svc', serviceCategory: 'addon', discount: { discountType: 'percentage', discountAmount: 20, discountDollars: 20, maxDiscountDollars: null } };
+      const floor = occurrenceFloorPrice(pricing, [addon], {
+        memberSeriesCovered: true, isBoosterDate: false, addonOnlyTotal,
+      });
+      expect(floor).toBe(80); // 20% of $100 off, nothing else to subtract
     });
   });
 
@@ -1661,8 +1757,14 @@ describe('freezeLegacySeriesRootCaps — the root parent itself gets marked on t
       // correct when the SAME id is later reused on an add-on.
 
       // The in-memory `parent` object is updated too (same-call multi-date
-      // loops must not redundantly re-freeze on their next iteration).
-      expect(hasPricingRegimeMarker(parent)).toBe(true);
+      // loops must not redundantly re-freeze on their next iteration) —
+      // with a CAPS-ONLY snapshot (round 3 P0 fix): freezing a legacy
+      // root's caps must never flip hasPricingRegimeMarker, which stays
+      // false so a null-primary root still defers to
+      // calculateStoredVisitFinancials' own reconstruction instead of
+      // being treated as a real, computed $0.
+      expect(hasPricingRegimeMarker(parent)).toBe(false);
+      expect(frozenCapsFromRow(parent)).toEqual({ line: 10, addons: { 'ld-1': 10 } });
 
       // "Extension 2": a FRESH re-fetch of this now-marked root (as a real
       // second, separate extension call would do), against a catalog
@@ -1682,6 +1784,122 @@ describe('freezeLegacySeriesRootCaps — the root parent itself gets marked on t
       await freezeLegacySeriesRootCaps(conn, parent, { pricing_provenance: true }, []);
       expect(updates).toHaveLength(1);
       expect(updates[0].data.pricing_provenance.caps).toEqual({ line: null, addons: {} });
+    });
+  });
+
+  // GitHub Codex round 3 (P0, PRRT_kwDOR3YQi86kmS5J): a caps-only-frozen
+  // root (no regime marker) is ALSO left alone on a later call — the same
+  // "already frozen, don't re-read the catalog" guarantee the regime-
+  // marked case already had, now covering the caps-only shape too.
+  test('a root ALREADY caps-only frozen (no regime marker) is also left alone — no redundant re-freeze', async () => {
+    await withGateLive(async () => {
+      const { conn, updates } = makeRootFreezeConn([{ id: 'ld-1', max_discount_dollars: 999 }]);
+      const parent = { id: 'root-5', line_discount_id: 'ld-1', pricing_provenance: { caps: { line: 10, addons: {} } } };
+      expect(hasPricingRegimeMarker(parent)).toBe(false); // caps-only, NOT canonically marked
+      await freezeLegacySeriesRootCaps(conn, parent, { pricing_provenance: true }, []);
+      expect(updates).toHaveLength(0);
+    });
+  });
+});
+
+// GitHub Codex round 3 on #4642 (PRRT_kwDOR3YQi86kmS5J, P0): freezing a
+// legacy root's caps must NEVER flip hasPricingRegimeMarker — a null
+// primary_line_price on such a row is genuinely ambiguous (a real $0, or
+// an unstructured estimated_price needing calculateStoredVisitFinancials's
+// own reconstruction), and stamping the FULL canonical-pricing marker
+// there resolved that ambiguity wrongly: restackStoredVisitFinancials read
+// the null primary as a real, computed $0 and a due add-on silently
+// overwrote the legacy reconstructed total.
+describe('caps-only provenance never implies canonical pricing (round 3 P0)', () => {
+  afterEach(() => { delete process.env.GATE_DISCOUNT_STACKING; });
+
+  test('stampFrozenCapsOnly writes caps but NOT pricing_regime — hasPricingRegimeMarker stays false', () => {
+    const target = {};
+    stampFrozenCapsOnly(target, { pricing_provenance: true }, { line: 10, addons: { 'addon-1': 25 } });
+    expect(target.pricing_provenance).toEqual({ caps: { line: 10, addons: { 'addon-1': 25 } } });
+    expect(target.pricing_provenance.pricing_regime).toBeUndefined();
+    expect(hasPricingRegimeMarker(target)).toBe(false);
+    // But the caps themselves are still readable — frozenCapsFromRow does
+    // NOT require the regime marker (round 3 fix).
+    expect(frozenCapsFromRow(target)).toEqual({ line: 10, addons: { 'addon-1': 25 } });
+  });
+
+  test('resolveStoredDiscountCaps honors a caps-only (unmarked) row’s frozen line cap, never the live catalog', () => {
+    const capsOnlyRow = { line_discount_id: 'ld-1', pricing_provenance: { caps: { line: 10, addons: {} } } };
+    expect(hasPricingRegimeMarker(capsOnlyRow)).toBe(false);
+    const liveCatalogRaisedTo20 = new Map([['ld-1', 20]]);
+    const resolved = resolveStoredDiscountCaps(capsOnlyRow, liveCatalogRaisedTo20);
+    expect(resolved.lineCap).toBe(10); // frozen, never the live $20
+  });
+
+  // The coordinator's exact pinned combination: a stored $120 legacy total
+  // containing a $20 due add-on, with primary_line_price NULL (unstructured
+  // — the estimated_price total is all that's known). Freezing this root's
+  // caps must NOT make it restack as a real $0 primary; it must keep
+  // deferring to calculateStoredVisitFinancials' own $100-implied-primary
+  // reconstruction, landing back at $120 — never $20.
+  test('Codex round 3: a $120 legacy total with a $20 add-on stays $120-based after a gate-on extension with frozen caps (never becomes $20)', async () => {
+    await withGateLive(() => {
+      const legacyRoot = {
+        primary_line_price: null,
+        estimated_price: 120,
+        line_discount_id: 'ld-1',
+        line_discount_type: null, // no line discount recorded — this row predates that structure too
+        discount_type: null,
+      };
+      const dueAddon = { estimated_price: 20, discount_type: null, service_id: 'addon-svc' };
+      const allParentAddons = [dueAddon];
+
+      // "Extension 1": freeze this legacy root's caps (e.g. it has a line
+      // discount id on file even though the amount/type were never
+      // recorded — freezeLegacySeriesRootCaps freezes whatever cap the
+      // catalog has for it today).
+      const frozenCaps = resolveStoredDiscountCaps(legacyRoot, new Map([['ld-1', 10]])).snapshot;
+      const rootStamp = {};
+      stampFrozenCapsOnly(rootStamp, { pricing_provenance: true }, frozenCaps);
+      const rootAfterFreeze = { ...legacyRoot, pricing_provenance: rootStamp.pricing_provenance };
+
+      // hasPricingRegimeMarker must STILL be false — this is the whole
+      // point of the fix.
+      expect(hasPricingRegimeMarker(rootAfterFreeze)).toBe(false);
+
+      // restackStoredVisitFinancials must defer (return null) — the null
+      // primary stays ambiguous, never a real computed $0.
+      const restacked = restackStoredVisitFinancials(rootAfterFreeze, [dueAddon], null, new Map([['ld-1', 10]]));
+      expect(restacked).toBeNull();
+
+      // The caller's actual fallback (exactly what applyDiscountStackRestack
+      // / storedOccurrenceFloorPrice do when the restack defers): the
+      // legacy reconstruction, landing on the real $120 — never the wrong
+      // $20 a false-positive canonical restack would have produced.
+      const legacy = calculateStoredVisitFinancials(rootAfterFreeze, [dueAddon], allParentAddons, null);
+      expect(legacy.price).toBe(120); // NEVER $20
+    });
+  });
+
+  // Control: the earlier round-2 root-freeze scenario (a NON-null primary,
+  // the ordinary case) must still hold its frozen cap through this same
+  // caps-only mechanism — round 3 changes WHICH marker gets written, not
+  // whether the cap freeze itself still works.
+  test('control: a root WITH a real primary_line_price still restacks from its frozen caps-only snapshot, not the live catalog', async () => {
+    await withGateLive(() => {
+      const root = {
+        primary_line_price: 100,
+        line_discount_id: 'ld-1',
+        line_discount_type: 'percentage',
+        line_discount_amount: 50, // uncapped, 50% of $100 would be $50 off
+        discount_type: null,
+      };
+      const frozenCaps = resolveStoredDiscountCaps(root, new Map([['ld-1', 10]])).snapshot;
+      const rootStamp = {};
+      stampFrozenCapsOnly(rootStamp, { pricing_provenance: true }, frozenCaps);
+      const rootAfterFreeze = { ...root, pricing_provenance: rootStamp.pricing_provenance };
+      expect(hasPricingRegimeMarker(rootAfterFreeze)).toBe(false); // caps-only, still not canonically marked
+
+      const catalogRaisedTo20 = new Map([['ld-1', 20]]);
+      const result = restackStoredVisitFinancials(rootAfterFreeze, [], null, catalogRaisedTo20);
+      expect(result.primaryLineDiscountDollars).toBe(10); // frozen, never the raised $20
+      expect(result.price).toBe(90);
     });
   });
 });

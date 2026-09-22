@@ -1402,8 +1402,10 @@ const {
   typedDiscountSlot,
   restackOccurrenceDiscounts,
   stampPricingRegimeMarker,
+  stampFrozenCapsOnly,
   hasPricingRegimeMarker,
   clearPricingRegimeMarker,
+  frozenCapsFromRow,
   resolveStoredDiscountCaps,
 } = require('../services/booking/visit-financial-stamps');
 const { anchorSoleProperty } = require('../services/customer-properties');
@@ -2171,9 +2173,24 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
         // which line came in with no base at all.
         if (line.price == null) return line;
         const restated = stacked.lines[i + 1];
+        // GitHub Codex round 3 on #4642 (PRRT_kwDOR3YQi86kmS5M): `price`
+        // (restated.net) is the line's OWN gross minus only its OWN line
+        // discount — stackVisitDiscounts deliberately keeps the line's
+        // ALLOCATED SHARE of the appointment-level credit as a separate
+        // per-line field (appointmentDiscountDollars), not folded into
+        // net, since the aggregate finalPrice/finalAppointmentDollars
+        // already account for it at the occurrence level. addonOnlyTotal
+        // (the covered-member add-on-only total) is the ONE consumer that
+        // needs this per-line share too — carried here as
+        // appointmentCreditDollars, subtracted only there; every other
+        // reader of addonLines[i].price keeps meaning exactly what it
+        // always has (the line's own net).
         return line.discount
-          ? { ...line, price: restated.net, discount: { ...line.discount, discountDollars: restated.lineDiscountDollars } }
-          : { ...line, price: restated.net };
+          ? {
+            ...line, price: restated.net, appointmentCreditDollars: restated.appointmentDiscountDollars,
+            discount: { ...line.discount, discountDollars: restated.lineDiscountDollars },
+          }
+          : { ...line, price: restated.net, appointmentCreditDollars: restated.appointmentDiscountDollars };
       });
       finalAppointmentDollars = stacked.appointmentDiscountDollars;
       finalPrice = stacked.total;
@@ -2560,11 +2577,17 @@ function restackLiveVisitFinancials(pricing, addonLines) {
     // (line.base || 0), so it cannot itself distinguish "genuinely $0" from
     // "not priced yet" — that distinction is restored here, at the one
     // place that still knows which add-ons came in with no base at all.
+    // appointmentCreditDollars (Codex round 3, PRRT_kwDOR3YQi86kmS5M): the
+    // line's OWN allocated share of the appointment-level credit —
+    // netPrice never folds this in (see buildAppointmentPricing's
+    // identical comment) — read ONLY by the covered-member addonOnlyTotal
+    // consumer.
     addonDollars: addons.map((line, i) => (line.base == null
-      ? { discountDollars: null, netPrice: null }
+      ? { discountDollars: null, netPrice: null, appointmentCreditDollars: null }
       : {
         discountDollars: stacked.lines[i + 1].lineDiscountDollars,
         netPrice: stacked.lines[i + 1].net,
+        appointmentCreditDollars: stacked.lines[i + 1].appointmentDiscountDollars,
       })),
   };
 }
@@ -2589,7 +2612,13 @@ function occurrenceFloorPrice(pricing, lines, { memberSeriesCovered, isBoosterDa
   const restack = restackLiveVisitFinancials(pricing, lines);
   if (memberSeriesCovered && !isBoosterDate) {
     const restatedLines = restack
-      ? lines.map((line, i) => ({ ...line, price: restack.addonDollars[i]?.netPrice ?? line.price }))
+      ? lines.map((line, i) => ({
+        ...line,
+        price: restack.addonDollars[i]?.netPrice ?? line.price,
+        // Codex round 3 P1: threaded through so addonOnlyTotal can
+        // subtract each line's own allocated appointment-credit share.
+        appointmentCreditDollars: restack.addonDollars[i]?.appointmentCreditDollars ?? 0,
+      }))
       : lines;
     return addonOnlyTotal(restatedLines);
   }
@@ -2988,9 +3017,9 @@ function applyDiscountStackRestack(target, cols, parent, addonRows, discountScop
 // changing a cap after one extension still changed the next contracted
 // visit. Freezing the FIRST gate-on extension's own resolved caps onto
 // the root itself — in the SAME transaction as its insert — means every
-// LATER extension's fresh read of that root already carries the marker,
-// and resolveStoredDiscountCaps then correctly refuses to re-read the
-// catalog for anything already frozen.
+// LATER extension's fresh read of that root already carries the frozen
+// snapshot, and resolveStoredDiscountCaps then correctly refuses to
+// re-read the catalog for anything already frozen.
 //
 // Computed from the RAW parent's own line_discount_id, never the
 // anchored-split template's nulled-out clone (resolveSeriesExtensionPriceTemplate
@@ -2999,20 +3028,39 @@ function applyDiscountStackRestack(target, cols, parent, addonRows, discountScop
 // wrong null line cap onto a root whose own discount fields are still
 // intact for whenever the override is later removed.
 //
-// A no-op once the root is already marked, the gate is off, or the
-// column doesn't exist. Call ONCE per extension episode, before its own
-// per-date loop — not once per date — and update the in-memory `parent`
-// object too, so a later date in the SAME loop sees it as already marked
-// instead of redundantly re-freezing.
+// GitHub Codex round 3 (P0, PRRT_kwDOR3YQi86kmS5J): stamps caps ONLY
+// (stampFrozenCapsOnly), never the full canonical-pricing regime marker.
+// A legacy root's null primary_line_price is genuinely ambiguous — it
+// could be a real $0, or it could need calculateStoredVisitFinancials's
+// own reconstruction from an unstructured estimated_price — and this
+// helper has no way to know which. Stamping the regime marker here
+// resolved that ambiguity WRONGLY: restackStoredVisitFinancials read
+// hasPricingRegimeMarker as true and treated the null primary as a real,
+// computed $0, so a due add-on on the FIRST gate-on extension silently
+// overwrote the legacy reconstructed total (a stored $120 total
+// containing a $20 add-on became $20 instead of staying $120-based).
+// Caps-only preserves the legacy deferral (hasPricingRegimeMarker stays
+// false) while still freezing a stable, catalog-drift-proof cap for
+// whenever this root DOES restack (a non-null primary_line_price, or once
+// its own real canonical stamp eventually lands from elsewhere).
+//
+// A no-op once the root already carries EITHER a frozen caps snapshot or
+// the canonical-pricing marker, the gate is off, or the column doesn't
+// exist — never re-reads or re-freezes an already-frozen root. Call ONCE
+// per extension episode, before its own per-date loop — not once per
+// date — and update the in-memory `parent` object too, so a later date in
+// the SAME loop sees it as already frozen instead of redundantly
+// re-freezing.
 async function freezeLegacySeriesRootCaps(trx, parent, cols, parentAddons) {
-  if (!discountStackingLive() || !cols?.pricing_provenance || hasPricingRegimeMarker(parent)) return;
+  if (!discountStackingLive() || !cols?.pricing_provenance
+    || hasPricingRegimeMarker(parent) || frozenCapsFromRow(parent)) return;
   const rootDiscountCaps = await loadDiscountCapsById(
     trx,
     [parent?.line_discount_id, ...(Array.isArray(parentAddons) ? parentAddons : []).map((a) => a.discount_id)],
   );
   const rootSnapshot = resolveStoredDiscountCaps(parent, rootDiscountCaps).snapshot;
   const rootStamp = {};
-  stampPricingRegimeMarker(rootStamp, cols, rootSnapshot);
+  stampFrozenCapsOnly(rootStamp, cols, rootSnapshot);
   await trx('scheduled_services').where({ id: parent.id }).update({ pricing_provenance: rootStamp.pricing_provenance });
   parent.pricing_provenance = rootStamp.pricing_provenance;
 }
@@ -5886,7 +5934,25 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // dues, and stamping the full price would surface/mint a $100 plan
     // visit + $20 add-on as $120 instead of the billable $20 (Codex r2+r3).
     // Base-only rows stay stamp-free.
-    const addonOnlyTotal = (lines) => (lines || []).reduce((sum, a) => sum + (Number(a?.price) > 0 ? Number(a.price) : 0), 0);
+    //
+    // GitHub Codex round 3 on #4642 (PRRT_kwDOR3YQi86kmS5M): `a.price` is
+    // the line's OWN net (gross minus its own line discount only) —
+    // stackVisitDiscounts deliberately keeps each line's ALLOCATED SHARE
+    // of an appointment-level credit as a separate field
+    // (appointmentCreditDollars, threaded through buildAppointmentPricing
+    // / restackLiveVisitFinancials's addonDollars — see their own
+    // comments), never folded into net. Reading `.price` alone here
+    // dropped that allocated share from the covered-member's stamped
+    // add-on total: a $100 add-on at 20% off with a $15 allocated fixed
+    // appointment credit stamped $83 (net alone) instead of the real $68
+    // (net minus its $15 share) — inflating the amount surfaced for an
+    // add-on that already got part of the credit applied to it.
+    const addonOnlyTotal = (lines) => (lines || []).reduce((sum, a) => {
+      const price = Number(a?.price);
+      if (!(price > 0)) return sum;
+      const share = Number(a?.appointmentCreditDollars) || 0;
+      return sum + Math.max(0, price - share);
+    }, 0);
 
     const zone = bookingProperty
       ? getZone(bookingProperty.service_address_city, bookingProperty.service_address_zip)
@@ -6512,7 +6578,13 @@ router.post('/', requireAdmin, async (req, res, next) => {
             // below already writes each addon row's OWN restacked net —
             // this total must agree with what actually got stamped on them.
             const addonStamp = addonOnlyTotal(childRestack
-              ? childAddonLines.map((line, i) => ({ ...line, price: childRestack.addonDollars[i]?.netPrice ?? line.price }))
+              ? childAddonLines.map((line, i) => ({
+                ...line,
+                price: childRestack.addonDollars[i]?.netPrice ?? line.price,
+                // Codex round 3 P1: threaded through so addonOnlyTotal can
+                // subtract each line's own allocated appointment-credit share.
+                appointmentCreditDollars: childRestack.addonDollars[i]?.appointmentCreditDollars ?? 0,
+              }))
               : childAddonLines);
             if (addonStamp > 0) childData.estimated_price = addonStamp;
           } else if (childRestack) { if (childRestack.price != null) childData.estimated_price = childRestack.price; }
@@ -19206,8 +19278,10 @@ router._test = {
   seriesExtensionUnbillable,
   loadDiscountCapsById,
   stampPricingRegimeMarker,
+  stampFrozenCapsOnly,
   hasPricingRegimeMarker,
   clearPricingRegimeMarker,
+  frozenCapsFromRow,
   resolveStoredDiscountCaps,
   insertRecurringChildAddons,
   insertScheduledServiceAddons,

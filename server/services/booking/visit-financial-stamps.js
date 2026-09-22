@@ -196,15 +196,43 @@ function hasPricingRegimeMarker(row) {
   return !!prov && prov.pricing_regime === PRICING_REGIME_VALUE;
 }
 
-// The frozen `caps` object off a marked row, or null (unmarked, or a
-// marked row whose caps are missing/malformed — treated the same as "no
-// frozen entry" by resolveStoredDiscountCaps, never as a crash).
+// GitHub Codex round 3 on #4642 (PRRT_kwDOR3YQi86kmS5J, P0): `caps` is
+// readable WHETHER OR NOT `pricing_regime` is set — a legacy root's null
+// primary_line_price is ambiguous (it could be a genuinely-priced $0, or
+// it could need calculateStoredVisitFinancials's own reconstruction from
+// an unstructured estimated_price), and freezeLegacySeriesRootCaps
+// (admin-schedule.js) must be able to freeze that root's catalog caps
+// WITHOUT resolving that ambiguity — stamping the full pricing_regime
+// marker alongside the caps made hasPricingRegimeMarker true for a row
+// this slice never actually priced, so restackStoredVisitFinancials
+// treated its null primary as a real, computed $0 and a due add-on
+// silently overwrote the legacy reconstructed total (Codex's repro: a
+// stored $120 total containing a $20 add-on became $20). `caps` and
+// `pricing_regime` are independent facts about the SAME row from here on:
+// a caps-only stamp (stampFrozenCapsOnly, below) never flips
+// hasPricingRegimeMarker; a full canonical stamp (stampPricingRegimeMarker)
+// always carries both.
 function frozenCapsFromRow(row) {
   const prov = parsePricingProvenance(row);
-  return prov && prov.pricing_regime === PRICING_REGIME_VALUE
-    && prov.caps && typeof prov.caps === 'object' && !Array.isArray(prov.caps)
+  return prov && prov.caps && typeof prov.caps === 'object' && !Array.isArray(prov.caps)
     ? prov.caps
     : null;
+}
+
+// Freezes ONLY the caps snapshot — no pricing_regime, no engine_version —
+// so hasPricingRegimeMarker stays false and restackStoredVisitFinancials's
+// null-primary legacy deferral is untouched. For a legacy series root
+// whose own pricing was never canonically computed (freezeLegacySeriesRootCaps,
+// admin-schedule.js): the row still gets to keep a stable, catalog-drift-
+// proof cap for whenever IT does restack (a non-null primary_line_price),
+// without asserting a canonical-pricing fact that isn't true.
+function stampFrozenCapsOnly(target, cols, caps) {
+  if (!target || !cols?.[PRICING_REGIME_COLUMN]) return;
+  target[PRICING_REGIME_COLUMN] = {
+    caps: caps && typeof caps === 'object'
+      ? { line: caps.line ?? null, addons: { ...(caps.addons || {}) } }
+      : { line: null, addons: {} },
+  };
 }
 
 // resolveSeriesExtensionPriceTemplate's anchored-split clear (admin-schedule.js)
@@ -235,7 +263,10 @@ function clearPricingRegimeMarker(target) {
 // `Map<discountId, cap|null>` (or null/undefined when the gate is off, or
 // nothing was fetched).
 function resolveStoredDiscountCaps(parent, liveDiscountCaps) {
-  const frozen = hasPricingRegimeMarker(parent) ? frozenCapsFromRow(parent) : null;
+  // Deliberately NOT gated on hasPricingRegimeMarker (round 3 fix, above):
+  // a caps-only-frozen legacy root has real frozen caps to honor even
+  // though it is not canonically-priced.
+  const frozen = frozenCapsFromRow(parent);
   const addons = { ...(frozen?.addons || {}) };
   if (liveDiscountCaps) {
     // GitHub Codex round 2 on #4642 (PRRT_kwDOR3YQi86kl-X3): an EARLIER
@@ -276,7 +307,9 @@ module.exports = {
   typedDiscountSlot,
   restackOccurrenceDiscounts,
   stampPricingRegimeMarker,
+  stampFrozenCapsOnly,
   hasPricingRegimeMarker,
   clearPricingRegimeMarker,
+  frozenCapsFromRow,
   resolveStoredDiscountCaps,
 };
