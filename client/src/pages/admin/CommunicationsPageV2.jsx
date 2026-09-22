@@ -940,8 +940,12 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
 
   const selectSmsRecipient = (contactPhone, ourNumber, customerId, replyTo) => {
     if (sending || uploading || listening) return;
-    setDraftForRecipient(contactPhone ? smsThreadKey(contactPhone) : "", (draft) => {
+    const selectedDraft = setDraftForRecipient(contactPhone ? smsThreadKey(contactPhone) : "", (draft) => {
       const hasDraft = draft.msgBody.trim() || draft.attachments.length || draft.loadedMessageDraft;
+      if (hasDraft && (draft.selectedCustomerId || null) !== (customerId || null)) {
+        setSendResult({ ok: false, text: "Saved draft kept with its original customer. Clear the draft before choosing another customer on this phone number." });
+        return {};
+      }
       if (hasDraft && draft.fromNumber && ourNumber
         && phoneKey(draft.fromNumber) !== phoneKey(ourNumber)
         && (replyTo === undefined || (replyTo?.messageId && replyTo.messageId !== draft.replyContext?.messageId))) {
@@ -958,6 +962,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     });
     setToNumber(contactPhone);
     setToSearch("");
+    return selectedDraft;
   };
 
   const customerSender = customer && customerMessages.find((message) => message.channel === "sms"
@@ -1012,11 +1017,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       if (Array.isArray(logData?.messages) && !logData.error) {
         const retainHistory = options.refresh && smsLoadedSearchRef.current === normalizedSearch;
         setMessages((prev) => append || retainHistory ? mergeSmsMessages(prev, logData.messages) : logData.messages);
-        if (!retainHistory || smsPageRef.current === 1) {
-          smsPageRef.current = logData.page || page;
-          setSmsPage(smsPageRef.current);
-          setSmsHasMore(!!logData.hasMore);
-        }
+        smsPageRef.current = logData.page || page;
+        setSmsPage(smsPageRef.current);
+        setSmsHasMore(!!logData.hasMore);
         smsLoadedSearchRef.current = normalizedSearch;
         setSmsLoadError("");
       } else {
@@ -1164,7 +1167,10 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           }
         })
         .catch(() => {
-          if (!cancelled) setAgentDraft(null);
+          if (!cancelled) {
+            setAgentDraft(null);
+            setSelectedAgentDraft(null);
+          }
         })
         .finally(() => {
           if (!cancelled) setAgentDraftLoading(false);
@@ -2671,8 +2677,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                 onClick={() => {
                   if (sending || uploading || listening) return;
                   const name = getCustomerOptionName(c);
-                  selectSmsRecipient(c.phone || "", null, c.id);
-                  setToSearch(`${name} — ${c.phone || ""}`);
+                  const selectedDraft = selectSmsRecipient(c.phone || "", null, c.id);
+                  if (selectedDraft?.selectedCustomerId === c.id) setToSearch(`${name} — ${c.phone || ""}`);
                   setToResults([]);
                 }}
                 className="px-3 py-2 cursor-pointer border-b border-hairline border-zinc-200 text-ui-body text-zinc-900 hover:bg-zinc-50"

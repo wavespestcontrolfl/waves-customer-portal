@@ -166,15 +166,17 @@ it("does not replace a newer search with a delayed previous result", async () =>
   expect(screen.queryByText("Stale result")).not.toBeInTheDocument();
 });
 
-it("keeps loaded older history and its pagination position during polling", async () => {
+it("keeps older history but restarts pagination so refreshed pages cannot be skipped", async () => {
   loadLog = (url) => response({ messages: [inbound(url.searchParams.get("page"), `Page ${url.searchParams.get("page")}`, `+1941555010${url.searchParams.get("page")}`)], hasMore: true, page: Number(url.searchParams.get("page")) });
   setup(); await tick();
   fireEvent.click(screen.getByRole("button", { name: /Load older/ })); await tick();
   expect(screen.getByText("Page 2")).toBeInTheDocument();
+  loadLog = (url) => response({ messages: [inbound(`fresh-${url.searchParams.get("page")}`, `Fresh page ${url.searchParams.get("page")}`, `+1941555020${url.searchParams.get("page")}`)], hasMore: true, page: Number(url.searchParams.get("page")) });
   await tick(30000);
   expect(screen.getByText("Page 2")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: /Load older/ })); await tick();
-  expect(screen.getByText("Page 3")).toBeInTheDocument();
+  expect(screen.getByText("Fresh page 2")).toBeInTheDocument();
+  expect(new URL(String(logRequests().at(-1)[0]), "http://localhost").searchParams.get("page")).toBe("2");
 });
 
 it("restores each conversation's own text and attachments when switching customers", async () => {
@@ -406,4 +408,37 @@ it.each([23, 24])("checks restored attachment expiry at send time (%s hours old)
   fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
   expect(smsRequests()).toHaveLength(1);
   expect(JSON.parse(smsRequests()[0][1].body).body).toBe("Gate photo");
+});
+
+
+it("keeps a recovered draft bound to its customer when another customer shares the phone", async () => {
+  const owner = "shared-phone-customer-owner";
+  saveDraft(owner, { msgBody: "Reply for property A", fromNumber: line, selectedCustomerId: "customer-a", attachments: [attachment], replyContext: { messageId: "request-a", phone: "9415550100", customerId: "customer-a" } });
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => String(url).includes("/admin/customers?")
+    ? response({ customers: [{ id: "customer-b", first_name: "Property", last_name: "B", phone: "+19415550100" }] }) : originalFetch(url, options));
+  setupWithOwner(owner); await tick();
+  fireEvent.change(screen.getByPlaceholderText("Search by name or enter phone number…"), { target: { value: "Property" } }); await tick();
+  fireEvent.click(screen.getByText("Property B")); await tick();
+  expect(screen.getByText(/Saved draft kept with its original customer/)).toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "Text message" })).toHaveValue("Reply for property A");
+  expect(screen.getByRole("button", { name: "Remove gate.png" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
+  const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/communications/sms"));
+  expect(JSON.parse(request[1].body)).toMatchObject({ customerId: "customer-a", replyToMessageId: "request-a", mediaUrls: [attachment.url] });
+});
+
+it("drops an unverifiable recovered agent selection while retaining the editable reply", async () => {
+  const owner = "failed-agent-lookup-owner";
+  saveDraft(owner, { msgBody: "My edited reply", fromNumber: line, selectedAgentDraft: { decisionId: "stale-decision", suggestedMessage: "Original suggestion" } });
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => String(url).includes("/communications/agent-draft?")
+    ? response({ error: "Unavailable" }, 503) : originalFetch(url, options));
+  setupWithOwner(owner); await tick();
+  fireEvent.change(screen.getByPlaceholderText("Search by name or enter phone number…"), { target: { value: "+19415550100" } }); await tick();
+  expect(screen.getByRole("textbox", { name: "Text message" })).toHaveValue("My edited reply");
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
+  const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/communications/sms"));
+  expect(JSON.parse(request[1].body)).not.toHaveProperty("agentDecisionId");
+  expect(JSON.parse(request[1].body)).toMatchObject({ body: "My edited reply", fromNumber: line });
 });
