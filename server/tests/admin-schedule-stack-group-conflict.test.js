@@ -45,7 +45,14 @@ const mockDb = jest.fn((table) => {
   q.whereIn = jest.fn((_col, ids) => { q.__whereInIds = ids; return q; });
   q.select = jest.fn(async (...cols) => {
     if (table === 'discounts' && Array.isArray(q.__whereInIds)) {
-      return q.__whereInIds.map((id) => DISCOUNTS[id]).filter(Boolean)
+      if (mockDb.__discountsSelectThrows) throw new Error('connection reset');
+      // __missingIds simulates a referenced discount id with NO catalog
+      // row at all (e.g. deleted between selection and this request) --
+      // filtered out of the returned set, same as a real whereIn would.
+      const ids = mockDb.__missingIds
+        ? q.__whereInIds.filter((id) => !mockDb.__missingIds.includes(id))
+        : q.__whereInIds;
+      return ids.map((id) => DISCOUNTS[id]).filter(Boolean)
         .map((row) => Object.fromEntries(cols.map((c) => [c, row[c]])));
     }
     return [];
@@ -100,6 +107,8 @@ beforeEach(() => {
   mockGateEnabled = true;
   mockDb.__customer = CUSTOMER;
   mockDb.__service = null;
+  mockDb.__discountsSelectThrows = false;
+  mockDb.__missingIds = null;
 });
 
 describe('assertNoDiscountStackGroupConflict / discountStackGroupRowsForPricing (unit)', () => {
@@ -192,5 +201,64 @@ describe('POST /api/admin/schedule — stack_group conflict (end to end, one-tim
     await handler(req, res, next);
     expect(res.status).toHaveBeenCalledWith(400);
     expect(res.body.code).toBe('DISCOUNT_STACK_GROUP_CONFLICT');
+  });
+});
+
+describe('GitHub round 5 P1 follow-up (Codex, blocked push 5) — fail closed on a stack_group metadata lookup failure', () => {
+  test('unit: discountStackGroupRowsForPricing throws when the discounts query itself throws', async () => {
+    mockDb.__discountsSelectThrows = true;
+    const pricing = {
+      primaryDiscount: { discountId: 'silver', discountName: 'Silver tier' },
+      addonLines: [], appointmentDiscount: null,
+    };
+    await expect(discountStackGroupRowsForPricing(pricing)).rejects.toThrow('connection reset');
+  });
+
+  test('unit: discountStackGroupRowsForPricing throws when a referenced discount id has no catalog row (query succeeds, id missing)', async () => {
+    mockDb.__missingIds = ['silver'];
+    const pricing = {
+      primaryDiscount: { discountId: 'silver', discountName: 'Silver tier' },
+      addonLines: [], appointmentDiscount: null,
+    };
+    await expect(discountStackGroupRowsForPricing(pricing)).rejects.toThrow(/silver/);
+  });
+
+  test('end to end (creation route): a lookup failure rejects with a retryable error, never silently proceeding as conflict-free', async () => {
+    mockDb.__discountsSelectThrows = true;
+    const { req, res, next } = makeReqRes({
+      customerId: 'cust-1', scheduledDate: '2026-10-01', serviceType: 'Quarterly Pest Control',
+      primaryLinePrice: 100,
+      primaryLineDiscount: { discountId: 'silver', discountType: 'percentage', discountAmount: 10 },
+      discountId: 'gold', discountType: 'percentage', discountAmount: 15,
+    });
+    await handler(req, res, next);
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(res.body).toMatchObject({ code: 'DISCOUNT_STACK_GROUP_LOOKUP_FAILED' });
+    // Never the (wrong) conflict-free path this failure used to silently
+    // fall into -- no 400 conflict verdict, and no proceeding further
+    // (next() reserved for genuinely unhandled errors, not this one).
+    expect(res.status).not.toHaveBeenCalledWith(200);
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  test('end to end (preview route): a lookup failure surfaces as this group\'s own advisory error, isolated from other groups', async () => {
+    mockDb.__discountsSelectThrows = true;
+    const previewLayer = adminScheduleRouter.stack.find(
+      (l) => l.route && l.route.path === '/preview' && l.route.methods.post,
+    );
+    const previewHandler = previewLayer.route.stack[previewLayer.route.stack.length - 1].handle;
+    const { req, res, next } = makeReqRes({
+      groups: [{
+        key: 'g1', customerId: 'cust-1', serviceType: 'Quarterly Pest Control',
+        primaryLinePrice: 100,
+        primaryLineDiscount: { discountId: 'silver', discountType: 'percentage', discountAmount: 10 },
+        discountId: 'gold', discountType: 'percentage', discountAmount: 15,
+      }],
+    });
+    await previewHandler(req, res, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(res.body.results[0].error).toEqual(expect.stringContaining('connection reset'));
+    // Never a fabricated conflict-free verdict for this group.
+    expect(res.body.results[0].stackGroupConflict).toBeUndefined();
   });
 });

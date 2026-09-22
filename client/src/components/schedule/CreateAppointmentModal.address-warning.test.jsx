@@ -164,10 +164,17 @@ function installModalFetch({
       const queued = Array.isArray(previewResponses) ? previewResponses[previewCalls] : undefined;
       previewCalls += 1;
       if (queued) return Promise.resolve(jsonResponse(queued(groups)));
-      // Echo one no-error result per requested group so previewGroupError
-      // never blocks Submit in tests that don't exercise it specifically —
-      // this mock intentionally does NOT replicate real pricing math.
-      return Promise.resolve(jsonResponse({ regime: true, results: groups.map((g) => ({ key: g.key, price: 0 })) }));
+      // Echo one no-error, no-price result per requested group so
+      // previewGroupError never blocks Submit in tests that don't
+      // exercise it specifically. Deliberately NO `price` field: this
+      // mock does not replicate real pricing math, and
+      // groupStackedPerVisitTotal now reads a fresh preview row's price
+      // when one is present (round 5 P0) -- a fabricated price here would
+      // silently override every OTHER test's own (correct) locally-
+      // computed display/prepay assertions once the debounce resolves.
+      // Omitting it makes that same read fall through to the local
+      // computation, unchanged, exactly as before this fix existed.
+      return Promise.resolve(jsonResponse({ regime: true, results: groups.map((g) => ({ key: g.key })) }));
     }
     throw new Error(`Unhandled fetch in CreateAppointmentModal test: ${url}`);
   });
@@ -1963,6 +1970,55 @@ describe('GitHub round 4 item 2: the preview request matches the real POST body 
   });
 });
 
+describe('GitHub round 5 P1 (Codex, blocked push 5 on PR #4656) — explicit zero primary price parity', () => {
+  const previewPost = (fetcher) => fetcher.mock.calls.filter(
+    ([url, options]) => String(url).endsWith('/admin/schedule/preview') && options?.method === 'POST',
+  );
+
+  // The real submit body sends primaryLinePrice: 0 for a non-mosquito
+  // primary EXPLICITLY priced at zero (groupHasPrice's own formula, in
+  // appointmentGroupRequestBody) -- the preview request used to send
+  // null instead (amountOrNull gated preserveZero to mosquito lines
+  // only), inflating the preview to the catalog price and, with a
+  // discounted paid add-on and collectPrepay, posting a HIGHER prepaid
+  // total than the preview showed -- exactly what the server's own
+  // PREPAY_TOTAL_DIVERGED check (round 4) would then reject.
+  it('previews primaryLinePrice: 0 for an explicit-zero primary, matching the real POST, not null', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    const { fetcher } = installModalFetch({
+      basePrice: 100,
+      discounts: [{ id: 'half-off', name: 'Half Off', discount_type: 'percentage', amount: 50, is_active: true, show_in_invoices: true }],
+    });
+    renderBooking();
+    fireEvent.change(screen.getByPlaceholderText('Search services'), { target: { value: 'Quarterly' } });
+    fireEvent.click(await screen.findByRole('button', { name: /Quarterly recurring service/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Add service/ }));
+    fireEvent.change(screen.getByPlaceholderText('Search to add service'), { target: { value: 'Monthly' } });
+    fireEvent.click(await screen.findByRole('button', { name: /Monthly recurring service/ }));
+    // Monthly (server order: primary) explicitly priced at $0 -- a
+    // deliberate waiver, not a blank/auto price.
+    const priceInputs = screen.getAllByPlaceholderText('0.00');
+    fireEvent.change(priceInputs[1], { target: { value: '0' } });
+    // Quarterly (server order: addon) keeps its normal $100 and carries
+    // the discount -- this is what makes the group regime-dependent and
+    // starts the preview fetch at all.
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for Quarterly recurring service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Half Off/ }));
+
+    await waitFor(() => expect(previewPost(fetcher).length).toBeGreaterThan(0));
+    const [, options] = previewPost(fetcher).at(-1);
+    const previewGroup = JSON.parse(options.body).groups.find((g) => g.serviceType === 'Monthly recurring service');
+    expect(previewGroup.primaryLinePrice).toBe(0);
+
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    const realBody = JSON.parse(schedulePosts(fetcher)[0][1].body);
+    expect(realBody.primaryLinePrice).toBe(previewGroup.primaryLinePrice);
+  });
+});
+
 describe('GitHub round 4 item 3 follow-up (Codex, blocked push 3 on PR #4656)', () => {
   // P1 (:3378): after the appointment-discount group commits,
   // appointmentDiscountCompound freezes (round 4's own :3513 fix) — a
@@ -2119,5 +2175,37 @@ describe('GitHub round 4 item 1 (Codex, blocked push 4 on PR #4656) — prepaid 
     // 2 visits x the PREVIEW's $42/visit = $84 -- never the client
     // engine's own $19.66/visit x 2 = $39.32.
     expect(body.prepaid.totalAmount).toBe(84);
+  });
+
+  // GitHub round 5 P0 (Codex, blocked push 5): the round-4 fix made the
+  // POSTED prepaid.totalAmount preview-sourced without also making the
+  // DISPLAYED "N visits x $X" text read the same number -- an operator
+  // could see one figure and have a DIFFERENT one actually billed.
+  // groupStackedPerVisitTotal (the one function both the display and the
+  // POST now funnel through) reads a fresh preview row's price first, so
+  // this proves the DISPLAY updates to match the preview too, not just
+  // the wire.
+  it('displays the "N visits x $X" prepay preview from the server preview, not the client engine, once it lands', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    installModalFetch({
+      basePrice: 20.70,
+      discounts: [{ id: 'five-pct', name: 'Five Percent', discount_type: 'percentage', amount: 5, is_active: true, show_in_invoices: true }],
+      previewResponses: [
+        (groups) => ({ regime: true, results: groups.map((g) => ({ key: g.key, price: 42, prepay: { perVisit: 42, totalAmount: 84 } })) }),
+      ],
+    });
+    renderBooking();
+    await addOneSeasonalService();
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for First seasonal service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Five Percent/ }));
+    fireEvent.change(screen.getByPlaceholderText('Ongoing'), { target: { value: '2' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Collect prepayment' }));
+
+    // Before the preview lands, the local (client engine) figure still
+    // shows -- this fix does not change that transient window.
+    await screen.findByText((_, node) => node?.textContent === '2 visits × $19.66 = $39.32');
+    // Once the preview resolves, the display SWITCHES to its number.
+    await screen.findByText((_, node) => node?.textContent === '2 visits × $42.00 = $84.00');
+    expect(screen.queryByText((_, node) => node?.textContent === '2 visits × $19.66 = $39.32')).toBeNull();
   });
 });

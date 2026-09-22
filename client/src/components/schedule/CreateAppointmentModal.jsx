@@ -2757,6 +2757,24 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // projection, which otherwise multiplies a subtotal that never had the
   // appointment discount taken off it (Codex #4405 r3 P1).
   const groupStackedPerVisitTotal = (group) => {
+    // GitHub round 5 P0 (Codex, blocked push 5 on PR #4656): the group's
+    // POSTED prepay total already sources from serverPreview (round 4
+    // item 1) — reading it HERE too, the one function every DISPLAY of a
+    // group's per-visit price already funnels through (the "N visits ×
+    // $X" prepay text below, and manualPrepayPlan's own price query),
+    // makes the display and the POST read the identical number by
+    // construction instead of two independently-computed ones that could
+    // (and, per this finding, did) diverge whenever a catalog value
+    // changed mid-session — display and write no longer just HAPPEN to
+    // agree, there is only the one source. Only for a FRESH preview
+    // (status ready, keyed to the CURRENT inputs) — a stale/in-flight
+    // preview falls through to the local computation below exactly as it
+    // always has, since Submit is independently held (previewConfirming)
+    // until a fresh one lands for any group this matters for.
+    if (serverPreview.status === 'ready' && serverPreview.forKey === previewRequestKey) {
+      const row = serverPreview.byKey.get(groupKey(group));
+      if (row && typeof row.price === 'number' && typeof row.error !== 'string') return row.price;
+    }
     const carriesAppointmentDiscount = !!appointmentDiscount
       && !!appointmentDiscountGroup
       && groupKey(group) === appointmentDiscountGroup.key;
@@ -2853,14 +2871,30 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         if (!groupRegimeDependent(group, carriesDiscount)) return null;
         const [primary, ...extras] = group.lines;
         const groupIsRecurring = group.cadence !== 'one_time';
-        const primaryPreserveZero = isOneTimeMosquitoLine(primary) && lineHasEnteredPrice(primary);
+        // GitHub round 5 P1 (Codex, blocked push 5): the REAL submit body
+        // (appointmentGroupRequestBody, in submitAppointments below) does
+        // NOT gate the primary's zero-vs-null on a per-line mosquito
+        // preserveZero flag the way an addon's basePrice does — it uses
+        // groupHasPrice (does ANY line in the group carry an entered
+        // price) together with the group's own blank-auto-mosquito flag.
+        // This used to diverge from that (amountOrNull(...,
+        // primaryPreserveZero) with preserveZero gated to mosquito-only),
+        // so an ordinary non-mosquito primary EXPLICITLY priced at $0
+        // previewed as null (server substitutes the catalog price) while
+        // the real POST correctly sent 0 — an inflated preview that, with
+        // a discounted paid add-on and prepay collection, posted a HIGHER
+        // total than the preview showed and the server's own
+        // PREPAY_TOTAL_DIVERGED check then rejected. Mirrors
+        // appointmentGroupRequestBody's own formula exactly now.
+        const groupHasPrice = group.lines.some(lineHasEnteredPrice);
+        const primaryIsBlankAutoMosquito = isOneTimeMosquitoLine(primary) && !lineHasEnteredPrice(primary);
         return {
           key,
           customerId: selectedCustomer.id,
           scheduledDate: apptDate,
           serviceType: primary?.name,
           serviceId: primary?.id || null,
-          primaryLinePrice: amountOrNull(lineBaseAmount(primary), primaryPreserveZero),
+          primaryLinePrice: primaryIsBlankAutoMosquito ? null : (groupHasPrice ? lineBaseAmount(primary) : null),
           primaryLineDiscount: primary?.lineDiscount ? lineDiscountFields(primary.lineDiscount, lineDiscountAmount(primary)) : undefined,
           serviceAddons: extras.map((s) => {
             const preserveZero = isOneTimeMosquitoLine(s) && lineHasEnteredPrice(s);

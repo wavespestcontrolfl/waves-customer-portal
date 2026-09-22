@@ -6033,11 +6033,26 @@ async function discountStackGroupRowsForPricing(pricing) {
   ].filter(Boolean);
   let stackGroupById = new Map();
   if (discountIdsInPricing.length) {
-    try {
-      const rows = await db('discounts').whereIn('id', [...new Set(discountIdsInPricing)]).select('id', 'stack_group', 'is_stackable');
-      stackGroupById = new Map(rows.map((r) => [String(r.id), r]));
-    } catch (e) {
-      logger.warn(`[schedule] stack_group lookup failed: ${e.message}`);
+    // GitHub round 5 P1 (Codex, blocked push 5): a swallowed lookup
+    // failure used to leave every row's stack_group/is_stackable
+    // undefined, and stackGroupConflict SKIPS a row with no stack_group
+    // at all — silently disabling the conflict check itself (both here
+    // and in the creation route's own hard 400 below) on a transient DB
+    // hiccup, exactly when it matters least to fail open. Propagated
+    // instead: each caller decides how to fail closed (the creation
+    // route as a retryable error before any write; the preview route as
+    // a per-group advisory error, matching its own buildAppointmentPricing
+    // catch immediately above this call).
+    const rows = await db('discounts').whereIn('id', [...new Set(discountIdsInPricing)]).select('id', 'stack_group', 'is_stackable');
+    stackGroupById = new Map(rows.map((r) => [String(r.id), r]));
+    // Also fail closed when the query itself SUCCEEDS but a referenced id
+    // has no catalog row at all (deleted between selection and this
+    // request) — that id's stack_group is unknowable, not "none", and
+    // treating unknowable as "none" is exactly the same silent-disable
+    // this fix closes.
+    const missing = discountIdsInPricing.filter((id) => !stackGroupById.has(String(id)));
+    if (missing.length) {
+      throw new Error(`Could not confirm the catalog stack_group for discount id(s): ${[...new Set(missing)].join(', ')}`);
     }
   }
   const conflictRow = (discount, lane) => {
@@ -6131,7 +6146,20 @@ router.post('/preview', requireAdmin, async (req, res, next) => {
       // as a hard 400, so the client sees the exact conflict it would hit
       // on save before ever submitting (GitHub round 5 P1 follow-up on
       // 3c7214fa45).
-      const conflictRows = await discountStackGroupRowsForPricing(pricing);
+      //
+      // GitHub round 5 P1 follow-up (Codex, blocked push 5): a lookup
+      // failure surfaces as THIS group's own advisory error — same
+      // per-group-isolation contract as the buildAppointmentPricing catch
+      // immediately above — rather than silently reporting a
+      // conflict-free verdict the create route's own hard 400 would then
+      // disagree with.
+      let conflictRows;
+      try {
+        conflictRows = await discountStackGroupRowsForPricing(pricing);
+      } catch (e) {
+        results.push({ key: key ?? null, error: e.message || 'stack-group lookup failed' });
+        continue;
+      }
       let stackGroupConflictVerdict = null;
       try { stackGroupConflictVerdict = discountStackGroupConflict(conflictRows); } catch { stackGroupConflictVerdict = null; }
 
@@ -6764,7 +6792,22 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // below has not opened yet) — a conflict throws a plain operational
     // 400, not the transaction's own rollback path, since nothing has
     // been written for it to roll back.
-    assertNoDiscountStackGroupConflict(await discountStackGroupRowsForPricing(pricing));
+    //
+    // GitHub round 5 P1 follow-up (Codex, blocked push 5): a failed
+    // stack_group lookup must FAIL CLOSED (a retryable error), never
+    // silently proceed as if the conflict check found nothing — the
+    // exact silent-disable this whole check exists to prevent, just
+    // moved one layer down.
+    let stackGroupRows;
+    try {
+      stackGroupRows = await discountStackGroupRowsForPricing(pricing);
+    } catch (e) {
+      throw Object.assign(
+        httpError(503, 'Could not confirm the discount rules for this booking — try again'),
+        { code: 'DISCOUNT_STACK_GROUP_LOOKUP_FAILED' },
+      );
+    }
+    assertNoDiscountStackGroupConflict(stackGroupRows);
 
     // Re-service callbacks default to $0 for WaveGuard customers, but an operator
     // can still enter an explicit charge (e.g. a re-service that also handled a
