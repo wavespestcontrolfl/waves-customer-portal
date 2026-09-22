@@ -1098,6 +1098,176 @@ postgres('round 5 on #4657 — service-swap freshness, and a gross echo does not
   });
 });
 
+postgres('round 6 on #4657 — a primary-service swap revalidates the stored discount, and the preview never shows a discount the same save just cleared', () => {
+  let database;
+  let trx;
+  let customerId;
+
+  beforeAll(() => {
+    const connection = process.env.DATABASE_URL;
+    const url = new URL(connection);
+    const localCI = ['localhost', '127.0.0.1'].includes(url.hostname);
+    const ownedQA = process.env.WAVES_LOCAL_DEV === '1'
+      && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
+    if (!localCI && !ownedQA) throw new Error('Use disposable CI or this worktree\'s private QA database');
+    database = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 2 } });
+    require('../models/db').connection = database;
+  });
+
+  beforeEach(async () => {
+    delete process.env.GATE_DISCOUNT_STACKING;
+    trx = await database.transaction();
+    require('../models/db').connection = trx;
+    customerId = randomUUID();
+    await trx('customers').insert({
+      id: customerId, first_name: 'Synthetic', last_name: 'Fixture',
+      email: `${customerId}@example.invalid`, phone: `fixture-${customerId.slice(0, 8)}`,
+      address_line1: '100 Test Lane', city: 'Test City', zip: '00000', active: true,
+      pipeline_stage: 'active_customer',
+    });
+  });
+
+  afterEach(async () => { if (trx) await trx.rollback(); delete process.env.GATE_DISCOUNT_STACKING; });
+  afterAll(async () => { await database?.destroy(); });
+
+  const router = require('../routes/admin-schedule');
+  function findHandler(method, path) {
+    const layer = router.stack.find((l) => l.route?.path === path && l.route.methods[method]);
+    return layer.route.stack[layer.route.stack.length - 1].handle;
+  }
+  async function call(method, id, body) {
+    const handler = findHandler(method, '/:id/update-details' + (method === 'post' ? '/preview' : ''));
+    const req = { params: { id }, query: {}, body, headers: {} };
+    let statusCode = 200;
+    let payload = null;
+    const res = { status(code) { statusCode = code; return this; }, json(p) { payload = p; return this; } };
+    let nextErr = null;
+    await handler(req, res, (err) => { nextErr = err; });
+    return { statusCode, payload, err: nextErr };
+  }
+  const preview = (id, body) => call('post', id, body);
+  const put = (id, body) => call('put', id, body);
+
+  async function seedNoAddonVisit({ discountId, discountKey, serviceKeyFilter }) {
+    let mosquitoSvc = await trx('services').where({ service_key: 'mosquito_monthly' }).first();
+    if (!mosquitoSvc) {
+      [mosquitoSvc] = await trx('services').insert({
+        id: randomUUID(), service_key: 'mosquito_monthly', name: 'Monthly Mosquito',
+        category: 'mosquito', frequency: 'monthly', billing_type: 'recurring', visits_per_year: 12,
+      }).returning('*');
+    }
+    let termiteSvc = await trx('services').where({ service_key: 'termite_bond' }).first();
+    if (!termiteSvc) {
+      [termiteSvc] = await trx('services').insert({
+        id: randomUUID(), service_key: 'termite_bond', name: 'Termite Bond',
+        category: 'termite', frequency: 'annual', billing_type: 'recurring', visits_per_year: 1,
+      }).returning('*');
+    }
+    await trx('discounts').insert({
+      id: discountId, discount_key: discountKey, name: 'Mosquito Only',
+      discount_type: 'fixed_amount', amount: 10, is_active: true, is_auto_apply: false, show_in_invoices: true,
+      service_key_filter: serviceKeyFilter,
+    });
+    const [row] = await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, service_type: 'Monthly Mosquito',
+      service_id: mosquitoSvc.id, service_key_snapshot: 'mosquito_monthly',
+      service_category_snapshot: 'mosquito', status: 'confirmed',
+      scheduled_date: '2040-02-01', window_start: '08:00', window_end: '10:00',
+      // Stored: $50 gross, $10 fixed discount, $40 net.
+      estimated_price: 40, primary_line_price: 50,
+      discount_type: 'fixed_amount', discount_amount: 10, discount_id: discountId,
+    }).returning('*');
+    return { visitId: row.id, mosquitoSvc, termiteSvc };
+  }
+
+  test(':9415 — swapping ONLY the primary service to one outside the stored discount\'s scope drops the discount instead of silently carrying it over', async () => {
+    const discountId = randomUUID();
+    const { visitId: id, termiteSvc } = await seedNoAddonVisit({
+      discountId, discountKey: 'mosquito_only_' + discountId.slice(0, 8), serviceKeyFilter: 'mosquito_monthly',
+    });
+    // Price/discount echoed VERBATIM (the modal round-trips the stored
+    // stamp unless the operator touches it) — only serviceId changed, to a
+    // service the Mosquito-Only preset does not reach.
+    const body = {
+      serviceId: termiteSvc.id, estimatedPrice: 40, discountType: 'fixed_amount', discountAmount: 10, discountId,
+    };
+    const previewResult = await preview(id, body);
+    expect(previewResult.err).toBeFalsy();
+    expect(previewResult.statusCode).toBe(200);
+    // Ineligible for the new service — dropped, not rejected: the full
+    // $50 (undiscounted) is what this save would actually persist.
+    expect(Number(previewResult.payload.total)).toBe(50);
+    const saveResult = await put(id, body);
+    expect(saveResult.err).toBeFalsy();
+    expect(saveResult.statusCode).toBe(200);
+    const savedRow = await trx('scheduled_services').where({ id }).first();
+    expect(Number(savedRow.estimated_price)).toBe(50);
+    expect(savedRow.discount_type).toBeNull();
+    expect(savedRow.discount_amount).toBeNull();
+    expect(savedRow.service_id).toBe(termiteSvc.id);
+  });
+
+  test(':9415 — swapping ONLY the primary service to one still inside the stored discount\'s scope preserves it', async () => {
+    const discountId = randomUUID();
+    let mosquitoSvc2 = await trx('services').where({ service_key: 'mosquito_monthly_v2' }).first();
+    if (!mosquitoSvc2) {
+      [mosquitoSvc2] = await trx('services').insert({
+        id: randomUUID(), service_key: 'mosquito_monthly_v2', name: 'Monthly Mosquito Plus',
+        category: 'mosquito', frequency: 'monthly', billing_type: 'recurring', visits_per_year: 12,
+      }).returning('*');
+    }
+    const { visitId: id } = await seedNoAddonVisit({
+      discountId, discountKey: 'mosquito_only_' + discountId.slice(0, 8), serviceKeyFilter: null,
+    });
+    // A preset with NO service_key_filter reaches every service — swap
+    // stays eligible.
+    const body = {
+      serviceId: mosquitoSvc2.id, estimatedPrice: 40, discountType: 'fixed_amount', discountAmount: 10, discountId,
+    };
+    const previewResult = await preview(id, body);
+    expect(previewResult.err).toBeFalsy();
+    expect(previewResult.statusCode).toBe(200);
+    expect(Number(previewResult.payload.total)).toBe(40);
+    const saveResult = await put(id, body);
+    expect(saveResult.err).toBeFalsy();
+    expect(saveResult.statusCode).toBe(200);
+    const savedRow = await trx('scheduled_services').where({ id }).first();
+    expect(Number(savedRow.estimated_price)).toBe(40);
+    expect(savedRow.service_id).toBe(mosquitoSvc2.id);
+  });
+
+  test(':13361 — a price change on a no-add-on visit whose primary line carries a stored line-discount stamp previews the stamp as CLEARED, matching what the PUT actually persists', async () => {
+    const [row] = await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, service_type: 'Quarterly Pest Control',
+      service_key_snapshot: 'pest_general_quarterly', status: 'confirmed',
+      scheduled_date: '2040-02-01', window_start: '08:00', window_end: '10:00',
+      estimated_price: 90, primary_line_price: 100,
+      // A frozen primary-line discount stamp (distinct columns from the
+      // appointment-level discount_type/discount_amount above).
+      line_discount_id: randomUUID(), line_discount_name: 'Legacy Primary Discount',
+      line_discount_type: 'fixed_amount', line_discount_amount: 10, line_discount_dollars: 10,
+    }).returning('*');
+    const id = row.id;
+    // A genuine price edit — no addons array — takes the single-service
+    // rebase branch, which NULLS every line_discount_* column in `updates`
+    // for the real PUT.
+    const body = { estimatedPrice: 80 };
+    const previewResult = await preview(id, body);
+    expect(previewResult.err).toBeFalsy();
+    expect(previewResult.statusCode).toBe(200);
+    // The preview must show the cleared state, not the still-unwritten
+    // stale DB row.
+    expect(previewResult.payload.primaryLineDiscountDollars).toBeNull();
+    expect(previewResult.payload.primaryLineDiscountName).toBeNull();
+    const saveResult = await put(id, body);
+    expect(saveResult.err).toBeFalsy();
+    expect(saveResult.statusCode).toBe(200);
+    const savedRow = await trx('scheduled_services').where({ id }).first();
+    expect(savedRow.line_discount_dollars).toBeNull();
+    expect(savedRow.line_discount_name).toBeNull();
+  });
+});
+
 describe('scheduledServicesDiscountProvenanceColumns — fails CLOSED on a genuine introspection error (Codex pre-push audit P1, round 4 on #4657)', () => {
   // Pure unit test — no live DB needed at all: the function takes its
   // `database` handle as a plain argument, so a fake object whose own

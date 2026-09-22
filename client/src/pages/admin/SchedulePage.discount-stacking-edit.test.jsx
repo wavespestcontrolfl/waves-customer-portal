@@ -9,7 +9,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { EditServiceModal, verifiedLineDiscountCap, lineDiscountSaveBlocked } from './SchedulePage';
+import { EditServiceModal, lineDiscountSaveBlocked } from './SchedulePage';
 import { __resetDiscountStackingCache } from '../../hooks/useDiscountStacking';
 import { stackVisitDiscounts } from '../../lib/discountStack';
 
@@ -277,7 +277,7 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.resetAllMocks(); localStorage.clear(); });
 
-describe('lineDiscountSaveBlocked / verifiedLineDiscountCap', () => {
+describe('lineDiscountSaveBlocked', () => {
   it('blocks only when the gate is unconfirmed AND both an appointment pick and a line discount are in play', () => {
     // An untouched stamp counts only while its Price still matches its
     // seed — round 2's own :1678 fix.
@@ -300,18 +300,6 @@ describe('lineDiscountSaveBlocked / verifiedLineDiscountCap', () => {
       known: false, appointmentDiscountSelected: true,
       lines: [{ _origDiscountType: 'fixed_amount', price: '70', _seededPrice: '55' }],
     })).toBe(false);
-  });
-
-  it('trusts a stamp\'s own cap only when the catalog row still confirms its type/amount', () => {
-    const stamp = { discount_type: 'percentage', amount: 10, id: 'disc-silver' };
-    expect(verifiedLineDiscountCap(stamp, { discount_type: 'percentage', amount: 10, max_discount_dollars: 20 }))
-      .toMatchObject({ max_discount_dollars: 20 });
-    // Catalog amount now disagrees (preset edited since) — cap withheld, stamp unchanged.
-    expect(verifiedLineDiscountCap(stamp, { discount_type: 'percentage', amount: 15, max_discount_dollars: 20 }))
-      .toBe(stamp);
-    // No catalog row loaded yet — stamp unchanged.
-    expect(verifiedLineDiscountCap(stamp, null)).toBe(stamp);
-    expect(verifiedLineDiscountCap(null, {})).toBeNull();
   });
 });
 
@@ -1175,4 +1163,50 @@ it('round 5 (:2958): a notes-only save on an UNDISCOUNTED visit skips the submit
   await waitFor(() => expect(writes()).toHaveLength(1));
   // Exactly one stacking-probe call (the mount) — no submit-time re-probe.
   expect(stackingCalls).toBe(1);
+});
+
+// ---------------------------------------------------------------------
+// Round 6 on #4657 (GitHub review): the gate-close reset path (separate
+// from setLineDiscount's own firstTouch guard) had its own, unsynced copy
+// of "was Price snapped this session" — fresh evidence beyond round 5's
+// :2441 fix, which only touched the PICK-time guard.
+// ---------------------------------------------------------------------
+
+it('round 6 (:2342): an independent reprice BEFORE picking a fresh discount survives a subsequent gate-close reset, not just the pick itself', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(screen.getAllByText('Military Discount').length).toBeGreaterThan(0));
+  const priceInputs = screen.getAllByPlaceholderText('0.00');
+  const mosquitoPrice = priceInputs.find((i) => Number(i.value) === 55);
+  expect(mosquitoPrice).toBeTruthy();
+  // Independent price edit FIRST, same as :2441 — the discount control is
+  // still untouched, so setLineDiscount's own firstTouch has nothing to
+  // snap FROM once it fires next.
+  fireEvent.change(mosquitoPrice, { target: { value: '70' } });
+  const mosquitoPicker = screen.getByRole('combobox', { name: 'Line discount for Monthly Mosquito' });
+  // First touch of the discount control this session — :2441 already
+  // proved this alone doesn't reset Price. The NEW evidence is what
+  // happens next.
+  fireEvent.change(mosquitoPicker, { target: { value: 'disc-silver' } });
+  await waitFor(() => expect(screen.getAllByText('WaveGuard Silver').length).toBeGreaterThan(0));
+  const priceInputsMidEdit = screen.getAllByPlaceholderText('0.00');
+  expect(priceInputsMidEdit.find((i) => i.value === '70')).toBeTruthy();
+  // The gate closes before Save — the fresh Silver pick reverts through
+  // the SEPARATE gate-close reset effect (:2342), not setLineDiscount.
+  __resetDiscountStackingCache();
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
+    if (url.endsWith('/admin/discounts/stacking')) return { ok: true, json: async () => ({ enabled: false }) };
+    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => DISCOUNTS };
+    return { ok: true, json: async () => ({}) };
+  }));
+  await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+  await waitFor(() => expect(screen.queryByRole('combobox', { name: 'Line discount for Monthly Mosquito' })).not.toBeInTheDocument());
+  // The operator's own $70 — never touched by any snap this session —
+  // must survive the reset. The buggy version restored _seededPrice ($55)
+  // for EVERY originally-stamped line regardless of whether ITS OWN touch
+  // ever snapped anything.
+  const priceInputsAfter = screen.getAllByPlaceholderText('0.00');
+  expect(priceInputsAfter.find((i) => i.value === '70')).toBeTruthy();
+  expect(priceInputsAfter.find((i) => i.value === '55')).toBeFalsy();
 });

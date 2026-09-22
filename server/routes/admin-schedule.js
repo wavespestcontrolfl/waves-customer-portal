@@ -9368,6 +9368,7 @@ async function computeSingleServiceEstimatedPricePlan({
         const existingPrice = await db('scheduled_services')
           .where({ id: id })
           .first('estimated_price', 'discount_type', 'discount_amount',
+            ...(cols.service_id ? ['service_id'] : []),
             ...(cols.discount_max_dollars ? ['discount_max_dollars'] : []),
             ...(cols.service_key_snapshot ? ['service_key_snapshot'] : []),
             ...(cols.service_category_snapshot ? ['service_category_snapshot'] : []),
@@ -9412,7 +9413,30 @@ async function computeSingleServiceEstimatedPricePlan({
         // same-valued preset switch): the replacement preset must still run
         // eligibility and the scope-aware recomputation before its id/name/
         // filters persist (Codex #3531 r6 P1).
-        const shouldRebaseStoredDiscounts = priceChanged || discountTypeChanged || discountAmountChanged || appointmentDiscountChanged;
+        // Codex pre-push audit P1 (round 6 on #4657, :9415): a primary
+        // SERVICE swap can move this row out of (or into) its stored
+        // discount's scope at an identical, echoed-unchanged price/discount
+        // selection — mirrors the addons branch's own `primaryServiceChanged`
+        // doctrine above (:10053). `updates.*` only carries these keys when
+        // THIS save actually resolved a service pick (resolveReServiceConversion,
+        // above), so presence still isn't change.
+        const primaryServiceChanged = (updates.service_id !== undefined
+          && String(updates.service_id ?? '') !== String(existingPrice?.service_id ?? ''))
+          || (updates.service_key_snapshot !== undefined
+            && String(updates.service_key_snapshot ?? '') !== String(existingPrice?.service_key_snapshot ?? ''))
+          || (updates.service_category_snapshot !== undefined
+            && String(updates.service_category_snapshot ?? '') !== String(existingPrice?.service_category_snapshot ?? ''));
+        const shouldRebaseStoredDiscounts = priceChanged || discountTypeChanged || discountAmountChanged || appointmentDiscountChanged || primaryServiceChanged;
+        // True only when the service swap is the SOLE reason for rebasing —
+        // the operator never touched price or the discount control at all
+        // (it round-trips the stored selection verbatim, same as every other
+        // untouched-stamp contract in this file). That is the one case where
+        // an ineligible result must silently DROP the discount rather than
+        // reject the save — an operator who deliberately picks an
+        // incompatible discount still gets presetEligibilityCheck's own 400
+        // (Codex #3531 r2 P1's original contract, unchanged).
+        const serviceOnlyRebase = primaryServiceChanged && !priceChanged
+          && !discountTypeChanged && !discountAmountChanged && !appointmentDiscountChanged;
         if (!shouldRebaseStoredDiscounts) {
           // The gross-echo case must write back the STORED NET, never the
           // echoed gross itself — writing basePrice ($100) here would
@@ -9421,7 +9445,21 @@ async function computeSingleServiceEstimatedPricePlan({
           if (cols.estimated_price) updates.estimated_price = isUnchangedGrossEcho ? existingEstimatedPrice : basePrice;
           throw new Error('noop-price-save');
         }
-        let finalPrice = basePrice;
+        // Codex pre-push audit P1 (round 6 on #4657, :9415): a
+        // serviceOnlyRebase's posted `estimatedPrice` is the stored NET,
+        // unedited (round 5 :6083's own contract for a zero-add-on visit —
+        // the operator never touched Price at all here). Re-discounting
+        // that NET as if it were a fresh gross (basePrice) would silently
+        // double-apply the stored discount ($40 net -> $30). Replay FROM
+        // the stored gross (primary_line_price) instead whenever Price
+        // itself is genuinely untouched; any OTHER trigger (an actual price
+        // or discount edit) still means the operator's own posted
+        // estimatedPrice IS the intended new gross, unchanged from before
+        // this round.
+        const rebaseBasePrice = (serviceOnlyRebase && existingPrimaryGross != null)
+          ? existingPrimaryGross
+          : basePrice;
+        let finalPrice = rebaseBasePrice;
         if (discountType && discountAmount != null && discountAmount !== '') {
           finalPrice = applyDiscount(finalPrice, discountType, discountAmount);
         }
@@ -9434,7 +9472,7 @@ async function computeSingleServiceEstimatedPricePlan({
           const value = Number(addon.base_price != null ? addon.base_price : addon.estimated_price);
           return Number.isFinite(value) && value > 0 ? sum + value : sum;
         }, 0);
-        const primaryGross = Math.max(0, Math.round((basePrice - addonBaseTotal) * 100) / 100);
+        const primaryGross = Math.max(0, Math.round((rebaseBasePrice - addonBaseTotal) * 100) / 100);
         // Percent-excluded lines stay out of a percentage discount here too —
         // this branch runs for add-on-less saves (Codex #3531 r1 P1), and a
         // catalog PRESET always goes through the canonical calculator so its
@@ -9467,23 +9505,36 @@ async function computeSingleServiceEstimatedPricePlan({
           }, legacyLines);
           if (exclusionAware.price != null) finalPrice = exclusionAware.price;
         }
-        await presetEligibilityCheck([
-          {
-            amount: primaryGross,
-            serviceKey: legacyPrimaryKey,
-            serviceCategory: legacyPrimaryCategory,
-          },
-          ...legacyLines.map((l) => ({ amount: l.price, serviceKey: l.serviceKey, serviceCategory: l.serviceCategory })),
-        ]);
+        let effectiveDiscountType = discountType;
+        let effectiveDiscountAmount = discountAmount;
+        try {
+          await presetEligibilityCheck([
+            {
+              amount: primaryGross,
+              serviceKey: legacyPrimaryKey,
+              serviceCategory: legacyPrimaryCategory,
+            },
+            ...legacyLines.map((l) => ({ amount: l.price, serviceKey: l.serviceKey, serviceCategory: l.serviceCategory })),
+          ]);
+        } catch (eligibilityErr) {
+          if (!serviceOnlyRebase || !eligibilityErr?.isOperational) throw eligibilityErr;
+          // The service swap alone made the stored discount ineligible —
+          // drop it silently (the operator didn't pick anything invalid,
+          // the visit just moved out of scope) rather than 400ing a save
+          // that never touched the discount control.
+          finalPrice = rebaseBasePrice;
+          effectiveDiscountType = null;
+          effectiveDiscountAmount = null;
+        }
         const replayGross = Math.round((primaryGross + addonBaseTotal) * 100) / 100;
         const replayDiscountDollars = Math.max(0, Math.round((replayGross - finalPrice) * 100) / 100);
         if (cols.estimated_price) updates.estimated_price = finalPrice;
         if (cols.primary_line_price) updates.primary_line_price = primaryGross;
         clearAppointmentDiscountCatalogFields(updates, cols);
-        if (cols.discount_type) updates.discount_type = discountType || (replayDiscountDollars > 0 ? 'fixed_amount' : null);
+        if (cols.discount_type) updates.discount_type = effectiveDiscountType || (replayDiscountDollars > 0 ? 'fixed_amount' : null);
         if (cols.discount_amount) {
-          updates.discount_amount = (discountAmount != null && discountAmount !== '')
-            ? Number(discountAmount)
+          updates.discount_amount = (effectiveDiscountAmount != null && effectiveDiscountAmount !== '')
+            ? Number(effectiveDiscountAmount)
             : (replayDiscountDollars > 0 ? replayDiscountDollars : null);
         }
         if (cols.discount_dollars) updates.discount_dollars = replayDiscountDollars > 0 ? replayDiscountDollars : null;
@@ -13349,19 +13400,32 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
     });
 
     // Client rearchitecture (structural round 3 on #4657): the primary
-    // line's own discount is FROZEN — this editor never displays or edits
-    // it, and computeUpdateDetailsFinancialPlan never writes it either (see
-    // "can't resend them" on the real save's own primary-line comment) — so
-    // it is read directly, verbatim, rather than re-derived: nothing this
-    // save does can change it.
-    const primaryLineDiscountRow = (cols.line_discount_dollars || cols.line_discount_name)
-      ? await db('scheduled_services').where({ id })
-          .first(
-            ...(cols.line_discount_dollars ? ['line_discount_dollars'] : []),
-            ...(cols.line_discount_name ? ['line_discount_name'] : []),
-          )
-          .catch(() => null)
-      : null;
+    // line's own discount is FROZEN for MOST saves — this editor never
+    // displays or edits it, and most of computeUpdateDetailsFinancialPlan
+    // never writes it either (see "can't resend them" on the real save's
+    // own primary-line comment). Codex pre-push audit P2 (round 6 on
+    // #4657, :13361): the single-service estimatedPrice branch
+    // (computeSingleServiceEstimatedPricePlan) is the ONE exception — a
+    // no-add-on visit's own price/service rebase explicitly NULLS these
+    // columns in `updates` before the real PUT would ever run. Rereading
+    // the still-unchanged DB row here (a dry run — nothing has been
+    // written yet) would show the old discount the same save is about to
+    // clear. Prefer the planned `updates` value whenever this save touched
+    // it; only fall back to the stored row for a save that never planned a
+    // write to these columns at all.
+    const primaryLineDiscountRow = (updates.line_discount_dollars !== undefined || updates.line_discount_name !== undefined)
+      ? {
+          line_discount_dollars: updates.line_discount_dollars ?? null,
+          line_discount_name: updates.line_discount_name ?? null,
+        }
+      : ((cols.line_discount_dollars || cols.line_discount_name)
+        ? await db('scheduled_services').where({ id })
+            .first(
+              ...(cols.line_discount_dollars ? ['line_discount_dollars'] : []),
+              ...(cols.line_discount_name ? ['line_discount_name'] : []),
+            )
+            .catch(() => null)
+        : null);
     res.json({
       total: updates.estimated_price !== undefined ? updates.estimated_price : null,
       primaryLinePrice: updates.primary_line_price !== undefined ? updates.primary_line_price : null,

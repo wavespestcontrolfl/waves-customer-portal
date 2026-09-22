@@ -1642,25 +1642,6 @@ const EDIT_FALLBACK_SERVICES = [
   },
 ];
 
-// GATE_DISCOUNT_STACKING (slice 7 of #4405): a line-discount stamp restored
-// from a stored add-on row (basePrice/discountType/discountAmount) carries
-// no cap of its own — scheduled_service_addons has no per-row max-dollars
-// column, so the cap only lives on the catalog row the stamp's discountId
-// names. Trust the CURRENT catalog row's cap in the PREVIEW only when it
-// still confirms the stamp's own type (and, for a fixed catalog amount, the
-// stamp's amount) — an edited-since preset must not have a stale/mismatched
-// cap silently merged into an untouched slot. Unverified (or no catalog row
-// loaded yet) leaves the stamp exactly as stored, uncapped in the preview —
-// a limitation, never a wrong number, and the server's own restack (already
-// live for a marked row, slice 3/4) is authoritative on save either way.
-export function verifiedLineDiscountCap(stamp, catalogRow) {
-  if (!stamp) return null;
-  if (!catalogRow || catalogRow.discount_type !== stamp.discount_type) return stamp;
-  const isVariable = isCustomAmountPreset(catalogRow) || isCustomPercentagePreset(catalogRow);
-  if (!isVariable && Number(catalogRow.amount) !== Number(stamp.amount)) return stamp;
-  return { ...stamp, max_discount_dollars: catalogRow.max_discount_dollars };
-}
-
 // GATE_DISCOUNT_STACKING (slice 7): the appointment-level "Discount" control
 // (pre-existing) can now compound with an add-on line's own discount slot
 // once the gate is truly ON — a fact this session's client math can only
@@ -2326,20 +2307,26 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     if (stackingEnabled) return;
     setServiceLines((lines) => lines.map((l) => {
       if (!l.lineDiscountTouched) return l;
-      // Codex pre-push audit P2 (round 4 on #4657, :2330): only a line
-      // whose FIRST touch this session actually snapped net -> gross (the
-      // SAME condition setLineDiscount's own firstTouch checks, above) has
-      // a Price this reset needs to undo. A line with no ORIGINAL discount
-      // stamp never had Price touched as a side effect of picking one —
-      // an operator who typed $50 -> $60 and THEN picked a (now-reverting)
-      // discount would otherwise lose that independent $60 edit on a
-      // transient gate flip, discarding a change the pick never caused.
-      const priceWasSnapped = l._origDiscountType && l._origBasePrice != null;
+      // Codex pre-push audit P2 (round 4 on #4657, :2330; corrected round 6
+      // on #4657, :2342): only a line whose FIRST touch this session
+      // ACTUALLY snapped net -> gross has a Price this reset needs to
+      // undo. Recomputing that from _origDiscountType/_origBasePrice alone
+      // (round 4's version) drifts from what setLineDiscount's own
+      // firstTouch guard decides — round 5's :2441 fix added an
+      // "unless Price was already edited away from the seed" exception
+      // there, which this reset had no way to see; it would restore
+      // _seededPrice for every originally-stamped line regardless, silently
+      // discarding an operator's own reprice ($55 -> $70) the instant the
+      // gate flips. _touchSnappedPrice is the one flag both paths now
+      // share — set only when a touch this session genuinely performed the
+      // snap.
+      const priceWasSnapped = l._touchSnappedPrice === true;
       return {
         ...l,
         lineDiscountTouched: false,
         lineDiscount: null,
         price: priceWasSnapped ? (l._seededPrice ?? l.price) : l.price,
+        _touchSnappedPrice: false,
       };
     }));
   }, [stackingEnabled]);
@@ -2450,6 +2437,17 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           lineDiscount: picked,
           lineDiscountTouched: true,
           price: firstTouch ? String(l._origBasePrice) : l.price,
+          // Codex pre-push audit P2 (round 6 on #4657, :2342): recorded
+          // HERE, at the moment firstTouch actually decides to snap, so the
+          // gate-close reset effect below can undo exactly what THIS touch
+          // did instead of recomputing a similar-looking condition that
+          // doesn't know whether the snap actually fired (it can't see
+          // whether Price already diverged from the seed by the time IT
+          // runs, only setLineDiscount can). A later touch this session
+          // (firstTouch already false) leaves the recorded flag as-is —
+          // it reflects whether Price was EVER snapped this session, not
+          // just on the most recent pick.
+          _touchSnappedPrice: firstTouch ? true : l._touchSnappedPrice,
         };
       }),
     );
