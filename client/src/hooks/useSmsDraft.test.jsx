@@ -292,7 +292,7 @@ describe("useSmsDraft", () => {
     expect(result.current.msgBody).toBe("");
   });
 
-  it("retains a newer shared edit when clearDraft receives a stale revision", () => {
+  it.each([true, false])("retains a newer shared edit when clearDraft receives a stale revision (saved: %s)", (saved) => {
     const first = renderHook(() => useSmsDraft({
       ownerId: "owner-revision",
       recipientKey: "recipient-revision",
@@ -304,14 +304,23 @@ describe("useSmsDraft", () => {
 
     act(() => first.result.current.setMsgBody("Body being sent"));
     const sendRevision = first.result.current.draftRevision;
+    const storedBeforeEdit = sessionStorage.getItem(SMS_DRAFT_STORAGE_KEY);
+    const failedWrite = saved ? null : vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("Synthetic newer-edit persistence failure");
+    });
     act(() => second.result.current.setMsgBody("New edit during send"));
 
     let cleared;
     act(() => { cleared = first.result.current.clearDraft(sendRevision); });
-    expect(cleared).toEqual({ cleared: false, persisted: true });
+    expect(cleared).toEqual({ cleared: false, persisted: saved });
     expect(first.result.current.msgBody).toBe("New edit during send");
     expect(second.result.current.msgBody).toBe("New edit during send");
     expect(first.result.current.draftRevision).toBe(sendRevision + 1);
+    if (!saved) {
+      expect(first.result.current.recoveryWarning).toBe(SMS_DRAFT_RECOVERY_WARNING);
+      expect(sessionStorage.getItem(SMS_DRAFT_STORAGE_KEY)).toBe(storedBeforeEdit);
+    }
+    failedWrite?.mockRestore();
 
     act(() => { cleared = first.result.current.clearDraft(first.result.current.draftRevision); });
     expect(cleared).toEqual({ cleared: true, persisted: true });
