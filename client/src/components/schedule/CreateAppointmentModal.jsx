@@ -2898,6 +2898,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   }, [appointmentSubmitGroups, services, selectedCustomer, apptDate, appointmentDiscount, appointmentDiscountGroup, recurringCount, collectPrepay]);
   const previewRequestKey = previewGroupRequests.length ? JSON.stringify(previewGroupRequests) : '';
   const [serverPreview, setServerPreview] = useState({ status: 'idle', forKey: '', regime: null, byKey: new Map() });
+  // Bumping this forces the effect below to re-run even when
+  // previewRequestKey itself hasn't changed — the manual Retry action for
+  // a 'ready' response that still carries a per-group error (below).
+  const [previewRetryNonce, setPreviewRetryNonce] = useState(0);
   useEffect(() => {
     if (!previewRequestKey) {
       setServerPreview({ status: 'idle', forKey: '', regime: null, byKey: new Map() });
@@ -2906,6 +2910,18 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setServerPreview((prev) => (prev.forKey === previewRequestKey ? prev : { ...prev, status: 'loading' }));
     let cancelled = false;
     let retryTimer = null;
+    // GitHub round 4 P1 (Codex, blocked push 4): a 'ready' response that
+    // still carries a per-group error (an unavailable discount, a
+    // transient pricing failure the server itself caught and reported)
+    // used to disable Save with no explanation and no way out — this
+    // status IS success from the fetch's own point of view, so the
+    // fetch-failure retry loop below never engaged. Armed ONCE per
+    // request key: if the very first attempt lands 'ready' with an error,
+    // retry automatically one more time (the transient case resolves
+    // itself); a SECOND error is presumed real (a genuinely unavailable
+    // discount) and surfaces through discountSaveBlockedReason's own
+    // banner with a manual Retry button instead of looping forever.
+    let autoRetriedOnGroupError = false;
     const attempt = (delayMs, attemptNumber) => {
       retryTimer = setTimeout(async () => {
         try {
@@ -2914,16 +2930,24 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           if (cancelled) return;
           const byKey = new Map((Array.isArray(r?.results) ? r.results : []).map((row) => [row.key, row]));
           setServerPreview({ status: 'ready', forKey: previewRequestKey, regime: r?.regime ?? null, byKey });
+          const hasGroupError = groups.some((g) => {
+            const row = byKey.get(g.key);
+            return !row || typeof row.error === 'string';
+          });
+          if (hasGroupError && !autoRetriedOnGroupError) {
+            autoRetriedOnGroupError = true;
+            attempt(1200, attemptNumber + 1);
+          }
         } catch (_e) {
           if (cancelled) return;
-          // GitHub round 4 P1 (Codex, blocked push 3): a transient failure
-          // used to leave serverPreview stuck at 'error' forever for
-          // unchanged inputs — this effect only re-runs when
+          // GitHub round 4 P1 (Codex, blocked push 3): a transient FETCH
+          // failure used to leave serverPreview stuck at 'error' forever
+          // for unchanged inputs — this effect only re-runs when
           // previewRequestKey itself changes, so a plain fail-closed left
-          // Save disabled indefinitely with no way out short of editing the
-          // booking. Self-healing retry instead (capped backoff, unlimited
-          // attempts — this is a read-only verification fetch, not a
-          // write, so repeating it costs nothing but a request): the
+          // Save disabled indefinitely with no way out short of editing
+          // the booking. Self-healing retry instead (capped backoff,
+          // unlimited attempts — this is a read-only verification fetch,
+          // not a write, so repeating it costs nothing but a request): the
           // operator sees "Confirming…" persist rather than a dead end,
           // and it resolves itself the moment connectivity/the server
           // recovers, with no manual Retry click required.
@@ -2934,7 +2958,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     };
     attempt(350, 0);
     return () => { cancelled = true; clearTimeout(retryTimer); };
-  }, [previewRequestKey]);
+  }, [previewRequestKey, previewRetryNonce]);
   // Submit is held while ANY regime-dependent group's server-confirmed
   // preview hasn't landed for the CURRENT inputs yet — the button reads
   // "Confirming…" during this window (below) rather than a plain
@@ -2949,21 +2973,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // about to post at all (a discount catalog row deleted/deactivated
   // mid-session, a scope/eligibility rejection, etc.) — the same class of
   // drift (a catalog value changed, not just the gate) this endpoint
-  // exists to catch. A full price-for-price comparison against the
-  // client's own display (closing the P0's full "$10 credit silently
-  // becomes $20" repro) is NOT done here — verifying it correctly needs a
-  // test harness that can compute the authoritative price for arbitrary
-  // discount/cadence combinations to assert against, which is a
-  // materially larger, higher-regression-risk change than fits this
-  // push's remaining budget to build AND verify blind. Flagged, not
-  // silently dropped: the gate-specific class of this exact bug (a
-  // GATE_DISCOUNT_STACKING flip, not a catalog edit) is already fully
-  // closed by items 1+3's write-time 409 and per-group revalidation,
-  // which do not depend on this comparison at all.
+  // exists to catch.
   const previewGroupError = previewConfirming ? null : previewGroupRequests.find((req) => {
     const row = serverPreview.byKey.get(req.key);
     return !row || typeof row.error === 'string';
   });
+  // GitHub round 4 P1 (:3916, Codex, blocked push 4): a 'ready' status
+  // with a per-group error is a SUCCESSFUL fetch — the auto-retry above
+  // (armed once) covers a transient failure; a SECOND error means Save
+  // needs an explicit, visible reason and an explicit, visible way out,
+  // not a silently-disabled button.
+  const retryPreviewGroups = () => setPreviewRetryNonce((n) => n + 1);
   const stackedLineDiscountAmount = (svc) => {
     const i = services.indexOf(svc);
     const restated = appointmentDiscountPreview.lines?.[i];
@@ -3386,7 +3406,20 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             ...recurringGroupRequestFields({
               isRecurring, group, recurringCount, skipWeekends, weekendShift,
               collectPrepay, groupSubtotal, prepayMethod, prepayNote,
-              prepayPerVisitAmount: groupStackedPerVisitTotal(group),
+              // GitHub round 4 item 1 (Codex, blocked push 4 — "close by
+              // construction... the create POST sends exactly the amounts
+              // from that response"): a group this session already
+              // preview-verified (groupOwnPricingRegimeDependent, checked
+              // below) sends the PREVIEW's OWN per-visit price — the
+              // literal same number buildAppointmentPricing produced on
+              // the server, not a second, client-side recomputation of
+              // it. A group with no preview entry (nothing regime-
+              // dependent about it at all) falls back to
+              // groupStackedPerVisitTotal, which is provably identical to
+              // what the server bills in that case (no discount
+              // interaction to diverge) — see groupRegimeDependent's own
+              // comment.
+              prepayPerVisitAmount: serverPreview.byKey.get(key)?.prepay?.perVisit ?? groupStackedPerVisitTotal(group),
             }),
             billingTerm,
           };
@@ -3902,7 +3935,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           ? (existingSelectionConflictInvolvesAppointment
             ? `${existingSelectionConflict.names[0]} and ${existingSelectionConflict.names[1]} can't both apply to the same line — remove one before saving.`
             : `${existingSelectionConflict.names[0]} and ${existingSelectionConflict.names[1]} can't both apply to the same line — remove one from its line above before saving.`)
-          : ''));
+          // GitHub round 4 P1 (:3916, Codex, blocked push 4): a preview
+          // that landed 'ready' but still could not price a group we're
+          // about to post — surfaced with its own retry, same as every
+          // other reason here.
+          : (previewGroupError
+            ? `Couldn't confirm today's price${serverPreview.byKey.get(previewGroupError.key)?.error ? ` (${serverPreview.byKey.get(previewGroupError.key).error})` : ''} — retry before saving.`
+            : '')));
 
   // While the property list is loading a multi-property customer has no
   // resolved address yet — a submit then would omit propertyId and book the
@@ -4965,7 +5004,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 && !percentExclusionsBlockSave && !appointmentDiscountGateDrifted) && (
                 <button
                   type="button"
-                  onClick={staleStackingNotice ? retryStaleStacking : (stackingUnconfirmedBlocksSave || appointmentDiscountGateDrifted) ? retryAppointmentDiscountGate : percentExclusionsBlockSave ? retryPercentExclusions : () => pickAppointmentDiscount('')}
+                  onClick={staleStackingNotice ? retryStaleStacking : (stackingUnconfirmedBlocksSave || appointmentDiscountGateDrifted) ? retryAppointmentDiscountGate : percentExclusionsBlockSave ? retryPercentExclusions : previewGroupError ? retryPreviewGroups : () => pickAppointmentDiscount('')}
                   style={{ background: 'none', border: `1px solid ${D.red}`, color: D.red, borderRadius: 6, padding: '4px 10px', fontSize: 14, fontWeight: 500, cursor: 'pointer', flex: '0 0 auto' }}
                 >{!staleStackingNotice && !stackingUnconfirmedBlocksSave && !percentExclusionsBlockSave && !appointmentDiscountGateDrifted && (appointmentDiscountHasNoGroup || existingSelectionConflict) ? 'Remove discount' : 'Retry'}</button>
               )}

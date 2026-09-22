@@ -6137,6 +6137,25 @@ router.post('/preview', requireAdmin, async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// GitHub round 4 P0 follow-up (Codex; "the part that makes the P0 unfakeable"):
+// req.body.prepaid.totalAmount used to be stamped VERBATIM with no
+// server-side recomputation against the actual per-visit price -- a
+// catalog value changing mid-session (not only GATE_DISCOUNT_STACKING
+// flipping, which expected_discount_stacking already guards) produces the
+// identical symptom: a client-computed prepaid total that disagrees with
+// what the visits actually bill. Recomputed from the SAME pricing.finalPrice
+// buildAppointmentPricing already produced for this exact request, times
+// the SAME planned-visit-count fallback the client's own
+// recurringGroupRequestFields mirrors (finiteCount ?? 4) -- a mismatch
+// throws a retryable 409, matching DISCOUNT_STACKING_GATE_DIVERGED's own
+// shape and "before any write" contract for its own field.
+function assertPrepayTotalMatchesPricing({ totalAmount, finalPrice, plannedCount }) {
+  const authoritativePrepayTotal = Math.round((Number(finalPrice) || 0) * (Number(plannedCount) || 0) * 100) / 100;
+  if (Math.round(Number(totalAmount) * 100) !== Math.round(authoritativePrepayTotal * 100)) {
+    throw Object.assign(httpError(409, 'The price changed since this was previewed — reload and try again'), { code: 'PREPAY_TOTAL_DIVERGED' });
+  }
+}
+
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const {
@@ -7392,6 +7411,27 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (req.body.prepaid && isRecurring) {
         const { totalAmount, method, note } = req.body.prepaid;
         if (totalAmount > 0) {
+          // GitHub round 4 P0 follow-up (Codex; the coordinator's own
+          // framing: "the part that makes the P0 unfakeable"): totalAmount
+          // above is CLIENT-COMPUTED and was stamped VERBATIM, with no
+          // server-side recomputation against the actual per-visit price —
+          // exactly the gap expected_discount_stacking's gate check (above)
+          // does not cover, since a CATALOG value changing (not the gate)
+          // produces the identical symptom: four $100 visits prepaid at a
+          // stale $360 while pricing.finalPrice (this route's own,
+          // authoritative, buildAppointmentPricing result) actually bills
+          // $320/visit. Recomputed here from the SAME pricing this route
+          // already produced (cent-exact, percentageDiscountDollars) and
+          // the SAME planned-visit-count fallback the client's own
+          // recurringGroupRequestFields mirrors (finiteCount ?? 4) — a
+          // mismatch rejects with a retryable 409 BEFORE any write (this
+          // stamp is the first write in the transaction that touches
+          // prepaid money; the transaction that already inserted the
+          // appointment rows above rolls back with it, so a mismatch here
+          // leaves nothing committed at all, matching the sibling
+          // DISCOUNT_STACKING_GATE_DIVERGED check's own "before any write"
+          // contract for its own field).
+          assertPrepayTotalMatchesPricing({ totalAmount, finalPrice: pricing.finalPrice, plannedCount });
           await stampSeriesPrepaid(trx, {
             anchorServiceId: svc.id,
             totalAmount,
@@ -20169,6 +20209,7 @@ router._test = {
   customerFacingCompanionTypes,
   bookingCreatesWaveGuardCoverage,
   buildAppointmentPricing,
+  assertPrepayTotalMatchesPricing,
   lineExcludedFromPercentDiscount,
   buildPercentExclusionCatalog,
   appointmentDiscountIdentityChanged,

@@ -71,9 +71,14 @@ function installModalFetch({
   discounts = [],
   basePrice = 100,
   servicesDropdownResponse,
+  // Queued /admin/schedule/preview responses, consumed one per call — each
+  // a function (groups) => { regime, results } (or throws, for a fetch
+  // failure). Once exhausted, falls back to the default no-error echo.
+  previewResponses,
 } = {}) {
   let addressRequests = 0;
   let prepayPreviews = 0;
+  let previewCalls = 0;
   const fetcher = vi.fn((input, options = {}) => {
     const url = String(input);
     if (url.includes('/admin/triage?')) {
@@ -155,10 +160,13 @@ function installModalFetch({
     // so an in-flight 350ms timer from an EARLIER test never leaks a
     // synchronous throw into a LATER one's execution window.
     if (url.endsWith('/admin/schedule/preview') && options.method === 'POST') {
+      const groups = JSON.parse(options.body || '{}').groups || [];
+      const queued = Array.isArray(previewResponses) ? previewResponses[previewCalls] : undefined;
+      previewCalls += 1;
+      if (queued) return Promise.resolve(jsonResponse(queued(groups)));
       // Echo one no-error result per requested group so previewGroupError
       // never blocks Submit in tests that don't exercise it specifically —
       // this mock intentionally does NOT replicate real pricing math.
-      const groups = JSON.parse(options.body || '{}').groups || [];
       return Promise.resolve(jsonResponse({ regime: true, results: groups.map((g) => ({ key: g.key, price: 0 })) }));
     }
     throw new Error(`Unhandled fetch in CreateAppointmentModal test: ${url}`);
@@ -2024,5 +2032,92 @@ describe('GitHub round 4 item 3 follow-up (Codex, blocked push 3 on PR #4656)', 
     // Second group's retry succeeded, carrying its OWN line discount --
     // never blocked behind First's unrelated, now-frozen snapshot.
     expect(JSON.parse(schedulePosts(fetcher)[2][1].body).primaryLineDiscount?.discountId).toBe('five-pct');
+  });
+});
+
+describe('GitHub round 4 P1 :3916 (Codex, blocked push 4 on PR #4656)', () => {
+  // A 'ready' preview response that still carries a per-group error is a
+  // SUCCESSFUL fetch (not a network failure) -- the auto-retry above fires
+  // once for exactly this case; a persistent (second) error surfaces
+  // through discountSaveBlockedReason's own banner with a visible,
+  // working Retry button, rather than leaving Save silently disabled.
+  it('surfaces a persistent preview group error with a message and a working Retry, and clears once the retry succeeds', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    const { fetcher } = installModalFetch({
+      basePrice: 100,
+      discounts: [{ id: 'five-pct', name: 'Five Percent', discount_type: 'percentage', amount: 5, is_active: true, show_in_invoices: true }],
+      previewResponses: [
+        // Attempt 1 (initial).
+        (groups) => ({ regime: true, results: groups.map((g) => ({ key: g.key, error: 'discount temporarily unavailable' })) }),
+        // Attempt 2 (the ONE automatic retry) -- still failing, so it must
+        // surface, not loop forever.
+        (groups) => ({ regime: true, results: groups.map((g) => ({ key: g.key, error: 'discount temporarily unavailable' })) }),
+        // Attempt 3 (the operator's own manual Retry click) -- resolves.
+        (groups) => ({ regime: true, results: groups.map((g) => ({ key: g.key, price: 95 })) }),
+      ],
+    });
+    renderBooking();
+    await addOneSeasonalService();
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for First seasonal service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Five Percent/ }));
+
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    // Exact string, not a substring/function predicate: a function
+    // matcher checking textContent.includes(...) matches BOTH the
+    // innermost <span> and its ancestor banner <div> (whose own
+    // textContent also contains it), and getByText/findByText throw
+    // "multiple elements" for that -- swallowed by findByText's own
+    // retry loop until it times out, reading as "never found" instead of
+    // the real ambiguity. An exact full-text match hits only the <span>.
+    await screen.findByText(
+      "Couldn't confirm today's price (discount temporarily unavailable) — retry before saving.",
+      {},
+      { timeout: 4000 },
+    );
+    expect(submit.disabled).toBe(true);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.queryByText("Couldn't confirm today's price (discount temporarily unavailable) — retry before saving.")).toBeNull(), { timeout: 4000 });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+
+    fireEvent.click(submit);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+  });
+});
+
+describe('GitHub round 4 item 1 (Codex, blocked push 4 on PR #4656) — prepaid total sourced from the preview', () => {
+  // "close by construction... the create POST sends exactly the amounts
+  // from that response" — the posted prepaid.totalAmount now comes from
+  // serverPreview's OWN prepay.perVisit for a regime-dependent group, not
+  // a second client-side recomputation of it. Deliberately queues a
+  // per-visit figure ($42) that disagrees with what the naive local
+  // $20.70-at-5%-off math would give ($19.66), so a pass here proves the
+  // SERVER's number is what's actually posted, not a coincidence of
+  // matching math.
+  it('posts prepaid.totalAmount computed from the preview response, not the client engine', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    const { fetcher } = installModalFetch({
+      basePrice: 20.70,
+      enablePrepay: true,
+      discounts: [{ id: 'five-pct', name: 'Five Percent', discount_type: 'percentage', amount: 5, is_active: true, show_in_invoices: true }],
+      previewResponses: [
+        (groups) => ({ regime: true, results: groups.map((g) => ({ key: g.key, price: 42, prepay: { perVisit: 42, totalAmount: 84 } })) }),
+      ],
+    });
+    renderBooking();
+    await addOneSeasonalService();
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for First seasonal service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Five Percent/ }));
+    fireEvent.change(screen.getByPlaceholderText('Ongoing'), { target: { value: '2' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Collect prepayment' }));
+
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    const body = JSON.parse(schedulePosts(fetcher)[0][1].body);
+    // 2 visits x the PREVIEW's $42/visit = $84 -- never the client
+    // engine's own $19.66/visit x 2 = $39.32.
+    expect(body.prepaid.totalAmount).toBe(84);
   });
 });
