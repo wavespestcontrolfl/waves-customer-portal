@@ -2,7 +2,7 @@
 import React from 'react';
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { useDiscountStackingState } from '../../hooks/useDiscountStacking';
+import { ensureStackingFresh, useDiscountStackingState } from '../../hooks/useDiscountStacking';
 vi.mock('../../hooks/useDiscountStacking', () => ({
   useDiscountStackingState: vi.fn(() => ({ enabled: false, known: true, retry: vi.fn() })),
   ensureStackingFresh: vi.fn(async () => ({ enabled: true, known: true })),
@@ -677,5 +677,67 @@ describe('appointment discount submission eligibility', () => {
     fireEvent.click(submit);
     await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
     expect(JSON.parse(schedulePosts(fetcher)[0][1].body).discountId).toBeUndefined();
+  });
+
+  // Codex pre-push audit P1 (this PR): manualPrepayPlan's price previously
+  // summed lineEffectiveNetAmount alone — every line's OWN discount, never
+  // the appointment-level one — so an appointment discount left the annual
+  // prepay preview (and the price it POSTS to the server) at the pre-stack
+  // total. The server's own post-booking eligibility check then disagreed
+  // with the inflated price and silently skipped minting the invoice.
+  it('prices the annual-prepay preview with the fully stacked appointment-discount total', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    const { fetcher } = installModalFetch({
+      enablePrepay: true,
+      discounts: [{
+        id: 'mil', name: 'Military Discount', discount_type: 'fixed_amount',
+        amount: 10, is_active: true, show_in_invoices: true,
+      }],
+    });
+    renderBooking();
+    await addOneSeasonalService();
+    const picker = await screen.findByLabelText('Appointment discount');
+    fireEvent.change(picker, { target: { value: 'mil' } });
+    await screen.findByText('Military Discount: -$10.00');
+    fireEvent.click(await screen.findByRole('button', { name: /Annual prepay — invoices/ }));
+    await waitFor(() => expect(fetcher.mock.calls.some(
+      ([url]) => String(url).includes('/annual-prepay-preview?'),
+    )).toBe(true));
+    const [previewUrl] = fetcher.mock.calls.find(([url]) => String(url).includes('/annual-prepay-preview?'));
+    const price = new URL(previewUrl, 'http://test').searchParams.get('price');
+    // $100 line, 10% appointment discount: $90 stacked, never the raw $100
+    // lineEffectiveNetAmount sum the bug used to post.
+    expect(price).toBe('90');
+  });
+});
+
+describe('appointment discount stale-gate retry (Codex pre-push audit P1)', () => {
+  // ensureStackingFresh() can disagree with the preview (or fail) at
+  // submit time while the POLLING hook's own `known` flag is still true —
+  // that leaves staleStackingNotice set with stackingUnconfirmedBlocksSave
+  // false. The banner's Retry button used to fall through to
+  // pickAppointmentDiscount(''), silently discarding the operator's
+  // selection instead of retrying.
+  it('retries the gate probe instead of removing the discount when only the submit-time check went stale', async () => {
+    const retry = vi.fn();
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry });
+    vi.mocked(ensureStackingFresh).mockResolvedValueOnce({ enabled: false, known: true });
+    const { fetcher } = installModalFetch({ discounts: [{
+      id: 'mil', name: 'Military Discount', discount_type: 'fixed_amount',
+      amount: 10, is_active: true, show_in_invoices: true,
+    }] });
+    renderBooking();
+    await addOneSeasonalService();
+    const picker = await screen.findByLabelText('Appointment discount');
+    fireEvent.change(picker, { target: { value: 'mil' } });
+    const submit = await screen.findByRole('button', { name: 'Schedule appointment' });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+    await screen.findByText('Could not confirm the discount-stacking status — retry before saving.');
+    expect(schedulePosts(fetcher)).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    // The selection survives the retry — never silently removed.
+    expect(picker.value).toBe('mil');
+    expect(retry).toHaveBeenCalled();
   });
 });

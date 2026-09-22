@@ -2581,7 +2581,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         localBlock: 'can’t be sold on a booking that splits into more than one recurring series — book them separately',
       };
     }
-    const price = group.lines.reduce((sum, s) => sum + lineEffectiveNetAmount(s), 0);
+    // GATE_DISCOUNT_STACKING (Codex pre-push audit P1): the raw per-line net
+    // sum carries only each line's OWN discount — an appointment-level
+    // discount riding this same group (groupStackedPerVisitTotal folds both
+    // in, exactly like the recurring-series prepay projection above) is
+    // otherwise invisible here. Previewing and posting the higher unstacked
+    // price let the annual invoice mint at a total the visit itself would
+    // never bill, so the post-booking assertManualPrepayMintEligible check
+    // (comparing this posted price against the freshly recomputed visit
+    // total) failed and the appointment booked with no prepay invoice at
+    // all — a silent drop, not an error the operator could act on.
+    const price = groupStackedPerVisitTotal(group);
     return {
       targetKey: groupKey(group),
       localBlock: null,
@@ -2605,7 +2615,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         windowStart,
       },
     };
-  }, [services, selectedCustomer, mosquitoQuote, apptDate, windowStart, skipWeekends, recurringCount]);
+  }, [services, selectedCustomer, mosquitoQuote, apptDate, windowStart, skipWeekends, recurringCount, appointmentDiscount, appointmentDiscountGroup, stackingEnabled, percentExcludedKeys]);
   const manualPrepayQuery = manualPrepayPlan.query;
 
   // Preview fetch. Runs whenever the control is on screen — NOT only once
@@ -3118,6 +3128,21 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     known: stackingKnown, appointmentDiscountSelected: appointmentDiscountState,
   });
   const retryPercentExclusions = () => setPercentExclusionsAttempt((n) => n + 1);
+  // Codex pre-push audit P1: staleStackingNotice is a SUBMIT-time finding
+  // (ensureStackingFresh() disagreed with the preview, or its probe failed)
+  // — distinct from stackingUnconfirmedBlocksSave, which watches the
+  // POLLING hook's own known flag. A submit can leave staleStackingNotice
+  // set while stackingKnown is still true (the poll resolved fine; only the
+  // submit-time revalidation caught the drift), so the banner's Retry button
+  // must not fall through the stackingUnconfirmedBlocksSave branch to the
+  // default (pickAppointmentDiscount('')) — that silently REMOVED the
+  // selected discount instead of retrying. Clears the notice and forces a
+  // fresh probe so the preview re-syncs to the live gate before the operator
+  // tries Save again.
+  const retryStaleStacking = () => {
+    setStaleStackingNotice('');
+    retryStackingProbe();
+  };
   // A percentage/variable_percentage appointment discount previews against
   // the live exclusion catalog; if that fetch hasn't resolved, every line
   // reads excluded in the preview (appointmentDiscountReaches) but nothing
@@ -4149,9 +4174,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               <span>{discountSaveBlockedReason}</span>
               <button
                 type="button"
-                onClick={stackingUnconfirmedBlocksSave ? retryStackingProbe : percentExclusionsBlockSave ? retryPercentExclusions : () => pickAppointmentDiscount('')}
+                onClick={staleStackingNotice ? retryStaleStacking : stackingUnconfirmedBlocksSave ? retryStackingProbe : percentExclusionsBlockSave ? retryPercentExclusions : () => pickAppointmentDiscount('')}
                 style={{ background: 'none', border: `1px solid ${D.red}`, color: D.red, borderRadius: 6, padding: '4px 10px', fontSize: 12, fontWeight: 500, cursor: 'pointer', flex: '0 0 auto' }}
-              >{appointmentDiscountHasNoGroup && !stackingUnconfirmedBlocksSave && !percentExclusionsBlockSave ? 'Remove discount' : 'Retry'}</button>
+              >{!staleStackingNotice && appointmentDiscountHasNoGroup && !stackingUnconfirmedBlocksSave && !percentExclusionsBlockSave ? 'Remove discount' : 'Retry'}</button>
             </div>
           )}
 
