@@ -10,6 +10,46 @@
  * in place; none reads the DB.
  */
 
+const { stackVisitDiscounts } = require('../discount-stack');
+
+// A discount slot for stackVisitDiscounts — { discountType, amount,
+// maxDiscountDollars } — built from a stored row's own TYPED columns
+// (line_discount_type/amount, discount_type/amount/max_dollars) or a live
+// pricing object's (discountType/discountAmount/maxDiscountDollars), never
+// from the row's frozen dollar figure. `null` when there's no discount at
+// all — the "no slot" contract stackVisitDiscounts' lineDiscount /
+// appointmentDiscount already expect.
+function typedDiscountSlot(discountType, amount, maxDiscountDollars = null) {
+  if (!discountType) return null;
+  const amt = Number(amount);
+  if (!Number.isFinite(amt)) return null;
+  return { discountType, amount: amt, maxDiscountDollars: maxDiscountDollars ?? null };
+}
+
+// Restack a primary line + its due add-ons + one appointment-level slot
+// through the canonical engine (server/services/discount-stack.js) — the ONE
+// reconstruction every recurring-extension caller (auto-extend, visit-count
+// top-up, alert extend/convert) shares instead of copyLineDiscountFields'
+// frozen line_discount_dollars / copyAddonDiscountFields' frozen
+// discount_dollars, which replay a dollar figure computed against a
+// DIFFERENT occurrence's add-on mix (Codex #4405 r7 P1: a later visit
+// computed $61.50 instead of $63.00). `lines[0]` is always the primary;
+// `lines[1..]` mirror `addonLines`' own order, so a caller can map
+// `stacked.lines[i + 1]` straight back to `addonLines[i]`. Eligibility
+// (percent-exclusion catalog, "Applies to" scope) is the caller's own — this
+// helper only restacks the slots it's handed.
+function restackOccurrenceDiscounts({ primaryGross, primaryDiscount, primaryEligible = true, addonLines, appointmentDiscount, compound }) {
+  const lines = [
+    { gross: primaryGross || 0, lineDiscount: primaryDiscount || null, eligible: primaryEligible !== false },
+    ...(Array.isArray(addonLines) ? addonLines : []).map((line) => ({
+      gross: line.gross || 0,
+      lineDiscount: line.lineDiscount || null,
+      eligible: line.eligible !== false,
+    })),
+  ];
+  return stackVisitDiscounts({ lines, appointmentDiscount: appointmentDiscount || null, compound });
+}
+
 // Apply a discount to a price. Returns the discounted price (>= 0).
 function applyDiscount(price, type, amount) {
   if (price == null || !type || amount == null || amount === '' || isNaN(Number(amount))) return price;
@@ -93,6 +133,186 @@ function copyStampedServiceAddressFields(target, source, cols) {
   }
 }
 
+// Provenance for restackStoredVisitFinancials (admin-schedule.js): marks a
+// row as priced under the canonical discount-stack engine
+// (GATE_DISCOUNT_STACKING) and freezes the catalog caps it priced against,
+// in `scheduled_services.pricing_provenance` (nullable jsonb, migration
+// 20260921000002 — GitHub Codex round 1 on #4642, PRRT_kwDOR3YQi86kllyE:
+// the ORIGINAL design reused a `metadata` column that does not exist on
+// this table — the initial schema and every migration were searched and
+// none defines one — so every stamp silently no-opped in production and
+// every add-on-only extension kept replaying frozen dollars).
+//
+// A stored row's null primary_line_price is normally ambiguous: it could
+// mean "no primary at all" (an add-on-only or re-service/callback booking
+// — safe to restack around a $0 primary) or "a legacy/unstructured total"
+// or "the anchored-split marker" (both need calculateStoredVisitFinancials's
+// own reconstruction, which a restack starting the primary from gross:0
+// cannot replicate — see restackStoredVisitFinancials's own history,
+// rounds 8 and 10). Every row THIS SLICE prices while the gate is live —
+// creation (the parent, every seeded child/booster) and every extension
+// write — carries this marker, so a later restack of an add-on-only
+// booking's own extension can tell "I priced this myself, null really
+// means zero" apart from a legacy row it never touched (Codex pre-push
+// audit P0, round 13: an add-on-only booking with a null primary restacked
+// correctly at CREATION — the seeded occurrence read $56 — but its own
+// EXTENSION replayed frozen dollars and read $54, because
+// restackStoredVisitFinancials could not yet tell the two apart).
+//
+// `caps` (GitHub Codex round 1, PRRT_kwDOR3YQi86kllyD): a percentage
+// discount's cap is never persisted on the row itself — only the catalog's
+// `max_discount_dollars`, read live via loadDiscountCapsById — so a marked
+// row also freezes the LINE cap and every ADD-ON cap it priced against
+// (`{ line, addons: { [discount_id]: cap|null } }`) here. A later
+// PUT /api/admin/discounts/:id cap edit on that catalog row must never
+// reprice an already-contracted recurring visit: restackStoredVisitFinancials
+// restacks a marked row from THIS frozen snapshot, never the live catalog
+// value (see resolveStoredDiscountCaps, below).
+const PRICING_REGIME_COLUMN = 'pricing_provenance';
+const PRICING_REGIME_VALUE = 'discount_stack_v1';
+const PRICING_ENGINE_VERSION = 1;
+
+function parsePricingProvenance(row) {
+  let prov = row?.[PRICING_REGIME_COLUMN];
+  if (typeof prov === 'string') {
+    try { prov = JSON.parse(prov); } catch { return null; }
+  }
+  return prov && typeof prov === 'object' && !Array.isArray(prov) ? prov : null;
+}
+
+function stampPricingRegimeMarker(target, cols, caps = null) {
+  if (!target || !cols?.[PRICING_REGIME_COLUMN]) return;
+  target[PRICING_REGIME_COLUMN] = {
+    pricing_regime: PRICING_REGIME_VALUE,
+    engine_version: PRICING_ENGINE_VERSION,
+    caps: caps && typeof caps === 'object'
+      ? { line: caps.line ?? null, addons: { ...(caps.addons || {}) } }
+      : { line: null, addons: {} },
+  };
+}
+
+function hasPricingRegimeMarker(row) {
+  const prov = parsePricingProvenance(row);
+  return !!prov && prov.pricing_regime === PRICING_REGIME_VALUE;
+}
+
+// GitHub Codex round 3 on #4642 (PRRT_kwDOR3YQi86kmS5J, P0): `caps` is
+// readable WHETHER OR NOT `pricing_regime` is set — a legacy root's null
+// primary_line_price is ambiguous (it could be a genuinely-priced $0, or
+// it could need calculateStoredVisitFinancials's own reconstruction from
+// an unstructured estimated_price), and freezeLegacySeriesRootCaps
+// (admin-schedule.js) must be able to freeze that root's catalog caps
+// WITHOUT resolving that ambiguity — stamping the full pricing_regime
+// marker alongside the caps made hasPricingRegimeMarker true for a row
+// this slice never actually priced, so restackStoredVisitFinancials
+// treated its null primary as a real, computed $0 and a due add-on
+// silently overwrote the legacy reconstructed total (Codex's repro: a
+// stored $120 total containing a $20 add-on became $20). `caps` and
+// `pricing_regime` are independent facts about the SAME row from here on:
+// a caps-only stamp (stampFrozenCapsOnly, below) never flips
+// hasPricingRegimeMarker; a full canonical stamp (stampPricingRegimeMarker)
+// always carries both.
+function frozenCapsFromRow(row) {
+  const prov = parsePricingProvenance(row);
+  return prov && prov.caps && typeof prov.caps === 'object' && !Array.isArray(prov.caps)
+    ? prov.caps
+    : null;
+}
+
+// Freezes ONLY the caps snapshot — no pricing_regime, no engine_version —
+// so hasPricingRegimeMarker stays false and restackStoredVisitFinancials's
+// null-primary legacy deferral is untouched. For a legacy series root
+// whose own pricing was never canonically computed (freezeLegacySeriesRootCaps,
+// admin-schedule.js): the row still gets to keep a stable, catalog-drift-
+// proof cap for whenever IT does restack (a non-null primary_line_price),
+// without asserting a canonical-pricing fact that isn't true.
+function stampFrozenCapsOnly(target, cols, caps) {
+  if (!target || !cols?.[PRICING_REGIME_COLUMN]) return;
+  target[PRICING_REGIME_COLUMN] = {
+    caps: caps && typeof caps === 'object'
+      ? { line: caps.line ?? null, addons: { ...(caps.addons || {}) } }
+      : { line: null, addons: {} },
+  };
+}
+
+// resolveSeriesExtensionPriceTemplate's anchored-split clear (admin-schedule.js)
+// spreads the parent's own provenance onto its template unchanged, so a
+// series that priced its PARENT under the canonical engine would otherwise
+// carry the marker (and its frozen caps) straight onto the marker-total
+// template too — exactly the one case the marker must NOT cover (the
+// template's own primary_line_price is cleared to null there for a
+// DIFFERENT reason: the marker total already folds the primary's implied
+// share in, not because there genuinely is no primary). Called from that
+// same clearing branch so the two stay in lockstep.
+function clearPricingRegimeMarker(target) {
+  if (!target || target[PRICING_REGIME_COLUMN] == null) return;
+  target[PRICING_REGIME_COLUMN] = null;
+}
+
+// Resolves the caps ONE stored restack must use (GitHub Codex round 1,
+// PRRT_kwDOR3YQi86kllyD): a row carrying the pricing-regime marker restacks
+// from its OWN frozen snapshot, ignoring a live catalog cap for any
+// discount id it already froze — a later catalog edit must not reprice a
+// contracted recurring visit. A discount id the row has never frozen
+// before (a newly-added add-on discount this occurrence is seeing for the
+// first time) still reads live and joins the returned snapshot, so the
+// row's NEXT stamp freezes it too. An unmarked (legacy, or gate-was-off-
+// at-creation) row has nothing to freeze from yet: every cap reads live,
+// exactly as before this fix, and becomes that row's own first frozen
+// snapshot once it is stamped. `liveDiscountCaps` is loadDiscountCapsById's
+// `Map<discountId, cap|null>` (or null/undefined when the gate is off, or
+// nothing was fetched).
+function resolveStoredDiscountCaps(parent, liveDiscountCaps) {
+  // Deliberately NOT gated on hasPricingRegimeMarker (round 3 fix, above):
+  // a caps-only-frozen legacy root has real frozen caps to honor even
+  // though it is not canonically-priced.
+  const frozen = frozenCapsFromRow(parent);
+  const addons = { ...(frozen?.addons || {}) };
+  if (liveDiscountCaps) {
+    // GitHub Codex round 2 on #4642 (PRRT_kwDOR3YQi86kl-X3): an EARLIER
+    // version of this loop skipped any discount id equal to
+    // parent.line_discount_id, reasoning the line's own cap already lives
+    // in `caps.line` and shouldn't be duplicated into `caps.addons`. That
+    // skip was wrong the moment the SAME catalog discount is reused on
+    // BOTH the primary line and an add-on (a real, supported shape —
+    // liveDiscountCaps has only ONE entry for that shared id either way):
+    // it silently dropped the add-on's own cap entry too, so addonCap()
+    // read it as uncapped and froze that wrong (uncapped) value into the
+    // very first gate-on extension's snapshot. Each slot's cap is kept
+    // independently, keyed only by discount id — never deduped against
+    // the line's own id — even though this means a genuinely line-only id
+    // also lands (harmlessly, unread) in `addons`.
+    for (const [discountId, cap] of liveDiscountCaps) {
+      if (!(discountId in addons)) addons[discountId] = cap ?? null;
+    }
+  }
+  const liveLineCap = (discountId) => (
+    liveDiscountCaps && discountId != null ? (liveDiscountCaps.get(discountId) ?? null) : null
+  );
+  const currentLineId = parent?.line_discount_id ?? null;
+  // GitHub Codex round 4 on #4642 (PRRT_kwDOR3YQi86kmS5J follow-up /
+  // PUT :id/update-details fix): the LINE slot's frozen cap is now keyed
+  // to the discount id it was frozen FOR — { id, cap }, not a bare
+  // number — closing the gap the round-2 addons-side fix already closed
+  // for add-ons (keyed by discount_id, the object's own key). Without
+  // this, an edit that swapped the appointment's/row's line_discount_id
+  // to a DIFFERENT discount (without clearing pricing_provenance) would
+  // have applied the OLD discount's frozen cap ceiling to whatever the
+  // NEW discount id resolves to — a wrong ceiling silently misapplied.
+  // A frozen line entry only counts when its own id still matches the
+  // row's CURRENT line_discount_id; any mismatch (a changed discount, or
+  // a legacy bare-number entry written before this shape existed) reads
+  // live instead — never trusts a cap frozen for a different discount.
+  const frozenLineMatches = frozen?.line && typeof frozen.line === 'object' && !Array.isArray(frozen.line)
+    && frozen.line.id === currentLineId;
+  const lineCap = frozenLineMatches ? (frozen.line.cap ?? null) : liveLineCap(currentLineId);
+  return {
+    lineCap,
+    addonCap: (discountId) => (discountId != null && discountId in addons ? addons[discountId] : null),
+    snapshot: { line: { id: currentLineId, cap: lineCap }, addons },
+  };
+}
+
 module.exports = {
   applyDiscount,
   copyLineDiscountFields,
@@ -100,4 +320,12 @@ module.exports = {
   copyBillToFields,
   copyStampedServiceAddressFields,
   recurringServiceAddress,
+  typedDiscountSlot,
+  restackOccurrenceDiscounts,
+  stampPricingRegimeMarker,
+  stampFrozenCapsOnly,
+  hasPricingRegimeMarker,
+  clearPricingRegimeMarker,
+  frozenCapsFromRow,
+  resolveStoredDiscountCaps,
 };

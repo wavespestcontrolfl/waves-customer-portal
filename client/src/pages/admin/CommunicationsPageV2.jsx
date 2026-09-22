@@ -53,7 +53,7 @@
 //   messages. This is the untrusted-input boundary — flag any
 //   missing signature verification or path that creates customers
 //   from arbitrary inbound numbers without rate-limiting.
-import { isAcceptedSms } from "../../utils/sms-delivery";
+import { isAcceptedSms, unansweredSmsReply } from "../../utils/sms-delivery";
 import React, {
   useState,
   useEffect,
@@ -429,6 +429,13 @@ export function MessageMediaV2({ media = [], inverted = false }) {
 // The newest inbound row of a thread, as the reply context a thread-level
 // "Text back" carries.
 function latestInboundContext(messages) {
+  const unansweredReply = unansweredSmsReply(messages);
+  if (unansweredReply) {
+    return {
+      messageId: unansweredReply.messageId,
+      messageType: unansweredReply.messageType,
+    };
+  }
   const list = Array.isArray(messages) ? messages : [];
   const inbound = list.filter((m) => m && m.direction === "inbound");
   if (!inbound.length) return null;
@@ -2188,7 +2195,11 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     });
     const threadList = Object.values(threadMap).map((t) => {
       t.messages.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-      t.unanswered = t.lastDirection === "inbound";
+      const unansweredReply = unansweredSmsReply(t.messages);
+      t.unanswered = Boolean(unansweredReply);
+      if (unansweredReply) {
+        t.ourNumber = unansweredReply.businessLine;
+      }
       t.unread = t.messages.some((m) => m.direction === "inbound" && !m.isRead);
       return t;
     });

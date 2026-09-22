@@ -861,6 +861,75 @@ describe('runRecurringAlertAction — billable-amount gate on extend / convert_o
   });
 });
 
+// Codex pre-push audit P1 (round 14): the spawned-row addon-restack loop at
+// the end of runRecurringAlertAction called resolveSeriesExtensionPriceTemplate
+// + loadDiscountCapsById once PER spawned row, even though parent (and its
+// id) never change across that loop. Two OTHER, pre-existing call sites in
+// this same action also read the discounts table once per placed date — the
+// primary row's own applyDiscountStackRestack call in the extend/convert_
+// ongoing insertion loop, and seriesExtensionUnbillable's own (already-
+// hoisted, per round-14's OTHER fix) read, invoked once per date because
+// this loop always calls it with a single-element `dates` array — and
+// neither is in scope for this fix (a different, unauthorized seam), so a
+// 2-date extend's TOTAL is 5 reads (2 + 2 from those two per-date sources,
+// which this fix does not touch, + 1 from the now-hoisted spawned-row loop),
+// not 1 — the fix under test is the delta from 6 (1 spawned-row call PER
+// row, 2 rows) to 5, not the absolute count. Traced and confirmed empirically
+// (DIAGNOSTIC run) before being pinned, since this action's control flow is
+// too deep to get right by inspection alone.
+describe('runRecurringAlertAction — spawned-row discount-cap read count (Codex P1, round 14)', () => {
+  beforeEach(() => {
+    delete process.env.GATE_DISCOUNT_STACKING;
+    jest.clearAllMocks();
+  });
+
+  function twoDateExtendScenario() {
+    const rows = [
+      { scheduled_date: '2098-01-15', status: 'completed' },
+      { scheduled_date: '2098-04-15', status: 'completed' },
+    ];
+    const { state, handler } = alertActionScenario({
+      seriesRows: rows, alertRow: { id: 70, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
+      customer: { id: 5, billing_mode: null, monthly_rate: 0, waveguard_tier: null, per_application_fee: null },
+      parentOverrides: {
+        estimated_price: '185.00', create_invoice_on_complete: true,
+        line_discount_id: 'ld1', line_discount_type: 'percentage', line_discount_amount: 10,
+      },
+    });
+    const discountCalls = [];
+    const wrapped = (ctx) => {
+      if (ctx.table === 'discounts') {
+        discountCalls.push((ctx.calls.find((c) => c[0] === 'whereIn') || [])[2] || null);
+        return [];
+      }
+      return handler(ctx);
+    };
+    return { state, conn: makeConn(wrapped), discountCalls };
+  }
+
+  test('gate off: no discounts table reads at all', async () => {
+    const { state, conn, discountCalls } = twoDateExtendScenario();
+    const out = await runRecurringAlertAction(conn, { idParam: '70', action: 'extend', count: 2, adminUserId: 'admin-1' });
+    expect(out.status).toBe(200);
+    expect(state.insertedVisits).toHaveLength(2);
+    expect(discountCalls).toHaveLength(0);
+  });
+
+  test('gate on: 2 spawned rows read the discount-cap set ONCE for the addon-restack loop (5 total, not 6)', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      const { state, conn, discountCalls } = twoDateExtendScenario();
+      const out = await runRecurringAlertAction(conn, { idParam: '70', action: 'extend', count: 2, adminUserId: 'admin-1' });
+      expect(out.status).toBe(200);
+      expect(state.insertedVisits).toHaveLength(2);
+      expect(discountCalls).toHaveLength(5);
+      expect(discountCalls.every((ids) => ids && ids.includes('ld1'))).toBe(true);
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
+});
+
 describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', () => {
   beforeEach(() => jest.clearAllMocks());
 
