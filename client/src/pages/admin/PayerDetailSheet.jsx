@@ -80,6 +80,14 @@ const STATUS_LABEL = {
 const OUTSTANDING = new Set(["finalized", "sent", "viewed", "processing"]);
 const DUNNABLE = new Set(["sent", "viewed"]);
 
+const parseCurrencyInput = (value) => {
+  const input = String(value ?? "").trim();
+  const completeCurrency = /^(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d{1,2})?$/;
+  if (!completeCurrency.test(input)) return null;
+  const parsed = Number(input.replaceAll(",", ""));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+};
+
 export default function PayerDetailSheet({ payer, onClose, onChanged }) {
   const [tab, setTab] = useState("statements");
   const [statements, setStatements] = useState([]);
@@ -425,12 +433,11 @@ function StatementDetail({ payerId, statement, onChanged, onPendingChange }) {
 function ReconcileForm({ total, busy, onCancel, onSubmit }) {
   const [method, setMethod] = useState("check");
   const [amount, setAmount] = useState(total != null ? Number(total).toFixed(2) : "");
-  // Validate client-side: a blank/NaN amount serializes to JSON null, which the
-  // server treats as "default to the full statement total" — so an invalid entry
-  // would silently record the whole balance. Block submit unless it's a positive
-  // finite number (the server still re-checks it against the locked total).
-  const parsed = parseFloat(amount);
-  const valid = Number.isFinite(parsed) && parsed > 0;
+  // Validate the complete input rather than accepting parseFloat's valid prefix.
+  // Commas are allowed only in conventional US groups, and cents are limited to
+  // two digits. The server still re-checks the amount against the locked total.
+  const parsed = parseCurrencyInput(amount);
+  const valid = parsed !== null;
   return (
     <fieldset disabled={!!busy} className="min-w-0 m-0 mt-3 p-4 border-hairline border-zinc-200 rounded-md bg-white flex flex-wrap items-end gap-3">
       <Field label="Method" className="w-full sm:w-auto">
