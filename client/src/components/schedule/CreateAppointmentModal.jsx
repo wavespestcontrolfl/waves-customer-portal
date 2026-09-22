@@ -38,7 +38,7 @@ import { useSlotConflicts } from './useSlotConflicts';
 import BestTimeHint, { detourPhrase } from './BestTimeHint';
 import { useBestTimes } from './useBestTimes';
 import { etDateString } from '../../lib/timezone';
-import { stackVisitDiscounts, stackablePresets, isCustomAmountPreset, isCustomPercentagePreset } from '../../lib/discountStack';
+import { stackVisitDiscounts, stackablePresets, stackGroupConflict, isCustomAmountPreset, isCustomPercentagePreset } from '../../lib/discountStack';
 import { useDiscountStackingState, ensureStackingFresh } from '../../hooks/useDiscountStacking';
 import { propertyRelationshipChip } from '../../lib/contact-roles';
 import { addressAskNotice } from '../../lib/addressAsks';
@@ -1104,41 +1104,40 @@ export function submitGroupLinesForService(groups, svc, allServices) {
   return (Array.isArray(groups) ? groups : []).find((g) => g.lines.includes(svc))?.lines || allServices;
 }
 
+// GitHub review round 2 P2 (PR #4656): dropped the scopeKey parameter this
+// helper (and lineMatchesDiscountScope / resolveAppointmentDiscountGroup
+// below) used to carry for an operator "Applies to" override — no caller
+// in this slice ever passed one, and speculative plumbing for a future
+// slice that does not exist yet was its own source of drift risk. Add it
+// back, with its own tests, only alongside the slice that actually ships
+// the override UI.
+//
 // Which submit group's lines the appointment-level slot ITSELF should be
-// scoped against — the group `scopeKey` targets, else the first group
-// (mirrors the same default the modal's appointmentDiscountGroup resolves
-// once a discount is actually chosen). This slice's modal always calls with
-// scopeKey null (no operator override; see the PR body's "Not in this
-// slice") — the parameter exists so a future scope-override slice can pass
-// one without reshaping this helper. lineServiceKeyOf is the modal's own
-// lineServiceKey helper: (svc) => string | null.
-export function appointmentDiscountScopeLinesFor(groups, scopeKey, lineServiceKeyOf, allServices) {
+// scoped against — always the first group (this slice's picker offers only
+// the discount's OWN catalog scope; that filtering happens in
+// resolveAppointmentDiscountGroup / lineMatchesDiscountScope below, which
+// this default exists to fall back to when neither resolves one).
+export function appointmentDiscountScopeLinesFor(groups, allServices) {
   const list = Array.isArray(groups) ? groups : [];
-  const target = scopeKey
-    ? list.find((g) => g.lines.some((svc) => lineServiceKeyOf(svc) === scopeKey))
-    : list[0];
-  return target?.lines || allServices;
+  return list[0]?.lines || allServices;
 }
 
-// Does this line fall within an appointment-level discount's catalog scope?
-// A preset can restrict by exact service key (service_key_filter, or a
-// caller-supplied scopeKey — always null from this slice's modal) AND/OR by
-// category (service_category_filter) — both are independent AND'd
-// conditions when present. Shared by
-// resolveAppointmentDiscountGroup below and the modal's own
-// appointmentDiscountReaches, so a line is judged eligible the same way in
-// both places.
-export function lineMatchesDiscountScope(svc, discount, scopeKey, lineServiceKeyOf) {
-  const key = discount?.service_key_filter || scopeKey || null;
-  if (key && key !== lineServiceKeyOf(svc)) return false;
+// Does this line fall within an appointment-level discount's catalog
+// scope? A preset can restrict by exact service key (service_key_filter)
+// AND/OR by category (service_category_filter) — both are independent
+// AND'd conditions when present. Shared by resolveAppointmentDiscountGroup
+// below and the modal's own appointmentDiscountReaches, so a line is
+// judged eligible the same way in both places.
+export function lineMatchesDiscountScope(svc, discount, lineServiceKeyOf) {
+  if (discount?.service_key_filter && discount.service_key_filter !== lineServiceKeyOf(svc)) return false;
   if (discount?.service_category_filter && discount.service_category_filter !== (svc?.category || svc?.serviceCategory || null)) return false;
   return true;
 }
 
 // Which submit group actually carries the appointment-level discount, once
-// one is chosen. Codex r2 P1: checking service_key_filter (or scopeKey)
-// alone and otherwise defaulting to groups[0] meant a discount scoped only
-// by service_category_filter (e.g. "any lawn line") ignored that filter
+// one is chosen. Codex r2 P1: checking service_key_filter alone and
+// otherwise defaulting to groups[0] meant a discount scoped only by
+// service_category_filter (e.g. "any lawn line") ignored that filter
 // entirely and always landed on whichever cadence group happened to book
 // first — a split-cadence booking (pest first group, lawn later group) with
 // a lawn-category appointment discount posted the discount with the pest
@@ -1146,12 +1145,12 @@ export function lineMatchesDiscountScope(svc, discount, scopeKey, lineServiceKey
 // No scope filter at all → the discount is appointment-wide; keep the prior
 // default of the first group. A filter that matches no group returns null —
 // same "no home for it" fallback the key-only version had.
-export function resolveAppointmentDiscountGroup(groups, discount, scopeKey, lineServiceKeyOf) {
+export function resolveAppointmentDiscountGroup(groups, discount, lineServiceKeyOf) {
   const list = Array.isArray(groups) ? groups : [];
   if (!discount || list.length === 0) return null;
-  const hasScopeFilter = !!(discount.service_key_filter || scopeKey || discount.service_category_filter);
+  const hasScopeFilter = !!(discount.service_key_filter || discount.service_category_filter);
   const target = hasScopeFilter
-    ? list.find((group) => group.lines.some((svc) => lineMatchesDiscountScope(svc, discount, scopeKey, lineServiceKeyOf)))
+    ? list.find((group) => group.lines.some((svc) => lineMatchesDiscountScope(svc, discount, lineServiceKeyOf)))
     : list[0];
   return target || null;
 }
@@ -1976,7 +1975,18 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const row = presetRowFor(chosen);
     return row ? { ...row, ...lane } : null;
   };
-  const presetsStackableWith = (chosenRows, lane) => (stackingEnabled
+  // GitHub review round 2 P1 (PR #4656): filtering must key off
+  // appointmentDiscountCompound (the FROZEN regime a selection was made
+  // under), never the live stackingEnabled — a live gate drift/unknown
+  // (poll flips off, or goes unresolved) after an appointment-level
+  // non-stackable tier was picked must not drop conflict filtering from
+  // the LINE pickers. It used to: an operator could add a conflicting
+  // WaveGuard tier to a line during the blocked interval, and if the poll
+  // then recovered to the ORIGINAL frozen value, the drift guard cleared
+  // and Save submitted both — the create route's pricing path never calls
+  // assertStackGroups itself. appointmentDiscountCompound already reduces
+  // to the live value whenever nothing is selected (no drift to protect).
+  const presetsStackableWith = (chosenRows, lane) => (appointmentDiscountCompound
     ? stackablePresets(lineDiscountPresets, chosenRows.filter(Boolean), lane)
     : lineDiscountPresets);
   // exceptIdx >= 0 scopes to the SAME submit group as that line; exceptIdx
@@ -2019,6 +2029,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   };
   // A custom preset takes the operator's amount, like a line pick.
   const pickAppointmentDiscount = (presetId) => {
+    // GitHub review round 2 P1 (PR #4656): once ANY group of a split save
+    // has already committed (createdGroupKeysRef), the appointment
+    // discount is FROZEN outright — neither replaced nor removed. A
+    // partial-save retry (some groups posted, a later one failed) skips
+    // already-created groups entirely (submitAppointments), so a changed
+    // pick here would never reach the group that actually carries it, and
+    // the committed group's own discount can never be un-done from this
+    // control after the fact either. This is checked BEFORE the
+    // presetId-empty branch too — clearing is no longer a safe no-op once
+    // something has already been persisted under the old selection.
+    if (createdGroupKeysRef.current.size > 0) return;
     if (!presetId) { setAppointmentDiscount(null); setAppointmentDiscountGateSnapshot(null); return; }
     // Codex pre-push audit P1 (round 5): the <select>'s own `disabled`
     // attribute (below, JSX) only stops genuine USER interaction — it does
@@ -2514,7 +2535,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const appointmentSubmitGroups = groupServicesForAppointmentSubmit(services);
   const submitGroupLinesFor = (svc) => submitGroupLinesForService(appointmentSubmitGroups, svc, services);
   const appointmentDiscountScopeLines = appointmentDiscountScopeLinesFor(
-    appointmentSubmitGroups, null, lineServiceKey, services,
+    appointmentSubmitGroups, services,
   );
   // Codex review round 1 (PR #4656): each CANDIDATE preset must be checked
   // for a non-stackable conflict against the lines of the group ITS OWN
@@ -2532,8 +2553,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const appointmentDiscountOptions = lineDiscountPresets
     .filter((d) => APPOINTMENT_DISCOUNT_TYPES.includes(d.discount_type))
     .filter((d) => {
-      if (!stackingEnabled) return true;
-      const group = resolveAppointmentDiscountGroup(appointmentSubmitGroups, d, null, lineServiceKey);
+      // Same FROZEN-regime rule as presetsStackableWith above — never the live stackingEnabled.
+      if (!appointmentDiscountCompound) return true;
+      const group = resolveAppointmentDiscountGroup(appointmentSubmitGroups, d, lineServiceKey);
       const groupLines = group?.lines || appointmentDiscountScopeLines;
       const chosenInGroup = groupLines
         .map((svc) => laneRow(svc.lineDiscount, { scope: `line:${services.indexOf(svc)}` }))
@@ -2547,7 +2569,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const appointmentDiscountGroup = (() => {
     if (!appointmentDiscount || services.length === 0) return null;
     const target = resolveAppointmentDiscountGroup(
-      appointmentSubmitGroups, appointmentDiscount, null, lineServiceKey,
+      appointmentSubmitGroups, appointmentDiscount, lineServiceKey,
     );
     return target
       ? { key: groupKey(target), lines: target.lines, split: appointmentSubmitGroups.length > 1 }
@@ -2557,7 +2579,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     if (!appointmentDiscount) return false;
     // Only the group this discount actually rides.
     if (appointmentDiscountGroup && !appointmentDiscountGroup.lines.includes(svc)) return false;
-    if (!lineMatchesDiscountScope(svc, appointmentDiscount, null, lineServiceKey)) return false;
+    if (!lineMatchesDiscountScope(svc, appointmentDiscount, lineServiceKey)) return false;
     // A percentage never reaches a percent-excluded line (termite bond,
     // palm injection, ...). An unknown catalog (the fetch failed) withholds
     // the line rather than previewing dollars the server will refuse —
@@ -2588,8 +2610,24 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   );
   const appointmentDiscountPreview = useMemo(() => {
     if (!appointmentDiscount) return { dollars: 0, total: netSubtotal, lines: null };
+    // GitHub review round 2 P1 (PR #4656): stack in SUBMISSION order — each
+    // submit group's own cadence-sorted lines (appointmentSubmitGroups[i].lines
+    // is exactly what appointmentGroupRequestBody posts as [primary, ...addons]),
+    // never raw UI insertion order. stackVisitDiscounts' fixed-credit
+    // pro-rata allocation (allocateProRata) breaks an equal-remainder tie
+    // by ARRAY INDEX, so a preview built from a different line order than
+    // the server's own restackOccurrenceDiscounts call can put the
+    // appointment credit's odd remainder cent on a DIFFERENT line than the
+    // server does — which changes the FINAL total by a cent once combined
+    // with other rounding (reproduced: a $100 quarterly line at 50% off, a
+    // $100 monthly line, and a $10.03 appointment credit preview $142.48 in
+    // UI-insertion order but the server's own monthly-first cadence order
+    // produces $142.47). Results are mapped back to each service's OWN UI
+    // identity below (submit order != UI order) so stackedLineDiscountAmount's
+    // services.indexOf lookup still finds the right row.
+    const orderedServices = appointmentSubmitGroups.flatMap((g) => g.lines);
     const stacked = stackVisitDiscounts({
-      lines: services.map((s) => ({
+      lines: orderedServices.map((s) => ({
         gross: lineEffectiveBaseAmount(s),
         lineDiscount: s.lineDiscount,
         eligible: appointmentDiscountReaches(s),
@@ -2597,8 +2635,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       appointmentDiscount,
       compound: appointmentDiscountCompound,
     });
-    return { dollars: stacked.appointmentDiscountDollars, total: stacked.total, lines: stacked.lines };
-  }, [services, selectedCustomer, mosquitoQuote, appointmentDiscount, netSubtotal, appointmentDiscountCompound, percentExcludedKeys]);
+    const byService = new Map(orderedServices.map((s, i) => [s, stacked.lines[i]]));
+    return {
+      dollars: stacked.appointmentDiscountDollars,
+      total: stacked.total,
+      lines: services.map((s) => byService.get(s) || null),
+    };
+  }, [services, selectedCustomer, mosquitoQuote, appointmentDiscount, netSubtotal, appointmentDiscountCompound, percentExcludedKeys, appointmentSubmitGroups]);
   // ONE cadence group's fully stacked per-visit total. The appointment-level
   // discount rides exactly one group (appointmentDiscountGroup), so a group
   // that does not carry it totals to its own subtotal. Used for the prepay
@@ -3202,19 +3245,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // Codex pre-push audit P1 (round 4): the disabled attribute on the
     // primary Save button is not the only path to this handler (the
     // header/footer/second-program CTA share this one lock, and a form
-    // Enter-key submission is a real bypass of a merely-disabled button) —
-    // so every discount-save-blocking condition canSubmit ANDs in below
-    // must ALSO be checked here directly, not just the two that happened
-    // to be added first.
-    // Codex pre-push audit P1 (round 6): staleStackingNotice drives the
-    // SAME banner text/select-disable as the other four reasons via
-    // discountSaveBlockedReason but was omitted from this list and from
-    // canSubmit below — a re-click after a submit-time drift fell through
-    // to another async ensureStackingFresh() round-trip instead of being
-    // short-circuited immediately, and the Save button stayed clickable
-    // while the banner visibly said not to.
-    if (appointmentDiscountHasNoGroup || appointmentDiscountGateDrifted
-      || stackingUnconfirmedBlocksSave || percentExclusionsBlockSave || staleStackingNotice) return;
+    // Enter-key submission is a real bypass of a merely-disabled button).
+    // GitHub review round 2 P1 (PR #4656): reads the ONE computed
+    // discountSaveBlockedReason — canSubmit below reads the exact same
+    // value — instead of independently re-deriving the same OR of five
+    // conditions a third time (the file's own round-4/round-6 notes
+    // document that this exact duplication already caused two real bugs:
+    // a new blocking reason added to only one or two of the three sites).
+    if (discountSaveBlockedReason) return;
     if (!canSubmitAppointments({
       selectedCustomer,
       services,
@@ -3369,6 +3407,50 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const percentExclusionsBlockSave = percentExclusionsSaveBlocked({
     discount: appointmentDiscount, excludedKeys: percentExcludedKeys,
   });
+  // GitHub review round 2 P1 (PR #4656): a cadence edit can MERGE two
+  // previously-separate submit groups into one (or split one apart) —
+  // groupServicesForAppointmentSubmit re-derives appointmentSubmitGroups
+  // fresh every render, so this re-checks on every cadence change, not
+  // only at pick time. Picking Filtering (presetsStackableWith /
+  // appointmentDiscountOptions) only ever stops a NEW conflicting pick
+  // from being ADDED — it does nothing once two ALREADY-selected discounts
+  // that never used to share a group suddenly do. stackGroupConflict (the
+  // same primitive the client-side picker filter already uses) is run
+  // directly against every CURRENTLY selected row in each group — the
+  // appointment-level slot's own group plus every line's own pick — so a
+  // conflict introduced purely by editing a cadence (no new pick at all)
+  // still blocks Save. buildAppointmentPricing (the create route) never
+  // calls assertStackGroups itself, so this client check is the only
+  // thing standing between the operator and two prohibited tiers both
+  // actually persisting; the coordinator has been told server-side
+  // enforcement is not in this slice's file-ownership scope.
+  const existingSelectionConflict = useMemo(() => {
+    if (!appointmentDiscountCompound) return null;
+    for (const group of appointmentSubmitGroups) {
+      const rows = group.lines
+        .map((svc) => laneRow(svc.lineDiscount, { scope: `line:${services.indexOf(svc)}` }))
+        .filter(Boolean);
+      if (appointmentDiscount && appointmentDiscountGroup?.key === groupKey(group)) {
+        const apptRow = laneRow(appointmentDiscount, { spansAll: true });
+        if (apptRow) rows.push(apptRow);
+      }
+      const conflict = stackGroupConflict(rows);
+      if (conflict) return conflict;
+    }
+    return null;
+    // discountPresets/lineDiscountPresets feed laneRow's own catalog
+    // lookup (presetRowFor) indirectly through closures already captured
+    // above; appointmentSubmitGroups is recomputed fresh every render from
+    // `services`, so listing both here (not just one) is what actually
+    // catches a cadence-only edit with no discount change at all.
+  }, [appointmentSubmitGroups, services, appointmentDiscount, appointmentDiscountGroup, appointmentDiscountCompound, discountPresets]);
+  // GitHub review round 2 P1 (PR #4656): the ONE computed value every
+  // Save-blocking site reads — handleSubmit's early-return guard, canSubmit,
+  // and this banner's own text used to independently re-derive the same OR
+  // of conditions in three places; the file's own round-4 and round-6 notes
+  // above document that split already caused two real bugs (a new blocking
+  // reason added to only one or two of the three). A future reason (like
+  // existingSelectionConflict just above) now only has to be added HERE.
   const discountSaveBlockedReason = staleStackingNotice
     || stackingUnconfirmedBlocksSave
     // Codex pre-push audit P1 (round 3): a background gate flip since this
@@ -3382,7 +3464,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       ? 'Could not confirm which services this percentage discount excludes — retry before saving.'
       : appointmentDiscountHasNoGroup
         ? 'This appointment discount does not match any selected service. Change or remove it before saving.'
-        : '');
+        : (existingSelectionConflict
+          ? `${existingSelectionConflict.names[0]} and ${existingSelectionConflict.names[1]} can't both apply to the same line — remove one before saving.`
+          : ''));
 
   // While the property list is loading a multi-property customer has no
   // resolved address yet — a submit then would omit propertyId and book the
@@ -3393,7 +3477,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     bookingPropertyState,
     alreadySubmitting: saving,
     addressAskPending,
-  }) && !stackingUnconfirmedBlocksSave && !percentExclusionsBlockSave && !appointmentDiscountHasNoGroup && !appointmentDiscountGateDrifted && !staleStackingNotice;
+  }) && !discountSaveBlockedReason;
   const hasRecurringServices = services.some((s) => s.cadence && s.cadence !== 'one_time');
   const firstCustomRecurringIndex = services.findIndex((s) => s.cadence === 'custom');
   const weekendRuleValue = skipWeekends ? weekendShift : 'allow';
@@ -4069,6 +4153,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 <div style={{ gridColumn: isMobile ? '1 / -1' : undefined }}>
                   {isMobile && serviceFieldLabel('Repeats')}
                   <select
+                    aria-label={`Repeats for ${svc.name || 'service'}`}
                     value={svc.cadence || 'one_time'}
                     onChange={(e) => updateServiceCadence(idx, e.target.value)}
                     style={inputStyle}
@@ -4388,8 +4473,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 // instant, discarding the fresh pick with no feedback the
                 // moment the drift check re-evaluates. The banner's own
                 // "Retry"/"Remove discount" button is a separate element,
-                // unaffected by this.
-                disabled={!!discountSaveBlockedReason}
+                // unaffected by this. GitHub review round 2 P1: ALSO
+                // disabled once any group of a split save has already
+                // committed (createdGroupKeysRef, same convention the
+                // customer selector already uses below) — a partial-save
+                // retry must never let the operator change or remove the
+                // discount a committed group already carries, or price a
+                // NEW pick against a group submitAppointments will skip.
+                disabled={!!discountSaveBlockedReason || createdGroupKeysRef.current.size > 0}
                 style={inputStyle}
               >
                 <option value="">None</option>
@@ -4412,13 +4503,18 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           )}
 
           {discountSaveBlockedReason && (
-            <div style={{ background: `${D.red}15`, border: `1px solid ${D.red}55`, borderRadius: 8, padding: 10, marginTop: 12, fontSize: 12, color: D.red, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+            // GitHub review round 2 P2 (PR #4656): 14px — the admin UI's
+            // text-readability floor, not the 12px most other captions in
+            // this modal use. This banner carries the ONLY reason a save
+            // is blocked and its only recovery action, on a surface that
+            // is also used on mobile.
+            <div style={{ background: `${D.red}15`, border: `1px solid ${D.red}55`, borderRadius: 8, padding: 10, marginTop: 12, fontSize: 14, color: D.red, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
               <span>{discountSaveBlockedReason}</span>
               <button
                 type="button"
                 onClick={staleStackingNotice ? retryStaleStacking : (stackingUnconfirmedBlocksSave || appointmentDiscountGateDrifted) ? retryAppointmentDiscountGate : percentExclusionsBlockSave ? retryPercentExclusions : () => pickAppointmentDiscount('')}
-                style={{ background: 'none', border: `1px solid ${D.red}`, color: D.red, borderRadius: 6, padding: '4px 10px', fontSize: 12, fontWeight: 500, cursor: 'pointer', flex: '0 0 auto' }}
-              >{!staleStackingNotice && appointmentDiscountHasNoGroup && !stackingUnconfirmedBlocksSave && !percentExclusionsBlockSave && !appointmentDiscountGateDrifted ? 'Remove discount' : 'Retry'}</button>
+                style={{ background: 'none', border: `1px solid ${D.red}`, color: D.red, borderRadius: 6, padding: '4px 10px', fontSize: 14, fontWeight: 500, cursor: 'pointer', flex: '0 0 auto' }}
+              >{!staleStackingNotice && !stackingUnconfirmedBlocksSave && !percentExclusionsBlockSave && !appointmentDiscountGateDrifted && (appointmentDiscountHasNoGroup || existingSelectionConflict) ? 'Remove discount' : 'Retry'}</button>
             </div>
           )}
 

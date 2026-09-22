@@ -82,6 +82,23 @@ function installModalFetch({
       return Promise.resolve(jsonResponse({ items: [] }));
     }
     if (url.includes('/admin/services?')) {
+      // 'Monthly'/'Quarterly' return YEAR-ROUND recurring services (merge
+      // into ONE submit group together, unlike the seasonal First/Second
+      // pair below, each of which always books its own separate group).
+      if (url.includes('Monthly') || url.includes('Quarterly')) {
+        const monthName = url.includes('Monthly') ? 'Monthly recurring service' : 'Quarterly recurring service';
+        return Promise.resolve(jsonResponse({
+          services: [{
+            id: url.includes('Monthly') ? 'service-monthly' : 'service-quarterly',
+            service_key: url.includes('Monthly') ? 'svc_monthly' : 'svc_quarterly',
+            name: monthName,
+            billing_type: 'recurring',
+            frequency: url.includes('Monthly') ? 'monthly' : 'quarterly',
+            base_price: basePrice,
+            default_duration_minutes: 30,
+          }],
+        }));
+      }
       const name = url.includes('Second') ? 'Second seasonal service' : 'First seasonal service';
       return Promise.resolve(jsonResponse({
         services: [{
@@ -159,6 +176,7 @@ async function addTwoSeasonalServices() {
   await waitFor(() => expect(submit.disabled).toBe(false));
   return submit;
 }
+
 
 const CUSTOMER = { id: 'customer-a', firstName: 'Ada', lastName: 'Lovelace' };
 const schedulePosts = (fetcher) => fetcher.mock.calls.filter(
@@ -1106,5 +1124,169 @@ describe('GitHub review round 1 on PR #4656', () => {
     expect(submit.disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Remove discount' }));
     await waitFor(() => expect(submit.disabled).toBe(false));
+  });
+});
+
+describe('GitHub review round 2 on PR #4656', () => {
+  // P1 (:1981): stack-group filtering must key off the FROZEN regime
+  // (appointmentDiscountCompound), never the live stackingEnabled — a gate
+  // drift after an appointment-level non-stackable tier was picked must
+  // not expose the unfiltered catalog to the LINE pickers.
+  it('keeps stack-group filtering active in the line picker during a gate drift', async () => {
+    const retry = vi.fn();
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry });
+    installModalFetch({
+      discounts: [
+        { id: 'silver', name: 'Silver', discount_type: 'percentage', amount: 10, is_active: true, show_in_invoices: true, stack_group: 'tier' },
+        { id: 'gold', name: 'Gold', discount_type: 'percentage', amount: 15, is_active: true, show_in_invoices: true, stack_group: 'tier' },
+      ],
+    });
+    const booking = renderBooking();
+    await addOneSeasonalService();
+    const picker = await screen.findByLabelText('Appointment discount');
+    fireEvent.change(picker, { target: { value: 'silver' } });
+    await screen.findByText('Silver - 10%');
+
+    // The poll drifts — the appointment slot stays frozen/shown, but the
+    // live gate now disagrees.
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: false, known: true, retry });
+    booking.view.rerender(<CreateAppointmentModal
+      defaultCustomer={CUSTOMER}
+      defaultDate={booking.scheduledDate}
+      defaultWindowStart="09:00"
+      onClose={booking.onClose}
+      onCreated={booking.onCreated}
+      onChange={booking.onChange}
+    />);
+    await screen.findByText('Could not confirm the discount-stacking status — retry before saving.');
+
+    // The line-level picker must still hide Gold (same non-stackable tier
+    // as the frozen appointment-level Silver) — never fall back to the
+    // unfiltered catalog just because the live gate currently disagrees.
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for First seasonal service...'));
+    expect(screen.queryByRole('button', { name: /^Gold/ })).toBeNull();
+  });
+
+  // P1 (:4392): once any group of a split save has committed, the
+  // appointment discount is frozen outright — a retry cannot replace or
+  // remove it, and a change here can never reach the already-created group.
+  it('freezes the appointment discount after a partial multi-group save', async () => {
+    vi.spyOn(window, 'alert').mockImplementation(() => {});
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    const secondScheduleRequest = deferred();
+    const { fetcher } = installModalFetch({
+      secondScheduleRequest,
+      discounts: [{ id: 'mil', name: 'Military Discount', discount_type: 'fixed_amount', amount: 10, is_active: true, show_in_invoices: true }],
+    });
+    renderBooking();
+    const submit = await addTwoSeasonalServices();
+    const picker = await screen.findByLabelText('Appointment discount');
+    fireEvent.change(picker, { target: { value: 'mil' } });
+    fireEvent.click(submit);
+    // First group's POST lands; the second is still in flight.
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(2));
+    // A group has already committed — frozen now, before the second POST
+    // even resolves.
+    await waitFor(() => expect(screen.getByLabelText('Appointment discount').disabled).toBe(true));
+    fireEvent.change(picker, { target: { value: '' } });
+    expect(picker.value).toBe('mil');
+    await act(async () => {
+      secondScheduleRequest.resolve(jsonResponse({ error: 'failed' }, { ok: false, status: 500 }));
+      await secondScheduleRequest.promise;
+    });
+    // Still frozen after the failure the operator would retry from.
+    expect(screen.getByLabelText('Appointment discount').disabled).toBe(true);
+  });
+
+  // Carried finding: a cadence edit can MERGE two previously-separate
+  // submit groups — an appointment-level tier scoped to a seasonal
+  // service and a conflicting LINE tier on a separate quarterly service
+  // are both valid picks while the groups are still separate; changing
+  // the seasonal line's cadence to quarterly merges them, and the two
+  // picks must be re-validated, not silently left to both persist.
+  it('re-validates existing selections when a cadence edit merges their submit groups', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    installModalFetch({
+      discounts: [
+        { id: 'silver', name: 'Silver', discount_type: 'percentage', amount: 10, is_active: true, show_in_invoices: true, stack_group: 'tier', service_key_filter: 'svc_first' },
+        { id: 'gold', name: 'Gold', discount_type: 'percentage', amount: 15, is_active: true, show_in_invoices: true, stack_group: 'tier' },
+      ],
+      // A REAL (id-bearing) catalog with nothing excluded — Silver (a
+      // percentage discount) needs this resolved to actually reach its
+      // line at all; an unresolved catalog would block Save on that
+      // (already-tested) reason first, masking this one.
+      servicesDropdownResponse: {
+        groups: [{
+          category: 'pest_control',
+          items: [
+            { id: 'svc-first-row', name: 'First seasonal service', duration: 30, serviceKey: 'svc_first', excludedFromPercentDiscount: false },
+            { id: 'svc-quarterly-row', name: 'Quarterly recurring service', duration: 30, serviceKey: 'svc_quarterly', excludedFromPercentDiscount: false },
+          ],
+        }],
+      },
+    });
+    renderBooking();
+    await addOneSeasonalService();
+    fireEvent.click(screen.getByRole('button', { name: /Add service/ }));
+    fireEvent.change(screen.getByPlaceholderText('Search to add service'), { target: { value: 'Quarterly' } });
+    fireEvent.click(await screen.findByRole('button', { name: /Quarterly recurring service/ }));
+
+    // Silver rides the seasonal group (its own catalog scope).
+    const apptPicker = await screen.findByLabelText('Appointment discount');
+    fireEvent.change(apptPicker, { target: { value: 'silver' } });
+    await screen.findByText('Silver - 10%');
+
+    // Gold on the quarterly line — valid right now: a DIFFERENT group.
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for Quarterly recurring service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Gold/ }));
+    await screen.findByText('Gold (Quarterly recurring service)');
+    expect(screen.queryByText(/can.t both apply/)).toBeNull();
+
+    // The cadence edit merges the seasonal line into the SAME (quarterly)
+    // group Gold already rides.
+    const cadenceSelect = screen.getByLabelText('Repeats for First seasonal service');
+    fireEvent.change(cadenceSelect, { target: { value: 'quarterly' } });
+    await waitFor(() => expect(cadenceSelect.value).toBe('quarterly'));
+
+    await screen.findByText("Gold and Silver can't both apply to the same line — remove one before saving.");
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    expect(submit.disabled).toBe(true);
+  });
+
+  // Carried finding (:2592/round-2 P1): the preview must stack in
+  // SUBMISSION order (each group's own cadence-sorted lines), not raw UI
+  // insertion order — stackVisitDiscounts' fixed-credit remainder
+  // tie-break is by array index, so a different order can put an odd
+  // remainder cent on a different line and change the FINAL total.
+  it('previews the fully stacked total in submission (cadence-sorted) order, matching the server', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    installModalFetch({
+      basePrice: 100,
+      discounts: [
+        { id: 'half-off', name: 'Half Off', discount_type: 'percentage', amount: 50, is_active: true, show_in_invoices: true },
+        { id: 'credit', name: 'Ten Oh Three', discount_type: 'fixed_amount', amount: 10.03, is_active: true, show_in_invoices: true },
+      ],
+    });
+    renderBooking();
+    // Added in UI order Quarterly (first), Monthly (second) — the SERVER's
+    // own cadence sort books the shorter interval (monthly) FIRST within
+    // the merged year-round group, the OPPOSITE of UI insertion order.
+    fireEvent.change(screen.getByPlaceholderText('Search services'), { target: { value: 'Quarterly' } });
+    fireEvent.click(await screen.findByRole('button', { name: /Quarterly recurring service/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Add service/ }));
+    fireEvent.change(screen.getByPlaceholderText('Search to add service'), { target: { value: 'Monthly' } });
+    fireEvent.click(await screen.findByRole('button', { name: /Monthly recurring service/ }));
+
+    // 50% off the quarterly line (the UI-first, server-SECOND line).
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for Quarterly recurring service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Half Off/ }));
+
+    const apptPicker = await screen.findByLabelText('Appointment discount');
+    fireEvent.change(apptPicker, { target: { value: 'credit' } });
+
+    // $142.47 (server, monthly-first stacking order) — never $142.48 (the
+    // pre-fix UI-insertion-order total).
+    await screen.findByText((_, node) => node?.textContent === 'Total: $142.47');
+    expect(screen.queryByText((_, node) => node?.textContent === 'Total: $142.48')).toBeNull();
   });
 });

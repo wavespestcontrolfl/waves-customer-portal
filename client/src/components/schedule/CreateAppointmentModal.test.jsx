@@ -448,6 +448,10 @@ describe('submitGroupLinesForService (Codex r1 P2 — tier picker scoped to subm
   });
 });
 
+// GitHub review round 2 P2 (PR #4656): the scopeKey parameter this helper
+// used to carry (for an operator "Applies to" override no caller in this
+// slice ever passed) was removed — add it back, with its own tests, only
+// alongside the slice that actually ships that override UI.
 describe('appointmentDiscountScopeLinesFor (Codex r1 P2 — appointment slot scoped to its own group)', () => {
   const quarterlyPest = { lineId: 'l1', name: 'Quarterly Pest', service_key: 'pest_general_quarterly' };
   const monthlyLawn = { lineId: 'l2', name: 'Monthly Lawn', service_key: 'lawn_monthly' };
@@ -456,23 +460,13 @@ describe('appointmentDiscountScopeLinesFor (Codex r1 P2 — appointment slot sco
     { cadence: 'quarterly', lines: [quarterlyPest] },
     { cadence: 'monthly', lines: [monthlyLawn] },
   ];
-  const keyOf = (svc) => svc?.service_key ?? null;
 
-  it('scopes to the group whose line matches a caller-supplied scope key', () => {
-    expect(appointmentDiscountScopeLinesFor(groups, 'lawn_monthly', keyOf, services)).toEqual([monthlyLawn]);
-  });
-
-  it('defaults to the first submit group when no scope key is chosen', () => {
-    expect(appointmentDiscountScopeLinesFor(groups, '', keyOf, services)).toEqual([quarterlyPest]);
-    expect(appointmentDiscountScopeLinesFor(groups, null, keyOf, services)).toEqual([quarterlyPest]);
-  });
-
-  it('falls back to every service when the scope key matches no group', () => {
-    expect(appointmentDiscountScopeLinesFor(groups, 'termite_bond', keyOf, services)).toBe(services);
+  it('always returns the first submit group\'s lines', () => {
+    expect(appointmentDiscountScopeLinesFor(groups, services)).toEqual([quarterlyPest]);
   });
 
   it('falls back to every service for a non-array groups argument', () => {
-    expect(appointmentDiscountScopeLinesFor(null, 'lawn_monthly', keyOf, services)).toBe(services);
+    expect(appointmentDiscountScopeLinesFor(null, services)).toBe(services);
   });
 });
 

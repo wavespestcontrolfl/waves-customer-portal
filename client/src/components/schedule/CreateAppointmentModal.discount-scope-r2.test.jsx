@@ -35,45 +35,44 @@ const GROUPS = [
   { key: 'monthly', lines: [LAWN] },
 ];
 
+// GitHub review round 2 P2 (PR #4656): both functions used to carry a
+// scopeKey parameter for an operator "Applies to" override — dropped
+// (with its own test) since no caller in this slice ever passed one;
+// add it back, with its own tests, only alongside the slice that ships
+// that override UI.
 describe('resolveAppointmentDiscountGroup (r2 P1 — category-scoped discounts)', () => {
   it('routes a CATEGORY-scoped lawn discount to the lawn group, not the first group', () => {
     const discount = { service_category_filter: 'lawn_care', service_key_filter: null };
-    const group = resolveAppointmentDiscountGroup(GROUPS, discount, '', lineServiceKey);
+    const group = resolveAppointmentDiscountGroup(GROUPS, discount, lineServiceKey);
     expect(group?.key).toBe('monthly');
-    // Pre-fix: no service_key_filter and no scopeKey meant `key` was null,
-    // so the whole find() was skipped and groups[0] (pest) was chosen —
-    // where the discount matches no line and is silently dropped.
+    // Pre-fix: no service_key_filter meant `key` was null, so the whole
+    // find() was skipped and groups[0] (pest) was chosen — where the
+    // discount matches no line and is silently dropped.
     expect(group?.lines).toEqual([LAWN]);
   });
 
   it('still honors an exact service-key filter', () => {
     const discount = { service_key_filter: 'lawn_fert_monthly' };
-    expect(resolveAppointmentDiscountGroup(GROUPS, discount, '', lineServiceKey)?.key).toBe('monthly');
-  });
-
-  it('honors the operator "Applies to" scope key over an unfiltered preset', () => {
-    const discount = { service_key_filter: null, service_category_filter: null };
-    expect(resolveAppointmentDiscountGroup(GROUPS, discount, 'lawn_fert_monthly', lineServiceKey)?.key)
-      .toBe('monthly');
+    expect(resolveAppointmentDiscountGroup(GROUPS, discount, lineServiceKey)?.key).toBe('monthly');
   });
 
   it('key AND category are AND-ed: a mismatched pair matches no group', () => {
     const discount = { service_key_filter: 'pest_general_quarterly', service_category_filter: 'lawn_care' };
-    expect(resolveAppointmentDiscountGroup(GROUPS, discount, '', lineServiceKey)).toBeNull();
+    expect(resolveAppointmentDiscountGroup(GROUPS, discount, lineServiceKey)).toBeNull();
   });
 
   it('an unscoped discount is appointment-wide — still the first group', () => {
     const discount = { service_key_filter: null, service_category_filter: null };
-    expect(resolveAppointmentDiscountGroup(GROUPS, discount, '', lineServiceKey)?.key).toBe('quarterly');
+    expect(resolveAppointmentDiscountGroup(GROUPS, discount, lineServiceKey)?.key).toBe('quarterly');
   });
 
   it('the group choice and per-line eligibility agree on the same scope test', () => {
     const discount = { service_category_filter: 'lawn_care' };
-    const group = resolveAppointmentDiscountGroup(GROUPS, discount, '', lineServiceKey);
+    const group = resolveAppointmentDiscountGroup(GROUPS, discount, lineServiceKey);
     // Every line of the chosen group that the discount reaches must pass
     // the same predicate the modal's appointmentDiscountReaches applies.
-    expect(group.lines.some((svc) => lineMatchesDiscountScope(svc, discount, '', lineServiceKey))).toBe(true);
-    expect(lineMatchesDiscountScope(PEST, discount, '', lineServiceKey)).toBe(false);
+    expect(group.lines.some((svc) => lineMatchesDiscountScope(svc, discount, lineServiceKey))).toBe(true);
+    expect(lineMatchesDiscountScope(PEST, discount, lineServiceKey)).toBe(false);
   });
 });
 
