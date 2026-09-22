@@ -878,6 +878,56 @@ describe('GitHub round 6 P0 item 3b (Codex, blocked push 7 on PR #4656) — expe
   });
 });
 
+describe('GitHub round 6 P0 item 1b follow-up (Codex, blocked push 8 on PR #4656) — expected_price sourced from the previewed price', () => {
+  // The server's own assertPriceMatchesPricing (admin-schedule.js) refuses
+  // a mismatch between this field and its freshly-computed
+  // pricing.finalPrice with a retryable 409 BEFORE any write — the same
+  // "the previewed number is the only number the write may bind to"
+  // contract expected_discount_stacking already proved for the regime,
+  // now proved for the dollar amount too (a catalog discount value can
+  // drift with the regime unchanged, which an agreeing regime never
+  // catches).
+  it('posts expected_price equal to the fresh preview row price, not the local client-engine figure', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    const { fetcher } = installModalFetch({
+      basePrice: 100,
+      discounts: [{ id: 'five-pct', name: 'Five Percent', discount_type: 'percentage', amount: 5, is_active: true, show_in_invoices: true }],
+      // The server previewed $77 -- deliberately NOT the naive local
+      // $95.00 the client engine would compute for 5% off $100, so a
+      // pass here proves the SERVER's previewed number is what's posted.
+      previewResponses: [(groups) => ({ regime: true, results: groups.map((g) => ({ key: g.key, price: 77 })) })],
+    });
+    renderBooking();
+    await addOneSeasonalService();
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for First seasonal service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Five Percent/ }));
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    const body = JSON.parse(schedulePosts(fetcher)[0][1].body);
+    expect(body.expected_price).toBe(77);
+  });
+
+  // A group with nothing regime-dependent about it never ran a preview at
+  // all -- expected_price must be omitted entirely, matching
+  // expected_discount_stacking's own "nothing to compare" contract, not
+  // sent as some fabricated 0/null that the server would then wrongly
+  // treat as an explicit divergence check.
+  it('omits expected_price entirely for a gate-invariant group with no discount at all', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    const { fetcher } = installModalFetch({ basePrice: 100 });
+    renderBooking();
+    await addOneSeasonalService();
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    const body = JSON.parse(schedulePosts(fetcher)[0][1].body);
+    expect(body.expected_price).toBeUndefined();
+  });
+});
+
 describe('appointment discount gate-drift protection (Codex pre-push audit P1, round 3)', () => {
   // The background poll behind useDiscountStackingState can flip
   // stackingEnabled after a discount is already selected. The picker can

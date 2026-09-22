@@ -6207,6 +6207,26 @@ function assertPrepayTotalMatchesPricing({ totalAmount, finalPrice, plannedCount
   }
 }
 
+// Codex pre-push audit P0 (round 6, blocked push 8 on PR #4656): only the
+// STACKING REGIME was bound to the POST (expected_discount_stacking) —
+// nothing bound the previewed DOLLAR AMOUNT itself. A discount's own
+// catalog amount changing mid-session (a $10 credit edited to $5, no gate
+// flip involved at all) lets ensureStackingFresh agree while buildAppointmentPricing
+// still recomputes a DIFFERENT pricing.finalPrice than what /preview
+// showed and the operator saw on screen — an unchanged $100 booking
+// displays $90 but silently saves $95. assertPrepayTotalMatchesPricing
+// above already closed this exact class for prepaid.totalAmount; this is
+// the same check for the group's own per-visit price, which every OTHER
+// (non-prepay) booking also needs. Same shape: a retryable 409 before any
+// write, undefined (no field sent) skipping the check entirely so every
+// existing/older caller stays byte-identical.
+function assertPriceMatchesPricing({ expectedPrice, finalPrice }) {
+  if (expectedPrice === undefined) return;
+  if (Math.round(Number(expectedPrice) * 100) !== Math.round((Number(finalPrice) || 0) * 100)) {
+    throw Object.assign(httpError(409, 'The price changed since this was previewed — reload and try again'), { code: 'PRICE_DIVERGED' });
+  }
+}
+
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const {
@@ -6808,6 +6828,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
       );
     }
     assertNoDiscountStackGroupConflict(stackGroupRows);
+    // Codex pre-push audit P0 (round 6, blocked push 8): the group's own
+    // per-visit price, bound to the SAME previewed number the client
+    // displayed and posted expected_discount_stacking alongside — see
+    // assertPriceMatchesPricing's own comment for why this is needed even
+    // with the regime unchanged.
+    assertPriceMatchesPricing({ expectedPrice: req.body?.expected_price, finalPrice: pricing.finalPrice });
 
     // Re-service callbacks default to $0 for WaveGuard customers, but an operator
     // can still enter an explicit charge (e.g. a re-service that also handled a
@@ -20290,6 +20316,7 @@ router._test = {
   bookingCreatesWaveGuardCoverage,
   buildAppointmentPricing,
   assertPrepayTotalMatchesPricing,
+  assertPriceMatchesPricing,
   discountStackGroupRowsForPricing,
   assertNoDiscountStackGroupConflict,
   lineExcludedFromPercentDiscount,

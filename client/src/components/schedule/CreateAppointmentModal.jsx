@@ -3644,6 +3644,20 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             // math, mirroring #4655/#4658's identical contract.
             confirmedGroupRegime = previewedRegime;
             body.expected_discount_stacking = confirmedGroupRegime;
+            // Codex pre-push audit P0 (round 6, blocked push 8): the
+            // regime alone wasn't enough — a discount's own CATALOG
+            // AMOUNT can drift mid-session with the regime unchanged
+            // (a $10 credit edited to $5), which agreeing regimes never
+            // catch. The server's own assertPriceMatchesPricing (mirroring
+            // assertPrepayTotalMatchesPricing's identical contract) refuses
+            // a mismatch against its freshly-computed pricing.finalPrice
+            // with a retryable 409 before any write. Sourced from the SAME
+            // fresh preview row groupStackedPerVisitTotal reads for the
+            // displayed price — omitted (not sent) when there is none to
+            // compare, so an older/different caller and a group with
+            // nothing priced yet stay byte-identical to before this fix.
+            const previewedPrice = freshPreviewGroupPrice({ serverPreview, previewRequestKey, groupKey: key });
+            if (previewedPrice != null) body.expected_price = previewedPrice;
           }
           bookingPostAttempted = true;
           const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
