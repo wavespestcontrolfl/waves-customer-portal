@@ -1401,6 +1401,9 @@ const {
   copyStampedServiceAddressFields,
   typedDiscountSlot,
   restackOccurrenceDiscounts,
+  stampPricingRegimeMarker,
+  hasPricingRegimeMarker,
+  clearPricingRegimeMarker,
 } = require('../services/booking/visit-financial-stamps');
 const { anchorSoleProperty } = require('../services/customer-properties');
 
@@ -2682,6 +2685,11 @@ async function resolveSeriesExtensionPriceTemplate(conn, parentId, parent) {
       template.line_discount_type = null;
       template.line_discount_amount = null;
       template.line_discount_dollars = null;
+      // The marker total already folds the primary's implied share in —
+      // strip any pricing-regime marker the parent itself carries so
+      // restackStoredVisitFinancials still defers on this null primary
+      // (see that function's own comment, and hasPricingRegimeMarker's).
+      clearPricingRegimeMarker(template);
     }
     return template;
   } catch {
@@ -2757,25 +2765,36 @@ function applyStoredVisitFinancials(target, cols, parent, addonRows, allParentAd
 // it gets every percentage term treated as uncapped (see the header note
 // below for why that is the honest degraded state, not a silent regression).
 function restackStoredVisitFinancials(parent, addonRows, discountScope, discountCaps) {
-  // A MISSING primary_line_price bails out here — unlike restackLiveVisitFinancials's
-  // identical-looking guard above, this one is NOT safe to collapse to
-  // gross:0 (Codex pre-push audit P0, round 10, reverting round 8's
-  // attempt at exactly that): a stored row's null primary_line_price does
-  // not mean "no primary charge" — calculateStoredVisitFinancials (the
-  // existing, unmodified computation this restack sits alongside) already
-  // reconstructs a REAL implied primary contribution for that case, from
-  // estimated_price minus the parent's full add-on total — covering BOTH
-  // the anchored-split marker (the visit's TOTAL, primary share folded in)
-  // AND an ordinary legacy/unstructured row (a flat estimated_price with no
-  // line-item breakdown ever recorded). Starting this restack's primary
-  // from gross:0 in either case would overwrite that reconstructed charge
-  // with a hard $0 — Codex's repro: `{ primary_line_price: null,
-  // estimated_price: 100 }`, no add-ons, restacked to price: 0. Only an
-  // EXPLICIT $0 primary_line_price (round 3 — a member-covered series
-  // stamps exactly this) is a real, known-zero gross safe to restack
-  // around; a missing one defers entirely to the existing fallback.
-  if (parent?.primary_line_price == null || parent.primary_line_price === '') return null;
-  const primaryGross = Number(parent.primary_line_price);
+  // A MISSING primary_line_price bails out here UNLESS the row itself
+  // carries the pricing-regime marker (Codex pre-push audit P0, round 10,
+  // reverting round 8's attempt to always collapse this to gross:0; round
+  // 13 restoring the collapse ONLY when it's provably safe): a stored
+  // row's null primary_line_price is normally ambiguous — it could mean
+  // "no primary at all" (an add-on-only or re-service/callback booking —
+  // safe to restack around a $0 primary) or a legacy/unstructured total or
+  // the anchored-split marker (both need calculateStoredVisitFinancials's
+  // own reconstruction from estimated_price minus the parent's full add-on
+  // total, which a restack starting the primary from gross:0 cannot
+  // replicate — Codex's repro: `{ primary_line_price: null, estimated_price:
+  // 100 }`, no add-ons, restacked to price: 0 instead of the reconstructed
+  // $100). hasPricingRegimeMarker resolves the ambiguity: this slice stamps
+  // that marker on every row it prices while the gate is live (creation,
+  // every seeded child/booster, every extension write — see
+  // stampPricingRegimeMarker), and resolveSeriesExtensionPriceTemplate's
+  // anchored-split clear strips it back off its own template, so a marked
+  // row's null primary is PROVABLY "no primary at all," never the marker
+  // or a legacy row (Codex pre-push audit P0, round 13: an add-on-only
+  // booking with a null primary restacked correctly at CREATION — the
+  // seeded occurrence read $56 — but its own EXTENSION replayed frozen
+  // dollars and read $54, because this guard could not yet tell a
+  // genuinely-empty primary apart from a legacy/marker one). An EXPLICIT
+  // $0 primary_line_price (round 3 — a member-covered series stamps
+  // exactly this) is unaffected either way — already a real, known-zero
+  // gross safe to restack around.
+  const primaryPriceRaw = parent?.primary_line_price;
+  const primaryPriceMissing = primaryPriceRaw == null || primaryPriceRaw === '';
+  if (primaryPriceMissing && !hasPricingRegimeMarker(parent)) return null;
+  const primaryGross = primaryPriceMissing ? 0 : Number(primaryPriceRaw);
   if (!Number.isFinite(primaryGross) || primaryGross < 0) return null;
   const addons = Array.isArray(addonRows) ? addonRows : [];
 
@@ -6266,6 +6285,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) insertData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
       if (pricing.primaryDiscount && cols.line_discount_amount && pricing.primaryDiscount.discountAmount != null) insertData.line_discount_amount = Number(pricing.primaryDiscount.discountAmount);
       if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) insertData.line_discount_dollars = Number(pricing.primaryDiscount.discountDollars);
+      // Pricing-regime provenance (GATE_DISCOUNT_STACKING) — lets a later
+      // extension's own restack tell a null primary_line_price genuinely
+      // means "no primary" apart from a legacy/unstructured row (see
+      // restackStoredVisitFinancials's own comment).
+      if (discountStackingLive()) stampPricingRegimeMarker(insertData, cols);
       if (cols.create_invoice_on_complete) insertData.create_invoice_on_complete = createInvoiceStamp;
 
       // Global occupancy probe under rung 1 (the contract's second half):
@@ -6406,6 +6430,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) {
           childData.line_discount_dollars = childRestack ? (childRestack.primaryDiscountDollars || 0) : Number(pricing.primaryDiscount.discountDollars);
         }
+        // Pricing-regime provenance — see the parent insertData's identical stamp.
+        if (discountStackingLive()) stampPricingRegimeMarker(childData, cols);
         if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = createInvoiceStamp;
         // Same global probe as the parent, under this child's own date lock.
         if (childData.window_start && childData.window_end) {
@@ -6492,6 +6518,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) {
             boosterData.line_discount_dollars = boosterRestack ? (boosterRestack.primaryDiscountDollars || 0) : Number(pricing.primaryDiscount.discountDollars);
           }
+          // Pricing-regime provenance — see the parent insertData's identical stamp.
+          if (discountStackingLive()) stampPricingRegimeMarker(boosterData, cols);
           // Same reasoning: boosters keep the modal's invoice intent even on
           // a covered member series (identical to createInvoiceStamp for
           // every non-member booking).
@@ -13058,6 +13086,10 @@ async function reconcileRecurringSeriesVisitCount(trx, {
       ? await loadDiscountCapsById(trx, [extensionPriceParent.line_discount_id, ...dueAddons.map((a) => a.discount_id)])
       : null;
     const restackedAddonDollars = applyDiscountStackRestack(data, cols, extensionPriceParent, dueAddons, storedDiscountScope, discountCaps);
+    // Pricing-regime provenance — see restackStoredVisitFinancials's own
+    // comment for why this lets a LATER extension of this same row tell a
+    // null primary apart from a legacy/unstructured one.
+    if (discountStackingLive()) stampPricingRegimeMarker(data, cols);
     if (occupancyGuard) {
       await guardRecurrenceDestination(trx, {
         lockedDates: occupancyGuard.lockedDates,
@@ -13352,6 +13384,9 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
             ? await loadDiscountCapsById(conn, [extensionPriceParent.line_discount_id, ...dueAddons.map((a) => a.discount_id)])
             : null;
           const restackedAddonDollars = applyDiscountStackRestack(nextData, cols, extensionPriceParent, dueAddons, storedDiscountScope, discountCaps);
+          // Pricing-regime provenance — see restackStoredVisitFinancials's
+          // own comment.
+          if (discountStackingLive()) stampPricingRegimeMarker(nextData, cols);
           // Extension rows keep invoice-on-complete stamping — sibling-
           // resolved so the freshest office billing intent wins (see
           // resolveSeriesCreateInvoiceOnComplete). Without it a
@@ -18484,6 +18519,9 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
           ? await loadDiscountCapsById(trx, [extensionPriceParent.line_discount_id, ...dueAddons.map((a) => a.discount_id)])
           : null;
         applyDiscountStackRestack(data, cols, extensionPriceParent, dueAddons, storedDiscountScope, discountCaps);
+        // Pricing-regime provenance — see restackStoredVisitFinancials's
+        // own comment.
+        if (discountStackingLive()) stampPricingRegimeMarker(data, cols);
         if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(childIdentity.service_type);
         if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
         if (cols.skip_weekends) data.skip_weekends = skipParentStamp;
@@ -18581,6 +18619,9 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
           ? await loadDiscountCapsById(trx, [extensionPriceParent.line_discount_id, ...dueAddons.map((a) => a.discount_id)])
           : null;
         applyDiscountStackRestack(data, cols, extensionPriceParent, dueAddons, storedDiscountScope, discountCaps);
+        // Pricing-regime provenance — see restackStoredVisitFinancials's
+        // own comment.
+        if (discountStackingLive()) stampPricingRegimeMarker(data, cols);
         if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(childIdentity.service_type);
         if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
         if (cols.skip_weekends) data.skip_weekends = skipParentStamp;
@@ -19035,6 +19076,9 @@ router._test = {
   applyDiscountStackRestack,
   storedOccurrenceFloorPrice,
   loadDiscountCapsById,
+  stampPricingRegimeMarker,
+  hasPricingRegimeMarker,
+  clearPricingRegimeMarker,
   insertRecurringChildAddons,
   insertScheduledServiceAddons,
   loadStoredDiscountScope,

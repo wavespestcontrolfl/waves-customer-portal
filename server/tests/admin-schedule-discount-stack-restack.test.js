@@ -52,6 +52,10 @@ const {
   calculateVisitFinancialsForAddons,
   storedOccurrenceFloorPrice,
   calculateStoredVisitFinancials,
+  stampPricingRegimeMarker,
+  hasPricingRegimeMarker,
+  clearPricingRegimeMarker,
+  resolveSeriesExtensionPriceTemplate,
 } = require('../routes/admin-schedule')._test;
 
 function discountQuery(discount) {
@@ -1059,5 +1063,146 @@ describe('recurring extension — storedOccurrenceFloorPrice (seriesExtensionUnb
       expect(floor).toBe(legacyFloor);
       expect(floor).toBe(100);
     });
+  });
+});
+
+// Round 13 (the P0 blocked at the prior push): restackStoredVisitFinancials
+// deferred on EVERY null primary_line_price (round 10's fix), which was
+// correct for a legacy/marker row but too broad — it also deferred a
+// genuinely-null-primary row THIS SLICE itself priced (an add-on-only
+// booking), so creation and its own later extension disagreed. The
+// pricing-regime marker (stampPricingRegimeMarker/hasPricingRegimeMarker,
+// visit-financial-stamps.js, reusing scheduled_services.metadata — no
+// migration) resolves it: a row THIS SLICE stamped while the gate was live
+// carries the marker and restacks its null primary as a real $0; a row
+// without it (legacy, or the anchored-split marker template, which strips
+// its own copy via clearPricingRegimeMarker) still defers.
+describe('pricing-regime marker (round 13)', () => {
+  afterEach(() => { delete process.env.GATE_DISCOUNT_STACKING; });
+
+  describe('stampPricingRegimeMarker / hasPricingRegimeMarker / clearPricingRegimeMarker', () => {
+    const cols = { metadata: true };
+
+    test('stamps the marker onto an empty target, merging rather than clobbering existing metadata', () => {
+      const target = { metadata: { other_key: 'keep-me' } };
+      stampPricingRegimeMarker(target, cols);
+      expect(target.metadata).toEqual({ other_key: 'keep-me', pricing_regime: 'discount_stack_v1' });
+      expect(hasPricingRegimeMarker(target)).toBe(true);
+    });
+
+    test('no-op without a metadata column, or without a target', () => {
+      const target = { metadata: 'unchanged' };
+      stampPricingRegimeMarker(target, {});
+      expect(target.metadata).toBe('unchanged');
+      expect(stampPricingRegimeMarker(null, cols)).toBeUndefined();
+    });
+
+    test('hasPricingRegimeMarker reads a JSON-string metadata value too (knex can return either shape)', () => {
+      expect(hasPricingRegimeMarker({ metadata: JSON.stringify({ pricing_regime: 'discount_stack_v1' }) })).toBe(true);
+      expect(hasPricingRegimeMarker({ metadata: JSON.stringify({ other_key: 'x' }) })).toBe(false);
+      expect(hasPricingRegimeMarker({ metadata: 'not json' })).toBe(false);
+      expect(hasPricingRegimeMarker({ metadata: null })).toBe(false);
+      expect(hasPricingRegimeMarker(null)).toBe(false);
+    });
+
+    test('clearPricingRegimeMarker removes only the one key, leaving other metadata intact', () => {
+      const target = { metadata: { pricing_regime: 'discount_stack_v1', other_key: 'keep-me' } };
+      clearPricingRegimeMarker(target);
+      expect(target.metadata).toEqual({ other_key: 'keep-me' });
+      expect(hasPricingRegimeMarker(target)).toBe(false);
+    });
+
+    test('clearPricingRegimeMarker is a no-op when there is nothing to clear', () => {
+      const target = { metadata: { other_key: 'keep-me' } };
+      clearPricingRegimeMarker(target);
+      expect(target.metadata).toEqual({ other_key: 'keep-me' });
+      const untouched = { metadata: null };
+      clearPricingRegimeMarker(untouched);
+      expect(untouched.metadata).toBeNull();
+    });
+  });
+
+  // Codex's exact worked example: a $100 recurring add-on at 20% off, a $50
+  // one-time add-on, and a $30 appointment credit, on a NULL (not $0)
+  // primary. Creation (restackLiveVisitFinancials, always safe — no
+  // ambiguity for fresh, in-memory pricing) already restacks the seeded
+  // occurrence without the one-time add-on to $56. A later EXTENSION of
+  // that SAME row — marked, since it was priced under this slice while the
+  // gate was live — must land on the identical $56, never the frozen $54
+  // (100's worth of "replay the anchor's own $16 add-on discount" math: 84
+  // net + 50 net for the anchor, but only the recurring add-on's frozen $16
+  // survives on an add-on-free-of-the-one-time-add-on occurrence, giving
+  // 84 - 30 = 54).
+  test('Codex round 13: creation and a marked extension agree on $56 for a null-primary add-on-only booking', async () => {
+    await withGateLive(() => {
+      const seededChild = restackLiveVisitFinancials({
+        primaryBase: null,
+        primaryServiceKey: 'general_pest',
+        primaryServiceCategory: 'pest_control',
+        primaryDiscount: null,
+        appointmentDiscount: { discountType: 'fixed_amount', discountAmount: 30, discountDollars: 30, maxDiscountDollars: null, serviceKeyFilter: null, serviceCategoryFilter: null },
+      }, [
+        { base: 100, price: 84, serviceKey: 'recurring_addon', serviceCategory: 'addon', discount: { discountType: 'percentage', discountAmount: 20, discountDollars: 16, maxDiscountDollars: null } },
+      ]);
+      expect(seededChild.price).toBe(56);
+
+      const markedParent = {
+        primary_line_price: null,
+        metadata: { pricing_regime: 'discount_stack_v1' },
+        line_discount_type: null,
+        discount_type: 'fixed_amount',
+        discount_amount: 30,
+      };
+      const recurringAddon = { base_price: 100, estimated_price: 84, discount_type: 'percentage', discount_amount: 20, discount_dollars: 16, discount_id: 'recurring-disc-13', service_id: 'recurring-addon' };
+      const caps = new Map([['recurring-disc-13', null]]);
+      const extension = restackStoredVisitFinancials(markedParent, [recurringAddon], null, caps);
+
+      expect(extension).not.toBeNull();
+      expect(extension.price).toBe(56); // never the frozen $54
+      expect(extension.price).toBe(seededChild.price);
+    });
+  });
+
+  test('a legacy null-primary row WITHOUT the marker still defers (no false restack)', () => {
+    const legacyRow = { primary_line_price: null, estimated_price: 100, discount_type: null }; // no metadata at all — never priced by this slice
+    expect(hasPricingRegimeMarker(legacyRow)).toBe(false);
+    expect(restackStoredVisitFinancials(legacyRow, [], null, new Map())).toBeNull();
+  });
+
+  // resolveSeriesExtensionPriceTemplate's anchored-split clear strips the
+  // marker back off its own template — a series whose PARENT priced under
+  // this slice (and so carries the marker) must not let a LATER
+  // anchored-split extension mistake the marker-total template's cleared
+  // primary for "genuinely no primary."
+  test('resolveSeriesExtensionPriceTemplate strips the marker from the anchored-split template', async () => {
+    const parent = {
+      id: 'p1',
+      estimated_price: '150.00',
+      primary_line_price: '150.00',
+      line_discount_dollars: 0,
+      metadata: { pricing_regime: 'discount_stack_v1' },
+      recurring_template_overrides: { anchored_split_per_visit: 100 },
+    };
+    const template = await resolveSeriesExtensionPriceTemplate(null, 'p1', parent);
+    expect(template.primary_line_price).toBeNull();
+    expect(hasPricingRegimeMarker(template)).toBe(false);
+    // The still-marked template restacks against gross:0 correctly — WITHOUT
+    // the strip it would (wrongly) restack instead of deferring to the
+    // marker's own $100 total.
+    expect(restackStoredVisitFinancials(template, [], null, new Map())).toBeNull();
+  });
+
+  // Gate-off parity: no marker written anywhere, rows byte-identical to
+  // main. Direct unit check (the full existing regression suite — run
+  // separately — is the end-to-end version of this same guarantee).
+  test('gate off: stampPricingRegimeMarker is never reached by any caller (verified via the byte-identical full suite); direct call still behaves, unconditionally, as documented', () => {
+    // stampPricingRegimeMarker itself has no gate check — every call site
+    // guards it with discountStackingLive() — so this pins its OWN
+    // contract (always stamps when called) while the full admin-schedule/
+    // recurring-series regression suite (run alongside this file) is what
+    // actually proves no call site reaches it with the gate off.
+    const target = {};
+    stampPricingRegimeMarker(target, { metadata: true });
+    expect(target.metadata).toEqual({ pricing_regime: 'discount_stack_v1' });
   });
 });

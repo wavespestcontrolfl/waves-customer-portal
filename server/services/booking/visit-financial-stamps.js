@@ -133,6 +133,68 @@ function copyStampedServiceAddressFields(target, source, cols) {
   }
 }
 
+// Provenance for restackStoredVisitFinancials (admin-schedule.js): marks a
+// row as priced under the canonical discount-stack engine
+// (GATE_DISCOUNT_STACKING), reusing scheduled_services.metadata — a
+// generic jsonb column already on every row, defined at the initial schema
+// as free-form ("any extra ... data") and, as of this slice, unread/
+// unwritten by any other app-layer code — no schema migration needed.
+//
+// A stored row's null primary_line_price is normally ambiguous: it could
+// mean "no primary at all" (an add-on-only or re-service/callback booking
+// — safe to restack around a $0 primary) or "a legacy/unstructured total"
+// or "the anchored-split marker" (both need calculateStoredVisitFinancials's
+// own reconstruction, which a restack starting the primary from gross:0
+// cannot replicate — see restackStoredVisitFinancials's own history,
+// rounds 8 and 10). Every row THIS SLICE prices while the gate is live —
+// creation (the parent, every seeded child/booster) and every extension
+// write — carries this marker, so a later restack of an add-on-only
+// booking's own extension can tell "I priced this myself, null really
+// means zero" apart from a legacy row it never touched (Codex pre-push
+// audit P0, round 13: an add-on-only booking with a null primary restacked
+// correctly at CREATION — the seeded occurrence read $56 — but its own
+// EXTENSION replayed frozen dollars and read $54, because
+// restackStoredVisitFinancials could not yet tell the two apart).
+const PRICING_REGIME_KEY = 'pricing_regime';
+const PRICING_REGIME_VALUE = 'discount_stack_v1';
+
+function stampPricingRegimeMarker(target, cols) {
+  if (!target || !cols?.metadata) return;
+  const existing = target.metadata && typeof target.metadata === 'object' && !Array.isArray(target.metadata)
+    ? target.metadata
+    : {};
+  target.metadata = { ...existing, [PRICING_REGIME_KEY]: PRICING_REGIME_VALUE };
+}
+
+function hasPricingRegimeMarker(row) {
+  let meta = row?.metadata;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { return false; }
+  }
+  return !!meta && typeof meta === 'object' && !Array.isArray(meta) && meta[PRICING_REGIME_KEY] === PRICING_REGIME_VALUE;
+}
+
+// resolveSeriesExtensionPriceTemplate's anchored-split clear (admin-schedule.js)
+// spreads the parent's own metadata onto its template unchanged, so a
+// series that priced its PARENT under the canonical engine would otherwise
+// carry the marker straight onto the marker-total template too — exactly
+// the one case the marker must NOT cover (the template's own
+// primary_line_price is cleared to null there for a DIFFERENT reason: the
+// marker total already folds the primary's implied share in, not because
+// there genuinely is no primary). Called from that same clearing branch so
+// the two stay in lockstep.
+function clearPricingRegimeMarker(target) {
+  if (!target || target.metadata == null) return;
+  let meta = target.metadata;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { return; }
+  }
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta) || !(PRICING_REGIME_KEY in meta)) return;
+  const rest = { ...meta };
+  delete rest[PRICING_REGIME_KEY];
+  target.metadata = rest;
+}
+
 module.exports = {
   applyDiscount,
   copyLineDiscountFields,
@@ -142,4 +204,7 @@ module.exports = {
   recurringServiceAddress,
   typedDiscountSlot,
   restackOccurrenceDiscounts,
+  stampPricingRegimeMarker,
+  hasPricingRegimeMarker,
+  clearPricingRegimeMarker,
 };

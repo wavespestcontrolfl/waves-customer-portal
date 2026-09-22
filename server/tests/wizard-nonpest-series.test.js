@@ -1213,7 +1213,12 @@ describe('resolveSeriesExtensionPriceTemplate — anchored marker over a structu
   const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
   const start = src.indexOf('async function resolveSeriesExtensionPriceTemplate(');
   const end = src.indexOf('function applyStoredVisitFinancials(');
-  const resolve = new Function(`${src.slice(start, end)}; return resolveSeriesExtensionPriceTemplate;`)();
+  // The anchored-split clearing branch calls clearPricingRegimeMarker
+  // (visit-financial-stamps.js) — a free variable inside this isolated
+  // slice of source, so the real implementation is injected as a closed-
+  // over parameter rather than left to throw a ReferenceError.
+  const { clearPricingRegimeMarker } = require('../services/booking/visit-financial-stamps');
+  const resolve = new Function('clearPricingRegimeMarker', `${src.slice(start, end)}; return resolveSeriesExtensionPriceTemplate;`)(clearPricingRegimeMarker);
   const marker = { anchored_split_per_visit: 88 };
   const conn = () => ({ where: () => ({ first: async () => ({ recurring_template_overrides: marker }) }) });
 
