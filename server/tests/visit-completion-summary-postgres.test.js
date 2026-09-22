@@ -2294,9 +2294,9 @@ postgres('visit summary recipient recovery', () => {
     // in exactly that gap is invisible to a fence check that already ran
     // and returned payerBilled:false (no live payer existed yet). The
     // withdrawal is run here as a REAL second fenceOnly call, for real,
-    // right before settleZeroBalance takes its first lock (the customer
-    // row). This preserves the gap without asking the concurrent Bill-To
-    // writer to wait on a customer lock the settlement already holds.
+    // right before settleZeroBalance takes its first lock (the customer).
+    // Waiting until its later invoice lock would make the simulated writer
+    // wait on the customer lock already held by the intercepted transaction.
     const invoiceId = randomUUID();
     await mockPg('invoices').insert({
       id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
@@ -2310,8 +2310,8 @@ postgres('visit summary recipient recovery', () => {
     const Invoice = require('../services/invoice');
     const execute = mockPg.client.constructor.prototype._query;
     let withdrawnInGap = false;
-    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(async function withdrawBeforeCustomerLock(connection, query) {
-      if (!withdrawnInGap && query.sql.includes('"customers"') && query.sql.toLowerCase().includes('for update')) {
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(async function withdrawBeforeLock(connection, query) {
+      if (!withdrawnInGap && query.sql.includes('from "customers"') && query.sql.toLowerCase().includes('for update')) {
         withdrawnInGap = true;
         // The concurrent Bill-To writer: a live payer gets attached and a
         // REAL fenceOnly withdrawal commits, all before the intercepted
@@ -2353,8 +2353,8 @@ postgres('visit summary recipient recovery', () => {
     // for an invoice the competing request already, genuinely, settled.
     // The competing settlement is modeled here as a real committed write
     // from a separate connection, landing exactly as this caller's own
-    // settleZeroBalance is about to lock the row — the same interception
-    // point the withdrawal-race test above uses for its own gap.
+    // settleZeroBalance is about to lock the invoice row. This writer only
+    // updates the invoice, so it can finish while the customer is locked.
     const invoiceId = randomUUID();
     await mockPg('invoices').insert({
       id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
