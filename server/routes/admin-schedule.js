@@ -2628,45 +2628,60 @@ async function resolveUpdateDetailsAddonFinancials({
 // "unchanged" could never be confirmed (this is the round-7 P0 itself: the
 // ORIGINAL bug never loaded them at all for this check).
 //
-// Three callsite-shaped guards, all from real Codex findings on this exact
-// function (pre-push audit, this slice):
+// Four callsite-shaped guards, all from real Codex findings on this exact
+// function across three rounds of pre-push audit (this slice):
 //
-// Add-on comparison is NET vs NET, never gross vs gross. This editor has
-// no per-addon discount UI (SchedulePage.jsx): an UNCHANGED line that
-// already carries a stored discount round-trips its true gross + discount
-// fields, but a NEW-or-EDITED line sends only a flat `price` — the
-// operator's intended NET, with no `basePrice` and no discount at all. On
-// the server that flat number becomes `normalizedAddons[i].base` (there is
-// nothing else to call it a gross OF). Comparing that against the row's
-// stored GROSS (`base_price`) treats a genuine net-price raise — say a
-// discounted $90 addon edited up to $100 — as numerically unchanged
-// whenever it happens to equal the OLD gross, silently keeping the OLD,
-// lower total. `normalizedAddons[i].price` is this save's own resolved NET
-// for the line (the round-tripped discount applied when one was resent,
-// or the flat posted number when none was) — comparing THAT against the
-// row's stored NET (`estimated_price`) is the one invariant that is
-// correct for both shapes: unchanged only when the money on this line
-// truly has not moved.
+// Add-on comparison is GROSS + discount TERMS for a STAMPED line, NET for a
+// flat-price line — never a single universal rule. This editor has no
+// per-addon discount UI (SchedulePage.jsx): an UNCHANGED line that already
+// carries a stored discount round-trips its true gross + full discount
+// stamp (id/type/amount), but a NEW-or-EDITED line sends only a flat
+// `price` — the operator's intended NET, with no `basePrice` and no
+// discount at all. Two DIFFERENT bugs live on either side of that fork,
+// both from real Codex repros:
+//  - (round 1) Comparing a flat-price line's posted number against the
+//    row's stored GROSS treats a genuine net-price raise — a discounted
+//    $90 addon edited up to $100 — as unchanged whenever it happens to
+//    equal the OLD gross, silently keeping the OLD, lower total. The fix:
+//    compare `normalizedAddons[i].price` (this save's resolved NET) against
+//    the row's stored NET (`estimated_price`) for this shape.
+//  - (round 3) `normalizedAddons[i].price` comes from applyDiscount(),
+//    which has NO notion of the discount's CATALOG cap — scheduled_service_
+//    addons stores only the raw type/amount ("50% off"), never the ceiling,
+//    which lives on the `discounts` row and is never re-read here. An
+//    UNCHANGED $100 add-on at 50% off capped at $10 round-trips its true
+//    gross and terms, but applyDiscount naively recomputes an UNCAPPED $50
+//    — never the row's real, stored $90 — so NET-vs-NET on a STAMPED line
+//    misreports an exact match as changed and falls through to a recompute
+//    that repeats the SAME cap-ignorant mistake ($160 silently becomes
+//    $120). The fix: for a line either side stamps with a discount, compare
+//    GROSS (`l.base` vs `base_price`) instead — matching terms already
+//    proves the line's economics did not change, so the row's OWN stored
+//    net (whatever it truly was capped at) remains correct by definition;
+//    gross-vs-gross is the only additional fact needed. A line with NO
+//    discount on either side still compares NET vs NET (gross and net are
+//    the same number there anyway, and a flat-net EDIT has no gross to
+//    compare against at all).
 //
-// Per-line DISCOUNT comparison is by TERMS, never by presence. The
-// editor's round-trip DOES resend `basePrice` + the full discount stamp
-// (id/type/amount) for an UNCHANGED discounted line (SchedulePage.jsx) —
-// so treating "a discount field was posted at all" as disqualifying would
+// Per-line DISCOUNT-TERMS comparison is by VALUE, never by presence
+// (round 2). The editor's round-trip DOES resend `basePrice` + the full
+// discount stamp (id/type/amount) for an UNCHANGED discounted line — so
+// treating "a discount field was posted at all" as disqualifying would
 // disable preservation on the ordinary notes-only save of any row that has
 // an add-on discount at all, defeating the point for exactly the rows the
 // round-7 P0 is about. Only a discount id/type/amount that DIFFERS from
 // what is actually stored on that line — added, removed, or changed — is a
 // genuine edit.
 //
-// Each stored row is matched AT MOST ONCE. An independent `.find()` per
-// posted line lets two posted lines match the SAME stored row while a
-// DIFFERENT stored row goes unaccounted for — primary $100 + add-ons A=$20
-// and B=$50 (total $170): replacing B with a second, unrelated $20 line
-// that happens to share A's identity would let BOTH posted lines match the
-// single stored A row under independent `.find()`s, "confirming" $170
-// unchanged when the real new total is $140. Matched stored rows are
-// consumed (spliced out) so a later posted line can never re-match one
-// already claimed.
+// Each stored row is matched AT MOST ONCE (round 2). An independent
+// `.find()` per posted line lets two posted lines match the SAME stored row
+// while a DIFFERENT stored row goes unaccounted for — primary $100 +
+// add-ons A=$20 and B=$50 (total $170): replacing B with a second,
+// unrelated $20 line that happens to share A's identity would let BOTH
+// posted lines match the single stored A row under independent `.find()`s,
+// "confirming" $170 unchanged when the real new total is $140. Matched
+// stored rows are consumed (spliced out) so a later posted line can never
+// re-match one already claimed.
 //
 // A primary SERVICE identity change (service_id / service_key_snapshot /
 // service_category_snapshot) never counts as money-unchanged even when the
@@ -2692,15 +2707,37 @@ function legacyEconomicsPreservationDecision({
     ));
     if (idx === -1) return false;
     const [stored] = remainingStored.splice(idx, 1); // consume — never re-matchable
-    if (moneyValuesDiffer(l.price, stored.estimated_price)) return false;
     // Discount identity/terms — ALWAYS compared, not only when an id is
     // present: a custom (no catalog id) discount's type/amount can still
     // change without ever gaining or losing an id, and comparing only when
-    // `postedDiscountId` is truthy would silently skip that case.
+    // an id is present would silently skip that case. Any mismatch (added,
+    // removed, or changed) is a genuine edit.
     if (String(l.discount?.discountId || '') !== String(stored.discount_id || '')) return false;
     if ((l.discount?.discountType || null) !== (stored.discount_type || null)) return false;
     if (moneyValuesDiffer(l.discount?.discountAmount, stored.discount_amount)) return false;
-    return true;
+    // A STAMPED line — this save round-tripped a discount, or the stored
+    // row carries one and the terms above already matched exactly — is
+    // compared GROSS vs GROSS, never net vs net (Codex pre-push audit P0,
+    // round 3): `l.price` comes from applyDiscount(), which has no notion
+    // of the discount's CATALOG cap (scheduled_service_addons stores only
+    // the raw type/amount, e.g. "50% off" — the $10 ceiling lives on the
+    // `discounts` row and is never re-read here). An unchanged $100 add-on
+    // at 50% off capped at $10 round-trips its true gross and terms, but
+    // applyDiscount naively recomputes an UNCAPPED $50 — never the row's
+    // real, stored $90 — so net-vs-net would misreport this exact-match
+    // line as changed and fall through to a recompute that repeats the
+    // SAME cap-ignorant mistake (Codex's repro: $160 silently becomes
+    // $120). Matching terms already proves nothing about this line's
+    // economics changed; the row's OWN stored net remains correct by
+    // definition and gross-vs-gross is the only additional fact needed.
+    if (l.discount?.discountId || stored.discount_id || stored.discount_type) {
+      return !moneyValuesDiffer(l.base, stored.base_price);
+    }
+    // Neither side carries a discount at all: NET vs NET is correct and
+    // necessary here — a flat-net price EDIT (Codex round 1's own P0) has
+    // no gross of its own to compare, and gross/net are the same number
+    // for an undiscounted line either way.
+    return !moneyValuesDiffer(l.price, stored.estimated_price);
   });
   const moneyInputsUnchanged = legacyPreservationCandidate
     && !discountInputsPosted

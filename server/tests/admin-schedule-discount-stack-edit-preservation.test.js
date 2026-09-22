@@ -29,22 +29,24 @@
  * sibling suite) and pin the round-7 P0's own $160 stored total surviving
  * a notes-only save.
  *
- * Three guards were added across two rounds of the pre-push Codex audit,
+ * Four guards were added across three rounds of the pre-push Codex audit,
  * which found real P0/P1s in earlier cuts of this decision (see their own
  * describe blocks below):
- *  - round 1: add-on comparison is NET vs NET (never gross vs gross — this
- *    editor's client sends an EDITED add-on price as a flat net with no
- *    discount fields, SchedulePage.jsx); a primary SERVICE identity change
- *    disqualifies preservation outright.
+ *  - round 1: add-on comparison is NET vs NET for a plain (undiscounted)
+ *    line (never gross vs gross — this editor's client sends an EDITED
+ *    add-on price as a flat net with no discount fields, SchedulePage.jsx);
+ *    a primary SERVICE identity change disqualifies preservation outright.
  *  - round 2: each stored add-on row is matched AT MOST ONCE (a naive
  *    independent `.find()` per posted line let two posted lines match the
  *    SAME stored row while a different stored row went unaccounted for);
  *    per-line discount comparison is BY TERMS, never by presence (the
  *    editor's round-trip DOES resend the full discount stamp for an
- *    UNCHANGED discounted line — treating that presence as disqualifying
- *    would have disabled preservation on the ordinary notes-only save of
- *    any row with an add-on discount, defeating the point for exactly the
- *    rows the round-7 P0 is about).
+ *    UNCHANGED discounted line).
+ *  - round 3: a STAMPED line (discount terms round-trip exactly) is
+ *    compared by GROSS, never NET — normalizedAddons[i].price comes from
+ *    applyDiscount(), which is blind to the discount's CATALOG cap, so an
+ *    unchanged CAPPED discount recomputes an uncapped (wrong, lower) net
+ *    and would otherwise misreport an exact match as changed.
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../middleware/admin-auth', () => ({
@@ -77,10 +79,10 @@ function withGateLive(fn) {
 // a $100 add-on stored at a 10% discount (net $90) + a $30 fixed appointment
 // credit — 100 + 90 - 30 = $160. Every case below shares this stored shape
 // and varies only what the notes-only save posts. The addon's stored
-// discount round-trips verbatim (SchedulePage.jsx's own Case A shape for an
-// unchanged discounted line) — normalizedAddons[i].price and .discount, and
-// existingAddonRows[i].estimated_price/discount_*, are the fields the
-// decision actually compares (see its own comment).
+// discount round-trips verbatim (SchedulePage.jsx's own shape for an
+// unchanged discounted line) — base/base_price (gross), price/estimated_price
+// (net), and the discount_* fields are ALL the fields the decision actually
+// compares (see its own comment for which pair applies to which line shape).
 const STORED_PRIMARY_GROSS = 100;
 const STORED_ADDON_GROSS = 100;
 const STORED_ADDON_NET = 90; // 10% off
@@ -95,11 +97,11 @@ describe('legacyEconomicsPreservationDecision — pure decision (slice 4 of #440
     primaryGross: STORED_PRIMARY_GROSS,
     existingPrimaryLinePrice: STORED_PRIMARY_GROSS,
     normalizedAddons: [{
-      serviceId: 'svc-1', serviceName: 'Addon', price: STORED_ADDON_NET,
+      serviceId: 'svc-1', serviceName: 'Addon', base: STORED_ADDON_GROSS, price: STORED_ADDON_NET,
       discount: { discountId: STORED_ADDON_DISCOUNT_ID, discountType: 'percentage', discountAmount: 10 },
     }],
     existingAddonRows: [{
-      service_id: 'svc-1', service_name: 'Addon', estimated_price: STORED_ADDON_NET,
+      service_id: 'svc-1', service_name: 'Addon', base_price: STORED_ADDON_GROSS, estimated_price: STORED_ADDON_NET,
       discount_id: STORED_ADDON_DISCOUNT_ID, discount_type: 'percentage', discount_amount: 10,
     }],
     existingEstimatedPrice: STORED_TOTAL,
@@ -132,16 +134,28 @@ describe('legacyEconomicsPreservationDecision — pure decision (slice 4 of #440
       ...baseArgs(),
       normalizedAddons: [
         ...baseArgs().normalizedAddons,
-        { serviceId: 'svc-2', serviceName: 'Second Addon', price: 40, discount: null },
+        { serviceId: 'svc-2', serviceName: 'Second Addon', base: 40, price: 40, discount: null },
       ],
     });
     expect(result.legacyEconomicsPreserved).toBe(false);
   });
 
-  test('an add-on\'s own NET price changed (matched by serviceId) — never preserved', () => {
+  test('a plain (undiscounted) add-on\'s own NET price changed (matched by serviceId) — never preserved', () => {
     const result = legacyEconomicsPreservationDecision({
       ...baseArgs(),
-      normalizedAddons: [{ serviceId: 'svc-1', serviceName: 'Addon', price: 110, discount: null }],
+      normalizedAddons: [{ serviceId: 'svc-1', serviceName: 'Addon', base: 110, price: 110, discount: null }],
+      existingAddonRows: [{ service_id: 'svc-1', service_name: 'Addon', base_price: 100, estimated_price: 100, discount_id: null }],
+    });
+    expect(result.legacyEconomicsPreserved).toBe(false);
+  });
+
+  test('a STAMPED add-on\'s own GROSS changed (round-tripped discount terms match, but base_price does not) — never preserved', () => {
+    const result = legacyEconomicsPreservationDecision({
+      ...baseArgs(),
+      normalizedAddons: [{
+        serviceId: 'svc-1', serviceName: 'Addon', base: 120, price: 108, // same 10% off, on a raised $120 gross
+        discount: { discountId: STORED_ADDON_DISCOUNT_ID, discountType: 'percentage', discountAmount: 10 },
+      }],
     });
     expect(result.legacyEconomicsPreserved).toBe(false);
   });
@@ -149,8 +163,8 @@ describe('legacyEconomicsPreservationDecision — pure decision (slice 4 of #440
   test('an add-on with no serviceId matches its stored row by trimmed service_name instead', () => {
     const result = legacyEconomicsPreservationDecision({
       ...baseArgs(),
-      normalizedAddons: [{ serviceId: null, serviceName: 'Addon', price: STORED_ADDON_NET, discount: null }],
-      existingAddonRows: [{ service_id: null, service_name: '  Addon  ', estimated_price: STORED_ADDON_NET, discount_id: null }],
+      normalizedAddons: [{ serviceId: null, serviceName: 'Addon', base: 100, price: 100, discount: null }],
+      existingAddonRows: [{ service_id: null, service_name: '  Addon  ', base_price: 100, estimated_price: 100, discount_id: null }],
     });
     expect(result.legacyEconomicsPreserved).toBe(true);
   });
@@ -158,8 +172,8 @@ describe('legacyEconomicsPreservationDecision — pure decision (slice 4 of #440
   test('an add-on with no serviceId whose name no longer matches any stored row — never preserved (nothing to confirm "unchanged" against)', () => {
     const result = legacyEconomicsPreservationDecision({
       ...baseArgs(),
-      normalizedAddons: [{ serviceId: null, serviceName: 'Renamed Addon', price: STORED_ADDON_NET, discount: null }],
-      existingAddonRows: [{ service_id: null, service_name: 'Addon', estimated_price: STORED_ADDON_NET, discount_id: null }],
+      normalizedAddons: [{ serviceId: null, serviceName: 'Renamed Addon', base: 100, price: 100, discount: null }],
+      existingAddonRows: [{ service_id: null, service_name: 'Addon', base_price: 100, estimated_price: 100, discount_id: null }],
     });
     expect(result.legacyEconomicsPreserved).toBe(false);
   });
@@ -200,17 +214,17 @@ describe('legacyEconomicsPreservationDecision — pure decision (slice 4 of #440
   // price as a flat NET with no discount fields at all. Comparing that
   // posted number against the stored GROSS treats a genuine net-price raise
   // as unchanged whenever it happens to equal the OLD gross.
-  describe('add-on NET-vs-NET comparison (Codex P0, round 1) — never gross vs gross', () => {
+  describe('plain (undiscounted) add-on: NET-vs-NET comparison (Codex P0, round 1) — never gross vs gross', () => {
     test('a genuine add-on price edit sent as a flat net (Codex\'s own repro: $90 discounted addon raised to $100) is detected as CHANGED, even though it numerically matches the stored GROSS', () => {
       const result = legacyEconomicsPreservationDecision({
         ...baseArgs(),
         // The client's own shape for an edited/new line (SchedulePage.jsx):
         // a flat `price`, no `discount`, no separate gross at all.
-        normalizedAddons: [{ serviceId: 'svc-1', serviceName: 'Addon', price: STORED_ADDON_GROSS, discount: null }],
-        existingAddonRows: [{
-          service_id: 'svc-1', service_name: 'Addon', base_price: STORED_ADDON_GROSS, estimated_price: STORED_ADDON_NET,
-          discount_id: STORED_ADDON_DISCOUNT_ID, discount_type: 'percentage', discount_amount: 10,
-        }],
+        normalizedAddons: [{ serviceId: 'svc-1', serviceName: 'Addon', base: STORED_ADDON_GROSS, price: STORED_ADDON_GROSS, discount: null }],
+        // baseArgs' existingAddonRows: the row IS stamped with a discount —
+        // dropping it entirely (posted discount: null) is itself a genuine
+        // edit (round 2's own per-line terms check), which is exactly the
+        // failure mode this repro demonstrates end to end.
       });
       // NEVER true: this would silently keep the OLD $160 on a save that
       // actually raised the addon's net by $10.
@@ -235,7 +249,7 @@ describe('legacyEconomicsPreservationDecision — pure decision (slice 4 of #440
       const result = legacyEconomicsPreservationDecision({
         ...baseArgs(),
         normalizedAddons: [{
-          serviceId: 'svc-1', serviceName: 'Addon', price: STORED_ADDON_NET,
+          serviceId: 'svc-1', serviceName: 'Addon', base: STORED_ADDON_GROSS, price: STORED_ADDON_NET,
           discount: { discountId: STORED_ADDON_DISCOUNT_ID, discountType: 'percentage', discountAmount: 15 },
         }],
       });
@@ -246,7 +260,7 @@ describe('legacyEconomicsPreservationDecision — pure decision (slice 4 of #440
       const result = legacyEconomicsPreservationDecision({
         ...baseArgs(),
         normalizedAddons: [{
-          serviceId: 'svc-1', serviceName: 'Addon', price: STORED_ADDON_NET,
+          serviceId: 'svc-1', serviceName: 'Addon', base: STORED_ADDON_GROSS, price: STORED_ADDON_NET,
           discount: { discountId: 'a-different-discount', discountType: 'percentage', discountAmount: 10 },
         }],
       });
@@ -256,7 +270,7 @@ describe('legacyEconomicsPreservationDecision — pure decision (slice 4 of #440
     test('a discount REMOVED relative to storage (posted has none, stored has one) is a genuine edit — never preserved', () => {
       const result = legacyEconomicsPreservationDecision({
         ...baseArgs(),
-        normalizedAddons: [{ serviceId: 'svc-1', serviceName: 'Addon', price: STORED_ADDON_NET, discount: null }],
+        normalizedAddons: [{ serviceId: 'svc-1', serviceName: 'Addon', base: STORED_ADDON_GROSS, price: STORED_ADDON_NET, discount: null }],
       });
       expect(result.legacyEconomicsPreserved).toBe(false);
     });
@@ -264,8 +278,8 @@ describe('legacyEconomicsPreservationDecision — pure decision (slice 4 of #440
     test('a plain, never-discounted add-on (both posted and stored carry no discount) still preserves', () => {
       const result = legacyEconomicsPreservationDecision({
         ...baseArgs(),
-        normalizedAddons: [{ serviceId: 'svc-1', serviceName: 'Addon', price: 100, discount: null }],
-        existingAddonRows: [{ service_id: 'svc-1', service_name: 'Addon', estimated_price: 100, discount_id: null }],
+        normalizedAddons: [{ serviceId: 'svc-1', serviceName: 'Addon', base: 100, price: 100, discount: null }],
+        existingAddonRows: [{ service_id: 'svc-1', service_name: 'Addon', base_price: 100, estimated_price: 100, discount_id: null }],
       });
       expect(result.legacyEconomicsPreserved).toBe(true);
     });
@@ -280,16 +294,16 @@ describe('legacyEconomicsPreservationDecision — pure decision (slice 4 of #440
   // the real new total is $100+20+20=$140 (B's $50 line genuinely dropped).
   describe('each stored add-on is matched AT MOST ONCE (Codex P0, round 2)', () => {
     const twoStoredAddons = [
-      { service_id: 'svc-a', service_name: 'Service A', estimated_price: 20, discount_id: null },
-      { service_id: 'svc-b', service_name: 'Service B', estimated_price: 50, discount_id: null },
+      { service_id: 'svc-a', service_name: 'Service A', base_price: 20, estimated_price: 20, discount_id: null },
+      { service_id: 'svc-b', service_name: 'Service B', base_price: 50, estimated_price: 50, discount_id: null },
     ];
 
     test('B replaced by a second A-priced line: never preserved — B\'s stored row goes unmatched, never double-claimed by two A lines', () => {
       const result = legacyEconomicsPreservationDecision({
         ...baseArgs(),
         normalizedAddons: [
-          { serviceId: 'svc-a', serviceName: 'Service A', price: 20, discount: null },
-          { serviceId: 'svc-a', serviceName: 'Service A', price: 20, discount: null }, // duplicate — was B
+          { serviceId: 'svc-a', serviceName: 'Service A', base: 20, price: 20, discount: null },
+          { serviceId: 'svc-a', serviceName: 'Service A', base: 20, price: 20, discount: null }, // duplicate — was B
         ],
         existingAddonRows: twoStoredAddons,
       });
@@ -300,12 +314,64 @@ describe('legacyEconomicsPreservationDecision — pure decision (slice 4 of #440
       const result = legacyEconomicsPreservationDecision({
         ...baseArgs(),
         normalizedAddons: [
-          { serviceId: 'svc-a', serviceName: 'Service A', price: 20, discount: null },
-          { serviceId: 'svc-b', serviceName: 'Service B', price: 50, discount: null },
+          { serviceId: 'svc-a', serviceName: 'Service A', base: 20, price: 20, discount: null },
+          { serviceId: 'svc-b', serviceName: 'Service B', base: 50, price: 50, discount: null },
         ],
         existingAddonRows: twoStoredAddons,
       });
       expect(result.legacyEconomicsPreserved).toBe(true);
+    });
+  });
+
+  // Codex pre-push audit P0 (round 3): a STAMPED line is compared by GROSS,
+  // never NET. normalizedAddons[i].price comes from applyDiscount(), which
+  // has NO notion of the discount's CATALOG cap — an unchanged $100 add-on
+  // at 50% off CAPPED AT $10 round-trips its true gross and terms but
+  // applyDiscount naively recomputes an UNCAPPED $50, never the row's real
+  // stored $90. Comparing NET here would misreport this exact match as
+  // changed (Codex's own repro: a notes-only save turns $160 into $120).
+  describe('capped discount: STAMPED lines compare by GROSS, never the cap-ignorant recomputed NET (Codex P0, round 3)', () => {
+    const cappedAddonDiscountId = 'disc-addon-50pct-cap10';
+    // What the route's own addon-normalization loop (existing, pre-slice-4
+    // code) actually computes for this posted line via applyDiscount(100,
+    // 'percentage', 50) = $50 — cap-ignorant, and DELIBERATELY wrong here:
+    // this is the exact value Codex's repro shows must NEVER be trusted for
+    // an unchanged capped line.
+    const naiveUncappedNet = 50;
+
+    test('an unchanged 50%-off-capped-at-$10 add-on ($100 gross, $90 TRUE stored net) still preserves — the naive $50 recompute is never consulted', () => {
+      const result = legacyEconomicsPreservationDecision({
+        ...baseArgs(),
+        normalizedAddons: [{
+          serviceId: 'svc-1', serviceName: 'Addon', base: 100, price: naiveUncappedNet, // $50, cap-ignorant
+          discount: { discountId: cappedAddonDiscountId, discountType: 'percentage', discountAmount: 50 },
+        }],
+        existingAddonRows: [{
+          service_id: 'svc-1', service_name: 'Addon', base_price: 100, estimated_price: 90, // the REAL, capped stored net
+          discount_id: cappedAddonDiscountId, discount_type: 'percentage', discount_amount: 50,
+        }],
+        existingEstimatedPrice: 160, // 100 (primary) + 90 (capped addon) - 30 (credit)
+      });
+      // NEVER false: a net-vs-net comparison here (naive $50 vs real $90)
+      // would wrongly disqualify this exact-match line and fall through to
+      // a recompute that repeats the same cap-ignorant mistake.
+      expect(result.legacyEconomicsPreserved).toBe(true);
+      expect(result.storedTotal).toBe(160);
+    });
+
+    test('control: the SAME capped line with a genuinely CHANGED gross ($120, not $100) is still correctly detected as changed', () => {
+      const result = legacyEconomicsPreservationDecision({
+        ...baseArgs(),
+        normalizedAddons: [{
+          serviceId: 'svc-1', serviceName: 'Addon', base: 120, price: 60, // applyDiscount(120, 'percentage', 50) = 60, still cap-ignorant
+          discount: { discountId: cappedAddonDiscountId, discountType: 'percentage', discountAmount: 50 },
+        }],
+        existingAddonRows: [{
+          service_id: 'svc-1', service_name: 'Addon', base_price: 100, estimated_price: 90,
+          discount_id: cappedAddonDiscountId, discount_type: 'percentage', discount_amount: 50,
+        }],
+      });
+      expect(result.legacyEconomicsPreserved).toBe(false);
     });
   });
 });
@@ -351,11 +417,11 @@ describe('round-7 P0, current computation path: a notes-only save\'s addon recon
       primaryGross: STORED_PRIMARY_GROSS,
       existingPrimaryLinePrice: STORED_PRIMARY_GROSS,
       normalizedAddons: [{
-        serviceId: 'svc-1', serviceName: 'Addon', price: STORED_ADDON_NET,
+        serviceId: 'svc-1', serviceName: 'Addon', base: STORED_ADDON_GROSS, price: STORED_ADDON_NET,
         discount: { discountId: STORED_ADDON_DISCOUNT_ID, discountType: 'percentage', discountAmount: 10 },
       }],
       existingAddonRows: [{
-        service_id: 'svc-1', service_name: 'Addon', estimated_price: STORED_ADDON_NET,
+        service_id: 'svc-1', service_name: 'Addon', base_price: STORED_ADDON_GROSS, estimated_price: STORED_ADDON_NET,
         discount_id: STORED_ADDON_DISCOUNT_ID, discount_type: 'percentage', discount_amount: 10,
       }],
       existingEstimatedPrice: STORED_TOTAL,

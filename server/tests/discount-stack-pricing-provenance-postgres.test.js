@@ -629,4 +629,74 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
       delete process.env.GATE_DISCOUNT_STACKING;
     }
   });
+
+  // Codex pre-push audit P0 (round 3): a real catalog CAP, sourced from a
+  // genuine `discounts` row (max_discount_dollars), through a real Postgres
+  // round trip. The stored add-on row's discount_amount is the RAW 50%
+  // (scheduled_service_addons has no cap column of its own — only the
+  // catalog row does), so its TRUE stored net ($90, capped at $10 off) can
+  // only be reconstructed by trusting the row's own estimated_price, never
+  // by naively re-applying 50% to the gross (which would silently produce
+  // an uncapped $50). A notes-only save that round-trips the addon's exact
+  // discount terms must preserve the real $160, never fall through to a
+  // recompute that repeats the SAME cap-ignorant mistake and lands on $120.
+  test('PUT /:id/update-details: an unchanged CAPPED add-on discount (real catalog cap) preserves the real stored $160, never a cap-ignorant $120', async () => {
+    const id = randomUUID();
+    const cappedDiscountId = randomUUID();
+    await mockPg('discounts').insert({
+      id: cappedDiscountId, discount_key: `fixture_capped_${cappedDiscountId.slice(0, 8)}`,
+      name: 'Fixture 50% Off Capped $10', discount_type: 'percentage', amount: 50, max_discount_dollars: 10, is_active: true,
+    });
+    const target = {
+      scheduled_date: '2099-11-17', service_type: 'Fixture Legacy Capped-Discount Service',
+      primary_line_price: 100,
+      discount_type: 'fixed_amount', discount_amount: 30, discount_dollars: 30,
+      estimated_price: 160, // 100 (primary) + 90 (capped addon net) - 30 (credit)
+    };
+    await mockPg('scheduled_services').insert({ id, ...target });
+    await mockPg('scheduled_service_addons').insert({
+      id: randomUUID(), scheduled_service_id: id, service_name: 'Fixture Capped Add-On',
+      base_price: 100, estimated_price: 90, // the REAL, capped net — never the uncapped $50
+      discount_type: 'percentage', discount_amount: 50, discount_dollars: 10, discount_id: cappedDiscountId,
+    });
+
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      const existing = await mockPg('scheduled_services').where({ id }).first(
+        'primary_line_price', 'discount_type', 'discount_amount', 'discount_dollars', 'estimated_price', 'pricing_provenance',
+      );
+      const existingAddonRows = await mockPg('scheduled_service_addons')
+        .where({ scheduled_service_id: id })
+        .select('service_id', 'service_name', 'base_price', 'estimated_price', 'discount_id', 'discount_type', 'discount_amount');
+
+      // Genuinely unchanged: round-trips the addon's exact stored terms
+      // (the RAW 50%, matching what scheduled_service_addons itself holds —
+      // the cap lives only on the `discounts` row, never re-read here).
+      const normalizedAddons = [{
+        serviceId: null, serviceName: 'Fixture Capped Add-On', base: 100, price: 50, // applyDiscount(100, 'percentage', 50) — cap-ignorant, deliberately wrong
+        discount: { discountId: cappedDiscountId, discountType: 'percentage', discountAmount: 50 },
+      }];
+
+      const decision = legacyEconomicsPreservationDecision({
+        legacyPreservationCandidate: discountStackingLive() && !hasPricingRegimeMarker(existing),
+        discountInputsPosted: false,
+        primaryServiceChanged: false,
+        primaryGross: 100,
+        existingPrimaryLinePrice: Number(existing.primary_line_price),
+        normalizedAddons,
+        existingAddonRows,
+        existingEstimatedPrice: existing.estimated_price,
+      });
+      // NEVER false: a net-vs-net comparison (naive $50 vs real $90) would
+      // wrongly disqualify this exact match and fall through to $120.
+      expect(decision.legacyEconomicsPreserved).toBe(true);
+      expect(decision.storedTotal).toBe(160);
+
+      await mockPg('scheduled_services').where({ id }).update({ estimated_price: decision.storedTotal });
+      const rowAfterSave = await mockPg('scheduled_services').where({ id }).first('estimated_price');
+      expect(Number(rowAfterSave.estimated_price)).toBe(160); // preserved through a real round trip, never $120
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
 });
