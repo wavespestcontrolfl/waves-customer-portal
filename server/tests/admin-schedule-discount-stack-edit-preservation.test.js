@@ -759,6 +759,50 @@ describe('legacyPreservationSnapshotStale — TOCTOU compare-and-swap before a p
       })).toBe(true);
     });
   });
+
+  // GitHub review round 4 (P1, post-round-3): a concurrent transaction
+  // changes ONLY the row's primary service between this route's unlocked
+  // `existing` read and the trx-locked re-check — no money field moves at
+  // all. Without checking service identity here, the CAS would pass and
+  // the STALE primaryServiceChanged=false conclusion (computed once, from
+  // the unlocked read) would go unrevalidated, letting a preserved write
+  // reapply a stored discount to a service that may no longer qualify —
+  // exactly the failure primaryServiceChanged exists to prevent.
+  describe('a concurrent primary-service swap (no money field moves at all) — GitHub round 4 P1 repro', () => {
+    const serviceIdentityArgs = () => ({
+      ...snapshotArgs(),
+      freshRow: { ...snapshotArgs().freshRow, service_id: 'svc-primary-a', service_key_snapshot: 'general_pest', service_category_snapshot: 'pest_control' },
+      existingRow: { ...snapshotArgs().existingRow, service_id: 'svc-primary-a', service_key_snapshot: 'general_pest', service_category_snapshot: 'pest_control' },
+    });
+
+    test('nothing changed (service identity included): still not stale', () => {
+      expect(legacyPreservationSnapshotStale(serviceIdentityArgs())).toBe(false);
+    });
+
+    test('service_id changed under us — no money field moved at all: stale', () => {
+      const args = serviceIdentityArgs();
+      expect(legacyPreservationSnapshotStale({
+        ...args,
+        freshRow: { ...args.freshRow, service_id: 'svc-primary-b' },
+      })).toBe(true);
+    });
+
+    test('service_key_snapshot changed under us (a re-service reclassification, same service_id): stale', () => {
+      const args = serviceIdentityArgs();
+      expect(legacyPreservationSnapshotStale({
+        ...args,
+        freshRow: { ...args.freshRow, service_key_snapshot: 'pest_re_service' },
+      })).toBe(true);
+    });
+
+    test('service_category_snapshot changed under us: stale', () => {
+      const args = serviceIdentityArgs();
+      expect(legacyPreservationSnapshotStale({
+        ...args,
+        freshRow: { ...args.freshRow, service_category_snapshot: 'lawn_care' },
+      })).toBe(true);
+    });
+  });
 });
 
 // GitHub review round 3 on PR #4654: the SHARED derivation module

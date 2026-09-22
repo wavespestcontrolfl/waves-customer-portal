@@ -2859,6 +2859,19 @@ function legacyEconomicsPreservationDecision({
 // add-on row untouched; comparing only the aggregate would miss that and
 // let a stale save silently revert the fresher primary_line_price /
 // discount_dollars / appointment discount_type-amount pairing.
+//
+// GitHub review round 4 (P1, post-round-3): `service_id` /
+// `service_key_snapshot` / `service_category_snapshot` are ALSO compared
+// — these are exactly the fields `primaryServiceChanged` (computed once,
+// from the UNLOCKED pre-transaction `existing` read) depends on to
+// disqualify preservation when a same-priced service swap moves the row
+// out of its stored discount's scope. Without re-checking them here, a
+// concurrent transaction that changes ONLY the row's service between this
+// route's unlocked read and the later locked re-check would sail through
+// the CAS untouched (no money field moved) and the stale
+// primaryServiceChanged=false conclusion would go uncaught — reapplying a
+// stored discount to a service it may no longer be eligible for, the
+// exact failure primaryServiceChanged exists to prevent.
 function legacyPreservationSnapshotStale({
   freshRow, existingRow, freshAddonRows, existingAddonRows,
 }) {
@@ -2867,6 +2880,9 @@ function legacyPreservationSnapshotStale({
   if (moneyValuesDiffer(freshRow?.discount_dollars, existingRow?.discount_dollars)) return true;
   if ((freshRow?.discount_type || null) !== (existingRow?.discount_type || null)) return true;
   if (moneyValuesDiffer(freshRow?.discount_amount, existingRow?.discount_amount)) return true;
+  if (String(freshRow?.service_id || '') !== String(existingRow?.service_id || '')) return true;
+  if ((freshRow?.service_key_snapshot || null) !== (existingRow?.service_key_snapshot || null)) return true;
+  if ((freshRow?.service_category_snapshot || null) !== (existingRow?.service_category_snapshot || null)) return true;
   if (freshAddonRows.length !== existingAddonRows.length) return true;
   const keyOf = (row) => String(row.service_id || '') || String(row.service_name || '').trim();
   const sortByKey = (rows) => [...rows].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
@@ -9832,6 +9848,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               discount_dollars: existing?.discount_dollars,
               discount_type: existing?.discount_type,
               discount_amount: existing?.discount_amount,
+              // GitHub review round 4 (P1): the fields primaryServiceChanged
+              // (above) was itself computed from — a concurrent service
+              // swap must re-fail this same guard under the trx's lock, not
+              // just a money field.
+              service_id: existing?.service_id,
+              service_key_snapshot: existing?.service_key_snapshot,
+              service_category_snapshot: existing?.service_category_snapshot,
             },
             addonRows: existingAddonRows,
           };
@@ -10840,8 +10863,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // an equivalent drift, rolling back this transaction with NO writes
         // committed, rather than clobbering whatever committed in between.
         if (legacyPreservationCasSnapshot) {
-          const freshRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate()
-            .first('estimated_price', 'primary_line_price', 'discount_dollars', 'discount_type', 'discount_amount');
+          // service_key_snapshot/service_category_snapshot are optional
+          // columns elsewhere in this route (existingFields, above, guards
+          // them on `cols.*`) — mirror that here rather than assume.
+          const casCols = await trx('scheduled_services').columnInfo();
+          const freshRowFields = ['estimated_price', 'primary_line_price', 'discount_dollars', 'discount_type', 'discount_amount', 'service_id'];
+          if (casCols.service_key_snapshot) freshRowFields.push('service_key_snapshot');
+          if (casCols.service_category_snapshot) freshRowFields.push('service_category_snapshot');
+          const freshRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first(...freshRowFields);
           const freshAddonRows = await trx('scheduled_service_addons').where({ scheduled_service_id: req.params.id })
             .select('service_id', 'service_name', 'base_price', 'estimated_price', 'discount_id', 'discount_type', 'discount_amount', 'discount_dollars');
           if (legacyPreservationSnapshotStale({

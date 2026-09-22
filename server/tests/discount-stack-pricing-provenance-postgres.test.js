@@ -1091,4 +1091,52 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
       delete process.env.GATE_DISCOUNT_STACKING;
     }
   });
+
+  // GitHub review round 4 (P1, post-round-3): a real Postgres round trip
+  // proving the CAS catches a concurrent PRIMARY-SERVICE swap even when NO
+  // money field moves at all. The decision's own snapshot (what the
+  // route's unlocked pre-transaction read would capture) includes
+  // service_id; a SEPARATE update changes ONLY that column (standing in
+  // for a concurrent admin re-servicing the same visit); the route's own
+  // locked re-check must flag it stale, refusing the preserved write.
+  test('legacyPreservationSnapshotStale: a concurrent primary-service swap (no money field moves) is detected via a real Postgres round trip', async () => {
+    const id = randomUUID();
+    const serviceA = randomUUID();
+    const serviceB = randomUUID();
+    await mockPg('services').insert([
+      { id: serviceA, service_key: `fixture_swap_a_${serviceA.slice(0, 8)}`, name: 'Fixture Service A', category: 'pest_control' },
+      { id: serviceB, service_key: `fixture_swap_b_${serviceB.slice(0, 8)}`, name: 'Fixture Service B', category: 'lawn_care' },
+    ]);
+    await mockPg('scheduled_services').insert({
+      id, scheduled_date: '2099-11-25', service_type: 'Fixture Service-Swap Service',
+      service_id: serviceA, service_key_snapshot: 'general_pest', service_category_snapshot: 'pest_control',
+      primary_line_price: 100, estimated_price: 160,
+      discount_type: 'fixed_amount', discount_amount: 30, discount_dollars: 30,
+    });
+    const rowFields = ['estimated_price', 'primary_line_price', 'discount_dollars', 'discount_type', 'discount_amount', 'service_id', 'service_key_snapshot', 'service_category_snapshot'];
+    const existing = await mockPg('scheduled_services').where({ id }).first(...rowFields);
+    const existingAddonRows = [];
+
+    // Nothing changed yet — the CAS must pass.
+    const freshRowBefore = await mockPg('scheduled_services').where({ id }).first(...rowFields);
+    expect(legacyPreservationSnapshotStale({
+      freshRow: freshRowBefore, existingRow: existing, freshAddonRows: existingAddonRows, existingAddonRows,
+    })).toBe(false);
+
+    // A CONCURRENT save re-services the SAME visit — a different catalog
+    // service, same price, no money field touched at all.
+    const swappedServiceId = serviceB;
+    await mockPg('scheduled_services').where({ id }).update({
+      service_id: swappedServiceId, service_key_snapshot: 'lawn_pest_knockdown', service_category_snapshot: 'lawn_care',
+    });
+
+    // The trx's own locked re-read (what the route re-fetches right before
+    // applying the ORIGINAL request's preserved write) now sees the swap.
+    const freshRowAfter = await mockPg('scheduled_services').where({ id }).first(...rowFields);
+    expect(freshRowAfter.service_id).toBe(swappedServiceId);
+    expect(Number(freshRowAfter.estimated_price)).toBe(160); // the aggregate itself never moved
+    expect(legacyPreservationSnapshotStale({
+      freshRow: freshRowAfter, existingRow: existing, freshAddonRows: existingAddonRows, existingAddonRows,
+    })).toBe(true); // the ORIGINAL request's stale primaryServiceChanged=false conclusion must never be trusted for the write now
+  });
 });
