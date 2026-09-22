@@ -826,12 +826,12 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const [toSearch, setToSearch] = useState("");
   const [toResults, setToResults] = useState([]);
   const previousSenderRef = useRef(null);
+  const automaticCustomerSenderRef = useRef(null);
   // The inbox row a "Text back" answers — sent as replyToMessageId so the
   // server routes a recruiting reply onto the recruiting rail (Codex r25 P1).
   // Carries the recipient (normalized phone) and customerId it was minted
   // for; a divergence between them and the live compose target invalidates
   // it (Codex #4623 P1) rather than riding along onto a different send.
-  const customerLine = customerMessages.find((message) => message.channel === "sms" && phoneKey(message.contactPhone) === phoneKey(customer?.phone));
   const {
     selectedCustomerId, setSelectedCustomerId, fromNumber, setFromNumber, threadLock, setThreadLock,
     msgBody, setMsgBody, attachments, setAttachments,
@@ -960,14 +960,24 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     setToSearch("");
   };
 
+  const customerSender = customer && customerMessages.find((message) => message.channel === "sms"
+    && message.ourEndpointId?.trim()
+    && smsThreadKey(message.contactPhone) === smsThreadKey(customer.phone));
+  const customerSenderNumber = customerSender?.ourEndpointId;
+  const customerSenderLabel = customerSender?.ourEndpointLabel || customerSenderNumber;
   useEffect(() => {
     if (!customer) return;
     if (!loadedMessageDraft) setSelectedCustomerId(customer.id);
-    if (customerLine?.ourEndpointId && !loadedMessageDraft && !fromNumber) {
-      setFromNumber(customerLine.ourEndpointId);
-      setThreadLock({ contactPhone: customer.phone, ourNumber: customerLine.ourEndpointId, label: customerLine.ourEndpointLabel || customerLine.ourEndpointId });
+    const automatic = automaticCustomerSenderRef.current;
+    const stillAutomatic = automatic?.customerId === customer.id
+      && automatic?.phone === smsThreadKey(customer.phone)
+      && automatic?.number === fromNumber && threadLock?.ourNumber === fromNumber;
+    if (customerSenderNumber && !loadedMessageDraft && (!fromNumber || stillAutomatic)) {
+      automaticCustomerSenderRef.current = { customerId: customer.id, phone: smsThreadKey(customer.phone), number: customerSenderNumber };
+      setFromNumber(customerSenderNumber);
+      setThreadLock({ contactPhone: customer.phone, ourNumber: customerSenderNumber, label: customerSenderLabel });
     }
-  }, [customer?.id, customer?.phone, customerLine?.ourEndpointId, fromNumber, loadedMessageDraft]);
+  }, [customer?.id, customer?.phone, customerSenderNumber, customerSenderLabel, fromNumber, threadLock?.ourNumber, loadedMessageDraft]);
 
   const loadData = useCallback((search = "", options = {}) => {
     if (customer) return Promise.resolve();

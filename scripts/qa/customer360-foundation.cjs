@@ -8,6 +8,8 @@ const fs = require("node:fs"),
 const { previewServer, launchBrowser, evidence, waitForFonts } = require("./browser");
 const root = path.resolve(__dirname, "../..");
 const output = path.join(root, ".tmp/design-system/customer360");
+const historyScenario = process.argv.includes("--history");
+const activityHistoryScenario = historyScenario && process.argv.includes("--activity-history");
 const customer = {
   id: "customer-a",
   firstName: "Avery",
@@ -73,7 +75,7 @@ const detail = {
   fs.mkdirSync(output, { recursive: true });
   let server;
   try {
-    server = await previewServer(root, process.argv[2]);
+    server = await previewServer(root, process.argv.slice(2).find((arg) => !arg.startsWith("--")));
     for (const [device, width, height] of [
       ["desktop", 1440, 1000],
       ["mobile", 390, 844],
@@ -180,6 +182,9 @@ const detail = {
               comms: [
                 {
                   id: "message-fixture",
+                  contactPhone: customer.phone,
+                  ourEndpointId: "+19415550190",
+                  ourEndpointLabel: "Fixture service line",
                   channel: "sms",
                   direction: "inbound",
                   body: "Please use the side gate.",
@@ -213,6 +218,33 @@ const detail = {
           if (url.pathname.endsWith("/autopay-state")) body = { recent_events: [] };
           if (url.pathname.endsWith("/credits")) body = { credits: [], balance: 0 };
           if (url.pathname === "/api/admin/document-templates") body = { templates: [] };
+          if (url.pathname.endsWith("/comms")) body.composerComms = body.comms.filter((item) => item.channel === "sms").slice(0, 1);
+          if (historyScenario && url.pathname === "/api/admin/customers" && url.searchParams.get("search") === "Sample") {
+            body = { customers: [
+              { ...customer, id: "exact-name", firstName: "Zed", lastName: "Sample", address: "1 Fixture Lane" },
+              { ...customer, id: "incidental-name", firstName: "Aaron", lastName: "Other", address: "2 Sample Lane" },
+            ], total: 2, totalPages: 1 };
+          }
+          if (historyScenario && url.pathname.endsWith("/comms")) {
+            const all = [...body.comms, ...Array.from({ length: 103 }, (_, i) => ({
+              id: `history-message-${i}`, channel: "sms", direction: "inbound",
+              body: `Historical customer text ${i + 1}`, createdAt: "2024-07-01T12:00:00Z",
+            }))];
+            const channel = url.searchParams.get("channel") || "all";
+            const items = channel === "all" ? all : all.filter((item) => item.channel === channel);
+            const offset = Number(url.searchParams.get("cursor") || 0);
+            body = { ...body, comms: items.slice(offset, offset + 50), hasMore: offset + 50 < items.length,
+              nextCursor: offset + 50 < items.length ? String(offset + 50) : null };
+          }
+          if (activityHistoryScenario && url.pathname.endsWith("/timeline")) {
+            const all = Array.from({ length: 105 }, (_, i) => ({ id: `history-event-${i}`, type: i === 104 ? "interaction" : "sms", title: i === 104 ? "Older side gate note" : `Historical activity ${i + 1}`, date: "2024-07-01T12:00:00Z" }));
+            const type = url.searchParams.get("type") || "all";
+            const search = (url.searchParams.get("search") || "").toLowerCase();
+            const items = all.filter((item) => (type === "all" || item.type === type) && item.title.toLowerCase().includes(search));
+            const offset = Number(url.searchParams.get("cursor") || 0);
+            body = { timeline: items.slice(offset, offset + 50), missingSources: [], hasMore: offset + 50 < items.length,
+              nextCursor: offset + 50 < items.length ? String(offset + 50) : null };
+          }
           if (body === undefined) {
             unmatched.push({ method: req.method(), path: url.pathname });
             body = {};
@@ -230,6 +262,16 @@ const detail = {
           .waitFor();
         await waitForFonts(page);
         await page.screenshot({ path: `${output}/${device}-directory.png` });
+        if (historyScenario) {
+          await page.getByRole("searchbox", { name: "Search customers" }).fill("Sample");
+          await page.getByRole("button", { name: "Open Zed Sample customer profile" }).waitFor();
+          const ranked = await page.getByRole("button", { name: /^Open .+ customer profile$/ }).allTextContents();
+          assert.ok(ranked[0].includes("Zed"), "Directory preserves exact-name ranking before alphabetical broad matches");
+          await page.screenshot({ path: `${output}/${device}-name-search.png` });
+          scenario.nameSearch = { preservesServerRank: true };
+          await page.getByRole("searchbox", { name: "Search customers" }).fill("");
+          await page.getByRole("button", { name: "Open Avery Sample customer profile" }).waitFor();
+        }
         await page.getByLabel("Actions for Avery Sample").click();
         await page
           .getByRole("button", { name: "Edit customer", exact: true })
@@ -281,6 +323,7 @@ const detail = {
         await page
           .getByRole("textbox", { name: "Text message" })
           .fill("Keep this local draft");
+        assert.equal(await page.getByRole("combobox", { name: "Send from" }).inputValue(), "+19415550190");
         await waitForFonts(page);
         await page.screenshot({ path: `${output}/${device}-message.png` });
         const drawerOverflow = await page
@@ -337,6 +380,24 @@ const detail = {
         )
           throw Error("Message draft lost");
         await page.getByRole("button", { name: "Back to customer" }).click();
+        if (activityHistoryScenario) {
+          await page.getByRole("tab", { name: "Activity", exact: true }).click();
+          await page.getByText("Historical activity 50", { exact: true }).waitFor();
+          await page.getByRole("button", { name: "Load older activity", exact: true }).click();
+          await page.getByText("Historical activity 100", { exact: true }).waitFor();
+          await page.getByRole("button", { name: "Load older activity", exact: true }).click();
+          await page.getByText("Older side gate note", { exact: true }).waitFor();
+          await page.getByRole("combobox", { name: "Filter activity" }).selectOption("interaction");
+          await page.getByText("Older side gate note", { exact: true }).waitFor();
+          assert.equal(await page.getByText("Historical activity 1", { exact: true }).count(), 0);
+          await page.getByRole("searchbox", { name: "Search activity" }).fill("side gate");
+          await page.waitForResponse((response) => new URL(response.url()).searchParams.get("search") === "side gate");
+          await page.getByText("Older side gate note", { exact: true }).waitFor();
+          await page.getByRole("combobox", { name: "Filter activity" }).scrollIntoViewIfNeeded();
+          await page.screenshot({ path: `${output}/${device}-history-filter.png` });
+          assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+          scenario.history = { pages: 3, events: 105, fullHistoryFilter: true, search: true };
+        }
         await page
           .getByRole("button", { name: "All customers", exact: true })
           .click();
@@ -368,6 +429,18 @@ const detail = {
         await page
           .getByText("Synthetic call summary", { exact: true })
           .waitFor();
+        if (historyScenario) {
+          await page.getByRole("button", { name: "Load older messages", exact: true }).click();
+          await page.getByText("Historical customer text 98", { exact: true }).waitFor();
+          await page.getByRole("button", { name: "Load older messages", exact: true }).click();
+          await page.getByText("Historical customer text 103", { exact: true }).waitFor();
+          await page.getByRole("combobox", { name: "Filter communication history" }).selectOption("voice");
+          await page.getByText("Synthetic call summary", { exact: true }).waitFor();
+          assert.equal(await page.getByText("Historical customer text 103", { exact: true }).count(), 0);
+          await page.getByRole("combobox", { name: "Filter communication history" }).scrollIntoViewIfNeeded();
+          await page.screenshot({ path: `${output}/${device}-message-history.png` });
+          scenario.messages = { pages: 3, messages: 105, channelFilter: true };
+        }
         await page
           .getByRole("combobox", { name: "Default bill-to" })
           .selectOption("__new__");

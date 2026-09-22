@@ -343,6 +343,24 @@ it.each([true, false])("preserves a recovered profile sender and its lock state 
   expect(JSON.parse(request[1].body)).toMatchObject({ fromNumber: chosenLine, customerId: profile.id });
 });
 
+it("keeps a manual profile sender override when newer history arrives", async () => {
+  const profile = { id: "manual-profile", phone: "+19415550100" };
+  const history = [{ channel: "sms", contactPhone: profile.phone, ourEndpointId: line }];
+  const view = render(<SmsTab active customer={profile} customerMessages={history} />, { wrapper: MemoryRouter });
+  await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Override" }));
+  const sender = screen.getByRole("combobox", { name: "Send from" });
+  const chosenLine = [...sender.options].find((option) => option.value && option.value !== line).value;
+  fireEvent.change(sender, { target: { value: chosenLine } });
+  fireEvent.change(screen.getByRole("textbox", { name: "Text message" }), { target: { value: "Keep my sender" } });
+  view.rerender(<SmsTab active customer={profile} customerMessages={[{ ...history[0], ourEndpointId: "+19415550197" }, ...history]} />);
+  expect(sender).toHaveValue(chosenLine);
+  expect(sender).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
+  const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/communications/sms"));
+  expect(JSON.parse(request[1].body)).toMatchObject({ fromNumber: chosenLine, body: "Keep my sender" });
+});
+
 it("requires an explicit sender for a new message without a saved line", async () => {
   setup(); await tick();
   fireEvent.change(screen.getByPlaceholderText("Search by name or enter phone number…"), { target: { value: "+19415550101" } });

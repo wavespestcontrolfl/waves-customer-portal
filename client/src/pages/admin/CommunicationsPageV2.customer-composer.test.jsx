@@ -69,6 +69,30 @@ it("keeps the profile recipient and thread line, sends once, and clears only on 
   expect(screen.getByRole("combobox", { name: "Send from" })).toBeDisabled();
 });
 
+it.each([{ name: "empty cache", cached: [] }, { name: "stale cache", cached: customerMessages }])("applies refreshed customer sender context without discarding the draft ($name)", async ({ cached }) => {
+  const view = render(<SmsTab active customer={customer} customerMessages={cached} />, { wrapper: MemoryRouter });
+  const field = screen.getByRole("textbox", { name: "Text message" });
+  fireEvent.change(field, { target: { value: "Keep this draft" } });
+  const refreshedLine = "+19415550197";
+  view.rerender(<SmsTab active customer={customer} customerMessages={[
+    { ...customerMessages[0], ourEndpointId: refreshedLine }, ...customerMessages,
+  ]} />);
+  expect(screen.getByRole("combobox", { name: "Send from" })).toHaveValue(refreshedLine);
+  expect(field).toHaveValue("Keep this draft");
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  expect(bodyOf("/admin/communications/sms")).toMatchObject({ fromNumber: refreshedLine, body: "Keep this draft" });
+  await act(async () => {});
+});
+
+it("does not choose another contact's sending line when international numbers share a suffix", () => {
+  const intl = { ...customer, phone: "+442025550100" };
+  render(<SmsTab active customer={intl} customerMessages={[
+    { ...customerMessages[0], contactPhone: "+12025550100", ourEndpointId: "+19415550197" },
+    { ...customerMessages[0], contactPhone: intl.phone },
+  ]} />, { wrapper: MemoryRouter });
+  expect(screen.getByRole("combobox", { name: "Send from" })).toHaveValue(line);
+});
+
 it("retains a suppressed message and does not report it as sent", async () => {
   responses["/admin/communications/sms"] = { sent: true, providerMessageId: "GATE_BLOCKED", reason: "Sending disabled" };
   const { field, onSent } = setup();
