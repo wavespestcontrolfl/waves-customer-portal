@@ -1101,3 +1101,69 @@ test.each([
 ])('contracted obligation auxiliaries: %s', (text, expected) => {
   expect(outcome(text)).toBe(expected);
 });
+
+// GitHub Codex round 4: a failure alternative preceding the success (not
+// only following it) still leaves a disjunction unresolved.
+test.each([
+  ['Either your payment was declined or it was approved.', 'pass'],
+  ['Either your payment was approved or it was declined.', 'pass'],
+  ['Your payment was declined or it was approved, I am not sure which.', 'pass'],
+  ['Either your payment was approved or processed.', 'fail'],
+  ['Your payment was approved.', 'fail'],
+])('disjunctive alternatives resolved on either side: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
+
+// A payment-status phrase (status, status update) is not itself the
+// transaction — it must not be treated as an outcome target, but a later
+// explicit pronoun reintroduction of the payment still counts.
+test.each([
+  ['We confirmed your payment status.', 'pass'],
+  ['We received your payment status update.', 'pass'],
+  ['Your payment status was updated.', 'pass'],
+  ['Your payment status was approved.', 'pass'],
+  ['I cannot confirm your payment status, but it was declined and is now approved.', 'fail'],
+  ['Your payment was approved.', 'fail'],
+])('payment-status phrases are not outcome targets: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
+
+// A past-tense denial of having made the claim ("never said"/"never
+// told"), not only the shared hedge vocabulary's base-form "say", leaves
+// the embedded outcome unconfirmed.
+test.each([
+  ['I never said your payment was approved.', 'pass'],
+  ['I did not say your payment was approved.', 'pass'],
+  ['We never told you your card was charged.', 'pass'],
+  ['We didn’t tell you your card was charged.', 'pass'],
+  ['Your payment was approved.', 'fail'],
+])('past-tense denials of the reporting speech act: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
+
+// A postclaim conditional follow-up about a separate offer does not
+// attach to — and so cannot exempt — an already-complete prior outcome.
+test.each([
+  ['Your payment was approved, if you want, I can send a receipt.', 'fail'],
+  ['Your payment was approved, if you would like, we can send a receipt.', 'fail'],
+  ['Your payment will be approved, if you authorize it.', 'pass'],
+  ['Your payment was processed, if you have any questions please call us.', 'fail'],
+])('conditional follow-ups do not attach to prior outcomes: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
+
+// A multiword certainty modifier ("in fact", "without a doubt", "for
+// sure") strengthens rather than qualifies the outcome predicate, like
+// the existing single-word adverbs (already/definitely).
+test.each([
+  ['Your payment was in fact approved.', 'fail'],
+  ['We did in fact process your payment.', 'fail'],
+  ['Your payment was without a doubt approved.', 'fail'],
+  ['Your payment has for sure gone through.', 'fail'],
+  ['Your payment was for certain approved.', 'fail'],
+  ['Your payment was no doubt approved.', 'fail'],
+  ['Your payment was beyond doubt approved.', 'fail'],
+  ['Your payment was possibly approved.', 'pass'],
+])('multiword certainty modifiers in outcome predicates: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});

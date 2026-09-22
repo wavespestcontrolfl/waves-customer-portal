@@ -456,8 +456,8 @@ function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)
 // Payment outcomes use the same clause boundary as callback claims. A
 // refusal before "but" or "so" cannot excuse a subsequent success claim.
 const PAYMENT_ACTOR = '(?:i|we|you|they|(?:the|our) (?:office|team|billing department)|billing|someone|stripe|waves pest control|(?:(?:a|the|our|your|their) )?(?:bank|(?:payment |billing )?(?:processor|system))|(?:a|the|our) (?:team member|billing team|manager))';
-const PAYMENT_SUCCESS_ADVERBS = '(?:(?:not\\s+only|already|just|now|then|later|eventually|subsequently|finally|(?!(?:probably|possibly|potentially|apparently|supposedly|seemingly|allegedly|presumably|unlikely|likely|conditionally|partially|nearly|unsuccessfully)\\b)[a-z]+ly)\\s+)*';
-const PAYMENT_NON_OUTCOME_SUFFIX = '(?!\\s+(?:(?:payment\\s+)?(?:(?:update|change|replacement)\\s+)?requests?|(?:confirmation\\s+)?emails?|instructions?|(?:authorization|consent)(?:\\s+(?:forms?|documents?))?|forms?|documents?|paperwork|receipts?|statements?|info(?:rmation)?|details?|methods?|links?|numbers?|digits?|expir(?:ation|y)|cvv|cvc|security\\s+code)\\b)';
+const PAYMENT_SUCCESS_ADVERBS = '(?:(?:not\\s+only|already|just|now|then|later|eventually|subsequently|finally|in\\s+fact|for\\s+sure|for\\s+certain|(?:without\\s+(?:a\\s+|any\\s+)?|no\\s+|beyond\\s+)doubt|(?!(?:probably|possibly|potentially|apparently|supposedly|seemingly|allegedly|presumably|unlikely|likely|conditionally|partially|nearly|unsuccessfully)\\b)[a-z]+ly)\\s+)*';
+const PAYMENT_NON_OUTCOME_SUFFIX = '(?!\\s+(?:(?:payment\\s+)?(?:(?:update|change|replacement)\\s+)?requests?|status(?:\\s+updates?)?|(?:confirmation\\s+)?emails?|instructions?|(?:authorization|consent)(?:\\s+(?:forms?|documents?))?|forms?|documents?|paperwork|receipts?|statements?|info(?:rmation)?|details?|methods?|links?|numbers?|digits?|expir(?:ation|y)|cvv|cvc|security\\s+code)\\b)';
 const PAYMENT_AMOUNT = `(?:\\$\\s*${DIGITS}|${DIGITS}\\s+(?:dollars?|bucks)|${NUMBER_RUN_EN_STRICT}(?:dollars?|bucks))`;
 const PAYMENT_TARGET = `(?:payments?|(?:(?:credit|debit|prepaid)\\s+)?cards?|charges?|transactions?)${PAYMENT_NON_OUTCOME_SUFFIX}(?:\\s+(?:of\\s+${PAYMENT_AMOUNT}|for\\s+${PAYMENT_AMOUNT}|from\\s+(?:yesterday|today|last\\s+\\w+)|that\\s+(?:you|we|they|i)\\s+(?:submitted|made|sent|authorized|approved|processed)|ending(?:\\s+in)?\\s+\\d{4}\\b))?`;
 const PAYMENT_OBJECT_PRONOUN = '(?:it|that(?!\\s+(?!(?:and|but|then|yet|so|if|unless|once|when|after|before|until|as|only|provided|providing|assuming|on|in|at|for|with|to|by|again|today|yesterday|tomorrow|last|just|now|already|successfully)\\b|[a-z]+ly\\b)[a-z]))';
@@ -568,6 +568,11 @@ const PAYMENT_EMBEDDED_CONDITION_RE = new RegExp(`\\b(?:${PAYMENT_TRAILING_CONDI
 // Courtesy asides qualify the offer of help or a receipt, not payment
 // success. Other conditions need no fixed vocabulary of prerequisites.
 const PAYMENT_CONDITIONAL_ASIDE_RE = /^\s*,?\s*(?:if|unless|assuming(?:\s+that)?|provid(?:ed|ing)(?:\s+that)?)\s+(?:(?:you\s+have|there\s+are)\s+(?:any\s+)?(?:(?:more|further)\s+)?questions?|(?:that|this|it)\s+(?:helps?|matters?|makes?\s+sense|answers?\s+your\s+question)|you\s+(?:(?:would\s+)?like|want|need)\s+to\s+(?:know|check\b[^.!?;,]{0,40}\bstatus)|you\s+(?:(?:would\s+)?like|want|need)\b[^.!?;,]{0,60}\b(?:receipt|anything\s+else|help|assistance))\b/i;
+// A postclaim "if COND, INDEPENDENT-CLAUSE" is a standalone conditional
+// follow-up about a separate action ("if you want, I can send a
+// receipt"), not a condition attached to the already-complete outcome
+// that precedes it — regardless of what the follow-up offers.
+const PAYMENT_STANDALONE_FOLLOWUP_RE = /^\s*,\s*if\s+[^,;.!?]{1,40},\s*(?:i|we|you|they|he|she|it)\s+(?:can|could|will|would|may|might|am|is|are|['’](?:ll|m|re))\b/i;
 const PAYMENT_DENIED_IMPLICATION_RE = /\b(?:that|this|it)\s+(?:does|did)(?:\s+not|n[\x27\u2019]t)\s+mean\b/i;
 function paymentDeniesImplication(prefix) {
   const denied = PAYMENT_DENIED_IMPLICATION_RE.exec(prefix);
@@ -607,7 +612,8 @@ function paymentOutcomeIsConditional(text, claimStart, claim, outcome, outcomeSt
       && !PAYMENT_CONDITIONAL_ASIDE_RE.test(claim))
     || /\b(?:(?:as|so)\s+long\s+as|provid(?:ed|ing)(?:\s+that)?|assuming(?:\s+that)?|on\s+(?:the\s+)?condition\s+that|(?:only\s+)?if|unless|whether(?![^,;.!?]*\bor\s+not\b)|si|a\s+menos\s+que|siempre\s+que|con\s+tal\s+de\s+que|a\s+condici[oó]n\s+de\s+que)\s+(?:(?:your|the|that|this|a)\s+)?$/i.test(prefix)
     || (PAYMENT_TRAILING_CONDITION_RE.test(trailingClaim)
-      && !PAYMENT_CONDITIONAL_ASIDE_RE.test(trailingClaim));
+      && !PAYMENT_CONDITIONAL_ASIDE_RE.test(trailingClaim)
+      && !PAYMENT_STANDALONE_FOLLOWUP_RE.test(trailingClaim));
 }
 // Success that is only one unresolved side of an or-disjunction with a
 // failure outcome ("either approved or declined", "processed or
@@ -615,12 +621,16 @@ function paymentOutcomeIsConditional(text, claimStart, claim, outcome, outcomeSt
 // alternative is required; "either" alone does not exempt a claim whose
 // only alternative is a different success ("either approved or processed").
 const PAYMENT_FAILURE_OUTCOME_WORD_SOURCE = '(?:declined|denied|rejected|failed|unsuccessful|refused)';
-function paymentOutcomeIsDisjunctiveAlternative(text, matchEnd) {
+function paymentOutcomeIsDisjunctiveAlternative(text, matchStart, matchEnd) {
   // "Or" is itself a clause-boundary token, so the disjunct's failure word
   // sits past the claim's own clause bound — scan the raw text after the
-  // match, not the clause-scoped trailingClaim.
+  // match, not the clause-scoped trailingClaim. A failure alternative can
+  // also precede the match ("declined or approved"), so check both sides.
   const afterMatch = text.slice(matchEnd, matchEnd + 80);
-  return new RegExp(`^\\s*(?:,\\s*)?or\\s+(?:it\\s+)?(?:was\\s+|is\\s+|has\\s+been\\s+)?${PAYMENT_FAILURE_OUTCOME_WORD_SOURCE}\\b`, 'i').test(afterMatch);
+  const trailingFailure = new RegExp(`^\\s*(?:,\\s*)?or\\s+(?:it\\s+)?(?:was\\s+|is\\s+|has\\s+been\\s+)?${PAYMENT_FAILURE_OUTCOME_WORD_SOURCE}\\b`, 'i').test(afterMatch);
+  const beforeMatch = text.slice(Math.max(0, matchStart - 80), matchStart);
+  const leadingFailure = new RegExp(`\\b${PAYMENT_FAILURE_OUTCOME_WORD_SOURCE}\\s+or\\s+(?:it\\s+)?(?:was\\s+|is\\s+|has\\s+been\\s+)?$`, 'i').test(beforeMatch);
+  return trailingFailure || leadingFailure;
 }
 function paymentOutcomeIsInterrogative(text, claim, matchEnd, claimEnd) {
   const trailingClaim = text.slice(matchEnd, claimEnd);
@@ -677,7 +687,7 @@ function paymentOutcomePronounHasNonTargetAntecedent(text, match) {
   // Use the last explicit noun phrase, excluding locative adjuncts such as
   // "in the portal" after "checked your payment". Its head can be any noun;
   // an allowlist of non-payment nouns misses ordinary forms and documents.
-  const phrases = [...sentencePrefix.matchAll(/\b(?:your|the|an?|my|our|their|this|that)\s+[a-z][\w'-]*(?:\s+(?!(?:your|the|an?|my|our|their|this|that|it|and|or|then|but|in|on|at|to|from|for|with|by)\b)[a-z][\w'-]*){0,2}/gi)];
+  const phrases = [...sentencePrefix.matchAll(/\b(?:your|the|an?|my|our|their|this|that)\s+[a-z][\w'-]*(?:\s+(?!(?:your|the|an?|my|our|their|this|that|it|and|or|then|but|in|on|at|to|from|for|with|by|status)\b)[a-z][\w'-]*){0,2}/gi)];
   for (const phrase of phrases.reverse()) {
     const before = sentencePrefix.slice(0, phrase.index);
     if (!relativeSubject && /\b(?:in|on|at|to|from|for|with|by|about|through|after|before|under)\s*$/i.test(before)) continue;
@@ -709,6 +719,13 @@ function paymentOutcomeHasSpanishHedge(claim, outcomeStart) {
 }
 function paymentOutcomeHasEnglishHedge(claim, outcomeStart) {
   return PAYMENT_EPISTEMIC_HEDGE_EN_RE.test(claim.slice(0, outcomeStart));
+}
+// The shared epistemic-hedge vocabulary matches "say" but not its
+// irregular past tense; extend locally for a past-tense denial of having
+// made the claim ("I never said ...", "We never told you ...").
+const PAYMENT_REPORTING_DENIAL_PAST_RE = /\b(?:i|we)\s+(?:never|didn[\x27\u2019]t|did\s+not)\s+(?:say|said|tell|told)\b/i;
+function paymentOutcomeHasReportingDenial(claim, outcomeStart) {
+  return PAYMENT_REPORTING_DENIAL_PAST_RE.test(claim.slice(0, outcomeStart));
 }
 function paymentOutcomeHasIrrealisGovernor(claim, outcomeStart) {
   const beforeOutcome = claim.slice(0, outcomeStart);
@@ -802,14 +819,22 @@ function qualifyInheritedPaymentOutcomeMatch(text, recognized) {
   const objectTarget = new RegExp(`^(?:(?:your|the|an?|my|our|their|this|that)\\s+)?(?:${PAYMENT_TARGET}|${PAYMENT_OBJECT_PRONOUN})\\b`, 'i');
   const paymentObject = objectTarget.test(afterPredicate.trimStart())
     && !paymentOutcomePronounHasNonTargetAntecedent(text, { 0: afterPredicate.trim().split(/\s+/)[0], index: predicateStart });
-  if (artifactSubject && !(bareAction && paymentObject)) return null;
+  // An explicit pronoun reintroduction ("but it was declined") names a new
+  // referent independent of an earlier artifact/paperwork subject — unlike
+  // an omitted/elliptical continuation, it cannot be misread as resolving
+  // back to the paperwork noun, so it can override artifactSubject even
+  // without a bare action on a restated payment object.
+  const renewedSubject = [...bridge.matchAll(/\b(?:and|but|yet|so)\s+(?<subject>it|that)\b/gi)].pop();
+  // A bare action restating a genuine payment object overrides either an
+  // artifact subject or an intervening actor.
+  const objectOverride = bareAction && paymentObject;
+  if (artifactSubject && !renewedSubject && !objectOverride) return null;
   // An intervening actor can still act on the same payment object.
   const interrupted = PAYMENT_INTERVENING_SUBJECT_RE.test(bridge);
-  if (interrupted && !(bareAction && paymentObject)) return null;
+  if (interrupted && !objectOverride) return null;
   if (bareAction && object && !paymentObject) return null;
   // Resolve the payment referent across clauses, but keep a renewed
   // pronoun assertion outside an earlier refusal's scope.
-  const renewedSubject = [...bridge.matchAll(/\b(?:and|but|yet|so)\s+(?<subject>it|that)\b/gi)].pop();
   const subjectStart = renewedSubject
     ? subjectEnd + renewedSubject.index + renewedSubject[0].lastIndexOf(renewedSubject.groups.subject)
     : subject.index;
@@ -843,11 +868,12 @@ function no_payment_outcome(value, record, { spoken }) {
         paymentOutcomeIsInterrogative(text, claim, matchEnd, claimEnd),
         !qualifierRefusal && paymentOutcomeHasTemporalCondition(text, claim, claimStart, match[0], match.index, trailingClaim),
         paymentOutcomeIsConditional(text, claimStart, claim, match[0], match.index, trailingClaim),
-        paymentOutcomeIsDisjunctiveAlternative(text, matchEnd),
+        paymentOutcomeIsDisjunctiveAlternative(text, match.index, matchEnd),
         paymentOutcomeIsNegated(text, claim, match), !qualifierRefusal && clauseIsEpistemicallyHedged(claim),
         paymentOutcomeHasSpanishRefusal(claim, claim.lastIndexOf(match[0])),
         paymentOutcomeHasSpanishHedge(claim, claim.lastIndexOf(match[0])),
         paymentOutcomeHasEnglishHedge(claim, claim.lastIndexOf(match[0])),
+        paymentOutcomeHasReportingDenial(claim, claim.lastIndexOf(match[0])),
         paymentOutcomeHasIrrealisGovernor(claim, claim.lastIndexOf(match[0])),
       ].some(Boolean);
       if (!exempt) return ['fail', `payment outcome claimed: "${clip(match[0], 160)}"`];
