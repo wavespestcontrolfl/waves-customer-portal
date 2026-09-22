@@ -69,6 +69,7 @@ function installModalFetch({
   prepayInvoiceRequest,
   enablePrepay = false,
   discounts = [],
+  basePrice = 100,
 } = {}) {
   let addressRequests = 0;
   let prepayPreviews = 0;
@@ -84,11 +85,12 @@ function installModalFetch({
       return Promise.resolve(jsonResponse({
         services: [{
           id: name.startsWith('First') ? 'service-first' : 'service-second',
+          service_key: name.startsWith('First') ? 'svc_first' : 'svc_second',
           name,
           billing_type: 'recurring',
           frequency: 'seasonal_feb_oct',
           visits_per_year: 9,
-          base_price: 100,
+          base_price: basePrice,
           default_duration_minutes: 30,
         }],
       }));
@@ -739,6 +741,7 @@ describe('appointment discount stale-gate retry (Codex pre-push audit P1)', () =
   // pickAppointmentDiscount(''), silently discarding the operator's
   // selection instead of retrying.
   it('retries the gate probe instead of removing the discount when only the submit-time check went stale', async () => {
+    vi.spyOn(window, 'alert').mockImplementation(() => {});
     const retry = vi.fn();
     vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry });
     vi.mocked(ensureStackingFresh).mockResolvedValueOnce({ enabled: false, known: true });
@@ -890,5 +893,141 @@ describe('appointment discount gate-drift protection (Codex pre-push audit P1, r
     fireEvent.change(picker, { target: { value: 'mil' } });
     expect(picker.value).toBe('mil');
     expect(screen.getByText('Military Discount: -$10.00')).toBeTruthy();
+  });
+});
+
+describe('GitHub review round 1 on PR #4656', () => {
+  // P1 (:2531): compound=false only changes STACKING ORDER in
+  // stackVisitDiscounts, never its per-discount ROUNDING — it always uses
+  // cent-exact integer half-up math. The server's UNGATED path
+  // (calculateDiscountDollars) keeps the OLDER float rounding instead: 5%
+  // of $20.70 is $1.03 there (IEEE754 float noise), never the half-up
+  // $1.04. groupStackedPerVisitTotal ran the stacked engine even with the
+  // gate off and even with NO appointment discount selected at all — an
+  // ordinary per-LINE discount, unrelated to this PR's own feature, so the
+  // collect-prepayment payload/preview disagreed with the persisted total
+  // on plain gate-off bookings.
+  it('gate OFF: the prepay preview uses the SAME legacy float rounding as the server, not stackVisitDiscounts\' cent-exact half-up', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: false, known: true, retry: vi.fn() });
+    installModalFetch({
+      basePrice: 20.70,
+      discounts: [{
+        id: 'five-pct', name: 'Five Percent', discount_type: 'percentage',
+        amount: 5, is_active: true, show_in_invoices: true,
+      }],
+    });
+    renderBooking();
+    await addOneSeasonalService();
+    // Gate off never renders the appointment-level picker — apply the
+    // discount as an ordinary LINE pick, exactly like any pre-lane save.
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for First seasonal service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Five Percent/ }));
+    fireEvent.change(screen.getByPlaceholderText('Ongoing'), { target: { value: '2' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Collect prepayment' }));
+    // $20.70 - $1.03 (legacy float rounding) = $19.67/visit x 2 = $39.34.
+    await screen.findByText((_, node) => node?.textContent === '2 visits × $19.67 = $39.34');
+  });
+
+  it('gate ON: the SAME line discount now goes through the cent-exact half-up engine (server\'s canonical restack)', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    installModalFetch({
+      basePrice: 20.70,
+      discounts: [{
+        id: 'five-pct', name: 'Five Percent', discount_type: 'percentage',
+        amount: 5, is_active: true, show_in_invoices: true,
+      }],
+    });
+    renderBooking();
+    await addOneSeasonalService();
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for First seasonal service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Five Percent/ }));
+    fireEvent.change(screen.getByPlaceholderText('Ongoing'), { target: { value: '2' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Collect prepayment' }));
+    // $20.70 - $1.04 (cent-exact half-up) = $19.66/visit x 2 = $39.32.
+    await screen.findByText((_, node) => node?.textContent === '2 visits × $19.66 = $39.32');
+  });
+
+  // P1 (:2472): a candidate preset's non-stackable conflict must be checked
+  // against the SUBMIT GROUP its OWN catalog scope actually resolves to —
+  // not a fixed group[0] baseline. A split seasonal booking has one group
+  // per seasonal line; a preset scoped to the SECOND line's service must be
+  // checked against the SECOND group's own picks, not the first (empty) one.
+  it('filters a scoped candidate against the submit group it actually resolves to, not always group[0]', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    installModalFetch({
+      discounts: [
+        {
+          id: 'silver', name: 'Silver', discount_type: 'percentage', amount: 10,
+          is_active: true, show_in_invoices: true, stack_group: 'tier',
+        },
+        {
+          id: 'gold', name: 'Gold', discount_type: 'percentage', amount: 15,
+          is_active: true, show_in_invoices: true, stack_group: 'tier',
+          service_key_filter: 'svc_second',
+        },
+      ],
+    });
+    renderBooking();
+    await addTwoSeasonalServices();
+    // Silver goes on the SECOND line — its own (second) submit group.
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for Second seasonal service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Silver/ }));
+    await screen.findByText('Silver - 10%');
+    // Gold is scoped to svc_second (the SECOND group) and shares Silver's
+    // non-stackable tier group — it must be EXCLUDED from the appointment
+    // picker's options. Checked against a fixed group[0] (First, no picks),
+    // the pre-fix code found no conflict and wrongly offered it.
+    const picker = await screen.findByLabelText('Appointment discount');
+    const optionNames = Array.from(picker.querySelectorAll('option')).map((o) => o.textContent);
+    expect(optionNames.some((t) => t.startsWith('Gold'))).toBe(false);
+  });
+
+  // P1 (:3100): the freshness check must be the LAST thing before EACH
+  // group's own POST, re-run per group in a multi-group (split seasonal)
+  // save — not just once up front, before mosquito/address-ask awaits and
+  // any earlier groups' own POSTs.
+  it('re-checks the gate freshness before EVERY group\'s POST in a multi-group save, not only once up front', async () => {
+    vi.spyOn(window, 'alert').mockImplementation(() => {});
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    // First group's own pre-POST probe still agrees with the pick-time
+    // snapshot; the SECOND group's probe finds the gate has since moved.
+    vi.mocked(ensureStackingFresh)
+      .mockResolvedValueOnce({ enabled: true, known: true })
+      .mockResolvedValueOnce({ enabled: false, known: true });
+    const { fetcher } = installModalFetch({ discounts: [{
+      id: 'mil', name: 'Military Discount', discount_type: 'fixed_amount',
+      amount: 10, is_active: true, show_in_invoices: true,
+    }] });
+    renderBooking();
+    const submit = await addTwoSeasonalServices();
+    const picker = await screen.findByLabelText('Appointment discount');
+    fireEvent.change(picker, { target: { value: 'mil' } });
+    fireEvent.click(submit);
+    // The first (unscoped -> first) group's POST lands; the second group's
+    // own pre-POST check catches the drift and refuses to post it.
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    await screen.findByText('Could not confirm the discount-stacking status — retry before saving.');
+    expect(schedulePosts(fetcher)).toHaveLength(1);
+  });
+
+  // P2 (:2021): the custom fixed-amount prompt only checked `amount > 0`,
+  // so Infinity/1e309 passed through — the preview clamped it to a "free
+  // visit" but JSON.stringify turns a non-finite discountAmount into null
+  // on the wire, and the server falls back to the custom preset's catalog
+  // amount of 0, saving the visit at full price.
+  it('rejects a non-finite custom appointment-discount amount, matching the percentage prompt\'s own guard', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    installModalFetch({ discounts: [{
+      id: 'custom-amt', name: 'Custom amount', discount_type: 'fixed_amount',
+      discount_key: 'custom_dollar', amount: 0, is_active: true, show_in_invoices: true,
+    }] });
+    vi.spyOn(window, 'prompt').mockReturnValue('Infinity');
+    renderBooking();
+    await addOneSeasonalService();
+    const picker = await screen.findByLabelText('Appointment discount');
+    fireEvent.change(picker, { target: { value: 'custom-amt' } });
+    // Rejected outright — never applied, never shown as a "free visit".
+    expect(picker.value).toBe('');
+    expect(screen.queryByText(/Custom amount:/)).toBeNull();
   });
 });

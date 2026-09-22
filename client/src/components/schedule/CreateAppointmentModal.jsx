@@ -2039,7 +2039,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     if (isCustomAmountDiscount(discount)) {
       const raw = window.prompt(`Discount amount for ${discount.name} ($)`, '');
       if (raw === null) return;
-      amount = Math.round((Number(raw) || 0) * 100) / 100;
+      const parsed = Number(raw);
+      // Codex review round 1 (PR #4656): the percentage branch below already
+      // guards with Number.isFinite; this one only checked `amount > 0`, so
+      // Infinity/1e309 passed through. The preview then clamps to the full
+      // service balance (a "free visit"), but JSON.stringify turns a
+      // non-finite discountAmount into `null` on the wire — the server
+      // falls back to the custom preset's catalog amount of 0 and saves the
+      // visit at full price, disagreeing with what was previewed.
+      if (!Number.isFinite(parsed)) return;
+      amount = Math.round(parsed * 100) / 100;
       if (!(amount > 0)) return;
     } else if (isCustomPercentageDiscount(discount)) {
       const raw = window.prompt(`Discount percentage for ${discount.name} (%)`, '');
@@ -2490,8 +2499,30 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const appointmentDiscountScopeLines = appointmentDiscountScopeLinesFor(
     appointmentSubmitGroups, null, lineServiceKey, services,
   );
-  const appointmentDiscountOptions = presetsStackableWith(lineLaneRows(-1), { spansAll: true })
-    .filter((d) => APPOINTMENT_DISCOUNT_TYPES.includes(d.discount_type));
+  // Codex review round 1 (PR #4656): each CANDIDATE preset must be checked
+  // for a non-stackable conflict against the lines of the group ITS OWN
+  // catalog scope (service_key_filter/service_category_filter) actually
+  // resolves to — not a single fixed appointmentDiscountScopeLines baseline
+  // (group[0], since this slice never sends an operator scope override).
+  // A split seasonal/year-round booking has more than one submit group; a
+  // category-scoped preset that really lands on the LATER group used to be
+  // checked against the FIRST group's existing picks instead, so it could
+  // stay selectable even though its actual group already carries a
+  // conflicting non-stackable tier — buildAppointmentPricing (the create
+  // route) never calls assertStackGroups itself, so this UI check was the
+  // only thing standing between the operator and two prohibited tiers both
+  // actually persisting.
+  const appointmentDiscountOptions = lineDiscountPresets
+    .filter((d) => APPOINTMENT_DISCOUNT_TYPES.includes(d.discount_type))
+    .filter((d) => {
+      if (!stackingEnabled) return true;
+      const group = resolveAppointmentDiscountGroup(appointmentSubmitGroups, d, null, lineServiceKey);
+      const groupLines = group?.lines || appointmentDiscountScopeLines;
+      const chosenInGroup = groupLines
+        .map((svc) => laneRow(svc.lineDiscount, { scope: `line:${services.indexOf(svc)}` }))
+        .filter(Boolean);
+      return stackablePresets([d], chosenInGroup, { spansAll: true }).length > 0;
+    });
   // Group selection and per-line eligibility both go through the exported
   // lineMatchesDiscountScope / resolveAppointmentDiscountGroup above — one
   // scope test, so a line can never be eligible for a discount that was
@@ -2540,6 +2571,21 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // projection, which otherwise multiplies a subtotal that never had the
   // appointment discount taken off it (Codex #4405 r3 P1).
   const groupStackedPerVisitTotal = (group) => {
+    // Codex review round 1 (PR #4656): compound=false only changes stacking
+    // ORDER in stackVisitDiscounts, never its per-discount ROUNDING —
+    // percentageDiscountDollars always uses cent-exact integer half-up math
+    // regardless of the flag. The server's UNGATED path (discountStackingLive()
+    // false, calculateDiscountDollars) keeps the OLDER float rounding
+    // instead (5% of $20.70 is $1.03 there, $1.04 half-up) — so calling
+    // stackVisitDiscounts here even with the gate off (and even with NO
+    // appointment discount at all — this ran for every plain per-line
+    // discount too) made the prepay preview/payload disagree with the
+    // persisted visit total on an ordinary gate-off booking, unrelated to
+    // this PR's own appointment-level feature. Reuse the pre-lane per-line
+    // legacy sum whenever the frozen/live regime is compound=false.
+    if (!appointmentDiscountCompound) {
+      return group.lines.reduce((sum, s) => sum + lineEffectiveNetAmount(s), 0);
+    }
     const carriesAppointmentDiscount = !!appointmentDiscount
       && !!appointmentDiscountGroup
       && groupKey(group) === appointmentDiscountGroup.key;
@@ -2970,6 +3016,28 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             billingTerm,
           };
           if (attachAnnualPrepay) prepayAttachedThisSubmit = true;
+          // Codex review round 1 (PR #4656): the LAST possible check before
+          // this specific group's money POST — re-run for EVERY group in a
+          // multi-group (split seasonal/year-round) save, not only once at
+          // the top of handleSubmit, so a gate flip during an EARLIER
+          // group's own POST (or during the mosquito/address-ask awaits
+          // above) is still caught before THIS group's request goes out.
+          // Compared against the frozen snapshot, exactly like the
+          // pre-move version — never the live stackingEnabled (see that
+          // version's own note on the race this avoids).
+          if (appointmentDiscountState) {
+            const fresh = await ensureStackingFresh();
+            assertSubmitCurrent();
+            if (!fresh.known || fresh.enabled !== appointmentDiscountGateSnapshot) {
+              setStaleStackingNotice('The discount-stacking setting changed while this was open. Reload before saving so the totals match what will be saved.');
+              firstError = {
+                label: groupLabel(group),
+                message: 'the discount-stacking setting changed while this was open — reload and try again',
+                duplicate: false,
+              };
+              break;
+            }
+          }
           bookingPostAttempted = true;
           const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
           createdGroupKeysRef.current.add(key);
@@ -3104,8 +3172,15 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // so every discount-save-blocking condition canSubmit ANDs in below
     // must ALSO be checked here directly, not just the two that happened
     // to be added first.
+    // Codex pre-push audit P1 (round 6): staleStackingNotice drives the
+    // SAME banner text/select-disable as the other four reasons via
+    // discountSaveBlockedReason but was omitted from this list and from
+    // canSubmit below — a re-click after a submit-time drift fell through
+    // to another async ensureStackingFresh() round-trip instead of being
+    // short-circuited immediately, and the Save button stayed clickable
+    // while the banner visibly said not to.
     if (appointmentDiscountHasNoGroup || appointmentDiscountGateDrifted
-      || stackingUnconfirmedBlocksSave || percentExclusionsBlockSave) return;
+      || stackingUnconfirmedBlocksSave || percentExclusionsBlockSave || staleStackingNotice) return;
     if (!canSubmitAppointments({
       selectedCustomer,
       services,
@@ -3114,28 +3189,19 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       addressAskPending,
     })) return;
     submitLockRef.current = true;
-    // Revalidate right before POSTING money: the hook polls, but a gate flip
-    // between the last probe and this click would still book under the
-    // semantics the preview used. Ordered AFTER the submit lock — awaiting
-    // before it would let two fast clicks both pass and double-book.
-    if (appointmentDiscountState) {
-      const fresh = await ensureStackingFresh();
-      // Compared against the FROZEN pick-time snapshot, not the live
-      // stackingEnabled (Codex pre-push audit P1, round 3's own reviewer
-      // note): by the time this line runs, appointmentDiscountGateDrifted
-      // above has already forced stackingEnabled === snapshot for Save to
-      // even be reachable — comparing against the live value here would
-      // reopen the exact race the reviewer flagged (a poll updating
-      // stackingEnabled between the click and this probe resolving would
-      // make a stale live value agree with itself). The snapshot only ever
-      // changes via an explicit Retry, so it is safe to await against here.
-      if (!fresh.known || fresh.enabled !== appointmentDiscountGateSnapshot) {
-        submitLockRef.current = false;
-        setStaleStackingNotice('The discount-stacking setting changed while this was open. Reload before saving so the totals match what will be saved.');
-        return;
-      }
-      setStaleStackingNotice('');
-    }
+    // Codex review round 1 (PR #4656): the freshness re-check used to live
+    // HERE, before submitAppointments — but that helper then awaits
+    // mosquitoSubmitGate's revalidation AND the mandatory address-ask
+    // recheck before the FIRST appointment POST even fires, and (for a
+    // split seasonal/year-round save) posts several groups in sequence
+    // after that. A gate flip during any of those windows reached the
+    // server un-caught. The check now lives at the actual network
+    // boundary, immediately before EACH group's own POST, inside
+    // submitAppointments — re-run per group, not just once up front. A
+    // notice left over from an earlier failed attempt is cleared here so a
+    // fresh attempt starts clean; submitAppointments re-sets it if its own
+    // per-group check finds a drift.
+    setStaleStackingNotice('');
     let booked = false;
     try {
       booked = await submitAppointments(separateProgram);
@@ -3293,7 +3359,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     bookingPropertyState,
     alreadySubmitting: saving,
     addressAskPending,
-  }) && !stackingUnconfirmedBlocksSave && !percentExclusionsBlockSave && !appointmentDiscountHasNoGroup && !appointmentDiscountGateDrifted;
+  }) && !stackingUnconfirmedBlocksSave && !percentExclusionsBlockSave && !appointmentDiscountHasNoGroup && !appointmentDiscountGateDrifted && !staleStackingNotice;
   const hasRecurringServices = services.some((s) => s.cadence && s.cadence !== 'one_time');
   const firstCustomRecurringIndex = services.findIndex((s) => s.cadence === 'custom');
   const weekendRuleValue = skipWeekends ? weekendShift : 'allow';
