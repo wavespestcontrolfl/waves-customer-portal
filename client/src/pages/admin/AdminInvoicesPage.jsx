@@ -454,6 +454,56 @@ export function invoiceDiscountItemTerm(item, discountRowById) {
   };
 }
 
+// GATE_DISCOUNT_STACKING (Codex pre-push audit P1, round 2 on PR #4655):
+// a document-wide credit's OWN scope — set only on a stored stamp via
+// document_scope_service_key / document_scope_service_category — must
+// narrow which lines its term reaches, mirroring
+// server/services/invoice.js's scopeEligibleLines exactly: no service-key
+// snapshot anywhere on this invoice's lines ⇒ unscoped (a pre-lane /
+// hand-built invoice never scopes anything); a snapshot present but this
+// stamp names a key/category no line satisfies ⇒ an empty eligibleLines
+// (orphaned — stackDocumentDiscounts' own empty-pool handling resolves it
+// to $0, never the frozen face value); otherwise the term reaches only
+// the matching line(s), and EVERY configured filter must match (AND), not
+// just one. Dropping this scope let a stamp narrowed to a $10 line preview
+// its full $30 across every line on the invoice instead of the $10 the
+// server's own scope resolution would actually save.
+function invoiceServiceScopeEligibleLines(serviceLineItems, scopeKey, scopeCategory) {
+  if (!scopeKey && !scopeCategory) return null;
+  const invoiceCarriesScope = serviceLineItems.some(
+    (line) => line?.service_key != null && String(line.service_key) !== "",
+  );
+  if (!invoiceCarriesScope) return null;
+  return serviceLineItems
+    .map((line, i) => (
+      (!scopeKey || String(line.service_key || "") === String(scopeKey))
+      && (!scopeCategory || String(line.service_category || "") === String(scopeCategory))
+        ? i
+        : -1
+    ))
+    .filter((i) => i >= 0);
+}
+
+// The document-wide terms every stacked computation below feeds to
+// stackDocumentDiscounts — ONE builder, shared by
+// computeInvoiceLineDiscountTotal and repriceLineWithNewDiscountPick, so
+// they can't independently drift on this rule the way the aggregate and
+// the per-pick sizing already once did (round 1).
+function invoiceDocumentTerms(items, serviceLineItems, discountRowById) {
+  return items
+    .filter((i) => i._kind === "discount" && !i.discount_for)
+    .map((i) => {
+      const term = invoiceDiscountItemTerm(i, discountRowById);
+      if (!isStoredInvoiceDiscountItem(i)) return term;
+      const eligibleLines = invoiceServiceScopeEligibleLines(
+        serviceLineItems,
+        i.document_scope_service_key,
+        i.document_scope_service_category,
+      );
+      return eligibleLines ? { ...term, eligibleLines } : term;
+    });
+}
+
 // The form's discount total: additive (pre-lane, byte-identical) when the
 // gate is off; compounded (client/src/lib/discountStack.js — the parity-
 // tested mirror of the server engine) when it is on. GATE_DISCOUNT_STACKING
@@ -491,9 +541,7 @@ export function computeInvoiceLineDiscountTotal({
       .filter((i) => i._kind === "discount" && i.discount_for === line.client_id)
       .map((i) => invoiceDiscountItemTerm(i, discountRowById)),
   }));
-  const documentTerms = items
-    .filter((i) => i._kind === "discount" && !i.discount_for)
-    .map((i) => invoiceDiscountItemTerm(i, discountRowById));
+  const documentTerms = invoiceDocumentTerms(items, serviceLineItems, discountRowById);
   const stacked = stackDocumentDiscounts({ lines, documentTerms });
   // Each line's `net` already folds in its pro-rata share of the document
   // terms above (stackDocumentDiscounts interleaves both in one canonical
@@ -552,9 +600,7 @@ export function repriceLineWithNewDiscountPick({
       terms: line.client_id === parentClientId ? [...terms, newTerm] : terms,
     };
   });
-  const documentTerms = items
-    .filter((i) => i._kind === "discount" && !i.discount_for)
-    .map((i) => invoiceDiscountItemTerm(i, discountRowById));
+  const documentTerms = invoiceDocumentTerms(items, serviceLineItems, discountRowById);
   const stacked = stackDocumentDiscounts({ lines, documentTerms });
   const parentTermDollars = parentIdx >= 0 ? stacked.lines[parentIdx].termDollars : [];
   const dollars = parentTermDollars.length
@@ -6022,34 +6068,49 @@ function CreateInvoice({
     // OTHER picks already left (owner ruling 2026-09-11, "the lesser of the
     // two") instead of resolving against the line's full gross — the exact
     // canonical order server/services/invoice.js's stackInvoiceDocumentDiscounts
-    // will apply once this saves. Gate off (or a custom preset, handled by
-    // getCustomDiscountValue above) keeps the pre-lane per-item sizing.
+    // will apply once this saves. Gate off keeps the pre-lane per-item
+    // sizing (including the old custom.dollars shortcut, unchanged).
     // Codex pre-push audit P2, round 1 on PR #4655: canonical reordering
     // can also change an EXISTING sibling's own share (a new fixed credit
     // sorting ahead of an existing percentage) — repriceLineWithNewDiscountPick
     // recomputes the WHOLE line's picks together and rewrites every
     // FRESH sibling row, not just this new one, so the visible per-row
     // breakdown agrees with the total immediately, not only after Save.
+    // Codex pre-push audit P2, round 2: a CUSTOM pick (operator-typed
+    // percentage/amount) used to always short-circuit through
+    // custom.dollars — computed by getCustomDiscountValue against the
+    // line's full gross — even under the gate, so a custom 10% added
+    // after an existing $30 fixed credit inserted a read-only $10 row
+    // while the aggregate/save both compounded it to $7. A custom pick's
+    // OWN entered term now goes through the SAME repriceLineWithNewDiscountPick
+    // call as a catalog pick.
     let repricedLineItems = lineItems;
-    const dollars =
-      custom?.dollars ??
-      (stackingEnabled
-        ? (() => {
-            const newTerm = {
-              discountType: discount.discount_type,
-              amount: Number(discount.amount) || 0,
-              maxDiscountDollars: discount.max_discount_dollars,
-            };
-            const result = repriceLineWithNewDiscountPick({
-              lineItems,
-              parentClientId: parent.client_id,
-              newTerm,
-              discountRowById,
-            });
-            repricedLineItems = result.lineItems;
-            return result.dollars;
-          })()
-        : Math.min(baseAmount, roundMoney(previewDiscount(discount, baseAmount))));
+    let dollars;
+    if (stackingEnabled) {
+      const newTerm = custom
+        ? (custom.custom_discount_amount != null
+            ? { discountType: "fixed_amount", amount: Number(custom.custom_discount_amount) || 0 }
+            : {
+                discountType: "percentage",
+                amount: Number(custom.custom_discount_percentage) || 0,
+                maxDiscountDollars: discount.max_discount_dollars,
+              })
+        : {
+            discountType: discount.discount_type,
+            amount: Number(discount.amount) || 0,
+            maxDiscountDollars: discount.max_discount_dollars,
+          };
+      const result = repriceLineWithNewDiscountPick({
+        lineItems,
+        parentClientId: parent.client_id,
+        newTerm,
+        discountRowById,
+      });
+      repricedLineItems = result.lineItems;
+      dollars = result.dollars;
+    } else {
+      dollars = custom?.dollars ?? Math.min(baseAmount, roundMoney(previewDiscount(discount, baseAmount)));
+    }
     if (dollars <= 0) {
       showToast("Discount has no amount for this line");
       return;

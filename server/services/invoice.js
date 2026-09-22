@@ -10,6 +10,7 @@ const {
   isPercentDiscountType,
   isFixedDiscountType,
   isVariableOrCustomDiscountPreset,
+  assertStackGroups,
 } = require("./discount-stack");
 const { discountStackingLive } = require("../config/feature-gates");
 const { etDateString, addETDays, etCalendarDayOf } = require("../utils/datetime-et");
@@ -733,6 +734,27 @@ function computeStackedDocumentDiscountLines({
       spansAll,
     };
   });
+  // Codex pre-push audit P1 (round 2 on PR #4655): the same non-stackable
+  // stack_group enforcement DiscountEngine.calculateDiscounts applies to
+  // its own eligible list must also run here — without it, the invoice
+  // editor could place WaveGuard Silver on one line and Gold on another
+  // and this stack would compound both, even though both belong to the
+  // non-stackable 'tier' group. Every catalog-identified row (stored or
+  // fresh — a row-less item has nothing to check) is decorated with its
+  // scope: a document-wide item (spansAll, from either an unparented
+  // credit or a manual discountIds pick) always conflicts with anything
+  // else in its group; a line-scoped item's scope is its own parent's
+  // client_id, so the SAME catalog row reaching two different lines is
+  // still fine (assertStackGroups' own same-row-different-lane carve-out)
+  // while two DIFFERENT same-group rows across lines are not.
+  assertStackGroups([
+    ...classifiedNegativeItems
+      .filter((entry) => entry.row)
+      .map((entry) => (entry.spansAll
+        ? { ...entry.row, spansAll: true }
+        : { ...entry.row, scope: entry.parent ? String(entry.parent.client_id) : undefined })),
+    ...manualDiscountRows.map((row) => ({ ...row, spansAll: true })),
+  ]);
   // A stamp needs only its parent (or spansAll); a fresh pick needs its
   // catalog row too — same validity rule as the "Invalid line-item
   // discount" throw below.
@@ -3563,7 +3585,45 @@ const InvoiceService = {
     const { retentionDiscountForInvoice } = require("./cancellation-resolution/retention-offer");
     // Eligible subtotal = the visit's net recurring charge (positive lines
     // minus stored visit discounts) — already post-tier-discount by design.
-    const eligibleSubtotal = (lineItems || []).reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+    // Codex pre-push audit P1 (round 2 on PR #4655): under
+    // GATE_DISCOUNT_STACKING, a stamped item's `amount` here is still its
+    // FROZEN face value as buildScheduledServiceInvoiceLines built it —
+    // scope resolution (an orphaned scoped stamp collapsing to $0) only
+    // happens inside computeStackedDocumentDiscountLines, which create()
+    // itself runs LATER, after this retention line is already sized and
+    // reserved. A $100 visit with an orphaned frozen $30 stamp used to
+    // size a 15% retention credit off the raw $70 ($10.50) instead of the
+    // real eligible $100 ($15) the invoice actually saves — permanently
+    // under-crediting the offer's charges-applied counter against the
+    // WRONG amount. Resolve the same computation here first (idempotent:
+    // create() reruns it on its own copy of these items and reaches the
+    // identical resolved amounts), so the retention line reserves against
+    // the subtotal the invoice will actually save. Gate off never scopes
+    // anything, so raw item.amount is already correct pre-lane — skip.
+    let resolvedLineItems = lineItems;
+    if (discountStackingLive() && Array.isArray(lineItems) && lineItems.length) {
+      const resolvedItems = normalizeInvoiceLineItems(lineItems);
+      const serviceLineByClientId = new Map(
+        resolvedItems
+          .filter((item) => Number(item.amount) > 0 && item.client_id)
+          .map((item) => [String(item.client_id), item]),
+      );
+      const lineItemDiscountIds = resolvedItems
+        .filter((item) => Number(item.amount) < 0 && item.discount_id)
+        .map((item) => item.discount_id);
+      const lineItemDiscountRowById = new Map(
+        (await loadInvoiceDiscountRows(lineItemDiscountIds, dbh)).map((row) => [String(row.id), row]),
+      );
+      computeStackedDocumentDiscountLines({
+        items: resolvedItems,
+        serviceLineByClientId,
+        lineItemDiscountRowById,
+        manualDiscountRows: [],
+        trustedStoredSources: new Set(["scheduled_service"]),
+      });
+      resolvedLineItems = resolvedItems;
+    }
+    const eligibleSubtotal = (resolvedLineItems || []).reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
     const application = retentionDiscountForInvoice(offer, eligibleSubtotal, {});
     if (!application) return null;
     return {

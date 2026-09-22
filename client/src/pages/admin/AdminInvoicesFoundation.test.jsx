@@ -352,4 +352,35 @@ describe("Invoice foundation workflow preservation", () => {
     expect(await screen.findAllByText(/Discount rules just changed/)).not.toHaveLength(0);
     expect(requests.some(request => request.key === key)).toBe(false);
   });
+
+  // GitHub Codex round 2 on PR #4655, P2 (:5993 in that head): a CUSTOM
+  // pick (operator-typed percentage) must compound with an existing fixed
+  // credit already on the line, exactly like a catalog pick already does
+  // — the inserted row must show the compounded $7, never the raw $10
+  // getCustomDiscountValue alone would give.
+  it("a custom percentage pick compounds with an existing fixed credit on the same line", async () => {
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "thirty-fixed", name: "Thirty Dollars", discount_type: "fixed_amount", amount: 30, is_active: true, show_in_invoices: true },
+      { id: "custom-pct", name: "Custom Percent", discount_type: "variable_percentage", amount: 0, is_active: true, show_in_invoices: true },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    vi.stubGlobal("prompt", vi.fn(() => "10"));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Quarterly pest control" } });
+    fireEvent.change(screen.getByLabelText("Price ($)"), { target: { value: "100" } });
+    fireEvent.change(await screen.findByLabelText("Add a discount"), { target: { value: "Thirty" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Thirty Dollars/ }));
+    fireEvent.change(await screen.findByLabelText("Add a discount"), { target: { value: "Custom" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Custom Percent/ }));
+    const creditValues = await waitFor(() => {
+      const inputs = screen.getAllByLabelText("Credit ($)");
+      expect(inputs).toHaveLength(2);
+      return inputs.map((el) => el.value);
+    });
+    expect(creditValues).toContain("-30");
+    expect(creditValues).toContain("-7");
+    expect(creditValues).not.toContain("-10");
+  });
 });

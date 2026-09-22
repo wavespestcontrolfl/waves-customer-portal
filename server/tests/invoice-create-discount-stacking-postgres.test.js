@@ -247,4 +247,29 @@ postgres('InvoiceService.create discount stacking — real Postgres round trip',
     expect(Number(invoice.discount_amount)).toBe(0);
     expect(Number(invoice.total)).toBe(100);
   });
+
+  // Codex pre-push audit P1, round 2 on PR #4655: two non-stackable
+  // tier-group discounts on different lines are rejected — real catalog
+  // rows, real round trip.
+  test('WaveGuard Silver on one line plus Gold on another is REJECTED — real catalog rows, real round trip', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const customerId = await insertCustomer();
+    const silverId = randomUUID();
+    const goldId = randomUUID();
+    await trx('discounts').insert([
+      { id: silverId, discount_key: `silver_${silverId.slice(0, 8)}`, name: 'WaveGuard Silver', discount_type: 'percentage', amount: 10, is_active: true, show_in_invoices: true, stack_group: 'tier', is_stackable: false },
+      { id: goldId, discount_key: `gold_${goldId.slice(0, 8)}`, name: 'WaveGuard Gold', discount_type: 'percentage', amount: 15, is_active: true, show_in_invoices: true, stack_group: 'tier', is_stackable: false },
+    ]);
+
+    await expect(InvoiceService.create({
+      customerId,
+      title: 'Two-tier invoice',
+      lineItems: [
+        { client_id: 'line-1', description: 'Pest', quantity: 1, unit_price: 100, amount: 100 },
+        { client_id: 'line-2', description: 'Lawn', quantity: 1, unit_price: 100, amount: 100 },
+        { discount_id: silverId, discount_for: 'line-1', description: 'WaveGuard Silver', quantity: 1, unit_price: -1, amount: -1 },
+        { discount_id: goldId, discount_for: 'line-2', description: 'WaveGuard Gold', quantity: 1, unit_price: -1, amount: -1 },
+      ],
+    })).rejects.toThrow(/Only one WaveGuard tier discount can apply/);
+  });
 });

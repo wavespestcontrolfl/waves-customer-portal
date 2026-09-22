@@ -1,7 +1,15 @@
 /**
- * GitHub Codex round 2 on PR #4655 (714f0ca821) — two client findings,
- * addressed per the coordinator's ruling (prepared locally; not yet
- * re-pushed as of this commit).
+ * client/src/pages/admin/AdminInvoicesPage.jsx — GATE_DISCOUNT_STACKING
+ * preview fixes, gathered across two review passes on the same commit
+ * lineage:
+ *
+ *  - Two findings the coordinator asked for directly (invoiceSubmitNeeds
+ *    StackingCheck's scoped probe gate; repriceLineWithNewDiscountPick
+ *    accounting for an existing document-wide credit).
+ *  - GitHub Codex round 2 on PR #4655 (714f0ca821): a document-wide
+ *    credit's OWN scope (document_scope_service_key/_category) was being
+ *    dropped in the preview, and a CUSTOM pick never reached
+ *    repriceLineWithNewDiscountPick at all.
  */
 import { describe, expect, test } from "vitest";
 import {
@@ -146,5 +154,49 @@ describe("repriceLineWithNewDiscountPick — accounts for an existing document-w
     // COMPOUND sequentially on what's left — $4, then 5% of the remaining
     // $76 = $3.80, not two independent $4s — for $27.80 total.
     expect(total).toBe(27.8);
+  });
+});
+
+// GitHub Codex round 2 on PR #4655, P1 (:479 in that head): a document-wide
+// credit's OWN scope must narrow which lines its term reaches in the
+// preview, mirroring server/services/invoice.js's scopeEligibleLines.
+describe("computeInvoiceLineDiscountTotal — document-wide credit scope (Codex round 2)", () => {
+  function scopedStampItem(overrides) {
+    return {
+      client_id: "credit-1", _kind: "discount", discount_for: null,
+      discount_id: "lawn-credit", discount_dollars: 30, stored_discount_source: "scheduled_service",
+      document_scope_service_key: "lawn_care", document_scope_service_category: "lawn",
+      quantity: 1, unit_price: -30, amount: -30,
+      ...overrides,
+    };
+  }
+
+  test("a $30 stamp scoped to a line reduced to $10 previews $10, never the unscoped $30", () => {
+    const lineItems = [
+      { client_id: "line-1", _kind: "service", description: "Lawn (reduced)", quantity: 1, unit_price: 10, service_key: "lawn_care", service_category: "lawn" },
+      { client_id: "line-2", _kind: "service", description: "Pest", quantity: 1, unit_price: 100, service_key: "pest_control", service_category: "pest" },
+      scopedStampItem(),
+    ];
+    const total = computeInvoiceLineDiscountTotal({ lineItems, availableDiscounts: [], stackingEnabled: true });
+    expect(total).toBe(10);
+  });
+
+  test("the same stamp targeting a line no longer present resolves to $0 (orphaned), never a silent replay elsewhere", () => {
+    const lineItems = [
+      { client_id: "line-2", _kind: "service", description: "Pest", quantity: 1, unit_price: 100, service_key: "pest_control", service_category: "pest" },
+      scopedStampItem(),
+    ];
+    const total = computeInvoiceLineDiscountTotal({ lineItems, availableDiscounts: [], stackingEnabled: true });
+    expect(total).toBe(0);
+  });
+
+  test("legacy no-snapshot rule: no line on this invoice carries a service_key at all, so the SAME scoped-looking stamp replays unscoped (its full $30, up to the combined pool)", () => {
+    const lineItems = [
+      { client_id: "line-1", _kind: "service", description: "Lawn (reduced)", quantity: 1, unit_price: 10 },
+      { client_id: "line-2", _kind: "service", description: "Pest", quantity: 1, unit_price: 100 },
+      scopedStampItem(),
+    ];
+    const total = computeInvoiceLineDiscountTotal({ lineItems, availableDiscounts: [], stackingEnabled: true });
+    expect(total).toBe(30);
   });
 });
