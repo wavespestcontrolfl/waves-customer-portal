@@ -965,6 +965,39 @@ function computeStackedDocumentDiscountLines({
       spansAll,
     };
   });
+  // Codex pre-push audit P1 (coordinator scope extension, round 4): a
+  // FRESH (not yet saved) document-wide pick whose catalog row is a type
+  // the client's own invoice-wide picker refuses to offer — free_service
+  // is the one so far (matchingDocumentDiscounts, AdminInvoicesPage.jsx:
+  // a document-wide free_service term would zero out every eligible
+  // line's remaining balance at once) — is rejected here too, with a
+  // clean operational 400, not admitted into documentEntries below. The
+  // UI can never reach this path (it never offers the type to pick), but
+  // a request built directly against the create/update API, bypassing
+  // the picker, otherwise could: entry.row resolves — and would have
+  // been admitted — for ANY catalog discount_type, with no check at all.
+  // Only a FRESH pick is checked; a STORED/trusted document-wide item
+  // (a genuine scheduled_service/validated_checkout stamp) is a
+  // completely different, already-existing pathway (visit-side
+  // stacking) this check does not touch.
+  const DOCUMENT_WIDE_UNSUPPORTED_TYPES = new Set(["free_service"]);
+  for (const entry of classifiedNegativeItems) {
+    if (
+      entry.spansAll &&
+      !entry.stored &&
+      entry.row &&
+      DOCUMENT_WIDE_UNSUPPORTED_TYPES.has(entry.row.discount_type)
+    ) {
+      const err = new Error(
+        `${entry.row.discount_type} discounts cannot be applied invoice-wide — apply "${entry.row.name || "this discount"}" to a specific line instead`,
+      );
+      err.statusCode = 400;
+      err.status = 400;
+      err.isOperational = true;
+      err.code = "DISCOUNT_DOCUMENT_WIDE_TYPE_UNSUPPORTED";
+      throw err;
+    }
+  }
   // Codex pre-push audit P1 (round 2 on PR #4655): the same non-stackable
   // stack_group enforcement DiscountEngine.calculateDiscounts applies to
   // its own eligible list must also run here — without it, the invoice

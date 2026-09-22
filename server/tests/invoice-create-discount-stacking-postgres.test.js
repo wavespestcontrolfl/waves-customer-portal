@@ -557,4 +557,38 @@ postgres('InvoiceService.create discount stacking — real Postgres round trip',
     expect(resaved.total).toBe(50);
     expect(resaved.total).not.toBeCloseTo(66.67, 2);
   });
+
+  // Pre-push audit P1 (coordinator scope extension, round 4): a direct
+  // API request (bypassing the client picker, which never offers
+  // free_service invoice-wide) must not be able to zero out every line —
+  // real catalog row, real create() round trip.
+  test('a document-wide free_service catalog pick is REJECTED by create() with a clean operational 400 — real catalog row, real round trip', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const freeSvcId = randomUUID();
+    await trx('discounts').insert([
+      { id: freeSvcId, discount_key: `freesvc_${freeSvcId.slice(0, 8)}`, name: 'Free Service', discount_type: 'free_service', amount: 0, is_active: true, show_in_invoices: true },
+    ]);
+    let caught;
+    try {
+      await InvoiceService.create({
+        customerId: await insertCustomer(),
+        title: 'Document-wide free_service pick, rejected',
+        lineItems: [
+          { client_id: 'line-1', description: 'Pest', quantity: 1, unit_price: 100, amount: 100 },
+          { client_id: 'line-2', description: 'Lawn', quantity: 1, unit_price: 100, amount: 100 },
+          { client_id: 'd-doc', discount_id: freeSvcId, discount_for: null, description: 'Free Service', quantity: 1, unit_price: -1, amount: -1 },
+        ],
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeTruthy();
+    expect(caught.message).toMatch(/free_service discounts cannot be applied invoice-wide/);
+    expect(caught.statusCode).toBe(400);
+    expect(caught.code).toBe('DISCOUNT_DOCUMENT_WIDE_TYPE_UNSUPPORTED');
+    // Nothing was minted — the rejection happens before any invoice row
+    // is inserted.
+    const rows = await trx('invoices').where({ title: 'Document-wide free_service pick, rejected' });
+    expect(rows).toHaveLength(0);
+  });
 });

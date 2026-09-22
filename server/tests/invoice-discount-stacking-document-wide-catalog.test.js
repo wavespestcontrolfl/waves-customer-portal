@@ -182,6 +182,49 @@ describe('a FRESH document-wide catalog pick (fixed OR percentage) is admitted a
     const { lineItemDiscounts } = run({ items: [line, credit], lineItemDiscountRowById: new Map() });
     expect(lineItemDiscounts[0]).toMatchObject({ id: null, row: null, discount_type: 'fixed_amount', dollars: 25 });
   });
+
+  // Pre-push audit P1 (coordinator scope extension, round 4): the
+  // client's invoice-wide picker refuses to offer a free_service catalog
+  // row (matchingDocumentDiscounts, AdminInvoicesPage.jsx — it would
+  // zero out every eligible line's balance at once), but the SAVE path
+  // had no matching guard — a request built directly against the API,
+  // bypassing the picker, could still post a document-wide free_service
+  // pick and zero the whole invoice. A clean operational 400 now closes
+  // that gap, matching the client's own exclusion.
+  test('a FRESH document-wide free_service pick is REJECTED with a clean operational 400 — the client picker refuses to offer this type, and a direct API request must not bypass that refusal', () => {
+    const line = positiveLine();
+    const pick = freshDocPick({ discount_id: 'free-svc-doc' });
+    const rowById = new Map([['free-svc-doc', catalogRow({ id: 'free-svc-doc', name: 'Free Service', discount_type: 'free_service', amount: 0 })]]);
+    let caught;
+    try {
+      run({ items: [line, pick], lineItemDiscountRowById: rowById });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeTruthy();
+    expect(caught.message).toMatch(/free_service discounts cannot be applied invoice-wide/);
+    expect(caught.statusCode).toBe(400);
+    expect(caught.isOperational).toBe(true);
+    expect(caught.code).toBe('DISCOUNT_DOCUMENT_WIDE_TYPE_UNSUPPORTED');
+  });
+
+  test('a STORED (persisted/trusted) document-wide free_service item is UNAFFECTED — this check only ever reaches a FRESH pick, never a genuine stamp', () => {
+    const line = positiveLine();
+    // A stored item never even reaches entry.row's type check (the
+    // documentEntries branch for entry.stored doesn't look at row.type
+    // at all) — this models a trusted stamp whose OWN visit-side
+    // stacking already resolved it to a free_service credit, unrelated
+    // to this invoice-wide picker guard.
+    const pick = freshDocPick({
+      discount_id: 'free-svc-doc',
+      stored_discount_source: 'scheduled_service',
+      discount_dollars: 50,
+      unit_price: -50,
+      amount: -50,
+    });
+    const rowById = new Map([['free-svc-doc', catalogRow({ id: 'free-svc-doc', name: 'Free Service', discount_type: 'free_service', amount: 0 })]]);
+    expect(() => run({ items: [line, pick], lineItemDiscountRowById: rowById })).not.toThrow();
+  });
 });
 
 // No-op-resave invariant — the property discount-stack.js's own replay-
