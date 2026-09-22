@@ -2458,9 +2458,14 @@ function restackLiveVisitFinancials(pricing, addonLines) {
     appointmentDiscount,
     compound: true,
   });
-  if (!(stacked.subtotal > 0)) {
-    return { price: null, appointmentDiscountDollars: null, primaryDiscountDollars: null, addonDollars: addons.map(() => null) };
-  }
+  // A fully-discounted line/appointment (subtotal restacks to exactly $0) is
+  // a REAL, computed zero — not "unpriced": stackVisitDiscounts already
+  // clamps every net/total to >= 0, so `stacked` is trustworthy here with no
+  // special case. Returning null discount dollars for this case (Codex
+  // pre-push audit P0, round 2) dropped the discount stamp entirely while
+  // primary_line_price stayed at its full gross, so invoice.js — which
+  // omits a discount line with zero/null dollars — billed the full price
+  // for a visit this restack itself says should be free.
   return {
     price: stacked.total,
     appointmentDiscountDollars: stacked.appointmentDiscountDollars > 0 ? stacked.appointmentDiscountDollars : null,
@@ -2722,9 +2727,12 @@ function restackStoredVisitFinancials(parent, addonRows, discountScope) {
     appointmentDiscount,
     compound: true,
   });
-  if (!(stacked.subtotal > 0)) {
-    return { price: null, appointmentDiscountDollars: null, primaryLineDiscountDollars: null, addonDollars: addons.map(() => null) };
-  }
+  // A fully-discounted line/appointment (subtotal restacks to exactly $0) is
+  // a REAL, computed zero — not "unpriced": see restackLiveVisitFinancials'
+  // identical comment (Codex pre-push audit P0, round 2) — nulling the
+  // discount dollars here dropped the stamp while primary_line_price stayed
+  // at its full gross, so invoice.js billed the full price for a visit this
+  // restack itself computed as free.
   return {
     price: stacked.total,
     appointmentDiscountDollars: stacked.appointmentDiscountDollars > 0 ? stacked.appointmentDiscountDollars : null,

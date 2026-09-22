@@ -219,6 +219,27 @@ describe('seeded recurring children/boosters — restackLiveVisitFinancials', ()
       expect(restackLiveVisitFinancials({ ...pricingFixture, primaryBase: null }, [])).toBeNull();
     });
   });
+
+  // Codex pre-push audit P0 (round 2): a fully-discounted line restacks to
+  // an exact $0 subtotal, which the "subtotal > 0" fallback used to treat as
+  // "unpriced" — nulling primaryDiscountDollars right alongside price, so
+  // the caller stamped line_discount_dollars: 0 while primary_line_price
+  // stayed at its full $100 gross. invoice.js omits a zero/null discount
+  // line, so the visit would have invoiced $100 for what is genuinely free.
+  test('gate on: a 100%-off primary line restacks to a real $0 price WITH its full discount stamp intact', async () => {
+    await withGateLive(() => {
+      const fullyDiscounted = {
+        primaryBase: 100,
+        primaryServiceKey: 'general_pest',
+        primaryServiceCategory: 'pest_control',
+        primaryDiscount: { discountType: 'percentage', discountAmount: 100, discountDollars: 100, maxDiscountDollars: null },
+        appointmentDiscount: null,
+      };
+      const result = restackLiveVisitFinancials(fullyDiscounted, []);
+      expect(result.price).toBe(0);
+      expect(result.primaryDiscountDollars).toBe(100);
+    });
+  });
 });
 
 describe('seeded recurring children/boosters — insertScheduledServiceAddons restack threading', () => {
@@ -365,6 +386,21 @@ describe('recurring extension — restackStoredVisitFinancials', () => {
     expect(result.primaryLineDiscountDollars).toBe(10);
     expect(result.price).toBe(80);
   });
+
+  // Codex pre-push audit P0 (round 2) — stored-row counterpart of the same
+  // fix in restackLiveVisitFinancials above.
+  test('a 100%-off primary line restacks to a real $0 price WITH its full discount stamp intact', () => {
+    const result = restackStoredVisitFinancials({
+      primary_line_price: 100,
+      line_discount_type: 'percentage',
+      line_discount_amount: 100,
+      line_discount_dollars: 100,
+      discount_type: null,
+    }, [], null);
+
+    expect(result.price).toBe(0);
+    expect(result.primaryLineDiscountDollars).toBe(100);
+  });
 });
 
 describe('recurring extension — applyDiscountStackRestack (no-op contract)', () => {
@@ -404,6 +440,20 @@ describe('recurring extension — applyDiscountStackRestack (no-op contract)', (
       const result = applyDiscountStackRestack(target, cols, { ...parentTemplate, primary_line_price: null }, [], null);
       expect(result).toBeNull();
       expect(target).toEqual({ estimated_price: 999, discount_dollars: 999, line_discount_dollars: 999 });
+    });
+  });
+
+  // Codex pre-push audit P0 (round 2), end-to-end through the stamp
+  // helper: a fully-discounted extension must stamp its REAL discount
+  // dollars, not a naive `|| 0` that would read as "no discount applied."
+  test('gate on: a 100%-off extension stamps estimated_price 0 AND its full line_discount_dollars, never 0', async () => {
+    await withGateLive(() => {
+      const target = { primary_line_price: 100, estimated_price: 999, discount_dollars: 999, line_discount_dollars: 999 };
+      applyDiscountStackRestack(target, cols, {
+        primary_line_price: 100, line_discount_type: 'percentage', line_discount_amount: 100, discount_type: null,
+      }, [], null);
+      expect(target.estimated_price).toBe(0);
+      expect(target.line_discount_dollars).toBe(100);
     });
   });
 });
