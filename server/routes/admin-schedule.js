@@ -348,6 +348,42 @@ function scopeToAssignedTech(req, q) {
   technicianCurrentVisitFilter(req, q);
 }
 
+// Column guard cache for the discount/provenance projection (GET /week,
+// GET /list — GET / already selects scheduled_services.* and needs no
+// guard at all: an absent column on that route simply never appears in
+// the row object, `s.discount_type` reads undefined, and the mapper's own
+// `|| null` / `?? null` already handle that — there is no explicit column
+// list there to error on a pre-migration database the way an unguarded
+// EXPLICIT select would). Codex pre-push audit P1 (round 3 on #4657): the
+// first cut called columnInfo() fresh on every /week and /list request —
+// scheduledServicesHasSelfPay's own established pattern (server/services/
+// payer.js), extended rather than parallel-built: cache process-wide on a
+// SUCCESSFUL introspection only (migrations run pre-deploy, so a booted
+// process's schema is stable); a failed introspection (a mocked db in
+// tests) is never cached, so the next call re-checks instead of latching
+// a wrong guess.
+let discountProvenanceColumnCache = null;
+async function scheduledServicesDiscountProvenanceColumns(database) {
+  if (discountProvenanceColumnCache !== null) return discountProvenanceColumnCache;
+  try {
+    const cols = await database('scheduled_services').columnInfo();
+    const present = {
+      discount_type: !!cols.discount_type,
+      discount_amount: !!cols.discount_amount,
+      discount_id: !!cols.discount_id,
+      discount_max_dollars: !!cols.discount_max_dollars,
+      pricing_provenance: !!cols.pricing_provenance,
+    };
+    discountProvenanceColumnCache = present;
+    return present;
+  } catch {
+    return {
+      discount_type: true, discount_amount: true, discount_id: true,
+      discount_max_dollars: true, pricing_provenance: true,
+    };
+  }
+}
+
 // Assignment currency (dead statuses + the ET date window) is the shared
 // predicate in services/technician-visit-scope.js — the job-card routes
 // apply the same one.
@@ -5393,8 +5429,9 @@ router.get('/week', async (req, res, next) => {
     const hasSelfPayCol = await require('../services/payer').scheduledServicesHasSelfPay(db);
     // Codex-directed scope extension on PR #4657: guard the new discount/
     // provenance columns the same way self_pay_override already is above —
-    // a DB mid-migration must not 500 the whole feed.
-    const cols = await db('scheduled_services').columnInfo();
+    // a DB mid-migration must not 500 the whole feed. Cached (Codex
+    // pre-push audit P1, round 3) — see scheduledServicesDiscountProvenanceColumns.
+    const discountProvenanceCols = await scheduledServicesDiscountProvenanceColumns(db);
     // Server-resolved Bill-To, same resolution as the day view (per-job payer,
     // else the customer default unless pinned self-pay, ACTIVE payers only).
     // The week payload needs it for the same reason: the checkout sheet must
@@ -5437,11 +5474,11 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.followup_included',
           'scheduled_services.payer_id', 'scheduled_services.po_number',
           ...(hasSelfPayCol ? ['scheduled_services.self_pay_override'] : []),
-          ...(cols.discount_type ? ['scheduled_services.discount_type'] : []),
-          ...(cols.discount_amount ? ['scheduled_services.discount_amount'] : []),
-          ...(cols.discount_id ? ['scheduled_services.discount_id'] : []),
-          ...(cols.discount_max_dollars ? ['scheduled_services.discount_max_dollars'] : []),
-          ...(cols.pricing_provenance ? ['scheduled_services.pricing_provenance'] : []),
+          ...(discountProvenanceCols.discount_type ? ['scheduled_services.discount_type'] : []),
+          ...(discountProvenanceCols.discount_amount ? ['scheduled_services.discount_amount'] : []),
+          ...(discountProvenanceCols.discount_id ? ['scheduled_services.discount_id'] : []),
+          ...(discountProvenanceCols.discount_max_dollars ? ['scheduled_services.discount_max_dollars'] : []),
+          ...(discountProvenanceCols.pricing_provenance ? ['scheduled_services.pricing_provenance'] : []),
           'scheduled_services.technician_id',
           'scheduled_services.zone', 'scheduled_services.route_order',
           'scheduled_services.is_recurring',
@@ -7931,8 +7968,9 @@ router.get('/list', async (req, res, next) => {
     const hasSelfPayCol = await require('../services/payer').scheduledServicesHasSelfPay(db);
     // Codex-directed scope extension on PR #4657: guard the new discount/
     // provenance columns the same way self_pay_override already is above —
-    // a DB mid-migration must not 500 the whole feed.
-    const cols = await db('scheduled_services').columnInfo();
+    // a DB mid-migration must not 500 the whole feed. Cached (Codex
+    // pre-push audit P1, round 3) — see scheduledServicesDiscountProvenanceColumns.
+    const discountProvenanceCols = await scheduledServicesDiscountProvenanceColumns(db);
 
     let q = db('scheduled_services')
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -8008,11 +8046,11 @@ router.get('/list', async (req, res, next) => {
         // (and trips the admin-only actual-change 403 for techs).
         'scheduled_services.payer_id', 'scheduled_services.po_number',
         ...(hasSelfPayCol ? ['scheduled_services.self_pay_override'] : []),
-        ...(cols.discount_type ? ['scheduled_services.discount_type'] : []),
-        ...(cols.discount_amount ? ['scheduled_services.discount_amount'] : []),
-        ...(cols.discount_id ? ['scheduled_services.discount_id'] : []),
-        ...(cols.discount_max_dollars ? ['scheduled_services.discount_max_dollars'] : []),
-        ...(cols.pricing_provenance ? ['scheduled_services.pricing_provenance'] : []),
+        ...(discountProvenanceCols.discount_type ? ['scheduled_services.discount_type'] : []),
+        ...(discountProvenanceCols.discount_amount ? ['scheduled_services.discount_amount'] : []),
+        ...(discountProvenanceCols.discount_id ? ['scheduled_services.discount_id'] : []),
+        ...(discountProvenanceCols.discount_max_dollars ? ['scheduled_services.discount_max_dollars'] : []),
+        ...(discountProvenanceCols.pricing_provenance ? ['scheduled_services.pricing_provenance'] : []),
         'customers.first_name', 'customers.last_name',
         // Stamped visit-specific address wins over the primary mirror here
         // too — this list is a display surface for the booked property. The
