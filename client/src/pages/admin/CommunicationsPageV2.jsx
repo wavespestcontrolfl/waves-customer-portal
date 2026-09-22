@@ -923,6 +923,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const smsSearchRef = useRef("");
   const smsLoadSeqRef = useRef(0);
   const smsRequestRef = useRef(null);
+  const approvalDraftRequestRef = useRef(0);
   const smsPageRef = useRef(1);
   const smsLoadedSearchRef = useRef(null);
   const rewriteContextRef = useRef({
@@ -1199,9 +1200,10 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     const draftId = params.get("draftId");
     if (draftId) {
       let cancelled = false;
+      const request = ++approvalDraftRequestRef.current;
       adminFetch(`/admin/drafts/${encodeURIComponent(draftId)}`)
         .then((draft) => {
-          if (cancelled || phoneKey(rewriteContextRef.current.toNumber) !== phoneKey(phone)) return;
+          if (cancelled || request !== approvalDraftRequestRef.current || phoneKey(rewriteContextRef.current.toNumber) !== phoneKey(phone)) return;
           const draftPhone = draft?.recipientPhone || draft?.customerPhone || "";
           let finalPhone = phone || draftPhone;
           if (draftPhone && (!phone || phoneKey(phone) !== phoneKey(draftPhone))) {
@@ -3043,6 +3045,26 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
               : "Quick Links"}
           </Button>{" "}
         </div>
+        <Button
+          variant="secondary"
+          className="mt-3"
+          disabled={sending || uploading || listening || rewritingSms || aiDrafting || insertingResched || insertingReservice || !!insertingCustomerLink}
+          onClick={() => {
+            approvalDraftRequestRef.current += 1;
+            const { cleared, persisted } = clearDraft(draftRevision);
+            if (!cleared) return;
+            for (const attachment of attachments) {
+              if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+            }
+            const url = new URL(window.location.href);
+            url.searchParams.delete("draftId");
+            url.searchParams.delete("draft");
+            window.history.replaceState(window.history.state, "", url);
+            setSendResult({ ok: persisted, text: persisted ? "Draft cleared." : "Draft cleared here, but recovery storage could not be updated. It may return after a reload." });
+          }}
+        >
+          Clear draft
+        </Button>
         <InsertLinkSheet
           open={active && showLinkSheet}
           onClose={() => setShowLinkSheet(false)}
