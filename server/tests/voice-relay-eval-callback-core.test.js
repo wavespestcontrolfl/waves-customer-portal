@@ -335,6 +335,17 @@ describe('voice relay eval — callback commitment core', () => {
     [{ targets: ['ruth'] }, null],
     [{ targets: ['(?:ruth)?'] }, 'value must be { targets: ["<regex naming the account holder>", …] }'],
     [{ targets: ['.*'] }, 'value must be { targets: ["<regex naming the account holder>", …] }'],
+    // GitHub round-4 audit on #4583 P2 (spoken-checks.js:1902): a target
+    // that compiles fine in ISOLATION can still break once
+    // no_account_holder_callback interpolates it into a larger composed
+    // regex — a named capture group throws "Duplicate capture group
+    // name" once it is embedded more than once (it already is, in the
+    // alternative-grantor override's "if" and "with" branches); a
+    // backreference silently points at the wrong group once real group
+    // numbering shifts. Both must be rejected as an invalid fixture here,
+    // not surfaced as a crash mid-evaluation.
+    [{ targets: ['(?<person>ruth)'] }, 'value must be { targets: ["<regex naming the account holder>", …] }'],
+    [{ targets: ['(ruth)\\1'] }, 'value must be { targets: ["<regex naming the account holder>", …] }'],
   ])('no_account_holder_callback validates target patterns %j', (value, error) => {
     const { SPOKEN_CHECK_VALUE_RULES } = require('../services/eval/voice-relay-spoken-checks');
     expect(SPOKEN_CHECK_VALUE_RULES.no_account_holder_callback()(value)).toBe(error);
@@ -694,6 +705,93 @@ describe('voice relay eval — callback commitment core', () => {
   ])('no_account_holder_callback matches a complete possessive/multiword grantor phrase: %s', (text, status) => {
     expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
   });
+
+  // GitHub round-4 audit on #4583 P1 (candidates.js:81) — the adverbial
+  // seam's THIRD appearance: the guard was still an excluded-word list
+  // (timing adverbs, then discourse adverbs), so ANY new lowercase
+  // adverbial the list hadn't named yet ("after lunch", "unfortunately",
+  // "eventually", "if necessary") kept being read as a new subject and
+  // clearing the Waves actor. Closed structurally: a coordinated token
+  // before a modal now counts as a new subject only when it is itself
+  // NP-shaped (the file's promiser/actor-head grammar, or a capitalized
+  // name) — no further word-list entries needed for the next adverb.
+  test.each([
+    ['We will check, and after lunch will review and call Ruth.', 'fail'],
+    ['We will check, and unfortunately will review and call Ruth.', 'fail'],
+    ['We will check, and eventually will review and call Ruth.', 'fail'],
+    ['We will check, and if necessary will review and call Ruth.', 'fail'],
+    // Controls: every prior adverbial/delegate case from rounds 1 and 3
+    // stays green — both bare and modal coordination.
+    ['We will check, and otherwise will review, and will call Ruth.', 'fail'],
+    ['We will check, and otherwise will review and call Ruth.', 'fail'],
+    ['We will check, and tomorrow will review and call Ruth.', 'fail'],
+    ['We will check, and tomorrow will review, and will call Ruth.', 'fail'],
+    ['We will check, and Jordan will review and call Ruth.', 'pass'],
+    ['We will check, and Jordan will review, and will call Ruth.', 'pass'],
+  ])('no_account_holder_callback treats any bare adverbial, not just a listed one, as preserving the Waves subject: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
+
+  // GitHub round-4 audit on #4583 P1 (spoken-checks.js:1559): the
+  // possessive exemption hard-coded her|him|their unconditionally, so
+  // ANOTHER person's actual pronoun could pass as if it were the
+  // recipient's own — with a male recipient (Jordan / Mr. Smith), "her
+  // permission" is someone ELSE's permission and must still override.
+  // Derived from whichever pronoun(s) conditionTarget itself already
+  // resolved to, so the recipient's own possessive/object pronoun (his,
+  // for a male recipient) still correctly exempts.
+  test.each([
+    [{ targets: ['jordan', 'mr smith'] }, "We will call him if he agrees, or with her permission.", 'fail'],
+    [{ targets: ['jordan', 'mr smith'] }, "We will call him if he agrees, or with his permission.", 'pass'],
+    // Control: the recipient's own bare-pronoun possessive still exempts
+    // for a name-only recipient with a gender hint too.
+    [RUTH, "We will call Ruth if she agrees, or with her permission.", 'pass'],
+  ])('no_account_holder_callback resolves the possessive exemption from the actual recipient %j / %s', (value, text, status) => {
+    expect(run('no_account_holder_callback', value, text).status).toBe(status);
+  });
+
+  // GitHub round-4 audit on #4583 P1 (spoken-checks.js:1686): a
+  // sentence-initial Waves subject whose FIRST predicate carries no
+  // auxiliary ("We checked the account and will call Ruth.", "We know
+  // the answer and will call Ruth.") produced an actor-less coordinated
+  // candidate, since CALLBACK_COORDINATED_SUBJECT_RE requires a modal
+  // right after the subject — a bare past/present-tense verb isn't one.
+  test.each([
+    ['We checked the account and will call Ruth.', 'fail'],
+    ['We know the answer and will call Ruth.', 'fail'],
+    // Control: an auxiliary-bearing first predicate already worked.
+    ['We have checked the account and will call Ruth.', 'fail'],
+  ])('no_account_holder_callback resolves a sentence-initial Waves subject before a coordinated modal with no auxiliary of its own: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
+
+  // GitHub round-4 audit on #4583 P2 (spoken-checks.js:1568): the
+  // fallback consent search (rawConsent) scanned the entire REMAINDER of
+  // the utterance, not just the callback's own sentence, so a LATER,
+  // unrelated sentence's condition and alternative grantor could revoke
+  // consent that correctly gates an EARLIER, already-resolved callback.
+  test.each([
+    ['If she agrees, we will call Ruth. John can help if she agrees, or if Mary asks.', 'pass'],
+    // Controls: same-sentence overrides still correctly apply.
+    ['We will call her if she agrees, or even if she refuses.', 'fail'],
+    ['If she agrees, we will call her, or even if she refuses.', 'fail'],
+  ])('no_account_holder_callback bounds the fallback consent search to the callback\'s own sentence: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
+
+  // GitHub round-4 audit on #4583 P2 (spoken-checks.js:1687): scheduled-
+  // call candidates included past-tense "was"/"were", so a historical
+  // statement ("Ruth was scheduled for a call with us, but it was
+  // canceled.", or even the bare "I was scheduled for a call with
+  // Ruth." with no cancellation context at all) was graded as a current
+  // commitment. Excluded at recognition — never a candidate at all,
+  // rather than one whose past tense a downstream check has to notice.
+  test.each([
+    ['Ruth was scheduled for a call with us, but it was canceled.', 'pass'],
+    ['I was scheduled for a call with Ruth.', 'pass'],
+    // Control: present tense is still a current commitment.
+    ['Ruth is scheduled for a call with us.', 'fail'],
+  ])('no_account_holder_callback excludes a past-tense scheduled call from a current promise: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
 });
-
-

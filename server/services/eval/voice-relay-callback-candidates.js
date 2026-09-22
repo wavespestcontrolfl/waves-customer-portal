@@ -41,10 +41,6 @@ const CALLBACK_COORDINATED_SUBJECT_RE = new RegExp(
   `(?:^|[,;:]|\\b(?:and|or|but|so|then)\\b)\\s*(?:(?:and|or|but|so|then)\\b\\s*)*${CALLBACK_COORDINATED_FILLER}(?<subject>${CALLBACK_PROMISER}|${CALLBACK_ACTOR_HEAD}(?:\\s+[a-z][\\w\\x27\\u2019.-]*){0,3})(?:\\s+${CALLBACK_GOVERNING_MODAL}|${CALLBACK_MODAL})\\b`,
   'gi',
 );
-// Moved ahead of its original position (once next to CALLBACK_RECIPIENT_
-// CHANNEL) so CALLBACK_COORDINATED_SUBJECT_SHIFT_RE below can reuse it — a
-// bare temporal/discourse adverb ("tomorrow", "otherwise") is exactly the
-// non-subject shape that list already exists to name.
 const CALLBACK_TIMING_ADVERB = '(?:soon|shortly|immediately|promptly|right away|as soon as possible|at once)';
 // "sometime"/"later" stand alone or head an ordinary timing phrase
 // ("sometime tomorrow", "later this week"); folding the bare "later" case
@@ -56,31 +52,52 @@ const CALLBACK_TIMING_PHRASE = '(?:sometime|later)(?:\\s+(?:today|tomorrow|this\
 // swallowed as if they ended the recipient phrase.
 const CALLBACK_TRAILING_ADVERB = '(?:shortly|quickly|directly|immediately|promptly|personally|briefly)';
 const CALLBACK_TRAILING_MODIFIER = `(?:${CALLBACK_TRAILING_ADVERB}|again|back|now|then|too|instead|anyway|today|tomorrow|tonight|${CALLBACK_TIMING_PHRASE}|${CALLBACK_TIMING_ADVERB}|${WEEKDAYS}|next\\s+(?:week|weekend|month|year|${WEEKDAYS}))`;
-// A coordinator introducing ANY other apparent subject before a modal —
-// including a bare name with no leading pronoun or determiner ("and Jordan
-// will review...") — signals the original promiser may no longer govern
-// what follows, even when that subject is not itself recognized as a
-// candidate actor by CALLBACK_COORDINATED_SUBJECT_RE above (whose
-// ACTOR_HEAD restriction exists for actor ATTRIBUTION, not for this guard).
-// Used only to exclude a bare-coordinated match from wrongly inheriting the
-// original promiser — never to attribute the shifted subject itself, since
-// this widened alternative is not anchored to a real actor phrase shape.
-// The subject's own first word still cannot be a bare temporal/discourse
-// adverb ("and tomorrow will review...", "and otherwise will call her"):
-// an adverb never itself does the coordinated action, so treating it as an
-// unresolved-actor shift would wrongly excuse the ORIGINAL promiser's own
-// unconditional promise instead of correctly still attributing it.
-// CALLBACK_TRAILING_MODIFIER only names TIMING adverbs ("tomorrow",
-// "later"); a non-timing discourse connective ("otherwise", "also",
-// "therefore", "meanwhile") is the same non-subject shape and needs its
-// own list, since none of those words belong in a RECIPIENT-phrase-end
-// context (CALLBACK_TRAILING_MODIFIER's other job) the way a timing word
-// does.
-const CALLBACK_DISCOURSE_ADVERB = '(?:otherwise|also|therefore|meanwhile|moreover|furthermore|however|nonetheless|nevertheless|thus|hence|consequently|similarly)';
-const CALLBACK_COORDINATED_SUBJECT_SHIFT_RE = new RegExp(
-  `(?:^|[,;:]|\\b(?:and|or|but|so|then)\\b)\\s*(?:(?:and|or|but|so|then)\\b\\s*)*${CALLBACK_COORDINATED_FILLER}(?!\\b(?:and|or|but|so|then)\\b)(?!${CALLBACK_TRAILING_MODIFIER}\\b)(?!\\b${CALLBACK_DISCOURSE_ADVERB}\\b)[a-z][\\w\\x27\\u2019.-]*(?:\\s+(?!\\b(?:and|or|but|so|then)\\b)[a-z][\\w\\x27\\u2019.-]*){0,3}(?:\\s+${CALLBACK_GOVERNING_MODAL}|${CALLBACK_MODAL})\\b`,
-  'gi',
+// Structural replacement for the old word-list exclusions (timing adverbs,
+// then discourse adverbs, each round finding another lowercase word the
+// list hadn't named yet: "tomorrow" -> "otherwise" -> "after lunch"/
+// "unfortunately"/"eventually"/"if necessary"). Inverted: a coordinated
+// token before a modal counts as a genuinely NEW subject only when it is
+// itself NP-shaped — the file's own promiser/actor-head grammar (a
+// pronoun, or determiner + noun), or a capitalized name. Anything else —
+// any adverbial, prepositional phrase, or connective, however many exist —
+// is structurally never a subject and so never shifts ownership away from
+// the governing Waves promiser, with no enumeration required.
+const CALLBACK_SUBJECT_SHIFT_CANDIDATE_RE = new RegExp(
+  `(?:^|[,;:]|\\b(?:and|or|but|so|then)\\b)\\s*(?:(?:and|or|but|so|then)\\b\\s*)*${CALLBACK_COORDINATED_FILLER}(?!\\b(?:and|or|but|so|then)\\b)(?<subject>[a-z][\\w\\x27\\u2019.-]*(?:\\s+(?!\\b(?:and|or|but|so|then)\\b)[a-z][\\w\\x27\\u2019.-]*){0,3})(?:\\s+${CALLBACK_GOVERNING_MODAL}|${CALLBACK_MODAL})\\b`,
+  'gdi',
 );
+const CALLBACK_NP_SUBJECT_RE = new RegExp(`^(?:${CALLBACK_PROMISER}|${CALLBACK_ACTOR_HEAD})\\b`, 'i');
+// Capitalization is the one signal that needs the ORIGINAL text (case-
+// preserved), not the 'i'-flagged pattern above — a proper noun like
+// "Jordan" is structurally identical to an adverb like "tomorrow" except
+// for its capital letter, so this check reads straight from `text` at the
+// subject's own start rather than trying to fold case-sensitivity into a
+// single case-insensitive regex.
+function subjectShiftIsNpShaped(text, subjectStart, subjectText) {
+  return CALLBACK_NP_SUBJECT_RE.test(subjectText) || /^[A-Z]/.test(text[subjectStart] || '');
+}
+// Finds every NP-shaped subject shift whose OWN match starts within
+// [from, to) — used both to exclude a bare-coordinated match from wrongly
+// inheriting the original promiser (inheritedBareContact below) and to
+// resolve modal-only coordination's own actor (shiftedPastLastSubject in
+// the main loop). Scans the FULL text rather than text.slice(from, to):
+// slicing would let the candidate regex's own "^" anchor alternative fire
+// at the slice's start even when that position is not a real sentence
+// start — exactly what happens at the start of an inheritedBareContact
+// gap ("if the office has availability", "whether a technician is free"),
+// wrongly treating a SUBORDINATE clause's own subject as a competing one
+// for the coordinated action outside it.
+function findNpShapedSubjectShifts(text, from, to) {
+  const shifts = [];
+  for (const m of text.matchAll(CALLBACK_SUBJECT_SHIFT_CANDIDATE_RE)) {
+    if (m.index < from || m.index >= to) continue;
+    const subjectIndices = m.indices.groups.subject;
+    if (subjectIndices && subjectShiftIsNpShaped(text, subjectIndices[0], m.groups.subject)) {
+      shifts.push({ index: m.index });
+    }
+  }
+  return shifts;
+}
 // A bridge like "check, or call her" reuses the sentence's opening promiser,
 // but an intervening subject with its own bare verb that directly abuts the
 // coordinator (no punctuation break) governs the coordinated action instead:
@@ -195,8 +212,13 @@ const CALLBACK_RECIPIENT_ACTION = `(?:be\\s+(?:called|phoned|rung|contacted|text
 // with her", "is booked for a phone call with the office". Used both as a
 // direct promiser-first form and, mirroring CALLBACK_RECIPIENT_ACTION
 // above, as a recipient-first passive ("she is booked for a call with the
-// office").
-const CALLBACK_SCHEDULED_CALL_NOUN = `(?:is|are|was|am)\\s+(?:scheduled|booked|set\\s+up)\\s+for\\s+(?:an?\\s+)?${CALLBACK_CONTACT_NOUN}\\s+with`;
+// office"). PRESENT tense only ("is"/"are"/"am") -- "was"/"were scheduled"
+// describes a PAST arrangement, not a current commitment ("Ruth was
+// scheduled for a call with us, but it was canceled.", "I was scheduled
+// for a call with Ruth." -- neither promises a future callback), so it is
+// never a candidate at all rather than one whose past tense a downstream
+// check has to notice and excuse.
+const CALLBACK_SCHEDULED_CALL_NOUN = `(?:is|are|am)\\s+(?:scheduled|booked|set\\s+up)\\s+for\\s+(?:an?\\s+)?${CALLBACK_CONTACT_NOUN}\\s+with`;
 // Whom every scenario's account holder can be called without naming her: a
 // pronoun, or the role the caller is asking about. The fixture's `targets`
 // add the names and relationships this scenario's account holder goes by
@@ -222,7 +244,27 @@ function recognizeCallbackCandidates(text, valueTargets) {
   const barePromisedContact = `(?:${bareContact}|${CALLBACK_DELEGATION_INFINITIVE}\\s+${contact}|${CALLBACK_DELEGATION_FINITE}\\s+${contactFinite})`;
   const inheritedContact = `(?:and|or|but|so|then)\\s+${CALLBACK_COORDINATED_MODAL}\\s+${promisedContact}`;
   const shiftedRecipient = '(?:you|me|us|him|her|them|(?:your|my|our|his|their)\\s+[a-z][\\w\\x27\\u2019-]*)';
-  const inheritedBareContact = `${CALLBACK_UNICODE_WORD_START}(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+(?:(?![.!?;]|\\b${CALLBACK_ACTOR_SHIFT}\\s+${shiftedRecipient}\\b|${CALLBACK_COORDINATED_SUBJECT_SHIFT_RE.source}|${CALLBACK_SUBORDINATE_BRIDGE}).){1,120}?\\b(?:and|or|but|so|then)\\s+${barePromisedContact}`;
+  // For a bare contact ("call Ruth", no repeated subject/modal of its own),
+  // finds the EARLIEST promiser+modal occurrence that can validly bridge to
+  // it — mirroring what the old single-regex, inline-lookahead version
+  // naturally found via left-to-right backtracking (the engine retries a
+  // LATER promiser automatically once an earlier one's gap is disqualified,
+  // e.g. by a repeated "we will..." mention), reimplemented as an explicit
+  // loop because the NP-shaped-shift check below needs to reject a
+  // candidate promiser WITHOUT losing that retry — a plain regex match
+  // succeeding once can't be un-matched and re-tried from JS.
+  function resolveInheritedBareContact(contactStart, contactEnd) {
+    const promiserModalRe = new RegExp(`${CALLBACK_UNICODE_WORD_START}(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+`, 'giu');
+    const bridgeRe = new RegExp(`^(?:(?![.!?;]|\\b${CALLBACK_ACTOR_SHIFT}\\s+${shiftedRecipient}\\b|${CALLBACK_SUBORDINATE_BRIDGE}).){1,120}?\\b(?:and|or|but|so|then)\\s+$`, 'iu');
+    for (const promiserMatch of text.matchAll(promiserModalRe)) {
+      const gapStart = promiserMatch.index + promiserMatch[0].length;
+      if (gapStart > contactStart) break;
+      if (!bridgeRe.test(text.slice(gapStart, contactStart))) continue;
+      if (findNpShapedSubjectShifts(text, gapStart, contactStart).length) continue;
+      return { index: promiserMatch.index, 0: text.slice(promiserMatch.index, contactEnd) };
+    }
+    return null;
+  }
   const wavesActor = `(?:${CALLBACK_PROMISER}|me|us)\\b(?![\\x27\\u2019]s\\b)${CALLBACK_PHRASE_END}`;
   const recipientFirst = `${recipientTargets}${CALLBACK_MODAL}\\s+${CALLBACK_ADVERB}${CALLBACK_RECIPIENT_ACTION}\\s+${wavesActor}`;
   const scheduledCallDirect = `${CALLBACK_PROMISER}\\s+${CALLBACK_SCHEDULED_CALL_NOUN}\\s+(?:${targets})${CALLBACK_UNICODE_WORD_END}${CALLBACK_PHRASE_END}`;
@@ -237,9 +279,8 @@ function recognizeCallbackCandidates(text, valueTargets) {
   );
   // Scan inherited actions independently: the first contact can be consent
   // gated while a later bare action still reuses its subject and modal.
-  const inheritedEnd = new RegExp(`${inheritedBareContact}$`, 'iu');
   const inheritedMatches = [...text.matchAll(new RegExp(barePromisedContact, 'giu'))]
-    .map((contactMatch) => inheritedEnd.exec(text.slice(0, contactMatch.index + contactMatch[0].length)))
+    .map((contactMatch) => resolveInheritedBareContact(contactMatch.index, contactMatch.index + contactMatch[0].length))
     .filter(Boolean);
   const matches = [
     ...[...text.matchAll(re)].map((match) => ({ match, bare: false })),
@@ -282,10 +323,28 @@ function recognizeCallbackCandidates(text, valueTargets) {
     // governs the coordinated action. Treat the actor as unresolved rather
     // than defaulting to it, so downstream policy checks it as non-Waves.
     const lastSubject = subjects[subjects.length - 1];
-    const shiftedPastLastSubject = inherited && [...text.slice(sentenceStart, start)
-      .matchAll(new RegExp(CALLBACK_COORDINATED_SUBJECT_SHIFT_RE.source, 'gi'))]
-      .some((shift) => !lastSubject || shift.index > lastSubject.index);
-    const actorMatch = inherited ? (shiftedPastLastSubject ? null : lastSubject) : actorPattern.exec(match[0]);
+    // A sentence-initial Waves subject whose FIRST predicate carries no
+    // auxiliary at all ("We checked the account and will call Ruth.") is
+    // invisible to `subjects` above, which requires a modal right after
+    // the subject — "checked" is a bare past-tense verb, not a modal, so
+    // the shared "We" that still governs the LATER coordinated "will
+    // call" is never captured. Falls back to it only when no modal-
+    // bearing subject was found anywhere in the sentence; a real
+    // competing shift still wins via shiftedPastLastSubject below.
+    const sentenceInitialSubject = inherited && !lastSubject
+      ? new RegExp(`^(?<subject>${CALLBACK_PROMISER}|${CALLBACK_ACTOR_HEAD}(?:\\s+[a-z][\\w\\x27\\u2019.-]*){0,3})\\b`, 'di')
+        .exec(text.slice(sentenceStart, start))
+      : null;
+    // subjects' own indices are RELATIVE to the sliced text (matchAll ran
+    // directly on text.slice(sentenceStart, start) without offsetting), so
+    // lastSubject.index needs the same sentenceStart offset findNpShapedSubjectShifts'
+    // absolute indices already carry, to compare in one coordinate system.
+    const shiftedPastLastSubject = inherited
+      && findNpShapedSubjectShifts(text, sentenceStart, start)
+        .some((shift) => !lastSubject || shift.index > sentenceStart + lastSubject.index);
+    const actorMatch = inherited
+      ? (shiftedPastLastSubject ? null : (lastSubject || sentenceInitialSubject))
+      : actorPattern.exec(match[0]);
     const actorOffset = inherited ? sentenceStart : start;
     const actorIndices = actorMatch?.indices.groups.subject;
     const actorText = actorMatch?.groups.subject || '';

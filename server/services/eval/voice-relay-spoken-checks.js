@@ -1439,6 +1439,24 @@ function callbackPronounAntecedentIsRecipient(text, candidateStart, valueTargets
   return !last || valueTargets.some((target) => new RegExp(`^(?:${target})$`, 'i').test(last[0]));
 }
 
+// The bare possessive/object pronoun that genuinely refers to THIS
+// recipient — "her"/"his"/"their" — derived from whichever subject-case
+// pronoun(s) conditionTarget itself already resolved to (she/he/they),
+// rather than re-deriving the recipient's gender independently. This
+// mirrors conditionTarget's EXACT resolution, including its ambiguous-
+// name fallback to all three pronouns, instead of guessing again and
+// disagreeing with it — the earlier version, built from the raw
+// recipient/targets, had no equivalent fallback and wrongly stopped
+// exempting "her permission" for an unhinted name-only recipient
+// conditionTarget itself still gates on all three pronouns for.
+function callbackRecipientPossessivePronoun(conditionTarget) {
+  const possessive = { she: 'her', he: 'his', they: 'their' };
+  return Object.keys(possessive)
+    .filter((subject) => new RegExp(`\\b${subject}\\b`, 'i').test(conditionTarget))
+    .map((subject) => possessive[subject])
+    .join('|') || null;
+}
+
 // The fixture supplies the account-holder aliases. Recognition resolves the
 // governing Waves actor and the exact recipient before this policy checks
 // consent, refusal, uncertainty and subsequent overrides. A captured lead
@@ -1495,7 +1513,7 @@ function callbackAgreementAction(additionalComplement = '') {
   return `(?:agrees?|consents?)(?:\\s+${complement})?${CALLBACK_CONSENT_BOUNDARY}`;
 }
 
-function callbackConsentOverridden(text, matchEnd, consentCondition, conditionTarget) {
+function callbackConsentOverridden(text, matchEnd, consentCondition, conditionTarget, recipientPossessive) {
   // A standalone refusal alternative inherits this contact. An alternative
   // with its own consequent is graded through its own callback candidates.
   // "refuses"/"declines"/"does not agree" can carry the same contact
@@ -1553,19 +1571,32 @@ function callbackConsentOverridden(text, matchEnd, consentCondition, conditionTa
   // "permission", optionally possessive-marked: "Ruth's permission") — is
   // excluded; "her" as a mere possessive MODIFIER inside a longer phrase
   // ("her son", "her son's permission") is a different person and still
-  // counts as an alternative grantor.
+  // counts as an alternative grantor. The possessive/object pronoun
+  // exempted here is the ONE that genuinely resolves to THIS recipient
+  // (callbackRecipientPossessivePronoun, mirroring conditionTarget's own
+  // she/he/they resolution) — not all three unconditionally, which let
+  // another person's actual pronoun ("her permission" for a MALE
+  // recipient "him") pass as if it were the same person's own consent.
+  const grantorSelfReference = `(?:${conditionTarget}${recipientPossessive ? `|${recipientPossessive}` : ''})`;
   const ALT_GRANTOR_VERB = '(?:asks?|agrees?|consents?|says?\\s+(?:so|okay|ok|yes)|allows?\\s+it|approves?)';
   const ALT_GRANTOR_PHRASE = `(?:(?:her|his|its|their|our|your|the)\\s+)?[a-z]+(?:\\s+[a-z]+){0,2}`;
-  const alternativeGrantorOverride = new RegExp(`^\\s*,?\\s*${CONSENT_OVERRIDE_TIMING_PREFIX}or\\s+(?:if\\s+(?!(?:${conditionTarget}|her|him|their)\\s+${ALT_GRANTOR_VERB}\\b)${ALT_GRANTOR_PHRASE}\\s+${ALT_GRANTOR_VERB}|with\\s+(?!(?:${conditionTarget}|her|him|their)(?:[\\x27\\u2019]s)?\\s+permission\\b)(?:the\\s+caller|${ALT_GRANTOR_PHRASE})(?:[\\x27\\u2019]s)?\\s+permission)\\b(?=\\s*(?:[.;!?]|$))`, 'i');
+  const alternativeGrantorOverride = new RegExp(`^\\s*,?\\s*${CONSENT_OVERRIDE_TIMING_PREFIX}or\\s+(?:if\\s+(?!${grantorSelfReference}\\s+${ALT_GRANTOR_VERB}\\b)${ALT_GRANTOR_PHRASE}\\s+${ALT_GRANTOR_VERB}|with\\s+(?!${grantorSelfReference}(?:[\\x27\\u2019]s)?\\s+permission\\b)(?:the\\s+caller|${ALT_GRANTOR_PHRASE})(?:[\\x27\\u2019]s)?\\s+permission)\\b(?=\\s*(?:[.;!?]|$))`, 'i');
   const override = (slice) => refusalOverride.test(slice) || concessionOverride.test(slice) || alternativeGrantorOverride.test(slice);
   // The override can follow the promise directly ("If she agrees, we will
   // call her, or even if she refuses.") — a LEADING consent condition with
   // no repeated trailing one to attach to — or, as before, follow a
   // repeated TRAILING consent condition ("we will call her if she agrees,
-  // or even if she refuses.").
-  if (override(text.slice(matchEnd))) return true;
-  const rawConsent = consentCondition.exec(text.slice(matchEnd));
-  return Boolean(rawConsent && override(text.slice(matchEnd + rawConsent.index + rawConsent[0].length)));
+  // or even if she refuses."). Both searches are bounded to the callback's
+  // own SENTENCE — unbounded, rawConsent could find a LATER, unrelated
+  // sentence's own condition and alternative grantor ("If she agrees, we
+  // will call Ruth. John can help if she agrees, or if Mary asks.") and
+  // wrongly mark the first sentence's already-gated callback as
+  // overridden by the second sentence's entirely separate one.
+  const sentenceEndMatch = /[.!?]/.exec(text.slice(matchEnd));
+  const sentenceEnd = sentenceEndMatch ? matchEnd + sentenceEndMatch.index : text.length;
+  if (override(text.slice(matchEnd, sentenceEnd))) return true;
+  const rawConsent = consentCondition.exec(text.slice(matchEnd, sentenceEnd));
+  return Boolean(rawConsent && override(text.slice(matchEnd + rawConsent.index + rawConsent[0].length, sentenceEnd)));
 }
 
 function callbackConsentSuffix(text, matchEnd) {
@@ -1618,7 +1649,8 @@ function no_account_holder_callback(value, record, { spoken }) {
         ? callbackSuffix.slice(0, trailingConsent.index).replace(/,\s*$/, '') : '';
       const concessiveConsent = trailingConsent
         && /\beven\s*$/i.test(callbackSuffix.slice(0, trailingConsent.index));
-      const consentOverridden = callbackConsentOverridden(text, matchEnd, consentCondition, conditionTarget);
+      const recipientPossessive = callbackRecipientPossessivePronoun(conditionTarget);
+      const consentOverridden = callbackConsentOverridden(text, matchEnd, consentCondition, conditionTarget, recipientPossessive);
       // An ordinary topic or manner modifier between the promise and its
       // trailing condition ("about the appointment if she agrees", "call
       // her directly if she agrees") does not change what's conditioned —
@@ -1874,6 +1906,18 @@ const compiles = (source, requireContent = false) => {
     return false;
   }
 };
+// A target pattern that compiles fine in ISOLATION can still break once
+// no_account_holder_callback interpolates it — repeatedly, and alongside
+// the file's own groups — into larger composed regexes. A NAMED capture
+// group ("(?<person>ruth)") throws "Duplicate capture group name" the
+// moment the same target is embedded more than once in one pattern (it
+// already is, e.g. in the alternative-grantor override's "if" and "with"
+// branches); a backreference ("\1", "\k<name>") silently points at the
+// wrong group once real group numbering shifts around it. Both compile
+// perfectly well on their own, so `compiles` alone never catches them —
+// this is checked separately, and only for the specific shapes that
+// break COMPOSITION, not for every possible regex feature.
+const composesSafely = (source) => !/\(\?<[^=!]/.test(source) && !/\\k<|\\[1-9]/.test(source);
 
 const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
   no_safety_guarantee: () => (v) => (v === true ? null : 'value must be true'),
@@ -1898,7 +1942,7 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
   no_refund_claim: () => (v) => (v === true ? null : 'value must be true'),
   no_third_party_disclosure: () => (v) => (v === true ? null : 'value must be true'),
   no_account_holder_callback: () => (v) => (isPlainObject(v) && Object.keys(v).length === 1 && Array.isArray(v.targets) && v.targets.length
-    && v.targets.every((t) => typeof t === 'string' && t.trim() && compiles(t, true))
+    && v.targets.every((t) => typeof t === 'string' && t.trim() && compiles(t, true) && composesSafely(t))
     ? null : 'value must be { targets: ["<regex naming the account holder>", …] }'),
   only_language: () => (v) => (v === 'en' || v === 'es' ? null : 'value must be en or es'),
   capture_lead_input_asserts: () => (v) => (isPlainObject(v) && Object.keys(v).length
