@@ -1399,6 +1399,15 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       setSendResult({ ok: false, text: "Choose a sending number before sending this message." });
       return;
     }
+    // Upload keys contain their creation time; the attachment route signs URLs for 24 hours.
+    const expiredAttachment = attachments.some(({ key }) => {
+      const uploadedAt = /^sms-attachments\/(\d+)-/.exec(key || "")?.[1];
+      return uploadedAt && Number(uploadedAt) + 24 * 60 * 60 * 1000 <= Date.now();
+    });
+    if (expiredAttachment) {
+      setSendResult({ ok: false, text: "An attachment has expired. Remove it and attach it again before sending." });
+      return;
+    }
     setSending(true);
     sendInFlightRef.current = true;
     setSendResult(null);

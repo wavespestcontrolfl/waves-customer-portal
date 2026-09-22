@@ -239,3 +239,25 @@ it("requires an explicit sender for a new message without a saved line", async (
   expect(screen.getByText("Choose a sending number before sending this message.")).toBeInTheDocument();
   expect(fetch.mock.calls.filter(([url]) => String(url).endsWith("/communications/sms"))).toHaveLength(0);
 });
+
+it.each([23, 24])("checks restored attachment expiry at send time (%s hours old)", async (ageHours) => {
+  const owner = `attachment-owner-${ageHours}`;
+  const media = { ...attachment, key: `sms-attachments/${Date.now() - ageHours * 60 * 60 * 1000}-fixture-gate.png` };
+  saveDraft(owner, { msgBody: "Gate photo", fromNumber: line, attachments: [media] });
+  window.history.replaceState({}, "", "/?phone=9415550100");
+  setupWithOwner(owner); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
+  const smsRequests = () => fetch.mock.calls.filter(([url]) => String(url).endsWith("/communications/sms"));
+  if (ageHours === 23) {
+    expect(smsRequests()).toHaveLength(1);
+    expect(JSON.parse(smsRequests()[0][1].body).mediaUrls).toEqual([media.url]);
+    return;
+  }
+  expect(smsRequests()).toHaveLength(0);
+  expect(screen.getByText("An attachment has expired. Remove it and attach it again before sending.")).toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "Text message" })).toHaveValue("Gate photo");
+  fireEvent.click(screen.getByRole("button", { name: "Remove gate.png" }));
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
+  expect(smsRequests()).toHaveLength(1);
+  expect(JSON.parse(smsRequests()[0][1].body).body).toBe("Gate photo");
+});

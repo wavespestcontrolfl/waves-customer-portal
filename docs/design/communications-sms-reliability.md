@@ -5,7 +5,7 @@ The communications reliability lane covers conversation-specific drafts, recover
 ## Resulting behavior
 
 - Inbox drafts are scoped to the authenticated staff account and normalized contact phone. A fixed customer-profile composer has an additional customer-record scope so another record sharing a phone cannot override its identity. Text, attachments, sender, customer context, approval context, reply target, scheduling choices, and minted-link metadata travel together.
-- Drafts recover within the same browser tab through session storage. Live previews remain available while switching conversations; recovered attachments use their stored URLs. Storage failures retain in-memory edits and show a warning. Approval recovery preserves staff edits and uses the existing approve/revise endpoints.
+- Drafts recover within the same browser tab through session storage. Live previews remain available while switching conversations; recovered attachments use their stored URLs. Sending refuses uploads older than the 24-hour URL lifetime, preserves the draft, and asks the user to remove and reattach expired media. Storage failures retain in-memory edits and show a warning. Approval recovery preserves staff edits and uses the existing approve/revise endpoints.
 - A thread or saved draft supplies its sending line. A new message without a saved line requires an explicit sender selection; the draft store never guesses a location number. Malformed recovery JSON is repaired on the next edit.
 - Subscribers sharing a draft see the same state. Accepted-send cleanup checks the submitted revision, preserves newer edits, and retains sender/customer identity. Failed cleanup of recovery storage is reported separately from send success. No send endpoint or provider contract changes.
 - The active, visible SMS inbox refreshes every 30 seconds and when the browser tab becomes visible. Inactive channels pause new reads. Superseded searches are cancelled, failed reads retain existing messages with a retry action, and updated receipts replace existing messages even when the message count is unchanged.
@@ -13,7 +13,7 @@ The communications reliability lane covers conversation-specific drafts, recover
 
 ## Verification
 
-- 140 integration tests across eight suites passed, including draft storage, account/conversation isolation, approval restoration, contract metadata, attachments, fixed customer identity, consecutive profile sends, sender selection, polling, retry, search ordering, delivery receipts, existing spam/link behavior, and Email draft preservation.
+- 142 integration tests across eight suites passed, including draft storage, account/conversation isolation, approval restoration, contract metadata, attachments, fixed customer identity, consecutive profile sends, sender selection, polling, retry, search ordering, delivery receipts, existing spam/link behavior, and Email draft preservation.
 - `npm run build` passed, including its schema/registry, portal-brand, and domain-rule prerequisites.
 - `npm run check:ib-coverage` passed with no new/changed unmapped sites. The three existing GET sites record their added cancellation signal and retained read-only scope; no new Intelligence Bar parity is claimed.
 - Targeted ESLint passed with no errors. The existing large `SmsTab` and send handler still produce complexity warnings.
