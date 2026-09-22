@@ -3164,13 +3164,28 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           // the top of handleSubmit, so a gate flip during an EARLIER
           // group's own POST (or during the mosquito/address-ask awaits
           // above) is still caught before THIS group's request goes out.
-          // Compared against the frozen snapshot, exactly like the
-          // pre-move version — never the live stackingEnabled (see that
-          // version's own note on the race this avoids).
-          if (appointmentDiscountState) {
+          // Compared against appointmentDiscountCompound — the SAME frozen
+          // regime groupStackedPerVisitTotal(group) already used to build
+          // prepayPerVisitAmount above, and (when a discount is actually
+          // selected) exactly equal to the pick-time snapshot the earlier
+          // version of this check compared against directly.
+          //
+          // GitHub review round 3 disclosed audit item: this used to gate
+          // on appointmentDiscountState alone, but groupStackedPerVisitTotal
+          // has used the stacking gate for its ROUNDING regime since round 1
+          // even with NO appointment discount selected at all (a $20.70
+          // line at 5% off previews/posts $39.32 for two visits stacked,
+          // $39.34 legacy) — a gate flip before submit for a LINE-only
+          // prepay-collecting booking reached the server with no
+          // revalidation at all. Now also fires whenever this group's own
+          // prepaid.totalAmount payload (isRecurring && collectPrepay)
+          // depends on that rounding, i.e. it carries any line discount.
+          const groupPrepayDependsOnRounding = isRecurring && collectPrepay
+            && group.lines.some((s) => s.lineDiscount);
+          if (appointmentDiscountState || groupPrepayDependsOnRounding) {
             const fresh = await ensureStackingFresh();
             assertSubmitCurrent();
-            if (!fresh.known || fresh.enabled !== appointmentDiscountGateSnapshot) {
+            if (!fresh.known || fresh.enabled !== appointmentDiscountCompound) {
               setStaleStackingNotice('The discount-stacking setting changed while this was open. Reload before saving so the totals match what will be saved.');
               firstError = {
                 label: groupLabel(group),
@@ -3465,7 +3480,20 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const retryAppointmentDiscountGate = async () => {
     const fresh = await ensureStackingFresh();
     if (fresh.known) {
-      if (fresh.enabled === false && appointmentDiscountState) {
+      // GitHub review round 3 P1 (PR #4656): a confirmed-OFF reconciliation
+      // must NEVER clear the local selection or claim the discount was
+      // removed once ANY group has already committed it — the committed
+      // group's own saved row still carries it regardless of what the LIVE
+      // gate reads now. This call bypasses pickAppointmentDiscount's own
+      // createdGroupKeysRef guard entirely (it sets state directly), so
+      // that guard alone did not cover it. The snapshot still updates to
+      // the live confirmed value — appointmentDiscountGroup stays locked to
+      // the COMMITTED group either way (appointmentDiscountCommittedGroupKeyRef,
+      // round 2's own fix), so Save unblocks for the remaining,
+      // not-yet-created groups to retry, while the committed group's own
+      // preview keeps showing its saved discount rather than reporting it
+      // gone.
+      if (fresh.enabled === false && appointmentDiscountState && createdGroupKeysRef.current.size === 0) {
         setAppointmentDiscount(null);
         setAppointmentDiscountGateSnapshot(null);
         setToast('Discount stacking is now off — the appointment discount was removed. Add it again if stacking comes back on.');
@@ -3528,6 +3556,18 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // above document that split already caused two real bugs (a new blocking
   // reason added to only one or two of the three). A future reason (like
   // existingSelectionConflict just above) now only has to be added HERE.
+  // GitHub review round 3 P2 (PR #4656): pickAppointmentDiscount('') --
+  // the banner button's own default action -- clears ONLY the
+  // appointment-level slot. When existingSelectionConflict is between two
+  // LINE discounts (neither row is the appointment-level one), that action
+  // clears nothing and leaves the conflict/block in place. Detected by
+  // whether the appointment discount's OWN name is one of the two
+  // conflicting names stackGroupConflict returned.
+  const existingSelectionConflictInvolvesAppointment = !!(
+    existingSelectionConflict
+    && appointmentDiscount
+    && existingSelectionConflict.names.some((name) => String(name) === String(appointmentDiscount.name))
+  );
   const discountSaveBlockedReason = staleStackingNotice
     || stackingUnconfirmedBlocksSave
     // Codex pre-push audit P1 (round 3): a background gate flip since this
@@ -3542,7 +3582,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       : appointmentDiscountHasNoGroup
         ? 'This appointment discount does not match any selected service. Change or remove it before saving.'
         : (existingSelectionConflict
-          ? `${existingSelectionConflict.names[0]} and ${existingSelectionConflict.names[1]} can't both apply to the same line — remove one before saving.`
+          ? (existingSelectionConflictInvolvesAppointment
+            ? `${existingSelectionConflict.names[0]} and ${existingSelectionConflict.names[1]} can't both apply to the same line — remove one before saving.`
+            : `${existingSelectionConflict.names[0]} and ${existingSelectionConflict.names[1]} can't both apply to the same line — remove one from its line above before saving.`)
           : ''));
 
   // While the property list is loading a multi-property customer has no
@@ -4594,11 +4636,22 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             // is also used on mobile.
             <div style={{ background: `${D.red}15`, border: `1px solid ${D.red}55`, borderRadius: 8, padding: 10, marginTop: 12, fontSize: 14, color: D.red, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
               <span>{discountSaveBlockedReason}</span>
-              <button
-                type="button"
-                onClick={staleStackingNotice ? retryStaleStacking : (stackingUnconfirmedBlocksSave || appointmentDiscountGateDrifted) ? retryAppointmentDiscountGate : percentExclusionsBlockSave ? retryPercentExclusions : () => pickAppointmentDiscount('')}
-                style={{ background: 'none', border: `1px solid ${D.red}`, color: D.red, borderRadius: 6, padding: '4px 10px', fontSize: 14, fontWeight: 500, cursor: 'pointer', flex: '0 0 auto' }}
-              >{!staleStackingNotice && !stackingUnconfirmedBlocksSave && !percentExclusionsBlockSave && !appointmentDiscountGateDrifted && (appointmentDiscountHasNoGroup || existingSelectionConflict) ? 'Remove discount' : 'Retry'}</button>
+              {/* GitHub review round 3 P2: a LINE-vs-LINE conflict has no
+                  single correct action this banner can safely take
+                  (pickAppointmentDiscount('') clears the appointment-level
+                  slot only, which isn't part of this conflict) — omit the
+                  button and let the message above direct the operator to
+                  the per-line "x" controls instead of offering one that
+                  silently does nothing. */}
+              {!(existingSelectionConflict && !existingSelectionConflictInvolvesAppointment
+                && !staleStackingNotice && !stackingUnconfirmedBlocksSave
+                && !percentExclusionsBlockSave && !appointmentDiscountGateDrifted) && (
+                <button
+                  type="button"
+                  onClick={staleStackingNotice ? retryStaleStacking : (stackingUnconfirmedBlocksSave || appointmentDiscountGateDrifted) ? retryAppointmentDiscountGate : percentExclusionsBlockSave ? retryPercentExclusions : () => pickAppointmentDiscount('')}
+                  style={{ background: 'none', border: `1px solid ${D.red}`, color: D.red, borderRadius: 6, padding: '4px 10px', fontSize: 14, fontWeight: 500, cursor: 'pointer', flex: '0 0 auto' }}
+                >{!staleStackingNotice && !stackingUnconfirmedBlocksSave && !percentExclusionsBlockSave && !appointmentDiscountGateDrifted && (appointmentDiscountHasNoGroup || existingSelectionConflict) ? 'Remove discount' : 'Retry'}</button>
+              )}
             </div>
           )}
 

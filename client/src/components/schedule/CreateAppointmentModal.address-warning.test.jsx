@@ -1383,3 +1383,186 @@ describe('GitHub review round 2 follow-up on PR #4656 (P0 :2571, P1 :4483)', () 
     expect(JSON.parse(schedulePosts(fetcher)[0][1].body).discountId).toBe('mil');
   });
 });
+
+describe('GitHub review round 3 on PR #4656', () => {
+  // P1 (:3471): a confirmed-off Retry after a group has ALREADY committed
+  // the discount must never clear the local selection or claim it was
+  // removed -- the committed group's own saved row still carries it.
+  it('preserves a committed appointment discount through a confirmed-off Retry, and the remaining group retries clean', async () => {
+    vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const retry = vi.fn();
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry });
+    const secondScheduleRequest = deferred();
+    const { fetcher } = installModalFetch({
+      secondScheduleRequest,
+      discounts: [{ id: 'mil', name: 'Military Discount', discount_type: 'fixed_amount', amount: 10, is_active: true, show_in_invoices: true }],
+    });
+    const booking = renderBooking();
+    const submit = await addTwoSeasonalServices();
+    const picker = await screen.findByLabelText('Appointment discount');
+    fireEvent.change(picker, { target: { value: 'mil' } });
+    fireEvent.click(submit);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(2));
+    expect(JSON.parse(schedulePosts(fetcher)[0][1].body).discountId).toBe('mil');
+    await act(async () => {
+      secondScheduleRequest.resolve(jsonResponse({ error: 'failed' }, { ok: false, status: 500 }));
+      await secondScheduleRequest.promise;
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Schedule appointment' }).disabled).toBe(false));
+
+    // The background poll drifts to confirmed-off AFTER the first group
+    // committed.
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: false, known: true, retry });
+    booking.view.rerender(<CreateAppointmentModal
+      defaultCustomer={CUSTOMER}
+      defaultDate={booking.scheduledDate}
+      defaultWindowStart="09:00"
+      onClose={booking.onClose}
+      onCreated={booking.onCreated}
+      onChange={booking.onChange}
+    />);
+    await screen.findByText('Could not confirm the discount-stacking status — retry before saving.');
+    vi.mocked(ensureStackingFresh).mockResolvedValue({ enabled: false, known: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    // NEVER cleared, NEVER announced as removed -- the committed group's
+    // own saved row still carries it.
+    await waitFor(() => expect(screen.queryByText('Could not confirm the discount-stacking status — retry before saving.')).toBeNull());
+    expect(screen.queryByText('Discount stacking is now off — the appointment discount was removed. Add it again if stacking comes back on.')).toBeNull();
+    expect(screen.getByLabelText('Appointment discount').value).toBe('mil');
+    expect(screen.getByText('Military Discount: -$10.00')).toBeTruthy();
+
+    // The remaining group retries clean -- locked to the ALREADY-committed
+    // group (round 2's own fix), so it correctly does NOT re-carry it.
+    const submit2 = screen.getByRole('button', { name: 'Schedule appointment' });
+    fireEvent.click(submit2);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(3));
+    expect(JSON.parse(schedulePosts(fetcher)[2][1].body).discountId).toBeUndefined();
+  });
+});
+
+describe('GitHub review round 3 P1 :2116 on PR #4656', () => {
+  // A REAL zero-percent, non-stackable catalog tier (WaveGuard Bronze) is
+  // NOT a custom preset -- it has no discount_key and is not
+  // variable_percentage. Selecting it must never prompt, and the posted
+  // amount must stay the catalog's own 0, never an operator-typed value.
+  it('never prompts for WaveGuard Bronze and posts no operator amount override', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('50');
+    const { fetcher } = installModalFetch({
+      discounts: [{
+        id: 'bronze', name: 'WaveGuard Bronze', discount_type: 'percentage', amount: 0, is_active: true, show_in_invoices: true,
+      }],
+      servicesDropdownResponse: {
+        groups: [{
+          category: 'pest_control',
+          items: [{ id: 'svc-first-row', name: 'First seasonal service', duration: 30, serviceKey: 'svc_first', excludedFromPercentDiscount: false }],
+        }],
+      },
+    });
+    renderBooking();
+    await addOneSeasonalService();
+    const picker = await screen.findByLabelText('Appointment discount');
+    fireEvent.change(picker, { target: { value: 'bronze' } });
+    expect(promptSpy).not.toHaveBeenCalled();
+    expect(screen.queryByText(/WaveGuard Bronze: -\$/)).toBeNull();
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    const body = JSON.parse(schedulePosts(fetcher)[0][1].body);
+    expect(body.discountId).toBe('bronze');
+    // Never the prompt's '50' -- the catalog's own 0, untouched.
+    expect(body.discountAmount).toBe(0);
+  });
+});
+
+describe('GitHub review round 3 P2 :4599 on PR #4656', () => {
+  // A LINE-vs-LINE conflict (no appointment-level discount involved at
+  // all) has no single safe action pickAppointmentDiscount('') can take --
+  // the banner must direct the operator to the per-line controls instead
+  // of offering a button that silently does nothing.
+  it('directs to the per-line controls instead of a no-op "Remove discount" button for a line-vs-line conflict', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    installModalFetch({
+      discounts: [
+        { id: 'silver', name: 'Silver', discount_type: 'percentage', amount: 10, is_active: true, show_in_invoices: true, stack_group: 'tier' },
+        { id: 'gold', name: 'Gold', discount_type: 'percentage', amount: 15, is_active: true, show_in_invoices: true, stack_group: 'tier' },
+      ],
+      servicesDropdownResponse: {
+        groups: [{
+          category: 'pest_control',
+          items: [
+            { id: 'svc-first-row', name: 'First seasonal service', duration: 30, serviceKey: 'svc_first', excludedFromPercentDiscount: false },
+            { id: 'svc-quarterly-row', name: 'Quarterly recurring service', duration: 30, serviceKey: 'svc_quarterly', excludedFromPercentDiscount: false },
+          ],
+        }],
+      },
+    });
+    renderBooking();
+    await addOneSeasonalService();
+    fireEvent.click(screen.getByRole('button', { name: /Add service/ }));
+    fireEvent.change(screen.getByPlaceholderText('Search to add service'), { target: { value: 'Quarterly' } });
+    fireEvent.click(await screen.findByRole('button', { name: /Quarterly recurring service/ }));
+
+    // Silver on the FIRST (seasonal) line, Gold on the quarterly line --
+    // valid right now, two SEPARATE groups.
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for First seasonal service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Silver/ }));
+    await screen.findByText('Silver (First seasonal service)');
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for Quarterly recurring service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Gold/ }));
+    await screen.findByText('Gold (Quarterly recurring service)');
+
+    // The cadence edit merges the two groups -- no appointment-level
+    // discount is selected at all, so this is a pure LINE-vs-LINE conflict.
+    fireEvent.change(screen.getByLabelText('Repeats for First seasonal service'), { target: { value: 'quarterly' } });
+    await screen.findByText("Silver and Gold can't both apply to the same line — remove one from its line above before saving.");
+    // The only "Remove discount" buttons are the two PER-LINE ones
+    // (Silver's and Gold's own "x" controls) -- no banner-level button
+    // was added for this reason, since it would be a no-op
+    // (pickAppointmentDiscount('') clears nothing when no appointment-
+    // level discount is selected at all).
+    expect(screen.getAllByRole('button', { name: 'Remove discount' })).toHaveLength(2);
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Schedule appointment' }).disabled).toBe(true);
+  });
+});
+
+describe('GitHub review round 3 disclosed audit item on PR #4656', () => {
+  // A LINE-only booking (no appointment discount at all) still needs
+  // submit-time gate revalidation -- groupStackedPerVisitTotal has used
+  // the stacking gate for ROUNDING since round 1 regardless of whether an
+  // appointment discount is selected, so a gate flip before submit can
+  // still make the posted prepaid.totalAmount disagree with what the
+  // server persists by a cent ($39.32 stacked vs $39.34 legacy for a
+  // $20.70/5%-off line, two visits).
+  it('revalidates the gate before submit for a line-only prepay-collecting booking', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    vi.mocked(ensureStackingFresh).mockResolvedValueOnce({ enabled: false, known: true });
+    const { fetcher } = installModalFetch({
+      basePrice: 20.70,
+      enablePrepay: true,
+      discounts: [{ id: 'five-pct', name: 'Five Percent', discount_type: 'percentage', amount: 5, is_active: true, show_in_invoices: true }],
+    });
+    renderBooking();
+    await addOneSeasonalService();
+    // An ordinary LINE discount -- no appointment-level pick at all.
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for First seasonal service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Five Percent/ }));
+    fireEvent.change(screen.getByPlaceholderText('Ongoing'), { target: { value: '2' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Collect prepayment' }));
+
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const submitBtn = screen.getByRole('button', { name: 'Schedule appointment' });
+    fireEvent.click(submitBtn);
+    // With zero groups committed (created: 0), submitFailureNotice routes
+    // the block through the blocking alert, not a persistent on-screen
+    // banner -- matching this file's own convention for a first-attempt
+    // failure on a single-group booking.
+    await waitFor(() => expect(alertSpy).toHaveBeenCalledWith(
+      expect.stringContaining('the discount-stacking setting changed while this was open'),
+    ));
+    expect(schedulePosts(fetcher)).toHaveLength(0);
+  });
+});
