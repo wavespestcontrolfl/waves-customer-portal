@@ -331,8 +331,13 @@ function recognizeCallbackCandidates(text, valueTargets) {
     // call" is never captured. Falls back to it only when no modal-
     // bearing subject was found anywhere in the sentence; a real
     // competing shift still wins via shiftedPastLastSubject below.
+    // sentenceStart points right after the PRECEDING sentence's own
+    // terminator ('.'), not after the whitespace following it, when the
+    // callback isn't in the text's first sentence ("Okay. We checked...")
+    // -- the leading \s* keeps that space from blocking the anchored
+    // match without pulling it into the subject span itself.
     const sentenceInitialSubject = inherited && !lastSubject
-      ? new RegExp(`^(?<subject>${CALLBACK_PROMISER}|${CALLBACK_ACTOR_HEAD}(?:\\s+[a-z][\\w\\x27\\u2019.-]*){0,3})\\b`, 'di')
+      ? new RegExp(`^\\s*(?<subject>${CALLBACK_PROMISER}|${CALLBACK_ACTOR_HEAD}(?:\\s+[a-z][\\w\\x27\\u2019.-]*){0,3})\\b`, 'di')
         .exec(text.slice(sentenceStart, start))
       : null;
     // subjects' own indices are RELATIVE to the sliced text (matchAll ran

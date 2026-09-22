@@ -794,4 +794,18 @@ describe('voice relay eval — callback commitment core', () => {
   ])('no_account_holder_callback excludes a past-tense scheduled call from a current promise: %s', (text, status) => {
     expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
   });
+
+  // GitHub round-5 audit on #4583 P1 (candidates.js:335): the fallback
+  // sentence-initial subject was anchored immediately after sentenceStart,
+  // which points right after the PRECEDING sentence's own terminator, not
+  // after the whitespace following it, whenever the callback isn't in the
+  // text's first sentence.
+  test.each([
+    ['Okay. We checked the account and will call Ruth.', 'fail'],
+    // Control: the first-sentence case (no leading whitespace to allow
+    // for) still resolves the same way.
+    ['We checked the account and will call Ruth.', 'fail'],
+  ])('no_account_holder_callback resolves a sentence-initial Waves subject after a preceding sentence: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
 });
