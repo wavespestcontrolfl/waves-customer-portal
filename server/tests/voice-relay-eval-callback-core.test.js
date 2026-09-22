@@ -548,4 +548,28 @@ describe('voice relay eval — callback commitment core', () => {
   ])('no_account_holder_callback excludes interrogative callback wording from a promise: %s', (text, status) => {
     expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
   });
+
+  // GitHub Codex round-2 P1 (spoken-checks.js:1527): alternativeGrantorOverride
+  // treated "and" the same as "or", so an ADDITIONAL required approval
+  // ("if she agrees, and if John agrees" — both are needed) was wrongly
+  // read as an alternative that excuses her own consent.
+  test.each([
+    ['We will call Ruth if she agrees, and if John agrees.', 'pass'],
+    // Control: "or" is still a genuine alternative.
+    ['We will call Ruth if she agrees, or if John asks.', 'fail'],
+  ])('no_account_holder_callback keeps consent mandatory when "and" adds a second required approval: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
+
+  // GitHub Codex round-2 P1 (spoken-checks.js:1621): interrogative
+  // detection scanned for the next ./!/? and skipped right past a
+  // semicolon, so a LATER unrelated question suppressed a violation the
+  // callback's own (semicolon-terminated) clause already committed.
+  test.each([
+    ['We will call Ruth; what else can I help with?', 'fail'],
+    // Control: the candidate's own clause really is a question.
+    ['We will call Ruth?', 'pass'],
+  ])('no_account_holder_callback bounds interrogative detection to the callback\'s own clause: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
 });

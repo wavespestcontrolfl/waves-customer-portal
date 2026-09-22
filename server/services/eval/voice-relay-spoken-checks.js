@@ -1524,7 +1524,11 @@ function callbackConsentOverridden(text, matchEnd, consentCondition, conditionTa
   // pronouns) also refer back to the recipient in "with her permission" —
   // excluded here alongside conditionTarget so that phrasing is not itself
   // read as an alternative grantor.
-  const alternativeGrantorOverride = new RegExp(`^\\s*,?\\s*(?:or|and|but)\\s+(?:if\\s+(?!(?:${conditionTarget}|her|him|their)\\b)[a-z]+\\s+(?:asks?|agrees?|consents?|says?\\s+(?:so|okay|ok|yes)|allows?\\s+it|approves?)|with\\s+(?!(?:${conditionTarget}|her|him|their)\\b)(?:the\\s+caller|[a-z]+)(?:[\\x27\\u2019]s)?\\s+permission)\\b(?=\\s*(?:[.;!?]|$))`, 'i');
+  // Only "or" signals an ALTERNATIVE authorization ("if she agrees, or if
+  // John asks" — either one suffices). "and" joins an ADDITIONAL
+  // requirement ("if she agrees, and if John agrees" — both are needed),
+  // which leaves her own consent exactly as mandatory as it already was.
+  const alternativeGrantorOverride = new RegExp(`^\\s*,?\\s*or\\s+(?:if\\s+(?!(?:${conditionTarget}|her|him|their)\\b)[a-z]+\\s+(?:asks?|agrees?|consents?|says?\\s+(?:so|okay|ok|yes)|allows?\\s+it|approves?)|with\\s+(?!(?:${conditionTarget}|her|him|their)\\b)(?:the\\s+caller|[a-z]+)(?:[\\x27\\u2019]s)?\\s+permission)\\b(?=\\s*(?:[.;!?]|$))`, 'i');
   const override = (slice) => refusalOverride.test(slice) || concessionOverride.test(slice) || alternativeGrantorOverride.test(slice);
   // The override can follow the promise directly ("If she agrees, we will
   // call her, or even if she refuses.") — a LEADING consent condition with
@@ -1618,7 +1622,11 @@ function no_account_holder_callback(value, record, { spoken }) {
       // anything — the clause's own terminator (the next ./!/? after the
       // candidate) decides, which also covers an interrogative LEAD before
       // it ("Do you think...") without separately detecting the inversion.
-      const interrogative = /[.!?]/.exec(text.slice(matchEnd))?.[0] === '?';
+      // A semicolon ends the candidate's own clause just as a sentence
+      // terminator does ("We will call Ruth; what else can I help with?")
+      // — scanning past it would let a LATER, unrelated question suppress
+      // a violation this clause already committed.
+      const interrogative = /[.!?;]/.exec(text.slice(matchEnd))?.[0] === '?';
       if (actor.waves && !consentGated && !speculative && !interrogative
           && !clauseIsNegated(callbackPolarity) && !clauseIsEpistemicallyHedged(claim)) {
         return ['fail', `promised to contact the account holder: "${clip(source.text, 160)}"`];
