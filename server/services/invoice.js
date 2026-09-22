@@ -706,17 +706,38 @@ function stackInvoiceDocumentDiscounts(serviceLines, lineEntries, manualDiscount
   // — only a stored stamp's document_scope_service_key/_category, set
   // exclusively by buildDiscountLineItem's appointment-level branch, can
   // narrow a document term.
+  //
+  // Scope extension (2026-09): a FRESH, catalog-backed document-wide pick
+  // (entry.row resolved, not yet stored/persisted) must preserve its OWN
+  // type — a document PERCENTAGE term occupies a DIFFERENT canonical-order
+  // bucket than a fixed credit (percentages compound LAST; fixed credits
+  // compound FIRST, discount-stack.js's stackOrder), so forcing it to
+  // fixed_amount here would silently save a different total than the one
+  // just previewed whenever the invoice carries any other term ($100 line
+  // at 10% line + 10% invoice previews $81 either way ONLY if the
+  // invoice term stays a genuine percentage; forced-fixed saves $81.90).
+  // lineItemDiscountTerm already resolves a variable/custom preset's
+  // operator-entered rate the same way a per-line pick does — id carried
+  // through (same reason a manual pick's id rides its term below) so two
+  // distinct same-rate/same-cap document terms don't fall through to
+  // array-order tie-breaking.
   const documentEntryTerms = documentDiscountEntries.map((entry) => {
-    const faceValue = entry.stored
-      ? storedDiscountDollars(entry.item)
-      : Math.abs(Number(entry.item.amount) || 0);
     const eligibleLines = entry.stored
       ? scopeEligibleLines(entry.item.document_scope_service_key, entry.item.document_scope_service_category)
       : null;
+    if (entry.stored) {
+      return {
+        discountType: "fixed_amount",
+        amount: storedDiscountDollars(entry.item),
+        ...(eligibleLines ? { eligibleLines } : {}),
+      };
+    }
+    if (entry.row) {
+      return { ...lineItemDiscountTerm(entry.row, entry.item), id: entry.row.id };
+    }
     return {
       discountType: "fixed_amount",
-      amount: faceValue,
-      ...(eligibleLines ? { eligibleLines } : {}),
+      amount: Math.abs(Number(entry.item.amount) || 0),
     };
   });
   // Codex pre-push audit P2 (round 1 on PR #4655): carry each manual pick's
@@ -939,12 +960,19 @@ function computeStackedDocumentDiscountLines({
   const lineEntries = classifiedNegativeItems.filter(
     (entry) => entry.parent && (entry.stored || entry.row),
   );
-  // Every unparented credit joins the document stack — stored, OR a plain
-  // literal with no discount_id at all. An unparented item with a
-  // discount_id that resolves to neither is deliberately excluded (falls
-  // through to the throw below, unchanged from the pre-lane validation).
+  // Every unparented credit joins the document stack — stored, a FRESH
+  // catalog-backed pick that resolves to a real row (scope extension,
+  // 2026-09: a document-wide discountIds-style pick made through a line
+  // item instead of the top-level discountIds array — see
+  // stackInvoiceDocumentDiscounts' own documentEntryTerms for how its
+  // type is preserved, never forced to fixed_amount), OR a plain literal
+  // with no discount_id at all. An unparented item with a discount_id
+  // that resolves to NEITHER a stored stamp NOR a live catalog row is
+  // deliberately excluded (falls through to the throw below, unchanged
+  // from the pre-lane validation) — the client can never fabricate a
+  // discount by posting an id that names nothing.
   const documentEntries = classifiedNegativeItems.filter(
-    (entry) => entry.spansAll && (entry.stored || !entry.item.discount_id),
+    (entry) => entry.spansAll && (entry.stored || entry.row || !entry.item.discount_id),
   );
   const stacked = stackInvoiceDocumentDiscounts(
     positiveServiceLines,
@@ -1009,6 +1037,25 @@ function computeStackedDocumentDiscountLines({
       item.quantity = 1;
       item.unit_price = -dollars;
       item.amount = -dollars;
+      // Scope extension (2026-09): a FRESH document-wide pick with a
+      // resolvable catalog row (documentEntryTerms above already sized it
+      // under its OWN type, not a forced fixed_amount) keeps its catalog
+      // attribution — the same {id, row, discount_type, amount} shape the
+      // LINE-scoped branch above returns — so invoice_discounts.discount_id
+      // is recorded and discounts.times_applied / total_discount_given
+      // roll up correctly (DiscountEngine.recordInvoiceDiscounts reads
+      // d.id). A plain literal credit (no row at all) keeps the pre-lane
+      // anonymous shape unchanged.
+      if (row) {
+        return {
+          id: row.id,
+          row,
+          name: row.name,
+          discount_type: row.discount_type,
+          amount: lineItemDiscountTerm(row, item).amount,
+          dollars,
+        };
+      }
       return {
         id: null,
         row: null,
@@ -9697,6 +9744,11 @@ InvoiceService._internals = {
   insertInvoiceRow,
   isInvoiceNumberCollision,
   calculateUpdateFinancials,
+  // Exposed for unit tests (scope extension, 2026-09): the shared
+  // create()/calculateUpdateFinancials engine, driven directly with no DB
+  // mocking — every input it needs (items, the two row/id maps) is a
+  // plain in-memory value.
+  computeStackedDocumentDiscountLines,
 };
 
 // Invoice statuses that need NO further money handling when their linked

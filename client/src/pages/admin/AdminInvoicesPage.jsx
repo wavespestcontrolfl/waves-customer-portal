@@ -104,7 +104,7 @@ import DictationButton from "../../components/tech/DictationButton";
 import MobileCardOnFileSheet from "../../components/schedule/MobileCardOnFileSheet";
 import { getAdminUser } from "../../lib/adminAuth";
 import { useDiscountStackingState, ensureStackingFresh } from "../../hooks/useDiscountStacking";
-import { isFixedDiscountType, stackDocumentDiscounts, stackablePresets } from "../../lib/discountStack";
+import { stackDocumentDiscounts, stackablePresets } from "../../lib/discountStack";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
 // STATUS_COLORS folds cleanly — sent/viewed were both #0A7EC2 in V1, stay identical post-fold.
@@ -750,51 +750,6 @@ export function repriceAllFreshDiscounts({
     if (newDollars == null) return item;
     if (Math.abs(newDollars - Math.abs(invoiceLineAmount(item))) < 0.005) return item;
     return { ...item, unit_price: -newDollars, amount: -newDollars };
-  });
-}
-
-// GATE_DISCOUNT_STACKING (slice 8 pre-push audit P1, round 1): server/
-// services/invoice.js — owned by another lane in this split, out of
-// scope here — only admits an UNPARENTED (document-wide) negative item
-// into its document stack when it is a trusted/persisted stamp OR
-// carries NO discount_id at all (a plain literal credit); a FRESH
-// catalog-referenced document-wide pick (discount_id set, discount_for:
-// null — exactly what addDocumentDiscount below creates) falls through
-// to its own "Invalid line-item discount" throw on save. This strips the
-// catalog reference ONLY at the submit boundary, turning a fresh
-// document-wide pick into the plain literal-credit shape the server
-// already accepts, at its own (already client-verified) face value — the
-// same shape an ad hoc "Referral Credit" always has.
-//
-// Pre-push audit P0 (round 2): safe ONLY for a FIXED-amount term — a
-// document PERCENTAGE term compounds LAST (its own canonical bucket);
-// once stripped to a literal credit it becomes a FIXED term, which
-// compounds FIRST, so a document already carrying another term can save
-// a genuinely different total than the one just previewed. matchingDocumentDiscounts
-// already restricts the picker to fixed-type rows for exactly this
-// reason, but this function re-checks independently (never trust a
-// single call site to keep an invariant like this alone) — an item whose
-// catalog row is missing has no rate to preserve either way (the live
-// preview itself already falls back to treating it as fixed —
-// invoiceDiscountItemTerm's own !row branch), so that case is safe too.
-// A STORED stamp or an already-PERSISTED row is untouched
-// (isStoredInvoiceDiscountItem true) — only a fresh, not-yet-saved item
-// is affected; a per-line pick (discount_for set) is untouched either
-// way, since the server DOES validate those against the live catalog row
-// and this form must not defeat that check.
-export function sanitizeInvoiceLineItemsForSubmit(lineItems, persistedClientIds, discountRowById) {
-  return (Array.isArray(lineItems) ? lineItems : []).map((item) => {
-    const isFreshDocumentPick =
-      item?._kind === "discount" &&
-      !item.discount_for &&
-      !!item.discount_id &&
-      !isStoredInvoiceDiscountItem(item, persistedClientIds);
-    if (!isFreshDocumentPick) return item;
-    const row = discountRowById?.get(String(item.discount_id));
-    const safeToStrip = !row || isFixedDiscountType(row.discount_type);
-    if (!safeToStrip) return item;
-    const { discount_id: _discount_id, discount_key: _discount_key, ...rest } = item;
-    return rest;
   });
 }
 
@@ -6419,40 +6374,41 @@ function CreateInvoice({
     }));
   };
   // Slice 8 of #4405 ("Invoice UI"): the invoice-wide picker's own
-  // candidate list — same name search as matchingDiscounts above, but
-  // scoped as a document-wide (spansAll) pick.
+  // candidate list — same name search + one-tier stack-group filter as
+  // matchingDiscounts above, but scoped as a document-wide (spansAll)
+  // pick, so a tier already chosen on ANY line — or already document-wide
+  // — hides the rest of its group here too, matching
+  // assertNewStackGroupConflicts server-side (invoice.js).
   //
-  // Pre-push audit P0 (round 2): server/services/invoice.js — owned by
-  // another lane, out of scope here — has NO way to save a fresh
-  // catalog-backed document-wide PERCENTAGE term at all (see
-  // sanitizeInvoiceLineItemsForSubmit's own comment); submitting one as a
-  // literal fixed credit changes its canonical-order bucket (a document
-  // percentage compounds LAST; a fixed credit compounds FIRST), so a
-  // document that already carries any other term can SAVE a different
-  // total than the one just previewed — a real, silent money bug, not a
-  // display quirk. A FIXED-type pick has no such problem: fixed credits
-  // (line or document) already share ONE canonical bucket regardless of
-  // which one this becomes at submit time, so its total is identical
-  // either way. This restricts the picker to fixed-type, non-grouped
-  // rows ONLY — is_stackable groups (WaveGuard tiers included) are
-  // additionally excluded outright, since the round-2 P1 also found that
-  // this slice's group-conflict metadata (discount_id) does not survive
-  // a save/reload for an item submitted without one, so a would-be
-  // second same-group pick could reappear as selectable after a reload.
-  // Percentage/free_service catalog picks and any stack_group stay
-  // per-line-only (the existing, server-validated picker above) until
-  // invoice.js itself grows a document-wide-percentage-safe save path.
+  // Coordinator scope extension (2026-09, after server/services/invoice.js
+  // came free of its prior lane): a fresh document-wide catalog pick's
+  // OWN type (fixed or percentage) now survives to save
+  // (stackInvoiceDocumentDiscounts' documentEntryTerms resolves it via
+  // lineItemDiscountTerm — the SAME per-type resolution a line pick
+  // gets — instead of forcing fixed_amount), so percentage and
+  // stack-grouped catalog rows (WaveGuard tiers included) are safe to
+  // offer here again; discount_id rides all the way to
+  // invoice_discounts.discount_id, so a saved pick's group membership
+  // (and catalog usage stats) survive a reload too. free_service stays
+  // EXCLUDED from this picker: a document-wide free_service term would
+  // zero out every eligible line's remaining balance at once — a far
+  // larger blast radius than anything requested here, and untested by
+  // either this slice or the server fix — so it stays per-line-only
+  // until asked for.
   const matchingDocumentDiscounts = () => {
     const q = (discountQueries.__document__ || "").trim().toLowerCase();
     const nameFiltered = availableDiscounts.filter((d) => (
-      isFixedDiscountType(d.discount_type) &&
-      !d.stack_group &&
-      !d.is_waveguard_tier_discount &&
+      d.discount_type !== "free_service" &&
       (!q || `${d.name || ""} ${d.description || ""} ${formatDiscountLabel(d)}`
         .toLowerCase()
         .includes(q))
     ));
-    return nameFiltered.slice(0, 10);
+    const groupFiltered = stackingEnabled
+      ? stackablePresets(nameFiltered, chosenDiscountRowsForGroupCheck(), {
+          spansAll: true,
+        })
+      : nameFiltered;
+    return groupFiltered.slice(0, 10);
   };
   // Slice 8: adds a NEW document-wide (unparented, discount_for: null)
   // discount/credit. #4655 already interleaves an EXISTING one into every
@@ -6810,11 +6766,7 @@ function CreateInvoice({
         customerId: selectedCustomer.id,
         serviceRecordId: selectedService?.id || null,
         serviceDate,
-        lineItems: sanitizeInvoiceLineItemsForSubmit(
-          repricedLineItems,
-          persistedClientIdsRef.current,
-          discountRowById,
-        )
+        lineItems: repricedLineItems
           .filter((i) => i.description && Number(i.unit_price) !== 0)
           .map((i) => ({
             ...i,
@@ -7041,11 +6993,7 @@ function CreateInvoice({
           stackingEnabled,
           persistedClientIds: persistedClientIdsRef.current,
         });
-        body.line_items = sanitizeInvoiceLineItemsForSubmit(
-          repricedLineItems,
-          persistedClientIdsRef.current,
-          discountRowById,
-        )
+        body.line_items = repricedLineItems
           .filter((i) => i.description && Number(i.unit_price) !== 0)
           .map((i) => ({
             ...i,

@@ -428,4 +428,60 @@ postgres('InvoiceService.create discount stacking — real Postgres round trip',
       invoice: { id: 'invoice-1', line_items: JSON.stringify(persisted) },
     })).rejects.toThrow(/Only one WaveGuard tier discount can apply/);
   });
+
+  // Coordinator scope extension (2026-09, slice 8 of #4405 / PR #4659):
+  // a FRESH document-wide (unparented) catalog pick — real catalog row,
+  // real round trip — must SAVE, must preserve its own percentage type
+  // (not silently reprice to $81.90), and must record its catalog
+  // attribution in invoice_discounts for discounts.times_applied /
+  // total_discount_given to roll up. The auditor's own reproduction.
+  test('a document-wide 10% catalog pick alongside a 10% line pick on the same $100 line saves $81 and records real catalog attribution', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const linePctId = randomUUID();
+    const docPctId = randomUUID();
+    await trx('discounts').insert([
+      { id: linePctId, discount_key: `line10_${linePctId.slice(0, 8)}`, name: 'Ten Percent', discount_type: 'percentage', amount: 10, is_active: true, show_in_invoices: true },
+      { id: docPctId, discount_key: `doc10_${docPctId.slice(0, 8)}`, name: 'Ten Percent Invoice-Wide', discount_type: 'percentage', amount: 10, is_active: true, show_in_invoices: true },
+    ]);
+    const invoice = await InvoiceService.create({
+      customerId: await insertCustomer(),
+      title: 'Document-wide catalog pick',
+      lineItems: [
+        { client_id: 'line-1', description: 'Quarterly Pest', quantity: 1, unit_price: 100, amount: 100 },
+        { client_id: 'd-line', discount_id: linePctId, discount_for: 'line-1', description: 'Ten Percent', quantity: 1, unit_price: -1, amount: -1 },
+        { client_id: 'd-doc', discount_id: docPctId, discount_for: null, description: 'Ten Percent Invoice-Wide', quantity: 1, unit_price: -1, amount: -1 },
+      ],
+    });
+    expect(Number(invoice.discount_amount)).toBe(19);
+    expect(Number(invoice.total)).toBe(81);
+    const auditRows = await trx('invoice_discounts').where({ invoice_id: invoice.id });
+    const docRow = auditRows.find((r) => r.discount_id === docPctId);
+    expect(docRow).toBeTruthy();
+    expect(Number(docRow.discount_dollars)).toBe(9);
+  });
+
+  // Same fixture, through the EDIT save path — calculateUpdateFinancials
+  // shares computeStackedDocumentDiscountLines with create(), so a
+  // no-op resubmit of the same document-wide pick must retotal to the
+  // identical $81, not silently drift on a later, unrelated edit.
+  test('the same document-wide pick resubmitted unchanged through calculateUpdateFinancials still totals $81', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const linePctId = randomUUID();
+    const docPctId = randomUUID();
+    await trx('discounts').insert([
+      { id: linePctId, discount_key: `line10b_${linePctId.slice(0, 8)}`, name: 'Ten Percent', discount_type: 'percentage', amount: 10, is_active: true, show_in_invoices: true },
+      { id: docPctId, discount_key: `doc10b_${docPctId.slice(0, 8)}`, name: 'Ten Percent Invoice-Wide', discount_type: 'percentage', amount: 10, is_active: true, show_in_invoices: true },
+    ]);
+    const items = [
+      { client_id: 'line-1', description: 'Quarterly Pest', quantity: 1, unit_price: 100, amount: 100 },
+      { client_id: 'd-line', discount_id: linePctId, discount_for: 'line-1', description: 'Ten Percent', quantity: 1, unit_price: -1, amount: -1 },
+      { client_id: 'd-doc', discount_id: docPctId, discount_for: null, description: 'Ten Percent Invoice-Wide', quantity: 1, unit_price: -1, amount: -1 },
+    ];
+    const result = await InvoiceService._internals.calculateUpdateFinancials({
+      lineItems: items,
+      customer: { property_type: 'residential' },
+      invoice: { id: 'invoice-1', line_items: JSON.stringify([]) },
+    });
+    expect(result.discount_amount).toBe(19);
+  });
 });
