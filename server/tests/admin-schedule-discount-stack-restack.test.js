@@ -57,6 +57,8 @@ const {
   clearPricingRegimeMarker,
   resolveSeriesExtensionPriceTemplate,
   seriesExtensionUnbillable,
+  resolveStoredDiscountCaps,
+  capsSnapshotFromPricing,
 } = require('../routes/admin-schedule')._test;
 
 function discountQuery(discount) {
@@ -1202,53 +1204,75 @@ describe('recurring extension — seriesExtensionUnbillable (single discountCaps
 // genuinely-null-primary row THIS SLICE itself priced (an add-on-only
 // booking), so creation and its own later extension disagreed. The
 // pricing-regime marker (stampPricingRegimeMarker/hasPricingRegimeMarker,
-// visit-financial-stamps.js, reusing scheduled_services.metadata — no
-// migration) resolves it: a row THIS SLICE stamped while the gate was live
-// carries the marker and restacks its null primary as a real $0; a row
-// without it (legacy, or the anchored-split marker template, which strips
-// its own copy via clearPricingRegimeMarker) still defers.
-describe('pricing-regime marker (round 13)', () => {
+// visit-financial-stamps.js) resolves it: a row THIS SLICE stamped while
+// the gate was live carries the marker and restacks its null primary as a
+// real $0; a row without it (legacy, or the anchored-split marker
+// template, which strips its own copy via clearPricingRegimeMarker) still
+// defers.
+//
+// GitHub Codex round 1 on #4642 (PRRT_kwDOR3YQi86kllyE): the marker
+// ORIGINALLY reused `scheduled_services.metadata`, which does not exist on
+// this table — every migration was searched, none defines one — so the
+// stamp silently no-opped in production. It now writes a real, migrated
+// column (`pricing_provenance`, migration 20260921000002), and the marker
+// also carries a `caps` snapshot (see the "frozen caps" describe below).
+describe('pricing-regime marker (round 13; round 14: real column + frozen caps)', () => {
   afterEach(() => { delete process.env.GATE_DISCOUNT_STACKING; });
 
   describe('stampPricingRegimeMarker / hasPricingRegimeMarker / clearPricingRegimeMarker', () => {
-    const cols = { metadata: true };
+    const cols = { pricing_provenance: true };
 
-    test('stamps the marker onto an empty target, merging rather than clobbering existing metadata', () => {
-      const target = { metadata: { other_key: 'keep-me' } };
+    test('stamps the marker (regime + engine version + an empty caps snapshot) onto an empty target', () => {
+      const target = {};
       stampPricingRegimeMarker(target, cols);
-      expect(target.metadata).toEqual({ other_key: 'keep-me', pricing_regime: 'discount_stack_v1' });
+      expect(target.pricing_provenance).toEqual({ pricing_regime: 'discount_stack_v1', engine_version: 1, caps: { line: null, addons: {} } });
       expect(hasPricingRegimeMarker(target)).toBe(true);
     });
 
-    test('no-op without a metadata column, or without a target', () => {
-      const target = { metadata: 'unchanged' };
+    test('stamps the given caps snapshot verbatim (defensively copied, not aliased)', () => {
+      const target = {};
+      const caps = { line: 10, addons: { 'addon-1': 25, 'addon-2': null } };
+      stampPricingRegimeMarker(target, cols, caps);
+      expect(target.pricing_provenance.caps).toEqual(caps);
+      caps.addons['addon-1'] = 999; // mutate the input after stamping
+      expect(target.pricing_provenance.caps.addons['addon-1']).toBe(25); // unaffected — a real copy
+    });
+
+    test('OVERWRITES a prior pricing_provenance value entirely — a single-purpose column, not a merge target', () => {
+      const target = { pricing_provenance: { some_other_shape: true } };
+      stampPricingRegimeMarker(target, cols, { line: 5, addons: {} });
+      expect(target.pricing_provenance).toEqual({ pricing_regime: 'discount_stack_v1', engine_version: 1, caps: { line: 5, addons: {} } });
+    });
+
+    test('no-op without a pricing_provenance column, or without a target', () => {
+      const target = { pricing_provenance: 'unchanged' };
       stampPricingRegimeMarker(target, {});
-      expect(target.metadata).toBe('unchanged');
+      expect(target.pricing_provenance).toBe('unchanged');
       expect(stampPricingRegimeMarker(null, cols)).toBeUndefined();
     });
 
-    test('hasPricingRegimeMarker reads a JSON-string metadata value too (knex can return either shape)', () => {
-      expect(hasPricingRegimeMarker({ metadata: JSON.stringify({ pricing_regime: 'discount_stack_v1' }) })).toBe(true);
-      expect(hasPricingRegimeMarker({ metadata: JSON.stringify({ other_key: 'x' }) })).toBe(false);
-      expect(hasPricingRegimeMarker({ metadata: 'not json' })).toBe(false);
-      expect(hasPricingRegimeMarker({ metadata: null })).toBe(false);
+    test('hasPricingRegimeMarker reads a JSON-string pricing_provenance value too (knex can return either shape)', () => {
+      expect(hasPricingRegimeMarker({ pricing_provenance: JSON.stringify({ pricing_regime: 'discount_stack_v1' }) })).toBe(true);
+      expect(hasPricingRegimeMarker({ pricing_provenance: JSON.stringify({ other_key: 'x' }) })).toBe(false);
+      expect(hasPricingRegimeMarker({ pricing_provenance: 'not json' })).toBe(false);
+      expect(hasPricingRegimeMarker({ pricing_provenance: null })).toBe(false);
       expect(hasPricingRegimeMarker(null)).toBe(false);
     });
 
-    test('clearPricingRegimeMarker removes only the one key, leaving other metadata intact', () => {
-      const target = { metadata: { pricing_regime: 'discount_stack_v1', other_key: 'keep-me' } };
+    test('clearPricingRegimeMarker nulls the whole column — a single-purpose column has nothing else to preserve', () => {
+      const target = { pricing_provenance: { pricing_regime: 'discount_stack_v1', caps: { line: 10, addons: {} } } };
       clearPricingRegimeMarker(target);
-      expect(target.metadata).toEqual({ other_key: 'keep-me' });
+      expect(target.pricing_provenance).toBeNull();
       expect(hasPricingRegimeMarker(target)).toBe(false);
     });
 
     test('clearPricingRegimeMarker is a no-op when there is nothing to clear', () => {
-      const target = { metadata: { other_key: 'keep-me' } };
+      const target = {};
       clearPricingRegimeMarker(target);
-      expect(target.metadata).toEqual({ other_key: 'keep-me' });
-      const untouched = { metadata: null };
+      expect(target.pricing_provenance).toBeUndefined();
+      const untouched = { pricing_provenance: null };
       clearPricingRegimeMarker(untouched);
-      expect(untouched.metadata).toBeNull();
+      expect(untouched.pricing_provenance).toBeNull();
     });
   });
 
@@ -1278,7 +1302,7 @@ describe('pricing-regime marker (round 13)', () => {
 
       const markedParent = {
         primary_line_price: null,
-        metadata: { pricing_regime: 'discount_stack_v1' },
+        pricing_provenance: { pricing_regime: 'discount_stack_v1' },
         line_discount_type: null,
         discount_type: 'fixed_amount',
         discount_amount: 30,
@@ -1294,7 +1318,7 @@ describe('pricing-regime marker (round 13)', () => {
   });
 
   test('a legacy null-primary row WITHOUT the marker still defers (no false restack)', () => {
-    const legacyRow = { primary_line_price: null, estimated_price: 100, discount_type: null }; // no metadata at all — never priced by this slice
+    const legacyRow = { primary_line_price: null, estimated_price: 100, discount_type: null }; // no pricing_provenance at all — never priced by this slice
     expect(hasPricingRegimeMarker(legacyRow)).toBe(false);
     expect(restackStoredVisitFinancials(legacyRow, [], null, new Map())).toBeNull();
   });
@@ -1310,7 +1334,7 @@ describe('pricing-regime marker (round 13)', () => {
       estimated_price: '150.00',
       primary_line_price: '150.00',
       line_discount_dollars: 0,
-      metadata: { pricing_regime: 'discount_stack_v1' },
+      pricing_provenance: { pricing_regime: 'discount_stack_v1' },
       recurring_template_overrides: { anchored_split_per_visit: 100 },
     };
     const template = await resolveSeriesExtensionPriceTemplate(null, 'p1', parent);
@@ -1332,8 +1356,8 @@ describe('pricing-regime marker (round 13)', () => {
     // recurring-series regression suite (run alongside this file) is what
     // actually proves no call site reaches it with the gate off.
     const target = {};
-    stampPricingRegimeMarker(target, { metadata: true });
-    expect(target.metadata).toEqual({ pricing_regime: 'discount_stack_v1' });
+    stampPricingRegimeMarker(target, { pricing_provenance: true });
+    expect(target.pricing_provenance).toEqual({ pricing_regime: 'discount_stack_v1', engine_version: 1, caps: { line: null, addons: {} } });
   });
 });
 
@@ -1350,7 +1374,7 @@ describe('pricing-regime marker — unpriced (quote-pending) occurrences stay nu
   test('restackStoredVisitFinancials: a marked, wholly-unpriced row returns price: null, not 0', () => {
     const markedUnpriced = {
       primary_line_price: null,
-      metadata: { pricing_regime: 'discount_stack_v1' },
+      pricing_provenance: { pricing_regime: 'discount_stack_v1' },
       line_discount_type: null,
       discount_type: null,
     };
@@ -1362,7 +1386,7 @@ describe('pricing-regime marker — unpriced (quote-pending) occurrences stay nu
   test('restackStoredVisitFinancials: a marked row with even ONE priced add-on restacks normally (not treated as unpriced)', () => {
     const markedParent = {
       primary_line_price: null,
-      metadata: { pricing_regime: 'discount_stack_v1' },
+      pricing_provenance: { pricing_regime: 'discount_stack_v1' },
       line_discount_type: null,
       discount_type: null,
     };
@@ -1374,7 +1398,7 @@ describe('pricing-regime marker — unpriced (quote-pending) occurrences stay nu
   test('restackStoredVisitFinancials: a marked, EXPLICITLY $0 primary is still a real, known zero (not treated as unpriced)', () => {
     const markedZeroPrimary = {
       primary_line_price: 0,
-      metadata: { pricing_regime: 'discount_stack_v1' },
+      pricing_provenance: { pricing_regime: 'discount_stack_v1' },
       line_discount_type: null,
       discount_type: null,
     };
@@ -1395,5 +1419,120 @@ describe('pricing-regime marker — unpriced (quote-pending) occurrences stay nu
       expect(result).not.toBeNull();
       expect(result.price).toBeNull();
     });
+  });
+});
+
+// GitHub Codex round 1 on #4642 (PRRT_kwDOR3YQi86kllyD): a percentage
+// discount's cap is never persisted on the row itself — only read live,
+// via loadDiscountCapsById, from the catalog's mutable max_discount_dollars
+// — so a marked row now ALSO freezes the cap it priced against, in the
+// SAME pricing_provenance column, and restacks every later extension from
+// that frozen snapshot rather than a fresh (and possibly since-edited)
+// catalog lookup. A later PUT /api/admin/discounts/:id cap change must
+// never reprice an already-contracted recurring visit.
+describe('frozen caps snapshot — a later catalog cap edit does not reprice a contracted recurring visit (round 14)', () => {
+  afterEach(() => { delete process.env.GATE_DISCOUNT_STACKING; });
+
+  test('resolveStoredDiscountCaps: a marked row restacks from its OWN frozen line cap, never the live (edited) catalog cap', () => {
+    const markedParent = {
+      line_discount_id: 'ld-1',
+      pricing_provenance: { pricing_regime: 'discount_stack_v1', engine_version: 1, caps: { line: 10, addons: {} } },
+    };
+    // The catalog has since been edited to $20 — loadDiscountCapsById would
+    // return this if it were consulted.
+    const liveCatalogCaps = new Map([['ld-1', 20]]);
+    const resolved = resolveStoredDiscountCaps(markedParent, liveCatalogCaps);
+    expect(resolved.lineCap).toBe(10); // the FROZEN $10, never the live $20
+    expect(resolved.snapshot.line).toBe(10);
+  });
+
+  // The coordinator's exact pinned combination: a 50%-off line discount
+  // capped at $10 when the row was priced; the catalog cap is later raised
+  // to $20; the extension must still restack to $10 off, not $20.
+  test('restackStoredVisitFinancials: $10 cap frozen at creation, catalog raised to $20 — extension still restacks $10 off, not $20', () => {
+    const markedParent = {
+      primary_line_price: 100,
+      line_discount_id: 'ld-1',
+      line_discount_type: 'percentage',
+      line_discount_amount: 50, // uncapped, 50% of $100 would be $50 off
+      discount_type: null,
+      pricing_provenance: { pricing_regime: 'discount_stack_v1', engine_version: 1, caps: { line: 10, addons: {} } },
+    };
+    const catalogCapRaisedTo20 = new Map([['ld-1', 20]]);
+    const result = restackStoredVisitFinancials(markedParent, [], null, catalogCapRaisedTo20);
+    expect(result.primaryLineDiscountDollars).toBe(10); // the frozen cap, never the raised $20 (or the uncapped $50)
+    expect(result.price).toBe(90);
+    // The persisted snapshot must also stay $10 — the NEXT extension must
+    // inherit the same frozen value, not silently re-freeze the raised one.
+    expect(result.capsSnapshot.line).toBe(10);
+  });
+
+  test('an UNMARKED (legacy) row has nothing to freeze from — every cap reads LIVE, exactly as before this fix', () => {
+    const legacyParent = {
+      primary_line_price: 100,
+      line_discount_id: 'ld-1',
+      line_discount_type: 'percentage',
+      line_discount_amount: 50,
+      discount_type: null,
+      // no pricing_provenance at all
+    };
+    const catalogCap = new Map([['ld-1', 20]]);
+    const result = restackStoredVisitFinancials(legacyParent, [], null, catalogCap);
+    expect(result.primaryLineDiscountDollars).toBe(20); // the LIVE cap — nothing frozen yet
+    // Once restacked, this row's OWN first stamp would freeze $20 going
+    // forward — proven by the creation-to-extension regression below.
+    expect(result.capsSnapshot.line).toBe(20);
+  });
+
+  // A discount id the row has NEVER frozen before (a new add-on discount
+  // this occurrence is seeing for the first time) reads live and joins the
+  // snapshot — it does not fail, and it does not inherit an unrelated
+  // frozen value.
+  test('a marked row with a frozen LINE cap but an add-on discount id it has never seen reads that add-on cap LIVE', () => {
+    const markedParent = {
+      primary_line_price: 100,
+      line_discount_id: 'ld-1',
+      line_discount_type: null,
+      discount_type: null,
+      pricing_provenance: { pricing_regime: 'discount_stack_v1', engine_version: 1, caps: { line: 10, addons: {} } }, // no 'new-addon-disc' entry yet
+    };
+    const addon = { base_price: 50, estimated_price: 50, discount_type: 'percentage', discount_amount: 40, discount_id: 'new-addon-disc', service_id: 'svc' };
+    const liveCaps = new Map([['new-addon-disc', 5]]);
+    const result = restackStoredVisitFinancials(markedParent, [addon], null, liveCaps);
+    // 40% of $50 would be $20 uncapped; the live $5 cap (never frozen
+    // before) applies and joins the returned snapshot.
+    expect(result.addonDollars[0].discountDollars).toBe(5);
+    expect(result.capsSnapshot.addons['new-addon-disc']).toBe(5);
+    expect(result.capsSnapshot.line).toBe(10); // the already-frozen line cap is untouched
+  });
+
+  // Creation-to-extension: the FIRST time a row is marked (creation), its
+  // caps snapshot is built from capsSnapshotFromPricing (the live catalog
+  // caps buildAppointmentPricing already resolved) — the SAME values a
+  // bare restackStoredVisitFinancials call would read live for an
+  // as-yet-unmarked row, proving the two paths agree at the handoff point.
+  test('capsSnapshotFromPricing (creation) agrees with the live lookup restackStoredVisitFinancials would make for the same row before it is marked', () => {
+    const pricing = {
+      primaryDiscount: { discountId: 'ld-1', maxDiscountDollars: 10 },
+      addonLines: [{ discount: { discountId: 'addon-1', maxDiscountDollars: 25 } }],
+    };
+    const createdSnapshot = capsSnapshotFromPricing(pricing);
+    expect(createdSnapshot).toEqual({ line: 10, addons: { 'addon-1': 25 } });
+
+    const unmarkedLegacyRow = { line_discount_id: 'ld-1' }; // no pricing_provenance — same row, before its first stamp
+    const liveCapsAtCreation = new Map([['ld-1', 10], ['addon-1', 25]]);
+    const resolved = resolveStoredDiscountCaps(unmarkedLegacyRow, liveCapsAtCreation);
+    expect(resolved.snapshot).toEqual(createdSnapshot);
+  });
+
+  // Gate-off parity: with the gate off, no caller ever builds or passes a
+  // caps snapshot — stampPricingRegimeMarker is never reached at all (the
+  // full byte-identical regression suite is the end-to-end proof), so
+  // there is nothing additional to pin here beyond stampPricingRegimeMarker's
+  // own documented default (an empty snapshot when none is given).
+  test('gate off parity: stampPricingRegimeMarker with no caps argument writes an empty, not undefined, snapshot', () => {
+    const target = {};
+    stampPricingRegimeMarker(target, { pricing_provenance: true });
+    expect(target.pricing_provenance.caps).toEqual({ line: null, addons: {} });
   });
 });

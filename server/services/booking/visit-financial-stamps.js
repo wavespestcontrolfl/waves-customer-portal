@@ -135,10 +135,13 @@ function copyStampedServiceAddressFields(target, source, cols) {
 
 // Provenance for restackStoredVisitFinancials (admin-schedule.js): marks a
 // row as priced under the canonical discount-stack engine
-// (GATE_DISCOUNT_STACKING), reusing scheduled_services.metadata — a
-// generic jsonb column already on every row, defined at the initial schema
-// as free-form ("any extra ... data") and, as of this slice, unread/
-// unwritten by any other app-layer code — no schema migration needed.
+// (GATE_DISCOUNT_STACKING) and freezes the catalog caps it priced against,
+// in `scheduled_services.pricing_provenance` (nullable jsonb, migration
+// 20260921000002 — GitHub Codex round 1 on #4642, PRRT_kwDOR3YQi86kllyE:
+// the ORIGINAL design reused a `metadata` column that does not exist on
+// this table — the initial schema and every migration were searched and
+// none defines one — so every stamp silently no-opped in production and
+// every add-on-only extension kept replaying frozen dollars).
 //
 // A stored row's null primary_line_price is normally ambiguous: it could
 // mean "no primary at all" (an add-on-only or re-service/callback booking
@@ -155,44 +158,104 @@ function copyStampedServiceAddressFields(target, source, cols) {
 // correctly at CREATION — the seeded occurrence read $56 — but its own
 // EXTENSION replayed frozen dollars and read $54, because
 // restackStoredVisitFinancials could not yet tell the two apart).
-const PRICING_REGIME_KEY = 'pricing_regime';
+//
+// `caps` (GitHub Codex round 1, PRRT_kwDOR3YQi86kllyD): a percentage
+// discount's cap is never persisted on the row itself — only the catalog's
+// `max_discount_dollars`, read live via loadDiscountCapsById — so a marked
+// row also freezes the LINE cap and every ADD-ON cap it priced against
+// (`{ line, addons: { [discount_id]: cap|null } }`) here. A later
+// PUT /api/admin/discounts/:id cap edit on that catalog row must never
+// reprice an already-contracted recurring visit: restackStoredVisitFinancials
+// restacks a marked row from THIS frozen snapshot, never the live catalog
+// value (see resolveStoredDiscountCaps, below).
+const PRICING_REGIME_COLUMN = 'pricing_provenance';
 const PRICING_REGIME_VALUE = 'discount_stack_v1';
+const PRICING_ENGINE_VERSION = 1;
 
-function stampPricingRegimeMarker(target, cols) {
-  if (!target || !cols?.metadata) return;
-  const existing = target.metadata && typeof target.metadata === 'object' && !Array.isArray(target.metadata)
-    ? target.metadata
-    : {};
-  target.metadata = { ...existing, [PRICING_REGIME_KEY]: PRICING_REGIME_VALUE };
+function parsePricingProvenance(row) {
+  let prov = row?.[PRICING_REGIME_COLUMN];
+  if (typeof prov === 'string') {
+    try { prov = JSON.parse(prov); } catch { return null; }
+  }
+  return prov && typeof prov === 'object' && !Array.isArray(prov) ? prov : null;
+}
+
+function stampPricingRegimeMarker(target, cols, caps = null) {
+  if (!target || !cols?.[PRICING_REGIME_COLUMN]) return;
+  target[PRICING_REGIME_COLUMN] = {
+    pricing_regime: PRICING_REGIME_VALUE,
+    engine_version: PRICING_ENGINE_VERSION,
+    caps: caps && typeof caps === 'object'
+      ? { line: caps.line ?? null, addons: { ...(caps.addons || {}) } }
+      : { line: null, addons: {} },
+  };
 }
 
 function hasPricingRegimeMarker(row) {
-  let meta = row?.metadata;
-  if (typeof meta === 'string') {
-    try { meta = JSON.parse(meta); } catch { return false; }
-  }
-  return !!meta && typeof meta === 'object' && !Array.isArray(meta) && meta[PRICING_REGIME_KEY] === PRICING_REGIME_VALUE;
+  const prov = parsePricingProvenance(row);
+  return !!prov && prov.pricing_regime === PRICING_REGIME_VALUE;
+}
+
+// The frozen `caps` object off a marked row, or null (unmarked, or a
+// marked row whose caps are missing/malformed — treated the same as "no
+// frozen entry" by resolveStoredDiscountCaps, never as a crash).
+function frozenCapsFromRow(row) {
+  const prov = parsePricingProvenance(row);
+  return prov && prov.pricing_regime === PRICING_REGIME_VALUE
+    && prov.caps && typeof prov.caps === 'object' && !Array.isArray(prov.caps)
+    ? prov.caps
+    : null;
 }
 
 // resolveSeriesExtensionPriceTemplate's anchored-split clear (admin-schedule.js)
-// spreads the parent's own metadata onto its template unchanged, so a
+// spreads the parent's own provenance onto its template unchanged, so a
 // series that priced its PARENT under the canonical engine would otherwise
-// carry the marker straight onto the marker-total template too — exactly
-// the one case the marker must NOT cover (the template's own
-// primary_line_price is cleared to null there for a DIFFERENT reason: the
-// marker total already folds the primary's implied share in, not because
-// there genuinely is no primary). Called from that same clearing branch so
-// the two stay in lockstep.
+// carry the marker (and its frozen caps) straight onto the marker-total
+// template too — exactly the one case the marker must NOT cover (the
+// template's own primary_line_price is cleared to null there for a
+// DIFFERENT reason: the marker total already folds the primary's implied
+// share in, not because there genuinely is no primary). Called from that
+// same clearing branch so the two stay in lockstep.
 function clearPricingRegimeMarker(target) {
-  if (!target || target.metadata == null) return;
-  let meta = target.metadata;
-  if (typeof meta === 'string') {
-    try { meta = JSON.parse(meta); } catch { return; }
+  if (!target || target[PRICING_REGIME_COLUMN] == null) return;
+  target[PRICING_REGIME_COLUMN] = null;
+}
+
+// Resolves the caps ONE stored restack must use (GitHub Codex round 1,
+// PRRT_kwDOR3YQi86kllyD): a row carrying the pricing-regime marker restacks
+// from its OWN frozen snapshot, ignoring a live catalog cap for any
+// discount id it already froze — a later catalog edit must not reprice a
+// contracted recurring visit. A discount id the row has never frozen
+// before (a newly-added add-on discount this occurrence is seeing for the
+// first time) still reads live and joins the returned snapshot, so the
+// row's NEXT stamp freezes it too. An unmarked (legacy, or gate-was-off-
+// at-creation) row has nothing to freeze from yet: every cap reads live,
+// exactly as before this fix, and becomes that row's own first frozen
+// snapshot once it is stamped. `liveDiscountCaps` is loadDiscountCapsById's
+// `Map<discountId, cap|null>` (or null/undefined when the gate is off, or
+// nothing was fetched).
+function resolveStoredDiscountCaps(parent, liveDiscountCaps) {
+  const frozen = hasPricingRegimeMarker(parent) ? frozenCapsFromRow(parent) : null;
+  const addons = { ...(frozen?.addons || {}) };
+  if (liveDiscountCaps) {
+    for (const [discountId, cap] of liveDiscountCaps) {
+      // The line's own cap lives in `caps.line`, never duplicated into
+      // `caps.addons` — liveDiscountCaps is a single Map built from
+      // [line_discount_id, ...addon discount ids] at every call site, so
+      // without this guard the line's id would land in both places.
+      if (discountId === parent?.line_discount_id) continue;
+      if (!(discountId in addons)) addons[discountId] = cap ?? null;
+    }
   }
-  if (!meta || typeof meta !== 'object' || Array.isArray(meta) || !(PRICING_REGIME_KEY in meta)) return;
-  const rest = { ...meta };
-  delete rest[PRICING_REGIME_KEY];
-  target.metadata = rest;
+  const liveLineCap = (discountId) => (
+    liveDiscountCaps && discountId != null ? (liveDiscountCaps.get(discountId) ?? null) : null
+  );
+  const lineCap = frozen ? (frozen.line ?? null) : liveLineCap(parent?.line_discount_id);
+  return {
+    lineCap,
+    addonCap: (discountId) => (discountId != null && discountId in addons ? addons[discountId] : null),
+    snapshot: { line: lineCap, addons },
+  };
 }
 
 module.exports = {
@@ -207,4 +270,5 @@ module.exports = {
   stampPricingRegimeMarker,
   hasPricingRegimeMarker,
   clearPricingRegimeMarker,
+  resolveStoredDiscountCaps,
 };

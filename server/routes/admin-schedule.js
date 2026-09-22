@@ -1404,6 +1404,7 @@ const {
   stampPricingRegimeMarker,
   hasPricingRegimeMarker,
   clearPricingRegimeMarker,
+  resolveStoredDiscountCaps,
 } = require('../services/booking/visit-financial-stamps');
 const { anchorSoleProperty } = require('../services/customer-properties');
 
@@ -2204,6 +2205,23 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
   };
 }
 
+// The caps a CREATE-time booking priced against (GitHub Codex round 1,
+// PRRT_kwDOR3YQi86kllyD): pricing.primaryDiscount / pricing.addonLines[i]
+// .discount already carry the catalog's max_discount_dollars, resolved
+// live once per request by resolveLineDiscount — the SAME set every
+// seeded child/booster in this request shares (a due-add-on subset never
+// changes which catalog cap a given discount_id maps to), so one snapshot
+// built here is reused across the parent + every child/booster's own
+// stampPricingRegimeMarker call, matching resolveStoredDiscountCaps'
+// { line, addons } shape exactly.
+function capsSnapshotFromPricing(pricing) {
+  const addons = {};
+  for (const line of pricing?.addonLines || []) {
+    if (line.discount?.discountId != null) addons[line.discount.discountId] = line.discount.maxDiscountDollars ?? null;
+  }
+  return { line: pricing?.primaryDiscount?.maxDiscountDollars ?? null, addons };
+}
+
 // `restackedAddonDollars`, when passed, is restackLiveVisitFinancials'
 // returned array — 1:1 with `addonLines` — so a seeded child/booster's own
 // due add-on is restated against ITS OWN gross and due-add-on pool instead
@@ -2822,28 +2840,31 @@ function restackStoredVisitFinancials(parent, addonRows, discountScope, discount
   // CAP directly — the catalog's max_discount_dollars is applied once at
   // creation and never copied onto the stamped row. `discountCaps` (built by
   // loadDiscountCapsById from line_discount_id / each addon's discount_id)
-  // is the REAL cap, read fresh from the catalog every time — never a
-  // frozen dollar figure standing in for one (Codex pre-push audit P0,
-  // rounds 1/4/5/7, in order: an absent cap let a genuinely-capped 50%-$10
-  // discount restack to $45; an explicit $0 cap needs to read as present,
-  // not absent; a frozen-dollars-as-ceiling trick goes stale the moment the
-  // credit sharing its pool is later edited; and legacy float rounding can
-  // itself differ from this engine's cent-exact math by a cent even with NO
-  // cap at all, so a frozen figure is never a safe ceiling for ANY reason —
-  // a real, freshly-read cap is the only sound source). A missing catalog
-  // row (deleted/deactivated since, or discountCaps simply not supplied)
-  // reads as uncapped — an honest "we don't know" that never UNDER-charges
-  // a real cap's own floor the way a stale/rounded surrogate could, and
-  // matches every OTHER discount type here (fixed/free_service), which
-  // never had a cap concept to begin with.
-  const catalogCap = (discountId) => {
-    if (!discountCaps || discountId == null) return null;
-    return discountCaps.get(discountId) ?? null;
-  };
+  // is the LIVE catalog cap — read fresh, never a frozen dollar figure
+  // standing in for one (Codex pre-push audit P0, rounds 1/4/5/7, in order:
+  // an absent cap let a genuinely-capped 50%-$10 discount restack to $45;
+  // an explicit $0 cap needs to read as present, not absent; a frozen-
+  // dollars-as-ceiling trick goes stale the moment the credit sharing its
+  // pool is later edited; and legacy float rounding can itself differ from
+  // this engine's cent-exact math by a cent even with NO cap at all, so a
+  // frozen figure is never a safe ceiling for ANY reason). BUT a MARKED row
+  // restacks from its OWN frozen `pricing_provenance.caps` instead of this
+  // live value (GitHub Codex round 1, PRRT_kwDOR3YQi86kllyD) — a later
+  // PUT /api/admin/discounts/:id cap edit must never reprice an already-
+  // contracted recurring visit; resolveStoredDiscountCaps is the one place
+  // that decision is made, shared with every caller that persists the
+  // caps snapshot going forward (see stampPricingRegimeMarker call sites).
+  // A missing catalog row (deleted/deactivated since, discountCaps simply
+  // not supplied, or a discount id neither frozen nor live) reads as
+  // uncapped — an honest "we don't know" that never UNDER-charges a real
+  // cap's own floor the way a stale/rounded surrogate could, and matches
+  // every OTHER discount type here (fixed/free_service), which never had a
+  // cap concept to begin with.
+  const storedCaps = resolveStoredDiscountCaps(parent, discountCaps);
   const primaryDiscount = typedDiscountSlot(
     parent?.line_discount_type,
     parent?.line_discount_amount,
-    catalogCap(parent?.line_discount_id),
+    storedCaps.lineCap,
   );
   const addonSlots = addons.map((addon) => {
     // scheduled_service_addons.base_price is the addon's own GROSS —
@@ -2858,7 +2879,7 @@ function restackStoredVisitFinancials(parent, addonRows, discountScope, discount
       lineDiscount: typedDiscountSlot(
         addon?.discount_type,
         addon?.discount_amount,
-        catalogCap(addon?.discount_id),
+        storedCaps.addonCap(addon?.discount_id),
       ),
       eligible: matchesScope(addon?.service_id) && !addonPctExcluded(addon),
     };
@@ -2927,6 +2948,12 @@ function restackStoredVisitFinancials(parent, addonRows, discountScope, discount
         netPrice: stacked.lines[i + 1].net,
       }
       : { discountDollars: null, netPrice: null })),
+    // The caps this restack actually used — frozen for a marked row, live
+    // (and now newly-frozen) otherwise. Callers pass this straight into
+    // their own stampPricingRegimeMarker call so a NEXT extension inherits
+    // the same frozen values rather than re-reading a possibly-since-
+    // changed catalog row (GitHub Codex round 1, PRRT_kwDOR3YQi86kllyD).
+    capsSnapshot: storedCaps.snapshot,
   };
 }
 
@@ -6327,7 +6354,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // extension's own restack tell a null primary_line_price genuinely
       // means "no primary" apart from a legacy/unstructured row (see
       // restackStoredVisitFinancials's own comment).
-      if (discountStackingLive()) stampPricingRegimeMarker(insertData, cols);
+      if (discountStackingLive()) stampPricingRegimeMarker(insertData, cols, capsSnapshotFromPricing(pricing));
       if (cols.create_invoice_on_complete) insertData.create_invoice_on_complete = createInvoiceStamp;
 
       // Global occupancy probe under rung 1 (the contract's second half):
@@ -6469,7 +6496,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
           childData.line_discount_dollars = childRestack ? (childRestack.primaryDiscountDollars || 0) : Number(pricing.primaryDiscount.discountDollars);
         }
         // Pricing-regime provenance — see the parent insertData's identical stamp.
-        if (discountStackingLive()) stampPricingRegimeMarker(childData, cols);
+        if (discountStackingLive()) stampPricingRegimeMarker(childData, cols, capsSnapshotFromPricing(pricing));
         if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = createInvoiceStamp;
         // Same global probe as the parent, under this child's own date lock.
         if (childData.window_start && childData.window_end) {
@@ -6557,7 +6584,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
             boosterData.line_discount_dollars = boosterRestack ? (boosterRestack.primaryDiscountDollars || 0) : Number(pricing.primaryDiscount.discountDollars);
           }
           // Pricing-regime provenance — see the parent insertData's identical stamp.
-          if (discountStackingLive()) stampPricingRegimeMarker(boosterData, cols);
+          if (discountStackingLive()) stampPricingRegimeMarker(boosterData, cols, capsSnapshotFromPricing(pricing));
           // Same reasoning: boosters keep the modal's invoice intent even on
           // a covered member series (identical to createInvoiceStamp for
           // every non-member booking).
@@ -13127,7 +13154,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     // Pricing-regime provenance — see restackStoredVisitFinancials's own
     // comment for why this lets a LATER extension of this same row tell a
     // null primary apart from a legacy/unstructured one.
-    if (discountStackingLive()) stampPricingRegimeMarker(data, cols);
+    if (discountStackingLive()) stampPricingRegimeMarker(data, cols, resolveStoredDiscountCaps(extensionPriceParent, discountCaps).snapshot);
     if (occupancyGuard) {
       await guardRecurrenceDestination(trx, {
         lockedDates: occupancyGuard.lockedDates,
@@ -13424,7 +13451,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
           const restackedAddonDollars = applyDiscountStackRestack(nextData, cols, extensionPriceParent, dueAddons, storedDiscountScope, discountCaps);
           // Pricing-regime provenance — see restackStoredVisitFinancials's
           // own comment.
-          if (discountStackingLive()) stampPricingRegimeMarker(nextData, cols);
+          if (discountStackingLive()) stampPricingRegimeMarker(nextData, cols, resolveStoredDiscountCaps(extensionPriceParent, discountCaps).snapshot);
           // Extension rows keep invoice-on-complete stamping — sibling-
           // resolved so the freshest office billing intent wins (see
           // resolveSeriesCreateInvoiceOnComplete). Without it a
@@ -18559,7 +18586,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         applyDiscountStackRestack(data, cols, extensionPriceParent, dueAddons, storedDiscountScope, discountCaps);
         // Pricing-regime provenance — see restackStoredVisitFinancials's
         // own comment.
-        if (discountStackingLive()) stampPricingRegimeMarker(data, cols);
+        if (discountStackingLive()) stampPricingRegimeMarker(data, cols, resolveStoredDiscountCaps(extensionPriceParent, discountCaps).snapshot);
         if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(childIdentity.service_type);
         if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
         if (cols.skip_weekends) data.skip_weekends = skipParentStamp;
@@ -18659,7 +18686,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         applyDiscountStackRestack(data, cols, extensionPriceParent, dueAddons, storedDiscountScope, discountCaps);
         // Pricing-regime provenance — see restackStoredVisitFinancials's
         // own comment.
-        if (discountStackingLive()) stampPricingRegimeMarker(data, cols);
+        if (discountStackingLive()) stampPricingRegimeMarker(data, cols, resolveStoredDiscountCaps(extensionPriceParent, discountCaps).snapshot);
         if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(childIdentity.service_type);
         if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
         if (cols.skip_weekends) data.skip_weekends = skipParentStamp;
@@ -19117,6 +19144,7 @@ router._test = {
   isPercentDiscountType,
   calculateVisitFinancialsForAddons,
   restackLiveVisitFinancials,
+  capsSnapshotFromPricing,
   occurrenceFloorPrice,
   calculateStoredVisitFinancials,
   applyStoredVisitFinancials,
@@ -19128,6 +19156,7 @@ router._test = {
   stampPricingRegimeMarker,
   hasPricingRegimeMarker,
   clearPricingRegimeMarker,
+  resolveStoredDiscountCaps,
   insertRecurringChildAddons,
   insertScheduledServiceAddons,
   loadStoredDiscountScope,
