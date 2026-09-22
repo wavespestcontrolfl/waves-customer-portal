@@ -98,6 +98,16 @@ function discardButtonLabel(draft) {
   return draft.discardRequested ? 'Retry discard' : 'Discard';
 }
 
+function rememberFailedDraft(map, serviceId, draft, message) {
+  map.delete(serviceId);
+  map.set(serviceId, { draft, message });
+}
+
+function forgetFailedDraft(map, serviceId, attemptId) {
+  const retained = map.get(serviceId);
+  if (!retained || attemptId === undefined || retained.draft.attemptId === attemptId) map.delete(serviceId);
+}
+
 export default function TechRecapCapture({ service, request }) {
   const serviceId = service?.id;
   const [itemState, setItemState] = useState({ serviceId: null, items: [] });
@@ -112,6 +122,7 @@ export default function TechRecapCapture({ service, request }) {
   const mountedRef = useRef(false);
   const uploadAttemptRef = useRef(0);
   const latestUploadByServiceRef = useRef(new Map());
+  const failedDraftsRef = useRef(new Map());
   serviceIdRef.current = serviceId;
 
   const isCurrentService = (targetServiceId, generation) => (
@@ -131,11 +142,12 @@ export default function TechRecapCapture({ service, request }) {
     serviceIdRef.current = serviceId;
     const generation = serviceGenerationRef.current + 1;
     serviceGenerationRef.current = generation;
+    const retained = failedDraftsRef.current.get(serviceId);
     setPendingFile(null);
-    setFailedUpload(null);
+    setFailedUpload(retained?.draft || null);
     setShowMore(false);
     setUploading(0);
-    setErr(null);
+    setErr(retained?.message || null);
     if (serviceId) refresh(serviceId, generation);
     return () => {
       serviceIdRef.current = null;
@@ -162,9 +174,11 @@ export default function TechRecapCapture({ service, request }) {
     const attemptId = uploadAttemptRef.current + 1;
     uploadAttemptRef.current = attemptId;
     latestUploadByServiceRef.current.set(targetServiceId, attemptId);
-    const canApplyAttempt = () => mountedRef.current
-      && serviceIdRef.current === targetServiceId
+    forgetFailedDraft(failedDraftsRef.current, targetServiceId);
+    draft = { ...draft, attemptId };
+    const canRetainAttempt = () => mountedRef.current
       && latestUploadByServiceRef.current.get(targetServiceId) === attemptId;
+    const canApplyAttempt = () => canRetainAttempt() && serviceIdRef.current === targetServiceId;
     setPendingFile(null);
     setFailedUpload(null);
     setShowMore(false);
@@ -229,6 +243,9 @@ export default function TechRecapCapture({ service, request }) {
       }
     } catch (e) {
       const { retainedDraft, message } = await recoverUploadFailure(e, draft, request);
+      if (canRetainAttempt()) {
+        rememberFailedDraft(failedDraftsRef.current, targetServiceId, retainedDraft, message);
+      }
       if (canApplyAttempt()) {
         // Keep the in-memory File, role, and any completed upload stages so Retry
         // can resume without asking the tech to capture or tag the clip again.
@@ -255,23 +272,30 @@ export default function TechRecapCapture({ service, request }) {
     const discarded = failedUpload;
     if (!discarded) return;
     if (!discarded.mediaId) {
+      forgetFailedDraft(failedDraftsRef.current, discarded.serviceId, discarded.attemptId);
       setFailedUpload(null);
       setErr(null);
       return;
     }
-    const generation = serviceGenerationRef.current;
     const cleanupDraft = { ...discarded, retryable: false, discardRequested: true, discardPending: true };
+    rememberFailedDraft(failedDraftsRef.current, discarded.serviceId, cleanupDraft, err);
     setFailedUpload(cleanupDraft);
     try {
       await deleteKnownDraft(discarded, request);
-      if (isCurrentService(discarded.serviceId, generation)) {
+      const latest = latestUploadByServiceRef.current.get(discarded.serviceId) === discarded.attemptId;
+      if (latest) forgetFailedDraft(failedDraftsRef.current, discarded.serviceId, discarded.attemptId);
+      if (latest && mountedRef.current && serviceIdRef.current === discarded.serviceId) {
         setFailedUpload(null);
         setErr(null);
       }
     } catch {
-      if (isCurrentService(discarded.serviceId, generation)) {
-        setFailedUpload({ ...cleanupDraft, discardPending: false });
-        setErr('Couldn’t discard this clip from the visit. Retry discard.');
+      const latest = latestUploadByServiceRef.current.get(discarded.serviceId) === discarded.attemptId;
+      const failedCleanup = { ...cleanupDraft, discardPending: false };
+      const message = 'Couldn’t discard this clip from the visit. Retry discard.';
+      if (latest && mountedRef.current) rememberFailedDraft(failedDraftsRef.current, discarded.serviceId, failedCleanup, message);
+      if (latest && mountedRef.current && serviceIdRef.current === discarded.serviceId) {
+        setFailedUpload(failedCleanup);
+        setErr(message);
       }
     }
   };

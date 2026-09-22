@@ -239,6 +239,50 @@ describe('TechRecapCapture upload recovery', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
+  it('restores a failed service draft after A to B to A and retries its original file and media id', async () => {
+    fetch.mockRejectedValueOnce(new Error('Network unavailable')).mockResolvedValueOnce({ ok: true, status: 200 });
+    const request = vi.fn(async (path, options) => {
+      if (isListRequest(path, options)) return { items: [] };
+      if (path.endsWith('/presign')) return { mediaId: 'retained-media', uploadUrl: 'https://upload.test/retained-media' };
+      if (path.endsWith('/retained-media/confirm')) return { ok: true, id: 'retained-media', status: 'ready' };
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    const view = render(<TechRecapCapture service={SERVICE_ONE} request={request} />);
+    const file = await tagPerimeter('retained-service.jpg');
+    expect(await screen.findByRole('alert')).toHaveTextContent('retained-service.jpg');
+
+    view.rerender(<TechRecapCapture service={SERVICE_TWO} request={request} />);
+    expect(screen.queryByText(/retained-service\.jpg/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '+ Capture recap clip' })).toBeEnabled();
+    view.rerender(<TechRecapCapture service={SERVICE_ONE} request={request} />);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Network unavailable');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry upload' }));
+    await waitFor(() => expect(pathsMatching(request, '/retained-media/confirm')).toHaveLength(1));
+    expect(pathsMatching(request, '/presign')).toHaveLength(1);
+    expect(fetch.mock.calls[1][0]).toBe('https://upload.test/retained-media');
+    expect(fetch.mock.calls[1][1].body).toBe(file);
+  });
+
+  it('retains one failed draft for every service visited during the component lifetime', async () => {
+    fetch.mockRejectedValue(new Error('Network unavailable'));
+    const request = vi.fn(async (path, options) => {
+      if (isListRequest(path, options)) return { items: [] };
+      if (path.endsWith('/presign')) return { mediaId: `media-${path.split('/')[3]}`, uploadUrl: `https://upload.test${path}` };
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    const services = ['service-one', 'service-two', 'service-three', 'service-four'].map((id) => ({ id }));
+    const view = render(<TechRecapCapture service={services[0]} request={request} />);
+
+    for (const current of services) {
+      view.rerender(<TechRecapCapture service={current} request={request} />);
+      await tagPerimeter(`${current.id}.jpg`);
+      await screen.findByText(`${current.id}.jpg · Spray — perimeter`);
+    }
+    view.rerender(<TechRecapCapture service={services[0]} request={request} />);
+    expect(await screen.findByRole('alert')).toHaveTextContent('service-one.jpg');
+  });
+
   it('discards a failed upload and removes its pending server row', async () => {
     fetch.mockResolvedValueOnce({ ok: false, status: 503 });
     const request = vi.fn(async (path, options) => {
@@ -264,6 +308,8 @@ describe('TechRecapCapture upload recovery', () => {
   it('retains discard-only cleanup when a lost-confirm media delete fails', async () => {
     let confirmed = false;
     let deleteAttempts = 0;
+    let rejectFirstDelete;
+    const firstDelete = new Promise((_resolve, reject) => { rejectFirstDelete = reject; });
     const request = vi.fn(async (path, options) => {
       if (isListRequest(path, options)) {
         return { items: confirmed ? [{ id: 'media-ready', role: 'perimeter', caption: 'Sealing your perimeter barrier', status: 'ready' }] : [] };
@@ -275,16 +321,26 @@ describe('TechRecapCapture upload recovery', () => {
       }
       if (path.endsWith('/media-ready') && options?.method === 'DELETE') {
         deleteAttempts += 1;
-        if (deleteAttempts === 1) throw new Error('Delete unavailable');
+        if (deleteAttempts === 1) return firstDelete;
         return { ok: true };
       }
       throw new Error(`Unexpected request: ${path}`);
     });
 
-    render(<TechRecapCapture service={SERVICE_ONE} request={request} />);
+    const view = render(<TechRecapCapture service={SERVICE_ONE} request={request} />);
     await tagPerimeter('discard-ready.jpg');
     await screen.findByRole('alert');
     fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
+
+    await waitFor(() => expect(deleteAttempts).toBe(1));
+    view.rerender(<TechRecapCapture service={SERVICE_TWO} request={request} />);
+    expect(screen.queryByText(/discard-ready\.jpg/)).not.toBeInTheDocument();
+    view.rerender(<TechRecapCapture service={SERVICE_ONE} request={request} />);
+    expect(await screen.findByRole('button', { name: 'Discarding…' })).toBeDisabled();
+    view.rerender(<TechRecapCapture service={SERVICE_TWO} request={request} />);
+    await act(async () => rejectFirstDelete(new Error('Delete unavailable')));
+    expect(screen.queryByText(/Couldn’t discard/)).not.toBeInTheDocument();
+    view.rerender(<TechRecapCapture service={SERVICE_ONE} request={request} />);
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Couldn’t discard this clip from the visit');
     expect(screen.queryByRole('button', { name: 'Retry upload' })).not.toBeInTheDocument();
@@ -347,8 +403,9 @@ describe('TechRecapCapture upload recovery', () => {
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
 
     view.rerender(<TechRecapCapture service={SERVICE_TWO} request={request} />);
-    view.rerender(<TechRecapCapture service={SERVICE_ONE} request={request} />);
     await act(async () => failPut(new Error('Original upload failed')));
+    expect(screen.queryByText('Original upload failed')).not.toBeInTheDocument();
+    view.rerender(<TechRecapCapture service={SERVICE_ONE} request={request} />);
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Original upload failed');
     expect(screen.getByRole('alert')).toHaveTextContent('return-failure.jpg');
