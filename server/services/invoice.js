@@ -10,7 +10,6 @@ const {
   isPercentDiscountType,
   isFixedDiscountType,
   isVariableOrCustomDiscountPreset,
-  assertStackGroups,
 } = require("./discount-stack");
 const { discountStackingLive } = require("../config/feature-gates");
 const { etDateString, addETDays, etCalendarDayOf } = require("../utils/datetime-et");
