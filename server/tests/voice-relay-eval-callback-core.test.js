@@ -601,4 +601,32 @@ describe('voice relay eval — callback commitment core', () => {
   ])('no_account_holder_callback recognizes a refusal override after a timing modifier: %s', (text, status) => {
     expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
   });
+
+  // GitHub Codex round-4 P1 (spoken-checks.js:1645, wider sibling of the
+  // round-3 fix): QUESTION_LEAD_RE only covers the aux-led half of the
+  // file's question-lead grammar. A WH-led trailing question after a
+  // comma ("we will call Ruth tomorrow, what else can I help with?") is
+  // the same kind of separate, later question as an aux-led one
+  // ("...can I help...?") and must be excluded the same way.
+  test.each([
+    ['We will call Ruth tomorrow, what else can I help with?', 'fail'],
+    // Control: the candidate's own clause really is a question.
+    ['We will call Ruth?', 'pass'],
+  ])('no_account_holder_callback bounds interrogative detection past a wh-led trailing question: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
+
+  // GitHub Codex round-4 P1 (spoken-checks.js:1498, wider sibling of the
+  // round-3 fix): CONSENT_OVERRIDE_TIMING_PREFIX accepted only a single
+  // timing component, so a compound timing phrase ("tomorrow morning",
+  // "later this week") between the recipient and the override still hid
+  // it, the same gap a single timing word had before.
+  test.each([
+    ['If she agrees, we will call her tomorrow morning even if she refuses.', 'fail'],
+    ['If she agrees, we will call her later this week even if she refuses.', 'fail'],
+    // Control: a single timing component, already covered, still correct.
+    ['If she agrees, we will call her tomorrow even if she refuses.', 'fail'],
+  ])('no_account_holder_callback recognizes a refusal override after a compound timing phrase: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
 });

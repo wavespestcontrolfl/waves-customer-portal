@@ -9,6 +9,7 @@ const {
   BARE_CONFIRMATION,
   SHORT_AFFIRMATION_RE,
   QUESTION_AUX_RE_SOURCE,
+  QUESTION_AUX_WH_RE_SOURCE,
   QUESTION_LEAD_RE,
   CONVERSATIONAL_CONDITION_RE,
   latestInterrogativeSegment,
@@ -1473,10 +1474,20 @@ function callbackConditionTarget(valueTargets, matchedRecipient, text, candidate
 const CALLBACK_CONSENT_BOUNDARY = '(?=\\s*(?:[,.;!?]|$))';
 const CALLBACK_RECEIVED_CONTACT = `(?:be\\s+(?:called|contacted|phoned|texted|emailed)|(?:receive|get)\\s+an?\\s+${CALLBACK_CONTACT_NOUN}|(?:an?|the)\\s+${CALLBACK_CONTACT_NOUN})`;
 const CALLBACK_TIMING_COMPONENT = `(?:${VISIT_TIME_RE.source}|${CALLBACK_TIMING_ADVERB}|now|later|morning|afternoon|evening|night|(?:before|after|until|till)\\s+(?:noon|midday|midnight))`;
+// The repeated "preposition? + timing component" group, factored out so
+// CONSENT_OVERRIDE_TIMING_PREFIX below can reuse the exact same compound-
+// phrase grammar ("tomorrow morning", "later this week") instead of a
+// single-component subset of it.
+const CALLBACK_TIMING_PHRASE_RE_SOURCE = `(?:\\s*(?:(?:for|on|at|by|from|between|around|about)\\s+)?${CALLBACK_TIMING_COMPONENT})*`;
 const CALLBACK_TIMING_MODIFIERS_RE = new RegExp(
-  `^(?:\\s*(?:(?:for|on|at|by|from|between|around|about)\\s+)?${CALLBACK_TIMING_COMPONENT})*(?:\\s+or\\s+not)?\\s*$`,
+  `^${CALLBACK_TIMING_PHRASE_RE_SOURCE}(?:\\s+or\\s+not)?\\s*$`,
   'i',
 );
+// QUESTION_LEAD_RE only covers the aux-led half of the file's question-lead
+// grammar; a wh-word can lead just as well ("what else can I help with?").
+// QUESTION_AUX_WH_RE_SOURCE is the file's complete lead vocabulary (aux OR
+// wh-word) -- reused whole rather than enumerating wh-words separately.
+const WH_QUESTION_LEAD_RE = new RegExp(`^\\s*(?:so\\s+)?${QUESTION_AUX_WH_RE_SOURCE}\\b`, 'i');
 function callbackAgreementAction(additionalComplement = '') {
   const complement = additionalComplement
     ? `(?:to\\s+${CALLBACK_RECEIVED_CONTACT}|${additionalComplement})`
@@ -1493,9 +1504,12 @@ function callbackConsentOverridden(text, matchEnd, consentCondition, conditionTa
   // the verb missed "even if she refuses to be contacted."
   // A timing modifier can sit between the recipient and the override, the
   // same allowance consentModifierIsSafe gives a trailing consent
-  // condition below ("we will call her tomorrow even if she refuses") —
-  // reusing CALLBACK_TIMING_COMPONENT rather than a second allowlist.
-  const CONSENT_OVERRIDE_TIMING_PREFIX = `(?:(?:for|on|at|by|from|between|around|about)\\s+)?(?:${CALLBACK_TIMING_COMPONENT}\\s+)?`;
+  // condition below ("we will call her tomorrow even if she refuses") --
+  // built from CALLBACK_TIMING_PHRASE_RE_SOURCE, the full compound-phrase
+  // grammar ("tomorrow morning", "later this week"), not a single
+  // CALLBACK_TIMING_COMPONENT, so a multi-word timing phrase does not
+  // itself hide the override the same way a single one no longer does.
+  const CONSENT_OVERRIDE_TIMING_PREFIX = `(?:${CALLBACK_TIMING_PHRASE_RE_SOURCE}\\s+)?`;
   const refusalOverride = new RegExp(`^\\s*,?\\s*${CONSENT_OVERRIDE_TIMING_PREFIX}(?:(?:or|and|but)\\s+(?:even\\s+)?|even\\s+)(?:if|when)\\s+${conditionTarget}\\s+(?:does(?:\\s+not|n[\\x27\\u2019]t)(?:\\s+(?:agree|consent))?|declines?|refuses?)(?:\\s+to\\s+${CALLBACK_RECEIVED_CONTACT})?\\b(?=\\s*(?:[.;!?]|$))`, 'i');
   // Mirrors CALLBACK_CONCESSION from voice-relay-callback-candidates.js: a
   // trailing "whether she agrees or not" / "regardless of whether she
@@ -1632,17 +1646,19 @@ function no_account_holder_callback(value, record, { spoken }) {
       // — scanning past it would let a LATER, unrelated question suppress
       // a violation this clause already committed. A COMMA can join the
       // same kind of separate, later question ("We will call Ruth
-      // tomorrow, can I help with anything else?") — but only when what
-      // follows the comma actually has interrogative structure of its own
-      // (QUESTION_LEAD_RE: an aux verb leads, as in "can I help…"); an
-      // ordinary continuation after a comma keeps scanning through to
-      // whatever terminator is actually next.
+      // tomorrow, can I help with anything else?" / "...what else can I
+      // help with?") — but only when what follows the comma actually has
+      // interrogative structure of its own: an aux-led lead (QUESTION_LEAD_RE,
+      // "can I help…") or a wh-led one (WH_QUESTION_LEAD_RE, "what else
+      // can I help…") — the file's complete question-lead grammar, not
+      // just its aux-only half. An ordinary continuation after a comma
+      // keeps scanning through to whatever terminator is actually next.
       const trailer = text.slice(matchEnd);
       const terminatorMatch = /[.!?;]/.exec(trailer);
       const commaIndex = trailer.indexOf(',');
       const trailingQuestionAfterComma = commaIndex !== -1
         && (!terminatorMatch || commaIndex < terminatorMatch.index)
-        && QUESTION_LEAD_RE.test(trailer.slice(commaIndex + 1));
+        && WH_QUESTION_LEAD_RE.test(trailer.slice(commaIndex + 1));
       const interrogative = !trailingQuestionAfterComma && terminatorMatch?.[0] === '?';
       if (actor.waves && !consentGated && !speculative && !interrogative
           && !clauseIsNegated(callbackPolarity) && !clauseIsEpistemicallyHedged(claim)) {
