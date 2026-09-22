@@ -60,8 +60,20 @@ const mockDb = jest.fn((table) => {
     q.__where = cond;
     return q;
   });
-  q.whereIn = jest.fn(() => q);
-  q.select = jest.fn(async () => []);
+  q.whereIn = jest.fn((_col, ids) => {
+    q.__whereInIds = ids;
+    return q;
+  });
+  q.select = jest.fn(async (...cols) => {
+    if (table === 'discounts' && Array.isArray(q.__whereInIds)) {
+      // The stack_group lookup: id/stack_group/is_stackable only.
+      return q.__whereInIds
+        .map((id) => DISCOUNTS[id])
+        .filter(Boolean)
+        .map((row) => Object.fromEntries(cols.map((c) => [c, row[c]])));
+    }
+    return [];
+  });
   q.first = jest.fn(async () => {
     if (table === 'customers') return mockDb.__customer;
     if (table === 'services') return mockDb.__service;
@@ -250,24 +262,45 @@ describe('POST /api/admin/schedule/preview', () => {
     expect(res.body.regime).toBe(false);
   });
 
-  test('surfaces a stack-group conflict as an advisory verdict, not a hard failure', async () => {
+  // Codex pre-push audit P1 (push 1): the route's own discountStackGroupConflict
+  // call used to read row.stack_group/row.id/row.name off buildAppointmentPricing's
+  // RETURNED discount shape (discountId/discountName, no stack_group at
+  // all) -- the check could never fire for a real conflict, silently
+  // returning null every time despite reading as a working safety net.
+  // Fixed by fetching each pricing result's own discount catalog rows
+  // (id/stack_group/is_stackable) directly. This test now proves a REAL
+  // conflict is actually caught, not merely that the response key exists.
+  test('surfaces a real stack-group conflict as an advisory verdict, not a hard failure', async () => {
     mockGateEnabled = true;
     const { req, res, next } = makeReqRes({
       groups: [{
         key: 'g1', customerId: 'cust-1', serviceType: 'Quarterly Pest Control',
         primaryLinePrice: 100,
-        primaryLineDiscount: { discountId: 'silver', discountType: 'percentage', discountAmount: 10, stackGroup: 'tier' },
+        primaryLineDiscount: { discountId: 'silver', discountType: 'percentage', discountAmount: 10 },
         serviceAddons: [],
         discountId: 'gold', discountType: 'percentage', discountAmount: 15,
       }],
     });
     await handler(req, res, next);
     expect(res.body.results[0].error).toBeUndefined();
-    // Neither catalog row in this fixture carries a real stack_group field
-    // (buildAppointmentPricing's own discount rows don't expose it without
-    // a live discounts-table lookup this mocked test doesn't provide) --
-    // the assertion that matters here is that a conflict verdict key
-    // always exists on the response and never throws/500s.
-    expect('stackGroupConflict' in res.body.results[0]).toBe(true);
+    // silver (line) and gold (appointment) share catalog stack_group
+    // 'tier' -- a real, currently-undetectable-without-this-fix conflict.
+    expect(res.body.results[0].stackGroupConflict).toMatchObject({ group: 'tier' });
+  });
+
+  test('does NOT flag a conflict when the two discounts share no stack_group at all', async () => {
+    mockGateEnabled = true;
+    const { req, res, next } = makeReqRes({
+      groups: [{
+        key: 'g1', customerId: 'cust-1', serviceType: 'Quarterly Pest Control',
+        primaryLinePrice: 100,
+        primaryLineDiscount: { discountId: 'five-pct', discountType: 'percentage', discountAmount: 5 },
+        serviceAddons: [],
+        discountId: 'credit-1', discountType: 'fixed_amount', discountAmount: 10.03,
+      }],
+    });
+    await handler(req, res, next);
+    expect(res.body.results[0].error).toBeUndefined();
+    expect(res.body.results[0].stackGroupConflict).toBeNull();
   });
 });

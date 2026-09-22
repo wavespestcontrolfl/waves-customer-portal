@@ -6068,12 +6068,47 @@ router.post('/preview', requireAdmin, async (req, res, next) => {
       // — surfaced here as a reviewed advisory alongside the price, not a
       // hard block, matching the creation route's own current (unenforced)
       // behavior exactly; a future slice can wire this into an actual 400.
-      const conflictRows = [];
-      if (pricing.primaryDiscount) conflictRows.push({ ...pricing.primaryDiscount, scope: 'line:primary' });
-      (pricing.addonLines || []).forEach((line, i) => {
-        if (line.discount) conflictRows.push({ ...line.discount, scope: `line:addon:${i}` });
-      });
-      if (pricing.appointmentDiscount) conflictRows.push({ ...pricing.appointmentDiscount, spansAll: true });
+      //
+      // Codex pre-push audit P1 (push 1): buildAppointmentPricing's own
+      // returned discount shape (discountId/discountName, no stack_group)
+      // is a load-bearing contract several other callers already depend
+      // on — widening it there risked an unrelated regression outside
+      // this route's own scope. Fetched independently here instead: one
+      // extra query for exactly the catalog rows this preview's own
+      // discounts reference, keyed by id, so the conflict check reads the
+      // REAL stack_group/is_stackable rather than silently matching
+      // nothing (the shape mismatch this finding reported — conflictRows
+      // used to carry discountId/discountName, but stackGroupConflict
+      // reads row.id/row.name/row.stack_group, none of which the spread
+      // pricing object actually had).
+      const discountIdsInPricing = [
+        pricing.primaryDiscount?.discountId,
+        ...(pricing.addonLines || []).map((l) => l.discount?.discountId),
+        pricing.appointmentDiscount?.discountId,
+      ].filter(Boolean);
+      let stackGroupById = new Map();
+      if (discountIdsInPricing.length) {
+        try {
+          const rows = await db('discounts').whereIn('id', [...new Set(discountIdsInPricing)]).select('id', 'stack_group', 'is_stackable');
+          stackGroupById = new Map(rows.map((r) => [String(r.id), r]));
+        } catch (e) {
+          logger.warn(`[schedule/preview] stack_group lookup failed: ${e.message}`);
+        }
+      }
+      const conflictRow = (discount, lane) => {
+        if (!discount) return null;
+        const catalog = stackGroupById.get(String(discount.discountId)) || {};
+        return {
+          id: discount.discountId, name: discount.discountName,
+          stack_group: catalog.stack_group, is_stackable: catalog.is_stackable,
+          ...lane,
+        };
+      };
+      const conflictRows = [
+        conflictRow(pricing.primaryDiscount, { scope: 'line:primary' }),
+        ...(pricing.addonLines || []).map((line, i) => conflictRow(line.discount, { scope: `line:addon:${i}` })),
+        conflictRow(pricing.appointmentDiscount, { spansAll: true }),
+      ].filter(Boolean);
       let stackGroupConflictVerdict = null;
       try { stackGroupConflictVerdict = discountStackGroupConflict(conflictRows); } catch { stackGroupConflictVerdict = null; }
 
