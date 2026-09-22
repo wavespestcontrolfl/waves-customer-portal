@@ -56,6 +56,7 @@ const {
   hasPricingRegimeMarker,
   clearPricingRegimeMarker,
   resolveSeriesExtensionPriceTemplate,
+  seriesExtensionUnbillable,
 } = require('../routes/admin-schedule')._test;
 
 function discountQuery(discount) {
@@ -699,6 +700,38 @@ describe('recurring extension — restackStoredVisitFinancials', () => {
 
     expect(result.primaryLineDiscountDollars).toBe(20);
   });
+
+  // Codex pre-push audit P1 (round 14): the appointment-level cap
+  // (parent.discount_max_dollars) is the ONE cap source in this function
+  // that reached typedDiscountSlot with no Number() wrap — every sibling
+  // (catalogCap's line/addon caps, buildAppointmentPricing's identical
+  // live-side slot) explicitly coerces. node-postgres returns a
+  // numeric/decimal column as a STRING by default, so this row is
+  // Postgres-shaped on purpose: '10.00', not 10.
+  //
+  // Revert-to-red note: with the coercion removed, this assertion still
+  // PASSES — discount-stack.js's own capDollars/resolveDiscountCap each do
+  // their own Number(maxDiscountDollars) before their Number.isFinite
+  // check, so a raw string cap is already honored one layer downstream
+  // today. The admin-schedule.js coercion this pins is real defense-in-
+  // depth matching every sibling call site (and the only thing standing
+  // between a raw string and Number.isFinite the moment either of those
+  // two engine functions is ever refactored to check isFinite directly)
+  // rather than a currently-observable output bug — recorded here rather
+  // than silently dropped so the next person doesn't have to re-derive it.
+  test('a Postgres-shaped (string) appointment discount cap is honored, not dropped, through a stored restack', () => {
+    const result = restackStoredVisitFinancials({
+      primary_line_price: 100,
+      line_discount_type: null,
+      discount_type: 'percentage',
+      discount_amount: 50,
+      discount_max_dollars: '10.00',
+    }, [], null, new Map());
+
+    // Uncapped, 50% of $100 would be $50 off; the $10 cap must hold.
+    expect(result.appointmentDiscountDollars).toBe(10);
+    expect(result.price).toBe(90);
+  });
 });
 
 describe('recurring extension — loadDiscountCapsById', () => {
@@ -1062,6 +1095,103 @@ describe('recurring extension — storedOccurrenceFloorPrice (seriesExtensionUnb
       const floor = storedOccurrenceFloorPrice(markerParent, [], [], null, new Map());
       expect(floor).toBe(legacyFloor);
       expect(floor).toBe(100);
+    });
+  });
+});
+
+// Codex pre-push audit P1 (round 14): seriesExtensionUnbillable's discount-
+// cap set is fixed for the whole call (gatePriceParent.line_discount_id +
+// parentAddons' own discount ids never vary per date), so it's read ONCE
+// before the per-date floor loop, not once per date — a billable-amount
+// guard the caller can ask about many dates at once has no business
+// repeating the same catalog round trip for each one.
+describe('recurring extension — seriesExtensionUnbillable (single discountCaps read across every date)', () => {
+  beforeEach(() => {
+    delete process.env.GATE_DISCOUNT_STACKING;
+  });
+
+  // A minimal fake conn: 'customers' resolves the gate's own read; every
+  // other table (only 'discounts', from loadDiscountCapsById, is actually
+  // reached — 'scheduled_services' is touched too, by
+  // resolveSeriesExtensionPriceTemplate's own unrelated read, and served a
+  // harmless null) is served through the SAME thenable, with every await
+  // against 'discounts' recorded so the fix can be pinned by COUNT, not
+  // just by result.
+  function makeUnbillableConn(discountRows) {
+    const discountCalls = [];
+    const conn = (table) => {
+      let whereInIds = null;
+      const chain = {
+        where: () => chain,
+        whereIn: (_col, ids) => { whereInIds = ids; return chain; },
+        select: () => chain,
+        first: () => Promise.resolve(table === 'customers' ? { id: 'c1' } : null),
+        then: (resolve, reject) => {
+          if (table === 'discounts') {
+            discountCalls.push(whereInIds);
+            return Promise.resolve(discountRows.filter((r) => whereInIds.includes(r.id))).then(resolve, reject);
+          }
+          return Promise.resolve([]).then(resolve, reject);
+        },
+      };
+      return chain;
+    };
+    return { conn, discountCalls };
+  }
+
+  // Priced (createInvoiceOnComplete forces willMint true regardless of
+  // customer billing lane, per recurringWithoutBillableAmount above), so
+  // the function returns null (billable — nothing to refuse) instead of
+  // exercising the gate's rejection branches, which are already covered by
+  // the runRecurringAlertAction P1 tests in recurring-series-maintenance.
+  // test.js. No service_id / service_key_snapshot / service_type means
+  // resolveCompletionProfileForScheduledService's own lookup returns early
+  // without touching the fake conn at all.
+  const parent = {
+    id: 'p1', customer_id: 'c1', primary_line_price: 100,
+    line_discount_id: 'ld1', line_discount_type: 'percentage', line_discount_amount: 10,
+    discount_type: null, service_type: '', create_invoice_on_complete: true,
+  };
+  const cols = { create_invoice_on_complete: {} };
+  const dates = ['2099-01-01', '2099-02-01', '2099-03-01'];
+
+  test('gate off: no discounts read at all (no-op path, byte-identical to before this slice)', async () => {
+    const { conn, discountCalls } = makeUnbillableConn([{ id: 'ld1', max_discount_dollars: null }]);
+    const result = await seriesExtensionUnbillable(conn, {
+      parent, dates, cols, parentAddons: [], storedDiscountScope: null, blackoutDates: [], skipParent: false,
+    });
+    expect(result).toBeNull();
+    expect(discountCalls).toHaveLength(0);
+  });
+
+  test('gate on: the SAME discount-cap set is read ONCE for 3 dates, not once per date', async () => {
+    await withGateLive(async () => {
+      const { conn, discountCalls } = makeUnbillableConn([{ id: 'ld1', max_discount_dollars: null }]);
+      const result = await seriesExtensionUnbillable(conn, {
+        parent, dates, cols, parentAddons: [], storedDiscountScope: null, blackoutDates: [], skipParent: false,
+      });
+      expect(result).toBeNull(); // billable — the gate itself is unaffected by this fix
+      expect(discountCalls).toHaveLength(1);
+      expect(discountCalls[0]).toEqual(['ld1']);
+    });
+  });
+
+  test('gate on: the read covers the UNION of every parentAddons discount id, not just the primary', () => {
+    return withGateLive(async () => {
+      const { conn, discountCalls } = makeUnbillableConn([
+        { id: 'ld1', max_discount_dollars: null },
+        { id: 'addon-disc-a', max_discount_dollars: 25 },
+        { id: 'addon-disc-b', max_discount_dollars: null },
+      ]);
+      const parentAddons = [
+        { discount_id: 'addon-disc-a', service_id: 'svc-a' },
+        { discount_id: 'addon-disc-b', service_id: 'svc-b' },
+      ];
+      await seriesExtensionUnbillable(conn, {
+        parent, dates, cols, parentAddons, storedDiscountScope: null, blackoutDates: [], skipParent: false,
+      });
+      expect(discountCalls).toHaveLength(1);
+      expect(discountCalls[0]).toEqual(['ld1', 'addon-disc-a', 'addon-disc-b']);
     });
   });
 });

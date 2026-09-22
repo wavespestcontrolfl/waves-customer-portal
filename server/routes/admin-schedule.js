@@ -2863,10 +2863,23 @@ function restackStoredVisitFinancials(parent, addonRows, discountScope, discount
       eligible: matchesScope(addon?.service_id) && !addonPctExcluded(addon),
     };
   });
+  // Codex pre-push audit P1 (round 14): every OTHER cap source reaching
+  // typedDiscountSlot in this function — catalogCap, a few lines above, and
+  // buildAppointmentPricing's identical live-side appointmentDiscount slot —
+  // explicitly Number()-coerces its cap before handing it in. This one
+  // didn't: node-postgres returns numeric/decimal columns as STRINGS by
+  // default, and discount-stack.js's own cap-application logic detects a
+  // real cap via Number.isFinite(...), which is false for a numeric
+  // string (not a coercing check) — so an uncoerced discount_max_dollars
+  // silently restacked as "no cap" on every recurring extension (auto-
+  // extend, visit-count top-up, alert extend/convert) even when the
+  // appointment-level discount genuinely carried one.
   const appointmentDiscount = typedDiscountSlot(
     parent?.discount_type,
     parent?.discount_amount,
-    parent?.discount_max_dollars,
+    parent?.discount_max_dollars != null && parent.discount_max_dollars !== ''
+      ? Number(parent.discount_max_dollars)
+      : null,
   );
 
   const stacked = restackOccurrenceDiscounts({
@@ -4131,14 +4144,18 @@ async function seriesExtensionUnbillable(conn, {
   // pricing + real catalog caps every extension write site's own
   // applyDiscountStackRestack already stamps rows with — see that
   // function's own comment for the concrete under-count this fixes.
-  // discountCaps is fetched fresh per date (mirroring every write site),
-  // gated so the gate-off path makes no extra query.
+  // discountCaps is gated so the gate-off path makes no extra query, and
+  // (Codex pre-push audit P1, round 14) fetched ONCE before the loop, not
+  // once per date: gatePriceParent's line_discount_id is fixed and
+  // parentAddons is a superset of every date's own dueAddons, so the whole
+  // cap set is knowable up front — a validation guard that can be asked
+  // about many dates has no reason to repeat the same catalog read.
+  const discountCaps = discountStackingLive()
+    ? await loadDiscountCapsById(conn, [gatePriceParent.line_discount_id, ...parentAddons.map((a) => a.discount_id)])
+    : null;
   let floor = Infinity;
   for (const d of dates) {
     const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, d, blackoutDates, skipParent);
-    const discountCaps = discountStackingLive()
-      ? await loadDiscountCapsById(conn, [gatePriceParent.line_discount_id, ...dueAddons.map((a) => a.discount_id)])
-      : null;
     const price = storedOccurrenceFloorPrice(gatePriceParent, dueAddons, parentAddons, storedDiscountScope, discountCaps);
     floor = Math.min(floor, price);
   }
@@ -18704,17 +18721,27 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         { statusCode: 409, isOperational: true, code: 'EXTENSION_SHORTFALL' },
       );
     }
+    // Canonical restack (GATE_DISCOUNT_STACKING) — parent is loop-invariant
+    // across every spawned row (same id, same row), so its price template
+    // and the FULL discount-cap set (the union across every row's own due
+    // add-ons — parentAddons is a superset of any single row's dueAddons)
+    // are each resolved ONCE here, not once per spawned row inside this
+    // locked transaction (Codex pre-push audit P1, round 14: these two
+    // reads were identical on every iteration).
+    const spawnedPriceTemplate = discountStackingLive()
+      ? await resolveSeriesExtensionPriceTemplate(trx, parent.id, parent)
+      : null;
+    const spawnedDiscountCaps = discountStackingLive()
+      ? await loadDiscountCapsById(trx, [spawnedPriceTemplate.line_discount_id, ...parentAddons.map((a) => a.discount_id)])
+      : null;
     for (const row of spawned) {
       const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, row.date, alertBlackoutDates, skipParent);
       // Canonical restack (GATE_DISCOUNT_STACKING): recomputed fresh per
       // spawned row's own due add-ons — see restackStoredVisitFinancials;
       // no-op off.
-      let restackedAddonDollars = null;
-      if (discountStackingLive()) {
-        const rowPriceTemplate = await resolveSeriesExtensionPriceTemplate(trx, parent.id, parent);
-        const discountCaps = await loadDiscountCapsById(trx, [rowPriceTemplate.line_discount_id, ...dueAddons.map((a) => a.discount_id)]);
-        restackedAddonDollars = restackStoredVisitFinancials(rowPriceTemplate, dueAddons, storedDiscountScope, discountCaps)?.addonDollars;
-      }
+      const restackedAddonDollars = discountStackingLive()
+        ? restackStoredVisitFinancials(spawnedPriceTemplate, dueAddons, storedDiscountScope, spawnedDiscountCaps)?.addonDollars
+        : null;
       await insertRecurringChildAddons(trx, row.id, dueAddons, restackedAddonDollars);
     }
     // Resolve/insert the alert row in the SAME transaction — the resolution
@@ -19096,6 +19123,7 @@ router._test = {
   restackStoredVisitFinancials,
   applyDiscountStackRestack,
   storedOccurrenceFloorPrice,
+  seriesExtensionUnbillable,
   loadDiscountCapsById,
   stampPricingRegimeMarker,
   hasPricingRegimeMarker,
