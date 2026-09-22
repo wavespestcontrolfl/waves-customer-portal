@@ -9770,6 +9770,20 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const n = Number(v);
         return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : null;
       };
+      // Codex pre-push audit P0 (round 4 on #4657): applyDiscount below has
+      // no notion of a discount's catalog CAP — an unmarked (legacy) row's
+      // add-on discount has no frozen cap of its own to fall back to (only
+      // a MARKED row's pricing_provenance.caps carries one; see
+      // resolveStoredDiscountCaps), so the only available ceiling is the
+      // LIVE catalog row, read once here for every discount id this save
+      // actually touches. reuses loadDiscountCapsById (already the ONE
+      // place a discount id's cap resolves from — restackStoredVisitFinancials's
+      // own callers use it too) rather than a new query. Deactivated-since
+      // ids still resolve (no active filter), matching every other cap
+      // read in this route.
+      const addonDiscountCaps = await loadDiscountCapsById(
+        db, addons.map((a) => a?.discountId).filter(Boolean),
+      );
       const normalizedAddons = [];
       for (const a of addons) {
         const serviceName = (a && (a.serviceName || a.name)) ? String(a.serviceName || a.name).trim() : '';
@@ -9786,7 +9800,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         let lineDiscount = null;
         if (gross != null && lineType && lineAmount != null && !isNaN(lineAmount)) {
           net = applyDiscount(gross, lineType, lineAmount);
-          const dollars = Math.max(0, Math.round((gross - net) * 100) / 100);
+          let dollars = Math.max(0, Math.round((gross - net) * 100) / 100);
+          const cap = a.discountId ? addonDiscountCaps.get(a.discountId) : null;
+          if (cap != null && dollars > cap) {
+            dollars = Math.max(0, Math.round(cap * 100) / 100);
+            net = Math.max(0, Math.round((gross - dollars) * 100) / 100);
+          }
           lineDiscount = {
             discountId: a.discountId || null,
             discountName: a.discountName || null,

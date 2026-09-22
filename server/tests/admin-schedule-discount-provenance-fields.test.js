@@ -170,3 +170,82 @@ postgres('scheduled_services discount/provenance GET fields against migrated Pos
     assertUndiscountedRow(payload.services.find((s) => s.id === plain.id));
   });
 });
+
+describe('scheduled_services PUT /:id/update-details — add-on discount catalog cap enforcement (Codex pre-push audit P0, round 4 on #4657) against migrated PostgreSQL', () => {
+  let database;
+  let trx;
+  let customerId;
+  let visitId;
+  let discountId;
+
+  beforeAll(() => {
+    const connection = process.env.DATABASE_URL;
+    const url = new URL(connection);
+    const localCI = ['localhost', '127.0.0.1'].includes(url.hostname);
+    const ownedQA = process.env.WAVES_LOCAL_DEV === '1'
+      && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
+    if (!localCI && !ownedQA) throw new Error('Use disposable CI or this worktree\'s private QA database');
+    database = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 2 } });
+    require('../models/db').connection = database;
+  });
+
+  beforeEach(async () => {
+    trx = await database.transaction();
+    require('../models/db').connection = trx;
+    customerId = randomUUID();
+    await trx('customers').insert({
+      id: customerId, first_name: 'Synthetic', last_name: 'Fixture',
+      email: `${customerId}@example.invalid`, phone: `fixture-${customerId.slice(0, 8)}`,
+      address_line1: '100 Test Lane', city: 'Test City', zip: '00000', active: true,
+      pipeline_stage: 'active_customer',
+    });
+    discountId = randomUUID();
+    await trx('discounts').insert({
+      id: discountId, discount_key: 'capped_twenty_' + discountId.slice(0, 8), name: 'Capped Twenty', discount_type: 'percentage', amount: 20,
+      max_discount_dollars: 5, is_active: true, is_auto_apply: false, show_in_invoices: true,
+    });
+    const [row] = await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, service_type: 'Quarterly Pest Control',
+      service_key_snapshot: 'pest_general_quarterly', status: 'confirmed',
+      scheduled_date: '2040-02-01', window_start: '08:00', window_end: '10:00',
+      estimated_price: 100, primary_line_price: 100,
+    }).returning('*');
+    visitId = row.id;
+  });
+
+  afterEach(async () => { if (trx) await trx.rollback(); });
+  afterAll(async () => { await database?.destroy(); });
+
+  const router = require('../routes/admin-schedule');
+  function findHandler(method, path) {
+    const layer = router.stack.find((l) => l.route?.path === path && l.route.methods[method]);
+    return layer.route.stack[layer.route.stack.length - 1].handle;
+  }
+  async function put(id, body) {
+    const handler = findHandler('put', '/:id/update-details');
+    const req = { params: { id }, query: {}, body, headers: {} };
+    let statusCode = 200;
+    let payload = null;
+    const res = { status(code) { statusCode = code; return this; }, json(p) { payload = p; return this; } };
+    let nextErr = null;
+    await handler(req, res, (err) => { nextErr = err; });
+    if (nextErr) throw nextErr;
+    return { statusCode, payload };
+  }
+
+  test('a NEW 20%-off-capped-at-$5 add-on discount on an unmarked visit saves capped at $5, never the raw uncapped $20', async () => {
+    const { statusCode } = await put(visitId, {
+      primaryLinePrice: 100,
+      addons: [{
+        serviceName: 'Mosquito Add-on', basePrice: 100,
+        discountType: 'percentage', discountAmount: 20, discountId, discountName: 'Capped Twenty',
+      }],
+    });
+    expect(statusCode).toBe(200);
+    const addonRow = await trx('scheduled_service_addons').where({ scheduled_service_id: visitId }).first();
+    expect(addonRow).toBeTruthy();
+    // Capped: $5 off a $100 line, net $95 — never the raw 20% ($20 off, net $80).
+    expect(Number(addonRow.discount_dollars)).toBe(5);
+    expect(Number(addonRow.estimated_price)).toBe(95);
+  });
+});
