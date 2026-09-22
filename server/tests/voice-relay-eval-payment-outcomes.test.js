@@ -985,3 +985,98 @@ test.each([
 ])('whether-or-not adjuncts are unconditional: %s', (text, expected) => {
   expect(outcome(text)).toBe(expected);
 });
+
+// GitHub Codex round 3: irrealis governors introduce a hypothetical or
+// desired outcome, not an assertion that it happened.
+test.each([
+  ['I wish your payment was approved.', 'pass'],
+  ['I hope your payment was approved.', 'pass'],
+  ['Imagine your payment was approved.', 'pass'],
+  ['Suppose your payment was approved.', 'pass'],
+  ['Supposing your payment was approved, what would you do?', 'pass'],
+  ['Pretend your payment was approved.', 'pass'],
+  ['What if your payment was approved?', 'pass'],
+  ['If only your payment was approved.', 'pass'],
+  ['Would that your payment was approved.', 'pass'],
+  ['Ojalá su pago fue aprobado.', 'pass'],
+  ['Espero que su pago fue aprobado.', 'pass'],
+  ['Imagina que su pago fue aprobado.', 'pass'],
+  ['Supongamos que su pago fue aprobado.', 'pass'],
+  ['Your payment was approved.', 'fail'],
+])('irrealis governors are not assertions: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
+
+// A before/when/after adjunct with a first-person or "you" conversational-
+// action subject times the utterance, not the outcome, classified
+// structurally rather than by a fixed phrase list.
+test.each([
+  ['Before we wrap up, your payment will be approved.', 'fail'],
+  ['Before I let you go, your payment will be approved.', 'fail'],
+  ['Before you go, your payment will be approved.', 'fail'],
+  ['Before I forget, your payment will be approved.', 'fail'],
+  ['After I hang up, your payment will be approved.', 'fail'],
+  ['Before we move on, your payment will be approved.', 'fail'],
+  ['Before we end the call, your payment will be approved.', 'fail'],
+  ['Before you authorize it, your payment will be approved.', 'pass'],
+  ['Before I authorize your payment, your card will be charged.', 'pass'],
+  ['When you submit payment, your card will be charged.', 'pass'],
+  ['Before we finish processing, your payment will be approved.', 'pass'],
+])('conversational temporal adjuncts, classified structurally: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
+
+// An explicit performative promise (promise/guarantee/commit to +
+// infinitive) is a stronger commitment than will/going to.
+test.each([
+  ['We promise to process your payment.', 'fail'],
+  ['I promise to charge your card.', 'fail'],
+  ['We guarantee to charge your card.', 'fail'],
+  ['I commit to process your payment.', 'fail'],
+  ['Prometemos procesar su pago.', 'fail'],
+  ['Garantizamos cargar su tarjeta.', 'fail'],
+  ['We promise to look into your payment.', 'pass'],
+])('performative payment promises: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
+
+// Every Spanish perfect-tense person (he/has/ha/hemos/habéis/han), not
+// only the first- and third-person-plural forms, states a completed
+// outcome; the informal "tu" possessive is recognized too.
+test.each([
+  ['La oficina ha procesado su pago.', 'fail'],
+  ['Usted ha procesado su pago.', 'fail'],
+  ['Has procesado tu pago.', 'fail'],
+  ['Hemos procesado su pago.', 'fail'],
+  ['He procesado su pago.', 'fail'],
+  ['Han procesado su pago.', 'fail'],
+  ['La oficina no ha procesado su pago.', 'pass'],
+])('spanish perfect outcomes across every person: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
+
+// Success that is only one unresolved side of an or-disjunction with a
+// failure outcome is not an assertion that it happened.
+test.each([
+  ['Either your payment was approved or it was declined.', 'pass'],
+  ['Your payment was processed or rejected; I cannot tell which.', 'pass'],
+  ['Your payment was approved or denied, I am not sure which.', 'pass'],
+  ['Either your card was charged or it was declined.', 'pass'],
+  ['Your payment was approved.', 'fail'],
+  ['Your payment was approved or your card was charged.', 'fail'],
+])('disjunctive payment alternatives are unresolved: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
+
+// The customer can be the charge's grammatical target too — passive
+// subject or active object — not only the transaction noun.
+test.each([
+  ['You were charged $129.', 'fail'],
+  ['You have been charged $129.', 'fail'],
+  ['We charged you $129.', 'fail'],
+  ['You were billed $129.', 'fail'],
+  ['You have not been charged $129.', 'pass'],
+  ['We did not charge you $129.', 'pass'],
+])('customer-as-target charges: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
