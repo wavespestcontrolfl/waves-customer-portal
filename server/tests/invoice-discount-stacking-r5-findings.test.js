@@ -393,3 +393,69 @@ describe('P1: the write binds the CONFIRMED gate state it was previewed under â€
     expect(invoice.subtotal).toBe(100);
   });
 });
+
+describe('P1 (post-push): the group-conflict error carries isOperational/statusCode/code, not just a bare .status', () => {
+  test('the REAL error calculateUpdateFinancials throws for a conflict has the full operational shape the PUT route reads', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const silverId = 'shape-silver';
+    const goldId = 'shape-gold';
+    setupDb({
+      discounts: [
+        discountRow({ id: silverId, name: 'WaveGuard Silver', discount_type: 'percentage', amount: 10, stack_group: 'tier', is_stackable: false }),
+        discountRow({ id: goldId, name: 'WaveGuard Gold', discount_type: 'percentage', amount: 15, stack_group: 'tier', is_stackable: false }),
+      ],
+    });
+    let caught = null;
+    try {
+      await calculateUpdateFinancials({
+        lineItems: [
+          { client_id: 'line-1', description: 'Pest', quantity: 1, unit_price: 100, amount: 100 },
+          { client_id: 'line-2', description: 'Lawn', quantity: 1, unit_price: 100, amount: 100 },
+          { discount_id: silverId, discount_for: 'line-1', description: 'WaveGuard Silver', quantity: 1, unit_price: -1, amount: -1 },
+          { discount_id: goldId, discount_for: 'line-2', description: 'WaveGuard Gold', quantity: 1, unit_price: -1, amount: -1 },
+        ],
+        customer: { property_type: 'residential' },
+        invoice: { id: 'invoice-1', line_items: '[]' },
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).not.toBeNull();
+    expect(caught.statusCode).toBe(400);
+    expect(caught.isOperational).toBe(true);
+    expect(caught.code).toBe('DISCOUNT_STACK_GROUP_CONFLICT');
+    expect(caught.message).toMatch(/Only one WaveGuard tier discount can apply/);
+  });
+
+  test('create() throws the same fully-shaped error for a conflict', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const silverId = 'shape-silver-2';
+    const goldId = 'shape-gold-2';
+    setupDb({
+      customer: CUSTOMER,
+      discounts: [
+        discountRow({ id: silverId, name: 'WaveGuard Silver', discount_type: 'percentage', amount: 10, stack_group: 'tier', is_stackable: false }),
+        discountRow({ id: goldId, name: 'WaveGuard Gold', discount_type: 'percentage', amount: 15, stack_group: 'tier', is_stackable: false }),
+      ],
+    });
+    let caught = null;
+    try {
+      await InvoiceService.create({
+        customerId: 'customer-1',
+        title: 'Two-tier invoice',
+        lineItems: [
+          { client_id: 'line-1', description: 'Pest', quantity: 1, unit_price: 100, amount: 100 },
+          { client_id: 'line-2', description: 'Lawn', quantity: 1, unit_price: 100, amount: 100 },
+          { discount_id: silverId, discount_for: 'line-1', description: 'WaveGuard Silver', quantity: 1, unit_price: -1, amount: -1 },
+          { discount_id: goldId, discount_for: 'line-2', description: 'WaveGuard Gold', quantity: 1, unit_price: -1, amount: -1 },
+        ],
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).not.toBeNull();
+    expect(caught.statusCode).toBe(400);
+    expect(caught.isOperational).toBe(true);
+    expect(caught.code).toBe('DISCOUNT_STACK_GROUP_CONFLICT');
+  });
+});

@@ -768,7 +768,19 @@ function assertNewStackGroupConflicts(rows) {
       if (clash && (row._isNew || clash._isNew)) {
         const label = group === "tier" ? "WaveGuard tier discount" : `${group} discount`;
         const err = new Error(`Only one ${label} can apply: ${(clash.name || "discount")} and ${(row.name || "discount")} cannot be combined`);
+        // Claude-fallback pre-push audit P1 (round 5 on PR #4655, post-push):
+        // a bare `err.status = 400` is invisible to server/middleware/errors.js'
+        // errorHandler, which branches on `err.isOperational` (using
+        // `err.statusCode`, not `err.status`) before falling through to a
+        // generic 500 — the SAME shape the gate-divergence error a few
+        // hundred lines below already uses, specifically so the admin
+        // routes' own isOperational/statusCode checks (and the global
+        // handler, for any caller that has neither) surface this everyday
+        // business-rule rejection as a clean 400, never an opaque 500.
+        err.statusCode = 400;
         err.status = 400;
+        err.isOperational = true;
+        err.code = "DISCOUNT_STACK_GROUP_CONFLICT";
         throw err;
       }
       seen.push(row);

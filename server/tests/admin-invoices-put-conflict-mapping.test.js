@@ -88,3 +88,52 @@ describe('PUT /:id editability-conflict mapping', () => {
     });
   });
 });
+
+// Codex/Claude-fallback pre-push audit P1 (round 5 on PR #4655, post-push):
+// the isOperational/statusCode check added to the PUT catch block must
+// actually catch the errors it was added FOR — the discount-stack-group
+// conflict (assertNewStackGroupConflicts) and gate-divergence
+// (calculateUpdateFinancials) errors both now carry that shape, and both
+// must surface at the STATUS CODE their own `statusCode` names, not fall
+// through to the fence-regex mapper or the generic 500.
+describe('PUT /:id isOperational/statusCode mapping (discount-stacking gate + group-conflict errors)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('a non-stackable-group conflict surfaces as its own 400, not the fence mapper or a generic 500', async () => {
+    const err = new Error('Only one WaveGuard tier discount can apply: WaveGuard Silver and WaveGuard Gold cannot be combined');
+    err.statusCode = 400; err.status = 400; err.isOperational = true; err.code = 'DISCOUNT_STACK_GROUP_CONFLICT';
+    InvoiceService.update.mockRejectedValue(err);
+
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/admin/invoices/inv-1`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ line_items: [] }),
+      });
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({
+        error: 'Only one WaveGuard tier discount can apply: WaveGuard Silver and WaveGuard Gold cannot be combined',
+        code: 'DISCOUNT_STACK_GROUP_CONFLICT',
+      });
+    });
+  });
+
+  test('a discount-stacking gate divergence surfaces as its own retryable 409', async () => {
+    const err = new Error('Discount rules changed since this was previewed — reload the invoice and try again');
+    err.statusCode = 409; err.status = 409; err.isOperational = true; err.code = 'DISCOUNT_STACKING_GATE_DIVERGED';
+    InvoiceService.update.mockRejectedValue(err);
+
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/admin/invoices/inv-1`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ line_items: [], expected_discount_stacking: true }),
+      });
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({
+        error: 'Discount rules changed since this was previewed — reload the invoice and try again',
+        code: 'DISCOUNT_STACKING_GATE_DIVERGED',
+      });
+    });
+  });
+});
