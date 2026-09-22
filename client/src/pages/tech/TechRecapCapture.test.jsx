@@ -65,16 +65,29 @@ describe('TechRecapCapture upload recovery', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
-  it('deletes a row with an expired PUT URL before retry presigns a replacement', async () => {
+  it.each([
+    ['successful cleanup', null],
+    ['already-cleaned 404', 404],
+  ])('deletes a row with an expired PUT URL before retry presigns a replacement (%s)', async (_label, retryDeleteStatus) => {
     fetch.mockResolvedValueOnce({ ok: false, status: 403 }).mockResolvedValueOnce({ ok: true, status: 200 });
     let presignCount = 0;
+    let deleteCount = 0;
     const request = vi.fn(async (path, options) => {
       if (isListRequest(path, options)) return { items: [] };
       if (path.endsWith('/presign')) {
         presignCount += 1;
         return { mediaId: `media-expired-${presignCount}`, uploadUrl: `https://upload.test/expired-${presignCount}` };
       }
-      if (path.endsWith('/media-expired-1') && options?.method === 'DELETE') return { ok: true };
+      if (path.endsWith('/media-expired-1') && options?.method === 'DELETE') {
+        deleteCount += 1;
+        if (deleteCount === 1) throw new Error('Cleanup unavailable');
+        if (retryDeleteStatus) {
+          const error = new Error('media not found');
+          error.status = retryDeleteStatus;
+          throw error;
+        }
+        return { ok: true };
+      }
       if (path.endsWith('/media-expired-2/confirm')) return { ok: true, id: 'media-expired-2', status: 'ready' };
       throw new Error(`Unexpected request: ${path}`);
     });
@@ -82,13 +95,15 @@ describe('TechRecapCapture upload recovery', () => {
     render(<TechRecapCapture service={SERVICE_ONE} request={request} />);
     await tagPerimeter('expired-link.jpg');
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('Upload link expired — retry to request a new link.');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Upload link expired, but cleanup failed.');
     fireEvent.click(screen.getByRole('button', { name: 'Retry upload' }));
 
     await waitFor(() => expect(pathsMatching(request, '/media-expired-2/confirm')).toHaveLength(1));
     expect(pathsMatching(request, '/presign')).toHaveLength(2);
-    expect(pathsMatching(request, '/media-expired-1')).toHaveLength(1);
-    const deleteOrder = request.mock.invocationCallOrder[request.mock.calls.findIndex(([path, options]) => path.endsWith('/media-expired-1') && options?.method === 'DELETE')];
+    expect(pathsMatching(request, '/media-expired-1')).toHaveLength(2);
+    expect(deleteCount).toBe(2);
+    const deleteIndexes = request.mock.calls.map(([path, options], index) => (path.endsWith('/media-expired-1') && options?.method === 'DELETE' ? index : -1)).filter((index) => index >= 0);
+    const deleteOrder = request.mock.invocationCallOrder[deleteIndexes[1]];
     const presignIndexes = request.mock.calls.map(([path], index) => (path.endsWith('/presign') ? index : -1)).filter((index) => index >= 0);
     const replacementOrder = request.mock.invocationCallOrder[presignIndexes[1]];
     expect(deleteOrder).toBeLessThan(replacementOrder);
@@ -266,14 +281,20 @@ describe('TechRecapCapture upload recovery', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
-  it('finishes confirmation for the original service when the selected service changes during PUT', async () => {
+  it('refreshes the original service when the tech returns to it during PUT', async () => {
     let finishPut;
     const put = new Promise((resolve) => { finishPut = resolve; });
     fetch.mockReturnValueOnce(put);
+    let confirmed = false;
     const request = vi.fn(async (path, options) => {
-      if (isListRequest(path, options)) return { items: [] };
+      if (isListRequest(path, options)) {
+        return { items: confirmed && path.includes('/service-one/') ? [{ id: 'old-media', role: 'perimeter', caption: 'Sealing your perimeter barrier', status: 'ready' }] : [] };
+      }
       if (path === '/tech/services/service-one/recap-media/presign') return { mediaId: 'old-media', uploadUrl: 'https://upload.test/old-media' };
-      if (path === '/tech/services/service-one/recap-media/old-media/confirm') return { ok: true, id: 'old-media', status: 'ready' };
+      if (path === '/tech/services/service-one/recap-media/old-media/confirm') {
+        confirmed = true;
+        return { ok: true, id: 'old-media', status: 'ready' };
+      }
       throw new Error(`Unexpected request: ${path}`);
     });
     const view = render(<TechRecapCapture service={SERVICE_ONE} request={request} />);
@@ -284,12 +305,12 @@ describe('TechRecapCapture upload recovery', () => {
     ));
 
     view.rerender(<TechRecapCapture service={SERVICE_TWO} request={request} />);
+    view.rerender(<TechRecapCapture service={SERVICE_ONE} request={request} />);
     await act(async () => finishPut({ ok: true, status: 200 }));
 
     await waitFor(() => expect(pathsMatching(request, '/service-one/recap-media/old-media/confirm')).toHaveLength(1));
     expect(pathsMatching(request, '/service-two/recap-media/old-media/confirm')).toHaveLength(0);
-    expect(screen.queryByText(/old-visit\.jpg/)).not.toBeInTheDocument();
-    expect(screen.queryByText('Uploaded')).not.toBeInTheDocument();
+    expect(await screen.findByText('Uploaded')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '+ Capture recap clip' })).toBeEnabled();
   });
 
@@ -333,5 +354,6 @@ describe('TechRecapCapture upload recovery', () => {
     await act(async () => finishPut({ ok: true, status: 200 }));
 
     await waitFor(() => expect(pathsMatching(request, '/service-one/recap-media/unmounted-media/confirm')).toHaveLength(1));
+    expect(request.mock.calls.filter(([path, options]) => isListRequest(path, options))).toHaveLength(1);
   });
 });

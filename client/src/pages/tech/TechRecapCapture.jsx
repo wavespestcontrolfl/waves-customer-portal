@@ -59,19 +59,28 @@ async function reconcileConfirmDraft(draft, request) {
   return { draft: { ...draft, needsReconcile: false }, readyItems: null };
 }
 
+async function deleteKnownDraft(draft, request) {
+  try {
+    await request(`/tech/services/${draft.serviceId}/recap-media/${draft.mediaId}`, { method: 'DELETE' });
+  } catch (error) {
+    if (error?.status !== 404) throw error;
+  }
+}
+
 async function recoverUploadFailure(error, draft, request) {
   let retainedDraft = draft;
   let message = error?.message || 'Couldn’t add that clip — try again or discard it.';
-  if (error?.status === 403 && !draft.uploaded && draft.mediaId) {
+  if (error?.status === 403 && !error.cleanupFailed && !draft.uploaded && draft.mediaId) {
     try {
       // S3 answers 403 when a presign is no longer usable. Remove its known
       // uploading row before allowing Retry to mint a replacement row/key.
-      await request(`/tech/services/${draft.serviceId}/recap-media/${draft.mediaId}`, { method: 'DELETE' });
-      retainedDraft = { ...draft, mediaId: null, uploadUrl: null };
+      await deleteKnownDraft(draft, request);
+      retainedDraft = { ...draft, mediaId: null, uploadUrl: null, cleanupBeforeRetry: false };
       message = 'Upload link expired — retry to request a new link.';
     } catch {
       // Keep the rejected presign until cleanup succeeds. This prevents a
       // fresh presign from leaving the known pending row orphaned.
+      retainedDraft = { ...draft, cleanupBeforeRetry: true };
       message = 'Upload link expired, but cleanup failed. Retry to clean it up and request a new link.';
     }
   }
@@ -113,6 +122,7 @@ export default function TechRecapCapture({ service, request }) {
   };
 
   useEffect(() => {
+    serviceIdRef.current = serviceId;
     const generation = serviceGenerationRef.current + 1;
     serviceGenerationRef.current = generation;
     setPendingFile(null);
@@ -122,6 +132,7 @@ export default function TechRecapCapture({ service, request }) {
     setErr(null);
     if (serviceId) refresh(serviceId, generation);
     return () => {
+      serviceIdRef.current = null;
       if (serviceGenerationRef.current === generation) serviceGenerationRef.current += 1;
     };
   }, [serviceId]); // eslint: react-hooks plugin is not configured in this repo;
@@ -146,6 +157,17 @@ export default function TechRecapCapture({ service, request }) {
       if (draft.durationMs === undefined) {
         const durationMs = draft.mediaType === 'video' ? await readVideoDurationMs(draft.file) : null;
         draft = { ...draft, durationMs };
+      }
+
+      if (draft.cleanupBeforeRetry && draft.mediaId) {
+        try {
+          await deleteKnownDraft(draft, request);
+        } catch (cleanupError) {
+          cleanupError.cleanupFailed = true;
+          cleanupError.message = 'Upload link expired, but cleanup failed. Retry to clean it up and request a new link.';
+          throw cleanupError;
+        }
+        draft = { ...draft, mediaId: null, uploadUrl: null, uploaded: false, cleanupBeforeRetry: false };
       }
 
       if (draft.needsReconcile && draft.mediaId) {
@@ -184,7 +206,9 @@ export default function TechRecapCapture({ service, request }) {
       await request(`/tech/services/${targetServiceId}/recap-media/${draft.mediaId}/confirm`, {
         method: 'POST', body: JSON.stringify({ durationMs: draft.durationMs }),
       });
-      if (isCurrentService(targetServiceId, generation)) await refresh(targetServiceId, generation);
+      if (serviceIdRef.current === targetServiceId) {
+        await refresh(targetServiceId, serviceGenerationRef.current);
+      }
     } catch (e) {
       const { retainedDraft, message } = await recoverUploadFailure(e, draft, request);
       if (isCurrentService(targetServiceId, generation)) {
@@ -206,7 +230,7 @@ export default function TechRecapCapture({ service, request }) {
     if (!file || !targetServiceId || targetServiceId !== serviceId) return;
     const mediaType = file.type.startsWith('image/') ? 'image' : 'video';
     const contentType = file.type || (mediaType === 'image' ? 'image/jpeg' : 'video/mp4');
-    upload({ file, role, serviceId: targetServiceId, mediaType, contentType, durationMs: undefined, mediaId: null, uploadUrl: null, uploaded: false, needsReconcile: false, retryable: true });
+    upload({ file, role, serviceId: targetServiceId, mediaType, contentType, durationMs: undefined, mediaId: null, uploadUrl: null, uploaded: false, needsReconcile: false, retryable: true, cleanupBeforeRetry: false });
   };
 
   const discardFailedUpload = async () => {
@@ -221,20 +245,15 @@ export default function TechRecapCapture({ service, request }) {
     const cleanupDraft = { ...discarded, retryable: false, discardRequested: true, discardPending: true };
     setFailedUpload(cleanupDraft);
     try {
-      await request(`/tech/services/${discarded.serviceId}/recap-media/${discarded.mediaId}`, { method: 'DELETE' });
+      await deleteKnownDraft(discarded, request);
       if (isCurrentService(discarded.serviceId, generation)) {
         setFailedUpload(null);
         setErr(null);
       }
-    } catch (error) {
+    } catch {
       if (isCurrentService(discarded.serviceId, generation)) {
-        if (error?.status === 404) {
-          setFailedUpload(null);
-          setErr(null);
-        } else {
-          setFailedUpload({ ...cleanupDraft, discardPending: false });
-          setErr('Couldn’t discard this clip from the visit. Retry discard.');
-        }
+        setFailedUpload({ ...cleanupDraft, discardPending: false });
+        setErr('Couldn’t discard this clip from the visit. Retry discard.');
       }
     }
   };
