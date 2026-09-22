@@ -2187,11 +2187,28 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     (async () => {
       try {
         const r = await adminFetch('/admin/schedule/services-dropdown');
+        const groups = Array.isArray(r) ? r : (r?.groups || []);
+        const items = groups.flatMap((group) => group?.items || []);
+        // GitHub review round 1 P1 (PR #4656): the route's own hardcoded
+        // fallback (served when ITS services-table query fails) is not a
+        // complete catalog — it omits several genuinely excluded keys
+        // (bed_bug_treatment, bora_care, palm_injection, ...), so trusting
+        // its excludedFromPercentDiscount flags as authoritative would
+        // preview (and let Save through on) a percentage discount the
+        // server's OWN last-good exclusion catalog refuses on save,
+        // charging more than shown. The endpoint has no explicit flag for
+        // this (adding one means editing server/routes/admin-schedule.js,
+        // out of this slice's scope), but the fallback's items are built
+        // from a bare S(name, duration, serviceKey) helper that never sets
+        // a catalog `id` — every REAL (services-table) response always
+        // does. No `id` anywhere in a non-empty response is the one
+        // observable signature available from here; treat it exactly like
+        // a failed fetch (unresolved, not a complete catalog).
+        const looksLikeFallback = items.length > 0 && items.every((item) => item?.id == null);
+        if (looksLikeFallback) throw new Error('exclusion catalog fell back to the hardcoded list');
         const keys = new Set();
-        for (const group of Array.isArray(r) ? r : (r?.groups || [])) {
-          for (const item of group?.items || []) {
-            if (item?.serviceKey && item.excludedFromPercentDiscount === true) keys.add(item.serviceKey);
-          }
+        for (const item of items) {
+          if (item?.serviceKey && item.excludedFromPercentDiscount === true) keys.add(item.serviceKey);
         }
         if (!cancelled) setPercentExcludedKeys(keys);
       } catch {
@@ -2536,7 +2553,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       ? { key: groupKey(target), lines: target.lines, split: appointmentSubmitGroups.length > 1 }
       : null;
   })();
-  const appointmentDiscountHasNoGroup = Boolean(appointmentDiscount && services.length && !appointmentDiscountGroup);
   const appointmentDiscountReaches = (svc) => {
     if (!appointmentDiscount) return false;
     // Only the group this discount actually rides.
@@ -2552,6 +2568,24 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     }
     return true;
   };
+  // GitHub review round 1 P1 (PR #4656): a group can be found (its OWN
+  // catalog scope matched a real submit group) while STILL reaching zero
+  // lines within it — a percentage discount whose matched service(s) are
+  // ALL percent-excluded (e.g. a booking that is only a termite bond) is
+  // the concrete case: appointmentDiscountGroup resolves fine, but
+  // appointmentDiscountReaches is false for every line in it, so the
+  // preview/POST already correctly compute a $0 discount — but Save stayed
+  // enabled with the discount still visibly selected, letting the operator
+  // book believing it applied. Treated exactly like "no group at all": the
+  // same banner, message and "Remove discount" recovery.
+  const appointmentDiscountReachesNoLine = Boolean(
+    appointmentDiscount && appointmentDiscountGroup
+    && !appointmentDiscountGroup.lines.some((svc) => appointmentDiscountReaches(svc)),
+  );
+  const appointmentDiscountHasNoGroup = Boolean(
+    appointmentDiscount && services.length
+    && (!appointmentDiscountGroup || appointmentDiscountReachesNoLine),
+  );
   const appointmentDiscountPreview = useMemo(() => {
     if (!appointmentDiscount) return { dollars: 0, total: netSubtotal, lines: null };
     const stacked = stackVisitDiscounts({

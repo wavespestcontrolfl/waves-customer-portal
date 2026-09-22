@@ -70,6 +70,7 @@ function installModalFetch({
   enablePrepay = false,
   discounts = [],
   basePrice = 100,
+  servicesDropdownResponse,
 } = {}) {
   let addressRequests = 0;
   let prepayPreviews = 0;
@@ -111,6 +112,10 @@ function installModalFetch({
     if (url.includes('/schedule-estimates')) return Promise.resolve(jsonResponse({ estimates: [] }));
     if (url.endsWith('/admin/technicians')) return Promise.resolve(jsonResponse({ technicians: [] }));
     if (url.endsWith('/admin/discounts')) return Promise.resolve(jsonResponse(discounts));
+    if (url.endsWith('/admin/schedule/services-dropdown')) {
+      if (servicesDropdownResponse === undefined) throw new Error('services-dropdown not mocked for this test');
+      return Promise.resolve(jsonResponse(servicesDropdownResponse));
+    }
     if (url.endsWith('/annual-prepay-availability')) {
       return Promise.resolve(jsonResponse({ enabled: enablePrepay }));
     }
@@ -1029,5 +1034,77 @@ describe('GitHub review round 1 on PR #4656', () => {
     // Rejected outright — never applied, never shown as a "free visit".
     expect(picker.value).toBe('');
     expect(screen.queryByText(/Custom amount:/)).toBeNull();
+  });
+
+  // P1 (GitHub round 1, extra thread :2196): the services-dropdown route
+  // serves a HARDCODED fallback (no explicit flag) when its own
+  // services-table query fails — an incomplete catalog, missing several
+  // genuinely excluded keys. Trusting it as complete would preview (and
+  // let Save through on) a percentage discount the server's real
+  // exclusion catalog refuses on save. Detected client-side: every
+  // fallback item lacks a real catalog `id` (built from a bare helper,
+  // not a services-table row), unlike a real response.
+  it('treats the services-dropdown fallback catalog as unresolved, never as a complete exclusion list', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    installModalFetch({
+      discounts: [{
+        id: 'ten-pct', name: 'Ten Percent', discount_type: 'percentage',
+        amount: 10, is_active: true, show_in_invoices: true,
+      }],
+      // Shaped exactly like the route's real hardcoded fallback: items
+      // with no `id` at all.
+      servicesDropdownResponse: {
+        groups: [{
+          category: 'termite',
+          items: [{
+            name: 'Termite Bond', duration: 60, priceMin: 45, priceMax: 45,
+            serviceKey: 'termite_bond_10yr', excludedFromPercentDiscount: true,
+          }],
+        }],
+      },
+    });
+    renderBooking();
+    await addOneSeasonalService();
+    const picker = await screen.findByLabelText('Appointment discount');
+    fireEvent.change(picker, { target: { value: 'ten-pct' } });
+    await screen.findByText('Could not confirm which services this percentage discount excludes — retry before saving.');
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    expect(submit.disabled).toBe(true);
+  });
+
+  // P1 (GitHub round 1, extra thread :2539): a percentage discount can
+  // resolve a real submit GROUP (its own catalog scope matched one) while
+  // still reaching ZERO lines within it — every matched service is
+  // percent-excluded (e.g. a booking that is only a termite bond). The
+  // preview/POST already compute $0 correctly, but Save stayed enabled
+  // with the discount still visibly selected.
+  it('blocks Save when a percentage discount matches a group but every line in it is percent-excluded', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    installModalFetch({
+      discounts: [{
+        id: 'ten-pct', name: 'Ten Percent', discount_type: 'percentage',
+        amount: 10, is_active: true, show_in_invoices: true,
+      }],
+      // A REAL (id-bearing) catalog — never the fallback path above —
+      // that marks the booking's only line as percent-excluded.
+      servicesDropdownResponse: {
+        groups: [{
+          category: 'pest_control',
+          items: [{
+            id: 'svc-first-row', name: 'First seasonal service', duration: 30,
+            serviceKey: 'svc_first', excludedFromPercentDiscount: true,
+          }],
+        }],
+      },
+    });
+    renderBooking();
+    await addOneSeasonalService();
+    const picker = await screen.findByLabelText('Appointment discount');
+    fireEvent.change(picker, { target: { value: 'ten-pct' } });
+    await screen.findByText('This appointment discount does not match any selected service. Change or remove it before saving.');
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    expect(submit.disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Remove discount' }));
+    await waitFor(() => expect(submit.disabled).toBe(false));
   });
 });
