@@ -1,3 +1,4 @@
+const { applyCustomerNameOrder, applyCustomerSearchFilter, applyStableCustomerOrder, customerSearchTerms } = require('../services/customer-list-search');
 const express = require('express');
 const Joi = require('joi');
 const { normalizeContactRole } = require('../constants/contact-roles');
@@ -1341,57 +1342,9 @@ function compactServiceContactSlots(updates, before = {}) {
   return updates;
 }
 
-function customerSearchTerms(value) {
-  return String(value || '')
-    .trim()
-    .match(/[a-z0-9]+/gi) || [];
-}
-
 function applyCustomerListFilters(query, filters, healthColumns) {
   const { search, stage, tier, tag, source, area, city, cards, hasBalance, lastVisited } = filters;
-  if (search) {
-    const s = `%${search}%`;
-    const isPhoneLike = /^[\d\s().+\-]+$/.test(search);
-    const phoneDigits = isPhoneLike ? String(search).replace(/\D/g, '') : '';
-    const terms = customerSearchTerms(search);
-    const searchableTextSql = `
-      CONCAT_WS(' ',
-        first_name,
-        last_name,
-        company_name,
-        phone,
-        email,
-        address_line1,
-        address_line2,
-        city,
-        state,
-        zip,
-        account_id,
-        profile_label
-      )
-    `;
-    query = query.where(function () {
-      this.whereILike('first_name', s).orWhereILike('last_name', s)
-        .orWhereILike('phone', s).orWhereILike('email', s)
-        .orWhereILike('address_line1', s).orWhereILike('city', s)
-        .orWhereILike('company_name', s)
-        .orWhereILike('state', s).orWhereILike('zip', s)
-        .orWhereILike('profile_label', s)
-        .orWhereRaw('account_id::text ILIKE ?', [s])
-        .orWhereRaw("(COALESCE(first_name, '') || ' ' || COALESCE(last_name, '')) ILIKE ?", [s])
-        .orWhereRaw(`${searchableTextSql} ILIKE ?`, [s]);
-      if (terms.length > 1) {
-        this.orWhere(function () {
-          terms.forEach((term) => {
-            this.whereRaw(`${searchableTextSql} ILIKE ?`, [`%${term}%`]);
-          });
-        });
-      }
-      if (phoneDigits.length >= 3) {
-        this.orWhereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits}%`]);
-      }
-    });
-  }
+  if (search) query = applyCustomerSearchFilter(query, search);
   if (stage) query = query.where('pipeline_stage', stage);
   if (tier === 'none') query = query.whereNull('waveguard_tier');
   else if (tier) query = query.where('waveguard_tier', tier);
@@ -2451,19 +2404,18 @@ router.get('/', async (req, res, next) => {
       db.raw("(SELECT COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0) FROM payments WHERE payments.customer_id = customers.id AND payments.status = 'paid') as lifetime_revenue_net"),
     );
 
-    // Alphabetical by first name only — operator preference. No tie-break
-    // on last name or other columns. NULLS LAST keeps blank-first-name
-    // rows pinned to the end of the list instead of the top.
+    // Keep first-name browsing and explicit metric sorts; when searching by
+    // name, prefer close identity matches to incidental address/email hits.
     const dir = order === 'desc' ? 'desc' : 'asc';
     const sortSql = new Map([
-      ['name', `LOWER(first_name) ${dir} NULLS LAST`],
-      // Net payments, matching the customer-detail revenue definition.
       ['revenue', `lifetime_revenue_net ${dir}`],
       ['lead_score', `lead_score ${dir}`],
       ['rate', `monthly_rate ${dir}`],
       ['last_contact', `last_contact_date ${dir}`],
-    ]).get(effectiveSort) || `first_name ${dir}`;
-    query = query.orderByRaw(sortSql);
+    ]).get(effectiveSort);
+    query = sortSql
+      ? applyStableCustomerOrder(query.orderByRaw(sortSql))
+      : applyCustomerNameOrder(query, filters.search, dir);
 
     const total = await scopeTechAssigned(applyCustomerListFilters(
       db('customers').whereNull('customers.deleted_at'),
