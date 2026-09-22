@@ -14,6 +14,7 @@
  */
 import { describe, expect, test } from "vitest";
 import { discountRowCaption, sanitizeInvoiceLineItemsForSubmit } from "./AdminInvoicesPage.jsx";
+import { stackDocumentDiscounts } from "../../lib/discountStack";
 
 describe("discountRowCaption — origin", () => {
   test("a scheduled_service stamp reads as frozen, from a visit", () => {
@@ -108,31 +109,62 @@ describe("discountRowCaption — cap", () => {
   });
 });
 
-// Pre-push audit P1 (this slice, round 1): server/services/invoice.js
+// Pre-push audit P1 round 1 (this slice): server/services/invoice.js
 // only admits an unparented (document-wide) item into its document stack
 // when it is trusted/persisted OR carries NO discount_id — a fresh
 // catalog-referenced document-wide pick (discount_id set, discount_for:
 // null — exactly what the new invoice-wide picker creates) otherwise
 // throws "Invalid line-item discount" on save. invoice.js itself is owned
 // by another lane in this split; this is the client-only accommodation.
+//
+// Pre-push audit P0 round 2: safe ONLY for a FIXED-amount term — a
+// document PERCENTAGE term's own canonical bucket compounds LAST; once
+// stripped to a literal credit it becomes a FIXED term, which compounds
+// FIRST, so an invoice already carrying another term can SAVE a
+// genuinely different total than the one just previewed. This function
+// re-checks the row's own type independently of the picker
+// (matchingDocumentDiscounts, AdminInvoicesPage.jsx) that is supposed to
+// only ever offer fixed-type rows in the first place.
 describe("sanitizeInvoiceLineItemsForSubmit — the server's actual accepted shape for a fresh document-wide pick", () => {
-  test("a FRESH document-wide catalog pick (discount_for: null, discount_id set) loses its catalog reference at the submit boundary", () => {
+  const fixedRow = { id: "twenty-five-fixed", discount_type: "fixed_amount", amount: 25 };
+  const percentRow = { id: "silver-id", discount_type: "percentage", amount: 10 };
+
+  test("a FRESH fixed-type document-wide pick loses its catalog reference at the submit boundary", () => {
     const items = [
-      { client_id: "d1", _kind: "discount", discount_for: null, discount_id: "silver-id", discount_key: "wg_silver", description: "WaveGuard Silver (the whole invoice)", unit_price: -10, amount: -10 },
+      { client_id: "d1", _kind: "discount", discount_for: null, discount_id: "twenty-five-fixed", discount_key: "twenty_five", description: "Twenty Five Dollars (the whole invoice)", unit_price: -25, amount: -25 },
     ];
-    const sanitized = sanitizeInvoiceLineItemsForSubmit(items, new Set());
+    const discountRowById = new Map([[fixedRow.id, fixedRow]]);
+    const sanitized = sanitizeInvoiceLineItemsForSubmit(items, new Set(), discountRowById);
     expect(sanitized[0]).not.toHaveProperty("discount_id");
     expect(sanitized[0]).not.toHaveProperty("discount_key");
-    expect(sanitized[0].unit_price).toBe(-10);
-    expect(sanitized[0].description).toBe("WaveGuard Silver (the whole invoice)");
+    expect(sanitized[0].unit_price).toBe(-25);
+    expect(sanitized[0].description).toBe("Twenty Five Dollars (the whole invoice)");
+  });
+
+  test("a FRESH percentage-type document-wide item keeps its discount_id — stripping it would change canonical order and silently save a different total", () => {
+    const items = [
+      { client_id: "d1", _kind: "discount", discount_for: null, discount_id: "silver-id", unit_price: -10, amount: -10 },
+    ];
+    const discountRowById = new Map([[percentRow.id, percentRow]]);
+    const sanitized = sanitizeInvoiceLineItemsForSubmit(items, new Set(), discountRowById);
+    expect(sanitized[0].discount_id).toBe("silver-id");
+  });
+
+  test("a fresh item whose catalog row can't be found is still safe to strip — the live preview itself already treats a rowless pick as fixed", () => {
+    const items = [
+      { client_id: "d1", _kind: "discount", discount_for: null, discount_id: "deactivated-row", unit_price: -10, amount: -10 },
+    ];
+    const sanitized = sanitizeInvoiceLineItemsForSubmit(items, new Set(), new Map());
+    expect(sanitized[0]).not.toHaveProperty("discount_id");
   });
 
   test("a PERSISTED document-wide item (its client_id already saved) keeps its discount_id — it's already frozen, and re-sending it unchanged is a no-op read either way", () => {
     const items = [
-      { client_id: "d1", _kind: "discount", discount_for: null, discount_id: "silver-id", unit_price: -10, amount: -10 },
+      { client_id: "d1", _kind: "discount", discount_for: null, discount_id: "twenty-five-fixed", unit_price: -25, amount: -25 },
     ];
-    const sanitized = sanitizeInvoiceLineItemsForSubmit(items, new Set(["d1"]));
-    expect(sanitized[0].discount_id).toBe("silver-id");
+    const discountRowById = new Map([[fixedRow.id, fixedRow]]);
+    const sanitized = sanitizeInvoiceLineItemsForSubmit(items, new Set(["d1"]), discountRowById);
+    expect(sanitized[0].discount_id).toBe("twenty-five-fixed");
   });
 
   test("a STORED stamp (trusted source) keeps its discount_id regardless of persistedClientIds", () => {
@@ -158,6 +190,47 @@ describe("sanitizeInvoiceLineItemsForSubmit — the server's actual accepted sha
     ];
     const sanitized = sanitizeInvoiceLineItemsForSubmit(items, new Set());
     expect(sanitized).toEqual(items);
+  });
+});
+
+// Pre-push audit P0 round 2, numeric proof: WHY the picker restricts to
+// fixed-type only. Fixture: a $100 line already carries a 10% LINE pick;
+// a document-wide term is added on top. stackDocumentDiscounts is the
+// exact engine both this form's live preview AND server/services/invoice.js
+// run (client mirror / server original) — this drives it twice per case:
+// once with the document term expressed with its REAL catalog type (what
+// the preview sees before submit), once as the literal fixed_amount term
+// the server would actually apply once discount_id is stripped (what
+// gets SAVED). A fixed-type term is provably invariant; a percentage-type
+// term is provably NOT — reproducing the auditor's own $81 vs $81.90 find.
+describe("why matchingDocumentDiscounts restricts to fixed-type only — numeric proof", () => {
+  function stackedTotal(documentTerm) {
+    const stacked = stackDocumentDiscounts({
+      lines: [{ gross: 100, terms: [{ discountType: "percentage", amount: 10 }] }],
+      documentTerms: [documentTerm],
+    });
+    return stacked.lines[0].net;
+  }
+
+  test("a FIXED $20 document term: previewed-as-catalog and saved-as-literal totals match exactly", () => {
+    const previewedAsCatalog = stackedTotal({ discountType: "fixed_amount", amount: 20 });
+    const savedAsLiteral = stackedTotal({ discountType: "fixed_amount", amount: 20 });
+    expect(savedAsLiteral).toBe(previewedAsCatalog);
+  });
+
+  test("a PERCENTAGE 10% document term: previewed-as-catalog (compounds LAST, $81) disagrees with saved-as-a-stripped-literal ($9 fixed, compounds FIRST, $81.90) — exactly why this type is excluded from the picker", () => {
+    const previewedAsCatalog = stackedTotal({ discountType: "percentage", amount: 10 });
+    // The line's own 10% alone (no document term) leaves $90 — the
+    // document term's OWN dollar contribution is whatever it took beyond
+    // that, i.e. the exact $9 sanitizeInvoiceLineItemsForSubmit would
+    // freeze into a literal credit if this type weren't excluded first.
+    const lineOnlyNet = 90;
+    const resolvedDollars = lineOnlyNet - previewedAsCatalog;
+    const savedAsLiteral = stackedTotal({ discountType: "fixed_amount", amount: resolvedDollars });
+    expect(previewedAsCatalog).toBe(81);
+    expect(resolvedDollars).toBe(9);
+    expect(savedAsLiteral).toBe(81.9);
+    expect(savedAsLiteral).not.toBe(previewedAsCatalog);
   });
 });
 
