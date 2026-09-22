@@ -1611,7 +1611,42 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [appointmentDiscountState, setAppointmentDiscount] = useState(null);
   const [percentExcludedKeys, setPercentExcludedKeys] = useState(null);
   const [percentExclusionsAttempt, setPercentExclusionsAttempt] = useState(0);
-  const appointmentDiscount = stackingEnabled ? appointmentDiscountState : null;
+  // Codex pre-push audit P1 (round 3): the gate CONFIRMED at the moment a
+  // discount was picked, frozen here — the picker can only ever be reached
+  // while stackingEnabled reads true, but useDiscountStackingState keeps
+  // polling in the BACKGROUND afterward and can flip stackingEnabled to
+  // false while the modal stays open with a discount already selected. Ap-
+  // pointmentDiscount below used to read the LIVE stackingEnabled directly,
+  // so that flip silently reverted the preview AND the eventual POST to
+  // full price — the operator sees no warning and the customer is charged
+  // MORE than what was shown. This snapshot only ever changes via an
+  // explicit operator Retry (retryAppointmentDiscountGate below), never on
+  // its own, so a background flip can only ever BLOCK Save (via
+  // appointmentDiscountGateDrifted), never silently reshape what is shown
+  // or sent.
+  const [appointmentDiscountGateSnapshot, setAppointmentDiscountGateSnapshot] = useState(null);
+  // The discount stays visible in the preview and the POST as long as it is
+  // selected — the live gate no longer decides this directly; only an
+  // explicit Retry can change appointmentDiscountGateSnapshot, so a
+  // background poll flip can never silently null this out from under an
+  // active selection.
+  const appointmentDiscount = appointmentDiscountState && appointmentDiscountGateSnapshot
+    ? appointmentDiscountState
+    : null;
+  // Which "compound" regime to preview/stack under: the FROZEN gate a
+  // selected discount was picked against, or the live gate when nothing is
+  // selected (no drift to protect against in that case).
+  const appointmentDiscountCompound = appointmentDiscountState && appointmentDiscountGateSnapshot !== null
+    ? appointmentDiscountGateSnapshot
+    : stackingEnabled;
+  // A discount is selected, the gate is CONFIRMED (known), and its current
+  // live value disagrees with the value frozen at selection time — the
+  // background poll moved under the operator's feet, in EITHER direction.
+  // Save must block until this is explicitly reconciled (never silently).
+  const appointmentDiscountGateDrifted = !!appointmentDiscountState
+    && appointmentDiscountGateSnapshot !== null
+    && stackingKnown
+    && stackingEnabled !== appointmentDiscountGateSnapshot;
   // Booster-months dropdown (owner request 2026-08-02): which service line's
   // month checklist is open. One open at a time, like the discount popover.
   // Keyed by STABLE lineId, never array index (Codex #3173 r2): removing an
@@ -1975,7 +2010,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   };
   // A custom preset takes the operator's amount, like a line pick.
   const pickAppointmentDiscount = (presetId) => {
-    if (!presetId) { setAppointmentDiscount(null); return; }
+    if (!presetId) { setAppointmentDiscount(null); setAppointmentDiscountGateSnapshot(null); return; }
     const discount = discountPresets.find((d) => String(d.id) === String(presetId));
     if (!discount) return;
     let amount = discount.amount;
@@ -1999,6 +2034,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       service_key_filter: discount.service_key_filter || null,
       service_category_filter: discount.service_category_filter || null,
     });
+    // Freeze the gate this pick was made under — the picker only renders
+    // while stackingEnabled reads true, so this is always true in practice;
+    // recorded explicitly (rather than assumed) so a later background flip
+    // has something concrete to compare against (appointmentDiscountGateDrifted).
+    setAppointmentDiscountGateSnapshot(stackingEnabled);
   };
   const lineServiceKey = (svc) => (svc?.service_key ?? svc?.serviceKey) || null;
   // A booking splits into one appointment per cadence group, and an
@@ -2468,10 +2508,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         eligible: appointmentDiscountReaches(s),
       })),
       appointmentDiscount,
-      compound: stackingEnabled,
+      compound: appointmentDiscountCompound,
     });
     return { dollars: stacked.appointmentDiscountDollars, total: stacked.total, lines: stacked.lines };
-  }, [services, selectedCustomer, mosquitoQuote, appointmentDiscount, netSubtotal, stackingEnabled, percentExcludedKeys]);
+  }, [services, selectedCustomer, mosquitoQuote, appointmentDiscount, netSubtotal, appointmentDiscountCompound, percentExcludedKeys]);
   // ONE cadence group's fully stacked per-visit total. The appointment-level
   // discount rides exactly one group (appointmentDiscountGroup), so a group
   // that does not carry it totals to its own subtotal. Used for the prepay
@@ -2488,7 +2528,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         eligible: carriesAppointmentDiscount && appointmentDiscountReaches(s),
       })),
       appointmentDiscount: carriesAppointmentDiscount ? appointmentDiscount : null,
-      compound: stackingEnabled,
+      compound: appointmentDiscountCompound,
     });
     return stacked.total;
   };
@@ -2615,7 +2655,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         windowStart,
       },
     };
-  }, [services, selectedCustomer, mosquitoQuote, apptDate, windowStart, skipWeekends, recurringCount, appointmentDiscount, appointmentDiscountGroup, stackingEnabled, percentExcludedKeys]);
+  }, [services, selectedCustomer, mosquitoQuote, apptDate, windowStart, skipWeekends, recurringCount, appointmentDiscount, appointmentDiscountGroup, appointmentDiscountCompound, percentExcludedKeys]);
   const manualPrepayQuery = manualPrepayPlan.query;
 
   // Preview fetch. Runs whenever the control is on screen — NOT only once
@@ -3035,7 +3075,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Header, footer and second-program CTA share one synchronous lock. React
   // state alone can admit two taps before the first render marks us saving.
   const handleSubmit = async (separateProgram) => {
-    if (appointmentDiscountHasNoGroup) return;
+    if (appointmentDiscountHasNoGroup || appointmentDiscountGateDrifted) return;
     if (!canSubmitAppointments({
       selectedCustomer,
       services,
@@ -3050,7 +3090,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // before it would let two fast clicks both pass and double-book.
     if (appointmentDiscountState) {
       const fresh = await ensureStackingFresh();
-      if (!fresh.known || fresh.enabled !== stackingEnabled) {
+      // Compared against the FROZEN pick-time snapshot, not the live
+      // stackingEnabled (Codex pre-push audit P1, round 3's own reviewer
+      // note): by the time this line runs, appointmentDiscountGateDrifted
+      // above has already forced stackingEnabled === snapshot for Save to
+      // even be reachable — comparing against the live value here would
+      // reopen the exact race the reviewer flagged (a poll updating
+      // stackingEnabled between the click and this probe resolving would
+      // make a stale live value agree with itself). The snapshot only ever
+      // changes via an explicit Retry, so it is safe to await against here.
+      if (!fresh.known || fresh.enabled !== appointmentDiscountGateSnapshot) {
         submitLockRef.current = false;
         setStaleStackingNotice('The discount-stacking setting changed while this was open. Reload before saving so the totals match what will be saved.');
         return;
@@ -3143,6 +3192,22 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setStaleStackingNotice('');
     retryStackingProbe();
   };
+  // Codex pre-push audit P1 (round 3): resolves appointmentDiscountGateDrifted
+  // — a background poll flip since this discount was selected. Issues a
+  // LIVE probe (not just the hook's cached poll) and, once it confirms an
+  // answer, re-freezes appointmentDiscountGateSnapshot to that value: the
+  // preview/POST (appointmentDiscount, appointmentDiscountCompound) recompute
+  // under the now-current regime and Save unblocks, WITHOUT ever having
+  // silently dropped the selection in the meantime. retryStackingProbe()
+  // afterward nudges the polling hook's own state to agree, so the picker
+  // section's stackingEnabled-gated render and this snapshot never disagree
+  // for long. If the probe fails (known: false), nothing is reconciled —
+  // stackingUnconfirmedBlocksSave (below) already covers that case.
+  const retryAppointmentDiscountGate = async () => {
+    const fresh = await ensureStackingFresh();
+    if (fresh.known) setAppointmentDiscountGateSnapshot(fresh.enabled);
+    retryStackingProbe();
+  };
   // A percentage/variable_percentage appointment discount previews against
   // the live exclusion catalog; if that fetch hasn't resolved, every line
   // reads excluded in the preview (appointmentDiscountReaches) but nothing
@@ -3153,6 +3218,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   });
   const discountSaveBlockedReason = staleStackingNotice
     || stackingUnconfirmedBlocksSave
+    // Codex pre-push audit P1 (round 3): a background gate flip since this
+    // discount was picked shares the SAME banner/copy as the probe-unknown
+    // case (per owner ruling) — the operator's fix is identical (Retry),
+    // and the risk is identical (the preview might not match what the
+    // server would save right now).
+    || appointmentDiscountGateDrifted
     ? 'Could not confirm the discount-stacking status — retry before saving.'
     : (percentExclusionsBlockSave
       ? 'Could not confirm which services this percentage discount excludes — retry before saving.'
@@ -3169,7 +3240,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     bookingPropertyState,
     alreadySubmitting: saving,
     addressAskPending,
-  }) && !stackingUnconfirmedBlocksSave && !percentExclusionsBlockSave && !appointmentDiscountHasNoGroup;
+  }) && !stackingUnconfirmedBlocksSave && !percentExclusionsBlockSave && !appointmentDiscountHasNoGroup && !appointmentDiscountGateDrifted;
   const hasRecurringServices = services.some((s) => s.cadence && s.cadence !== 'one_time');
   const firstCustomRecurringIndex = services.findIndex((s) => s.cadence === 'custom');
   const weekendRuleValue = skipWeekends ? weekendShift : 'allow';
@@ -4140,8 +4211,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           {/* Appointment-level discount — stacks on top of the line
               discounts above (one WaveGuard tier per appointment). Scoped
               only by the chosen preset's own catalog filter — no operator
-              "Applies to" override (see the PR body's "Not in this slice"). */}
-          {stackingEnabled && services.length > 0 && lineDiscountPresets.length > 0 && (
+              "Applies to" override (see the PR body's "Not in this slice").
+              Codex pre-push audit P1 (round 3): stays rendered once a
+              discount is actually selected even if the live gate later
+              reads off (appointmentDiscountState survives a background
+              poll flip) — hiding the whole control would leave the
+              operator unable to even SEE what is still selected while the
+              blocking banner below tells them to retry. A fresh (never-
+              picked) session still hides it exactly as before while the
+              gate reads off. */}
+          {(stackingEnabled || appointmentDiscountState) && services.length > 0 && lineDiscountPresets.length > 0 && (
             <div style={{ borderTop: `1px solid ${D.border}`, marginTop: 12, paddingTop: 12 }}>
               <label htmlFor="appointment-discount" style={labelStyle}>Appointment discount</label>
               <select
@@ -4174,9 +4253,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               <span>{discountSaveBlockedReason}</span>
               <button
                 type="button"
-                onClick={staleStackingNotice ? retryStaleStacking : stackingUnconfirmedBlocksSave ? retryStackingProbe : percentExclusionsBlockSave ? retryPercentExclusions : () => pickAppointmentDiscount('')}
+                onClick={staleStackingNotice ? retryStaleStacking : (stackingUnconfirmedBlocksSave || appointmentDiscountGateDrifted) ? retryAppointmentDiscountGate : percentExclusionsBlockSave ? retryPercentExclusions : () => pickAppointmentDiscount('')}
                 style={{ background: 'none', border: `1px solid ${D.red}`, color: D.red, borderRadius: 6, padding: '4px 10px', fontSize: 12, fontWeight: 500, cursor: 'pointer', flex: '0 0 auto' }}
-              >{!staleStackingNotice && appointmentDiscountHasNoGroup && !stackingUnconfirmedBlocksSave && !percentExclusionsBlockSave ? 'Remove discount' : 'Retry'}</button>
+              >{!staleStackingNotice && appointmentDiscountHasNoGroup && !stackingUnconfirmedBlocksSave && !percentExclusionsBlockSave && !appointmentDiscountGateDrifted ? 'Remove discount' : 'Retry'}</button>
             </div>
           )}
 

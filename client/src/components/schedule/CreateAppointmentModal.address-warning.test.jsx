@@ -761,3 +761,84 @@ describe('appointment discount stale-gate retry (Codex pre-push audit P1)', () =
     expect(retry).toHaveBeenCalled();
   });
 });
+
+describe('appointment discount gate-drift protection (Codex pre-push audit P1, round 3)', () => {
+  // The background poll behind useDiscountStackingState can flip
+  // stackingEnabled after a discount is already selected. The picker can
+  // only ever be REACHED while the gate reads confirmed-on, so the pick is
+  // always made under a true snapshot — this simulates the live value
+  // moving out from under that snapshot via a rerender with a new mocked
+  // hook return, exactly like a real background poll landing.
+  async function pickThenFlipGateTo(nextEnabled) {
+    const retry = vi.fn();
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry });
+    const { fetcher } = installModalFetch({ discounts: [{
+      id: 'mil', name: 'Military Discount', discount_type: 'fixed_amount',
+      amount: 10, is_active: true, show_in_invoices: true,
+    }] });
+    const booking = renderBooking();
+    await addOneSeasonalService();
+    const picker = await screen.findByLabelText('Appointment discount');
+    fireEvent.change(picker, { target: { value: 'mil' } });
+    await screen.findByText('Military Discount: -$10.00');
+
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: nextEnabled, known: true, retry });
+    booking.view.rerender(<CreateAppointmentModal
+      defaultCustomer={CUSTOMER}
+      defaultDate={booking.scheduledDate}
+      defaultWindowStart="09:00"
+      onClose={booking.onClose}
+      onCreated={booking.onCreated}
+      onChange={booking.onChange}
+    />);
+    return { booking, fetcher, retry };
+  }
+
+  it('flip true -> false after picking: blocks Save, shows the retry banner, and keeps the selection visible — never silently drops it', async () => {
+    const { fetcher } = await pickThenFlipGateTo(false);
+    await screen.findByText('Could not confirm the discount-stacking status — retry before saving.');
+    // Never silently stripped: the picker still shows the pick and the
+    // preview still reflects its dollars, even though the LIVE gate now
+    // disagrees with what was selected under.
+    expect(screen.getByLabelText('Appointment discount').value).toBe('mil');
+    expect(screen.getByText('Military Discount: -$10.00')).toBeTruthy();
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    expect(submit.disabled).toBe(true);
+    fireEvent.click(submit);
+    expect(schedulePosts(fetcher)).toHaveLength(0);
+  });
+
+  it('a later flip back to the ORIGINAL gate (false -> true) never needed to have silently dropped the selection either', async () => {
+    const { booking, fetcher } = await pickThenFlipGateTo(false);
+    await screen.findByText('Could not confirm the discount-stacking status — retry before saving.');
+    // Still selected and still previewed through the blocked window —
+    // this is the invariant the true -> false flip already proved; the
+    // false -> true transition below must never have depended on it
+    // breaking that invariant at any point.
+    expect(screen.getByLabelText('Appointment discount').value).toBe('mil');
+
+    // The poll lands again, back to the value the pick was originally made
+    // under — this transition is the false -> true direction the true ->
+    // false test above does not cover, exercised via the SAME symmetric
+    // (order-independent) mismatch check, not a second one-directional path.
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    booking.view.rerender(<CreateAppointmentModal
+      defaultCustomer={CUSTOMER}
+      defaultDate={booking.scheduledDate}
+      defaultWindowStart="09:00"
+      onClose={booking.onClose}
+      onCreated={booking.onCreated}
+      onChange={booking.onChange}
+    />);
+    // The selection was never silently dropped by either flip — it reads
+    // back exactly as the operator left it, and the total the operator
+    // agreed to (again matching the live gate) is safe to submit.
+    expect(screen.getByLabelText('Appointment discount').value).toBe('mil');
+    expect(screen.getByText('Military Discount: -$10.00')).toBeTruthy();
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    expect(JSON.parse(schedulePosts(fetcher)[0][1].body).discountId).toBe('mil');
+  });
+});
