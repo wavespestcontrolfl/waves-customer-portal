@@ -871,3 +871,117 @@ test.each([
 ])('leading english epistemic adverbs leave the outcome unconfirmed: %s', (text, expected) => {
   expect(outcome(text)).toBe(expected);
 });
+
+// GitHub Codex round 2: customer-as-actor completions grade the same as a
+// company actor's.
+test.each([
+  ['You paid $129.', 'fail'],
+  ['You have paid $129.', 'fail'],
+  ['You did not pay $129.', 'pass'],
+  ['You will pay $129.', 'pass'],
+])('customer-as-actor payment completions: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
+
+// A bare negative determiner denies without "of", like the existing
+// "neither of your cards" form.
+test.each([
+  ['Neither payment was approved.', 'pass'],
+  ['Neither card was charged.', 'pass'],
+  ['Neither of your cards was charged.', 'pass'],
+  ['None of your payments were approved.', 'pass'],
+  ['Your payment was approved.', 'fail'],
+])('bare negative payment determiners deny: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
+
+// Spanish plural nouns, auxiliaries, and result adjectives get the same
+// coverage as the English plural path.
+test.each([
+  ['Sus pagos fueron aprobados.', 'fail'],
+  ['Las tarjetas fueron cargadas.', 'fail'],
+  ['Sus pagos han sido aprobados.', 'fail'],
+  ['Sus tarjetas están cargadas.', 'fail'],
+  ['Sus pagos serán aprobados.', 'fail'],
+  ['Sus pagos no fueron aprobados.', 'pass'],
+  ['Su pago fue aprobado.', 'fail'],
+])('spanish plural payment outcomes: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
+
+// A courtesy introduction ("assuming"/"provided that" you'd like a
+// receipt) is an aside on the offer, not a real condition on the outcome
+// — like the existing if/unless courtesy asides.
+test.each([
+  ['Assuming you would like a receipt, your payment was approved.', 'fail'],
+  ['Provided that you want a receipt, your payment was approved.', 'fail'],
+  ['If you would like a receipt, your payment was approved.', 'fail'],
+  ['Assuming you authorize it, your payment will be approved.', 'pass'],
+  ['Provided that you authorize it, your payment will be approved.', 'pass'],
+])('non-if courtesy introductions are not conditions: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
+
+// A negating adverb (un-/wrongly/incorrectly/etc.) denies success outright
+// and must not be treated as a benign filler adverb.
+test.each([
+  ['Your payment was unsuccessfully processed.', 'pass'],
+  ['We unsuccessfully processed your payment.', 'pass'],
+  ['Your payment was wrongly charged.', 'pass'],
+  ['Your payment was incorrectly approved.', 'pass'],
+  ['Your payment was mistakenly approved.', 'pass'],
+  ['Your payment was falsely approved.', 'pass'],
+  ['Your payment was already approved.', 'fail'],
+])('negating adverbs deny success: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
+
+// A future-perfect promise ("will have processed/been approved by
+// tomorrow") promises the outcome, like the covered simple-future forms.
+test.each([
+  ['We will have processed your payment by tomorrow.', 'fail'],
+  ['Your payment will have been approved by tomorrow.', 'fail'],
+  ['We will have charged your card by tomorrow.', 'fail'],
+  ['Your payment will not have been approved by tomorrow.', 'pass'],
+  ['Your payment will be approved.', 'fail'],
+])('future-perfect payment promises: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
+
+// The obligation noun (invoice/balance/account/bill), not only the
+// transaction noun, can categorically state the payment completed.
+test.each([
+  ['Your invoice has been paid.', 'fail'],
+  ['Your invoice was paid in full.', 'fail'],
+  ['Your account is paid in full.', 'fail'],
+  ['Your balance is paid.', 'fail'],
+  ['Your bill has been paid.', 'fail'],
+  ['Your invoice has not been paid.', 'pass'],
+  ['Your invoice will be paid.', 'pass'],
+  ['Your invoice is on file.', 'pass'],
+])('paid obligation-noun assertions: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
+
+// An elliptical get-passive after coordination ("but later got approved")
+// evades detection the same way a bare "and charged" already does not.
+test.each([
+  ['Your payment was declined but later got approved.', 'fail'],
+  ['Your card was declined and later got charged.', 'fail'],
+  ['Your payment was declined but later became approved.', 'fail'],
+  ['Your payment got approved.', 'fail'],
+  ['Your payment was declined.', 'pass'],
+])('coordinated get-passive outcomes: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
+
+// A "whether ... or not" adjunct (either word order) promises the outcome
+// unconditionally, like the already-covered "even if" form.
+test.each([
+  ['Whether or not you authorize it, your payment will be approved.', 'fail'],
+  ['Whether you authorize it or not, your payment will be approved.', 'fail'],
+  ['If you authorize it, your payment will be approved.', 'pass'],
+  ['Even if you do not authorize it, your payment will be approved.', 'fail'],
+])('whether-or-not adjuncts are unconditional: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});
