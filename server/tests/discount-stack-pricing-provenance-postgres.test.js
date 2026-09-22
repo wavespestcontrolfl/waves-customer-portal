@@ -1035,4 +1035,60 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
       delete process.env.GATE_DISCOUNT_STACKING;
     }
   });
+
+  // GitHub review round 3 P0 (blocking push, post-round-3), real Postgres
+  // row: Codex's own exact repro — a $160 visit with a real Postgres NULL
+  // primary_line_price, one $100 (undiscounted) add-on, a $30 stored
+  // appointment discount. The client's own gross-derived primary is $60;
+  // a preserved save must write primary_line_price back as NULL — never
+  // that derived $60, which would let invoice.js recompute a DIFFERENT
+  // total ($130) than the preserved estimated_price ($160) actually says.
+  test('PUT /:id/update-details: a null primary_line_price row\'s preserved write keeps it NULL through a real Postgres round trip, never the client\'s derived $60', async () => {
+    const id = randomUUID();
+    await mockPg('scheduled_services').insert({
+      id, scheduled_date: '2099-11-24', service_type: 'Fixture Null-Primary Invoice-Parity Service',
+      primary_line_price: null, // a real Postgres NULL
+      discount_type: 'fixed_amount', discount_amount: 30, discount_dollars: 30,
+      estimated_price: 160,
+    });
+    await mockPg('scheduled_service_addons').insert({
+      id: randomUUID(), scheduled_service_id: id, service_name: 'Fixture Add-On',
+      base_price: 100, estimated_price: 100,
+    });
+
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      const existing = await mockPg('scheduled_services').where({ id }).first(
+        'primary_line_price', 'discount_type', 'discount_amount', 'discount_dollars', 'estimated_price', 'pricing_provenance',
+      );
+      expect(existing.primary_line_price).toBeNull();
+      const existingAddonRows = await mockPg('scheduled_service_addons')
+        .where({ scheduled_service_id: id })
+        .select('service_id', 'service_name', 'base_price', 'estimated_price', 'discount_id', 'discount_name', 'discount_type', 'discount_amount', 'discount_dollars');
+
+      const normalizedAddons = [{ serviceId: null, serviceName: 'Fixture Add-On', base: 100, price: 100, discount: null }];
+      const decision = legacyEconomicsPreservationDecision({
+        legacyPreservationCandidate: discountStackingLive() && !hasPricingRegimeMarker(existing),
+        discountInputsPosted: false,
+        primaryServiceChanged: false,
+        primaryGross: 60, // the client's own gross-derived primary (160 - 100)
+        existingPrimaryLinePrice: existing.primary_line_price,
+        normalizedAddons,
+        existingAddonRows,
+        existingEstimatedPrice: existing.estimated_price,
+      });
+      expect(decision.legacyEconomicsPreserved).toBe(true);
+      expect(decision.preservedPrimaryLinePrice).toBeNull(); // NEVER 60
+
+      // The route writes updates.primary_line_price = decision.preservedPrimaryLinePrice.
+      await mockPg('scheduled_services').where({ id }).update({
+        estimated_price: decision.storedTotal, primary_line_price: decision.preservedPrimaryLinePrice,
+      });
+      const rowAfterSave = await mockPg('scheduled_services').where({ id }).first('estimated_price', 'primary_line_price');
+      expect(rowAfterSave.primary_line_price).toBeNull(); // preserved through a real round trip
+      expect(Number(rowAfterSave.estimated_price)).toBe(160);
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
 });

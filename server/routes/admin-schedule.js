@@ -2824,6 +2824,18 @@ function legacyEconomicsPreservationDecision({
     storedTotal,
     legacyEconomicsPreserved,
     preservedAddonLines,
+    // GitHub review round 3 P0 (blocking push, post-round-3): the write
+    // callsite unconditionally wrote `primary_line_price = primaryGross`
+    // (the POSTED/derived value) even on a preserved save — a previously
+    // NULL primary_line_price (a pre-column legacy row) got "filled in"
+    // with the client's own derived reconstruction (e.g. $60), even though
+    // the row's REAL stored state was null. invoice.js branches on
+    // primary_line_price's null-ness, so that fill-in alone changed what
+    // an unrelated notes-only save billed (Codex's repro: a $160 invoice
+    // read $130 once primary_line_price stopped being null). The row's
+    // OWN stored primary_line_price (null-ness included) is the only
+    // correct value to write on this branch.
+    preservedPrimaryLinePrice: legacyEconomicsPreserved ? (existingPrimaryLinePrice ?? null) : null,
   };
 }
 
@@ -9783,7 +9795,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             && String(updates.service_key_snapshot ?? '') !== String(existing?.service_key_snapshot ?? ''))
           || (updates.service_category_snapshot !== undefined
             && String(updates.service_category_snapshot ?? '') !== String(existing?.service_category_snapshot ?? ''));
-        const { legacyEconomicsPreserved, storedTotal, preservedAddonLines } = legacyEconomicsPreservationDecision({
+        const {
+          legacyEconomicsPreserved, storedTotal, preservedAddonLines, preservedPrimaryLinePrice,
+        } = legacyEconomicsPreservationDecision({
           legacyPreservationCandidate,
           discountInputsPosted,
           primaryServiceChanged,
@@ -9873,7 +9887,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         if (cols.estimated_price) {
           updates.estimated_price = legacyEconomicsPreserved ? storedTotal : financials.price;
         }
-        if (cols.primary_line_price && primaryGross != null) updates.primary_line_price = primaryGross;
+        // GitHub round 3 P0 (blocking push): preserved and unpreserved
+        // writes each need their OWN value here — never primaryGross
+        // unconditionally, which would silently turn a null primary_line_price
+        // into a structured one on a save that changed nothing about the
+        // money (see legacyEconomicsPreservationDecision's own comment).
+        if (cols.primary_line_price) {
+          if (legacyEconomicsPreserved) {
+            updates.primary_line_price = preservedPrimaryLinePrice;
+          } else if (primaryGross != null) {
+            updates.primary_line_price = primaryGross;
+          }
+        }
         // Only rewrite the appointment-level discount columns when the request
         // explicitly carried a discount value; otherwise leave them as-is.
         if (discountProvided) {

@@ -922,6 +922,48 @@ describe('legacyEconomicsPreservationDecision end to end with the shared derivat
   });
 });
 
+// GitHub review round 3 P0 (blocking push, post-round-3): the write
+// callsite used to write `primary_line_price = primaryGross` (the
+// POSTED/derived value) unconditionally, even on a preserved save — a
+// previously NULL primary_line_price got "filled in" with the client's
+// own reconstruction. Codex's own repro: a $160 visit, null primary, one
+// $100 add-on, a $30 stored appointment discount — the client derives and
+// resubmits primaryGross=60 (GROSS-preferring, per the shared module),
+// and the preserved write must keep primary_line_price NULL, never write
+// that derived $60 — invoice.js branches on its null-ness, and writing a
+// structured $60 there let the invoice recompute to $130 instead of $160.
+describe('preservedPrimaryLinePrice — the primary_line_price WRITE, not just estimated_price (GitHub round 3 P0)', () => {
+  const nullPrimaryRepro = () => ({
+    legacyPreservationCandidate: true, discountInputsPosted: false, primaryServiceChanged: false,
+    primaryGross: 60, // the client's own derived primary (160 - 100 addon gross)
+    existingPrimaryLinePrice: null, // the row's REAL stored state
+    normalizedAddons: [{ serviceId: 'svc-1', serviceName: 'Addon', base: 100, price: 100, discount: null }],
+    existingAddonRows: [{ service_id: 'svc-1', service_name: 'Addon', base_price: 100, estimated_price: 100, discount_id: null }],
+    existingEstimatedPrice: 160,
+  });
+
+  test('a null-primary row\'s preserved write keeps primary_line_price NULL, never the client\'s derived $60', () => {
+    const result = legacyEconomicsPreservationDecision(nullPrimaryRepro());
+    expect(result.legacyEconomicsPreserved).toBe(true);
+    expect(result.preservedPrimaryLinePrice).toBeNull(); // NEVER 60
+  });
+
+  test('a POPULATED primary_line_price row\'s preserved write keeps the row\'s OWN stored value', () => {
+    const result = legacyEconomicsPreservationDecision({
+      ...nullPrimaryRepro(),
+      primaryGross: 60, existingPrimaryLinePrice: 60, // already structured, unchanged
+    });
+    expect(result.legacyEconomicsPreserved).toBe(true);
+    expect(result.preservedPrimaryLinePrice).toBe(60);
+  });
+
+  test('NOT preserved (a genuine edit): preservedPrimaryLinePrice is null — the route falls through to writing primaryGross itself, unchanged from before this fix', () => {
+    const result = legacyEconomicsPreservationDecision({ ...nullPrimaryRepro(), primaryGross: 999 });
+    expect(result.legacyEconomicsPreserved).toBe(false);
+    expect(result.preservedPrimaryLinePrice).toBeNull();
+  });
+});
+
 // The round-7 P0 itself, reproduced against the CURRENT (post-slice-3)
 // computation path: without existingAddonRows, a notes-only save's add-on
 // reconstruction has no way to know the add-on was ever discounted, so it
