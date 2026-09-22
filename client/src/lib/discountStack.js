@@ -87,6 +87,25 @@ function capDollars(dollars, maxDiscountDollars) {
 // an already-normalized object (spread-copied below to tag a synthetic
 // scope) — every downstream resolver calls this first. slot/eligibleLines/id
 // are camelCase-only in every caller this module has ever seen.
+//
+// Pre-push audit P0 (coordinator scope extension, round 5): sortKind/
+// sortValue/sortCap MUST pass through here too — stackDocumentDiscounts
+// and stackVisitDiscounts both normalize every term (docTerms, each
+// line's own terms, appointmentDiscount) at the TOP of the function,
+// before resolveSortKind/Value/Cap ever see them. Omitting these three
+// silently stripped a caller's persisted sort key on every call into
+// either function — the replay-stability fix worked when tested against
+// resolveSortKind directly, but never actually reached a real
+// stackDocumentDiscounts/stackVisitDiscounts call, where normalize()
+// sits in front of every term. Reproduced exactly like the server-side
+// bug this whole round exists to fix: a frozen $50 line credit + a
+// frozen 50% document discount on $50/$100 lines replayed $66.67 here
+// while the server (which has no such normalize step) correctly saved
+// $50 — a preview/save mismatch, not a money bug (the SAVE was already
+// right), but the exact class every other fix in this round exists to
+// close. camelCase-only, like id/slot/eligibleLines — no raw-catalog-row
+// equivalent, so passing them through as-is (no further normalization)
+// is correct.
 function normalize(discount) {
   if (!discount) return null;
   return {
@@ -96,6 +115,9 @@ function normalize(discount) {
     slot: discount.slot === 'document' ? 'document' : 'line',
     eligibleLines: Array.isArray(discount.eligibleLines) ? discount.eligibleLines : null,
     id: discount.id ?? discount.discount_key ?? undefined,
+    sortKind: discount.sortKind,
+    sortValue: discount.sortValue,
+    sortCap: discount.sortCap,
   };
 }
 
