@@ -72,7 +72,7 @@ describe('Customer 360 billing-pause banner', () => {
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);
       if (path.endsWith('/admin/payers')) return response({ payers: [] });
-      if (path.endsWith('/timeline')) return response({ timeline: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
       if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail());
       return response({});
     }));
@@ -88,7 +88,7 @@ describe('Customer 360 billing-pause banner', () => {
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);
       if (path.endsWith('/admin/payers')) return response({ payers: [] });
-      if (path.endsWith('/timeline')) return response({ timeline: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
       if (path.endsWith('/admin/customers/customer-a')) {
         return response(customerDetail({
           servicePausedAt: '2026-05-02T23:30:00Z', servicePausedOn: '2026-05-02',
@@ -118,7 +118,7 @@ describe('Customer 360 billing-pause banner', () => {
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);
       if (path.endsWith('/admin/payers')) return response({ payers: [] });
-      if (path.endsWith('/timeline')) return response({ timeline: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
       if (path.endsWith('/admin/customers/customer-a')) {
         return response(customerDetail({
           servicePausedAt: '2026-05-02T23:30:00Z', servicePausedOn: '2026-05-02',
@@ -140,7 +140,7 @@ describe('Customer 360 billing-pause banner', () => {
     const fetchMock = vi.fn((url, options) => {
       const path = String(url);
       if (path.endsWith('/admin/payers')) return response({ payers: [] });
-      if (path.endsWith('/timeline')) return response({ timeline: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
       if (path.endsWith('/resume-service')) {
         expect(options?.method).toBe('POST');
         paused = false;
@@ -175,7 +175,7 @@ describe('Customer 360 billing-pause banner', () => {
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);
       if (path.endsWith('/admin/payers')) return response({ payers: [] });
-      if (path.endsWith('/timeline')) return response({ timeline: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
       if (path.endsWith('/resume-service')) {
         return response({ success: true, resumed: false, reason: 'pause_changed' });
       }
@@ -205,7 +205,7 @@ describe('Customer 360 billing-pause banner', () => {
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);
       if (path.endsWith('/admin/payers')) return response({ payers: [] });
-      if (path.endsWith('/timeline')) return response({ timeline: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
       if (path.endsWith('/resume-service')) {
         resumed = true;
         return response({ success: true, resumed: true });
@@ -236,7 +236,7 @@ describe('Customer 360 billing-pause banner', () => {
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);
       if (path.endsWith('/admin/payers')) return response({ payers: [] });
-      if (path.endsWith('/timeline')) return response({ timeline: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
       if (path.endsWith('/resume-service')) {
         let release;
         const gate = new Promise((r) => { release = r; });
@@ -281,7 +281,7 @@ describe('Customer 360 billing-pause banner', () => {
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);
       if (path.endsWith('/admin/payers')) return response({ payers: [] });
-      if (path.endsWith('/timeline')) return response({ timeline: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
       if (path.endsWith('/resume-service')) {
         return resumeGate.then(() => response({ error: 'Customer A blew up' }, 500));
       }
@@ -331,7 +331,7 @@ describe('Customer 360 billing-pause banner', () => {
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);
       if (path.endsWith('/admin/payers')) return response({ payers: [] });
-      if (path.endsWith('/timeline')) return response({ timeline: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
       if (path.endsWith('/resume-service')) return response({ error: 'Customer not found' }, 404);
       if (path.endsWith('/admin/customers/customer-a')) {
         return response(customerDetail({

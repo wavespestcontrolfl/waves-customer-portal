@@ -40,6 +40,7 @@ const { randomUUID, randomBytes } = require('node:crypto');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { invoiceOverdueSql, invoiceDaysOverdue } = require('../services/collections/account-anchor');
 const router = require('../routes/admin-customers');
+const { listCustomerTimeline } = require('../services/customer-history');
 const { countUnreadInboundSms, markInboundSmsRead, retargetOrClearUnknownSenderBell } = require('../services/inbound-sms-read');
 const { appendMessage } = require('../services/conversations');
 const realNotificationService = jest.requireActual('../services/notification-service');
@@ -209,6 +210,99 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
     expect(result.timeline.some(row => row.type === 'sms' && row.description.length > 200)).toBe(true);
     expect(result.timeline.some(row => row.title === 'Estimate sent')).toBe(false);
     expect(JSON.stringify(result)).not.toContain('token');
+  }, 30000);
+
+  test('timeline filters and searches the full history with keyset pages and keeps future appointments', async () => {
+    const interactionIds = [randomUUID(), randomUUID(), randomUUID()];
+    try {
+      await mockPg('customer_interactions').insert([
+        { id: interactionIds[0], customer_id: ids[3], interaction_type: 'note', subject: 'Older match', body: 'Synthetic history needle', created_at: mockPg.raw("?::timestamp", ['2026-01-02 12:00:00.123001']) },
+        { id: interactionIds[1], customer_id: ids[3], interaction_type: 'note', subject: 'Newer match', body: 'Synthetic history needle', created_at: mockPg.raw("?::timestamp", ['2026-01-02 12:00:00.123999']) },
+        { id: interactionIds[2], customer_id: ids[3], interaction_type: 'note', subject: 'Nonmatch', body: 'Different text', created_at: mockPg.raw("?::timestamp", ['2026-01-03 12:00:00']) },
+      ]);
+      const first = await read('/:id/timeline', { limit: '1', type: 'interaction', search: 'history needle' }, { params: { id: ids[3] } });
+      expect(first).toMatchObject({ hasMore: true, type: 'interaction', search: 'history needle' });
+      expect(first.timeline.map(row => row.title)).toEqual(['Newer match']);
+      const second = await read('/:id/timeline', { limit: '1', type: 'interaction', search: 'history needle', cursor: first.nextCursor }, { params: { id: ids[3] } });
+      expect(second).toMatchObject({ hasMore: false, nextCursor: null });
+      expect(second.timeline.map(row => row.title)).toEqual(['Older match']);
+
+      const future = await read('/:id/timeline', { type: 'scheduled_service' }, { params: { id: ids[0] } });
+      expect(future.timeline).toEqual(expect.arrayContaining([expect.objectContaining({ title: 'Scheduled: Synthetic service' })]));
+    } finally {
+      await mockPg('customer_interactions').whereIn('id', interactionIds).delete();
+    }
+  }, 30000);
+
+  test('timeline payment search accepts a raw amount without display punctuation', async () => {
+    const paymentId = randomUUID();
+    try {
+      await mockPg('payments').insert({
+        id: paymentId, customer_id: ids[3], payment_date: '2026-01-04',
+        amount: '1250.00', status: 'paid', description: 'Synthetic payment search',
+      });
+      const result = await read('/:id/timeline', { type: 'payment', search: '1250.00' }, { params: { id: ids[3] } });
+      expect(result.timeline.map(row => row.id)).toEqual([`payment:${paymentId}`]);
+      expect(result.timeline[0].title).toContain('$1,250.00');
+    } finally {
+      await mockPg('payments').where({ id: paymentId }).delete();
+    }
+  }, 30000);
+
+  test('timeline deduplicates mirrored voice calls and retains unmatched legacy calls', async () => {
+    const conversationId = randomUUID();
+    const messageId = randomUUID();
+    const mirroredCallId = randomUUID();
+    const legacyCallId = randomUUID();
+    const sid = `CA-synthetic-${randomUUID()}`;
+    try {
+      await mockPg('conversations').insert({ id: conversationId, customer_id: ids[3], channel: 'voice', contact_phone: '+19415550103', our_endpoint_id: '+19415550190' });
+      await mockPg('messages').insert({ id: messageId, conversation_id: conversationId, channel: 'voice', direction: 'inbound', author_type: 'customer', twilio_sid: sid, ai_summary: 'Mirrored summary', duration_seconds: 45 });
+      await mockPg('call_log').insert([
+        { id: mirroredCallId, customer_id: ids[3], twilio_call_sid: sid, call_summary: 'Legacy mirrored summary', disposition: 'follow_up' },
+        { id: legacyCallId, customer_id: ids[3], twilio_call_sid: `CA-legacy-${randomUUID()}`, call_summary: 'Unmirrored summary', status: 'completed' },
+      ]);
+      const result = await read('/:id/timeline', { type: 'call' }, { params: { id: ids[3] } });
+      expect(result.timeline).toHaveLength(2);
+      expect(result.timeline.filter(row => row.metadata.callId === mirroredCallId)).toHaveLength(1);
+      expect(result.timeline.find(row => row.metadata.callId === mirroredCallId).description).toBe('Mirrored summary · follow_up');
+      expect(result.timeline.find(row => row.metadata.callId === legacyCallId).description).toBe('Unmirrored summary · completed');
+    } finally {
+      await mockPg('messages').where({ id: messageId }).delete();
+      await mockPg('call_log').whereIn('id', [mirroredCallId, legacyCallId]).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('timeline keeps null-dated optional events and freezes a missing source across a page chain', async () => {
+    const reviewId = randomUUID();
+    try {
+      await mockPg('google_reviews').insert({ id: reviewId, customer_id: ids[0], google_review_id: `synthetic-${reviewId}`, location_id: 'synthetic', star_rating: 5, review_text: 'Undated synthetic review', review_created_at: null });
+      const reviewPage = await read('/:id/timeline', { type: 'review' }, { params: { id: ids[0] } });
+      expect(reviewPage.timeline).toEqual(expect.arrayContaining([expect.objectContaining({ id: `review:${reviewId}`, date: null })]));
+
+      const failingDb = (...args) => {
+        if (args[0] === 'google_reviews as r') throw new Error('Synthetic optional source failure');
+        return mockPg(...args);
+      };
+      failingDb.raw = mockPg.raw.bind(mockPg);
+      const first = await listCustomerTimeline(failingDb, ids[0], { limit: '1' });
+      expect(first.missingSources).toContain('Reviews');
+      expect(first.nextCursor).toEqual(expect.any(String));
+      const queried = [];
+      const onQuery = query => queried.push(query.sql);
+      mockPg.on('query', onQuery);
+      let second;
+      try {
+        second = await listCustomerTimeline(mockPg, ids[0], { limit: '1', cursor: first.nextCursor });
+      } finally {
+        mockPg.off('query', onQuery);
+      }
+      expect(second.missingSources).toContain('Reviews');
+      expect(queried.some(sql => sql.includes('google_reviews'))).toBe(false);
+    } finally {
+      await mockPg('google_reviews').where({ id: reviewId }).delete();
+    }
   }, 30000);
 
   test('profile reads the upcoming technician and complete billing summary from the same records', async () => {

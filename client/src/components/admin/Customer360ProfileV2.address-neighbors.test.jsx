@@ -65,7 +65,7 @@ function stubFetch(detail) {
   vi.stubGlobal('fetch', vi.fn((url) => {
     const path = String(url);
     if (path.endsWith('/admin/payers')) return response({ payers: [] });
-    if (path.endsWith('/admin/customers/wife/timeline')) return response({ timeline: [] });
+    if (path.split('?')[0].endsWith('/admin/customers/wife/timeline')) return response({ timeline: [] });
     if (path.endsWith('/admin/customers/wife')) return response(detail);
     return response({});
   }));
