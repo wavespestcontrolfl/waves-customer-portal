@@ -140,6 +140,8 @@ describe('Tech field workspace uses the existing route workflow', () => {
     expect(screen.queryByText('Recap clips')).not.toBeInTheDocument();
     fireEvent.click(await screen.findByRole('button', { name: 'Open visit' }));
     await screen.findByText('Recap clips');
+    expect(screen.getByRole('button', { name: 'Uploading… (1)' })).toBeDisabled();
+    expect(document.querySelector('input[type="file"]')).toBeDisabled();
     await act(async () => rejectFirstPut(new Error('Field upload interrupted')));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('field-recovery.jpg');

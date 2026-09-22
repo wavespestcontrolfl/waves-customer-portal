@@ -114,7 +114,7 @@ function forgetFailedDraft(map, serviceId, attemptId, onChange = () => {}) {
 }
 
 const mediaKey = (serviceId, mediaId) => `${serviceId}:${mediaId}`;
-const createRecoveryStore = () => ({ failedDrafts: new Map(), latestAttempts: new Map(), discardedMedia: new Set(), refreshServices: new Set(), nextAttempt: 0 });
+const createRecoveryStore = () => ({ failedDrafts: new Map(), latestAttempts: new Map(), inFlightAttempts: new Map(), discardedMedia: new Set(), refreshServices: new Set(), nextAttempt: 0 });
 const captureButtonLabel = (uploading, failedUpload) => (
   uploading ? `Uploading… (${uploading})` : failedUpload ? 'Resolve pending clip' : '+ Capture recap clip'
 );
@@ -122,6 +122,19 @@ function requestRecoveryRefresh(ownedStore, recoveryStore, serviceId, notify) {
   if (!ownedStore) return;
   recoveryStore.refreshServices.add(serviceId);
   notify();
+}
+function isVisibleAttempt(mounted, recoveryStore, serviceId, targetServiceId, attemptId) {
+  return mounted && recoveryStore.latestAttempts.get(targetServiceId) === attemptId && serviceId === targetServiceId;
+}
+function finishInFlightAttempt(recoveryStore, serviceId, attemptId, notify) {
+  if (recoveryStore.inFlightAttempts.get(serviceId) !== attemptId) return;
+  recoveryStore.inFlightAttempts.delete(serviceId);
+  notify();
+}
+function showFinishedUpload(mounted, recoveryStore, serviceId, targetServiceId, setUploading) {
+  if (mounted && serviceId === targetServiceId) {
+    setUploading(Number(recoveryStore.inFlightAttempts.has(targetServiceId)));
+  }
 }
 
 export default function TechRecapCapture({ service, request, recoveryStore: ownedRecoveryStore = null, recoveryRevision = 0, onRecoveryChange = () => {} }) {
@@ -162,7 +175,7 @@ export default function TechRecapCapture({ service, request, recoveryStore: owne
     setPendingFile(null);
     setFailedUpload(retained?.draft || null);
     setShowMore(false);
-    setUploading(0);
+    setUploading(recoveryStore.inFlightAttempts.has(serviceId) ? 1 : 0);
     setErr(retained?.message || null);
     if (serviceId) refresh(serviceId, generation);
     return () => {
@@ -176,6 +189,7 @@ export default function TechRecapCapture({ service, request, recoveryStore: owne
     const retained = recoveryStore.failedDrafts.get(serviceId);
     setFailedUpload(retained?.draft || null);
     setErr(retained?.message || null);
+    setUploading(recoveryStore.inFlightAttempts.has(serviceId) ? 1 : 0);
     setItemState((current) => current.serviceId === serviceId
       ? { ...current, items: current.items.filter((item) => !recoveryStore.discardedMedia.has(mediaKey(serviceId, item.id))) }
       : current);
@@ -199,14 +213,16 @@ export default function TechRecapCapture({ service, request, recoveryStore: owne
     let draft = uploadDraft;
     const targetServiceId = draft.serviceId;
     const generation = serviceGenerationRef.current;
-    if (!isCurrentService(targetServiceId, generation)) return;
+    if (!isCurrentService(targetServiceId, generation) || recoveryStore.inFlightAttempts.has(targetServiceId)) return;
     const attemptId = recoveryStore.nextAttempt + 1;
     recoveryStore.nextAttempt = attemptId;
     recoveryStore.latestAttempts.set(targetServiceId, attemptId);
-    forgetFailedDraft(recoveryStore.failedDrafts, targetServiceId, undefined, onRecoveryChange);
+    recoveryStore.inFlightAttempts.set(targetServiceId, attemptId);
+    forgetFailedDraft(recoveryStore.failedDrafts, targetServiceId);
+    onRecoveryChange();
     draft = { ...draft, attemptId };
     const canRetainAttempt = () => recoveryStore.latestAttempts.get(targetServiceId) === attemptId;
-    const canApplyAttempt = () => mountedRef.current && canRetainAttempt() && serviceIdRef.current === targetServiceId;
+    const canApplyAttempt = () => isVisibleAttempt(mountedRef.current, recoveryStore, serviceIdRef.current, targetServiceId, attemptId);
     setPendingFile(null);
     setFailedUpload(null);
     setShowMore(false);
@@ -277,7 +293,6 @@ export default function TechRecapCapture({ service, request, recoveryStore: owne
       const { retainedDraft, message } = await recoverUploadFailure(e, draft, request);
       if (canRetainAttempt()) {
         rememberFailedDraft(recoveryStore.failedDrafts, targetServiceId, retainedDraft, message);
-        onRecoveryChange();
       }
       if (canApplyAttempt()) {
         // Keep the in-memory File, role, and any completed upload stages so Retry
@@ -286,9 +301,8 @@ export default function TechRecapCapture({ service, request, recoveryStore: owne
         setErr(message);
       }
     } finally {
-      if (isCurrentService(targetServiceId, generation)) {
-        setUploading((n) => Math.max(0, n - 1));
-      }
+      finishInFlightAttempt(recoveryStore, targetServiceId, attemptId, onRecoveryChange);
+      showFinishedUpload(mountedRef.current, recoveryStore, serviceIdRef.current, targetServiceId, setUploading);
     }
   };
 
@@ -365,7 +379,7 @@ export default function TechRecapCapture({ service, request, recoveryStore: owne
         Grab a few 5-sec clips while you work — live pests, spraying, the lanai sweep. They play in the customer’s recap. Skip it and the recap still generates.
       </div>
 
-      <input ref={fileRef} type="file" accept="video/*,image/*" capture="environment" onChange={onPick} style={{ display: 'none' }} />
+      <input ref={fileRef} type="file" accept="video/*,image/*" capture="environment" disabled={captureDisabled} onChange={onPick} style={{ display: 'none' }} />
 
       {items.length > 0 && (
         <div style={{ display: 'grid', gap: 8, marginBottom: 10 }}>

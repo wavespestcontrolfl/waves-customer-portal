@@ -202,7 +202,7 @@ export default function TechHomePage({ section = 'today' }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedVisitKey = fieldWorkspace ? searchParams.get('visit') : null;
   const visitSearch = selectedVisitKey ? `?visit=${encodeURIComponent(selectedVisitKey)}` : '';
-  const [recapRecoveryStore] = useState(() => ({ failedDrafts: new Map(), latestAttempts: new Map(), discardedMedia: new Set(), refreshServices: new Set(), nextAttempt: 0 }));
+  const [recapRecoveryStore] = useState(() => ({ failedDrafts: new Map(), latestAttempts: new Map(), inFlightAttempts: new Map(), discardedMedia: new Set(), refreshServices: new Set(), nextAttempt: 0 }));
   const [recapRecoveryRevision, setRecapRecoveryRevision] = useState(0);
   const notifyRecapRecoveryChange = useCallback(() => setRecapRecoveryRevision((revision) => revision + 1), []);
   const [schedule, setSchedule] = useState([]);
