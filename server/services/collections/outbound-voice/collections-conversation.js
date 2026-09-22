@@ -1691,12 +1691,24 @@ class CollectionsConversation {
       await ContactLedger.markSendFailed(entry, { stage: 'send_via_sms', code: result?.code || null });
       return 'The text did not go through. Offer the office number for payment instead.';
     } catch (err) {
-      // A THROW is ambiguous (gh prb-r16): sendViaSMS can fail in its
-      // post-send bookkeeping AFTER Twilio accepted the SMS. Never assert
-      // failure, never permit an in-call retry (a duplicate link is worse
-      // than a missing one), and stamp the ledger delivery-unknown — not
-      // send_failed, which would falsely release the frequency window's
-      // claim on a text that may have arrived.
+      // A settlement-stage throw is a DEFINITE non-delivery (#4131 slice 5,
+      // #4634 deferral): the chokepoint (settleZeroDueBeforeSend,
+      // invoice.js) tags it deliveryNeverAttempted when it catches its own
+      // pre-provider settlement failure (e.g. visit_busy from the NOWAIT
+      // visit lock) — that class never reaches a provider, so a retry here
+      // is always safe, unlike the genuinely ambiguous case below.
+      if (err?.deliveryNeverAttempted) {
+        logger.warn(`[collections-voice] pay-link send failed before any provider contact (definite non-delivery): ${err.message}`);
+        this.payLinkSent = false;
+        await ContactLedger.markSendFailed(entry, { stage: 'send_via_sms', code: err.code || 'settlement_failed' });
+        return 'The text did not go through. Offer the office number for payment instead.';
+      }
+      // Any OTHER throw is ambiguous (gh prb-r16): sendViaSMS can fail in
+      // its post-send bookkeeping AFTER Twilio accepted the SMS. Never
+      // assert failure, never permit an in-call retry (a duplicate link is
+      // worse than a missing one), and stamp the ledger delivery-unknown —
+      // not send_failed, which would falsely release the frequency
+      // window's claim on a text that may have arrived.
       logger.error(`[collections-voice] pay-link send threw (delivery UNKNOWN): ${err.message}`);
       this.payLinkSent = true;
       await db('collections_contact_ledger').where({ id: entry.id }).update({

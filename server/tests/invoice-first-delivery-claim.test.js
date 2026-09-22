@@ -539,6 +539,29 @@ describe('settleZeroDueBeforeSend — THE zero-due chokepoint (#4131 slice 4 rou
 
     await expect(InvoiceService._settleZeroDueBeforeSend(INVOICE_ID)).rejects.toBe(boom);
   });
+
+  test('a settlement-stage throw is tagged deliveryNeverAttempted (#4131 slice 5, #4634 deferral) — settleZeroBalance never contacts a provider, so anything it throws is a definite non-delivery', async () => {
+    // e.g. visit_busy from the NOWAIT visit lock in lockVisitForSettlement.
+    // Direct callers of sendViaSMS (collections-conversation.js, the
+    // AI-assistant send tool) otherwise read ANY throw here as ambiguous
+    // delivery and stamp delivery_unknown, freezing a retry that this class
+    // of pre-provider failure always makes safe.
+    makeDb(zeroDueRow());
+    const busy = Object.assign(new Error("This invoice's visit is being edited right now — nothing was recorded. Retry in a moment."), { code: 'visit_busy' });
+    settleSpy.mockRejectedValue(busy);
+
+    await expect(InvoiceService._settleZeroDueBeforeSend(INVOICE_ID)).rejects.toBe(busy);
+    expect(busy.deliveryNeverAttempted).toBe(true);
+  });
+
+  test('an already-tagged deliveryNeverAttempted throw is left exactly as its own caller set it (never overwritten to a different value)', async () => {
+    makeDb(zeroDueRow());
+    const tagged = Object.assign(new Error('some other definite pre-provider failure'), { deliveryNeverAttempted: 'explicit-non-boolean-marker' });
+    settleSpy.mockRejectedValue(tagged);
+
+    await expect(InvoiceService._settleZeroDueBeforeSend(INVOICE_ID)).rejects.toBe(tagged);
+    expect(tagged.deliveryNeverAttempted).toBe('explicit-non-boolean-marker');
+  });
 });
 
 describe('sendViaSMS — resolving the zero-due chokepoint after catching zero_due_detected (#4131 slice 4)', () => {
@@ -798,6 +821,42 @@ describe('zeroDueDirectSendOutcome / zeroDueWrapperOutcome — an exhausted not_
       ok: false, code: 'balance_changed_retry', error: 'The balance changed while sending; try again',
       sms: { ok: false, code: 'balance_changed_retry', deliveryOutcome: 'not_sent' },
       email: { ok: false, code: 'balance_changed_retry', deliveryOutcome: 'not_sent' },
+    });
+    expect(result.error).not.toMatch(/undefined/);
+    expect(result.code).not.toBe('deposit_settlement_pending');
+  });
+});
+
+describe('zeroDueDirectSendOutcome / zeroDueWrapperOutcome — the rescheduled kind has its own explicit branch, never the generic "(undefined)" fallback (#4131 slice 5, #4634 round-11 pre-push audit note)', () => {
+  // Latent/unreachable through normal traffic today (only
+  // processScheduledSends' own due loop can ever produce this kind, and it
+  // handles it inline without routing through either mapper) — pinned
+  // directly against the mapper functions so a future caller that DOES
+  // route { kind: 'rescheduled' } through them gets an honest, retryable,
+  // deferred-semantics result instead of falling to
+  // zeroDueRefusalReasonText/depositSettlementPendingError's generic
+  // "(undefined)" wording (the exact class round-7 already fixed for
+  // not_zero_due).
+  const rescheduledOutcome = { kind: 'rescheduled' };
+
+  test('direct (sendViaSMS) shape: a distinct rescheduled code, a defined reason, never "(undefined)", never deposit_settlement_pending', async () => {
+    const result = await InvoiceService._zeroDueDirectSendOutcome(INVOICE_ID, rescheduledOutcome);
+
+    expect(result).toEqual({
+      sent: false, ok: false, code: 'rescheduled', deliveryOutcome: 'not_sent', retryable: true,
+      reason: 'The scheduled send time changed while this was being sent; it will send again at the new time',
+    });
+    expect(result.reason).not.toMatch(/undefined/);
+    expect(result.code).not.toBe('deposit_settlement_pending');
+  });
+
+  test('wrapper (sendViaSMSAndEmail) shape: same fix — rescheduled on both legs, a defined error, never "(undefined)"', async () => {
+    const result = await InvoiceService._zeroDueWrapperOutcome(INVOICE_ID, rescheduledOutcome);
+
+    expect(result).toEqual({
+      ok: false, code: 'rescheduled', error: 'The scheduled send time changed while this was being sent; it will send again at the new time',
+      sms: { ok: false, code: 'rescheduled', deliveryOutcome: 'not_sent' },
+      email: { ok: false, code: 'rescheduled', deliveryOutcome: 'not_sent' },
     });
     expect(result.error).not.toMatch(/undefined/);
     expect(result.code).not.toBe('deposit_settlement_pending');

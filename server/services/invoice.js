@@ -1382,7 +1382,30 @@ async function settleZeroDueBeforeSend(invoiceId, { fenceOwnership = false, row 
       return { kind: "refused", code: "payer_billed", reason: `withdrawn to payer ${fence.payerId}` };
     }
   }
-  const settlement = await settleZeroDueVisitInvoice(invoiceId, db, { requireDueBy: workerOriginated ? new Date() : null });
+  let settlement;
+  try {
+    settlement = await settleZeroDueVisitInvoice(invoiceId, db, { requireDueBy: workerOriginated ? new Date() : null });
+  } catch (settlementErr) {
+    // Settlement-stage throw → definite non-delivery (#4131 slice 5, #4634
+    // deferral, invoice.js ~1297): settleZeroBalance never contacts a
+    // provider — everything it can throw (e.g. visit_busy from the NOWAIT
+    // visit lock in lockVisitForSettlement, or a genuine DB fault) happens
+    // strictly BEFORE any send attempt. Tag it deliveryNeverAttempted, the
+    // SAME marker claimInvoiceForSend's own preclaimed zero-due re-check
+    // already uses for exactly this class of pre-provider throw, then
+    // re-throw — this does NOT swallow the error (settleZeroDueVisitInvoice's
+    // own contract, a prior pre-push fix, is that an unrecognized throw must
+    // still propagate rather than loop silently forever): it only tells
+    // every caller of this chokepoint, definitively, that no text went out.
+    // Direct callers of sendViaSMS (collections-conversation.js, the
+    // AI-assistant send tool) otherwise read ANY throw here as ambiguous
+    // delivery and stamp delivery_unknown, freezing a retry that is
+    // actually always safe.
+    if (settlementErr && typeof settlementErr === "object" && settlementErr.deliveryNeverAttempted === undefined) {
+      settlementErr.deliveryNeverAttempted = true;
+    }
+    throw settlementErr;
+  }
   if (settlement.reason === "rescheduled") {
     logger.info(`[invoice] ${invoiceId}: due-list row went stale — rescheduled to a later time before settlement could run; deferred, not settled`);
     return { kind: "rescheduled" };
@@ -1514,6 +1537,19 @@ async function zeroDueDirectSendOutcome(invoiceId, outcome) {
     return { sent: false, ok: false, code: "balance_changed_retry", deliveryOutcome: "not_sent", retryable: true,
       reason: "The balance changed while sending; try again" };
   }
+  if (outcome.kind === "rescheduled") {
+    // #4131 slice 5 (#4634 round-11 pre-push audit note, latent/unreachable
+    // today): only processScheduledSends' own due loop can ever produce
+    // this kind (workerOriginated — see settleZeroDueBeforeSend — is the
+    // one condition that arms the requireDueBy re-check inside
+    // settleZeroBalance), and that loop handles it inline without ever
+    // routing through this mapper. Added defensively so a future caller
+    // that DOES route it here gets an honest, retryable, deferred-semantics
+    // result — never the generic "(undefined)" fallback below (the same
+    // class of bug round-7 fixed for not_zero_due).
+    return { sent: false, ok: false, code: "rescheduled", deliveryOutcome: "not_sent", retryable: true,
+      reason: "The scheduled send time changed while this was being sent; it will send again at the new time" };
+  }
   return { sent: false, ok: false, code: "deposit_settlement_pending", deliveryOutcome: "not_sent", retryable: true,
     reason: zeroDueRefusalReasonText(outcome) };
 }
@@ -1571,6 +1607,15 @@ async function zeroDueWrapperOutcome(invoiceId, outcome) {
     return { ok: false, code: "balance_changed_retry", error: reason,
       sms: { ok: false, code: "balance_changed_retry", deliveryOutcome: "not_sent" },
       email: { ok: false, code: "balance_changed_retry", deliveryOutcome: "not_sent" } };
+  }
+  if (outcome.kind === "rescheduled") {
+    // Same #4634 round-11 latent-branch fix, mirrored here for the wrapper
+    // shape (see zeroDueDirectSendOutcome's own comment) — unreachable
+    // today for the same reason, added defensively.
+    const reason = "The scheduled send time changed while this was being sent; it will send again at the new time";
+    return { ok: false, code: "rescheduled", error: reason,
+      sms: { ok: false, code: "rescheduled", deliveryOutcome: "not_sent" },
+      email: { ok: false, code: "rescheduled", deliveryOutcome: "not_sent" } };
   }
   const err = depositSettlementPendingError(invoiceId, outcome.reason);
   return { ok: false, code: err.code, error: err.message, sms: { ok: false, code: err.code }, email: { ok: false, code: err.code } };
@@ -1795,6 +1840,14 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, {
   // requireDue/allowClaimed — a worker/preclaimed caller always follows
   // this fence with its own claim in the SAME call, never a separate one.
   fenceOnly = false,
+  // Threaded into the ordinary (non-requireDue, non-fenceOnly) claim below
+  // exactly like claimInvoiceForSend's own callers already do for a
+  // non-packet invoice (#4131 slice 5 — deferred by #4632 r2 P2). Without
+  // this, an operator retry of a packet-backed invoice whose earlier
+  // combined send queued its SMS leg on the scheduled rail was refused
+  // outright with queued_pay_link until the window, instead of adopting
+  // (cancelling) that row the way the ordinary claim path already can.
+  adoptsQueuedInvoiceSend = false,
 } = {}) {
   // requireDue is the scheduled-send worker's claim: an automatic queue
   // send, never a first-delivery request, and never an operator override —
@@ -1835,7 +1888,7 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, {
       const invoice = await claimDueScheduledInvoiceForSend(trx, invoiceId);
       return { payerBilled: false, claim: invoice ? { invoice, previousStatus: "scheduled", claimed: true } : null };
     }
-    return { payerBilled: false, claim: await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, database: trx }) };
+    return { payerBilled: false, claim: await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, database: trx }) };
   });
 }
 
@@ -3556,7 +3609,7 @@ const InvoiceService = {
       if (!allowClaimed) {
         pre = await db("invoices").where({ id: invoiceId }).first("visit_completion_packet_id", "payer_id");
         const packetClaim = pre?.visit_completion_packet_id && !pre.payer_id
-          ? await claimPacketInvoiceForSend(invoiceId, pre.visit_completion_packet_id, { firstDeliveryOnly, overridesReviewHold }) : null;
+          ? await claimPacketInvoiceForSend(invoiceId, pre.visit_completion_packet_id, { firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend }) : null;
         if (packetClaim?.payerBilled) {
           return { sent: false, reason: "Suppressed — the visit is now billed to a third-party payer", code: "payer_billed" };
         }
@@ -4163,7 +4216,7 @@ const InvoiceService = {
     let packetClaim = null;
     if (accrualPre?.visit_completion_packet_id && !accrualPre.payer_id) {
       try {
-        packetClaim = await claimPacketInvoiceForSend(invoiceId, accrualPre.visit_completion_packet_id, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold });
+        packetClaim = await claimPacketInvoiceForSend(invoiceId, accrualPre.visit_completion_packet_id, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend: true });
       } catch (err) {
         const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, _zeroDueRetried ? null : retryOnce);
         if (zeroDueResult) return zeroDueResult;
@@ -6987,6 +7040,21 @@ const InvoiceService = {
    */
   async settleZeroBalance(id, database = db, { requireDueBy = null } = {}) {
     const run = async (trx) => {
+      // Lock order (#4131 slice 5, #4634 deferral, invoice.js ~1385): most
+      // of the packet-invoice send/claim machinery — resolvePacketOwnershipLocked
+      // (customer FOR SHARE first), claimPacketInvoiceForSend, and
+      // admin-schedule.js's Bill-To edit ("OWNERSHIP ROWS FIRST for a
+      // Bill-To edit", server/routes/admin-schedule.js) — locks the customer
+      // row before any invoice row it may go on to touch. This function was
+      // the one reversed order (invoice, then customer), so a concurrent
+      // pair — this settlement racing a Bill-To edit on the same invoice's
+      // customer — could deadlock; PostgreSQL aborts one side (40P01), the
+      // worker retries next pass and the operator retries the edit. An
+      // unlocked pre-read gets customer_id without yet holding the invoice
+      // row, so the customer lock lands first, matching the majority order.
+      const preCustomer = await trx("invoices").where({ id }).first("customer_id");
+      if (!preCustomer) return { settled: false, reason: "not_found", invoice: null };
+      await trx("customers").where({ id: preCustomer.customer_id }).forUpdate().first("id");
       const invoice = await trx("invoices").where({ id }).forUpdate().first();
       if (!invoice) return { settled: false, reason: "not_found", invoice: null };
       const skip = (reason) => ({ settled: false, reason, invoice });
@@ -7049,7 +7117,9 @@ const InvoiceService = {
       if (new Date(sequence?.touch_claimed_at).getTime() > Date.now() - 10 * 60 * 1000) {
         return { ...skip("followup_in_flight"), retryable: true };
       }
-      await trx("customers").where({ id: invoice.customer_id }).forUpdate().first("id");
+      // The customer row is already locked above (moved ahead of the
+      // invoice lock for the lock-order fix, #4131 slice 5) — re-acquiring
+      // it here would be a redundant round trip, not a correctness need.
       // Resolve the CANONICAL linked visit before this terminal check
       // (Codex round-3 P1 #4131): invoice.scheduled_service_id alone is
       // null for most post-completion invoices, which carry only
@@ -8746,3 +8816,8 @@ module.exports._zeroDueDirectSendOutcome = zeroDueDirectSendOutcome;
 module.exports._zeroDueWrapperOutcome = zeroDueWrapperOutcome;
 module.exports.claimPacketInvoiceForSend = claimPacketInvoiceForSend;
 module.exports.claimInvoiceForSend = claimInvoiceForSend;
+// Test-only seam (#4131 slice 5): the ONE chokepoint for giving a send claim
+// back, exercised directly by the ported Postgres adoption-restore cases
+// (invoice-claim-ownership-postgres.test.js) so a genuine restore failure can
+// be asserted against real schema without driving the whole send twice.
+module.exports.restoreSendClaim = restoreSendClaim;

@@ -317,3 +317,55 @@ describe('quiet-hours completion SMS deferral clears the pre-send uncertainty ma
     expect(mergeAt).toBeGreaterThan(txAt);
   });
 });
+
+describe('payment-failed decline notice claim acquisition (#4131 slice 5, deferred by #4632 r2 P2)', () => {
+  // Same "source contract" convention as the quiet-hours deferral test above
+  // (invoice-issued-closeout-completion-postgres.test.js's own precedent,
+  // cited there): no existing harness in this repo drives
+  // completeScheduledService's own autopay-decline branch to a real
+  // sendCustomerMessage call (it needs a declined saved-card charge inside a
+  // full packet/visit completion — the nearest fixture,
+  // visit-completion-packets-postgres.test.js's enableFixtureAutopay, tests
+  // the retention/collection lane, not this notice). Pinned structurally: the
+  // notice must acquire the shared invoice send claim before it can send,
+  // must wrap the provider call with throwIfDeliveryUnverified (an uncertain
+  // outcome must escape to the outer catch WITHOUT restoring the claim), and
+  // must give the claim back on every outcome that resolves without it
+  // (deferred / not-sent / delivered) before the delivered branch finalizes
+  // through markDeliverySent.
+  const fs = require('fs');
+  const path = require('path');
+  const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+  const noticeStart = source.indexOf("&& !isBackfillCompletion) {");
+  const noticeEnd = source.indexOf("// Report EMAIL enqueue", noticeStart);
+  const noticeBlock = noticeStart > -1 && noticeEnd > noticeStart ? source.slice(noticeStart, noticeEnd) : '';
+
+  test('the notice block exists exactly once and is where the claim/send/restore sequence is checked', () => {
+    expect(noticeStart).toBeGreaterThan(-1);
+    expect(noticeEnd).toBeGreaterThan(noticeStart);
+  });
+
+  test('claims the shared invoice send claim before rendering or sending the notice', () => {
+    const claimAt = noticeBlock.indexOf('.claimInvoiceForSend(invoice.id)');
+    const sendAt = noticeBlock.indexOf('await sendCustomerMessage({');
+    expect(claimAt).toBeGreaterThan(-1);
+    expect(sendAt).toBeGreaterThan(claimAt);
+  });
+
+  test('a claim refusal is caught and logged rather than thrown out of the completion', () => {
+    expect(noticeBlock).toMatch(/let declineSendClaim = null;\s*\n\s*try \{\s*\n\s*declineSendClaim = await \w+\.claimInvoiceForSend\(invoice\.id\);\s*\n\s*\} catch \(claimErr\) \{/);
+  });
+
+  test('the send itself is wrapped with throwIfDeliveryUnverified', () => {
+    expect(noticeBlock).toMatch(/const failResult = throwIfDeliveryUnverified\(await sendCustomerMessage\(\{/);
+  });
+
+  test('every resolved outcome (deferred, not-sent, delivered) gives the claim back exactly once, before the delivered branch finalizes', () => {
+    const restoreCount = (noticeBlock.match(/\.restoreSendClaim\(\s*\n\s*invoice\.id, declineSendClaim\.previousStatus, declineSendClaim\.claimed,\s*\n\s*\[\], db, declineSendClaim\.invoice\.send_claim_token,\s*\n\s*\);/g) || []).length;
+    expect(restoreCount).toBe(3);
+    const restoreInSentBranch = noticeBlock.indexOf('.restoreSendClaim(', noticeBlock.indexOf('} else {\n            // The notice DELIVERED the pay link'));
+    const markDeliveredAt = noticeBlock.indexOf('.markDeliverySent(invoice.id', restoreInSentBranch);
+    expect(restoreInSentBranch).toBeGreaterThan(-1);
+    expect(markDeliveredAt).toBeGreaterThan(restoreInSentBranch);
+  });
+});

@@ -1691,6 +1691,54 @@ describe('prb-r18', () => {
     expect(db).not.toHaveBeenCalledWith('collections_contact_ledger');
   });
 
+  test('a pre-provider settlement throw (deliveryNeverAttempted) is reported as a definite non-delivery — never the ambiguous "may or may not" copy, no delivery_unknown ledger stamp (#4131 slice 5, #4634 deferral)', async () => {
+    // Same seam as the two resolved-outcome tests above, but the chokepoint
+    // (settleZeroDueBeforeSend, invoice.js) itself THREW — e.g. visit_busy
+    // from the NOWAIT visit lock in lockVisitForSettlement, a genuine
+    // pre-provider failure that never reached Twilio. It is tagged
+    // deliveryNeverAttempted so this definite class is told apart from a
+    // truly ambiguous throw (sendViaSMS's own post-send bookkeeping failing
+    // after Twilio already accepted the text), which must still read as
+    // "may or may not have gone through" and keep the retry latch closed.
+    process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const { convo } = makeConvo();
+    await verifyAndDisclose(convo);
+    convo._turns.push({ role: 'caller', text: 'yes please text it', at: Date.now() });
+    InvoiceService.sendViaSMS.mockRejectedValueOnce(Object.assign(
+      new Error("This invoice's visit is being edited right now — nothing was recorded. Retry in a moment."),
+      { code: 'visit_busy', deliveryNeverAttempted: true },
+    ));
+
+    const out = await convo._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' });
+
+    expect(out).not.toMatch(/texted/i);
+    expect(out).not.toMatch(/may or may not/i);
+    expect(convo.payLinkSent).toBe(false); // definite non-delivery — retry is safe
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'ledger-sms-1' }),
+      expect.objectContaining({ code: 'visit_busy' }),
+    );
+    // The ambiguous-throw branch's raw db() ledger stamp must never run for
+    // a definite non-delivery.
+    expect(db).not.toHaveBeenCalledWith('collections_contact_ledger');
+  });
+
+  test('an ambiguous throw with no deliveryNeverAttempted tag still reads as "may or may not have gone through" and keeps the retry latch closed (control for the definite-non-delivery branch above)', async () => {
+    process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const { convo } = makeConvo();
+    await verifyAndDisclose(convo);
+    convo._turns.push({ role: 'caller', text: 'yes please text it', at: Date.now() });
+    InvoiceService.sendViaSMS.mockRejectedValueOnce(new Error('post-send bookkeeping failed'));
+
+    const out = await convo._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' });
+
+    expect(out).toMatch(/may or may not/i);
+    expect(convo.payLinkSent).toBe(true); // ambiguous — never re-open the latch
+    expect(db).toHaveBeenCalledWith('collections_contact_ledger');
+  });
+
   test('the pay-link latch closes BEFORE the provider await — a concurrent attempt cannot double-send', async () => {
     process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
     process.env.GATE_COLLECTIONS_POLICY = 'true';
