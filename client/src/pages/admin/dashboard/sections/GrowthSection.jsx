@@ -1,3 +1,4 @@
+import { ActionFeedback } from "../../../../components/ui";
 import {
   AttributionScorecard,
   CapitalAllocationCard,
@@ -36,6 +37,8 @@ function sparkSeries(daily) {
 // conversion, the estimate funnel, and where the leads/dollars come from.
 export default function GrowthSection({
   data,
+  loadError,
+  onRetry,
   compare,
   salesCapture,
   kpis,
@@ -53,11 +56,15 @@ export default function GrowthSection({
   channelRoi,
   attributionLoading,
   attributionError,
+  leadFunnelLoading,
+  leadFunnelError,
+  channelRoiLoading,
+  channelRoiError,
   onDrillSource,
   isMobile,
 }) {
-  const k = data.kpis;
-  const dailySpark = sparkSeries(data.revenueChart?.daily);
+  const k = data?.kpis || {};
+  const dailySpark = sparkSeries(data?.revenueChart?.daily);
   const sales = kpis?.sales || {};
   const salesUnavailable = !!sales.error;
 
@@ -78,15 +85,15 @@ export default function GrowthSection({
     },
     {
       label: "MRR",
-      value: fmtMoney(data.mrr),
+      value: fmtMoney(data?.mrr),
       // Headline MRR counts every recurring account, but paused-autopay and
       // overdue accounts aren't actually going to bill. When any MRR is at
       // risk, surface the committed-vs-at-risk split instead of ARR so the
       // headline doesn't silently overstate the run-rate.
       sub:
-        data.mrrBreakdown?.atRisk > 0
+        data?.mrrBreakdown?.atRisk > 0
           ? `${fmtMoneyCompact(data.mrrBreakdown.committed)} committed · ${fmtMoneyCompact(data.mrrBreakdown.atRisk)} at risk`
-          : `ARR ${fmtMoneyCompact(data.mrr * 12)}`,
+          : `ARR ${fmtMoneyCompact(data?.mrr * 12)}`,
     },
     {
       label: "Review Index",
@@ -105,6 +112,9 @@ export default function GrowthSection({
       caption="Is the business growing?"
       about="Top of the funnel to closed revenue: how much estimated work you're capturing, revenue vs the same days last month, lead-to-booked conversion, and where customers actually come from. The ad-dollars card banding is 12-month gross-profit LTV against all-in acquisition cost — 3:1 is the floor; cut what's below it, feed what's far above it."
     >
+      {!data?.kpis ? <ActionFeedback error={!!loadError} onRetry={loadError ? onRetry : undefined}>
+        {loadError ? "Growth data could not be loaded." : "Loading growth…"}
+      </ActionFeedback> : <>
       {/* Sales Capture gauge + Revenue trend — capture rate next to the
           revenue it drives. */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4 md:mb-5">
@@ -297,8 +307,8 @@ export default function GrowthSection({
           <div className="px-1 pt-1">
             <ChannelROI
               data={channelRoi}
-              loading={attributionLoading}
-              error={attributionError}
+              loading={channelRoiLoading}
+              error={channelRoiError}
             />
           </div>
         </MobileFold>
@@ -310,8 +320,8 @@ export default function GrowthSection({
           >
             <ChannelROI
               data={channelRoi}
-              loading={attributionLoading}
-              error={attributionError}
+              loading={channelRoiLoading}
+              error={channelRoiError}
             />
           </ChartCard>
         </div>
@@ -366,8 +376,8 @@ export default function GrowthSection({
           <div className="px-1 pt-1">
             <FunnelBySource
               data={leadFunnel}
-              loading={attributionLoading}
-              error={attributionError}
+              loading={leadFunnelLoading}
+              error={leadFunnelError}
             />
           </div>
         </MobileFold>
@@ -379,12 +389,13 @@ export default function GrowthSection({
           >
             <FunnelBySource
               data={leadFunnel}
-              loading={attributionLoading}
-              error={attributionError}
+              loading={leadFunnelLoading}
+              error={leadFunnelError}
             />
           </ChartCard>
         </div>
       )}
+      </>}
     </DashboardSection>
   );
 }
