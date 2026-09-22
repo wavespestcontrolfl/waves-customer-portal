@@ -176,6 +176,22 @@ it("does not carry a reply target into a manually changed recipient", async () =
   expect(JSON.parse(request[1].body)).not.toHaveProperty("replyToMessageId");
 });
 
+it("replies to the outstanding request on its own line after newer recruiting activity", async () => {
+  messages = [
+    { ...inbound("request-a", "Need help"), messageType: "inbound", customerId: "customer-a" },
+    { ...inbound("applicant-b", "Applicant reply"), to: "+19412972606", messageType: "job_applicant_reply", customerId: "customer-a", createdAt: "2024-07-01T12:01:00Z" },
+  ];
+  const { container } = setup(); await tick();
+  fireEvent.change(container.querySelector("#sms-thread-filter"), { target: { value: "unanswered" } });
+  fireEvent.click(screen.getByText("Applicant reply"));
+  fireEvent.click(screen.getByRole("button", { name: "Text back" }));
+  expect(screen.getByRole("combobox", { name: "Send from" })).toHaveValue(line);
+  fireEvent.change(screen.getByRole("textbox", { name: "Text message" }), { target: { value: "We can help" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
+  const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/communications/sms"));
+  expect(JSON.parse(request[1].body)).toMatchObject({ fromNumber: line, to: "+19415550100", customerId: "customer-a", replyToMessageId: "request-a" });
+});
+
 it.each([false, true])("restores edited approvals with sender and approval authority (draft deep link: %s)", async (deepLink) => {
   const owner = `approval-owner-${deepLink}`;
   saveDraft(owner, savedApproval);
