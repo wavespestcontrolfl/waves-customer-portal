@@ -2611,75 +2611,12 @@ router.get('/:id/timeline', requireAdmin, async (req, res, next) => {
     const customerId = req.params.id;
     const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
-    const missingSources = [];
-    const [interactions, comms, calls, services, invoices, estimates, payments, scheduled, reviews, activities] = await Promise.all([
-      db('customer_interactions').where({ customer_id: customerId }).select('interaction_type', 'subject', 'body', 'created_at'),
-      db('messages')
-        .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
-        .where('conversations.customer_id', customerId)
-        .whereIn('messages.channel', ['sms', 'voice'])
-        .select('messages.channel', 'messages.direction', 'messages.body', 'messages.ai_summary', 'messages.duration_seconds', 'messages.created_at', 'messages.twilio_sid', 'messages.delivery_status'),
-      db('call_log').where({ customer_id: customerId })
-        .select('id', 'twilio_call_sid', 'call_summary', 'disposition', 'status', 'created_at'),
-      db('service_records').where('service_records.customer_id', customerId)
-        .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
-        .select('service_records.service_type', 'service_records.service_date', 'technicians.name as tech_name'),
-      db('invoices').where({ customer_id: customerId }).select('id', 'invoice_number', 'status', 'service_type', 'created_at', 'sent_at', 'viewed_at', 'paid_at'),
-      db('estimates').where({ customer_id: customerId }).select('id', 'status', 'created_at', 'sent_at', 'viewed_at', 'accepted_at', 'declined_at'),
-      db('payments').where({ customer_id: customerId }).select('id', 'amount', 'payment_date', 'description', 'status'),
-      db('scheduled_services').where({ customer_id: customerId }).select('id', 'service_type', 'scheduled_date', 'status'),
-      // These optional integrations have older snapshots without customer_id.
-      // Tell the UI about omissions instead of asserting complete history.
-      db('google_reviews').where({ customer_id: customerId }).select('star_rating', 'review_text', 'review_created_at')
-        .catch(() => { missingSources.push('Reviews'); return []; }),
-      db('activity_log').where({ customer_id: customerId }).select('action', 'description', 'created_at')
-        .catch(() => { missingSources.push('Account activity'); return []; }),
-    ]);
-    const callsBySid = new Map(calls.filter(call => call.twilio_call_sid).map(call => [call.twilio_call_sid, call]));
-    const voice = comms.filter(message => message.channel === 'voice');
-    const mirroredCallSids = new Set(voice.map(message => message.twilio_sid));
-    const timeline = [
-      ...interactions.map(row => ({ type: 'interaction', title: row.subject || `${row.interaction_type} interaction`, description: row.body || '', date: row.created_at, metadata: { interactionType: row.interaction_type } })),
-      ...comms.filter(message => message.channel === 'sms').map(message => ({
-        type: 'sms', title: message.direction === 'inbound' ? 'SMS received' : `SMS outbound · ${message.delivery_status || 'delivery not recorded'}`,
-        description: message.body || '', date: message.created_at, metadata: { direction: message.direction },
-      })),
-      ...voice.map(message => {
-        const call = callsBySid.get(message.twilio_sid);
-        return { type: 'call', title: 'Phone call', date: message.created_at,
-          description: [message.ai_summary || call?.call_summary || message.body, call?.disposition].filter(Boolean).join(' · '),
-          metadata: { durationSeconds: message.duration_seconds, callId: call?.id || null } };
-      }),
-      // Preserve older calls that were never mirrored. The existing Calls view
-      // owns transcripts and audio; the feed links to that exact record.
-      ...calls.filter(call => !call.twilio_call_sid || !mirroredCallSids.has(call.twilio_call_sid)).map(call => ({
-        type: 'call', title: 'Phone call', date: call.created_at,
-        description: [call.call_summary, call.disposition || call.status].filter(Boolean).join(' · '), metadata: { callId: call.id },
-      })),
-      ...services.map(service => ({ type: 'service', title: `Service: ${service.service_type}`, description: service.tech_name ? `Performed by ${service.tech_name}` : 'Service recorded', date: service.service_date, metadata: { serviceType: service.service_type, techName: service.tech_name } })),
-      // Lifecycle events require their own timestamp. A final status alone
-      // never invents sent/viewed/paid events. No bearer tokens enter the feed.
-      ...invoices.flatMap(invoice => ['created', 'sent', 'viewed', 'paid'].filter(event => invoice[`${event}_at`]).map(event => ({
-        type: 'invoice', title: `Invoice ${invoice.invoice_number} ${event}`,
-        description: [invoice.service_type, `Current status: ${invoice.status}`].filter(Boolean).join(' · '),
-        date: invoice[`${event}_at`], metadata: { invoiceId: invoice.id },
-      }))),
-      ...estimates.flatMap(estimate => ['created', 'sent', 'viewed', 'accepted', 'declined'].filter(event => estimate[`${event}_at`]).map(event => ({
-        type: 'estimate', title: `Estimate ${event}`, description: `Current status: ${estimate.status}`,
-        date: estimate[`${event}_at`], metadata: { estimateId: estimate.id },
-      }))),
-      ...payments.map(payment => ({
-        type: 'payment', title: `Payment · ${payment.status || 'status not recorded'}: ${Number(payment.amount || 0).toLocaleString('en-US', { style: 'currency', currency: 'USD' })}`,
-        description: payment.description || '', date: payment.payment_date,
-        metadata: { paymentId: payment.id, amount: Number(payment.amount || 0), status: payment.status },
-      })),
-      ...scheduled.map(service => ({ type: 'scheduled_service', title: `Scheduled: ${service.service_type}`, description: `Current status: ${service.status}`, date: service.scheduled_date, metadata: { scheduledServiceId: service.id, serviceType: service.service_type, status: service.status } })),
-      ...reviews.map(review => ({ type: 'review', title: `Google review: ${review.star_rating}/5`, description: review.review_text || '', date: review.review_created_at, metadata: { starRating: review.star_rating } })),
-      ...activities.map(activity => ({ type: 'activity', title: activity.action, description: activity.description || '', date: activity.created_at, metadata: { action: activity.action } })),
-    ];
-    timeline.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
-    res.json({ timeline, missingSources });
-  } catch (err) { next(err); }
+    const history = require('../services/customer-history');
+    res.json(await history.listCustomerTimeline(db, customerId, req.query || {}));
+  } catch (err) {
+    if (err?.status === 400) return res.status(400).json({ error: err.message });
+    next(err);
+  }
 });
 
 // GET /api/admin/customers/:id/comms — unified per-customer SMS + voice

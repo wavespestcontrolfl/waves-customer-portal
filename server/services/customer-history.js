@@ -271,7 +271,7 @@ function buildTimelineSources(db) {
     eventSource({
       key: 'payment', type: 'payment', eventAt: 'p.payment_date', eventKey: "'payment:' || p.id::text",
       columns: ['p.id as payment_id', 'p.amount', 'p.description', 'p.status'], query: simpleQuery('payments', 'p'),
-      search: "concat_ws(' ', 'Payment · ' || coalesce(nullif(p.status, ''), 'status not recorded') || ':', to_char(p.amount, 'FM$999,999,990.00'), p.description)",
+      search: "concat_ws(' ', 'Payment · ' || coalesce(nullif(p.status, ''), 'status not recorded') || ':', to_char(p.amount, 'FM$999,999,990.00'), p.amount::text, p.description)",
       map: row => ({ id: row.event_key, type: 'payment', title: `Payment · ${row.status || 'status not recorded'}: ${money(row.amount)}`, description: row.description || '', date: row.event_at, metadata: { paymentId: row.payment_id, amount: Number(row.amount || 0), status: row.status } }),
     }),
     eventSource({

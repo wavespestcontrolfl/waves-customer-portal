@@ -32,6 +32,8 @@ const CHIPS_MORE = [
   { role: 'before', label: 'Before' },
   { role: 'after', label: 'After' },
 ];
+const ROLE_LABELS = new Map([...CHIPS_TOP, ...CHIPS_MORE].map(({ role, label }) => [role, label]));
+const TERMINAL_CONFIRM_STATUSES = new Set([413, 422]);
 
 function readVideoDurationMs(file) {
   return new Promise((resolve) => {
@@ -46,50 +48,311 @@ function readVideoDurationMs(file) {
   });
 }
 
-export default function TechRecapCapture({ service, request }) {
+async function reconcileConfirmDraft(draft, request) {
+  const media = await request(`/tech/services/${draft.serviceId}/recap-media`);
+  if (!Array.isArray(media?.items)) throw new Error('Couldn’t verify the pending upload — try again.');
+  const existing = media.items.find((item) => item.id === draft.mediaId);
+  if (existing?.status === 'ready') return { draft, readyItems: media.items };
+  if (!existing) {
+    return { draft: { ...draft, mediaId: null, uploadUrl: null, uploaded: false, needsReconcile: false }, readyItems: null };
+  }
+  return { draft: { ...draft, needsReconcile: false }, readyItems: null };
+}
+
+async function deleteKnownDraft(draft, request) {
+  try {
+    await request(`/tech/services/${draft.serviceId}/recap-media/${draft.mediaId}`, { method: 'DELETE' });
+  } catch (error) {
+    if (error?.status !== 404) throw error;
+  }
+}
+
+async function recoverUploadFailure(error, draft, request) {
+  let retainedDraft = draft;
+  let message = error?.message || 'Couldn’t add that clip — try again or discard it.';
+  if (error?.status === 403 && !error.cleanupFailed && !draft.uploaded && draft.mediaId) {
+    try {
+      // S3 answers 403 when a presign is no longer usable. Remove its known
+      // uploading row before allowing Retry to mint a replacement row/key.
+      await deleteKnownDraft(draft, request);
+      retainedDraft = { ...draft, mediaId: null, uploadUrl: null, cleanupBeforeRetry: false };
+      message = 'Upload link expired — retry to request a new link.';
+    } catch {
+      // Keep the rejected presign until cleanup succeeds. This prevents a
+      // fresh presign from leaving the known pending row orphaned.
+      retainedDraft = { ...draft, cleanupBeforeRetry: true };
+      message = 'Upload link expired, but cleanup failed. Retry to clean it up and request a new link.';
+    }
+  }
+  if (draft.needsReconcile && TERMINAL_CONFIRM_STATUSES.has(error?.status)) {
+    retainedDraft = { ...draft, retryable: false };
+  }
+  if (draft.presignAttempted && !draft.mediaId && error?.status === 400) {
+    retainedDraft = { ...draft, retryable: false };
+  }
+  return { retainedDraft, message };
+}
+
+function discardButtonLabel(draft) {
+  if (draft.discardPending) return 'Discarding…';
+  return draft.discardRequested ? 'Retry discard' : 'Discard';
+}
+
+function rememberFailedDraft(map, serviceId, draft, message) {
+  map.delete(serviceId);
+  map.set(serviceId, { draft, message });
+}
+
+function forgetFailedDraft(map, serviceId, attemptId, onChange = () => {}) {
+  const retained = map.get(serviceId);
+  if (!retained || attemptId === undefined || retained.draft.attemptId === attemptId) {
+    const changed = map.delete(serviceId);
+    if (changed) onChange();
+    return changed;
+  }
+  return false;
+}
+
+const mediaKey = (serviceId, mediaId) => `${serviceId}:${mediaId}`;
+const createRecoveryStore = () => ({ failedDrafts: new Map(), latestAttempts: new Map(), inFlightAttempts: new Map(), discardedMedia: new Set(), refreshServices: new Set(), nextAttempt: 0 });
+const captureButtonLabel = (uploading, failedUpload) => (
+  uploading ? `Uploading… (${uploading})` : failedUpload ? 'Resolve pending clip' : '+ Capture recap clip'
+);
+function requestRecoveryRefresh(ownedStore, recoveryStore, serviceId, notify) {
+  if (!ownedStore) return;
+  recoveryStore.refreshServices.add(serviceId);
+  notify();
+}
+function isVisibleAttempt(mounted, recoveryStore, serviceId, targetServiceId, attemptId) {
+  return mounted && recoveryStore.latestAttempts.get(targetServiceId) === attemptId && serviceId === targetServiceId;
+}
+function finishInFlightAttempt(recoveryStore, serviceId, attemptId, notify) {
+  if (recoveryStore.inFlightAttempts.get(serviceId) !== attemptId) return;
+  recoveryStore.inFlightAttempts.delete(serviceId);
+  notify();
+}
+function showFinishedUpload(mounted, recoveryStore, serviceId, targetServiceId, setUploading) {
+  if (mounted && serviceId === targetServiceId) {
+    setUploading(Number(recoveryStore.inFlightAttempts.has(targetServiceId)));
+  }
+}
+
+export default function TechRecapCapture({ service, request, recoveryStore: ownedRecoveryStore = null, recoveryRevision = 0, onRecoveryChange = () => {} }) {
   const serviceId = service?.id;
-  const [items, setItems] = useState([]);
+  const [itemState, setItemState] = useState({ serviceId: null, items: [] });
   const [pendingFile, setPendingFile] = useState(null);
+  const [failedUpload, setFailedUpload] = useState(null);
   const [showMore, setShowMore] = useState(false);
   const [uploading, setUploading] = useState(0);
   const [err, setErr] = useState(null);
   const fileRef = useRef(null);
+  const serviceIdRef = useRef(serviceId);
+  const serviceGenerationRef = useRef(0);
+  const mountedRef = useRef(false);
+  const [localRecoveryStore] = useState(createRecoveryStore);
+  const recoveryStore = ownedRecoveryStore || localRecoveryStore;
+  serviceIdRef.current = serviceId;
 
-  const refresh = () => request(`/tech/services/${serviceId}/recap-media`)
-    .then((d) => setItems(d?.items || [])).catch(() => {});
-  useEffect(() => { if (serviceId) refresh(); }, [serviceId]) // eslint: react-hooks plugin is not configured in this repo;
+  const isCurrentService = (targetServiceId, generation) => (
+    serviceIdRef.current === targetServiceId && serviceGenerationRef.current === generation
+  );
+
+  const refresh = async (targetServiceId = serviceId, generation = serviceGenerationRef.current) => {
+    try {
+      const data = await request(`/tech/services/${targetServiceId}/recap-media`);
+      if (isCurrentService(targetServiceId, generation)) {
+        const items = (data?.items || []).filter((item) => !recoveryStore.discardedMedia.has(mediaKey(targetServiceId, item.id)));
+        setItemState({ serviceId: targetServiceId, items });
+      }
+    } catch { /* keep the last confirmed list for this visit */ }
+  };
+
+  useEffect(() => {
+    serviceIdRef.current = serviceId;
+    const generation = serviceGenerationRef.current + 1;
+    serviceGenerationRef.current = generation;
+    const retained = recoveryStore.failedDrafts.get(serviceId);
+    setPendingFile(null);
+    setFailedUpload(retained?.draft || null);
+    setShowMore(false);
+    setUploading(recoveryStore.inFlightAttempts.has(serviceId) ? 1 : 0);
+    setErr(retained?.message || null);
+    if (serviceId) refresh(serviceId, generation);
+    return () => {
+      serviceIdRef.current = null;
+      if (serviceGenerationRef.current === generation) serviceGenerationRef.current += 1;
+    };
+  }, [serviceId]); // eslint: react-hooks plugin is not configured in this repo;
+
+  useEffect(() => {
+    if (!ownedRecoveryStore) return;
+    const retained = recoveryStore.failedDrafts.get(serviceId);
+    setFailedUpload(retained?.draft || null);
+    setErr(retained?.message || null);
+    setUploading(recoveryStore.inFlightAttempts.has(serviceId) ? 1 : 0);
+    setItemState((current) => current.serviceId === serviceId
+      ? { ...current, items: current.items.filter((item) => !recoveryStore.discardedMedia.has(mediaKey(serviceId, item.id))) }
+      : current);
+    if (recoveryStore.refreshServices.delete(serviceId)) {
+      refresh(serviceId, serviceGenerationRef.current);
+    }
+  }, [ownedRecoveryStore, recoveryRevision, serviceId]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   const onPick = (e) => {
     const file = e.target.files && e.target.files[0];
     if (fileRef.current) fileRef.current.value = '';
-    if (file) { setPendingFile(file); setShowMore(false); }
+    if (file && serviceId) { setPendingFile({ file, serviceId }); setShowMore(false); }
   };
 
-  const tag = async (role) => {
-    const file = pendingFile;
+  const upload = async (uploadDraft) => {
+    let draft = uploadDraft;
+    const targetServiceId = draft.serviceId;
+    const generation = serviceGenerationRef.current;
+    if (!isCurrentService(targetServiceId, generation) || recoveryStore.inFlightAttempts.has(targetServiceId)) return;
+    const attemptId = recoveryStore.nextAttempt + 1;
+    recoveryStore.nextAttempt = attemptId;
+    recoveryStore.latestAttempts.set(targetServiceId, attemptId);
+    recoveryStore.inFlightAttempts.set(targetServiceId, attemptId);
+    forgetFailedDraft(recoveryStore.failedDrafts, targetServiceId);
+    onRecoveryChange();
+    draft = { ...draft, attemptId };
+    const canRetainAttempt = () => recoveryStore.latestAttempts.get(targetServiceId) === attemptId;
+    const canApplyAttempt = () => isVisibleAttempt(mountedRef.current, recoveryStore, serviceIdRef.current, targetServiceId, attemptId);
     setPendingFile(null);
+    setFailedUpload(null);
     setShowMore(false);
-    if (!file) return;
     setUploading((n) => n + 1);
     setErr(null);
     try {
-      const mediaType = file.type.startsWith('image/') ? 'image' : 'video';
-      const durationMs = mediaType === 'video' ? await readVideoDurationMs(file) : null;
-      const { mediaId, uploadUrl } = await request(`/tech/services/${serviceId}/recap-media/presign`, {
-        method: 'POST',
-        body: JSON.stringify({ role, mediaType, contentType: file.type || (mediaType === 'image' ? 'image/jpeg' : 'video/mp4') }),
+      if (draft.durationMs === undefined) {
+        const durationMs = draft.mediaType === 'video' ? await readVideoDurationMs(draft.file) : null;
+        draft = { ...draft, durationMs };
+      }
+
+      if (draft.cleanupBeforeRetry && draft.mediaId) {
+        try {
+          await deleteKnownDraft(draft, request);
+        } catch (cleanupError) {
+          cleanupError.cleanupFailed = true;
+          cleanupError.message = 'Upload link expired, but cleanup failed. Retry to clean it up and request a new link.';
+          throw cleanupError;
+        }
+        draft = { ...draft, mediaId: null, uploadUrl: null, uploaded: false, cleanupBeforeRetry: false };
+      }
+
+      if (draft.needsReconcile && draft.mediaId) {
+        const reconciled = await reconcileConfirmDraft(draft, request);
+        draft = reconciled.draft;
+        if (reconciled.readyItems) {
+          if (isCurrentService(targetServiceId, generation)) {
+            setItemState({ serviceId: targetServiceId, items: reconciled.readyItems });
+          } else {
+            requestRecoveryRefresh(ownedRecoveryStore, recoveryStore, targetServiceId, onRecoveryChange);
+          }
+          return;
+        }
+      }
+
+      if (!draft.mediaId || !draft.uploadUrl) {
+        draft = { ...draft, presignAttempted: true };
+        const presigned = await request(`/tech/services/${targetServiceId}/recap-media/presign`, {
+          method: 'POST',
+          body: JSON.stringify({ role: draft.role, mediaType: draft.mediaType, contentType: draft.contentType }),
+        });
+        draft = { ...draft, mediaId: presigned.mediaId, uploadUrl: presigned.uploadUrl };
+      }
+
+      if (!draft.uploaded) {
+        const put = await fetch(draft.uploadUrl, { method: 'PUT', headers: { 'Content-Type': draft.contentType }, body: draft.file });
+        if (!put.ok) {
+          const putError = new Error(`upload failed (${put.status})`);
+          putError.status = put.status;
+          throw putError;
+        }
+        draft = { ...draft, uploaded: true };
+      }
+
+      // Once PUT starts, finish confirmation against the captured original
+      // service even if the tech navigates away. The generation guard below
+      // still suppresses every stale UI update in the newly selected visit.
+      draft = { ...draft, needsReconcile: true };
+      await request(`/tech/services/${targetServiceId}/recap-media/${draft.mediaId}/confirm`, {
+        method: 'POST', body: JSON.stringify({ durationMs: draft.durationMs }),
       });
-      const put = await fetch(uploadUrl, { method: 'PUT', headers: { 'Content-Type': file.type || 'video/mp4' }, body: file });
-      if (!put.ok) throw new Error(`upload failed (${put.status})`);
-      await request(`/tech/services/${serviceId}/recap-media/${mediaId}/confirm`, {
-        method: 'POST', body: JSON.stringify({ durationMs }),
-      });
-      await refresh();
+      if (serviceIdRef.current === targetServiceId) {
+        await refresh(targetServiceId, serviceGenerationRef.current);
+      } else {
+        requestRecoveryRefresh(ownedRecoveryStore, recoveryStore, targetServiceId, onRecoveryChange);
+      }
     } catch (e) {
-      // Surface the server reason (unsupported format, too long, etc.) — don't drop silently.
-      setErr(e?.message || 'Couldn’t add that clip — try a shorter clip or a photo.');
+      const { retainedDraft, message } = await recoverUploadFailure(e, draft, request);
+      if (canRetainAttempt()) {
+        rememberFailedDraft(recoveryStore.failedDrafts, targetServiceId, retainedDraft, message);
+      }
+      if (canApplyAttempt()) {
+        // Keep the in-memory File, role, and any completed upload stages so Retry
+        // can resume without asking the tech to capture or tag the clip again.
+        setFailedUpload(retainedDraft);
+        setErr(message);
+      }
     } finally {
-      setUploading((n) => Math.max(0, n - 1));
+      finishInFlightAttempt(recoveryStore, targetServiceId, attemptId, onRecoveryChange);
+      showFinishedUpload(mountedRef.current, recoveryStore, serviceIdRef.current, targetServiceId, setUploading);
+    }
+  };
+
+  const tag = (role) => {
+    const file = pendingFile?.file;
+    const targetServiceId = pendingFile?.serviceId;
+    if (!file || !targetServiceId || targetServiceId !== serviceId) return;
+    const mediaType = file.type.startsWith('image/') ? 'image' : 'video';
+    const contentType = file.type || (mediaType === 'image' ? 'image/jpeg' : 'video/mp4');
+    upload({ file, role, serviceId: targetServiceId, mediaType, contentType, durationMs: undefined, mediaId: null, uploadUrl: null, uploaded: false, needsReconcile: false, retryable: true, cleanupBeforeRetry: false, presignAttempted: false });
+  };
+
+  const discardFailedUpload = async () => {
+    const discarded = failedUpload;
+    if (!discarded) return;
+    if (!discarded.mediaId) {
+      forgetFailedDraft(recoveryStore.failedDrafts, discarded.serviceId, discarded.attemptId, onRecoveryChange);
+      setFailedUpload(null);
+      setErr(null);
+      return;
+    }
+    const cleanupDraft = { ...discarded, retryable: false, discardRequested: true, discardPending: true };
+    rememberFailedDraft(recoveryStore.failedDrafts, discarded.serviceId, cleanupDraft, err);
+    onRecoveryChange();
+    setFailedUpload(cleanupDraft);
+    try {
+      await deleteKnownDraft(discarded, request);
+      const latest = recoveryStore.latestAttempts.get(discarded.serviceId) === discarded.attemptId;
+      recoveryStore.discardedMedia.add(mediaKey(discarded.serviceId, discarded.mediaId));
+      if (latest) forgetFailedDraft(recoveryStore.failedDrafts, discarded.serviceId, discarded.attemptId);
+      onRecoveryChange();
+      if (latest && mountedRef.current && serviceIdRef.current === discarded.serviceId) {
+        setItemState((current) => current.serviceId === discarded.serviceId
+          ? { ...current, items: current.items.filter((item) => item.id !== discarded.mediaId) }
+          : current);
+        setFailedUpload(null);
+        setErr(null);
+      }
+    } catch {
+      const latest = recoveryStore.latestAttempts.get(discarded.serviceId) === discarded.attemptId;
+      const failedCleanup = { ...cleanupDraft, discardPending: false };
+      const message = 'Couldn’t discard this clip from the visit. Retry discard.';
+      if (latest) {
+        rememberFailedDraft(recoveryStore.failedDrafts, discarded.serviceId, failedCleanup, message);
+        onRecoveryChange();
+      }
+      if (latest && mountedRef.current && serviceIdRef.current === discarded.serviceId) {
+        setFailedUpload(failedCleanup);
+        setErr(message);
+      }
     }
   };
 
@@ -99,6 +362,9 @@ export default function TechRecapCapture({ service, request }) {
 
   if (!serviceId) return null;
 
+  const items = itemState.serviceId === serviceId ? itemState.items : [];
+  const visiblePendingFile = pendingFile?.serviceId === serviceId ? pendingFile.file : null;
+  const captureDisabled = Boolean(uploading) + Boolean(failedUpload) > 0;
   const chip = { display: 'flex', alignItems: 'center', gap: 7, padding: '12px 10px', borderRadius: 11, background: C.bg, border: `1px solid ${C.border}`, color: C.text, fontSize: 12.5, fontWeight: 700, cursor: 'pointer', textAlign: 'left' };
 
   return (
@@ -113,7 +379,7 @@ export default function TechRecapCapture({ service, request }) {
         Grab a few 5-sec clips while you work — live pests, spraying, the lanai sweep. They play in the customer’s recap. Skip it and the recap still generates.
       </div>
 
-      <input ref={fileRef} type="file" accept="video/*,image/*" capture="environment" onChange={onPick} style={{ display: 'none' }} />
+      <input ref={fileRef} type="file" accept="video/*,image/*" capture="environment" disabled={captureDisabled} onChange={onPick} style={{ display: 'none' }} />
 
       {items.length > 0 && (
         <div style={{ display: 'grid', gap: 8, marginBottom: 10 }}>
@@ -131,13 +397,28 @@ export default function TechRecapCapture({ service, request }) {
         </div>
       )}
 
-      {err && <div style={{ fontSize: 12, color: C.red, margin: '0 0 8px', lineHeight: 1.4 }}>{err}</div>}
-      <button type="button" onClick={() => fileRef.current && fileRef.current.click()} style={{ width: '100%', padding: 12, borderRadius: 10, border: 'none', background: C.teal, color: '#04240f', fontWeight: 800, fontSize: 14, cursor: 'pointer' }}>
-        {uploading ? `Uploading… (${uploading})` : '+ Capture recap clip'}
+      {err && (
+        <div role="alert" style={{ color: C.red, margin: '0 0 10px', lineHeight: 1.4 }}>
+          <div style={{ fontSize: 14 }}>{err}</div>
+          {failedUpload && (
+            <>
+              <div style={{ fontSize: 14, color: C.muted, marginTop: 4, overflowWrap: 'anywhere' }}>
+                {failedUpload.file.name} · {ROLE_LABELS.get(failedUpload.role)}
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginTop: 9 }}>
+                {failedUpload.retryable && <button type="button" onClick={() => upload(failedUpload)} style={{ flex: 1, minHeight: 44, padding: 10, borderRadius: 9, border: 'none', background: C.teal, color: '#04240f', fontWeight: 800, fontSize: 14, cursor: 'pointer' }}>Retry upload</button>}
+                <button type="button" disabled={failedUpload.discardPending} onClick={discardFailedUpload} style={{ flex: 1, minHeight: 44, padding: 10, borderRadius: 9, border: `1px solid ${C.border}`, background: 'none', color: C.text, fontWeight: 700, fontSize: 14, cursor: 'pointer' }}>{discardButtonLabel(failedUpload)}</button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+      <button type="button" disabled={captureDisabled} onClick={() => fileRef.current && fileRef.current.click()} style={{ width: '100%', padding: 12, borderRadius: 10, border: 'none', background: C.teal, color: '#04240f', fontWeight: 800, fontSize: 14, cursor: captureDisabled ? 'default' : 'pointer', opacity: captureDisabled ? 0.65 : 1 }}>
+        {captureButtonLabel(uploading, failedUpload)}
       </button>
 
       {/* zIndex 1000 like the other tech sheets: the bottom nav is fixed at 50 and later in the DOM, so at 50 it painted over the sheet's last rows. */}
-      {pendingFile && (
+      {visiblePendingFile && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(5,8,13,.7)', zIndex: 1000, display: 'flex', alignItems: 'flex-end' }} onClick={() => setPendingFile(null)}>
           <div onClick={(e) => e.stopPropagation()} style={{ width: '100%', background: C.card, borderRadius: '18px 18px 0 0', border: `1px solid ${C.border}`, boxSizing: 'border-box', padding: '16px 14px calc(22px + env(safe-area-inset-bottom, 0px))', maxHeight: '82%', overflowY: 'auto' }}>
             <div style={{ width: 40, height: 4, background: C.border, borderRadius: 3, margin: '0 auto 12px' }} />

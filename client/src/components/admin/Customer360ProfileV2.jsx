@@ -46,6 +46,7 @@
  *   Switching filter should clear stale rows / not mix categories.
  */
 
+import useCustomerHistory from "../../hooks/useCustomerHistory";
 import { useState, useEffect, useRef, useId, useCallback, lazy, Suspense } from "react";
 import { useIntelligenceBarActions, usePublishIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
 import { createPortal } from "react-dom";
@@ -6901,6 +6902,8 @@ function CustomerProfileTimeline({
   timelineFilter,
   retryTimeline,
   timelineRetrying,
+  timelineHasMore,
+  loadOlderTimeline,
 }) {
   return (
     isAdmin && (
@@ -6957,7 +6960,7 @@ function CustomerProfileTimeline({
         {/* On mobile the timeline grows inline (panel handles the scroll) so
               a nested 250px scroll region doesn't trap touch; capped on desktop. */}
         <div className="md:max-h-[250px] md:overflow-y-auto flex flex-col">
-          {filteredTimeline.slice(0, 30).map((item, i) => {
+          {filteredTimeline.map((item, i) => {
             const TYPE_LABEL = {
               sms: "SMS",
               call: "CALL",
@@ -7009,12 +7012,14 @@ function CustomerProfileTimeline({
               </Button>
             </div>
           )}
-          {!timelineError && filteredTimeline.length === 0 && (
+          {!timelineError && !timelineRetrying && filteredTimeline.length === 0 && (
             <div className="text-ink-secondary text-ui-label text-center py-4">
               No timeline events
             </div>
           )}
         </div>{" "}
+        {timelineRetrying && <p role="status" className="py-3 text-14 text-ink-secondary">Loading history…</p>}
+        {timelineHasMore && !timelineError && <Button variant="secondary" onClick={loadOlderTimeline} disabled={timelineRetrying}>Load older activity</Button>}
       </div>
     )
   );
@@ -8505,10 +8510,6 @@ function useCustomerProfileRecord({ customerId, customerIdRef, isAdmin, lastMuta
   const [profileLoadError, setProfileLoadError] = useState("");
   const [profileReloadKey, setProfileReloadKey] = useState(0);
   const [profileActionErr, setProfileActionErr] = useState("");
-  const [timeline, setTimeline] = useState([]);
-  const [timelineMissingSources, setTimelineMissingSources] = useState([]);
-  const [timelineError, setTimelineError] = useState(false);
-  const [timelineRetrying, setTimelineRetrying] = useState(false);
   const profileSeqRef = useRef(0);
   const profileAbortRef = useRef(null);
   // Bumped on every successful profile reload. The properties panel keys its
@@ -8517,35 +8518,19 @@ function useCustomerProfileRecord({ customerId, customerIdRef, isAdmin, lastMuta
   // unchanged resave still self-heals a stale mirror), so a tuple-based
   // signal would leave the panel stale exactly when the server fixed it.
   const [profileVersion, setProfileVersion] = useState(0);
-  // One abortable load shared by the mount/customer-change effect and every
-  // in-place refresh: profile and timeline move together, so an Intelligence
-  // Bar write cannot leave the history showing the pre-write record.
+  // Profile version also invalidates the paginated histories after a write.
   const reloadCustomer = useCallback(async () => {
     if (customerIdRef.current !== customerId) return null;
     const seq = ++profileSeqRef.current;
     profileAbortRef.current?.abort();
     const ctrl = new AbortController();
     profileAbortRef.current = ctrl;
-    setTimelineRetrying(false);
     try {
-      const [detail, tl] = await Promise.all([
-        adminFetch(`/admin/customers/${customerId}`, { signal: ctrl.signal }),
-        isAdmin
-          ? adminFetch(`/admin/customers/${customerId}/timeline`, {
-              signal: ctrl.signal,
-            }).catch((err) => {
-              if (err.name === "AbortError") throw err;
-              return null;
-            })
-          : Promise.resolve({ timeline: [] }),
-      ]);
+      const detail = await adminFetch(`/admin/customers/${customerId}`, { signal: ctrl.signal });
       if (ctrl.signal.aborted || seq !== profileSeqRef.current || customerIdRef.current !== customerId) return null;
       setData(detail);
       setProfileVersion((v) => v + 1);
       setProfileLoadError("");
-      setTimeline(tl?.timeline || []);
-      setTimelineMissingSources(tl?.missingSources || []);
-      setTimelineError(tl === null);
       return detail;
     } catch (err) {
       if (ctrl.signal.aborted || seq !== profileSeqRef.current || customerIdRef.current !== customerId) return null;
@@ -8559,7 +8544,6 @@ function useCustomerProfileRecord({ customerId, customerIdRef, isAdmin, lastMuta
     setLoading(true);
     setData(null);
     setProfileLoadError("");
-    setTimelineRetrying(false);
     setProfileActionErr("");
     void reloadCustomer().catch((err) => {
       setProfileLoadError(err.message || "Failed to load customer");
@@ -8575,27 +8559,6 @@ function useCustomerProfileRecord({ customerId, customerIdRef, isAdmin, lastMuta
     });
   }, [lastMutation, customerId, customerIdRef, reloadCustomer]);
 
-  const retryTimeline = async () => {
-    const seq = profileSeqRef.current;
-    const signal = profileAbortRef.current.signal;
-    setTimelineRetrying(true);
-    try {
-      const result = await adminFetch(
-        `/admin/customers/${customerId}/timeline`,
-        { signal },
-      );
-      if (signal.aborted || seq !== profileSeqRef.current) return;
-      setTimeline(result.timeline || []);
-      setTimelineMissingSources(result.missingSources || []);
-      setTimelineError(false);
-    } catch {
-      // Keep the loaded profile and recovery action when history is still unavailable.
-    } finally {
-      if (!signal.aborted && seq === profileSeqRef.current)
-        setTimelineRetrying(false);
-    }
-  };
-
   return {
     profileReloadKey,
     reloadCustomer,
@@ -8609,12 +8572,8 @@ function useCustomerProfileRecord({ customerId, customerIdRef, isAdmin, lastMuta
     profileLoadError,
     setProfileReloadKey,
     setData,
-    timeline,
-    retryTimeline,
+    profileCustomerId: data?.customer?.id,
     profileVersion,
-    timelineMissingSources,
-    timelineError,
-    timelineRetrying,
     profileActionErr,
   };
 }
@@ -9242,7 +9201,6 @@ function useCustomerMessages({
 }
 
 function useCustomerProfileNavigation({
-  timeline,
   profileReloadKey,
   initialTab,
   embedded,
@@ -9364,17 +9322,7 @@ function useCustomerProfileNavigation({
     setCancelPlanOpen(false);
     setRefundPayment(null);
   }, [customerId, profileReloadKey, isAdmin]);
-  const filteredTimeline =
-    timelineFilter === "all"
-      ? timeline
-      : timeline.filter(
-          (t) =>
-            t.type === timelineFilter ||
-            (timelineFilter === "notes" && t.type === "interaction"),
-        );
-
   return {
-    filteredTimeline,
     activeTab,
     timelineFilter,
     setAnnualPrepayOpen,
@@ -9653,12 +9601,8 @@ export default function Customer360ProfileV2({
     profileLoadError,
     setProfileReloadKey,
     setData,
-    timeline,
-    retryTimeline,
+    profileCustomerId,
     profileVersion,
-    timelineMissingSources,
-    timelineError,
-    timelineRetrying,
     profileActionErr,
   } = useCustomerProfileRecord({ customerId, customerIdRef, isAdmin, lastMutation });
   const {
@@ -9707,7 +9651,6 @@ export default function Customer360ProfileV2({
     initialEditForm,
   } = useCustomerProfileEditor({ profileReloadKey, data, customerId, isAdmin });
   const {
-    filteredTimeline,
     activeTab,
     timelineFilter,
     setAnnualPrepayOpen,
@@ -9737,7 +9680,6 @@ export default function Customer360ProfileV2({
     cancelPlanOpen,
     refundPayment,
   } = useCustomerProfileNavigation({
-    timeline,
     profileReloadKey,
     initialTab,
     embedded,
@@ -9749,6 +9691,27 @@ export default function Customer360ProfileV2({
     reloadCustomer,
     customerId,
   });
+  const [historySearch, setHistorySearch] = useState("");
+  useEffect(() => {
+    const timer = setTimeout(() => setHistorySearch(timelineSearch.trim()), 250);
+    return () => clearTimeout(timer);
+  }, [timelineSearch]);
+  useEffect(() => {
+    setTimelineFilter("all");
+    setTimelineSearch("");
+    setHistorySearch("");
+  }, [customerId, setTimelineFilter, setTimelineSearch]);
+  const history = useCustomerHistory({
+    customerId, kind: "timeline", enabled: [isAdmin, !loading, String(profileCustomerId) === String(customerId)].every(Boolean),
+    query: new URLSearchParams({ type: timelineFilter === "notes" ? "interaction" : timelineFilter, search: historySearch }).toString(),
+    revision: profileVersion,
+  });
+  const timeline = history.items;
+  const filteredTimeline = timeline;
+  const timelineMissingSources = history.meta.missingSources || [];
+  const timelineError = Boolean(history.error);
+  const timelineRetrying = history.loading;
+  const retryTimeline = history.retry;
   const {
     comms,
     commsLoading,
@@ -10001,7 +9964,7 @@ export default function Customer360ProfileV2({
     activity: (
       <Customer360Activity
         missingSources={timelineMissingSources}
-        timeline={timeline}
+        timeline={historySearch === timelineSearch.trim() ? timeline : []}
         filter={timelineFilter}
         onFilter={setTimelineFilter}
         search={timelineSearch}
@@ -10009,6 +9972,9 @@ export default function Customer360ProfileV2({
         error={timelineError}
         retrying={timelineRetrying}
         onRetry={retryTimeline}
+        loading={history.loading || historySearch !== timelineSearch.trim()}
+        hasMore={history.hasMore}
+        onLoadOlder={history.loadOlder}
       />
     ),
     timeline: (
@@ -10020,6 +9986,8 @@ export default function Customer360ProfileV2({
         timelineFilter={timelineFilter}
         retryTimeline={retryTimeline}
         timelineRetrying={timelineRetrying}
+        timelineHasMore={history.hasMore}
+        loadOlderTimeline={history.loadOlder}
       />
     ),
     conversation,
