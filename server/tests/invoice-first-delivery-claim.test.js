@@ -554,13 +554,44 @@ describe('settleZeroDueBeforeSend — THE zero-due chokepoint (#4131 slice 4 rou
     expect(busy.deliveryNeverAttempted).toBe(true);
   });
 
-  test('an already-tagged deliveryNeverAttempted throw is left exactly as its own caller set it (never overwritten to a different value)', async () => {
+  test('the tag is set unconditionally (Codex pre-push P1, round 1 of the owner\'s audit — complexity simplification): nothing upstream of this catch ever pre-tags an error, so the guard that preserved a pre-existing value was dead defensive code, removed to match the unguarded convention refuseZeroDuePreclaimedInvoice already uses for the same marker', async () => {
     makeDb(zeroDueRow());
-    const tagged = Object.assign(new Error('some other definite pre-provider failure'), { deliveryNeverAttempted: 'explicit-non-boolean-marker' });
-    settleSpy.mockRejectedValue(tagged);
+    const boom = new Error('a bug reaching this catch with anything already set would be surprising, but the tag still wins');
+    settleSpy.mockRejectedValue(boom);
 
-    await expect(InvoiceService._settleZeroDueBeforeSend(INVOICE_ID)).rejects.toBe(tagged);
-    expect(tagged.deliveryNeverAttempted).toBe('explicit-non-boolean-marker');
+    await expect(InvoiceService._settleZeroDueBeforeSend(INVOICE_ID)).rejects.toBe(boom);
+    expect(boom.deliveryNeverAttempted).toBe(true);
+  });
+
+  test('a throw from the initial invoice row read — BEFORE the zero-due lookup and the packet-ownership fence ever run — is tagged too (Codex pre-push P1, round 1): the tagged try starts at the very first pre-provider step, not only the settlement call', async () => {
+    // No `makeDb` fixture here: force the very first `db("invoices")...first()`
+    // read (the one settleZeroDueBeforeSend does itself when called with no
+    // `row`) to throw, before settleZeroBalance is ever reached.
+    const rowReadError = new Error('transient connection reset reading the invoice row');
+    db.mockImplementation(() => ({
+      where: () => ({ first: () => Promise.reject(rowReadError) }),
+    }));
+
+    await expect(InvoiceService._settleZeroDueBeforeSend(INVOICE_ID)).rejects.toBe(rowReadError);
+    expect(rowReadError.deliveryNeverAttempted).toBe(true);
+    expect(settleSpy).not.toHaveBeenCalled();
+  });
+
+  test('a throw from the packet-ownership fenceOnly claim (claimPacketInvoiceForSend) is tagged too (Codex pre-push P1, round 1): the same pre-provider chokepoint, one step later', async () => {
+    makeDb(zeroDueRow({ visit_completion_packet_id: 'pkt-1', payer_id: null }));
+    const fenceError = new Error('transient connection reset resolving packet ownership');
+    // claimPacketInvoiceForSend opens its own db.transaction and its first
+    // read is visit_completion_packets — throw there specifically; the
+    // invoices table keeps using the normal makeDb fixture above it.
+    const realDbImpl = db.getMockImplementation();
+    db.mockImplementation((table) => (table === 'visit_completion_packets'
+      ? { where: () => ({ first: () => Promise.reject(fenceError) }) }
+      : realDbImpl(table)));
+
+    await expect(InvoiceService._settleZeroDueBeforeSend(INVOICE_ID, { fenceOwnership: true }))
+      .rejects.toBe(fenceError);
+    expect(fenceError.deliveryNeverAttempted).toBe(true);
+    expect(settleSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -827,38 +858,12 @@ describe('zeroDueDirectSendOutcome / zeroDueWrapperOutcome — an exhausted not_
   });
 });
 
-describe('zeroDueDirectSendOutcome / zeroDueWrapperOutcome — the rescheduled kind has its own explicit branch, never the generic "(undefined)" fallback (#4131 slice 5, #4634 round-11 pre-push audit note)', () => {
-  // Latent/unreachable through normal traffic today (only
-  // processScheduledSends' own due loop can ever produce this kind, and it
-  // handles it inline without routing through either mapper) — pinned
-  // directly against the mapper functions so a future caller that DOES
-  // route { kind: 'rescheduled' } through them gets an honest, retryable,
-  // deferred-semantics result instead of falling to
-  // zeroDueRefusalReasonText/depositSettlementPendingError's generic
-  // "(undefined)" wording (the exact class round-7 already fixed for
-  // not_zero_due).
-  const rescheduledOutcome = { kind: 'rescheduled' };
-
-  test('direct (sendViaSMS) shape: a distinct rescheduled code, a defined reason, never "(undefined)", never deposit_settlement_pending', async () => {
-    const result = await InvoiceService._zeroDueDirectSendOutcome(INVOICE_ID, rescheduledOutcome);
-
-    expect(result).toEqual({
-      sent: false, ok: false, code: 'rescheduled', deliveryOutcome: 'not_sent', retryable: true,
-      reason: 'The scheduled send time changed while this was being sent; it will send again at the new time',
-    });
-    expect(result.reason).not.toMatch(/undefined/);
-    expect(result.code).not.toBe('deposit_settlement_pending');
-  });
-
-  test('wrapper (sendViaSMSAndEmail) shape: same fix — rescheduled on both legs, a defined error, never "(undefined)"', async () => {
-    const result = await InvoiceService._zeroDueWrapperOutcome(INVOICE_ID, rescheduledOutcome);
-
-    expect(result).toEqual({
-      ok: false, code: 'rescheduled', error: 'The scheduled send time changed while this was being sent; it will send again at the new time',
-      sms: { ok: false, code: 'rescheduled', deliveryOutcome: 'not_sent' },
-      email: { ok: false, code: 'rescheduled', deliveryOutcome: 'not_sent' },
-    });
-    expect(result.error).not.toMatch(/undefined/);
-    expect(result.code).not.toBe('deposit_settlement_pending');
-  });
-});
+// The `rescheduled` mapper branches (zeroDueDirectSendOutcome /
+// zeroDueWrapperOutcome) added here defensively for a latent/unreachable
+// caller were removed on Codex pre-push audit (round 1 of the owner's
+// review): only processScheduledSends' own due loop can ever produce that
+// kind, and it always handles it inline without routing through either
+// mapper — the repo disallows speculative future-proofing for a path no
+// real caller reaches. `{ kind: 'rescheduled' }` now falls through both
+// mappers to the same generic deposit_settlement_pending shape every other
+// unrecognized refusal reason gets.

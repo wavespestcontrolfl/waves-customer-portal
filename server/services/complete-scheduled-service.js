@@ -11340,6 +11340,25 @@ async function completeScheduledService(completionInput, packetContext = null) {
       } catch (claimErr) {
         logger.info(`[dispatch] payment-failed notice for invoice ${invoice.id} skipped — send claim unavailable (${claimErr.code || claimErr.message})`);
       }
+      // Codex pre-push P1 (round 1 of the owner's audit): restoreSendClaim
+      // catches its OWN database errors and resolves false rather than
+      // throwing — every one of the four call sites below used to await it
+      // without checking, so a transient restore failure was silently
+      // treated as a release. The claim then stays 'sending' until stale-
+      // claim recovery parks it (10 minutes later, review-hold), blocking
+      // an ordinary resend in the meantime with no signal anyone could act
+      // on sooner. One shared checked call, used at all four sites, so a
+      // future exit added to this block can't reintroduce an unchecked one.
+      const restoreDeclineSendClaim = async () => {
+        const restored = await DeclineNoticeInvoiceService.restoreSendClaim(
+          invoice.id, declineSendClaim.previousStatus, declineSendClaim.claimed,
+          [], db, declineSendClaim.invoice.send_claim_token,
+        );
+        if (!restored) {
+          logger.error(`[dispatch] payment-failed notice claim restore FAILED for invoice ${invoice.id} — the claim stays 'sending' until stale-claim recovery parks it for operator review; an ordinary resend is blocked until then`);
+        }
+        return restored;
+      };
       if (declineSendClaim) {
         try {
           const { formatCardLine, invoiceAmountDue } = require('../services/invoice-helpers');
@@ -11457,16 +11476,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
               // one of PAY_LINK_QUEUE_ENTRY_POINTS) already guards against a
               // second sender delivering this same pay link, so the invoice
               // claim itself is no longer needed to protect it — give it back.
-              await DeclineNoticeInvoiceService.restoreSendClaim(
-                invoice.id, declineSendClaim.previousStatus, declineSendClaim.claimed,
-                [], db, declineSendClaim.invoice.send_claim_token,
-              );
+              await restoreDeclineSendClaim();
               logger.info(`[dispatch] payment-failed notice for invoice ${invoice.id} held outside the 8AM-8PM ET send window — queued for ${failResult.nextAllowedAt}`);
             } else if (!failResult.sent) {
-              await DeclineNoticeInvoiceService.restoreSendClaim(
-                invoice.id, declineSendClaim.previousStatus, declineSendClaim.claimed,
-                [], db, declineSendClaim.invoice.send_claim_token,
-              );
+              await restoreDeclineSendClaim();
               logger.warn(`[dispatch] payment-failed notice not sent for invoice ${invoice.id} (completion SMS keeps the pay link): ${failResult.code || failResult.reason || 'unknown'}`);
             } else {
               // The notice DELIVERED the pay link — the invoice must finalize
@@ -11498,40 +11511,29 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // invoice is left 'sending' until stale-claim recovery parks
             // it for manual review, blocking every ordinary retry in the
             // meantime.
-            await DeclineNoticeInvoiceService.restoreSendClaim(
-              invoice.id, declineSendClaim.previousStatus, declineSendClaim.claimed,
-              [], db, declineSendClaim.invoice.send_claim_token,
-            );
+            await restoreDeclineSendClaim();
           }
         } catch (failErr) {
           // Every branch above that resolves (deferred / not-sent /
           // delivered / no body) already gives the claim back or finalizes
-          // it. The remaining gap is a THROW reaching here, which falls
-          // into three classes: (1) still pre-provider (template render,
-          // the pre-send notes write) — restore; (2) a DEFINITE rejection
-          // the send layer throws rather than returns — restore; (3) the
-          // provider ACCEPTED the text and the throw came from bookkeeping
-          // AFTER that (e.g. the audit-row insert) — do NOT restore, or a
-          // customer who already has the pay link gets it re-texted. Codex
-          // pre-push P1 (round 2): checking mere presence of
-          // failErr.providerOutcome wrongly restored class (2) too (it is
-          // attached to EVERY exception the messaging layer raises, not
-          // only uncertain ones) — deliveryUnverifiedProviderOutcome fixed
-          // that. Codex pre-push P1 (round 3): that alone still missed
-          // class (3) — an ACCEPTED outcome is not 'uncertain' either, so
-          // it read as restorable too, the exact "delivered, bookkeeping
-          // failed" shape sendViaSMS's own catch (smsDelivered) instead
-          // deliberately leaves claimed for review. providerAccepted below
-          // closes that: only a genuinely pre-provider or definite
-          // non-delivery throw restores; an accepted or uncertain one is
-          // retained, the same posture every other sender in this codebase
-          // gives those two.
-          const providerAccepted = failErr?.providerOutcome?.sent === true;
-          if (declineSendClaim && !providerAccepted && !deliveryUnverifiedProviderOutcome(failErr)) {
-            await DeclineNoticeInvoiceService.restoreSendClaim(
-              invoice.id, declineSendClaim.previousStatus, declineSendClaim.claimed,
-              [], db, declineSendClaim.invoice.send_claim_token,
-            ).catch(() => {});
+          // it. The remaining gap is a THROW reaching here. The messaging
+          // layer's own three-state contract (see the deliveryOutcome doc
+          // comment in services/messaging/send-customer-message.js) makes
+          // 'accepted' / 'not_sent' / 'uncertain' mutually exclusive, so
+          // one direct read decides restorability: no providerOutcome at
+          // all (still pre-provider — template render, the pre-send notes
+          // write) or an explicit 'not_sent' (a definite rejection the send
+          // layer threw rather than returned) both restore; 'uncertain'
+          // (Codex pre-push P1 round 2 — checking mere presence wrongly
+          // restored a definite rejection too) and 'accepted' (round 3 —
+          // the provider took the text and the throw came from bookkeeping
+          // after that, e.g. the audit-row insert; restoring here would
+          // re-text an already-delivered pay link) do not — the same
+          // "retained for review" posture sendViaSMS's own catch
+          // (smsDelivered) gives that exact accepted-then-failed shape.
+          const outcome = failErr?.providerOutcome?.deliveryOutcome;
+          if (declineSendClaim && (!outcome || outcome === 'not_sent')) {
+            await restoreDeclineSendClaim();
           }
           logger.warn(`[dispatch] payment-failed notice errored for invoice ${invoice?.id} (completion SMS keeps the pay link): ${failErr.message}`);
         }

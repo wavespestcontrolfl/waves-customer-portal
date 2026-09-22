@@ -1373,17 +1373,25 @@ async function settleZeroDueBeforeSend(invoiceId, { fenceOwnership = false, row 
   // direct claim-path resolve, an operator-initiated send) — they have no
   // due-list snapshot to go stale in the first place.
   const workerOriginated = !!row;
-  row = row || await db("invoices").where({ id: invoiceId }).first();
-  if (!(await zeroDueVisitInvoice(row, db))) return { kind: "not_zero_due" };
-  if (fenceOwnership && row.visit_completion_packet_id && !row.payer_id) {
-    const fence = await claimPacketInvoiceForSend(invoiceId, row.visit_completion_packet_id, { fenceOnly: true });
-    if (fence.payerBilled) {
-      logger.info(`[invoice] ${invoiceId}: zero-due settlement skipped — the visit is now billed to payer ${fence.payerId}`);
-      return { kind: "refused", code: "payer_billed", reason: `withdrawn to payer ${fence.payerId}` };
-    }
-  }
+  // Codex pre-push P1 (round 2 of the owner's audit): the tagged try used
+  // to start only at the settlement call, AFTER the row read, the
+  // zero-due detection and the packet fenceOnly claim — a transient throw
+  // from any of those (a DB fault) escaped untagged, so collections read
+  // it as ambiguous and stamped delivery_unknown for a text that was
+  // never attempted. NONE of this chokepoint ever reaches a provider —
+  // every step here is pre-provider — so the whole thing is one tagged
+  // try, not just the settlement call.
   let settlement;
   try {
+    row = row || await db("invoices").where({ id: invoiceId }).first();
+    if (!(await zeroDueVisitInvoice(row, db))) return { kind: "not_zero_due" };
+    if (fenceOwnership && row.visit_completion_packet_id && !row.payer_id) {
+      const fence = await claimPacketInvoiceForSend(invoiceId, row.visit_completion_packet_id, { fenceOnly: true });
+      if (fence.payerBilled) {
+        logger.info(`[invoice] ${invoiceId}: zero-due settlement skipped — the visit is now billed to payer ${fence.payerId}`);
+        return { kind: "refused", code: "payer_billed", reason: `withdrawn to payer ${fence.payerId}` };
+      }
+    }
     settlement = await settleZeroDueVisitInvoice(invoiceId, db, { requireDueBy: workerOriginated ? new Date() : null });
   } catch (settlementErr) {
     // Settlement-stage throw → definite non-delivery (#4131 slice 5, #4634
@@ -1392,18 +1400,17 @@ async function settleZeroDueBeforeSend(invoiceId, { fenceOwnership = false, row 
     // visit lock in lockVisitForSettlement, or a genuine DB fault) happens
     // strictly BEFORE any send attempt. Tag it deliveryNeverAttempted, the
     // SAME marker claimInvoiceForSend's own preclaimed zero-due re-check
-    // already uses for exactly this class of pre-provider throw, then
-    // re-throw — this does NOT swallow the error (settleZeroDueVisitInvoice's
-    // own contract, a prior pre-push fix, is that an unrecognized throw must
-    // still propagate rather than loop silently forever): it only tells
-    // every caller of this chokepoint, definitively, that no text went out.
-    // Direct callers of sendViaSMS (collections-conversation.js, the
-    // AI-assistant send tool) otherwise read ANY throw here as ambiguous
-    // delivery and stamp delivery_unknown, freezing a retry that is
-    // actually always safe.
-    if (settlementErr && typeof settlementErr === "object" && settlementErr.deliveryNeverAttempted === undefined) {
-      settlementErr.deliveryNeverAttempted = true;
-    }
+    // already uses for exactly this class of pre-provider throw (set
+    // unconditionally, same convention, since nothing upstream of this
+    // catch ever tags it first), then re-throw — this does NOT swallow the
+    // error (settleZeroDueVisitInvoice's own contract, a prior pre-push
+    // fix, is that an unrecognized throw must still propagate rather than
+    // loop silently forever): it only tells every caller of this
+    // chokepoint, definitively, that no text went out. Direct callers of
+    // sendViaSMS (collections-conversation.js, the AI-assistant send tool)
+    // otherwise read ANY throw here as ambiguous delivery and stamp
+    // delivery_unknown, freezing a retry that is actually always safe.
+    settlementErr.deliveryNeverAttempted = true;
     throw settlementErr;
   }
   if (settlement.reason === "rescheduled") {
@@ -1537,19 +1544,13 @@ async function zeroDueDirectSendOutcome(invoiceId, outcome) {
     return { sent: false, ok: false, code: "balance_changed_retry", deliveryOutcome: "not_sent", retryable: true,
       reason: "The balance changed while sending; try again" };
   }
-  if (outcome.kind === "rescheduled") {
-    // #4131 slice 5 (#4634 round-11 pre-push audit note, latent/unreachable
-    // today): only processScheduledSends' own due loop can ever produce
-    // this kind (workerOriginated — see settleZeroDueBeforeSend — is the
-    // one condition that arms the requireDueBy re-check inside
-    // settleZeroBalance), and that loop handles it inline without ever
-    // routing through this mapper. Added defensively so a future caller
-    // that DOES route it here gets an honest, retryable, deferred-semantics
-    // result — never the generic "(undefined)" fallback below (the same
-    // class of bug round-7 fixed for not_zero_due).
-    return { sent: false, ok: false, code: "rescheduled", deliveryOutcome: "not_sent", retryable: true,
-      reason: "The scheduled send time changed while this was being sent; it will send again at the new time" };
-  }
+  // Codex pre-push P1 (round 1 of the owner's audit): a `rescheduled`
+  // branch was added here defensively (#4634's own round-11 note flagged
+  // it as latent/unreachable), but the repo disallows speculative
+  // future-proofing — only processScheduledSends' own due loop can ever
+  // produce this kind, and it handles that inline without ever routing
+  // through this mapper. Removed rather than kept as dead code; add it
+  // back if a real caller ever needs to route `rescheduled` through here.
   return { sent: false, ok: false, code: "deposit_settlement_pending", deliveryOutcome: "not_sent", retryable: true,
     reason: zeroDueRefusalReasonText(outcome) };
 }
@@ -1608,15 +1609,9 @@ async function zeroDueWrapperOutcome(invoiceId, outcome) {
       sms: { ok: false, code: "balance_changed_retry", deliveryOutcome: "not_sent" },
       email: { ok: false, code: "balance_changed_retry", deliveryOutcome: "not_sent" } };
   }
-  if (outcome.kind === "rescheduled") {
-    // Same #4634 round-11 latent-branch fix, mirrored here for the wrapper
-    // shape (see zeroDueDirectSendOutcome's own comment) — unreachable
-    // today for the same reason, added defensively.
-    const reason = "The scheduled send time changed while this was being sent; it will send again at the new time";
-    return { ok: false, code: "rescheduled", error: reason,
-      sms: { ok: false, code: "rescheduled", deliveryOutcome: "not_sent" },
-      email: { ok: false, code: "rescheduled", deliveryOutcome: "not_sent" } };
-  }
+  // Same #4634 round-11 latent-branch removal as zeroDueDirectSendOutcome
+  // above (Codex pre-push P1, round 1) — unreachable today for the same
+  // reason, and the repo disallows speculative future-proofing.
   const err = depositSettlementPendingError(invoiceId, outcome.reason);
   return { ok: false, code: err.code, error: err.message, sms: { ok: false, code: err.code }, email: { ok: false, code: err.code } };
 }
@@ -4828,7 +4823,12 @@ const InvoiceService = {
     const invoice = await db("invoices").where({ id: invoiceId }).first();
     if (!invoice) return null;
     if (!SEND_FINALIZABLE_STATUSES.includes(invoice.status)) return invoice;
-    if (claimToken && invoice.send_claim_token !== claimToken) return invoice;
+    // Codex pre-push P1 (round 1 of the owner's audit — complexity
+    // simplification): a claimToken mismatch pre-check used to short-
+    // circuit here too, ahead of the finalize UPDATE's own token
+    // predicate below — genuinely redundant, since that predicate (and the
+    // post-update fresh re-read a few lines down) already give the exact
+    // same correctness guarantee without a second decision point. Removed.
 
     // Same contract as sendViaSMSAndEmail (the #1604 fix): callers that take
     // no review decision inherit the review request configured at schedule
@@ -4858,12 +4858,18 @@ const InvoiceService = {
       updated_at: now,
     };
     if (sms) updates.sms_sent_at = db.raw("COALESCE(sms_sent_at, ?)", [now]);
-    if (claimToken) updates.send_claim_token = null;
 
     const finalizeQuery = db("invoices")
       .where({ id: invoiceId })
       .whereIn("status", SEND_FINALIZABLE_STATUSES);
-    if (claimToken) finalizeQuery.where({ send_claim_token: claimToken });
+    // Require-and-release together, one decision: a claimed caller's token
+    // both gates the UPDATE (never finalize a row this exact episode
+    // doesn't own) and is what gets cleared by it — merged into the single
+    // predicate/payload pair below rather than two separate `if`s.
+    if (claimToken) {
+      finalizeQuery.where({ send_claim_token: claimToken });
+      updates.send_claim_token = null;
+    }
     const [updated] = await finalizeQuery.update(updates).returning("*");
     // A claimed caller that loses the race (another episode already
     // restored/re-claimed/finalized this exact token's row between the
@@ -7077,6 +7083,21 @@ const InvoiceService = {
       const invoice = await trx("invoices").where({ id }).forUpdate().first();
       if (!invoice) return { settled: false, reason: "not_found", invoice: null };
       const skip = (reason) => ({ settled: false, reason, invoice });
+      // Codex pre-push P1 (round 1 of the owner's audit): a customer merge
+      // can repoint invoices.customer_id between the unlocked pre-read
+      // above and this FOR UPDATE — the lock just taken would then be on
+      // the WRONG (retired) customer, while this settlement marks an
+      // invoice the SURVIVOR now owns as prepaid without ever holding the
+      // survivor's own customer lock, so a concurrent Bill-To edit on the
+      // survivor is not actually serialized behind it. Re-verify under the
+      // invoice's own lock: a real merge racing a settlement is rare and
+      // this transaction has made no writes yet, so fail closed and
+      // retryable (the worker retries next pass, a direct caller's own
+      // retry rail applies) rather than attempt a mid-transaction lock
+      // swap.
+      if (invoice.customer_id !== preCustomer.customer_id) {
+        return { ...skip("owner_changed"), retryable: true };
+      }
       // Packet ownership RE-VALIDATED under THIS lock (Codex round-9 audit
       // P1 #4131): settleZeroDueBeforeSend's own packet fence
       // (claimPacketInvoiceForSend fenceOnly) commits and returns in its

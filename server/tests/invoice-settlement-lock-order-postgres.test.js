@@ -44,6 +44,39 @@ test('settleZeroBalance source locks the customer row before the invoice row', (
   expect(invoiceLockAt).toBeGreaterThan(customerLockAt);
 });
 
+// Codex pre-push P1 (round 1, sibling-caller sweep): settleZeroBalance
+// fixing its OWN internal lock order is not enough on its own — a caller
+// that passes an EXISTING transaction (one that already locked rows in
+// the old order before settleZeroBalance ever runs on that same trx) still
+// establishes the order PostgreSQL sees. Grep-swept every production
+// caller of .settleZeroBalance( in the repo (not just server/services/):
+// server/services/estimate-deposits.js and settleZeroDueVisitInvoice
+// (invoice.js itself) both call with no `database` argument, so
+// settleZeroBalance opens its OWN transaction and its own internal order
+// governs — no external caller lock precedes it, nothing to fix there.
+// server/services/visit-completion-payment.js's collectVisitCompletionInvoice
+// is the ONE caller that passes an existing trx with rows already locked —
+// checked below.
+test('the one sibling caller that passes an existing transaction (visit-completion-payment.js) also locks customer before invoice', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const source = fs.readFileSync(path.join(__dirname, '../services/visit-completion-payment.js'), 'utf8');
+  const fnAt = source.indexOf("const settlement = await database.transaction(async (trx) => {");
+  expect(fnAt).toBeGreaterThan(-1);
+  const fnBody = source.slice(fnAt, fnAt + 2000);
+  const customerLockAt = fnBody.indexOf("trx('customers').where({ id: invoice.customer_id }).forUpdate()");
+  const invoiceLockAt = fnBody.indexOf("trx('invoices').where({ id: invoice.id }).forUpdate()");
+  expect(customerLockAt).toBeGreaterThan(-1);
+  expect(invoiceLockAt).toBeGreaterThan(customerLockAt);
+  // The customer-id mismatch guard travels with the reorder here too —
+  // same reasoning as settleZeroBalance's own guard, ported to this
+  // caller's own pre-lock/lock pair, using the outer (pre-transaction)
+  // invoice.customer_id snapshot rather than a second in-transaction read
+  // (a prior reorder attempt added one, and its extra invoice query
+  // regressed lock-timing tests elsewhere — see the source comment).
+  expect(fnBody).toMatch(/if \(locked\.customer_id !== invoice\.customer_id\) throw new Error\(/);
+});
+
 postgres('settleZeroBalance customer-then-invoice lock order (#4131 slice 5, #4634 deferral)', () => {
   let database;
   let customerId;
@@ -130,5 +163,100 @@ postgres('settleZeroBalance customer-then-invoice lock order (#4131 slice 5, #46
       await trxB.rollback().catch(() => {});
       throw err;
     }
+  });
+});
+
+// Codex pre-push P1 (round 1 of the owner's audit): the customer-first
+// reorder above reads customer_id UNLOCKED, then locks that customer,
+// THEN locks the invoice — a customer merge repointing invoices.customer_id
+// in the gap between the two reads would lock the WRONG (retired)
+// customer and settle an invoice the SURVIVOR now owns without ever
+// holding the survivor's own lock. This drives the REAL settleZeroBalance
+// function (via the app's own db singleton, not a private connection —
+// it always opens its own top-level transaction) through that exact gap
+// using the same blocking-lock interleaving technique as the deadlock
+// proof above, and asserts it fails closed instead of settling under the
+// wrong lock.
+postgres('settleZeroBalance re-verifies the customer after locking (Codex pre-push P1, round 1)', () => {
+  let database; // raw, for fixture setup/teardown and the interleaving lock
+  let Invoice;
+  let customerAId;
+  let customerBId;
+  let invoiceId;
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  beforeAll(() => {
+    const url = new URL(connection);
+    const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname);
+    const ciTest = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname === '/waves_test';
+    if (!privateQa && !ciTest) throw new Error('Use a verified, task-private QA database or the isolated CI database');
+    database = knex({ client: 'pg', connection, pool: { min: 0, max: 6 } });
+    // The app's own db singleton — settleZeroBalance's default `database`
+    // param — connects via the SAME DATABASE_URL from process.env, so it
+    // reaches the identical physical database as `database` above.
+    Invoice = require('../services/invoice');
+  });
+  afterAll(async () => { if (database) await database.destroy(); });
+
+  beforeEach(async () => {
+    customerAId = randomUUID();
+    customerBId = randomUUID();
+    invoiceId = randomUUID();
+    await database('customers').insert([
+      { id: customerAId, first_name: 'Owner', last_name: 'Original', phone: '+12025550171', email: `${customerAId}@example.invalid` },
+      { id: customerBId, first_name: 'Owner', last_name: 'Survivor', phone: '+12025550172', email: `${customerBId}@example.invalid` },
+    ]);
+    await database('invoices').insert({
+      id: invoiceId, customer_id: customerAId, invoice_number: `TEST-OWNER-${invoiceId.slice(0, 8)}`,
+      token: randomUUID(), status: 'draft', total: 117, subtotal: 117, line_items: '[]',
+    });
+  });
+  afterEach(async () => {
+    await database('invoices').where({ id: invoiceId }).del().catch(() => {});
+    await database('customers').whereIn('id', [customerAId, customerBId]).del().catch(() => {});
+  });
+
+  test('a customer repointing the invoice between the unlocked pre-read and the customer lock is caught — fails closed and retryable, never settles under the wrong customer', async () => {
+    // Hold customer A locked so settleZeroBalance's OWN customer-lock
+    // attempt (which will read customer A from its unlocked pre-check)
+    // blocks on it — the exact window a real merge would land in.
+    const trxA = await database.transaction();
+    try {
+      await trxA('customers').where({ id: customerAId }).forUpdate().first('id');
+
+      const settlePromise = Invoice.settleZeroBalance(invoiceId);
+      // Let settleZeroBalance's unlocked preCustomer read (customer A) and
+      // its subsequent customer-lock attempt actually register and block
+      // on trxA before the "merge" commits underneath it.
+      await sleep(200);
+
+      // The "merge": repoint the invoice to the survivor customer B and
+      // commit, from a separate, unrelated connection — customer B isn't
+      // locked by anyone, and the invoice itself isn't locked yet either
+      // (settleZeroBalance hasn't reached its own invoice FOR UPDATE).
+      await database('invoices').where({ id: invoiceId }).update({ customer_id: customerBId });
+
+      // Release trxA — settleZeroBalance's blocked customer-A lock now
+      // resolves (a stale lock: A is no longer this invoice's owner), and
+      // it proceeds to lock + re-read the invoice, which now points to B.
+      await trxA.commit();
+
+      const result = await settlePromise;
+      expect(result).toMatchObject({ settled: false, reason: 'owner_changed', retryable: true });
+      expect(result.invoice).toMatchObject({ id: invoiceId, customer_id: customerBId });
+    } finally {
+      await trxA.rollback().catch(() => {});
+    }
+
+    // Confirmed NOT settled — no write of any kind happened to the invoice
+    // beyond the "merge" update itself.
+    const after = await database('invoices').where({ id: invoiceId }).first('status', 'customer_id');
+    expect(after).toMatchObject({ status: 'draft', customer_id: customerBId });
+  });
+
+  test('control: no merge in the gap settles normally (the guard never fires on the ordinary path)', async () => {
+    await database('invoices').where({ id: invoiceId }).update({ total: 0, subtotal: 0, credit_applied: 0 });
+    const result = await Invoice.settleZeroBalance(invoiceId);
+    expect(result.reason).not.toBe('owner_changed');
   });
 });

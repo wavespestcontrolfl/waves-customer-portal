@@ -1697,7 +1697,7 @@ class CollectionsConversation {
       // pre-provider settlement failure (e.g. visit_busy from the NOWAIT
       // visit lock) — that class never reaches a provider, so a retry here
       // is always safe, unlike the genuinely ambiguous case below.
-      if (err?.deliveryNeverAttempted) {
+      if (err.deliveryNeverAttempted) {
         logger.warn(`[collections-voice] pay-link send failed before any provider contact (definite non-delivery): ${err.message}`);
         this.payLinkSent = false;
         await ContactLedger.markSendFailed(entry, { stage: 'send_via_sms', code: err.code || 'settlement_failed' });
