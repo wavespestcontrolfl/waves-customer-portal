@@ -520,6 +520,28 @@ function invoiceServiceScopeEligibleLines(serviceLineItems, scopeKey, scopeCateg
     .filter((i) => i >= 0);
 }
 
+// GitHub review round 1 P0, second finding (PR #4659, round 2) — client
+// mirror of server/services/invoice.js's freshPickEligibleLines. Unlike
+// invoiceServiceScopeEligibleLines above (which falls back to UNSCOPED
+// when this invoice carries no service_key data anywhere, preserving a
+// pre-lane invoice's own historical "never scopes" contract), a FRESH
+// catalog pick the operator just chose must never silently preview as
+// unscoped just because this invoice's lines carry no service_key
+// snapshot — that would disagree with the server's own fail-closed save
+// (a preview/save mismatch). Fails closed: no service_key data to
+// verify against means no line can be confirmed eligible, so this
+// always returns the (possibly empty) matched-line array, never null.
+function freshPickEligibleLines(serviceLineItems, scopeKey, scopeCategory) {
+  return serviceLineItems
+    .map((line, i) => (
+      (!scopeKey || String(line?.service_key || "") === String(scopeKey))
+      && (!scopeCategory || String(line?.service_category || "") === String(scopeCategory))
+        ? i
+        : -1
+    ))
+    .filter((i) => i >= 0);
+}
+
 // A document-wide/scoped discount item's own "Applies to" fragment — a
 // per-line pick's row already sits nested under its own line, so this is
 // only ever called for one with discount_for: null (see discountRowCaption
@@ -603,18 +625,19 @@ export function invoiceDocumentTerms(items, serviceLineItems, discountRowById, p
       }
       // GitHub review round 1 P1 (PR #4659): a FRESH catalog-backed pick's
       // OWN service_key_filter/_category_filter scopes it exactly like a
-      // stored stamp's document_scope_service_key/_category does — the
-      // SAME invoiceServiceScopeEligibleLines helper, reading the catalog
-      // row's own filter columns (server mirror: invoice.js's
-      // documentEntryTerms / scopeEligibleLines).
+      // stored stamp's document_scope_service_key/_category does — but
+      // via freshPickEligibleLines (fail-closed — see its own comment),
+      // never invoiceServiceScopeEligibleLines' stored-stamp "no keys
+      // anywhere ⇒ unscoped" fallback, or the preview could disagree
+      // with the server's own fail-closed save.
       const row = i.discount_id ? discountRowById?.get(String(i.discount_id)) : null;
       if (!row || (!row.service_key_filter && !row.service_category_filter)) return term;
-      const eligibleLines = invoiceServiceScopeEligibleLines(
+      const eligibleLines = freshPickEligibleLines(
         serviceLineItems,
         row.service_key_filter,
         row.service_category_filter,
       );
-      return eligibleLines ? { ...term, eligibleLines } : term;
+      return { ...term, eligibleLines };
     });
 }
 

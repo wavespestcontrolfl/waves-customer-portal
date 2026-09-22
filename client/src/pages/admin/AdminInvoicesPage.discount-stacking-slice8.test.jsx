@@ -223,11 +223,20 @@ describe("invoiceDocumentTerms — a FRESH pick with a scoped catalog row is sco
     expect(terms[0].eligibleLines).toEqual([]);
   });
 
-  test("no service_key anywhere on the invoice (no pickService use) leaves a scoped row unscoped — same fallback a stored stamp's own scope already uses", () => {
+  test("no service_key anywhere on the invoice (no pickService use) resolves the scoped row to an EMPTY eligibleLines — a FRESH pick fails CLOSED, unlike a stored stamp's legacy fallback", () => {
+    // GitHub review round 1 P0, second finding (PR #4659, round 2): the
+    // "no service_key data anywhere ⇒ unscoped" fallback is preserved
+    // ONLY for a STORED item's own document_scope_service_key/_category
+    // (a pre-lane invoice whose stamp predates service_key tracking has
+    // no scope concept to begin with). A FRESH pick has no such excuse —
+    // the operator is choosing a scoped catalog row right now, against
+    // lines that plainly carry no service_key at all, so there is no
+    // verifiable match. Admitting it unscoped would let a WDO-only 100%
+    // discount hit a hand-typed line it was never meant to touch.
     const items = [{ client_id: "d1", _kind: "discount", discount_for: null, discount_id: "wdo-row" }];
     const discountRowById = new Map([["wdo-row", { id: "wdo-row", discount_type: "percentage", amount: 100, service_key_filter: "wdo_inspection" }]]);
     const terms = invoiceDocumentTerms(items, [{ client_id: "l1", description: "Hand-typed line" }], discountRowById, new Set());
-    expect(terms[0]).not.toHaveProperty("eligibleLines");
+    expect(terms[0].eligibleLines).toEqual([]);
   });
 });
 

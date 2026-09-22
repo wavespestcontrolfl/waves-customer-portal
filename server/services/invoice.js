@@ -745,6 +745,28 @@ function stackInvoiceDocumentDiscounts(serviceLines, lineEntries, manualDiscount
       .map((line, i) => (matchesKey(line) && matchesCategory(line) ? i : -1))
       .filter((i) => i >= 0);
   };
+  // GitHub review round 1 P0, second finding (PR #4659, round 2): unlike
+  // scopeEligibleLines above — which intentionally falls back to
+  // UNSCOPED when this invoice carries no service_key data anywhere at
+  // all, preserving "a pre-lane invoice never scopes a STAMP" for
+  // genuine historical data with no scope concept to begin with — a
+  // FRESH catalog pick the operator just chose, whose row explicitly
+  // names a scope, must never silently widen to the whole invoice just
+  // because this invoice's lines happen to carry no service_key
+  // snapshot. Reproduced: a hand-typed $100 line (no pickService use)
+  // took the FULL $100 off a 100%-off, WDO-only pick with this fallback
+  // shared. FAILS CLOSED instead — no service_key data to verify against
+  // means no line can be confirmed eligible, so this returns an EMPTY
+  // array (every configured filter, $0), never null (unscoped, every
+  // line). The only real "unscoped" case left is a row with neither
+  // filter set at all (checked by the caller before this is invoked).
+  const freshPickEligibleLines = (scopeKey, scopeCategory) => {
+    const matchesKey = (line) => !scopeKey || String(line.service_key || "") === String(scopeKey);
+    const matchesCategory = (line) => !scopeCategory || String(line.service_category || "") === String(scopeCategory);
+    return serviceLines
+      .map((line, i) => (matchesKey(line) && matchesCategory(line) ? i : -1))
+      .filter((i) => i >= 0);
+  };
   // A plain literal credit (no discount_id) has no scope concept of its own
   // — only a stored stamp's document_scope_service_key/_category, set
   // exclusively by buildDiscountLineItem's appointment-level branch, can
@@ -777,14 +799,16 @@ function stackInvoiceDocumentDiscounts(serviceLines, lineEntries, manualDiscount
   const documentEntryTerms = documentDiscountEntries.map((entry) => {
     // GitHub review round 1 P1 (PR #4659): a FRESH catalog-backed pick's
     // OWN service_key_filter/_category_filter scopes it exactly like a
-    // stored stamp's document_scope_service_key/_category does — the
-    // SAME scopeEligibleLines call, just reading the catalog row's own
-    // filter columns instead of a stamp's snapshotted ones. A row with
-    // neither filter set (the common case) resolves eligibleLines to
-    // null (unscoped) here exactly as before.
+    // stored stamp's document_scope_service_key/_category does. A row
+    // with neither filter set (the common case) resolves eligibleLines
+    // to null (unscoped) here exactly as before. A FRESH pick's own
+    // resolution uses freshPickEligibleLines (fail-closed — see its own
+    // comment), never scopeEligibleLines' stored-stamp fallback.
     const eligibleLines = entry.stored
       ? scopeEligibleLines(entry.item.document_scope_service_key, entry.item.document_scope_service_category)
-      : (entry.row ? scopeEligibleLines(entry.row.service_key_filter, entry.row.service_category_filter) : null);
+      : (entry.row && (entry.row.service_key_filter || entry.row.service_category_filter)
+        ? freshPickEligibleLines(entry.row.service_key_filter, entry.row.service_category_filter)
+        : null);
     if (entry.stored) {
       return {
         discountType: "fixed_amount",
@@ -801,6 +825,19 @@ function stackInvoiceDocumentDiscounts(serviceLines, lineEntries, manualDiscount
       };
     }
     if (entry.row) {
+      // GitHub review round 1 P0, first finding (PR #4659, round 2): a
+      // FRESH pick's scope must be PERSISTED onto the item, the same way
+      // lineItemDiscountTerm persists its sort key — otherwise, once
+      // this item is SAVED and this same resolve runs again on the next
+      // edit (entry.stored === true this time), the entry.stored branch
+      // above reads document_scope_service_key/_category straight off
+      // the item, finds nothing, and silently reverts to unscoped —
+      // reproduced: a WDO-only $90 document credit plus an $80 line
+      // credit totaled $20 fresh, $33.33 on a plain unchanged resave.
+      if (entry.row.service_key_filter || entry.row.service_category_filter) {
+        entry.item.document_scope_service_key = entry.row.service_key_filter || null;
+        entry.item.document_scope_service_category = entry.row.service_category_filter || null;
+      }
       return {
         ...lineItemDiscountTerm(entry.row, entry.item),
         id: entry.row.id,

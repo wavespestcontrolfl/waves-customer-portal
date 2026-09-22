@@ -275,7 +275,7 @@ describe('a FRESH document-wide catalog pick with service_key_filter/_category_f
     expect(lineItemDiscounts[0].dollars).toBe(0);
   });
 
-  test('a scoped row on an invoice with NO service_key data anywhere (a hand-typed line, no pickService) stays unscoped — same "no keys ⇒ unscoped" rule a stored stamp already follows, not a NEW gap', () => {
+  test('a scoped row on an invoice with NO service_key data anywhere (a hand-typed line, no pickService) resolves to $0 — a FRESH pick fails CLOSED, unlike a stored stamp\'s legacy fallback', () => {
     const line = positiveLine({ client_id: 'l1', unit_price: 100, amount: 100 }); // no service_key at all
     const pick = freshDocPick({ discount_id: 'waveguard-wdo' });
     const rowById = new Map([[
@@ -283,12 +283,15 @@ describe('a FRESH document-wide catalog pick with service_key_filter/_category_f
       catalogRow({ id: 'waveguard-wdo', name: 'WaveGuard Member WDO', discount_type: 'percentage', amount: 100, service_key_filter: 'wdo_inspection' }),
     ]]);
     const { lineItemDiscounts } = run({ items: [line, pick], lineItemDiscountRowById: rowById });
-    // Pre-existing "invoiceCarriesServiceScope" gate (scopeEligibleLines):
-    // with no service_key snapshot anywhere on the invoice, there is no
-    // per-line signal to scope against at all, so this resolves unscoped
-    // — exactly the same behavior a stored stamp's own scope already
-    // falls back to on a pre-lane/hand-built invoice.
-    expect(lineItemDiscounts[0].dollars).toBe(100);
+    // scopeEligibleLines's "no service_key snapshot anywhere ⇒ unscoped"
+    // fallback is intentionally preserved ONLY for STORED/replayed items
+    // (a pre-lane invoice whose stamp predates service_key tracking).
+    // A FRESH pick has no such excuse — the operator is choosing a
+    // scoped catalog row right now, against lines that plainly carry no
+    // service_key at all, so there is no verifiable match. Admitting it
+    // unscoped here would let a WDO-only 100% discount zero a hand-typed
+    // line it was never meant to touch. Fail closed: $0, not $100.
+    expect(lineItemDiscounts[0].dollars).toBe(0);
   });
 
   test('an UNSCOPED catalog row (no filter set) is unaffected — this only changes rows that actually carry a filter', () => {
@@ -362,6 +365,38 @@ describe('replay stability: a saved document-wide pick totals identically on an 
     const { fresh, resubmitted } = saveThenResubmitUnchanged(items, rowById);
     expect(netOf(150, fresh.lineItemDiscounts)).toBe(20);
     expect(netOf(150, resubmitted.lineItemDiscounts)).toBe(20);
+  });
+
+  // Round-1 GitHub review P0 #1: a FRESH scoped document-wide catalog
+  // pick (service_key_filter set) applies its eligibleLines correctly on
+  // the FIRST save, but nothing persisted that scope onto the item — so
+  // on an unchanged resubmit, the STORED-replay branch found no
+  // document_scope_service_key/_category, scopeEligibleLines treated the
+  // absent key as "unscoped", and the discount silently widened to the
+  // whole invoice (documentEntryTerms now stamps
+  // entry.item.document_scope_service_key/_category alongside the sort
+  // key whenever a fresh row carries a filter, so the stored branch's
+  // existing scopeEligibleLines call reads the SAME scope back on
+  // replay). $50 WDO / $100 pest lines, a 100%-off pick scoped to
+  // wdo_inspection: only the $50 WDO line is discounted on the first
+  // save AND on an unchanged resubmit — the pre-fix code silently
+  // widened to $150 (the whole invoice) on the resubmit.
+  test('round-1 P0 repro: a WDO-scoped 100% document-wide pick discounts only the $50 WDO line on save AND on an unchanged resubmit, never the whole $150 invoice', () => {
+    const rowById = new Map([
+      ['waveguard-wdo', catalogRow({ id: 'waveguard-wdo', name: 'WaveGuard Member WDO', discount_type: 'percentage', amount: 100, service_key_filter: 'wdo_inspection' })],
+    ]);
+    const items = [
+      positiveLine({ client_id: 'l-wdo', description: 'WDO Inspection', unit_price: 50, amount: 50, service_key: 'wdo_inspection' }),
+      positiveLine({ client_id: 'l-pest', description: 'Quarterly Pest', unit_price: 100, amount: 100, service_key: 'pest_control' }),
+      freshDocPick({ discount_id: 'waveguard-wdo' }),
+    ];
+    const { fresh, resubmitted } = saveThenResubmitUnchanged(items, rowById);
+    expect(totalOf(fresh.lineItemDiscounts)).toBe(50);
+    expect(totalOf(resubmitted.lineItemDiscounts)).toBe(50);
+    // The scope itself must have been persisted onto the item, not just
+    // happened to net out right — assert it directly.
+    const docItem = items.find((i) => i.client_id === 'd-doc');
+    expect(docItem.document_scope_service_key).toBe('wdo_inspection');
   });
 });
 
