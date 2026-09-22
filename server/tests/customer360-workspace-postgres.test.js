@@ -100,6 +100,60 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
     }
   }, 30000);
 
+  test('composer context stays on the latest primary-phone SMS across voice pages and the read boundary', async () => {
+    const conversationIds = Array.from({ length: 5 }, () => randomUUID());
+    const primarySmsIds = [randomUUID(), randomUUID()];
+    const otherContactSmsId = randomUUID();
+    const otherCustomerSmsId = randomUUID();
+    const unusableEndpointSmsIds = [randomUUID(), randomUUID()];
+    const afterBoundarySmsId = randomUUID();
+    const voiceIds = Array.from({ length: 51 }, () => randomUUID());
+    const base = new Date('2025-01-01T12:00:00.000Z');
+    try {
+      await mockPg('conversations').insert([
+        { id: conversationIds[0], customer_id: ids[3], channel: 'sms', contact_phone: '(941) 555-0103', our_endpoint_id: '+19415550190' },
+        { id: conversationIds[1], customer_id: ids[3], channel: 'sms', contact_phone: '+19415550999', our_endpoint_id: '+19415550191' },
+        { id: conversationIds[2], customer_id: ids[2], channel: 'sms', contact_phone: '+19415550103', our_endpoint_id: '+19415550192' },
+        { id: conversationIds[3], customer_id: ids[3], channel: 'sms', contact_phone: '+19415550103', our_endpoint_id: null },
+        { id: conversationIds[4], customer_id: ids[3], channel: 'sms', contact_phone: '+19415550103', our_endpoint_id: '' },
+      ]);
+      await mockPg('messages').insert([
+        { id: primarySmsIds[0], conversation_id: conversationIds[0], channel: 'sms', direction: 'outbound', author_type: 'admin', body: 'Earlier primary SMS', created_at: base },
+        { id: primarySmsIds[1], conversation_id: conversationIds[0], channel: 'sms', direction: 'outbound', author_type: 'admin', body: 'Latest primary SMS', created_at: new Date(base.getTime() + 1000) },
+        { id: otherContactSmsId, conversation_id: conversationIds[1], channel: 'sms', direction: 'outbound', author_type: 'admin', body: 'Newer alternate-contact SMS', created_at: new Date(base.getTime() + 2000) },
+        { id: otherCustomerSmsId, conversation_id: conversationIds[2], channel: 'sms', direction: 'outbound', author_type: 'admin', body: 'Newer other-customer SMS', created_at: new Date(base.getTime() + 3000) },
+        { id: unusableEndpointSmsIds[0], conversation_id: conversationIds[3], channel: 'sms', direction: 'outbound', author_type: 'admin', body: 'Newer SMS without a sending line', created_at: new Date(base.getTime() + 4000) },
+        { id: unusableEndpointSmsIds[1], conversation_id: conversationIds[4], channel: 'sms', direction: 'outbound', author_type: 'admin', body: 'Newer SMS with an empty sending line', created_at: new Date(base.getTime() + 5000) },
+        ...voiceIds.map((id, index) => ({
+          id, conversation_id: conversationIds[0], channel: 'voice', direction: 'inbound',
+          author_type: 'customer', body: `Newer synthetic call ${index}`, created_at: new Date(base.getTime() + 60000 + index * 1000),
+        })),
+      ]);
+
+      const first = await read('/:id/comms', { limit: '50', channel: 'voice' }, { params: { id: ids[3] } });
+      expect(first).toMatchObject({ hasMore: true, channel: 'voice' });
+      expect(first.comms).toHaveLength(50);
+      expect(first.composerComms.map(message => message.id)).toEqual([primarySmsIds[1]]);
+      expect(first.composerComms[0]).toMatchObject({ contactPhone: '(941) 555-0103', body: 'Latest primary SMS' });
+
+      const readBefore = new Date(first.readScope.readBefore);
+      await mockPg('messages').insert({
+        id: afterBoundarySmsId, conversation_id: conversationIds[0], channel: 'sms', direction: 'outbound',
+        author_type: 'admin', body: 'After-boundary primary SMS', created_at: new Date(readBefore.getTime() + 1000),
+      });
+      const second = await read('/:id/comms', { limit: '50', channel: 'voice', cursor: first.nextCursor }, { params: { id: ids[3] } });
+      expect(second.comms).toHaveLength(1);
+      expect(second).toMatchObject({ hasMore: false, readScope: { readBefore: first.readScope.readBefore } });
+      expect(second.composerComms.map(message => message.id)).toEqual([primarySmsIds[1]]);
+
+      const { listCustomerComms } = require('../services/customer-history');
+      expect((await listCustomerComms(mockPg, { id: ids[3], phone: null }, { channel: 'voice' })).composerComms).toEqual([]);
+    } finally {
+      await mockPg('messages').whereIn('id', [...primarySmsIds, otherContactSmsId, otherCustomerSmsId, ...unusableEndpointSmsIds, afterBoundarySmsId, ...voiceIds]).delete();
+      await mockPg('conversations').whereIn('id', conversationIds).delete();
+    }
+  }, 30000);
+
   test('SMS sender claims converge across pooled connections and stale owners cannot mutate a replacement', async () => {
     const phone = `+1202${randomBytes(4).readUInt32BE().toString().padStart(10, '0').slice(-7)}`;
     try {

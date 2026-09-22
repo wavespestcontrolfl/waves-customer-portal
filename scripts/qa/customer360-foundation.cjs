@@ -182,6 +182,9 @@ const detail = {
               comms: [
                 {
                   id: "message-fixture",
+                  contactPhone: customer.phone,
+                  ourEndpointId: "+19415550190",
+                  ourEndpointLabel: "Fixture service line",
                   channel: "sms",
                   direction: "inbound",
                   body: "Please use the side gate.",
@@ -215,6 +218,7 @@ const detail = {
           if (url.pathname.endsWith("/autopay-state")) body = { recent_events: [] };
           if (url.pathname.endsWith("/credits")) body = { credits: [], balance: 0 };
           if (url.pathname === "/api/admin/document-templates") body = { templates: [] };
+          if (url.pathname.endsWith("/comms")) body.composerComms = body.comms.filter((item) => item.channel === "sms").slice(0, 1);
           if (historyScenario && url.pathname === "/api/admin/customers" && url.searchParams.get("search") === "Sample") {
             body = { customers: [
               { ...customer, id: "exact-name", firstName: "Zed", lastName: "Sample", address: "1 Fixture Lane" },
@@ -319,6 +323,7 @@ const detail = {
         await page
           .getByRole("textbox", { name: "Text message" })
           .fill("Keep this local draft");
+        assert.equal(await page.getByRole("combobox", { name: "Send from" }).inputValue(), "+19415550190");
         await waitForFonts(page);
         await page.screenshot({ path: `${output}/${device}-message.png` });
         const drawerOverflow = await page

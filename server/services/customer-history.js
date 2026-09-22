@@ -346,21 +346,38 @@ async function listCustomerTimeline(db, customerId, query = {}) {
   };
 }
 
+function mapCommsMessage(message, customer, twilioNumbers) {
+  const numberCfg = twilioNumbers?.findByNumber?.(message.our_endpoint_id) || null;
+  let media = [];
+  try { media = typeof message.media === 'string' ? JSON.parse(message.media) : (message.media || []); } catch { media = []; }
+  return {
+    id: message.id, conversationId: message.conversation_id, channel: message.channel,
+    direction: message.direction, body: message.body, aiSummary: message.ai_summary,
+    messageType: message.message_type, durationSeconds: message.duration_seconds, media,
+    answeredBy: message.answered_by, isRead: !!message.is_read,
+    deliveryStatus: message.delivery_status, recordingSid: message.recording_sid,
+    createdAt: message.created_at, ourEndpointId: message.our_endpoint_id,
+    ourEndpointLabel: numberCfg?.label || null,
+    contactPhone: message.contact_phone || customer.phone || null,
+  };
+}
+
 async function listCustomerComms(db, customer, query = {}) {
   const customerId = customer.id;
   const parsed = parseCommsRequest(query, customerId);
   const readBefore = parsed.cursor?.readBefore || new Date().toISOString();
-  const rowsQuery = db('messages as m')
-    .leftJoin('conversations as c', 'm.conversation_id', 'c.id')
-    .where('c.customer_id', customerId)
-    .whereIn('m.channel', parsed.channel === 'all' ? ['sms', 'voice'] : [parsed.channel])
-    .where('m.created_at', '<=', readBefore)
+  const selectCommsColumns = queryBuilder => queryBuilder
     .select(
       'm.id', 'm.conversation_id', 'm.channel', 'm.direction', 'm.body',
       'm.ai_summary', 'm.message_type', 'm.duration_seconds', 'm.media', 'm.answered_by',
       'm.is_read', 'm.delivery_status', 'm.recording_sid', 'm.created_at',
       'c.our_endpoint_id', 'c.contact_phone',
-    )
+    );
+  const rowsQuery = selectCommsColumns(db('messages as m')
+    .leftJoin('conversations as c', 'm.conversation_id', 'c.id')
+    .where('c.customer_id', customerId)
+    .whereIn('m.channel', parsed.channel === 'all' ? ['sms', 'voice'] : [parsed.channel])
+    .where('m.created_at', '<=', readBefore))
     .select(db.raw('m.created_at::text AS cursor_created_at'));
   if (parsed.cursor) {
     rowsQuery.whereRaw('(m.created_at < ? OR (m.created_at = ? AND m.id < ?))',
@@ -377,23 +394,28 @@ async function listCustomerComms(db, customer, query = {}) {
   const conversationIds = await db('conversations').where({ customer_id: customerId }).pluck('id');
   let twilioNumbers;
   try { twilioNumbers = require('../config/twilio-numbers'); } catch { twilioNumbers = null; }
-  const comms = pageRows.map((message) => {
-    const numberCfg = twilioNumbers?.findByNumber?.(message.our_endpoint_id) || null;
-    let media = [];
-    try { media = typeof message.media === 'string' ? JSON.parse(message.media) : (message.media || []); } catch { media = []; }
-    return {
-      id: message.id, conversationId: message.conversation_id, channel: message.channel,
-      direction: message.direction, body: message.body, aiSummary: message.ai_summary,
-      messageType: message.message_type, durationSeconds: message.duration_seconds, media,
-      answeredBy: message.answered_by, isRead: !!message.is_read,
-      deliveryStatus: message.delivery_status, recordingSid: message.recording_sid,
-      createdAt: message.created_at, ourEndpointId: message.our_endpoint_id,
-      ourEndpointLabel: numberCfg?.label || null,
-      contactPhone: message.contact_phone || customer.phone || null,
-    };
-  });
+  const comms = pageRows.map(message => mapCommsMessage(message, customer, twilioNumbers));
+  const primaryPhoneKey = String(customer.phone || '').replace(/\D/g, '').slice(-10);
+  let composerComms = [];
+  if (primaryPhoneKey) {
+    const composerRows = await selectCommsColumns(db('messages as m')
+      .join('conversations as c', 'm.conversation_id', 'c.id')
+      .where('c.customer_id', customerId)
+      .where('m.channel', 'sms')
+      .where('m.created_at', '<=', readBefore)
+      .whereNotNull('c.our_endpoint_id')
+      .whereRaw("btrim(c.our_endpoint_id) <> ''")
+      .whereRaw(
+        "right(regexp_replace(CASE WHEN c.contact_phone IS NULL OR c.contact_phone = '' THEN ? ELSE c.contact_phone END, '[^0-9]', '', 'g'), 10) = ?",
+        [customer.phone, primaryPhoneKey],
+      ))
+      .orderBy('m.created_at', 'desc')
+      .orderBy('m.id', 'desc')
+      .limit(1);
+    composerComms = composerRows.map(message => mapCommsMessage(message, customer, twilioNumbers));
+  }
   return {
-    comms, total: comms.length, limit: parsed.limit, channel: parsed.channel,
+    comms, composerComms, total: comms.length, limit: parsed.limit, channel: parsed.channel,
     hasMore, nextCursor, readScope: { conversationIds, readBefore },
   };
 }

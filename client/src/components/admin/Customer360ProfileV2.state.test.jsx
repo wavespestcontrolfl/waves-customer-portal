@@ -38,6 +38,9 @@ function deferred() {
 }
 
 function response(body, status = 200) {
+  if (Array.isArray(body?.comms) && !Object.hasOwn(body, 'composerComms')) {
+    body = { ...body, composerComms: body.comms.filter(message => message.channel === 'sms').slice(0, 1) };
+  }
   return Promise.resolve(new Response(JSON.stringify(body), {
     status,
     headers: { 'Content-Type': 'application/json' },
@@ -1263,11 +1266,14 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(await screen.findByRole('combobox', { name: 'Send from' })).toHaveValue('+12025550199');
   });
 
-  it('opens the composer with the customer sending line after a deferred history refresh and retains it through filtering', async () => {
+  it('uses prefetched SMS context beyond a call-only page when the opening refresh fails', async () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
     const refreshed = deferred();
     let reads = 0;
-    const thread = { comms: [{ id: 'line-message', channel: 'sms', direction: 'inbound', body: 'Use this sending line', contactPhone: '+12025550100', ourEndpointId: '+12025550199', ourEndpointLabel: 'Fixture service line' }] };
+    const thread = {
+      comms: Array.from({ length: 50 }, (_, i) => ({ id: `call-${i}`, channel: 'voice', direction: 'inbound', body: `Newer call ${i}` })),
+      composerComms: [{ id: 'line-message', channel: 'sms', direction: 'inbound', body: 'Use this sending line', contactPhone: '+12025550100', ourEndpointId: '+12025550199', ourEndpointLabel: 'Fixture service line' }],
+    };
     vi.stubGlobal('fetch', vi.fn((url) => {
       const parsed = new URL(String(url), 'https://fixture.invalid');
       if (parsed.pathname.endsWith('/customer-a')) {
@@ -1288,10 +1294,12 @@ describe('Customer360ProfileV2 profile state', () => {
     container.querySelector('.c360-panel').scrollTo = vi.fn();
     fireEvent.click(screen.getByRole('button', { name: 'Message', exact: true }));
     await waitFor(() => expect(reads).toBe(2));
-    expect(screen.queryByRole('combobox', { name: 'Send from' })).not.toBeInTheDocument();
-    await act(async () => refreshed.resolve(await response(thread)));
     expect(await screen.findByRole('combobox', { name: 'Send from' })).toHaveValue('+12025550199');
     fireEvent.change(screen.getByRole('textbox', { name: 'Text message' }), { target: { value: 'Keep this draft and sender' } });
+    await act(async () => refreshed.resolve(await response({ error: 'Refresh unavailable' }, 503)));
+    expect(await screen.findByText('Refresh unavailable')).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Send from' })).toHaveValue('+12025550199');
+    expect(screen.getByRole('textbox', { name: 'Text message' })).toHaveValue('Keep this draft and sender');
     fireEvent.change(screen.getByRole('combobox', { name: 'Filter communication history' }), { target: { value: 'voice' } });
     await waitFor(() => expect(screen.getByRole('combobox', { name: 'Send from' })).toHaveValue('+12025550199'));
     expect(screen.getByRole('textbox', { name: 'Text message' })).toHaveValue('Keep this draft and sender');

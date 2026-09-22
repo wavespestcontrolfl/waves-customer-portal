@@ -9131,13 +9131,16 @@ function useCustomerMessages({
   // derived from this customer's messages. Keep it mounted on later refreshes
   // so filters and reopening the sheet cannot discard the operator's draft.
   useEffect(() => {
-    if (history.loaded && !history.error && commsChannel === "all") {
-      setComposerContext({ customerId, messages: history.items, readScope: history.meta.readScope });
+    if (history.loaded && !history.error && commsChannel === "all" && Array.isArray(history.meta.composerComms)) {
+      const senderIds = new Set(history.meta.composerComms.map(message => message.id));
+      const messages = [...history.meta.composerComms, ...history.items.filter(message => !senderIds.has(message.id))];
+      setComposerContext({ customerId, messages, readScope: history.meta.readScope });
       if (messageOpened || !embedded) setCommsComposerReady(true);
     }
-  }, [history.loaded, history.error, history.items, history.meta.readScope, commsChannel, customerId, messageOpened, embedded]);
+  }, [history.loaded, history.error, history.items, history.meta.composerComms, history.meta.readScope, commsChannel, customerId, messageOpened, embedded]);
   const [linkRequest, setLinkRequest] = useState(0);
   const openMessages = () => {
+    if (composerContext?.customerId === customerId) setCommsComposerReady(true);
     setCommsChannel("all");
     setCommsLoaded(false);
     setMessageOpened(true);
