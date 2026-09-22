@@ -2361,3 +2361,55 @@ describe('GitHub round 5 P1 follow-up (Codex, on a271bcefe6) — prepayPerVisitA
     expect(body.prepaid.totalAmount).toBe(231);
   });
 });
+
+describe('GitHub round 5 P1 follow-up (Codex, on a80ec67565) — manualPrepayPlan recomputes when the server preview lands', () => {
+  // manualPrepayPlan's useMemo calls groupStackedPerVisitTotal, which
+  // reads stackingEnabled (for a group carrying no appointment discount)
+  // and, via freshPreviewGroupPrice, serverPreview/previewRequestKey --
+  // none of which were in this memo's own dependency array. A fresh
+  // server preview landing, with every OTHER listed dep (services,
+  // selectedCustomer, mosquitoQuote, apptDate, windowStart, skipWeekends,
+  // recurringCount, appointmentDiscount, appointmentDiscountGroup,
+  // appointmentDiscountCompound, percentExcludedKeys) unchanged, used to
+  // leave manualPrepayPlan.price stuck at its stale, pre-preview local
+  // figure -- the "Bill annual prepay" control's own GET
+  // /annual-prepay-preview query never picked up the server-authoritative
+  // number at all, only whatever OTHER edit happened to also touch a
+  // listed dep.
+  it('a fresh preview landing, with nothing else changed, updates manualPrepayPlan.price (the annual-prepay-preview query)', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    const { fetcher } = installModalFetch({
+      enablePrepay: true,
+      basePrice: 20.70,
+      discounts: [{ id: 'five-pct', name: 'Five Percent', discount_type: 'percentage', amount: 5, is_active: true, show_in_invoices: true }],
+      previewResponses: [
+        (groups) => ({ regime: true, results: groups.map((g) => ({ key: g.key, price: 42, prepay: { perVisit: 42, totalAmount: 168 } })) }),
+      ],
+    });
+    renderBooking();
+    await addOneSeasonalService();
+    // An ordinary LINE discount -- no appointment-level pick at all, so
+    // NONE of manualPrepayPlan's originally-listed deps (appointmentDiscount
+    // included) ever changes across this whole test.
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for First seasonal service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Five Percent/ }));
+
+    const annualPrepayCalls = () => fetcher.mock.calls.filter(([url]) => String(url).includes('/annual-prepay-preview?'));
+    const latestPrice = () => {
+      const calls = annualPrepayCalls();
+      if (!calls.length) return null;
+      const [url] = calls.at(-1);
+      return new URL(url, 'http://test').searchParams.get('price');
+    };
+
+    // Once BOTH debounced effects (the server preview's own 350ms, and
+    // manualPrepayPlan's own annual-prepay-preview fetch, which fires off
+    // manualPrepayQuery) have had time to settle, with nothing about the
+    // booking edited beyond the single discount pick above (no cadence,
+    // customer, or appointment-discount change at any point) --
+    // manualPrepayPlan.price carries the SERVER preview's own $42, never
+    // stuck at the pre-preview local $19.66 figure.
+    await waitFor(() => expect(latestPrice()).toBe('42'));
+    expect(latestPrice()).not.toBe('19.66');
+  });
+});

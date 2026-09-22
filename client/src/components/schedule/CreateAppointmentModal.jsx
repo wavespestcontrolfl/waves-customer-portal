@@ -3155,6 +3155,20 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     return {
       targetKey: groupKey(group),
       localBlock: null,
+      // GitHub review round 5 P1 (Codex, on a80ec67565): groupStackedPerVisitTotal
+      // reads stackingEnabled (for a group carrying no appointment
+      // discount) and, via freshPreviewGroupPrice, serverPreview/
+      // previewRequestKey — none of which were in this memo's own
+      // dependency array below. A background gate flip, or a fresh
+      // server preview landing, while none of the LISTED deps changed
+      // (an ordinary line-only-discount booking, no appointment discount,
+      // no cadence/customer edit) left this memo un-recomputed — a stale
+      // per-visit price on the "Bill annual prepay" control's own GET
+      // /annual-prepay-preview query. The eventual mint stays protected
+      // regardless (assertManualPrepayMintEligible re-fetches and
+      // compares against the committed series before invoicing), so this
+      // was a stale DISPLAY, not a silent wrong charge — closed anyway,
+      // matching every other staleness class this PR closed elsewhere.
       query: {
         customerId: String(selectedCustomer.id),
         serviceType: group.lines[0]?.name || '',
@@ -3175,7 +3189,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         windowStart,
       },
     };
-  }, [services, selectedCustomer, mosquitoQuote, apptDate, windowStart, skipWeekends, recurringCount, appointmentDiscount, appointmentDiscountGroup, appointmentDiscountCompound, percentExcludedKeys]);
+  }, [services, selectedCustomer, mosquitoQuote, apptDate, windowStart, skipWeekends, recurringCount, appointmentDiscount, appointmentDiscountGroup, appointmentDiscountCompound, percentExcludedKeys, stackingEnabled, serverPreview, previewRequestKey]);
   const manualPrepayQuery = manualPrepayPlan.query;
 
   // Preview fetch. Runs whenever the control is on screen — NOT only once
