@@ -2235,7 +2235,13 @@ function capsSnapshotFromPricing(pricing) {
   for (const line of pricing?.addonLines || []) {
     if (line.discount?.discountId != null) addons[line.discount.discountId] = line.discount.maxDiscountDollars ?? null;
   }
-  return { line: pricing?.primaryDiscount?.maxDiscountDollars ?? null, addons };
+  // Round 4: the line slot is keyed to its own discount id (matching
+  // resolveStoredDiscountCaps' { id, cap } shape) — see that function's
+  // own comment for why a bare cap number is no longer trustworthy.
+  return {
+    line: { id: pricing?.primaryDiscount?.discountId ?? null, cap: pricing?.primaryDiscount?.maxDiscountDollars ?? null },
+    addons,
+  };
 }
 
 // `restackedAddonDollars`, when passed, is restackLiveVisitFinancials'
@@ -2477,6 +2483,121 @@ function calculateVisitFinancialsForAddons(pricing, addonLines) {
   return {
     price: Math.max(0, Math.round((subtotal - appointmentDiscountDollars) * 100) / 100),
     appointmentDiscountDollars: appointmentDiscountDollars > 0 ? appointmentDiscountDollars : null,
+  };
+}
+
+// GitHub Codex round 4 P0 on #4642 (PRRT_kwDOR3YQi86kmS5J follow-up): the
+// PUT /:id/update-details multi-line editor used to recompute add-on/
+// appointment discount amounts on EVERY save via calculateVisitFinancialsForAddons
+// (additive, not the canonical engine), independent of what creation (and
+// every extension) actually stored — an UNRELATED edit (adding an add-on,
+// touching notes, …) that resent the SAME discount terms still silently
+// restamped a DIFFERENT total (Codex's repro: $100 primary + $100 add-on
+// at 20% + $30 appointment credit creates at $153, an unrelated edit made
+// it $150). A row this slice itself canonically priced (hasPricingRegimeMarker)
+// now routes through the SAME restackStoredVisitFinancials every creation/
+// extension writer uses, with the row's own FROZEN caps — unchanged terms
+// therefore restack to the byte-identical figure they were stored at.
+//
+// A discount id/amount an edit CHANGES is, by definition, not yet in the
+// row's frozen snapshot — resolveStoredDiscountCaps (via restackStoredVisitFinancials)
+// then reads its cap live rather than trusting a stale frozen entry for a
+// DIFFERENT discount (the line slot's own { id, cap } keying, round 4's
+// other closed item, is what makes this safe once resolved) — and the
+// caller re-freezes provenance with the merged result so the NEXT save/
+// extension inherits it.
+//
+// Gate off, or an unmarked (legacy) row: financials falls through entirely
+// unchanged to calculateVisitFinancialsForAddons, byte-identical to before
+// this fix — canonicalRestackedAddonDollars/capsSnapshotToPersist both stay
+// null, so insertScheduledServiceAddons and the provenance re-stamp are
+// both no-ops on that path.
+async function resolveUpdateDetailsAddonFinancials({
+  db, existing, updates, primaryGross, normalizedAddons,
+  effDiscountType, effDiscountAmount, effMaxDiscountDollars, effServiceKeyFilter, effServiceCategoryFilter,
+  appointmentDiscountId,
+}) {
+  // Primary line discount is not exposed here — back it out of the gross
+  // primary price so the subtotal matches what was originally stored
+  // (mirrors calculateStoredVisitFinancials). Used for presetEligibilityCheck's
+  // own approximation regardless of which pricing path runs below — that
+  // check's contract is unchanged; only which engine computes the STORED
+  // totals changes.
+  const primaryLineDiscountDollars = (existing?.line_discount_dollars != null && existing.line_discount_dollars !== '')
+    ? Math.max(0, Number(existing.line_discount_dollars))
+    : 0;
+  const primaryNet = primaryGross != null
+    ? Math.max(0, Math.round((primaryGross - primaryLineDiscountDollars) * 100) / 100)
+    : 0;
+  const primaryServiceKeySnapshot = updates.service_key_snapshot ?? existing?.service_key_snapshot ?? null;
+  const primaryServiceCategorySnapshot = updates.service_category_snapshot ?? existing?.service_category_snapshot ?? null;
+  let financials = null;
+  let canonicalRestackedAddonDollars = null;
+  let capsSnapshotToPersist = null;
+  if (discountStackingLive() && hasPricingRegimeMarker(existing)) {
+    const canonicalParent = {
+      primary_line_price: primaryGross,
+      line_discount_id: existing?.line_discount_id ?? null,
+      line_discount_type: existing?.line_discount_type ?? null,
+      line_discount_amount: existing?.line_discount_amount ?? null,
+      service_key_snapshot: primaryServiceKeySnapshot,
+      service_id: updates.service_id ?? existing?.service_id ?? null,
+      discount_type: effDiscountType,
+      discount_amount: effDiscountAmount,
+      discount_max_dollars: effMaxDiscountDollars,
+      // The row's own frozen caps snapshot — restackStoredVisitFinancials
+      // reads this (via resolveStoredDiscountCaps) to restack from FROZEN
+      // caps rather than a fresh catalog lookup for anything already
+      // frozen. Without this, every save would silently restack against
+      // live caps only, defeating the whole freeze mechanism for edits.
+      pricing_provenance: existing?.pricing_provenance ?? null,
+    };
+    const canonicalAddonRows = normalizedAddons.map((l) => ({
+      base_price: l.base,
+      estimated_price: l.price,
+      service_id: l.serviceId,
+      service_key_snapshot: l.serviceKey,
+      discount_type: l.discount?.discountType ?? null,
+      discount_amount: l.discount?.discountAmount ?? null,
+      discount_id: l.discount?.discountId ?? null,
+    }));
+    // The union of every discount id this save could possibly touch — the
+    // row's own frozen ids are already covered by resolveStoredDiscountCaps'
+    // own merge (it prefers frozen over live for anything it already
+    // knows), and a discount id an edit CHANGES to needs a live read here
+    // to resolve at all.
+    const editDiscountIds = [
+      canonicalParent.line_discount_id,
+      effDiscountType ? appointmentDiscountId : null,
+      ...canonicalAddonRows.map((a) => a.discount_id),
+    ].filter(Boolean);
+    const discountScope = (effServiceKeyFilter || effServiceCategoryFilter)
+      ? await loadStoredDiscountScope(db, { ...canonicalParent, discount_service_key_filter: effServiceKeyFilter, discount_service_category_filter: effServiceCategoryFilter }, canonicalAddonRows)
+      : null;
+    const discountCaps = await loadDiscountCapsById(db, editDiscountIds);
+    const restacked = restackStoredVisitFinancials(canonicalParent, canonicalAddonRows, discountScope, discountCaps);
+    if (restacked) {
+      financials = { price: restacked.price, appointmentDiscountDollars: restacked.appointmentDiscountDollars };
+      canonicalRestackedAddonDollars = restacked.addonDollars;
+      capsSnapshotToPersist = restacked.capsSnapshot;
+    }
+  }
+  if (!financials) {
+    financials = calculateVisitFinancialsForAddons({
+      primaryNet,
+      primaryServiceKey: primaryServiceKeySnapshot,
+      primaryServiceCategory: primaryServiceCategorySnapshot,
+      appointmentDiscount: effDiscountType ? {
+        discountType: effDiscountType,
+        discountAmount: effDiscountAmount,
+        maxDiscountDollars: effMaxDiscountDollars,
+        serviceKeyFilter: effServiceKeyFilter,
+        serviceCategoryFilter: effServiceCategoryFilter,
+      } : null,
+    }, normalizedAddons);
+  }
+  return {
+    financials, primaryNet, canonicalRestackedAddonDollars, capsSnapshotToPersist,
   };
 }
 
@@ -3052,13 +3173,37 @@ function applyDiscountStackRestack(target, cols, parent, addonRows, discountScop
 // the SAME loop sees it as already frozen instead of redundantly
 // re-freezing.
 async function freezeLegacySeriesRootCaps(trx, parent, cols, parentAddons) {
-  if (!discountStackingLive() || !cols?.pricing_provenance
-    || hasPricingRegimeMarker(parent) || frozenCapsFromRow(parent)) return;
+  if (!discountStackingLive() || !cols?.pricing_provenance || hasPricingRegimeMarker(parent)) return;
+  // GitHub Codex round 4 on #4642 (PRRT_kwDOR3YQi86kmS5J follow-up): an
+  // EARLIER version early-returned once the root had ANY frozen caps at
+  // all, so a series whose first freeze happened before a given add-on
+  // discount was ever due never learned that add-on's cap — every LATER
+  // extension that finally sees it falls through to a live catalog read
+  // forever, letting a subsequent cap edit reprice a contracted visit the
+  // same way an entirely-unfrozen root would (the exact bug this whole
+  // mechanism exists to prevent). resolveStoredDiscountCaps' own merge
+  // logic already preserves every EXISTING frozen entry while adding any
+  // NEW id it's handed (round 2's fix) — so recomputing the snapshot on
+  // EVERY call and writing only when something NEW actually appears
+  // extends that same guarantee to a root frozen on a prior, narrower
+  // occasion, without ever touching an already-frozen value.
+  const existing = frozenCapsFromRow(parent);
   const rootDiscountCaps = await loadDiscountCapsById(
     trx,
     [parent?.line_discount_id, ...(Array.isArray(parentAddons) ? parentAddons : []).map((a) => a.discount_id)],
   );
   const rootSnapshot = resolveStoredDiscountCaps(parent, rootDiscountCaps).snapshot;
+  if (existing) {
+    const existingAddonIds = new Set(Object.keys(existing.addons || {}));
+    // The line's own current discount id can land in rootSnapshot.addons
+    // too (round 2 P1: no longer deduped against line_discount_id) —
+    // that's a harmless artifact of the shared-id-cap fix, never a
+    // genuinely new ADD-ON discount, so it must not trigger a write here.
+    const hasNewAddonId = Object.keys(rootSnapshot.addons)
+      .filter((id) => id !== (parent?.line_discount_id ?? null))
+      .some((id) => !existingAddonIds.has(id));
+    if (!hasNewAddonId) return; // nothing new to merge — already-frozen values are untouched either way
+  }
   const rootStamp = {};
   stampFrozenCapsOnly(rootStamp, cols, rootSnapshot);
   await trx('scheduled_services').where({ id: parent.id }).update({ pricing_provenance: rootStamp.pricing_provenance });
@@ -8727,6 +8872,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // lines for this appointment (replace strategy) and recompute the stored
     // visit financials from the primary line + add-on lines.
     let replaceAddons = null;
+    // GitHub Codex round 4 on #4642 (PRRT_kwDOR3YQi86kmS5J follow-up): when
+    // the canonical restack path below actually runs, its own per-add-on
+    // dollars (cent-exact, interaction-aware — see restackStoredVisitFinancials)
+    // must reach insertScheduledServiceAddons alongside replaceAddons,
+    // exactly the way every other extension writer already threads its own
+    // restackedAddonDollars through. null everywhere else (gate off, or the
+    // row isn't canonically marked) — the legacy per-line dollars already
+    // baked into replaceAddons[i] are used as-is, unchanged.
+    let canonicalRestackedAddonDollars = null;
     if (serviceType !== undefined) updates.service_type = serviceType;
     // Re-service reclassification on edit. Callers post a service switch two
     // ways:
@@ -9246,6 +9400,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         if (cols.discount_service_key_filter) existingFields.push('discount_service_key_filter');
         if (cols.discount_service_category_filter) existingFields.push('discount_service_category_filter');
         if (cols.discount_max_dollars) existingFields.push('discount_max_dollars');
+        // Read whether this row is canonically priced, and its frozen line
+        // discount identity (never resent by this editor — see
+        // resolveUpdateDetailsAddonFinancials' own comment — so it must
+        // come from the stored row either way).
+        if (cols.pricing_provenance) existingFields.push('pricing_provenance');
+        if (cols.line_discount_id) existingFields.push('line_discount_id');
+        if (cols.line_discount_type) existingFields.push('line_discount_type');
+        if (cols.line_discount_amount) existingFields.push('line_discount_amount');
         const existing = await db('scheduled_services')
           .where({ id: req.params.id })
           .first(...existingFields)
@@ -9263,35 +9425,25 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             ? Number(existing.discount_amount)
             : null;
         }
+        const effMaxDiscountDollars = appointmentDiscountPreset
+          ? (appointmentDiscountPreset.max_discount_dollars ?? null)
+          : (appointmentDiscountChanged ? null : (existing?.discount_max_dollars ?? null));
+        const effServiceKeyFilter = appointmentDiscountPreset
+          ? (appointmentDiscountPreset.service_key_filter || null)
+          : (appointmentDiscountChanged ? null : (existing?.discount_service_key_filter || null));
+        const effServiceCategoryFilter = appointmentDiscountPreset
+          ? (appointmentDiscountPreset.service_category_filter || null)
+          : (appointmentDiscountChanged ? null : (existing?.discount_service_category_filter || null));
 
-        // Primary line discount is not exposed here — back it out of the gross
-        // primary price so the subtotal matches what was originally stored
-        // (mirrors calculateStoredVisitFinancials).
-        const primaryLineDiscountDollars = (existing?.line_discount_dollars != null && existing.line_discount_dollars !== '')
-          ? Math.max(0, Number(existing.line_discount_dollars))
-          : 0;
-        const primaryNet = primaryGross != null
-          ? Math.max(0, Math.round((primaryGross - primaryLineDiscountDollars) * 100) / 100)
-          : 0;
+        const {
+          financials, primaryNet, canonicalRestackedAddonDollars: canonicalDollars, capsSnapshotToPersist,
+        } = await resolveUpdateDetailsAddonFinancials({
+          db, existing, updates, primaryGross, normalizedAddons,
+          effDiscountType, effDiscountAmount, effMaxDiscountDollars, effServiceKeyFilter, effServiceCategoryFilter,
+          appointmentDiscountId: appointmentDiscountPreset?.id ?? existing?.discount_id ?? null,
+        });
+        canonicalRestackedAddonDollars = canonicalDollars;
 
-        const financials = calculateVisitFinancialsForAddons({
-          primaryNet,
-          primaryServiceKey: updates.service_key_snapshot ?? existing?.service_key_snapshot ?? null,
-          primaryServiceCategory: updates.service_category_snapshot ?? existing?.service_category_snapshot ?? null,
-          appointmentDiscount: effDiscountType ? {
-            discountType: effDiscountType,
-            discountAmount: effDiscountAmount,
-            maxDiscountDollars: appointmentDiscountPreset
-              ? (appointmentDiscountPreset.max_discount_dollars ?? null)
-              : (appointmentDiscountChanged ? null : (existing?.discount_max_dollars ?? null)),
-            serviceKeyFilter: appointmentDiscountPreset
-              ? (appointmentDiscountPreset.service_key_filter || null)
-              : (appointmentDiscountChanged ? null : (existing?.discount_service_key_filter || null)),
-            serviceCategoryFilter: appointmentDiscountPreset
-              ? (appointmentDiscountPreset.service_category_filter || null)
-              : (appointmentDiscountChanged ? null : (existing?.discount_service_category_filter || null)),
-          } : null,
-        }, normalizedAddons);
         await presetEligibilityCheck([
           {
             amount: primaryNet,
@@ -9312,6 +9464,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         if (cols.discount_dollars) updates.discount_dollars = financials.appointmentDiscountDollars;
         // Leave the primary line_discount_* columns untouched — invoicing reads
         // them and this editor can't resend them.
+        // Re-freeze provenance with the (possibly merged/updated) caps this
+        // save actually restacked against — keeps the row's canonical-pricing
+        // marker while a changed discount id/amount's cap resolves fresh
+        // (never a stale cap silently applied to a new discount) and joins
+        // the frozen snapshot for the next save/extension to inherit.
+        if (capsSnapshotToPersist && cols.pricing_provenance) {
+          stampPricingRegimeMarker(updates, cols, capsSnapshotToPersist);
+        }
       }
     } else if (estimatedPrice !== undefined && estimatedPrice !== '' && !isNaN(Number(estimatedPrice))) {
       try {
@@ -9465,6 +9625,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         replaceAddons = replaceAddons.map((line) => ({
           ...line, base: line.base != null ? 0 : line.base, price: line.price != null ? 0 : line.price, discount: null,
         }));
+        // A canonical restack computed above (if any) is now stale against
+        // these zeroed lines — insertScheduledServiceAddons must use the
+        // zeroed price/discount above, not a pre-zero restacked figure.
+        canonicalRestackedAddonDollars = null;
       }
     }
     const addonsReplaced = Array.isArray(replaceAddons);
@@ -10348,7 +10512,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       if (addonsReplaced) {
         const addonCols = await trx('scheduled_service_addons').columnInfo().catch(() => ({}));
         await trx('scheduled_service_addons').where({ scheduled_service_id: req.params.id }).del();
-        await insertScheduledServiceAddons(trx, req.params.id, replaceAddons, addonCols);
+        await insertScheduledServiceAddons(trx, req.params.id, replaceAddons, addonCols, canonicalRestackedAddonDollars);
       }
       if (clearAddonDiscountsOnPriceEdit) {
         const addonCols = await trx('scheduled_service_addons').columnInfo().catch(() => ({}));
@@ -19266,6 +19430,7 @@ router._test = {
   appointmentDiscountIdentityChanged,
   isPercentDiscountType,
   calculateVisitFinancialsForAddons,
+  resolveUpdateDetailsAddonFinancials,
   restackLiveVisitFinancials,
   capsSnapshotFromPricing,
   occurrenceFloorPrice,

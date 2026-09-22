@@ -24,6 +24,7 @@ const {
 const adminScheduleRouter = require('../routes/admin-schedule');
 const {
   restackStoredVisitFinancials, freezeLegacySeriesRootCaps, calculateStoredVisitFinancials, occurrenceFloorPrice,
+  resolveUpdateDetailsAddonFinancials,
 } = adminScheduleRouter._test;
 
 const connection = process.env.DISCOUNT_STACK_PROVENANCE_TEST_DATABASE_URL;
@@ -96,7 +97,7 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
       line_discount_type: 'percentage',
       line_discount_amount: 50, // uncapped, 50% of $100 would be $50 off
     };
-    stampPricingRegimeMarker(created, { pricing_provenance: true }, { line: 10, addons: {} });
+    stampPricingRegimeMarker(created, { pricing_provenance: true }, { line: { id: lineDiscountId, cap: 10 }, addons: {} });
     await mockPg('scheduled_services').insert({ id, ...created });
 
     // "Extension": the row read back through the SAME kind of query an
@@ -107,7 +108,7 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
     const result = restackStoredVisitFinancials(parentAsReadByExtension, [], null, catalogRaisedTo20);
     expect(result.primaryLineDiscountDollars).toBe(10); // frozen, never the raised $20 (or the uncapped $50)
     expect(result.price).toBe(90);
-    expect(result.capsSnapshot.line).toBe(10); // the NEXT extension inherits the same frozen $10
+    expect(result.capsSnapshot.line).toEqual({ id: lineDiscountId, cap: 10 }); // the NEXT extension inherits the same frozen $10
   });
 
   test('an unmarked (legacy) row read from Postgres has a real NULL pricing_provenance — never the string "null" or an empty object', async () => {
@@ -121,7 +122,7 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
     // And restacks with LIVE caps, exactly as before this fix.
     const liveCaps = new Map();
     const result = restackStoredVisitFinancials(row, [], null, liveCaps);
-    expect(result.capsSnapshot).toEqual({ line: null, addons: {} });
+    expect(result.capsSnapshot).toEqual({ line: { id: null, cap: null }, addons: {} });
   });
 
   test('gate-off parity: a row inserted with no pricing_provenance stays NULL — nothing this migration adds is written unconditionally', async () => {
@@ -177,7 +178,7 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
     expect(result.addonDollars[0].discountDollars).toBe(10); // never null/uncapped
     // The persisted snapshot must freeze BOTH slots — the next extension
     // reading this frozen snapshot must not silently uncap the add-on.
-    expect(result.capsSnapshot).toEqual({ line: 10, addons: { [sharedDiscountId]: 10 } });
+    expect(result.capsSnapshot).toEqual({ line: { id: sharedDiscountId, cap: 10 }, addons: { [sharedDiscountId]: 10 } });
   });
 
   // The coordinator's exact pinned combination for the ROOT-freeze fix,
@@ -217,7 +218,7 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
       // hasPricingRegimeMarker — stays false so a null-primary root still
       // defers to calculateStoredVisitFinancials' own reconstruction.
       expect(hasPricingRegimeMarker(rootAfterExtension1)).toBe(false);
-      expect(frozenCapsFromRow(rootAfterExtension1).line).toBe(10);
+      expect(frozenCapsFromRow(rootAfterExtension1).line).toEqual({ id: lineDiscountId, cap: 10 });
 
       // The catalog cap is raised to $20 between extension 1 and 2.
       await mockPg('discounts').where({ id: lineDiscountId }).update({ max_discount_dollars: 20 });
@@ -356,6 +357,116 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
         memberSeriesCovered: true, isBoosterDate: false, addonOnlyTotal,
       });
       expect(floor).toBe(68); // NEVER $83
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
+
+  // GitHub Codex round 4 P0 on #4642 (PRRT_kwDOR3YQi86kmS5J follow-up): the
+  // coordinator's exact pinned combination for the PUT /:id/update-details
+  // edit-route fix, sourced from a REAL, previously-created row (proving
+  // the routing decision — hasPricingRegimeMarker read off a row that
+  // actually round-tripped through Postgres — and the real catalog cap
+  // lookup, not just hand-typed JS objects).
+  test('PUT /:id/update-details: unchanged discount terms on a real marked row restack to the byte-identical $153, never $150', async () => {
+    const id = randomUUID();
+    const addonDiscountId = randomUUID();
+    await mockPg('discounts').insert({
+      id: addonDiscountId, discount_key: `fixture_edit_route_${addonDiscountId.slice(0, 8)}`,
+      name: 'Fixture Add-On 20%', discount_type: 'percentage', amount: 20, is_active: true,
+    });
+    const target = {
+      scheduled_date: '2099-09-15', service_type: 'Fixture Edit-Route Service', primary_line_price: 100,
+    };
+    stampPricingRegimeMarker(target, { pricing_provenance: true }, { line: { id: null, cap: null }, addons: { [addonDiscountId]: null } });
+    await mockPg('scheduled_services').insert({ id, ...target });
+
+    // The row exactly as PUT /:id/update-details' own `existing` fetch reads it.
+    const existing = await mockPg('scheduled_services').where({ id }).first(
+      'line_discount_dollars', 'line_discount_id', 'line_discount_type', 'line_discount_amount',
+      'discount_type', 'discount_amount', 'discount_max_dollars',
+      'discount_service_key_filter', 'discount_service_category_filter', 'pricing_provenance',
+    );
+    expect(hasPricingRegimeMarker(existing)).toBe(true);
+
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      // price: 80 — the legacy per-line applyDiscount(100, 'percentage', 20)
+      // figure the route's own upstream step computes BEFORE this function
+      // ever runs; the canonical branch restacks from base/discount.* and
+      // must ignore it to reach $153 (see the mocked unit test's own
+      // comment for why this matters).
+      const normalizedAddons = [{
+        base: 100, price: 80, serviceId: null, serviceKey: null,
+        discount: { discountId: addonDiscountId, discountType: 'percentage', discountAmount: 20 },
+      }];
+      const result = await resolveUpdateDetailsAddonFinancials({
+        db: mockPg, existing, updates: {}, primaryGross: 100, normalizedAddons,
+        effDiscountType: 'fixed_amount', effDiscountAmount: 30, effMaxDiscountDollars: null,
+        effServiceKeyFilter: null, effServiceCategoryFilter: null, appointmentDiscountId: null,
+      });
+      expect(result.financials.price).toBe(153); // NEVER $150
+      expect(result.canonicalRestackedAddonDollars[0].netPrice).toBe(83);
+
+      // Persisting the re-frozen snapshot and reading it back is itself a
+      // real round trip — the next save must see the SAME frozen state.
+      await mockPg('scheduled_services').where({ id }).update({ pricing_provenance: (() => {
+        const stamp = {};
+        stampPricingRegimeMarker(stamp, { pricing_provenance: true }, result.capsSnapshotToPersist);
+        return stamp.pricing_provenance;
+      })() });
+      const rowAfterSave = await mockPg('scheduled_services').where({ id }).first();
+      expect(hasPricingRegimeMarker(rowAfterSave)).toBe(true);
+      expect(frozenCapsFromRow(rowAfterSave).addons[addonDiscountId]).toBeNull(); // uncapped, correctly frozen as such
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
+
+  // GitHub Codex round 4 P1 on #4642 (PRRT_kwDOR3YQi86kmS5J follow-up):
+  // the coordinator's exact pinned merge scenario end to end through a real
+  // Postgres round trip — a $100 primary (no discount) + a $100 add-on at
+  // 50%, whose cap is raised from $10 to $20 AFTER the add-on's cap was
+  // first merged into an already-frozen root. Successive extensions must
+  // stay $190, never $180.
+  test('freezeLegacySeriesRootCaps merges a newly-due add-on cap into an already-frozen root through a real Postgres round trip; successive extensions stay $190', async () => {
+    const rootId = randomUUID();
+    const addonDiscountId = randomUUID();
+    await mockPg('discounts').insert({
+      id: addonDiscountId, discount_key: `fixture_merge_${addonDiscountId.slice(0, 8)}`,
+      name: 'Fixture Merge 50%', discount_type: 'percentage', amount: 50, max_discount_dollars: 10, is_active: true,
+    });
+    await mockPg('scheduled_services').insert({
+      id: rootId, scheduled_date: '2099-10-15', service_type: 'Fixture Merge Root', primary_line_price: 100,
+    });
+    const cols = await mockPg('scheduled_services').columnInfo();
+
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      // Extension 1: no add-on due yet.
+      const rootBefore = await mockPg('scheduled_services').where({ id: rootId }).first();
+      await freezeLegacySeriesRootCaps(mockPg, rootBefore, cols, []);
+      expect(frozenCapsFromRow(rootBefore).addons).toEqual({});
+
+      // Extension 2: the add-on is due for the FIRST time — its current
+      // catalog cap ($10) must merge into the root's already-frozen snapshot.
+      const addonRow = { discount_id: addonDiscountId, base_price: 100, estimated_price: 100, discount_type: 'percentage', discount_amount: 50 };
+      await freezeLegacySeriesRootCaps(mockPg, rootBefore, cols, [addonRow]);
+      const rootAfterMerge = await mockPg('scheduled_services').where({ id: rootId }).first();
+      expect(frozenCapsFromRow(rootAfterMerge).addons[addonDiscountId]).toBe(10);
+
+      // The catalog cap is raised to $20 after the merge.
+      await mockPg('discounts').where({ id: addonDiscountId }).update({ max_discount_dollars: 20 });
+
+      // Extension 3: nothing new to merge — no further write.
+      await freezeLegacySeriesRootCaps(mockPg, rootAfterMerge, cols, [addonRow]);
+
+      // The actual stored restack must use the frozen $10, not the raised $20.
+      const catalogRow = await mockPg('discounts').where({ id: addonDiscountId }).first('max_discount_dollars');
+      const liveCaps = new Map([[addonDiscountId, Number(catalogRow.max_discount_dollars)]]);
+      const result = restackStoredVisitFinancials(rootAfterMerge, [addonRow], null, liveCaps);
+      expect(result.addonDollars[0].discountDollars).toBe(10); // frozen, never the raised $20
+      expect(result.price).toBe(190); // 100 + 90 — NEVER $180
     } finally {
       delete process.env.GATE_DISCOUNT_STACKING;
     }

@@ -62,6 +62,7 @@ const {
   freezeLegacySeriesRootCaps,
   stampFrozenCapsOnly,
   frozenCapsFromRow,
+  resolveUpdateDetailsAddonFinancials,
 } = require('../routes/admin-schedule')._test;
 
 function discountQuery(discount) {
@@ -1533,14 +1534,14 @@ describe('frozen caps snapshot — a later catalog cap edit does not reprice a c
   test('resolveStoredDiscountCaps: a marked row restacks from its OWN frozen line cap, never the live (edited) catalog cap', () => {
     const markedParent = {
       line_discount_id: 'ld-1',
-      pricing_provenance: { pricing_regime: 'discount_stack_v1', engine_version: 1, caps: { line: 10, addons: {} } },
+      pricing_provenance: { pricing_regime: 'discount_stack_v1', engine_version: 1, caps: { line: { id: 'ld-1', cap: 10 }, addons: {} } },
     };
     // The catalog has since been edited to $20 — loadDiscountCapsById would
     // return this if it were consulted.
     const liveCatalogCaps = new Map([['ld-1', 20]]);
     const resolved = resolveStoredDiscountCaps(markedParent, liveCatalogCaps);
     expect(resolved.lineCap).toBe(10); // the FROZEN $10, never the live $20
-    expect(resolved.snapshot.line).toBe(10);
+    expect(resolved.snapshot.line).toEqual({ id: 'ld-1', cap: 10 });
   });
 
   // The coordinator's exact pinned combination: a 50%-off line discount
@@ -1553,7 +1554,7 @@ describe('frozen caps snapshot — a later catalog cap edit does not reprice a c
       line_discount_type: 'percentage',
       line_discount_amount: 50, // uncapped, 50% of $100 would be $50 off
       discount_type: null,
-      pricing_provenance: { pricing_regime: 'discount_stack_v1', engine_version: 1, caps: { line: 10, addons: {} } },
+      pricing_provenance: { pricing_regime: 'discount_stack_v1', engine_version: 1, caps: { line: { id: 'ld-1', cap: 10 }, addons: {} } },
     };
     const catalogCapRaisedTo20 = new Map([['ld-1', 20]]);
     const result = restackStoredVisitFinancials(markedParent, [], null, catalogCapRaisedTo20);
@@ -1561,7 +1562,7 @@ describe('frozen caps snapshot — a later catalog cap edit does not reprice a c
     expect(result.price).toBe(90);
     // The persisted snapshot must also stay $10 — the NEXT extension must
     // inherit the same frozen value, not silently re-freeze the raised one.
-    expect(result.capsSnapshot.line).toBe(10);
+    expect(result.capsSnapshot.line).toEqual({ id: 'ld-1', cap: 10 });
   });
 
   test('an UNMARKED (legacy) row has nothing to freeze from — every cap reads LIVE, exactly as before this fix', () => {
@@ -1578,7 +1579,7 @@ describe('frozen caps snapshot — a later catalog cap edit does not reprice a c
     expect(result.primaryLineDiscountDollars).toBe(20); // the LIVE cap — nothing frozen yet
     // Once restacked, this row's OWN first stamp would freeze $20 going
     // forward — proven by the creation-to-extension regression below.
-    expect(result.capsSnapshot.line).toBe(20);
+    expect(result.capsSnapshot.line).toEqual({ id: 'ld-1', cap: 20 });
   });
 
   // A discount id the row has NEVER frozen before (a new add-on discount
@@ -1591,7 +1592,7 @@ describe('frozen caps snapshot — a later catalog cap edit does not reprice a c
       line_discount_id: 'ld-1',
       line_discount_type: null,
       discount_type: null,
-      pricing_provenance: { pricing_regime: 'discount_stack_v1', engine_version: 1, caps: { line: 10, addons: {} } }, // no 'new-addon-disc' entry yet
+      pricing_provenance: { pricing_regime: 'discount_stack_v1', engine_version: 1, caps: { line: { id: 'ld-1', cap: 10 }, addons: {} } }, // no 'new-addon-disc' entry yet
     };
     const addon = { base_price: 50, estimated_price: 50, discount_type: 'percentage', discount_amount: 40, discount_id: 'new-addon-disc', service_id: 'svc' };
     const liveCaps = new Map([['new-addon-disc', 5]]);
@@ -1600,7 +1601,7 @@ describe('frozen caps snapshot — a later catalog cap edit does not reprice a c
     // before) applies and joins the returned snapshot.
     expect(result.addonDollars[0].discountDollars).toBe(5);
     expect(result.capsSnapshot.addons['new-addon-disc']).toBe(5);
-    expect(result.capsSnapshot.line).toBe(10); // the already-frozen line cap is untouched
+    expect(result.capsSnapshot.line).toEqual({ id: 'ld-1', cap: 10 }); // the already-frozen line cap is untouched
   });
 
   // Creation-to-extension: the FIRST time a row is marked (creation), its
@@ -1614,7 +1615,7 @@ describe('frozen caps snapshot — a later catalog cap edit does not reprice a c
       addonLines: [{ discount: { discountId: 'addon-1', maxDiscountDollars: 25 } }],
     };
     const createdSnapshot = capsSnapshotFromPricing(pricing);
-    expect(createdSnapshot).toEqual({ line: 10, addons: { 'addon-1': 25 } });
+    expect(createdSnapshot).toEqual({ line: { id: 'ld-1', cap: 10 }, addons: { 'addon-1': 25 } });
 
     const unmarkedLegacyRow = { line_discount_id: 'ld-1' }; // no pricing_provenance — same row, before its first stamp
     const liveCapsAtCreation = new Map([['ld-1', 10], ['addon-1', 25]]);
@@ -1626,7 +1627,7 @@ describe('frozen caps snapshot — a later catalog cap edit does not reprice a c
     // it, which capsSnapshotFromPricing never does (it only ever iterates
     // pricing.addonLines) — a harmless, unread extra key, not a
     // disagreement.
-    expect(resolved.snapshot.line).toBe(createdSnapshot.line);
+    expect(resolved.snapshot.line).toEqual(createdSnapshot.line);
     for (const [id, cap] of Object.entries(createdSnapshot.addons)) {
       expect(resolved.snapshot.addons[id]).toBe(cap);
     }
@@ -1665,7 +1666,7 @@ describe('frozen caps snapshot — a later catalog cap edit does not reprice a c
     // The persisted snapshot must freeze BOTH slots at $10 — a LATER
     // extension reading this frozen snapshot must not silently uncap the
     // add-on even though it shares the primary's own discount id.
-    expect(result.capsSnapshot).toEqual({ line: 10, addons: { [sharedId]: 10 } });
+    expect(result.capsSnapshot).toEqual({ line: { id: sharedId, cap: 10 }, addons: { [sharedId]: 10 } });
   });
 
   // Gate-off parity: with the gate off, no caller ever builds or passes a
@@ -1729,11 +1730,11 @@ describe('freezeLegacySeriesRootCaps — the root parent itself gets marked on t
       const { conn, updates } = makeRootFreezeConn([{ id: 'ld-1', max_discount_dollars: 999 }]);
       const parent = {
         id: 'root-2', line_discount_id: 'ld-1',
-        pricing_provenance: { pricing_regime: 'discount_stack_v1', engine_version: 1, caps: { line: 10, addons: {} } },
+        pricing_provenance: { pricing_regime: 'discount_stack_v1', engine_version: 1, caps: { line: { id: 'ld-1', cap: 10 }, addons: {} } },
       };
       await freezeLegacySeriesRootCaps(conn, parent, { pricing_provenance: true }, []);
       expect(updates).toHaveLength(0);
-      expect(parent.pricing_provenance.caps.line).toBe(10); // unchanged
+      expect(parent.pricing_provenance.caps.line).toEqual({ id: 'ld-1', cap: 10 }); // unchanged
     });
   });
 
@@ -1751,7 +1752,7 @@ describe('freezeLegacySeriesRootCaps — the root parent itself gets marked on t
       expect(updates).toHaveLength(1);
       expect(updates[0].table).toBe('scheduled_services');
       expect(updates[0].id).toBe('root-3');
-      expect(updates[0].data.pricing_provenance.caps.line).toBe(10);
+      expect(updates[0].data.pricing_provenance.caps.line).toEqual({ id: 'ld-1', cap: 10 });
       // addons also carries ld-1 (round 2 P1: no longer deduped against the
       // line's own id) — harmless here since nothing due reads it, and
       // correct when the SAME id is later reused on an add-on.
@@ -1764,7 +1765,7 @@ describe('freezeLegacySeriesRootCaps — the root parent itself gets marked on t
       // calculateStoredVisitFinancials' own reconstruction instead of
       // being treated as a real, computed $0.
       expect(hasPricingRegimeMarker(parent)).toBe(false);
-      expect(frozenCapsFromRow(parent)).toEqual({ line: 10, addons: { 'ld-1': 10 } });
+      expect(frozenCapsFromRow(parent)).toEqual({ line: { id: 'ld-1', cap: 10 }, addons: { 'ld-1': 10 } });
 
       // "Extension 2": a FRESH re-fetch of this now-marked root (as a real
       // second, separate extension call would do), against a catalog
@@ -1777,13 +1778,62 @@ describe('freezeLegacySeriesRootCaps — the root parent itself gets marked on t
     });
   });
 
+  // GitHub Codex round 4 on #4642 (PRRT_kwDOR3YQi86kmS5J follow-up,
+  // PRRT_kwDOR3YQi86kmS5M): the coordinator's exact pinned combination —
+  // a $100 primary (no discount of its own) + a $100 add-on at 50% off.
+  // Extension 1 freezes the root with NO add-on due yet (line-only).
+  // Extension 2 is the FIRST time the add-on is due: its cap ($10, the
+  // catalog value AT THAT MOMENT) must get MERGED into the already-frozen
+  // root, not skipped by the early-return an earlier version of this
+  // function had. The catalog is then raised to $20; extension 3 (and
+  // every later one) must still restack the add-on at the $10 frozen at
+  // extension 2 — successive extensions stay $190 (100 + 90), never $180.
+  test('Codex round 4: a newly-due add-on cap merges into an already-frozen root; successive extensions stay $190 after the catalog is later raised', async () => {
+    await withGateLive(async () => {
+      const addonDiscountId = 'addon-disc-merge';
+      const discountRows = [{ id: addonDiscountId, max_discount_dollars: 10 }];
+      const { conn, updates } = makeRootFreezeConn(discountRows);
+      // No line_discount_id at all — only the add-on carries a discount.
+      const parent = { id: 'root-6', primary_line_price: 100, line_discount_id: null };
+
+      // Extension 1: no add-on due yet — freezes an empty (line-only) snapshot.
+      await freezeLegacySeriesRootCaps(conn, parent, { pricing_provenance: true }, []);
+      expect(updates).toHaveLength(1);
+      expect(frozenCapsFromRow(parent).addons).toEqual({});
+
+      // Extension 2: the add-on is due for the FIRST time. parentAddons now
+      // includes it — its CURRENT catalog cap ($10) must merge into the
+      // root's already-frozen snapshot.
+      const addonRow = { discount_id: addonDiscountId, base_price: 100, estimated_price: 100, discount_type: 'percentage', discount_amount: 50 };
+      await freezeLegacySeriesRootCaps(conn, parent, { pricing_provenance: true }, [addonRow]);
+      expect(updates).toHaveLength(2); // the merge DID write
+      expect(frozenCapsFromRow(parent).addons[addonDiscountId]).toBe(10);
+
+      // The catalog cap is raised to $20 after extension 2 froze $10.
+      discountRows[0] = { id: addonDiscountId, max_discount_dollars: 20 };
+
+      // Extension 3: freezeLegacySeriesRootCaps sees NOTHING new (the
+      // add-on id is already frozen) — no further write, no re-read that
+      // would pick up the raised value.
+      await freezeLegacySeriesRootCaps(conn, parent, { pricing_provenance: true }, [addonRow]);
+      expect(updates).toHaveLength(2); // unchanged — nothing new to merge
+
+      // The actual stored restack for extension 3 (or any later one) must
+      // use the frozen $10, not the raised $20.
+      const result = restackStoredVisitFinancials(parent, [addonRow], null, new Map([[addonDiscountId, 20]]));
+      expect(result.addonDollars[0].discountDollars).toBe(10); // frozen, never the raised $20
+      expect(result.addonDollars[0].netPrice).toBe(90);
+      expect(result.price).toBe(190); // 100 (undiscounted primary) + 90 — NEVER $180
+    });
+  });
+
   test('a root whose primary line has NO discount at all still gets marked (an empty, correct snapshot) — future add-ons still freeze correctly from it', async () => {
     await withGateLive(async () => {
       const { conn, updates } = makeRootFreezeConn([]);
       const parent = { id: 'root-4', primary_line_price: 100, line_discount_id: null };
       await freezeLegacySeriesRootCaps(conn, parent, { pricing_provenance: true }, []);
       expect(updates).toHaveLength(1);
-      expect(updates[0].data.pricing_provenance.caps).toEqual({ line: null, addons: {} });
+      expect(updates[0].data.pricing_provenance.caps).toEqual({ line: { id: null, cap: null }, addons: {} });
     });
   });
 
@@ -1794,7 +1844,7 @@ describe('freezeLegacySeriesRootCaps — the root parent itself gets marked on t
   test('a root ALREADY caps-only frozen (no regime marker) is also left alone — no redundant re-freeze', async () => {
     await withGateLive(async () => {
       const { conn, updates } = makeRootFreezeConn([{ id: 'ld-1', max_discount_dollars: 999 }]);
-      const parent = { id: 'root-5', line_discount_id: 'ld-1', pricing_provenance: { caps: { line: 10, addons: {} } } };
+      const parent = { id: 'root-5', line_discount_id: 'ld-1', pricing_provenance: { caps: { line: { id: 'ld-1', cap: 10 }, addons: {} } } };
       expect(hasPricingRegimeMarker(parent)).toBe(false); // caps-only, NOT canonically marked
       await freezeLegacySeriesRootCaps(conn, parent, { pricing_provenance: true }, []);
       expect(updates).toHaveLength(0);
@@ -1825,7 +1875,7 @@ describe('caps-only provenance never implies canonical pricing (round 3 P0)', ()
   });
 
   test('resolveStoredDiscountCaps honors a caps-only (unmarked) row’s frozen line cap, never the live catalog', () => {
-    const capsOnlyRow = { line_discount_id: 'ld-1', pricing_provenance: { caps: { line: 10, addons: {} } } };
+    const capsOnlyRow = { line_discount_id: 'ld-1', pricing_provenance: { caps: { line: { id: 'ld-1', cap: 10 }, addons: {} } } };
     expect(hasPricingRegimeMarker(capsOnlyRow)).toBe(false);
     const liveCatalogRaisedTo20 = new Map([['ld-1', 20]]);
     const resolved = resolveStoredDiscountCaps(capsOnlyRow, liveCatalogRaisedTo20);
@@ -1900,6 +1950,174 @@ describe('caps-only provenance never implies canonical pricing (round 3 P0)', ()
       const result = restackStoredVisitFinancials(rootAfterFreeze, [], null, catalogRaisedTo20);
       expect(result.primaryLineDiscountDollars).toBe(10); // frozen, never the raised $20
       expect(result.price).toBe(90);
+    });
+  });
+});
+
+
+// GitHub Codex round 4 P0 on #4642 (PRRT_kwDOR3YQi86kmS5J follow-up): PUT
+// /:id/update-details' multi-line editor routes through the same canonical
+// engine as creation/extension when the gate is live and the row is
+// canonically marked, instead of recomputing independently via
+// calculateVisitFinancialsForAddons — so an UNRELATED edit resending the
+// SAME discount terms restacks to the byte-identical figure, never a
+// silently different one.
+describe('resolveUpdateDetailsAddonFinancials — PUT /:id/update-details routes through the canonical engine (round 4 P0)', () => {
+  afterEach(() => { delete process.env.GATE_DISCOUNT_STACKING; });
+
+  // A minimal fake db: only loadDiscountCapsById's discounts read + an
+  // optional loadStoredDiscountScope services read are ever reached here
+  // (no service-key/category filter in the pinned scenarios below, so the
+  // services table is never actually queried).
+  function makeDb(discountRows) {
+    return (table) => {
+      let whereInIds = null;
+      const chain = {
+        where: () => chain,
+        whereIn: (_col, ids) => { whereInIds = ids; return chain; },
+        select: () => chain,
+        then: (resolve, reject) => {
+          if (table === 'discounts') {
+            return Promise.resolve(discountRows.filter((r) => whereInIds.includes(r.id))).then(resolve, reject);
+          }
+          return Promise.resolve([]).then(resolve, reject);
+        },
+      };
+      return chain;
+    };
+  }
+
+  // The coordinator's exact pinned combination: $100 primary (no line
+  // discount of its own) + a $100 add-on at 20% off + a $30 FIXED
+  // appointment credit — creates at $153 (100 + 83 net − the $30 total
+  // credit is already folded into that $83 addon net via its own $15
+  // allocated share; the SCALAR $30 comes off the $183 subtotal once more
+  // at the total level: 183 − 30 = 153). An UNRELATED edit — the SAME
+  // terms resent — must restack to the byte-identical $153, never $150.
+  test('Codex round 4: unchanged discount terms restack to the byte-identical $153 an unrelated edit must not disturb', async () => {
+    await withGateLive(async () => {
+      const existing = {
+        line_discount_dollars: null, line_discount_id: null, line_discount_type: null, line_discount_amount: null,
+        discount_type: 'fixed_amount', discount_amount: 30, discount_max_dollars: null,
+        discount_service_key_filter: null, discount_service_category_filter: null, discount_id: 'appt-fixed-1',
+        pricing_provenance: {
+          pricing_regime: 'discount_stack_v1', engine_version: 1,
+          caps: { line: { id: null, cap: null }, addons: { 'addon-disc-1': null } },
+        },
+      };
+      // price: 80 — the LEGACY per-line applyDiscount(100, 'percentage', 20)
+      // figure the route's own upstream normalization step would actually
+      // produce (100 * (1 - 20/100)) — NOT the canonical $83. The canonical
+      // branch must restack from base/discount.discountType/discountAmount,
+      // ignoring this pre-computed legacy .price, to reach $153; feeding it
+      // the already-canonical $83 here would let the legacy fallback
+      // coincidentally match by construction and mask a routing regression.
+      const normalizedAddons = [{
+        base: 100, price: 80, serviceId: null, serviceKey: null,
+        discount: { discountId: 'addon-disc-1', discountType: 'percentage', discountAmount: 20 },
+      }];
+      const db = makeDb([{ id: 'addon-disc-1', max_discount_dollars: null }]);
+      const result = await resolveUpdateDetailsAddonFinancials({
+        db, existing, updates: {}, primaryGross: 100, normalizedAddons,
+        effDiscountType: 'fixed_amount', effDiscountAmount: 30, effMaxDiscountDollars: null,
+        effServiceKeyFilter: null, effServiceCategoryFilter: null, appointmentDiscountId: 'appt-fixed-1',
+      });
+      expect(result.financials.price).toBe(153); // NEVER the legacy-additive $150 (100 + 80 - 30)
+      expect(result.canonicalRestackedAddonDollars[0].netPrice).toBe(83);
+      expect(result.capsSnapshotToPersist).not.toBeNull(); // re-frozen for the next save
+    });
+  });
+
+  // Gate off: financials falls straight through to the legacy calculator —
+  // canonicalRestackedAddonDollars / capsSnapshotToPersist both stay null,
+  // matching the pre-fix behavior byte for byte.
+  test('gate off: legacy path, byte-identical — no canonical routing, nothing re-frozen', async () => {
+    const existing = {
+      line_discount_dollars: null, discount_type: 'fixed_amount', discount_amount: 30, discount_max_dollars: null,
+      pricing_provenance: {
+        pricing_regime: 'discount_stack_v1', engine_version: 1,
+        caps: { line: { id: null, cap: null }, addons: { 'addon-disc-1': null } },
+      },
+    };
+    const normalizedAddons = [{
+      base: 100, price: 80, serviceId: null, serviceKey: null,
+      discount: { discountId: 'addon-disc-1', discountType: 'percentage', discountAmount: 20, discountDollars: 20 },
+    }];
+    const db = makeDb([{ id: 'addon-disc-1', max_discount_dollars: null }]);
+    const result = await resolveUpdateDetailsAddonFinancials({
+      db, existing, updates: {}, primaryGross: 100, normalizedAddons,
+      effDiscountType: 'fixed_amount', effDiscountAmount: 30, effMaxDiscountDollars: null,
+      effServiceKeyFilter: null, effServiceCategoryFilter: null, appointmentDiscountId: 'appt-fixed-1',
+    });
+    expect(result.canonicalRestackedAddonDollars).toBeNull();
+    expect(result.capsSnapshotToPersist).toBeNull();
+  });
+
+  // A row that is gate-on but UNMARKED (legacy/never canonically priced):
+  // same parity guarantee — legacy path, nothing re-frozen.
+  test('gate on but the row is UNMARKED (legacy): legacy path, byte-identical — no canonical routing', async () => {
+    await withGateLive(async () => {
+      const existing = {
+        line_discount_dollars: null, discount_type: 'fixed_amount', discount_amount: 30, discount_max_dollars: null,
+        // no pricing_provenance at all — never canonically priced
+      };
+      const normalizedAddons = [{
+        base: 100, price: 80, serviceId: null, serviceKey: null,
+        discount: { discountId: 'addon-disc-1', discountType: 'percentage', discountAmount: 20, discountDollars: 20 },
+      }];
+      const db = makeDb([{ id: 'addon-disc-1', max_discount_dollars: null }]);
+      const result = await resolveUpdateDetailsAddonFinancials({
+        db, existing, updates: {}, primaryGross: 100, normalizedAddons,
+        effDiscountType: 'fixed_amount', effDiscountAmount: 30, effMaxDiscountDollars: null,
+        effServiceKeyFilter: null, effServiceCategoryFilter: null, appointmentDiscountId: 'appt-fixed-1',
+      });
+      expect(result.canonicalRestackedAddonDollars).toBeNull();
+      expect(result.capsSnapshotToPersist).toBeNull();
+    });
+  });
+
+  // An edit that CHANGES the add-on's discount id (a real, supported edit —
+  // swapping which catalog discount an add-on carries): the OLD frozen
+  // entry (keyed to the OLD id) must never apply to the NEW id — its cap
+  // resolves fresh (live), and the re-frozen snapshot picks up the NEW id
+  // going forward.
+  test('Codex round 4: an edit that CHANGES the add-on discount id resolves its cap fresh, never a stale frozen value for the OLD id', async () => {
+    await withGateLive(async () => {
+      const existing = {
+        line_discount_dollars: null, line_discount_id: null, line_discount_type: null, line_discount_amount: null,
+        discount_type: null, discount_amount: null, discount_max_dollars: null,
+        discount_service_key_filter: null, discount_service_category_filter: null,
+        pricing_provenance: {
+          pricing_regime: 'discount_stack_v1', engine_version: 1,
+          // frozen against the OLD discount id, capped at $5 — must NOT
+          // apply to the NEW id below.
+          caps: { line: { id: null, cap: null }, addons: { 'old-addon-disc': 5 } },
+        },
+      };
+      const normalizedAddons = [{
+        base: 100, price: 90, serviceId: null, serviceKey: null,
+        // the edit swapped to a DIFFERENT discount id, uncapped in the
+        // catalog (no cap row at all for it — reads as genuinely uncapped).
+        discount: { discountId: 'new-addon-disc', discountType: 'percentage', discountAmount: 10 },
+      }];
+      // The NEW id's own catalog row — genuinely uncapped.
+      const db = makeDb([{ id: 'new-addon-disc', max_discount_dollars: null }]);
+      const result = await resolveUpdateDetailsAddonFinancials({
+        db, existing, updates: {}, primaryGross: 100, normalizedAddons,
+        effDiscountType: null, effDiscountAmount: null, effMaxDiscountDollars: null,
+        effServiceKeyFilter: null, effServiceCategoryFilter: null, appointmentDiscountId: null,
+      });
+      // 10% of $100 = $10 off, uncapped (the OLD $5 cap for a DIFFERENT id
+      // never applies) — net $90, never a wrongly-capped $95.
+      expect(result.canonicalRestackedAddonDollars[0].discountDollars).toBe(10);
+      expect(result.canonicalRestackedAddonDollars[0].netPrice).toBe(90);
+      // The re-frozen snapshot now carries the NEW id too, read fresh and
+      // correctly uncapped (never the OLD id's $5) — the OLD id's own
+      // entry persists (additive, never deleted — the same harmless-leftover
+      // convention every prior round's caps merge already follows), but
+      // nothing reads it once no addon carries that id any more.
+      expect(result.capsSnapshotToPersist.addons['new-addon-disc']).toBeNull();
+      expect(result.capsSnapshotToPersist.addons['old-addon-disc']).toBe(5);
     });
   });
 });

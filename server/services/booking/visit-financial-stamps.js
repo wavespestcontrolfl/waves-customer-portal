@@ -289,11 +289,27 @@ function resolveStoredDiscountCaps(parent, liveDiscountCaps) {
   const liveLineCap = (discountId) => (
     liveDiscountCaps && discountId != null ? (liveDiscountCaps.get(discountId) ?? null) : null
   );
-  const lineCap = frozen ? (frozen.line ?? null) : liveLineCap(parent?.line_discount_id);
+  const currentLineId = parent?.line_discount_id ?? null;
+  // GitHub Codex round 4 on #4642 (PRRT_kwDOR3YQi86kmS5J follow-up /
+  // PUT :id/update-details fix): the LINE slot's frozen cap is now keyed
+  // to the discount id it was frozen FOR — { id, cap }, not a bare
+  // number — closing the gap the round-2 addons-side fix already closed
+  // for add-ons (keyed by discount_id, the object's own key). Without
+  // this, an edit that swapped the appointment's/row's line_discount_id
+  // to a DIFFERENT discount (without clearing pricing_provenance) would
+  // have applied the OLD discount's frozen cap ceiling to whatever the
+  // NEW discount id resolves to — a wrong ceiling silently misapplied.
+  // A frozen line entry only counts when its own id still matches the
+  // row's CURRENT line_discount_id; any mismatch (a changed discount, or
+  // a legacy bare-number entry written before this shape existed) reads
+  // live instead — never trusts a cap frozen for a different discount.
+  const frozenLineMatches = frozen?.line && typeof frozen.line === 'object' && !Array.isArray(frozen.line)
+    && frozen.line.id === currentLineId;
+  const lineCap = frozenLineMatches ? (frozen.line.cap ?? null) : liveLineCap(currentLineId);
   return {
     lineCap,
     addonCap: (discountId) => (discountId != null && discountId in addons ? addons[discountId] : null),
-    snapshot: { line: lineCap, addons },
+    snapshot: { line: { id: currentLineId, cap: lineCap }, addons },
   };
 }
 
