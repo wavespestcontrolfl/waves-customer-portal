@@ -691,6 +691,66 @@ describe("Invoice foundation workflow preservation", () => {
     expect(discountLine).toBeUndefined();
   });
 
+  // GitHub review round 2, follow-up P1 (PR #4659): the mirror-image
+  // gap of the rename fix above — pickService changes a line's OWN
+  // scope (which can change what a SIBLING document-wide discount
+  // resolves to) but called setLineItems(updated) directly, never
+  // repricing any other row. Reproduced: apply the WDO-scoped $200
+  // discount, edit the service text so the credit zeroes (the rename
+  // fix above), then RE-PICK WDO Inspection on the same line — the
+  // credit field stayed blank/$0 while the aggregate preview and the
+  // submitted discount amount were already back to $200, a preview/row
+  // display mismatch. Fixed by having pickService run
+  // repriceAllFreshDiscounts too, the same call updateLineItem's own
+  // scope-clearing branch already makes.
+  it("re-picking a service after a scope-clearing rename brings a sibling discount row's displayed credit back in line — preview matches the submitted amount", async () => {
+    overrides.set("GET /api/admin/services", () => response({ services: [
+      { id: "svc-wdo", name: "WDO Inspection", service_key: "wdo_inspection", category: "wdo", base_price: 200 },
+    ] }));
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "wdo-discount", name: "WaveGuard Member WDO", discount_type: "percentage", amount: 100, is_active: true, show_in_invoices: true, service_key_filter: "wdo_inspection" },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+
+    // Pick WDO, apply the WDO-scoped 100%-off invoice-wide discount —
+    // credit shows -200.
+    const serviceField = screen.getByLabelText("Service", { exact: true });
+    fireEvent.focus(serviceField);
+    fireEvent.change(serviceField, { target: { value: "WDO" } });
+    fireEvent.mouseDown(await screen.findByRole("button", { name: /WDO Inspection/ }));
+    fireEvent.change(await screen.findByLabelText("Add an invoice-wide discount"), { target: { value: "WaveGuard" } });
+    fireEvent.click(await screen.findByRole("button", { name: /WaveGuard Member WDO/ }));
+    await waitFor(() => expect(screen.getByLabelText("Credit ($)")).toHaveValue(-200));
+
+    // Rename by hand — the credit zeroes (round 2's own fix).
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Custom WDO Follow-Up Visit" } });
+    await waitFor(() => expect(screen.getByLabelText("Credit ($)")).not.toHaveValue(-200));
+
+    // RE-PICK WDO Inspection on the same line.
+    fireEvent.focus(screen.getByLabelText("Service", { exact: true }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "WDO" } });
+    fireEvent.mouseDown(await screen.findByRole("button", { name: /WDO Inspection/ }));
+
+    // Preview: the credit is back to -200 immediately — no stale $0
+    // display waiting for some OTHER trigger to catch it up.
+    await waitFor(() => expect(screen.getByLabelText("Credit ($)")).toHaveValue(-200));
+
+    fireEvent.change(screen.getByLabelText("Send", { exact: true }), { target: { value: "draft" } });
+    const key = "POST /api/admin/invoices";
+    overrides.set(key, () => response({ id: "new-invoice-repicked", invoice_number: "WPC-2026-0104", status: "draft" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create draft", exact: true }));
+    await waitFor(() => expect(requests.some((request) => request.key === key)).toBe(true));
+    const body = requests.find((request) => request.key === key).body;
+    const wdoLine = body.lineItems.find((i) => i.description === "WDO Inspection");
+    const discountLine = body.lineItems.find((i) => i.discount_id === "wdo-discount");
+    // Preview == submitted: both read -200, not a stale $0.
+    expect(wdoLine.service_key).toBe("wdo_inspection");
+    expect(discountLine.unit_price).toBe(-200);
+  });
+
   // Pre-push audit P1 (coordinator scope extension, round 2):
   // repriceLineWithNewDiscountPick only rewrote siblings on the SAME
   // line — a fresh invoice-wide row's own displayed dollars could go

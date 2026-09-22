@@ -6233,7 +6233,25 @@ function CreateInvoice({
       service_key: svc.service_key || null,
       service_category: svc.category || null,
     };
-    setLineItems(updated);
+    // Codex pre-push audit P1 (round 2 on PR #4659, follow-up to the
+    // updateLineItem fix): picking a service changes the line's OWN
+    // scope, which can change what a SIBLING document-wide discount
+    // resolves to (e.g. re-selecting the WDO service after a prior
+    // scope-clearing rename had zeroed a WDO-scoped credit) — but
+    // setLineItems(updated) alone never recomputes any other row's
+    // displayed dollars, only this line's own fields. Reproduced: apply
+    // a WDO-scoped $200 discount, edit the service text so the credit
+    // zeroes, then re-pick WDO — the credit field stayed blank/$0 while
+    // the aggregate preview and the submitted discount were already
+    // $200 again, a preview/row mismatch. repriceAllFreshDiscounts is
+    // the SAME call updateLineItem's own scope-clearing branch already
+    // makes for exactly this reason.
+    setLineItems(repriceAllFreshDiscounts({
+      lineItems: updated,
+      availableDiscounts,
+      stackingEnabled,
+      persistedClientIds: persistedClientIdsRef.current,
+    }));
     setServiceSearchIdx(null);
     setServiceResults([]);
   };
