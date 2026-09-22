@@ -776,6 +776,184 @@ postgres('POST /:id/update-details/preview — dry-run parity with the real save
   });
 });
 
+postgres('round 4 on #4657 — preview must equal what the PUT persists, verbatim per line', () => {
+  let database;
+  let trx;
+  let customerId;
+  let visitId;
+
+  beforeAll(() => {
+    const connection = process.env.DATABASE_URL;
+    const url = new URL(connection);
+    const localCI = ['localhost', '127.0.0.1'].includes(url.hostname);
+    const ownedQA = process.env.WAVES_LOCAL_DEV === '1'
+      && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
+    if (!localCI && !ownedQA) throw new Error('Use disposable CI or this worktree\'s private QA database');
+    database = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 2 } });
+    require('../models/db').connection = database;
+  });
+
+  beforeEach(async () => {
+    delete process.env.GATE_DISCOUNT_STACKING;
+    trx = await database.transaction();
+    require('../models/db').connection = trx;
+    customerId = randomUUID();
+    await trx('customers').insert({
+      id: customerId, first_name: 'Synthetic', last_name: 'Fixture',
+      email: `${customerId}@example.invalid`, phone: `fixture-${customerId.slice(0, 8)}`,
+      address_line1: '100 Test Lane', city: 'Test City', zip: '00000', active: true,
+      pipeline_stage: 'active_customer',
+    });
+  });
+
+  afterEach(async () => { if (trx) await trx.rollback(); delete process.env.GATE_DISCOUNT_STACKING; });
+  afterAll(async () => { await database?.destroy(); });
+
+  const router = require('../routes/admin-schedule');
+  function findHandler(method, path) {
+    const layer = router.stack.find((l) => l.route?.path === path && l.route.methods[method]);
+    return layer.route.stack[layer.route.stack.length - 1].handle;
+  }
+  async function call(method, id, body) {
+    const handler = findHandler(method, '/:id/update-details' + (method === 'post' ? '/preview' : ''));
+    const req = { params: { id }, query: {}, body, headers: {} };
+    let statusCode = 200;
+    let payload = null;
+    const res = { status(code) { statusCode = code; return this; }, json(p) { payload = p; return this; } };
+    let nextErr = null;
+    await handler(req, res, (err) => { nextErr = err; });
+    return { statusCode, payload, err: nextErr };
+  }
+  const preview = (id, body) => call('post', id, body);
+  const put = (id, body) => call('put', id, body);
+
+  test(':13285 — the preview reports the CANONICAL (frozen-cap) per-line dollars, never the pre-restack figure the normalization loop alone would compute', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const discountId = randomUUID();
+    await trx('discounts').insert({
+      id: discountId, discount_key: 'half_off_' + discountId.slice(0, 8), name: 'Half Off',
+      discount_type: 'percentage', amount: 50, max_discount_dollars: null, is_active: true,
+      is_auto_apply: false, show_in_invoices: true,
+    });
+    const [row] = await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, service_type: 'Quarterly Pest Control',
+      service_key_snapshot: 'pest_general_quarterly', status: 'confirmed',
+      scheduled_date: '2040-02-01', window_start: '08:00', window_end: '10:00',
+      estimated_price: 100, primary_line_price: 100,
+      // MARKED, with this discount's cap frozen at $2 even though the LIVE
+      // catalog row above is uncapped — a fresh pick resolves against the
+      // live (uncapped) cap first, then the canonical restack must clamp
+      // it to the FROZEN $2.
+      pricing_provenance: {
+        pricing_regime: 'discount_stack_v1', engine_version: 1,
+        caps: { line: null, addons: { [discountId]: 2 } },
+      },
+    }).returning('*');
+    visitId = row.id;
+    const body = {
+      primaryLinePrice: 100,
+      addons: [{
+        serviceName: 'Mosquito Add-on', basePrice: 100,
+        discountType: 'percentage', discountAmount: 50, discountId, discountName: 'Half Off',
+      }],
+    };
+    const previewResult = await preview(visitId, body);
+    expect(previewResult.err).toBeFalsy();
+    expect(previewResult.statusCode).toBe(200);
+    const previewAddon = previewResult.payload.addons.find((a) => a.serviceName === 'Mosquito Add-on');
+    // Frozen $2 — never the live-cap (uncapped) $50 the addon-normalization
+    // loop alone would have resolved before the canonical restack ran.
+    expect(Number(previewAddon.discountDollars)).toBe(2);
+    expect(Number(previewAddon.price)).toBe(98);
+    // Primary ($100, no discount) + the addon's canonically-capped net ($98).
+    expect(Number(previewResult.payload.total)).toBe(198);
+    const saveResult = await put(visitId, body);
+    expect(saveResult.err).toBeFalsy();
+    expect(saveResult.statusCode).toBe(200);
+    const savedAddon = await trx('scheduled_service_addons').where({ scheduled_service_id: visitId }).first();
+    expect(Number(savedAddon.discount_dollars)).toBe(2);
+    expect(Number(savedAddon.estimated_price)).toBe(98);
+    expect(Number(previewAddon.discountDollars)).toBe(Number(savedAddon.discount_dollars));
+    expect(Number(previewAddon.price)).toBe(Number(savedAddon.estimated_price));
+  });
+
+  test(':9542 — removing and reselecting the SAME preset after a reprice is treated as a FRESH pick (cap + eligibility enforced), not an unchanged round-trip', async () => {
+    const discountId = randomUUID();
+    await trx('discounts').insert({
+      id: discountId, discount_key: 'twenty_capped_' + discountId.slice(0, 8), name: 'Twenty Percent Capped',
+      discount_type: 'percentage', amount: 20, max_discount_dollars: 5, is_active: true,
+      is_auto_apply: false, show_in_invoices: true,
+    });
+    const [row] = await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, service_type: 'Quarterly Pest Control',
+      service_key_snapshot: 'pest_general_quarterly', status: 'confirmed',
+      scheduled_date: '2040-02-01', window_start: '08:00', window_end: '10:00',
+      estimated_price: 200, primary_line_price: 100,
+      // Unmarked.
+    }).returning('*');
+    visitId = row.id;
+    const [addon] = await trx('scheduled_service_addons').insert({
+      id: randomUUID(), scheduled_service_id: visitId, service_name: 'Mosquito Add-on',
+      base_price: 100, estimated_price: 80, discount_id: discountId, discount_name: 'Twenty Percent Capped',
+      discount_type: 'percentage', discount_amount: 20, discount_dollars: 20,
+    }).returning('*');
+    // SAME id/type/amount as stored, but the gross moved 100 -> 200 — the
+    // operator removed and reselected the same preset after retyping Price.
+    const body = {
+      primaryLinePrice: 100,
+      addons: [{
+        id: addon.id, serviceName: 'Mosquito Add-on', basePrice: 200,
+        discountType: 'percentage', discountAmount: 20, discountId, discountName: 'Twenty Percent Capped',
+      }],
+    };
+    const previewResult = await preview(visitId, body);
+    expect(previewResult.err).toBeFalsy();
+    expect(previewResult.statusCode).toBe(200);
+    const previewAddon = previewResult.payload.addons.find((a) => a.serviceName === 'Mosquito Add-on');
+    // Capped at $5 (resolveLineDiscount, catalog-authoritative) — never the
+    // uncapped $40 cap-unaware applyDiscount(200, 20%) would have produced.
+    expect(Number(previewAddon.discountDollars)).toBe(5);
+    expect(Number(previewAddon.price)).toBe(195);
+    const saveResult = await put(visitId, body);
+    expect(saveResult.err).toBeFalsy();
+    expect(saveResult.statusCode).toBe(200);
+    const savedAddon = await trx('scheduled_service_addons').where({ scheduled_service_id: visitId }).first();
+    expect(Number(savedAddon.discount_dollars)).toBe(5);
+    expect(Number(savedAddon.estimated_price)).toBe(195);
+  });
+
+  test(':13181 — a re-service conversion with no explicit new charge previews its saved ZERO price, never the stale carried-over total', async () => {
+    let service = await trx('services').where({ service_key: 'pest_re_service' }).first();
+    if (!service) {
+      [service] = await trx('services').insert({
+        id: randomUUID(), service_key: 'pest_re_service', name: 'Pest Re-Service',
+        category: 'pest', frequency: 'as_needed', billing_type: 'one_time', visits_per_year: 0,
+      }).returning('*');
+    }
+    await trx('customers').where({ id: customerId }).update({ waveguard_tier: 'Silver' });
+    const [row] = await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, service_type: 'Quarterly Pest Control',
+      service_key_snapshot: 'pest_general_quarterly', status: 'confirmed',
+      scheduled_date: '2040-02-01', window_start: '08:00', window_end: '10:00',
+      estimated_price: 100, primary_line_price: 100, is_callback: false,
+    }).returning('*');
+    visitId = row.id;
+    // Switches to the re-service catalog pick and echoes the SAME carried-over
+    // $100 primary price — no explicit new charge typed.
+    const body = { serviceId: service.id, serviceType: 'Pest Re-Service', primaryLinePrice: 100 };
+    const previewResult = await preview(visitId, body);
+    expect(previewResult.err).toBeFalsy();
+    expect(previewResult.statusCode).toBe(200);
+    expect(Number(previewResult.payload.total)).toBe(0);
+    const saveResult = await put(visitId, body);
+    expect(saveResult.err).toBeFalsy();
+    expect(saveResult.statusCode).toBe(200);
+    const savedRow = await trx('scheduled_services').where({ id: visitId }).first();
+    expect(Number(savedRow.estimated_price)).toBe(0);
+    expect(Number(previewResult.payload.total)).toBe(Number(savedRow.estimated_price));
+  });
+});
+
 describe('scheduledServicesDiscountProvenanceColumns — fails CLOSED on a genuine introspection error (Codex pre-push audit P1, round 4 on #4657)', () => {
   // Pure unit test — no live DB needed at all: the function takes its
   // `database` handle as a plain argument, so a fake object whose own

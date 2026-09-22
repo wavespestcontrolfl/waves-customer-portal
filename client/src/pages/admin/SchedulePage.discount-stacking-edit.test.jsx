@@ -560,6 +560,11 @@ it('save-lock: a double click while a discounted save is in flight posts exactly
   const save = screen.getByRole('button', { name: 'Save', exact: true });
   fireEvent.click(save);
   fireEvent.click(save);
+  // Codex pre-push audit P1 (round 4 on #4657, :2936): handleSave now
+  // re-probes the stacking gate on EVERY save (not just discount+line
+  // combos), so the actual PUT (and onUpdateDetails's own resolveSave
+  // assignment) fires one microtask later than the click.
+  await waitFor(() => expect(resolveSave).toBeInstanceOf(Function));
   await act(async () => { resolveSave(); });
   await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
   expect(writes().filter(([url]) => url.includes('/update-details'))).toHaveLength(1); // preview already excluded by writes() itself
@@ -997,4 +1002,107 @@ it('structural round 3 on #4657 (:3606): the preview request carries the primary
   // always priced/validated against what THIS save would actually
   // resolve, never a stale identity the OLD narrower preview body omitted.
   expect(body.serviceType).toBe(baseService.serviceType);
+});
+
+// ---------------------------------------------------------------------
+// Round 4 on #4657 (GitHub review): the PUT must consume the plan
+// verbatim and nothing money-related may live outside it.
+// ---------------------------------------------------------------------
+
+it('round 4 (:2936): the submit-time gate re-probe runs even with NO appointment discount selected — a marked visit with only a capped line stamp', async () => {
+  let stackingCalls = 0;
+  const service = {
+    ...baseService,
+    pricingProvenance: {
+      pricing_regime: 'discount_stack_v1', engine_version: 1,
+      caps: { line: null, addons: { 'disc-military': 5 } },
+    },
+  };
+  vi.stubGlobal('fetch', vi.fn(async (url, options) => {
+    if (url.endsWith('/admin/discounts/stacking')) {
+      stackingCalls += 1;
+      // The FIRST probe (mount) reads on; the SECOND (submit-time
+      // re-probe) reads off — a flip that happened while the modal sat
+      // open, with no appointment-level discount ever touched.
+      return { ok: true, json: async () => ({ enabled: stackingCalls === 1 }) };
+    }
+    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => DISCOUNTS };
+    if (url.includes('/update-details/preview')) {
+      return { ok: true, json: async () => computeMockPreview(JSON.parse(options.body), service, DISCOUNTS) };
+    }
+    return { ok: true, json: async () => ({}) };
+  }));
+  vi.spyOn(window, 'alert').mockImplementation(() => {});
+  render(<Harness service={service} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  // No appointment discount is ever selected this session — apptDiscountSelect
+  // stays "None" throughout.
+  await waitForMoneyReady();
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  // The re-probe (round 2 of the stacking call) fires and reports the gate
+  // flipped — Save must refuse, not silently post under the wrong regime.
+  await waitFor(() => expect(window.alert).toHaveBeenCalledWith(
+    expect.stringContaining('The discount-stacking setting changed while this was open'),
+  ));
+  expect(stackingCalls).toBeGreaterThanOrEqual(2);
+});
+
+it('round 4 (:2330): an independent price edit on a previously-undiscounted line survives a gate flip that reverts its fresh discount pick', async () => {
+  const twoLinesNoDiscount = {
+    ...baseService,
+    serviceAddons: [
+      { id: 'addon-2', serviceId: 'svc-fert', serviceName: 'Quarterly Fertilization', serviceKey: 'lawn_fert', serviceCategory: 'lawn', basePrice: 40, estimatedPrice: 40, estimatedDuration: 20 },
+    ],
+  };
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service: twoLinesNoDiscount }));
+  render(<Harness service={twoLinesNoDiscount} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  const fertPriceInput = (await screen.findAllByPlaceholderText('0.00')).find((i) => Number(i.value) === 40);
+  // Independent price edit FIRST — nothing about this touches the discount
+  // control, so there is nothing for setLineDiscount's own net->gross snap
+  // to have caused.
+  fireEvent.change(fertPriceInput, { target: { value: '60' } });
+  const fertPicker = screen.getByRole('combobox', { name: 'Line discount for Quarterly Fertilization' });
+  fireEvent.change(fertPicker, { target: { value: 'disc-silver' } });
+  await waitFor(() => expect(screen.getAllByText('WaveGuard Silver').length).toBeGreaterThan(0));
+  // Gate closes before Save — the fresh Silver pick reverts.
+  __resetDiscountStackingCache();
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
+    if (url.endsWith('/admin/discounts/stacking')) return { ok: true, json: async () => ({ enabled: false }) };
+    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => DISCOUNTS };
+    return { ok: true, json: async () => ({}) };
+  }));
+  await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+  await waitFor(() => expect(screen.queryByRole('combobox', { name: 'Line discount for Quarterly Fertilization' })).not.toBeInTheDocument());
+  // The $60 the operator typed BEFORE ever touching the discount control
+  // survives — it was never a snap side effect of the (now-reverted) pick.
+  const fertPriceAfter = (await screen.findAllByPlaceholderText('0.00')).find((i) => i.value === '60');
+  expect(fertPriceAfter).toBeTruthy();
+});
+
+it('round 4 (:2850): a line preset picked while Price is blank blocks Save instead of silently dropping the discount', async () => {
+  const blankPriceLine = {
+    ...baseService,
+    serviceAddons: [
+      { id: 'addon-2', serviceId: 'svc-fert', serviceName: 'Quarterly Fertilization', serviceKey: 'lawn_fert', serviceCategory: 'lawn', basePrice: 40, estimatedPrice: 40, estimatedDuration: 20 },
+    ],
+  };
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service: blankPriceLine }));
+  render(<Harness service={blankPriceLine} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  const fertPriceInput = (await screen.findAllByPlaceholderText('0.00')).find((i) => Number(i.value) === 40);
+  fireEvent.change(fertPriceInput, { target: { value: '' } });
+  const fertPicker = screen.getByRole('combobox', { name: 'Line discount for Quarterly Fertilization' });
+  fireEvent.change(fertPicker, { target: { value: 'disc-silver' } });
+  await waitFor(() => expect(screen.getAllByText('WaveGuard Silver').length).toBeGreaterThan(0));
+  // Let the (unrelated) server-preview round trip settle first, so the
+  // disabled-button assertion below isolates lineDiscountPriceMissing —
+  // not a coincidental still-loading moneyPreviewBlocksSave.
+  await waitFor(() => expect(screen.queryByText(/Confirming totals with the server/)).not.toBeInTheDocument());
+  expect(screen.getByText(/A line has a discount selected but no price/)).toBeInTheDocument();
+  const save = screen.getByRole('button', { name: 'Save', exact: true });
+  expect(save).toBeDisabled();
+  fireEvent.click(save);
+  // Blocked at the client — no save attempt reaches the wire at all.
+  expect(writes().filter(([url]) => url.includes('/update-details') && !url.includes('/preview'))).toHaveLength(0);
 });

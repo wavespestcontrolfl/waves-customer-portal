@@ -9530,13 +9530,24 @@ async function normalizeUpdateDetailsAddons({
       // reuses isNewAddonDiscount again).
       const existingAddonDiscountRows = await db('scheduled_service_addons')
         .where({ scheduled_service_id: id })
-        .select('id', 'discount_id', 'discount_type', 'discount_amount');
+        .select('id', 'discount_id', 'discount_type', 'discount_amount', 'base_price');
       const existingAddonDiscountById = new Map(existingAddonDiscountRows.map((r) => [r.id, r]));
-      const isNewAddonDiscount = (submittedAddonId, discount) => {
+      // Codex pre-push audit P1 (round 4 on #4657, :9542): the terms alone
+      // (id/type/amount) are not enough — removing and reselecting the
+      // SAME preset after a reprice looks identical on terms but is a
+      // genuinely fresh application against a NEW base. `submittedGross`
+      // is optional (the stack-group conflict check below reuses this
+      // function on an already-normalized line with no gross handy) —
+      // only checked when the caller actually has it to compare.
+      const isNewAddonDiscount = (submittedAddonId, discount, submittedGross) => {
         if (!discount) return false;
         if (!submittedAddonId) return true;
         const priorRow = existingAddonDiscountById.get(submittedAddonId);
         if (!priorRow || !priorRow.discount_id) return true;
+        if (submittedGross != null) {
+          const priorGross = priorRow.base_price != null ? Number(priorRow.base_price) : null;
+          if (priorGross == null || Math.abs(priorGross - Number(submittedGross)) >= 0.005) return true;
+        }
         return String(priorRow.discount_id) !== String(discount.discountId || '')
           || priorRow.discount_type !== discount.discountType
           || Number(priorRow.discount_amount) !== Number(discount.discountAmount);
@@ -9582,7 +9593,7 @@ async function normalizeUpdateDetailsAddons({
         if (gross != null && lineType && lineAmount != null && !isNaN(lineAmount)) {
           const freshCatalogPick = !!a.discountId && isNewAddonDiscount(a.id || null, {
             discountId: a.discountId, discountType: lineType, discountAmount: lineAmount,
-          });
+          }, gross);
           if (freshCatalogPick) {
             const { customerRow, recurringMembershipBooking } = await getMembershipContext();
             const resolved = await resolveLineDiscount(a, gross, customerRow || {}, {
@@ -9647,9 +9658,139 @@ async function normalizeUpdateDetailsAddons({
   return { cols, normalizedAddons, existingAddonDiscountRows, existingAddonDiscountById, isNewAddonDiscount };
 }
 
+async function resolveReServiceConversion({
+  db, id, updates, serviceId, serviceType, postedServiceKey, primaryLinePrice, estimatedPrice, addons,
+}) {
+  // Codex pre-push audit P1 (round 4 on #4657, :13181): extracted
+  // verbatim so the shared financial planner (computeUpdateDetailsFinancialPlan,
+  // below) can run this SAME re-service/is_callback classification and its
+  // reServiceConversionZeroPrice decision — the PUT route used to compute
+  // this itself and apply the zero-price override AFTER calling the
+  // planner, which the preview route never replicated at all: a visit
+  // converting to a free callback previewed its old nonzero total, then
+  // saved $0. Mutates `updates` (service_type/is_callback/service_id/
+  // service_key_snapshot/service_category_snapshot) exactly as the
+  // inline block always did.
+  let reServiceConversionZeroPrice = false;
+  let reServiceConversion = false;
+  let reServiceTransition = false;
+    if (serviceType !== undefined) updates.service_type = serviceType;
+    // Re-service reclassification on edit. Callers post a service switch two
+    // ways:
+    //   • EditServiceModal sends `serviceId` (+ raw label) when the operator
+    //     picks from the library — authoritative.
+    //   • DispatchPageV2.saveEdit posts only `serviceType` (a raw library label
+    //     such as "Lawn Care Re-Service"), no serviceId.
+    // An unrelated modal save posts a *normalized* label ("Pest Control
+    // Service") with no serviceId — NOT a switch, so the persisted flag must
+    // survive. So: trust serviceId when present; otherwise fall back to the raw
+    // service_type label, but only to ADD the callback classification (a
+    // non-re-service label without serviceId can't tell "changed to regular"
+    // from "no-op save of a normalized re-service", so we leave it alone).
+    // TRUE only when the row wasn't already a re-service — an actual switch.
+    // A price-only save of an EXISTING re-service echoes its serviceId, which
+    // sets reServiceConversion above; the series-scope block must not stand
+    // down for that echo or a 'following' reprice of a re-service series
+    // silently skips its siblings (Codex #3505 r9 P1).
+    if (serviceId !== undefined || serviceType !== undefined) {
+      try {
+        const cols = await db('scheduled_services').columnInfo();
+        let incomingIsReService = null; // null = unknown → leave flag as-is
+        let resolvedServiceId; // undefined = don't touch service_id
+        let resolvedServiceKey;
+        let resolvedServiceCategory;
+
+        if (serviceId !== undefined) {
+          // serviceId null + a label = a pick from the modal's static fallback
+          // list (services-dropdown unavailable). Recover the catalog identity
+          // by the item's STABLE service_key first (fallback labels are not
+          // catalog display names — "Rodent Bait Station Service" vs the
+          // seeded "Quarterly Rodent Bait Station Service"), then by exact
+          // name as a last resort; an unknown pick clears the stale snapshot
+          // instead of carrying the replaced service's identity (Codex #3531
+          // r6/r8 P2).
+          const fallbackKey = String(postedServiceKey || '').trim().toLowerCase();
+          const svcRow = serviceId
+            ? await db('services').where({ id: serviceId }).first('id', 'service_key', 'category', 'name').catch(() => null)
+            : ((fallbackKey
+              ? await db('services').where({ service_key: fallbackKey, is_active: true }).first('id', 'service_key', 'category', 'name').catch(() => null)
+              : null)
+              || (serviceType
+                ? await db('services').where({ name: String(serviceType).trim(), is_active: true }).first('id', 'service_key', 'category', 'name').catch(() => null)
+                : null));
+          incomingIsReService = isReService({ serviceKey: svcRow?.service_key, serviceName: svcRow?.name, serviceType });
+          resolvedServiceId = serviceId || svcRow?.id || null;
+          resolvedServiceKey = svcRow?.service_key || null;
+          resolvedServiceCategory = svcRow?.category || null;
+        } else if (isReService({ serviceType })) {
+          // Label-only switch INTO a re-service (dispatch card). Resolve the
+          // catalog row so completion-profile resolution (keyed off service_id)
+          // is correct; lawn vs pest is inferred from the label.
+          incomingIsReService = true;
+          const reKey = /lawn|turf/i.test(serviceType) ? 'lawn_re_service' : 'pest_re_service';
+          const reSvc = await db('services').where({ service_key: reKey }).first('id', 'service_key', 'category').catch(() => null);
+          resolvedServiceId = reSvc?.id || null;
+          resolvedServiceKey = reSvc?.service_key || null;
+          resolvedServiceCategory = reSvc?.category || null;
+        }
+
+        if (incomingIsReService !== null) {
+          if (cols.is_callback) updates.is_callback = incomingIsReService;
+          if (cols.service_id && resolvedServiceId !== undefined) updates.service_id = resolvedServiceId;
+          if (cols.service_key_snapshot && resolvedServiceId !== undefined) updates.service_key_snapshot = resolvedServiceKey || null;
+          if (cols.service_category_snapshot && resolvedServiceId !== undefined) updates.service_category_snapshot = resolvedServiceCategory || null;
+        }
+
+        if (incomingIsReService === true) {
+          reServiceConversion = true;
+          const existingRow = await db('scheduled_services').where({ id: id })
+            .first('estimated_price', 'customer_id', ...(cols.is_callback ? ['is_callback'] : []));
+          // No is_callback column (pre-migration env) → prior state unknowable;
+          // treat as a transition, which preserves today's behavior.
+          reServiceTransition = !cols.is_callback || !existingRow?.is_callback;
+          const customerRow = await db('customers').where({ id: existingRow?.customer_id })
+            .first('waveguard_tier', 'monthly_rate').catch(() => null);
+          // The payload carries over the PRIOR service's pre-filled price AND its
+          // existing add-on rows on a switch, so "is there any price?" wrongly
+          // reads as a new charge. Compare the full INTENDED visit total in the
+          // payload (primary line + NET add-on lines — unchanged discounted
+          // add-ons arrive as basePrice + discount fields, not a net price)
+          // against the stored estimated_price: only an actual delta means the
+          // operator typed a new charge; an unchanged carryover is stale and
+          // must not bill a free callback.
+          const posMoney = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null; };
+          const addonNet = (a) => {
+            if (a == null) return 0;
+            const net = posMoney(a.price);
+            if (net != null) return net;
+            const gross = posMoney(a.basePrice ?? a.estimatedPrice);
+            if (gross == null) return 0;
+            if (a.discountType && a.discountAmount != null && a.discountAmount !== '') {
+              return Math.max(0, Math.round(applyDiscount(gross, a.discountType, Number(a.discountAmount)) * 100) / 100);
+            }
+            return gross;
+          };
+          const prevEstimate = existingRow?.estimated_price != null ? Math.round(Number(existingRow.estimated_price) * 100) / 100 : null;
+          const postedPrimary = posMoney(primaryLinePrice);
+          const postedAddonTotal = Array.isArray(addons)
+            ? addons.reduce((sum, a) => sum + addonNet(a), 0)
+            : 0;
+          const postedTotal = (postedPrimary != null || postedAddonTotal > 0)
+            ? Math.round(((postedPrimary || 0) + postedAddonTotal) * 100) / 100
+            : posMoney(estimatedPrice);
+          const explicitNewCharge = postedTotal != null && postedTotal > 0
+            && (prevEstimate == null || Math.abs(postedTotal - prevEstimate) >= 0.005);
+          reServiceConversionZeroPrice = customerEligibleForFreeCallback(customerRow || {}) && !explicitNewCharge;
+        }
+      } catch { /* columns may not exist pre-migration — non-blocking */ }
+    }
+
+  return { reServiceConversion, reServiceTransition, reServiceConversionZeroPrice };
+}
+
 async function computeUpdateDetailsFinancialPlan({
   db, id, updates, discountType, discountAmount, isRecurring, serviceType, scheduledDate,
-  primaryLinePrice, estimatedPrice, addons,
+  primaryLinePrice, estimatedPrice, addons, serviceId, postedServiceKey,
   appointmentDiscountPreset, appointmentDiscountChanged, appointmentDiscountCols,
   presetEligibilityCheck,
 }) {
@@ -9669,6 +9810,19 @@ async function computeUpdateDetailsFinancialPlan({
   let canonicalRestackedAddonDollars = null;
   let legacyPreservationCasSnapshot = null;
   let clearAddonDiscountsOnPriceEdit = false;
+  // Codex pre-push audit P1 (round 4 on #4657, :13181): resolved HERE, at
+  // the planner's own top, not by the caller beforehand — the preview
+  // route used to omit this classification entirely (it never affects
+  // is_callback until an actual write, so it looked money-irrelevant),
+  // but reServiceConversionZeroPrice below zeros the visit AND every
+  // add-on once it fires; the preview must know that BEFORE it computes
+  // anything downstream, or it shows a nonzero total for a save that
+  // will persist $0.
+  const {
+    reServiceConversion, reServiceTransition, reServiceConversionZeroPrice,
+  } = await resolveReServiceConversion({
+    db, id, updates, serviceId, serviceType, postedServiceKey, primaryLinePrice, estimatedPrice, addons,
+  });
     if (Array.isArray(addons)) {
       const {
         cols, normalizedAddons, existingAddonDiscountRows, isNewAddonDiscount,
@@ -9958,6 +10112,33 @@ async function computeUpdateDetailsFinancialPlan({
           },
           ...normalizedAddons.map((l) => ({ amount: l.price || 0, serviceKey: l.serviceKey, serviceCategory: l.serviceCategory })),
         ]);
+        // Codex pre-push audit P1 (round 4 on #4657, :13285): the canonical
+        // restack (marked rows only, computed just above) is the money
+        // insertScheduledServiceAddons ACTUALLY persists per line — it
+        // overrides discount_dollars/estimated_price from this exact array
+        // whenever it's present, unconditionally, regardless of what
+        // normalizedAddons' own pre-restack discount object held. Merge it
+        // into normalizedAddons HERE (after presetEligibilityCheck, which
+        // has its own documented contract of reading the pre-restack
+        // approximation — see resolveUpdateDetailsAddonFinancials's own
+        // comment) so replaceAddons — read by the real save's write AND
+        // returned to the preview route — carries the SAME final per-line
+        // numbers either way; a line the canonical pass didn't touch (no
+        // frozen/live cap entry to restack against) is left exactly as
+        // normalizeUpdateDetailsAddons computed it.
+        if (canonicalDollars) {
+          normalizedAddons.forEach((line, i) => {
+            const restack = canonicalDollars[i];
+            if (!restack) return;
+            line.price = restack.netPrice;
+            line.discount = line.discount
+              ? { ...line.discount, discountDollars: restack.discountDollars }
+              : {
+                  discountId: null, discountName: null, discountType: null, discountAmount: null,
+                  discountDollars: restack.discountDollars,
+                };
+          });
+        }
         // legacyEconomicsPreserved (above): the visit total AND the
         // appointment-level stamp are preserved verbatim under the SAME
         // condition, so they can never split from each other — a partial
@@ -10033,8 +10214,32 @@ async function computeUpdateDetailsFinancialPlan({
       if (presetCols.discount_max_dollars) updates.discount_max_dollars = appointmentDiscountPreset.max_discount_dollars ?? null;
     }
 
+  // Converting an existing priced visit to a WaveGuard re-service: the
+  // price handling above may have stored the prior service's carried-over
+  // price. Zero it (callbacks default to $0) unless the operator entered
+  // an explicit new charge, which resolveReServiceConversion already
+  // detected. Applied HERE, inside the planner, so both the real save
+  // (which consumes `updates`/`replaceAddons` verbatim) and the preview
+  // (which reports them verbatim) always agree — moved from the PUT
+  // route's own post-planner step, which the preview never ran at all.
+  if (reServiceConversionZeroPrice) {
+    try {
+      const zeroCols = await db('scheduled_services').columnInfo();
+      if (zeroCols.estimated_price) updates.estimated_price = 0;
+      if (zeroCols.primary_line_price) updates.primary_line_price = 0;
+      if (zeroCols.discount_dollars) updates.discount_dollars = null;
+    } catch { /* non-blocking */ }
+    if (Array.isArray(replaceAddons)) {
+      replaceAddons = replaceAddons.map((line) => ({
+        ...line, base: line.base != null ? 0 : line.base, price: line.price != null ? 0 : line.price, discount: null,
+      }));
+      canonicalRestackedAddonDollars = null;
+    }
+  }
+
   return {
     replaceAddons, canonicalRestackedAddonDollars, legacyPreservationCasSnapshot, clearAddonDiscountsOnPriceEdit,
+    reServiceConversion, reServiceTransition, reServiceConversionZeroPrice,
   };
 }
 
@@ -10201,119 +10406,6 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // write (legacyPreservationSnapshotStale). null/false everywhere the
     // decision never ran or never preserved — no-op there.
     let legacyPreservationCasSnapshot = null;
-    if (serviceType !== undefined) updates.service_type = serviceType;
-    // Re-service reclassification on edit. Callers post a service switch two
-    // ways:
-    //   • EditServiceModal sends `serviceId` (+ raw label) when the operator
-    //     picks from the library — authoritative.
-    //   • DispatchPageV2.saveEdit posts only `serviceType` (a raw library label
-    //     such as "Lawn Care Re-Service"), no serviceId.
-    // An unrelated modal save posts a *normalized* label ("Pest Control
-    // Service") with no serviceId — NOT a switch, so the persisted flag must
-    // survive. So: trust serviceId when present; otherwise fall back to the raw
-    // service_type label, but only to ADD the callback classification (a
-    // non-re-service label without serviceId can't tell "changed to regular"
-    // from "no-op save of a normalized re-service", so we leave it alone).
-    let reServiceConversionZeroPrice = false;
-    let reServiceConversion = false; // the posted service IS a re-service (echoes included)
-    // TRUE only when the row wasn't already a re-service — an actual switch.
-    // A price-only save of an EXISTING re-service echoes its serviceId, which
-    // sets reServiceConversion above; the series-scope block must not stand
-    // down for that echo or a 'following' reprice of a re-service series
-    // silently skips its siblings (Codex #3505 r9 P1).
-    let reServiceTransition = false;
-    if (serviceId !== undefined || serviceType !== undefined) {
-      try {
-        const cols = await db('scheduled_services').columnInfo();
-        let incomingIsReService = null; // null = unknown → leave flag as-is
-        let resolvedServiceId; // undefined = don't touch service_id
-        let resolvedServiceKey;
-        let resolvedServiceCategory;
-
-        if (serviceId !== undefined) {
-          // serviceId null + a label = a pick from the modal's static fallback
-          // list (services-dropdown unavailable). Recover the catalog identity
-          // by the item's STABLE service_key first (fallback labels are not
-          // catalog display names — "Rodent Bait Station Service" vs the
-          // seeded "Quarterly Rodent Bait Station Service"), then by exact
-          // name as a last resort; an unknown pick clears the stale snapshot
-          // instead of carrying the replaced service's identity (Codex #3531
-          // r6/r8 P2).
-          const fallbackKey = String(postedServiceKey || '').trim().toLowerCase();
-          const svcRow = serviceId
-            ? await db('services').where({ id: serviceId }).first('id', 'service_key', 'category', 'name').catch(() => null)
-            : ((fallbackKey
-              ? await db('services').where({ service_key: fallbackKey, is_active: true }).first('id', 'service_key', 'category', 'name').catch(() => null)
-              : null)
-              || (serviceType
-                ? await db('services').where({ name: String(serviceType).trim(), is_active: true }).first('id', 'service_key', 'category', 'name').catch(() => null)
-                : null));
-          incomingIsReService = isReService({ serviceKey: svcRow?.service_key, serviceName: svcRow?.name, serviceType });
-          resolvedServiceId = serviceId || svcRow?.id || null;
-          resolvedServiceKey = svcRow?.service_key || null;
-          resolvedServiceCategory = svcRow?.category || null;
-        } else if (isReService({ serviceType })) {
-          // Label-only switch INTO a re-service (dispatch card). Resolve the
-          // catalog row so completion-profile resolution (keyed off service_id)
-          // is correct; lawn vs pest is inferred from the label.
-          incomingIsReService = true;
-          const reKey = /lawn|turf/i.test(serviceType) ? 'lawn_re_service' : 'pest_re_service';
-          const reSvc = await db('services').where({ service_key: reKey }).first('id', 'service_key', 'category').catch(() => null);
-          resolvedServiceId = reSvc?.id || null;
-          resolvedServiceKey = reSvc?.service_key || null;
-          resolvedServiceCategory = reSvc?.category || null;
-        }
-
-        if (incomingIsReService !== null) {
-          if (cols.is_callback) updates.is_callback = incomingIsReService;
-          if (cols.service_id && resolvedServiceId !== undefined) updates.service_id = resolvedServiceId;
-          if (cols.service_key_snapshot && resolvedServiceId !== undefined) updates.service_key_snapshot = resolvedServiceKey || null;
-          if (cols.service_category_snapshot && resolvedServiceId !== undefined) updates.service_category_snapshot = resolvedServiceCategory || null;
-        }
-
-        if (incomingIsReService === true) {
-          reServiceConversion = true;
-          const existingRow = await db('scheduled_services').where({ id: req.params.id })
-            .first('estimated_price', 'customer_id', ...(cols.is_callback ? ['is_callback'] : []));
-          // No is_callback column (pre-migration env) → prior state unknowable;
-          // treat as a transition, which preserves today's behavior.
-          reServiceTransition = !cols.is_callback || !existingRow?.is_callback;
-          const customerRow = await db('customers').where({ id: existingRow?.customer_id })
-            .first('waveguard_tier', 'monthly_rate').catch(() => null);
-          // The payload carries over the PRIOR service's pre-filled price AND its
-          // existing add-on rows on a switch, so "is there any price?" wrongly
-          // reads as a new charge. Compare the full INTENDED visit total in the
-          // payload (primary line + NET add-on lines — unchanged discounted
-          // add-ons arrive as basePrice + discount fields, not a net price)
-          // against the stored estimated_price: only an actual delta means the
-          // operator typed a new charge; an unchanged carryover is stale and
-          // must not bill a free callback.
-          const posMoney = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null; };
-          const addonNet = (a) => {
-            if (a == null) return 0;
-            const net = posMoney(a.price);
-            if (net != null) return net;
-            const gross = posMoney(a.basePrice ?? a.estimatedPrice);
-            if (gross == null) return 0;
-            if (a.discountType && a.discountAmount != null && a.discountAmount !== '') {
-              return Math.max(0, Math.round(applyDiscount(gross, a.discountType, Number(a.discountAmount)) * 100) / 100);
-            }
-            return gross;
-          };
-          const prevEstimate = existingRow?.estimated_price != null ? Math.round(Number(existingRow.estimated_price) * 100) / 100 : null;
-          const postedPrimary = posMoney(primaryLinePrice);
-          const postedAddonTotal = Array.isArray(addons)
-            ? addons.reduce((sum, a) => sum + addonNet(a), 0)
-            : 0;
-          const postedTotal = (postedPrimary != null || postedAddonTotal > 0)
-            ? Math.round(((postedPrimary || 0) + postedAddonTotal) * 100) / 100
-            : posMoney(estimatedPrice);
-          const explicitNewCharge = postedTotal != null && postedTotal > 0
-            && (prevEstimate == null || Math.abs(postedTotal - prevEstimate) >= 0.005);
-          reServiceConversionZeroPrice = customerEligibleForFreeCallback(customerRow || {}) && !explicitNewCharge;
-        }
-      } catch { /* columns may not exist pre-migration — non-blocking */ }
-    }
     if (estimatedDuration !== undefined && estimatedDuration !== '') updates.estimated_duration_minutes = parseInt(estimatedDuration);
     if (scheduledDate !== undefined && scheduledDate !== '') updates.scheduled_date = scheduledDate;
     // Notify + past date is always a mistake (a week-off click in the
@@ -10614,10 +10706,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // Multi-line edit: an explicit `addons` array describes the full set of
     // additional service lines. Recompute stored visit financials from the
     // primary line + add-on lines, then replace add-on rows in the transaction.
+    let reServiceConversion = false;
+    let reServiceTransition = false;
+    let reServiceConversionZeroPrice = false;
     {
       const financialPlan = await computeUpdateDetailsFinancialPlan({
         db, id: req.params.id, updates, discountType, discountAmount, isRecurring, serviceType, scheduledDate,
-        primaryLinePrice, estimatedPrice, addons,
+        primaryLinePrice, estimatedPrice, addons, serviceId, postedServiceKey,
         appointmentDiscountPreset, appointmentDiscountChanged, appointmentDiscountCols,
         presetEligibilityCheck,
       });
@@ -10625,30 +10720,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       canonicalRestackedAddonDollars = financialPlan.canonicalRestackedAddonDollars;
       legacyPreservationCasSnapshot = financialPlan.legacyPreservationCasSnapshot;
       clearAddonDiscountsOnPriceEdit = financialPlan.clearAddonDiscountsOnPriceEdit;
-    }
-    // Converting an existing priced visit to a WaveGuard re-service: the price
-    // handling above may have stored the prior service's carried-over price.
-    // Zero it (callbacks default to $0) unless the operator entered an explicit
-    // new charge, which the reclassification block already detected.
-    if (reServiceConversionZeroPrice) {
-      try {
-        const cols = await db('scheduled_services').columnInfo();
-        if (cols.estimated_price) updates.estimated_price = 0;
-        if (cols.primary_line_price) updates.primary_line_price = 0;
-        if (cols.discount_dollars) updates.discount_dollars = null;
-      } catch { /* non-blocking */ }
-      // Also zero any carried-over add-on line prices so the visit total stays
-      // $0 — leaving priced add-on rows while estimated_price=0 would let
-      // completion re-bill them on a free callback.
-      if (Array.isArray(replaceAddons)) {
-        replaceAddons = replaceAddons.map((line) => ({
-          ...line, base: line.base != null ? 0 : line.base, price: line.price != null ? 0 : line.price, discount: null,
-        }));
-        // A canonical restack computed above (if any) is now stale against
-        // these zeroed lines — insertScheduledServiceAddons must use the
-        // zeroed price/discount above, not a pre-zero restacked figure.
-        canonicalRestackedAddonDollars = null;
-      }
+      // Codex pre-push audit P1 (round 4 on #4657, :13181): the re-service/
+      // is_callback classification AND its reServiceConversionZeroPrice
+      // decision (zeroing the visit + every add-on for an eligible free
+      // callback) now live INSIDE the planner — updates/replaceAddons
+      // above already reflect it. Read back here only because later
+      // series-scope logic in this route still needs the flags themselves.
+      reServiceConversion = financialPlan.reServiceConversion;
+      reServiceTransition = financialPlan.reServiceTransition;
+      reServiceConversionZeroPrice = financialPlan.reServiceConversionZeroPrice;
     }
     const addonsReplaced = Array.isArray(replaceAddons);
     const detailsChanged = Object.keys(updates).length > 0;
@@ -13176,28 +13256,14 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
     }
 
     const updates = {};
-    // The save path's own resolvedServiceId block, minus the re-service /
-    // is_callback reclassification it also does — that classification never
-    // affects money, only is_callback, so it is deliberately not replicated
-    // here; the identity fields the financial resolution actually reads
-    // (service_id/service_key_snapshot/service_category_snapshot) resolve
-    // exactly the same way.
-    if (serviceId !== undefined) {
-      const fallbackKey = String(postedServiceKey || '').trim().toLowerCase();
-      const svcRow = serviceId
-        ? await db('services').where({ id: serviceId }).first('id', 'service_key', 'category', 'name').catch(() => null)
-        : ((fallbackKey
-          ? await db('services').where({ service_key: fallbackKey, is_active: true }).first('id', 'service_key', 'category', 'name').catch(() => null)
-          : null)
-          || (serviceType
-            ? await db('services').where({ name: String(serviceType).trim(), is_active: true }).first('id', 'service_key', 'category', 'name').catch(() => null)
-            : null));
-      const resolvedServiceId = serviceId || svcRow?.id || null;
-      if (cols.service_id) updates.service_id = resolvedServiceId;
-      if (cols.service_key_snapshot) updates.service_key_snapshot = svcRow?.service_key || null;
-      if (cols.service_category_snapshot) updates.service_category_snapshot = svcRow?.category || null;
-    }
-
+    // Codex pre-push audit P1 (round 4 on #4657, :13181): service-identity
+    // AND re-service/is_callback resolution both now happen INSIDE
+    // computeUpdateDetailsFinancialPlan (via resolveReServiceConversion,
+    // called at the planner's own top) — this route no longer needs its
+    // own copy. The earlier "minus the re-service reclassification, which
+    // never affects money" reasoning was itself the bug this round fixes:
+    // that classification decides reServiceConversionZeroPrice, which DOES
+    // zero the whole visit.
     let appointmentDiscountCols = null;
     let appointmentDiscountChanged = false;
     if (discountType !== undefined || discountAmount !== undefined) {
@@ -13247,7 +13313,7 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
 
     const plan = await computeUpdateDetailsFinancialPlan({
       db, id, updates, discountType, discountAmount, isRecurring, serviceType, scheduledDate,
-      primaryLinePrice, estimatedPrice, addons,
+      primaryLinePrice, estimatedPrice, addons, serviceId, postedServiceKey,
       appointmentDiscountPreset, appointmentDiscountChanged, appointmentDiscountCols,
       presetEligibilityCheck,
     });
@@ -13277,7 +13343,12 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
       // client already has a row id for correlates by submittedAddonId; a
       // brand-new (id-less) line correlates by array position against the
       // client's own filtered addon list (both filter out an empty
-      // serviceName the same way).
+      // serviceName the same way). l.price/l.discount.discountDollars are
+      // already the FINAL per-line numbers — computeUpdateDetailsFinancialPlan
+      // merges the canonical restack (marked rows) into normalizedAddons
+      // itself (Codex pre-push audit P1, round 4, :13285), the same array
+      // insertScheduledServiceAddons writes from — so there is no separate
+      // pre-restack figure left to expose here.
       addons: (plan.replaceAddons || []).map((l) => ({
         submittedAddonId: l.submittedAddonId || null,
         serviceName: l.serviceName,
@@ -13285,7 +13356,6 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
         discountDollars: l.discount?.discountDollars ?? null,
         discountName: l.discount?.discountName ?? null,
       })),
-      canonicalRestackedAddonDollars: plan.canonicalRestackedAddonDollars ?? null,
     });
   } catch (err) {
     if (err.status) {

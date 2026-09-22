@@ -87,8 +87,11 @@ it('retains edits after a failed save and prevents duplicate saves and dismissal
   await waitFor(() => expect(save).toBeEnabled(), { timeout: 2000 });
   fireEvent.click(save);
   fireEvent.click(save);
+  // Codex pre-push audit P1 (round 4 on #4657, :2936): handleSave now
+  // re-probes the stacking gate on every save before it actually POSTs —
+  // the write lands one microtask after the click.
+  await waitFor(() => expect(writes()).toHaveLength(1));
   fireEvent.keyDown(document, { key: 'Escape' });
-  expect(writes()).toHaveLength(1);
   expect(screen.getByRole('dialog', { name: 'Edit appointment' })).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Close' })).toBeDisabled();
   await act(async () => rejectSave(new Error('Synthetic save failure')));

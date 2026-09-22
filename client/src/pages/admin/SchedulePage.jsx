@@ -2324,11 +2324,24 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // round-trips its true original stamp exactly like #2306/#2803 already do.
   useEffect(() => {
     if (stackingEnabled) return;
-    setServiceLines((lines) => lines.map((l) => (
-      l.lineDiscountTouched
-        ? { ...l, lineDiscountTouched: false, lineDiscount: null, price: l._seededPrice ?? l.price }
-        : l
-    )));
+    setServiceLines((lines) => lines.map((l) => {
+      if (!l.lineDiscountTouched) return l;
+      // Codex pre-push audit P2 (round 4 on #4657, :2330): only a line
+      // whose FIRST touch this session actually snapped net -> gross (the
+      // SAME condition setLineDiscount's own firstTouch checks, above) has
+      // a Price this reset needs to undo. A line with no ORIGINAL discount
+      // stamp never had Price touched as a side effect of picking one —
+      // an operator who typed $50 -> $60 and THEN picked a (now-reverting)
+      // discount would otherwise lose that independent $60 edit on a
+      // transient gate flip, discarding a change the pick never caused.
+      const priceWasSnapped = l._origDiscountType && l._origBasePrice != null;
+      return {
+        ...l,
+        lineDiscountTouched: false,
+        lineDiscount: null,
+        price: priceWasSnapped ? (l._seededPrice ?? l.price) : l.price,
+      };
+    }));
   }, [stackingEnabled]);
   // Codex pre-push audit P1 (round 2, #4657): a Price edit on an untouched
   // stamped line (the discount CONTROL itself never touched) must also
@@ -2785,16 +2798,20 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // stored discount with a fresh line pick exactly the same way, so the
   // guard/preview must see it too.
   const appointmentDiscountSelected = !!(discountType && discountAmount !== "") || !!storedAppointmentDiscount;
-  // GitHub review round 2 on #4657 (P2, :1678): reuse effectiveLineDiscount
-  // (which already knows a price-edited stamp is no longer "in play") so
-  // this stays consistent with the exported lineDiscountSaveBlocked's own
-  // fix, and with the preview/payload themselves.
-  const lineDiscountInPlay = serviceLines.some((l) => !!effectiveLineDiscount(l));
   const stackingUnconfirmedBlocksSave = lineDiscountSaveBlocked({
     known: stackingKnown,
     appointmentDiscountSelected,
     lines: serviceLines,
   });
+  // Codex pre-push audit P2 (round 4 on #4657, :2850): a line preset picked
+  // while Price is blank fails buildAddonsPayload's own price !== "" guard
+  // and falls through to the flat-net (no discount) branch — the payload
+  // silently drops the operator's selection while the picker keeps showing
+  // it chosen. Block Save until every actively-picked line has a valid
+  // price to submit it against, rather than let the pick vanish unseen.
+  const lineDiscountPriceMissing = serviceLines.some(
+    (l) => lineDiscountActive(l) && l.lineDiscount && !(l.price !== "" && !isNaN(parseFloat(l.price))),
+  );
 
   // Codex pre-push audit structural round on #4657 (:3526/:2394's class):
   // extracted so the preview debounce below can send the SAME add-on
@@ -2911,6 +2928,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
 
   const handleSave = async ({ takePayment = false } = {}) => {
     if (stackingUnconfirmedBlocksSave) return;
+    if (lineDiscountPriceMissing) return;
     // Codex pre-push audit structural round on #4657: Save is blocked while
     // a discount is in play until the server's OWN dry-run (moneyPreview)
     // has confirmed what THIS exact form would persist — moneyPreviewBlocksSave
@@ -2924,14 +2942,18 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     setSaving(true);
     // Revalidate right before POSTING money — the hook polls, but a gate
     // flip between the last probe and this click would still save under the
-    // semantics the preview used. Scoped to a save that actually interacts
-    // (appointment discount + a line discount on the same visit) — a
-    // discount-free, or single-discount, save never depends on this probe's
-    // uptime (same ruling as AdminInvoicesPage's invoiceSubmitNeedsStackingCheck,
-    // slice 5 of #4405). Ordered AFTER setSaving so the await cannot widen
+    // semantics the preview used. Codex pre-push audit P1 (round 4 on
+    // #4657, :2936): this used to scope to "appointment discount + a line
+    // discount on the same visit" — a MARKED visit with only a single
+    // capped line stamp also changes semantics across the gate (canonical
+    // frozen-cap restack on, cap-unaware applyDiscount off), so scoping by
+    // "which discounts are visibly in play" can't tell which saves are
+    // actually gate-sensitive. The server preview is unconditional now
+    // (every save has some total to confirm), so this re-probe runs for
+    // every save too — ordered AFTER setSaving so the await cannot widen
     // the double-click window; alert() is how this handler already reports
     // a blocking validation failure (see the time-on-site check below).
-    if (appointmentDiscountSelected && lineDiscountInPlay) {
+    {
       const fresh = await ensureStackingFresh();
       if (!fresh.known || fresh.enabled !== stackingEnabled) {
         savingRef.current = false;
@@ -4094,7 +4116,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             )}{" "}
             <button
               onClick={() => handleSave({ takePayment: true })}
-              disabled={saving || cancelling || newPayerSaving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave}
+              disabled={saving || cancelling || newPayerSaving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave || lineDiscountPriceMissing}
               className="font-medium flex-1 md:flex-initial"
               style={{
                 padding: "11px 14px",
@@ -4103,8 +4125,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 color: "#fff",
                 border: "none",
                 fontSize: 13,
-                cursor: (saving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave) ? "wait" : "pointer",
-                opacity: (saving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave) ? 0.6 : 1,
+                cursor: (saving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave || lineDiscountPriceMissing) ? "wait" : "pointer",
+                opacity: (saving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave || lineDiscountPriceMissing) ? 0.6 : 1,
                 whiteSpace: "nowrap",
               }}
             >
@@ -4112,7 +4134,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             </button>{" "}
             <button
               onClick={() => handleSave()}
-              disabled={saving || cancelling || newPayerSaving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave}
+              disabled={saving || cancelling || newPayerSaving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave || lineDiscountPriceMissing}
               className="font-medium flex-1 md:flex-initial"
               style={{
                 padding: "11px 14px",
@@ -4121,8 +4143,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 color: "#111827",
                 border: `1px solid ${D.inputBorder}`,
                 fontSize: 13,
-                cursor: (saving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave) ? "wait" : "pointer",
-                opacity: (saving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave) ? 0.6 : 1,
+                cursor: (saving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave || lineDiscountPriceMissing) ? "wait" : "pointer",
+                opacity: (saving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave || lineDiscountPriceMissing) ? 0.6 : 1,
                 whiteSpace: "nowrap",
               }}
             >
@@ -4820,6 +4842,22 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   }}
                 >
                   Confirming totals with the server…
+                </div>
+              )}
+              {lineDiscountPriceMissing && (
+                <div
+                  style={{
+                    background: "#DC262615",
+                    border: "1px solid #DC262655",
+                    borderRadius: 8,
+                    padding: 10,
+                    marginBottom: 14,
+                    fontSize: 12,
+                    color: "#DC2626",
+                  }}
+                >
+                  A line has a discount selected but no price — enter a price for that line, or
+                  remove the discount, before saving.
                 </div>
               )}
               <div
