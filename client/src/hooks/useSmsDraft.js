@@ -31,7 +31,7 @@ const emptyDraft = () => ({
   replyContext: null,
   sendTiming: "now",
   sendCustomAt: "",
-  fromNumber: "+19413187612",
+  fromNumber: "",
   selectedCustomerId: null,
   threadLock: null,
 });
@@ -69,7 +69,7 @@ function hydrateDraft(value) {
   if (!isRecord(draft.insertedCustomerLinks)) draft.insertedCustomerLinks = {};
   if (typeof draft.sendTiming !== "string") draft.sendTiming = "now";
   if (typeof draft.sendCustomAt !== "string") draft.sendCustomAt = "";
-  if (typeof draft.fromNumber !== "string") draft.fromNumber = "+19413187612";
+  if (typeof draft.fromNumber !== "string") draft.fromNumber = "";
   return draft;
 }
 
@@ -89,7 +89,13 @@ function persistedDraft(draft) {
 }
 
 function readStorage() {
-  const parsed = JSON.parse(sessionStorage.getItem(SMS_DRAFT_STORAGE_KEY) || "null");
+  const raw = sessionStorage.getItem(SMS_DRAFT_STORAGE_KEY);
+  let parsed;
+  try {
+    parsed = JSON.parse(raw || "null");
+  } catch {
+    return { owners: {} };
+  }
   return isRecord(parsed) && isRecord(parsed.owners) ? parsed : { owners: {} };
 }
 

@@ -16,6 +16,27 @@ afterEach(() => {
 });
 
 describe("useSmsDraft", () => {
+  it("leaves missing or malformed senders unset for the caller to resolve", () => {
+    const { result, rerender } = renderHook(({ initialDraft }) => useSmsDraft({
+      recipientKey: initialDraft ? "malformed-sender" : "missing-sender",
+      initialDraft,
+    }), { initialProps: { initialDraft: null } });
+    expect(result.current.fromNumber).toBe("");
+    rerender({ initialDraft: { fromNumber: 123 } });
+    expect(result.current.fromNumber).toBe("");
+  });
+
+  it("repairs malformed JSON on the next edit", () => {
+    sessionStorage.setItem(SMS_DRAFT_STORAGE_KEY, "{broken");
+    const { result } = renderHook(() => useSmsDraft({
+      ownerId: "owner-malformed", recipientKey: "recipient-a",
+    }));
+    act(() => result.current.setMsgBody("Recovered persistence"));
+    const stored = JSON.parse(sessionStorage.getItem(SMS_DRAFT_STORAGE_KEY));
+    expect(stored.owners["owner-malformed"]["recipient-a"].msgBody).toBe("Recovered persistence");
+    expect(result.current.recoveryWarning).toBeNull();
+  });
+
   it("switches recipients atomically and restores each recipient's live text and attachments", () => {
     const attachmentA = {
       url: "https://media.example/a.jpg",
