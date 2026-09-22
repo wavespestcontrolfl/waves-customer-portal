@@ -82,6 +82,11 @@ async function recoverUploadFailure(error, draft, request) {
   return { retainedDraft, message };
 }
 
+function discardButtonLabel(draft) {
+  if (draft.discardPending) return 'Discarding…';
+  return draft.discardRequested ? 'Retry discard' : 'Discard';
+}
+
 export default function TechRecapCapture({ service, request }) {
   const serviceId = service?.id;
   const [itemState, setItemState] = useState({ serviceId: null, items: [] });
@@ -211,12 +216,33 @@ export default function TechRecapCapture({ service, request }) {
     upload({ file, role, serviceId: targetServiceId, mediaType, contentType, durationMs: undefined, mediaId: null, uploadUrl: null, uploaded: false, needsReconcile: false, retryable: true });
   };
 
-  const discardFailedUpload = () => {
+  const discardFailedUpload = async () => {
     const discarded = failedUpload;
-    setFailedUpload(null);
-    setErr(null);
-    if (discarded?.mediaId) {
-      request(`/tech/services/${discarded.serviceId}/recap-media/${discarded.mediaId}`, { method: 'DELETE' }).catch(() => {});
+    if (!discarded) return;
+    if (!discarded.mediaId) {
+      setFailedUpload(null);
+      setErr(null);
+      return;
+    }
+    const generation = serviceGenerationRef.current;
+    const cleanupDraft = { ...discarded, retryable: false, discardRequested: true, discardPending: true };
+    setFailedUpload(cleanupDraft);
+    try {
+      await request(`/tech/services/${discarded.serviceId}/recap-media/${discarded.mediaId}`, { method: 'DELETE' });
+      if (isCurrentService(discarded.serviceId, generation)) {
+        setFailedUpload(null);
+        setErr(null);
+      }
+    } catch (error) {
+      if (isCurrentService(discarded.serviceId, generation)) {
+        if (error?.status === 404) {
+          setFailedUpload(null);
+          setErr(null);
+        } else {
+          setFailedUpload({ ...cleanupDraft, discardPending: false });
+          setErr('Couldn’t discard this clip from the visit. Retry discard.');
+        }
+      }
     }
   };
 
@@ -271,14 +297,14 @@ export default function TechRecapCapture({ service, request }) {
               </div>
               <div style={{ display: 'flex', gap: 8, marginTop: 9 }}>
                 {failedUpload.retryable && <button type="button" onClick={() => upload(failedUpload)} style={{ flex: 1, minHeight: 44, padding: 10, borderRadius: 9, border: 'none', background: C.teal, color: '#04240f', fontWeight: 800, fontSize: 14, cursor: 'pointer' }}>Retry upload</button>}
-                <button type="button" onClick={discardFailedUpload} style={{ flex: 1, minHeight: 44, padding: 10, borderRadius: 9, border: `1px solid ${C.border}`, background: 'none', color: C.text, fontWeight: 700, fontSize: 14, cursor: 'pointer' }}>Discard</button>
+                <button type="button" disabled={failedUpload.discardPending} onClick={discardFailedUpload} style={{ flex: 1, minHeight: 44, padding: 10, borderRadius: 9, border: `1px solid ${C.border}`, background: 'none', color: C.text, fontWeight: 700, fontSize: 14, cursor: 'pointer' }}>{discardButtonLabel(failedUpload)}</button>
               </div>
             </>
           )}
         </div>
       )}
       <button type="button" disabled={captureDisabled} onClick={() => fileRef.current && fileRef.current.click()} style={{ width: '100%', padding: 12, borderRadius: 10, border: 'none', background: C.teal, color: '#04240f', fontWeight: 800, fontSize: 14, cursor: captureDisabled ? 'default' : 'pointer', opacity: captureDisabled ? 0.65 : 1 }}>
-        {uploading ? `Uploading… (${uploading})` : failedUpload ? 'Retry or discard pending clip' : '+ Capture recap clip'}
+        {uploading ? `Uploading… (${uploading})` : failedUpload ? 'Resolve pending clip' : '+ Capture recap clip'}
       </button>
 
       {/* zIndex 1000 like the other tech sheets: the bottom nav is fixed at 50 and later in the DOM, so at 50 it painted over the sheet's last rows. */}

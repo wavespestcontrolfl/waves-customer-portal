@@ -161,7 +161,11 @@ describe('TechRecapCapture upload recovery', () => {
         error.status = 413;
         throw error;
       }
-      if (path.endsWith('/media-terminal') && options?.method === 'DELETE') return { ok: true };
+      if (path.endsWith('/media-terminal') && options?.method === 'DELETE') {
+        const error = new Error('media not found');
+        error.status = 404;
+        throw error;
+      }
       throw new Error(`Unexpected request: ${path}`);
     });
 
@@ -171,6 +175,8 @@ describe('TechRecapCapture upload recovery', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Clip too large');
     expect(screen.queryByRole('button', { name: 'Retry upload' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Discard' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
   });
 
   it('retains the selected file and role after a PUT failure and resumes with the same presign', async () => {
@@ -186,7 +192,7 @@ describe('TechRecapCapture upload recovery', () => {
     const file = await tagPerimeter('put-retry.jpg');
 
     expect(await screen.findByRole('alert')).toHaveTextContent('put-retry.jpg · Spray — perimeter');
-    expect(screen.getByRole('button', { name: 'Retry or discard pending clip' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Resolve pending clip' })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Retry upload' }));
 
     await waitFor(() => expect(pathsMatching(request, '/media-two/confirm')).toHaveLength(1));
@@ -212,12 +218,52 @@ describe('TechRecapCapture upload recovery', () => {
     await screen.findByRole('alert');
     fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
 
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '+ Capture recap clip' })).toBeEnabled();
     await waitFor(() => expect(request).toHaveBeenCalledWith(
       '/tech/services/service-one/recap-media/media-three',
       { method: 'DELETE' },
     ));
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+    expect(screen.getByRole('button', { name: '+ Capture recap clip' })).toBeEnabled();
+  });
+
+  it('retains discard-only cleanup when a lost-confirm media delete fails', async () => {
+    let confirmed = false;
+    let deleteAttempts = 0;
+    const request = vi.fn(async (path, options) => {
+      if (isListRequest(path, options)) {
+        return { items: confirmed ? [{ id: 'media-ready', role: 'perimeter', caption: 'Sealing your perimeter barrier', status: 'ready' }] : [] };
+      }
+      if (path.endsWith('/presign')) return { mediaId: 'media-ready', uploadUrl: 'https://upload.test/media-ready' };
+      if (path.endsWith('/media-ready/confirm')) {
+        confirmed = true;
+        throw new Error('Connection closed before confirmation arrived');
+      }
+      if (path.endsWith('/media-ready') && options?.method === 'DELETE') {
+        deleteAttempts += 1;
+        if (deleteAttempts === 1) throw new Error('Delete unavailable');
+        return { ok: true };
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+
+    render(<TechRecapCapture service={SERVICE_ONE} request={request} />);
+    await tagPerimeter('discard-ready.jpg');
+    await screen.findByRole('alert');
+    fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Couldn’t discard this clip from the visit');
+    expect(screen.queryByRole('button', { name: 'Retry upload' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retry discard' })).toBeEnabled();
+    expect(pathsMatching(request, '/presign')).toHaveLength(1);
+    expect(pathsMatching(request, '/confirm')).toHaveLength(1);
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry discard' }));
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+    expect(deleteAttempts).toBe(2);
+    expect(pathsMatching(request, '/presign')).toHaveLength(1);
+    expect(pathsMatching(request, '/confirm')).toHaveLength(1);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it('stops an in-flight file when the selected service changes', async () => {
