@@ -67,6 +67,10 @@ const {
   resolveUpdateDetailsAddonFinancials,
   hasPricingRegimeMarker,
 } = require('../routes/admin-schedule')._test;
+const {
+  deriveLegacyPrimarySubmission,
+  deriveLegacyAddonSubmission,
+} = require('../../shared/legacy-visit-money-submission.cjs');
 
 function withGateLive(fn) {
   const prior = process.env.GATE_DISCOUNT_STACKING;
@@ -675,12 +679,12 @@ describe('a stored row with an INFERRED (not submitted) service id still matches
 // a stale snapshot. legacyPreservationSnapshotStale is the pure
 // compare-and-swap check the route re-runs, under `trx`, immediately
 // before applying a preserved write.
-describe('legacyPreservationSnapshotStale — TOCTOU compare-and-swap before a preserved write (GitHub round 2 P1)', () => {
+describe('legacyPreservationSnapshotStale — TOCTOU compare-and-swap before a preserved write (GitHub round 2 P1; every preserved field, round 3 P1)', () => {
   const snapshotArgs = () => ({
-    freshEstimatedPrice: 160,
-    existingEstimatedPrice: 160,
-    freshAddonRows: [{ service_id: 'svc-1', service_name: 'Addon', base_price: 100, estimated_price: 90, discount_id: 'd1', discount_type: 'percentage', discount_amount: 10 }],
-    existingAddonRows: [{ service_id: 'svc-1', service_name: 'Addon', base_price: 100, estimated_price: 90, discount_id: 'd1', discount_type: 'percentage', discount_amount: 10 }],
+    freshRow: { estimated_price: 160, primary_line_price: 100, discount_dollars: 30, discount_type: 'fixed_amount', discount_amount: 30 },
+    existingRow: { estimated_price: 160, primary_line_price: 100, discount_dollars: 30, discount_type: 'fixed_amount', discount_amount: 30 },
+    freshAddonRows: [{ service_id: 'svc-1', service_name: 'Addon', base_price: 100, estimated_price: 90, discount_id: 'd1', discount_type: 'percentage', discount_amount: 10, discount_dollars: 10 }],
+    existingAddonRows: [{ service_id: 'svc-1', service_name: 'Addon', base_price: 100, estimated_price: 90, discount_id: 'd1', discount_type: 'percentage', discount_amount: 10, discount_dollars: 10 }],
   });
 
   test('nothing changed since the read: not stale', () => {
@@ -688,7 +692,8 @@ describe('legacyPreservationSnapshotStale — TOCTOU compare-and-swap before a p
   });
 
   test('the aggregate estimated_price moved under us: stale', () => {
-    expect(legacyPreservationSnapshotStale({ ...snapshotArgs(), freshEstimatedPrice: 175 })).toBe(true);
+    const args = snapshotArgs();
+    expect(legacyPreservationSnapshotStale({ ...args, freshRow: { ...args.freshRow, estimated_price: 175 } })).toBe(true);
   });
 
   test('an add-on row\'s net moved under us (a concurrent edit): stale', () => {
@@ -720,6 +725,200 @@ describe('legacyPreservationSnapshotStale — TOCTOU compare-and-swap before a p
       freshAddonRows: [rowB, args.freshAddonRows[0]],
       existingAddonRows: [args.existingAddonRows[0], rowB],
     })).toBe(false);
+  });
+
+  // GitHub round 3 on PR #4654 (P1): comparing ONLY the aggregate missed an
+  // overlapping save that changes the primary/appointment BREAKDOWN — which
+  // column carries the money — while leaving the aggregate total and every
+  // add-on row untouched. Codex's own scenario: a concurrent save moves
+  // $20 from the primary line into the appointment credit (both still sum
+  // to the same $160/$30-off shape in aggregate terms), which this fix
+  // must catch even though estimated_price and every add-on row are
+  // byte-identical to the original read.
+  describe('an overlapping save that changes ONLY the breakdown (Codex round 3 P1 repro)', () => {
+    test('primary_line_price moved under us (aggregate + add-ons unchanged): stale', () => {
+      const args = snapshotArgs();
+      expect(legacyPreservationSnapshotStale({ ...args, freshRow: { ...args.freshRow, primary_line_price: 80 } })).toBe(true);
+    });
+
+    test('discount_dollars (the appointment stamp) moved under us: stale', () => {
+      const args = snapshotArgs();
+      expect(legacyPreservationSnapshotStale({ ...args, freshRow: { ...args.freshRow, discount_dollars: 50 } })).toBe(true);
+    });
+
+    test('the appointment discount_type changed under us (same dollars, different terms): stale', () => {
+      const args = snapshotArgs();
+      expect(legacyPreservationSnapshotStale({ ...args, freshRow: { ...args.freshRow, discount_type: 'percentage', discount_amount: 15 } })).toBe(true);
+    });
+
+    test('an add-on\'s own discount_dollars stamp moved under us (type/amount unchanged): stale', () => {
+      const args = snapshotArgs();
+      expect(legacyPreservationSnapshotStale({
+        ...args,
+        freshAddonRows: [{ ...args.freshAddonRows[0], discount_dollars: 5 }],
+      })).toBe(true);
+    });
+  });
+});
+
+// GitHub review round 3 on PR #4654: the SHARED derivation module
+// (shared/legacy-visit-money-submission.cjs) is the structural fix for
+// three rounds of "another legacy data shape the server's own
+// re-derivation missed" — these tests pin the shared functions directly
+// (round-tripping every shape review found across rounds 2-3), then pin
+// legacyEconomicsPreservationDecision actually using them end to end.
+describe('deriveLegacyPrimarySubmission — the shared module itself (GitHub round 3 P0)', () => {
+  test('GROSS-preferring, never net: a $160 total with a $100-gross/$90-net add-on derives $60, never $70', () => {
+    // Codex's own round-3 repro, pinned directly against the shared
+    // function: the earlier server-side reconstruction subtracted the
+    // add-on's NET ($90), landing on $70 — SchedulePage.jsx actually
+    // subtracts the GROSS ($100), landing on $60.
+    const result = deriveLegacyPrimarySubmission({
+      primaryLinePrice: null,
+      estimatedPrice: 160,
+      addons: [{ basePrice: 100, estimatedPrice: 90 }],
+    });
+    expect(result).toBe(60);
+  });
+
+  test('an addon with NO recorded base_price falls back to its own net for the subtraction (nothing else to subtract)', () => {
+    const result = deriveLegacyPrimarySubmission({
+      primaryLinePrice: null,
+      estimatedPrice: 160,
+      addons: [{ basePrice: null, estimatedPrice: 90 }],
+    });
+    expect(result).toBe(70); // 160 - 90, the only figure this addon has
+  });
+
+  test('a populated primaryLinePrice is trusted as-is, never re-derived from the total', () => {
+    const result = deriveLegacyPrimarySubmission({ primaryLinePrice: 60, estimatedPrice: 999, addons: [] });
+    expect(result).toBe(60);
+  });
+
+  test('null total, null primary, no addons: nothing derivable — returns null', () => {
+    expect(deriveLegacyPrimarySubmission({ primaryLinePrice: null, estimatedPrice: null, addons: [] })).toBeNull();
+  });
+
+  test('no addons known at all (not even an empty array): the total itself is the primary', () => {
+    expect(deriveLegacyPrimarySubmission({ primaryLinePrice: null, estimatedPrice: 160, addons: null })).toBe(160);
+  });
+});
+
+describe('deriveLegacyAddonSubmission — the shared module itself (GitHub round 3 P0)', () => {
+  test('a discount WITH a recorded base_price: the full STAMPED shape (basePrice + discount terms), net omitted', () => {
+    const result = deriveLegacyAddonSubmission({
+      basePrice: 100, netPrice: 90, discountType: 'percentage', discountAmount: 10, discountId: 'd1', discountName: 'Fixture',
+    });
+    expect(result).toEqual({ basePrice: 100, discountType: 'percentage', discountAmount: 10, discountId: 'd1', discountName: 'Fixture' });
+  });
+
+  // Codex's own round-3 repro: migration 20260504000004 added the add-on
+  // discount columns BEFORE 20260511000002 added base_price, so a real
+  // legacy row can carry a discount with base_price still null.
+  test('a discount whose base_price is NULL (pre-base_price legacy row): the flat-NET shape, discount fields omitted entirely', () => {
+    const result = deriveLegacyAddonSubmission({
+      basePrice: null, netPrice: 90, discountType: 'percentage', discountAmount: 10, discountId: 'd1', discountName: 'Fixture',
+    });
+    expect(result).toEqual({ price: 90 });
+  });
+
+  test('no discount at all: the flat-NET shape', () => {
+    expect(deriveLegacyAddonSubmission({ basePrice: 100, netPrice: 100, discountType: null })).toEqual({ price: 100 });
+  });
+});
+
+describe('legacyEconomicsPreservationDecision end to end with the shared derivation (GitHub round 3 P0)', () => {
+  // The add-on itself carries a real 10% discount ($100 gross -> $90 net)
+  // so the stored row is internally consistent — the interesting number is
+  // the PRIMARY: 160 (total) - 100 (addon GROSS) = 60, never 160 - 90 = 70.
+  test('null primary_line_price + a gross/net-differing add-on: preserves via the SAME derivation the client uses ($60, never the old $70)', () => {
+    const result = legacyEconomicsPreservationDecision({
+      legacyPreservationCandidate: true, discountInputsPosted: false, primaryServiceChanged: false,
+      primaryGross: 60, // the client's own gross-derived primary
+      existingPrimaryLinePrice: null,
+      normalizedAddons: [{
+        serviceId: 'svc-1', serviceName: 'Addon', base: 100,
+        discount: { discountId: null, discountType: 'percentage', discountAmount: 10 },
+      }],
+      existingAddonRows: [{
+        service_id: 'svc-1', service_name: 'Addon', base_price: 100, estimated_price: 90,
+        discount_id: null, discount_type: 'percentage', discount_amount: 10,
+      }],
+      existingEstimatedPrice: 160,
+    });
+    expect(result.legacyEconomicsPreserved).toBe(true);
+  });
+
+  test('control: the OLD net-subtraction figure ($70) is now correctly rejected as a mismatch against the client\'s real gross-derived $60', () => {
+    const result = legacyEconomicsPreservationDecision({
+      legacyPreservationCandidate: true, discountInputsPosted: false, primaryServiceChanged: false,
+      primaryGross: 70, // what the OLD, wrong reconstruction would have expected — never what the real client sends
+      existingPrimaryLinePrice: null,
+      normalizedAddons: [{
+        serviceId: 'svc-1', serviceName: 'Addon', base: 100,
+        discount: { discountId: null, discountType: 'percentage', discountAmount: 10 },
+      }],
+      existingAddonRows: [{
+        service_id: 'svc-1', service_name: 'Addon', base_price: 100, estimated_price: 90,
+        discount_id: null, discount_type: 'percentage', discount_amount: 10,
+      }],
+      existingEstimatedPrice: 160,
+    });
+    expect(result.legacyEconomicsPreserved).toBe(false);
+  });
+
+  // Codex's own round-3 repro, at the decision-function level: a caller
+  // posts `primaryLinePrice: 0` with an empty add-on set against a
+  // genuinely UNPRICED (estimated_price NULL) legacy visit — Number(null)
+  // is 0, so BOTH the reconstructed primary and storedTotal could look
+  // like a valid free visit without the explicit null check.
+  test('a NULL stored total is never coerced to a preservable $0 — never preserved, regardless of what else matches', () => {
+    const result = legacyEconomicsPreservationDecision({
+      legacyPreservationCandidate: true, discountInputsPosted: false, primaryServiceChanged: false,
+      primaryGross: 0, existingPrimaryLinePrice: 0, // a caller posting 0 against an unpriced row
+      normalizedAddons: [], existingAddonRows: [],
+      existingEstimatedPrice: null, // the REAL stored state: unpriced, unknown — never a real $0
+    });
+    expect(result.legacyEconomicsPreserved).toBe(false);
+    expect(result.storedTotal).toBeNaN(); // never silently reads as 0
+  });
+
+  test('control: a GENUINE stored $0 (not null) still preserves — the null-guard does not over-correct', () => {
+    const result = legacyEconomicsPreservationDecision({
+      legacyPreservationCandidate: true, discountInputsPosted: false, primaryServiceChanged: false,
+      primaryGross: 0, existingPrimaryLinePrice: 0,
+      normalizedAddons: [], existingAddonRows: [],
+      existingEstimatedPrice: 0,
+    });
+    expect(result.legacyEconomicsPreserved).toBe(true);
+    expect(result.storedTotal).toBe(0);
+  });
+
+  // Codex's own round-3 repro: a discounted add-on whose base_price
+  // predates that column. The old per-shape comparison routed this into
+  // the STAMPED (gross-vs-gross) branch because stored.discount_type was
+  // populated, comparing a posted `undefined` base against a stored
+  // `null` base — the shared derivation instead recognizes this as the
+  // flat-NET shape (matching what the client ACTUALLY sends) and, once
+  // matched, still retains the row's stored discount fields on write.
+  test('a discounted add-on with base_price NULL (pre-base_price legacy row): preserves via the flat-NET shape, retaining the stored discount audit on write', () => {
+    const result = legacyEconomicsPreservationDecision({
+      legacyPreservationCandidate: true, discountInputsPosted: false, primaryServiceChanged: false,
+      primaryGross: 100, existingPrimaryLinePrice: 100,
+      // The client's real payload for this shape: a flat net, no discount fields at all.
+      normalizedAddons: [{ serviceId: 'svc-1', serviceName: 'Addon', base: 90, price: 90, discount: null }],
+      existingAddonRows: [{
+        service_id: 'svc-1', service_name: 'Addon', base_price: null, estimated_price: 90,
+        discount_id: 'd1', discount_name: 'Fixture', discount_type: 'percentage', discount_amount: 10, discount_dollars: 10,
+      }],
+      existingEstimatedPrice: 190,
+    });
+    expect(result.legacyEconomicsPreserved).toBe(true);
+    // The written addon row retains its FULL discount audit, pulled from
+    // storage — never dropped just because the client couldn't round-trip it.
+    expect(result.preservedAddonLines[0].discount).toMatchObject({
+      discountId: 'd1', discountType: 'percentage', discountAmount: 10, discountDollars: 10,
+    });
   });
 });
 

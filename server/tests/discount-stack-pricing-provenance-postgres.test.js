@@ -918,22 +918,20 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
       base_price: 100, estimated_price: 90, discount_type: 'percentage', discount_amount: 10, discount_dollars: 10,
     });
 
+    const rowFields = ['estimated_price', 'primary_line_price', 'discount_dollars', 'discount_type', 'discount_amount'];
+    const addonFields = ['service_id', 'service_name', 'base_price', 'estimated_price', 'discount_id', 'discount_type', 'discount_amount', 'discount_dollars'];
+
     // The snapshot the route's own pre-transaction read would have taken.
-    const existing = await mockPg('scheduled_services').where({ id }).first('estimated_price');
+    const existing = await mockPg('scheduled_services').where({ id }).first(...rowFields);
     const existingAddonRows = await mockPg('scheduled_service_addons')
-      .where({ scheduled_service_id: id })
-      .select('service_id', 'service_name', 'base_price', 'estimated_price', 'discount_id', 'discount_type', 'discount_amount');
+      .where({ scheduled_service_id: id }).select(...addonFields);
 
     // Nothing changed yet — the CAS must pass.
-    const freshRowBefore = await mockPg('scheduled_services').where({ id }).first('estimated_price');
+    const freshRowBefore = await mockPg('scheduled_services').where({ id }).first(...rowFields);
     const freshAddonRowsBefore = await mockPg('scheduled_service_addons')
-      .where({ scheduled_service_id: id })
-      .select('service_id', 'service_name', 'base_price', 'estimated_price', 'discount_id', 'discount_type', 'discount_amount');
+      .where({ scheduled_service_id: id }).select(...addonFields);
     expect(legacyPreservationSnapshotStale({
-      freshEstimatedPrice: freshRowBefore.estimated_price,
-      existingEstimatedPrice: existing.estimated_price,
-      freshAddonRows: freshAddonRowsBefore,
-      existingAddonRows,
+      freshRow: freshRowBefore, existingRow: existing, freshAddonRows: freshAddonRowsBefore, existingAddonRows,
     })).toBe(false);
 
     // A CONCURRENT save (a different admin, or a retry) lands in between —
@@ -942,15 +940,99 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
 
     // The trx's own locked re-read (what the route re-fetches right before
     // applying the ORIGINAL request's preserved write) now sees the drift.
-    const freshRowAfter = await mockPg('scheduled_services').where({ id }).first('estimated_price');
+    const freshRowAfter = await mockPg('scheduled_services').where({ id }).first(...rowFields);
     const freshAddonRowsAfter = await mockPg('scheduled_service_addons')
-      .where({ scheduled_service_id: id })
-      .select('service_id', 'service_name', 'base_price', 'estimated_price', 'discount_id', 'discount_type', 'discount_amount');
+      .where({ scheduled_service_id: id }).select(...addonFields);
     expect(legacyPreservationSnapshotStale({
-      freshEstimatedPrice: freshRowAfter.estimated_price,
-      existingEstimatedPrice: existing.estimated_price,
-      freshAddonRows: freshAddonRowsAfter,
-      existingAddonRows,
+      freshRow: freshRowAfter, existingRow: existing, freshAddonRows: freshAddonRowsAfter, existingAddonRows,
     })).toBe(true); // the ORIGINAL request's stale snapshot must never be trusted for the write now
+  });
+
+  // GitHub round 3 on PR #4654 (P1): a real Postgres round trip pinning
+  // Codex's exact repro — an OVERLAPPING save changes ONLY the primary/
+  // appointment BREAKDOWN (which column carries the money), leaving the
+  // aggregate estimated_price and every add-on row byte-identical. The
+  // earlier CAS (aggregate + add-on rows only) would have missed this;
+  // comparing every preserved parent field catches it.
+  test('legacyPreservationSnapshotStale: an overlapping save that moves money between primary_line_price and the appointment credit (aggregate unchanged) is detected via a real Postgres round trip', async () => {
+    const id = randomUUID();
+    await mockPg('scheduled_services').insert({
+      id, scheduled_date: '2099-11-22', service_type: 'Fixture Breakdown-Only Service',
+      primary_line_price: 100, estimated_price: 160,
+      discount_type: 'fixed_amount', discount_amount: 30, discount_dollars: 30,
+    });
+    const rowFields = ['estimated_price', 'primary_line_price', 'discount_dollars', 'discount_type', 'discount_amount'];
+    const existing = await mockPg('scheduled_services').where({ id }).first(...rowFields);
+    const existingAddonRows = [];
+
+    // A concurrent save re-splits the SAME $160 total: primary drops to
+    // $80, the fixed credit rises to $50 (80 + 30 = 110... this fixture
+    // keeps the exact aggregate by also raising a hypothetical addon-free
+    // total's math: 160 stays the visible total either way — the point is
+    // the BREAKDOWN moved, not the total).
+    await mockPg('scheduled_services').where({ id }).update({
+      primary_line_price: 80, discount_amount: 10, discount_dollars: 10, estimated_price: 160,
+    });
+
+    const freshRow = await mockPg('scheduled_services').where({ id }).first(...rowFields);
+    // The aggregate itself is untouched — a check that compared only
+    // estimated_price would wrongly call this "not stale".
+    expect(Number(freshRow.estimated_price)).toBe(160);
+    expect(legacyPreservationSnapshotStale({
+      freshRow, existingRow: existing, freshAddonRows: existingAddonRows, existingAddonRows,
+    })).toBe(true); // primary_line_price and discount_amount/discount_dollars both moved
+  });
+
+  // GitHub round 3 on PR #4654 (P0): a real Postgres row whose add-on
+  // discount columns predate base_price (migration 20260504000004 added
+  // the discount columns before 20260511000002 added base_price) — the
+  // exact historical ordering Codex's finding names. base_price is a real
+  // Postgres NULL on this row, not a hand-typed fixture.
+  test('PUT /:id/update-details: a discounted add-on with a real Postgres NULL base_price (pre-base_price legacy row) preserves via the flat-NET shape, retaining its discount audit', async () => {
+    const id = randomUUID();
+    await mockPg('scheduled_services').insert({
+      id, scheduled_date: '2099-11-23', service_type: 'Fixture Pre-Base-Price Add-On Service',
+      primary_line_price: 100, estimated_price: 190,
+    });
+    await mockPg('scheduled_service_addons').insert({
+      id: randomUUID(), scheduled_service_id: id, service_name: 'Fixture Pre-Base-Price Add-On',
+      base_price: null, estimated_price: 90, // a real Postgres NULL base_price
+      discount_type: 'percentage', discount_amount: 10, discount_dollars: 10, discount_id: null,
+    });
+
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      const existing = await mockPg('scheduled_services').where({ id }).first(
+        'primary_line_price', 'discount_type', 'discount_amount', 'discount_dollars', 'estimated_price', 'pricing_provenance',
+      );
+      const existingAddonRows = await mockPg('scheduled_service_addons')
+        .where({ scheduled_service_id: id })
+        .select('service_id', 'service_name', 'base_price', 'estimated_price', 'discount_id', 'discount_name', 'discount_type', 'discount_amount', 'discount_dollars');
+      expect(existingAddonRows[0].base_price).toBeNull();
+
+      // The real client shape for this row: a flat net, no discount fields
+      // at all — SchedulePage.jsx cannot round-trip a gross it never had.
+      const normalizedAddons = [{ serviceId: null, serviceName: 'Fixture Pre-Base-Price Add-On', base: 90, price: 90, discount: null }];
+
+      const decision = legacyEconomicsPreservationDecision({
+        legacyPreservationCandidate: discountStackingLive() && !hasPricingRegimeMarker(existing),
+        discountInputsPosted: false,
+        primaryServiceChanged: false,
+        primaryGross: 100,
+        existingPrimaryLinePrice: Number(existing.primary_line_price),
+        normalizedAddons,
+        existingAddonRows,
+        existingEstimatedPrice: existing.estimated_price,
+      });
+      expect(decision.legacyEconomicsPreserved).toBe(true);
+      expect(decision.storedTotal).toBe(190);
+      // The discount audit survives on the WRITTEN row even though the
+      // client's own payload never carried it.
+      expect(decision.preservedAddonLines[0].discount).toMatchObject({
+        discountType: 'percentage', discountAmount: 10, discountDollars: 10,
+      });
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
   });
 });

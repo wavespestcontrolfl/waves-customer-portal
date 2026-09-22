@@ -10,6 +10,7 @@ const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../midd
 const logger = require('../services/logger');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive } = require('../config/feature-gates');
+const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
 const { collectiveMoveGateOn, dateExceptionStamp } = require('../services/rebooker');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
@@ -2656,60 +2657,34 @@ async function resolveUpdateDetailsAddonFinancials({
 // "unchanged" could never be confirmed (this is the round-7 P0 itself: the
 // ORIGINAL bug never loaded them at all for this check).
 //
-// Four callsite-shaped guards, all from real Codex findings on this exact
-// function across three rounds of pre-push audit (this slice):
+// GitHub review round 3 on PR #4654: three separate rounds each found a
+// DIFFERENT real legacy-data shape this function's own independent
+// re-derivation missed (a gross-vs-net fallback mismatch, a null total
+// coerced to a false $0, an add-on row predating the base_price column).
+// Structural fix: `deriveLegacyPrimarySubmission` / `deriveLegacyAddonSubmission`
+// (shared/legacy-visit-money-submission.cjs) are the SAME functions
+// SchedulePage.jsx calls to build its own save payload — this function
+// calls them against the STORED row to compute the payload an untouched
+// save would submit, then diffs that against what was ACTUALLY posted.
+// Any future client-side shape change is automatically covered here too,
+// because it is literally the same code, not a hand-mirrored guess.
 //
-// Add-on comparison is GROSS + discount TERMS for a STAMPED line, NET for a
-// flat-price line — never a single universal rule. This editor has no
-// per-addon discount UI (SchedulePage.jsx): an UNCHANGED line that already
-// carries a stored discount round-trips its true gross + full discount
-// stamp (id/type/amount), but a NEW-or-EDITED line sends only a flat
-// `price` — the operator's intended NET, with no `basePrice` and no
-// discount at all. Two DIFFERENT bugs live on either side of that fork,
-// both from real Codex repros:
-//  - (round 1) Comparing a flat-price line's posted number against the
-//    row's stored GROSS treats a genuine net-price raise — a discounted
-//    $90 addon edited up to $100 — as unchanged whenever it happens to
-//    equal the OLD gross, silently keeping the OLD, lower total. The fix:
-//    compare `normalizedAddons[i].price` (this save's resolved NET) against
-//    the row's stored NET (`estimated_price`) for this shape.
-//  - (round 3) `normalizedAddons[i].price` comes from applyDiscount(),
-//    which has NO notion of the discount's CATALOG cap — scheduled_service_
-//    addons stores only the raw type/amount ("50% off"), never the ceiling,
-//    which lives on the `discounts` row and is never re-read here. An
-//    UNCHANGED $100 add-on at 50% off capped at $10 round-trips its true
-//    gross and terms, but applyDiscount naively recomputes an UNCAPPED $50
-//    — never the row's real, stored $90 — so NET-vs-NET on a STAMPED line
-//    misreports an exact match as changed and falls through to a recompute
-//    that repeats the SAME cap-ignorant mistake ($160 silently becomes
-//    $120). The fix: for a line either side stamps with a discount, compare
-//    GROSS (`l.base` vs `base_price`) instead — matching terms already
-//    proves the line's economics did not change, so the row's OWN stored
-//    net (whatever it truly was capped at) remains correct by definition;
-//    gross-vs-gross is the only additional fact needed. A line with NO
-//    discount on either side still compares NET vs NET (gross and net are
-//    the same number there anyway, and a flat-net EDIT has no gross to
-//    compare against at all).
+// Two guards remain specific to this side (the shared module has no
+// concept of either):
 //
-// Per-line DISCOUNT-TERMS comparison is by VALUE, never by presence
-// (round 2). The editor's round-trip DOES resend `basePrice` + the full
-// discount stamp (id/type/amount) for an UNCHANGED discounted line — so
-// treating "a discount field was posted at all" as disqualifying would
-// disable preservation on the ordinary notes-only save of any row that has
-// an add-on discount at all, defeating the point for exactly the rows the
-// round-7 P0 is about. Only a discount id/type/amount that DIFFERS from
-// what is actually stored on that line — added, removed, or changed — is a
-// genuine edit.
-//
-// Each stored row is matched AT MOST ONCE (round 2). An independent
-// `.find()` per posted line lets two posted lines match the SAME stored row
-// while a DIFFERENT stored row goes unaccounted for — primary $100 +
-// add-ons A=$20 and B=$50 (total $170): replacing B with a second,
-// unrelated $20 line that happens to share A's identity would let BOTH
-// posted lines match the single stored A row under independent `.find()`s,
-// "confirming" $170 unchanged when the real new total is $140. Matched
-// stored rows are consumed (spliced out) so a later posted line can never
-// re-match one already claimed.
+// Each stored add-on row is matched AT MOST ONCE (round 2 P0). An
+// independent `.find()` per posted line lets two posted lines match the
+// SAME stored row while a DIFFERENT stored row goes unaccounted for —
+// primary $100 + add-ons A=$20 and B=$50 (total $170): replacing B with a
+// second, unrelated $20 line that happens to share A's identity would let
+// BOTH posted lines match the single stored A row under independent
+// `.find()`s, "confirming" $170 unchanged when the real new total is $140.
+// Matched stored rows are consumed (spliced out) so a later posted line
+// can never re-match one already claimed. `submittedServiceId` (round 2
+// P0) is the RAW client-posted id, distinct from the possibly-INFERRED
+// `serviceId` a null-service_id stored row's name/key can resolve to —
+// matching on the raw value lets an unlinked stored row still pair by
+// name; undefined falls back to the old serviceId-only behavior.
 //
 // A primary SERVICE identity change (service_id / service_key_snapshot /
 // service_category_snapshot) never counts as money-unchanged even when the
@@ -2742,50 +2717,29 @@ async function loadExistingAddonRowsForLegacyPreservation(db, legacyPreservation
 }
 
 function legacyEconomicsPreservationDecision({
-  // Appointment-level only (never the per-addon signal — see the per-line
-  // TERMS comparison above): "the editor only sends discountType/
-  // discountAmount when one is actively selected; an omitted value means
-  // leave it alone" (this route's own long-standing contract, unchanged).
   legacyPreservationCandidate, discountInputsPosted, primaryServiceChanged, primaryGross, existingPrimaryLinePrice,
   normalizedAddons, existingAddonRows, existingEstimatedPrice,
 }) {
-  // GitHub round 2 on PR #4654 (P0): a row that predates the
-  // primary_line_price column (its migration never backfilled it) stores
-  // it as null — but SchedulePage does not know or care about that split;
-  // it derives a numeric primary from the stored TOTAL minus the stored
-  // add-on NETS and resubmits that derived number on every save, notes-
-  // only included. Comparing the posted (derived) primaryGross against a
-  // raw null always "differs" (moneyValuesDiffer treats null vs a number
-  // as a difference by construction), so every save on such a row looked
-  // like a price edit no matter what. Reconstruct the SAME way the client
-  // derives it — total minus the stored add-ons' own nets — and compare
-  // against THAT instead, only when the column itself is null (a populated
-  // primary_line_price is trusted as-is, unconditionally).
-  const reconstructedPrimaryLinePrice = existingPrimaryLinePrice == null
-    ? (() => {
-      const total = Number(existingEstimatedPrice);
-      if (!Number.isFinite(total)) return null;
-      const addonNetSum = existingAddonRows.reduce((sum, row) => {
-        const net = Number(row.estimated_price);
-        return sum + (Number.isFinite(net) ? net : 0);
-      }, 0);
-      return Math.max(0, Math.round((total - addonNetSum) * 100) / 100);
-    })()
-    : existingPrimaryLinePrice;
+  // GitHub round 3 on PR #4654 (P0): `Number(null)` is `0` — NOT NaN — so
+  // `Number.isFinite(storedTotal)` alone does not exclude a genuinely
+  // unpriced (null) legacy visit; the earlier comment claiming it did was
+  // simply wrong. Check the RAW stored value's nullness before any numeric
+  // coercion touches it, so a null total can never be silently accepted as
+  // a real $0 no matter what the rest of this save's inputs look like.
+  const storedTotalIsNull = existingEstimatedPrice == null || existingEstimatedPrice === '';
+  const storedTotal = storedTotalIsNull ? NaN : Number(existingEstimatedPrice);
+
+  // The primary line's own expected submission, derived from the STORED
+  // row via the SAME function the client calls to build its own payload.
+  const expectedPrimary = deriveLegacyPrimarySubmission({
+    primaryLinePrice: existingPrimaryLinePrice,
+    estimatedPrice: existingEstimatedPrice,
+    addons: existingAddonRows.map((row) => ({ basePrice: row.base_price, estimatedPrice: row.estimated_price })),
+  });
+
   const remainingStored = existingAddonRows.slice();
   const matchedPairs = [];
   const addonsUnchanged = normalizedAddons.every((l) => {
-    // GitHub round 2 on PR #4654 (P0): a stored add-on row with a null
-    // service_id (never linked to the catalog) whose NAME/KEY now resolves
-    // to an ACTIVE catalog entry has that id INFERRED onto the posted line
-    // by this route's own (pre-slice-4) normalization — `serviceId:
-    // a.serviceId || catalogService?.id || null` — purely for pricing/
-    // eligibility, never because the client actually submitted one.
-    // Matching by that inferred id can then never pair with the
-    // still-unlinked ($null) stored row. `submittedServiceId` (when the
-    // caller provides it) is the RAW client-posted value, distinct from
-    // the possibly-inferred `serviceId` — undefined falls back to the old
-    // `serviceId`-only behavior unchanged, for every existing caller shape.
     const matchId = l.submittedServiceId !== undefined ? l.submittedServiceId : l.serviceId;
     const idx = remainingStored.findIndex((row) => (
       matchId ? String(row.service_id || '') === String(matchId) : String(row.service_name || '').trim() === l.serviceName
@@ -2793,53 +2747,45 @@ function legacyEconomicsPreservationDecision({
     if (idx === -1) return false;
     const [stored] = remainingStored.splice(idx, 1); // consume — never re-matchable
     matchedPairs.push({ line: l, stored });
-    // Discount identity/terms — ALWAYS compared, not only when an id is
-    // present: a custom (no catalog id) discount's type/amount can still
-    // change without ever gaining or losing an id, and comparing only when
-    // an id is present would silently skip that case. Any mismatch (added,
-    // removed, or changed) is a genuine edit.
-    if (String(l.discount?.discountId || '') !== String(stored.discount_id || '')) return false;
-    if ((l.discount?.discountType || null) !== (stored.discount_type || null)) return false;
-    if (moneyValuesDiffer(l.discount?.discountAmount, stored.discount_amount)) return false;
-    // A STAMPED line — this save round-tripped a discount, or the stored
-    // row carries one and the terms above already matched exactly — is
-    // compared GROSS vs GROSS, never net vs net (Codex pre-push audit P0,
-    // round 3): `l.price` comes from applyDiscount(), which has no notion
-    // of the discount's CATALOG cap (scheduled_service_addons stores only
-    // the raw type/amount, e.g. "50% off" — the $10 ceiling lives on the
-    // `discounts` row and is never re-read here). An unchanged $100 add-on
-    // at 50% off capped at $10 round-trips its true gross and terms, but
-    // applyDiscount naively recomputes an UNCAPPED $50 — never the row's
-    // real, stored $90 — so net-vs-net would misreport this exact-match
-    // line as changed and fall through to a recompute that repeats the
-    // SAME cap-ignorant mistake (Codex's repro: $160 silently becomes
-    // $120). Matching terms already proves nothing about this line's
-    // economics changed; the row's OWN stored net remains correct by
-    // definition and gross-vs-gross is the only additional fact needed.
-    if (l.discount?.discountId || stored.discount_id || stored.discount_type) {
-      return !moneyValuesDiffer(l.base, stored.base_price);
+    // The expected submission for THIS stored line, via the shared
+    // derivation — either the STAMPED shape (basePrice + discount terms)
+    // or the flat-NET shape (no discount fields at all), exactly mirroring
+    // whichever one SchedulePage.jsx would actually have sent for it.
+    const expected = deriveLegacyAddonSubmission({
+      basePrice: stored.base_price,
+      netPrice: stored.estimated_price,
+      discountType: stored.discount_type,
+      discountAmount: stored.discount_amount,
+      discountId: stored.discount_id,
+      discountName: stored.discount_name,
+    });
+    if (expected.basePrice !== undefined) {
+      // STAMPED: compare gross + discount terms — never net, which
+      // normalizedAddons[i].price computes via the cap-ignorant
+      // applyDiscount() and is never trustworthy for a capped discount
+      // (GitHub round 3 P0: an unchanged 50%-off-capped-at-$10 line
+      // recomputes an uncapped $50, never the row's real $90).
+      if (moneyValuesDiffer(l.base, expected.basePrice)) return false;
+      if ((l.discount?.discountType || null) !== (expected.discountType || null)) return false;
+      if (moneyValuesDiffer(l.discount?.discountAmount, expected.discountAmount)) return false;
+      if (String(l.discount?.discountId || '') !== String(expected.discountId || '')) return false;
+      return true;
     }
-    // Neither side carries a discount at all: NET vs NET is correct and
-    // necessary here — a flat-net price EDIT (Codex round 1's own P0) has
-    // no gross of its own to compare, and gross/net are the same number
-    // for an undiscounted line either way.
-    return !moneyValuesDiffer(l.price, stored.estimated_price);
+    // Flat-NET expected shape (no discount at all, OR a discount whose
+    // base_price predates that column — GitHub round 3 P0): the posted
+    // line must ALSO carry no discount at all; a posted discount where
+    // none was expected is a genuine edit, never a coincidental match.
+    if (l.discount) return false;
+    return !moneyValuesDiffer(l.price, expected.price);
   });
   const moneyInputsUnchanged = legacyPreservationCandidate
     && !discountInputsPosted
     && !primaryServiceChanged
-    && !moneyValuesDiffer(primaryGross, reconstructedPrimaryLinePrice)
+    && !moneyValuesDiffer(primaryGross, expectedPrimary)
     && normalizedAddons.length === existingAddonRows.length
     && addonsUnchanged
     && remainingStored.length === 0; // every stored row accounted for — explicit, though implied once lengths match and nothing re-matched
-  const storedTotal = Number(existingEstimatedPrice);
-  // GitHub round 2 on PR #4654 (P0): a legitimately FREE unmarked visit
-  // (fully covered by an appointment credit) must be preservable too —
-  // `storedTotal > 0` excluded a real, finite $0 total from the exact
-  // protection this mechanism exists to provide. `Number.isFinite` alone
-  // already excludes null/undefined/NaN (an unpriced or missing total);
-  // `>= 0` is the only change needed to also accept a genuine zero.
-  const legacyEconomicsPreserved = moneyInputsUnchanged && Number.isFinite(storedTotal) && storedTotal >= 0;
+  const legacyEconomicsPreserved = moneyInputsUnchanged && !storedTotalIsNull && Number.isFinite(storedTotal) && storedTotal >= 0;
   // Codex pre-push audit P1 (round 4): the aggregate total above is
   // preserved verbatim, but the individual scheduled_service_addons ROW
   // writes are a SEPARATE call site (insertScheduledServiceAddons, via
@@ -2893,10 +2839,22 @@ function legacyEconomicsPreservationDecision({
 // was built from is stale, and the preserved write must be refused rather
 // than silently clobbering whatever committed in between. Row order is
 // irrelevant (both sides are sorted by the same stable key first).
+//
+// `freshRow`/`existingRow` carry EVERY field a preserved write later
+// touches (GitHub round 3 P1): estimated_price alone is not enough — two
+// overlapping saves can change the primary/appointment BREAKDOWN (which
+// column carries the money) while leaving the aggregate total and every
+// add-on row untouched; comparing only the aggregate would miss that and
+// let a stale save silently revert the fresher primary_line_price /
+// discount_dollars / appointment discount_type-amount pairing.
 function legacyPreservationSnapshotStale({
-  freshEstimatedPrice, existingEstimatedPrice, freshAddonRows, existingAddonRows,
+  freshRow, existingRow, freshAddonRows, existingAddonRows,
 }) {
-  if (moneyValuesDiffer(freshEstimatedPrice, existingEstimatedPrice)) return true;
+  if (moneyValuesDiffer(freshRow?.estimated_price, existingRow?.estimated_price)) return true;
+  if (moneyValuesDiffer(freshRow?.primary_line_price, existingRow?.primary_line_price)) return true;
+  if (moneyValuesDiffer(freshRow?.discount_dollars, existingRow?.discount_dollars)) return true;
+  if ((freshRow?.discount_type || null) !== (existingRow?.discount_type || null)) return true;
+  if (moneyValuesDiffer(freshRow?.discount_amount, existingRow?.discount_amount)) return true;
   if (freshAddonRows.length !== existingAddonRows.length) return true;
   const keyOf = (row) => String(row.service_id || '') || String(row.service_name || '').trim();
   const sortByKey = (rows) => [...rows].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
@@ -2911,6 +2869,7 @@ function legacyPreservationSnapshotStale({
     if (String(fresh.discount_id || '') !== String(stored.discount_id || '')) return true;
     if ((fresh.discount_type || null) !== (stored.discount_type || null)) return true;
     if (moneyValuesDiffer(fresh.discount_amount, stored.discount_amount)) return true;
+    if (moneyValuesDiffer(fresh.discount_dollars, stored.discount_dollars)) return true;
   }
   return false;
 }
@@ -9846,13 +9805,20 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         if (legacyEconomicsPreserved && preservedAddonLines) {
           replaceAddons = preservedAddonLines;
         }
-        // GitHub round 2 on PR #4654 (P1, TOCTOU): capture the exact
-        // snapshot this decision preserved FROM, so the trx below can
-        // re-verify — under lock — that nothing committed in between
-        // before actually applying the preserved write.
+        // GitHub round 2 on PR #4654 (P1, TOCTOU); expanded round 3 (P1):
+        // capture EVERY preserved money field this branch later writes —
+        // not just the aggregate — so the trx below can re-verify, under
+        // lock, that nothing committed in between before actually applying
+        // the preserved write.
         if (legacyEconomicsPreserved) {
           legacyPreservationCasSnapshot = {
-            estimatedPrice: existing?.estimated_price,
+            row: {
+              estimated_price: existing?.estimated_price,
+              primary_line_price: existing?.primary_line_price,
+              discount_dollars: existing?.discount_dollars,
+              discount_type: existing?.discount_type,
+              discount_amount: existing?.discount_amount,
+            },
             addonRows: existingAddonRows,
           };
         }
@@ -10849,12 +10815,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // an equivalent drift, rolling back this transaction with NO writes
         // committed, rather than clobbering whatever committed in between.
         if (legacyPreservationCasSnapshot) {
-          const freshRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first('estimated_price');
+          const freshRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate()
+            .first('estimated_price', 'primary_line_price', 'discount_dollars', 'discount_type', 'discount_amount');
           const freshAddonRows = await trx('scheduled_service_addons').where({ scheduled_service_id: req.params.id })
-            .select('service_id', 'service_name', 'base_price', 'estimated_price', 'discount_id', 'discount_type', 'discount_amount');
+            .select('service_id', 'service_name', 'base_price', 'estimated_price', 'discount_id', 'discount_type', 'discount_amount', 'discount_dollars');
           if (legacyPreservationSnapshotStale({
-            freshEstimatedPrice: freshRow?.estimated_price,
-            existingEstimatedPrice: legacyPreservationCasSnapshot.estimatedPrice,
+            freshRow,
+            existingRow: legacyPreservationCasSnapshot.row,
             freshAddonRows,
             existingAddonRows: legacyPreservationCasSnapshot.addonRows,
           })) {

@@ -50,7 +50,7 @@ export default defineConfig({
       });
     },
   }],
-  resolve: { alias: { ...capShimAlias, '@proposal-bid': fileURLToPath(new URL('../shared/proposal-bid.cjs', import.meta.url)), '@lawn-scores': fileURLToPath(new URL('../shared/lawn-scores.cjs', import.meta.url)) } },
+  resolve: { alias: { ...capShimAlias, '@proposal-bid': fileURLToPath(new URL('../shared/proposal-bid.cjs', import.meta.url)), '@lawn-scores': fileURLToPath(new URL('../shared/lawn-scores.cjs', import.meta.url)), '@legacy-visit-money-submission': fileURLToPath(new URL('../shared/legacy-visit-money-submission.cjs', import.meta.url)) } },
   // Vitest reads this block. The global setup shims window.matchMedia (jsdom
   // omits it) so tests can mount the liquid-glass scene, which now renders on
   // every customer surface.
