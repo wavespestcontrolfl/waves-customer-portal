@@ -25,7 +25,7 @@
 //   leak focus.
 
 import { createPortal } from 'react-dom';
-import { stackDiscounts } from '../../lib/discountStack';
+import { stackDiscounts, percentageDiscountDollars } from '../../lib/discountStack';
 import { useDiscountStackingState, ensureStackingFresh } from '../../hooks/useDiscountStacking';
 import { X, Tag } from 'lucide-react';
 import { useMemo, useState } from 'react';
@@ -125,7 +125,16 @@ export default function MobileCheckoutSheet({
   // moving servicesSubtotal. Only the gate-ON path re-derives live through
   // the shared engine.
   const { stackedDiscountRows, extraDiscountsTotal } = useMemo(() => {
-    const discountExtras = extras.filter((e) => Number(e.amount) < 0);
+    // Codex GitHub round 2 P1 (PR #4658): select discount ROWS by _kind,
+    // never by their (possibly stale, possibly -0) stored dollar amount —
+    // a percentage picked while the base is $0 (a free callback, before
+    // any paid service is added) snapshots a provisional -0 that a
+    // Number(e.amount) < 0 filter drops from the stack FOREVER, since
+    // nothing ever writes a recomputed value back into e.amount itself.
+    // That silently excluded the row from every later live recompute too,
+    // so adding a paid service afterward left it out of both the preview
+    // and the submitted payload.
+    const discountExtras = extras.filter((e) => e._kind === 'discount');
     if (!stackingEnabled) {
       const total = discountExtras.reduce((sum, e) => sum + Number(e.amount), 0);
       return { stackedDiscountRows: new Map(), extraDiscountsTotal: total };
@@ -264,10 +273,15 @@ export default function MobileCheckoutSheet({
     const amt = Number(d.amount || 0);
     if (!amt) return;
     const isPercent = d.discount_type === 'percentage' || d.discount_type === 'variable_percentage';
-    // Provisional dollars — the stacked amount (extraAmount) is what the
-    // row shows and what the charge sends.
+    // Codex GitHub round 2 P1 (PR #4658): this snapshot is what gate-off
+    // posts verbatim (never recomputed — round 1's fix) AND what a
+    // gate-on row shows before the live memo below takes over, so it must
+    // already be cent-exact — plain float division rounds 5% of $20.70
+    // down to $1.03 instead of $1.04, which the route's
+    // Math.min(submittedDollars, resolved.dollars) then preserves even
+    // though the server's own cap-check resolves the correct $1.04.
     const dollarOff = isPercent
-      ? Math.round(servicesSubtotal * (amt / 100) * 100) / 100
+      ? percentageDiscountDollars(servicesSubtotal, amt, d.max_discount_dollars)
       : amt;
     const label = payload.kind === 'custom_discount'
       ? (isPercent ? `Custom Discount (${amt}%)` : 'Custom Discount')

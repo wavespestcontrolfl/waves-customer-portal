@@ -318,3 +318,38 @@ describe('MobileCheckoutSheet — stable identity tiebreak survives click order'
     expect(rowAmount('Promo B (50%)')).toBe('−$25.00');
   });
 });
+
+// Codex GitHub review round 2 on PR #4658, P1 (MobileCheckoutSheet.jsx:270):
+// the selection-time snapshot (posted verbatim while the gate is off, per
+// round 1's fix) must be cent-exact, matching the server's own cap-check —
+// not the plain-float formula that rounds 5% of $20.70 down to $1.03.
+describe('MobileCheckoutSheet — cent-exact selection-time snapshot', () => {
+  it('gate off: 5% of $20.70 snapshots at the cent-exact $1.04, never the float-rounded $1.03', () => {
+    stacking.enabled = false;
+    render(<MobileCheckoutSheet service={{ ...SERVICE, estimatedPrice: 20.70 }} onClose={() => {}} />);
+    addDiscount('Military Discount');
+    expect(screen.getByText('−$1.04')).toBeInTheDocument();
+    expect(screen.queryByText('−$1.03')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Charge $19.66' })).toBeInTheDocument();
+  });
+});
+
+// Codex GitHub review round 2 on PR #4658, P2 (MobileCheckoutSheet.jsx:128):
+// a percentage discount picked while the base is $0 (a free callback, before
+// any paid service is added) must not be dropped from the live stack once a
+// paid service arrives — selection is by _kind, never by the provisional
+// (possibly -0) dollar amount stamped at add-time.
+describe('MobileCheckoutSheet — zero-base discount survives a later paid service', () => {
+  it('gate on: a percentage picked at $0 recomputes once a paid service is added, not dropped', () => {
+    render(<MobileCheckoutSheet service={{ ...SERVICE, estimatedPrice: 0 }} onClose={() => {}} />);
+    addDiscount('WaveGuard Silver');
+    // Nothing to stack against yet — $0 base, $0 off, nothing chargeable.
+    expect(screen.getByRole('button', { name: 'No charge — complete from job' })).toBeInTheDocument();
+
+    addService();
+    // The $100 service becomes the base the (still-present) 10% discount
+    // now resolves against — not silently dropped from the stack.
+    expect(screen.getByText('−$10.00')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Charge $90.00' })).toBeInTheDocument();
+  });
+});
