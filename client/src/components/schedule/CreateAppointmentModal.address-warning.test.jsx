@@ -14,6 +14,7 @@ import CreateAppointmentModal, {
   useAddressAskLookup,
   handleSubmitBlockedByDiscountOrPreviewState,
   freshPreviewGroupPrice,
+  wouldExceedPreviewGroupCap,
 } from './CreateAppointmentModal.jsx';
 
 afterEach(() => {
@@ -173,7 +174,17 @@ function installModalFetch({
       const groups = JSON.parse(options.body || '{}').groups || [];
       const queued = Array.isArray(previewResponses) ? previewResponses[previewCalls] : undefined;
       previewCalls += 1;
-      if (queued) return Promise.resolve(jsonResponse(queued(groups)));
+      if (queued) {
+        const result = queued(groups);
+        // GitHub round 6 P2 follow-up (PR #4656): an optional __httpStatus
+        // on the queued function's own return lets a test simulate a
+        // non-200 (e.g. the /preview route's 12-group batch cap 400) —
+        // additive: every existing queued() fixture returns a plain
+        // {regime, results} object with no such field, so this changes
+        // nothing for them.
+        const { __httpStatus, ...body } = result || {};
+        return Promise.resolve(jsonResponse(body, __httpStatus ? { ok: false, status: __httpStatus } : undefined));
+      }
       // Echo one no-error, no-price result per requested group so
       // previewGroupError never blocks Submit in tests that don't
       // exercise it specifically. Deliberately NO `price` field: this
@@ -1537,11 +1548,19 @@ describe('GitHub review round 2 on PR #4656', () => {
 });
 
 describe('GitHub review round 2 follow-up on PR #4656 (P0 :2571, P1 :4483)', () => {
-  // P0: an UNSCOPED appointment discount always resolves to group[0] --
-  // once one group has committed with it, removing that group's own
-  // service must never let a retry re-resolve (and re-POST) the SAME
-  // credit against whichever group is now first.
-  it('never re-posts a committed appointment discount after removing its group and retrying', async () => {
+  // P0 (superseded by the round-5 P1 read-only-lock fix, PR #4656): an
+  // UNSCOPED appointment discount always resolves to group[0] -- once one
+  // group has committed with it, removing that group's own service must
+  // never let a retry re-resolve (and re-POST) the SAME credit against
+  // whichever group is now first. This used to be caught AFTER the fact
+  // (appointmentDiscountHasNoGroup's own "unmatched discount" recovery
+  // banner, once the removal already happened); partialCommitLocked now
+  // prevents the removal from ever happening at all, by construction --
+  // the whole form (including "Remove line item") is a no-op once
+  // anything has committed, so the race this test originally proved a
+  // recovery FOR is now unreachable in the first place. Retitled and
+  // rewritten to prove the stronger, current invariant.
+  it('freezes the form once a group commits: removing its line is a no-op, and retry completes only the remaining group', async () => {
     vi.spyOn(window, 'alert').mockImplementation(() => {});
     vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
     const secondScheduleRequest = deferred();
@@ -1565,32 +1584,29 @@ describe('GitHub review round 2 follow-up on PR #4656 (P0 :2571, P1 :4483)', () 
     });
     await waitFor(() => expect(screen.getByRole('button', { name: 'Schedule appointment' }).disabled).toBe(false));
 
-    // Remove "First seasonal service" -- the ONLY line in the group that
-    // actually committed the discount. Without the commit-lock, an
-    // unscoped discount would now silently re-resolve to "Second seasonal
-    // service"'s group (now group[0]) and re-post the same credit. WITH
-    // the lock, the discount's own committed group no longer exists at
-    // all -- correctly read as unmatched (the same
-    // appointmentDiscountHasNoGroup path an unreachable scope already
-    // uses), blocking Save with its own named recovery rather than
-    // silently either re-posting OR silently dropping it.
+    // Attempting to remove "First seasonal service" -- the ONLY line in
+    // the group that actually committed the discount -- is now a no-op:
+    // the button itself is disabled, and clicking it anyway changes
+    // nothing. Cadence is likewise frozen (matching the "changing cadence
+    // ... is a no-op" contract for the same partialCommitLocked flag).
     const removeButtons = screen.getAllByRole('button', { name: 'Remove line item' });
+    expect(removeButtons).toHaveLength(2);
+    expect(removeButtons[0].disabled).toBe(true);
     fireEvent.click(removeButtons[0]);
-    await screen.findByText('This appointment discount does not match any selected service. Change or remove it before saving.');
-    const submit2 = screen.getByRole('button', { name: 'Schedule appointment' });
-    expect(submit2.disabled).toBe(true);
-    fireEvent.click(submit2);
-    expect(schedulePosts(fetcher)).toHaveLength(2);
+    expect(screen.getAllByRole('button', { name: 'Remove line item' })).toHaveLength(2);
+    const cadenceSelects = screen.getAllByRole('combobox', { name: /^Repeats for/ });
+    expect(cadenceSelects[0].disabled).toBe(true);
+    fireEvent.change(cadenceSelects[0], { target: { value: 'monthly' } });
+    expect(screen.getAllByLabelText(/^Repeats for/)[0].value).not.toBe('monthly');
 
-    // The labeled recovery unblocks the retry.
-    fireEvent.click(screen.getByRole('button', { name: 'Remove discount' }));
-    await waitFor(() => expect(submit2.disabled).toBe(false));
+    // Retry completes the ONE remaining group -- never re-posts the
+    // already-committed one, never loses the line the old bug would have
+    // silently dropped.
+    const submit2 = screen.getByRole('button', { name: 'Schedule appointment' });
     fireEvent.click(submit2);
     await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(3));
-    // The retry's ONLY new POST (for "Second seasonal service") must NOT
-    // carry the discount again -- it already saved once, on the group
-    // that no longer exists.
     expect(JSON.parse(schedulePosts(fetcher)[2][1].body).discountId).toBeUndefined();
+    expect(JSON.parse(schedulePosts(fetcher)[2][1].body).serviceType).toBe('Second seasonal service');
   });
 
   // P1: the discount picker must be locked from the SYNCHRONOUS instant
@@ -2671,5 +2687,162 @@ describe('GitHub round 6 P1 (Codex, blocked push 9 on PR #4656) — a committed 
       await secondScheduleRequest.promise;
     });
     await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(2));
+  });
+});
+
+describe('GitHub round 6 P1 (Codex, blocked push 10 on PR #4656) — line-tier conflict filtering/validation stay active gate-off', () => {
+  // Tier exclusivity (Gold/Silver, stack_group) is a business rule
+  // independent of GATE_DISCOUNT_STACKING (which governs only whether
+  // multiple STACKABLE discounts' dollars compound) — presetsStackableWith
+  // used to gate its filtering on appointmentDiscountCompound (false, gate
+  // off), offering the unfiltered catalog on every line picker.
+  it('excludes a conflicting tier from a line picker even with the gate confirmed off', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: false, known: true, retry: vi.fn() });
+    installModalFetch({
+      discounts: [
+        { id: 'silver', name: 'Silver', discount_type: 'percentage', amount: 10, is_active: true, show_in_invoices: true, stack_group: 'tier' },
+        { id: 'gold', name: 'Gold', discount_type: 'percentage', amount: 15, is_active: true, show_in_invoices: true, stack_group: 'tier' },
+      ],
+    });
+    renderBooking();
+    fireEvent.change(screen.getByPlaceholderText('Search services'), { target: { value: 'Quarterly' } });
+    fireEvent.click(await screen.findByRole('button', { name: /Quarterly recurring service/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Add service/ }));
+    fireEvent.change(screen.getByPlaceholderText('Search to add service'), { target: { value: 'Monthly' } });
+    fireEvent.click(await screen.findByRole('button', { name: /Monthly recurring service/ }));
+    // Both lines land in the SAME submit group (year-round cadences merge)
+    // — no cadence edit needed to exercise the same-group conflict.
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for Quarterly recurring service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Silver/ }));
+    await screen.findByText('Silver (Quarterly recurring service)');
+
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for Monthly recurring service...'));
+    // Gold is excluded outright — never rendered as an option to pick,
+    // gate off, exactly as it already is gate on.
+    expect(screen.queryByRole('button', { name: /Gold/ })).toBeNull();
+  });
+
+  // Gate-off twin of "re-validates existing selections when a cadence
+  // edit merges their submit groups" above — existingSelectionConflict
+  // used to early-return null whenever appointmentDiscountCompound was
+  // false, so this exact save-blocking check never ran gate off at all.
+  it('re-validates a gate-off cadence merge too — the conflict still blocks Save', async () => {
+    // Both picks below are LINE discounts (not the appointment-level
+    // slot, which is only reachable while the gate reads confirmed-on) —
+    // Silver on the seasonal line, Gold on the quarterly line, each
+    // valid while the two ride separate submit groups.
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: false, known: true, retry: vi.fn() });
+    installModalFetch({
+      discounts: [
+        { id: 'silver', name: 'Silver', discount_type: 'percentage', amount: 10, is_active: true, show_in_invoices: true, stack_group: 'tier' },
+        { id: 'gold', name: 'Gold', discount_type: 'percentage', amount: 15, is_active: true, show_in_invoices: true, stack_group: 'tier' },
+      ],
+    });
+    renderBooking();
+    await addOneSeasonalService();
+    fireEvent.click(screen.getByRole('button', { name: /Add service/ }));
+    fireEvent.change(screen.getByPlaceholderText('Search to add service'), { target: { value: 'Quarterly' } });
+    fireEvent.click(await screen.findByRole('button', { name: /Quarterly recurring service/ }));
+
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for First seasonal service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Silver/ }));
+    await screen.findByText('Silver (First seasonal service)');
+
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for Quarterly recurring service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Gold/ }));
+    await screen.findByText('Gold (Quarterly recurring service)');
+    expect(screen.queryByText(/can.t both apply/)).toBeNull();
+
+    // The cadence edit merges the seasonal line into the SAME (quarterly)
+    // group Gold already rides — the conflict only exists once merged.
+    const cadenceSelect = screen.getByLabelText('Repeats for First seasonal service');
+    fireEvent.change(cadenceSelect, { target: { value: 'quarterly' } });
+    await waitFor(() => expect(cadenceSelect.value).toBe('quarterly'));
+
+    await screen.findByText(/can.t both apply to the same line/);
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    expect(submit.disabled).toBe(true);
+  });
+
+  // Regression pin: an ordinary gate-off SINGLE-discount booking (the
+  // overwhelmingly common case) must stay byte-identical — no conflict
+  // banner, the discount posts exactly as picked.
+  it('a gate-off single-discount booking is unaffected: no conflict banner, discount posts normally', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: false, known: true, retry: vi.fn() });
+    const { fetcher } = installModalFetch({
+      basePrice: 100,
+      discounts: [{ id: 'silver', name: 'Silver', discount_type: 'percentage', amount: 10, is_active: true, show_in_invoices: true, stack_group: 'tier' }],
+    });
+    renderBooking();
+    await addOneSeasonalService();
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for First seasonal service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Silver/ }));
+    await screen.findByText('Silver (First seasonal service)');
+    expect(screen.queryByText(/can.t both apply/)).toBeNull();
+
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    expect(JSON.parse(schedulePosts(fetcher)[0][1].body).primaryLineDiscount?.discountId).toBe('silver');
+  });
+});
+
+describe('GitHub round 6 P2 (Codex, blocked push 10 on PR #4656) — a permanent preview failure is surfaced, not retried forever', () => {
+  // The /preview route's own 12-group batch cap (admin-schedule.js:6100)
+  // — and any other 4xx it might return — is not transient: retrying the
+  // SAME request changes nothing. The old classify-everything-as-
+  //-transient retry loop would hold Submit disabled forever with no
+  // explanation and no way out.
+  it('a 400 from /preview surfaces a named, Retry-able reason instead of retrying indefinitely', async () => {
+    let previewCalls = 0;
+    const { fetcher } = installModalFetch({
+      discounts: [{ id: 'five-pct', name: 'Five Percent', discount_type: 'percentage', amount: 5, is_active: true, show_in_invoices: true }],
+      previewResponses: [
+        () => { previewCalls += 1; return { __httpStatus: 400, error: 'too many groups' }; },
+      ],
+    });
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    renderBooking();
+    await addOneSeasonalService();
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for First seasonal service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Five Percent/ }));
+
+    await screen.findByText("Couldn't confirm today's price (too many groups) — retry before saving.", {}, { timeout: 4000 });
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    expect(submit.disabled).toBe(true);
+    expect(schedulePosts(fetcher)).toHaveLength(0);
+
+    // No retry loop: only the ONE attempt ran, and it stays exactly ONE
+    // (not climbing) across the auto-retry window a transient failure
+    // would have kept climbing through.
+    await new Promise((resolve) => { setTimeout(resolve, 1500); });
+    expect(previewCalls).toBe(1);
+
+    // A manual Retry re-attempts (still a no-op here — same fixture,
+    // exhausted queue falls through to the default no-error echo, which
+    // resolves it) — proving Retry is wired, not just present.
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(submit.disabled).toBe(false));
+  });
+});
+
+describe('GitHub round 6 P2 (Codex, blocked push 10 on PR #4656) — wouldExceedPreviewGroupCap', () => {
+  const makeRequests = (n) => Array.from({ length: n }, (_, i) => ({ key: `g${i}` }));
+
+  it('a NEW group (key not already counted) at exactly the cap is refused', () => {
+    expect(wouldExceedPreviewGroupCap({ previewGroupRequests: makeRequests(12), targetKey: 'g99', cap: 12 })).toBe(true);
+  });
+
+  it('a group already counted is never refused, even at the cap', () => {
+    expect(wouldExceedPreviewGroupCap({ previewGroupRequests: makeRequests(12), targetKey: 'g3', cap: 12 })).toBe(false);
+  });
+
+  it('below the cap, a new group is not refused', () => {
+    expect(wouldExceedPreviewGroupCap({ previewGroupRequests: makeRequests(11), targetKey: 'g99', cap: 12 })).toBe(false);
+  });
+
+  it('an empty previewGroupRequests array never refuses', () => {
+    expect(wouldExceedPreviewGroupCap({ previewGroupRequests: [], targetKey: 'g0', cap: 12 })).toBe(false);
   });
 });

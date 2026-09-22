@@ -75,6 +75,11 @@ function adminFetch(path, options = {}) {
       // Structured payload for callers that adjudicate specific rejections
       // (e.g. the split-save duplicate-series recovery below).
       err.body = parsedBody;
+      // Codex P2 (round 5, PR #4656): the debounced /admin/schedule/preview
+      // fetch (below) needs to tell a PERMANENT client error (400 — e.g.
+      // more submit groups than the server's batch cap) from a transient
+      // one (network failure, 5xx) to stop retrying the former forever.
+      err.status = r.status;
       throw err;
     }
     return r.json();
@@ -707,6 +712,18 @@ export function freshPreviewGroupPrice({ serverPreview, previewRequestKey, group
   return null;
 }
 
+// Codex P2 (round 5, blocked push 10 on PR #4656): POST
+// /admin/schedule/preview hard-rejects (400) a request with more than 12
+// groups — extracted and exported (same convention as freshPreviewGroupPrice
+// just above) so the cap check is directly unit-testable without building
+// 12 real submit groups through the DOM. A group already counted in
+// previewGroupRequests (picking a SECOND discount on an already-regime-
+// dependent group) never counts as a NEW one.
+export function wouldExceedPreviewGroupCap({ previewGroupRequests, targetKey, cap = 12 }) {
+  const requests = Array.isArray(previewGroupRequests) ? previewGroupRequests : [];
+  return !requests.some((r) => r.key === targetKey) && requests.length >= cap;
+}
+
 // Classify a failed group POST. Idempotent retry recovery, PROVEN only
 // (codex r20 P1 + r21 P0): a prior partial split save can lose
 // createdGroupKeysRef when the modal closes between POSTs, and the retry
@@ -1256,6 +1273,58 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
   const searchRef = useRef(null);
 
+  // Tracks cadence-group keys already POSTed during this modal session. If
+  // the loop fails partway (e.g. quarterly succeeded, monthly errored), a
+  // retry click skips the keys that landed so we don't double-book the
+  // customer. Reset on successful close.
+  const createdGroupKeysRef = useRef(new Set());
+  // Codex pre-push audit P1 (round 5, PR #4656): committedGroupPricesRef
+  // freezes each group's displayed total at the exact moment it commits
+  // (see groupStackedPerVisitTotal's own comment) — read FIRST, ahead of
+  // the fresh-preview and local-computation fallbacks, so a committed
+  // group's own total can never move again for the rest of this session.
+  const committedGroupPricesRef = useRef(new Map());
+  // Bumped alongside every createdGroupKeysRef.current.add() — a plain ref
+  // triggers no re-render, and several useMemo blocks (previewGroupRequests,
+  // manualPrepayPlan) and this render's own partialCommitLocked below need
+  // something reactive to actually pick the change up.
+  const [committedGroupKeysVersion, setCommittedGroupKeysVersion] = useState(0);
+  // Codex pre-push audit P1 (round 5, blocked push 10 on PR #4656): "fix
+  // by construction, not another per-handler guard" — the earlier state of
+  // this file had the raw expression createdGroupKeysRef.current.size > 0
+  // checked ad hoc in roughly a dozen different places (the customer-clear
+  // button, the appointment-discount picker, two submit-lock predicates,
+  // several JSX disabled props...) with the cadence/removal/line-discount handlers
+  // missing the check ENTIRELY — a retry then skipped groups purely by the
+  // mutable, re-derived groupKey string, so editing an uncommitted line's
+  // cadence to match an already-committed group's key could merge it under
+  // that key (silently never booked on retry) or repost the committed
+  // group. ONE canonical flag now: declared here, at the very top of the
+  // component, specifically so every handler defined anywhere below it in
+  // this file can read it in its own closure with no ordering concerns,
+  // and gates every control that can mutate `services`, its line-level
+  // discounts, or the appointment-level discount/cadence/window inputs
+  // that feed appointmentSubmitGroups — the entire form is read-only
+  // except Retry/Close once anything has committed. Companion fix: the
+  // retry/preview-exclusion skip decision itself no longer trusts the
+  // mutable groupKey alone either — see committedLineIdsRef below.
+  const partialCommitLocked = committedGroupKeysVersion > 0;
+  // The immutable half of the same fix: each line's own STABLE lineId
+  // (assigned once, at add time, in addServiceFromCatalog/manual-add/
+  // estimate-add — never recomputed) recorded here the moment its group
+  // commits, alongside committedGroupPricesRef. groupAlreadyCommitted
+  // (used by the submit loop and previewGroupRequests, below) treats a
+  // group as done when EVERY one of its current lines carries an already-
+  // committed lineId — never by matching the group's own re-derived
+  // cadence-based key, which is exactly the identity partialCommitLocked's
+  // own lock prevents from drifting in normal operation, but this is the
+  // line-level backstop for the same invariant regardless.
+  const committedLineIdsRef = useRef(new Set());
+  const groupAlreadyCommitted = (group) => (
+    Array.isArray(group?.lines) && group.lines.length > 0
+    && group.lines.every((s) => s?.lineId && committedLineIdsRef.current.has(s.lineId))
+  );
+
   // Customer state
   const [customerSearch, setCustomerSearch] = useState('');
   const [customerResults, setCustomerResults] = useState([]);
@@ -1532,7 +1601,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // After a partial split save (one cadence group committed, a later one
     // failed) the retry posts only the remaining groups — changing the
     // address now would split one booking across two properties.
-    if (createdGroupKeysRef.current.size > 0) return false;
+    if (partialCommitLocked) return false;
     setSelectedPropertyId(String(propertyId));
     resetAddressDerivedState();
     return true;
@@ -1810,22 +1879,36 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // line without touching the others) and its own `cadence` + `intervalDays`
   // so quarterly pest + monthly lawn can live on the same form. The
   // summed total drives the discount base and the totals strip.
+  // Codex pre-push audit P1 (round 5, blocked push 10 on PR #4656): every
+  // handler below that mutates `services` (the sole input to
+  // appointmentSubmitGroups) is a no-op once partialCommitLocked — see
+  // that const's own comment at the top of the component. This is the
+  // "grouping edit" surface the fix targets: cadence/interval/nth/weekday/
+  // booster edits, price edits, line removal, and adding a new line all
+  // reshape appointmentSubmitGroups, which is exactly what let an
+  // uncommitted line get silently merged under an already-committed key.
   const updateServicePrice = (idx, val) => {
+    if (partialCommitLocked) return;
     setServices((arr) => arr.map((s, i) => (i === idx ? { ...s, price: val } : s)));
   };
   const updateServiceCadence = (idx, val) => {
+    if (partialCommitLocked) return;
     setServices((arr) => arr.map((s, i) => (i === idx ? { ...s, cadence: val } : s)));
   };
   const updateServiceInterval = (idx, val) => {
+    if (partialCommitLocked) return;
     setServices((arr) => arr.map((s, i) => (i === idx ? { ...s, intervalDays: val } : s)));
   };
   const updateServiceNth = (idx, val) => {
+    if (partialCommitLocked) return;
     setServices((arr) => arr.map((s, i) => (i === idx ? { ...s, nth: val } : s)));
   };
   const updateServiceWeekday = (idx, val) => {
+    if (partialCommitLocked) return;
     setServices((arr) => arr.map((s, i) => (i === idx ? { ...s, weekday: val } : s)));
   };
   const toggleBoosterMonth = (idx, month) => {
+    if (partialCommitLocked) return;
     setServices((arr) => arr.map((s, i) => {
       if (i !== idx) return s;
       const current = Array.isArray(s.boosterMonths) ? s.boosterMonths : [];
@@ -1834,6 +1917,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     }));
   };
   const removeServiceAt = (idx) => {
+    if (partialCommitLocked) return;
     setServices((arr) => arr.filter((_, i) => i !== idx));
     setLineDiscountOpenIdx((current) => (current === idx ? null : current));
     // The booster menu is keyed by stable lineId, but manual lines fall back
@@ -1842,6 +1926,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setBoosterOpenKey(null);
   };
   const addServiceFromCatalog = (svc) => {
+    if (partialCommitLocked) return;
     // One-time mosquito is priced by the lot-based ladder on the server when
     // no price is typed (owner decision 2026-07-28) — leave the field empty so
     // the server computes it from the customer's lot size; typing still wins.
@@ -1883,6 +1968,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     return [servicesLabel, amount, statusLabel].filter(Boolean).join(' - ');
   };
   const applyScheduleEstimate = (estimateId) => {
+    if (partialCommitLocked) return;
     if (!estimateId) {
       setLinkedEstimate(null);
       // Lines priced for a property other than the one being booked cannot
@@ -2079,20 +2165,22 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const row = presetRowFor(chosen);
     return row ? { ...row, ...lane } : null;
   };
-  // GitHub review round 2 P1 (PR #4656): filtering must key off
-  // appointmentDiscountCompound (the FROZEN regime a selection was made
-  // under), never the live stackingEnabled — a live gate drift/unknown
-  // (poll flips off, or goes unresolved) after an appointment-level
-  // non-stackable tier was picked must not drop conflict filtering from
-  // the LINE pickers. It used to: an operator could add a conflicting
-  // WaveGuard tier to a line during the blocked interval, and if the poll
-  // then recovered to the ORIGINAL frozen value, the drift guard cleared
-  // and Save submitted both — the create route's pricing path never calls
-  // assertStackGroups itself. appointmentDiscountCompound already reduces
-  // to the live value whenever nothing is selected (no drift to protect).
-  const presetsStackableWith = (chosenRows, lane) => (appointmentDiscountCompound
-    ? stackablePresets(lineDiscountPresets, chosenRows.filter(Boolean), lane)
-    : lineDiscountPresets);
+  // Codex pre-push audit P1 (round 5, blocked push 10 on PR #4656):
+  // stackablePresets filters PURELY on stack_group/is_stackable — TIER
+  // EXCLUSIVITY (Gold and Silver can never both apply), a business rule
+  // completely independent of GATE_DISCOUNT_STACKING (which governs only
+  // whether multiple STACKABLE discounts' dollar amounts compound). This
+  // used to gate the filter on appointmentDiscountCompound (the frozen
+  // arithmetic regime) — gate off/unconfirmed offered the UNFILTERED
+  // catalog on every line picker, so an operator could select Gold on one
+  // line and Silver on another with nothing to stop it; the server's own
+  // unconditional assertNoDiscountStackGroupConflict (admin-schedule.js,
+  // gate-independent by design) then rejected the POST with
+  // DISCOUNT_STACK_GROUP_CONFLICT. Filtering now runs unconditionally —
+  // the arithmetic gate has no bearing on which tier a line picker offers.
+  const presetsStackableWith = (chosenRows, lane) => (
+    stackablePresets(lineDiscountPresets, chosenRows.filter(Boolean), lane)
+  );
   // exceptIdx >= 0 scopes to the SAME submit group as that line; exceptIdx
   // -1 (the appointment-level slot) scopes to whichever group ITS "Applies
   // to" key targets. Both reference appointmentSubmitGroups /
@@ -2154,7 +2242,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // "Remove discount" recovery button this same banner shows, with no
     // way to actually press it. A brand-new (non-empty) pick stays refused
     // unconditionally; only clearing is ever exempted.
-    if (createdGroupKeysRef.current.size > 0 && !(presetId === '' && appointmentDiscountHasNoGroup)) return;
+    if (partialCommitLocked && !(presetId === '' && appointmentDiscountHasNoGroup)) return;
     // Codex review round 2 P1: submitLockRef is set SYNCHRONOUSLY at the
     // very top of handleSubmit, before submitAppointments even starts its
     // mosquito-price revalidation / address-ask recheck awaits that run
@@ -2186,6 +2274,15 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     if (discountSaveBlockedReason) return;
     const discount = discountPresets.find((d) => String(d.id) === String(presetId));
     if (!discount) return;
+    // Codex P2 (round 5, blocked push 10 on PR #4656): same 12-group cap
+    // as applyLineDiscount's own check above — see wouldExceedPreviewGroupCap's
+    // comment.
+    const targetGroup = resolveAppointmentDiscountGroup(appointmentSubmitGroups, discount, lineServiceKey);
+    if (targetGroup && wouldExceedPreviewGroupCap({ previewGroupRequests, targetKey: groupKey(targetGroup), cap: PREVIEW_GROUP_CAP })) {
+      setToast(`This booking already has ${PREVIEW_GROUP_CAP} discounted cadence groups — the most this form supports. Remove a discount elsewhere first.`);
+      setTimeout(() => setToast(''), 2400);
+      return;
+    }
     let amount = discount.amount;
     if (isCustomAmountDiscount(discount)) {
       const raw = window.prompt(`Discount amount for ${discount.name} ($)`, '');
@@ -2223,12 +2320,29 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setAppointmentDiscountGateSnapshot(stackingEnabled);
   };
   const lineServiceKey = (svc) => (svc?.service_key ?? svc?.serviceKey) || null;
+  // Codex P2 (round 5, blocked push 10 on PR #4656): POST
+  // /admin/schedule/preview hard-rejects (400) a request with more than
+  // PREVIEW_GROUP_CAP groups — every seasonal line can become its own
+  // discounted submit group, so a large enough booking could construct a
+  // valid-looking request the server always refuses. Mirrors that same
+  // limit here so the operator is blocked with a visible reason at the
+  // moment they'd create the 13th one, never at a dead-end preview 400
+  // later. wouldExceedPreviewGroupCap is the exported pure check above
+  // (module scope, mirroring freshPreviewGroupPrice's own convention).
+  const PREVIEW_GROUP_CAP = 12;
   // A booking splits into one appointment per cadence group, and an
   // appointment-level discount belongs to exactly ONE of them — the group
   // its own catalog service_key_filter/service_category_filter lands in,
   // else the first. Attaching it to every group would apply the whole
   // discount on each separate visit.
   const applyLineDiscount = (idx, discount) => {
+    if (partialCommitLocked) return;
+    const targetGroup = appointmentSubmitGroups.find((g) => g.lines.includes(services[idx]));
+    if (targetGroup && wouldExceedPreviewGroupCap({ previewGroupRequests, targetKey: groupKey(targetGroup), cap: PREVIEW_GROUP_CAP })) {
+      setToast(`This booking already has ${PREVIEW_GROUP_CAP} discounted cadence groups — the most this form supports. Remove a discount elsewhere first.`);
+      setTimeout(() => setToast(''), 2400);
+      return;
+    }
     const base = lineEffectiveBaseAmount(services[idx]);
     if (base <= 0) {
       setToast('Enter a price before applying a line discount');
@@ -2280,6 +2394,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setLineDiscountOpenIdx(null);
   };
   const clearLineDiscount = (idx) => {
+    if (partialCommitLocked) return;
     setServices((arr) => arr.map((s, i) => (i === idx ? { ...s, lineDiscount: null } : s)));
   };
   // Display totals use the EFFECTIVE amounts (entered price, or the auto
@@ -2416,7 +2531,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   };
 
   const selectCustomer = (c) => {
-    if (submittingRef.current || createdGroupKeysRef.current.size > 0) return false;
+    if (submittingRef.current || partialCommitLocked) return false;
     setSelectedCustomer(c);
     const label = c.profileLabel && c.profileLabel !== 'Primary' ? ` - ${c.profileLabel}` : '';
     setCustomerSearch(`${c.firstName} ${c.lastName}${label}`);
@@ -2425,7 +2540,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   };
 
   const clearSelectedCustomer = () => {
-    if (submittingRef.current || createdGroupKeysRef.current.size > 0) return false;
+    if (submittingRef.current || partialCommitLocked) return false;
     setSelectedCustomer(null);
     setCustomerSearch('');
     return true;
@@ -2680,8 +2795,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const appointmentDiscountOptions = lineDiscountPresets
     .filter((d) => APPOINTMENT_DISCOUNT_TYPES.includes(d.discount_type))
     .filter((d) => {
-      // Same FROZEN-regime rule as presetsStackableWith above — never the live stackingEnabled.
-      if (!appointmentDiscountCompound) return true;
+      // Codex pre-push audit P1 (round 5, blocked push 10 on PR #4656):
+      // same fix as presetsStackableWith above — tier exclusivity is
+      // independent of the arithmetic gate, so this filter now runs
+      // unconditionally too (was: `if (!appointmentDiscountCompound)
+      // return true;`, offering every appointment-level preset unfiltered,
+      // gate off, even one conflicting with an already-picked line tier).
       const group = resolveAppointmentDiscountGroup(appointmentSubmitGroups, d, lineServiceKey);
       const groupLines = group?.lines || appointmentDiscountScopeLines;
       const chosenInGroup = groupLines
@@ -2890,36 +3009,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // check too — groupStackedPerVisitTotal (the prepay total's own input)
   // depends on the exact same two conditions.
   //
-  // Tracks cadence-group keys already POSTed during this modal session.
-  // If the loop fails partway (e.g. quarterly succeeded, monthly errored),
-  // a retry click skips the keys that landed so we don't double-book the
-  // customer. Reset on successful close. Moved up from just above
-  // recurringPreview (declared much later in this component) to here —
-  // previewGroupRequests below needs to read it, and hook declarations
-  // don't care about surrounding variable order, only call-order
-  // stability across renders, which a plain useRef move preserves.
-  const createdGroupKeysRef = useRef(new Set());
-  // Codex pre-push audit P1 (round 5): previewGroupRequests used to
-  // include groups already recorded in createdGroupKeysRef — a preview
-  // refresh after a PARTIAL multi-group save re-requested the already-
-  // committed group's own (possibly since-deactivated) discount, which
-  // could block the remaining groups on it indefinitely even though
-  // submit itself already skips a committed group (line ~3408 above), and
-  // could reprice the committed group's own DISPLAYED total out from
-  // under its already-saved figure. committedGroupPricesRef freezes each
-  // group's displayed total at the exact moment it commits (read via
-  // groupStackedPerVisitTotal(group) — whatever result actually shaped
-  // that POST — right before createdGroupKeysRef.current.add(key), both
-  // success-path call sites below); groupStackedPerVisitTotal checks this
-  // FIRST, ahead of the fresh-preview and local-computation fallbacks, so
-  // a committed group's own total can never move again for the rest of
-  // this modal session. committedGroupKeysVersion is bumped alongside
-  // each add() — createdGroupKeysRef alone is a ref (no re-render), and
-  // previewGroupRequests is a useMemo, so something reactive has to be in
-  // its dependency array for the exclusion below to actually take effect
-  // the next render after a commit.
-  const committedGroupPricesRef = useRef(new Map());
-  const [committedGroupKeysVersion, setCommittedGroupKeysVersion] = useState(0);
+  // createdGroupKeysRef / committedGroupPricesRef / committedGroupKeysVersion
+  // / partialCommitLocked / committedLineIdsRef are all declared at the
+  // very top of the component now (round 5 P1 follow-up) — see their own
+  // fuller comments there.
   const groupRegimeDependent = (group, carriesDiscount) => (
     carriesDiscount || group.lines.some((s) => s.lineDiscount)
   );
@@ -2946,8 +3039,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         // itself skips it (line ~3408), so re-requesting it here only
         // risks blocking the REMAINING groups on its own discount (which
         // may since be deactivated/changed) and repricing its already-
-        // saved total out from under it.
-        if (createdGroupKeysRef.current.has(key)) return null;
+        // saved total out from under it. groupAlreadyCommitted (per-line
+        // lineId identity, round 5 P1 follow-up), not a raw key lookup —
+        // the form is read-only post-commit (partialCommitLocked) so the
+        // two should never disagree in practice, but this is the line-
+        // level check that stays correct even if they somehow did.
+        if (createdGroupKeysRef.current.has(key) || groupAlreadyCommitted(group)) return null;
         const carriesDiscount = !!appointmentDiscount && !!appointmentDiscountGroup && key === appointmentDiscountGroup.key;
         if (!groupRegimeDependent(group, carriesDiscount)) return null;
         const [primary, ...extras] = group.lines;
@@ -3055,6 +3152,23 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           }
         } catch (_e) {
           if (cancelled) return;
+          // Codex P2 (round 5, blocked push 10 on PR #4656): a 4xx is the
+          // SERVER refusing this exact request — e.g. more submit groups
+          // than the /preview route's own 12-group batch cap (a booking
+          // with enough regime-dependent lines) — and retrying it changes
+          // nothing; every attempt would refuse identically. Classified
+          // 'failed' (terminal, never auto-retried) and surfaced through
+          // discountSaveBlockedReason's own banner with a manual Retry
+          // button (the same recovery previewGroupError already uses) —
+          // "manual Retry" here mainly buys a chance to edit the booking
+          // first (remove a line), not a hope the SAME request now works.
+          if (_e?.status >= 400 && _e.status < 500) {
+            setServerPreview({
+              status: 'failed', forKey: previewRequestKey, regime: null, byKey: new Map(),
+              errorMessage: _e.body?.error || _e.message || 'the request could not be confirmed',
+            });
+            return;
+          }
           // GitHub round 4 P1 (Codex, blocked push 3): a transient FETCH
           // failure used to leave serverPreview stuck at 'error' forever
           // for unchanged inputs — this effect only re-runs when
@@ -3105,6 +3219,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // needs an explicit, visible reason and an explicit, visible way out,
   // not a silently-disabled button.
   const retryPreviewGroups = () => setPreviewRetryNonce((n) => n + 1);
+  // Codex P2 (round 5, blocked push 10 on PR #4656): a PERMANENT preview
+  // failure (the fetch effect's own 4xx branch) — same "named reason,
+  // visible Retry" contract as previewGroupError, never a silent
+  // forever-disabled Save.
+  const previewFailed = serverPreview.status === 'failed' && serverPreview.forKey === previewRequestKey;
   const stackedLineDiscountAmount = (svc) => {
     const i = services.indexOf(svc);
     const restated = appointmentDiscountPreview.lines?.[i];
@@ -3456,7 +3575,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         const key = groupKey(group);
         // Skip groups already created in a prior attempt of this submit
         // session — a retry after partial failure shouldn't duplicate them.
-        if (createdGroupKeysRef.current.has(key)) continue;
+        // Codex pre-push audit P1 (round 5): groupAlreadyCommitted (every
+        // current line's own STABLE lineId already recorded as committed)
+        // is checked alongside the key lookup, not in place of it — the
+        // form-wide read-only lock (partialCommitLocked) means `key`
+        // should never drift out from under an uncommitted group post-
+        // commit, but a retry must never re-derive "already done" from a
+        // key string alone when a per-line identity check is available.
+        if (createdGroupKeysRef.current.has(key) || groupAlreadyCommitted(group)) continue;
         assertSubmitCurrent();
         // Declared OUTSIDE the try block (Codex review round 2 P0 follow-up:
         // the catch's "recoverable" branch below also needs to read this to
@@ -3721,6 +3847,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           // in this same modal session.
           committedGroupPricesRef.current.set(key, groupStackedPerVisitTotal(group));
           createdGroupKeysRef.current.add(key);
+          // Codex pre-push audit P1 (round 5): the immutable half of the
+          // freeze-on-commit fix — each of THIS group's lines' own stable
+          // lineId (never recomputed, unlike the group's own cadence-
+          // derived key), so groupAlreadyCommitted's per-line check stays
+          // correct even for a group whose key would otherwise drift.
+          group.lines.forEach((s) => { if (s?.lineId) committedLineIdsRef.current.add(s.lineId); });
           setCommittedGroupKeysVersion((v) => v + 1);
           // Codex review round 2 P0: lock the discount to the group that
           // ACTUALLY carried it in a successful POST -- a later edit
@@ -3749,6 +3881,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             // currently displayed for it.
             committedGroupPricesRef.current.set(key, groupStackedPerVisitTotal(group));
             createdGroupKeysRef.current.add(key);
+            group.lines.forEach((s) => { if (s?.lineId) committedLineIdsRef.current.add(s.lineId); });
             setCommittedGroupKeysVersion((v) => v + 1);
             // Same lock as the success path above — a recoverable
             // duplicate-series outcome still means this group's own save
@@ -3849,6 +3982,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         }
         createdGroupKeysRef.current = new Set();
         committedGroupPricesRef.current = new Map();
+        committedLineIdsRef.current = new Set();
         appointmentDiscountCommittedGroupKeyRef.current = null;
         onCreated?.({ id: results[0]?.id, scheduledDate: apptDate });
         onChange?.({ id: results[0]?.id, scheduledDate: apptDate });
@@ -4103,13 +4237,30 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // directly against every CURRENTLY selected row in each group — the
   // appointment-level slot's own group plus every line's own pick — so a
   // conflict introduced purely by editing a cadence (no new pick at all)
-  // still blocks Save. buildAppointmentPricing (the create route) never
-  // calls assertStackGroups itself, so this client check is the only
-  // thing standing between the operator and two prohibited tiers both
-  // actually persisting; the coordinator has been told server-side
-  // enforcement is not in this slice's file-ownership scope.
+  // still blocks Save. This is no longer the ONLY backstop (the create
+  // route's own unconditional assertNoDiscountStackGroupConflict, added
+  // this slice, refuses the POST with DISCOUNT_STACK_GROUP_CONFLICT
+  // regardless of the client), but a client-side 400 after the operator
+  // already clicked Submit is a worse experience than catching it here.
+  //
+  // Codex pre-push audit P1 (round 5, blocked push 10 on PR #4656): this
+  // used to early-return null (no conflict, ever) when
+  // appointmentDiscountCompound was false (gate off/unconfirmed) — tier
+  // exclusivity is a business rule independent of the arithmetic gate
+  // (see presetsStackableWith's own comment above), so it now runs
+  // unconditionally too. Gate-off single-discount bookings are unaffected
+  // (a group with only ONE selected discount never produces a conflict —
+  // stackGroupConflict needs two rows in the same stack_group — pinned by
+  // a dedicated gate-off byte-identical test); a booking that previously
+  // could construct two conflicting tiers gate-off (Gold on one line,
+  // Silver on another) now gets the SAME save-blocking banner a gate-on
+  // booking already got, matching the server's own now-unconditional
+  // check exactly. This is a deliberate business-rule tightening — a
+  // refused save (never a money change), and gate-off already never
+  // persisted it: the create route's unconditional server check (this
+  // same slice) would have rejected the POST with a 400 regardless of
+  // whether this client check ran.
   const existingSelectionConflict = useMemo(() => {
-    if (!appointmentDiscountCompound) return null;
     for (const group of appointmentSubmitGroups) {
       const rows = group.lines
         .map((svc) => laneRow(svc.lineDiscount, { scope: `line:${services.indexOf(svc)}` }))
@@ -4186,7 +4337,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           // other reason here.
           : (previewGroupError
             ? `Couldn't confirm today's price${serverPreview.byKey.get(previewGroupError.key)?.error ? ` (${serverPreview.byKey.get(previewGroupError.key).error})` : ''} — retry before saving.`
-            : '')));
+            // Codex P2 (round 5, blocked push 10 on PR #4656): a
+            // PERMANENT preview failure (see the fetch effect's own
+            // comment) — never silently disabled forever, surfaced with
+            // the same named-reason/Retry shape as every other blocker
+            // above.
+            : (previewFailed
+              ? `Couldn't confirm today's price (${serverPreview.errorMessage}) — retry before saving.`
+              : ''))));
 
   // While the property list is loading a multi-property customer has no
   // resolved address yet — a submit then would omit propertyId and book the
@@ -4202,6 +4360,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const firstCustomRecurringIndex = services.findIndex((s) => s.cadence === 'custom');
   const weekendRuleValue = skipWeekends ? weekendShift : 'allow';
   const updateWeekendRule = (value) => {
+    if (partialCommitLocked) return;
     if (value === 'allow') {
       setSkipWeekends(false);
       return;
@@ -4462,19 +4621,19 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               <button
                 type="button"
                 aria-label="Clear selected customer"
-                disabled={saving || createdGroupKeysRef.current.size > 0}
+                disabled={saving || partialCommitLocked}
                 onClick={clearSelectedCustomer}
                 style={{
                   background: 'none', border: 'none', color: D.muted,
-                  cursor: saving || createdGroupKeysRef.current.size > 0 ? 'default' : 'pointer',
-                  opacity: saving || createdGroupKeysRef.current.size > 0 ? 0.45 : 1,
+                  cursor: saving || partialCommitLocked ? 'default' : 'pointer',
+                  opacity: saving || partialCommitLocked ? 0.45 : 1,
                   fontSize: 16, minWidth: 48, minHeight: 48,
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                 }}
               >✕</button>
             </div>
           )}
-          {selectedCustomer && createdGroupKeysRef.current.size > 0 && (
+          {selectedCustomer && partialCommitLocked && (
             <div role="status" style={{ fontSize: 14, color: D.muted, marginTop: 10 }}>
               Part of this booking is already saved for this customer. Close and start a new appointment to change customers.
             </div>
@@ -4506,7 +4665,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                         name="booking-property"
                         value={String(property.id)}
                         checked={selected}
-                        disabled={!bookable || createdGroupKeysRef.current.size > 0}
+                        disabled={!bookable || partialCommitLocked}
                         onChange={() => chooseBookingProperty(property.id)}
                         aria-label={`Service address ${address.street}`}
                         style={{ width: 18, height: 18, margin: 0, accentColor: D.text, flexShrink: 0 }}
@@ -4530,7 +4689,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                   This quote's property has an incomplete address. Finish it on the customer profile to book the quote there.
                 </div>
               )}
-              {createdGroupKeysRef.current.size > 0 && (
+              {partialCommitLocked && (
                 <div style={{ fontSize: 14, color: D.muted, marginTop: 8 }}>
                   Part of this booking is already saved at this address. Book the remaining services here, or start a new appointment for another address.
                 </div>
@@ -4876,6 +5035,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     aria-label={`Repeats for ${svc.name || 'service'}`}
                     value={svc.cadence || 'one_time'}
                     onChange={(e) => updateServiceCadence(idx, e.target.value)}
+                    disabled={partialCommitLocked}
                     style={inputStyle}
                   >
                     {CADENCE_OPTIONS.map((c) => (
@@ -4886,6 +5046,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
                 <button
                   onClick={() => removeServiceAt(idx)}
+                  disabled={partialCommitLocked}
                   aria-label="Remove line item"
                   style={{
                     background: 'none',
@@ -5147,6 +5308,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             <button
               type="button"
               onClick={() => setAddingService(true)}
+              disabled={partialCommitLocked}
               style={{
                 padding: isMobile ? '12px 14px' : '8px 12px',
                 background: 'transparent',
@@ -5207,7 +5369,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 // guard is pickAppointmentDiscount's own submitLockRef
                 // check (synchronous, sooner than this React state
                 // update); this is the matching visual state.
-                disabled={!!discountSaveBlockedReason || createdGroupKeysRef.current.size > 0 || saving}
+                disabled={!!discountSaveBlockedReason || partialCommitLocked || saving}
                 style={inputStyle}
               >
                 <option value="">None</option>
@@ -5216,7 +5378,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 ))}
               </select>
               {appointmentDiscountPreview.dollars > 0 && (
-                <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
+                // Codex P2 (round 5, PR #4656): 14px is the portal's
+                // documented minimum for readable text — this is the
+                // operator's immediate confirmation of the exact dollar
+                // amount being removed from the appointment, same as the
+                // adjacent save-blocking discount banner already renders
+                // at the floor.
+                <div style={{ fontSize: 14, color: D.muted, marginTop: 6 }}>
                   {appointmentDiscount.name}: -${appointmentDiscountPreview.dollars.toFixed(2)}
                 </div>
               )}
@@ -5249,7 +5417,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 && !percentExclusionsBlockSave && !appointmentDiscountGateDrifted) && (
                 <button
                   type="button"
-                  onClick={staleStackingNotice ? retryStaleStacking : (stackingUnconfirmedBlocksSave || appointmentDiscountGateDrifted) ? retryAppointmentDiscountGate : percentExclusionsBlockSave ? retryPercentExclusions : previewGroupError ? retryPreviewGroups : () => pickAppointmentDiscount('')}
+                  onClick={staleStackingNotice ? retryStaleStacking : (stackingUnconfirmedBlocksSave || appointmentDiscountGateDrifted) ? retryAppointmentDiscountGate : percentExclusionsBlockSave ? retryPercentExclusions : (previewGroupError || previewFailed) ? retryPreviewGroups : () => pickAppointmentDiscount('')}
                   style={{ background: 'none', border: `1px solid ${D.red}`, color: D.red, borderRadius: 6, padding: '4px 10px', fontSize: 14, fontWeight: 500, cursor: 'pointer', flex: '0 0 auto' }}
                 >{!staleStackingNotice && !stackingUnconfirmedBlocksSave && !percentExclusionsBlockSave && !appointmentDiscountGateDrifted && (appointmentDiscountHasNoGroup || existingSelectionConflict) ? 'Remove discount' : 'Retry'}</button>
               )}
@@ -5269,6 +5437,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 value={recurringCount}
                 onChange={(e) => setRecurringCount(e.target.value)}
                 placeholder="Ongoing"
+                disabled={partialCommitLocked}
                 style={inputStyle}
               />
               {recurringPreview.length > 0 && (
@@ -5417,7 +5586,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           return (
             <div style={{ ...sectionStyle, background: collectPrepay ? '#F0FDF4' : undefined, border: collectPrepay ? '1px solid #BBF7D0' : undefined, borderRadius: 8, padding: collectPrepay ? 14 : undefined }}>
               <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
-                <input type="checkbox" checked={collectPrepay} onChange={(e) => { setCollectPrepay(e.target.checked); if (e.target.checked) { setBillAsAnnualPrepay(false); setBillAsManualPrepay(false); } }} />
+                <input type="checkbox" checked={collectPrepay} disabled={partialCommitLocked} onChange={(e) => { setCollectPrepay(e.target.checked); if (e.target.checked) { setBillAsAnnualPrepay(false); setBillAsManualPrepay(false); } }} />
                 <span style={{ fontSize: 14, fontWeight: 500, color: '#18181B' }}>Collect prepayment{billAsAnnualPrepay ? ' in person (turns off the annual-prepay invoice)' : ''}</span>
               </label>
               {collectPrepay && (
@@ -5547,11 +5716,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 10, marginBottom: 10 }}>
             <div>
               <label style={labelStyle}>Date</label>
-              <input type="date" value={apptDate} onChange={e => setApptDate(e.target.value)} className="waves-sq-date" style={inputStyle} />
+              <input type="date" value={apptDate} onChange={e => setApptDate(e.target.value)} disabled={partialCommitLocked} className="waves-sq-date" style={inputStyle} />
             </div>
             <div>
               <label style={labelStyle}>Time</label>
-              <select value={windowStart} onChange={e => setWindowStart(normalizeHourTime(e.target.value, windowStart))} className="waves-sq-date" style={inputStyle}>
+              <select value={windowStart} onChange={e => setWindowStart(normalizeHourTime(e.target.value, windowStart))} disabled={partialCommitLocked} className="waves-sq-date" style={inputStyle}>
                 {HOURLY_TIME_OPTIONS.map((option) => (
                   <option key={option.value} value={option.value}>{option.label}</option>
                 ))}
