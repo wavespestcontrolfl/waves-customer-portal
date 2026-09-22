@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AdminInvoicesPage from "./AdminInvoicesPage";
+import { __resetDiscountStackingCache } from "../../hooks/useDiscountStacking";
 
 const customer = { id: "customer-example", first_name: "Avery", last_name: "Example", email: "avery@example.invalid", phone: "9415550100", property_type: "residential" };
 const invoice = { ...customer, customer_id: customer.id, id: "invoice-example", invoice_number: "WPC-QA-001", status: "sent", total: 120, due_date: "2099-12-31", service_date: "2026-09-08", line_items: [{ description: "Quarterly pest control", quantity: 1, unit_price: 120, amount: 120 }], notes: "Existing notes" };
@@ -14,6 +15,7 @@ let overrides, requests, unmatched, rows;
 
 beforeEach(() => {
   overrides = new Map(); requests = []; unmatched = []; rows = [{ ...invoice }];
+  __resetDiscountStackingCache();
   localStorage.clear(); localStorage.setItem("waves_admin_token", "synthetic-token");
   localStorage.setItem("waves_admin_user", JSON.stringify({ id: "fixture-user", role: "admin" }));
   vi.stubGlobal("confirm", vi.fn(() => true));
@@ -309,5 +311,45 @@ describe("Invoice foundation workflow preservation", () => {
     const writes = requests.filter(request => request.key.startsWith("POST "));
     expect(writes).toHaveLength(1); expect(writes[0].key).toBe(key);
     expect(writes[0].body).toMatchObject({ customerId: customer.id, serviceRecordId: null, notes: "Preserve new draft", lineItems: [{ description: "Quarterly pest control", quantity: 1, unit_price: 120, amount: 120 }] });
+  });
+
+  // GATE_DISCOUNT_STACKING (coordinator ruling after Codex round 2 on PR
+  // #4655): the stacking-freshness probe must never gate a discount-free
+  // save — an unreachable /admin/discounts/stacking endpoint (simulated
+  // here as a hard failure on every call) must not block an ordinary
+  // invoice create that carries no discount line items at all.
+  it("a failed stacking probe never blocks a discount-free create", async () => {
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ error: "stacking probe down" }, 503));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Quarterly pest control" } });
+    fireEvent.change(screen.getByLabelText("Price ($)"), { target: { value: "120" } });
+    fireEvent.change(screen.getByLabelText("Send", { exact: true }), { target: { value: "draft" } });
+    const key = "POST /api/admin/invoices";
+    overrides.set(key, () => response({ id: "new-invoice-1", invoice_number: "WPC-2026-0100", status: "draft" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create draft", exact: true }));
+    await waitFor(() => expect(requests.some(request => request.key === key)).toBe(true));
+    expect(screen.queryByText(/Discount rules just changed/)).not.toBeInTheDocument();
+  });
+
+  // Same probe failure, but the invoice now carries a discount line item —
+  // the save must refuse rather than silently post additive totals the
+  // server might actually compound (or vice versa).
+  it("a failed stacking probe refuses a create that carries a discount line item", async () => {
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [{ id: "ten-pct", name: "Ten Percent", discount_type: "percentage", amount: 10, is_active: true, show_in_invoices: true }] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ error: "stacking probe down" }, 503));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Quarterly pest control" } });
+    fireEvent.change(screen.getByLabelText("Price ($)"), { target: { value: "120" } });
+    fireEvent.change(screen.getByLabelText("Send", { exact: true }), { target: { value: "draft" } });
+    fireEvent.change(await screen.findByLabelText("Add a discount"), { target: { value: "Ten" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Ten Percent/ }));
+    const key = "POST /api/admin/invoices";
+    fireEvent.click(screen.getByRole("button", { name: "Create draft", exact: true }));
+    expect(await screen.findAllByText(/Discount rules just changed/)).not.toHaveLength(0);
+    expect(requests.some(request => request.key === key)).toBe(false);
   });
 });

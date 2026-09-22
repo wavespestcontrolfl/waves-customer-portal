@@ -104,7 +104,7 @@ import DictationButton from "../../components/tech/DictationButton";
 import MobileCardOnFileSheet from "../../components/schedule/MobileCardOnFileSheet";
 import { getAdminUser } from "../../lib/adminAuth";
 import { useDiscountStackingState, ensureStackingFresh } from "../../hooks/useDiscountStacking";
-import { stackDiscounts, stackDocumentDiscounts } from "../../lib/discountStack";
+import { stackDocumentDiscounts } from "../../lib/discountStack";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
 // STATUS_COLORS folds cleanly — sent/viewed were both #0A7EC2 in V1, stay identical post-fold.
@@ -383,6 +383,24 @@ export function stackingProbeMatchesPreview(fresh, stackingEnabledAtPreview) {
   return !!fresh?.known && fresh.enabled === stackingEnabledAtPreview;
 }
 
+// GATE_DISCOUNT_STACKING (coordinator ruling after Codex round 2 on PR
+// #4655): the freshness probe above is a real network dependency — a
+// discount-FREE invoice save must never depend on it. This is the ONE
+// place that decides whether a submit needs the probe at all: any
+// discount line item present (a per-line pick OR a document-wide/
+// unparented credit — both are `_kind: "discount"` items, so one check
+// covers both), OR the preview already reads the gate as confirmed ON
+// (a discount-free save under a known-on gate still checks, cheaply,
+// rather than assume a state that could flip the moment the operator
+// adds a pick mid-save). A discount-free save under gate off/unknown
+// skips the probe entirely — its total can never differ by gate state
+// with zero discounts on it, so there is nothing for the probe to
+// protect and no reason to couple it to an unrelated endpoint's uptime.
+export function invoiceSubmitNeedsStackingCheck(lineItems, stackingEnabledAtPreview) {
+  if (stackingEnabledAtPreview) return true;
+  return (Array.isArray(lineItems) ? lineItems : []).some((i) => i?._kind === "discount");
+}
+
 // Mirrors invoice.js's isStoredDiscountLineItem: a trusted source PLUS a
 // real discount_dollars figure — never inferred from the source alone.
 export function isStoredInvoiceDiscountItem(item) {
@@ -489,21 +507,31 @@ export function computeInvoiceLineDiscountTotal({
   ) / 100;
 }
 
-// GATE_DISCOUNT_STACKING (Codex pre-push audit P2, round 1 on PR #4655):
-// adding a discount pick to a line can change canonical order — a NEW
-// fixed credit can sort AHEAD of an existing percentage pick (fixed
-// credits, any slot, first), shrinking what that existing pick actually
-// takes. The aggregate total (computeInvoiceLineDiscountTotal) always
-// recomputes every term fresh, so it was already correct — but each
-// EXISTING sibling row's own stored dollars (its displayed line-item
-// amount) stayed whatever they were the moment THEY were added, stale
-// until the next save. Recomputes and rewrites every FRESH (non-stored)
-// sibling on the line from the SAME stackDiscounts() call the new pick's
-// own sizing already runs — one allocation, not two independent ones — so
-// the read-only rows the operator sees match the total before Save, not
-// only after it. A stored/frozen sibling (isStoredInvoiceDiscountItem) is
-// NEVER rewritten — its displayed dollars stay its own frozen face value,
-// exactly like create()'s save.
+// GATE_DISCOUNT_STACKING (Codex pre-push audit P2, round 1 on PR #4655;
+// widened per round-2 P1): adding a discount pick to a line can change
+// canonical order — a NEW fixed credit can sort AHEAD of an existing
+// percentage pick (fixed credits, any slot, first), shrinking what that
+// existing pick actually takes; a document-wide credit ALREADY on the
+// invoice can do the same, since it competes for the same lines' remaining
+// balance in the SAME canonical pass (stackInvoiceDocumentDiscounts on the
+// server; stackDocumentDiscounts here). The aggregate total
+// (computeInvoiceLineDiscountTotal) always recomputes every term fresh
+// from scratch, so it was already correct either way — but each EXISTING
+// sibling row's own stored dollars (its displayed line-item amount) stayed
+// whatever they were the moment THEY were added, stale until the next
+// save. This now runs the SAME stackDocumentDiscounts call
+// computeInvoiceLineDiscountTotal runs — every line, every document-wide
+// credit, the new term appended to its own line's terms — instead of a
+// narrower single-line stackDiscounts call that ignored any document-wide
+// credit already on the invoice (round-2 P1: an existing $30 unparented
+// credit used to be invisible here, so adding a fresh line pick could
+// display a wrong per-row split even though computeInvoiceLineDiscountTotal
+// itself already accounted for the credit correctly). Rewrites every FRESH
+// (non-stored) sibling on the SAME line as the new pick from that one
+// allocation, so the read-only rows the operator sees match the total
+// before Save, not only after it. A stored/frozen sibling
+// (isStoredInvoiceDiscountItem) is NEVER rewritten — its displayed dollars
+// stay its own frozen face value, exactly like create()'s save.
 // Returns { lineItems: <copy with siblings repriced>, dollars: <the new
 // pick's own resolved dollars> }.
 export function repriceLineWithNewDiscountPick({
@@ -513,18 +541,32 @@ export function repriceLineWithNewDiscountPick({
   discountRowById,
 }) {
   const items = Array.isArray(lineItems) ? lineItems : [];
-  const parent = items.find((i) => i.client_id === parentClientId);
-  const baseAmount = Math.max(0, invoiceLineAmount(parent));
+  const serviceLineItems = items.filter((i) => i._kind !== "discount");
+  const parentIdx = serviceLineItems.findIndex((i) => i.client_id === parentClientId);
+  const lines = serviceLineItems.map((line) => {
+    const terms = items
+      .filter((i) => i._kind === "discount" && i.discount_for === line.client_id)
+      .map((i) => invoiceDiscountItemTerm(i, discountRowById));
+    return {
+      gross: Math.max(0, invoiceLineAmount(line)),
+      terms: line.client_id === parentClientId ? [...terms, newTerm] : terms,
+    };
+  });
+  const documentTerms = items
+    .filter((i) => i._kind === "discount" && !i.discount_for)
+    .map((i) => invoiceDiscountItemTerm(i, discountRowById));
+  const stacked = stackDocumentDiscounts({ lines, documentTerms });
+  const parentTermDollars = parentIdx >= 0 ? stacked.lines[parentIdx].termDollars : [];
+  const dollars = parentTermDollars.length
+    ? parentTermDollars[parentTermDollars.length - 1]
+    : 0;
   const siblingItems = items.filter(
     (i) => i._kind === "discount" && i.discount_for === parentClientId,
   );
-  const siblingTerms = siblingItems.map((i) => invoiceDiscountItemTerm(i, discountRowById));
-  const stacked = stackDiscounts(baseAmount, [...siblingTerms, newTerm], { compound: true });
-  const dollars = stacked.items[stacked.items.length - 1].dollars;
   const repriced = items.map((item) => {
     const siblingIdx = siblingItems.indexOf(item);
     if (siblingIdx === -1 || isStoredInvoiceDiscountItem(item)) return item;
-    const newDollars = stacked.items[siblingIdx].dollars;
+    const newDollars = parentTermDollars[siblingIdx];
     if (Math.abs(newDollars - Math.abs(invoiceLineAmount(item))) < 0.005) return item;
     return { ...item, unit_price: -newDollars, amount: -newDollars };
   });
@@ -5601,7 +5643,13 @@ function CreateInvoice({
   // genuinely be on, in which case the server compounds while this just
   // posted additive totals. known:false must always refuse, independent
   // of whether enabled happens to equal stackingEnabled.
+  // Codex round 2 / coordinator ruling: gated by invoiceSubmitNeedsStackingCheck
+  // — a discount-free save (no discount line items, gate not confirmed on)
+  // never even calls the probe, so a transient failure or outage on
+  // /admin/discounts/stacking can never block an ordinary, discount-free
+  // invoice save.
   const stackingStillFresh = async () => {
+    if (!invoiceSubmitNeedsStackingCheck(lineItems, stackingEnabled)) return true;
     const fresh = await ensureStackingFresh();
     if (!stackingProbeMatchesPreview(fresh, stackingEnabled)) {
       showToast(
