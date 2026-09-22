@@ -9,6 +9,7 @@ const { previewServer, launchBrowser, evidence, waitForFonts } = require("./brow
 const root = path.resolve(__dirname, "../..");
 const output = path.join(root, ".tmp/design-system/customer360");
 const historyScenario = process.argv.includes("--history");
+const activityHistoryScenario = historyScenario && process.argv.includes("--activity-history");
 const customer = {
   id: "customer-a",
   firstName: "Avery",
@@ -231,7 +232,7 @@ const detail = {
             body = { ...body, comms: items.slice(offset, offset + 50), hasMore: offset + 50 < items.length,
               nextCursor: offset + 50 < items.length ? String(offset + 50) : null };
           }
-          if (historyScenario && url.pathname.endsWith("/timeline")) {
+          if (activityHistoryScenario && url.pathname.endsWith("/timeline")) {
             const all = Array.from({ length: 105 }, (_, i) => ({ id: `history-event-${i}`, type: i === 104 ? "interaction" : "sms", title: i === 104 ? "Older side gate note" : `Historical activity ${i + 1}`, date: "2024-07-01T12:00:00Z" }));
             const type = url.searchParams.get("type") || "all";
             const search = (url.searchParams.get("search") || "").toLowerCase();
@@ -374,7 +375,7 @@ const detail = {
         )
           throw Error("Message draft lost");
         await page.getByRole("button", { name: "Back to customer" }).click();
-        if (historyScenario) {
+        if (activityHistoryScenario) {
           await page.getByRole("tab", { name: "Activity", exact: true }).click();
           await page.getByText("Historical activity 50", { exact: true }).waitFor();
           await page.getByRole("button", { name: "Load older activity", exact: true }).click();
