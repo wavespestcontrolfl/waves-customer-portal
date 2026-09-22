@@ -46,6 +46,7 @@ const {
   restackStoredVisitFinancials,
   applyDiscountStackRestack,
   loadDiscountCapsById,
+  assertDueAddonsWithinDiscountCapUniverse,
   insertRecurringChildAddons,
   insertScheduledServiceAddons,
   occurrenceFloorPrice,
@@ -802,6 +803,53 @@ describe('recurring extension — loadDiscountCapsById', () => {
     expect(caps.get('d3')).toBeNull();
     const table = conn.mock.results[0].value;
     expect(table.whereIn).toHaveBeenCalledWith('id', ['d1', 'd2', 'd3']);
+  });
+});
+
+// GitHub round 2 on PR #4654 (P1): reconcileRecurringSeriesVisitCount and
+// both runRecurringAlertAction loops (slice 4 of #4405) hoist their own
+// per-date loadDiscountCapsById read to ONCE per call, keyed off
+// parentAddons rather than each date's own dueAddons. Safe today because
+// filterAddonLinesForDate is a pure `.filter()` — dueAddons is always a
+// subset of whatever array it filtered — but that invariant is easy to
+// break silently in a future edit. assertDueAddonsWithinDiscountCapUniverse
+// is the safety net each of those three loops now calls right after
+// computing dueAddons: a no-op when the invariant holds (always, today,
+// so the cap still resolves normally) and a loud, safe throw the instant
+// it does not, rather than a silent "missing Map entry reads as uncapped".
+describe('assertDueAddonsWithinDiscountCapUniverse — the dueAddons ⊆ discount-cap-universe safety net (GitHub round 2 P1)', () => {
+  test('every due add-on\'s discount id IS present in the caps universe (the ordinary case, since parentAddons is a superset by construction): no-op — the cap resolves normally, never silently missing', () => {
+    const discountCaps = new Map([['d1', 10], ['d2', null]]);
+    const dueAddons = [{ discount_id: 'd1' }, { discount_id: 'd2' }, { discount_id: null }];
+    expect(() => assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountCaps, 'test')).not.toThrow();
+  });
+
+  test('a due add-on\'s discount id is ABSENT from the caps universe (the invariant this safety net exists for, manufactured directly — dueAddons cannot actually diverge from parentAddons through the real filterAddonLinesForDate today): throws, never silently proceeds as uncapped', () => {
+    const discountCaps = new Map([['d1', 10]]); // built from parentAddons alone — 'd2' never made it in
+    const dueAddons = [{ discount_id: 'd1' }, { discount_id: 'd2' }]; // a hypothetically-diverged dueAddons
+    expect(() => assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountCaps, 'test-context'))
+      .toThrow(/d2.*test-context/);
+  });
+
+  test('gate off (discountCaps null): no-op — nothing would read the Map either way', () => {
+    expect(() => assertDueAddonsWithinDiscountCapUniverse([{ discount_id: 'd1' }], null, 'test')).not.toThrow();
+  });
+
+  test('a due add-on with no discount at all is never flagged, regardless of the caps universe', () => {
+    const discountCaps = new Map();
+    expect(() => assertDueAddonsWithinDiscountCapUniverse([{ discount_id: null }], discountCaps, 'test')).not.toThrow();
+  });
+
+  test('source guard: all three loops call this right after computing dueAddons, threading the SAME dueAddons/discountCaps the restack itself uses', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    const calls = [...src.matchAll(/const dueAddons = filterAddonLinesForDate\(parentAddons,[^\n]*\);\n\s*assertDueAddonsWithinDiscountCapUniverse\(dueAddons, discountCaps, '([^']+)'\);/g)];
+    const contexts = calls.map((m) => m[1]);
+    expect(contexts).toEqual(expect.arrayContaining([
+      'reconcileRecurringSeriesVisitCount', 'runRecurringAlertAction:extend', 'runRecurringAlertAction:convert_ongoing',
+    ]));
+    expect(contexts).toHaveLength(3); // exactly these three loops — not the already-hoisted, already-tested spawned-row loop
   });
 });
 

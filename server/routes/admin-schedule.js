@@ -2327,6 +2327,34 @@ function filterAddonLinesForDate(addons, baseDateStr, targetDateStr, blackoutDat
     .filter((addon) => lineDueOnRecurringDate(addon, baseDateStr, targetDateStr, blackoutDates, skipWeekendsOverride));
 }
 
+// GitHub round 2 on PR #4654 (P1): reconcileRecurringSeriesVisitCount and
+// both runRecurringAlertAction loops (slice 4 of #4405) hoist their own
+// per-date `loadDiscountCapsById` read to ONCE per call, keyed off
+// `parentAddons` (the full add-on superset) rather than each date's own
+// `dueAddons`. That substitution is safe only because filterAddonLinesForDate
+// (above) is a pure `.filter()` over whatever array it is handed — every
+// one of its call sites in this file passes `parentAddons`, so `dueAddons`
+// is a subset of `parentAddons` BY CONSTRUCTION, and the hoisted discount
+// id list (parentAddons' own ids) can never be missing a due add-on's id.
+// That invariant is easy to break silently in a future edit (a caller that
+// starts filtering some OTHER array, or a `dueAddons` built a different
+// way) — the failure mode AGENTS.md explicitly flags for discount caps: a
+// missing Map entry reads as "uncapped" rather than throwing, so a
+// discount silently loses its ceiling instead of loudly failing. Called
+// right after `dueAddons` is computed in each of those three loops: a
+// no-op when the invariant holds (always, today) and a loud, safe failure
+// the instant it does not, rather than a silent uncap. `discountCaps` null
+// (gate off) is itself a no-op — nothing would read the Map either way.
+function assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountCaps, context) {
+  if (!discountCaps) return;
+  for (const addon of (Array.isArray(dueAddons) ? dueAddons : [])) {
+    const discountId = addon?.discount_id;
+    if (discountId && !discountCaps.has(discountId)) {
+      throw new Error(`Discount cap universe missing a due add-on's own discount id (${discountId}, ${context}) — refusing to silently treat it as uncapped.`);
+    }
+  }
+}
+
 function calculateAppointmentDiscountDollars(discount, subtotal) {
   if (!discount || !(subtotal > 0)) return 0;
   let dollars = 0;
@@ -13886,6 +13914,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     copyStampedServiceAddressFields(data, parent, cols);
     await anchorSoleProperty(data, cols, trx);
     const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, extendBlackoutDates, skipParent);
+    assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountCaps, 'reconcileRecurringSeriesVisitCount');
     // Anchored-split provenance governs the per-visit amount on EVERY
     // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
     // plans renew through these office paths, not the auto-extend.
@@ -19342,6 +19371,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         copyStampedServiceAddressFields(data, parent, cols);
         await anchorSoleProperty(data, cols, conn);
         const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, alertBlackoutDates, skipParent);
+        assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountCaps, 'runRecurringAlertAction:extend');
         // Anchored-split provenance governs the per-visit amount on EVERY
         // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
         // plans renew through these office paths, not the auto-extend.
@@ -19441,6 +19471,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         copyStampedServiceAddressFields(data, parent, cols);
         await anchorSoleProperty(data, cols, conn);
         const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, alertBlackoutDates, skipParent);
+        assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountCaps, 'runRecurringAlertAction:convert_ongoing');
         // Anchored-split provenance governs the per-visit amount on EVERY
         // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
         // plans renew through these office paths, not the auto-extend.
@@ -19925,6 +19956,7 @@ router._test = {
   storedOccurrenceFloorPrice,
   seriesExtensionUnbillable,
   loadDiscountCapsById,
+  assertDueAddonsWithinDiscountCapUniverse,
   stampPricingRegimeMarker,
   stampFrozenCapsOnly,
   hasPricingRegimeMarker,
