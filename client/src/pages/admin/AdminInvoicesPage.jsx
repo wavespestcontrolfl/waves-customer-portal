@@ -5784,6 +5784,17 @@ function CreateInvoice({
   const [serviceSearchIdx, setServiceSearchIdx] = useState(null);
   const [serviceResults, setServiceResults] = useState([]);
   const [availableDiscounts, setAvailableDiscounts] = useState([]);
+  // Codex pre-push audit P2 (round 6 on PR #4655): EVERY discounts row
+  // (active or retired/hidden) from the SAME fetch — GET /api/admin/discounts
+  // itself returns the full catalog unfiltered; only availableDiscounts
+  // narrows it to active+visible for the PICKER's selectable list.
+  // chosenDiscountRowsForGroupCheck below reads THIS map instead, so a
+  // persisted discount retired since it was applied still surfaces its
+  // stack_group for the conflict filter — mirrors
+  // server/services/invoice.js's loadTrustedGroupConflictMeta exactly (a
+  // retired row still blocks a same-group pick; it is never re-added as a
+  // SELECTABLE option, only consulted for the conflict check).
+  const [allDiscountRowById, setAllDiscountRowById] = useState(new Map());
   const [discountSearchIdx, setDiscountSearchIdx] = useState(null);
   const [discountQueries, setDiscountQueries] = useState({});
   const [aiNotesLoading, setAiNotesLoading] = useState(false);
@@ -5820,12 +5831,12 @@ function CreateInvoice({
     setDiscountsError("");
     adminFetch("/admin/discounts")
       .then((data) => {
-        if (alive)
-          setAvailableDiscounts(
-            (Array.isArray(data) ? data : data.discounts || []).filter(
-              (discount) => discount.is_active && discount.show_in_invoices,
-            ),
-          );
+        if (!alive) return;
+        const rows = Array.isArray(data) ? data : data.discounts || [];
+        setAvailableDiscounts(
+          rows.filter((discount) => discount.is_active && discount.show_in_invoices),
+        );
+        setAllDiscountRowById(new Map(rows.map((d) => [String(d.id), d])));
       })
       .catch((error) => {
         if (alive) setDiscountsError(error.message || "Discounts unavailable");
@@ -5869,6 +5880,22 @@ function CreateInvoice({
             }
           })()
         : editInvoice.line_items || [];
+    // Codex pre-push audit P1 (round 6 on PR #4655): freeze only client_ids
+    // that were ACTUALLY persisted — read from `stored` (the raw parsed
+    // JSON) BEFORE the fallback-id synthesis below, mirroring
+    // server/services/invoice.js's own persistedClientIds exactly
+    // (parseInvoiceLineItems(invoice?.line_items).map(i => i?.client_id)
+    // .filter(Boolean)). A legacy catalog-backed row saved with no
+    // client_id at all gets one synthesized here purely for React keys/
+    // reprice bookkeeping — that synthetic id must never count as
+    // persisted, or a $100→$200 edit on its parent line would keep
+    // previewing its saved $10 discount frozen while the server (which
+    // never sees this synthetic id) correctly recomputes $20.
+    const persistedIdsFromStored = new Set(
+      (Array.isArray(stored) ? stored : [])
+        .map((item) => item?.client_id)
+        .filter(Boolean),
+    );
     const prefilled = (Array.isArray(stored) ? stored : []).map((item) => ({
       ...item,
       client_id: item.client_id || newLineItem().client_id,
@@ -5876,9 +5903,7 @@ function CreateInvoice({
     const initialLineItems = prefilled.length ? prefilled : [newLineItem()];
     setLineItems(initialLineItems);
     editLineItemsBaselineRef.current = JSON.stringify(initialLineItems);
-    persistedClientIdsRef.current = new Set(
-      initialLineItems.map((item) => item?.client_id).filter(Boolean),
-    );
+    persistedClientIdsRef.current = persistedIdsFromStored;
     setNotes(editInvoice.notes || "");
     setEmailMessage(editInvoice.email_message || "");
     setTitle(editInvoice.title || "");
@@ -6085,7 +6110,10 @@ function CreateInvoice({
     lineItems
       .filter((i) => i._kind === "discount" && i.discount_id)
       .map((i) => {
-        const row = discountRowById.get(String(i.discount_id));
+        // Codex pre-push audit P2 (round 6): allDiscountRowById (every row,
+        // active or retired) — not discountRowById (active-only) — so a
+        // retired persisted discount's stack_group still counts here.
+        const row = allDiscountRowById.get(String(i.discount_id));
         if (!row) return null;
         return i.discount_for
           ? { ...row, scope: String(i.discount_for) }

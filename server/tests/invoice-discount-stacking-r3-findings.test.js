@@ -139,11 +139,17 @@ describe('P0: non-stackable group enforcement on EDIT is grandfathered against t
 });
 
 describe('P0: a persisted discount row survives ANY gate transition unchanged', () => {
+  // Round 6 (Claude-fallback P1, this diff's own marker-gating fix):
+  // "created compounded" now means this row was priced under
+  // computeStackedDocumentDiscountLines while the gate was live, which
+  // stamps stacking_regime: "compound" on it — carried here explicitly so
+  // this fixture actually represents that history, not just a persisted
+  // row of unknown origin.
   test('created compounded ($10+$4.50=$14.50), edited under gate OFF with an unrelated change: stays $14.50, never recomputed to the additive $15', async () => {
     const persisted = [
       { client_id: 'line-1', description: 'Pest', quantity: 1, unit_price: 100, amount: 100 },
-      { client_id: 'd1', discount_id: 'ten-pct', discount_for: 'line-1', description: 'Ten Percent', quantity: 1, unit_price: -10, amount: -10 },
-      { client_id: 'd2', discount_id: 'five-pct', discount_for: 'line-1', description: 'Five Percent', quantity: 1, unit_price: -4.5, amount: -4.5 },
+      { client_id: 'd1', discount_id: 'ten-pct', discount_for: 'line-1', description: 'Ten Percent', quantity: 1, unit_price: -10, amount: -10, stacking_regime: 'compound' },
+      { client_id: 'd2', discount_id: 'five-pct', discount_for: 'line-1', description: 'Five Percent', quantity: 1, unit_price: -4.5, amount: -4.5, stacking_regime: 'compound' },
     ];
     setupDiscountsDb([
       { id: 'ten-pct', discount_type: 'percentage', amount: 10, is_active: true, show_in_invoices: true },

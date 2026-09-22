@@ -929,6 +929,16 @@ function computeStackedDocumentDiscountLines({
     documentEntries,
   );
   const lineItemDiscounts = negativeItems.map((item) => {
+    // Codex pre-push audit P1 (round 6 on PR #4655): stamp every discount
+    // line THIS engine (gate-ON only — computeStackedDocumentDiscountLines
+    // is never reached when the gate is off) resolves, so a LATER edit
+    // under a rolled-back gate can tell "this row was priced under
+    // compounding, its own dollars are a commitment" from "this row
+    // predates the lane entirely, nothing has ever recomputed it under
+    // compounding" — calculateUpdateFinancials's gate-OFF branch freezes
+    // ONLY a row carrying this marker (see its own comment), so a
+    // pre-lane row still recomputes exactly as main always did.
+    item.stacking_regime = "compound";
     const row = item.discount_id
       ? lineItemDiscountRowById.get(String(item.discount_id))
       : null;
@@ -1379,19 +1389,27 @@ async function calculateUpdateFinancials({
         const row = item.discount_id
           ? lineItemDiscountRowById.get(String(item.discount_id))
           : null;
-        if (isStoredDiscountLineItem(item, EDIT_TRUSTED_DISCOUNT_SOURCES) || isFrozenByPosition(item)) {
-          // Codex pre-push audit P1 (round 5 on PR #4655, revert): gate OFF
-          // stays BYTE-IDENTICAL to main's pre-lane replay — main never
-          // checked whether an orphaned stamp's target line still exists
-          // here, and the dark-ship contract this gate ships under
-          // (GATE_DISCOUNT_STACKING off ⇒ every document-stack path
-          // unchanged) depends on that staying true. The orphaned ⇒ $0
-          // rule is a GATE_DISCOUNT_STACKING behavior, confined to
-          // computeStackedDocumentDiscountLines above (the gate-ON
-          // branch) — never applied here. See "Not in this slice" in the
-          // PR body for the pre-existing gate-off quirk this leaves in
-          // place (an orphaned line-scoped stamp replays its frozen face
-          // value under gate off, same as before this lane).
+        // Codex pre-push audit P1 (round 6 on PR #4655): freeze-by-position
+        // here is gated on item.stacking_regime === "compound" — the
+        // marker computeStackedDocumentDiscountLines stamps on every row
+        // IT resolves (gate ON only). A pre-lane row, or any row never
+        // once saved while the gate was live, carries no marker and falls
+        // through to the SAME live recompute (resolveLineItemDiscount
+        // below) main has always done — gate OFF stays byte-identical to
+        // main for every row main could ever have produced. A row this
+        // lane itself priced under compounding is a genuinely NEW kind of
+        // data main never wrote (main has no stacking_regime field at
+        // all) — once stamped, it stays pinned to its own compounded
+        // dollars even if the gate is later rolled back, never silently
+        // reverted to additive math out from under an already-quoted
+        // total — the same "a committed figure doesn't drift under an
+        // unrelated edit" principle a scheduled_service stamp already
+        // gets, just for a row this lane's own engine (not a booking
+        // flow) committed.
+        if (
+          isStoredDiscountLineItem(item, EDIT_TRUSTED_DISCOUNT_SOURCES)
+          || (isFrozenByPosition(item) && item.stacking_regime === "compound")
+        ) {
           return resolveStoredDiscountLineItem(item, row);
         }
         const parent = item.discount_for

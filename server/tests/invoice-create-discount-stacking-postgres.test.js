@@ -284,10 +284,13 @@ postgres('InvoiceService.create discount stacking — real Postgres round trip',
       { id: tenId, discount_key: `ten_${tenId.slice(0, 8)}`, name: 'Ten Percent', discount_type: 'percentage', amount: 10, is_active: true, show_in_invoices: true },
       { id: fiveId, discount_key: `five_${fiveId.slice(0, 8)}`, name: 'Five Percent', discount_type: 'percentage', amount: 5, is_active: true, show_in_invoices: true },
     ]);
+    // Round 6: "compounded" means priced under computeStackedDocumentDiscountLines
+    // while the gate was live, which stamps stacking_regime: "compound" —
+    // carried explicitly so this fixture represents that history.
     const persisted = [
       { client_id: 'line-1', description: 'Pest', quantity: 1, unit_price: 100, amount: 100 },
-      { client_id: 'd1', discount_id: tenId, discount_for: 'line-1', description: 'Ten Percent', quantity: 1, unit_price: -10, amount: -10 },
-      { client_id: 'd2', discount_id: fiveId, discount_for: 'line-1', description: 'Five Percent', quantity: 1, unit_price: -4.5, amount: -4.5 },
+      { client_id: 'd1', discount_id: tenId, discount_for: 'line-1', description: 'Ten Percent', quantity: 1, unit_price: -10, amount: -10, stacking_regime: 'compound' },
+      { client_id: 'd2', discount_id: fiveId, discount_for: 'line-1', description: 'Five Percent', quantity: 1, unit_price: -4.5, amount: -4.5, stacking_regime: 'compound' },
     ];
     // Gate OFF at edit time — deliberately NOT setting GATE_DISCOUNT_STACKING.
     const result = await calculateUpdateFinancials({
@@ -296,6 +299,32 @@ postgres('InvoiceService.create discount stacking — real Postgres round trip',
       invoice: { id: 'invoice-1', line_items: JSON.stringify(persisted) },
     });
     expect(result.discount_amount).toBe(14.5);
+  });
+
+  // Round 6 companion: a PRE-LANE persisted percentage discount (no
+  // stacking_regime marker at all — never once saved while the gate was
+  // live) still live-recomputes against a changed parent gross under gate
+  // OFF — byte-identical to main — real catalog rows, real round trip.
+  test('a PRE-LANE persisted 10% discount recomputes live on a price edit under gate OFF — byte-identical to main', async () => {
+    const { calculateUpdateFinancials } = InvoiceService._internals;
+    const tenId = randomUUID();
+    await trx('discounts').insert([
+      { id: tenId, discount_key: `ten_${tenId.slice(0, 8)}`, name: 'Ten Percent', discount_type: 'percentage', amount: 10, is_active: true, show_in_invoices: true },
+    ]);
+    const persisted = [
+      { client_id: 'line-1', description: 'Pest', quantity: 1, unit_price: 100, amount: 100 },
+      { client_id: 'd1', discount_id: tenId, discount_for: 'line-1', description: 'Ten Percent', quantity: 1, unit_price: -10, amount: -10 },
+    ];
+    const submitted = [
+      { client_id: 'line-1', description: 'Pest', quantity: 1, unit_price: 200, amount: 200 },
+      { client_id: 'd1', discount_id: tenId, discount_for: 'line-1', description: 'Ten Percent', quantity: 1, unit_price: -10, amount: -10 },
+    ];
+    const result = await calculateUpdateFinancials({
+      lineItems: submitted,
+      customer: { property_type: 'residential' },
+      invoice: { id: 'invoice-1', line_items: JSON.stringify(persisted) },
+    });
+    expect(result.discount_amount).toBe(20);
   });
 
   // Codex pre-push audit P1, round 4 ("the gate-transition class",

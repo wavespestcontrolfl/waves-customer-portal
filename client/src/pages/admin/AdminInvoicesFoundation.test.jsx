@@ -525,4 +525,70 @@ describe("Invoice foundation workflow preservation", () => {
     expect(await screen.findAllByText(/Discount rules just changed/)).not.toHaveLength(0);
     expect(requests.some(request => request.key === key)).toBe(false);
   });
+
+  // Codex pre-push audit P1 (round 6 on PR #4655): freeze only client_ids
+  // that were ACTUALLY persisted — a legacy catalog-backed discount item
+  // saved with NO client_id of its own gets one synthesized purely for
+  // React/reprice bookkeeping; that synthetic id must never be treated as
+  // persisted, or the preview would keep a $10 discount frozen after its
+  // $100 parent line is edited to $200, while the server (which never
+  // sees the synthetic id) correctly recomputes $20 — client and server
+  // must agree.
+  it("a legacy discount item with no stored client_id recomputes live on a price edit, matching the server", async () => {
+    const legacyInvoice = {
+      ...invoice,
+      status: "draft",
+      line_items: [
+        { client_id: "line-1", description: "Quarterly pest control", quantity: 1, unit_price: 100, amount: 100 },
+        // No client_id at all — a legacy row from before this field existed.
+        { _kind: "discount", discount_id: "ten-pct", discount_for: "line-1", description: "Ten Percent", quantity: 1, unit_price: -10, amount: -10 },
+      ],
+    };
+    rows = [legacyInvoice];
+    overrides.set(`GET /api/admin/invoices/${invoice.id}`, () => response(legacyInvoice));
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "ten-pct", name: "Ten Percent", discount_type: "percentage", amount: 10, is_active: true, show_in_invoices: true },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    await openPage(); await expand();
+    fireEvent.click(screen.getByRole("button", { name: "Edit", exact: true }));
+    const priceInputs = await screen.findAllByLabelText("Price ($)");
+    fireEvent.change(priceInputs[0], { target: { value: "200" } });
+    // The aggregate total (computeInvoiceLineDiscountTotal) is the ONE
+    // place this recompute is proven — before this fix, the synthetic
+    // client_id kept the aggregate frozen at -$10.00 (10% of the OLD
+    // $100), disagreeing with the server, which never sees that id and
+    // always recomputes to $20 (10% of the new $200).
+    expect(await screen.findByText("-$20.00")).toBeInTheDocument();
+  });
+
+  // Codex pre-push audit P2 (round 6 on PR #4655): the picker's own
+  // conflict check must include a PERSISTED discount whose catalog row is
+  // now retired/hidden — not only active rows — or an operator could pick
+  // a second same-group discount that previews fine and only 400s on Save.
+  it("a retired persisted Silver still hides Gold in the picker (not just at Save)", async () => {
+    const tieredInvoice = {
+      ...invoice,
+      status: "draft",
+      line_items: [
+        { client_id: "line-1", description: "Quarterly pest control", quantity: 1, unit_price: 100, amount: 100 },
+        { client_id: "d1", _kind: "discount", discount_id: "silver-id", discount_for: "line-1", description: "WaveGuard Silver", quantity: 1, unit_price: -10, amount: -10 },
+      ],
+    };
+    rows = [tieredInvoice];
+    overrides.set(`GET /api/admin/invoices/${invoice.id}`, () => response(tieredInvoice));
+    // The server's own GET /api/admin/discounts returns EVERY row,
+    // retired included — only the picker's SELECTABLE list narrows it.
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "silver-id", name: "WaveGuard Silver", discount_type: "percentage", amount: 10, is_active: false, show_in_invoices: false, stack_group: "tier", is_stackable: false },
+      { id: "gold-id", name: "WaveGuard Gold", discount_type: "percentage", amount: 15, is_active: true, show_in_invoices: true, stack_group: "tier", is_stackable: false },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    await openPage(); await expand();
+    fireEvent.click(screen.getByRole("button", { name: "Edit", exact: true }));
+    fireEvent.change(await screen.findByLabelText("Add a discount"), { target: { value: "Wave" } });
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /WaveGuard Gold/ })).not.toBeInTheDocument();
+    });
+  });
 });

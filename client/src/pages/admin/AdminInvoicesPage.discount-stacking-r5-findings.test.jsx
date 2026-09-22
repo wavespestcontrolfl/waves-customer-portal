@@ -139,3 +139,32 @@ describe("repriceLineWithNewDiscountPick — a persisted sibling on the same lin
     expect(sibling.amount).toBe(-10);
   });
 });
+
+// Codex pre-push audit P1 (round 6 on PR #4655): "same on the client
+// preview" — computeInvoiceLineDiscountTotal's gate-OFF path is the
+// additive early return, which sums each discount item's OWN CURRENT
+// face value directly and never consults persistedClientIds at all — so
+// it was ALREADY byte-identical to main under gate off, with or without
+// this round's server-side stacking_regime marker. Pinned directly so a
+// future change can't silently make the client's additive path start
+// reading persistedClientIds (which would reproduce the exact server-side
+// mistake this round's audit caught).
+describe("computeInvoiceLineDiscountTotal — gate OFF ignores persistedClientIds entirely (matches main)", () => {
+  test("a persisted discount item sums its OWN current face value under gate off, regardless of persistedClientIds", () => {
+    const persistedClientIds = new Set(["d1"]);
+    const lineItems = [
+      { client_id: "line-1", _kind: "service", description: "Service", quantity: 1, unit_price: 200, amount: 200 },
+      { client_id: "d1", _kind: "discount", discount_id: "row-1", discount_for: "line-1", quantity: 1, unit_price: -10, amount: -10 },
+    ];
+    const total = computeInvoiceLineDiscountTotal({
+      lineItems,
+      availableDiscounts: [discountRow({ id: "row-1", discount_type: "percentage", amount: 10 })],
+      stackingEnabled: false,
+      persistedClientIds,
+    });
+    // Just the item's own face value ($10) — never a live 10%-of-$200
+    // recompute (that's a SAVE-time server concern under gate off) and
+    // never anything persistedClientIds-gated.
+    expect(total).toBe(10);
+  });
+});
