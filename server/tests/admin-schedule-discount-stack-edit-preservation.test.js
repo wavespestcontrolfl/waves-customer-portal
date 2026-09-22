@@ -21,14 +21,25 @@
  * that should not have moved it at all.
  *
  * legacyEconomicsPreservationDecision (admin-schedule.js) is the pure fix:
- * when an unmarked row's save touches NEITHER a price NOR a discount, the
- * route preserves the row's stored estimated_price/discount_dollars
- * VERBATIM under ONE shared condition, rather than trusting a recompute
- * that was never given the information it needed to reproduce the stored
- * figure. These tests exercise that decision directly (no HTTP layer —
- * matching this codebase's convention for a route this large; see
- * resolveUpdateDetailsAddonFinancials's own sibling suite) and pin the
- * round-7 P0's own $160 stored total surviving a notes-only save.
+ * when an unmarked row's save touches NEITHER a price NOR a discount NOR
+ * the primary service identity, the route preserves the row's stored
+ * estimated_price/discount_dollars VERBATIM under ONE shared condition,
+ * rather than trusting a recompute that was never given the information it
+ * needed to reproduce the stored figure. These tests exercise that
+ * decision directly (no HTTP layer — matching this codebase's convention
+ * for a route this large; see resolveUpdateDetailsAddonFinancials's own
+ * sibling suite) and pin the round-7 P0's own $160 stored total surviving
+ * a notes-only save.
+ *
+ * Two guards were added after the pre-push Codex audit found real P0s in
+ * the first cut of this decision (see their own describe blocks below):
+ * add-on comparison is NET vs NET (never gross vs gross — this editor's
+ * client sends an EDITED add-on price as a flat net with no discount
+ * fields, SchedulePage.jsx, so comparing it against the stored GROSS can
+ * match by coincidence and silently keep a stale, lower total), and a
+ * primary SERVICE identity change disqualifies preservation outright (a
+ * same-priced service swap can move the row out of the stored appointment
+ * discount's scope even though no raw dollar figure moved).
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../middleware/admin-auth', () => ({
@@ -60,9 +71,11 @@ function withGateLive(fn) {
 // The round-7 P0's own pinned combination: $100 primary (no line discount) +
 // a $100 add-on stored at a 10% discount (net $90) + a $30 fixed appointment
 // credit — 100 + 90 - 30 = $160. Every case below shares this stored shape
-// and varies only what the notes-only save posts.
+// and varies only what the notes-only save posts. normalizedAddons.price
+// and existingAddonRows.estimated_price are both NET — the one invariant
+// the decision function actually compares (see its own comment).
 const STORED_PRIMARY_GROSS = 100;
-const STORED_ADDON_BASE = 100;
+const STORED_ADDON_GROSS = 100;
 const STORED_ADDON_NET = 90; // 10% off
 const STORED_TOTAL = 160; // 100 + 90 - 30
 
@@ -70,10 +83,11 @@ describe('legacyEconomicsPreservationDecision — pure decision (slice 4 of #440
   const baseArgs = () => ({
     legacyPreservationCandidate: true,
     discountInputsPosted: false,
+    primaryServiceChanged: false,
     primaryGross: STORED_PRIMARY_GROSS,
     existingPrimaryLinePrice: STORED_PRIMARY_GROSS,
-    normalizedAddons: [{ serviceId: 'svc-1', serviceName: 'Addon', base: STORED_ADDON_BASE }],
-    existingAddonRows: [{ service_id: 'svc-1', service_name: 'Addon', base_price: STORED_ADDON_BASE }],
+    normalizedAddons: [{ serviceId: 'svc-1', serviceName: 'Addon', price: STORED_ADDON_NET }],
+    existingAddonRows: [{ service_id: 'svc-1', service_name: 'Addon', estimated_price: STORED_ADDON_NET }],
     existingEstimatedPrice: STORED_TOTAL,
   });
 
@@ -103,17 +117,17 @@ describe('legacyEconomicsPreservationDecision — pure decision (slice 4 of #440
     const result = legacyEconomicsPreservationDecision({
       ...baseArgs(),
       normalizedAddons: [
-        { serviceId: 'svc-1', serviceName: 'Addon', base: STORED_ADDON_BASE },
-        { serviceId: 'svc-2', serviceName: 'Second Addon', base: 40 },
+        { serviceId: 'svc-1', serviceName: 'Addon', price: STORED_ADDON_NET },
+        { serviceId: 'svc-2', serviceName: 'Second Addon', price: 40 },
       ],
     });
     expect(result.legacyEconomicsPreserved).toBe(false);
   });
 
-  test('an add-on\'s own base price changed (matched by serviceId) — never preserved', () => {
+  test('an add-on\'s own NET price changed (matched by serviceId) — never preserved', () => {
     const result = legacyEconomicsPreservationDecision({
       ...baseArgs(),
-      normalizedAddons: [{ serviceId: 'svc-1', serviceName: 'Addon', base: 110 }],
+      normalizedAddons: [{ serviceId: 'svc-1', serviceName: 'Addon', price: 110 }],
     });
     expect(result.legacyEconomicsPreserved).toBe(false);
   });
@@ -121,8 +135,8 @@ describe('legacyEconomicsPreservationDecision — pure decision (slice 4 of #440
   test('an add-on with no serviceId matches its stored row by trimmed service_name instead', () => {
     const result = legacyEconomicsPreservationDecision({
       ...baseArgs(),
-      normalizedAddons: [{ serviceId: null, serviceName: 'Addon', base: STORED_ADDON_BASE }],
-      existingAddonRows: [{ service_id: null, service_name: '  Addon  ', base_price: STORED_ADDON_BASE }],
+      normalizedAddons: [{ serviceId: null, serviceName: 'Addon', price: STORED_ADDON_NET }],
+      existingAddonRows: [{ service_id: null, service_name: '  Addon  ', estimated_price: STORED_ADDON_NET }],
     });
     expect(result.legacyEconomicsPreserved).toBe(true);
   });
@@ -130,8 +144,8 @@ describe('legacyEconomicsPreservationDecision — pure decision (slice 4 of #440
   test('an add-on with no serviceId whose name no longer matches any stored row — never preserved (nothing to confirm "unchanged" against)', () => {
     const result = legacyEconomicsPreservationDecision({
       ...baseArgs(),
-      normalizedAddons: [{ serviceId: null, serviceName: 'Renamed Addon', base: STORED_ADDON_BASE }],
-      existingAddonRows: [{ service_id: null, service_name: 'Addon', base_price: STORED_ADDON_BASE }],
+      normalizedAddons: [{ serviceId: null, serviceName: 'Renamed Addon', price: STORED_ADDON_NET }],
+      existingAddonRows: [{ service_id: null, service_name: 'Addon', estimated_price: STORED_ADDON_NET }],
     });
     expect(result.legacyEconomicsPreserved).toBe(false);
   });
@@ -152,6 +166,62 @@ describe('legacyEconomicsPreservationDecision — pure decision (slice 4 of #440
     const result = legacyEconomicsPreservationDecision({ ...baseArgs(), primaryGross: 100.001 });
     expect(result.legacyEconomicsPreserved).toBe(true);
   });
+
+  // Codex pre-push audit P0 (round 1 of this slice): a primary SERVICE swap
+  // can move the row out of (or into) the stored appointment discount's
+  // scope even at an identical raw price. resolveUpdateDetailsAddonFinancials's
+  // canonical branch already re-derives eligibility for a service change on
+  // a MARKED row; legacy preservation on an UNMARKED row must defer to that
+  // SAME live-recompute path, never keep the OLD discount_dollars stamped
+  // for a service that may no longer qualify for it.
+  describe('primaryServiceChanged guard (Codex P0)', () => {
+    test('a primary service swap disqualifies preservation even though every price and add-on matches', () => {
+      const result = legacyEconomicsPreservationDecision({ ...baseArgs(), primaryServiceChanged: true });
+      expect(result.legacyEconomicsPreserved).toBe(false);
+    });
+
+    test('control: primaryServiceChanged false (the ordinary case) still preserves', () => {
+      const result = legacyEconomicsPreservationDecision({ ...baseArgs(), primaryServiceChanged: false });
+      expect(result.legacyEconomicsPreserved).toBe(true);
+    });
+  });
+
+  // Codex pre-push audit P0 (round 1 of this slice): the editor sends an
+  // EDITED add-on price as a flat NET with no discount fields at all (no
+  // per-addon discount UI exists yet). Comparing that posted number against
+  // the stored GROSS treats a genuine net-price raise as unchanged whenever
+  // it happens to equal the OLD gross — a discounted $90 addon raised to
+  // $100 numerically matches the stored $100 gross, so the OLD (lower)
+  // total would have been silently kept. Comparing NET vs NET (this fix)
+  // catches it: the posted $100 net does not match the stored $90 net.
+  describe('add-on NET-vs-NET comparison (Codex P0) — never gross vs gross', () => {
+    test('a genuine add-on price edit sent as a flat net (Codex\'s own repro: $90 discounted addon raised to $100) is detected as CHANGED, even though it numerically matches the stored GROSS', () => {
+      const result = legacyEconomicsPreservationDecision({
+        ...baseArgs(),
+        // The client's own shape for an edited/new line (SchedulePage.jsx):
+        // a flat `price`, no `discount`, no separate gross at all. The
+        // server's own normalizedAddons construction sets `.price` to this
+        // exact posted figure when no discount is resent — matching what
+        // the route itself would build.
+        normalizedAddons: [{ serviceId: 'svc-1', serviceName: 'Addon', price: STORED_ADDON_GROSS }],
+        // Stored row: base_price 100 (gross), estimated_price 90 (net,
+        // after the 10% stored discount) — Codex's own pinned shape.
+        existingAddonRows: [{ service_id: 'svc-1', service_name: 'Addon', base_price: STORED_ADDON_GROSS, estimated_price: STORED_ADDON_NET }],
+      });
+      // NEVER true: this would silently keep the OLD $160 on a save that
+      // actually raised the addon's net by $10.
+      expect(result.legacyEconomicsPreserved).toBe(false);
+    });
+
+    test('control: the SAME flat-net shape with a TRULY unchanged net ($90 sent, $90 stored) still preserves — the fix does not over-correct', () => {
+      const result = legacyEconomicsPreservationDecision({
+        ...baseArgs(),
+        normalizedAddons: [{ serviceId: 'svc-1', serviceName: 'Addon', price: STORED_ADDON_NET }],
+        existingAddonRows: [{ service_id: 'svc-1', service_name: 'Addon', base_price: STORED_ADDON_GROSS, estimated_price: STORED_ADDON_NET }],
+      });
+      expect(result.legacyEconomicsPreserved).toBe(true);
+    });
+  });
 });
 
 // The round-7 P0 itself, reproduced against the CURRENT (post-slice-3)
@@ -168,7 +238,7 @@ describe('round-7 P0, current computation path: a notes-only save\'s addon recon
     // What the notes-only save reconstructs WITHOUT the stored add-on
     // discount: the addon's price is its full gross ($100), not the net
     // ($90) the row was actually saved at.
-    const brokenAddonLine = { price: STORED_ADDON_BASE, serviceKey: null, serviceCategory: null };
+    const brokenAddonLine = { price: STORED_ADDON_GROSS, serviceKey: null, serviceCategory: null };
     const result = calculateVisitFinancialsForAddons({
       primaryNet: STORED_PRIMARY_GROSS,
       primaryServiceKey: null,
@@ -202,10 +272,11 @@ describe('round-7 P0, current computation path: a notes-only save\'s addon recon
     const decision = legacyEconomicsPreservationDecision({
       legacyPreservationCandidate: true,
       discountInputsPosted: false,
+      primaryServiceChanged: false,
       primaryGross: STORED_PRIMARY_GROSS,
       existingPrimaryLinePrice: STORED_PRIMARY_GROSS,
-      normalizedAddons: [{ serviceId: 'svc-1', serviceName: 'Addon', base: STORED_ADDON_BASE }],
-      existingAddonRows: [{ service_id: 'svc-1', service_name: 'Addon', base_price: STORED_ADDON_BASE }],
+      normalizedAddons: [{ serviceId: 'svc-1', serviceName: 'Addon', price: STORED_ADDON_NET }],
+      existingAddonRows: [{ service_id: 'svc-1', service_name: 'Addon', estimated_price: STORED_ADDON_NET }],
       existingEstimatedPrice: STORED_TOTAL,
     });
     expect(decision.legacyEconomicsPreserved).toBe(true);
@@ -226,7 +297,7 @@ describe('round-7 P0, current computation path: a notes-only save\'s addon recon
 // P0)"); these tests pin only the ROUTING decision itself — which function a
 // row's marker state sends a PRICE edit through — not the arithmetic either
 // path already owns.
-describe('PUT /:id/update-details eligibility — restack (marked) vs preserve (unmarked) vs live-recompute (a genuine price/discount edit)', () => {
+describe('PUT /:id/update-details eligibility — restack (marked) vs preserve (unmarked) vs live-recompute (a genuine price/discount/service edit)', () => {
   test('an UNMARKED row is a legacy-preservation candidate whenever the gate is live', () => {
     const unmarked = { pricing_provenance: null };
     expect(hasPricingRegimeMarker(unmarked)).toBe(false);
@@ -293,7 +364,26 @@ describe('PUT /:id/update-details eligibility — restack (marked) vs preserve (
     const decision = legacyEconomicsPreservationDecision({
       legacyPreservationCandidate: true, // gate on, row unmarked
       discountInputsPosted: false,
+      primaryServiceChanged: false,
       primaryGross: 150, // CHANGED from the stored 100
+      existingPrimaryLinePrice: 100,
+      normalizedAddons: [],
+      existingAddonRows: [],
+      existingEstimatedPrice: 100,
+    });
+    expect(decision.legacyEconomicsPreserved).toBe(false);
+  });
+
+  // Codex pre-push audit P0 (round 1 of this slice): a same-priced primary
+  // SERVICE switch on an UNMARKED row must also fall through to the live
+  // recompute — never preserve a discount stamped for a service the new
+  // pick may no longer qualify for.
+  test('a SERVICE swap on an UNMARKED row at the SAME price: primaryServiceChanged is true, so legacy preservation never engages', () => {
+    const decision = legacyEconomicsPreservationDecision({
+      legacyPreservationCandidate: true,
+      discountInputsPosted: false,
+      primaryServiceChanged: true, // service_id (or key/category snapshot) changed
+      primaryGross: 100, // UNCHANGED price — the exact scenario preservation would otherwise have matched
       existingPrimaryLinePrice: 100,
       normalizedAddons: [],
       existingAddonRows: [],

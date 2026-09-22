@@ -2622,24 +2622,55 @@ async function resolveUpdateDetailsAddonFinancials({
 // resolveUpdateDetailsAddonFinancials's canonical branch already IS for a
 // MARKED row — an unmarked row simply has none to restack from.
 //
-// Pure decision function: `existingAddonRows` (the row's stored add-on
-// base prices) MUST be loaded by the caller before this runs — an
-// add-on's own stored price is unknowable here otherwise, and "unchanged"
-// could never be confirmed (this is the round-7 P0 itself: the ORIGINAL
-// bug never loaded them at all for this check).
+// Pure decision function: `existingAddonRows` (the row's stored add-on NET
+// prices) MUST be loaded by the caller before this runs — an add-on's own
+// stored price is unknowable here otherwise, and "unchanged" could never
+// be confirmed (this is the round-7 P0 itself: the ORIGINAL bug never
+// loaded them at all for this check).
+//
+// Two callsite-shaped guards, both from real Codex findings on this exact
+// function (pre-push audit, this slice):
+//
+// Add-on comparison is NET vs NET, never gross vs gross. This editor has
+// no per-addon discount UI (SchedulePage.jsx): an UNCHANGED line that
+// already carries a stored discount round-trips its true gross + discount
+// fields, but a NEW-or-EDITED line sends only a flat `price` — the
+// operator's intended NET, with no `basePrice` and no discount at all. On
+// the server that flat number becomes `normalizedAddons[i].base` (there is
+// nothing else to call it a gross OF). Comparing that against the row's
+// stored GROSS (`base_price`) treats a genuine net-price raise — say a
+// discounted $90 addon edited up to $100 — as numerically unchanged
+// whenever it happens to equal the OLD gross, silently keeping the OLD,
+// lower total. `normalizedAddons[i].price` is this save's own resolved NET
+// for the line (the round-tripped discount applied when one was resent,
+// or the flat posted number when none was) — comparing THAT against the
+// row's stored NET (`estimated_price`) is the one invariant that is
+// correct for both shapes: unchanged only when the money on this line
+// truly has not moved.
+//
+// A primary SERVICE identity change (service_id / service_key_snapshot /
+// service_category_snapshot) never counts as money-unchanged even when the
+// raw price is identical: a same-priced switch to a service outside the
+// stored appointment discount's scope changes what that discount is
+// legally allowed to apply to — resolveUpdateDetailsAddonFinancials's
+// canonical (MARKED-row) branch already re-derives eligibility for exactly
+// this case; preservation must defer to the SAME live recompute an
+// unmarked row's price edit already uses, never keep a discount stamped
+// for a service that no longer qualifies for it.
 function legacyEconomicsPreservationDecision({
-  legacyPreservationCandidate, discountInputsPosted, primaryGross, existingPrimaryLinePrice,
+  legacyPreservationCandidate, discountInputsPosted, primaryServiceChanged, primaryGross, existingPrimaryLinePrice,
   normalizedAddons, existingAddonRows, existingEstimatedPrice,
 }) {
   const moneyInputsUnchanged = legacyPreservationCandidate
     && !discountInputsPosted
+    && !primaryServiceChanged
     && !moneyValuesDiffer(primaryGross, existingPrimaryLinePrice)
     && normalizedAddons.length === existingAddonRows.length
     && normalizedAddons.every((l) => {
       const stored = existingAddonRows.find((row) => (
         l.serviceId ? String(row.service_id || '') === String(l.serviceId) : String(row.service_name || '').trim() === l.serviceName
       ));
-      return stored && !moneyValuesDiffer(l.base, stored.base_price);
+      return stored && !moneyValuesDiffer(l.price, stored.estimated_price);
     });
   const storedTotal = Number(existingEstimatedPrice);
   return {
@@ -9509,20 +9540,39 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // PRICE edit stays on that path even when nothing else changed.
         //
         // The existing add-on rows must be loaded BEFORE this check can run
-        // at all — without them, every add-on's own stored base price is
-        // unknowable here and "unchanged" can never be confirmed.
+        // at all — without them, every add-on's own stored NET price is
+        // unknowable here and "unchanged" can never be confirmed (see
+        // legacyEconomicsPreservationDecision's own comment for why NET,
+        // not gross, is the correct comparison).
         const legacyPreservationCandidate = discountStackingLive() && !hasPricingRegimeMarker(existing);
         const existingAddonRows = legacyPreservationCandidate
           ? await db('scheduled_service_addons')
             .where({ scheduled_service_id: req.params.id })
-            .select('service_id', 'service_name', 'base_price')
+            .select('service_id', 'service_name', 'base_price', 'estimated_price')
             .catch(() => [])
           : [];
         const discountInputsPosted = discountType !== undefined
           || addons.some((a) => a?.discountId || a?.discountType);
+        // Codex pre-push audit P0 (this slice): a primary SERVICE swap can
+        // move the row out of (or into) the stored appointment discount's
+        // scope even at an identical raw price — resolveUpdateDetailsAddonFinancials's
+        // canonical branch already re-derives eligibility for a service
+        // change; legacy preservation must defer to that same live path
+        // rather than keep a discount stamped for a service that no longer
+        // qualifies. `updates.*` only carries these keys when THIS save
+        // actually resolved a service pick (see resolvedServiceId, above) —
+        // presence still isn't change (Codex #3531 r2 P1's own doctrine),
+        // so each is checked against the stored row's own value.
+        const primaryServiceChanged = (updates.service_id !== undefined
+          && String(updates.service_id ?? '') !== String(existing?.service_id ?? ''))
+          || (updates.service_key_snapshot !== undefined
+            && String(updates.service_key_snapshot ?? '') !== String(existing?.service_key_snapshot ?? ''))
+          || (updates.service_category_snapshot !== undefined
+            && String(updates.service_category_snapshot ?? '') !== String(existing?.service_category_snapshot ?? ''));
         const { legacyEconomicsPreserved, storedTotal } = legacyEconomicsPreservationDecision({
           legacyPreservationCandidate,
           discountInputsPosted,
+          primaryServiceChanged,
           primaryGross,
           existingPrimaryLinePrice: existing?.primary_line_price,
           normalizedAddons,

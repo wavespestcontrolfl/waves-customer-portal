@@ -473,18 +473,20 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
     }
   });
 
-  // Slice 4 of #4405 (round-7 P0 carried forward): a real, previously-created
-  // UNMARKED (legacy) row — $100 primary, a $100 add-on stored at a 10%
-  // discount (net $90), a $30 fixed appointment credit — stored total
-  // 100 + 90 - 30 = $160, exactly the round-7 report's own pinned figure.
-  // A notes-only PUT /:id/update-details save resends every price field (per
-  // this editor's own contract) but posts NEITHER a discount NOR the add-on's
-  // discount identity (it doesn't display per-addon discount editing) — the
-  // route must load the REAL stored add-on row via a genuine Postgres query
-  // before it can tell the money is unchanged, and must then preserve the
-  // stored $160 verbatim rather than let calculateVisitFinancialsForAddons
-  // recompute the add-on at its full undiscounted gross.
-  test('PUT /:id/update-details: a notes-only save on an UNMARKED row preserves the real stored $160 — never the broken $170 an undiscounted-addon recompute would produce', async () => {
+  // Slice 4 of #4405 (round-7 P0 carried forward, hardened after a
+  // pre-push Codex audit found the first cut compared the wrong figure): a
+  // real, previously-created UNMARKED (legacy) row — $100 primary, a $100
+  // add-on stored at a 10% discount (net $90), a $30 fixed appointment
+  // credit — stored total 100 + 90 - 30 = $160, exactly the round-7
+  // report's own pinned figure. A genuinely notes-only save resends every
+  // price field (per this editor's own contract) but posts NEITHER a
+  // discount NOR the add-on's discount identity (it doesn't display
+  // per-addon discount editing) — the route must load the REAL stored
+  // add-on row via a genuine Postgres query before it can tell the money
+  // is unchanged, and must then preserve the stored $160 verbatim rather
+  // than let calculateVisitFinancialsForAddons recompute against the wrong
+  // figure.
+  test('PUT /:id/update-details: a genuinely notes-only save on an UNMARKED row preserves the real stored $160', async () => {
     const id = randomUUID();
     const target = {
       scheduled_date: '2099-11-15', service_type: 'Fixture Legacy Notes-Only Service',
@@ -509,19 +511,23 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
 
       // The route's own load (round-7 P0's fix): the real stored add-on
       // rows, fetched via a genuine query BEFORE testing legacy preservation.
+      // estimated_price (the NET) is the field the decision actually
+      // compares against — see legacyEconomicsPreservationDecision's own
+      // comment for why gross is the wrong comparison.
       const existingAddonRows = await mockPg('scheduled_service_addons')
         .where({ scheduled_service_id: id })
-        .select('service_id', 'service_name', 'base_price');
+        .select('service_id', 'service_name', 'estimated_price');
 
-      // Notes-only save: primaryLinePrice resent unchanged, one addon
-      // re-posted at its unchanged base price with NO discount fields (this
-      // editor doesn't resend per-addon discounts), no appointment discount
-      // posted at all.
-      const normalizedAddons = [{ serviceId: null, serviceName: 'Fixture Legacy Add-On', base: 100, price: 100, discount: null }];
+      // Genuinely notes-only save: this editor has no per-addon discount UI
+      // (SchedulePage.jsx), so an UNTOUCHED add-on line is resent as a flat
+      // `price` at its DISPLAYED (net) figure — $90, never the $100 gross —
+      // with no discount fields and no separate basePrice at all.
+      const normalizedAddons = [{ serviceId: null, serviceName: 'Fixture Legacy Add-On', base: 90, price: 90, discount: null }];
 
       const decision = legacyEconomicsPreservationDecision({
         legacyPreservationCandidate: discountStackingLive() && !hasPricingRegimeMarker(existing),
         discountInputsPosted: false,
+        primaryServiceChanged: false,
         primaryGross: 100,
         existingPrimaryLinePrice: Number(existing.primary_line_price),
         normalizedAddons,
@@ -531,15 +537,6 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
       expect(decision.legacyEconomicsPreserved).toBe(true);
       expect(decision.storedTotal).toBe(160);
 
-      // What the OLD (pre-fix) unconditional fallback would have written
-      // instead — proof this is a real, not hypothetical, divergence.
-      const broken = calculateVisitFinancialsForAddons({
-        primaryNet: 100, primaryServiceKey: null, primaryServiceCategory: null,
-        appointmentDiscount: { discountType: existing.discount_type, discountAmount: Number(existing.discount_amount), maxDiscountDollars: null, serviceKeyFilter: null, serviceCategoryFilter: null },
-      }, normalizedAddons);
-      expect(broken.price).toBe(170); // NEVER what the route now writes
-      expect(broken.price).not.toBe(decision.storedTotal);
-
       // The route writes updates.estimated_price = decision.storedTotal
       // (160) and updates.discount_dollars = existing.discount_dollars (30)
       // on this path — never financials.price/appointmentDiscountDollars.
@@ -547,6 +544,69 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
       const rowAfterSave = await mockPg('scheduled_services').where({ id }).first('estimated_price', 'pricing_provenance');
       expect(Number(rowAfterSave.estimated_price)).toBe(160); // preserved through a real round trip
       expect(hasPricingRegimeMarker(rowAfterSave)).toBe(false); // still unmarked — this path never stamps one
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
+
+  // Codex pre-push audit P0 (this slice): the editor sends an EDITED add-on
+  // price as a flat NET with no discount fields at all — comparing that
+  // posted figure against the row's stored GROSS (base_price) can match by
+  // coincidence and silently keep a stale total. Same fixture as the
+  // notes-only test above, but the operator raises the add-on from its
+  // discounted $90 net to $100 — a real $10 increase that numerically
+  // equals the stored GROSS. The fix (NET vs NET) must detect this as
+  // CHANGED and defer to the live recompute, which correctly reaches $170
+  // (100 + 100 - 30), never silently keep the stale $160.
+  test('PUT /:id/update-details: an add-on raised from its discounted $90 net to $100 is detected as changed, never silently kept at the stale $160', async () => {
+    const id = randomUUID();
+    const target = {
+      scheduled_date: '2099-11-16', service_type: 'Fixture Legacy Price-Edit Service',
+      primary_line_price: 100,
+      discount_type: 'fixed_amount', discount_amount: 30, discount_dollars: 30,
+      estimated_price: 160,
+    };
+    await mockPg('scheduled_services').insert({ id, ...target });
+    await mockPg('scheduled_service_addons').insert({
+      id: randomUUID(), scheduled_service_id: id, service_name: 'Fixture Legacy Add-On',
+      base_price: 100, estimated_price: 90, discount_type: 'percentage', discount_amount: 10, discount_dollars: 10,
+    });
+
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      const existing = await mockPg('scheduled_services').where({ id }).first(
+        'primary_line_price', 'discount_type', 'discount_amount', 'discount_dollars', 'estimated_price', 'pricing_provenance',
+      );
+      const existingAddonRows = await mockPg('scheduled_service_addons')
+        .where({ scheduled_service_id: id })
+        .select('service_id', 'service_name', 'base_price', 'estimated_price');
+
+      // The operator raises the add-on's displayed price from 90 to 100 —
+      // the client sends a flat `price: 100`, no discount, no basePrice.
+      const normalizedAddons = [{ serviceId: null, serviceName: 'Fixture Legacy Add-On', base: 100, price: 100, discount: null }];
+
+      const decision = legacyEconomicsPreservationDecision({
+        legacyPreservationCandidate: discountStackingLive() && !hasPricingRegimeMarker(existing),
+        discountInputsPosted: false,
+        primaryServiceChanged: false,
+        primaryGross: 100,
+        existingPrimaryLinePrice: Number(existing.primary_line_price),
+        normalizedAddons,
+        existingAddonRows,
+        existingEstimatedPrice: existing.estimated_price,
+      });
+      // NEVER true: 100 (posted) === 100 (stored GROSS) would have matched
+      // under the pre-fix comparison; 100 (posted NET) !== 90 (stored NET)
+      // correctly does not.
+      expect(decision.legacyEconomicsPreserved).toBe(false);
+
+      // The live recompute this save correctly falls through to.
+      const recompute = calculateVisitFinancialsForAddons({
+        primaryNet: 100, primaryServiceKey: null, primaryServiceCategory: null,
+        appointmentDiscount: { discountType: existing.discount_type, discountAmount: Number(existing.discount_amount), maxDiscountDollars: null, serviceKeyFilter: null, serviceCategoryFilter: null },
+      }, normalizedAddons);
+      expect(recompute.price).toBe(170); // 100 + 100 - 30 — the REAL new total
+      expect(recompute.price).not.toBe(160); // never the stale, pre-edit figure
     } finally {
       delete process.env.GATE_DISCOUNT_STACKING;
     }
