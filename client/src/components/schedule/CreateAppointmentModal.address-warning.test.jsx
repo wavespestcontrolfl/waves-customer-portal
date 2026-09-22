@@ -920,17 +920,30 @@ describe('appointment discount gate-drift protection (Codex pre-push audit P1, r
 });
 
 describe('GitHub review round 1 on PR #4656', () => {
-  // P1 (:2531): compound=false only changes STACKING ORDER in
-  // stackVisitDiscounts, never its per-discount ROUNDING — it always uses
-  // cent-exact integer half-up math. The server's UNGATED path
-  // (calculateDiscountDollars) keeps the OLDER float rounding instead: 5%
-  // of $20.70 is $1.03 there (IEEE754 float noise), never the half-up
-  // $1.04. groupStackedPerVisitTotal ran the stacked engine even with the
-  // gate off and even with NO appointment discount selected at all — an
-  // ordinary per-LINE discount, unrelated to this PR's own feature, so the
-  // collect-prepayment payload/preview disagreed with the persisted total
-  // on plain gate-off bookings.
-  it('gate OFF: the prepay preview uses the SAME legacy float rounding as the server, not stackVisitDiscounts\' cent-exact half-up', async () => {
+  // P1 (:2531), UPDATED per the round 4 structural finding: compound=false
+  // only changes STACKING ORDER in stackVisitDiscounts, never its
+  // per-discount ROUNDING — it always uses cent-exact integer half-up
+  // math. This test used to pin the server's UNGATED path
+  // (calculateDiscountDollars) at the OLDER float rounding (5% of $20.70
+  // as $1.03, IEEE754 float noise) to match it — that was correct at the
+  // time, but slice 9 of #4405 (#4658, merged to main and into this
+  // branch) made calculateDiscountDollars share the SAME cent-exact
+  // percentageDiscountDollars helper for its own percentage branch
+  // UNCONDITIONALLY ("not itself gated... whether or not
+  // GATE_DISCOUNT_STACKING is live" — see that function's own comment;
+  // also documented in this repo's CLAUDE.md: "The corrected cent-exact
+  // rounding... is live regardless of the gate"). previewLineDiscount
+  // (this component's own base per-line preview, used whenever no
+  // appointment-level discount rides the group) still did the OLD plain
+  // `baseAmount * (amt / 100)` float division, so after that merge landed
+  // this component's gate-OFF preview UNDERSHOT the server's actual
+  // persisted total by a cent on every gate-off percentage-discount line
+  // — the exact class of bug this whole file exists to catch, just with
+  // the mismatch now running the OTHER direction from what this test used
+  // to pin. Fixed by sharing lib/discountStack's percentageDiscountDollars
+  // in previewLineDiscount too, removing the legacy-float special case
+  // outright rather than adding a second one to track.
+  it('gate OFF: the prepay preview now matches the server\'s own cent-exact half-up rounding too, not the pre-slice-9 legacy float figure', async () => {
     vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: false, known: true, retry: vi.fn() });
     installModalFetch({
       basePrice: 20.70,
@@ -947,11 +960,14 @@ describe('GitHub review round 1 on PR #4656', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Five Percent/ }));
     fireEvent.change(screen.getByPlaceholderText('Ongoing'), { target: { value: '2' } });
     fireEvent.click(screen.getByRole('checkbox', { name: 'Collect prepayment' }));
-    // $20.70 - $1.03 (legacy float rounding) = $19.67/visit x 2 = $39.34.
-    await screen.findByText((_, node) => node?.textContent === '2 visits × $19.67 = $39.34');
+    // $20.70 - $1.04 (cent-exact half-up, matching the server regardless
+    // of gate) = $19.66/visit x 2 = $39.32 — never the stale $19.67/$39.34
+    // legacy-float figure.
+    await screen.findByText((_, node) => node?.textContent === '2 visits × $19.66 = $39.32');
+    expect(screen.queryByText((_, node) => node?.textContent === '2 visits × $19.67 = $39.34')).toBeNull();
   });
 
-  it('gate ON: the SAME line discount now goes through the cent-exact half-up engine (server\'s canonical restack)', async () => {
+  it('gate ON: the SAME line discount goes through the cent-exact half-up engine (server\'s canonical restack), same figure as gate off', async () => {
     vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
     installModalFetch({
       basePrice: 20.70,
@@ -1388,7 +1404,18 @@ describe('GitHub review round 3 on PR #4656', () => {
   // P1 (:3471): a confirmed-off Retry after a group has ALREADY committed
   // the discount must never clear the local selection or claim it was
   // removed -- the committed group's own saved row still carries it.
-  it('preserves a committed appointment discount through a confirmed-off Retry, and the remaining group retries clean', async () => {
+  //
+  // UPDATED per the round 4 structural finding (:3513, see
+  // appointmentDiscountGateDrifted's own comment): this used to expect a
+  // "Could not confirm..." banner to appear and require an explicit Retry
+  // click even AFTER the discount's own group had already committed --
+  // clicking that Retry used to also re-price the committed group under
+  // the newly-live regime (the exact bug :3513 reports). Once retrying no
+  // longer touches the committed group's frozen pricing at all, a drift
+  // banner whose only remaining job would be to gate that now-inert Retry
+  // serves no purpose -- Save simply stays enabled and the remaining group
+  // posts without ever needing a confirmation click.
+  it('preserves a committed appointment discount through a live gate drift, without ever blocking or requiring a Retry for it', async () => {
     vi.spyOn(window, 'alert').mockImplementation(() => {});
     const retry = vi.fn();
     vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry });
@@ -1421,19 +1448,19 @@ describe('GitHub review round 3 on PR #4656', () => {
       onCreated={booking.onCreated}
       onChange={booking.onChange}
     />);
-    await screen.findByText('Could not confirm the discount-stacking status — retry before saving.');
-    vi.mocked(ensureStackingFresh).mockResolvedValue({ enabled: false, known: true });
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
 
-    // NEVER cleared, NEVER announced as removed -- the committed group's
-    // own saved row still carries it.
-    await waitFor(() => expect(screen.queryByText('Could not confirm the discount-stacking status — retry before saving.')).toBeNull());
+    // NEVER cleared, NEVER announced as removed, and NEVER blocked on a
+    // confirmation banner -- the committed group's own saved row still
+    // carries it, and nothing further depends on the now-drifted live gate.
+    expect(screen.queryByText('Could not confirm the discount-stacking status — retry before saving.')).toBeNull();
     expect(screen.queryByText('Discount stacking is now off — the appointment discount was removed. Add it again if stacking comes back on.')).toBeNull();
     expect(screen.getByLabelText('Appointment discount').value).toBe('mil');
     expect(screen.getByText('Military Discount: -$10.00')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Schedule appointment' }).disabled).toBe(false);
 
-    // The remaining group retries clean -- locked to the ALREADY-committed
-    // group (round 2's own fix), so it correctly does NOT re-carry it.
+    // The remaining group retries clean, with no Retry click needed --
+    // locked to the ALREADY-committed group (round 2's own fix), so it
+    // correctly does NOT re-carry it.
     const submit2 = screen.getByRole('button', { name: 'Schedule appointment' });
     fireEvent.click(submit2);
     await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(3));
@@ -1591,10 +1618,14 @@ describe('GitHub review round 3 disclosed audit item on PR #4656', () => {
   // A LINE-only booking (no appointment discount at all) still needs
   // submit-time gate revalidation -- groupStackedPerVisitTotal has used
   // the stacking gate for ROUNDING since round 1 regardless of whether an
-  // appointment discount is selected, so a gate flip before submit can
-  // still make the posted prepaid.totalAmount disagree with what the
-  // server persists by a cent ($39.32 stacked vs $39.34 legacy for a
-  // $20.70/5%-off line, two visits).
+  // appointment discount is selected. This mock's `ensureStackingFresh`
+  // resolves DISAGREEING with the frozen `appointmentDiscountCompound`
+  // snapshot the pick was made under, which is what this check actually
+  // guards — the exact cents a stale vs. fresh regime would each produce
+  // (a per-line-only case now agrees either way per the round 4 finding
+  // below; a fixed-credit-plus-percentage interaction can still diverge)
+  // is not what's being pinned here, only that a disagreement blocks
+  // Save before the POST goes out at all.
   it('revalidates the gate before submit for a line-only prepay-collecting booking', async () => {
     vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
     vi.mocked(ensureStackingFresh).mockResolvedValueOnce({ enabled: false, known: true });
@@ -1622,5 +1653,112 @@ describe('GitHub review round 3 disclosed audit item on PR #4656', () => {
       expect.stringContaining('the discount-stacking setting changed while this was open'),
     ));
     expect(schedulePosts(fetcher)).toHaveLength(0);
+  });
+});
+
+describe('GitHub review round 4 on PR #4656', () => {
+  // P1 (:3185): manualPrepayPlan ("Bill annual prepay") prices through the
+  // SAME groupStackedPerVisitTotal/regime as collectPrepay, so a
+  // line-discounted booking with billAsManualPrepay armed depends on the
+  // gate exactly like a collectPrepay booking does — but the submit-time
+  // revalidation used to check collectPrepay only. Mirrors the existing
+  // "revalidates the gate before submit for a line-only prepay-collecting
+  // booking" pin one section up, with "Bill annual prepay" armed instead
+  // of the "Collect prepayment" checkbox.
+  it('revalidates the gate before submit for a manual annual-prepay booking with a line discount', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    vi.mocked(ensureStackingFresh).mockResolvedValueOnce({ enabled: false, known: true });
+    const { fetcher } = installModalFetch({
+      basePrice: 20.70,
+      enablePrepay: true,
+      discounts: [{ id: 'five-pct', name: 'Five Percent', discount_type: 'percentage', amount: 5, is_active: true, show_in_invoices: true }],
+    });
+    renderBooking();
+    await addOneSeasonalService();
+    // An ordinary LINE discount -- no appointment-level pick at all.
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for First seasonal service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Five Percent/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Annual prepay — invoices/ }));
+
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const submitBtn = screen.getByRole('button', { name: 'Schedule appointment' });
+    fireEvent.click(submitBtn);
+    await waitFor(() => expect(alertSpy).toHaveBeenCalledWith(
+      expect.stringContaining('the discount-stacking setting changed while this was open'),
+    ));
+    expect(schedulePosts(fetcher)).toHaveLength(0);
+  });
+
+  // P1 (:3513): once the discount's OWN group has committed under
+  // stacking-ON, a LATER group's own failure followed by a live gate drift
+  // to confirmed-off must not silently re-price the ALREADY-SAVED group
+  // under the OTHER regime — appointmentDiscountGateSnapshot (and
+  // therefore appointmentDiscountCompound, which appointmentDiscountPreview
+  // reads directly every render) must stay frozen at whatever regime the
+  // committed group actually saved under. No Retry banner/click is
+  // involved here at all (see appointmentDiscountGateDrifted's own
+  // comment) — the drift alone, with no action taken, must never move
+  // the displayed total.
+  it('keeps the committed group priced under its ORIGINAL regime through a live gate drift, with no banner or Retry needed', async () => {
+    vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const retry = vi.fn();
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry });
+    const secondScheduleRequest = deferred();
+    const { fetcher } = installModalFetch({
+      secondScheduleRequest,
+      discounts: [
+        { id: 'half', name: 'Half Off', discount_type: 'percentage', amount: 50, is_active: true, show_in_invoices: true },
+        {
+          id: 'credit', name: 'Ten Oh Three', discount_type: 'fixed_amount', amount: 10.03,
+          is_active: true, show_in_invoices: true, service_key_filter: 'svc_first',
+        },
+      ],
+    });
+    const booking = renderBooking();
+    const submit = await addTwoSeasonalServices();
+    // 50% line discount on First -- the SAME line the scoped appointment
+    // credit reaches, so their interaction (fixed credit BEFORE line
+    // percentage, compound-ordered) actually changes the total by regime.
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for First seasonal service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Half Off/ }));
+    const picker = await screen.findByLabelText('Appointment discount');
+    fireEvent.change(picker, { target: { value: 'credit' } });
+
+    // Compound (stacking ON): the $10.03 fixed credit comes off First's
+    // full $100 FIRST ($89.97 left), then 50% off that remainder ($44.99)
+    // -- $55.01 net for First, $100 untouched for Second -- $144.98 total.
+    await screen.findByText((_, node) => node?.textContent === 'Total: $144.98');
+
+    fireEvent.click(submit);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(2));
+    // First (the discount's own, scoped group) committed; Second is still
+    // in flight.
+    expect(JSON.parse(schedulePosts(fetcher)[0][1].body).discountId).toBe('credit');
+    await act(async () => {
+      secondScheduleRequest.resolve(jsonResponse({ error: 'failed' }, { ok: false, status: 500 }));
+      await secondScheduleRequest.promise;
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Schedule appointment' }).disabled).toBe(false));
+
+    // The gate drifts to confirmed-off AFTER First already committed.
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: false, known: true, retry });
+    booking.view.rerender(<CreateAppointmentModal
+      defaultCustomer={CUSTOMER}
+      defaultDate={booking.scheduledDate}
+      defaultWindowStart="09:00"
+      onClose={booking.onClose}
+      onCreated={booking.onCreated}
+      onChange={booking.onChange}
+    />);
+    // No banner, no block -- the discount's own group already committed,
+    // so this drift changes nothing further to reconcile.
+    expect(screen.queryByText('Could not confirm the discount-stacking status — retry before saving.')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Schedule appointment' }).disabled).toBe(false);
+
+    // The selection stays (round 3's own fix) AND its regime stays frozen
+    // at stacking-ON (THIS fix) -- $144.98, never the $139.97 a re-priced
+    // compound=false total would show for the ALREADY-SAVED First group.
+    expect(screen.getByText((_, node) => node?.textContent === 'Total: $144.98')).toBeTruthy();
+    expect(screen.queryByText((_, node) => node?.textContent === 'Total: $139.97')).toBeNull();
   });
 });

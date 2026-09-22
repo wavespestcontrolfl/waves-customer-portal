@@ -525,7 +525,17 @@ export function stackGroupConflict(rows) {
       || String(first.scope ?? '') === String(row.scope ?? '')
     ));
     if (clash) {
-      return { group, names: [clash.name || 'discount', row.name || 'discount'] };
+      // GitHub review round 4 P2 (PR #4656, :3579): `names` alone lets two
+      // callers that only compare display names misclassify which SIDE of
+      // the conflict is the appointment-level slot — the same catalog
+      // preset can legitimately sit on the appointment slot in one submit
+      // group and on an unrelated LINE in another group; a cadence edit
+      // that merges groups can then produce a line-vs-line conflict where
+      // one of the two names happens to equal the (uninvolved) appointment
+      // discount's own name. Returning the actual clashing rows (which
+      // still carry the `spansAll`/`scope` tags laneRow attached) lets a
+      // caller identify appointment involvement by ROW IDENTITY instead.
+      return { group, names: [clash.name || 'discount', row.name || 'discount'], rows: [clash, row] };
     }
     seen.set(group, [...held, row]);
   }

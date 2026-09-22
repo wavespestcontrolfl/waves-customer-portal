@@ -10,7 +10,7 @@ const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../midd
 const logger = require('../services/logger');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive } = require('../config/feature-gates');
-const { percentageDiscountDollars } = require('../services/discount-stack');
+const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
 const { collectiveMoveGateOn, dateExceptionStamp } = require('../services/rebooker');
@@ -5989,6 +5989,119 @@ function duplicateSeriesConflictBody(existingSeries) {
 }
 
 // POST /api/admin/schedule — create new service
+// ─────────────────────────────────────────────────────────────────────────
+// POST /api/admin/schedule/preview — dry-run pricing/prepay preview for the
+// appointment-creation modal (GATE_DISCOUNT_STACKING, round 4 structural
+// fix on PR #4656). Accepts the SAME per-group payload shape the modal
+// POSTs to /api/admin/schedule to create a series (services, cadence,
+// discounts including the appointment-level pick and each line's own pick,
+// prepay options) and runs it through the EXACT SAME buildAppointmentPricing
+// the creation route below calls — zero drift risk, since it is the
+// identical function, not a client-side mirror. NO writes: nothing is
+// inserted, updated or deleted; only customer/service rows are READ, the
+// same reads buildAppointmentPricing's own inputs already require.
+//
+// Why this exists: the modal's own client-side re-derivation of this math
+// (CreateAppointmentModal.jsx's appointmentDiscountPreview /
+// groupStackedPerVisitTotal) kept drifting from this route's actual save
+// path across many review rounds — cadence-sort ordering, gate-regime
+// mismatches, committed-group tracking, each fixed as its own caller-side
+// patch, each round finding a new one (see this branch's own commit
+// history). The structural fix: stop maintaining two sources of truth for
+// the same number. The server computes it ONCE, here; the modal displays
+// and later POSTS exactly what this endpoint returned, never recomputing
+// it independently.
+//
+// Placed in its own region, separate from the creation route immediately
+// below — server/routes/admin-schedule.js is shared with another
+// concurrently-developed lane (an update-details preview endpoint); this
+// block is scoped to creation only and does not touch anything above it.
+router.post('/preview', requireAdmin, async (req, res, next) => {
+  try {
+    const groups = Array.isArray(req.body?.groups) ? req.body.groups : [];
+    if (!groups.length) return res.status(400).json({ error: 'groups is required and must be a non-empty array' });
+    if (groups.length > 12) return res.status(400).json({ error: 'too many groups' });
+    // The regime this WHOLE preview response was computed under — the
+    // modal records this per group at commit time (expected_discount_stacking
+    // on the real create POST) so the create route can refuse a mismatch
+    // instead of silently saving under a different regime than what was
+    // previewed.
+    const regime = discountStackingLive();
+    const results = [];
+    for (const group of groups) {
+      const {
+        key, customerId, scheduledDate, serviceType, serviceId, estimatedPrice, primaryLinePrice,
+        primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount,
+        isRecurring, recurringCount, collectPrepay,
+      } = group || {};
+      if (!customerId || !serviceType) {
+        results.push({ key: key ?? null, error: 'customerId and serviceType are required' });
+        continue;
+      }
+      const customer = await db('customers').where({ id: customerId }).first();
+      if (!customer) { results.push({ key: key ?? null, error: 'Customer not found' }); continue; }
+      let serviceRecord = null;
+      if (serviceId) {
+        try { serviceRecord = await db('services').where({ id: serviceId }).first(); }
+        catch (e) { logger.warn(`[schedule/preview] services lookup failed: ${e.message}`); }
+      }
+      // Same derivation the creation route itself uses (bookingCreatesWaveGuardCoverage,
+      // defined above buildAppointmentPricing) — a missing/invalid scheduledDate
+      // resolves anchorDate to null and this conservatively returns false
+      // (no membership-booking discount floor), never throws.
+      const resolvedIsCallback = isReService({ serviceKey: serviceRecord?.service_key, serviceName: serviceRecord?.name, serviceType });
+      const recurringMembershipBooking = bookingCreatesWaveGuardCoverage({
+        isRecurring: !!isRecurring, isCallback: resolvedIsCallback, serviceType, serviceRecord, customer, scheduledDate,
+      });
+      let pricing;
+      try {
+        pricing = await buildAppointmentPricing({
+          serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount,
+          serviceAddons, discountId, discountType, discountAmount, customer, recurringMembershipBooking,
+        });
+      } catch (e) {
+        results.push({ key: key ?? null, error: e.message || 'pricing failed' });
+        continue;
+      }
+      // Stack-group verdict: the creation route itself does not enforce
+      // this today (buildAppointmentPricing never calls assertStackGroups)
+      // — surfaced here as a reviewed advisory alongside the price, not a
+      // hard block, matching the creation route's own current (unenforced)
+      // behavior exactly; a future slice can wire this into an actual 400.
+      const conflictRows = [];
+      if (pricing.primaryDiscount) conflictRows.push({ ...pricing.primaryDiscount, scope: 'line:primary' });
+      (pricing.addonLines || []).forEach((line, i) => {
+        if (line.discount) conflictRows.push({ ...line.discount, scope: `line:addon:${i}` });
+      });
+      if (pricing.appointmentDiscount) conflictRows.push({ ...pricing.appointmentDiscount, spansAll: true });
+      let stackGroupConflictVerdict = null;
+      try { stackGroupConflictVerdict = discountStackGroupConflict(conflictRows); } catch { stackGroupConflictVerdict = null; }
+
+      // The per-visit prepay projection — mirrors recurringGroupRequestFields'
+      // own client-side formula (finiteCount-or-4 default), now computed
+      // against the AUTHORITATIVE stacked per-visit price
+      // (pricing.finalPrice) instead of a client re-derivation.
+      const parsedCount = Number.parseInt(recurringCount, 10);
+      const finiteCount = Number.isInteger(parsedCount) && parsedCount >= 2 ? parsedCount : null;
+      const perVisit = pricing.finalPrice || 0;
+      const prepay = (isRecurring && collectPrepay)
+        ? { perVisit, totalAmount: Math.round(perVisit * (finiteCount || 4) * 100) / 100 }
+        : null;
+
+      results.push({
+        key: key ?? null,
+        price: pricing.finalPrice,
+        primaryDiscount: pricing.primaryDiscount || null,
+        addonLines: (pricing.addonLines || []).map((l) => ({ price: l.price, discount: l.discount || null })),
+        appointmentDiscount: pricing.appointmentDiscount || null,
+        stackGroupConflict: stackGroupConflictVerdict,
+        prepay,
+      });
+    }
+    res.json({ regime, results });
+  } catch (e) { next(e); }
+});
+
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const {

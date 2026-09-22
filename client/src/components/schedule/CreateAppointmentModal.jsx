@@ -38,7 +38,10 @@ import { useSlotConflicts } from './useSlotConflicts';
 import BestTimeHint, { detourPhrase } from './BestTimeHint';
 import { useBestTimes } from './useBestTimes';
 import { etDateString } from '../../lib/timezone';
-import { stackVisitDiscounts, stackablePresets, stackGroupConflict, isCustomAmountPreset, isCustomPercentagePreset } from '../../lib/discountStack';
+import {
+  stackVisitDiscounts, stackablePresets, stackGroupConflict, isCustomAmountPreset, isCustomPercentagePreset,
+  percentageDiscountDollars,
+} from '../../lib/discountStack';
 import { useDiscountStackingState, ensureStackingFresh } from '../../hooks/useDiscountStacking';
 import { propertyRelationshipChip } from '../../lib/contact-roles';
 import { addressAskNotice } from '../../lib/addressAsks';
@@ -688,7 +691,9 @@ export function canSubmitAppointments({
 // Multiple same-family seasonal lines on one estimate are not producible by
 // the estimate builder today, so this conservative surface is the
 // operator-decides path, not a workflow regression.
-export function classifySubmitGroupFailure(e, { group, linkedEstimate, separateProgram, key, groupLabelText }) {
+export function classifySubmitGroupFailure(e, {
+  group, linkedEstimate, separateProgram, key, groupLabelText, carriesAppointmentDiscount = false,
+}) {
   const dupBody = e?.body?.code === 'duplicate_recurring_series' ? e.body : null;
   const ownSeriesCount = !!dupBody && !!linkedEstimate?.id && Array.isArray(dupBody.existingSeries)
     ? dupBody.existingSeries.filter(
@@ -696,16 +701,36 @@ export function classifySubmitGroupFailure(e, { group, linkedEstimate, separateP
     ).length
     : 0;
   const familyIndex = Number.isInteger(group.seasonalIndex) ? group.seasonalIndex : 0;
-  if (ownSeriesCount > familyIndex && separateProgram?.key !== key) {
+  const ownSeriesProven = ownSeriesCount > familyIndex && separateProgram?.key !== key;
+  // GitHub review round 4 P1 (PR #4656, :3225): ownSeriesProven proves only
+  // that an EARLIER ATTEMPT of this same booking already created a series
+  // in this family position — duplicateSeriesConflictBody (server) does
+  // not report the existing row's discount identity or amount, so it
+  // proves nothing about whether that row actually carries the discount
+  // picked in THIS session. Auto-recovering a discount-bearing group here
+  // would mark it appointmentDiscountCommittedGroupKeyRef's committed
+  // group (skipping it for the rest of this submit, per the caller) even
+  // when the existing series predates the pick — the operator selected a
+  // discount that was labeled "already linked" and no row ever actually
+  // received it, a silent drop with no error the operator could act on.
+  // Recovery stays safe for a group that carries no discount; one that
+  // does must surface instead of being auto-recovered, until the server's
+  // conflict payload can prove the existing row's discount (tracked
+  // separately — not this slice's file-ownership scope for
+  // duplicateSeriesConflictBody itself).
+  if (ownSeriesProven && !carriesAppointmentDiscount) {
     return { recoverable: true, duplicateConflict: null, firstError: null };
   }
   const duplicateConflict = dupBody
     ? { ...dupBody, key, retryUncertain: separateProgram?.key === key }
     : null;
+  const message = (ownSeriesProven && carriesAppointmentDiscount)
+    ? `${e.message} — a discount was selected for this group and the existing series' discount can't be confirmed; resolve manually before retrying`
+    : e.message;
   return {
     recoverable: false,
     duplicateConflict,
-    firstError: { label: groupLabelText, message: e.message, duplicate: !!dupBody },
+    firstError: { label: groupLabelText, message, duplicate: !!dupBody },
   };
 }
 
@@ -1664,10 +1689,24 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // live value disagrees with the value frozen at selection time — the
   // background poll moved under the operator's feet, in EITHER direction.
   // Save must block until this is explicitly reconciled (never silently).
+  //
+  // GitHub review round 4 P1 (PR #4656, :3513) follow-up: once the
+  // discount's OWN group has already committed, retryAppointmentDiscountGate
+  // deliberately stops updating appointmentDiscountGateSnapshot (its own
+  // comment explains why — the committed group's displayed total must stay
+  // priced under the regime it actually saved under). A drift banner whose
+  // only job was to gate a Retry that would otherwise re-price that saved
+  // group is no longer needed once there is nothing left it could
+  // mis-price: the commit-lock (appointmentDiscountCommittedGroupKeyRef)
+  // already prevents this discount from ever being re-picked or re-posted,
+  // so once the own group commits, a later live-gate drift is inert for
+  // THIS discount and must not go on blocking the remaining groups' own
+  // saves behind a Retry that would no longer change anything.
   const appointmentDiscountGateDrifted = !!appointmentDiscountState
     && appointmentDiscountGateSnapshot !== null
     && stackingKnown
-    && stackingEnabled !== appointmentDiscountGateSnapshot;
+    && stackingEnabled !== appointmentDiscountGateSnapshot
+    && appointmentDiscountCommittedGroupKeyRef.current === null;
   // Booster-months dropdown (owner request 2026-08-02): which service line's
   // month checklist is open. One open at a time, like the discount popover.
   // Keyed by STABLE lineId, never array index (Codex #3173 r2): removing an
@@ -1917,8 +1956,24 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const amt = Number(discount?.amount) || 0;
     let dollars = 0;
     if (discount?.discount_type === 'percentage' || discount?.discount_type === 'variable_percentage') {
-      dollars = baseAmount * (amt / 100);
-      if (discount.max_discount_dollars) dollars = Math.min(dollars, Number(discount.max_discount_dollars));
+      // GitHub round 4 structural finding (PR #4656): this used to be
+      // baseAmount * (amt / 100) — plain IEEE754 float division (5% of
+      // $20.70 rounds down to $1.03, 20.70 * 0.05 === 1.0349999999999999).
+      // That matched the server's OWN calculateDiscountDollars whenever
+      // GATE_DISCOUNT_STACKING was off — until slice 9 of #4405 (#4658,
+      // merged to main and into this branch) made calculateDiscountDollars
+      // share this SAME cent-exact percentageDiscountDollars helper for
+      // its own percentage branch UNCONDITIONALLY ("not itself gated...
+      // whether or not GATE_DISCOUNT_STACKING is live" — see that
+      // function's own comment). buildAppointmentPricing (the create
+      // route) calls calculateDiscountDollars for every primary/add-on
+      // line discount regardless of gate, so this client preview now
+      // undershoots the ACTUAL persisted total by a cent on every gate-off
+      // percentage-discount line too — not only the gate-on case this
+      // helper already matched via stackVisitDiscounts elsewhere. Sharing
+      // the same helper here removes the divergence outright, in both gate
+      // states, rather than adding a second special case to track.
+      dollars = percentageDiscountDollars(baseAmount, amt, discount.max_discount_dollars);
     } else if (discount?.discount_type === 'fixed_amount' || discount?.discount_type === 'variable_amount') {
       dollars = amt;
     } else if (discount?.discount_type === 'free_service') {
@@ -3180,8 +3235,28 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           // revalidation at all. Now also fires whenever this group's own
           // prepaid.totalAmount payload (isRecurring && collectPrepay)
           // depends on that rounding, i.e. it carries any line discount.
-          const groupPrepayDependsOnRounding = isRecurring && collectPrepay
-            && group.lines.some((s) => s.lineDiscount);
+          // GitHub review round 4 P1 (PR #4656, :3185): manualPrepayPlan
+          // (the "Bill annual prepay" control) prices its preview through
+          // this SAME groupStackedPerVisitTotal/regime — a line-discounted
+          // recurring booking with billAsManualPrepay armed depends on the
+          // gate exactly like a collectPrepay booking does, but this check
+          // only ever covered collectPrepay. A gate flip after the
+          // displayed annual-prepay preview but before THIS group's POST
+          // went undetected here: the appointment still booked, the server
+          // committed the other rounding regime for the visit price, and
+          // the post-booking assertManualPrepayMintEligible comparison
+          // (which re-fetches and compares against what the operator
+          // approved) then rejected the changed total — the appointment
+          // booked but the annual-prepay invoice was never created, a
+          // silent-to-the-operator-until-then loss of the sale. Matched by
+          // group identity (manualPrepayPlan.targetKey), the same way the
+          // mint path itself identifies which created series the prepay
+          // covers — a stray OTHER group's line discount must not force
+          // this revalidation on a booking that was never going to mint.
+          const groupPrepayDependsOnRounding = group.lines.some((s) => s.lineDiscount) && (
+            (isRecurring && collectPrepay)
+            || (billAsManualPrepay && manualPrepayPlan.targetKey === key)
+          );
           if (appointmentDiscountState || groupPrepayDependsOnRounding) {
             const fresh = await ensureStackingFresh();
             assertSubmitCurrent();
@@ -3216,6 +3291,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           assertSubmitCurrent();
           const decision = classifySubmitGroupFailure(e, {
             group, linkedEstimate, separateProgram, key, groupLabelText: groupLabel(group),
+            carriesAppointmentDiscount,
           });
           if (decision.recoverable) {
             createdGroupKeysRef.current.add(key);
@@ -3508,6 +3584,24 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         setAppointmentDiscountGateSnapshot(null);
         setToast('Discount stacking is now off — the appointment discount was removed. Add it again if stacking comes back on.');
         setTimeout(() => setToast(''), 4000);
+      } else if (appointmentDiscountCommittedGroupKeyRef.current !== null) {
+        // GitHub review round 4 P1 (PR #4656, :3513): the discount's OWN
+        // group has already committed under whatever regime
+        // appointmentDiscountGateSnapshot currently holds — that saved row
+        // priced under THAT regime and cannot un-happen. A LATER group's
+        // own failure-then-gate-off-Retry reached this branch and
+        // overwrote the snapshot to the new live value anyway: the
+        // selection itself stayed preserved (the branch above correctly
+        // skips clearing it), but appointmentDiscountCompound is exactly
+        // this snapshot, and appointmentDiscountPreview /
+        // groupStackedPerVisitTotal recompute the ALREADY-SAVED group's
+        // display total from it on every render — so a fixed appointment
+        // credit plus a line percentage could show a different total than
+        // the amount actually saved, with no edit and no re-submit of that
+        // group at all. Once this discount's own group has committed, its
+        // pricing regime is frozen; only a reload (which re-derives
+        // everything from scratch, no stale committed-group ref) may
+        // change it.
       } else {
         setAppointmentDiscountGateSnapshot(fresh.enabled);
       }
@@ -3570,13 +3664,29 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // the banner button's own default action -- clears ONLY the
   // appointment-level slot. When existingSelectionConflict is between two
   // LINE discounts (neither row is the appointment-level one), that action
-  // clears nothing and leaves the conflict/block in place. Detected by
-  // whether the appointment discount's OWN name is one of the two
-  // conflicting names stackGroupConflict returned.
+  // clears nothing and leaves the conflict/block in place.
+  //
+  // GitHub review round 4 P2 (PR #4656, :3579): this USED to detect
+  // involvement by matching `existingSelectionConflict.names` against
+  // `appointmentDiscount.name` — a display-name string compare. If the
+  // appointment slot uses preset X in one submit group while a DIFFERENT
+  // group has a line also using preset X, a cadence edit can merge that
+  // line with a different non-stackable line discount and produce a
+  // line-vs-line conflict where neither clashing row is the appointment
+  // slot at all — but one of the two names still equals "X", so the old
+  // check misclassified it as involving the appointment slot. The banner
+  // then offered "Remove discount", which cleared the UNRELATED
+  // appointment discount while leaving both real conflicting line
+  // discounts (and the save blocker) untouched. stackGroupConflict now
+  // returns the actual clashing `rows` (still carrying laneRow's own
+  // `spansAll`/`scope` tags), so involvement is identified by ROW IDENTITY
+  // — whichever row(s) laneRow tagged `spansAll: true` really is the
+  // appointment-level slot — never by whether a name happens to match.
   const existingSelectionConflictInvolvesAppointment = !!(
     existingSelectionConflict
     && appointmentDiscount
-    && existingSelectionConflict.names.some((name) => String(name) === String(appointmentDiscount.name))
+    && Array.isArray(existingSelectionConflict.rows)
+    && existingSelectionConflict.rows.some((row) => row?.spansAll === true)
   );
   const discountSaveBlockedReason = staleStackingNotice
     || stackingUnconfirmedBlocksSave

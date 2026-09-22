@@ -343,6 +343,30 @@ describe('classifySubmitGroupFailure', () => {
     expect(decision).toEqual({ recoverable: true, duplicateConflict: null, firstError: null });
   });
 
+  // GitHub review round 4 P1 (PR #4656, :3225): the SAME conflict payload
+  // as the "recovers silently" case above proves only that a series
+  // exists from this booking's linked estimate -- duplicateSeriesConflictBody
+  // (server) does not report the existing row's discount identity or
+  // amount, so it proves nothing about whether that row actually carries
+  // the discount picked THIS session. A discount-bearing group must
+  // surface instead of being auto-recovered, with a message that tells
+  // the operator why.
+  it('does not auto-recover a discount-bearing group even when the same conflict payload would otherwise prove it', () => {
+    const decision = classifySubmitGroupFailure(
+      dupError([{ id: 's1', sourceEstimateId: 108 }]),
+      {
+        group: { seasonalIndex: 0 }, linkedEstimate: { id: 108 }, separateProgram: null,
+        key: 'quarterly', groupLabelText: 'Quarterly', carriesAppointmentDiscount: true,
+      },
+    );
+    expect(decision.recoverable).toBe(false);
+    expect(decision.duplicateConflict).toMatchObject({ key: 'quarterly' });
+    expect(decision.firstError).toMatchObject({
+      label: 'Quarterly', duplicate: true,
+      message: expect.stringContaining("discount was selected for this group and the existing series' discount can't be confirmed"),
+    });
+  });
+
   it('does not recover a same-family second seasonal sibling short of its own series', () => {
     // Only one owned series exists, but THIS group is the second seasonal
     // sibling (seasonalIndex 1) — the guard must not treat the first
