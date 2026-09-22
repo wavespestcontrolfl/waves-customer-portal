@@ -2,7 +2,7 @@
 import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { MemoryRouter } from "react-router-dom";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import DashboardPageV2 from "../DashboardPageV2";
 import { adminFetch } from "../../../utils/admin-fetch";
@@ -73,6 +73,7 @@ const CORE_KPIS = {
 };
 
 const FIXTURES = {
+  "/admin/command-center/stale-visits": { visits: [] },
   "/admin/dashboard": {
     kpis: {
       revenueMTD: 497,
@@ -419,4 +420,43 @@ describe("DashboardPageV2 sections", () => {
       ).toBe(true);
     });
   });
+  it("keeps current-period KPI values visible after a failed refresh", async () => {
+    renderPage();
+    await screen.findByText("3/6 jobs");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Refresh", exact: true })).toBeEnabled());
+    const fetchFixture = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options) => path.includes("/core-kpis")
+      ? Promise.reject(new Error("Unavailable")) : fetchFixture(path, options));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh", exact: true }));
+    await screen.findByText(/Previously loaded values may be out of date/);
+    expect(screen.getByText("3/6 jobs")).toBeInTheDocument();
+    expect(screen.queryByText("Failed to load KPIs for this period")).not.toBeInTheDocument();
+  });
+
+  it("keeps attribution visible when optional channel ROI is unavailable", async () => {
+    const fetchFixture = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options) => {
+      if (path.includes("/channel-roi")) return Promise.reject(new Error("Unavailable"));
+      if (path.includes("/leads-by-source")) return Promise.resolve({ sources: [{ name: "Fixture source", sourceType: "organic", leads: 2, booked: 1, revenue: 100 }] });
+      return fetchFixture(path, options);
+    });
+    renderPage();
+    await screen.findByText("Where leads & revenue come from");
+    await screen.findByText("Failed to load channel ROI for this period");
+    expect(screen.queryByText("Failed to load attribution")).not.toBeInTheDocument();
+    expect(screen.getByText("Where leads & revenue come from")).toBeInTheDocument();
+  });
+
+  it("renders KPI history sparklines from the history response and removes them outside MTD", async () => {
+    const fetchFixture = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options) => path.includes("/kpi-history")
+      ? Promise.resolve({ days: 90, series: { completion_rate: [{ value: 40 }, { value: 50 }] } })
+      : fetchFixture(path, options));
+    renderPage();
+    const label = await screen.findByText("Service Completion");
+    await waitFor(() => expect(label.parentElement.querySelector("polyline")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "7D" }));
+    await waitFor(() => expect(within(document.getElementById("today")).getByText("Service Completion").parentElement.querySelector("polyline")).toBeNull());
+  });
+
 });
