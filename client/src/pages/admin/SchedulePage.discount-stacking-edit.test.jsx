@@ -341,6 +341,58 @@ it('retryable gate availability: an unconfirmed probe with an interacting appoin
   await waitFor(() => expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeEnabled());
 });
 
+it('structural round on #4657: Save is disabled until the server preview confirms the appointment+line total, then shows the server figure', async () => {
+  let resolvePreview;
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
+    if (url.endsWith('/admin/discounts/stacking')) return { ok: true, json: async () => ({ enabled: true }) };
+    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => DISCOUNTS };
+    if (url.includes('/update-details/preview')) {
+      return new Promise((resolve) => {
+        resolvePreview = () => resolve({ ok: true, json: async () => ({ total: 123.45, addons: [] }) });
+      });
+    }
+    return { ok: true, json: async () => ({}) };
+  }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  // Same ambiguous scenario as the gate-probe test above (appointment pick +
+  // the mosquito line's own frozen Military stamp) — this time the STACKING
+  // probe itself resolves cleanly and quickly; it is the NEW server money
+  // preview (a separate round trip) that Save now waits on.
+  await waitFor(() => expect(apptDiscountSelect()).toBeInTheDocument());
+  fireEvent.change(apptDiscountSelect(), { target: { value: 'custom' } });
+  fireEvent.change(labeledControl('Discount type'), { target: { value: 'fixed_amount' } });
+  fireEvent.change(labeledControl('Amount ($)'), { target: { value: '10' } });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeDisabled(), { timeout: 2000 });
+  expect(screen.getByText(/Confirming totals with the server/)).toBeInTheDocument();
+  // The 500ms debounce has to actually elapse and the request land before
+  // there is anything to resolve.
+  await waitFor(() => expect(resolvePreview).toBeInstanceOf(Function), { timeout: 2000 });
+  await act(async () => { resolvePreview(); });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeEnabled());
+  // The displayed total is now the SERVER's own figure ($123.45), never a
+  // client re-derivation.
+  expect(totalText()).toBe('$123.45');
+});
+
+it('structural round on #4657: a preview failure blocks Save with a visible error, not a silent stale total', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
+    if (url.endsWith('/admin/discounts/stacking')) return { ok: true, json: async () => ({ enabled: true }) };
+    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => DISCOUNTS };
+    if (url.includes('/update-details/preview')) return { ok: false, status: 500, json: async () => ({ error: 'boom' }) };
+    return { ok: true, json: async () => ({}) };
+  }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(apptDiscountSelect()).toBeInTheDocument());
+  fireEvent.change(apptDiscountSelect(), { target: { value: 'custom' } });
+  fireEvent.change(labeledControl('Discount type'), { target: { value: 'fixed_amount' } });
+  fireEvent.change(labeledControl('Amount ($)'), { target: { value: '10' } });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeDisabled(), { timeout: 2000 });
+  await waitFor(() => expect(screen.getByText(/Could not confirm the totals this save would produce/)).toBeInTheDocument(), { timeout: 2000 });
+  expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
+});
+
 it('VISIT_CHANGED_RETRY: the save is refused with a clear message and nothing silently overwrites', async () => {
   vi.stubGlobal('fetch', mockFetch({
     stackingEnabled: true,

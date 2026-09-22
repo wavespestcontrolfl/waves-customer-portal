@@ -393,6 +393,336 @@ postgres('scheduled_services PUT /:id/update-details — non-stackable stack_gro
   });
 });
 
+postgres('scheduled_services PUT /:id/update-details — structural round (P0 :9965, P1 :10095, P1 :2994) against migrated PostgreSQL', () => {
+  let database;
+  let trx;
+  let customerId;
+  let visitId;
+  let silverId;
+  let militaryId;
+
+  beforeAll(() => {
+    const connection = process.env.DATABASE_URL;
+    const url = new URL(connection);
+    const localCI = ['localhost', '127.0.0.1'].includes(url.hostname);
+    const ownedQA = process.env.WAVES_LOCAL_DEV === '1'
+      && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
+    if (!localCI && !ownedQA) throw new Error('Use disposable CI or this worktree\'s private QA database');
+    database = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 2 } });
+    require('../models/db').connection = database;
+  });
+
+  beforeEach(async () => {
+    // Every pinned scenario below is deliberately GATE-OFF (never set here)
+    // — the P0 is specifically that a gate-OFF save gets zero preservation
+    // coverage from legacyEconomicsPreservationDecision.
+    delete process.env.GATE_DISCOUNT_STACKING;
+    trx = await database.transaction();
+    require('../models/db').connection = trx;
+    customerId = randomUUID();
+    await trx('customers').insert({
+      id: customerId, first_name: 'Synthetic', last_name: 'Fixture',
+      email: `${customerId}@example.invalid`, phone: `fixture-${customerId.slice(0, 8)}`,
+      address_line1: '100 Test Lane', city: 'Test City', zip: '00000', active: true,
+      pipeline_stage: 'active_customer', is_military: false,
+    });
+    silverId = randomUUID();
+    militaryId = randomUUID();
+    await trx('discounts').insert([
+      {
+        id: silverId, discount_key: 'wg_silver_' + silverId.slice(0, 8), name: 'WaveGuard Silver',
+        discount_type: 'percentage', amount: 10, max_discount_dollars: 5, is_active: true,
+        is_auto_apply: false, show_in_invoices: true, stack_group: 'tier', is_stackable: false,
+      },
+      {
+        id: militaryId, discount_key: 'military_' + militaryId.slice(0, 8), name: 'Military Discount',
+        discount_type: 'fixed_amount', amount: 10, is_active: true, is_auto_apply: false,
+        show_in_invoices: true, requires_military: true,
+      },
+    ]);
+    const [row] = await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, service_type: 'Quarterly Pest Control',
+      service_key_snapshot: 'pest_general_quarterly', status: 'confirmed',
+      scheduled_date: '2040-02-01', window_start: '08:00', window_end: '10:00',
+      estimated_price: 100, primary_line_price: 100,
+    }).returning('*');
+    visitId = row.id;
+  });
+
+  afterEach(async () => { if (trx) await trx.rollback(); });
+  afterAll(async () => { await database?.destroy(); });
+
+  const router = require('../routes/admin-schedule');
+  function findHandler(method, path) {
+    const layer = router.stack.find((l) => l.route?.path === path && l.route.methods[method]);
+    return layer.route.stack[layer.route.stack.length - 1].handle;
+  }
+  async function put(id, body) {
+    const handler = findHandler('put', '/:id/update-details');
+    const req = { params: { id }, query: {}, body, headers: {} };
+    let statusCode = 200;
+    let payload = null;
+    const res = { status(code) { statusCode = code; return this; }, json(p) { payload = p; return this; } };
+    let nextErr = null;
+    await handler(req, res, (err) => { nextErr = err; });
+    return { statusCode, payload, err: nextErr };
+  }
+
+  test('P0 :9965 — gate OFF, a notes-only resave of an UNCHANGED add-on stamp keeps its frozen $180 total, never the live-cap-clamped $195', async () => {
+    const [addon] = await trx('scheduled_service_addons').insert({
+      id: randomUUID(), scheduled_service_id: visitId, service_name: 'Mosquito Add-on',
+      base_price: 100, estimated_price: 80, discount_id: silverId, discount_name: 'WaveGuard Silver',
+      discount_type: 'percentage', discount_amount: 20, discount_dollars: 20,
+    }).returning('*');
+    // silverId's OWN catalog cap is $5 (see fixture above) — lower than the
+    // $20 this line was originally stamped at. A notes-only resave that
+    // round-trips this SAME line (same id, same discount identity/type/
+    // amount) must not let that live cap silently reprice it.
+    const { statusCode, err } = await put(visitId, {
+      primaryLinePrice: 100,
+      addons: [{
+        id: addon.id, serviceName: 'Mosquito Add-on', basePrice: 100,
+        discountType: 'percentage', discountAmount: 20, discountId: silverId, discountName: 'WaveGuard Silver',
+      }],
+    });
+    expect(err).toBeFalsy();
+    expect(statusCode).toBe(200);
+    const addonRow = await trx('scheduled_service_addons').where({ scheduled_service_id: visitId }).first();
+    expect(Number(addonRow.discount_dollars)).toBe(20);
+    expect(Number(addonRow.estimated_price)).toBe(80);
+    const visitRow = await trx('scheduled_services').where({ id: visitId }).first();
+    expect(Number(visitRow.estimated_price)).toBe(180);
+  });
+
+  test('P1 :10095 — replacing a stored appointment-level Silver with a custom $5 discount, then picking Silver fresh on an add-on, is allowed', async () => {
+    await trx('scheduled_services').where({ id: visitId })
+      .update({ discount_id: silverId, discount_type: 'percentage', discount_amount: 10 });
+    const { statusCode, payload, err } = await put(visitId, {
+      // No discountId posted — a custom (catalog-less) discount replacing
+      // the stored Silver preset.
+      discountType: 'fixed_amount', discountAmount: 5,
+      primaryLinePrice: 100,
+      addons: [{
+        serviceName: 'Mosquito Add-on', basePrice: 50, discountType: 'percentage',
+        discountAmount: 10, discountId: silverId, discountName: 'WaveGuard Silver', lineDiscountFresh: true,
+      }],
+    });
+    expect(err).toBeFalsy();
+    expect(statusCode).toBe(200);
+    expect(payload?.error).toBeFalsy();
+  });
+
+  test('P1 :2994 — a FRESH ineligible line discount pick is rejected 400, not silently saved', async () => {
+    const { statusCode, payload } = await put(visitId, {
+      primaryLinePrice: 100,
+      addons: [{
+        serviceName: 'Mosquito Add-on', basePrice: 50, discountType: 'fixed_amount',
+        discountAmount: 10, discountId: militaryId, discountName: 'Military Discount', lineDiscountFresh: true,
+      }],
+    });
+    expect(statusCode).toBe(400);
+    expect(payload.error).toMatch(/not eligible/);
+  });
+
+  test('P1 :2994 — an UNTOUCHED stamped line discount is never re-validated, even though the customer would now fail its eligibility', async () => {
+    const [addon] = await trx('scheduled_service_addons').insert({
+      id: randomUUID(), scheduled_service_id: visitId, service_name: 'Mosquito Add-on',
+      base_price: 50, estimated_price: 40, discount_id: militaryId, discount_name: 'Military Discount',
+      discount_type: 'fixed_amount', discount_amount: 10, discount_dollars: 10,
+    }).returning('*');
+    // Customer is still not military (fixture default) — this stamp would
+    // fail eligibility if re-checked. Round-tripped UNCHANGED, with no
+    // lineDiscountFresh flag — exactly what an untouched line posts.
+    const { statusCode, err } = await put(visitId, {
+      primaryLinePrice: 100,
+      addons: [{
+        id: addon.id, serviceName: 'Mosquito Add-on', basePrice: 50, discountType: 'fixed_amount',
+        discountAmount: 10, discountId: militaryId, discountName: 'Military Discount',
+      }],
+    });
+    expect(err).toBeFalsy();
+    expect(statusCode).toBe(200);
+  });
+});
+
+postgres('POST /:id/update-details/preview — dry-run parity with the real save (structural round on #4657)', () => {
+  let database;
+  let trx;
+  let customerId;
+  let visitId;
+
+  beforeAll(() => {
+    const connection = process.env.DATABASE_URL;
+    const url = new URL(connection);
+    const localCI = ['localhost', '127.0.0.1'].includes(url.hostname);
+    const ownedQA = process.env.WAVES_LOCAL_DEV === '1'
+      && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
+    if (!localCI && !ownedQA) throw new Error('Use disposable CI or this worktree\'s private QA database');
+    database = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 2 } });
+    require('../models/db').connection = database;
+  });
+
+  beforeEach(async () => {
+    delete process.env.GATE_DISCOUNT_STACKING;
+    trx = await database.transaction();
+    require('../models/db').connection = trx;
+    customerId = randomUUID();
+    await trx('customers').insert({
+      id: customerId, first_name: 'Synthetic', last_name: 'Fixture',
+      email: `${customerId}@example.invalid`, phone: `fixture-${customerId.slice(0, 8)}`,
+      address_line1: '100 Test Lane', city: 'Test City', zip: '00000', active: true,
+      pipeline_stage: 'active_customer',
+    });
+  });
+
+  afterEach(async () => { if (trx) await trx.rollback(); delete process.env.GATE_DISCOUNT_STACKING; });
+  afterAll(async () => { await database?.destroy(); });
+
+  const router = require('../routes/admin-schedule');
+  function findHandler(method, path) {
+    const layer = router.stack.find((l) => l.route?.path === path && l.route.methods[method]);
+    return layer.route.stack[layer.route.stack.length - 1].handle;
+  }
+  async function call(method, id, body) {
+    const handler = findHandler(method, '/:id/update-details' + (method === 'post' ? '/preview' : ''));
+    const req = { params: { id }, query: {}, body, headers: {} };
+    let statusCode = 200;
+    let payload = null;
+    const res = { status(code) { statusCode = code; return this; }, json(p) { payload = p; return this; } };
+    let nextErr = null;
+    await handler(req, res, (err) => { nextErr = err; });
+    return { statusCode, payload, err: nextErr };
+  }
+  const preview = (id, body) => call('post', id, body);
+  const put = (id, body) => call('put', id, body);
+
+  test('(a) notes-only legacy row: stored $90 kept, preview and save agree', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const [row] = await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, service_type: 'Quarterly Pest Control',
+      service_key_snapshot: 'pest_general_quarterly', status: 'confirmed',
+      scheduled_date: '2040-02-01', window_start: '08:00', window_end: '10:00',
+      estimated_price: 90, primary_line_price: 0,
+    }).returning('*');
+    visitId = row.id;
+    const [addon] = await trx('scheduled_service_addons').insert({
+      id: randomUUID(), scheduled_service_id: visitId, service_name: 'Mosquito Add-on',
+      base_price: 100, estimated_price: 90, discount_type: 'percentage', discount_amount: 10, discount_dollars: 10,
+    }).returning('*');
+    const body = {
+      primaryLinePrice: 0,
+      addons: [{
+        id: addon.id, serviceName: 'Mosquito Add-on', basePrice: 100,
+        discountType: 'percentage', discountAmount: 10,
+      }],
+    };
+    const previewResult = await preview(visitId, body);
+    expect(previewResult.err).toBeFalsy();
+    expect(previewResult.statusCode).toBe(200);
+    expect(Number(previewResult.payload.total)).toBe(90);
+    const saveResult = await put(visitId, body);
+    expect(saveResult.err).toBeFalsy();
+    expect(saveResult.statusCode).toBe(200);
+    const savedRow = await trx('scheduled_services').where({ id: visitId }).first();
+    expect(Number(savedRow.estimated_price)).toBe(90);
+    expect(Number(previewResult.payload.total)).toBe(Number(savedRow.estimated_price));
+  });
+
+  test('(b) single-service estimatedPrice row: preview and save agree', async () => {
+    const [row] = await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, service_type: 'Quarterly Pest Control',
+      service_key_snapshot: 'pest_general_quarterly', status: 'confirmed',
+      scheduled_date: '2040-02-01', window_start: '08:00', window_end: '10:00',
+      estimated_price: 50,
+    }).returning('*');
+    visitId = row.id;
+    const body = { estimatedPrice: 100, discountType: 'fixed_amount', discountAmount: 10 };
+    const previewResult = await preview(visitId, body);
+    expect(previewResult.err).toBeFalsy();
+    expect(previewResult.statusCode).toBe(200);
+    expect(Number(previewResult.payload.total)).toBe(90);
+    const saveResult = await put(visitId, body);
+    expect(saveResult.err).toBeFalsy();
+    expect(saveResult.statusCode).toBe(200);
+    const savedRow = await trx('scheduled_services').where({ id: visitId }).first();
+    expect(Number(savedRow.estimated_price)).toBe(90);
+    expect(Number(previewResult.payload.total)).toBe(Number(savedRow.estimated_price));
+  });
+
+  test('(c) marked row with frozen caps: preview and save agree, restacking from the FROZEN cap not the live catalog', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const lineDiscountId = randomUUID();
+    await trx('discounts').insert({
+      id: lineDiscountId, discount_key: 'frozen_' + lineDiscountId.slice(0, 8), name: 'Frozen Line Discount',
+      discount_type: 'percentage', amount: 20, max_discount_dollars: 5, is_active: true,
+      is_auto_apply: false, show_in_invoices: true,
+    });
+    const [row] = await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, service_type: 'Quarterly Pest Control',
+      service_key_snapshot: 'pest_general_quarterly', status: 'confirmed',
+      scheduled_date: '2040-02-01', window_start: '08:00', window_end: '10:00',
+      estimated_price: 85, primary_line_price: 100,
+      line_discount_type: 'percentage', line_discount_amount: 20, line_discount_id: lineDiscountId,
+      pricing_provenance: {
+        pricing_regime: 'discount_stack_v1', engine_version: 1,
+        caps: { line: { id: lineDiscountId, cap: 15 }, addons: {} },
+      },
+    }).returning('*');
+    visitId = row.id;
+    const body = { primaryLinePrice: 100, addons: [] };
+    const previewResult = await preview(visitId, body);
+    expect(previewResult.err).toBeFalsy();
+    expect(previewResult.statusCode).toBe(200);
+    // Frozen cap ($15) wins over the catalog's now-lower live cap ($5, see
+    // max_discount_dollars above): 100 - 15 = 85, never 100 - 5 = 95.
+    expect(Number(previewResult.payload.total)).toBe(85);
+    const saveResult = await put(visitId, body);
+    expect(saveResult.err).toBeFalsy();
+    expect(saveResult.statusCode).toBe(200);
+    const savedRow = await trx('scheduled_services').where({ id: visitId }).first();
+    expect(Number(savedRow.estimated_price)).toBe(85);
+    expect(Number(previewResult.payload.total)).toBe(Number(savedRow.estimated_price));
+  });
+
+  test('(d) cap-lowered unmarked row: $190 kept, preview and save agree (never the live-cap-clamped $198)', async () => {
+    const discountId = randomUUID();
+    await trx('discounts').insert({
+      id: discountId, discount_key: 'lowered_' + discountId.slice(0, 8), name: 'Lowered Cap Discount',
+      discount_type: 'percentage', amount: 10, max_discount_dollars: 2, is_active: true,
+      is_auto_apply: false, show_in_invoices: true,
+    });
+    const [row] = await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, service_type: 'Quarterly Pest Control',
+      service_key_snapshot: 'pest_general_quarterly', status: 'confirmed',
+      scheduled_date: '2040-02-01', window_start: '08:00', window_end: '10:00',
+      estimated_price: 190, primary_line_price: 100,
+    }).returning('*');
+    visitId = row.id;
+    const [addon] = await trx('scheduled_service_addons').insert({
+      id: randomUUID(), scheduled_service_id: visitId, service_name: 'Fert Add-on',
+      base_price: 100, estimated_price: 90, discount_id: discountId, discount_name: 'Lowered Cap Discount',
+      discount_type: 'percentage', discount_amount: 10, discount_dollars: 10,
+    }).returning('*');
+    const body = {
+      primaryLinePrice: 100,
+      addons: [{
+        id: addon.id, serviceName: 'Fert Add-on', basePrice: 100,
+        discountType: 'percentage', discountAmount: 10, discountId, discountName: 'Lowered Cap Discount',
+      }],
+    };
+    const previewResult = await preview(visitId, body);
+    expect(previewResult.err).toBeFalsy();
+    expect(previewResult.statusCode).toBe(200);
+    expect(Number(previewResult.payload.total)).toBe(190);
+    const saveResult = await put(visitId, body);
+    expect(saveResult.err).toBeFalsy();
+    expect(saveResult.statusCode).toBe(200);
+    const savedRow = await trx('scheduled_services').where({ id: visitId }).first();
+    expect(Number(savedRow.estimated_price)).toBe(190);
+    expect(Number(previewResult.payload.total)).toBe(Number(savedRow.estimated_price));
+  });
+});
+
 describe('scheduledServicesDiscountProvenanceColumns — fails CLOSED on a genuine introspection error (Codex pre-push audit P1, round 4 on #4657)', () => {
   // Pure unit test — no live DB needed at all: the function takes its
   // `database` handle as a plain argument, so a fake object whose own

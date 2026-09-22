@@ -2863,8 +2863,128 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     lines: serviceLines,
   });
 
+  // Codex pre-push audit structural round on #4657 (:3526/:2394's class):
+  // extracted so the preview debounce below can send the SAME add-on
+  // payload shape handleSave will actually POST — the server's dry-run
+  // preview endpoint is the source of truth for the numbers shown, but
+  // the REQUEST BODY itself must still genuinely match what Save sends,
+  // or a preview of a different payload proves nothing.
+  const buildAddonsPayload = (lines) => {
+      const cleanLines = lines
+        .map((l) => ({ ...l, serviceType: (l.serviceType || "").trim() }))
+        .filter((l) => l.serviceType);
+      const sendAddons = cleanLines.length > 0 || hadAddonsInitially;
+      const addonsPayload = sendAddons
+        ? cleanLines.map((l) => {
+            const common = {
+              // Codex pre-push audit P1 (round 3 on #4657): the server's
+              // new stack-group grandfathering (:2513) matches THIS line
+              // back to its own prior stored discount by row id — without
+              // it, every existing line looked "new" and an unrelated
+              // resave of two already-persisted same-group stamps 400'd.
+              id: l.id || undefined,
+              serviceId: l.serviceId || null,
+              // Stable catalog key for a fallback pick (no serviceId) — the
+              // server resolves the row by it before trying the label.
+              serviceKey: l.serviceKey || undefined,
+              serviceName: l.serviceType,
+              estimatedDuration:
+                l.estimatedDuration !== "" && !isNaN(parseInt(l.estimatedDuration, 10))
+                  ? parseInt(l.estimatedDuration, 10)
+                  : null,
+              recurringPattern: l.recurringPattern || null,
+              recurringIntervalDays: l.recurringIntervalDays ?? null,
+              recurringNth: l.recurringNth ?? null,
+              recurringWeekday: l.recurringWeekday ?? null,
+              skipWeekends: l.skipWeekends,
+              weekendShift: l.weekendShift,
+            };
+            // GATE_DISCOUNT_STACKING (slice 7): a line whose discount slot
+            // was touched THIS session (a fresh pick, or an explicit
+            // removal) never round-trips the original stamp below — that
+            // path is for a genuinely untouched line only. A fresh pick
+            // posts its GROSS price (Price now means "before discount" for
+            // this line — see lineGrossFor's own note) plus the slot; the
+            // server keeps an unchanged stamp verbatim elsewhere and
+            // resolves a new pick through the catalog. An explicit removal
+            // falls through to the flat-net branch at the bottom exactly
+            // like a line that never had a discount. lineDiscountActive
+            // (not the raw flag) — Codex pre-push audit P1 (round 2,
+            // #4657): if the gate closed since this line was touched, its
+            // hidden pick must NOT be posted at all; falling through to the
+            // flat-net branch below is exactly the behavior an operator who
+            // never saw a Line discount control would get.
+            if (lineDiscountActive(l) && l.lineDiscount && l.price !== "" && !isNaN(parseFloat(l.price))) {
+              return {
+                ...common,
+                basePrice: parseFloat(l.price),
+                discountType: l.lineDiscount.discount_type,
+                discountAmount: l.lineDiscount.amount != null ? l.lineDiscount.amount : null,
+                discountId: l.lineDiscount.id || null,
+                discountName: l.lineDiscount.name || null,
+                // Codex pre-push audit P1 (structural round on #4657,
+                // :2994/:2186): this branch is the ONLY place a line's
+                // discount pick was actually touched this session (a fresh
+                // catalog/custom pick — lineDiscountActive gates it) — tell
+                // the server so it runs manualEligibilityFailures against
+                // THIS pick; an untouched round-tripped stamp (below) never
+                // sets this.
+                lineDiscountFresh: true,
+              };
+            }
+            const priceUnchanged =
+              !lineDiscountActive(l) && !!l.id && String(l.price) === String(l._seededPrice ?? "");
+            // Unchanged existing line: derive its submission the SAME way
+            // the server expects (shared module, slice 4 of #4405 GitHub
+            // round 3 structural fix) — a real gross + line discount
+            // round-trips the full stamp so the server reconstructs the
+            // same line ($100 − $10), preserving the discount audit; a
+            // discount whose gross was never recorded (a legacy row
+            // predating the base_price column) sends only the flat net,
+            // because this editor cannot reconstruct a gross it never had
+            // and must not guess one (re-applying a stored discount to a
+            // price it can't verify would double-discount the row).
+            if (priceUnchanged) {
+              return {
+                ...common,
+                ...deriveLegacyAddonSubmission({
+                  basePrice: l._origBasePrice,
+                  netPrice: l._seededPrice,
+                  discountType: l._origDiscountType,
+                  discountAmount: l._origDiscountAmount,
+                  discountId: l._origDiscountId,
+                  discountName: l._origDiscountName,
+                }),
+              };
+            }
+            // New line, price-edited line, or a line whose discount slot was
+            // explicitly cleared this session (lineDiscountTouched with
+            // lineDiscount null — setLineDiscount already restored Price to
+            // the true gross when there was an original stamp to clear):
+            // treat Price as the final (net) charge with no discount.
+            // (Re-applying a stored discount here would double-discount rows
+            // whose seeded price was already net.)
+            return {
+              ...common,
+              price:
+                l.price !== "" && !isNaN(parseFloat(l.price))
+                  ? parseFloat(l.price)
+                  : null,
+            };
+          })
+        : undefined;
+    return { cleanLines, sendAddons, addonsPayload };
+  };
+
   const handleSave = async ({ takePayment = false } = {}) => {
     if (stackingUnconfirmedBlocksSave) return;
+    // Codex pre-push audit structural round on #4657: Save is blocked while
+    // a discount is in play until the server's OWN dry-run (moneyPreview)
+    // has confirmed what THIS exact form would persist — moneyPreviewBlocksSave
+    // and appointmentTotal are declared further down this component body but
+    // are in scope here by closure; handleSave itself is only ever invoked
+    // after the full render (and every const in it) has completed.
+    if (moneyPreviewBlocksSave) return;
     if (savingRef.current || cancellingRef.current) return;
     savingRef.current = true;
     setSaveError("");
@@ -2946,101 +3066,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     try {
       // Only manage add-on lines when there are any to send (or any existed
       // originally, so removals persist). Otherwise keep the legacy payload.
-      const cleanLines = serviceLines
-        .map((l) => ({ ...l, serviceType: (l.serviceType || "").trim() }))
-        .filter((l) => l.serviceType);
-      const sendAddons = cleanLines.length > 0 || hadAddonsInitially;
-      const addonsPayload = sendAddons
-        ? cleanLines.map((l) => {
-            const common = {
-              // Codex pre-push audit P1 (round 3 on #4657): the server's
-              // new stack-group grandfathering (:2513) matches THIS line
-              // back to its own prior stored discount by row id — without
-              // it, every existing line looked "new" and an unrelated
-              // resave of two already-persisted same-group stamps 400'd.
-              id: l.id || undefined,
-              serviceId: l.serviceId || null,
-              // Stable catalog key for a fallback pick (no serviceId) — the
-              // server resolves the row by it before trying the label.
-              serviceKey: l.serviceKey || undefined,
-              serviceName: l.serviceType,
-              estimatedDuration:
-                l.estimatedDuration !== "" && !isNaN(parseInt(l.estimatedDuration, 10))
-                  ? parseInt(l.estimatedDuration, 10)
-                  : null,
-              recurringPattern: l.recurringPattern || null,
-              recurringIntervalDays: l.recurringIntervalDays ?? null,
-              recurringNth: l.recurringNth ?? null,
-              recurringWeekday: l.recurringWeekday ?? null,
-              skipWeekends: l.skipWeekends,
-              weekendShift: l.weekendShift,
-            };
-            // GATE_DISCOUNT_STACKING (slice 7): a line whose discount slot
-            // was touched THIS session (a fresh pick, or an explicit
-            // removal) never round-trips the original stamp below — that
-            // path is for a genuinely untouched line only. A fresh pick
-            // posts its GROSS price (Price now means "before discount" for
-            // this line — see lineGrossFor's own note) plus the slot; the
-            // server keeps an unchanged stamp verbatim elsewhere and
-            // resolves a new pick through the catalog. An explicit removal
-            // falls through to the flat-net branch at the bottom exactly
-            // like a line that never had a discount. lineDiscountActive
-            // (not the raw flag) — Codex pre-push audit P1 (round 2,
-            // #4657): if the gate closed since this line was touched, its
-            // hidden pick must NOT be posted at all; falling through to the
-            // flat-net branch below is exactly the behavior an operator who
-            // never saw a Line discount control would get.
-            if (lineDiscountActive(l) && l.lineDiscount && l.price !== "" && !isNaN(parseFloat(l.price))) {
-              return {
-                ...common,
-                basePrice: parseFloat(l.price),
-                discountType: l.lineDiscount.discount_type,
-                discountAmount: l.lineDiscount.amount != null ? l.lineDiscount.amount : null,
-                discountId: l.lineDiscount.id || null,
-                discountName: l.lineDiscount.name || null,
-              };
-            }
-            const priceUnchanged =
-              !lineDiscountActive(l) && !!l.id && String(l.price) === String(l._seededPrice ?? "");
-            // Unchanged existing line: derive its submission the SAME way
-            // the server expects (shared module, slice 4 of #4405 GitHub
-            // round 3 structural fix) — a real gross + line discount
-            // round-trips the full stamp so the server reconstructs the
-            // same line ($100 − $10), preserving the discount audit; a
-            // discount whose gross was never recorded (a legacy row
-            // predating the base_price column) sends only the flat net,
-            // because this editor cannot reconstruct a gross it never had
-            // and must not guess one (re-applying a stored discount to a
-            // price it can't verify would double-discount the row).
-            if (priceUnchanged) {
-              return {
-                ...common,
-                ...deriveLegacyAddonSubmission({
-                  basePrice: l._origBasePrice,
-                  netPrice: l._seededPrice,
-                  discountType: l._origDiscountType,
-                  discountAmount: l._origDiscountAmount,
-                  discountId: l._origDiscountId,
-                  discountName: l._origDiscountName,
-                }),
-              };
-            }
-            // New line, price-edited line, or a line whose discount slot was
-            // explicitly cleared this session (lineDiscountTouched with
-            // lineDiscount null — setLineDiscount already restored Price to
-            // the true gross when there was an original stamp to clear):
-            // treat Price as the final (net) charge with no discount.
-            // (Re-applying a stored discount here would double-discount rows
-            // whose seeded price was already net.)
-            return {
-              ...common,
-              price:
-                l.price !== "" && !isNaN(parseFloat(l.price))
-                  ? parseFloat(l.price)
-                  : null,
-            };
-          })
-        : undefined;
+      const { cleanLines, sendAddons, addonsPayload } = buildAddonsPayload(serviceLines);
       const notifyOnMove = scheduleMoved && notificationType === "sms";
       const result = await adminFetch(`/admin/schedule/${service.id}/update-details`, {
         method: "PUT",
@@ -3544,7 +3570,99 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       ].filter((row) => row.dollars > 0)
     : [];
   const manualDiscount = stackingEnabled ? stackedPreview.appointmentDiscountDollars : legacyManualDiscount;
-  const appointmentTotal = stackingEnabled ? stackedPreview.total : legacyAppointmentTotal;
+  // Codex pre-push audit structural round on #4657 (replaces the recurring
+  // "mirror the server" P1s :3526/:2394): stackedPreview/legacyAppointmentTotal
+  // above stay as the INSTANT, optimistic figure while a preview request is
+  // in flight or hasn't fired yet — clientAppointmentTotal below, never
+  // renamed away. The actual displayed total prefers the server's own
+  // dry-run (moneyPreview, from POST .../update-details/preview) the
+  // moment a fresh one is back, so the summary is never a client
+  // re-derivation of what the server will actually persist.
+  const clientAppointmentTotal = stackingEnabled ? stackedPreview.total : legacyAppointmentTotal;
+
+  // Debounced server preview (structural round on #4657) — scoped like
+  // ensureStackingFresh's own re-probe in handleSave, above: a save with no
+  // appointment-level discount selected and no line discount in play never
+  // depends on this endpoint at all, matching the existing "discount-free
+  // save never depends on this probe's uptime" doctrine.
+  const previewRequestRef = useRef(0);
+  const previewAbortRef = useRef(null);
+  const [moneyPreview, setMoneyPreview] = useState(null);
+  const [moneyPreviewLoading, setMoneyPreviewLoading] = useState(false);
+  // Same conjunction stackingUnconfirmedBlocksSave already gates on
+  // (lineDiscountSaveBlocked, above) — an appointment-level pick stacking
+  // with a line discount is exactly the scenario whose combined total can
+  // genuinely diverge from a client re-derivation (cap clamps, eligibility,
+  // compound-vs-additive engine choice); a single discount alone, or an
+  // untouched stamp merely round-tripping unchanged (P0 :9965's own
+  // guarantee), needs no live round-trip to stay correct.
+  const moneyPreviewRelevant = appointmentDiscountSelected && lineDiscountInPlay;
+  const moneyPreviewInputsKey = JSON.stringify({
+    price: form.price,
+    discountType, discountAmount, discountPresetId,
+    lines: serviceLines.map((l) => [
+      l.id || null, l.serviceType, l.price, l.serviceId || null,
+      !!l.lineDiscountTouched, l.lineDiscount, l._seededPrice ?? null,
+    ]),
+  });
+  useEffect(() => {
+    if (!moneyPreviewRelevant) {
+      previewRequestRef.current += 1;
+      if (previewAbortRef.current) previewAbortRef.current.abort();
+      setMoneyPreview(null);
+      setMoneyPreviewLoading(false);
+      return;
+    }
+    const requestId = ++previewRequestRef.current;
+    if (previewAbortRef.current) previewAbortRef.current.abort();
+    const controller = new AbortController();
+    previewAbortRef.current = controller;
+    const timer = setTimeout(async () => {
+      setMoneyPreviewLoading(true);
+      try {
+        const { sendAddons, addonsPayload } = buildAddonsPayload(serviceLines);
+        const result = await adminFetch(`/admin/schedule/${service.id}/update-details/preview`, {
+          method: "POST",
+          signal: controller.signal,
+          body: JSON.stringify({
+            ...(sendAddons ? { addons: addonsPayload } : {}),
+            primaryLinePrice:
+              form.price !== "" && !isNaN(parseFloat(form.price)) ? parseFloat(form.price) : undefined,
+            estimatedPrice:
+              form.price !== "" && !isNaN(parseFloat(form.price)) ? parseFloat(form.price) : undefined,
+            discountType: discountType || undefined,
+            discountAmount:
+              discountType && discountAmount !== "" ? Number(discountAmount) : undefined,
+            discountId:
+              discountType && discountPresetId && discountPresetId !== "custom" ? discountPresetId : undefined,
+          }),
+        });
+        if (requestId !== previewRequestRef.current) return;
+        setMoneyPreview({ forRequestId: requestId, ...result });
+      } catch (err) {
+        if (err?.name === "AbortError") return;
+        if (requestId !== previewRequestRef.current) return;
+        setMoneyPreview({ forRequestId: requestId, error: err.message || "Could not preview totals" });
+      } finally {
+        if (requestId === previewRequestRef.current) setMoneyPreviewLoading(false);
+      }
+    }, 500);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [moneyPreviewInputsKey, moneyPreviewRelevant, service.id]);
+  const moneyPreviewFresh =
+    moneyPreviewRelevant &&
+    !!moneyPreview &&
+    moneyPreview.forRequestId === previewRequestRef.current &&
+    !moneyPreview.error;
+  // Save stays enabled for anything discount-free; once a discount is in
+  // play, Save is blocked until the server's own dry-run has confirmed what
+  // this exact form would persist — never the client engine's own guess.
+  const moneyPreviewBlocksSave = moneyPreviewRelevant && (moneyPreviewLoading || !moneyPreviewFresh);
+  const appointmentTotal =
+    moneyPreviewFresh && moneyPreview.total != null ? Number(moneyPreview.total) : clientAppointmentTotal;
   const appointmentHistory = customerPanelHistory(customerData, service?.id);
   const cards = Array.isArray(customerData?.cards) ? customerData.cards : [];
 
@@ -4107,7 +4225,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             )}{" "}
             <button
               onClick={() => handleSave({ takePayment: true })}
-              disabled={saving || cancelling || newPayerSaving || stackingUnconfirmedBlocksSave}
+              disabled={saving || cancelling || newPayerSaving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave}
               className="font-medium flex-1 md:flex-initial"
               style={{
                 padding: "11px 14px",
@@ -4116,8 +4234,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 color: "#fff",
                 border: "none",
                 fontSize: 13,
-                cursor: (saving || stackingUnconfirmedBlocksSave) ? "wait" : "pointer",
-                opacity: (saving || stackingUnconfirmedBlocksSave) ? 0.6 : 1,
+                cursor: (saving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave) ? "wait" : "pointer",
+                opacity: (saving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave) ? 0.6 : 1,
                 whiteSpace: "nowrap",
               }}
             >
@@ -4125,7 +4243,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             </button>{" "}
             <button
               onClick={() => handleSave()}
-              disabled={saving || cancelling || newPayerSaving || stackingUnconfirmedBlocksSave}
+              disabled={saving || cancelling || newPayerSaving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave}
               className="font-medium flex-1 md:flex-initial"
               style={{
                 padding: "11px 14px",
@@ -4134,8 +4252,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 color: "#111827",
                 border: `1px solid ${D.inputBorder}`,
                 fontSize: 13,
-                cursor: (saving || stackingUnconfirmedBlocksSave) ? "wait" : "pointer",
-                opacity: (saving || stackingUnconfirmedBlocksSave) ? 0.6 : 1,
+                cursor: (saving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave) ? "wait" : "pointer",
+                opacity: (saving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave) ? 0.6 : 1,
                 whiteSpace: "nowrap",
               }}
             >
@@ -4806,6 +4924,33 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   >
                     Retry
                   </button>
+                </div>
+              )}
+              {!stackingUnconfirmedBlocksSave && moneyPreview?.error && (
+                <div
+                  style={{
+                    background: "#DC262615",
+                    border: "1px solid #DC262655",
+                    borderRadius: 8,
+                    padding: 10,
+                    marginBottom: 14,
+                    fontSize: 12,
+                    color: "#DC2626",
+                  }}
+                >
+                  Could not confirm the totals this save would produce: {moneyPreview.error}. Edit a
+                  discount field to retry, or reload before saving.
+                </div>
+              )}
+              {!stackingUnconfirmedBlocksSave && !moneyPreview?.error && moneyPreviewBlocksSave && (
+                <div
+                  style={{
+                    fontSize: 12,
+                    color: D.textMuted || D.textSecondary || "#6B7280",
+                    marginBottom: 14,
+                  }}
+                >
+                  Confirming totals with the server…
                 </div>
               )}
               <div
