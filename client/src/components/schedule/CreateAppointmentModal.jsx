@@ -4321,9 +4321,22 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           // The fully stacked per-visit total — the raw price sum carried
           // neither the line discounts nor the appointment-level one, so the
           // operator was shown (and charged) more than the visits bill
-          // (Codex #4405 r3 P1). appointmentDiscountPreview.total falls back
-          // to the net subtotal when no appointment discount is selected.
-          const perVisit = appointmentDiscountPreview.total;
+          // (Codex #4405 r3 P1). Codex pre-push audit P1 (round 2 on this
+          // PR): appointmentDiscountPreview.total sums EVERY service across
+          // EVERY cadence submit group, not just the recurring one(s) this
+          // "X visits x $Y" line describes — a split-cadence booking (a
+          // recurring group plus a one-time add-on group, or two recurring
+          // groups where the appointment discount rides only one) would show
+          // a per-visit figure padded with a one-time line's price, or
+          // missing a discount that only reaches the OTHER group. Each
+          // recurring group's OWN stacked total (groupStackedPerVisitTotal,
+          // scoped exactly like the prepayPerVisitAmount actually posted per
+          // group below) summed together matches what collectPrepay will
+          // actually record across every recurring group on this booking.
+          const recurringGroups = appointmentSubmitGroups.filter((g) => g.cadence && g.cadence !== 'one_time');
+          const perVisit = recurringGroups.length
+            ? recurringGroups.reduce((sum, g) => sum + groupStackedPerVisitTotal(g), 0)
+            : appointmentDiscountPreview.total;
           const total = perVisit * finiteCount;
           return (
             <div style={{ ...sectionStyle, background: collectPrepay ? '#F0FDF4' : undefined, border: collectPrepay ? '1px solid #BBF7D0' : undefined, borderRadius: 8, padding: collectPrepay ? 14 : undefined }}>

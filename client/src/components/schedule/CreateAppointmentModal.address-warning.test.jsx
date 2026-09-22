@@ -711,6 +711,26 @@ describe('appointment discount submission eligibility', () => {
   });
 });
 
+describe('recurring prepay preview scoping (Codex pre-push audit P1, round 2)', () => {
+  it("scopes the visits-x-price preview to the recurring group's own stacked total, not every service in the booking", async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    installModalFetch({ discounts: [{
+      id: 'mil', name: 'Military Discount', discount_type: 'fixed_amount',
+      amount: 10, is_active: true, show_in_invoices: true,
+    }] });
+    renderBooking();
+    await addOneSeasonalService();
+    const picker = await screen.findByLabelText('Appointment discount');
+    fireEvent.change(picker, { target: { value: 'mil' } });
+    await screen.findByText('Military Discount: -$10.00');
+    fireEvent.change(screen.getByPlaceholderText('Ongoing'), { target: { value: '3' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Collect prepayment' }));
+    // $100 line, $10 appointment discount: $90/visit x 3 = $270, never the
+    // unscoped appointmentDiscountPreview.total the earlier bug used.
+    await screen.findByText((_, node) => node?.textContent === '3 visits \u00d7 $90.00 = $270.00');
+  });
+});
+
 describe('appointment discount stale-gate retry (Codex pre-push audit P1)', () => {
   // ensureStackingFresh() can disagree with the preview (or fail) at
   // submit time while the POLLING hook's own `known` flag is still true —
