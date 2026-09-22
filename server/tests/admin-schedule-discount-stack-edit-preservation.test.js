@@ -61,6 +61,7 @@ jest.mock('../services/discount-engine', () => ({
 
 const {
   legacyEconomicsPreservationDecision,
+  loadExistingAddonRowsForLegacyPreservation,
   calculateVisitFinancialsForAddons,
   resolveUpdateDetailsAddonFinancials,
   hasPricingRegimeMarker,
@@ -88,6 +89,56 @@ const STORED_ADDON_GROSS = 100;
 const STORED_ADDON_NET = 90; // 10% off
 const STORED_ADDON_DISCOUNT_ID = 'disc-addon-10pct';
 const STORED_TOTAL = 160; // 100 + 90 - 30
+
+// Codex pre-push audit P1 (PR #4654, GitHub round 1): a stored-add-on read
+// failure must fail CLOSED — reject the whole save with no writes — never
+// silently default to an empty set (which, for an `addons: []` removal
+// save, could otherwise let legacy preservation keep the OLD total while
+// the real rows get deleted underneath it).
+describe('loadExistingAddonRowsForLegacyPreservation — fail-closed on a read failure (Codex P1, PR #4654 round 1)', () => {
+  test('not a candidate at all: returns [] WITHOUT ever touching the db (gate off, or a marked row)', async () => {
+    const db = jest.fn(() => { throw new Error('must not be called'); });
+    await expect(loadExistingAddonRowsForLegacyPreservation(db, false, 'svc-1')).resolves.toEqual([]);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('a candidate row: a successful read resolves with the rows', async () => {
+    const rows = [{ service_id: 'svc-1', estimated_price: 90 }];
+    const db = jest.fn(() => ({
+      where: () => ({ select: () => Promise.resolve(rows) }),
+    }));
+    await expect(loadExistingAddonRowsForLegacyPreservation(db, true, 'svc-1')).resolves.toBe(rows);
+  });
+
+  test('a candidate row whose SELECT throws (e.g. a transient DB error): the rejection PROPAGATES — never silently becomes []', async () => {
+    const readFailure = new Error('QA transient read failure');
+    const db = jest.fn(() => ({
+      where: () => ({ select: () => Promise.reject(readFailure) }),
+    }));
+    await expect(loadExistingAddonRowsForLegacyPreservation(db, true, 'svc-1')).rejects.toBe(readFailure);
+  });
+
+  test('the same read failure, threaded through legacyEconomicsPreservationDecision\'s own caller shape: rejects rather than resolving to a preserved decision built on an empty stand-in', async () => {
+    // Models the route's own call: `addons: []` (every add-on removed) —
+    // the exact scenario the finding names. Before this fix, a caught
+    // failure here would have handed legacyEconomicsPreservationDecision
+    // `existingAddonRows: []`, which (0 posted === 0 "stored") could
+    // preserve the OLD total while the save deletes the real rows.
+    const readFailure = new Error('QA transient read failure');
+    const db = jest.fn(() => ({
+      where: () => ({ select: () => Promise.reject(readFailure) }),
+    }));
+    await expect((async () => {
+      const existingAddonRows = await loadExistingAddonRowsForLegacyPreservation(db, true, 'svc-1');
+      // Unreached on a real failure — if this line ever runs, the read
+      // silently swallowed the error and the whole point of this test failed.
+      return legacyEconomicsPreservationDecision({
+        legacyPreservationCandidate: true, discountInputsPosted: false, primaryServiceChanged: false,
+        primaryGross: 100, existingPrimaryLinePrice: 100, normalizedAddons: [], existingAddonRows, existingEstimatedPrice: 100,
+      });
+    })()).rejects.toBe(readFailure);
+  });
+});
 
 describe('legacyEconomicsPreservationDecision — pure decision (slice 4 of #4405)', () => {
   const baseArgs = () => ({

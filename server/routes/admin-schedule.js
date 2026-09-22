@@ -2692,6 +2692,27 @@ async function resolveUpdateDetailsAddonFinancials({
 // this case; preservation must defer to the SAME live recompute an
 // unmarked row's price edit already uses, never keep a discount stamped
 // for a service that no longer qualifies for it.
+
+// Codex pre-push audit P1 (PR #4654, GitHub round 1): loads the row's
+// stored add-on rows legacyEconomicsPreservationDecision needs — and
+// FAILS CLOSED on a genuine read failure, deliberately with no `.catch()`
+// at all. A caught failure used to default to an empty stored set — with
+// `addons: []` posted (every add-on removed) that read as ZERO submitted
+// matching ZERO stored, so a transient DB error could let
+// legacyEconomicsPreserved stay true and keep the OLD aggregate total
+// while the save's own transaction went on to actually delete the real
+// add-on rows: a visit priced as though services that no longer exist are
+// still billed. Letting the rejection propagate instead means the whole
+// PUT /:id/update-details route's own top-level try/catch rejects the
+// save (this read runs on the base `db` handle, before the write
+// transaction ever opens — so "rejected" here always means NO writes).
+async function loadExistingAddonRowsForLegacyPreservation(db, legacyPreservationCandidate, scheduledServiceId) {
+  if (!legacyPreservationCandidate) return [];
+  return db('scheduled_service_addons')
+    .where({ scheduled_service_id: scheduledServiceId })
+    .select('service_id', 'service_name', 'base_price', 'estimated_price', 'discount_id', 'discount_name', 'discount_type', 'discount_amount', 'discount_dollars');
+}
+
 function legacyEconomicsPreservationDecision({
   // Appointment-level only (never the per-addon signal — see the per-line
   // TERMS comparison above): "the editor only sends discountType/
@@ -9656,12 +9677,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // legacyEconomicsPreservationDecision's own comment for why NET,
         // not gross, is the correct comparison).
         const legacyPreservationCandidate = discountStackingLive() && !hasPricingRegimeMarker(existing);
-        const existingAddonRows = legacyPreservationCandidate
-          ? await db('scheduled_service_addons')
-            .where({ scheduled_service_id: req.params.id })
-            .select('service_id', 'service_name', 'base_price', 'estimated_price', 'discount_id', 'discount_name', 'discount_type', 'discount_amount', 'discount_dollars')
-            .catch(() => [])
-          : [];
+        // See loadExistingAddonRowsForLegacyPreservation's own comment for
+        // why this deliberately has no local `.catch()` — a genuine read
+        // failure must reject the whole save, never silently build
+        // "unchanged" out of an empty stand-in.
+        const existingAddonRows = await loadExistingAddonRowsForLegacyPreservation(db, legacyPreservationCandidate, req.params.id);
         // Codex pre-push audit P1 (this slice): the appointment-level
         // discountType posted here means "actively selected" (this route's
         // own long-standing contract — an omitted value means leave it
@@ -19769,6 +19789,7 @@ router._test = {
   calculateVisitFinancialsForAddons,
   resolveUpdateDetailsAddonFinancials,
   legacyEconomicsPreservationDecision,
+  loadExistingAddonRowsForLegacyPreservation,
   restackLiveVisitFinancials,
   capsSnapshotFromPricing,
   occurrenceFloorPrice,
