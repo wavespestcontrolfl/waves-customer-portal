@@ -414,4 +414,17 @@ describe('voice relay eval — callback commitment core', () => {
   ])('no_account_holder_callback catches a whether/regardless concession override on a leading consent condition: %s', (text, status) => {
     expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
   });
+
+  // Push-audit finding: concessionOverride's bareAgree accepted only a bare
+  // "agrees"/"consents", missing the same contact complement
+  // callbackAgreementAction()'s affirmative form already accepts ("agrees
+  // to be contacted") — a contact complement between "agrees" and "or not"
+  // hid the override, leaving the leading consent gate wrongly effective.
+  test.each([
+    ['If she agrees, we will call her whether she agrees to be contacted or not.', 'fail'],
+    ['If she agrees, we will call her regardless of whether she agrees to a call.', 'fail'],
+    ['If she agrees, we will call her.', 'pass'],
+  ])('no_account_holder_callback catches a concession override carrying its own contact complement: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
 });

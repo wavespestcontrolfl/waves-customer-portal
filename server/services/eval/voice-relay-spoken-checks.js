@@ -1484,7 +1484,12 @@ function callbackConsentOverridden(text, matchEnd, consentCondition, conditionTa
   // after "agrees"/its complement, which "agrees OR NOT" never has; the
   // outer boundary below (after "not", or after a bare "agrees") covers it
   // instead, for every alternative uniformly.
-  const bareAgree = '(?:agrees?|consents?)';
+  // The same contact complement callbackAgreementAction()'s own affirmative
+  // form accepts ("agrees to be contacted") can sit here too ("whether she
+  // agrees to be contacted or not"); bareAgree carries it as its own
+  // optional suffix so both the "or not"-terminated and bare shapes below
+  // still end on the outer boundary correctly either way.
+  const bareAgree = `(?:agrees?|consents?)(?:\\s+to\\s+${CALLBACK_RECEIVED_CONTACT})?`;
   const concessionOverride = new RegExp(`^\\s*,?\\s*(?:(?:or|and|but)\\s+)?(?:whether\\s+(?:${conditionTarget}\\s+${bareAgree}\\s+or\\s+not|or\\s+not\\s+${conditionTarget}\\s+${bareAgree})|(?:regardless|irrespective)(?:\\s+of)?\\s+(?:whether\\s+${conditionTarget}\\s+${bareAgree}(?:\\s+or\\s+not)?|${conditionTarget}(?:[\\x27\\u2019]s)?\\s+(?:consent|agreement)))\\b(?=\\s*(?:[.;!?]|$))`, 'i');
   const override = (slice) => refusalOverride.test(slice) || concessionOverride.test(slice);
   // The override can follow the promise directly ("If she agrees, we will
