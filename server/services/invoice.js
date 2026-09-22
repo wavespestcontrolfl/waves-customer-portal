@@ -961,18 +961,37 @@ function computeStackedDocumentDiscountLines({
     (entry) => entry.parent && (entry.stored || entry.row),
   );
   // Every unparented credit joins the document stack — stored, a FRESH
-  // catalog-backed pick that resolves to a real row (scope extension,
-  // 2026-09: a document-wide discountIds-style pick made through a line
-  // item instead of the top-level discountIds array — see
-  // stackInvoiceDocumentDiscounts' own documentEntryTerms for how its
-  // type is preserved, never forced to fixed_amount), OR a plain literal
-  // with no discount_id at all. An unparented item with a discount_id
-  // that resolves to NEITHER a stored stamp NOR a live catalog row is
-  // deliberately excluded (falls through to the throw below, unchanged
-  // from the pre-lane validation) — the client can never fabricate a
-  // discount by posting an id that names nothing.
+  // FIXED-type catalog-backed pick that resolves to a real row (scope
+  // extension, 2026-09: a document-wide discountIds-style pick made
+  // through a line item instead of the top-level discountIds array — see
+  // stackInvoiceDocumentDiscounts' own documentEntryTerms), OR a plain
+  // literal with no discount_id at all. A FRESH PERCENTAGE (or
+  // free_service) catalog row is deliberately excluded here too — pinned
+  // pre-push audit P0: once such a pick is SAVED, it freezes and is
+  // replayed on any later edit as a fixed_amount term (every frozen
+  // discount is, by design — resolveStoredDiscountLineItem /
+  // storedDiscountDollars), but a document-wide fixed term sorts BEFORE
+  // (wider scope) a narrower line-scoped fixed credit in the SAME pass a
+  // genuine live percentage term never even competed in (percentages
+  // resolve strictly after every fixed credit) — so the SAME invoice
+  // totals differently on a no-op resubmit ($50 → $66.67 in the
+  // auditor's own fixture) purely from that bucket transition. Fixing it
+  // needs a new term category in discount-stack.js (the SHARED engine
+  // — visit/checkout callers too), outside this round's authorized file
+  // (this scope extension is server/services/invoice.js only); the
+  // client's invoice-wide picker mirrors this same fixed-type-only
+  // restriction. An unparented item with a discount_id that resolves to
+  // NEITHER a stored stamp NOR a live FIXED-type catalog row is excluded
+  // (falls through to the throw below, unchanged from the pre-lane
+  // validation) — the client can never fabricate a discount by posting
+  // an id that names nothing, or sidestep this restriction by omitting
+  // the type check client-side.
   const documentEntries = classifiedNegativeItems.filter(
-    (entry) => entry.spansAll && (entry.stored || entry.row || !entry.item.discount_id),
+    (entry) => entry.spansAll && (
+      entry.stored
+      || (entry.row && isFixedDiscountType(entry.row.discount_type))
+      || !entry.item.discount_id
+    ),
   );
   const stacked = stackInvoiceDocumentDiscounts(
     positiveServiceLines,
