@@ -671,6 +671,42 @@ export function canSubmitAppointments({
   return !!selectedCustomer && services.length > 0 && bookingPropertyState !== 'loading';
 }
 
+// GitHub review round 5 P1 (Codex, on a271bcefe6): handleSubmit's own
+// synchronous lock (below) is DEFENSE IN DEPTH against a bypass of the
+// disabled attribute on whichever CTA reached it (the "Codex pre-push
+// audit P1 (round 4)" comment on handleSubmit names the threat model:
+// "the disabled attribute is not the only path to this handler"). It
+// used to just be `if (discountSaveBlockedReason) return;`, inline — a
+// pure, exported predicate instead (mirroring canSubmitAppointments'
+// own convention just above) so the guard can be tested directly
+// against arbitrary discountSaveBlockedReason/previewConfirming
+// combinations, independent of whatever DOM path a test can actually
+// exercise (a genuinely `disabled` button's click never reaches its
+// onClick at all, in this codebase's test environment or a real browser
+// — so there is no way to click-test a bypass of it; testing the
+// predicate itself is what actually proves the guard).
+export function handleSubmitBlockedByDiscountOrPreviewState({ discountSaveBlockedReason, previewConfirming }) {
+  return !!discountSaveBlockedReason || !!previewConfirming;
+}
+
+// GitHub review round 5 P1 follow-up (Codex, on a271bcefe6): the ONE read
+// of a fresh server-preview row's price, shared by groupStackedPerVisitTotal
+// (both the "N visits × $X" display and, since it's the same call,
+// prepayPerVisitAmount's own source) — extracted and exported (mirroring
+// handleSubmitBlockedByDiscountOrPreviewState just above) so the freshness
+// guard itself is directly testable: a serverPreview whose status isn't
+// 'ready', or whose forKey doesn't match the CURRENT previewRequestKey (a
+// stale entry left over from a prior discount/cadence configuration that
+// happens to share this group's key string), returns null — never that
+// stale row's price — so the caller falls through to its own local
+// computation exactly as if no preview existed at all.
+export function freshPreviewGroupPrice({ serverPreview, previewRequestKey, groupKey: key }) {
+  if (serverPreview?.status !== 'ready' || serverPreview?.forKey !== previewRequestKey) return null;
+  const row = serverPreview.byKey?.get(key);
+  if (row && typeof row.price === 'number' && typeof row.error !== 'string') return row.price;
+  return null;
+}
+
 // Classify a failed group POST. Idempotent retry recovery, PROVEN only
 // (codex r20 P1 + r21 P0): a prior partial split save can lose
 // createdGroupKeysRef when the modal closes between POSTs, and the retry
@@ -2771,10 +2807,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // preview falls through to the local computation below exactly as it
     // always has, since Submit is independently held (previewConfirming)
     // until a fresh one lands for any group this matters for.
-    if (serverPreview.status === 'ready' && serverPreview.forKey === previewRequestKey) {
-      const row = serverPreview.byKey.get(groupKey(group));
-      if (row && typeof row.price === 'number' && typeof row.error !== 'string') return row.price;
-    }
+    const freshPrice = freshPreviewGroupPrice({ serverPreview, previewRequestKey, groupKey: groupKey(group) });
+    if (freshPrice != null) return freshPrice;
     const carriesAppointmentDiscount = !!appointmentDiscount
       && !!appointmentDiscountGroup
       && groupKey(group) === appointmentDiscountGroup.key;
@@ -3443,17 +3477,35 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               // GitHub round 4 item 1 (Codex, blocked push 4 — "close by
               // construction... the create POST sends exactly the amounts
               // from that response"): a group this session already
-              // preview-verified (groupOwnPricingRegimeDependent, checked
-              // below) sends the PREVIEW's OWN per-visit price — the
-              // literal same number buildAppointmentPricing produced on
-              // the server, not a second, client-side recomputation of
-              // it. A group with no preview entry (nothing regime-
-              // dependent about it at all) falls back to
-              // groupStackedPerVisitTotal, which is provably identical to
-              // what the server bills in that case (no discount
-              // interaction to diverge) — see groupRegimeDependent's own
-              // comment.
-              prepayPerVisitAmount: serverPreview.byKey.get(key)?.prepay?.perVisit ?? groupStackedPerVisitTotal(group),
+              // preview-verified sends the PREVIEW's OWN per-visit price
+              // — the literal same number buildAppointmentPricing
+              // produced on the server, not a second, client-side
+              // recomputation of it.
+              //
+              // GitHub review round 5 P1 (Codex, on a271bcefe6): this used
+              // to read serverPreview.byKey.get(key)?.prepay?.perVisit
+              // directly, with none of the freshness guard
+              // groupStackedPerVisitTotal (a few dozen lines above, and
+              // already this SAME expression's own fallback) applies
+              // before trusting a preview row — status 'ready' AND keyed
+              // to the CURRENT previewRequestKey, not a stale entry left
+              // over from a prior discount/cadence configuration that
+              // just happens to share this group's key string. Routed
+              // through groupStackedPerVisitTotal entirely instead of
+              // duplicating that guard a second time here: ONE read site
+              // for "this group's authoritative per-visit price," reused
+              // by the display, the prepay projection, and now this
+              // field too — a group with no FRESH preview entry (nothing
+              // regime-dependent about it, or one still in flight/stale)
+              // falls through to the local computation there, which is
+              // provably identical to the server's own answer in the
+              // no-discount-interaction case (see groupRegimeDependent's
+              // own comment) and — for the in-flight/stale case — is
+              // moot in practice, since previewConfirming now holds
+              // Submit itself until a fresh preview lands for any group
+              // this matters for (the handleSubmit fix immediately
+              // above).
+              prepayPerVisitAmount: groupStackedPerVisitTotal(group),
             }),
             billingTerm,
           };
@@ -3684,7 +3736,26 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // conditions a third time (the file's own round-4/round-6 notes
     // document that this exact duplication already caused two real bugs:
     // a new blocking reason added to only one or two of the three sites).
-    if (discountSaveBlockedReason) return;
+    //
+    // GitHub review round 5 P1 (Codex, on a271bcefe6): discountSaveBlockedReason
+    // does NOT fold in previewConfirming (canSubmit's own disabled
+    // condition below is `... && !discountSaveBlockedReason &&
+    // !previewConfirming && !previewGroupError`) — so the exact same
+    // Enter-key/alt-CTA bypass this comment already documents once also
+    // let a submit through while the debounced POST /admin/schedule/preview
+    // verification for a regime-dependent group was still in flight (the
+    // first ~350ms+ after picking a discount or editing cadence, before
+    // serverPreview.status is 'ready' for the CURRENT previewRequestKey).
+    // Checked here explicitly, not folded into discountSaveBlockedReason
+    // itself: that value drives a persistent BANNER with its own message
+    // and Retry button, but "still confirming" is a transient state with
+    // neither — nothing to show or retry, just a submit to hold until it
+    // resolves on its own. Routed through the exported
+    // handleSubmitBlockedByDiscountOrPreviewState predicate (defined
+    // alongside canSubmitAppointments above) rather than an inline OR, so
+    // the guard itself — not just this DOM path to it — is directly
+    // testable.
+    if (handleSubmitBlockedByDiscountOrPreviewState({ discountSaveBlockedReason, previewConfirming })) return;
     if (!canSubmitAppointments({
       selectedCustomer,
       services,

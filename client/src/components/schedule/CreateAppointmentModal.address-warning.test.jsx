@@ -12,6 +12,8 @@ import CreateAppointmentModal, {
   addressAskNoticesMatch,
   recheckAddressAskAtSubmit,
   useAddressAskLookup,
+  handleSubmitBlockedByDiscountOrPreviewState,
+  freshPreviewGroupPrice,
 } from './CreateAppointmentModal.jsx';
 
 afterEach(() => {
@@ -2207,5 +2209,155 @@ describe('GitHub round 4 item 1 (Codex, blocked push 4 on PR #4656) — prepaid 
     // Once the preview resolves, the display SWITCHES to its number.
     await screen.findByText((_, node) => node?.textContent === '2 visits × $42.00 = $84.00');
     expect(screen.queryByText((_, node) => node?.textContent === '2 visits × $19.66 = $39.32')).toBeNull();
+  });
+});
+
+describe('GitHub round 5 P1 follow-up (Codex, on a271bcefe6) — handleSubmit\'s own lock, independent of the disabled attribute', () => {
+  // fireEvent.click on a genuinely `disabled` button never reaches onClick
+  // at all in this test environment (nor a real browser) -- confirmed
+  // directly: neither a plain disabled button nor one whose .disabled DOM
+  // property is forced back to false afterward ever re-fires the click to
+  // React's handler. So the only way to actually exercise handleSubmit's
+  // OWN internal guard (as opposed to the button's disabled attribute,
+  // already covered by the many `await waitFor(() => expect(submit.disabled)
+  // .toBe(false))` pins elsewhere in this file) is to test the guard
+  // itself -- handleSubmitBlockedByDiscountOrPreviewState, the exact
+  // predicate handleSubmit calls, exported alongside canSubmitAppointments
+  // for exactly this reason.
+  it('submit attempted while previewConfirming -> the guard blocks it (no POST would ever be attempted)', () => {
+    expect(handleSubmitBlockedByDiscountOrPreviewState({
+      discountSaveBlockedReason: '', previewConfirming: true,
+    })).toBe(true);
+  });
+
+  it('with no blocking reason and the preview confirmed (not confirming) -> the guard allows it through', () => {
+    expect(handleSubmitBlockedByDiscountOrPreviewState({
+      discountSaveBlockedReason: '', previewConfirming: false,
+    })).toBe(false);
+  });
+
+  it('a discountSaveBlockedReason banner message alone (previewConfirming false) still blocks it', () => {
+    expect(handleSubmitBlockedByDiscountOrPreviewState({
+      discountSaveBlockedReason: 'Could not confirm the discount-stacking status — retry before saving.',
+      previewConfirming: false,
+    })).toBe(true);
+  });
+
+  // End-to-end companion: proves the button's OWN disabled attribute
+  // (canSubmit, which also reads previewConfirming) keeps a real operator
+  // from ever reaching handleSubmit in the first place while a
+  // regime-dependent group's preview is still in flight -- the two layers
+  // together (this one, and the guard unit-tested above) are what close
+  // the finding.
+  it('end to end: the Submit button stays disabled (no click ever reaches handleSubmit) while previewConfirming', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    const { fetcher } = installModalFetch({
+      basePrice: 20.70,
+      discounts: [{ id: 'five-pct', name: 'Five Percent', discount_type: 'percentage', amount: 5, is_active: true, show_in_invoices: true }],
+    });
+    renderBooking();
+    await addOneSeasonalService();
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for First seasonal service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Five Percent/ }));
+
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    expect(submit.disabled).toBe(true);
+    fireEvent.click(submit);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(schedulePosts(fetcher)).toHaveLength(0);
+  });
+});
+
+describe('GitHub round 5 P1 follow-up (Codex, on a271bcefe6) — prepayPerVisitAmount reads the SAME guarded source as the display, never a stale preview row', () => {
+  // prepayPerVisitAmount used to read serverPreview.byKey.get(key)?.prepay?.perVisit
+  // directly, with none of the freshness guard groupStackedPerVisitTotal
+  // applied -- status 'ready' AND keyed to the CURRENT previewRequestKey,
+  // not a stale entry left over from a prior recurringCount/discount
+  // configuration that still shares this group's key STRING. Now routed
+  // through groupStackedPerVisitTotal entirely, which itself delegates
+  // to freshPreviewGroupPrice (exported alongside
+  // handleSubmitBlockedByDiscountOrPreviewState, same reasoning: a
+  // genuinely `disabled` Submit button's click never reaches its onClick
+  // in this test environment at all -- confirmed directly, including
+  // after forcing the DOM node's own .disabled back to false -- so the
+  // ONLY way to prove a stale row never leaks into what gets posted is to
+  // test the read itself, not try to race a click through a button
+  // canSubmit already correctly disables for the entire stale window).
+  it('stale preview (status not ready, or a different previewRequestKey) -> freshPreviewGroupPrice returns null, never the stale row', () => {
+    const staleByKey = new Map([['g1', { price: 999, prepay: { perVisit: 999 } }]]);
+    // Wrong key: status is 'ready', but for a DIFFERENT previewRequestKey
+    // than the one being asked about (a prior discount/cadence
+    // configuration whose response landed before the CURRENT inputs
+    // changed).
+    expect(freshPreviewGroupPrice({
+      serverPreview: { status: 'ready', forKey: 'OLD_KEY', byKey: staleByKey },
+      previewRequestKey: 'NEW_KEY',
+      groupKey: 'g1',
+    })).toBeNull();
+    // Right key, but still loading (the debounce/fetch for the CURRENT
+    // inputs hasn't resolved yet).
+    expect(freshPreviewGroupPrice({
+      serverPreview: { status: 'loading', forKey: 'NEW_KEY', byKey: staleByKey },
+      previewRequestKey: 'NEW_KEY',
+      groupKey: 'g1',
+    })).toBeNull();
+    // Fresh: status ready AND the matching key -> the row's own price.
+    const freshByKey = new Map([['g1', { price: 77 }]]);
+    expect(freshPreviewGroupPrice({
+      serverPreview: { status: 'ready', forKey: 'NEW_KEY', byKey: freshByKey },
+      previewRequestKey: 'NEW_KEY',
+      groupKey: 'g1',
+    })).toBe(77);
+  });
+
+  // End-to-end companion: proves the same guard at the display, which
+  // (since groupStackedPerVisitTotal is prepayPerVisitAmount's OWN and
+  // only source now) is exactly what would be posted too. The FIRST
+  // preview lands and shows its figure; a recurringCount edit starts a
+  // NEW debounced preview round for a DIFFERENT recurringCount (changing
+  // previewRequestKey) whose response is queued to land later -- in the
+  // window before it resolves, the stale first-round figure must NOT
+  // still be showing, and the eventual POST carries the fresh one.
+  it('a recurringCount edit invalidates the stale preview row immediately, before the new one lands', async () => {
+    vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: true, known: true, retry: vi.fn() });
+    const { fetcher } = installModalFetch({
+      basePrice: 20.70,
+      discounts: [{ id: 'five-pct', name: 'Five Percent', discount_type: 'percentage', amount: 5, is_active: true, show_in_invoices: true }],
+      previewResponses: [
+        // Round 1 (recurringCount '2'): a deliberately-distinctive price.
+        (groups) => ({ regime: true, results: groups.map((g) => ({ key: g.key, price: 42, prepay: { perVisit: 42, totalAmount: 84 } })) }),
+        // Round 2 (recurringCount '3', after the edit below): a
+        // DIFFERENT distinctive price, proving the eventual read is this
+        // fresh one, not round 1's stale $42.
+        (groups) => ({ regime: true, results: groups.map((g) => ({ key: g.key, price: 77, prepay: { perVisit: 77, totalAmount: 231 } })) }),
+      ],
+    });
+    renderBooking();
+    await addOneSeasonalService();
+    fireEvent.focus(screen.getByPlaceholderText('Search discounts for First seasonal service...'));
+    fireEvent.click(await screen.findByRole('button', { name: /Five Percent/ }));
+    fireEvent.change(screen.getByPlaceholderText('Ongoing'), { target: { value: '2' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Collect prepayment' }));
+
+    // Round 1's preview lands.
+    await screen.findByText((_, node) => node?.textContent === '2 visits × $42.00 = $84.00');
+
+    // Edit recurringCount -- a NEW previewRequestKey, round 1's row is
+    // now for a DIFFERENT (stale) configuration. Checked IMMEDIATELY,
+    // before round 2's own debounce/fetch has any chance to resolve: the
+    // stale $42 figure must already be gone, not lingering until round 2
+    // lands.
+    fireEvent.change(screen.getByPlaceholderText('Ongoing'), { target: { value: '3' } });
+    expect(screen.queryByText((_, node) => node?.textContent === '3 visits × $42.00 = $126.00')).toBeNull();
+
+    // Round 2 lands -- the FRESH figure, never round 1's stale one.
+    await screen.findByText((_, node) => node?.textContent === '3 visits × $77.00 = $231.00');
+
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    const body = JSON.parse(schedulePosts(fetcher)[0][1].body);
+    expect(body.prepaid.totalAmount).toBe(231);
   });
 });
