@@ -575,6 +575,12 @@ async function persistSavedCardChargeCreditDelta({
     await trx('customers').where({ id: customerId }).forUpdate().first('id');
     const locked = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
     if (!locked) return false;
+    // Codex pre-push P1 (round 2 fallback audit): a customer merge could
+    // repoint invoices.customer_id between the caller's own read of
+    // customerId and this lock — re-verify under the invoice's own lock
+    // before spending it, the same owner-changed guard settleZeroBalance
+    // (server/services/invoice.js) and this file's sibling fix below use.
+    if (String(locked.customer_id) !== String(customerId)) return false;
     if (attemptId) {
       const unresolvedAttempt = await trx('stripe_invoice_charge_attempts')
         .where({ id: attemptId, invoice_id: invoiceId })

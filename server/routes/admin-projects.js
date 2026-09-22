@@ -4417,13 +4417,24 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       // the customer, and this abort-cleanup path's old invoice-then-
       // customer order could deadlock against settleZeroBalance's now
       // customer-first order (server/services/invoice.js). claimedInvoice
-      // carries no customer_id, so an unlocked pre-read supplies it; stale
-      // is harmless here (an invoice's customer_id does not change once
-      // minted).
+      // carries no customer_id, so an unlocked pre-read supplies it.
       const preCustomer = await db('invoices').where({ id: claimedInvoice.id }).first('customer_id');
       await db.transaction(async (trx) => {
         if (preCustomer) await trx('customers').where({ id: preCustomer.customer_id }).forUpdate().first('id');
         const locked = await trx('invoices').where({ id: claimedInvoice.id }).forUpdate().first();
+        // Local pre-push audit P1 (round 2, Claude fallback): the pre-read
+        // above is unlocked and can go stale — a customer merge repointing
+        // this invoice's owner in that window would leave us holding the
+        // WRONG (retired) customer while postCreditMovement posts against
+        // the invoice's CURRENT (survivor) customer with no lock on it.
+        // This path is best-effort cleanup (already wrapped in try/catch
+        // with no rethrow), so on a mismatch skip the reversal and log
+        // rather than throw — the credit stays applied and needs manual
+        // reconciliation, same as any other failure of this cleanup.
+        if (preCustomer && locked && locked.customer_id !== preCustomer.customer_id) {
+          logger.error(`[projects] credit-reversal abort-cleanup skipped for invoice ${claimedInvoice.id} — owner changed between the pre-read and the lock; reconcile the $${appliedProjectCredit} applied credit manually`);
+          return;
+        }
         if (locked && String(locked.status || '').toLowerCase() === 'prepaid' && !locked.stripe_payment_intent_id) {
           const reverseAmt = Math.min(round2(appliedProjectCredit), round2(locked.credit_applied || 0));
           if (reverseAmt > 0) {

@@ -1914,7 +1914,26 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
         .forUpdate()
         .first();
       if (!lockedInvoice) return;
-
+      // Local pre-push audit P1 (round 2, Claude fallback) raised the same
+      // concern here as the other reorders in this sweep: the customer lock
+      // above is sourced from the unlocked findInvoiceForPaymentIntent read,
+      // so it can name the WRONG (retired) customer if a merge repoints this
+      // invoice's owner before the lock lands. NOT guarded with a throw here
+      // — unlike the other five callers in this sweep, this handler already
+      // has its own deliberate, tested, documented answer to a stale
+      // pre-lock owner: every actual write below (the payments insert, and
+      // postCreditMovement's customerId on a matching ambiguous attempt)
+      // sources customer_id from `lockedInvoice` — the post-wait re-read —
+      // never from `invoice`. See the "OWNERSHIP COMES FROM THE LOCKED ROW"
+      // comment on the payments insert below, and
+      // tests/stripe-webhook-settlement-ownership.test.js, which pins that a
+      // concurrent ownership change must be FOLLOWED to its new owner, not
+      // refused. A mismatch here only means the upfront lock above landed on
+      // the previous owner's row rather than the current one — a narrow
+      // lock-order edge case (this handler racing a merge racing
+      // settleZeroBalance on the very same invoice), not a correctness gap,
+      // and Stripe's own webhook retry already recovers from a 40P01 if that
+      // ever collides.
       const activePi = lockedInvoice.stripe_payment_intent_id
         ? String(lockedInvoice.stripe_payment_intent_id)
         : '';
@@ -5954,6 +5973,16 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
       .first();
 
     if (!lockedInvoice) return;
+    // Local pre-push audit P1 (round 2, Claude fallback): same concern as
+    // the succeeded-PI fallback handler above, and NOT guarded with a throw
+    // for the same reason — the customer lock above is sourced from the
+    // unlocked findInvoiceForPaymentIntent read and can name a stale
+    // customer if a merge repoints this invoice's owner first, but every
+    // actual write below (postCreditMovement's customerId, on a matching
+    // ambiguous attempt) sources customer_id from `lockedInvoice` — the
+    // post-wait re-read — never from the stale `invoice`. A mismatch here
+    // only means the upfront lock landed on the previous owner's row, a
+    // narrow lock-order edge case, not a correctness gap.
     if (INVOICE_TERMINAL_PAYMENT_STATUSES.includes(String(lockedInvoice.status || '').toLowerCase())) {
       logger.info(`[stripe-webhook] Skipping processing event for terminal invoice ${invoice.id} status=${lockedInvoice.status} on PI: ${piId}`);
       return;

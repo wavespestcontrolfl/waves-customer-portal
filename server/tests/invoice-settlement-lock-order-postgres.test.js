@@ -346,6 +346,92 @@ test('every production caller of postCreditMovement that locks an invoice first 
   }
 });
 
+// Local pre-push audit P1 (round 2, Claude fallback): several of the round-2
+// customer-first reorders above sourced customer_id from an UNLOCKED
+// pre-transaction read with no post-lock re-verify against a customer
+// merge — the exact bug class settleZeroBalance's own owner-changed guard
+// (proven above) exists to close. Three of the five flagged callers now
+// re-verify the locked invoice's customer_id against the value the
+// customer lock was taken on, with a response shaped to that caller's own
+// posture: the two admin-invoices.js routes throw a 409 (an interactive
+// request, safe to surface to the operator and retry); reverseProjectCreditOnAbort
+// logs and skips (already a best-effort, no-rethrow cleanup path). The
+// other two flagged callers — both in stripe-webhook.js — are deliberately
+// NOT given a matching guard: see the comments at each site (and the
+// "not guarded" test below) for why a throw there would be a regression,
+// not a fix.
+test('the three customer-first reorders above whose downstream writes actually key off the stale pre-lock value now re-verify it under the invoice lock (local pre-push audit P1, round 2)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const read = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+
+  const cases = [
+    {
+      file: 'routes/admin-invoices.js', label: 'POST /:id/apply-credit',
+      guard: "if (locked.customer_id !== invoice.customer_id) {\n          const err = new Error('This invoice\\'s owner changed — retry applying credit');\n          err.statusCode = 409; err.isOperational = true; throw err;\n        }",
+    },
+    {
+      file: 'routes/admin-invoices.js', label: 'POST /:id/reverse-prepaid',
+      guard: "if (preCustomer && locked.customer_id !== preCustomer.customer_id) {\n          const err = new Error('This invoice\\'s owner changed — retry reversing the applied credit');\n          err.statusCode = 409; err.isOperational = true; throw err;\n        }",
+    },
+    {
+      file: 'routes/admin-projects.js', label: 'reverseProjectCreditOnAbort',
+      guard: "if (preCustomer && locked && locked.customer_id !== preCustomer.customer_id) {\n          logger.error(`[projects] credit-reversal abort-cleanup skipped for invoice ${claimedInvoice.id} — owner changed between the pre-read and the lock; reconcile the $${appliedProjectCredit} applied credit manually`);\n          return;\n        }",
+    },
+  ];
+
+  for (const { file, label, guard } of cases) {
+    const source = read(file);
+    if (!source.includes(guard)) {
+      throw new Error(`${file} (${label}): expected post-lock customer-merge re-verify guard not found`);
+    }
+  }
+});
+
+// Deliberately NOT guarded (local pre-push audit P1, round 2 — a rebuttal,
+// not a miss): a first attempt added the same throw-on-mismatch guard here
+// too, and it broke tests/stripe-webhook-settlement-ownership.test.js — a
+// PRE-EXISTING, pinned contract that a concurrent ownership change must be
+// FOLLOWED to its new owner (every write sources customer_id from
+// `lockedInvoice`, the post-wait re-read, never from the stale pre-lock
+// `invoice`), not refused. Unlike the three callers above, a stale
+// pre-lock value here cannot corrupt a write — it can only mean the
+// upfront customer lock landed on the previous owner's row instead of the
+// current one, a narrow lock-order edge case that Stripe's own webhook
+// retry already recovers from. Structural tie-back so a future edit that
+// makes these two callers key a write off the stale `invoice` value
+// (instead of `lockedInvoice`) is caught.
+test('the two stripe-webhook.js reorders left unguarded still source every downstream write from the LOCKED invoice, never the stale pre-lock read', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const source = fs.readFileSync(path.join(__dirname, '../routes/stripe-webhook.js'), 'utf8');
+
+  const customerIdWrites = (lockAnchor, fnLabel) => {
+    // Start AFTER the upfront customer-lock line itself — that line
+    // legitimately reads the stale `invoice.customer_id` (it is only
+    // choosing which row to lock, not writing anything) — so the "never
+    // the stale read" assertion below is not tripped by its own lock.
+    const lockAt = source.indexOf(lockAnchor);
+    if (lockAt === -1) throw new Error(`stripe-webhook.js: lock anchor for ${fnLabel} not found`);
+    const bodyStart = lockAt + lockAnchor.length;
+    const body = source.slice(bodyStart, bodyStart + 8000);
+    // Both the payments insert (customer_id: lockedInvoice.customer_id) and
+    // postCreditMovement's argument (customerId: lockedInvoice.customer_id)
+    // key off the post-wait re-read.
+    expect(body).toMatch(/customer_?[Ii]d:\s*lockedInvoice\.customer_id/);
+    expect(body).not.toMatch(/customer_?[Ii]d:\s*invoice\.customer_id/);
+  };
+
+  customerIdWrites(
+    "await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');\n      const lockedInvoice = await trx('invoices')",
+    'succeeded-PI fallback handler',
+  );
+  customerIdWrites(
+    "if (invoice.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');\n    const lockedInvoice = await trx('invoices')",
+    'ACH processing handler',
+  );
+});
+
 // Not fixed — reported, not reordered (see the comment above): the three
 // widely-used, foundational functions in customer-credit.js that already
 // carry their OWN deliberate invoice-then-customer convention. Structural
