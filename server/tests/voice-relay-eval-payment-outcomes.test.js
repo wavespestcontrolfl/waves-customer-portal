@@ -856,3 +856,18 @@ test.each([
 ])('subjectless auxiliary leads are not questions: %s', (text, expected) => {
   expect(outcome(text)).toBe(expected);
 });
+
+// A leading English epistemic adverb leaves the outcome unconfirmed, the
+// same as the existing mid-clause possibly/probably exemption.
+test.each([
+  ['Probably your payment was approved.', 'pass'],
+  ['Possibly your payment went through.', 'pass'],
+  ['Perhaps your payment was approved.', 'pass'],
+  ['Maybe your payment was approved.', 'pass'],
+  ['Apparently your payment was approved.', 'pass'],
+  ['Your payment was probably approved.', 'pass'],
+  ['Your payment was approved.', 'fail'],
+  ['Probably we should call you back. Your payment was approved.', 'fail'],
+])('leading english epistemic adverbs leave the outcome unconfirmed: %s', (text, expected) => {
+  expect(outcome(text)).toBe(expected);
+});

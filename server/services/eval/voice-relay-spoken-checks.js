@@ -506,6 +506,11 @@ const PAYMENT_EPISTEMIC_REFUSAL_ES_RE = /\bno\s+(?:(?:le|te)\s+)?(?:puedo|podemo
 // Spanish epistemic adverbs/doubt clauses leave an outcome unconfirmed,
 // like the English mid-clause possibly/probably exemption.
 const PAYMENT_EPISTEMIC_HEDGE_ES_RE = /\b(?:quiz[aá]s?|tal\s+vez|probablemente|posiblemente|presumiblemente|aparentemente|supuestamente|no\s+(?:creo|creemos|estoy\s+seguro|estamos\s+seguros)(?:\s+de)?\s+que|dudo\s+que|dudamos\s+que)(?![a-záéíóúñ])/i;
+// A leading/clause-level English epistemic adverb ("Probably your payment
+// was approved") leaves the outcome unconfirmed too, not only the existing
+// mid-predicate exemption ("was probably approved") that PAYMENT_SUCCESS_
+// ADVERBS already excludes from matching as an outcome claim.
+const PAYMENT_EPISTEMIC_HEDGE_EN_RE = /\b(?:probably|possibly|perhaps|maybe|potentially|presumably|apparently|supposedly|seemingly|allegedly|likely|unlikely)\b/i;
 const PAYMENT_OUTCOME_RES = Object.freeze([PAYMENT_OUTCOME_RE, PAYMENT_FUTURE_OUTCOME_RE, PAYMENT_OUTCOME_ES_RE]);
 const PAYMENT_CONDITION_RE = /^\s*(?:(?:(?:only\s+)?(?:after|before|once|when|until)|as\s+soon\s+as)(?=\s+(?:i|you|we|they|he|she|it|the|your|our|this|that|submitt(?:ed|ing)|enter(?:ed|ing)|provid(?:ed|ing)|complet(?:ed|ing)|authori[sz](?:ed|ing)|paying|paid)\b)|cuando|despu[eé]s\s+de\s+que|una\s+vez\s+que)\b/i;
 const PAYMENT_PREREQUISITE_RE = /^\s*(?:(?:only\s+)?(?:after|once|when|until)|as\s+soon\s+as)\b[^.!?;,]{0,80}\b(?:submit(?:ted)?|enter(?:ed)?|provide(?:d)?|complete(?:d)?|authori[sz](?:e|ed)|pay|paid)\b/i;
@@ -648,6 +653,9 @@ function paymentOutcomeHasSpanishRefusal(claim, outcomeStart) {
 function paymentOutcomeHasSpanishHedge(claim, outcomeStart) {
   return PAYMENT_EPISTEMIC_HEDGE_ES_RE.test(claim.slice(0, outcomeStart));
 }
+function paymentOutcomeHasEnglishHedge(claim, outcomeStart) {
+  return PAYMENT_EPISTEMIC_HEDGE_EN_RE.test(claim.slice(0, outcomeStart));
+}
 function paymentRefusalPresupposesOutcome(claim) {
   const hedge = EPISTEMIC_HEDGE_RE.exec(claim);
   // Refusing the time/reason/amount/location/manner of an outcome still
@@ -780,6 +788,7 @@ function no_payment_outcome(value, record, { spoken }) {
         paymentOutcomeIsNegated(text, claim, match), !qualifierRefusal && clauseIsEpistemicallyHedged(claim),
         paymentOutcomeHasSpanishRefusal(claim, claim.lastIndexOf(match[0])),
         paymentOutcomeHasSpanishHedge(claim, claim.lastIndexOf(match[0])),
+        paymentOutcomeHasEnglishHedge(claim, claim.lastIndexOf(match[0])),
       ].some(Boolean);
       if (!exempt) return ['fail', `payment outcome claimed: "${clip(match[0], 160)}"`];
     }
