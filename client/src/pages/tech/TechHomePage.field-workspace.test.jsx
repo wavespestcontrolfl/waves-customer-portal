@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({ navigationBusy: vi.fn(), socketEvent: null }));
 vi.mock('socket.io-client', () => ({ io: () => ({ on: (_event, callback) => { mocks.socketEvent = callback; }, off: vi.fn(), disconnect: vi.fn() }) }));
-vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false }));
+vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: (key) => key === 'pest-recap-v1' }));
 vi.mock('../../components/tech/TechIntelligenceBar', () => ({ default: () => <div>Field assistant</div> }));
 vi.mock('../../components/tech/GeofenceArrivalPrompt', () => ({ default: () => null }));
 vi.mock('../../components/tech/CreateProjectModal', () => ({
@@ -104,6 +104,91 @@ describe('Tech field workspace uses the existing route workflow', () => {
     await waitFor(() => expect(screen.queryByRole('button', { name: 'On site' })).not.toBeInTheDocument());
     fireEvent.click(screen.getByRole('button', { name: 'Service photos' }));
     expect(screen.getByText('Photos for two')).toBeInTheDocument();
+  });
+
+  it('restores a recap upload that fails after the real visit panel unmounts and remounts', async () => {
+    rows = [row('one', { status: 'on_site', serviceType: 'Quarterly Pest Control', completionProfile: { category: 'pest_control' } })];
+    const respond = fetchMock.getMockImplementation();
+    let rejectFirstPut;
+    let putCount = 0;
+    fetchMock.mockImplementation(async (path, options) => {
+      if (path === 'https://upload.test/recap-one') {
+        putCount += 1;
+        if (putCount === 1) return new Promise((_resolve, reject) => { rejectFirstPut = reject; });
+        return { ok: true, status: 200 };
+      }
+      if (path.endsWith('/tech/services/one/recap-media/presign')) {
+        return { ok: true, status: 200, json: async () => ({ mediaId: 'recap-one', uploadUrl: 'https://upload.test/recap-one' }) };
+      }
+      if (path.endsWith('/tech/services/one/recap-media/recap-one/confirm')) {
+        return { ok: true, status: 200, json: async () => ({ ok: true, id: 'recap-one', status: 'ready' }) };
+      }
+      if (path.endsWith('/tech/services/one/recap-media')) {
+        return { ok: true, status: 200, json: async () => ({ items: [] }) };
+      }
+      return respond(path, options);
+    });
+
+    mount('/tech?visit=row%3Aone');
+    await screen.findByText('Recap clips');
+    const file = new File(['fixture'], 'field-recovery.jpg', { type: 'image/jpeg' });
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [file] } });
+    fireEvent.click(screen.getByRole('button', { name: 'Spray — perimeter' }));
+    await waitFor(() => expect(rejectFirstPut).toBeTypeOf('function'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Today' }));
+    expect(screen.queryByText('Recap clips')).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: 'Open visit' }));
+    await screen.findByText('Recap clips');
+    expect(screen.getByRole('button', { name: 'Uploading… (1)' })).toBeDisabled();
+    expect(document.querySelector('input[type="file"]')).toBeDisabled();
+    await act(async () => rejectFirstPut(new Error('Field upload interrupted')));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('field-recovery.jpg');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry upload' }));
+    await waitFor(() => expect(putCount).toBe(2));
+    expect(fetchMock.mock.calls.filter(([path]) => path.endsWith?.('/recap-media/presign'))).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([path]) => path.endsWith?.('/recap-one/confirm'))).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([path]) => path === 'https://upload.test/recap-one')[1][1].body).toBe(file);
+  });
+
+  it('refreshes a remounted visit when the original recap instance confirms successfully', async () => {
+    rows = [row('one', { status: 'on_site', serviceType: 'Quarterly Pest Control', completionProfile: { category: 'pest_control' } })];
+    const respond = fetchMock.getMockImplementation();
+    let finishPut;
+    let presigned = false;
+    let confirmed = false;
+    fetchMock.mockImplementation(async (path, options) => {
+      if (path === 'https://upload.test/recap-success') {
+        return new Promise((resolve) => { finishPut = () => resolve({ ok: true, status: 200 }); });
+      }
+      if (path.endsWith('/tech/services/one/recap-media/presign')) {
+        presigned = true;
+        return { ok: true, status: 200, json: async () => ({ mediaId: 'recap-success', uploadUrl: 'https://upload.test/recap-success' }) };
+      }
+      if (path.endsWith('/tech/services/one/recap-media/recap-success/confirm')) {
+        confirmed = true;
+        return { ok: true, status: 200, json: async () => ({ ok: true, id: 'recap-success', status: 'ready' }) };
+      }
+      if (path.endsWith('/tech/services/one/recap-media')) {
+        const items = presigned ? [{ id: 'recap-success', role: 'perimeter', caption: 'Sealing your perimeter barrier', status: confirmed ? 'ready' : 'uploading' }] : [];
+        return { ok: true, status: 200, json: async () => ({ items }) };
+      }
+      return respond(path, options);
+    });
+
+    mount('/tech?visit=row%3Aone');
+    await screen.findByText('Recap clips');
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [new File(['fixture'], 'success.jpg', { type: 'image/jpeg' })] } });
+    fireEvent.click(screen.getByRole('button', { name: 'Spray — perimeter' }));
+    await waitFor(() => expect(finishPut).toBeTypeOf('function'));
+    fireEvent.click(screen.getByRole('button', { name: 'Today' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Open visit' }));
+    expect(await screen.findByText('uploading')).toBeInTheDocument();
+
+    await act(async () => finishPut());
+    expect(await screen.findByText('Uploaded')).toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(([path]) => path.endsWith?.('/recap-success/confirm'))).toHaveLength(1);
   });
 
   it('brings the active visit ahead of an earlier pending stop', async () => {

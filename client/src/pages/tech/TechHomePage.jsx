@@ -133,7 +133,11 @@ async function techRequest(path, options = {}) {
     },
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
+  if (!res.ok) {
+    const error = new Error(data?.error || `Request failed (${res.status})`);
+    error.status = res.status;
+    throw error;
+  }
   return data;
 }
 
@@ -198,6 +202,9 @@ export default function TechHomePage({ section = 'today' }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedVisitKey = fieldWorkspace ? searchParams.get('visit') : null;
   const visitSearch = selectedVisitKey ? `?visit=${encodeURIComponent(selectedVisitKey)}` : '';
+  const [recapRecoveryStore] = useState(() => ({ failedDrafts: new Map(), latestAttempts: new Map(), inFlightAttempts: new Map(), discardedMedia: new Set(), refreshServices: new Set(), nextAttempt: 0 }));
+  const [recapRecoveryRevision, setRecapRecoveryRevision] = useState(0);
+  const notifyRecapRecoveryChange = useCallback(() => setRecapRecoveryRevision((revision) => revision + 1), []);
   const [schedule, setSchedule] = useState([]);
   // The tech's own Twilio line, if they hold one (GET /api/tech/line):
   // the brief panel's Call/Text then go through the line. Null = personal
@@ -689,7 +696,11 @@ export default function TechHomePage({ section = 'today' }) {
               /></div>}
               {selectedVisit?.primary.status === 'on_site' && <>
                 {visualServiceNotesEnabled && <VisualNotesPanel service={selectedVisit.primary} />}
-                {recapCaptureEnabled && isPestControlService(selectedVisit.primary) && <TechRecapCapture service={selectedVisit.primary} request={techRequest} />}
+                {recapCaptureEnabled && isPestControlService(selectedVisit.primary) && <TechRecapCapture
+                  service={selectedVisit.primary} request={techRequest}
+                  recoveryStore={recapRecoveryStore} recoveryRevision={recapRecoveryRevision}
+                  onRecoveryChange={notifyRecapRecoveryChange}
+                />}
               </>}
             </TechFieldVisit>
           ) : null}
@@ -918,7 +929,11 @@ export default function TechHomePage({ section = 'today' }) {
         )}
         {/* During-visit recap clip capture (P4b) — active pest job only, flag-gated. */}
         {recapCaptureEnabled && nextStop.status === 'on_site' && isPestControlService(nextStop) && (
-          <TechRecapCapture service={nextStop} request={techRequest} />
+          <TechRecapCapture
+            service={nextStop} request={techRequest}
+            recoveryStore={recapRecoveryStore} recoveryRevision={recapRecoveryRevision}
+            onRecoveryChange={notifyRecapRecoveryChange}
+          />
         )}
         </>
       ) : (
