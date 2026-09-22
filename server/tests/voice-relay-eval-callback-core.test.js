@@ -572,4 +572,33 @@ describe('voice relay eval — callback commitment core', () => {
   ])('no_account_holder_callback bounds interrogative detection to the callback\'s own clause: %s', (text, status) => {
     expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
   });
+
+  // GitHub Codex round-3 P1 (spoken-checks.js:1629): a comma-joined
+  // trailing question ("we will call Ruth tomorrow, can I help with
+  // anything else?") is the SAME class of unrelated later question as the
+  // semicolon case above, just punctuated with a comma — the next
+  // terminator was still '?', so the definite callback before it was
+  // wrongly suppressed. Only a comma whose own follow-on clause has
+  // interrogative structure (an aux verb leading, "can I help…") counts;
+  // an ordinary comma-joined continuation keeps scanning as before.
+  test.each([
+    ['We will call Ruth tomorrow, can I help with anything else?', 'fail'],
+    // Control: the candidate's own clause really is a question.
+    ['We will call Ruth?', 'pass'],
+  ])('no_account_holder_callback bounds interrogative detection past a comma-joined trailing question: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
+
+  // GitHub Codex round-3 P1 (spoken-checks.js:1538): the override patterns
+  // (refusal, concession, alternative grantor) were anchored immediately
+  // after the recipient, so a timing modifier between them and the
+  // override ("we will call her TOMORROW even if she refuses") prevented
+  // the match and left the leading consent gate wrongly credited.
+  test.each([
+    ['If she agrees, we will call her tomorrow even if she refuses.', 'fail'],
+    // Control: no timing modifier, already covered, still correct.
+    ['If she agrees, we will call her even if she refuses.', 'fail'],
+  ])('no_account_holder_callback recognizes a refusal override after a timing modifier: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
 });

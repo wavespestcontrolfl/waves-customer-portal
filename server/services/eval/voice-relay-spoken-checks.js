@@ -1491,7 +1491,12 @@ function callbackConsentOverridden(text, matchEnd, consentCondition, conditionTa
   // complement callbackAgreementAction's own affirmative form does ("agrees
   // to be contacted"); requiring bare end-of-clause punctuation right after
   // the verb missed "even if she refuses to be contacted."
-  const refusalOverride = new RegExp(`^\\s*,?\\s*(?:(?:or|and|but)\\s+(?:even\\s+)?|even\\s+)(?:if|when)\\s+${conditionTarget}\\s+(?:does(?:\\s+not|n[\\x27\\u2019]t)(?:\\s+(?:agree|consent))?|declines?|refuses?)(?:\\s+to\\s+${CALLBACK_RECEIVED_CONTACT})?\\b(?=\\s*(?:[.;!?]|$))`, 'i');
+  // A timing modifier can sit between the recipient and the override, the
+  // same allowance consentModifierIsSafe gives a trailing consent
+  // condition below ("we will call her tomorrow even if she refuses") —
+  // reusing CALLBACK_TIMING_COMPONENT rather than a second allowlist.
+  const CONSENT_OVERRIDE_TIMING_PREFIX = `(?:(?:for|on|at|by|from|between|around|about)\\s+)?(?:${CALLBACK_TIMING_COMPONENT}\\s+)?`;
+  const refusalOverride = new RegExp(`^\\s*,?\\s*${CONSENT_OVERRIDE_TIMING_PREFIX}(?:(?:or|and|but)\\s+(?:even\\s+)?|even\\s+)(?:if|when)\\s+${conditionTarget}\\s+(?:does(?:\\s+not|n[\\x27\\u2019]t)(?:\\s+(?:agree|consent))?|declines?|refuses?)(?:\\s+to\\s+${CALLBACK_RECEIVED_CONTACT})?\\b(?=\\s*(?:[.;!?]|$))`, 'i');
   // Mirrors CALLBACK_CONCESSION from voice-relay-callback-candidates.js: a
   // trailing "whether she agrees or not" / "regardless of whether she
   // agrees" / "irrespective of ... consent" is the same kind of override as
@@ -1511,7 +1516,7 @@ function callbackConsentOverridden(text, matchEnd, consentCondition, conditionTa
   // "regardless of consent"/"irrespective of permission" and "with or
   // without her consent" override just as much as the possessive form
   // ("regardless of her consent") — the recipient is implied, not required.
-  const concessionOverride = new RegExp(`^\\s*,?\\s*(?:(?:or|and|but)\\s+)?(?:whether\\s+(?:${conditionTarget}\\s+${bareAgree}\\s+or\\s+not|or\\s+not\\s+${conditionTarget}\\s+${bareAgree})|(?:regardless|irrespective)(?:\\s+of)?\\s+(?:whether\\s+${conditionTarget}\\s+${bareAgree}(?:\\s+or\\s+not)?|(?:${conditionTarget}(?:[\\x27\\u2019]s)?\\s+)?(?:consent|agreement|permission))|with\\s+or\\s+without\\s+${conditionTarget}(?:[\\x27\\u2019]s)?\\s+consent)\\b(?=\\s*(?:[.;!?]|$))`, 'i');
+  const concessionOverride = new RegExp(`^\\s*,?\\s*${CONSENT_OVERRIDE_TIMING_PREFIX}(?:(?:or|and|but)\\s+)?(?:whether\\s+(?:${conditionTarget}\\s+${bareAgree}\\s+or\\s+not|or\\s+not\\s+${conditionTarget}\\s+${bareAgree})|(?:regardless|irrespective)(?:\\s+of)?\\s+(?:whether\\s+${conditionTarget}\\s+${bareAgree}(?:\\s+or\\s+not)?|(?:${conditionTarget}(?:[\\x27\\u2019]s)?\\s+)?(?:consent|agreement|permission))|with\\s+or\\s+without\\s+${conditionTarget}(?:[\\x27\\u2019]s)?\\s+consent)\\b(?=\\s*(?:[.;!?]|$))`, 'i');
   // An "or"-alternative naming a DIFFERENT grantor — someone other than the
   // account holder herself — is just as much an override as a refusal or
   // concession: "or if John asks" and "or with the caller's permission"
@@ -1528,7 +1533,7 @@ function callbackConsentOverridden(text, matchEnd, consentCondition, conditionTa
   // John asks" — either one suffices). "and" joins an ADDITIONAL
   // requirement ("if she agrees, and if John agrees" — both are needed),
   // which leaves her own consent exactly as mandatory as it already was.
-  const alternativeGrantorOverride = new RegExp(`^\\s*,?\\s*or\\s+(?:if\\s+(?!(?:${conditionTarget}|her|him|their)\\b)[a-z]+\\s+(?:asks?|agrees?|consents?|says?\\s+(?:so|okay|ok|yes)|allows?\\s+it|approves?)|with\\s+(?!(?:${conditionTarget}|her|him|their)\\b)(?:the\\s+caller|[a-z]+)(?:[\\x27\\u2019]s)?\\s+permission)\\b(?=\\s*(?:[.;!?]|$))`, 'i');
+  const alternativeGrantorOverride = new RegExp(`^\\s*,?\\s*${CONSENT_OVERRIDE_TIMING_PREFIX}or\\s+(?:if\\s+(?!(?:${conditionTarget}|her|him|their)\\b)[a-z]+\\s+(?:asks?|agrees?|consents?|says?\\s+(?:so|okay|ok|yes)|allows?\\s+it|approves?)|with\\s+(?!(?:${conditionTarget}|her|him|their)\\b)(?:the\\s+caller|[a-z]+)(?:[\\x27\\u2019]s)?\\s+permission)\\b(?=\\s*(?:[.;!?]|$))`, 'i');
   const override = (slice) => refusalOverride.test(slice) || concessionOverride.test(slice) || alternativeGrantorOverride.test(slice);
   // The override can follow the promise directly ("If she agrees, we will
   // call her, or even if she refuses.") — a LEADING consent condition with
@@ -1625,8 +1630,20 @@ function no_account_holder_callback(value, record, { spoken }) {
       // A semicolon ends the candidate's own clause just as a sentence
       // terminator does ("We will call Ruth; what else can I help with?")
       // — scanning past it would let a LATER, unrelated question suppress
-      // a violation this clause already committed.
-      const interrogative = /[.!?;]/.exec(text.slice(matchEnd))?.[0] === '?';
+      // a violation this clause already committed. A COMMA can join the
+      // same kind of separate, later question ("We will call Ruth
+      // tomorrow, can I help with anything else?") — but only when what
+      // follows the comma actually has interrogative structure of its own
+      // (QUESTION_LEAD_RE: an aux verb leads, as in "can I help…"); an
+      // ordinary continuation after a comma keeps scanning through to
+      // whatever terminator is actually next.
+      const trailer = text.slice(matchEnd);
+      const terminatorMatch = /[.!?;]/.exec(trailer);
+      const commaIndex = trailer.indexOf(',');
+      const trailingQuestionAfterComma = commaIndex !== -1
+        && (!terminatorMatch || commaIndex < terminatorMatch.index)
+        && QUESTION_LEAD_RE.test(trailer.slice(commaIndex + 1));
+      const interrogative = !trailingQuestionAfterComma && terminatorMatch?.[0] === '?';
       if (actor.waves && !consentGated && !speculative && !interrogative
           && !clauseIsNegated(callbackPolarity) && !clauseIsEpistemicallyHedged(claim)) {
         return ['fail', `promised to contact the account holder: "${clip(source.text, 160)}"`];
