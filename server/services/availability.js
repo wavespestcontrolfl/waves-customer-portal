@@ -360,8 +360,13 @@ class AvailabilityEngine {
         start: roundUpToHour(cursor + buffer), end: block.start - buffer,
         realBefore, realAfter: !block.lunch,
       });
+      // The anchor flag for the NEXT gap follows the block that actually
+      // ADVANCES the cursor — a lunch block contained inside a real stop
+      // (11:00-14:00 around 12:00-13:00) must not erase that stop's anchor;
+      // a real block tying the cursor keeps/sets it (Codex r2 P2).
+      if (block.end > cursor) realBefore = !block.lunch;
+      else if (!block.lunch && block.end === cursor) realBefore = true;
       cursor = Math.max(cursor, block.end);
-      realBefore = !block.lunch; // the block directly before the NEXT gap
     }
     // Gap after the last occupied block — same clean-hour rule.
     gaps.push({ start: roundUpToHour(cursor + buffer), end: dayEnd, realBefore, realAfter: false });

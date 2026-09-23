@@ -405,7 +405,9 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     // is identical for both.
     // 760: the probe call grew by one option line (`includeInterviews: true`,
     // PR #4623) — the SLOT_TAKEN shape still sits directly after it.
-    const probeBlock = src.slice(probeIdx, probeIdx + 760);
+    // 1000: grew again by the travel probe's expected-minutes credit
+    // (#4664, offer/commit parity).
+    const probeBlock = src.slice(probeIdx, probeIdx + 1000);
     expect(probeBlock).toMatch(/code: 'SLOT_TAKEN',/);
     expect(probeBlock).toMatch(/statusCode: 409/);
     // Shared module import rides the same lazy require as the lock helper.

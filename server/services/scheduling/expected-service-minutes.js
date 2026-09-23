@@ -33,11 +33,22 @@ let catalogCache = null; // { byKey: Map<string, row>, byName: Map<string, row>,
 function buildCatalogIndex(rows) {
   const byKey = new Map();
   const byName = new Map();
+  const nameCounts = new Map();
   for (const row of (rows || [])) {
     if (!row) continue;
     if (row.service_key) byKey.set(String(row.service_key), row);
-    if (row.name) byName.set(String(row.name).trim().toLowerCase(), row);
+    if (row.name) {
+      const name = String(row.name).trim().toLowerCase();
+      nameCounts.set(name, (nameCounts.get(name) || 0) + 1);
+      byName.set(name, row);
+    }
   }
+  // services.name is NOT unique across active/inactive rows (migration
+  // 20260829000060 treats such matches as ambiguous) — a duplicated name
+  // resolves to NOTHING here rather than to whichever row came last, so a
+  // legacy row without service_key_snapshot never borrows the wrong
+  // service's padding (Codex r2 P1). Window-length fallback instead.
+  for (const [name, count] of nameCounts) if (count > 1) byName.delete(name);
   return { byKey, byName, expiresAt: Date.now() + CATALOG_TTL_MS };
 }
 

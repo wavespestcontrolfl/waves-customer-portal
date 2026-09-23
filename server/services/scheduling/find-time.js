@@ -195,11 +195,44 @@ async function findCapacitySlots(opts) {
       estimated_arrival: fit.estimatedArrival, route_arrivals: fit.arrivals,
       route_mode: 'arrival_windows', travel_source: fit.travelSource, travel_reasons: fit.travelReasons,
       stops_that_day: fit.arrivals.length - 1, latest_start_min: start,
+      // Route neighbours of this placement (packed-ends filter below).
+      _gap: {
+        prevId: index > 0 ? fit.routeOrder[index - 1] : null,
+        nextId: index < fit.routeOrder.length - 1 ? fit.routeOrder[index + 1] : null,
+      },
     });
   }
-  slots.sort((a, b) => a.score - b.score || a.waiting_minutes - b.waiting_minutes || a.start_time.localeCompare(b.start_time));
-  return { slots: slots.slice(0, topN).map((slot, i) => ({ rank: i + 1, ...slot })),
-    evaluated: candidates.length, total_feasible: slots.length, travel: travel.diagnostics() };
+  const packed = opts.packEnds === true ? packCapacityEnds(slots) : slots;
+  for (const slot of packed) delete slot._gap;
+  packed.sort((a, b) => a.score - b.score || a.waiting_minutes - b.waiting_minutes || a.start_time.localeCompare(b.start_time));
+  return { slots: packed.slice(0, topN).map((slot, i) => ({ rank: i + 1, ...slot })),
+    evaluated: candidates.length, total_feasible: packed.length, travel: travel.diagnostics() };
+}
+
+// Packed-ends for capacity results (Codex r2 P1): findCapacitySlots
+// enumerates EVERY feasible whole-hour start against the complete route, so
+// a customer-facing caller would still see the hole-making mid-gap hours.
+// Group feasible placements by (date, tech, previous stop, next stop) and
+// keep only the earliest start when the gap follows a real stop and the
+// latest when it precedes one; a gap bordered by no stop (empty day) keeps
+// every hour, exactly as the non-capacity packEnds rule does.
+function packCapacityEnds(slots) {
+  const groups = new Map();
+  for (const slot of slots) {
+    const key = `${slot.date}|${slot.technician.id}|${slot._gap?.prevId ?? ''}|${slot._gap?.nextId ?? ''}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(slot);
+  }
+  const keep = new Set();
+  for (const group of groups.values()) {
+    const prevReal = group[0]._gap?.prevId != null;
+    const nextReal = group[0]._gap?.nextId != null;
+    if (!prevReal && !nextReal) { for (const s of group) keep.add(s); continue; }
+    const byStart = group.slice().sort((a, b) => a.start_time.localeCompare(b.start_time));
+    if (prevReal) keep.add(byStart[0]);
+    if (nextReal) keep.add(byStart[byStart.length - 1]);
+  }
+  return slots.filter((s) => keep.has(s));
 }
 
 /**
@@ -413,7 +446,13 @@ async function findAvailableSlots(opts) {
         .filter(s => {
           if (excludeSet.has(String(s.id))) return false;
           const sd = toDateStr(s.scheduled_date);
-          return sd === date && s.technician_id === tech.id;
+          if (sd !== date) return false;
+          // Packed-ends callers (customer-facing): an UNASSIGNED committed
+          // visit is a real stop someone will serve that day — it anchors
+          // the packing on every tech's route rather than reading as an
+          // open day that fans out every grid hour (Codex r2 P1). Legacy
+          // callers keep the per-tech route byte-identical.
+          return s.technician_id === tech.id || (wantsPackedEnds && s.technician_id == null);
         })
         .map(s => {
           const startMin = timeToMinutes(s.window_start);
@@ -598,5 +637,6 @@ module.exports = {
   DAY_END_HOUR,
   _internals: {
     enumerateDates,
+    packCapacityEnds,
   },
 };

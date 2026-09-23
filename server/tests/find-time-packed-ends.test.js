@@ -181,3 +181,38 @@ describe('legacy callers (packEnds omitted) stay byte-identical on a stop day', 
     expect(middleGap.start_time).toBe('10:15'); // 10:00 + 0 drive + 15 buffer, unsnapped
   });
 });
+
+describe('unassigned committed visits anchor the packing (Codex #4664 r2 P1)', () => {
+  test('a technician_id NULL stop at 12:00 packs the leading gap to 10:00 for the tech instead of an open day', async () => {
+    const unassigned = { ...stopRow('u1', '12:00', '13:00'), technician_id: null };
+    wireDb({ stops: [unassigned], catalog: NO_CATALOG_ROWS });
+    const { slots } = await findAvailableSlots({ ...BASE, packEnds: true, bufferMinutes: customerFacingBufferMinutes() });
+    const starts = slots.map((s) => s.start_time);
+    expect(starts).toContain('10:00');
+    expect(starts).not.toContain('09:00');
+    expect(slots.every((s) => s.stops_that_day === 1)).toBe(true);
+  });
+
+  test('legacy callers (packEnds omitted) still ignore unassigned rows on a tech route', async () => {
+    const unassigned = { ...stopRow('u1', '12:00', '13:00'), technician_id: null };
+    wireDb({ stops: [unassigned], catalog: NO_CATALOG_ROWS });
+    const { slots } = await findAvailableSlots({ ...BASE, bufferMinutes: customerFacingBufferMinutes() });
+    expect(slots.every((s) => s.stops_that_day === 0)).toBe(true);
+  });
+});
+
+describe('packCapacityEnds — capacity results keep only the packed ends per gap (Codex #4664 r2 P1)', () => {
+  const { packCapacityEnds } = require('../services/scheduling/find-time')._internals;
+  const cap = (start, prevId, nextId, tech = 't1') => ({ date: '2026-10-01', technician: { id: tech }, start_time: start, _gap: { prevId, nextId } });
+
+  test('leading gap keeps the latest hour, trailing the earliest, middle both, empty day everything', () => {
+    const slots = [
+      cap('09:00', null, 's1'), cap('10:00', null, 's1'), cap('11:00', null, 's1'), // before s1 → 11:00
+      cap('14:00', 's1', 's2'), cap('15:00', 's1', 's2'), cap('16:00', 's1', 's2'), // between → 14:00 + 16:00
+      cap('18:00', 's2', null), cap('19:00', 's2', null), // after s2 → 18:00
+      cap('09:00', null, null, 't2'), cap('10:00', null, null, 't2'), // t2 empty day → both
+    ];
+    const kept = packCapacityEnds(slots).map((s) => `${s.technician.id}@${s.start_time}`);
+    expect(kept).toEqual(['t1@11:00', 't1@14:00', 't1@16:00', 't1@18:00', 't2@09:00', 't2@10:00']);
+  });
+});

@@ -215,3 +215,11 @@ describe('findGaps packed-ends: the lunch block is never a packing anchor (Codex
     expect(slots.map((g) => g.start / 60)).toEqual([8, 13, 17]);
   });
 });
+
+test('findGaps packed-ends: a lunch block contained inside a real stop keeps that stop as the anchor (Codex #4664 r2 P2)', () => {
+  const occupied = [{ start: 11 * 60, end: 14 * 60 }, { start: 12 * 60, end: 13 * 60, lunch: true }];
+  const slots = engine.findGaps(occupied, 8 * 60, 18 * 60, 60, 0, null, true);
+  // 10:00 packed before the 11:00 stop; 14:00 packed after it (the
+  // contained lunch block must not erase the after-stop anchor).
+  expect(slots.map((g) => g.start / 60)).toEqual([10, 14]);
+});

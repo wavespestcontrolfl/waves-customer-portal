@@ -1135,9 +1135,14 @@ async function reserveSlot({
           // would hand back a hold the commit is guaranteed to reject. Same
           // expected-minutes credit as the row this hold already carries
           // (owner ruling 2026-09-23).
+          // The CURRENT selection's profile is authoritative (Codex r2 P1):
+          // a same-slot reselect under another single-service mode still
+          // matches sameSlotHold, and the commit check below reads the
+          // reselected profile — the stale row's stamp is only the fallback.
           travel: {
             ...(holdPin || { lat: null, lng: null }),
-            expectedMinutes: await candidateExpectedMinutesFromRow(trx, sameSlotHold, effectiveDurationMinutes),
+            expectedMinutes: candidateExpectedMinutes
+              ?? await candidateExpectedMinutesFromRow(trx, sameSlotHold, effectiveDurationMinutes),
           },
         });
         if (refreshClash.length) {

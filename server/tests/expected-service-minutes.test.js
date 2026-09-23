@@ -199,3 +199,17 @@ describe('expectedMinutesForServices — a whole visit sums every service (push-
     expect(await expectedMinutesForServices(conn(), [], 60)).toBe(60);
   });
 });
+
+describe('ambiguous catalog names (Codex #4664 r2 P1)', () => {
+  test('a services.name shared by two rows resolves to NOTHING by name — window-length fallback', async () => {
+    const conn = fakeConn([
+      { service_key: 'lawn_a', name: 'Lawn Care', min_duration_minutes: 20, max_duration_minutes: 30 },
+      { service_key: 'lawn_b', name: 'Lawn Care', min_duration_minutes: 50, max_duration_minutes: 60 },
+      { service_key: 'pest', name: 'Pest', min_duration_minutes: 30, max_duration_minutes: 60 },
+    ]);
+    expect(await expectedServiceMinutes(conn, { serviceType: 'Lawn Care', windowMinutes: 60 })).toBe(60);
+    // The key lookups still resolve; the unique name still resolves.
+    expect(expectedMinutesSync({ serviceKey: 'lawn_a', windowMinutes: 60 })).toBe(25);
+    expect(expectedMinutesSync({ serviceType: 'pest', windowMinutes: 60 })).toBe(45);
+  });
+});

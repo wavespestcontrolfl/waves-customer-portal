@@ -11,6 +11,20 @@ const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
 const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes, requiredGapMinutes } = require('../services/scheduling/travel-gap');
+const { expectedMinutesForServices } = require('../services/scheduling/expected-service-minutes');
+
+// The booking's own expected-minutes credit (owner ruling 2026-09-23) for
+// a funnel serviceKey ('pest_control', 'pest_control+lawn_care', …): every
+// member's catalog credit summed, clamped to the advertised window. Resolved
+// ONCE per request and threaded through the finder, the offer-side mirror
+// and the commit probe so all three measure the same gap (Codex r2 P2).
+// Gate off → the window length (zero padding, legacy gap).
+async function bookingExpectedMinutes(conn, serviceKey, durationMinutes) {
+  if (!travelGapEnabled()) return durationMinutes;
+  const services = normalizeBookingServiceKeys(serviceKey)
+    .map((key) => ({ label: BOOKING_FUNNEL_SERVICE_LABELS[key] || key }));
+  return expectedMinutesForServices(conn, services, durationMinutes);
+}
 const { fallbackCenterZoneName } = require('../services/scheduling/zone-day-funnel');
 const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
@@ -907,11 +921,15 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       .catch(() => null)
     : null;
 
+  const candidateExpectedMinutes = await bookingExpectedMinutes(db, serviceKey, duration);
   const result = await findAvailableSlots({
     lat,
     lng,
     durationMinutes: duration,
     serviceTypes: normalizeBookingServiceKeys(serviceKey).map(key => BOOKING_FUNNEL_SERVICE_LABELS[key]),
+    // This booking's own expected-minutes credit — the same number the
+    // mirror below and the commit probe use (offer/commit parity).
+    expectedMinutes: candidateExpectedMinutes,
     dateFrom: rangeFrom,
     dateTo: rangeTo,
     // Travel gap (GATE_SLOT_TRAVEL_GAP): customer-facing turnaround buffer
@@ -1087,7 +1105,9 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       // findConflictingVisits `travel` probe rejects a window that merely
       // touches a stop across a real drive; drop it here so it is never
       // offered. Same soft-degrade as the overlap mirror (no map → skip).
-      if (dayOccupied && violatesTravelGap({ startMin, endMin, lat, lng }, dayOccupied)) return;
+      if (dayOccupied && violatesTravelGap({
+        startMin, endMin, lat, lng, windowMinutes: duration, expectedMinutes: candidateExpectedMinutes,
+      }, dayOccupied)) return;
       idleMinutes = idleMinutesAgainst(dayOccupied, startMin, endMin);
     }
     const startTime = fmt(startMin);
@@ -2680,6 +2700,8 @@ async function createSelfBooking(payload = {}) {
         travel: {
           lat: Number.isFinite(offerLat) ? offerLat : null,
           lng: Number.isFinite(offerLng) ? offerLng : null,
+          // Same credit buildBookingAvailability offered this window under.
+          expectedMinutes: await bookingExpectedMinutes(trx, serviceKey, duration),
         },
       });
       if (globalClash.length) {
