@@ -734,6 +734,21 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // should have every later visit follow, not sit a double interval out.
     // Strict statuses only (no allowLive) — eligibility already gated those.
     const reanchor = shouldReanchor(svc, date);
+    // Self-serve notice window re-check INSIDE the rebooker's transaction
+    // (owner ruling 2026-09-23): the guard above ran on an unlocked snapshot
+    // before the availability build. The `expect` fence below pins the row to
+    // that snapshot (a concurrent staff move that changed date/start aborts
+    // the CAS with SLOT_TAKEN instead of moving a row this page never saw),
+    // and beforeMove re-reads the clock under the scheduling locks so a
+    // request that waited across the boundary is refused, missed exemption
+    // preserved. Same code/message as the pre-check.
+    const noticeRecheck = async () => {
+      if (!elig.missed && visitInsideNoticeWindow(svc)) {
+        throw Object.assign(new Error('This visit starts too soon to move online — call (941) 297-5749 and our team can help.'), {
+          statusCode: 409, isOperational: true, code: 'SELF_SERVE_NOTICE',
+        });
+      }
+    };
     let result;
     try {
       result = reanchor
@@ -758,6 +773,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             travelGap: true,
             // The confirmation is the series pass's durable text (below).
             notifyRequested: true,
+            beforeMove: noticeRecheck,
           }
         )
         : await SmartRebooker.reschedule(
@@ -771,7 +787,13 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
           // the collective choke point must not widen a disclosed single move.
           // travelGap: customer-facing move — the rebooker's occupancy probe
           // applies GATE_SLOT_TRAVEL_GAP (the offers above were built under it).
-          { technicianId: slot.technician_id, seriesPolicy: 'single', travelGap: true }
+          {
+            technicianId: slot.technician_id,
+            seriesPolicy: 'single',
+            travelGap: true,
+            expect: { scheduled_date: svc.scheduled_date, window_start: svc.window_start },
+            beforeMove: noticeRecheck,
+          }
         );
     } catch (err) {
       if (err?.statusCode) {

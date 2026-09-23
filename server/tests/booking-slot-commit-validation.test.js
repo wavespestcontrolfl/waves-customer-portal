@@ -739,21 +739,23 @@ describe('self-serve notice window — offer/commit parity (source guards)', () 
     expect(src.split("require('../services/scheduling/self-serve-notice')")).toHaveLength(2);
   });
 
-  test('createSelfBooking refuses a slot inside the notice window, replacing the old same-day-only "already passed" floor', () => {
+  test('createSelfBooking refuses a slot inside the notice window INSIDE the transaction, after the idempotent replay', () => {
     const idx = src.indexOf('violatesSelfServeNotice({ date: slotDateStr, startTime: slot_start })');
     expect(idx).toBeGreaterThan(-1);
-    // After the past-date check, before the customer insert (no-orphan-profile
-    // invariant the test above this one pins).
-    const pastDateIdx = src.indexOf("error: 'That date has already passed — please pick another day.'");
-    const insertIdx = src.indexOf("await db('customers').insert(applyContactNormalization(");
-    expect(pastDateIdx).toBeGreaterThan(-1);
-    expect(idx).toBeGreaterThan(pastDateIdx);
-    expect(idx).toBeLessThan(insertIdx);
-    // Customer-facing call-us copy, matching the tone of the file's other
-    // operational refusals.
-    const block = src.slice(idx, idx + 300);
+    // After the replay lookup (a booking that landed just outside the boundary
+    // whose response was lost must still replay as success when the retry
+    // crosses it), before the day-cap / slot-conflict re-checks.
+    const replayIdx = src.indexOf('if (existing) return { existing };');
+    const dayCapIdx = src.indexOf('if (selfBookDayCapEnabled()) {', replayIdx);
+    expect(replayIdx).toBeGreaterThan(-1);
+    expect(idx).toBeGreaterThan(replayIdx);
+    expect(idx).toBeLessThan(dayCapIdx);
+    // Customer-facing call-us copy, thrown as an operational 409 the route's
+    // error mapping already renders (same shape as DAY_FULL / ALREADY_BOOKED).
+    const block = src.slice(idx, idx + 400);
     expect(block).toMatch(/941\)\s*297-5749/);
-    expect(block).toMatch(/status: 409/);
+    expect(block).toMatch(/statusCode: 409/);
+    expect(block).toMatch(/code: 'SELF_SERVE_NOTICE'/);
   });
 
   test("buildBookingAvailability's offer filter is self-serve opt-in only — the voice agent's calls never set it", () => {

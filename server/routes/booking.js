@@ -1495,18 +1495,6 @@ async function createSelfBooking(payload = {}) {
     if (slotDateStr < todayEtStr) {
       return { ok: false, status: 400, error: 'That date has already passed — please pick another day.' };
     }
-    // Self-serve notice window (owner ruling 2026-09-23), replacing the old
-    // same-day-only "already passed" floor: a customer can't self-book a
-    // visit starting within the notice window (default 24h), whether that
-    // falls later today or early tomorrow. Offer/commit parity: this is the
-    // same (date, startTime) check buildBookingAvailability's addCandidate
-    // runs with selfServeNotice: true.
-    if (violatesSelfServeNotice({ date: slotDateStr, startTime: slot_start })) {
-      return {
-        ok: false, status: 409,
-        error: 'That time is too soon to book online — call (941) 297-5749 and our team can get you on the schedule.',
-      };
-    }
 
     // Redemption re-check for owner blackout days: a signed slot offered
     // minutes before the admin blacked the date out must not stay bookable.
@@ -2564,6 +2552,23 @@ async function createSelfBooking(payload = {}) {
       if (callbackVisit) replayQuery.where('service_type', resolvedServiceType);
       const existing = await replayQuery.first();
       if (existing) return { existing };
+
+      // Self-serve notice window (owner ruling 2026-09-23), replacing the old
+      // same-day-only "already passed" floor: a customer can't self-book a
+      // visit starting within the notice window (default 24h), whether that
+      // falls later today or early tomorrow. Offer/commit parity: this is the
+      // same (date, startTime) check buildBookingAvailability's addCandidate
+      // runs with selfServeNotice: true. Placed AFTER the idempotent replay
+      // above, under the locks: a booking that landed just outside the
+      // boundary whose response was lost still replays as success when the
+      // retry crosses it, and the clock is read inside the transaction.
+      if (violatesSelfServeNotice({ date: slotDateStr, startTime: slot_start })) {
+        throw Object.assign(new Error('That time is too soon to book online — call (941) 297-5749 and our team can get you on the schedule.'), {
+          statusCode: 409,
+          isOperational: true,
+          code: 'SELF_SERVE_NOTICE',
+        });
+      }
 
       if (callbackVisit) {
         const { openCallbackExistsForLane, laneForCallbackRow } = require('../services/reservice-scheduler');

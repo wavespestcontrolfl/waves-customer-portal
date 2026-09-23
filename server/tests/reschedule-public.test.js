@@ -791,6 +791,31 @@ describe('reschedule-public inactive-account fail-closed (C4)', () => {
   });
 });
 
+describe('POST commit re-checks the notice window INSIDE the rebooker transaction (source guard)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '../routes/reschedule-public.js'), 'utf8');
+
+  test('the single-visit move pins the snapshot (expect) and re-runs the notice check under the locks (beforeMove); the series move gets beforeMove beside its expectAnchor', () => {
+    const singleIdx = src.indexOf('await SmartRebooker.reschedule(');
+    const seriesIdx = src.indexOf('await SmartRebooker.rescheduleSeries(');
+    expect(singleIdx).toBeGreaterThan(-1);
+    expect(seriesIdx).toBeGreaterThan(-1);
+    const single = src.slice(singleIdx, singleIdx + 900);
+    expect(single).toMatch(/expect: \{ scheduled_date: svc\.scheduled_date, window_start: svc\.window_start \}/);
+    expect(single).toMatch(/beforeMove: noticeRecheck/);
+    const series = src.slice(seriesIdx, singleIdx);
+    expect(series).toMatch(/expectAnchor: \{ scheduled_date: svc\.scheduled_date, window_start: svc\.window_start \}/);
+    expect(series).toMatch(/beforeMove: noticeRecheck/);
+    // The re-check keeps the missed exemption and throws the same code.
+    const recheckIdx = src.indexOf('const noticeRecheck = async () => {');
+    expect(recheckIdx).toBeGreaterThan(-1);
+    const recheck = src.slice(recheckIdx, recheckIdx + 400);
+    expect(recheck).toMatch(/!elig\.missed && visitInsideNoticeWindow\(svc\)/);
+    expect(recheck).toMatch(/code: 'SELF_SERVE_NOTICE'/);
+  });
+});
+
 describe('withSelfServeNotice (self-serve notice window, owner ruling 2026-09-23)', () => {
   const { withSelfServeNotice } = reschedulePublicRouter._test;
 
