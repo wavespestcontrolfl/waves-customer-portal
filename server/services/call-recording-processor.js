@@ -13845,7 +13845,16 @@ const CallRecordingProcessor = {
                   // 'phone_call', so anything else came from the attach path.
                   const isAttachedManualBooking = String(existing.booking_source || '') !== 'phone_call';
                   let primaryRow = existing;
-                  if (!isAttachedManualBooking && !existing.technician_id && defaultTechnicianId) {
+                  // A DISPUTED house number (on_file_house_number_conflict
+                  // card filed above) keeps the existing booking as it is
+                  // but holds the NEW side effects — a technician assignment
+                  // and a follow-up visit at the disputed address — until
+                  // the office confirms the number (pre-push audit P1).
+                  const reuseHeldForAddress = houseNumberConflictFiled;
+                  if (reuseHeldForAddress) {
+                    logger.warn(`[call-proc] reused booking for ${callSid} kept unassigned and without a follow-up: house number disputed (on_file_house_number_conflict)`);
+                  }
+                  if (!isAttachedManualBooking && !existing.technician_id && defaultTechnicianId && !reuseHeldForAddress) {
                     // Tech-day membership fence + route_order clear (uncapped
                     // audit r26 P1): unassigned → tech is a tech-day ENTRY,
                     // so it must hold the same 'slot-reserve' fence every
@@ -13921,7 +13930,7 @@ const CallRecordingProcessor = {
                   if (isAttachedManualBooking) {
                     attachedManualBookingId = primaryRow.id;
                     attachSkippedFollowUpPlan = !!callFollowUpPlan;
-                  } else if (!primaryRowSkipped) {
+                  } else if (!primaryRowSkipped && !reuseHeldForAddress) {
                     // After the backfill so the child inherits the assigned tech.
                     followUpCreated = await ensureCallFollowUpVisit(primaryRow);
                   }
