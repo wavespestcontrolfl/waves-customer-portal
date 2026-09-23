@@ -39,6 +39,14 @@ function deriveAddressUnverified(enriched, address = null) {
 
 const zip5 = (v) => (String(v || '').match(/\d{5}/) || [''])[0];
 const lineKey = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+// Street line with any inline unit stripped ("1260 Example St Apt 4" →
+// "1260 example st"): the audited house number is the same with or
+// without the unit, on every comparison (pre-push audit P1).
+const streetKeyNoUnit = (v) => {
+  const { splitStreetLineUnit } = require('../utils/address-normalizer');
+  const text = String(v || '');
+  return lineKey(splitStreetLineUnit(text).street || text);
+};
 const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z]/g, '');
 
 // Same premise: same street line and, where both sides carry one, the same
@@ -65,7 +73,7 @@ function sameLocality(a, b) {
 function snapshotCoversAddress(snapshot, address) {
   const prior = snapshot?.address;
   if (!prior || typeof prior !== 'object' || !address) return false;
-  if (!lineKey(prior.line1) || lineKey(prior.line1) !== lineKey(address.line1)) return false;
+  if (!streetKeyNoUnit(prior.line1) || streetKeyNoUnit(prior.line1) !== streetKeyNoUnit(address.line1)) return false;
   return sameLocality(prior, address);
 }
 
@@ -98,7 +106,7 @@ function recoverAddressUnverified(snapshot) {
 function flagCoversAddress(flag, address) {
   if (!flag || typeof flag !== 'object' || !address) return false;
   if (!flag.address_line1) return true;
-  if (lineKey(flag.address_line1) !== lineKey(address.line1)) return false;
+  if (streetKeyNoUnit(flag.address_line1) !== streetKeyNoUnit(address.line1)) return false;
   return sameLocality(flag, address);
 }
 
@@ -111,7 +119,6 @@ function flagCoversAddress(flag, address) {
 // so a street-only submission can never match a published estimate for
 // that street in some other town (pre-push audit P1).
 function samePremiseDisplay(a, b, { requireLocality = false } = {}) {
-  const { splitStreetLineUnit } = require('../utils/address-normalizer');
   // The normalizer may emit the unit as its OWN comma segment ("…St, Apt
   // 4, Parrish, FL 34219"): the city is the first later segment that is
   // neither a unit line nor the "FL 34219" tail (pre-push audit P1).
@@ -119,13 +126,13 @@ function samePremiseDisplay(a, b, { requireLocality = false } = {}) {
   const STATE_ZIP_SEGMENT = /^[a-z]{2}\s*\d{5}(?:-\d{4})?$/i;
   const parse = (text) => {
     const parts = String(text || '').split(',').map((part) => part.trim()).filter(Boolean);
-    const street = splitStreetLineUnit(parts[0] || '').street || parts[0] || '';
+    const street = parts[0] || '';
     const city = parts.slice(1).find((part) => !UNIT_SEGMENT.test(part) && !STATE_ZIP_SEGMENT.test(part)) || '';
     // ZIP from the state/ZIP (or bare ZIP) segment only — the first five
     // digits of the whole string may be a five-digit house number
     // (pre-push audit P1).
     const tail = parts.slice(1).find((part) => STATE_ZIP_SEGMENT.test(part) || /^\d{5}(?:-\d{4})?$/.test(part)) || '';
-    return { street: lineKey(street), city, zip: zip5(tail) };
+    return { street: streetKeyNoUnit(street), city, zip: zip5(tail) };
   };
   const x = parse(a);
   const y = parse(b);
