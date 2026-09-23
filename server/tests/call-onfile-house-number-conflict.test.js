@@ -126,9 +126,10 @@ describe('triage auto-resolve: house_number_adopted', () => {
   const item = (over = {}) => ({
     id: 1, status: 'open', severity: 'advisory', reason_code: 'on_file_house_number_conflict',
     created_at: '2026-09-16T15:00:00Z', customer_deleted_at: null,
+    call_extraction: { scheduling: { status: 'none' } },
     customer_address_line1: '1260 Example Street', customer_zip: '34219',
     customer_city: 'Parrish',
-    payload: { stated_house_number: '1250', on_file_house_number: '1260', stated_street: '1250 Example Street', stated_city: 'Parrish', stated_zip: '34219' },
+    payload: { stated_house_number: '1250', on_file_house_number: '1260', stated_street: '1250 Example Street', stated_city: 'Parrish', stated_zip: '34219', scheduling_status: null },
     ...over,
   });
 
@@ -141,6 +142,17 @@ describe('triage auto-resolve: house_number_adopted', () => {
   test('stands while the record still carries the other number, and is never aged out', () => {
     expect(classifyTriageItem(item(), {}, { now: NOW })).toBeNull();
     expect(classifyTriageItem(item({ created_at: '2026-01-01T00:00:00Z' }), {}, { now: NOW })).toBeNull();
+  });
+
+  test('a confirmed call held on this card stays open until a booking lands', () => {
+    const confirmed = item({
+      customer_address_line1: '1250 Example Street',
+      call_extraction: { scheduling: { status: 'confirmed' } },
+      payload: { stated_house_number: '1250', stated_street: '1250 Example Street', stated_city: 'Parrish', stated_zip: '34219', scheduling_status: 'confirmed' },
+    });
+    expect(classifyTriageItem(confirmed, {}, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(confirmed, { evidence: new Map([[1, { booking_after_card: true }]]) }, { now: NOW }))
+      .toEqual({ action: 'resolve', rule: 'house_number_adopted' });
   });
 
   test('an unrelated street sharing the house number does not settle the ask', () => {
@@ -156,7 +168,7 @@ describe('triage auto-resolve: house_number_adopted', () => {
     expect(houseNumberStreetKey('Main St')).toBe('');
     expect(classifyTriageItem(item({
       customer_address_line1: '1250 N Main St', customer_city: 'Parrish', customer_zip: '34219',
-      payload: { stated_house_number: '1250', stated_street: '1250 North Main Street', stated_city: 'Parrish', stated_zip: '34219' },
+      payload: { stated_house_number: '1250', stated_street: '1250 North Main Street', stated_city: 'Parrish', stated_zip: '34219', scheduling_status: null },
     }), {}, { now: NOW })).toEqual({ action: 'resolve', rule: 'house_number_adopted' });
   });
 
@@ -167,7 +179,7 @@ describe('triage auto-resolve: house_number_adopted', () => {
     expect(sameHouseNumberStreet('Main St', '1250 Main St')).toBe(false);
     expect(classifyTriageItem(item({
       customer_address_line1: '1250 Main', customer_city: 'Parrish', customer_zip: '34219',
-      payload: { stated_house_number: '1250', stated_street: '1250 Main St', stated_city: 'Parrish', stated_zip: '34219' },
+      payload: { stated_house_number: '1250', stated_street: '1250 Main St', stated_city: 'Parrish', stated_zip: '34219', scheduling_status: null },
     }), {}, { now: NOW })).toEqual({ action: 'resolve', rule: 'house_number_adopted' });
   });
 
@@ -176,7 +188,7 @@ describe('triage auto-resolve: house_number_adopted', () => {
       .toEqual({ action: 'resolve', rule: 'house_number_adopted' });
     // A card whose call stated no locality is settled by the street alone.
     expect(classifyTriageItem(item({ customer_address_line1: '1250 Example Street', customer_zip: null, customer_city: null,
-      payload: { stated_house_number: '1250', stated_street: '1250 Example Street' } }), {}, { now: NOW }))
+      payload: { stated_house_number: '1250', stated_street: '1250 Example Street', scheduling_status: null } }), {}, { now: NOW }))
       .toEqual({ action: 'resolve', rule: 'house_number_adopted' });
   });
 

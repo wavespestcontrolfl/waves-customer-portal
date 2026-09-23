@@ -1011,10 +1011,16 @@ const CLASSIFY_RULES = [
   // now carries the number the caller stated (an operator or the correction
   // lane adopted it). Any other edit keeps the ask — the office still has
   // to pick a number. Never aged out: it gates an estimate send.
+  // A confirmed call held on this card has no other scheduling card (the
+  // hold suppresses the skipped-booking fallback), so the corrected record
+  // settles the address but not the still-unbooked appointment — the
+  // confirmed-unbooked guard keeps the card until a booking lands
+  // (pre-push audit P1).
   { rule: 'house_number_adopted', action: 'resolve',
-    when: (item) => item.reason_code === 'on_file_house_number_conflict'
+    when: (item, ev) => item.reason_code === 'on_file_house_number_conflict'
       && !item.customer_deleted_at
-      && recordCarriesStatedStreet(item) },
+      && recordCarriesStatedStreet(item)
+      && !cardConfirmedUnbooked(item, ev) },
   { rule: 'spam_aged', action: 'dismiss', when: (item, ev, now) => item.reason_code === 'spam_or_wrong_number' && ageDays(item.created_at, now) >= SPAM_AGE_DAYS },
   { rule: 'advisory_aged', action: 'dismiss',
     when: (item, ev, now) => ADVISORY_AGE_CODES.has(item.reason_code) && item.severity === 'advisory' && ageDays(item.created_at, now) >= ADVISORY_AGE_DAYS },
