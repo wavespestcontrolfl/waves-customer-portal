@@ -144,6 +144,9 @@ describe('samePremiseDisplay', () => {
   test('a unit added on a repeat run is the same audited premise; a new number or town is not', () => {
     expect(samePremiseDisplay('1260 Example St, Parrish, FL 34219', '1260 Example St Apt 4, Parrish, FL 34219')).toBe(true);
     expect(samePremiseDisplay('1260 Example St, Parrish, FL 34219', '1260 EXAMPLE ST., Parrish, FL 34219')).toBe(true);
+    // A unit emitted as its own segment must not be read as the city.
+    expect(samePremiseDisplay('1260 Example St, Parrish, FL 34219', '1260 Example St, Apt 4, Parrish, FL 34219')).toBe(true);
+    expect(samePremiseDisplay('1260 Example St, Apt 4, Parrish, FL 34219', '1260 Example St, Apt 4, Bradenton, FL 34219')).toBe(false);
     expect(samePremiseDisplay('1260 Example St, Parrish, FL 34219', '1250 Example St, Parrish, FL 34219')).toBe(false);
     expect(samePremiseDisplay('1260 Example St, Parrish, FL 34219', '1260 Example St, Bradenton, FL 34219')).toBe(false);
     expect(samePremiseDisplay('1260 Example St, Parrish, FL 34219', '1260 Example St, Parrish, FL 34221')).toBe(false);

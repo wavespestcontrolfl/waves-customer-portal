@@ -108,10 +108,16 @@ function flagCoversAddress(flag, address) {
 // number (pre-push audit P1). Either side missing a street → false.
 function samePremiseDisplay(a, b) {
   const { splitStreetLineUnit } = require('../utils/address-normalizer');
+  // The normalizer may emit the unit as its OWN comma segment ("…St, Apt
+  // 4, Parrish, FL 34219"): the city is the first later segment that is
+  // neither a unit line nor the "FL 34219" tail (pre-push audit P1).
+  const UNIT_SEGMENT = /^(?:#|apt|apartment|unit|ste|suite|bldg|building|lot|rm|room|fl|floor|spc|space)\b/i;
+  const STATE_ZIP_SEGMENT = /^[a-z]{2}\s*\d{5}(?:-\d{4})?$/i;
   const parse = (text) => {
-    const parts = String(text || '').split(',').map((part) => part.trim());
+    const parts = String(text || '').split(',').map((part) => part.trim()).filter(Boolean);
     const street = splitStreetLineUnit(parts[0] || '').street || parts[0] || '';
-    return { street: lineKey(street), city: parts[1] || '', zip: zip5(text) };
+    const city = parts.slice(1).find((part) => !UNIT_SEGMENT.test(part) && !STATE_ZIP_SEGMENT.test(part)) || '';
+    return { street: lineKey(street), city, zip: zip5(text) };
   };
   const x = parse(a);
   const y = parse(b);
