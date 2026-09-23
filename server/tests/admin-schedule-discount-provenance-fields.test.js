@@ -774,6 +774,82 @@ postgres('POST /:id/update-details/preview — dry-run parity with the real save
     expect(Number(savedRow.estimated_price)).toBe(190);
     expect(Number(previewResult.payload.total)).toBe(Number(savedRow.estimated_price));
   });
+
+  test(':13469 — a marked row\'s PERCENTAGE primary-line discount restacks its cached dollar figure on a primary price change, and the preview shows the SAME fresh figure the PUT persists', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const lineDiscountId = randomUUID();
+    await trx('discounts').insert({
+      id: lineDiscountId, discount_key: 'pct10_' + lineDiscountId.slice(0, 8), name: '10% Off',
+      discount_type: 'percentage', amount: 10, is_active: true, is_auto_apply: false, show_in_invoices: true,
+    });
+    const [row] = await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, service_type: 'Quarterly Pest Control',
+      service_key_snapshot: 'pest_general_quarterly', status: 'confirmed',
+      scheduled_date: '2040-02-01', window_start: '08:00', window_end: '10:00',
+      // Stored: $100 gross, 10% line discount = $10 cached dollars, $90 net.
+      estimated_price: 90, primary_line_price: 100,
+      line_discount_type: 'percentage', line_discount_amount: 10, line_discount_id: lineDiscountId,
+      line_discount_dollars: 10, line_discount_name: '10% Off',
+      pricing_provenance: {
+        pricing_regime: 'discount_stack_v1', engine_version: 1,
+        caps: { line: { id: lineDiscountId, cap: null }, addons: {} },
+      },
+    }).returning('*');
+    visitId = row.id;
+    // A genuine primary price change (100 -> 200, no addons touched) —
+    // the SAME 10% recomputes to $20, not the stale cached $10.
+    const body = { primaryLinePrice: 200, addons: [] };
+    const previewResult = await preview(visitId, body);
+    expect(previewResult.err).toBeFalsy();
+    expect(previewResult.statusCode).toBe(200);
+    expect(Number(previewResult.payload.total)).toBe(180);
+    expect(Number(previewResult.payload.primaryLineDiscountDollars)).toBe(20);
+    // The name is untouched by this restack (it's a derived-dollars-only
+    // write) — the preview must still report it, not null.
+    expect(previewResult.payload.primaryLineDiscountName).toBe('10% Off');
+    const saveResult = await put(visitId, body);
+    expect(saveResult.err).toBeFalsy();
+    expect(saveResult.statusCode).toBe(200);
+    const savedRow = await trx('scheduled_services').where({ id: visitId }).first();
+    expect(Number(savedRow.estimated_price)).toBe(180);
+    expect(Number(savedRow.line_discount_dollars)).toBe(20);
+    expect(savedRow.line_discount_name).toBe('10% Off');
+    expect(Number(previewResult.payload.total)).toBe(Number(savedRow.estimated_price));
+    expect(Number(previewResult.payload.primaryLineDiscountDollars)).toBe(Number(savedRow.line_discount_dollars));
+  });
+
+  test(':10574 — an UNMARKED (legacy) row\'s stored primary-line discount dollars survive a genuine addons-array money edit, never silently nulled', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const [row] = await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, service_type: 'Quarterly Pest Control',
+      service_key_snapshot: 'pest_general_quarterly', status: 'confirmed',
+      scheduled_date: '2040-02-01', window_start: '08:00', window_end: '10:00',
+      // Stored: $100 gross, a legacy $10 fixed line discount, $90 net.
+      // NO pricing_provenance — this row predates the discount-stacking
+      // marker entirely (the common shape for anything not resaved since).
+      estimated_price: 90, primary_line_price: 100,
+      line_discount_type: 'fixed_amount', line_discount_amount: 10, line_discount_id: randomUUID(),
+      line_discount_dollars: 10, line_discount_name: 'Legacy $10 Off',
+    }).returning('*');
+    visitId = row.id;
+    // A genuine, non-preserved money edit through the addons-array branch
+    // (primary price actually changes, 100 -> 150) — the canonical restack
+    // never runs for an unmarked row, so restackedPrimaryLineDiscountDollars
+    // stays null; the fix must not write that null over the row's real
+    // cached figure.
+    const body = { primaryLinePrice: 150, addons: [] };
+    const saveResult = await put(visitId, body);
+    expect(saveResult.err).toBeFalsy();
+    expect(saveResult.statusCode).toBe(200);
+    const savedRow = await trx('scheduled_services').where({ id: visitId }).first();
+    expect(Number(savedRow.primary_line_price)).toBe(150);
+    // The stored discount stamp is untouched — this editor can't resend
+    // it (pre-existing contract) — dollars included, never nulled out
+    // from underneath the still-intact type/amount/id/name.
+    expect(Number(savedRow.line_discount_dollars)).toBe(10);
+    expect(savedRow.line_discount_type).toBe('fixed_amount');
+    expect(savedRow.line_discount_name).toBe('Legacy $10 Off');
+  });
 });
 
 postgres('round 4 on #4657 — preview must equal what the PUT persists, verbatim per line', () => {
@@ -1098,7 +1174,7 @@ postgres('round 5 on #4657 — service-swap freshness, and a gross echo does not
   });
 });
 
-postgres('round 6 on #4657 — a primary-service swap revalidates the stored discount, and the preview never shows a discount the same save just cleared', () => {
+postgres('round 6 on #4657 — the preview never shows a discount the same save just cleared; owner revert-and-carry pins the P0 legacy-null-gross repro', () => {
   let database;
   let trx;
   let customerId;
@@ -1148,7 +1224,19 @@ postgres('round 6 on #4657 — a primary-service swap revalidates the stored dis
   const preview = (id, body) => call('post', id, body);
   const put = (id, body) => call('put', id, body);
 
-  async function seedNoAddonVisit({ discountId, discountKey, serviceKeyFilter }) {
+  // Codex pre-push audit P0 (owner revert-and-carry on #4657, this round):
+  // pins the exact repro that forced the revert of the primaryServiceChanged/
+  // serviceOnlyRebase rebase trigger — a LEGACY zero-add-on row whose
+  // primary_line_price is NULL (never backfilled by the discount-stacking
+  // migration; estimated_price is the only money column such a row has).
+  // A service-only swap must NEVER re-derive a gross from this NULL column
+  // and re-apply the stored discount on top of the already-net total — the
+  // reverted code did exactly that ($90 -> $81). Post-revert, a
+  // service-only swap on ANY row (legacy or not) takes the plain no-op
+  // branch below and keeps the stored total verbatim; this test's actual
+  // purpose is to ensure a future re-attempt at service-only revalidation
+  // is tested against this exact legacy shape before it can ship again.
+  test(':9465-p0-legacy-null-gross-double-discount — a legacy zero-add-on visit with NULL primary_line_price keeps its $90 net on a service-only swap, never re-discounts to $81', async () => {
     let mosquitoSvc = await trx('services').where({ service_key: 'mosquito_monthly' }).first();
     if (!mosquitoSvc) {
       [mosquitoSvc] = await trx('services').insert({
@@ -1163,78 +1251,36 @@ postgres('round 6 on #4657 — a primary-service swap revalidates the stored dis
         category: 'termite', frequency: 'annual', billing_type: 'recurring', visits_per_year: 1,
       }).returning('*');
     }
-    await trx('discounts').insert({
-      id: discountId, discount_key: discountKey, name: 'Mosquito Only',
-      discount_type: 'fixed_amount', amount: 10, is_active: true, is_auto_apply: false, show_in_invoices: true,
-      service_key_filter: serviceKeyFilter,
-    });
     const [row] = await trx('scheduled_services').insert({
       id: randomUUID(), customer_id: customerId, service_type: 'Monthly Mosquito',
       service_id: mosquitoSvc.id, service_key_snapshot: 'mosquito_monthly',
       service_category_snapshot: 'mosquito', status: 'confirmed',
       scheduled_date: '2040-02-01', window_start: '08:00', window_end: '10:00',
-      // Stored: $50 gross, $10 fixed discount, $40 net.
-      estimated_price: 40, primary_line_price: 50,
-      discount_type: 'fixed_amount', discount_amount: 10, discount_id: discountId,
+      // LEGACY shape: primary_line_price never backfilled (NULL) — only
+      // estimated_price (the stored NET, $90) and the appointment-level
+      // 10% discount exist.
+      estimated_price: 90, primary_line_price: null,
+      discount_type: 'percentage', discount_amount: 10,
     }).returning('*');
-    return { visitId: row.id, mosquitoSvc, termiteSvc };
-  }
-
-  test(':9415 — swapping ONLY the primary service to one outside the stored discount\'s scope drops the discount instead of silently carrying it over', async () => {
-    const discountId = randomUUID();
-    const { visitId: id, termiteSvc } = await seedNoAddonVisit({
-      discountId, discountKey: 'mosquito_only_' + discountId.slice(0, 8), serviceKeyFilter: 'mosquito_monthly',
-    });
-    // Codex pre-push audit P1 (round 7 on #4657, :9465): the REAL modal
-    // never echoes discountType/discountAmount/discountId for a save that
-    // never touched the Discount control — those fields simply arrive
-    // undefined (the control's own local state starts empty). Only
-    // serviceId and the stored NET (unedited Price) are posted, exactly
-    // what an actual service-only edit sends.
-    const body = { serviceId: termiteSvc.id, estimatedPrice: 40 };
+    const id = row.id;
+    // Service-only swap: serviceId changes, Price echoes the stored NET
+    // unedited (the real modal's own contract), no discount fields posted
+    // at all — exactly what a genuine service-only edit sends.
+    const body = { serviceId: termiteSvc.id, estimatedPrice: 90 };
     const previewResult = await preview(id, body);
     expect(previewResult.err).toBeFalsy();
     expect(previewResult.statusCode).toBe(200);
-    // Ineligible for the new service — dropped, not rejected: the full
-    // $50 (undiscounted) is what this save would actually persist.
-    expect(Number(previewResult.payload.total)).toBe(50);
+    // $90 preserved verbatim — never $81 (90 * 0.9, the double-discount
+    // the reverted gross re-derivation produced on this exact shape).
+    expect(Number(previewResult.payload.total)).toBe(90);
     const saveResult = await put(id, body);
     expect(saveResult.err).toBeFalsy();
     expect(saveResult.statusCode).toBe(200);
     const savedRow = await trx('scheduled_services').where({ id }).first();
-    expect(Number(savedRow.estimated_price)).toBe(50);
-    expect(savedRow.discount_type).toBeNull();
-    expect(savedRow.discount_amount).toBeNull();
+    expect(Number(savedRow.estimated_price)).toBe(90);
+    expect(Number(savedRow.discount_amount)).toBe(10);
+    expect(savedRow.discount_type).toBe('percentage');
     expect(savedRow.service_id).toBe(termiteSvc.id);
-  });
-
-  test(':9415 — swapping ONLY the primary service to one still inside the stored discount\'s scope preserves it', async () => {
-    const discountId = randomUUID();
-    let mosquitoSvc2 = await trx('services').where({ service_key: 'mosquito_monthly_v2' }).first();
-    if (!mosquitoSvc2) {
-      [mosquitoSvc2] = await trx('services').insert({
-        id: randomUUID(), service_key: 'mosquito_monthly_v2', name: 'Monthly Mosquito Plus',
-        category: 'mosquito', frequency: 'monthly', billing_type: 'recurring', visits_per_year: 12,
-      }).returning('*');
-    }
-    const { visitId: id } = await seedNoAddonVisit({
-      discountId, discountKey: 'mosquito_only_' + discountId.slice(0, 8), serviceKeyFilter: null,
-    });
-    // A preset with NO service_key_filter reaches every service — swap
-    // stays eligible. Codex pre-push audit P1 (round 7 on #4657, :9465):
-    // same real-modal payload as the sibling test above — no discount
-    // fields posted at all.
-    const body = { serviceId: mosquitoSvc2.id, estimatedPrice: 40 };
-    const previewResult = await preview(id, body);
-    expect(previewResult.err).toBeFalsy();
-    expect(previewResult.statusCode).toBe(200);
-    expect(Number(previewResult.payload.total)).toBe(40);
-    const saveResult = await put(id, body);
-    expect(saveResult.err).toBeFalsy();
-    expect(saveResult.statusCode).toBe(200);
-    const savedRow = await trx('scheduled_services').where({ id }).first();
-    expect(Number(savedRow.estimated_price)).toBe(40);
-    expect(savedRow.service_id).toBe(mosquitoSvc2.id);
   });
 
   test(':13361 — a price change on a no-add-on visit whose primary line carries a stored line-discount stamp previews the stamp as CLEARED, matching what the PUT actually persists', async () => {

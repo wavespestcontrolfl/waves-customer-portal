@@ -2733,6 +2733,16 @@ async function resolveUpdateDetailsAddonFinancials({
   let financials = null;
   let canonicalRestackedAddonDollars = null;
   let capsSnapshotToPersist = null;
+  // Codex pre-push audit P1 (owner revert-and-carry on #4657, this round,
+  // :13469): a marked row's own primary-line discount can be a PERCENTAGE
+  // (or any type whose dollar amount depends on gross) — a primary price
+  // change makes the canonical restack below compute a NEW
+  // primaryLineDiscountDollars even though line_discount_type/amount/id
+  // never changed (this editor still can't resend those — see the write
+  // site's own "can't resend them" comment). Captured here, alongside the
+  // restack's other outputs, so the caller can persist the FRESH cached
+  // dollar figure instead of leaving the stale stored one behind.
+  let restackedPrimaryLineDiscountDollars = null;
   if (discountStackingLive() && hasPricingRegimeMarker(existing)) {
     const canonicalParent = {
       primary_line_price: primaryGross,
@@ -2779,6 +2789,7 @@ async function resolveUpdateDetailsAddonFinancials({
       financials = { price: restacked.price, appointmentDiscountDollars: restacked.appointmentDiscountDollars };
       canonicalRestackedAddonDollars = restacked.addonDollars;
       capsSnapshotToPersist = restacked.capsSnapshot;
+      restackedPrimaryLineDiscountDollars = restacked.primaryLineDiscountDollars;
     }
   }
   if (!financials) {
@@ -2797,6 +2808,7 @@ async function resolveUpdateDetailsAddonFinancials({
   }
   return {
     financials, primaryNet, canonicalRestackedAddonDollars, capsSnapshotToPersist,
+    restackedPrimaryLineDiscountDollars,
   };
 }
 
@@ -9687,8 +9699,6 @@ async function computeSingleServiceEstimatedPricePlan({
         const existingPrice = await db('scheduled_services')
           .where({ id: id })
           .first('estimated_price', 'discount_type', 'discount_amount',
-            ...(cols.service_id ? ['service_id'] : []),
-            ...(cols.discount_id ? ['discount_id'] : []),
             ...(cols.discount_max_dollars ? ['discount_max_dollars'] : []),
             ...(cols.service_key_snapshot ? ['service_key_snapshot'] : []),
             ...(cols.service_category_snapshot ? ['service_category_snapshot'] : []),
@@ -9733,30 +9743,27 @@ async function computeSingleServiceEstimatedPricePlan({
         // same-valued preset switch): the replacement preset must still run
         // eligibility and the scope-aware recomputation before its id/name/
         // filters persist (Codex #3531 r6 P1).
-        // Codex pre-push audit P1 (round 6 on #4657, :9415): a primary
-        // SERVICE swap can move this row out of (or into) its stored
-        // discount's scope at an identical, echoed-unchanged price/discount
-        // selection — mirrors the addons branch's own `primaryServiceChanged`
-        // doctrine above (:10053). `updates.*` only carries these keys when
-        // THIS save actually resolved a service pick (resolveReServiceConversion,
-        // above), so presence still isn't change.
-        const primaryServiceChanged = (updates.service_id !== undefined
-          && String(updates.service_id ?? '') !== String(existingPrice?.service_id ?? ''))
-          || (updates.service_key_snapshot !== undefined
-            && String(updates.service_key_snapshot ?? '') !== String(existingPrice?.service_key_snapshot ?? ''))
-          || (updates.service_category_snapshot !== undefined
-            && String(updates.service_category_snapshot ?? '') !== String(existingPrice?.service_category_snapshot ?? ''));
-        const shouldRebaseStoredDiscounts = priceChanged || discountTypeChanged || discountAmountChanged || appointmentDiscountChanged || primaryServiceChanged;
-        // True only when the service swap is the SOLE reason for rebasing —
-        // the operator never touched price or the discount control at all
-        // (it round-trips the stored selection verbatim, same as every other
-        // untouched-stamp contract in this file). That is the one case where
-        // an ineligible result must silently DROP the discount rather than
-        // reject the save — an operator who deliberately picks an
-        // incompatible discount still gets presetEligibilityCheck's own 400
-        // (Codex #3531 r2 P1's original contract, unchanged).
-        const serviceOnlyRebase = primaryServiceChanged && !priceChanged
-          && !discountTypeChanged && !discountAmountChanged && !appointmentDiscountChanged;
+        // Codex pre-push audit P0 (owner revert-and-carry on #4657): a
+        // `primaryServiceChanged` rebase trigger and its serviceOnlyRebase
+        // branch briefly lived here (stored-terms loading, a presetOverride
+        // on presetEligibilityCheck, a gross re-derivation from
+        // primary_line_price, and a drop-not-reject catch) to revalidate a
+        // stored discount on a service-only swap. It double-discounted a
+        // legacy zero-add-on row whose primary_line_price is NULL — the
+        // gross re-derivation fell back to the posted estimatedPrice (the
+        // stored NET), so a service-only swap on such a row re-applied the
+        // stored discount ON TOP of the already-net figure ($90 -> $81,
+        // never observed as a genuine price edit). Reverted back to this
+        // simpler, pre-existing contract: a service-only swap (no price or
+        // discount touch at all) takes the no-op branch below and keeps the
+        // stored discount + total verbatim, scope-unchecked, even if the
+        // new service would no longer qualify — an accepted, bounded gap
+        // (undercharge-only, and only while GATE_DISCOUNT_STACKING is on)
+        // rather than a fragile re-validation that can overcorrect on a
+        // legacy row shape. See :9465-p0-legacy-null-gross-double-discount
+        // in admin-schedule-discount-provenance-fields.test.js for the
+        // pinned repro.
+        const shouldRebaseStoredDiscounts = priceChanged || discountTypeChanged || discountAmountChanged || appointmentDiscountChanged;
         if (!shouldRebaseStoredDiscounts) {
           // The gross-echo case must write back the STORED NET, never the
           // echoed gross itself — writing basePrice ($100) here would
@@ -9765,42 +9772,7 @@ async function computeSingleServiceEstimatedPricePlan({
           if (cols.estimated_price) updates.estimated_price = isUnchangedGrossEcho ? existingEstimatedPrice : basePrice;
           throw new Error('noop-price-save');
         }
-        // Codex pre-push audit P1 (round 6 on #4657, :9415): a
-        // serviceOnlyRebase's posted `estimatedPrice` is the stored NET,
-        // unedited (round 5 :6083's own contract for a zero-add-on visit —
-        // the operator never touched Price at all here). Re-discounting
-        // that NET as if it were a fresh gross (basePrice) would silently
-        // double-apply the stored discount ($40 net -> $30). Replay FROM
-        // the stored gross (primary_line_price) instead whenever Price
-        // itself is genuinely untouched; any OTHER trigger (an actual price
-        // or discount edit) still means the operator's own posted
-        // estimatedPrice IS the intended new gross, unchanged from before
-        // this round.
-        const rebaseBasePrice = (serviceOnlyRebase && existingPrimaryGross != null)
-          ? existingPrimaryGross
-          : basePrice;
-        // Codex pre-push audit P1 (round 7 on #4657, :9465): the real
-        // modal never echoes discountType/discountAmount/discountId for a
-        // save that never touched the Discount control at all — those
-        // fields simply arrive undefined here (the control's local state
-        // starts empty and Save omits it unless touched), not a verbatim
-        // echo of the stored stamp. Round 6's own regression test supplied
-        // an artificial echo the modal never sends. For a serviceOnlyRebase,
-        // load the STORED discount terms — and, if it names a catalog id,
-        // that catalog row — from the visit itself, the same source legacy
-        // preservation already trusts, instead of depending on the request
-        // to carry them.
-        let loadedDiscountPreset = null;
-        if (serviceOnlyRebase && discountType === undefined && discountAmount === undefined
-          && existingPrice?.discount_type && existingPrice?.discount_amount != null) {
-          discountType = existingPrice.discount_type;
-          discountAmount = existingPrice.discount_amount;
-          if (existingPrice.discount_id) {
-            loadedDiscountPreset = await db('discounts').where({ id: existingPrice.discount_id }).first().catch(() => null);
-          }
-        }
-        const effectivePresetForRebase = loadedDiscountPreset || appointmentDiscountPreset;
-        let finalPrice = rebaseBasePrice;
+        let finalPrice = basePrice;
         if (discountType && discountAmount != null && discountAmount !== '') {
           finalPrice = applyDiscount(finalPrice, discountType, discountAmount);
         }
@@ -9813,7 +9785,7 @@ async function computeSingleServiceEstimatedPricePlan({
           const value = Number(addon.base_price != null ? addon.base_price : addon.estimated_price);
           return Number.isFinite(value) && value > 0 ? sum + value : sum;
         }, 0);
-        const primaryGross = Math.max(0, Math.round((rebaseBasePrice - addonBaseTotal) * 100) / 100);
+        const primaryGross = Math.max(0, Math.round((basePrice - addonBaseTotal) * 100) / 100);
         // Percent-excluded lines stay out of a percentage discount here too —
         // this branch runs for add-on-less saves (Codex #3531 r1 P1), and a
         // catalog PRESET always goes through the canonical calculator so its
@@ -9829,7 +9801,7 @@ async function computeSingleServiceEstimatedPricePlan({
           && (assertPercentExclusionCatalogReady() || lineExcludedFromPercentDiscount(legacyPrimaryKey)
             || legacyLines.some((line) => lineExcludedFromPercentDiscount(line.serviceKey)));
         if (discountType && discountAmount != null && discountAmount !== ''
-          && (effectivePresetForRebase || legacyExclusionApplies)) {
+          && (appointmentDiscountPreset || legacyExclusionApplies)) {
           const exclusionAware = calculateVisitFinancialsForAddons({
             primaryNet: primaryGross,
             primaryServiceKey: legacyPrimaryKey,
@@ -9837,45 +9809,32 @@ async function computeSingleServiceEstimatedPricePlan({
             appointmentDiscount: {
               discountType,
               discountAmount: Number(discountAmount),
-              maxDiscountDollars: effectivePresetForRebase
-                ? (effectivePresetForRebase.max_discount_dollars ?? null)
+              maxDiscountDollars: appointmentDiscountPreset
+                ? (appointmentDiscountPreset.max_discount_dollars ?? null)
                 : (appointmentDiscountChanged ? null : (existingPrice?.discount_max_dollars ?? null)),
-              serviceKeyFilter: effectivePresetForRebase?.service_key_filter || null,
-              serviceCategoryFilter: effectivePresetForRebase?.service_category_filter || null,
+              serviceKeyFilter: appointmentDiscountPreset?.service_key_filter || null,
+              serviceCategoryFilter: appointmentDiscountPreset?.service_category_filter || null,
             },
           }, legacyLines);
           if (exclusionAware.price != null) finalPrice = exclusionAware.price;
         }
-        let effectiveDiscountType = discountType;
-        let effectiveDiscountAmount = discountAmount;
-        try {
-          await presetEligibilityCheck([
-            {
-              amount: primaryGross,
-              serviceKey: legacyPrimaryKey,
-              serviceCategory: legacyPrimaryCategory,
-            },
-            ...legacyLines.map((l) => ({ amount: l.price, serviceKey: l.serviceKey, serviceCategory: l.serviceCategory })),
-          ], effectivePresetForRebase || undefined);
-        } catch (eligibilityErr) {
-          if (!serviceOnlyRebase || !eligibilityErr?.isOperational) throw eligibilityErr;
-          // The service swap alone made the stored discount ineligible —
-          // drop it silently (the operator didn't pick anything invalid,
-          // the visit just moved out of scope) rather than 400ing a save
-          // that never touched the discount control.
-          finalPrice = rebaseBasePrice;
-          effectiveDiscountType = null;
-          effectiveDiscountAmount = null;
-        }
+        await presetEligibilityCheck([
+          {
+            amount: primaryGross,
+            serviceKey: legacyPrimaryKey,
+            serviceCategory: legacyPrimaryCategory,
+          },
+          ...legacyLines.map((l) => ({ amount: l.price, serviceKey: l.serviceKey, serviceCategory: l.serviceCategory })),
+        ]);
         const replayGross = Math.round((primaryGross + addonBaseTotal) * 100) / 100;
         const replayDiscountDollars = Math.max(0, Math.round((replayGross - finalPrice) * 100) / 100);
         if (cols.estimated_price) updates.estimated_price = finalPrice;
         if (cols.primary_line_price) updates.primary_line_price = primaryGross;
         clearAppointmentDiscountCatalogFields(updates, cols);
-        if (cols.discount_type) updates.discount_type = effectiveDiscountType || (replayDiscountDollars > 0 ? 'fixed_amount' : null);
+        if (cols.discount_type) updates.discount_type = discountType || (replayDiscountDollars > 0 ? 'fixed_amount' : null);
         if (cols.discount_amount) {
-          updates.discount_amount = (effectiveDiscountAmount != null && effectiveDiscountAmount !== '')
-            ? Number(effectiveDiscountAmount)
+          updates.discount_amount = (discountAmount != null && discountAmount !== '')
+            ? Number(discountAmount)
             : (replayDiscountDollars > 0 ? replayDiscountDollars : null);
         }
         if (cols.discount_dollars) updates.discount_dollars = replayDiscountDollars > 0 ? replayDiscountDollars : null;
@@ -10519,6 +10478,7 @@ async function computeUpdateDetailsFinancialPlan({
 
         const {
           financials, primaryNet, canonicalRestackedAddonDollars: canonicalDollars, capsSnapshotToPersist,
+          restackedPrimaryLineDiscountDollars,
         } = await resolveUpdateDetailsAddonFinancials({
           db, existing, updates, primaryGross, normalizedAddons,
           effDiscountType, effDiscountAmount, effMaxDiscountDollars, effServiceKeyFilter, effServiceCategoryFilter,
@@ -10597,7 +10557,31 @@ async function computeUpdateDetailsFinancialPlan({
             : financials.appointmentDiscountDollars;
         }
         // Leave the primary line_discount_* columns untouched — invoicing reads
-        // them and this editor can't resend them.
+        // them and this editor can't resend them. line_discount_dollars is
+        // the ONE exception: it is a derived CACHE of type+amount+gross,
+        // never an operator-editable field, and the canonical restack
+        // above already recomputed it against this save's own (possibly
+        // changed) gross. Codex pre-push audit P1 (owner revert-and-carry
+        // on #4657, this round, :13469): persist that fresh figure so a
+        // marked row's percentage primary-line discount doesn't leave a
+        // stale cached dollar amount behind after a primary price change —
+        // preview and PUT must agree, and invoice generation must read the
+        // SAME number this save just computed, not a pre-restack one.
+        // Codex pre-push audit P0 (local audit, this same push): gated on
+        // hasPricingRegimeMarker(existing) — the SAME condition
+        // resolveUpdateDetailsAddonFinancials itself uses to decide
+        // whether the canonical restack ran at all — not merely on
+        // "not legacy-preserved". An UNMARKED row's real (non-preserved)
+        // money edit never runs the canonical restack, so
+        // restackedPrimaryLineDiscountDollars stays null there; writing
+        // that null anyway would silently wipe a legacy row's legitimate
+        // cached dollar figure while line_discount_type/amount/id/name
+        // stay untouched, producing an inconsistent stamp invoicing reads.
+        // Only a MARKED row's own restack result — which can itself be a
+        // legitimate null (the discount computed to $0) — is trusted here.
+        if (discountStackingLive() && hasPricingRegimeMarker(existing) && cols.line_discount_dollars && existing?.line_discount_type) {
+          updates.line_discount_dollars = restackedPrimaryLineDiscountDollars;
+        }
         // Re-freeze provenance with the (possibly merged/updated) caps this
         // save actually restacked against — keeps the row's canonical-pricing
         // marker while a changed discount id/amount's cap resolves fresh
@@ -10757,26 +10741,16 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // visit passes on its add-on, and out-of-scope / excluded lines can't
     // satisfy a minimum subtotal (Codex #3531 r2 P1). `lines` =
     // [{ amount, serviceKey, serviceCategory }], primary first.
-    // Codex pre-push audit P1 (round 7 on #4657, :9465): an OPTIONAL second
-    // `presetOverride` argument lets a caller check eligibility against a
-    // discount that was never posted in the request at all —
-    // computeSingleServiceEstimatedPricePlan's own serviceOnlyRebase loads
-    // the STORED catalog row for this (the real modal never echoes
-    // discountType/discountAmount/discountId for a save that never touched
-    // the Discount control). Every other caller passes nothing and keeps
-    // the original closure-over-`appointmentDiscountPreset` behavior,
-    // unchanged.
-    const presetEligibilityCheck = async (lines, presetOverride) => {
-      const preset = presetOverride || appointmentDiscountPreset;
-      if (!preset) return;
-      const keyFilter = preset.service_key_filter || null;
-      const categoryFilter = preset.service_category_filter || null;
+    const presetEligibilityCheck = async (lines) => {
+      if (!appointmentDiscountPreset) return;
+      const keyFilter = appointmentDiscountPreset.service_key_filter || null;
+      const categoryFilter = appointmentDiscountPreset.service_category_filter || null;
       const matching = (lines || []).filter((line) => (
         (!keyFilter || keyFilter === line.serviceKey)
         && (!categoryFilter || categoryFilter === line.serviceCategory)
       ));
-      if (isPercentDiscountType(preset.discount_type)) assertPercentExclusionCatalogReady();
-      const eligible = isPercentDiscountType(preset.discount_type)
+      if (isPercentDiscountType(appointmentDiscountPreset.discount_type)) assertPercentExclusionCatalogReady();
+      const eligible = isPercentDiscountType(appointmentDiscountPreset.discount_type)
         ? matching.filter((line) => !lineExcludedFromPercentDiscount(line.serviceKey))
         : matching;
       const context = eligible[0] || matching[0] || {};
@@ -10791,14 +10765,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       const { customerRow, recurringMembershipBooking } = await resolveMembershipBookingContext({
         db, id: req.params.id, updates, isRecurring, serviceType, scheduledDate: req.body.scheduledDate,
       });
-      const failures = await DiscountEngine.manualEligibilityFailures(preset, customerRow || {}, {
+      const failures = await DiscountEngine.manualEligibilityFailures(appointmentDiscountPreset, customerRow || {}, {
         subtotal,
         serviceKey: serviceKey || null,
         serviceCategory: serviceCategory || null,
         recurringMembershipBooking,
       });
       if (failures.length) {
-        throw httpError(400, `${preset.name} is not eligible: ${failures.join(', ')}`);
+        throw httpError(400, `${appointmentDiscountPreset.name} is not eligible: ${failures.join(', ')}`);
       }
     };
     let clearAddonDiscountsOnPriceEdit = false;
@@ -13713,19 +13687,16 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
     // serviceType, which differ in shape between the two routes; any future
     // fix to one must be mirrored to the other by inspection (they sit a
     // few hundred lines apart in this same file).
-    // Codex pre-push audit P1 (round 7 on #4657, :9465): byte-identical to
-    // the save path's own override contract, above.
-    const presetEligibilityCheck = async (lines, presetOverride) => {
-      const preset = presetOverride || appointmentDiscountPreset;
-      if (!preset) return;
-      const keyFilter = preset.service_key_filter || null;
-      const categoryFilter = preset.service_category_filter || null;
+    const presetEligibilityCheck = async (lines) => {
+      if (!appointmentDiscountPreset) return;
+      const keyFilter = appointmentDiscountPreset.service_key_filter || null;
+      const categoryFilter = appointmentDiscountPreset.service_category_filter || null;
       const matching = (lines || []).filter((line) => (
         (!keyFilter || keyFilter === line.serviceKey)
         && (!categoryFilter || categoryFilter === line.serviceCategory)
       ));
-      if (isPercentDiscountType(preset.discount_type)) assertPercentExclusionCatalogReady();
-      const eligible = isPercentDiscountType(preset.discount_type)
+      if (isPercentDiscountType(appointmentDiscountPreset.discount_type)) assertPercentExclusionCatalogReady();
+      const eligible = isPercentDiscountType(appointmentDiscountPreset.discount_type)
         ? matching.filter((line) => !lineExcludedFromPercentDiscount(line.serviceKey))
         : matching;
       const context = eligible[0] || matching[0] || {};
@@ -13735,14 +13706,14 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
       const { customerRow, recurringMembershipBooking } = await resolveMembershipBookingContext({
         db, id, updates, isRecurring, serviceType, scheduledDate,
       });
-      const failures = await DiscountEngine.manualEligibilityFailures(preset, customerRow || {}, {
+      const failures = await DiscountEngine.manualEligibilityFailures(appointmentDiscountPreset, customerRow || {}, {
         subtotal,
         serviceKey: serviceKeyCtx || null,
         serviceCategory: serviceCategoryCtx || null,
         recurringMembershipBooking,
       });
       if (failures.length) {
-        throw httpError(400, `${preset.name} is not eligible: ${failures.join(', ')}`);
+        throw httpError(400, `${appointmentDiscountPreset.name} is not eligible: ${failures.join(', ')}`);
       }
     };
 
@@ -13757,36 +13728,45 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
     // line's own discount is FROZEN for MOST saves — this editor never
     // displays or edits it, and most of computeUpdateDetailsFinancialPlan
     // never writes it either (see "can't resend them" on the real save's
-    // own primary-line comment). Codex pre-push audit P2 (round 6 on
-    // #4657, :13361): the single-service estimatedPrice branch
-    // (computeSingleServiceEstimatedPricePlan) is the ONE exception — a
-    // no-add-on visit's own price/service rebase explicitly NULLS these
-    // columns in `updates` before the real PUT would ever run. Rereading
-    // the still-unchanged DB row here (a dry run — nothing has been
-    // written yet) would show the old discount the same save is about to
-    // clear. Prefer the planned `updates` value whenever this save touched
-    // it; only fall back to the stored row for a save that never planned a
-    // write to these columns at all.
-    const primaryLineDiscountRow = (updates.line_discount_dollars !== undefined || updates.line_discount_name !== undefined)
-      ? {
-          line_discount_dollars: updates.line_discount_dollars ?? null,
-          line_discount_name: updates.line_discount_name ?? null,
-        }
-      : ((cols.line_discount_dollars || cols.line_discount_name)
-        ? await db('scheduled_services').where({ id })
-            .first(
-              ...(cols.line_discount_dollars ? ['line_discount_dollars'] : []),
-              ...(cols.line_discount_name ? ['line_discount_name'] : []),
-            )
-            .catch(() => null)
-        : null);
+    // own primary-line comment). Two DIFFERENT branches plan a write to
+    // exactly ONE of these two columns, never both together, so each is
+    // resolved independently rather than as a single all-or-nothing pair:
+    // Codex pre-push audit P2 (round 6 on #4657, :13361):
+    // computeSingleServiceEstimatedPricePlan's own price/service rebase
+    // NULLS every line_discount_* column together (dollars AND name);
+    // Codex pre-push audit P1 (owner revert-and-carry on #4657, this
+    // round, :13469): the addons-array marked-row restack plans ONLY
+    // line_discount_dollars (a derived cache the restack recomputes),
+    // leaving line_discount_name untouched because it never changes.
+    // Rereading the still-unwritten DB row for whichever field this save
+    // did NOT plan a write to (a dry run — nothing has been written yet)
+    // would otherwise show either a discount the save is about to clear,
+    // or — the new failure mode this round's fix would have introduced
+    // without this split — a null name for a dollar figure that just got
+    // freshly restacked but whose name never changed at all.
+    const dollarsPlanned = updates.line_discount_dollars !== undefined;
+    const namePlanned = updates.line_discount_name !== undefined;
+    const primaryLineDiscountRow = (!dollarsPlanned || !namePlanned) && (cols.line_discount_dollars || cols.line_discount_name)
+      ? await db('scheduled_services').where({ id })
+          .first(
+            ...(cols.line_discount_dollars ? ['line_discount_dollars'] : []),
+            ...(cols.line_discount_name ? ['line_discount_name'] : []),
+          )
+          .catch(() => null)
+      : null;
+    const previewPrimaryLineDiscountDollars = dollarsPlanned
+      ? updates.line_discount_dollars
+      : (primaryLineDiscountRow?.line_discount_dollars ?? null);
+    const previewPrimaryLineDiscountName = namePlanned
+      ? updates.line_discount_name
+      : (primaryLineDiscountRow?.line_discount_name ?? null);
     res.json({
       total: updates.estimated_price !== undefined ? updates.estimated_price : null,
       primaryLinePrice: updates.primary_line_price !== undefined ? updates.primary_line_price : null,
       appointmentDiscountDollars: updates.discount_dollars !== undefined ? updates.discount_dollars : null,
-      primaryLineDiscountDollars: primaryLineDiscountRow?.line_discount_dollars != null
-        ? Number(primaryLineDiscountRow.line_discount_dollars) : null,
-      primaryLineDiscountName: primaryLineDiscountRow?.line_discount_name || null,
+      primaryLineDiscountDollars: previewPrimaryLineDiscountDollars != null
+        ? Number(previewPrimaryLineDiscountDollars) : null,
+      primaryLineDiscountName: previewPrimaryLineDiscountName || null,
       // Ordered exactly like the save path's own replaceAddons — a line the
       // client already has a row id for correlates by submittedAddonId; a
       // brand-new (id-less) line correlates by array position against the

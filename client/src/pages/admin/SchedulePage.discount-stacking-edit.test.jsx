@@ -1211,40 +1211,57 @@ it('round 6 (:2342): an independent reprice BEFORE picking a fresh discount surv
   expect(priceInputsAfter.find((i) => i.value === '55')).toBeFalsy();
 });
 
+
 // ---------------------------------------------------------------------
-// Round 7 on #4657 (GitHub review): a client-side parity pin for the
-// server's own round-7 fix (:9465) — the server now LOADS the stored
-// discount for a service-only rebase instead of trusting a request echo,
-// specifically because the real modal never sends one. This test pins
-// that contract from the other side.
+// Owner revert-and-carry on #4657 (this round): a P2 itemization bug —
+// shared/legacy-visit-money-submission.cjs:52's zero-add-on NET seed
+// (correct for the save-preservation contract) was also feeding the
+// Subtotal DISPLAY line, rendering an itemization no arithmetic ever
+// produces (Subtotal $90, Discount ($10), Total $90).
 // ---------------------------------------------------------------------
 
-it('round 7 (:9465 client parity): a service-only change omits discountType/discountAmount/discountId from the Save payload — the Discount control opens empty, never seeded from the stored stamp', async () => {
+it('owner revert-and-carry: a discounted zero-add-on visit renders Subtotal as the GROSS, not the net save-seed — $100 / ($10) / $90', async () => {
   const noAddonDiscountedVisit = {
     ...baseService,
     serviceAddons: [],
     primaryLinePrice: 100,
     estimatedPrice: 90,
-    discountType: 'fixed_amount', discountAmount: 10, discountId: 'disc-military',
+    discountType: 'fixed_amount', discountAmount: 10,
   };
-  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service: noAddonDiscountedVisit }));
+  // A genuinely UNTOUCHED save's real-server preview response never sets
+  // primaryLinePrice at all (computeSingleServiceEstimatedPricePlan's
+  // no-op branch — the one this fixture exercises — never touches
+  // updates.primary_line_price; only an actual rebase does). Stubbed
+  // directly rather than through computeMockPreview, whose simplified
+  // primaryGross precedence (body.primaryLinePrice over service.primaryLinePrice)
+  // doesn't reproduce that no-op-vs-rebase distinction — this is the
+  // exact response shape the real save-preservation contract produces,
+  // and the one the client's own Subtotal fallback (service.primaryLinePrice)
+  // exists to handle.
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
+    if (url.endsWith('/admin/discounts/stacking')) return { ok: true, json: async () => ({ enabled: true }) };
+    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => DISCOUNTS };
+    if (url.includes('/update-details/preview')) {
+      return {
+        ok: true,
+        json: async () => ({
+          total: 90, primaryLinePrice: null, appointmentDiscountDollars: 10,
+          primaryLineDiscountDollars: null, primaryLineDiscountName: null, addons: [],
+        }),
+      };
+    }
+    return { ok: true, json: async () => ({}) };
+  }));
   render(<Harness service={noAddonDiscountedVisit} />);
   fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
-  // Open the primary service picker and swap ONLY the service — Price and
-  // the Discount control are both left untouched.
-  fireEvent.click(await screen.findByRole('button', { name: 'Change' }));
-  fireEvent.click(screen.getByRole('button', { name: /Termite/ }));
-  fireEvent.click(screen.getByRole('button', { name: 'Termite Monitoring Service' }));
   await waitForMoneyReady();
-  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
-  await waitFor(() => expect(writes()).toHaveLength(1));
-  const body = JSON.parse(writes()[0][1].body);
-  expect(body.serviceType).toBe('Termite Monitoring Service');
-  // The whole point of the server's :9465 fix: these keys are not merely
-  // falsy, they are ABSENT — the modal's Discount control state
-  // (useState("")) never seeds from the visit's stored stamp, so a
-  // service-only save has nothing to echo even if it wanted to.
-  expect('discountType' in body).toBe(false);
-  expect('discountAmount' in body).toBe(false);
-  expect('discountId' in body).toBe(false);
+  // Subtotal: falls back to the visit's own STORED gross ($100) — never
+  // the net save-seed ($90) form.price carries for the SAVE payload, and
+  // never a null the preview's own no-op response leaves unresolved.
+  expect(screen.getByText('Subtotal').nextElementSibling.textContent).toBe('$100.00');
+  // Discount: the stored appointment-level discount, applied.
+  expect(screen.getByText('Custom Discount').nextElementSibling.textContent).toBe('($10.00)');
+  // Total: the server preview's own net total — unaffected by this fix,
+  // pinned here so the full itemization is checked together.
+  expect(screen.getByText('Total').nextElementSibling.textContent).toBe('$90.00');
 });

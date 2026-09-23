@@ -3388,7 +3388,6 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // so this is byte-identical to the pre-lane sum when nothing is discounted
   // or the gate is off.
   const addonLinesTotal = serviceLines.reduce((sum, l) => sum + lineGrossFor(l), 0);
-  const servicePrice = primaryPrice + addonLinesTotal;
   const selectedDiscountPreset =
     discountPresetId && discountPresetId !== "custom"
       ? discountPresets.find((d) => String(d.id) === String(discountPresetId))
@@ -3522,6 +3521,27 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     moneyPreviewFresh && moneyPreview.appointmentDiscountDollars != null
       ? Number(moneyPreview.appointmentDiscountDollars)
       : 0;
+  // Codex pre-push audit P2 (owner revert-and-carry on #4657, this round,
+  // legacy-visit-money-submission.cjs:52 / SchedulePage.jsx): form.price
+  // (primaryPrice, above) is seeded with the stored NET — correct for the
+  // SAVE contract (deriveLegacyPrimarySubmission's own doctrine: an
+  // unedited zero-add-on save must resubmit the stored NET, never the
+  // gross), wrong for the Subtotal DISPLAY. A discounted zero-add-on
+  // visit otherwise renders Subtotal $90 / Discount ($10) / Total $90 —
+  // an itemization no arithmetic ever produces. Prefer the server
+  // preview's own primaryLinePrice (the authoritative gross this exact
+  // save would persist); fall back to the visit's own stored
+  // primaryLinePrice while the preview hasn't resolved yet; only fall
+  // back to the (net) seed itself when neither is known at all — the same
+  // degenerate legacy shape where net already equals gross, so there is
+  // nothing to correct.
+  const displayPrimaryGross =
+    moneyPreviewFresh && moneyPreview.primaryLinePrice != null
+      ? Number(moneyPreview.primaryLinePrice)
+      : service.primaryLinePrice != null
+        ? Number(service.primaryLinePrice)
+        : primaryPrice;
+  const displaySubtotal = displayPrimaryGross + addonLinesTotal;
   // cleanServiceLines mirrors buildAddonsPayload's own filter exactly (the
   // same "trimmed serviceType" test) — the server's addons[] is ordered
   // and filtered identically, so a brand-new (id-less) line correlates by
@@ -4895,7 +4915,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 >
                   {" "}
                   <span>Subtotal</span>
-                  <strong>${servicePrice.toFixed(2)}</strong>{" "}
+                  <strong>${displaySubtotal.toFixed(2)}</strong>{" "}
                 </div>
                 {/* Codex pre-push audit P1 (round 1, #4657): routine
                     financial info, not a warning — no color override, so
