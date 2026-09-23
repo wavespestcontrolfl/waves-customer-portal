@@ -2899,7 +2899,11 @@ async function createSelfBooking(payload = {}) {
       // path: both are "pick another slot" outcomes, and both must roll back
       // a just-created profile so the retry doesn't strand on the
       // phone-already-on-file 409.
-      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL' || txErr.code === 'ALREADY_BOOKED') {
+      // SELF_SERVE_NOTICE rides it too (Codex r1 P1): the offered slot
+      // crossed the notice boundary while this request waited — another
+      // "pick another slot" outcome that must not strand a just-created
+      // profile.
+      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SELF_SERVE_NOTICE') {
         // Undo a profile this request just created: leaving it would make
         // the customer's retry with a different slot hit the
         // phone-already-on-file 409 and strand them entirely. The row is

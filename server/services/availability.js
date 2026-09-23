@@ -518,6 +518,13 @@ class AvailabilityEngine {
           throw bookingError('That day just filled up — please pick another day', 'SLOT_TAKEN');
         }
       }
+      // Self-serve notice window, re-read UNDER the scheduling locks (Codex
+      // r1 P1): the pre-transaction check above ran before the date/zone
+      // advisory waits; a start that crossed the cutoff during that wait is
+      // refused here, before the occupancy validation and the insert.
+      if (violatesSelfServeNotice({ date: dateStr, startTime })) {
+        throw bookingError('That time is too soon to book online — please pick another slot', 'SLOT_TAKEN');
+      }
 
       // Rows the tech-blind probe below must ignore — the onboarding
       // reschedule books the replacement BEFORE cancelling the original, so

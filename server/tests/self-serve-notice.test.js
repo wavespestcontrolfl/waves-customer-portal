@@ -159,3 +159,26 @@ describe('visitInsideNoticeWindow — existing scheduled_services rows', () => {
     expect(visitInsideNoticeWindow(null, now)).toBe(true);
   });
 });
+
+describe('SELF_SERVE_NOTICE_HOURS blank values (Codex r1 P2)', () => {
+  const saved = process.env.SELF_SERVE_NOTICE_HOURS;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.SELF_SERVE_NOTICE_HOURS;
+    else process.env.SELF_SERVE_NOTICE_HOURS = saved;
+  });
+  const { selfServeNoticeMinutes, DEFAULT_NOTICE_HOURS } = require('../services/scheduling/self-serve-notice');
+
+  test('an empty or whitespace value is UNSET — the 24-hour default applies', () => {
+    process.env.SELF_SERVE_NOTICE_HOURS = '';
+    expect(selfServeNoticeMinutes()).toBe(DEFAULT_NOTICE_HOURS * 60);
+    process.env.SELF_SERVE_NOTICE_HOURS = '   ';
+    expect(selfServeNoticeMinutes()).toBe(DEFAULT_NOTICE_HOURS * 60);
+  });
+
+  test('an explicit numeric zero disables the window', () => {
+    process.env.SELF_SERVE_NOTICE_HOURS = '0';
+    expect(selfServeNoticeMinutes()).toBe(0);
+    process.env.SELF_SERVE_NOTICE_HOURS = ' 0 ';
+    expect(selfServeNoticeMinutes()).toBe(0);
+  });
+});

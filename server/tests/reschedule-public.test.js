@@ -810,9 +810,12 @@ describe('POST commit re-checks the notice window INSIDE the rebooker transactio
     // The re-check keeps the missed exemption and throws the same code.
     const recheckIdx = src.indexOf('const noticeRecheck = async () => {');
     expect(recheckIdx).toBeGreaterThan(-1);
-    const recheck = src.slice(recheckIdx, recheckIdx + 400);
+    const recheck = src.slice(recheckIdx, recheckIdx + 1400);
     expect(recheck).toMatch(/!elig\.missed && visitInsideNoticeWindow\(svc\)/);
     expect(recheck).toMatch(/code: 'SELF_SERVE_NOTICE'/);
+    // The DESTINATION is re-checked under the locks too (Codex r1 P1) —
+    // a missed visit's only guard, since it skips the current-visit check.
+    expect(recheck).toMatch(/violatesSelfServeNotice\(\{ date, startTime: newWindow\.start \}\)/);
   });
 });
 

@@ -64,7 +64,7 @@ const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
 // missed-appointment rule) lives in a service so the promised-link worker
 // reaches the SAME answer this page gives (codex #4293 r3 P2).
 const { eligibility, apptDateStr, hhmm } = require('../services/reschedule-eligibility');
-const { visitInsideNoticeWindow } = require('../services/scheduling/self-serve-notice');
+const { visitInsideNoticeWindow, violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
 
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;
@@ -745,6 +745,16 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     const noticeRecheck = async () => {
       if (!elig.missed && visitInsideNoticeWindow(svc)) {
         throw Object.assign(new Error('This visit starts too soon to move online — call (941) 297-5749 and our team can help.'), {
+          statusCode: 409, isOperational: true, code: 'SELF_SERVE_NOTICE',
+        });
+      }
+      // The DESTINATION too (Codex r1 P1): the availability build above
+      // floored its offers at now + notice on an unlocked clock; a request
+      // that waited across the boundary must not commit a start that is now
+      // inside the window (missed visits skip the current-visit check
+      // above, so this is their only guard). Same code as the offer floor.
+      if (violatesSelfServeNotice({ date, startTime: newWindow.start })) {
+        throw Object.assign(new Error('That time is too soon to book online — call (941) 297-5749 and our team can help.'), {
           statusCode: 409, isOperational: true, code: 'SELF_SERVE_NOTICE',
         });
       }

@@ -1264,6 +1264,17 @@ async function reserveSlot({
       // Visit groups: deliberately NOT stamped — a customer_id-less slot
       // HOLD is not a customer stop; graduation goes through the
       // estimate converter, which stamps.
+      // Self-serve notice window re-read under the occupancy/tech/zone
+      // locks (Codex r1 P2): the entry check ran before coordinate
+      // resolution, capacity preparation and the lock waits — a start that
+      // crossed the cutoff meanwhile would otherwise become a live hold that
+      // commitReservation is guaranteed to reject.
+      if (violatesSelfServeNotice({ date, startTime: windowStart })) {
+        const err = new Error('slot start is inside the booking notice window');
+        err.code = 'SLOT_UNAVAILABLE';
+        err.slotId = slotId;
+        throw err;
+      }
       const [row] = await trx('scheduled_services').insert({
         customer_id: null,
         technician_id: techId,

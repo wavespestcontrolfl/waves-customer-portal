@@ -30,7 +30,11 @@ const DEFAULT_NOTICE_HOURS = 24;
 // Read at call time (not cached) so a flip needs no redeploy, same
 // convention as every other GATE_*/env-tunable this codebase reads live.
 function selfServeNoticeMinutes() {
-  const raw = Number(process.env.SELF_SERVE_NOTICE_HOURS);
+  // A blank/whitespace value (an env template placeholder) is UNSET, not
+  // zero: Number('') is 0 and would silently disable the window (Codex r1
+  // P2). Only an explicit numeric zero disables it.
+  const text = String(process.env.SELF_SERVE_NOTICE_HOURS ?? '').trim();
+  const raw = text === '' ? NaN : Number(text);
   const hours = Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_NOTICE_HOURS;
   return hours * 60;
 }
