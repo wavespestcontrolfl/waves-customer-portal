@@ -192,23 +192,34 @@ describe('zero buffer still credits expected minutes for a customer-facing calle
   // SLOT_TRAVEL_BUFFER_MINUTES=0 is a supported, deliberate owner override
   // (travel-gap.js travelBufferMinutes()) — gate on, buffer explicitly
   // zeroed. travel-gap.js's effectiveEndMinutes/paddingMinutesOf are
-  // buffer-agnostic — a stop's own catalog credit must still reduce its
-  // effective end for a customer-facing (packEnds) caller even at buffer 0,
-  // or the offer geometry silently reverts to gate-off behavior while the
-  // commit probes keep crediting it (an offer/commit mismatch).
+  // buffer-agnostic — a stop's own catalog credit must still resolve for a
+  // customer-facing (packEnds) caller even at buffer 0, or the commit
+  // probes (which credit it regardless of buffer) disagree with the offer.
   const WIDE_CATALOG = [{
     service_key: 'wide_pest', name: 'pest_control',
     min_duration_minutes: 15, max_duration_minutes: 45, default_duration_minutes: null,
   }];
   const stops = [stopRow('s1', '10:00', '12:00')]; // 120-min window; expected 30 -> effective end 10:30
 
-  test('a trailing gap packs to the credited hour (11:00), not the raw window-end hour (12:00)', async () => {
+  test('the catalog credit still resolves at buffer 0, but the packed-after-prev bound never starts before the stop\'s RAW end (Codex r5 P1)', async () => {
     wireDb({ stops, catalog: WIDE_CATALOG });
     const { slots } = await findAvailableSlots({
       ...BASE, packEnds: true, serviceKey: 'pest_control', bufferMinutes: 0, // explicit zero, NOT customerFacingBufferMinutes()
     });
+    // wantsExpectedMinutesCredit engaged (buffer 0, but packEnds + gate on) —
+    // proven structurally: the catalog was actually queried, not skipped
+    // like a gate-off/staff caller.
+    expect(db.mock.calls.map((c) => c[0])).toContain('services');
+    // At zero modeled drive (this file's route-optimizer mock) AND zero
+    // buffer, the credited bound (effectiveEnd + 0 drive + 0 buffer) never
+    // exceeds the stop's own raw end, so packedBounds' Codex r5 P1 clamp
+    // (earliest >= prev.rawEndMin) is what actually governs here: the
+    // packed candidate can never start before the stop's PROMISED window
+    // (10:00-12:00) truly closes, whatever the 30-minute credit optimistically
+    // estimates — 11:00 would double-book a customer still legitimately
+    // holding the slot until noon.
     const trailing = slots.filter((s) => s.insertion.after_stop_id === 's1' && s.insertion.before_stop_id == null);
-    expect(trailing.map((s) => s.start_time)).toEqual(['11:00']);
+    expect(trailing.map((s) => s.start_time)).toEqual(['12:00']);
   });
 
   test('legacy callers (packEnds omitted) are unaffected by this gate — bufferMinutes 0 stays legacy geometry', async () => {
