@@ -9938,6 +9938,22 @@ const CallRecordingProcessor = {
           logger.info(`[call-proc] processing claim lost — skipping the house-number conflict card write for ${maskSid(callSid)} (the owner files it)`);
         }
       }
+      // An UNRESOLVED card from an earlier pass is still the owed ask
+      // (this pass may have had no AV, lost its claim, or deliberately
+      // left a confirmed card standing): the booking hold and the
+      // second-address suppression follow the standing card, not only a
+      // card this pass filed (pre-push audit P1).
+      if (!houseNumberConflictFiled && customerId) {
+        const standing = await db('triage_items')
+          .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict' })
+          .whereIn('status', ['open', 'in_progress'])
+          .first('id');
+        if (standing) {
+          houseNumberConflictFiled = true;
+          if (!bridgeNeedsConfirmation.includes('on_file_house_number_conflict')) bridgeNeedsConfirmation.push('on_file_house_number_conflict');
+          logger.info(`[call-proc] house-number conflict still open for ${maskSid(callSid)} — booking hold carried over`);
+        }
+      }
     } catch (e) {
       // Code/name only: a knex error message carries the insert bindings
       // (both streets) — no addresses in logs (pre-push audit P1).
