@@ -31,7 +31,7 @@ const db = require('../models/db');
 const { applyAssignable } = require('./technician-eligibility');
 const logger = require('./logger');
 const { findAvailableSlots } = require('./scheduling/find-time');
-const { capacityEnabled, placementFitsShift } = require('./scheduling/policy');
+const { capacityEnabled } = require('./scheduling/policy');
 const { guardedCoordSelects } = require('./scheduling/day-stops');
 const {
   violatesTravelGap, travelGapEnabled, travelBufferMinutes, customerFacingBufferMinutes,
@@ -41,8 +41,8 @@ const { signSlotOffer, appendOfferToSlotId, CAPACITY_OFFER_POLICY } = require('.
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 const { getZoneFunnelDays, applyZoneDayFunnel, fallbackCenterZoneName } = require('./scheduling/zone-day-funnel');
 const {
-  CUSTOMER_DAY_END_MINUTES, customerOfferGrid, overlapsLunch, lunchBlockEnabled,
-  refreshCustomerBookingWindowConfig, currentDayEndMinutes, currentLunchInterval,
+  CUSTOMER_DAY_END_MINUTES, customerOfferGrid, lunchBlockEnabled,
+  refreshCustomerBookingWindowConfig, currentDayEndMinutes, currentLunchInterval, customerWindowAdmits,
 } = require('./scheduling/customer-windows');
 const { selfServeNoticeMinutes } = require('./scheduling/self-serve-notice');
 const { isEnabled } = require('../config/feature-gates');
@@ -1121,21 +1121,15 @@ function addMinutesToHHMM(hhmm, minutes) {
 function slotWindowFitsDay(windowStart, windowEnd) {
   const startMin = timeToMinutes(windowStart);
   const endMin = timeToMinutes(windowEnd);
-  // Lunch block (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23): the
-  // synthetic ASAP grid already excludes noon via customerOfferGrid(), but a
-  // ROUTE-DERIVED slot's proven-feasible start can still round onto it — this
-  // is the one choke point every customer-facing slot (ASAP and route) runs
-  // through, so it is also where the gate is enforced for route slots, in
-  // BOTH capacity modes (checked before the shift-fit branch; false outright
-  // while the gate is off, so legacy output is byte-identical).
-  if (overlapsLunch(startMin, endMin)) return false;
-  if (capacityEnabled()) return placementFitsShift(startMin, endMin);
   if (startMin == null || endMin == null) return true;
-  // currentDayEndMinutes() honors a preserved booking_config.day_end
-  // override (Codex r1 P2 on #4663); falls back to SLOT_DAY_END_MINUTES
-  // (18:00) before refreshCustomerBookingWindowConfig() has been awaited.
-  if (endMin <= startMin || endMin > currentDayEndMinutes()) return false;
-  return true;
+  // The ONE customer-window admission rule (scheduling/customer-windows.js
+  // customerWindowAdmits, Codex r4 on #4663) — grid floor (09:00-17:00,
+  // never find-time's own 08:00 shift-start, in EITHER capacity mode),
+  // resolved close (currentDayEndMinutes(), honoring a preserved
+  // booking_config.day_end override) and the lunch gate, all in one call.
+  // This is the one choke point every customer-facing slot (ASAP and
+  // route) runs through, in both capacity modes.
+  return customerWindowAdmits({ startMin, endMin });
 }
 
 function splitSlotResults(slots, maxResults, expanderMaxResults) {
@@ -2170,17 +2164,27 @@ async function getSlotDebug(estimateId, userOpts = {}) {
     includeWeekends: opts.includeWeekends,
   });
 
-  const classified = (raw?.slots || []).map((s) => ({
-    ...classifySlot(s, opts.proximityDriveMinutes, serviceProfile.durationMinutes),
-    raw: {
-      score: s.score,
-      detour_minutes: s.detour_minutes,
-      baseline_drive_minutes: s.baseline_drive_minutes,
-      total_drive_minutes: s.total_drive_minutes,
-      insertion: s.insertion,
-      stops_that_day: s.stops_that_day,
-    },
-  }));
+  // getSlotDebug classifies find-time's raw output directly — it never runs
+  // through filterCollidingSlots (the live path's slot-zone/occupancy pass,
+  // which needs a real DB customer/estimate context this debug surface
+  // doesn't build), so slotWindowFitsDay's lunch-gate check (customerFacing
+  // above only restricts capacity mode's own generator, not a legacy-mode
+  // raw candidate) never ran either. This debug view exists to mirror
+  // exactly what the customer is offered, so a noon slot the gate would
+  // hide from the live path must not show up here (Codex r4 P2 on #4663).
+  const classified = (raw?.slots || [])
+    .map((s) => ({
+      ...classifySlot(s, opts.proximityDriveMinutes, serviceProfile.durationMinutes),
+      raw: {
+        score: s.score,
+        detour_minutes: s.detour_minutes,
+        baseline_drive_minutes: s.baseline_drive_minutes,
+        total_drive_minutes: s.total_drive_minutes,
+        insertion: s.insertion,
+        stops_that_day: s.stops_that_day,
+      },
+    }))
+    .filter((c) => slotWindowFitsDay(c.windowStart, c.windowEnd));
 
   return {
     estimate: {

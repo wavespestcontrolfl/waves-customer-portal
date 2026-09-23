@@ -344,4 +344,21 @@ describe('buildBookingAvailability — customerFacing propagation to find-time',
     });
     expect(findAvailableSlots).toHaveBeenCalledWith(expect.objectContaining({ customerFacing: false }));
   });
+
+  // Codex r4 P0 on #4663: GATE_SCHEDULING_CAPACITY unset never reaches
+  // find-time's own customerFacing filter (findCapacitySlots), so an idle
+  // route's exact 08:00 route-derived candidate (zero modeled drive from
+  // the HQ opening anchor) survived addCandidate's dayStartMin(08:00) check
+  // and reached self-serve offer/commit surfaces. addCandidate now also
+  // runs customerWindowAdmits (the documented 09:00-17:00 grid) for
+  // self-serve callers, in BOTH capacity modes.
+  test('gate-off self-serve caller never offers the exact 08:00 route-derived candidate; a voice-style caller still can', async () => {
+    findAvailableSlots.mockResolvedValue({ slots: [gapSlot('08:00', { latest_start_min: 16 * 60 })] });
+    const base = { lat: 27.4, lng: -82.4, duration: 60, rangeFrom: D, rangeTo: D, config: CONFIG, today: new Date() };
+    const selfServe = await buildBookingAvailability({ ...base, selfServeNotice: true });
+    const voice = await buildBookingAvailability(base);
+    expect(startTimes(selfServe)).not.toContain('08:00');
+    expect(startTimes(selfServe)[0]).toBe('09:00');
+    expect(startTimes(voice)).toContain('08:00');
+  });
 });

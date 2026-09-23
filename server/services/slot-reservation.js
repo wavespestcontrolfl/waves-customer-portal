@@ -993,8 +993,16 @@ async function reserveSlot({
       // SLOT_DAY_END_MINUTES/18:00), plus the round-up grace — see
       // ROUND_UP_GRACE_MINUTES. Needs the profile-resolved duration, so it
       // lives in-txn with the signature check rather than with the pre-txn
-      // policy guards.
-      if (useCapacity ? !placementFitsShift(slotStartMinutes, slotStartMinutes + effectiveDurationMinutes)
+      // policy guards. Capacity mode's own placementFitsShift only checks
+      // the FIXED SHIFT.endMinutes fallback, not a preserved non-18:00
+      // override — offer-side parity now runs every customer-facing
+      // capacity offer through customerWindowAdmits (currentDayEndMinutes()
+      // included), so the commit side needs the same live bound here too,
+      // in ADDITION to placementFitsShift's own whole-hour/shift-start
+      // checks (Codex r4 P2 on #4663).
+      if (useCapacity
+        ? (!placementFitsShift(slotStartMinutes, slotStartMinutes + effectiveDurationMinutes)
+          || slotStartMinutes + effectiveDurationMinutes > currentDayEndMinutes())
         : slotStartMinutes + effectiveDurationMinutes > currentDayEndMinutes() + ROUND_UP_GRACE_MINUTES) {
         const err = new Error('slot runs past the end of the working day');
         err.code = 'SLOT_UNAVAILABLE';
@@ -1690,23 +1698,26 @@ async function commitReservation({
     // here would let that longer window commit past the real close — a 17:00
     // hold re-resolving to 90 min would pass a +59 check (ends 18:30, bound
     // 18:59) even though the actual close is 18:00. Compare the exact bound.
-    // Codex r2 P2 on #4663.
-    if (!useCapacity && serviceProfile?.reservationServiceMix
+    // Runs in BOTH capacity modes (Codex r4 P2 on #4663): capacity mode's own
+    // verifyArrivalCapacity/placementFitsShift check just below only bounds
+    // against the FIXED SHIFT.endMinutes fallback, not a preserved non-18:00
+    // booking_config.day_end override, so it alone is not enough once the
+    // offer side (customerWindowAdmits) can narrow to that live bound.
+    // Codex r2 P2, r4 P2 on #4663.
+    if (serviceProfile?.reservationServiceMix
       && require('./scheduling/window-rules').parseHHMM(windowStart) + effectiveDurationMinutes > currentDayEndMinutes()) {
       throw require('./combined-visit-capacity').capacityUnavailable();
     }
-    // Day-end bound on the FINAL resolved window, for the non-capacity,
-    // non-combined-visit hold the check above doesn't cover: a plain
-    // estimate hold's accepted service profile can lengthen between reserve
-    // and accept (e.g. 60->90 min on a 17:00 hold) without ever going
-    // through reserveSlot's own day-end guard again, and reservationServiceMix
-    // is what scoped the check above — nothing enforced this bound for the
-    // ordinary single-service case. Capacity mode's day-end bound is already
-    // enforced on this same resolved window by verifyArrivalCapacity
-    // (placementFitsShift) just below, so this only needs !useCapacity. No
-    // ROUND_UP_GRACE_MINUTES for the same reason as the mix check above.
-    // Codex r1 P2, r2 P2 on #4663.
-    if (!useCapacity && !serviceProfile?.reservationServiceMix && windowStart && effectiveDurationMinutes
+    // Day-end bound on the FINAL resolved window, for the non-combined-visit
+    // hold the check above doesn't cover: an estimate hold's accepted
+    // service profile can lengthen between reserve and accept (e.g. 60->90
+    // min on a 17:00 hold) without ever going through reserveSlot's own
+    // day-end guard again, and reservationServiceMix is what scoped the
+    // check above — nothing enforced this bound for the ordinary
+    // single-service case. Runs in BOTH capacity modes for the same reason
+    // as the mix check above. No ROUND_UP_GRACE_MINUTES for the same reason
+    // too. Codex r1 P2, r2 P2, r4 P2 on #4663.
+    if (!serviceProfile?.reservationServiceMix && windowStart && effectiveDurationMinutes
       && require('./scheduling/window-rules').parseHHMM(windowStart) + effectiveDurationMinutes > currentDayEndMinutes()) {
       const err = new Error('slot runs past the end of the working day');
       err.code = 'SLOT_UNAVAILABLE';

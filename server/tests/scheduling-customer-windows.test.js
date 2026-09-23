@@ -11,6 +11,7 @@ const {
   lunchBlockEnabled,
   customerOfferGrid,
   overlapsLunch,
+  customerWindowAdmits,
 } = require('../services/scheduling/customer-windows');
 
 describe('CUSTOMER_HOUR_GRID', () => {
@@ -28,6 +29,63 @@ describe('CUSTOMER_DAY_END_HOUR / CUSTOMER_DAY_END_MINUTES', () => {
   test('is 18:00 — a 17:00 start plus the standard 60-minute visit', () => {
     expect(CUSTOMER_DAY_END_HOUR).toBe(18);
     expect(CUSTOMER_DAY_END_MINUTES).toBe(18 * 60);
+  });
+});
+
+// Codex r4 on #4663: the ONE customer-window admission rule — the grid
+// floor (09:00-17:00), the resolved close, and the lunch gate, all in one
+// call, so offer generation (both find-time paths), the estimate
+// classifier, the slot debug mirror and reservation/commit checks can no
+// longer drift the way four separate rounds of per-call-site patches did.
+describe('customerWindowAdmits', () => {
+  test('a start on the documented grid, ending by the (explicit) close, is admitted', () => {
+    expect(customerWindowAdmits({ startMin: 9 * 60, endMin: 10 * 60, dayEndMinutes: 18 * 60, lunchGateOn: false })).toBe(true);
+    expect(customerWindowAdmits({ startMin: 17 * 60, endMin: 18 * 60, dayEndMinutes: 18 * 60, lunchGateOn: false })).toBe(true);
+  });
+
+  test('a start before the grid (08:00, find-time capacity mode\'s own shift start) is refused, even when it otherwise fits the close', () => {
+    expect(customerWindowAdmits({ startMin: 8 * 60, endMin: 9 * 60, dayEndMinutes: 18 * 60, lunchGateOn: false })).toBe(false);
+  });
+
+  test('an off-grid minute (not on the hour, or an hour outside 09:00-17:00) is refused', () => {
+    expect(customerWindowAdmits({ startMin: 9 * 60 + 15, endMin: 10 * 60, dayEndMinutes: 18 * 60, lunchGateOn: false })).toBe(false);
+    expect(customerWindowAdmits({ startMin: 18 * 60, endMin: 19 * 60, dayEndMinutes: 20 * 60, lunchGateOn: false })).toBe(false);
+  });
+
+  test('an end past the resolved close is refused, even for a documented-grid start', () => {
+    expect(customerWindowAdmits({ startMin: 17 * 60, endMin: 17 * 60 + 90, dayEndMinutes: 18 * 60, lunchGateOn: false })).toBe(false);
+    // A tighter, configured close (e.g. 16:00) narrows admission the same way.
+    expect(customerWindowAdmits({ startMin: 16 * 60, endMin: 17 * 60, dayEndMinutes: 16 * 60, lunchGateOn: false })).toBe(false);
+  });
+
+  test('a window overlapping the lunch interval is refused only while the gate is on', () => {
+    expect(customerWindowAdmits({ startMin: 12 * 60, endMin: 13 * 60, dayEndMinutes: 18 * 60, lunchGateOn: true })).toBe(false);
+    expect(customerWindowAdmits({ startMin: 12 * 60, endMin: 13 * 60, dayEndMinutes: 18 * 60, lunchGateOn: false })).toBe(true);
+  });
+
+  test('non-finite or inverted bounds are refused, never thrown', () => {
+    expect(customerWindowAdmits({ startMin: null, endMin: 10 * 60 })).toBe(false);
+    expect(customerWindowAdmits({ startMin: 9 * 60, endMin: undefined })).toBe(false);
+    expect(customerWindowAdmits({ startMin: 10 * 60, endMin: 9 * 60 })).toBe(false);
+    expect(customerWindowAdmits()).toBe(false);
+  });
+
+  test('dayEndMinutes and lunchGateOn default to the live currentDayEndMinutes()/lunchBlockEnabled() when not passed', () => {
+    // Nothing has ever refreshed the cache in this describe — currentDayEndMinutes()
+    // falls back to the fixed 18:00 constant, matching CUSTOMER_DAY_END_MINUTES.
+    expect(customerWindowAdmits({ startMin: 17 * 60, endMin: 18 * 60 })).toBe(true);
+    expect(customerWindowAdmits({ startMin: 17 * 60, endMin: 18 * 60 + 1 })).toBe(false);
+    const ENV_KEY = 'GATE_BOOKING_LUNCH_BLOCK';
+    const previous = process.env[ENV_KEY];
+    try {
+      process.env[ENV_KEY] = 'true';
+      expect(customerWindowAdmits({ startMin: 12 * 60, endMin: 13 * 60 })).toBe(false);
+      delete process.env[ENV_KEY];
+      expect(customerWindowAdmits({ startMin: 12 * 60, endMin: 13 * 60 })).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env[ENV_KEY];
+      else process.env[ENV_KEY] = previous;
+    }
   });
 });
 

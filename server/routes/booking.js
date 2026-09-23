@@ -12,7 +12,7 @@ const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
 const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes } = require('../services/scheduling/travel-gap');
 const { fallbackCenterZoneName } = require('../services/scheduling/zone-day-funnel');
-const { CUSTOMER_HOUR_GRID, lunchBlockEnabled } = require('../services/scheduling/customer-windows');
+const { CUSTOMER_HOUR_GRID, lunchBlockEnabled, customerWindowAdmits } = require('../services/scheduling/customer-windows');
 const { violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
 const { selfBookDayCapEnabled } = require('../config/feature-gates');
 const { etDateString, addETDays } = require('../utils/datetime-et');
@@ -1083,6 +1083,16 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     const endMin = startMin + duration;
     if (!isWholeHour(startMin)) return;
     if (startMin < dayStartMin || endMin > dayEndMin) return;
+    // The documented public grid (09:00-17:00) is narrower than dayStartMin
+    // (08:00, this file's own day-start default — matched to the voice
+    // agent's 8am-6pm business-hours bound, call-recording-processor.js) —
+    // self-serve callers only (selfServeNotice, same split as the notice
+    // window and the lunch gate below): an idle route's earliest-feasible
+    // 08:00 candidate must not reach a self-serve surface just because it
+    // clears dayStartMin. Voice-agent callers keep the full shift (Codex r4
+    // P0 on #4663 — capacity mode's own generator already applies this via
+    // customerFacing; this closes the identical gate-off leak).
+    if (selfServeNotice && !customerWindowAdmits({ startMin, endMin })) return;
     // Lunch windows are reserved for route health and never self-booked —
     // but ONLY while GATE_BOOKING_LUNCH_BLOCK is on (owner ruling 2026-09-23,
     // unset by default). Off, noon is a normal offerable hour.

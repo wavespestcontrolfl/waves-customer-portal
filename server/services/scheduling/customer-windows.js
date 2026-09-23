@@ -193,8 +193,52 @@ function overlapsLunch(startMin, endMin) {
   return startMin < endMinutes && endMin > startMinutes;
 }
 
+// Minute-of-day values of CUSTOMER_HOUR_GRID — 09:00 through 17:00, one hour
+// apart. The one set every admission check below (and find-time.js's
+// capacity-mode generator) tests a whole-hour start against.
+const CUSTOMER_GRID_MINUTES = new Set(CUSTOMER_HOUR_GRID.map(parseHHMMMinutes));
+
+/**
+ * ONE customer-window admission rule (picker-windows PR 4, Codex r4 on
+ * #4663 — four earlier rounds each patched one call site's copy of this
+ * check: the grid floor, the day-end bound, and the lunch gate). Given a
+ * candidate [startMin, endMin) window, true iff a customer-facing/token
+ * surface may offer or commit it:
+ *  - startMin lands exactly on the documented public grid (09:00-17:00,
+ *    CUSTOMER_HOUR_GRID) — never a raw route-derived minute like 08:47, and
+ *    never before 09:00 or after 17:00, regardless of what a caller's own
+ *    shift bound (scheduling/policy.js SHIFT, 08:00-18:00) would otherwise
+ *    admit;
+ *  - endMin does not run past the customer close (dayEndMinutes — defaults
+ *    to currentDayEndMinutes(), which honors a preserved, non-18:00
+ *    booking_config.day_end override; a caller that already resolved the
+ *    bound for this request may pass it explicitly instead of triggering a
+ *    second cache read);
+ *  - the window does not overlap the lunch interval while that gate is on
+ *    (lunchGateOn — defaults to lunchBlockEnabled(); the interval itself is
+ *    always currentLunchInterval(), read through overlapsLunch()).
+ *
+ * Every caller here is customer-facing by construction — an estimate offer,
+ * a /book candidate, an admin debug mirror of what the customer sees, or a
+ * reservation/commit re-check of an already-offered window. Staff,
+ * optimizer and voice callers never call this: they stay on find-time's raw
+ * shift bounds (placementFitsShift) and are unaffected by everything this
+ * function enforces.
+ */
+function customerWindowAdmits({ startMin, endMin, dayEndMinutes = currentDayEndMinutes(), lunchGateOn = lunchBlockEnabled() } = {}) {
+  if (!Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) return false;
+  if (!CUSTOMER_GRID_MINUTES.has(startMin)) return false;
+  if (endMin > dayEndMinutes) return false;
+  if (lunchGateOn) {
+    const { startMinutes, endMinutes } = currentLunchInterval();
+    if (startMin < endMinutes && endMin > startMinutes) return false;
+  }
+  return true;
+}
+
 module.exports = {
   CUSTOMER_HOUR_GRID,
+  CUSTOMER_GRID_MINUTES,
   CUSTOMER_DAY_END_HOUR,
   CUSTOMER_DAY_END_MINUTES,
   CUSTOMER_LUNCH_START_MINUTES,
@@ -202,6 +246,7 @@ module.exports = {
   lunchBlockEnabled,
   customerOfferGrid,
   overlapsLunch,
+  customerWindowAdmits,
   refreshCustomerBookingWindowConfig,
   currentLunchInterval,
   currentDayEndMinutes,

@@ -147,7 +147,20 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
       // return-to-HQ leg the real evaluator requires. Shorten BOTH the
       // stored row and the requested duration to 15 minutes so the round
       // trip has real slack.
-      await mockConn('scheduled_services').where({ id: TARGET }).update({ estimated_duration_minutes: 15 });
+      //
+      // Codex r4 root cause on this same test (#4663): the previous fix
+      // shortened estimated_duration_minutes but left the base fixture's
+      // window_start/window_end at their original 09:00-10:00 (a 60-minute
+      // span). route-reorder-window-fit.js's workDuration() charges
+      // Math.max(windowSpan, estimated_duration_minutes) — a promised
+      // window floors the work even when the stored estimate shrinks — so
+      // the stale 60-minute span silently reintroduced the exact
+      // 60-minute-at-17:00 infeasibility this fix thought it had already
+      // removed (60 min work + the ~20-23 min return leg overruns the
+      // 18:00 close by ~17-20 min). Shorten the window span too so both
+      // inputs agree at 15 minutes.
+      await mockConn('scheduled_services').where({ id: TARGET })
+        .update({ estimated_duration_minutes: 15, window_start: '09:00', window_end: '09:15' });
       const offers = await findAvailableSlots({ ...OPTIONS, earliestStartMin: 1020, durationMinutes: 15 });
       expect(offers.slots).toEqual(expect.arrayContaining([
         expect.objectContaining({ start_time: '17:00', technician: expect.objectContaining({ id: TECH }) }),
