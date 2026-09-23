@@ -384,9 +384,14 @@ describe('reviseAdminEstimate', () => {
     expect(afterCorrection.addressUnverified).toBe(false);
     expect(afterCorrection.addressUnverifiedClearedBy).toBe('address_corrected');
     const confirmed = makeReviseDatabase({ estimate: flagged, lockedEstimate: flagged });
-    await reviseAdminEstimate({ database: confirmed.database, estimateId: 'est-1', body: { ...reviseBody, estimateData: { ...reviseBody.estimateData, addressUnverified: false } },
+    await reviseAdminEstimate({ database: confirmed.database, estimateId: 'est-1', body: { ...reviseBody, confirmAddress: true },
       technicianId: 'tech-2', recompute: noRecompute, now: fixedNow });
     expect(JSON.parse(confirmed.updates[0].estimate_data).addressUnverifiedClearedBy).toBe('staff_confirmed');
+    // A copied `addressUnverified: false` in the client's data is NOT a confirmation.
+    const copied = makeReviseDatabase({ estimate: flagged, lockedEstimate: flagged });
+    await reviseAdminEstimate({ database: copied.database, estimateId: 'est-1', body: { ...reviseBody, estimateData: { ...reviseBody.estimateData, addressUnverified: false } },
+      technicianId: 'tech-2', recompute: noRecompute, now: fixedNow });
+    expect(JSON.parse(copied.updates[0].estimate_data).addressUnverified).toBe(true);
   });
 
   test('retains the wizard address-verification marker across an ordinary revision', async () => {

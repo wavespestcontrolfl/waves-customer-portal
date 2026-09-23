@@ -1263,6 +1263,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         if (newestClean && newestClean > newestFlag) {
           leadCleanVerdict = true;
           priorAddressUnverified = null;
+          cleanEvidenceAt = new Date(newestClean).toISOString();
         } else if (matchingFlags.length) {
           leadCleanVerdict = false;
           priorAddressUnverified = matchingFlags.sort((a, b) => (Date.parse(b.flagged_at || '') || 0) - (Date.parse(a.flagged_at || '') || 0))[0];
@@ -1290,11 +1291,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         logger.warn(`[public-quote] withdrawn-publication flag re-read failed: ${withdrawnErr.code || withdrawnErr.name || 'error'}`);
       }
     }
-    const addressUnverified = nextAddressUnverified({
+    let addressUnverified = nextAddressUnverified({
       enriched: trustedProfileFound ? trustedTurf : null,
       profileFound: trustedProfileFound,
       prior: leadCleanVerdict ? null : priorAddressUnverified,
     });
+    // The clean evidence's ORIGINAL timestamp, carried onto the published
+    // verdict so a recovered clean verdict never outranks a flag committed
+    // after it (pre-push audit P1).
+    let cleanEvidenceAt = null;
     // Did the county roll answer on THIS run (or, for this premise, on the
     // lookup stage)? Only an answer may clear a marker an existing draft
     // already carries (see the draft refresh).
@@ -2093,7 +2098,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // (jsonb_strip_nulls drops a key the prior row never had); a value in
         // THIS stage's snapshot wins the merge.
         extracted_data: db.raw(
-          "CASE WHEN lead_type = 'quote_wizard' THEN jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'duplicate_of_lead_id', COALESCE(extracted_data, '{}'::jsonb)->'duplicate_of_lead_id', 'won_estimate_id', COALESCE(extracted_data, '{}'::jsonb)->'won_estimate_id')) || ?::jsonb ELSE COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb END",
+          "CASE WHEN lead_type = 'quote_wizard' THEN jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'duplicate_of_lead_id', COALESCE(extracted_data, '{}'::jsonb)->'duplicate_of_lead_id', 'won_estimate_id', COALESCE(extracted_data, '{}'::jsonb)->'won_estimate_id', 'address_unverified', COALESCE(extracted_data, '{}'::jsonb)->'address_unverified', 'address_verdict', COALESCE(extracted_data, '{}'::jsonb)->'address_verdict')) || ?::jsonb ELSE COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb END",
           [extractedData, extractedData]
         ),
         updated_at: new Date(),
@@ -2133,7 +2138,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         const relabel = label === undefined ? {} : {
           status: label ? 'duplicate' : 'new',
           extracted_data: db.raw(
-            "jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'won_estimate_id', COALESCE(extracted_data, '{}'::jsonb)->'won_estimate_id')) || ?::jsonb || ?::jsonb",
+            "jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'won_estimate_id', COALESCE(extracted_data, '{}'::jsonb)->'won_estimate_id', 'address_unverified', COALESCE(extracted_data, '{}'::jsonb)->'address_unverified', 'address_verdict', COALESCE(extracted_data, '{}'::jsonb)->'address_verdict')) || ?::jsonb || ?::jsonb",
             [extractedData, JSON.stringify(label ? { duplicate_of_lead_id: label } : {})],
           ),
         };
@@ -2320,15 +2325,38 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       try {
         await db.transaction(async (trx) => {
           await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(contactEmail, contactPhone)]);
+          // Re-read the contact pair UNDER the lock: a flag committed since
+          // the unlocked scan outranks a recovered clean verdict when it is
+          // newer than that verdict's ORIGINAL evidence (pre-push audit P1).
+          if (!addressUnverified && !(trustedProfileFound && countyRollAnswered(trustedTurf))) {
+            const phoneTen = String(contactPhone).replace(/\D/g, '').slice(-10);
+            const lockedRows = await trx('leads')
+              .whereNull('deleted_at')
+              .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()])
+              .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneTen])
+              .whereRaw("extracted_data->'address_unverified' IS NOT NULL")
+              .select('extracted_data');
+            const cleanAt = Date.parse(cleanEvidenceAt || '') || 0;
+            const newerFlag = lockedRows
+              .map((row) => recoverAddressUnverified(typeof row.extracted_data === 'string' ? (() => { try { return JSON.parse(row.extracted_data); } catch { return null; } })() : row.extracted_data))
+              .filter((flag) => flag && flag.address_line1 && flagCoversAddress(flag, normalizedAddress) && (Date.parse(flag.flagged_at || '') || 0) > cleanAt)
+              .sort((a, b) => (Date.parse(b.flagged_at || '') || 0) - (Date.parse(a.flagged_at || '') || 0))[0];
+            if (newerFlag) {
+              addressUnverified = newerFlag;
+              leadCleanVerdict = false;
+            }
+          }
+          const verdict = buildAddressVerdict({
+            flag: addressUnverified,
+            enriched: trustedProfileFound ? trustedTurf : (leadCleanVerdict ? { addressVerdict: 'audited' } : null),
+            profileFound: trustedProfileFound || leadCleanVerdict,
+            address: normalizedAddress,
+          });
+          if (verdict.status === 'clean' && cleanEvidenceAt && !(trustedProfileFound && countyRollAnswered(trustedTurf))) verdict.at = cleanEvidenceAt;
           await trx('leads').where({ id: lead.id }).update({
             extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
               address_unverified: addressUnverified || null,
-              address_verdict: buildAddressVerdict({
-                flag: addressUnverified,
-                enriched: trustedProfileFound ? trustedTurf : (leadCleanVerdict ? { addressVerdict: 'audited' } : null),
-                profileFound: trustedProfileFound || leadCleanVerdict,
-                address: normalizedAddress,
-              }),
+              address_verdict: verdict,
             })]),
             updated_at: new Date(),
           });

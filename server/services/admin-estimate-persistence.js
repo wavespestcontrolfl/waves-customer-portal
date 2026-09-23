@@ -2594,9 +2594,12 @@ function premiseChanged(priorAddress, nextAddress) {
   if (!String(priorAddress || '').trim() || !String(nextAddress || '').trim()) return String(priorAddress || '') !== String(nextAddress || '');
   return !samePremiseDisplay(priorAddress, nextAddress);
 }
-function carryAddressBlockAcrossRevise(nextData, priorData, { addressChanged = false } = {}) {
+// `explicitConfirm` comes from the REQUEST (body.confirmAddress === true),
+// never from a copied `addressUnverified: false` in the client's data
+// (a stale copy must not read as a confirmation — pre-push audit P1).
+function carryAddressBlockAcrossRevise(nextData, priorData, { addressChanged = false, explicitConfirm = false } = {}) {
   if (!nextData || typeof nextData !== 'object' || !priorData || typeof priorData !== 'object') return false;
-  const explicitlyConfirmed = nextData.addressUnverified === false;
+  const explicitlyConfirmed = explicitConfirm === true;
   if (addressChanged || explicitlyConfirmed) {
     if (priorData.addressUnverified === true || priorData.addressUnverifiedFlag) {
       nextData.addressUnverified = false;
@@ -2862,6 +2865,7 @@ async function reviseAdminEstimate({
       }
       if (carryAddressBlockAcrossRevise(nextData, existingData, {
         addressChanged: premiseChanged(estimate.address, writeFields.address),
+        explicitConfirm: body?.confirmAddress === true,
       })) preserved = true;
       // Publication belongs to the group that sent the link. A move or
       // explicit removal cannot carry that group's navigation window away.
@@ -3114,6 +3118,7 @@ async function reviseAdminEstimate({
           }
           carryAddressBlockAcrossRevise(pendingData, lockedData, {
             addressChanged: premiseChanged(lockedPrior.address, revisedFields.address),
+            explicitConfirm: body?.confirmAddress === true,
           });
           const revisedGroupId = revisedFields.estimate_group_id === undefined
             ? lockedPrior.estimate_group_id : revisedFields.estimate_group_id;
