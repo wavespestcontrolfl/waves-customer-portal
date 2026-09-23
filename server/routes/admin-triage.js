@@ -876,7 +876,9 @@ router.post('/:id/verdict', async (req, res) => {
               extraPayload: {
                 skipped_reason: decision.skippedReason,
                 scheduling_window: decision.approvedWindow,
-                on_file_address: liveOnFile || heldConflictPayload.on_file_address || null,
+                // The same live-else-snapshot choice the decision made (a
+                // blank live line falls back to the snapshot).
+                on_file_address: decision.approvedPayload?.on_file_address || null,
               },
             }))
             .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
