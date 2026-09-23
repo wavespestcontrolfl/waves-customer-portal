@@ -1630,6 +1630,24 @@ async function commitReservation({
       && require('./scheduling/window-rules').parseHHMM(windowStart) + effectiveDurationMinutes > SLOT_DAY_END_MINUTES + ROUND_UP_GRACE_MINUTES) {
       throw require('./combined-visit-capacity').capacityUnavailable();
     }
+    // Lunch block (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23) on the
+    // FINAL resolved window (the accepted profile's duration, not the hold's
+    // original): estimate acceptance graduates an existing hold through this
+    // path without passing reserveSlot's guard, so a noon hold minted before
+    // the gate flipped on — or an 11:00 hold the accepted profile lengthens
+    // into lunch — must stop here, in both capacity modes. No-op while unset.
+    {
+      const { parseHHMM } = require('./scheduling/window-rules');
+      const lunchEndMin = windowEnd
+        ? parseHHMM(windowEnd)
+        : (row.window_end ? parseHHMM(row.window_end) : null);
+      if (windowStart && lunchEndMin != null && overlapsLunch(parseHHMM(windowStart), lunchEndMin)) {
+        const err = new Error('slot is inside the lunch block');
+        err.code = 'SLOT_UNAVAILABLE';
+        err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id}`;
+        throw err;
+      }
+    }
 
     const capacityFit = useCapacity ? await verifyArrivalCapacity(preparedCapacity, {
       conn: client, windowStart, windowEnd, durationMinutes: effectiveDurationMinutes,

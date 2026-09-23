@@ -411,6 +411,62 @@ describe('slot reservation helpers', () => {
     expect(updateBuilder.update).not.toHaveBeenCalled();
   });
 
+  describe('commitReservation — lunch block mirror (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23)', () => {
+    const ENV_KEY = 'GATE_BOOKING_LUNCH_BLOCK';
+    let previous;
+    beforeEach(() => { previous = process.env[ENV_KEY]; });
+    afterEach(() => {
+      if (previous === undefined) delete process.env[ENV_KEY];
+      else process.env[ENV_KEY] = previous;
+    });
+    function wire({ windowStart, windowEnd }) {
+      const dateProbeBuilder = { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ scheduled_date: '2027-05-20' }) };
+      const reservationBuilder = {
+        where: jest.fn().mockReturnThis(), select: jest.fn().mockReturnThis(), forUpdate: jest.fn().mockReturnThis(),
+        first: jest.fn().mockResolvedValue({
+          id: 'scheduled-123', source_estimate_id: 'estimate-456', scheduled_date: '2027-05-20',
+          window_start: windowStart, window_end: windowEnd, technician_id: 'tech-1',
+          reservation_expires_at: '2027-05-20T13:15:00.000Z',
+        }),
+      };
+      const updateBuilder = { where: jest.fn().mockReturnThis(), update: jest.fn().mockReturnThis(), returning: jest.fn() };
+      const scheduledBuilders = [dateProbeBuilder, reservationBuilder, updateBuilder];
+      const techBuilder = makeAssignableTechnicianBuilder({ id: 'tech-1', name: 'Tech One', employment_status: 'active', field_dispatchable: true });
+      const trx = jest.fn((table) => {
+        if (table === 'scheduled_services') return scheduledBuilders.shift();
+        if (table === 'technicians') return techBuilder;
+        throw new Error(`unexpected table ${table}`);
+      });
+      trx.raw = jest.fn((sql) => ({ raw: sql }));
+      trx.isTransaction = true;
+      return { trx, updateBuilder };
+    }
+    const commit = (trx) => slotReservation.commitReservation({
+      scheduledServiceId: 'scheduled-123', customerId: 'customer-1', paymentMethodPreference: 'card_on_file',
+      estimatedPrice: 219.6, estimate: { id: 'estimate-456', service_interest: 'Pest Control' }, trx,
+    });
+
+    test('gate on: a noon hold minted before the flip is refused SLOT_UNAVAILABLE, nothing written', async () => {
+      process.env[ENV_KEY] = 'true';
+      jest.useFakeTimers(); jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+      try {
+        const { trx, updateBuilder } = wire({ windowStart: '12:00:00', windowEnd: '13:00:00' });
+        await expect(commit(trx)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: 'slot is inside the lunch block' });
+        expect(updateBuilder.update).not.toHaveBeenCalled();
+      } finally { jest.useRealTimers(); }
+    });
+
+    test('gate on: an 11:00 hold whose resolved window runs into lunch (11:00-12:30) is refused too', async () => {
+      process.env[ENV_KEY] = 'true';
+      jest.useFakeTimers(); jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+      try {
+        const { trx, updateBuilder } = wire({ windowStart: '11:00:00', windowEnd: '12:30:00' });
+        await expect(commit(trx)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+        expect(updateBuilder.update).not.toHaveBeenCalled();
+      } finally { jest.useRealTimers(); }
+    });
+  });
+
   test('commitReservation rebinds the held row to the accepted service profile', async () => {
     // Unlocked pre-read that keys the date-occupancy lock (rung 1) — taken
     // before the FOR UPDATE so a writer already holding the date lock and
