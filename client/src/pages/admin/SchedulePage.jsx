@@ -129,6 +129,8 @@ import {
 import ServiceScore from "../../components/payGrowth/ServiceScore";
 import { request as payGrowthRequest } from "../../components/payGrowth/common";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
+// Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
+const STORED_APPOINTMENT_DISCOUNT_OPTION = "__stored_appointment_discount";
 const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
 const TREATMENT_AREA_FIELD_KEYS = ["areas_treated", "spot_treatment_areas", "treatment_zones"];
 // Area fields that changed from free text to chips in this PR: restored legacy
@@ -2090,6 +2092,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // amount, the same way Create/Invoices do.
   const [lineDiscountPresets, setLineDiscountPresets] = useState([]);
   const [discountPresetId, setDiscountPresetId] = useState("");
+  // GitHub Codex round 14 on #4657 (P2 @ :2494): the row's STORED
+  // appointment discount used to sit behind an empty picker ("None") while
+  // still applying, and picking None serialized `undefined` — the server's
+  // "leave it alone" — so an operator could never remove it. The stored
+  // stamp now renders as its own "(current)" option; choosing None sets
+  // this, which posts an explicit null discount (preview AND save).
+  const [storedDiscountCleared, setStoredDiscountCleared] = useState(false);
+  const serviceHasStoredAppointmentDiscount = !!service.discountType && service.discountAmount != null;
   const [createInvoice, setCreateInvoice] = useState(
     !!(service.createInvoiceOnComplete ?? service.create_invoice_on_complete),
   );
@@ -2250,10 +2260,19 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   };
 
   const applyDiscountPreset = (id) => {
+    if (id === STORED_APPOINTMENT_DISCOUNT_OPTION) {
+      // Back to the row's own stored stamp: nothing posted, nothing cleared.
+      setDiscountPresetId("");
+      setDiscountType("");
+      setDiscountAmount("");
+      setStoredDiscountCleared(false);
+      return;
+    }
     setDiscountPresetId(id);
     if (!id) {
       setDiscountType("");
       setDiscountAmount("");
+      if (serviceHasStoredAppointmentDiscount) setStoredDiscountCleared(true);
       return;
     }
     if (id === "custom") return;
@@ -2491,7 +2510,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // Only relevant while the operator hasn't overridden it THIS session —
   // once they pick something in the Discount control, THEIR pick is what
   // will actually save, and the stored value is being replaced.
-  const storedAppointmentDiscount = !discountType && service.discountType && service.discountAmount != null
+  const storedAppointmentDiscount = !discountType && !storedDiscountCleared && serviceHasStoredAppointmentDiscount
     ? {
         id: service.discountId || null,
         discount_type: service.discountType,
@@ -2980,7 +2999,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     form, selectedPropertyId, notificationType, serviceLines, seriesPreviewValue: seriesPreview.preview,
     isRecurring, recurringFreq, recurringCount, recurringOngoing, seriesSummary,
     recurringNth, recurringWeekday, recurringIntervalDays, skipWeekends, weekendShift,
-    discountType, discountAmount, discountPresetId, createInvoice, assignmentScope,
+    discountType, discountAmount, discountPresetId, storedDiscountCleared, createInvoice, assignmentScope,
     priceServiceScope, timeOnSiteMinutes, reentryExterior, reentryInterior,
   };
   const saveInputsDrifted = (before) => {
@@ -3194,18 +3213,20 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           skipWeekends: recurringControlsActive ? !!skipWeekends : undefined,
           weekendShift:
             recurringControlsActive && skipWeekends ? weekendShift : undefined,
-          discountType: discountType || undefined,
+          // Round 14 P2 (:2494): an explicitly cleared stored discount posts
+          // null (the server's "remove it"), never undefined ("leave it").
+          discountType: discountType || (storedDiscountCleared ? null : undefined),
           discountAmount:
             discountType && discountAmount !== ""
               ? Number(discountAmount)
-              : undefined,
+              : (storedDiscountCleared ? null : undefined),
           // A catalog preset posts its id so the row keeps the discount's
           // identity (name on the invoice line, service filters); "custom"
           // stays an anonymous type/amount pair.
           discountId:
             discountType && discountPresetId && discountPresetId !== "custom"
               ? discountPresetId
-              : undefined,
+              : (storedDiscountCleared ? null : undefined),
           estimatedPrice:
             form.price !== "" && !isNaN(parseFloat(form.price))
               ? parseFloat(form.price)
@@ -3521,7 +3542,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const moneyPreviewInputsKey = JSON.stringify({
     form,
     isRecurring, recurringOngoing,
-    discountType, discountAmount, discountPresetId,
+    discountType, discountAmount, discountPresetId, storedDiscountCleared,
     lines: serviceLines.map((l) => [
       l.id || null, l.serviceType, l.price, l.serviceId || null,
       !!l.lineDiscountTouched, l.lineDiscount, l._seededPrice ?? null,
@@ -3552,11 +3573,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               form.price !== "" && !isNaN(parseFloat(form.price)) ? parseFloat(form.price) : undefined,
             estimatedPrice:
               form.price !== "" && !isNaN(parseFloat(form.price)) ? parseFloat(form.price) : undefined,
-            discountType: discountType || undefined,
+            discountType: discountType || (storedDiscountCleared ? null : undefined),
             discountAmount:
-              discountType && discountAmount !== "" ? Number(discountAmount) : undefined,
+              discountType && discountAmount !== "" ? Number(discountAmount) : (storedDiscountCleared ? null : undefined),
             discountId:
-              discountType && discountPresetId && discountPresetId !== "custom" ? discountPresetId : undefined,
+              discountType && discountPresetId && discountPresetId !== "custom" ? discountPresetId : (storedDiscountCleared ? null : undefined),
           }),
         });
         if (requestId !== previewRequestRef.current) return;
@@ -3594,7 +3615,39 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // Save is held until the server's own dry-run has confirmed what THIS
   // exact form would persist — never a client guess, and never a stale
   // response (moneyPreviewFresh requires it be for the LATEST request).
-  const moneyPreviewBlocksSave = moneyPreviewLoading || !moneyPreviewFresh;
+  // GitHub Codex round 14 on #4657 (P1 @ :3597): a preview 5xx / network
+  // failure left moneyPreviewFresh false forever and disabled EVERY save,
+  // including a notes-only, assignment or date edit on an undiscounted
+  // visit — an edit whose money the server preserves untouched and which
+  // never needed the dry-run's figure. A failed preview (for THIS render's
+  // inputs — a stale error never counts) only unblocks a save that cannot
+  // change money: no money input edited since the modal opened, no
+  // discount anywhere (picked or stored, appointment or line), no prepay
+  // to reconcile, no invoice being minted. Anything else still waits for a
+  // confirmed figure exactly as before.
+  const previewErroredForLatest =
+    !!moneyPreview
+    && moneyPreview.forRequestId === previewRequestRef.current
+    && moneyPreview.forInputsKey === moneyPreviewInputsKey
+    && !!moneyPreview.error;
+  const moneyEditKey = JSON.stringify({
+    price: form.price, serviceType: form.serviceType, serviceKey: form.serviceKey,
+    isRecurring, recurringOngoing,
+    discountType, discountAmount, discountPresetId, storedDiscountCleared,
+    lines: serviceLines.map((l) => [
+      l.id || null, l.serviceType, l.price, l.serviceId || null, !!l.lineDiscountTouched, l.lineDiscount,
+    ]),
+  });
+  const moneyEditSeedRef = useRef(moneyEditKey);
+  const saveTouchesMoney =
+    moneyEditKey !== moneyEditSeedRef.current
+    || appointmentDiscountSelected
+    || serviceLines.some((l) => !!effectiveLineDiscount(l))
+    || !!service.lineDiscountType
+    || (service.prepaidAmount != null && Number(service.prepaidAmount) > 0)
+    || !!createInvoice;
+  const moneyPreviewBlocksSave =
+    moneyPreviewLoading || (!moneyPreviewFresh && !(previewErroredForLatest && !saveTouchesMoney));
   // null (not 0, not a stale figure) while unconfirmed — the render below
   // shows "Confirming…" rather than ever displaying a client-computed
   // guess as if it were the real total.
@@ -4939,7 +4992,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   {" "}
                   <label style={labelStyle}>Discount</label>{" "}
                   <select
-                    value={discountPresetId}
+                    value={discountPresetId || (storedAppointmentDiscount ? STORED_APPOINTMENT_DISCOUNT_OPTION : "")}
                     onChange={(e) => applyDiscountPreset(e.target.value)}
                     disabled={saving || visitDiscountsLocked}
                     className="font-medium"
@@ -4947,6 +5000,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   >
                     {" "}
                     <option value="">None</option>
+                    {serviceHasStoredAppointmentDiscount && (
+                      <option value={STORED_APPOINTMENT_DISCOUNT_OPTION}>
+                        {storedAppointmentDiscountRow?.name || "Custom Discount"} (current) -{" "}
+                        {service.discountType === "percentage"
+                          ? `${Number(service.discountAmount)}%`
+                          : `$${Number(service.discountAmount).toFixed(2)}`}
+                      </option>
+                    )}
                     {appointmentPresetOptions.map((d) => (
                       <option key={d.id} value={d.id}>
                         {d.name} -{" "}
@@ -4962,6 +5023,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
                       Discounts can't be changed on this legacy visit until its
                       primary price is re-entered.
+                    </div>
+                  )}
+                  {storedDiscountCleared && !discountType && (
+                    <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
+                      The stored discount will be removed when you save.
                     </div>
                   )}
                 </div>
@@ -5057,8 +5123,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     color: "#DC2626",
                   }}
                 >
-                  Could not confirm the totals this save would produce: {moneyPreview.error}. Edit a
-                  discount field to retry, or reload before saving.
+                  Could not confirm the totals this save would produce: {moneyPreview.error}.{" "}
+                  {moneyPreviewBlocksSave
+                    ? "Edit a discount field to retry, or reload before saving."
+                    : "This save changes no pricing, so it can still be saved; the stored totals are kept as they are."}
                 </div>
               )}
               {!stackingUnconfirmedBlocksSave && !moneyPreview?.error && moneyPreviewBlocksSave && (

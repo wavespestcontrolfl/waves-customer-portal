@@ -1494,6 +1494,23 @@ function appointmentDiscountIdentityChanged(existing, discountId) {
   return String(discountId || '') !== String(existing?.discount_id || '');
 }
 
+// GitHub Codex round 14 P1 (#4657, :10034): the stale-add-on-id check in
+// normalizeUpdateDetailsAddons runs on the base db BEFORE the save
+// transaction opens, so two concurrent saves can both read the same row
+// ids and pass it; the first replaces the rows and commits while the
+// second waits on the row lock, then deletes the first operator's fresh
+// rows using pricing computed from the obsolete ones. The route re-reads
+// the row ids UNDER the lock and refuses (409 VISIT_CHANGED_RETRY) when
+// the set it planned against is no longer the set on disk. Pure set
+// comparison; order and id type are irrelevant.
+function addonRowIdsDrifted(expectedIds, freshIds) {
+  const expected = new Set((expectedIds || []).map((id) => String(id)));
+  const fresh = new Set((freshIds || []).map((id) => String(id)));
+  if (expected.size !== fresh.size) return true;
+  for (const id of expected) if (!fresh.has(id)) return true;
+  return false;
+}
+
 function appointmentDiscountInputChanged(existing, discountType, discountAmount) {
   const existingType = existing?.discount_type || null;
   const existingAmount = existing?.discount_amount == null || existing.discount_amount === ''
@@ -10307,6 +10324,10 @@ async function computeUpdateDetailsFinancialPlan({
   let replaceAddons = null;
   let canonicalRestackedAddonDollars = null;
   let legacyPreservationCasSnapshot = null;
+  // Round 14 P1: the add-on row ids this plan was computed against, for
+  // the route's under-lock recheck (addonRowIdsDrifted). null when the
+  // save does not replace add-ons at all.
+  let expectedAddonRowIds = null;
   let clearAddonDiscountsOnPriceEdit = false;
   // GitHub Codex round 12 P0 (#4657, :10306) — reported here, never thrown:
   // see the assignment inside the addons block below for the full
@@ -10333,6 +10354,7 @@ async function computeUpdateDetailsFinancialPlan({
         db, id, addons, updates, isRecurring, serviceType, scheduledDate,
       });
       replaceAddons = normalizedAddons;
+      expectedAddonRowIds = existingAddonDiscountRows.map((r) => r.id);
 
       let primaryGross = toMoney(primaryLinePrice);
       if (primaryGross == null) {
@@ -10859,6 +10881,7 @@ async function computeUpdateDetailsFinancialPlan({
   return {
     replaceAddons, canonicalRestackedAddonDollars, legacyPreservationCasSnapshot, clearAddonDiscountsOnPriceEdit,
     reServiceConversion, reServiceTransition, reServiceConversionZeroPrice, legacyPrimaryGrossUnknown,
+    expectedAddonRowIds,
   };
 }
 
@@ -11025,6 +11048,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // write (legacyPreservationSnapshotStale). null/false everywhere the
     // decision never ran or never preserved — no-op there.
     let legacyPreservationCasSnapshot = null;
+    let expectedAddonRowIds = null;
     if (estimatedDuration !== undefined && estimatedDuration !== '') updates.estimated_duration_minutes = parseInt(estimatedDuration);
     if (scheduledDate !== undefined && scheduledDate !== '') updates.scheduled_date = scheduledDate;
     // Notify + past date is always a mistake (a week-off click in the
@@ -11339,6 +11363,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       canonicalRestackedAddonDollars = financialPlan.canonicalRestackedAddonDollars;
       legacyPreservationCasSnapshot = financialPlan.legacyPreservationCasSnapshot;
       clearAddonDiscountsOnPriceEdit = financialPlan.clearAddonDiscountsOnPriceEdit;
+      expectedAddonRowIds = financialPlan.expectedAddonRowIds;
       // Codex pre-push audit P1 (round 4 on #4657, :13181): the re-service/
       // is_callback classification AND its reServiceConversionZeroPrice
       // decision (zeroing the visit + every add-on for an eligible free
@@ -12133,6 +12158,24 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             existingAddonRows: legacyPreservationCasSnapshot.addonRows,
           })) {
             throw Object.assign(new Error('This appointment changed while saving — reload and save again.'), {
+              statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY',
+            });
+          }
+        }
+        // GitHub Codex round 14 P1 (#4657, :10034): the replace-strategy
+        // delete below must only ever remove the rows this save PLANNED
+        // against. Re-read the add-on row ids under the row lock (the
+        // FOR UPDATE here is a no-op when an earlier branch already holds
+        // it) and refuse if a concurrent save replaced them in between —
+        // its rows, discounts and totals would otherwise be overwritten
+        // with figures computed from rows that no longer exist. Same 409
+        // the legacy-preservation CAS above uses; nothing is committed.
+        if (addonsReplaced && Array.isArray(expectedAddonRowIds)) {
+          await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first('id');
+          const freshAddonIdRows = await trx('scheduled_service_addons')
+            .where({ scheduled_service_id: req.params.id }).select('id');
+          if (addonRowIdsDrifted(expectedAddonRowIds, freshAddonIdRows.map((r) => r.id))) {
+            throw Object.assign(new Error('This visit changed while you were editing — reload and save again.'), {
               statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY',
             });
           }
@@ -21439,6 +21482,7 @@ function blackoutDateString(value) {
 }
 
 router._test = {
+  addonRowIdsDrifted,
   scheduledServicesDiscountProvenanceColumns,
   resetDiscountProvenanceColumnCache,
   weeklyBlackoutRefreshDates,

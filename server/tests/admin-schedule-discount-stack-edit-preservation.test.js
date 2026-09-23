@@ -68,6 +68,7 @@ const {
   hasPricingRegimeMarker,
   adoptsCanonicalPricingOnEdit,
   stampPricingRegimeMarker,
+  addonRowIdsDrifted,
 } = require('../routes/admin-schedule')._test;
 const {
   deriveLegacyPrimarySubmission,
@@ -1321,5 +1322,29 @@ describe('GitHub round 9 P1 on #4657 — a discount-term change on an UNMARKED r
     expect(result.canonicalPricingApplied).toBe(false);
     expect(result.capsSnapshotToPersist).toBeNull();
     expect(result.financials.price).toBe(195);
+  });
+});
+
+// GitHub Codex round 14 P1 (#4657, :10034): the pre-transaction stale-id
+// check cannot see a concurrent save that lands between the plan's read
+// and the row lock; the route re-reads the add-on row ids under the lock
+// and refuses via this predicate when the planned set is not the set on
+// disk (replace strategy = every save reissues ids).
+describe('addonRowIdsDrifted (round 14 P1: add-on identities rechecked under the write lock)', () => {
+  test('same ids, any order or type: not drifted', () => {
+    expect(addonRowIdsDrifted(['a', 'b'], ['b', 'a'])).toBe(false);
+    expect(addonRowIdsDrifted([1, 2], ['2', '1'])).toBe(false);
+    expect(addonRowIdsDrifted([], [])).toBe(false);
+  });
+  test('a concurrent save replaced the rows (new ids, same count): drifted', () => {
+    expect(addonRowIdsDrifted(['a', 'b'], ['c', 'd'])).toBe(true);
+  });
+  test('a row added or removed in between: drifted', () => {
+    expect(addonRowIdsDrifted(['a', 'b'], ['a'])).toBe(true);
+    expect(addonRowIdsDrifted(['a'], ['a', 'b'])).toBe(true);
+  });
+  test('a visit that had no add-ons and still has none: not drifted (a first add-on save must not refuse itself)', () => {
+    expect(addonRowIdsDrifted(null, [])).toBe(false);
+    expect(addonRowIdsDrifted([], [])).toBe(false);
   });
 });

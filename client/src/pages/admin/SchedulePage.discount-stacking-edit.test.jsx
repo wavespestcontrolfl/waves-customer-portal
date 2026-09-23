@@ -763,8 +763,10 @@ it(':3293 — the row\'s STORED appointment discount (never touched this session
   vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, discounts: DISCOUNTS, service }));
   render(<Harness service={service} />);
   fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
-  // The appointment Discount control itself is still untouched (shows "None").
-  await waitFor(() => expect(apptDiscountSelect().value).toBe(''));
+  // The appointment Discount control itself is still untouched — it shows
+  // the row's own stored stamp as the selected "(current)" option (GitHub
+  // round 14 P2 on #4657; it used to read "None" while still applying).
+  await waitFor(() => expect(apptDiscountSelect().options[apptDiscountSelect().selectedIndex].textContent).toMatch(/\(current\)/));
   // Its stored 10% already reaches the untouched primary+addon lines, so
   // the Total must already be lower than the raw subtotal even though the
   // operator picked nothing this session.
@@ -1703,4 +1705,110 @@ it('round 13 P2 (:3011): an untouched form during the probe still saves normally
   await waitForMoneyReady();
   fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
   await waitFor(() => expect(writes()).toHaveLength(1));
+});
+
+// ---------------------------------------------------------------------
+// GitHub Codex round 14 on #4657.
+// ---------------------------------------------------------------------
+
+// P1 (:3597): a failed preview (5xx / network) must not disable a save
+// that cannot change money; anything money-bearing still waits.
+const undiscountedVisit = {
+  ...baseService,
+  estimatedPrice: 140,
+  serviceAddons: [
+    {
+      id: 'addon-2', serviceId: 'svc-fert', serviceName: 'Quarterly Fertilization', serviceKey: 'lawn_fert',
+      serviceCategory: 'lawn', basePrice: 40, estimatedPrice: 40, estimatedDuration: 20,
+    },
+  ],
+};
+function previewDownFetch(service) {
+  return vi.fn(async (url, options) => {
+    if (url.endsWith('/admin/discounts/stacking')) return { ok: true, json: async () => ({ enabled: true }) };
+    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => DISCOUNTS };
+    if (url.includes('/update-details/preview')) {
+      return { ok: false, status: 503, json: async () => ({ error: 'preview unavailable' }) };
+    }
+    if (url.includes('/update-details')) return { ok: true, json: async () => ({}) };
+    return { ok: true, json: async () => ({}) };
+  });
+}
+
+it('round 14 P1 (:3597): preview 503 on an UNDISCOUNTED visit — a notes-only save is still allowed and posts', async () => {
+  vi.stubGlobal('fetch', previewDownFetch(undiscountedVisit));
+  render(<Harness service={undiscountedVisit} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(screen.getByText(/Could not confirm the totals/)).toBeInTheDocument());
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeEnabled());
+  expect(screen.getByText(/This save changes no pricing/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  await waitFor(() => expect(writes()).toHaveLength(1));
+});
+
+it('round 14 P1 (:3597): preview 503 on a visit with a STORED line discount keeps Save disabled', async () => {
+  vi.stubGlobal('fetch', previewDownFetch(baseService));
+  render(<Harness service={baseService} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(screen.getByText(/Could not confirm the totals/)).toBeInTheDocument());
+  expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
+  expect(screen.queryByText(/This save changes no pricing/)).not.toBeInTheDocument();
+});
+
+it('round 14 P1 (:3597): preview 503 on an undiscounted visit — editing the Price re-blocks Save', async () => {
+  vi.stubGlobal('fetch', previewDownFetch(undiscountedVisit));
+  render(<Harness service={undiscountedVisit} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeEnabled());
+  const priceInputs = screen.getAllByPlaceholderText('0.00');
+  fireEvent.change(priceInputs[0], { target: { value: '150' } });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeDisabled(), { timeout: 2000 });
+});
+
+// P2 (:2494): a stored appointment discount is selectable as "(current)"
+// and choosing None posts an explicit null (remove), never undefined
+// (leave alone).
+const storedApptDiscountVisit = {
+  ...baseService,
+  serviceAddons: [],
+  primaryLinePrice: 100,
+  estimatedPrice: 90,
+  discountType: 'fixed_amount', discountAmount: 10,
+};
+
+it('round 14 P2 (:2494): the stored appointment discount renders as the selected "(current)" option, and None posts discountType null on save', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service: storedApptDiscountVisit }));
+  render(<Harness service={storedApptDiscountVisit} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  const select = apptDiscountSelect();
+  expect(select.options[select.selectedIndex].textContent).toMatch(/\(current\)/);
+  fireEvent.change(select, { target: { value: '' } });
+  expect(screen.getByText(/The stored discount will be removed when you save/).style.fontSize).toBe('14px');
+  await waitForMoneyReady();
+  // The preview asked for the cleared shape too.
+  const previewBodies = fetch.mock.calls.filter(([u]) => u.includes('/update-details/preview')).map(([, o]) => JSON.parse(o.body));
+  expect(previewBodies[previewBodies.length - 1].discountType).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  const body = JSON.parse(writes()[0][1].body);
+  expect(body.discountType).toBeNull();
+  expect(body.discountAmount).toBeNull();
+  expect(body.discountId).toBeNull();
+});
+
+it('round 14 P2 (:2494): returning to the "(current)" option after None posts undefined again (leave the stored discount alone)', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service: storedApptDiscountVisit }));
+  render(<Harness service={storedApptDiscountVisit} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  fireEvent.change(apptDiscountSelect(), { target: { value: '' } });
+  const current = [...apptDiscountSelect().options].find((o) => /\(current\)/.test(o.textContent));
+  fireEvent.change(apptDiscountSelect(), { target: { value: current.value } });
+  expect(screen.queryByText(/The stored discount will be removed/)).not.toBeInTheDocument();
+  await waitForMoneyReady();
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  const body = JSON.parse(writes()[0][1].body);
+  expect(body.discountType).toBeUndefined();
 });
