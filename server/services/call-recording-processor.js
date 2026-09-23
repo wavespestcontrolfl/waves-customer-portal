@@ -14855,6 +14855,15 @@ const CallRecordingProcessor = {
                 } catch (replayErr) {
                   logger.warn(`[call-proc] replay credit redemption deferred to sweep for ${svc.id}: ${replayErr.message}`);
                 }
+              } else if (disputeHeldReuse) {
+                // A reused AI booking held on a house-number dispute gets NO
+                // replay repair: registerScheduleSideEffects re-arms the
+                // confirmation SMS / email and reminders, and no confirmation
+                // may reach the customer while the address is unresolved
+                // and the technician was just pulled (codex r9 P1). The
+                // office re-arms them from the card once the number is
+                // confirmed.
+                logger.warn(`[call-proc] replay repairs skipped for reused booking ${svc.id} (${maskSid(callSid)}): house number disputed`);
               } else {
                 // Same-key REPLAY of this call's OWN still-live booking
                 // (idempotency conflict): the first attempt committed the
