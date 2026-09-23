@@ -1162,6 +1162,13 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
         expectedMinutes: anchor.expectedEndMin - anchor.rawStartMin,
         lat: anchor.lat,
         lng: anchor.lng,
+        // A live hold never shadows a committed neighbour (travel-gap.js's
+        // isHoldStop/travelGapConflicts) — without this, isHoldStop's
+        // `stop.hold != null` check sees undefined (not explicitly false)
+        // and falls through to a reservation_expires_at heuristic this row
+        // never carries, so every anchor here (Codex push-audit P1 on r6)
+        // silently read as a full committed block instead.
+        hold: anchor.hold,
       };
       if (!occupiedByDate.has(row.date)) occupiedByDate.set(row.date, []);
       occupiedByDate.get(row.date).push(row);

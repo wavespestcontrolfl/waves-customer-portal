@@ -126,6 +126,38 @@ describe('buildBookingAvailability — travel-gap mirror (GATE_SLOT_TRAVEL_GAP)'
     process.env.GATE_SLOT_TRAVEL_GAP = 'true';
     expect(dayStarts(await buildPalmetto())).toEqual(['14:00']);
   });
+
+  // Codex push-audit P1 (r6) — the occupancy mirror's anchor→row mapping
+  // never set `hold`, so travel-gap.js's isHoldStop (`stop.hold != null`)
+  // fell through to its reservation_expires_at heuristic, which this row
+  // never carries either — every anchor here read as a plain committed
+  // stop, never a hold. That breaks travelGapConflicts' "a hold never
+  // shadows the committed neighbour behind it" rule: a CLOSE, COMPLIANT
+  // hold naturally wins the nearest-before-candidate slot (real stops and
+  // holds compete on raw proximity when hold status is unknown), silently
+  // discarding a FARTHER, genuinely violating committed stop that a
+  // correctly-flagged hold would never have been allowed to eclipse.
+  test('a close, compliant hold never shadows a farther, genuinely violating committed stop', async () => {
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    listOccupiedWindows.mockResolvedValue([
+      // Farther from the 09:00-10:00 (540-600) candidate, in Bradenton
+      // (~33 modeled minutes + 15 buffer needed): ends at 08:20 (500), only
+      // 40 free minutes — well short of the ~48 required, a real violation.
+      { id: 'real-far', technician_id: 'tech-1', customer_id: 'cust-1', date: D, startMin: 440, endMin: 500, lat: 27.425, lng: -82.41 },
+      // Closer to the candidate (ends at 08:45 = 525) but co-located
+      // (Palmetto, zero drive) and compliant on its own: exactly 15 free
+      // minutes meets the flat buffer with room to spare.
+      { id: 'hold-near', technician_id: null, customer_id: null, date: D, startMin: 465, endMin: 525, lat: 27.545, lng: -82.545, hold: true },
+    ]);
+    const result = await buildPalmetto();
+    // Before the fix: the compliant, closer "hold" (misread as an ordinary
+    // committed stop) wins the before-candidate slot on raw proximity,
+    // discarding the farther real violator entirely — 09:00 wrongly
+    // survives. After the fix: the hold is correctly excluded from that
+    // slot, the real violator is checked instead, and 09:00 is dropped.
+    expect(dayStarts(result)).not.toContain('09:00');
+    expect(dayStarts(result)).toEqual(['14:00']);
+  });
 });
 
 describe('buildBookingAvailability — commit-gate occupancy mirror', () => {
