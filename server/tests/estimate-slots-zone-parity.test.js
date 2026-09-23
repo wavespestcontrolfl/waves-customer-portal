@@ -279,7 +279,14 @@ test('capacity estimates keep late work within the shared shift and its last arr
       { ...certified, windowEnd: '18:30' },
     ], { dateFrom: certified.date, dateTo: certified.date })).resolves.toEqual([certified]);
     process.env.GATE_SCHEDULING_CAPACITY = 'false';
-    expect(estimateSlotAvailability._internals.slotWindowFitsDay('16:00', '17:30')).toBe(false);
+    // Non-capacity path caps at the customer-facing day end — 18:00 since PR 2
+    // (2026-09-23, scheduling/customer-windows.js CUSTOMER_DAY_END_MINUTES): a
+    // 17:00 offer + the 60-minute visit legitimately ends at 18:00, and a
+    // 16:00-17:30 window (an odd-duration probe, not a real offer) now fits
+    // too. Anything ending past 18:00 still does not.
+    expect(estimateSlotAvailability._internals.slotWindowFitsDay('16:00', '17:30')).toBe(true);
+    expect(estimateSlotAvailability._internals.slotWindowFitsDay('17:00', '18:00')).toBe(true);
+    expect(estimateSlotAvailability._internals.slotWindowFitsDay('17:30', '18:30')).toBe(false);
   } finally {
     if (previous === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
     else process.env.GATE_SCHEDULING_CAPACITY = previous;

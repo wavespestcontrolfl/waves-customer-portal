@@ -26,7 +26,10 @@ const D = dayOffset(10);
 const CONFIG = {
   advance_days_min: 1, advance_days_max: 14,
   slot_duration_minutes: 60,
-  day_start: '08:00', day_end: '17:00',
+  // 18:00 close since PR 2 (2026-09-23, scheduling/customer-windows.js
+  // CUSTOMER_DAY_END_MINUTES) — a 17:00 start + the standard 60-minute
+  // visit ends at 18:00.
+  day_start: '08:00', day_end: '18:00',
   max_self_books_per_day: 3,
 };
 
@@ -138,15 +141,41 @@ describe('buildBookingAvailability — gap fan-out', () => {
     expect(findAvailableSlots).toHaveBeenCalledWith(expect.objectContaining({ serviceTypes: ['Pest Control', 'Tree & Shrub'] }));
   });
 
-  test('a gap whose earliest snap lands in lunch still offers its free afternoon hours', async () => {
+  test('a gap whose earliest snap lands in lunch still offers its free afternoon hours (GATE_BOOKING_LUNCH_BLOCK=true)', async () => {
     // Gap opens 11:10 (snaps to 12:00 = lunch) and runs long enough to hold
     // starts through 15:30. Pre-fan-out this day rendered EMPTY.
-    findAvailableSlots.mockResolvedValue({
-      slots: [gapSlot('11:10', { latest_start_min: 15 * 60 + 30 })],
-      total_feasible: 1,
-    });
-    const availability = await build();
-    expect(startTimes(availability)).toEqual(['13:00', '14:00', '15:00']);
+    // Lunch is only excluded while GATE_BOOKING_LUNCH_BLOCK is on (owner
+    // ruling 2026-09-23, unset by default) — this test exercises that ON
+    // path; the sibling test below covers the default (unset/off) grid.
+    const previous = process.env.GATE_BOOKING_LUNCH_BLOCK;
+    process.env.GATE_BOOKING_LUNCH_BLOCK = 'true';
+    try {
+      findAvailableSlots.mockResolvedValue({
+        slots: [gapSlot('11:10', { latest_start_min: 15 * 60 + 30 })],
+        total_feasible: 1,
+      });
+      const availability = await build();
+      expect(startTimes(availability)).toEqual(['13:00', '14:00', '15:00']);
+    } finally {
+      if (previous === undefined) delete process.env.GATE_BOOKING_LUNCH_BLOCK;
+      else process.env.GATE_BOOKING_LUNCH_BLOCK = previous;
+    }
+  });
+
+  test('the same lunch-snap gap offers noon too once GATE_BOOKING_LUNCH_BLOCK is unset (default)', async () => {
+    const previous = process.env.GATE_BOOKING_LUNCH_BLOCK;
+    delete process.env.GATE_BOOKING_LUNCH_BLOCK;
+    try {
+      findAvailableSlots.mockResolvedValue({
+        slots: [gapSlot('11:10', { latest_start_min: 15 * 60 + 30 })],
+        total_feasible: 1,
+      });
+      const availability = await build();
+      expect(startTimes(availability)).toEqual(['12:00', '13:00', '14:00', '15:00']);
+    } finally {
+      if (previous === undefined) delete process.env.GATE_BOOKING_LUNCH_BLOCK;
+      else process.env.GATE_BOOKING_LUNCH_BLOCK = previous;
+    }
   });
 
   test('an occupied hour rejects that start only, not the rest of the gap', async () => {
@@ -200,7 +229,41 @@ describe('buildBookingAvailability — gap fan-out', () => {
     });
     const availability = await build();
     // Keep the full day so a search result is also valid at confirmation.
-    expect(startTimes(availability)).toEqual(['08:00', '09:00', '10:00', '11:00', '13:00', '14:00', '15:00']);
+    // Includes 12:00: GATE_BOOKING_LUNCH_BLOCK is unset (default) in this
+    // suite, so noon is a normal offerable hour (owner ruling 2026-09-23).
+    expect(startTimes(availability)).toEqual(['08:00', '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00']);
+  });
+
+  test('an open day (expandOpenDays, no existing stops) fans out the full OPEN_DAY_WINDOWS grid, 09:00 through 17:00', async () => {
+    // Non-capacity path, a day with zero stops so far: this is the ONLY
+    // branch that reads OPEN_DAY_WINDOWS directly (scheduling/customer-windows.js
+    // CUSTOMER_HOUR_GRID) rather than fanning out a route gap.
+    findAvailableSlots.mockResolvedValue({
+      slots: [gapSlot('09:00', { stops_that_day: 0 })],
+      total_feasible: 1,
+    });
+    const availability = await build('', { expandOpenDays: true });
+    expect(startTimes(availability)).toEqual([
+      '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00',
+    ]);
+  });
+
+  test('the same open day drops noon when GATE_BOOKING_LUNCH_BLOCK is true', async () => {
+    const previous = process.env.GATE_BOOKING_LUNCH_BLOCK;
+    process.env.GATE_BOOKING_LUNCH_BLOCK = 'true';
+    try {
+      findAvailableSlots.mockResolvedValue({
+        slots: [gapSlot('09:00', { stops_that_day: 0 })],
+        total_feasible: 1,
+      });
+      const availability = await build('', { expandOpenDays: true });
+      expect(startTimes(availability)).toEqual([
+        '09:00', '10:00', '11:00', '13:00', '14:00', '15:00', '16:00', '17:00',
+      ]);
+    } finally {
+      if (previous === undefined) delete process.env.GATE_BOOKING_LUNCH_BLOCK;
+      else process.env.GATE_BOOKING_LUNCH_BLOCK = previous;
+    }
   });
 });
 

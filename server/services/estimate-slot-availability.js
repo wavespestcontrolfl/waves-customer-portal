@@ -40,6 +40,7 @@ const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/
 const { signSlotOffer, appendOfferToSlotId, CAPACITY_OFFER_POLICY } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 const { getZoneFunnelDays, applyZoneDayFunnel, fallbackCenterZoneName } = require('./scheduling/zone-day-funnel');
+const { CUSTOMER_HOUR_GRID, CUSTOMER_DAY_END_HOUR, CUSTOMER_DAY_END_MINUTES } = require('./scheduling/customer-windows');
 const { isEnabled } = require('../config/feature-gates');
 const { getDailyRainOutlookBounded } = require('./weather-forecast');
 const {
@@ -73,7 +74,10 @@ const MAX_ESTIMATE_SLOT_DURATION_MINUTES = 180;
 // in scheduling/find-time.js, which generates every route-derived offer.
 // Keep the two in sync.
 const SLOT_DAY_START_MINUTES = 8 * 60;
-const SLOT_DAY_END_MINUTES = 17 * 60;
+// Customer-facing service day close (scheduling/customer-windows.js) — a
+// 17:00 start plus the standard 60-minute visit ends at 18:00. Shared with
+// slot-reservation.js's server-side re-validation via this module's export.
+const SLOT_DAY_END_MINUTES = CUSTOMER_DAY_END_MINUTES;
 // Furthest-out date any offer surface produces: the public route clamps
 // ?windowDays to this and findEstimateSlots caps the AI date parse's
 // maxDaysOut to it. slot-reservation enforces the same bound on reserve so a
@@ -1106,7 +1110,9 @@ function slotWindowFitsDay(windowStart, windowEnd) {
 }
 
 // Synthetic capacity retains its feasible start; selection only changes order.
-const PREFERRED_WINDOWS = ['09:00', '10:00', '11:00', '13:00', '14:00', '15:00', '16:00'];
+// Shared grid (scheduling/customer-windows.js) — see that module for the
+// consolidation rationale.
+const PREFERRED_WINDOWS = CUSTOMER_HOUR_GRID;
 
 function splitSlotResults(slots, maxResults, expanderMaxResults) {
   const visibleCount = Math.max(0, Number(maxResults) || 0);
@@ -1861,6 +1867,10 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       excludeEstimateId: estimateId,
       // Travel gap (GATE_SLOT_TRAVEL_GAP): customer-facing turnaround buffer.
       bufferMinutes: customerFacingBufferMinutes(),
+      // Customer-facing day close (scheduling/customer-windows.js) — find-time's
+      // own DAY_END_HOUR default (17) stays untouched for staff/optimizer
+      // callers that don't pass this.
+      dayEndHour: CUSTOMER_DAY_END_HOUR,
       dateFrom: segFrom,
       dateTo: segTo,
       topN: Number.MAX_SAFE_INTEGER,
@@ -2068,6 +2078,8 @@ async function getSlotDebug(estimateId, userOpts = {}) {
     // reflects what the customer is actually offered (codex r16 P1).
     excludeEstimateId: estimateId,
     bufferMinutes: customerFacingBufferMinutes(),
+    // Same customer-facing day close as the live path (see above).
+    dayEndHour: CUSTOMER_DAY_END_HOUR,
     dateFrom,
     dateTo,
     topN: 200, // broad — debug surface wants everything

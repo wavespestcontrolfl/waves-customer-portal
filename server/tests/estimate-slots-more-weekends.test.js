@@ -168,7 +168,9 @@ describe('estimate slot weekend and expander behavior', () => {
       dateFrom: '2026-05-26', dateTo: '2026-05-26', durationMinutes: 60,
       techs: [{ id: 'tech-1' }], now: new Date('2026-05-26T15:01:00Z'), minimumLeadMinutes: 120,
     });
-    expect(slots.map(s => s.windowStart)).toEqual(['14:00', '15:00', '16:00']);
+    // Grid now runs through 17:00 (scheduling/customer-windows.js, PR 2
+    // 2026-09-23).
+    expect(slots.map(s => s.windowStart)).toEqual(['14:00', '15:00', '16:00', '17:00']);
   });
 
   test('past-slot filter also trims a route-optimal window that has already passed today', () => {
@@ -195,7 +197,8 @@ describe('estimate slot weekend and expander behavior', () => {
     });
 
     const windows = new Set(slots.map((slot) => slot.windowStart));
-    expect(slots).toHaveLength(210);
+    // 30 techs × the 9-window customer hour grid (scheduling/customer-windows.js).
+    expect(slots).toHaveLength(270);
     expect(windows.has('09:00')).toBe(true);
     expect(windows.has('10:00')).toBe(true);
     expect(windows.has('11:00')).toBe(true);
@@ -401,7 +404,10 @@ describe('estimate slot weekend and expander behavior', () => {
 
   test('longer service windows must still fit the customer-facing workday', () => {
     expect(slotAvailabilityInternals.slotWindowFitsDay('15:00', '16:30')).toBe(true);
-    expect(slotAvailabilityInternals.slotWindowFitsDay('16:00', '17:30')).toBe(false);
+    // Day end is 18:00 since PR 2 (2026-09-23) — 17:30 now fits...
+    expect(slotAvailabilityInternals.slotWindowFitsDay('16:00', '17:30')).toBe(true);
+    // ...but anything ending past 18:00 still does not.
+    expect(slotAvailabilityInternals.slotWindowFitsDay('17:00', '18:30')).toBe(false);
   });
 });
 
@@ -594,6 +600,8 @@ test('synthetic capacity includes the end of the date horizon before filtering o
     techs: [{ id: 'tech-1' }], now: new Date('2029-12-01T12:00:00Z'),
   });
   const afterBusyWeek = slots.filter(s => s.date >= '2030-01-09');
-  expect(afterBusyWeek).toHaveLength(42);
+  // 6 days (01-09..01-14) × the 9-window customer hour grid
+  // (scheduling/customer-windows.js: 09:00-17:00 hourly, PR 2 2026-09-23).
+  expect(afterBusyWeek).toHaveLength(54);
   expect(afterBusyWeek.some(s => s.date === '2030-01-14')).toBe(true);
 });

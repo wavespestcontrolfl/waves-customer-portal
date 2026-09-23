@@ -16,9 +16,11 @@ jest.mock('../services/estimate-slot-availability', () => ({
     ],
   })),
   // Mirror the real exported business bounds — slot-reservation destructures
-  // these at require time for its server-side slot policy.
+  // these at require time for its server-side slot policy. Customer-facing
+  // day end is 18:00 since PR 2 (2026-09-23,
+  // scheduling/customer-windows.js CUSTOMER_DAY_END_MINUTES).
   SLOT_DAY_START_MINUTES: 8 * 60,
-  SLOT_DAY_END_MINUTES: 17 * 60,
+  SLOT_DAY_END_MINUTES: 18 * 60,
   MAX_SLOT_HORIZON_DAYS: 90,
 }));
 
@@ -744,8 +746,9 @@ describe('slot reservation helpers', () => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
     try {
-      // 180-minute profile starting 15:00 ends 18:00 — more than the 59-min
-      // round-up grace past the 17:00 close, so no generator offers it.
+      // 180-minute profile starting 16:00 ends 19:00 — more than the 59-min
+      // round-up grace past the 18:00 close (PR 2, 2026-09-23), so no
+      // generator offers it.
       estimateSlotAvailability.resolveEstimateSlotProfile.mockReturnValueOnce({
         serviceMode: 'recurring',
         serviceLabel: 'Lawn Care',
@@ -766,10 +769,48 @@ describe('slot reservation helpers', () => {
       // the DAY-END guard is what rejects (defense-in-depth stays live).
       await expect(slotReservation.reserveSlot({
         estimateId: 'estimate-456',
-        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '15:00', techId: 'tech-1', durationMinutes: 180 }),
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '16:00', techId: 'tech-1', durationMinutes: 180 }),
       })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
       // Rejected before the hold/conflict/insert queries ran.
       expect(scheduledBuilders).toHaveLength(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('reserveSlot accepts a 17:00 start with the standard 60-minute visit (ends exactly at the 18:00 day close, PR 2 2026-09-23)', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    try {
+      estimateSlotAvailability.resolveEstimateSlotProfile.mockReturnValueOnce({
+        serviceMode: 'one_time',
+        serviceLabel: 'Pest Control',
+        durationMinutes: 60,
+        services: [],
+      });
+      const estimateBuilder = makeEstimateBuilder({
+        id: 'estimate-456',
+        status: 'sent',
+        service_interest: 'Pest Control',
+      });
+      const technicianBuilder = makeTechnicianBuilder();
+      const insertBuilder = makeInsertBuilder({
+        id: 'scheduled-1700',
+        reservation_expires_at: '2027-05-20T21:15:00.000Z',
+      });
+      const scheduledBuilders = [makeLiveHoldsBuilder([]), makeConflictBuilder(null), makeGlobalProbeBuilder([]), insertBuilder];
+      const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
+      db.transaction = jest.fn(async (callback) => callback(trx));
+
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '17:00', techId: 'tech-1', durationMinutes: 60 }),
+        serviceMode: 'one_time',
+      })).resolves.toEqual({
+        scheduledServiceId: 'scheduled-1700',
+        expiresAt: '2027-05-20T21:15:00.000Z',
+      });
+      expect(insertBuilder.insert).toHaveBeenCalled();
     } finally {
       jest.useRealTimers();
     }

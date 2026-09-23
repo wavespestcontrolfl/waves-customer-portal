@@ -7,7 +7,7 @@
  *   - every appointment is a 60-minute slot that starts ON THE HOUR (HH:00)
  *     — same rule admin-leads' schedule-appointment route already enforces;
  *   - end > start, end <= 20:00 — the admin dispatch grid's day end
- *     (TimeGridDay DAY_END_HOUR); the customer slot finder stops at 17:00
+ *     (TimeGridDay DAY_END_HOUR); the customer slot finder stops at 18:00
  *     but admins book evening visits the self-booking path never offers.
  *
  * There is deliberately NO earliest-start floor (owner ruling 2026-08-27:
@@ -27,7 +27,7 @@ const { findConflictingVisits, acquireOccupancyLock, acquireOccupancyLocks } = r
 const { SHIFT, capacityEnabled, placementFitsShift } = require('./policy');
 
 // Admin day END is the dispatch grid's bound (TimeGridDay DAY_END_HOUR = 20),
-// not the customer slot-finder's 17:00: operators legitimately book/move
+// not the customer slot-finder's 18:00: operators legitimately book/move
 // evening visits the self-booking path never offers. There is no start
 // bound — any on-the-hour start from 00:00 is accepted.
 const ADMIN_DAY_END_HOUR = 20;

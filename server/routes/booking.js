@@ -12,6 +12,7 @@ const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
 const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes } = require('../services/scheduling/travel-gap');
 const { fallbackCenterZoneName } = require('../services/scheduling/zone-day-funnel');
+const { CUSTOMER_HOUR_GRID, lunchBlockEnabled } = require('../services/scheduling/customer-windows');
 const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
@@ -522,7 +523,7 @@ router.get('/config', async (req, res, next) => {
       advance_days_max: config.advance_days_max ?? 14,
       slot_duration_minutes: config.slot_duration_minutes ?? 60,
       day_start: config.day_start || '08:00',
-      day_end: config.day_end || '17:00',
+      day_end: config.day_end || '18:00',
     });
   } catch (err) { next(err); }
 });
@@ -577,8 +578,10 @@ const NEARBY_DETOUR_MINUTES = 15;
 
 // Whole-hour windows offered on a day with no existing stops, so a customer
 // who picks/searches an otherwise-empty day gets real choice across the open
-// block instead of just the 8 AM gap start. Skips noon (lunch is reserved).
-const OPEN_DAY_WINDOWS = ['09:00', '10:00', '11:00', '13:00', '14:00', '15:00', '16:00'];
+// block instead of just the 8 AM gap start. Shared grid
+// (scheduling/customer-windows.js); addCandidate's lunchBlockEnabled() check
+// below still strips noon when GATE_BOOKING_LUNCH_BLOCK is on.
+const OPEN_DAY_WINDOWS = CUSTOMER_HOUR_GRID;
 
 // Rain chips (GATE_BOOKING_RAIN_CHIPS): office point for the NWS daily rain
 // outlook. Rain is a DAILY value on these surfaces, and SWFL storm systems
@@ -649,7 +652,7 @@ async function loadBookingConfig() {
   return (await db('booking_config').first()) || {
     advance_days_min: 1, advance_days_max: 14,
     slot_duration_minutes: 60,
-    day_start: '08:00', day_end: '17:00',
+    day_start: '08:00', day_end: '18:00',
     max_self_books_per_day: 3,
   };
 }
@@ -663,7 +666,10 @@ function bookingSlotWindow(config = {}) {
   return {
     slotGridMinutes: 60,
     dayStartMin: timeToMin(config.day_start || '08:00'),
-    dayEndMin: timeToMin(config.day_end || '17:00'),
+    dayEndMin: timeToMin(config.day_end || '18:00'),
+    // Lunch bounds are still derived unconditionally — callers gate their USE
+    // with lunchBlockEnabled() (addCandidate, validateBookingSlotGeometry) so
+    // GATE_BOOKING_LUNCH_BLOCK is the single point of control.
     lunchStartMin: timeToMin(config.lunch_start || '12:00'),
     lunchEndMin: timeToMin(config.lunch_end || '13:00'),
     maxPerDay: config.max_self_books_per_day ?? 3,
@@ -831,8 +837,10 @@ function validateBookingSlotGeometry({ startMin, duration, config }) {
     || (capacityEnabled() && !placementFitsShift(startMin, endMin))) {
     return 'That time is outside our working hours — please pick another slot.';
   }
-  // Lunch windows are reserved for route health and are never self-bookable.
-  if (startMin < lunchEndMin && endMin > lunchStartMin) {
+  // Lunch windows are reserved for route health and never self-bookable —
+  // but ONLY while GATE_BOOKING_LUNCH_BLOCK is on (owner ruling 2026-09-23,
+  // unset by default). Off, noon is a normal bookable hour like any other.
+  if (lunchBlockEnabled() && startMin < lunchEndMin && endMin > lunchStartMin) {
     return 'That time isn\'t available — please pick another slot.';
   }
   return null;
@@ -915,7 +923,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // out of. Default [] = identical behavior for every other caller.
     excludeServiceIds,
     dayStartHour: parseInt((config.day_start || '08:00').split(':')[0]),
-    dayEndHour: parseInt((config.day_end || '17:00').split(':')[0]),
+    dayEndHour: parseInt((config.day_end || '18:00').split(':')[0]),
     // Waves works weekends (Sat AND Sun) — the estimate slot flow already
     // offers Sundays (estimate-slot-availability defaults includeWeekends:true).
     // find-time's legacy default drops Sundays, which silently hid every Sunday
@@ -1049,8 +1057,10 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     const endMin = startMin + duration;
     if (!isWholeHour(startMin)) return;
     if (startMin < dayStartMin || endMin > dayEndMin) return;
-    // Lunch windows are reserved for route health and should never be self-booked.
-    if (startMin < lunchEnd && endMin > lunchStart) return;
+    // Lunch windows are reserved for route health and never self-booked —
+    // but ONLY while GATE_BOOKING_LUNCH_BLOCK is on (owner ruling 2026-09-23,
+    // unset by default). Off, noon is a normal offerable hour.
+    if (lunchBlockEnabled() && startMin < lunchEnd && endMin > lunchStart) return;
     // Commit-gate occupancy mirror (see the fetch above). Overlap semantics
     // match the gate's SQL predicate (half-open: back-to-back windows touch
     // without clashing). Also covers cleanBookingStart snaps that would land
@@ -1236,7 +1246,7 @@ router.get('/availability', async (req, res, next) => {
     const config = (await db('booking_config').first()) || {
       advance_days_min: 1, advance_days_max: 14,
       slot_duration_minutes: 60,
-      day_start: '08:00', day_end: '17:00',
+      day_start: '08:00', day_end: '18:00',
       max_self_books_per_day: 3,
     };
 
@@ -1341,7 +1351,7 @@ router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req,
     const config = (await db('booking_config').first()) || {
       advance_days_min: 1, advance_days_max: 14,
       slot_duration_minutes: 60,
-      day_start: '08:00', day_end: '17:00',
+      day_start: '08:00', day_end: '18:00',
       max_self_books_per_day: 3,
     };
 

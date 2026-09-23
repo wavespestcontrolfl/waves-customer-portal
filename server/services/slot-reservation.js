@@ -48,8 +48,9 @@ const { capacityError, prepareArrivalCapacity, verifyArrivalCapacity, persistArr
 const { serviceDurationMinutes } = require('./service-library');
 
 // Business bounds shared with the slot generators (see the exporting module
-// for provenance): 8:00 day start (find-time DAY_START_HOUR), 17:00 day end,
-// 90-day offer horizon.
+// for provenance): 8:00 day start (find-time DAY_START_HOUR), 18:00
+// customer-facing day end (scheduling/customer-windows.js), 90-day offer
+// horizon.
 const {
   SLOT_DAY_START_MINUTES,
   SLOT_DAY_END_MINUTES,
@@ -86,7 +87,7 @@ function commitGraceMinutes() {
 const MAX_HOLD_MINUTES = 60;
 // classifySlot's roundUpToHour can push a proven-feasible route slot's
 // DISPLAY window up to 59 minutes later than the gap find-time validated, so
-// a legitimately offered slot can end up to 59 minutes past the 17:00 day
+// a legitimately offered slot can end up to 59 minutes past the 18:00 day
 // close. Allow exactly that much on the end-of-day check and no more.
 const ROUND_UP_GRACE_MINUTES = 59;
 

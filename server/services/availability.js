@@ -13,6 +13,7 @@ const { etParts, etDateString, addETDays, parseETDateTime } = require('../utils/
 const { generateConfirmationCode } = require('../utils/slot-offer-token');
 const { findConflictingVisits, acquireOccupancyLock, listOccupiedWindows } = require('./scheduling/occupancy');
 const { travelGapEnabled, violatesTravelGap } = require('./scheduling/travel-gap');
+const { lunchBlockEnabled } = require('./scheduling/customer-windows');
 
 function bookingError(message, code, statusCode = 409) {
   return Object.assign(new Error(message), { code, statusCode, isOperational: true });
@@ -112,7 +113,7 @@ class AvailabilityEngine {
     // 2. Get config
     const config = await db('booking_config').first() || {
       advance_days_min: 1, advance_days_max: 14,
-      day_start: '08:00', day_end: '17:00',
+      day_start: '08:00', day_end: '18:00',
       lunch_start: '12:00', lunch_end: '13:00',
       slot_duration_minutes: 60, buffer_minutes: 15,
       max_self_books_per_day: 3,
@@ -123,7 +124,7 @@ class AvailabilityEngine {
     const lunchStart = this.timeToMin(config.lunch_start || '12:00');
     const lunchEnd = this.timeToMin(config.lunch_end || '13:00');
     const dayStart = this.timeToMin(config.day_start || '08:00');
-    const dayEnd = this.timeToMin(config.day_end || '17:00');
+    const dayEnd = this.timeToMin(config.day_end || '18:00');
 
     const days = [];
     const today = new Date();
@@ -265,8 +266,10 @@ class AvailabilityEngine {
         occupied.push({ start: this.timeToMin(b.start_time), end: this.timeToMin(b.end_time) });
       });
 
-      // Add lunch block
-      occupied.push({ start: lunchStart, end: lunchEnd });
+      // Add lunch block — ONLY while GATE_BOOKING_LUNCH_BLOCK is on (owner
+      // ruling 2026-09-23, unset by default). Off, noon is a normal
+      // offerable/bookable hour like any other on this legacy zone engine.
+      if (lunchBlockEnabled()) occupied.push({ start: lunchStart, end: lunchEnd });
 
       // Sort occupied by start time
       occupied.sort((a, b) => a.start - b.start);
