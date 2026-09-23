@@ -99,7 +99,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, streetHouseNum } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 
 // The address_recovered card's pass marker, reconciled to THIS pass. The two
@@ -9778,7 +9778,14 @@ const CallRecordingProcessor = {
         // pipeline's own verdict — enforce mode adopted the AV street into
         // it, shadow mode adopted it only when V1 agreed — so a house number
         // the record does not carry is not corroborated. Fail closed.
-        if (houseConflict && streetHouseNum(extracted?.address_line1) !== houseConflict.stated_house_number) houseConflict = null;
+        if (houseConflict) {
+          const n = effectiveAddressValidation?.normalized || {};
+          const canonicalZip = String(extracted?.zip || '').match(/\d{5}/)?.[0] || '';
+          const avZip = String(n.postal_code || '').match(/\d{5}/)?.[0] || '';
+          const corroborated = streetCompareKey(extracted?.address_line1) === streetCompareKey(n.street_line_1)
+            && (!canonicalZip || !avZip || canonicalZip === avZip);
+          if (!corroborated) houseConflict = null;
+        }
         // A second property the account already holds on the same street
         // (a duplex, a rental two doors down) is a known address, not a typo
         // — the same recognition the second-address check applies (pre-push
