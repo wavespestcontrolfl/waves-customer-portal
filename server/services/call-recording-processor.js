@@ -10009,6 +10009,58 @@ const CallRecordingProcessor = {
       // (both streets) — no addresses in logs (pre-push audit P1).
       logger.warn(`[call-proc] house-number conflict check skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
     }
+    // Existing AI bookings this call created are reconciled HERE, the
+    // moment a dispute stands — independently of whether the latest
+    // extraction still qualifies to create a booking (a reprocess can be
+    // routing-blocked, unconfirmed or time-less and never reach the booking
+    // branch, leaving an earlier booking and its children assigned and
+    // dispatchable at the disputed number — pre-push audit P1). Same
+    // writer, same CAS, same allowed-status fence and processing-claim
+    // check as the reuse branch; the reuse branch then finds nothing left
+    // to pull.
+    if (houseNumberDisputed && customerId) {
+      try {
+        await db.transaction(async (trx) => {
+          const owned = await trx('call_log')
+            .where({ id: call.id })
+            .where('processing_token', procToken)
+            .forUpdate()
+            .first('id');
+          if (!owned) {
+            logger.info(`[call-proc] processing claim lost — existing-booking dispute pull skipped for ${maskSid(callSid)} (the owner applies it)`);
+            return;
+          }
+          const parents = await trx('scheduled_services')
+            .where({ source_call_log_id: call.id, booking_source: 'phone_call' })
+            .whereIn('status', ['pending', 'confirmed'])
+            .select('id', 'technician_id');
+          const parentIds = parents.map((row) => row.id);
+          const children = parentIds.length
+            ? await trx('scheduled_services')
+              .whereIn('parent_service_id', parentIds)
+              .where({ source_action: 'ai_call_pipeline_followup' })
+              .whereIn('status', ['pending', 'confirmed'])
+              .select('id', 'technician_id')
+            : [];
+          const { assignDispatchJob } = require('./dispatch-assignment');
+          for (const row of [...parents, ...children]) {
+            if (!row.technician_id) continue;
+            try {
+              await assignDispatchJob({ jobId: row.id, technicianId: null, actorId: null, emit: true, trx, expectTechnicianId: row.technician_id, allowedStatuses: ['pending', 'confirmed'] });
+              logger.warn(`[call-proc] existing AI booking ${row.id} unassigned for ${maskSid(callSid)}: house number disputed`);
+            } catch (pullErr) {
+              if (['STATUS_NOT_ALLOWED', 'TERMINAL_STATUS_RACE', 'ASSIGNMENT_STALE'].includes(pullErr?.code) || pullErr?.status === 409 || pullErr?.statusCode === 409) {
+                logger.warn(`[call-proc] existing AI booking ${row.id} kept its assignment for ${maskSid(callSid)}: ${pullErr.code || 'reassigned concurrently'}`);
+                continue;
+              }
+              throw pullErr;
+            }
+          }
+        });
+      } catch (pullErr) {
+        logger.warn(`[call-proc] existing-booking dispute pull failed for ${maskSid(callSid)}: ${pullErr.code || pullErr.name || 'db_error'}`);
+      }
+    }
     // Runs whether or not the lane above threw (pre-push audit P1).
     try {
       // An UNRESOLVED card from an earlier pass is still the owed ask
