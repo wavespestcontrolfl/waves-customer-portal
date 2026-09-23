@@ -1043,7 +1043,7 @@ const quoteLimiter = rateLimit({
   message: { error: 'Too many quote requests. Please try again later.' },
 });
 
-const { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified, flagCoversAddress, countyRollAnswered, samePremiseDisplay, buildAddressVerdict, cleanVerdictCovers } = require('../services/lead-address-unverified');
+const { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified, flagCoversAddress, countyRollAnswered, samePremiseDisplay, buildAddressVerdict, cleanVerdictCovers, contactPairLockKey } = require('../services/lead-address-unverified');
 
 router.post('/calculate', quoteLimiter, async (req, res) => {
   try {
@@ -1242,7 +1242,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           .select('extracted_data') : [];
         const snapshots = rows.map((row) => (typeof row.extracted_data === 'string' ? (() => { try { return JSON.parse(row.extracted_data); } catch { return null; } })() : row.extracted_data)).filter(Boolean);
         const newestClean = snapshots
-          .filter((snap) => cleanVerdictCovers(snap, normalizedAddress))
+          .filter((snap) => cleanVerdictCovers(snap, normalizedAddress, { requireLocality: true }))
           .map((snap) => Date.parse(snap.address_verdict?.at || '') || 0)
           .reduce((max, at) => Math.max(max, at), 0);
         // The clean verdict counts only when it is newer than EVERY matching
@@ -2307,6 +2307,33 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       }
     }
 
+    // The lead's verdict is (re)written under the contact-pair advisory
+    // lock the booking confirm also takes: a flag becomes visible to a
+    // concurrent old-link confirmation only in lock order, never as a
+    // phantom row between its read and its insert (codex r11 P1). The
+    // snapshot above already carries the same keys; this is the serialized
+    // publication of them.
+    if (lead?.id && contactEmail && contactPhone) {
+      try {
+        await db.transaction(async (trx) => {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(contactEmail, contactPhone)]);
+          await trx('leads').where({ id: lead.id }).update({
+            extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+              address_unverified: addressUnverified || null,
+              address_verdict: buildAddressVerdict({
+                flag: addressUnverified,
+                enriched: trustedProfileFound ? trustedTurf : (leadCleanVerdict ? { addressVerdict: 'audited' } : null),
+                profileFound: trustedProfileFound || leadCleanVerdict,
+                address: normalizedAddress,
+              }),
+            })]),
+            updated_at: new Date(),
+          });
+        });
+      } catch (lockErr) {
+        logger.warn(`[public-quote] locked verdict publication failed: ${lockErr.code || lockErr.name || 'error'}`);
+      }
+    }
     // Upsert a customers row so wizard-priced leads surface in /admin/customers
     // alongside the leads pipeline. Mirrors the lead-webhook precedent where
     // any qualified inbound creates a customer record at pipeline_stage=

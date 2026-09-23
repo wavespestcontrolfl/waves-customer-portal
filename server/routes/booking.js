@@ -1658,23 +1658,9 @@ async function createSelfBooking(payload = {}) {
     // booked, never as identity (a forged lead id can only block a booking
     // at a premise the roll could not match, never enable one). Only when
     // the submitted address is the flagged premise (codex #4667 r6 P1).
-    if (LEAD_ID_RE.test(String(lead_id || '')) && new_customer?.address_line1) {
-      try {
-        const { recoverAddressUnverified, flagCoversAddress } = require('../services/lead-address-unverified');
-        const leadRow = await db('leads').where({ id: String(lead_id) }).whereNull('deleted_at').first('extracted_data');
-        const snapshot = typeof leadRow?.extracted_data === 'string'
-          ? (() => { try { return JSON.parse(leadRow.extracted_data); } catch { return null; } })()
-          : leadRow?.extracted_data;
-        const flag = recoverAddressUnverified(snapshot);
-        if (flag && flagCoversAddress(flag, {
-          line1: new_customer.address_line1, city: new_customer.city, state: new_customer.state, zip: new_customer.zip,
-        })) {
-          return ADDRESS_UNVERIFIED_REFUSAL();
-        }
-      } catch (flagErr) {
-        logger.warn(`[booking] lead address-verdict check failed: ${flagErr.code || flagErr.name || 'error'}`);
-      }
-    }
+    // The lead-named verdict is judged ONLY inside the booking transaction
+    // below, where it can be reconciled with newer clean verdicts for the
+    // contact pair under the shared advisory lock (codex r11 P2).
     // The same verdict on a TOKEN-VERIFIED pricing handoff, checked
     // unconditionally — before any booking write and regardless of the
     // customers-only gate or an authenticated customer: the draft
@@ -2614,40 +2600,45 @@ async function createSelfBooking(payload = {}) {
         const submitted = new_customer?.address_line1 ? {
           line1: new_customer.address_line1, city: new_customer.city, state: new_customer.state, zip: new_customer.zip,
         } : null;
+        // Serialized with /calculate's verdict publication on the same
+        // contact pair (codex r11 P1): a flag being persisted for this
+        // email + phone lands before or after this whole recheck, never
+        // as a phantom row in between.
+        const { cleanVerdictCovers, contactPairLockKey } = require('../services/lead-address-unverified');
+        if (new_customer?.email && phoneDigits) {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(new_customer.email, phoneDigits)]);
+        }
+        // Newest clean verdict for this premise across the contact pair —
+        // computed FIRST so the lead-named flag below can be superseded by
+        // it too (codex r11 P2).
+        let newestClean = 0;
+        let contactSnapshots = [];
+        if (submitted && new_customer?.email && phoneDigits) {
+          const contactLeads = await trx('leads')
+            .whereNull('deleted_at')
+            .whereRaw('LOWER(email) = ?', [String(new_customer.email).toLowerCase().trim()])
+            .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneDigits.slice(-10)])
+            .whereRaw("(extracted_data->'address_unverified' IS NOT NULL OR extracted_data->'address_verdict' IS NOT NULL)")
+            .forUpdate()
+            .select('extracted_data');
+          contactSnapshots = contactLeads.map((row) => parseData(row.extracted_data)).filter(Boolean);
+          newestClean = contactSnapshots
+            .filter((snap) => cleanVerdictCovers(snap, submitted, { requireLocality: true }))
+            .map((snap) => Date.parse(snap.address_verdict?.at || '') || 0)
+            .reduce((max, at) => Math.max(max, at), 0);
+        }
         if (LEAD_ID_RE.test(String(lead_id || '')) && submitted) {
           const lockedLead = await trx('leads').where({ id: String(lead_id) }).whereNull('deleted_at').forUpdate().first('extracted_data');
           const flag = recoverAddressUnverified(parseData(lockedLead?.extracted_data));
-          if (flag && flagCoversAddress(flag, submitted)) refuse();
+          if (flag && flagCoversAddress(flag, submitted) && !(newestClean && newestClean > (Date.parse(flag.flagged_at || '') || 0))) refuse();
         }
         // The CURRENT contact-and-premise verdict too, not only the lead
         // the link names: a repeat lookup mints a NEW lead whose flag
         // commits before the shared draft is re-locked, and an old link
         // confirming in that window would see only the older clean lead
         // (codex r9 P1). Both typed contact factors bind the lookup.
-        if (submitted && new_customer?.email && phoneDigits) {
-          // Phones compare on their last ten digits: the quote intake stores
-          // +1 E.164, the booking page submits ten (pre-push audit P1).
-          const { cleanVerdictCovers } = require('../services/lead-address-unverified');
-          const contactLeads = await trx('leads')
-            .whereNull('deleted_at')
-            .whereRaw('LOWER(email) = ?', [String(new_customer.email).toLowerCase().trim()])
-            .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneDigits.slice(-10)])
-            .whereRaw("(extracted_data->'address_unverified' IS NOT NULL OR extracted_data->'address_verdict' IS NOT NULL)")
-            // Row-locked like the direct-lead read: a /calculate committing
-            // a flag on one of these rows serializes behind this booking
-            // rather than landing between the read and the insert.
-            .forUpdate()
-            .select('extracted_data');
-          // A NEWER clean verdict for this premise (a later run, possibly on
-          // a different lead row) supersedes an older lead's flag — repeat
-          // lookups mint new rows and a clean run clears only its own
-          // (pre-push audit P1).
-          const snapshots = contactLeads.map((row) => parseData(row.extracted_data)).filter(Boolean);
-          const newestClean = snapshots
-            .filter((snap) => cleanVerdictCovers(snap, submitted))
-            .map((snap) => Date.parse(snap.address_verdict?.at || '') || 0)
-            .reduce((max, at) => Math.max(max, at), 0);
-          for (const snap of snapshots) {
+        if (submitted && contactSnapshots.length) {
+          for (const snap of contactSnapshots) {
             const flag = recoverAddressUnverified(snap);
             // Stamped flags only across leads (an unstamped one would match
             // any address) — pre-push audit P1.

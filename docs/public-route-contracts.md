@@ -932,8 +932,15 @@ the early read and the insert still refuses (409, code
 lead for the typed email AND phone whose flag covers the submitted premise
 (a repeat lookup's newer lead). If the flagged run's publication
 withdrawal transaction fails, `/calculate` answers 503 (retry) rather than
-leaving an earlier publication live. Staff clear the draft's marker by
-revising the estimate with a changed address (correction) or an explicit
+leaving an earlier publication live. The public lookup response never carries the profile's
+internal `addressVerdict` trust marker (stripped with `subdivisionMedian`);
+the lead-level verdict is derived server-side. `/calculate` publishes the
+lead's verdict under a contact-pair advisory lock (`address-verdict`,
+email + last-ten-digit phone) that `/api/booking/confirm` takes before its
+recheck, so no flag lands as a phantom row between that recheck and the
+insert. Staff clear the draft's marker by
+revising the estimate with a changed PREMISE (house number / street /
+locality — a unit-only edit is not a correction) or an explicit
 `addressUnverified: false` (confirmation); the admin send guard refuses a
 still-flagged estimate with 409 `ADDRESS_UNVERIFIED` since the customer
 link would not render. A roll that never answered (GIS

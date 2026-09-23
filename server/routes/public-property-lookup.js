@@ -70,7 +70,10 @@ function publicPropertySummary(record) {
 // so the block is dropped from both the response and the lead snapshot.
 function publicEnrichedProfile(enriched) {
   if (!enriched || typeof enriched !== 'object') return enriched ?? null;
-  const { subdivisionMedian, ...rest } = enriched;
+  // addressVerdict is a server-owned trust marker (the lead's verdict is
+  // derived from it server-side) — never part of the public payload
+  // (codex #4667 r11 P0).
+  const { subdivisionMedian, addressVerdict, ...rest } = enriched;
   if (!subdivisionMedian || !Array.isArray(rest.fieldVerifyFlags)) return rest;
   // The homeSqFt verify flag spells the same figures out in prose — swap in
   // the median-free vacant-parcel copy (one shared string, never a regex).

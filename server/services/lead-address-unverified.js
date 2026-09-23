@@ -193,10 +193,23 @@ function buildAddressVerdict({ flag = null, enriched = null, profileFound = fals
 }
 
 // Does a snapshot's stored verdict say THIS premise is clean?
-function cleanVerdictCovers(snapshot, address) {
+// `requireLocality`: for CROSS-lead reuse both sides must carry a city and
+// ZIP and they must agree — a street-only request must not be cleared by
+// a clean verdict for that street in another town (codex #4667 r11 P1).
+function cleanVerdictCovers(snapshot, address, { requireLocality = false } = {}) {
   const verdict = snapshot?.address_verdict;
   if (!verdict || typeof verdict !== 'object' || verdict.status !== 'clean' || !verdict.address_line1) return false;
+  if (requireLocality && (!cityKey(verdict.city) || !cityKey(address?.city) || !verdict.zip || !zip5(address?.zip))) return false;
   return flagCoversAddress({ ...verdict, reason: 'clean' }, address);
 }
 
-module.exports = { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, countyRollAnswered, nextAddressUnverified, flagCoversAddress, samePremiseDisplay, parseDisplayAddress, buildAddressVerdict, cleanVerdictCovers };
+// The advisory-lock key both intake and booking take around a contact
+// pair's address verdict, so a /calculate persisting a flag and a booking
+// confirm rechecking it serialize (no phantom lead row between the read
+// and the insert — codex #4667 r11 P1).
+function contactPairLockKey(email, phone) {
+  const ten = String(phone || '').replace(/\D/g, '').slice(-10);
+  return `address-verdict:${String(email || '').toLowerCase().trim()}:${ten}`;
+}
+
+module.exports = { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, countyRollAnswered, nextAddressUnverified, flagCoversAddress, samePremiseDisplay, parseDisplayAddress, buildAddressVerdict, cleanVerdictCovers, contactPairLockKey };

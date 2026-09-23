@@ -2584,6 +2584,16 @@ const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'schedul
 // correction), or an explicit `addressUnverified: false` in the revision
 // payload (the confirmation) — pre-push audit P1 on #4667. Prior-wins
 // otherwise, so a stale client copy cannot drop it by omission.
+// The correction is a change of PREMISE (house number / street / locality,
+// unit-insensitive — the roll's verdict is about the house number): a
+// unit-only edit keeps the block and needs the explicit confirmation
+// (codex #4667 r11 P1).
+function premiseChanged(priorAddress, nextAddress) {
+  if (nextAddress === undefined) return false;
+  const { samePremiseDisplay } = require('./lead-address-unverified');
+  if (!String(priorAddress || '').trim() || !String(nextAddress || '').trim()) return String(priorAddress || '') !== String(nextAddress || '');
+  return !samePremiseDisplay(priorAddress, nextAddress);
+}
 function carryAddressBlockAcrossRevise(nextData, priorData, { addressChanged = false } = {}) {
   if (!nextData || typeof nextData !== 'object' || !priorData || typeof priorData !== 'object') return false;
   const explicitlyConfirmed = nextData.addressUnverified === false;
@@ -2851,7 +2861,7 @@ async function reviseAdminEstimate({
         }
       }
       if (carryAddressBlockAcrossRevise(nextData, existingData, {
-        addressChanged: writeFields.address !== undefined && String(writeFields.address || '') !== String(estimate.address || ''),
+        addressChanged: premiseChanged(estimate.address, writeFields.address),
       })) preserved = true;
       // Publication belongs to the group that sent the link. A move or
       // explicit removal cannot carry that group's navigation window away.
@@ -3103,7 +3113,7 @@ async function reviseAdminEstimate({
             if (lockedData[key] !== undefined) pendingData[key] = lockedData[key];
           }
           carryAddressBlockAcrossRevise(pendingData, lockedData, {
-            addressChanged: revisedFields.address !== undefined && String(revisedFields.address || '') !== String(lockedPrior.address || ''),
+            addressChanged: premiseChanged(lockedPrior.address, revisedFields.address),
           });
           const revisedGroupId = revisedFields.estimate_group_id === undefined
             ? lockedPrior.estimate_group_id : revisedFields.estimate_group_id;
