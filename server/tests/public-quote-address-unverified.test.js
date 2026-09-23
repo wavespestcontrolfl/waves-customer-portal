@@ -5,7 +5,7 @@
 // the flag). Pins the pure derivation; the route stamps it on the lead's
 // extracted_data as address_unverified.
 const { _internals } = require('../routes/public-quote');
-const { snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified, countyRollAnswered, flagCoversAddress, samePremiseDisplay, buildAddressVerdict, cleanVerdictCovers } = require('../services/lead-address-unverified');
+const { snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified, countyRollAnswered, flagCoversAddress, samePremiseDisplay, parseDisplayAddress, buildAddressVerdict, cleanVerdictCovers } = require('../services/lead-address-unverified');
 
 const { deriveAddressUnverified } = _internals;
 
@@ -194,5 +194,13 @@ describe('assertEstimateSendable refuses a flagged address', () => {
     const base = { status: 'draft', archived_at: null, estimate_data: { addressUnverified: true } };
     expect(() => _internals.assertEstimateSendable(base)).toThrow(/Correct the address/);
     try { _internals.assertEstimateSendable(base); } catch (e) { expect(e.code).toBe('ADDRESS_UNVERIFIED'); }
+  });
+});
+
+describe('parseDisplayAddress', () => {
+  test('unit segments and the state/ZIP tail are read correctly', () => {
+    expect(parseDisplayAddress('1260 Example St, Apt 4, Parrish, FL 34219')).toMatchObject({ streetLine: '1260 Example St', city: 'Parrish', state: 'FL', zip: '34219' });
+    expect(parseDisplayAddress('12345 Example St, Parrish, FL 34219-1234')).toMatchObject({ city: 'Parrish', zip: '34219' });
+    expect(parseDisplayAddress('')).toMatchObject({ streetLine: '', city: '', zip: '' });
   });
 });

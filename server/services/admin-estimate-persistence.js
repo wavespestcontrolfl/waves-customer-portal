@@ -3196,13 +3196,14 @@ async function reviseAdminEstimate({
     const writtenData = parseJson(row.estimate_data);
     const priorLockedData = parseJson(lockedPrior?.estimate_data);
     if (writtenData?.addressUnverifiedClearedBy && priorLockedData?.addressUnverified === true && writtenData.lead_id) {
-      const parts = String(row.address || '').split(',').map((part) => part.trim());
+      const { parseDisplayAddress } = require('./lead-address-unverified');
+      const parsed = parseDisplayAddress(row.address);
       const verdict = {
         status: 'clean',
-        address_line1: parts[0] || null,
-        city: parts[1] || null,
-        state: 'FL',
-        zip: (String(row.address || '').match(/\b\d{5}\b(?!.*\b\d{5}\b)/) || [null])[0],
+        address_line1: parsed.streetLine || null,
+        city: parsed.city || null,
+        state: parsed.state || 'FL',
+        zip: parsed.zip || null,
         at: new Date().toISOString(),
         source: `staff:${writtenData.addressUnverifiedClearedBy}`,
       };

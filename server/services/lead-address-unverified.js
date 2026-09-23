@@ -121,24 +121,26 @@ function flagCoversAddress(flag, address) {
 // agree — the cross-lead publication withdrawal uses this stricter form,
 // so a street-only submission can never match a published estimate for
 // that street in some other town (pre-push audit P1).
+// One display address ("<street line>, [<unit>,] <City>, FL <zip>") into
+// its parts. The normalizer may emit the unit as its OWN comma segment:
+// the city is the first later segment that is neither a unit line nor the
+// "FL 34219" tail, and the ZIP comes from that tail only (a five-digit
+// house number is not a ZIP). Shared by the premise comparison and the
+// staff clean-verdict stamp (pre-push audit P1).
+const UNIT_SEGMENT = /^(?:#|apt|apartment|unit|ste|suite|bldg|building|lot|rm|room|fl|floor|spc|space)\b/i;
+const STATE_ZIP_SEGMENT = /^[a-z]{2}\s*\d{5}(?:-\d{4})?$/i;
+function parseDisplayAddress(text) {
+  const parts = String(text || '').split(',').map((part) => part.trim()).filter(Boolean);
+  const streetLine = parts[0] || '';
+  const city = parts.slice(1).find((part) => !UNIT_SEGMENT.test(part) && !STATE_ZIP_SEGMENT.test(part)) || '';
+  const tail = parts.slice(1).find((part) => STATE_ZIP_SEGMENT.test(part) || /^\d{5}(?:-\d{4})?$/.test(part)) || '';
+  const state = (tail.match(/^([a-z]{2})\s*\d{5}/i) || [null, null])[1];
+  return { streetLine, street: streetKeyNoUnit(streetLine), city, state: state ? state.toUpperCase() : null, zip: zip5(tail) };
+}
+
 function samePremiseDisplay(a, b, { requireLocality = false } = {}) {
-  // The normalizer may emit the unit as its OWN comma segment ("…St, Apt
-  // 4, Parrish, FL 34219"): the city is the first later segment that is
-  // neither a unit line nor the "FL 34219" tail (pre-push audit P1).
-  const UNIT_SEGMENT = /^(?:#|apt|apartment|unit|ste|suite|bldg|building|lot|rm|room|fl|floor|spc|space)\b/i;
-  const STATE_ZIP_SEGMENT = /^[a-z]{2}\s*\d{5}(?:-\d{4})?$/i;
-  const parse = (text) => {
-    const parts = String(text || '').split(',').map((part) => part.trim()).filter(Boolean);
-    const street = parts[0] || '';
-    const city = parts.slice(1).find((part) => !UNIT_SEGMENT.test(part) && !STATE_ZIP_SEGMENT.test(part)) || '';
-    // ZIP from the state/ZIP (or bare ZIP) segment only — the first five
-    // digits of the whole string may be a five-digit house number
-    // (pre-push audit P1).
-    const tail = parts.slice(1).find((part) => STATE_ZIP_SEGMENT.test(part) || /^\d{5}(?:-\d{4})?$/.test(part)) || '';
-    return { street: streetKeyNoUnit(street), city, zip: zip5(tail) };
-  };
-  const x = parse(a);
-  const y = parse(b);
+  const x = parseDisplayAddress(a);
+  const y = parseDisplayAddress(b);
   if (!x.street || x.street !== y.street) return false;
   if (requireLocality && (!cityKey(x.city) || !cityKey(y.city) || !x.zip || !y.zip)) return false;
   return sameLocality(x, y);
@@ -197,4 +199,4 @@ function cleanVerdictCovers(snapshot, address) {
   return flagCoversAddress({ ...verdict, reason: 'clean' }, address);
 }
 
-module.exports = { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, countyRollAnswered, nextAddressUnverified, flagCoversAddress, samePremiseDisplay, buildAddressVerdict, cleanVerdictCovers };
+module.exports = { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, countyRollAnswered, nextAddressUnverified, flagCoversAddress, samePremiseDisplay, parseDisplayAddress, buildAddressVerdict, cleanVerdictCovers };
