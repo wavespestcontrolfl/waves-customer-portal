@@ -9865,8 +9865,14 @@ const CallRecordingProcessor = {
               .where('triage_items.status', 'open');
             return 'filed';
           }
+          // A card whose call CONFIRMED an appointment carries the only
+          // scheduling ask (the booking hold suppressed the fallback card):
+          // the system may not retire it on address evidence alone — the
+          // sweep's house_number_adopted rule closes it once a booking
+          // answers the snapshotted ask (pre-push audit P1).
           const retired = await trx('triage_items')
             .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict', status: 'open' })
+            .whereRaw("COALESCE(payload->'scheduling_window'->>'status', payload->>'scheduling_status') IS DISTINCT FROM 'confirmed'")
             .update({
               status: 'resolved',
               resolution_note: customerId
