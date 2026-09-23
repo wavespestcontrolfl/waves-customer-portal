@@ -19,6 +19,25 @@ const mismatchPriorityCases = lowerPriorityReasons.flatMap((reason) => (
   })))
 ));
 
+describe('on_file_house_number_conflict', () => {
+  it('is an address ask whose evidence is the street the caller stated', () => {
+    const n = notice(ask('on_file_house_number_conflict', {
+      stated_street: '1250 Example Street',
+      on_file_street: '1260 Example Street',
+      on_file_address: { address_line1: '1260 Example Street' },
+    }, 7, 3));
+    expect(n).toMatchObject({
+      cardId: 3,
+      callId: 7,
+      unitOnly: false,
+      readbackOnly: false,
+      reason: 'the caller gave a different house number than the one on file',
+      heard: '1250 Example Street',
+    });
+    expect(filterAddressAsks([ask('on_file_house_number_conflict')])).toHaveLength(1);
+  });
+});
+
 describe('filterAddressAsks', () => {
   it('keeps validation-ask cards only', () => {
     const items = [

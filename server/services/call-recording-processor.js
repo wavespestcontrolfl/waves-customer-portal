@@ -99,7 +99,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 
 // The address_recovered card's pass marker, reconciled to THIS pass. The two
@@ -826,6 +826,7 @@ const CONFIRM_REASON_TEXT = {
   missing_last_name: "no last name captured — get the account holder's full name",
   rental_or_tenant_occupied: 'rental / tenant-occupied property — confirm property access and whether to tag it a rental',
   second_service_address: 'service address differs from the one on file — may be a second property (e.g. a rental vs. their home)',
+  on_file_house_number_conflict: 'caller gave a different house number on the same street as the address on file — confirm which number before sending the estimate or dispatching',
   email_unverified: 'email was spelled out on the call — read it back to the caller before relying on it (spelled letters mishear)',
   email_invalid: 'captured email is not a valid address — re-collect it on the callback',
   email_bounced: 'email on file hard-bounced (mailbox rejected) — get a corrected address; estimates/receipts will not deliver',
@@ -9751,6 +9752,68 @@ const CallRecordingProcessor = {
       }
     }
 
+    // House-number disagreement lane (live incident, 2026-09-16): the call
+    // validated a premise on the SAME street as the canonical customer's
+    // on-file address but with a DIFFERENT house number. The profile keeps
+    // its filled street (never overwrite a filled field from a call), the
+    // correction lane needs correction language it did not hear, and the
+    // routing gate sees a validated address and nothing to hold — so the
+    // typo'd number (a web-form 1260 for a real 1250) reached the estimate
+    // untouched. Advisory card: "caller stated X, on file Y, confirm before
+    // sending." Filed AFTER the canonical re-stamp so it compares against
+    // the customer the call is actually linked to; skips a customer minted
+    // from this call (its street IS the call's). Best-effort, never blocks.
+    // Live 2026-09-16: the call DID file the second_service_address card
+    // below, framed as "may be a second property (a rental vs. their home)"
+    // and absent from the estimate-send surface — so it read as a landlord
+    // note, not a typo. This card replaces it for the same-street shape.
+    let houseNumberConflictFiled = false;
+    if (customerId && !createdCustomerFromCall && onFileAddress) {
+      try {
+        let houseConflict = onFileHouseNumberConflict({ addressValidation: effectiveAddressValidation, onFileAddress });
+        // A second property the account already holds on the same street
+        // (a duplex, a rental two doors down) is a known address, not a typo
+        // — the same recognition the second-address check applies (pre-push
+        // audit P1). Only when the multi-property table is live.
+        if (houseConflict && process.env.GATE_CUSTOMER_PROPERTIES === 'true') {
+          const { addressKey: propertyKey } = require('./customer-properties');
+          const n = effectiveAddressValidation.normalized;
+          // The caller's unit rides on the V2 service_address (AV normalizes
+          // line 1 only) — without it Unit A and Unit B at one building
+          // collapse to the same key (pre-push audit P1).
+          const statedUnit = v2CanonicalExtraction?.property?.service_address?.street_line_2 || null;
+          const statedKey = propertyKey({ address_line1: n.street_line_1, address_line2: statedUnit, city: n.city, zip: n.postal_code });
+          const props = await db('customer_properties').where({ customer_id: customerId, active: true }).select('address_line1', 'address_line2', 'city', 'zip');
+          if (statedKey && props.some((prop) => propertyKey(prop) === statedKey)) houseConflict = null;
+        }
+        if (houseConflict) {
+          houseNumberConflictFiled = true;
+          // Rides needs_confirmation like the second-address flag it replaces:
+          // that list drives call_log.review_status, the lead's
+          // needs_confirmation and the CONFIRM BEFORE DISPATCH timeline note
+          // (pre-push audit P1) — the card alone would leave the call
+          // reading as fully processed.
+          if (!bridgeNeedsConfirmation.includes('on_file_house_number_conflict')) bridgeNeedsConfirmation.push('on_file_house_number_conflict');
+          await db('triage_items')
+            .insert(buildTriageItem({
+              callLogId: call.id,
+              flag: 'on_file_house_number_conflict',
+              onFileAddress,
+              extraction: v2CanonicalExtraction,
+              severity: 'advisory',
+              addressValidation: effectiveAddressValidation,
+              extraPayload: houseConflict,
+            }))
+            .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+          logger.info(`[call-proc] house-number conflict card for ${maskSid(callSid)}: stated ${houseConflict.stated_house_number}, on file ${houseConflict.on_file_house_number}`);
+        }
+      } catch (e) {
+        // Code/name only: a knex error message carries the insert bindings
+        // (both streets) — no addresses in logs (pre-push audit P1).
+        logger.warn(`[call-proc] house-number conflict check skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
+      }
+    }
+
     const verifiableAni = firstExternalPhone(call.from_phone);
     if (customerId && verifiableAni && !createdCustomerFromCall && !isOutboundCall(call)) {
       try {
@@ -9859,7 +9922,9 @@ const CallRecordingProcessor = {
           || callAddsDifferentUnit
           || bothPresentAndDiffer(existingCust?.city, extracted.city)
           || bothPresentAndDiffer(existingCust?.zip, extracted.zip);
-        if (!knownProperty && onFileStreet && fromCallStreet && locationDiffers && !bridgeNeedsConfirmation.includes('second_service_address')) {
+        // A same-street house-number difference already has its own card
+        // above; framing it as a possible second property buried the typo.
+        if (!knownProperty && !houseNumberConflictFiled && onFileStreet && fromCallStreet && locationDiffers && !bridgeNeedsConfirmation.includes('second_service_address')) {
           bridgeNeedsConfirmation.push('second_service_address');
           logger.info(`[call-proc-bridge] ${callSid} service address differs from customer record (possible second property)`);
           // This flag is appended AFTER the bridge's triage_items loop above, so

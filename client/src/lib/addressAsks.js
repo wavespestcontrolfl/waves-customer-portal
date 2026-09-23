@@ -8,6 +8,7 @@ export const ADDRESS_ASK_REASONS = new Set([
   'address_unverifiable',
   'address_not_validated',
   'on_file_proof_customer_mismatch',
+  'on_file_house_number_conflict',
 ]);
 
 // Valid premises whose street still needs a read-back. Separate because the
@@ -37,6 +38,12 @@ const NOTICE_BY_REASON = new Map([
     unitOnly: false,
     readbackOnly: false,
     reason: 'the saved address was validated for a different customer and this service address still needs confirmation',
+  }],
+  ['on_file_house_number_conflict', {
+    rank: 0,
+    unitOnly: false,
+    readbackOnly: false,
+    reason: 'the caller gave a different house number than the one on file',
   }],
   ['address_recovered', {
     rank: 1,
@@ -76,6 +83,9 @@ function evidenceFromCard(card, unitOnly) {
   const heard = payload.address_as_heard
     || (heardSnapshot?.street_line_1 ? snapshotParts.join(', ') : heardSnapshot?.raw_text)
     || (snapshotParts.length > 0 ? snapshotParts.join(', ') : null)
+    // House-number disagreement cards carry the validated street the caller
+    // stated instead of an as-heard transcript line.
+    || payload.stated_street
     || null;
   return {
     // A validated building is not transcription evidence.

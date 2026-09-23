@@ -63,6 +63,7 @@ const REASON_LABELS = {
   confirmed_without_start_time: "Confirmed, no start time",
   low_confidence: "Low confidence",
   address_recovered: "Address recovered — read back",
+  on_file_house_number_conflict: "House number differs from record — confirm",
   email_unverified: "Email spelled — read back",
   email_invalid: "Email couldn't be captured",
   secondary_contact_captured: "Second contact named — confirm",
@@ -183,6 +184,10 @@ export function ConfirmEvidence({ payload }) {
       label: "Customer replied",
       value: `${p.customer_reply_unit} (by text${p.customer_reply_at ? ` ${new Date(p.customer_reply_at).toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })} ET` : ""}) — confirm and enter it on the record`,
     },
+    // House-number disagreement: the validated call address beside the
+    // record's street so the reviewer picks a number, not just "confirm".
+    p.stated_street && { label: "Caller stated", value: p.stated_street },
+    p.stated_street && (p.on_file_address?.address_line1 || p.on_file_street) && { label: "On file", value: p.on_file_address?.address_line1 || p.on_file_street },
     p.address_as_heard && { label: "Heard", value: p.address_as_heard },
     p.address_recovered && { label: "Matched to", value: p.address_recovered },
     !p.address_recovered && addressCandidates.length > 0 && { label: "Did you mean", value: addressCandidates.join(" · ") },

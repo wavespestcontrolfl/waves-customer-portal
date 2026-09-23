@@ -1755,6 +1755,50 @@ function restatesOnFileAddress(sa, knownCustomer) {
 }
 
 /**
+ * A validated call address that disagrees with the linked customer's on-file
+ * street by HOUSE NUMBER ONLY (same street name, same locality where both
+ * sides carry one). live incident, 2026-09-16: the web form saved 1260
+ * Example Street (a number that does not exist), the call validated 1250
+ * at premise level, and the never-overwrite-a-filled-field rule kept the
+ * profile as it was — correctly — while nothing surfaced the disagreement.
+ * The correction lane only acts on correction language ("actually", "wrong"),
+ * and stating an address while asking for a quote is a mention by design, so
+ * this is the one shape that had no owner: a typo'd number on the RIGHT
+ * street. A different street is a second property (multi_property_call /
+ * second_service_address own that); a different ZIP or city is not a typo.
+ * Returns the evidence for an advisory review card, or null. Pure.
+ */
+function onFileHouseNumberConflict({ addressValidation = null, onFileAddress = null } = {}) {
+  const av = addressValidation;
+  if (!av || !(av.status === 'validated_accept' || av.status === 'corrected')) return null;
+  const stated = String(av.normalized?.street_line_1 || '').trim();
+  const onFile = String(onFileAddress?.address_line1 || '').trim();
+  if (!stated || !onFile) return null;
+  const a = restatementStreetParts(splitStreetLineUnit(stated).street || stated);
+  const b = restatementStreetParts(splitStreetLineUnit(onFile).street || onFile);
+  if (!a.house || !b.house || a.house === b.house) return null;
+  if (!a.name || !b.name) return null;
+  const sameStreet = [b.name, b.withoutSuffix].includes(a.name) || [a.name, a.withoutSuffix].includes(b.name);
+  if (!sameStreet) return null;
+  const statedZip = zip5Of(av.normalized?.postal_code);
+  const onFileZip = zip5Of(onFileAddress.zip);
+  if (statedZip && onFileZip && statedZip !== onFileZip) return null;
+  const statedCity = cityKey(av.normalized?.city);
+  const onFileCity = cityKey(onFileAddress.city);
+  if (statedCity && onFileCity && statedCity !== onFileCity) return null;
+  return {
+    stated_street: stated,
+    on_file_street: onFile,
+    stated_house_number: a.house,
+    on_file_house_number: b.house,
+    // The stated locality rides along so the auto-resolve rule can hold the
+    // record to the SAME premise, not just the same leading digits.
+    stated_city: String(av.normalized?.city || '').trim() || null,
+    stated_zip: statedZip || null,
+  };
+}
+
+/**
  * Would this booking dispatch to the customer's ON-FILE (already Google-
  * verified) address rather than one stated on this call? That is the only
  * shape the address fail-open covers: a known customer who did not restate
@@ -1775,6 +1819,7 @@ function dispatchesToOnFileAddress(extraction, opts = {}) {
 }
 
 module.exports = {
+  onFileHouseNumberConflict,
   SCHEDULING_CHANGE_REVIEW_FLAGS,
   isExplicitlyNonOwner,
   computeDeterministicTriageFlags,

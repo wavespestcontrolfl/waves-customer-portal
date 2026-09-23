@@ -407,6 +407,10 @@ function buildTriageItem({
     // resolved to and the call carried no street of its own (codex P1) —
     // nothing either side vouches for, so the office confirms WHERE.
     on_file_proof_customer_mismatch: 'address_review',
+    // The call validated a premise on the customer's own street with a
+    // DIFFERENT house number — a typo on one side or the other. Advisory:
+    // the office confirms which number before an estimate or visit goes out.
+    on_file_house_number_conflict: 'address_review',
     // The call was attached to a human's existing booking, so the promised
     // follow-up treatment was NOT auto-booked — the office books visit 2.
     attached_booking_followup_unbooked: 'time_ambiguous',

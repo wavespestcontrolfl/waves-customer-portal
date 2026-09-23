@@ -151,6 +151,7 @@ const RULE_NOTES = {
   visit_completed_at_address: 'Auto-resolved: a visit was completed at the address this call named; the address is proven.',
   spam_aged: `Auto-dismissed: spam/wrong-number advisory unactioned after ${SPAM_AGE_DAYS} days.`,
   advisory_aged: `Auto-dismissed: informational flag unactioned after ${ADVISORY_AGE_DAYS} days.`,
+  house_number_adopted: 'Auto-resolved: the customer record now carries the house number the caller stated; the disagreement is settled.',
 };
 
 // scheduled_services statuses that are a booking still going to happen or
@@ -931,6 +932,24 @@ function trustedPreexistingCustomer(item) {
     && customerPredatesCall(item);
 }
 const filled = (v) => String(v || '').trim() !== '';
+// The record now names the SAME premise the caller stated on a
+// house-number-conflict card: same street key (house + street name, unit
+// and suffix spelling aside) and, where both sides carry one, the same ZIP.
+// Leading digits alone would let '120 Unrelated Ave' close a card about
+// '120 Example St' (pre-push audit P1).
+function recordCarriesStatedStreet(item) {
+  const payload = parseMaybeJson(item.payload);
+  const stated = addressKey(payload?.stated_street);
+  const onRecord = addressKey(item.customer_address_line1);
+  if (!stated || !onRecord || stated !== onRecord) return false;
+  // The stated locality must hold on the record too (same helper the
+  // address-moot rules use): a ZIP or city the caller gave that the record
+  // now lacks or contradicts is not the same premise (pre-push audit P1).
+  return localityAgrees(
+    { city: item.customer_city, zip: item.customer_zip },
+    { city: payload?.stated_city, zip: payload?.stated_zip },
+  );
+}
 
 // The rules, in precedence order — ONE table (codex r28 P2). `when` reads
 // the joined card row, its evidence flags (`ev`, null while the evidence
@@ -985,6 +1004,14 @@ const CLASSIFY_RULES = [
   { rule: 'visit_completed_at_address', action: 'resolve',
     when: (item, ev) => ADDRESS_MOOT_CODES.has(item.reason_code) && ev?.visit_completed_at_address === true
       && !item.customer_deleted_at && heardAddressMatchesOnFile(item) && !cardConfirmedUnbooked(item, ev) },
+  // The house-number disagreement answers itself when the record's street
+  // now carries the number the caller stated (an operator or the correction
+  // lane adopted it). Any other edit keeps the ask — the office still has
+  // to pick a number. Never aged out: it gates an estimate send.
+  { rule: 'house_number_adopted', action: 'resolve',
+    when: (item) => item.reason_code === 'on_file_house_number_conflict'
+      && !item.customer_deleted_at
+      && recordCarriesStatedStreet(item) },
   { rule: 'spam_aged', action: 'dismiss', when: (item, ev, now) => item.reason_code === 'spam_or_wrong_number' && ageDays(item.created_at, now) >= SPAM_AGE_DAYS },
   { rule: 'advisory_aged', action: 'dismiss',
     when: (item, ev, now) => ADVISORY_AGE_CODES.has(item.reason_code) && item.severity === 'advisory' && ageDays(item.created_at, now) >= ADVISORY_AGE_DAYS },
