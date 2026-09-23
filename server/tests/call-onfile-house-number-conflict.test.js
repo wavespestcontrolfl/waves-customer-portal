@@ -254,6 +254,9 @@ describe('heldConflictTaskDecision (verdict route)', () => {
     expect(d.file).toBe(true);
     expect(d.skippedReason).toBe('address_confirmed_on_file_after_house_number_dispute');
     expect(d.approvedWindow.requested_address).toEqual({ street_line_1: '1260 Example St', street_line_2: null, city: 'Parrish', postal_code: '34219' });
+    const multi = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: { ...held, scheduling_window: { ...held.scheduling_window, requested_address: { ...held.scheduling_window.requested_address, additional_properties: [{ street_line_1: '9 Other Rd' }] } } } });
+    expect(multi.approvedWindow.requested_address.additional_properties).toEqual([{ street_line_1: '9 Other Rd' }]);
+    expect(multi.approvedWindow.requested_address.street_line_1).toBe('1260 Example St');
     expect(d.approvedPayload.stated_street).toBeUndefined();
     expect(d.approvedPayload.heard_address.street_line_1).toBe('1260 Example St');
   });

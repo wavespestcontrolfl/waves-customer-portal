@@ -14730,7 +14730,13 @@ const CallRecordingProcessor = {
                   existingScheduledServiceId: svc.__held.existingId || null,
                 };
                 logger.warn(`[call-proc] Held auto-booking for ${callSid}: ${svc.__held.reason} (existing ${svc.__held.existingId || 'n/a'}, status ${svc.__held.existingStatus || 'n/a'})`);
-                await db('triage_items')
+                // The house-number dispute's card is owned by its fenced
+                // writer (locks, evidence, retirement) — this generic
+                // insert must not recreate it evidence-less after an
+                // operator resolved it, nor outside those locks; when that
+                // writer could not persist its card, the approved-but-
+                // unbooked fallback below files instead (pre-push audit P1).
+                if (svc.__held.reason !== 'on_file_house_number_conflict') await db('triage_items')
                   .insert(buildTriageItem({
                     callLogId: call.id,
                     flag: svc.__held.reason,

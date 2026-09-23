@@ -623,8 +623,15 @@ function heldConflictTaskDecision({ verdict, wrongFields = [], heldConflictPaylo
   const approvedAddress = onFile
     ? { street_line_1: onFile.address_line1, street_line_2: onFile.address_line2 || null, city: onFile.city || null, postal_code: onFile.zip || null }
     : null;
+  // Only the PRIMARY address fields are replaced: the snapshot's other
+  // properties (additional_properties and any sibling fields on the
+  // requested address) stay, so a multi-property ask is still judged in
+  // full (pre-push audit P1).
   const approvedWindow = payload?.scheduling_window
-    ? { ...payload.scheduling_window, ...(approvedAddress ? { requested_address: approvedAddress } : {}) }
+    ? {
+      ...payload.scheduling_window,
+      ...(approvedAddress ? { requested_address: { ...(payload.scheduling_window.requested_address || {}), ...approvedAddress } } : {}),
+    }
     : null;
   const approvedPayload = payload ? {
     ...payload,
