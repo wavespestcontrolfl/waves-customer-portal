@@ -20,6 +20,9 @@ jest.mock('../config/feature-gates', () => ({
   // time (scheduling/travel-gap.js); keep the real helper so the builder runs
   // exactly as it does in prod with the gate unset.
   gateEnvValue: jest.requireActual('../config/feature-gates').gateEnvValue,
+  // GATE_SELF_BOOK_DAY_CAP (owner ruling 2026-09-23): dark by default —
+  // this file isn't about the day cap, so keep it off.
+  selfBookDayCapEnabled: jest.fn(() => false),
 }));
 
 const db = require('../models/db');

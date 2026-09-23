@@ -9,10 +9,12 @@ const db = require('../models/db');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
-const { etParts, etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 const { generateConfirmationCode } = require('../utils/slot-offer-token');
 const { findConflictingVisits, acquireOccupancyLock, listOccupiedWindows } = require('./scheduling/occupancy');
 const { travelGapEnabled, violatesTravelGap } = require('./scheduling/travel-gap');
+const { selfBookDayCapEnabled } = require('../config/feature-gates');
+const { violatesSelfServeNotice } = require('./scheduling/self-serve-notice');
 
 function bookingError(message, code, statusCode = 409) {
   return Object.assign(new Error(message), { code, statusCode, isOperational: true });
@@ -230,9 +232,13 @@ class AvailabilityEngine {
       // a day that another zone had already filled — every confirm on those
       // offers then failed with SLOT_TAKEN. Same count, same predicate, so
       // the builder never offers a day the confirm path would reject on cap.
-      const existingBookingsCount = await countActiveSelfBookingsForDay(db, dateStr);
-
-      if (existingBookingsCount >= (config.max_self_books_per_day || 3)) continue;
+      // GATE_SELF_BOOK_DAY_CAP (owner ruling 2026-09-23): retired in favor
+      // of the self-serve notice window below — unset (default) skips the
+      // count entirely (no per-day cap anywhere).
+      if (selfBookDayCapEnabled()) {
+        const existingBookingsCount = await countActiveSelfBookingsForDay(db, dateStr);
+        if (existingBookingsCount >= (config.max_self_books_per_day || 3)) continue;
+      }
 
       // Build occupied slots from scheduled_services
       const occupied = scheduledInZone.map(s => ({
@@ -271,15 +277,23 @@ class AvailabilityEngine {
       // Sort occupied by start time
       occupied.sort((a, b) => a.start - b.start);
 
-      // Find gaps. Travel-gap mirror (see above): drop what the commit probe
-      // would 409 — BEFORE findGaps' four-slot cap, so a dense day's later
-      // valid gap is not hidden behind four rejected ones (r4 P2).
-      const slots = this.findGaps(occupied, dayStart, dayEnd, slotDuration, buffer, travelMirror
-        ? (g) => !violatesTravelGap(
+      // Find gaps. Self-serve notice window (owner ruling 2026-09-23) +
+      // travel-gap mirror (see above): drop what confirmBooking would now
+      // refuse — BEFORE findGaps' four-slot cap, so a dense day's later
+      // valid gap is not hidden behind rejected ones (r4 P2 precedent).
+      // This engine's only self-serve caller is the AI assistant's
+      // check_availability tool; the internal pickFirstServiceDate caller
+      // (estimate-converter.js) only reads the day, not a specific time, so
+      // the per-slot filter is harmless there too.
+      const accept = (g) => {
+        if (violatesSelfServeNotice({ date: dateStr, startTime: this.minToTime24(g.start) }, today)) return false;
+        if (travelMirror && violatesTravelGap(
           { startMin: g.start, endMin: g.end, ...travelMirror.pin },
           travelMirror.byDate.get(dateStr) || [],
-        )
-        : null);
+        )) return false;
+        return true;
+      };
+      const slots = this.findGaps(occupied, dayStart, dayEnd, slotDuration, buffer, accept);
 
       if (slots.length > 0) {
         days.push({
@@ -391,11 +405,13 @@ class AvailabilityEngine {
     }
     const startMin = this.timeToMin(startTime);
     const endMin = this.timeToMin(endTime);
-    if (dateStr === todayStr) {
-      const nowEt = etParts(new Date());
-      if (startMin <= nowEt.hour * 60 + nowEt.minute) {
-        throw bookingError('That time has already passed today — please pick another slot', 'SLOT_TAKEN');
-      }
+    // Self-serve notice window (owner ruling 2026-09-23), replacing the old
+    // same-day-only "already passed" floor: the AI assistant's book_appointment
+    // can't commit a slot starting within the notice window, whether that
+    // falls later today or early tomorrow. Same (date, startTime) check
+    // getAvailableSlots' accept() runs, so offer and commit stay in lockstep.
+    if (violatesSelfServeNotice({ date: dateStr, startTime })) {
+      throw bookingError('That time is too soon to book online — please pick another slot', 'SLOT_TAKEN');
     }
 
     // Shared CSPRNG generator (utils/slot-offer-token.js) — this row is served
@@ -448,7 +464,10 @@ class AvailabilityEngine {
       // order stays fixed — date → zone → day-cap, the same relative order
       // as createSelfBooking's date → customer → tech → zone → day-cap — so
       // concurrent confirms across both writers can never deadlock.
-      await acquireSelfBookingDayCapLock(trx, dateStr);
+      // GATE_SELF_BOOK_DAY_CAP (owner ruling 2026-09-23): retired in favor of
+      // the self-serve notice window — unset (default) skips the lock AND the
+      // count below, matching getAvailableSlots (offer/commit parity).
+      if (selfBookDayCapEnabled()) await acquireSelfBookingDayCapLock(trx, dateStr);
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): the
       // scheduled_services insert below serializes against a concurrent
       // merge-undo of this customer — after the scheduling rungs, before
@@ -491,11 +510,20 @@ class AvailabilityEngine {
           }
         }
       }
-      const dayCount = await countActiveSelfBookingsForDay(trx, dateStr, {
-        excludeSelfBookingId: options.excludeSelfBookingId || null,
-      });
-      if (dayCount >= maxPerDay) {
-        throw bookingError('That day just filled up — please pick another day', 'SLOT_TAKEN');
+      if (selfBookDayCapEnabled()) {
+        const dayCount = await countActiveSelfBookingsForDay(trx, dateStr, {
+          excludeSelfBookingId: options.excludeSelfBookingId || null,
+        });
+        if (dayCount >= maxPerDay) {
+          throw bookingError('That day just filled up — please pick another day', 'SLOT_TAKEN');
+        }
+      }
+      // Self-serve notice window, re-read UNDER the scheduling locks (Codex
+      // r1 P1): the pre-transaction check above ran before the date/zone
+      // advisory waits; a start that crossed the cutoff during that wait is
+      // refused here, before the occupancy validation and the insert.
+      if (violatesSelfServeNotice({ date: dateStr, startTime })) {
+        throw bookingError('That time is too soon to book online — please pick another slot', 'SLOT_TAKEN');
       }
 
       // Rows the tech-blind probe below must ignore — the onboarding

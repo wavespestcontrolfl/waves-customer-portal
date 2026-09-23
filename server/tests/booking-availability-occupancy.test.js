@@ -178,11 +178,27 @@ describe('buildBookingAvailability — commit-gate occupancy mirror', () => {
   });
 
   test('day-cap fullDays behavior is unchanged by the occupancy filter', async () => {
-    wireDayCapCounts([{ date: D, count: '3' }]); // at max_self_books_per_day
+    // GATE_SELF_BOOK_DAY_CAP (owner ruling 2026-09-23): dark by default —
+    // force it on to exercise the cap this test is about.
+    process.env.GATE_SELF_BOOK_DAY_CAP = 'true';
+    try {
+      wireDayCapCounts([{ date: D, count: '3' }]); // at max_self_books_per_day
+      listOccupiedWindows.mockResolvedValue([]);
+
+      const result = await build();
+      expect(result.days.find((d) => d.date === D)).toBeUndefined();
+      expect(result.slots).toEqual([]);
+    } finally {
+      delete process.env.GATE_SELF_BOOK_DAY_CAP;
+    }
+  });
+
+  test('day cap off by default: a day at max_self_books_per_day is still offered', async () => {
+    delete process.env.GATE_SELF_BOOK_DAY_CAP;
+    wireDayCapCounts([{ date: D, count: '3' }]);
     listOccupiedWindows.mockResolvedValue([]);
 
     const result = await build();
-    expect(result.days.find((d) => d.date === D)).toBeUndefined();
-    expect(result.slots).toEqual([]);
+    expect(result.days.find((d) => d.date === D)).toBeDefined();
   });
 });

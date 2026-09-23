@@ -363,9 +363,17 @@ async function commitVoiceBooking({
 
       // Commit-time max_self_books_per_day re-check, the same predicate the
       // availability builder drops full days with (shared helper). The builder's
-      // cap is advisory-only without this.
-      const dayCount = await countActiveSelfBookingsForDay(trx, dateStr);
-      if (dayCount >= maxPerDay) return { status: 'day_full' };
+      // cap is advisory-only without this. GATE_SELF_BOOK_DAY_CAP (owner
+      // ruling 2026-09-23): the cap is retired — the shared builder no longer
+      // drops full days for anyone while the gate is unset, so this commit
+      // check must skip too or every voice pick on a 3-booking day comes back
+      // day_full for a time the builder just offered (offer/commit parity).
+      // The self-serve NOTICE rule is separate and still never reaches the
+      // voice agent.
+      if (require('../../config/feature-gates').selfBookDayCapEnabled()) {
+        const dayCount = await countActiveSelfBookingsForDay(trx, dateStr);
+        if (dayCount >= maxPerDay) return { status: 'day_full' };
+      }
 
       // The GLOBAL, tech-blind occupancy probe the contract requires of every
       // rung-1 holder. Excludes this customer's own rows only via the dedupe

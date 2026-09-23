@@ -139,9 +139,11 @@ test('a missed appointment is still promised the link the page would honour', ()
   // this link, so the worker reaches the page's own verdict.
   expect(select({ now: parseETDateTime('2030-01-08T11:00') }).visit?.id).toBe('visit');
   expect(select({ now: parseETDateTime('2030-02-01T09:00') }).visit?.id).toBe('visit');
-  // Still inside the quoted two-hour arrival window: not missed, and eligible
-  // for the same reason.
-  expect(select({ now: parseETDateTime('2030-01-08T10:45') }).visit?.id).toBe('visit');
+  // Still inside the quoted two-hour arrival window: not missed — but its
+  // start is now INSIDE the self-serve notice window (owner ruling
+  // 2026-09-23), so the page refuses to move it and the worker parks the
+  // promise for the office instead of texting a link that says "call us".
+  expect(select({ now: parseETDateTime('2030-01-08T10:45') }).reason).toBe('visit_not_self_service');
   // Terminal and live states are still refused, elapsed or not.
   for (const status of ['completed', 'cancelled', 'en_route']) {
     expect(select({ candidates: [{ ...visit, status }], now: parseETDateTime('2030-01-08T11:00') }).reason).toBe('visit_not_self_service');
@@ -151,6 +153,26 @@ test('a missed appointment is still promised the link the page would honour', ()
   // placeholder is never "missed"), which reads here as visit_elapsed rather
   // than the generic visit_not_self_service the other terminal statuses get.
   expect(select({ candidates: [{ ...visit, status: 'rescheduled' }], now: parseETDateTime('2030-01-08T11:00') }).reason).toBe('visit_elapsed');
+});
+
+test('a visit starting inside the self-serve notice window is parked, not sent the link the page would refuse (owner ruling 2026-09-23)', () => {
+  const prev = process.env.SELF_SERVE_NOTICE_HOURS;
+  delete process.env.SELF_SERVE_NOTICE_HOURS; // default 24 h
+  try {
+    // Fixture `now` is 07:00 ET on 01-07 — 26 h before the 09:00 visit on
+    // 01-08: outside the window, eligible (the baseline every test above uses).
+    expect(select().visit?.id).toBe('visit');
+    // 15:00 ET on 01-07 — 18 h before: inside the window, parked.
+    expect(select({ now: parseETDateTime('2030-01-07T15:00') }).reason).toBe('visit_not_self_service');
+    // A MISSED visit is being rebooked, not moved off a too-soon start: still sent.
+    expect(select({ now: parseETDateTime('2030-01-08T11:00') }).visit?.id).toBe('visit');
+    // A shorter configured window re-admits the 18 h case.
+    process.env.SELF_SERVE_NOTICE_HOURS = '6';
+    expect(select({ now: parseETDateTime('2030-01-07T15:00') }).visit?.id).toBe('visit');
+  } finally {
+    if (prev === undefined) delete process.env.SELF_SERVE_NOTICE_HOURS;
+    else process.env.SELF_SERVE_NOTICE_HOURS = prev;
+  }
 });
 
 test('a rescheduled visit in the future can receive its promised link', () => {
