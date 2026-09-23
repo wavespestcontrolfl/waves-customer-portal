@@ -31,7 +31,7 @@ const db = require('../models/db');
 const { applyAssignable } = require('./technician-eligibility');
 const logger = require('./logger');
 const { findAvailableSlots } = require('./scheduling/find-time');
-const { capacityEnabled, placementFitsShift } = require('./scheduling/policy');
+const { capacityEnabled } = require('./scheduling/policy');
 const { guardedCoordSelects } = require('./scheduling/day-stops');
 const {
   violatesTravelGap, travelGapEnabled, travelBufferMinutes, customerFacingBufferMinutes,
@@ -40,6 +40,10 @@ const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/
 const { signSlotOffer, appendOfferToSlotId, CAPACITY_OFFER_POLICY } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 const { getZoneFunnelDays, applyZoneDayFunnel, fallbackCenterZoneName } = require('./scheduling/zone-day-funnel');
+const {
+  CUSTOMER_DAY_END_MINUTES, customerOfferGrid, lunchBlockEnabled,
+  refreshCustomerBookingWindowConfig, currentDayEndMinutes, currentLunchInterval, customerWindowAdmits,
+} = require('./scheduling/customer-windows');
 const { selfServeNoticeMinutes } = require('./scheduling/self-serve-notice');
 const { isEnabled } = require('../config/feature-gates');
 const { getDailyRainOutlookBounded } = require('./weather-forecast');
@@ -81,7 +85,16 @@ const MAX_ESTIMATE_SLOT_DURATION_MINUTES = 180;
 // in scheduling/find-time.js, which generates every route-derived offer.
 // Keep the two in sync.
 const SLOT_DAY_START_MINUTES = 8 * 60;
-const SLOT_DAY_END_MINUTES = 17 * 60;
+// Customer-facing service day close (scheduling/customer-windows.js) — a
+// 17:00 start plus the standard 60-minute visit ends at 18:00. Shared with
+// slot-reservation.js's server-side re-validation via this module's export.
+// FIXED FALLBACK ONLY — kept as the static default other consumers (and
+// tests) expect. The actual bound any admission check should use is
+// customer-windows.js's currentDayEndMinutes(), which honors a preserved
+// (non-18:00) booking_config.day_end override once
+// refreshCustomerBookingWindowConfig() has been awaited (Codex r1 P2 on
+// #4663 — estimate offers/reservations used to ignore that override).
+const SLOT_DAY_END_MINUTES = CUSTOMER_DAY_END_MINUTES;
 // Furthest-out date any offer surface produces: the public route clamps
 // ?windowDays to this and findEstimateSlots caps the AI date parse's
 // maxDaysOut to it. slot-reservation enforces the same bound on reserve so a
@@ -1108,13 +1121,16 @@ function addMinutesToHHMM(hhmm, minutes) {
 function slotWindowFitsDay(windowStart, windowEnd) {
   const startMin = timeToMinutes(windowStart);
   const endMin = timeToMinutes(windowEnd);
-  if (capacityEnabled()) return placementFitsShift(startMin, endMin);
   if (startMin == null || endMin == null) return true;
-  return endMin > startMin && endMin <= SLOT_DAY_END_MINUTES;
+  // The ONE customer-window admission rule (scheduling/customer-windows.js
+  // customerWindowAdmits, Codex r4 on #4663) — grid floor (09:00-17:00,
+  // never find-time's own 08:00 shift-start, in EITHER capacity mode),
+  // resolved close (currentDayEndMinutes(), honoring a preserved
+  // booking_config.day_end override) and the lunch gate, all in one call.
+  // This is the one choke point every customer-facing slot (ASAP and
+  // route) runs through, in both capacity modes.
+  return customerWindowAdmits({ startMin, endMin });
 }
-
-// Synthetic capacity retains its feasible start; selection only changes order.
-const PREFERRED_WINDOWS = ['09:00', '10:00', '11:00', '13:00', '14:00', '15:00', '16:00'];
 
 function splitSlotResults(slots, maxResults, expanderMaxResults) {
   const visibleCount = Math.max(0, Number(maxResults) || 0);
@@ -1223,7 +1239,14 @@ function buildAsapCapacitySlotsForTechs({
   for (const date of enumerateETDateStrings(dateFrom, dateTo, { includeWeekends })) {
     if (excludeDates && excludeDates.has(date)) continue;
     const earliestMinute = earliestBookableMinuteForDate(date, now, minimumLeadMinutes);
-    for (const windowStart of PREFERRED_WINDOWS) {
+    // Read at call time (customerOfferGrid(), not a module-level constant) so
+    // a mid-process GATE_BOOKING_LUNCH_BLOCK flip takes effect immediately.
+    // Pass the REAL duration (Codex push-audit P1 on #4663) — a fixed 60
+    // here wrongly excluded a documented grid hour for a SHORTER service
+    // (e.g. an 11:00 start + 30 min ends at 11:30, before an 11:30 lunch
+    // start, but comparing 11:00-12:00 against it excluded 11:00 anyway).
+    // slotWindowFitsDay below still re-verifies the real window either way.
+    for (const windowStart of customerOfferGrid(durationMinutes)) {
       if (timeToMinutes(windowStart) < earliestMinute) continue;
       const windowEnd = addMinutesToHHMM(windowStart, durationMinutes);
       if (!slotWindowFitsDay(windowStart, windowEnd)) continue;
@@ -1663,6 +1686,11 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // (tests, internal callers) via the spread order below.
   const opts = { ...DEFAULT_OPTS, minimumLeadMinutes: selfServeNoticeMinutes(), ...userOpts };
 
+  // One booking_config read (lunch interval + day-end override, 60s TTL) for
+  // every synchronous lunch/day-end check this call makes below — see
+  // scheduling/customer-windows.js (Codex r1 P2s on #4663).
+  await refreshCustomerBookingWindowConfig();
+
   const estimate = await db('estimates').where({ id: estimateId }).first();
   if (!estimate) {
     const err = new Error('estimate not found');
@@ -1697,6 +1725,18 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   const cacheKey = [
     estimateId,
     capacityEnabled() ? 'capacity_v2' : 'legacy_capacity',
+    // Lunch gate state in the key (GATE_BOOKING_LUNCH_BLOCK, owner ruling
+    // 2026-09-23): a result computed while noon was offerable must never be
+    // served after the gate flips on (or vice versa) for the TTL's length.
+    lunchBlockEnabled() ? 'lunch_blocked' : 'noon_open',
+    // The RESOLVED bounds, not just the gate flag (Codex push-audit P1 on
+    // #4663): booking_config's lunch interval / day-end override refreshes
+    // on its own 60s TTL (customer-windows.js), independent of this 5-min
+    // offer cache — an owner narrowing either mid-window must not keep
+    // serving offers the reservation validation (which re-reads current
+    // config) would then reject.
+    `${currentLunchInterval().startMinutes}-${currentLunchInterval().endMinutes}`,
+    currentDayEndMinutes(),
     cacheHour(),
     opts.windowDays,
     opts.maxResults,
@@ -1894,6 +1934,16 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       excludeEstimateId: estimateId,
       // Travel gap (GATE_SLOT_TRAVEL_GAP): customer-facing turnaround buffer.
       bufferMinutes: customerFacingBufferMinutes(),
+      // Customer-facing day close (scheduling/customer-windows.js) — find-time's
+      // own DAY_END_HOUR default (17) stays untouched for staff/optimizer
+      // callers that don't pass this. currentDayEndMinutes() honors a
+      // preserved booking_config.day_end override (Codex r1 P2 on #4663).
+      dayEndHour: currentDayEndMinutes() / 60,
+      // Capacity mode's shared shift starts at 08:00 for every caller; this
+      // is the public estimate picker, which only ever offers the documented
+      // customer grid (09:00-17:00, docs/public-route-contracts.md) — never
+      // an 08:00 start (Codex r3 P0 on #4663).
+      customerFacing: true,
       dateFrom: segFrom,
       dateTo: segTo,
       topN: Number.MAX_SAFE_INTEGER,
@@ -2070,6 +2120,9 @@ async function getSlotDebug(estimateId, userOpts = {}) {
   // Same live-notice default as getAvailableSlots — the admin debug view
   // must reflect the lead a customer actually sees, not the old constant.
   const opts = { ...DEFAULT_OPTS, minimumLeadMinutes: selfServeNoticeMinutes(), ...userOpts };
+  // Mirrors the live path's config read so this debug surface's dayEndHour
+  // reflects what the customer is actually offered (Codex r1 P2 on #4663).
+  await refreshCustomerBookingWindowConfig();
   const estimate = await db('estimates').where({ id: estimateId }).first();
   if (!estimate) {
     const err = new Error('estimate not found');
@@ -2103,23 +2156,40 @@ async function getSlotDebug(estimateId, userOpts = {}) {
     // reflects what the customer is actually offered (codex r16 P1).
     excludeEstimateId: estimateId,
     bufferMinutes: customerFacingBufferMinutes(),
+    // Same customer-facing day close as the live path (see above).
+    dayEndHour: currentDayEndMinutes() / 60,
+    // Same customer-grid restriction as the live path — this admin debug
+    // view exists to mirror exactly what the customer is offered, so it must
+    // never show an 08:00 candidate the live path would never surface
+    // (Codex r3 P0 on #4663).
+    customerFacing: true,
     dateFrom,
     dateTo,
     topN: 200, // broad — debug surface wants everything
     includeWeekends: opts.includeWeekends,
   });
 
-  const classified = (raw?.slots || []).map((s) => ({
-    ...classifySlot(s, opts.proximityDriveMinutes, serviceProfile.durationMinutes),
-    raw: {
-      score: s.score,
-      detour_minutes: s.detour_minutes,
-      baseline_drive_minutes: s.baseline_drive_minutes,
-      total_drive_minutes: s.total_drive_minutes,
-      insertion: s.insertion,
-      stops_that_day: s.stops_that_day,
-    },
-  }));
+  // getSlotDebug classifies find-time's raw output directly — it never runs
+  // through filterCollidingSlots (the live path's slot-zone/occupancy pass,
+  // which needs a real DB customer/estimate context this debug surface
+  // doesn't build), so slotWindowFitsDay's lunch-gate check (customerFacing
+  // above only restricts capacity mode's own generator, not a legacy-mode
+  // raw candidate) never ran either. This debug view exists to mirror
+  // exactly what the customer is offered, so a noon slot the gate would
+  // hide from the live path must not show up here (Codex r4 P2 on #4663).
+  const classified = (raw?.slots || [])
+    .map((s) => ({
+      ...classifySlot(s, opts.proximityDriveMinutes, serviceProfile.durationMinutes),
+      raw: {
+        score: s.score,
+        detour_minutes: s.detour_minutes,
+        baseline_drive_minutes: s.baseline_drive_minutes,
+        total_drive_minutes: s.total_drive_minutes,
+        insertion: s.insertion,
+        stops_that_day: s.stops_that_day,
+      },
+    }))
+    .filter((c) => slotWindowFitsDay(c.windowStart, c.windowEnd));
 
   return {
     estimate: {

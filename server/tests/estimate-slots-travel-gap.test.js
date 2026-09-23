@@ -88,30 +88,39 @@ test('gate on: tech-blind — an UNASSIGNED neighbour row blocks an unassigned o
   expect(await filterCollidingSlots([candidateSlot({ techId: null })], { ...RANGE, coords: PALMETTO })).toHaveLength(0);
 });
 
-test('gate on: a window with enough free time is kept (13:00 after an 11:00 end, or 08:00 before 10:00 with a 60-min gap)', async () => {
+test('gate on: a window with enough free time is kept (13:00 after an 11:00 end)', async () => {
   process.env.GATE_SLOT_TRAVEL_GAP = 'true';
   wireRows([neighbourRow()]);
+  // Codex r4 on #4663: an 08:00 candidate used to sit alongside 12:00 here
+  // purely to exercise the "gap BEFORE the neighbour" direction — but 08:00
+  // is before the documented customer grid (09:00-17:00), which
+  // slotWindowFitsDay (this filter's own choke point) now enforces in every
+  // mode, and 09:00 (the grid's first hour) touches this 10:00 neighbour
+  // with zero gap — no grid-valid "before" example exists against this
+  // fixture's neighbour. 12:00 alone still proves the "enough free time is
+  // kept" claim; the 11:00 candidate proves the "not enough" claim below.
   const out = await filterCollidingSlots([
-    candidateSlot({ slotId: `${DATE}_08-00_tech-1`, windowStart: '08:00', windowEnd: '09:00' }),
     candidateSlot({ slotId: `${DATE}_12-00_tech-1`, windowStart: '12:00', windowEnd: '13:00' }),
     candidateSlot({ slotId: `${DATE}_11-00_tech-1`, windowStart: '11:00', windowEnd: '12:00' }),
   ], { ...RANGE, coords: PALMETTO });
-  expect(out.map((s) => s.windowStart)).toEqual(['08:00', '12:00']);
+  expect(out.map((s) => s.windowStart)).toEqual(['12:00']);
 });
 
 test('gate on: a coordless stop (or a no-coords estimate) degrades to the 15-minute buffer only', async () => {
   process.env.GATE_SLOT_TRAVEL_GAP = 'true';
   wireRows([neighbourRow({ lat: null, lng: null })]);
-  // 0 free minutes < 15 → dropped; 15 free minutes (08:45–09:45) → kept.
+  // 0 free minutes < 15 → dropped; 15 free minutes (09:00-09:45, the
+  // grid's first hour) → kept. Codex r4 on #4663: 08:45 was off-grid
+  // (before 09:00) and off-the-hour; slotWindowFitsDay now enforces both.
   expect(await filterCollidingSlots([candidateSlot()], { ...RANGE, coords: PALMETTO })).toHaveLength(0);
   expect(await filterCollidingSlots(
-    [candidateSlot({ windowStart: '08:45', windowEnd: '09:45' })], { ...RANGE, coords: PALMETTO },
+    [candidateSlot({ windowStart: '09:00', windowEnd: '09:45' })], { ...RANGE, coords: PALMETTO },
   )).toHaveLength(1);
   // No estimate coords at all (the no-coords branch passes null) → same buffer-only rule.
   wireRows([neighbourRow()]);
   expect(await filterCollidingSlots([candidateSlot()], { ...RANGE, coords: null })).toHaveLength(0);
   expect(await filterCollidingSlots(
-    [candidateSlot({ windowStart: '08:45', windowEnd: '09:45' })], { ...RANGE, coords: null },
+    [candidateSlot({ windowStart: '09:00', windowEnd: '09:45' })], { ...RANGE, coords: null },
   )).toHaveLength(1);
 });
 

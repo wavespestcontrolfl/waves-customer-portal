@@ -139,8 +139,16 @@ function pickedUnscorable({ from, today, sameDayFloorMin, pickedMin, pickedEndMi
   const nowEt = etParts();
   const { capacityEnabled, SHIFT } = require('./policy');
   const dayEndMin = capacityEnabled() ? SHIFT.endMinutes : (useArrivalWindows ? ADMIN_DAY_END_MINUTES : DAY_END_HOUR * 60);
+  // Real (start, end) admission only — no flat headroom margin. A
+  // `pickedMin + SHIFT.arrivalMinutes (120) > SHIFT.endMinutes` check lived
+  // here (mirroring policy.js's placementFitsShift before Codex r1 P1 on
+  // #4663 removed it there) — the recommendation list already dropped the
+  // same margin, so a picker offering 17:00 for a 60-minute job (ending
+  // exactly at the 18:00 close) returned NO VERDICT the moment the operator
+  // actually picked it, an offer/verdict break identical to the one r1
+  // fixed for offer/commit. `pickedEndMin > dayEndMin` below already
+  // enforces the real close. Codex r4 P2 on #4663.
   return pickedMin % 60 !== 0
-    || (capacityEnabled() && pickedMin + SHIFT.arrivalMinutes > SHIFT.endMinutes)
     || (from === today && pickedMin < nowEt.hour * 60 + nowEt.minute + 30)
     || (from === today && Number.isInteger(sameDayFloorMin) && pickedMin < sameDayFloorMin)
     || pickedMin < DAY_START_HOUR * 60

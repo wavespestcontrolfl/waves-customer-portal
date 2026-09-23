@@ -12,6 +12,9 @@ const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
 const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes } = require('../services/scheduling/travel-gap');
 const { fallbackCenterZoneName } = require('../services/scheduling/zone-day-funnel');
+const {
+  CUSTOMER_HOUR_GRID, lunchBlockEnabled, customerWindowAdmits, refreshCustomerBookingWindowConfig,
+} = require('../services/scheduling/customer-windows');
 const { violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
 const { selfBookDayCapEnabled } = require('../config/feature-gates');
 const { etDateString, addETDays } = require('../utils/datetime-et');
@@ -524,7 +527,7 @@ router.get('/config', async (req, res, next) => {
       advance_days_max: config.advance_days_max ?? 14,
       slot_duration_minutes: config.slot_duration_minutes ?? 60,
       day_start: config.day_start || '08:00',
-      day_end: config.day_end || '17:00',
+      day_end: config.day_end || '18:00',
     });
   } catch (err) { next(err); }
 });
@@ -579,8 +582,10 @@ const NEARBY_DETOUR_MINUTES = 15;
 
 // Whole-hour windows offered on a day with no existing stops, so a customer
 // who picks/searches an otherwise-empty day gets real choice across the open
-// block instead of just the 8 AM gap start. Skips noon (lunch is reserved).
-const OPEN_DAY_WINDOWS = ['09:00', '10:00', '11:00', '13:00', '14:00', '15:00', '16:00'];
+// block instead of just the 8 AM gap start. Shared grid
+// (scheduling/customer-windows.js); addCandidate's lunchBlockEnabled() check
+// below still strips noon when GATE_BOOKING_LUNCH_BLOCK is on.
+const OPEN_DAY_WINDOWS = CUSTOMER_HOUR_GRID;
 
 // Rain chips (GATE_BOOKING_RAIN_CHIPS): office point for the NWS daily rain
 // outlook. Rain is a DAILY value on these surfaces, and SWFL storm systems
@@ -651,7 +656,7 @@ async function loadBookingConfig() {
   return (await db('booking_config').first()) || {
     advance_days_min: 1, advance_days_max: 14,
     slot_duration_minutes: 60,
-    day_start: '08:00', day_end: '17:00',
+    day_start: '08:00', day_end: '18:00',
     max_self_books_per_day: 3,
   };
 }
@@ -665,7 +670,10 @@ function bookingSlotWindow(config = {}) {
   return {
     slotGridMinutes: 60,
     dayStartMin: timeToMin(config.day_start || '08:00'),
-    dayEndMin: timeToMin(config.day_end || '17:00'),
+    dayEndMin: timeToMin(config.day_end || '18:00'),
+    // Lunch bounds are still derived unconditionally — callers gate their USE
+    // with lunchBlockEnabled() (addCandidate, validateBookingSlotGeometry) so
+    // GATE_BOOKING_LUNCH_BLOCK is the single point of control.
     lunchStartMin: timeToMin(config.lunch_start || '12:00'),
     lunchEndMin: timeToMin(config.lunch_end || '13:00'),
     maxPerDay: config.max_self_books_per_day ?? 3,
@@ -833,8 +841,10 @@ function validateBookingSlotGeometry({ startMin, duration, config }) {
     || (capacityEnabled() && !placementFitsShift(startMin, endMin))) {
     return 'That time is outside our working hours — please pick another slot.';
   }
-  // Lunch windows are reserved for route health and are never self-bookable.
-  if (startMin < lunchEndMin && endMin > lunchStartMin) {
+  // Lunch windows are reserved for route health and never self-bookable —
+  // but ONLY while GATE_BOOKING_LUNCH_BLOCK is on (owner ruling 2026-09-23,
+  // unset by default). Off, noon is a normal bookable hour like any other.
+  if (lunchBlockEnabled() && startMin < lunchEndMin && endMin > lunchStartMin) {
     return 'That time isn\'t available — please pick another slot.';
   }
   return null;
@@ -897,6 +907,19 @@ function roundPublicCoord(value) {
 // this false — the call agent is unaffected by the notice rule.
 async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], excludeSelfBookingId = null, serviceKey = '', selfServeNotice = false }) {
   config = applySchedulingPolicy(config);
+  // addCandidate's customerWindowAdmits() call defaults dayEndMinutes to
+  // currentDayEndMinutes() / lunchGateOn to lunchBlockEnabled() — both read
+  // scheduling/customer-windows.js's shared, 60s-TTL cache. Unlike
+  // estimate-slot-availability.js and slot-reservation.js (which both
+  // explicitly warm it before relying on it), this file never had to before
+  // customerWindowAdmits existed — its own day-end/lunch bounds always came
+  // straight from the freshly-loaded `config` above. Warm it here too, so a
+  // reconfigured booking_config.day_end/lunch_start/_end can't leave this
+  // offer generator on a stale or never-initialized cached value while
+  // validateBookingSlotGeometry (the commit-side check in this same file)
+  // reads a fresh config row on every request — the exact offer/commit
+  // parity break this predicate exists to prevent (push-audit P1 on #4663).
+  await refreshCustomerBookingWindowConfig();
   // Rain chips (GATE_BOOKING_RAIN_CHIPS): kick off ONE bounded office-point
   // daily outlook so it overlaps the slot computation; stamped onto days/slots
   // just before the return. Bounded + cached + fail-open in the service (null
@@ -924,7 +947,17 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // out of. Default [] = identical behavior for every other caller.
     excludeServiceIds,
     dayStartHour: parseInt((config.day_start || '08:00').split(':')[0]),
-    dayEndHour: parseInt((config.day_end || '17:00').split(':')[0]),
+    dayEndHour: parseInt((config.day_end || '18:00').split(':')[0]),
+    // Capacity mode's shared shift starts at 08:00 for every caller; only
+    // the self-serve HTTP surfaces (this file's /availability, /find-slots
+    // and capture-intent revalidation; reschedule-public.js; reservice-public.js
+    // — the exact set that sets selfServeNotice) are bound to the documented
+    // customer grid (09:00-17:00, docs/public-route-contracts.md). The
+    // voice-agent callers (relay-tools.js, relay-booking.js) leave
+    // selfServeNotice unset, same as they leave the notice window unset —
+    // phone bookings follow the full 8am-6pm business-hours shift, matching
+    // call-recording-processor.js's own sanity bound (Codex r3 P0 on #4663).
+    customerFacing: selfServeNotice,
     // Waves works weekends (Sat AND Sun) — the estimate slot flow already
     // offers Sundays (estimate-slot-availability defaults includeWeekends:true).
     // find-time's legacy default drops Sundays, which silently hid every Sunday
@@ -1065,8 +1098,20 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     const endMin = startMin + duration;
     if (!isWholeHour(startMin)) return;
     if (startMin < dayStartMin || endMin > dayEndMin) return;
-    // Lunch windows are reserved for route health and should never be self-booked.
-    if (startMin < lunchEnd && endMin > lunchStart) return;
+    // The documented public grid (09:00-17:00) is narrower than dayStartMin
+    // (08:00, this file's own day-start default — matched to the voice
+    // agent's 8am-6pm business-hours bound, call-recording-processor.js) —
+    // self-serve callers only (selfServeNotice, same split as the notice
+    // window and the lunch gate below): an idle route's earliest-feasible
+    // 08:00 candidate must not reach a self-serve surface just because it
+    // clears dayStartMin. Voice-agent callers keep the full shift (Codex r4
+    // P0 on #4663 — capacity mode's own generator already applies this via
+    // customerFacing; this closes the identical gate-off leak).
+    if (selfServeNotice && !customerWindowAdmits({ startMin, endMin })) return;
+    // Lunch windows are reserved for route health and never self-booked —
+    // but ONLY while GATE_BOOKING_LUNCH_BLOCK is on (owner ruling 2026-09-23,
+    // unset by default). Off, noon is a normal offerable hour.
+    if (lunchBlockEnabled() && startMin < lunchEnd && endMin > lunchStart) return;
     // Self-serve notice window (owner ruling 2026-09-23) — self-serve
     // callers only (selfServeNotice opt-in; the voice agent never sets it).
     // Offer/commit parity: createSelfBooking's commit gate runs the same
@@ -1257,7 +1302,7 @@ router.get('/availability', async (req, res, next) => {
     const config = (await db('booking_config').first()) || {
       advance_days_min: 1, advance_days_max: 14,
       slot_duration_minutes: 60,
-      day_start: '08:00', day_end: '17:00',
+      day_start: '08:00', day_end: '18:00',
       max_self_books_per_day: 3,
     };
 
@@ -1364,7 +1409,7 @@ router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req,
     const config = (await db('booking_config').first()) || {
       advance_days_min: 1, advance_days_max: 14,
       slot_duration_minutes: 60,
-      day_start: '08:00', day_end: '17:00',
+      day_start: '08:00', day_end: '18:00',
       max_self_books_per_day: 3,
     };
 

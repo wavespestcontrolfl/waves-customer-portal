@@ -128,6 +128,46 @@ function wireConfirm({ zones = [], replacedRow = undefined } = {}) {
   return { trx, scheduledQueries };
 }
 
+describe('confirmBooking — lunch block commit mirror (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23)', () => {
+  const ENV_KEY = 'GATE_BOOKING_LUNCH_BLOCK';
+  let previous;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    findConflictingVisits.mockResolvedValue([]);
+    previous = process.env[ENV_KEY];
+  });
+  afterEach(() => {
+    if (previous === undefined) delete process.env[ENV_KEY];
+    else process.env[ENV_KEY] = previous;
+  });
+
+  test('gate on: a noon option (quoted before the flip) is refused SLOT_TAKEN before any insert', async () => {
+    process.env[ENV_KEY] = 'true';
+    const { scheduledQueries } = wireConfirm({ zones: [] });
+    await expect(
+      Availability.confirmBooking(null, 'cust-1', DATE, '12:00', null),
+    ).rejects.toMatchObject({ code: 'SLOT_TAKEN', statusCode: 409, message: expect.stringMatching(/lunch/i) });
+    expect(scheduledQueries.every((q) => !q.insert.mock.calls.length)).toBe(true);
+    // Rejected before the occupancy probe ran — the lunch mirror sits with
+    // the other pre-transaction sanity checks.
+    expect(findConflictingVisits).not.toHaveBeenCalled();
+  });
+
+  test('gate on: a window that only TOUCHES the block (11:00–12:00) still commits', async () => {
+    process.env[ENV_KEY] = 'true';
+    wireConfirm({ zones: [] });
+    const result = await Availability.confirmBooking(null, 'cust-1', DATE, '11:00', null);
+    expect(result.confirmationCode).toBeTruthy();
+  });
+
+  test('gate unset (default): the same noon option commits — noon is an ordinary hour', async () => {
+    delete process.env[ENV_KEY];
+    wireConfirm({ zones: [] });
+    const result = await Availability.confirmBooking(null, 'cust-1', DATE, '12:00', null);
+    expect(result.confirmationCode).toBeTruthy();
+  });
+});
+
 describe('confirmBooking — zone-null occupancy fallback', () => {
   beforeEach(() => {
     jest.clearAllMocks();

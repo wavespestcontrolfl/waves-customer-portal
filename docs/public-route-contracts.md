@@ -146,14 +146,21 @@ retains its intentional companion exclusion, using the acceptance predicate.
 With default-off `GATE_SCHEDULING_CAPACITY`, these public availability surfaces
 use whole-route feasibility, technician eligibility, existing arrival promises,
 blocked time and return-by-shift-end checks. Only evaluated whole-hour starts
-through 16:00 ET are offered; estimate ASAP and booking open-day expansion
-cannot create additional starts. The estimate cache separates capacity mode
+on the shared customer grid (09:00–17:00 ET, `scheduling/customer-windows.js`;
+the customer-facing day closes at 18:00, and `booking_config.day_end` was
+migrated to 18:00 on 2026-09-23) are offered; estimate ASAP and booking
+open-day expansion cannot create additional starts. 12:00 is an ordinary
+offerable and reservable hour unless `GATE_BOOKING_LUNCH_BLOCK` is set, in
+which case every customer-facing offer AND commit surface (estimate picker +
+reserve, /book, public reschedule, public re-service, the assistant's
+availability engine) refuses a window overlapping 12:00–13:00. The estimate cache separates capacity mode
 from legacy mode. Assigned technicians have independent route capacity;
 unassigned work remains a fixed blocker. Public responses expose no full route,
 provider legs or exact route coordinates. Scheduling traffic lookups share a
 40-request/800-element allowance per application process per 15 minutes across
 HTTP requests and fall back to the conservative model when exhausted; response
-data remains request-local. Gate-off availability is unchanged.
+data remains request-local. Gate-off availability is unchanged apart from the
+shared grid / day-end / lunch-gate rules above, which apply in both modes.
 Self-serve notice window (owner ruling 2026-09-23,
 `scheduling/self-serve-notice.js`, `SELF_SERVE_NOTICE_HOURS`, default 24 h):
 every SELF-SERVE offer and commit surface — the estimate slot picker and its
@@ -1419,7 +1426,10 @@ than duplicates).
 gains `van_scene` — the same `GATE_VAN_SCENE` boolean, read by booking step 4
 to show the van scene above the secure-card block. Unset gate = `false`
 in production (non-production envs return true, as above); no other field
-changes.
+changes. `day_end` carries the stored `booking_config.day_end` (18:00 since
+the 2026-09-23 migration; the code fallback is 18:00 too), and the offered
+start grid is the shared 09:00–17:00 customer grid with 12:00 present unless
+`GATE_BOOKING_LUNCH_BLOCK` is set.
 `/api/public/reschedule/:token` (GET + POST, plus `POST /:token/find-slots`;
 customer self-serve reschedule linked from appointment
 confirmation/72h/24h texts + reminder emails.
@@ -1447,9 +1457,9 @@ within the window, and POST refuses such a visit with 409 code
 scopes (ruling 2026-07-13; single-visit-only before #2725), both limited
 to the token's own customer/visit and never live/terminal visits (409),
 and only to a slot the availability engine still offers for that day
-(route feasibility, lunch reserve, the self-serve notice window, and —
-only while `GATE_SELF_BOOK_DAY_CAP` is set — self-book day caps re-checked
-server-side):
+(route feasibility, the lunch reserve only while `GATE_BOOKING_LUNCH_BLOCK`
+is set, the self-serve notice window, and — only while `GATE_SELF_BOOK_DAY_CAP`
+is set — self-book day caps re-checked server-side):
   - default: moves the single visit via `SmartRebooker.reschedule`
     (advisory lock + tech-route overlap conflict check + `reschedule_log`
     audit as `customer_self_serve` + escalation flagging);
@@ -1535,8 +1545,9 @@ lane that becomes unavailable refreshes eligibility with null availability,
 allowing the page to select the remaining lane; malformed lanes still return 400.
 POST is a WRITE limited to the token's own customer: lane re-validated,
 slot re-validated against a fresh single-day availability build (route
-feasibility, lunch reserve, the self-serve notice window, day caps only while
-`GATE_SELF_BOOK_DAY_CAP` is set — the anti-forgery model
+feasibility, the lunch reserve only while `GATE_BOOKING_LUNCH_BLOCK` is set,
+the self-serve notice window, day caps only while `GATE_SELF_BOOK_DAY_CAP`
+is set — the anti-forgery model
 reschedule-public uses in place of the funnel's signed-offer HMAC), then
 committed through `createSelfBooking`'s transaction with the
 internal-only `callbackVisit` option (is_callback=true — completion

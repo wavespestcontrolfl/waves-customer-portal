@@ -13,6 +13,7 @@ const { etDateString, addETDays } = require('../utils/datetime-et');
 const { generateConfirmationCode } = require('../utils/slot-offer-token');
 const { findConflictingVisits, acquireOccupancyLock, listOccupiedWindows } = require('./scheduling/occupancy');
 const { travelGapEnabled, violatesTravelGap } = require('./scheduling/travel-gap');
+const { lunchBlockEnabled } = require('./scheduling/customer-windows');
 const { selfBookDayCapEnabled } = require('../config/feature-gates');
 const { violatesSelfServeNotice } = require('./scheduling/self-serve-notice');
 
@@ -114,7 +115,7 @@ class AvailabilityEngine {
     // 2. Get config
     const config = await db('booking_config').first() || {
       advance_days_min: 1, advance_days_max: 14,
-      day_start: '08:00', day_end: '17:00',
+      day_start: '08:00', day_end: '18:00',
       lunch_start: '12:00', lunch_end: '13:00',
       slot_duration_minutes: 60, buffer_minutes: 15,
       max_self_books_per_day: 3,
@@ -125,7 +126,7 @@ class AvailabilityEngine {
     const lunchStart = this.timeToMin(config.lunch_start || '12:00');
     const lunchEnd = this.timeToMin(config.lunch_end || '13:00');
     const dayStart = this.timeToMin(config.day_start || '08:00');
-    const dayEnd = this.timeToMin(config.day_end || '17:00');
+    const dayEnd = this.timeToMin(config.day_end || '18:00');
 
     const days = [];
     const today = new Date();
@@ -271,8 +272,10 @@ class AvailabilityEngine {
         occupied.push({ start: this.timeToMin(b.start_time), end: this.timeToMin(b.end_time) });
       });
 
-      // Add lunch block
-      occupied.push({ start: lunchStart, end: lunchEnd });
+      // Add lunch block — ONLY while GATE_BOOKING_LUNCH_BLOCK is on (owner
+      // ruling 2026-09-23, unset by default). Off, noon is a normal
+      // offerable/bookable hour like any other on this legacy zone engine.
+      if (lunchBlockEnabled()) occupied.push({ start: lunchStart, end: lunchEnd });
 
       // Sort occupied by start time
       occupied.sort((a, b) => a.start - b.start);
@@ -285,6 +288,15 @@ class AvailabilityEngine {
       // check_availability tool; the internal pickFirstServiceDate caller
       // (estimate-converter.js) only reads the day, not a specific time, so
       // the per-slot filter is harmless there too.
+      // Morning/afternoon coverage while the lunch block is OFF: the block
+      // used to split every day into two gaps, so an empty day offered
+      // [09:00, 14:00]; without it the day is ONE gap and findGaps' first-
+      // accepted-start-per-gap rule would offer 09:00 alone. Pass the
+      // configured afternoon boundary so each gap spanning it also offers
+      // its first accepted afternoon start (13:00 on an empty day — noon
+      // stays offerable where a gap opens onto it). Null while the block is
+      // on: the block itself already splits the day, legacy output exactly.
+      const afternoonStartMin = lunchBlockEnabled() ? null : lunchEnd;
       const accept = (g) => {
         if (violatesSelfServeNotice({ date: dateStr, startTime: this.minToTime24(g.start) }, today)) return false;
         if (travelMirror && violatesTravelGap(
@@ -293,7 +305,7 @@ class AvailabilityEngine {
         )) return false;
         return true;
       };
-      const slots = this.findGaps(occupied, dayStart, dayEnd, slotDuration, buffer, accept);
+      const slots = this.findGaps(occupied, dayStart, dayEnd, slotDuration, buffer, accept, { afternoonStartMin });
 
       if (slots.length > 0) {
         days.push({
@@ -320,23 +332,39 @@ class AvailabilityEngine {
   // gap then advances an hour at a time so a long zone-local hole still
   // yields its first ACCEPTED hour (an out-of-zone stop can reject 9:00 while
   // 12:00 in the same hole is fine — r5 P2).
-  findGaps(occupied, dayStart, dayEnd, slotDuration, buffer, accept = null) {
+  //
+  // opts.afternoonStartMin (GATE_BOOKING_LUNCH_BLOCK unset, owner ruling
+  // 2026-09-23): a gap that spans this boundary ALSO offers its first
+  // accepted start at/after it, so removing the lunch block (which used to
+  // split every day into a morning and an afternoon gap) doesn't collapse an
+  // empty day's choices from [09:00, 14:00] to [09:00]. Null = legacy
+  // first-start-per-gap only.
+  findGaps(occupied, dayStart, dayEnd, slotDuration, buffer, accept = null, { afternoonStartMin = null } = {}) {
     const slots = [];
-    const offer = (gapStart, gapEnd) => {
-      for (let start = gapStart; gapEnd - start >= slotDuration; start += 60) {
-        const slot = { start, end: start + slotDuration };
-        if (!accept || accept(slot)) { slots.push(slot); return; }
-        if (!accept) return;
-      }
-    };
-    let cursor = dayStart;
-
     // Round minutes-since-midnight UP to the next clean hour. Customer-
     // facing slot starts like 1:15 / 2:45 felt like "we're squeezing you
     // into a travel gap" — the operator wants every quoted time to land
     // on the hour (1:00, 2:00). The buffer still applies but the slot
     // only starts at the next :00 after buffer.
     const roundUpToHour = (min) => Math.ceil(min / 60) * 60;
+    const firstAccepted = (from, gapEnd) => {
+      for (let start = from; gapEnd - start >= slotDuration; start += 60) {
+        const slot = { start, end: start + slotDuration };
+        if (!accept || accept(slot)) return slot;
+        if (!accept) return null;
+      }
+      return null;
+    };
+    const offer = (gapStart, gapEnd) => {
+      const first = firstAccepted(gapStart, gapEnd);
+      if (!first) return;
+      slots.push(first);
+      if (Number.isFinite(afternoonStartMin) && first.start < afternoonStartMin) {
+        const pm = firstAccepted(roundUpToHour(afternoonStartMin), gapEnd);
+        if (pm && pm.start !== first.start) slots.push(pm);
+      }
+    };
+    let cursor = dayStart;
 
     for (const block of occupied) {
       const gapStart = roundUpToHour(cursor + buffer);
@@ -412,6 +440,17 @@ class AvailabilityEngine {
     // getAvailableSlots' accept() runs, so offer and commit stay in lockstep.
     if (violatesSelfServeNotice({ date: dateStr, startTime })) {
       throw bookingError('That time is too soon to book online — please pick another slot', 'SLOT_TAKEN');
+    }
+    // Lunch block (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23) —
+    // commit-side mirror of getAvailableSlots' occupied-lunch push, using the
+    // same configured interval: an option the assistant quoted before the
+    // gate flipped on must not commit onto the block. No-op while unset.
+    if (lunchBlockEnabled()) {
+      const lunchStart = this.timeToMin(config?.lunch_start || '12:00');
+      const lunchEnd = this.timeToMin(config?.lunch_end || '13:00');
+      if (startMin < lunchEnd && endMin > lunchStart) {
+        throw bookingError('That time falls in the lunch block — please pick another slot', 'SLOT_TAKEN');
+      }
     }
 
     // Shared CSPRNG generator (utils/slot-offer-token.js) — this row is served

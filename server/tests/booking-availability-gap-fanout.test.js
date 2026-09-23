@@ -26,7 +26,10 @@ const D = dayOffset(10);
 const CONFIG = {
   advance_days_min: 1, advance_days_max: 14,
   slot_duration_minutes: 60,
-  day_start: '08:00', day_end: '17:00',
+  // 18:00 close since PR 2 (2026-09-23, scheduling/customer-windows.js
+  // CUSTOMER_DAY_END_MINUTES) — a 17:00 start + the standard 60-minute
+  // visit ends at 18:00.
+  day_start: '08:00', day_end: '18:00',
   max_self_books_per_day: 3,
 };
 
@@ -125,7 +128,13 @@ describe('buildBookingAvailability — gap fan-out', () => {
       expect(startTimes(await build('termite', { duration: 90 }))).toEqual(['16:00']);
       const { validateBookingSlotGeometry } = require('../routes/booking')._internals;
       expect(validateBookingSlotGeometry({ startMin: 960, duration: 90, config: CONFIG })).toBeNull();
-      expect(validateBookingSlotGeometry({ startMin: 1020, duration: 30, config: CONFIG })).not.toBeNull();
+      // A 17:00 start ending at 17:30 is now valid too (Codex r1 P1 on
+      // #4663 — placementFitsShift used to require 2 hours of headroom past
+      // start regardless of the job's own end, rejecting 17:00 even though
+      // it ends well before the 18:00 close); a duration that would run
+      // past 18:00 is still rejected.
+      expect(validateBookingSlotGeometry({ startMin: 1020, duration: 30, config: CONFIG })).toBeNull();
+      expect(validateBookingSlotGeometry({ startMin: 1020, duration: 90, config: CONFIG })).not.toBeNull();
     } finally {
       if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
       else process.env.GATE_SCHEDULING_CAPACITY = gate;
@@ -138,15 +147,41 @@ describe('buildBookingAvailability — gap fan-out', () => {
     expect(findAvailableSlots).toHaveBeenCalledWith(expect.objectContaining({ serviceTypes: ['Pest Control', 'Tree & Shrub'] }));
   });
 
-  test('a gap whose earliest snap lands in lunch still offers its free afternoon hours', async () => {
+  test('a gap whose earliest snap lands in lunch still offers its free afternoon hours (GATE_BOOKING_LUNCH_BLOCK=true)', async () => {
     // Gap opens 11:10 (snaps to 12:00 = lunch) and runs long enough to hold
     // starts through 15:30. Pre-fan-out this day rendered EMPTY.
-    findAvailableSlots.mockResolvedValue({
-      slots: [gapSlot('11:10', { latest_start_min: 15 * 60 + 30 })],
-      total_feasible: 1,
-    });
-    const availability = await build();
-    expect(startTimes(availability)).toEqual(['13:00', '14:00', '15:00']);
+    // Lunch is only excluded while GATE_BOOKING_LUNCH_BLOCK is on (owner
+    // ruling 2026-09-23, unset by default) — this test exercises that ON
+    // path; the sibling test below covers the default (unset/off) grid.
+    const previous = process.env.GATE_BOOKING_LUNCH_BLOCK;
+    process.env.GATE_BOOKING_LUNCH_BLOCK = 'true';
+    try {
+      findAvailableSlots.mockResolvedValue({
+        slots: [gapSlot('11:10', { latest_start_min: 15 * 60 + 30 })],
+        total_feasible: 1,
+      });
+      const availability = await build();
+      expect(startTimes(availability)).toEqual(['13:00', '14:00', '15:00']);
+    } finally {
+      if (previous === undefined) delete process.env.GATE_BOOKING_LUNCH_BLOCK;
+      else process.env.GATE_BOOKING_LUNCH_BLOCK = previous;
+    }
+  });
+
+  test('the same lunch-snap gap offers noon too once GATE_BOOKING_LUNCH_BLOCK is unset (default)', async () => {
+    const previous = process.env.GATE_BOOKING_LUNCH_BLOCK;
+    delete process.env.GATE_BOOKING_LUNCH_BLOCK;
+    try {
+      findAvailableSlots.mockResolvedValue({
+        slots: [gapSlot('11:10', { latest_start_min: 15 * 60 + 30 })],
+        total_feasible: 1,
+      });
+      const availability = await build();
+      expect(startTimes(availability)).toEqual(['12:00', '13:00', '14:00', '15:00']);
+    } finally {
+      if (previous === undefined) delete process.env.GATE_BOOKING_LUNCH_BLOCK;
+      else process.env.GATE_BOOKING_LUNCH_BLOCK = previous;
+    }
   });
 
   test('an occupied hour rejects that start only, not the rest of the gap', async () => {
@@ -200,7 +235,41 @@ describe('buildBookingAvailability — gap fan-out', () => {
     });
     const availability = await build();
     // Keep the full day so a search result is also valid at confirmation.
-    expect(startTimes(availability)).toEqual(['08:00', '09:00', '10:00', '11:00', '13:00', '14:00', '15:00']);
+    // Includes 12:00: GATE_BOOKING_LUNCH_BLOCK is unset (default) in this
+    // suite, so noon is a normal offerable hour (owner ruling 2026-09-23).
+    expect(startTimes(availability)).toEqual(['08:00', '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00']);
+  });
+
+  test('an open day (expandOpenDays, no existing stops) fans out the full OPEN_DAY_WINDOWS grid, 09:00 through 17:00', async () => {
+    // Non-capacity path, a day with zero stops so far: this is the ONLY
+    // branch that reads OPEN_DAY_WINDOWS directly (scheduling/customer-windows.js
+    // CUSTOMER_HOUR_GRID) rather than fanning out a route gap.
+    findAvailableSlots.mockResolvedValue({
+      slots: [gapSlot('09:00', { stops_that_day: 0 })],
+      total_feasible: 1,
+    });
+    const availability = await build('', { expandOpenDays: true });
+    expect(startTimes(availability)).toEqual([
+      '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00',
+    ]);
+  });
+
+  test('the same open day drops noon when GATE_BOOKING_LUNCH_BLOCK is true', async () => {
+    const previous = process.env.GATE_BOOKING_LUNCH_BLOCK;
+    process.env.GATE_BOOKING_LUNCH_BLOCK = 'true';
+    try {
+      findAvailableSlots.mockResolvedValue({
+        slots: [gapSlot('09:00', { stops_that_day: 0 })],
+        total_feasible: 1,
+      });
+      const availability = await build('', { expandOpenDays: true });
+      expect(startTimes(availability)).toEqual([
+        '09:00', '10:00', '11:00', '13:00', '14:00', '15:00', '16:00', '17:00',
+      ]);
+    } finally {
+      if (previous === undefined) delete process.env.GATE_BOOKING_LUNCH_BLOCK;
+      else process.env.GATE_BOOKING_LUNCH_BLOCK = previous;
+    }
   });
 });
 
@@ -243,4 +312,83 @@ test.each(['self-booking', 'voice'])('a same-day %s move excludes itself from th
   } finally {
     delete process.env.GATE_SELF_BOOK_DAY_CAP;
   }
+});
+
+// Codex r3 P0 on #4663: capacity mode's shared find-time shift starts at
+// 08:00 for every caller, but the documented public/token offer grid is
+// 09:00-17:00. buildBookingAvailability's self-serve callers (this file's
+// /availability, /find-slots, capture-intent revalidation; reschedule-public.js;
+// reservice-public.js) must mark themselves customerFacing so capacity mode
+// never hands them an 08:00 candidate; the voice-agent callers (relay-tools.js,
+// relay-booking.js), which never set selfServeNotice, must not be narrowed.
+describe('buildBookingAvailability — customerFacing propagation to find-time', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    wireDayCapCounts([]);
+    listOccupiedWindows.mockResolvedValue([]);
+    findAvailableSlots.mockResolvedValue({ slots: [] });
+  });
+
+  test('a self-serve caller (selfServeNotice: true) marks the find-time call customerFacing', async () => {
+    await buildBookingAvailability({
+      lat: 27.4, lng: -82.4, duration: 60, rangeFrom: D, rangeTo: D,
+      config: CONFIG, today: new Date(), selfServeNotice: true,
+    });
+    expect(findAvailableSlots).toHaveBeenCalledWith(expect.objectContaining({ customerFacing: true }));
+  });
+
+  test('a voice-agent caller (no selfServeNotice) does not mark the find-time call customerFacing', async () => {
+    await buildBookingAvailability({
+      lat: 27.4, lng: -82.4, duration: 60, rangeFrom: D, rangeTo: D,
+      config: CONFIG, today: new Date(),
+    });
+    expect(findAvailableSlots).toHaveBeenCalledWith(expect.objectContaining({ customerFacing: false }));
+  });
+
+  // Codex r4 P0 on #4663: GATE_SCHEDULING_CAPACITY unset never reaches
+  // find-time's own customerFacing filter (findCapacitySlots), so an idle
+  // route's exact 08:00 route-derived candidate (zero modeled drive from
+  // the HQ opening anchor) survived addCandidate's dayStartMin(08:00) check
+  // and reached self-serve offer/commit surfaces. addCandidate now also
+  // runs customerWindowAdmits (the documented 09:00-17:00 grid) for
+  // self-serve callers, in BOTH capacity modes.
+  test('gate-off self-serve caller never offers the exact 08:00 route-derived candidate; a voice-style caller still can', async () => {
+    findAvailableSlots.mockResolvedValue({ slots: [gapSlot('08:00', { latest_start_min: 16 * 60 })] });
+    const base = { lat: 27.4, lng: -82.4, duration: 60, rangeFrom: D, rangeTo: D, config: CONFIG, today: new Date() };
+    const selfServe = await buildBookingAvailability({ ...base, selfServeNotice: true });
+    const voice = await buildBookingAvailability(base);
+    expect(startTimes(selfServe)).not.toContain('08:00');
+    expect(startTimes(selfServe)[0]).toBe('09:00');
+    expect(startTimes(voice)).toContain('08:00');
+  });
+
+  // Push-audit P1 on #4663: addCandidate's customerWindowAdmits() call
+  // defaults dayEndMinutes to currentDayEndMinutes() — scheduling/
+  // customer-windows.js's shared, 60s-TTL cache — which this file never
+  // had to warm before customerWindowAdmits existed (its own bounds always
+  // came straight from the freshly-loaded `config`). Prove
+  // buildBookingAvailability warms that cache itself, so a reconfigured
+  // booking_config.day_end narrower than the passed-in `config` still
+  // narrows the offer the moment this request reads it, not up to 60s
+  // later.
+  test('buildBookingAvailability warms the customer-windows cache with the LIVE booking_config row before generating candidates', async () => {
+    // CONFIG (passed in, used for addCandidate's OWN dayStartMin/dayEndMin
+    // check) keeps its normal 18:00 day_end — 17:00+60=18:00 fits it fine.
+    // The mocked booking_config ROW (what a fresh read would return) is a
+    // tighter 16:00 — only customerWindowAdmits()'s live-cache default
+    // reads that value. Without the refresh this test guards, the cache
+    // would never see the tighter row and currentDayEndMinutes() would
+    // fall back to the fixed 18:00 constant, wrongly admitting 17:00.
+    findAvailableSlots.mockResolvedValue({ slots: [gapSlot('17:00', { latest_start_min: 17 * 60 })] });
+    const bookingConfigBuilder = { first: jest.fn().mockResolvedValue({ day_end: '16:00:00', lunch_start: null, lunch_end: null }) };
+    db.mockImplementation((table) => {
+      if (table === 'booking_config') return bookingConfigBuilder;
+      throw new Error(`unexpected table ${table}`);
+    });
+    const result = await buildBookingAvailability({
+      lat: 27.4, lng: -82.4, duration: 60, rangeFrom: D, rangeTo: D, config: CONFIG, today: new Date(), selfServeNotice: true,
+    });
+    expect(bookingConfigBuilder.first).toHaveBeenCalled();
+    expect(startTimes(result)).not.toContain('17:00');
+  });
 });

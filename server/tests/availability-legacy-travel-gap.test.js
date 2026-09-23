@@ -135,8 +135,10 @@ test('gate on: an OUT-OF-ZONE stop across a real drive drops the touching window
   expect(starts).not.toContain('09:00');
   // 10:00–11:00 overlaps it outright.
   expect(starts).not.toContain('10:00');
-  // Afternoon windows are clear of it.
-  expect(starts).toContain('14:00');
+  // Clear of it once the travel gap ends — 12:00, since
+  // GATE_BOOKING_LUNCH_BLOCK is unset (default, owner ruling 2026-09-23):
+  // no artificial lunch occupancy pushes this later to 14:00 any more.
+  expect(starts).toContain('12:00');
 });
 
 test('gate on with a customerId and no estimate (AI assistant session): the customer pin, no estimates read', async () => {
@@ -148,7 +150,8 @@ test('gate on with a customerId and no estimate (AI assistant session): the cust
   expect(seen).not.toContain('estimates');
   expect(seen).toContain('customers');
   expect(startsOf(result)).not.toContain('09:00');
-  expect(startsOf(result)).toContain('14:00');
+  // See the previous test — 12:00 with the lunch gate unset (default).
+  expect(startsOf(result)).toContain('12:00');
 });
 
 test('gate on without an estimate: buffer-only pin, still mirrored; a failed range read serves unfiltered', async () => {
@@ -185,6 +188,30 @@ test('findGaps advances an hour at a time inside a rejected gap (r5 P2)', () => 
   expect(slots.map((g) => g.start / 60)).toEqual([12, 16]);
   // Without a predicate the legacy shape is unchanged: one slot per gap.
   expect(engine.findGaps(occupied, 8 * 60, 18 * 60, 60, 0).map((g) => g.start / 60)).toEqual([9, 16]);
+});
+
+test('GATE_BOOKING_LUNCH_BLOCK (owner ruling 2026-09-23): unset drops the artificial lunch occupancy, true restores it', async () => {
+  const previous = process.env.GATE_BOOKING_LUNCH_BLOCK;
+  try {
+    // Unset (default): no lunch entry is pushed onto `occupied`, so the whole
+    // day is ONE gap; findGaps still offers its first hour (09:00) AND — so
+    // removing the block never costs the assistant its afternoon choices —
+    // the first accepted start at/after the configured afternoon boundary
+    // (13:00, the old lunch_end). Noon is offerable where a gap opens onto
+    // it (availability-lunch-gate-coverage.test.js).
+    delete process.env.GATE_BOOKING_LUNCH_BLOCK;
+    let result = await engine.getAvailableSlots('Palmetto');
+    expect(startsOf(result)).toEqual(['09:00', '13:00']);
+
+    // 'true' restores the legacy split: a morning gap (09:00) and an
+    // afternoon gap starting after the lunch block + buffer (14:00).
+    process.env.GATE_BOOKING_LUNCH_BLOCK = 'true';
+    result = await engine.getAvailableSlots('Palmetto');
+    expect(startsOf(result)).toEqual(['09:00', '14:00']);
+  } finally {
+    if (previous === undefined) delete process.env.GATE_BOOKING_LUNCH_BLOCK;
+    else process.env.GATE_BOOKING_LUNCH_BLOCK = previous;
+  }
 });
 
 test('a linked booking copy cannot retain the old window after its visit stops occupying it', async () => {
