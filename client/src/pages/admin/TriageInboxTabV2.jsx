@@ -188,6 +188,9 @@ export function ConfirmEvidence({ payload }) {
     // record's street so the reviewer picks a number, not just "confirm".
     p.stated_street && { label: "Caller stated", value: p.stated_unit ? `${p.stated_street}, ${p.stated_unit}` : p.stated_street },
     p.stated_street && (p.on_file_address?.address_line1 || p.on_file_street) && { label: "On file", value: p.on_file_address?.address_line1 || p.on_file_street },
+    // Accept here means "the address on file is right" — adopting the
+    // caller's number is a record edit, after which the card closes itself.
+    p.stated_street && { label: "To resolve", value: "Accept = the address on file is correct. If the caller's number is right, edit the customer's address to it; this card then closes on its own." },
     p.address_as_heard && { label: "Heard", value: p.address_as_heard },
     p.address_recovered && { label: "Matched to", value: p.address_recovered },
     !p.address_recovered && addressCandidates.length > 0 && { label: "Did you mean", value: addressCandidates.join(" · ") },

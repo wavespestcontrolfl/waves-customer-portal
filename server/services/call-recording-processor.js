@@ -9768,6 +9768,11 @@ const CallRecordingProcessor = {
     // and absent from the estimate-send surface — so it read as a landlord
     // note, not a typo. This card replaces it for the same-street shape.
     let houseNumberConflictFiled = false;
+    // The booking hold follows the DISPUTE, not the card write: a
+    // corroborated conflict this pass could not persist (a thrown insert,
+    // a lost claim) still must not dispatch to the disputed number
+    // (pre-push audit P1). Set on detection; the card lands or not.
+    let houseNumberDisputed = false;
     try {
       const canCompare = !!(customerId && !createdCustomerFromCall && onFileAddress);
       // `detected` is the detector's own verdict; the guards below may
@@ -9823,6 +9828,7 @@ const CallRecordingProcessor = {
         && !!avNormalized.street_line_1;
       const retireStale = !customerId
         || (canCompare && avPositive && corroborated && (!detected || knownIndependentProperty));
+      if (houseConflict) houseNumberDisputed = true;
       if (houseConflict || retireStale) {
         const conflictCard = houseConflict
           ? buildTriageItem({
@@ -9950,6 +9956,7 @@ const CallRecordingProcessor = {
           .first('id');
         if (standing) {
           houseNumberConflictFiled = true;
+          houseNumberDisputed = true;
           if (!bridgeNeedsConfirmation.includes('on_file_house_number_conflict')) bridgeNeedsConfirmation.push('on_file_house_number_conflict');
           logger.info(`[call-proc] house-number conflict still open for ${maskSid(callSid)} — booking hold carried over`);
         }
@@ -13866,9 +13873,43 @@ const CallRecordingProcessor = {
                   // but holds the NEW side effects — a technician assignment
                   // and a follow-up visit at the disputed address — until
                   // the office confirms the number (pre-push audit P1).
-                  const reuseHeldForAddress = houseNumberConflictFiled;
+                  const reuseHeldForAddress = houseNumberDisputed;
                   if (reuseHeldForAddress) {
                     logger.warn(`[call-proc] reused booking for ${callSid} kept unassigned and without a follow-up: house number disputed (on_file_house_number_conflict)`);
+                  }
+                  // An AI booking this call already ASSIGNED is still
+                  // dispatchable to the disputed number: pull the
+                  // assignment (technician + route position) under the
+                  // same tech-day fence the assignment path holds, so the
+                  // visit sits in the unassigned pool until the office
+                  // confirms the address (codex r6 P1). A human's attached
+                  // booking is never touched.
+                  if (reuseHeldForAddress && !isAttachedManualBooking && existing.technician_id) {
+                    const dayRow = await trx('scheduled_services')
+                      .where({ id: existing.id })
+                      .first(trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+                    if (dayRow?.day) {
+                      const { lockTechDays } = require('./scheduling/tech-day-lock');
+                      await lockTechDays(trx, [
+                        { techId: existing.technician_id, date: dayRow.day },
+                        { techId: null, date: dayRow.day },
+                      ]);
+                    }
+                    const [unassigned] = await trx('scheduled_services')
+                      .where({ id: existing.id })
+                      .whereIn('status', ['pending', 'confirmed'])
+                      .update({ technician_id: null, route_order: null, updated_at: new Date() })
+                      .returning('*');
+                    if (unassigned) {
+                      primaryRow = unassigned;
+                      logger.warn(`[call-proc] reused booking ${existing.id} unassigned for ${callSid}: house number disputed`);
+                      if (trx?.executionPromise) {
+                        const seamRowId = existing.id;
+                        trx.executionPromise
+                          .then(() => require('./visit-groups').handleChildStopChanged(seamRowId))
+                          .catch((vgErr) => logger.warn(`[call-proc] visit-group seam failed for ${seamRowId}: ${vgErr.message}`));
+                      }
+                    }
                   }
                   if (!isAttachedManualBooking && !existing.technician_id && defaultTechnicianId && !reuseHeldForAddress) {
                     // Tech-day membership fence + route_order clear (uncapped
@@ -14017,7 +14058,7 @@ const CallRecordingProcessor = {
                 // confirmed appointment must not dispatch a technician to
                 // a number the office has been asked to confirm first —
                 // hold it like an ambiguous attach (codex #4666 r5 P1).
-                if (houseNumberConflictFiled) {
+                if (houseNumberDisputed) {
                   return { __held: { reason: 'on_file_house_number_conflict' } };
                 }
                 // findExistingCallAppointment only sees THIS call's rows —

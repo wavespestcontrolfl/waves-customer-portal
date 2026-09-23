@@ -1680,11 +1680,17 @@ function restatementStreetParts(line) {
 // Name + suffix-less name of an already house-less token list — a numbered
 // street ("42 St") keeps its number (pre-push audit P1: re-parsing the
 // remainder as a house number made 42 St and 43 St the same street).
+const DIRECTIONAL_TOKENS = new Set(Object.values(DIRECTIONAL_ALIASES));
 function streetNameParts(tokens) {
   const name = tokens.join(' ');
   const rest = [...tokens];
+  // The suffix may sit BEFORE a trailing post-directional ("Main St N" vs
+  // the suffixless "Main N") — strip the recognized suffix ahead of an
+  // optional directional run (codex r6 P2).
+  const tail = [];
+  while (rest.length > 1 && DIRECTIONAL_TOKENS.has(rest[rest.length - 1])) tail.unshift(rest.pop());
   if (STREET_SUFFIX_WORDS.has(rest[rest.length - 1])) rest.pop();
-  return { name, withoutSuffix: rest.join(' ') };
+  return { name, withoutSuffix: [...rest, ...tail].join(' ') };
 }
 
 function restatesOnFileAddress(sa, knownCustomer) {
@@ -1786,10 +1792,6 @@ function houseAndName(line) {
   return { house: m[1].toLowerCase(), ...streetNameParts(tokens) };
 }
 
-// The detector's own street identity ("<house> <aliased name>") for a
-// single line, so a resolver judging "does the record now carry the stated
-// premise" equates exactly the spellings the detector equates (N / North,
-// St / Street) — codex #4666 P2. '' when the line carries no house token.
 // Do two street lines name the SAME house on the same street by the
 // detector's own rules: equal house token, and the street names equal with
 // or without a trailing suffix ("1250 Main" == "1250 Main St") — codex
@@ -1799,11 +1801,6 @@ function sameHouseNumberStreet(a, b) {
   const y = houseAndName(splitStreetLineUnit(String(b || '')).street || String(b || ''));
   if (!x.house || !y.house || x.house !== y.house || !x.name || !y.name) return false;
   return [y.name, y.withoutSuffix].includes(x.name) || [x.name, x.withoutSuffix].includes(y.name);
-}
-
-function houseNumberStreetKey(line) {
-  const { house, name } = houseAndName(splitStreetLineUnit(String(line || '')).street || String(line || ''));
-  return house && name ? `${house} ${name}` : '';
 }
 
 function onFileHouseNumberConflict({ addressValidation = null, onFileAddress = null } = {}) {
@@ -1861,7 +1858,6 @@ function dispatchesToOnFileAddress(extraction, opts = {}) {
 
 module.exports = {
   onFileHouseNumberConflict,
-  houseNumberStreetKey,
   sameHouseNumberStreet,
   SCHEDULING_CHANGE_REVIEW_FLAGS,
   isExplicitlyNonOwner,

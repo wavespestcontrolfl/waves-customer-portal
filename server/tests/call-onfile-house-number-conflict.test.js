@@ -14,7 +14,7 @@ jest.mock('../config/twilio-numbers', () => ({
   getLeadSourceFromNumber: jest.fn(() => ({ source: 'phone_call' })),
 }));
 
-const { onFileHouseNumberConflict, houseNumberStreetKey, sameHouseNumberStreet } = require('../services/call-triage-flags');
+const { onFileHouseNumberConflict, sameHouseNumberStreet } = require('../services/call-triage-flags');
 const { buildTriageItem } = require('../services/call-routing-gates');
 const { classifyTriageItem, RULE_NOTES } = require('../services/triage-auto-resolve');
 
@@ -58,6 +58,12 @@ describe('onFileHouseNumberConflict', () => {
     expect(onFileHouseNumberConflict({ addressValidation: av('1250 42 St'), onFileAddress: { ...ON_FILE, address_line1: '1260 43 St' } })).toBeNull();
     expect(onFileHouseNumberConflict({ addressValidation: av('1250 42nd St'), onFileAddress: { ...ON_FILE, address_line1: '1260 42nd Street' } })?.stated_house_number).toBe('1250');
     expect(onFileHouseNumberConflict({ addressValidation: av('1250 42 St'), onFileAddress: { ...ON_FILE, address_line1: '1260 42 St' } })?.on_file_house_number).toBe('1260');
+  });
+
+  test('a suffix ahead of a post-directional still equates the suffixless spelling', () => {
+    expect(onFileHouseNumberConflict({ addressValidation: av('1250 Main St N'), onFileAddress: { ...ON_FILE, address_line1: '1260 Main N' } })?.stated_house_number).toBe('1250');
+    expect(sameHouseNumberStreet('1250 Main St N', '1250 Main N')).toBe(true);
+    expect(sameHouseNumberStreet('1250 Main St N', '1250 Main St S')).toBe(false);
   });
 
   test('same house number → nothing to confirm', () => {
@@ -168,8 +174,8 @@ describe('triage auto-resolve: house_number_adopted', () => {
   });
 
   test('directional and suffix spellings resolve exactly as they were detected', () => {
-    expect(houseNumberStreetKey('1250 North Main Street')).toBe(houseNumberStreetKey('1250 N Main St'));
-    expect(houseNumberStreetKey('Main St')).toBe('');
+    expect(sameHouseNumberStreet('1250 North Main Street', '1250 N Main St')).toBe(true);
+    expect(sameHouseNumberStreet('Main St', '1250 Main St')).toBe(false);
     expect(classifyTriageItem(item({
       customer_address_line1: '1250 N Main St', customer_city: 'Parrish', customer_zip: '34219',
       payload: { stated_house_number: '1250', stated_street: '1250 North Main Street', stated_city: 'Parrish', stated_zip: '34219', scheduling_status: null },
