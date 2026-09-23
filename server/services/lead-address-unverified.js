@@ -117,7 +117,11 @@ function samePremiseDisplay(a, b) {
     const parts = String(text || '').split(',').map((part) => part.trim()).filter(Boolean);
     const street = splitStreetLineUnit(parts[0] || '').street || parts[0] || '';
     const city = parts.slice(1).find((part) => !UNIT_SEGMENT.test(part) && !STATE_ZIP_SEGMENT.test(part)) || '';
-    return { street: lineKey(street), city, zip: zip5(text) };
+    // ZIP from the state/ZIP (or bare ZIP) segment only — the first five
+    // digits of the whole string may be a five-digit house number
+    // (pre-push audit P1).
+    const tail = parts.slice(1).find((part) => STATE_ZIP_SEGMENT.test(part) || /^\d{5}(?:-\d{4})?$/.test(part)) || '';
+    return { street: lineKey(street), city, zip: zip5(tail) };
   };
   const x = parse(a);
   const y = parse(b);

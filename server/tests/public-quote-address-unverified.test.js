@@ -151,5 +151,8 @@ describe('samePremiseDisplay', () => {
     expect(samePremiseDisplay('1260 Example St, Parrish, FL 34219', '1260 Example St, Bradenton, FL 34219')).toBe(false);
     expect(samePremiseDisplay('1260 Example St, Parrish, FL 34219', '1260 Example St, Parrish, FL 34221')).toBe(false);
     expect(samePremiseDisplay('', '1260 Example St, Parrish, FL 34219')).toBe(false);
+    // A five-digit house number is not the ZIP.
+    expect(samePremiseDisplay('12345 Example St, Parrish, FL 34219', '12345 Example St, Parrish, FL 34221')).toBe(false);
+    expect(samePremiseDisplay('12345 Example St, Parrish, FL 34219', '12345 Example St, Parrish, FL 34219-1234')).toBe(true);
   });
 });

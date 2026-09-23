@@ -3043,25 +3043,33 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // visitor's verified ownership — the typed email, the same proof
         // the lead UPDATE uses — plus the same street line, not by lead id
         // alone (pre-push audit P1). Own publications only.
-        const withdrawn = await db('estimates')
+        // Candidates: this lead's own, or — ownership without a token —
+        // BOTH typed contact factors (the pair the same-phone draft refresh
+        // trusts); then the audited PREMISE is matched in code (street
+        // with any unit stripped, plus the complete locality), never an
+        // email plus a street with a mistyped locality (pre-push audit
+        // P0) and never a display string a unit changes (pre-push audit P1).
+        const candidates = await db('estimates')
           .where({ source: 'quote_wizard' })
           .whereIn('status', ['sent', 'viewed'])
           .whereNull('archived_at')
           .whereRaw("estimate_data->'websiteSelfService' IS NOT NULL")
           .where((q) => q
             .whereRaw("estimate_data->>'lead_id' = ?", [String(lead.id)])
-            // Ownership without a token: BOTH typed contact factors (the
-            // same pair the same-phone draft refresh trusts) AND the
-            // complete judged address (street, city, ZIP) — never an email
-            // plus a street with a mistyped locality (pre-push audit P0).
             .orWhere((own) => own
               .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
-              .where('customer_phone', contactPhone)
-              .whereRaw("LOWER(regexp_replace(address, '[^a-z0-9]+', ' ', 'gi')) = ?", [
-                String(quoteFullAddress || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(),
-              ])))
-          .update({ archived_at: new Date(), updated_at: new Date() })
-          .returning('id');
+              .where('customer_phone', contactPhone)))
+          .select('id', 'address', db.raw("estimate_data->>'lead_id' as lead_id"));
+        const toWithdraw = candidates
+          .filter((row) => String(row.lead_id || '') === String(lead.id) || samePremiseDisplay(row.address, quoteFullAddress))
+          .map((row) => row.id);
+        const withdrawn = toWithdraw.length
+          ? await db('estimates')
+            .whereIn('id', toWithdraw)
+            .whereNull('archived_at')
+            .update({ archived_at: new Date(), updated_at: new Date() })
+            .returning('id')
+          : [];
         if (withdrawn.length) {
           const { recordAuditEvent } = require('../services/audit-log');
           for (const row of withdrawn) {
