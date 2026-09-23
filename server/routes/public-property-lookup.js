@@ -3,6 +3,7 @@ const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { deriveAddressUnverified } = require('../services/lead-address-unverified');
 const { performPropertyLookup, VACANT_SQFT_FLAG_COPY } = require('./property-lookup-v2');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
 const { normalizeLeadAddress, formatAddress } = require('../utils/address-normalizer');
@@ -434,6 +435,11 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
         landing_url: attr?.landing_url || null,
         address: normalizedAddress,
         ...(additionalProperties.length ? { additional_properties: additionalProperties } : {}),
+        // County roll could not vouch for the typed house number (see
+        // lead-address-unverified). Derived from the SERVER result, so an
+        // abandoned row already carries the callback ask; /calculate
+        // re-derives it (or recovers this one when its cache read misses).
+        address_unverified: deriveAddressUnverified(result.enriched),
       };
       await db('leads').where({ id: lead.id }).update({
         extracted_data: attachedToExistingLead

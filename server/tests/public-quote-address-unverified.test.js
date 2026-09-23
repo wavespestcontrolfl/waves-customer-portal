@@ -5,6 +5,7 @@
 // the flag). Pins the pure derivation; the route stamps it on the lead's
 // extracted_data as address_unverified.
 const { _internals } = require('../routes/public-quote');
+const { snapshotCoversAddress } = require('../services/lead-address-unverified');
 
 const { deriveAddressUnverified } = _internals;
 
@@ -55,5 +56,21 @@ describe('deriveAddressUnverified', () => {
   test('the flag stands on its own when the audit object is missing', () => {
     const r = deriveAddressUnverified({ fieldVerifyFlags: [ADDRESS_FLAG] });
     expect(r).toMatchObject({ reason: ADDRESS_FLAG.reason, county: null, house_number: null, nearest_numbers: [] });
+  });
+});
+
+describe('snapshotCoversAddress', () => {
+  const snapshot = { address: { line1: '1260 Example St', city: 'Parrish', state: 'FL', zip: '34219' } };
+
+  test('same street line (spelling aside) and ZIP → the lookup-stage flag carries over', () => {
+    expect(snapshotCoversAddress(snapshot, { line1: '1260 EXAMPLE ST.', zip: '34219-1234' })).toBe(true);
+    expect(snapshotCoversAddress(snapshot, { line1: '1260 Example St', zip: '' })).toBe(true);
+  });
+
+  test('a changed street or ZIP between the two stages does not carry a flag over', () => {
+    expect(snapshotCoversAddress(snapshot, { line1: '1250 Example St', zip: '34219' })).toBe(false);
+    expect(snapshotCoversAddress(snapshot, { line1: '1260 Example St', zip: '34221' })).toBe(false);
+    expect(snapshotCoversAddress({}, { line1: '1260 Example St', zip: '34219' })).toBe(false);
+    expect(snapshotCoversAddress(snapshot, null)).toBe(false);
   });
 });

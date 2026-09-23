@@ -1043,34 +1043,7 @@ const quoteLimiter = rateLimit({
   message: { error: 'Too many quote requests. Please try again later.' },
 });
 
-// The lookup's county-roll house-number audit, as a lead-level flag. The
-// address panel already raises a HIGH `address` verify flag when the county
-// roll cannot match the typed house number (or the geocoder snapped it to a
-// neighbour), but the quote intake never read it: live 2026-09-14, a typo'd
-// house number that does not exist on an established street became the lead
-// AND the customer address, and the estimate went out to it. Only the
-// server-trusted profile is consulted (never the client's `enriched`), and
-// only the audit's own numbers ride along — the nearest numbers are context
-// for the callback, not corrections. Returns null when the roll vouched for
-// the number or never answered (a GIS outage yields no audit at all).
-function deriveAddressUnverified(enriched) {
-  const flags = Array.isArray(enriched?.fieldVerifyFlags) ? enriched.fieldVerifyFlags : [];
-  const flag = flags.find((f) => f && f.field === 'address' && f.priority === 'HIGH' && f.reason);
-  if (!flag) return null;
-  const audit = enriched?.addressAudit && typeof enriched.addressAudit === 'object' ? enriched.addressAudit : {};
-  const nearest = Array.isArray(audit.nearestNumbers)
-    ? audit.nearestNumbers.map(String).filter(Boolean).slice(0, 5)
-    : [];
-  return {
-    source: 'county_roll',
-    reason: String(flag.reason).slice(0, 600),
-    county: audit.county || null,
-    house_number: audit.houseNumber != null ? String(audit.houseNumber) : null,
-    street_exists: typeof audit.streetExists === 'boolean' ? audit.streetExists : null,
-    nearest_numbers: nearest,
-    flagged_at: new Date().toISOString(),
-  };
-}
+const { deriveAddressUnverified, snapshotCoversAddress } = require('../services/lead-address-unverified');
 
 router.post('/calculate', quoteLimiter, async (req, res) => {
   try {
@@ -1214,7 +1187,29 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // County roll could not vouch for the typed house number — carried on
     // the lead for the callback (see deriveAddressUnverified). Never
     // changes the price: the profile the engine priced from is unchanged.
-    const addressUnverified = trustedProfileFound ? deriveAddressUnverified(trustedTurf) : null;
+    // The cache-only re-read misses when the lookup found an audit but no
+    // record to cache (the missing-house-number case itself); the lookup
+    // stage persisted its trusted profile on the visitor's own lead row, so
+    // recover the flag from THAT snapshot — ownership-predicated (id +
+    // typed email, the same proof the UPDATE below uses) and only when the
+    // snapshot is for this address (codex r1 P1).
+    let addressUnverified = trustedProfileFound ? deriveAddressUnverified(trustedTurf) : null;
+    if (!trustedProfileFound && leadId && contactEmail) {
+      try {
+        const own = await db('leads')
+          .where({ id: leadId })
+          .whereNull('deleted_at')
+          .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()])
+          .first('extracted_data');
+        const snapshot = typeof own?.extracted_data === 'string' ? JSON.parse(own.extracted_data) : own?.extracted_data;
+        if (snapshot && snapshotCoversAddress(snapshot, normalizedAddress)) {
+          addressUnverified = deriveAddressUnverified(snapshot.enriched)
+            || (snapshot.address_unverified && typeof snapshot.address_unverified === 'object' ? snapshot.address_unverified : null);
+        }
+      } catch (snapErr) {
+        logger.warn(`[public-quote] lookup-stage snapshot re-read failed — address flag not recovered: ${snapErr.code || snapErr.name || 'error'}`);
+      }
+    }
     if (addressUnverified) {
       logger.info(`[public-quote] county roll could not match the typed house number (${addressUnverified.county || 'county unknown'}) — lead flagged address_unverified`);
     }
@@ -1880,7 +1875,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       landing_url: attr?.landing_url || null,
       address: normalizedAddress,
       ...(additionalProperties.length ? { additional_properties: additionalProperties } : {}),
-      ...(addressUnverified ? { address_unverified: addressUnverified } : {}),
+      // Always present: on the merge path (a lead the wizard attached to)
+      // an omitted key would keep a stale flag from an earlier address —
+      // null clears it once a clean lookup prices the corrected address
+      // (codex r1 P2).
+      address_unverified: addressUnverified || null,
     });
 
     // If the property-lookup step already captured a lead row, update it
