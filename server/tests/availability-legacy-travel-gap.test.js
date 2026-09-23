@@ -24,6 +24,7 @@ const db = require('../models/db');
 const { listOccupiedWindows } = require('../services/scheduling/occupancy');
 const engine = require('../services/availability');
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const { clearExpectedServiceMinutesCache } = require('../services/scheduling/expected-service-minutes');
 
 const ZONE = { id: 'zone-a', zone_name: 'Palmetto', cities: ['Palmetto'] };
 const CONFIG = {
@@ -86,6 +87,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   for (const k of ENV_KEYS) delete process.env[k];
   seen = [];
+  clearExpectedServiceMinutesCache();
   db.mockReset();
   const t = tables();
   db.mockImplementation((table) => {
@@ -122,8 +124,18 @@ test('gate on: an OUT-OF-ZONE stop across a real drive drops the touching window
   expect(starts).not.toContain('09:00');
   // 10:00–11:00 overlaps it outright.
   expect(starts).not.toContain('10:00');
-  // Afternoon windows are clear of it.
-  expect(starts).toContain('14:00');
+  // Codex r3 P1: the far stop is now merged into the SAME packing geometry
+  // findGaps uses (it is a real neighbour on the one tech-blind route, just
+  // in another zone) — the afternoon is no longer offered either, exactly
+  // like a zone-local stop immediately followed by lunch already behaves
+  // (see 'findGaps packed-ends: … a stop before lunch anchors the hour
+  // after it, but the gap after lunch gets nothing from the lunch side'
+  // below): the only real stop that day is mid-morning, lunch resets the
+  // packing anchor right after it, and nothing borders a real stop again
+  // before day-close. Offering 14:00 anyway was the bug this finding fixed
+  // — an unpacked, hole-making slot the rest of this PR's picked-ends rule
+  // would never allow for a zone-local stop in the same position.
+  expect(starts).toEqual([]);
 });
 
 test('gate on with a customerId and no estimate (AI assistant session): the customer pin, no estimates read', async () => {
@@ -135,7 +147,8 @@ test('gate on with a customerId and no estimate (AI assistant session): the cust
   expect(seen).not.toContain('estimates');
   expect(seen).toContain('customers');
   expect(startsOf(result)).not.toContain('09:00');
-  expect(startsOf(result)).toContain('14:00');
+  // Codex r3 P1 — see the identical comment above.
+  expect(startsOf(result)).toEqual([]);
 });
 
 test('gate on without an estimate: buffer-only pin, still mirrored; a failed range read serves unfiltered', async () => {
@@ -150,6 +163,75 @@ test('gate on without an estimate: buffer-only pin, still mirrored; a failed ran
   listOccupiedWindows.mockRejectedValue(new Error('boom'));
   result = await engine.getAvailableSlots('Palmetto', 'est-1');
   expect(startsOf(result)).toContain('09:00');
+});
+
+describe('global mirror stops anchor legacy packing (Codex #4664 r3 P1)', () => {
+  test('a day whose ONLY committed visit is out-of-zone packs against it instead of offering a hole-making early hour', async () => {
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    // Bradenton 16:00–17:00 — not in the Palmetto zone's city list (no
+    // coords, so this isolates the packing-geometry fix from any drive-time
+    // arithmetic). scheduledInZone stays empty; only the global mirror
+    // knows about this stop.
+    listOccupiedWindows.mockResolvedValue([
+      { id: 'far', date: DATE, startMin: 960, endMin: 1020, lat: null, lng: null },
+    ]);
+    const result = await engine.getAvailableSlots('Palmetto', 'est-1');
+    const starts = startsOf(result);
+    // Before the fix, hasRealStops read this day as empty (occupied was
+    // built from scheduledInZone alone) and the legacy earliest-per-gap
+    // walk offered 9:00 immediately — a hole-making slot nowhere near the
+    // day's only real (out-of-zone) stop. The fix merges that stop into the
+    // same geometry findGaps uses, so the day is correctly packed instead:
+    // only the latest hour that still clears the buffer before 16:00.
+    expect(starts).not.toContain('09:00');
+    expect(starts).toEqual(['14:00']);
+  });
+
+  test('legacy callers (gate off) never read the mirror and keep the zone-only geometry', async () => {
+    const result = await engine.getAvailableSlots('Palmetto', 'est-1');
+    expect(listOccupiedWindows).not.toHaveBeenCalled();
+    expect(startsOf(result)).toContain('09:00');
+  });
+});
+
+describe('the candidate\'s own expected-minutes credit (Codex #4664 r3 P2)', () => {
+  // Offer/commit parity (owner ruling 2026-09-23): the offer-side mirror
+  // must resolve the SAME candidate credit confirmBooking's commit probe
+  // does (see availability-zone-null-confirm.test.js's "candidate
+  // expected-minutes credit" suite, which proves the numeric effect at
+  // commit — findConflictingVisits there is a plain jest.fn(), so the exact
+  // `travel.expectedMinutes` argument is directly assertable). Here we
+  // prove the offer side resolves and threads the SAME identity: the
+  // catalog is read only when the gate is on and an estimate is present,
+  // and an empty day's output is unaffected either way (this engine's own
+  // hard-coded flat buffer trims every REAL stop's gap boundary before the
+  // credit-aware accept-callback ever runs, exactly as it always has for a
+  // zone-local stop — so a merged stop's credit is not independently
+  // observable through this legacy engine's slot output; the formula itself
+  // is covered above and in expected-service-minutes.test.js).
+  const QUARTERLY_PEST_CATALOG = [
+    { service_key: 'quarterly_pest', name: 'General Pest Control', min_duration_minutes: 30, max_duration_minutes: 60 },
+  ];
+
+  test('gate on + an estimate: reads the catalog for the candidate\'s own credit', async () => {
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    const t = tables();
+    t.services = () => arrayChain(QUARTERLY_PEST_CATALOG);
+    db.mockImplementation((table) => { seen.push(table); return t[table](); });
+    listOccupiedWindows.mockResolvedValue([]); // empty day — isolates the wiring from the packing geometry
+    const result = await engine.getAvailableSlots('Palmetto', 'est-1');
+    expect(seen).toContain('services');
+    expect(startsOf(result)).toContain('09:00');
+  });
+
+  test('gate off: never reads the catalog for the candidate', async () => {
+    const t = tables();
+    t.services = () => arrayChain(QUARTERLY_PEST_CATALOG);
+    db.mockImplementation((table) => { seen.push(table); return t[table](); });
+    const result = await engine.getAvailableSlots('Palmetto', 'est-1');
+    expect(seen).not.toContain('services');
+    expect(startsOf(result)).toContain('09:00');
+  });
 });
 
 test('findGaps applies the accept predicate BEFORE its four-slot cap (r4 P2)', () => {

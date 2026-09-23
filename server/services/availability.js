@@ -13,6 +13,7 @@ const { etParts, etDateString, addETDays, parseETDateTime } = require('../utils/
 const { generateConfirmationCode } = require('../utils/slot-offer-token');
 const { findConflictingVisits, acquireOccupancyLock, listOccupiedWindows } = require('./scheduling/occupancy');
 const { travelGapEnabled, violatesTravelGap } = require('./scheduling/travel-gap');
+const { ensureCatalogLoaded, expectedMinutesSync, expectedServiceMinutes } = require('./scheduling/expected-service-minutes');
 
 function bookingError(message, code, statusCode = 409) {
   return Object.assign(new Error(message), { code, statusCode, isOperational: true });
@@ -163,15 +164,27 @@ class AvailabilityEngine {
         }
         let pin = { lat: null, lng: null };
         let pinCustomerId = opts.customerId || null;
-        if (!pinCustomerId && estimateId) {
-          const est = await db('estimates').where('id', estimateId).first('customer_id');
-          pinCustomerId = est?.customer_id || null;
+        // The candidate's own service identity, for its expected-minutes
+        // padding credit (owner ruling 2026-09-23) — this legacy engine
+        // previously passed the mirror/commit probes only timing and
+        // coordinates for the candidate, so paddingMinutesOf(candidate)
+        // always read zero and a short job in a wide window lost its
+        // legitimate credit (Codex r3 P1). Same estimate-derived identity
+        // confirmBooking resolves at commit; no estimate/no match falls
+        // back to the window length (zero padding, legacy gap).
+        let candidateServiceType = 'General Pest Control';
+        if (estimateId) {
+          const est = await db('estimates').where('id', estimateId).first('customer_id', 'services', 'service_type');
+          if (!pinCustomerId) pinCustomerId = est?.customer_id || null;
+          candidateServiceType = est?.services?.[0] || est?.service_type || candidateServiceType;
         }
         if (pinCustomerId) {
           const cust = await db('customers').where('id', pinCustomerId).first('latitude', 'longitude');
           pin = { lat: cust?.latitude ?? null, lng: cust?.longitude ?? null };
         }
-        travelMirror = { byDate, pin };
+        await ensureCatalogLoaded(db);
+        const candidateExpectedMinutes = expectedMinutesSync({ serviceType: candidateServiceType, windowMinutes: slotDuration });
+        travelMirror = { byDate, pin, expectedMinutes: candidateExpectedMinutes };
       } catch (mirrorErr) {
         logger.warn(`[availability] travel-gap mirror unavailable — serving unfiltered slots: ${mirrorErr.message}`);
         travelMirror = null;
@@ -236,6 +249,7 @@ class AvailabilityEngine {
 
       // Build occupied slots from scheduled_services
       const occupied = scheduledInZone.map(s => ({
+        id: s.id,
         start: this.timeToMin(s.window_start),
         end: this.timeToMin(s.window_end || this.addMinutes(s.window_start, s.estimated_duration_minutes || 60)),
       }));
@@ -265,6 +279,26 @@ class AvailabilityEngine {
         occupied.push({ start: this.timeToMin(b.start_time), end: this.timeToMin(b.end_time) });
       });
 
+      // Global mirror stops anchor the packing too (Codex r3 P1): this
+      // engine is TECH-BLIND like travel-gap.js — every stop on a date is on
+      // the SAME route regardless of which zone its customer's city falls
+      // in — but `occupied` above is built ONLY from `scheduledInZone`
+      // (city-matched). A day whose only committed visit belongs to another
+      // zone had `occupied` empty here even though travelMirror.byDate
+      // carried it, so `hasRealStops` read the day as empty and every hour
+      // was offered instead of packing against that real stop. Merge the
+      // mirror's stops for this date into the same packing geometry,
+      // deduplicating rows already added above by id.
+      if (travelMirror) {
+        const knownIds = new Set(occupied.map((o) => o.id).filter((id) => id != null).map(String));
+        for (const stop of travelMirror.byDate.get(dateStr) || []) {
+          if (stop.id != null && knownIds.has(String(stop.id))) continue;
+          if (!Number.isFinite(stop.startMin) || !Number.isFinite(stop.endMin)) continue;
+          occupied.push({ id: stop.id, start: stop.startMin, end: stop.endMin });
+          if (stop.id != null) knownIds.add(String(stop.id));
+        }
+      }
+
       // Packed-ends (owner bug report 2026-09-23): a day with at least one
       // REAL committed stop (not counting the lunch block added next)
       // restricts each gap to its packed end(s) against that stop, instead
@@ -284,7 +318,14 @@ class AvailabilityEngine {
       // valid gap is not hidden behind four rejected ones (r4 P2).
       const slots = this.findGaps(occupied, dayStart, dayEnd, slotDuration, buffer, travelMirror
         ? (g) => !violatesTravelGap(
-          { startMin: g.start, endMin: g.end, ...travelMirror.pin },
+          {
+            startMin: g.start, endMin: g.end, ...travelMirror.pin,
+            // The candidate's own expected-minutes credit (see above) — the
+            // commit probe's findConflictingVisits `travel` option resolves
+            // the same padding, so a candidate the mirror rejects here is
+            // one the commit would also reject (offer/commit parity).
+            expectedMinutes: travelMirror.expectedMinutes,
+          },
           travelMirror.byDate.get(dateStr) || [],
         )
         : null, hasRealStops);
@@ -652,6 +693,14 @@ class AvailabilityEngine {
       // was taken at the TOP of the transaction (rung 1 of the global
       // order) — the rebooker takes neither the zone nor the day-cap lock,
       // so that date lock is the only rung shared with it.
+      // The candidate's own expected-minutes credit (owner ruling
+      // 2026-09-23) — the SAME identity/window getAvailableSlots' offer-side
+      // mirror resolved (Codex r3 P1); passing only {lat,lng} here fell back
+      // to zero candidate padding, so a short job's legitimate credit
+      // dropped between offer and commit. Gate off: no catalog read.
+      const candidateExpectedMinutes = travelGapEnabled()
+        ? await expectedServiceMinutes(trx, { serviceType, windowMinutes: slotDuration })
+        : null;
       const occupancyClash = await findConflictingVisits({
         db: trx,
         includeInterviews: true,
@@ -662,7 +711,9 @@ class AvailabilityEngine {
         // Travel gap (GATE_SLOT_TRAVEL_GAP): the customer's pin from the
         // fenced re-read; the zone engine's offers are city-only, so this
         // is the only drive check.
-        travel: bookingPin,
+        travel: Number.isFinite(candidateExpectedMinutes)
+          ? { ...bookingPin, expectedMinutes: candidateExpectedMinutes }
+          : bookingPin,
       });
       if (occupancyClash.length) {
         throw bookingError('That time slot was just taken — please pick another', 'SLOT_TAKEN');

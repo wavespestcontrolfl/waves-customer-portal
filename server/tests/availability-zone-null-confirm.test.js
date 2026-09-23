@@ -298,3 +298,69 @@ describe('confirmBooking — zone-null occupancy fallback', () => {
     });
   });
 });
+
+describe('confirmBooking — candidate expected-minutes credit (Codex #4664 r3 P2)', () => {
+  // Offer/commit parity (owner ruling 2026-09-23): confirmBooking previously
+  // passed findConflictingVisits only {lat, lng} for the candidate, so its
+  // own padding always read zero regardless of the estimate's service. The
+  // commit probe must resolve and thread the SAME credit
+  // getAvailableSlots' offer-side mirror resolves.
+  const ENV_KEYS = ['GATE_SLOT_TRAVEL_GAP'];
+  const saved = {};
+  beforeAll(() => { for (const k of ENV_KEYS) saved[k] = process.env[k]; });
+  afterAll(() => {
+    for (const k of ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  const CATALOG = [
+    { service_key: 'general_pest', name: 'General Pest Control', min_duration_minutes: 30, max_duration_minutes: 50 },
+  ];
+
+  function wireConfirmWithCatalog(catalog) {
+    const wired = wireConfirm({ zones: [] });
+    const baseImpl = wired.trx.getMockImplementation();
+    wired.trx.mockImplementation((table) => {
+      if (table === 'services') return chain({ select: jest.fn().mockResolvedValue(catalog) });
+      return baseImpl(table);
+    });
+    return wired;
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    findConflictingVisits.mockResolvedValue([]);
+    delete process.env.GATE_SLOT_TRAVEL_GAP;
+    require('../services/scheduling/expected-service-minutes').clearExpectedServiceMinutesCache();
+  });
+
+  test('gate on: resolves the estimate-less "General Pest Control" default against the catalog and threads it through', async () => {
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    const { trx } = wireConfirmWithCatalog(CATALOG);
+    await Availability.confirmBooking(null, 'cust-1', DATE, '09:00', null);
+    // midpoint(30, 50) = 40, well under the 60-minute default slot window —
+    // a real credit, not the window length the bug always fell back to.
+    expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
+      travel: { lat: null, lng: null, expectedMinutes: 40 },
+    }));
+  });
+
+  test('gate on, no catalog match: falls back to the window length (zero padding), same shape as the gate-off pin', async () => {
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    const { trx } = wireConfirmWithCatalog([]);
+    await Availability.confirmBooking(null, 'cust-1', DATE, '09:00', null);
+    expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
+      travel: { lat: null, lng: null, expectedMinutes: 60 },
+    }));
+  });
+
+  test('gate off: travel stays the plain {lat, lng} pin — byte-identical, no catalog read', async () => {
+    const { trx } = wireConfirmWithCatalog(CATALOG);
+    await Availability.confirmBooking(null, 'cust-1', DATE, '09:00', null);
+    expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
+      travel: { lat: null, lng: null },
+    }));
+  });
+});
