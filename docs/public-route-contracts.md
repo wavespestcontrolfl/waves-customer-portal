@@ -896,13 +896,16 @@ booking link minted by an EARLIER clean run over the same draft dies on
 its live recheck at `/api/booking/confirm` once the address is flagged,
 and a staff revision of the draft preserves the marker. A website estimate
 an earlier run already PUBLISHED for the same lead — or, since a repeat
-lookup mints a new lead row, for the same typed email AND the same street
-line — is archived on the flagged run
+lookup mints a new lead row, for the same typed email AND phone AND the
+complete judged address (street, city, ZIP) — is archived on the flagged
+run
 (`website_quote_withdrawn_address_unverified` audit event), so its old
 token neither renders nor accepts. A roll that never answered (GIS
 outage) is not a fresh flag — but it does not clear one either: the prior
 server-written flag for the same address carries forward until the roll
-answers clean.
+answers clean, and an existing draft's own `addressUnverified` marker is
+carried over under its row lock (handoff withheld) when the run got no
+roll answer and the draft's address is unchanged.
 Request shape: either `services` keyed by the engine
 keys in `PUBLIC_QUOTE_SERVICE_KEYS` (`routes/public-quote.js`) or a catalog
 `serviceKey` / `service_key` from the `/api/public/services/menu` payload,

@@ -1043,7 +1043,7 @@ const quoteLimiter = rateLimit({
   message: { error: 'Too many quote requests. Please try again later.' },
 });
 
-const { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified, flagCoversAddress } = require('../services/lead-address-unverified');
+const { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified, flagCoversAddress, countyRollAnswered } = require('../services/lead-address-unverified');
 
 router.post('/calculate', quoteLimiter, async (req, res) => {
   try {
@@ -1222,6 +1222,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       profileFound: trustedProfileFound,
       prior: priorAddressUnverified,
     });
+    // Did the county roll answer on THIS run? Only an answer may clear a
+    // marker an existing draft already carries (see the draft refresh).
+    const rollAnsweredThisRun = trustedProfileFound && countyRollAnswered(trustedTurf);
+    // Set when an existing draft's own addressUnverified marker was carried
+    // over under its row lock (a repeat lookup minted a NEW lead, so the
+    // lead-level recovery above could not see it) — the handoff is then
+    // withheld exactly as for a fresh flag (pre-push audit P1).
+    let draftAddressBlockCarried = false;
     if (addressUnverified) {
       // Stamp the judged address on a freshly derived flag (a recovered
       // prior flag already carries its own).
@@ -2803,6 +2811,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // would otherwise stamp the next series with the OLD property.
       const wizardAddressChanged = (row) => String(row?.address || '').trim().toLowerCase()
         !== String(quoteFullAddress || '').trim().toLowerCase();
+      // The locked draft's own county-roll marker survives a refresh whose
+      // run got NO roll answer (outage, or a repeat lookup that minted a new
+      // lead with no prior flag to recover): a clean answer clears it, a
+      // changed address makes it moot, missing evidence keeps it (pre-push
+      // audit P1). Read under the row lock.
+      const carryDraftAddressBlock = (lockedRow) => {
+        if (addressUnverified || rollAnsweredThisRun) return false;
+        if (wizardAddressChanged(lockedRow)) return false;
+        const data = typeof lockedRow?.estimate_data === 'string' ? (() => { try { return JSON.parse(lockedRow.estimate_data); } catch { return null; } })() : lockedRow?.estimate_data;
+        return data?.addressUnverified === true;
+      };
       const estFields = {
         customer_id: customerId,
         customer_name: `${contactFirstName} ${contactLastName}`,
@@ -2860,7 +2879,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           const lockedEst = await trx('estimates')
             .where({ id: existingEst.id })
             .forUpdate()
-            .first('id', 'source', 'status', 'archived_at', 'address');
+            .first('id', 'source', 'status', 'archived_at', 'address', 'estimate_data');
           if (!lockedEst || lockedEst.source !== 'quote_wizard' || lockedEst.status !== 'draft') return;
           if (lockedEst.archived_at) {
             const consumedBy = await trx('scheduled_services')
@@ -2869,8 +2888,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             if (!consumedBy) return;
           }
           await applySetupFeeQuote(trx);
+          const carried = carryDraftAddressBlock(lockedEst);
+          if (carried) draftAddressBlockCarried = true;
           await trx('estimates').where({ id: existingEst.id }).update({
             ...estFields,
+            ...(carried ? { estimate_data: { ...estimateDataObj, addressUnverified: true } } : {}),
             ...(wizardAddressChanged(lockedEst) ? { property_id: null } : {}),
             archived_at: null,
             updated_at: new Date(),
@@ -2904,14 +2926,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               const lockedDup = await trx('estimates')
                 .where({ id: duplicateBlock.existingEstimateId })
                 .forUpdate()
-                .first('id', 'source', 'status', 'archived_at', 'address');
+                .first('id', 'source', 'status', 'archived_at', 'address', 'estimate_data');
               if (lockedDup && lockedDup.source === 'quote_wizard'
                 && lockedDup.status === 'draft' && !lockedDup.archived_at) {
                 await applySetupFeeQuote(trx);
+                const carried = carryDraftAddressBlock(lockedDup);
+                if (carried) draftAddressBlockCarried = true;
                 const refreshed = await trx('estimates')
                   .where({ id: duplicateBlock.existingEstimateId, source: 'quote_wizard', status: 'draft' })
                   .update({
                     ...estFields,
+                    ...(carried ? { estimate_data: { ...estimateDataObj, addressUnverified: true } } : {}),
                     ...(wizardAddressChanged(lockedDup) ? { property_id: null } : {}),
                     updated_at: new Date(),
                   });
@@ -2977,7 +3002,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // link and no website publication: the price still shows, but the
     // visitor must not book (or publish) the bad address before the
     // callback confirms it — the exact incident path (codex #4667 r3 P1).
-    const selfBookBlockedByAddress = !!addressUnverified;
+    const selfBookBlockedByAddress = !!addressUnverified || draftAddressBlockCarried;
     if (selfBookBlockedByAddress) {
       logger.info('[public-quote] self-book link withheld — address flagged by the county-roll audit; office confirms on the callback');
       // A website estimate an EARLIER run already published for this lead
@@ -3001,10 +3026,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           .whereRaw("estimate_data->'websiteSelfService' IS NOT NULL")
           .where((q) => q
             .whereRaw("estimate_data->>'lead_id' = ?", [String(lead.id)])
+            // Ownership without a token: BOTH typed contact factors (the
+            // same pair the same-phone draft refresh trusts) AND the
+            // complete judged address (street, city, ZIP) — never an email
+            // plus a street with a mistyped locality (pre-push audit P0).
             .orWhere((own) => own
               .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
-              .whereRaw("LOWER(regexp_replace(split_part(address, ',', 1), '[^a-z0-9]+', ' ', 'gi')) = ?", [
-                String(quoteAddress || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(),
+              .where('customer_phone', contactPhone)
+              .whereRaw("LOWER(regexp_replace(address, '[^a-z0-9]+', ' ', 'gi')) = ?", [
+                String(quoteFullAddress || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(),
               ])))
           .update({ archived_at: new Date(), updated_at: new Date() })
           .returning('id');
