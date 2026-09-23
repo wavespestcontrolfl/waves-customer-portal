@@ -888,9 +888,13 @@ house-number audit, the run withholds the self-book handoff entirely: no
 (`booking_url` null). The price still returns and the lead / estimate
 still persist; the lead's `extracted_data.address_unverified` records the
 audit (reason, county, typed number, nearest roll numbers, the judged
-street/city/ZIP) for the callback, and a later run over a clean address
-clears it (the key is always written, null when clean). A roll that never
-answered (GIS outage) is not a flag.
+street/city/state/ZIP) for the callback, and a later run over a clean
+address clears it (the key is always written, null when clean). The draft
+estimate carries the same verdict as `estimate_data.addressUnverified`
+(always written), which `wizardDraftSelfServeBookable` refuses — so a
+booking link minted by an EARLIER clean run over the same draft dies on
+its live recheck at `/api/booking/confirm` once the address is flagged. A
+roll that never answered (GIS outage) is not a flag.
 Request shape: either `services` keyed by the engine
 keys in `PUBLIC_QUOTE_SERVICE_KEYS` (`routes/public-quote.js`) or a catalog
 `serviceKey` / `service_key` from the `/api/public/services/menu` payload,

@@ -31,6 +31,7 @@ function deriveAddressUnverified(enriched, address = null) {
     // without every correction path having to know about it (codex r2 P2).
     address_line1: String(address?.line1 || '').trim() || null,
     city: String(address?.city || '').trim() || null,
+    state: String(address?.state || '').trim().toUpperCase().slice(0, 2) || null,
     zip: zip5(address?.zip) || null,
     flagged_at: new Date().toISOString(),
   };
@@ -50,7 +51,11 @@ function sameLocality(a, b) {
   if (za && zb && za !== zb) return false;
   const ca = cityKey(a?.city);
   const cb = cityKey(b?.city);
-  return !ca || !cb || ca === cb;
+  if (ca && cb && ca !== cb) return false;
+  // State too — the route accepts an explicit state (codex r4 P2).
+  const sa = String(a?.state || '').trim().toUpperCase();
+  const sb = String(b?.state || '').trim().toUpperCase();
+  return !sa || !sb || sa === sb;
 }
 
 // A lookup-stage snapshot (leads.extracted_data written by
@@ -79,6 +84,7 @@ function recoverAddressUnverified(snapshot) {
     nearest_numbers: Array.isArray(flag.nearest_numbers) ? flag.nearest_numbers.map(String).filter(Boolean).slice(0, 5) : [],
     address_line1: typeof flag.address_line1 === 'string' ? flag.address_line1.slice(0, 120) : null,
     city: typeof flag.city === 'string' ? flag.city.slice(0, 60) : null,
+    state: typeof flag.state === 'string' ? flag.state.trim().toUpperCase().slice(0, 2) || null : null,
     zip: zip5(flag.zip) || null,
     flagged_at: typeof flag.flagged_at === 'string' ? flag.flagged_at : new Date().toISOString(),
   };

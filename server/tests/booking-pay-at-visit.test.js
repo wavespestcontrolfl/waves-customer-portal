@@ -223,6 +223,11 @@ describe('wizardDraftSelfServeBookable — current-shape re-check for stored han
     expect(wizardDraftSelfServeBookable(draft({}, { quoteRequired: true }))).toBe(false);
   });
 
+  test('a draft flagged by the county-roll house-number audit → not eligible until cleared', () => {
+    expect(wizardDraftSelfServeBookable(draft({}, { addressUnverified: true }))).toBe(false);
+    expect(wizardDraftSelfServeBookable(draft({}, { addressUnverified: false }))).toBe(true);
+  });
+
   test('mixed recurring + one-time → not eligible (summary first, top-level fallback)', () => {
     expect(wizardDraftSelfServeBookable(draft({}, {
       engineResult: { summary: { recurringAnnualAfterDiscount: 388, oneTimeTotal: 150 } },

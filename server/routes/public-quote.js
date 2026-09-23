@@ -2751,6 +2751,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         },
         commercialEstimatedPricing: !!commercialDisclaimer,
         commercialDisclaimer: commercialDisclaimer || undefined,
+        // Durable address block on the DRAFT: a booking link minted by an
+        // earlier clean run stays HMAC-valid for days and re-checks this
+        // draft through wizardDraftSelfServeBookable — the marker is what
+        // that shared predicate reads, so the stale link dies with the
+        // flag (codex #4667 r4 P1). Always written; false clears it once a
+        // clean run refreshes the draft in place.
+        addressUnverified: !!addressUnverified,
       };
       if (quoteRequired) {
         // A quoteRequired draft with NO engine manual line (the unit-on-
