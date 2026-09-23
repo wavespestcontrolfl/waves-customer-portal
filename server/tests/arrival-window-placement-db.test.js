@@ -139,13 +139,22 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
       for (const table of ['tech_schedule_blocks', 'technician_capabilities', 'system_settings', 'schedule_blackout_dates', 'audit_log']) {
         await mockConn.raw('CREATE TEMP TABLE ?? ON COMMIT DROP AS SELECT * FROM public.?? WITH NO DATA', [table, table]);
       }
-      const offers = await findAvailableSlots({ ...OPTIONS, earliestStartMin: 1020 });
+      // Codex push-audit P1: OPTIONS' arrivalWindow.serviceId mode evaluates
+      // TARGET's own STORED estimated_duration_minutes (60, from the base
+      // fixture), not just the opts.durationMinutes passed to
+      // findAvailableSlots — a 17:00 start + 60 min of on-site work already
+      // reaches the 18:00 close with zero minutes left for the mandatory
+      // return-to-HQ leg the real evaluator requires. Shorten BOTH the
+      // stored row and the requested duration to 15 minutes so the round
+      // trip has real slack.
+      await mockConn('scheduled_services').where({ id: TARGET }).update({ estimated_duration_minutes: 15 });
+      const offers = await findAvailableSlots({ ...OPTIONS, earliestStartMin: 1020, durationMinutes: 15 });
       expect(offers.slots).toEqual(expect.arrayContaining([
         expect.objectContaining({ start_time: '17:00', technician: expect.objectContaining({ id: TECH }) }),
       ]));
       const capacity = require('../services/scheduling/arrival-route');
       const prepared = await capacity.prepareArrivalCapacity({
-        serviceId: TARGET, date: DAY, technicianId: TECH, windowStart: '17:00', windowEnd: '18:00', durationMinutes: 60,
+        serviceId: TARGET, date: DAY, technicianId: TECH, windowStart: '17:00', windowEnd: '17:15', durationMinutes: 15,
       });
       await mockConn('scheduled_services').where({ id: TARGET }).update({ scheduled_date: DAY });
       await expect(capacity.verifyArrivalCapacity(prepared, { conn: mockConn })).resolves.toMatchObject({ feasible: true });
