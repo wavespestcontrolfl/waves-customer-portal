@@ -795,8 +795,11 @@ router.post('/:id/verdict', async (req, res) => {
         // evidence, so the task card files (fail closed).
         const { loadEvidence } = require('../services/triage-auto-resolve');
         const callRow = await trx('call_log').where({ id: item.call_log_id }).first('customer_id');
+        // The row's own identity (id, call_log_id, created_at): the coverage
+        // check associates bookings through source_call_log_id (pre-push
+        // audit P1).
         const heldItem = {
-          id: item.id, reason_code: 'on_file_house_number_conflict', status: 'open',
+          id: item.id, call_log_id: item.call_log_id, reason_code: 'on_file_house_number_conflict', status: 'open',
           created_at: item.created_at, payload: heldConflictPayload, call_customer_id: callRow?.customer_id || null,
         };
         const evidence = await loadEvidence(trx, [heldItem]).catch(() => new Map());
