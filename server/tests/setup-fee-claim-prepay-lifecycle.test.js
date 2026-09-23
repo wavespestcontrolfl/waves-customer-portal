@@ -1068,18 +1068,32 @@ describe('retireRodentSetupObligationForRevivedPrepay — a re-paid/revived prep
     ],
   };
   const rodentRoot = { id: 'root-rb', service_type: 'Rodent Bait Stations', service_id: null, recurring_parent_id: null };
-  function revivalConn({ stamp = '99.00', invoiceRow = prepayInvoiceRow, rebills = [], markerRebill = null } = {}) {
+  function revivalConn({
+    stamp = '99.00', invoiceRow = prepayInvoiceRow, rebills = [], markerRebill = null,
+    // The estimate-origin switch guard's own 3-arg where('notes', 'like', …)
+    // probe for a voided sibling carrying [prepay-switch-superseded-by:…]
+    // (P0 fix): default null (no superseded sibling) so every pre-existing
+    // fixture in this describe block — none of which is a switch prepay —
+    // keeps hitting the normal ledger/stamp path unchanged.
+    supersededSibling = null,
+  } = {}) {
     const c = conn({ rootsForCoverage: [rodentRoot], scheduledService: { id: 'root-rb', pending_setup_fee: stamp } });
     const inner = c;
     const wrapped = (table) => {
       const q = inner(table);
       if (table === 'invoices') {
-        // The r75 marker probe is a 3-arg where('notes', 'like', …) —
-        // route it to the markerRebill fixture, everything else to the row.
-        let notesProbe = false;
+        // Both the switch-supersede probe and the r75 rebill-marker probe
+        // are a 3-arg where('notes', 'like', <pattern>) — route each to its
+        // own fixture by the marker text in the pattern, everything else to
+        // the row.
+        let notesPattern = null;
         const origWhere = q.where;
-        q.where = (...args) => { if (args[0] === 'notes') { notesProbe = true; return q; } return origWhere(args[0]); };
-        q.first = async () => (notesProbe ? markerRebill : invoiceRow);
+        q.where = (...args) => { if (args[0] === 'notes') { notesPattern = String(args[2] || ''); return q; } return origWhere(args[0]); };
+        q.first = async () => {
+          if (notesPattern && notesPattern.includes('prepay-switch-superseded-by')) return supersededSibling;
+          if (notesPattern) return markerRebill;
+          return invoiceRow;
+        };
         q.select = async () => rebills;
       }
       return q;
@@ -1322,7 +1336,13 @@ describe('r47 wiring — commercial bait, anchor-less revival sweep, unvoid reti
     const wrapped = (table) => {
       const q = inner(table);
       if (table === 'invoices') {
-        q.first = async () => prepayInvoiceRow;
+        // Not a switch-superseded prepay (source contract for this fixture)
+        // — the P0 switch-supersede probe (where('notes','like', a
+        // prepay-switch-superseded-by pattern)) must find no sibling here.
+        let notesPattern = null;
+        const origWhere = q.where;
+        q.where = (...args) => { if (args[0] === 'notes') { notesPattern = String(args[2] || ''); return q; } return origWhere(args[0]); };
+        q.first = async () => (notesPattern && notesPattern.includes('prepay-switch-superseded-by') ? null : prepayInvoiceRow);
         q.select = async () => [{ id: 'inv-rebill', status: 'draft', sent_at: null, paid_at: null, payment_recorded_at: null, stripe_payment_intent_id: null }];
       }
       return q;
@@ -1463,13 +1483,23 @@ describe('r48 — completion claims restore, in-flight/sibling reconciliation, c
     const prepayRow = { id: 'inv-prepay', customer_id: 'cust-1', scheduled_service_id: null, line_items: [{ description: 'Bait Station Setup — one-time setup fee', amount: 99 }] };
     const writes = [];
     const trx = (table) => {
-      const q = { _where: null };
-      q.where = (w) => { if (typeof w === 'function') { w.call(q); return q; } q._where = { ...(q._where || {}), ...(typeof w === 'object' ? w : {}) }; return q; };
+      const q = { _where: null, _notesPattern: null };
+      q.where = (w, ...rest) => {
+        if (typeof w === 'function') { w.call(q); return q; }
+        if (w === 'notes') { q._notesPattern = String(rest[1] || ''); return q; }
+        q._where = { ...(q._where || {}), ...(typeof w === 'object' ? w : {}) };
+        return q;
+      };
       q.whereNot = () => q; q.orWhere = () => q; q.whereNull = () => q; q.forUpdate = () => q; q.whereNotIn = () => q; q.whereIn = () => q; q.orderBy = () => q; q.orWhereNotNull = () => q;
       q.first = async () => {
-        if (table === 'invoices') return q._where && q._where.id === 'inv-comp-draft'
-          ? { id: 'inv-comp-draft', status: 'draft', sent_at: null, paid_at: null, payment_recorded_at: null, stripe_payment_intent_id: null }
-          : prepayRow;
+        if (table === 'invoices') {
+          // Not a switch-superseded prepay (source contract for this
+          // fixture) — the P0 switch-supersede probe must find no sibling.
+          if (q._notesPattern && q._notesPattern.includes('prepay-switch-superseded-by')) return null;
+          return q._where && q._where.id === 'inv-comp-draft'
+            ? { id: 'inv-comp-draft', status: 'draft', sent_at: null, paid_at: null, payment_recorded_at: null, stripe_payment_intent_id: null }
+            : prepayRow;
+        }
         if (table === 'scheduled_services') return { id: 'root-rb', pending_setup_fee: null };
         if (table === 'knex_migrations') return { migration_time: '2026-08-29T18:30:00.000Z' };
         return null;

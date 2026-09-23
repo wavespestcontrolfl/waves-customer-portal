@@ -8770,6 +8770,33 @@ const InvoiceService = {
       .where({ id: prepayInvoiceId })
       .first("id", "customer_id", "scheduled_service_id", "line_items");
     if (!invoiceRow) return null;
+    // ESTIMATE-origin on-site prepay switches deliberately never write a
+    // setup_fee_claims row for THIS prepay (admin-schedule.js prepay-switch,
+    // codex #3591 r38 P1): the switch's own setup line was carried off the
+    // superseded per-application accept invoice, and a later void/refund of
+    // this prepay re-mints that accept invoice — setup line included —
+    // through the prepay-switch-restore marker
+    // (restoreSwitchSupersededInvoicesForPrepay), independent of the claims
+    // ledger. This function runs on EVERY first payment, not only a
+    // dispute-revival, so without this guard it ledgers the claim the switch
+    // refused to write; the refund then restores the setup TWICE — once via
+    // the marker re-mint, once via the claims-restore stamp/re-bill. Detect
+    // the shape from the marker itself (the switch's own estimate flag isn't
+    // available here): a voided sibling invoice pointing at this prepay that
+    // still carries a setup-fee line.
+    const supersededSibling = await conn("invoices")
+      .where("notes", "like", `%${prepaySwitchSupersededByMarker(prepayInvoiceId)}%`)
+      .first("id", "line_items");
+    if (supersededSibling) {
+      let siblingLines = supersededSibling.line_items;
+      if (typeof siblingLines === "string") { try { siblingLines = JSON.parse(siblingLines); } catch { siblingLines = []; } }
+      const siblingCarriesSetup = (Array.isArray(siblingLines) ? siblingLines : [])
+        .some((li) => /setup fee/i.test(String(li?.description || "")));
+      if (siblingCarriesSetup) {
+        logger.info(`[invoice] revived prepay ${prepayInvoiceId}: estimate-origin switch — superseded invoice ${supersededSibling.id} already carries the setup line; no claim ledgered (its marker re-mint on refund is the restore path)`);
+        return null;
+      }
+    }
     let lines = invoiceRow.line_items;
     if (typeof lines === "string") { try { lines = JSON.parse(lines); } catch { lines = []; } }
     const setupLine = (Array.isArray(lines) ? lines : []).find((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()));

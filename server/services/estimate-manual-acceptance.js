@@ -10,6 +10,7 @@ const {
   estimateDataHasUnresolvedManagerApproval,
   commercialRiskTypeReviewNeeded,
 } = require('./estimate-delivery-options');
+const { customerPreservesMonthlyMembership } = require('./billing-cadence');
 
 // A grouped fixed bid's token may stay viewable past its own date (the
 // delivered entry link outlives the group's longest hold), so acceptance —
@@ -49,6 +50,17 @@ function parseEstimateData(value) {
     }
   }
   return value && typeof value === 'object' ? value : {};
+}
+
+// Frozen at estimate save/reprice time (estimate-membership-context.js,
+// computeMembershipContext) from the customer's live qualifying recurring
+// rows — true whenever the linked customer already has ANY active service
+// (monthly_membership OR per_application billing alike), independent of the
+// NEW estimate's own service mix. Shared by prepayBookingEligibility and
+// markEstimateManuallyAccepted so an add-on estimate can't be prepaid.
+function estimateDataMembershipSnapshotIsExistingCustomer(estimate = {}) {
+  const data = parseEstimateData(estimate.estimate_data || estimate.estimateData);
+  return !!(data.membershipSnapshot && data.membershipSnapshot.isExistingCustomer);
 }
 
 function hasManualAnnualPrepayRecurringRows(estimate = {}) {
@@ -257,6 +269,16 @@ async function prepayBookingEligibility(estimate = {}) {
   if (isCommercialProposalEstimate(estimate)) return ineligible('commercial_proposal');
   if (estimate.bill_by_invoice) return ineligible('invoice_mode');
   if (estimate.show_one_time_option) return ineligible('one_time_option');
+  // Existing customers are pay-per-application (or already on their own
+  // monthly membership) only — never annual prepay for an add-on quote. The
+  // public accept refuses this exact shape (estimate-public.js: "annual
+  // prepay is not available for existing customers"); mirrored here so none
+  // of the three admin lanes (Estimates page, Pipeline, prepay-on-book) ever
+  // OFFERS what markEstimateManuallyAccepted's own guard below would reject.
+  // Without this, an add-on prepay preserves the existing plan's billing_mode
+  // at accept but the term's payment-time stamp still rewrites it to
+  // 'annual_prepay', silently killing the other plan's dues for the term.
+  if (estimateDataMembershipSnapshotIsExistingCustomer(estimate)) return ineligible('existing_customer');
   // Mirror the accept transaction's own blockers (status window, expiry,
   // manager approval, commercial risk-type review): the schedule POST books
   // the visit BEFORE calling markEstimateManuallyAccepted, so anything the
@@ -525,6 +547,31 @@ async function markEstimateManuallyAccepted({
     }
     if (annualPrepaySelected && !isManualAnnualPrepayEligibleServiceMix(estimate)) {
       throw httpError('Annual prepay is not available for this estimate service mix.', 400);
+    }
+    // Refuse the shape the public accept already refuses (estimate-public.js:
+    // "annual prepay is not available for existing customers"): an add-on
+    // estimate for a customer who already has a live plan must not open an
+    // annual-prepay term. Without this, convertEstimate PRESERVES the
+    // existing plan's billing_mode at accept, but the pending term suppresses
+    // the monthly dues cron immediately and the term's payment-time stamp
+    // (stampAnnualPrepayBillingMode) unconditionally rewrites billing_mode to
+    // 'annual_prepay' — silently killing the OTHER plan's billing for the
+    // whole prepay term while its visits keep completing unbilled. Checked
+    // two ways: the frozen membershipSnapshot on the estimate (billing-mode
+    // agnostic — set for both monthly_membership and per_application
+    // customers), and, when a customer is linked, the LIVE row via the same
+    // predicate the converter itself uses to decide preservation
+    // (customerPreservesMonthlyMembership) — a defense against a stale/
+    // missing snapshot.
+    if (annualPrepaySelected) {
+      let customerLivePreservesMembership = false;
+      if (estimate.customer_id) {
+        const linkedCustomer = await trx('customers').where({ id: estimate.customer_id }).first();
+        customerLivePreservesMembership = !!(linkedCustomer && customerPreservesMonthlyMembership(linkedCustomer));
+      }
+      if (estimateDataMembershipSnapshotIsExistingCustomer(estimate) || customerLivePreservesMembership) {
+        throw httpError('Annual prepay is not available for an existing customer’s add-on — accept it as pay-at-visit (or per-application) so the customer’s existing plan keeps billing.', 400);
+      }
     }
 
     // #1917: a commercial proposal's customer creation + first invoice run AFTER
