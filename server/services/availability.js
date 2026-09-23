@@ -11,9 +11,10 @@ const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { generateConfirmationCode } = require('../utils/slot-offer-token');
-const { findConflictingVisits, acquireOccupancyLock, listOccupiedWindows } = require('./scheduling/occupancy');
+const { findConflictingVisits, acquireOccupancyLock } = require('./scheduling/occupancy');
 const { travelGapEnabled, violatesTravelGap } = require('./scheduling/travel-gap');
 const { ensureCatalogLoaded, expectedMinutesSync, expectedServiceMinutes } = require('./scheduling/expected-service-minutes');
+const { loadPackingAnchors, packedBounds } = require('./scheduling/packing-geometry');
 const { selfBookDayCapEnabled } = require('../config/feature-gates');
 const { violatesSelfServeNotice } = require('./scheduling/self-serve-notice');
 
@@ -139,31 +140,45 @@ class AvailabilityEngine {
       etDateString(addETDays(today, config.advance_days_max)),
     );
 
+    // Global packing anchors (Codex r5 P1): every committed stop across the
+    // date range, regardless of zone or technician — loaded UNCONDITIONALLY
+    // via scheduling/packing-geometry.js's loadPackingAnchors (allocation
+    // expansion + expected-minutes credit are catalog/schema facts, not a
+    // feature flag). Previously this whole read lived INSIDE the
+    // GATE_SLOT_TRAVEL_GAP branch below, so with the gate unset an
+    // out-of-zone visit was invisible to this engine's packing decision
+    // (hasRealStops) too, not just to drive-time filtering. Soft-degrade
+    // like every other mirror here: a failed read serves the zone-only set.
+    let anchorsByDate = new Map();
+    try {
+      const anchors = await loadPackingAnchors({
+        dateFrom: etDateString(addETDays(today, config.advance_days_min)),
+        dateTo: etDateString(addETDays(today, config.advance_days_max)),
+      });
+      for (const anchor of anchors) {
+        if (!anchorsByDate.has(anchor.date)) anchorsByDate.set(anchor.date, []);
+        anchorsByDate.get(anchor.date).push(anchor);
+      }
+    } catch (anchorErr) {
+      logger.warn(`[availability] packing anchors unavailable — serving zone-only slots: ${anchorErr.message}`);
+      anchorsByDate = new Map();
+    }
+
     // Travel-gap mirror (GATE_SLOT_TRAVEL_GAP): confirmBooking's commit probe
     // runs the tech-blind, coordinate-aware findConflictingVisits `travel`
     // predicate over EVERY stop that day, while this builder's occupied set
     // is zone-scoped and buffer-only — an out-of-zone stop adjacent to a
     // quoted slot would make the commit reject the exact option just
-    // offered (offer/commit dead end). Gate on: one range read of every
-    // occupying row with guarded coords + the same pin the commit measures
-    // with (customers.latitude/longitude via opts.customerId, else the
-    // estimate's customer; neither → buffer-only, never a skipped check;
-    // lead-response quotes have no customer row and no booking tool). Gate off:
-    // no extra statements. Soft-degrade like /book's mirror: a failed read
-    // serves unfiltered and the commit gate keeps correctness.
+    // offered (offer/commit dead end). Gate on: the same pin the commit
+    // measures with (customers.latitude/longitude via opts.customerId, else
+    // the estimate's customer; neither → buffer-only, never a skipped
+    // check; lead-response quotes have no customer row and no booking
+    // tool) plus the candidate's own expected-minutes credit. Gate off: no
+    // extra statements (this is now ONLY the drive-time-filtering/candidate-
+    // credit half of the old mirror — the anchor set above is unconditional).
     let travelMirror = null;
     if (travelGapEnabled()) {
       try {
-        const rows = await listOccupiedWindows({
-          dateFrom: etDateString(addETDays(today, config.advance_days_min)),
-          dateTo: etDateString(addETDays(today, config.advance_days_max)),
-          withCoords: true,
-        });
-        const byDate = new Map();
-        for (const row of rows) {
-          if (!byDate.has(row.date)) byDate.set(row.date, []);
-          byDate.get(row.date).push(row);
-        }
         let pin = { lat: null, lng: null };
         let pinCustomerId = opts.customerId || null;
         // The candidate's own service identity, for its expected-minutes
@@ -195,7 +210,7 @@ class AvailabilityEngine {
         }
         await ensureCatalogLoaded(db);
         const candidateExpectedMinutes = expectedMinutesSync({ serviceType: candidateServiceType, windowMinutes: slotDuration });
-        travelMirror = { byDate, pin, expectedMinutes: candidateExpectedMinutes };
+        travelMirror = { pin, expectedMinutes: candidateExpectedMinutes };
       } catch (mirrorErr) {
         logger.warn(`[availability] travel-gap mirror unavailable — serving unfiltered slots: ${mirrorErr.message}`);
         travelMirror = null;
@@ -294,23 +309,25 @@ class AvailabilityEngine {
         occupied.push({ start: this.timeToMin(b.start_time), end: this.timeToMin(b.end_time) });
       });
 
-      // Global mirror stops anchor the packing too (Codex r3 P1): this
+      // Global anchors anchor the packing too (Codex r3 P1, r5 P1): this
       // engine is TECH-BLIND like travel-gap.js — every stop on a date is on
       // the SAME route regardless of which zone its customer's city falls
       // in — but `occupied` above is built ONLY from `scheduledInZone`
       // (city-matched). A day whose only committed visit belongs to another
-      // zone had `occupied` empty here even though travelMirror.byDate
+      // zone had `occupied` empty here even though the global anchor set
       // carried it, so `hasRealStops` read the day as empty and every hour
       // was offered instead of packing against that real stop. Merge the
-      // mirror's stops for this date into the same packing geometry,
-      // deduplicating rows already added above by id.
-      if (travelMirror) {
+      // anchors for this date into the same packing geometry, deduplicating
+      // rows already added above by id — UNCONDITIONAL (anchorsByDate is
+      // loaded above independently of GATE_SLOT_TRAVEL_GAP).
+      const dayAnchors = anchorsByDate.get(dateStr) || [];
+      {
         const knownIds = new Set(occupied.map((o) => o.id).filter((id) => id != null).map(String));
-        for (const stop of travelMirror.byDate.get(dateStr) || []) {
-          if (stop.id != null && knownIds.has(String(stop.id))) continue;
-          if (!Number.isFinite(stop.startMin) || !Number.isFinite(stop.endMin)) continue;
-          occupied.push({ id: stop.id, start: stop.startMin, end: stop.endMin });
-          if (stop.id != null) knownIds.add(String(stop.id));
+        for (const anchor of dayAnchors) {
+          if (anchor.id != null && knownIds.has(String(anchor.id))) continue;
+          if (!Number.isFinite(anchor.rawStartMin) || !Number.isFinite(anchor.rawEndMin)) continue;
+          occupied.push({ id: anchor.id, start: anchor.rawStartMin, end: anchor.rawEndMin });
+          if (anchor.id != null) knownIds.add(String(anchor.id));
         }
       }
 
@@ -327,6 +344,17 @@ class AvailabilityEngine {
 
       // Sort occupied by start time
       occupied.sort((a, b) => a.start - b.start);
+
+      // Travel-gap stops, reshaped from the packing anchors to the
+      // {startMin, endMin, lat, lng, expectedMinutes, hold} entity shape
+      // travelGapConflicts/violatesTravelGap read — gate-agnostic by
+      // construction (travelGapEnabled() is checked inside violatesTravelGap
+      // itself), so this list is built once per day regardless of the gate.
+      const travelGapStops = dayAnchors.map((anchor) => ({
+        id: anchor.id, startMin: anchor.rawStartMin, endMin: anchor.rawEndMin,
+        lat: anchor.lat, lng: anchor.lng,
+        expectedMinutes: anchor.expectedEndMin - anchor.rawStartMin, hold: anchor.hold,
+      }));
 
       // Find gaps. Self-serve notice window (owner ruling 2026-09-23) +
       // travel-gap mirror (see above): drop what confirmBooking would now
@@ -347,11 +375,18 @@ class AvailabilityEngine {
             // one the commit would also reject (offer/commit parity).
             expectedMinutes: travelMirror.expectedMinutes,
           },
-          travelMirror.byDate.get(dateStr) || [],
+          travelGapStops,
         )) return false;
         return true;
       };
-      const slots = this.findGaps(occupied, dayStart, dayEnd, slotDuration, buffer, accept, hasRealStops);
+      // The gap bound this engine computes for "packed before an upcoming
+      // stop" now shares scheduling/packing-geometry.js's packedBounds
+      // formula (Codex r5 P2) instead of a flat buffer subtraction that
+      // always measured from the full window regardless of credit — with no
+      // travelMirror (gate off) this degrades to the exact legacy
+      // block.start - buffer shape.
+      const credit = travelMirror ? { expectedMinutes: travelMirror.expectedMinutes } : null;
+      const slots = this.findGaps(occupied, dayStart, dayEnd, slotDuration, buffer, accept, hasRealStops, credit);
 
       if (slots.length > 0) {
         days.push({
@@ -391,7 +426,17 @@ class AvailabilityEngine {
   // a fixed break, not a stop, so a gap bounded by it on one side gets no
   // offer on that side (a day whose only stop is 16:00 offers the hour
   // before that stop and the hour after it — never "packed before lunch").
-  findGaps(occupied, dayStart, dayEnd, slotDuration, buffer, accept = null, packEnds = false) {
+  // `credit` ({ expectedMinutes } — the CANDIDATE's own, resolved by the
+  // caller from the same estimate identity the accept() callback already
+  // credits) feeds the "packed before an upcoming block" bound through
+  // scheduling/packing-geometry.js's packedBounds instead of a flat buffer
+  // subtraction that always measured from the full window (Codex r5 P2:
+  // an offer/commit mismatch, since the accept() callback beside it already
+  // credited this). Omitted (null): every bound degrades to the exact
+  // legacy `block.start - buffer` shape — packedBounds' own no-credit
+  // fallback is arithmetically identical, so every existing caller of this
+  // method (including every direct unit test) is byte-for-byte unaffected.
+  findGaps(occupied, dayStart, dayEnd, slotDuration, buffer, accept = null, packEnds = false, credit = null) {
     const slots = [];
     // Round minutes-since-midnight UP to the next clean hour. Customer-
     // facing slot starts like 1:15 / 2:45 felt like "we're squeezing you
@@ -420,8 +465,18 @@ class AvailabilityEngine {
     let cursor = dayStart;
     let realBefore = false;
     for (const block of occupied) {
+      // The latest a slotDuration-long candidate can start before this
+      // block, credited with the candidate's own expected minutes when
+      // known — see packedBounds (packing-geometry.js). `+ slotDuration`
+      // converts its "latest START" back to the "latest END" boundary this
+      // gap object's downstream consumers (offerLatest) already expect.
+      const { latestStart } = packedBounds({
+        prev: null, next: { rawStartMin: block.start },
+        durationMinutes: slotDuration, expectedMinutes: credit?.expectedMinutes,
+        buffer,
+      });
       gaps.push({
-        start: roundUpToHour(cursor + buffer), end: block.start - buffer,
+        start: roundUpToHour(cursor + buffer), end: latestStart + slotDuration,
         realBefore, realAfter: !block.lunch,
       });
       // The anchor flag for the NEXT gap follows the block that actually

@@ -112,9 +112,11 @@ beforeEach(() => {
 
 const startsOf = (result) => (result.days[0]?.slots || []).map((s) => s.startTime24);
 
-test('gate off: no occupancy range read, no estimate/customer pin read — legacy statements only', async () => {
+test('gate off: the global anchor read still runs (Codex r5 P1 — anchor loading is gate-independent), but no estimate/customer pin read', async () => {
   const result = await engine.getAvailableSlots('Palmetto', 'est-1');
-  expect(listOccupiedWindows).not.toHaveBeenCalled();
+  // loadPackingAnchors (packing-geometry.js) is unconditional — only the
+  // pin/credit half of the old mirror stays behind GATE_SLOT_TRAVEL_GAP.
+  expect(listOccupiedWindows).toHaveBeenCalledWith(expect.objectContaining({ withCoords: true }));
   expect(seen).not.toContain('estimates');
   expect(seen).not.toContain('customers');
   // Empty zone timeline → the builder's own gaps, 09:00 onward.
@@ -200,28 +202,36 @@ describe('global mirror stops anchor legacy packing (Codex #4664 r3 P1)', () => 
     expect(starts).toEqual(['14:00']);
   });
 
-  test('legacy callers (gate off) never read the mirror and keep the zone-only geometry', async () => {
+  test('legacy callers (gate off): the anchor read still runs (Codex r5 P1), but with no real anchor that day the zone-only geometry is unaffected', async () => {
+    listOccupiedWindows.mockResolvedValue([]); // no anchor for this date — isolates this test from the fixture above
     const result = await engine.getAvailableSlots('Palmetto', 'est-1');
-    expect(listOccupiedWindows).not.toHaveBeenCalled();
+    expect(listOccupiedWindows).toHaveBeenCalledWith(expect.objectContaining({ withCoords: true }));
     expect(startsOf(result)).toContain('09:00');
+  });
+
+  test('GATE_SLOT_TRAVEL_GAP unset: the day\'s only out-of-zone visit still anchors the packing (Codex r5 P1)', async () => {
+    // Gate deliberately left unset (beforeEach already cleared it) — before
+    // this fix, the whole global-anchor read lived INSIDE the gate branch,
+    // so with the gate off this out-of-zone visit was invisible to
+    // hasRealStops too, not just to drive-time filtering.
+    listOccupiedWindows.mockResolvedValue([
+      { id: 'far', date: DATE, startMin: 960, endMin: 1020, lat: null, lng: null },
+    ]);
+    const result = await engine.getAvailableSlots('Palmetto', 'est-1');
+    const starts = startsOf(result);
+    expect(starts).not.toContain('09:00');
+    expect(starts).toEqual(['14:00']);
   });
 });
 
-describe('the candidate\'s own expected-minutes credit (Codex #4664 r3 P2)', () => {
+describe('the candidate\'s own expected-minutes credit (Codex #4664 r3 P2, r5 P2)', () => {
   // Offer/commit parity (owner ruling 2026-09-23): the offer-side mirror
   // must resolve the SAME candidate credit confirmBooking's commit probe
   // does (see availability-zone-null-confirm.test.js's "candidate
   // expected-minutes credit" suite, which proves the numeric effect at
   // commit — findConflictingVisits there is a plain jest.fn(), so the exact
-  // `travel.expectedMinutes` argument is directly assertable). Here we
-  // prove the offer side resolves and threads the SAME identity: the
-  // catalog is read only when the gate is on and an estimate is present,
-  // and an empty day's output is unaffected either way (this engine's own
-  // hard-coded flat buffer trims every REAL stop's gap boundary before the
-  // credit-aware accept-callback ever runs, exactly as it always has for a
-  // zone-local stop — so a merged stop's credit is not independently
-  // observable through this legacy engine's slot output; the formula itself
-  // is covered above and in expected-service-minutes.test.js).
+  // `travel.expectedMinutes` argument is directly assertable). The catalog
+  // is read only when the gate is on and an estimate is present.
   const QUARTERLY_PEST_CATALOG = [
     { service_key: 'quarterly_pest', name: 'General Pest Control', min_duration_minutes: 30, max_duration_minutes: 60 },
   ];
@@ -244,6 +254,28 @@ describe('the candidate\'s own expected-minutes credit (Codex #4664 r3 P2)', () 
     const result = await engine.getAvailableSlots('Palmetto', 'est-1');
     expect(seen).not.toContain('services');
     expect(startsOf(result)).toContain('09:00');
+  });
+
+  test('Codex r5 P2 — a noon stop is packed to the credited hour (11:00), not the flat-buffer hour (10:00)', async () => {
+    // 60-minute window (config default), 45 expected (catalog midpoint
+    // 30/60), 15-minute buffer, a noon stop: findGaps' gap bound previously
+    // subtracted the flat 15-minute buffer from the stop's full window
+    // (12:00 - 0:15 = 11:45, rounded down to 10:00 by offerLatest's hour
+    // snap) regardless of credit, while the accept() callback beside it —
+    // and confirmBooking at commit — already credited the same candidate.
+    // packedBounds now threads that credit through the bound itself.
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    const t = tables();
+    t.services = () => arrayChain(QUARTERLY_PEST_CATALOG);
+    t.scheduled_services = () => arrayChain([
+      { id: 's1', window_start: '12:00', window_end: '13:00', estimated_duration_minutes: 60, city: 'Palmetto' },
+    ]);
+    db.mockImplementation((table) => { seen.push(table); return t[table](); });
+    listOccupiedWindows.mockResolvedValue([]); // zone-local stop only — isolates from the global-anchor merge (r5 P1)
+    const result = await engine.getAvailableSlots('Palmetto', 'est-1');
+    const starts = startsOf(result);
+    expect(starts).toContain('11:00');
+    expect(starts).not.toContain('10:00');
   });
 });
 
