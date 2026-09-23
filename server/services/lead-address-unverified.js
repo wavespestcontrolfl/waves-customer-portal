@@ -30,6 +30,7 @@ function deriveAddressUnverified(enriched, address = null) {
     // (customer-address fanout, an operator) retires the flag on display
     // without every correction path having to know about it (codex r2 P2).
     address_line1: String(address?.line1 || '').trim() || null,
+    city: String(address?.city || '').trim() || null,
     zip: zip5(address?.zip) || null,
     flagged_at: new Date().toISOString(),
   };
@@ -37,6 +38,20 @@ function deriveAddressUnverified(enriched, address = null) {
 
 const zip5 = (v) => (String(v || '').match(/\d{5}/) || [''])[0];
 const lineKey = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z]/g, '');
+
+// Same premise: same street line and, where both sides carry one, the same
+// ZIP and the same city — the public route accepts a ZIP-less address, and
+// a street name that repeats across cities is exactly the audit's own
+// warning (codex #4667 r3 P2).
+function sameLocality(a, b) {
+  const za = zip5(a?.zip);
+  const zb = zip5(b?.zip);
+  if (za && zb && za !== zb) return false;
+  const ca = cityKey(a?.city);
+  const cb = cityKey(b?.city);
+  return !ca || !cb || ca === cb;
+}
 
 // A lookup-stage snapshot (leads.extracted_data written by
 // public-property-lookup) answers for THIS address only: same street line
@@ -46,9 +61,7 @@ function snapshotCoversAddress(snapshot, address) {
   const prior = snapshot?.address;
   if (!prior || typeof prior !== 'object' || !address) return false;
   if (!lineKey(prior.line1) || lineKey(prior.line1) !== lineKey(address.line1)) return false;
-  const a = zip5(prior.zip);
-  const b = zip5(address.zip);
-  return !a || !b || a === b;
+  return sameLocality(prior, address);
 }
 
 // The persisted flag off a lead snapshot, shape-checked: the only source a
@@ -65,6 +78,7 @@ function recoverAddressUnverified(snapshot) {
     street_exists: typeof flag.street_exists === 'boolean' ? flag.street_exists : null,
     nearest_numbers: Array.isArray(flag.nearest_numbers) ? flag.nearest_numbers.map(String).filter(Boolean).slice(0, 5) : [],
     address_line1: typeof flag.address_line1 === 'string' ? flag.address_line1.slice(0, 120) : null,
+    city: typeof flag.city === 'string' ? flag.city.slice(0, 60) : null,
     zip: zip5(flag.zip) || null,
     flagged_at: typeof flag.flagged_at === 'string' ? flag.flagged_at : new Date().toISOString(),
   };

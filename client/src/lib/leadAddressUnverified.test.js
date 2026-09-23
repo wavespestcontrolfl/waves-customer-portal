@@ -24,6 +24,10 @@ describe('leadAddressUnverified', () => {
     expect(leadAddressUnverified({ address: '1260 Example St', extracted_data: { address_unverified: stamped } })).not.toBeNull();
     expect(leadAddressUnverified({ address: '1250 Example St, Parrish, FL 34219', zip: '34219', extracted_data: { address_unverified: stamped } })).toBeNull();
     expect(leadAddressUnverified({ address: '1260 Example St', zip: '34221', extracted_data: { address_unverified: stamped } })).toBeNull();
+    // A city change alone (ZIP-less lead) retires it too.
+    const cityStamped = { ...flag, address_line1: '1260 Example St', city: 'Parrish' };
+    expect(leadAddressUnverified({ address: '1260 Example St, Bradenton, FL', extracted_data: { address_unverified: cityStamped } })).toBeNull();
+    expect(leadAddressUnverified({ address: '1260 Example St', city: 'Parrish', extracted_data: { address_unverified: cityStamped } })).not.toBeNull();
     // An older flag with no stamped address still shows.
     expect(leadAddressUnverified({ address: '1250 Example St', extracted_data: { address_unverified: flag } })).not.toBeNull();
   });

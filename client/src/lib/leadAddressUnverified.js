@@ -31,12 +31,19 @@ export function leadAddressUnverified(lead) {
 const lineKey = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 const zip5 = (v) => (String(v || '').match(/\d{5}/) || [''])[0];
 
+const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z]/g, '');
+
 function flagCoversLeadAddress(flag, lead) {
   const leadLine = lineKey(String(lead?.address || '').split(',')[0]);
   if (!leadLine || leadLine !== lineKey(flag.address_line1)) return false;
   const a = zip5(flag.zip);
   const b = zip5(lead?.zip) || zip5(lead?.address);
-  return !a || !b || a === b;
+  if (a && b && a !== b) return false;
+  // City too (a ZIP-less lead can change city alone): the lead's city
+  // column, else the second comma segment of its composed address.
+  const leadCity = cityKey(lead?.city) || cityKey(String(lead?.address || '').split(',')[1]);
+  const flagCity = cityKey(flag.city);
+  return !flagCity || !leadCity || flagCity === leadCity;
 }
 
 // One line for the card: the audit's OWN reason (a missing number, a number

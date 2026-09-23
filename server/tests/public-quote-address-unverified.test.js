@@ -72,6 +72,9 @@ describe('snapshotCoversAddress', () => {
 
   test('a changed street or ZIP between the two stages does not carry a flag over', () => {
     expect(snapshotCoversAddress(snapshot, { line1: '1250 Example St', zip: '34219' })).toBe(false);
+    // A ZIP-less pair that changed city alone is a different premise.
+    expect(snapshotCoversAddress({ address: { line1: '1260 Example St', city: 'Parrish' } }, { line1: '1260 Example St', city: 'Bradenton' })).toBe(false);
+    expect(snapshotCoversAddress({ address: { line1: '1260 Example St', city: 'Parrish' } }, { line1: '1260 Example St', city: 'PARRISH' })).toBe(true);
     expect(snapshotCoversAddress(snapshot, { line1: '1260 Example St', zip: '34221' })).toBe(false);
     expect(snapshotCoversAddress({}, { line1: '1260 Example St', zip: '34219' })).toBe(false);
     expect(snapshotCoversAddress(snapshot, null)).toBe(false);

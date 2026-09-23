@@ -2948,7 +2948,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // A keyed product the Service Library has set booking_enabled=false
     // prices instantly but never mints a self-book slot (GH codex #3585).
     const keyedNotBookable = !!(keyedService && keyedService.booking_enabled === false);
-    if (!quoteRequired && !commercialDetected && !estimateBlocksSelfBookLink(estimate) && !keyedNotBookable) {
+    // A house number the county roll could not vouch for gets NO self-book
+    // link and no website publication: the price still shows, but the
+    // visitor must not book (or publish) the bad address before the
+    // callback confirms it — the exact incident path (codex #4667 r3 P1).
+    const selfBookBlockedByAddress = !!addressUnverified;
+    if (selfBookBlockedByAddress) {
+      logger.info('[public-quote] self-book link withheld — address flagged by the county-roll audit; office confirms on the callback');
+    }
+    if (!quoteRequired && !commercialDetected && !estimateBlocksSelfBookLink(estimate) && !keyedNotBookable && !selfBookBlockedByAddress) {
       try {
         let bookingServiceId;
         let recurringServiceLabelParam = null;
