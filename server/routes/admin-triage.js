@@ -794,13 +794,24 @@ router.post('/:id/verdict', async (req, res) => {
         // reads the call's customer itself; with its gate off it yields no
         // evidence, so the task card files (fail closed).
         const { loadEvidence } = require('../services/triage-auto-resolve');
-        const callRow = await trx('call_log').where({ id: item.call_log_id }).first('customer_id');
-        // The row's own identity (id, call_log_id, created_at): the coverage
-        // check associates bookings through source_call_log_id (pre-push
-        // audit P1).
+        const callRow = await trx('call_log').where({ id: item.call_log_id }).first('customer_id', 'created_at');
+        // The row's own identity (id, call_log_id): the coverage check
+        // associates bookings through source_call_log_id (pre-push audit
+        // P1). Accept means the ON-FILE address is the right one, so the
+        // ask is judged at that address (the card's heard address is
+        // rewritten to it), and a booking this call created BEFORE the card
+        // (an earlier pass) counts too — the evidence boundary is the call,
+        // not the card (pre-push audit P1).
+        const onFile = heldConflictPayload.on_file_address || null;
+        const approvedPayload = {
+          ...heldConflictPayload,
+          stated_street: undefined,
+          address_as_heard: undefined,
+          heard_address: onFile ? { street_line_1: onFile.address_line1, street_line_2: onFile.address_line2 || null, city: onFile.city || null, postal_code: onFile.zip || null } : heldConflictPayload.heard_address,
+        };
         const heldItem = {
           id: item.id, call_log_id: item.call_log_id, reason_code: 'on_file_house_number_conflict', status: 'open',
-          created_at: item.created_at, payload: heldConflictPayload, call_customer_id: callRow?.customer_id || null,
+          created_at: callRow?.created_at || item.created_at, payload: approvedPayload, call_customer_id: callRow?.customer_id || null,
         };
         const evidence = await loadEvidence(trx, [heldItem]).catch(() => new Map());
         const liveBooking = evidence.get(item.id)?.booking_after_card === true;

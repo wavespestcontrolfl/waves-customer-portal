@@ -13899,7 +13899,15 @@ const CallRecordingProcessor = {
                   // visit sits in the unassigned pool until the office
                   // confirms the address (codex r6 P1). A human's attached
                   // booking is never touched.
-                  if (reuseHeldForAddress && !isAttachedManualBooking && existing.technician_id) {
+                  // Pre-dispatch rows only: a visit already en route or on
+                  // site keeps its technician (pulling them mid-job would
+                  // cut their access to the ongoing work) — the conflict
+                  // card is the office's surface for it (pre-push audit P1).
+                  const preDispatch = ['pending', 'confirmed'].includes(String(existing.status || ''));
+                  if (reuseHeldForAddress && !isAttachedManualBooking && existing.technician_id && !preDispatch) {
+                    logger.warn(`[call-proc] reused booking ${existing.id} is ${existing.status} for ${callSid}: left assigned despite the house-number dispute (office review)`);
+                  }
+                  if (reuseHeldForAddress && !isAttachedManualBooking && existing.technician_id && preDispatch) {
                     // Through the canonical assignment writer (codex r7 P1):
                     // its technician CAS (expectTechnicianId) refuses to
                     // overwrite a dispatcher's NEWER assignment, it holds the
