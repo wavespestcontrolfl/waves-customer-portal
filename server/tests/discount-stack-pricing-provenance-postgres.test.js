@@ -1357,4 +1357,77 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
       delete process.env.GATE_DISCOUNT_STACKING;
     }
   });
+  // GitHub Codex round 10 on #4657 (P1, :10035): REMOVING one line's
+  // discount on an unmarked visit is a discount-term change too — the
+  // other add-on's capped stamp must restack from its real cap and the row
+  // must be marked, never replayed cap-unaware because "no term was posted".
+  async function seedTwoStampedAddonsUnmarked() {
+    const id = randomUUID();
+    const cappedRowId = randomUUID();
+    const customRowId = randomUUID();
+    const discountId = randomUUID();
+    await mockPg('discounts').insert({
+      id: discountId, discount_key: `fixture_r10_${discountId.slice(0, 8)}`, name: 'Fixture 20% (cap $5)',
+      discount_type: 'percentage', amount: 20, max_discount_dollars: 5, is_active: true, show_in_invoices: true,
+    });
+    await mockPg('scheduled_services').insert({
+      id, scheduled_date: '2099-09-18', service_type: 'Fixture Round-10 Removal', primary_line_price: 100, estimated_price: 240,
+    });
+    // A: capped catalog stamp, stored at its TRUE $95. B: a custom 10% stamp ($45).
+    await mockPg('scheduled_service_addons').insert([
+      { id: cappedRowId, scheduled_service_id: id, service_name: 'Fixture Capped Add-On', base_price: 100, estimated_price: 95,
+        discount_id: discountId, discount_name: 'Fixture 20% (cap $5)', discount_type: 'percentage', discount_amount: 20, discount_dollars: 5 },
+      { id: customRowId, scheduled_service_id: id, service_name: 'Fixture Custom Add-On', base_price: 50, estimated_price: 45,
+        discount_type: 'percentage', discount_amount: 10, discount_dollars: 5 },
+    ]);
+    return { id, cappedRowId, customRowId, discountId };
+  }
+  const cappedLineRoundTrip = (rowId, discountId) => ({
+    id: rowId, serviceName: 'Fixture Capped Add-On', basePrice: 100,
+    discountId, discountName: 'Fixture 20% (cap $5)', discountType: 'percentage', discountAmount: 20,
+  });
+
+  test('PUT /:id/update-details (planner, real rows): removing ONE line\'s discount on an UNMARKED visit adopts — the other capped line stays $95 (never $80) and the regime + cap are stamped', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      const { id, cappedRowId, customRowId, discountId } = await seedTwoStampedAddonsUnmarked();
+      const updates = {};
+      const plan = await computeUpdateDetailsFinancialPlan({
+        db: mockPg, id, updates, primaryLinePrice: 100,
+        addons: [
+          cappedLineRoundTrip(cappedRowId, discountId),
+          { id: customRowId, serviceName: 'Fixture Custom Add-On', basePrice: 50 }, // discount REMOVED
+        ],
+        appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+        presetEligibilityCheck: async () => {},
+      });
+      expect(plan.replaceAddons[0].price).toBe(95); // NEVER $80
+      expect(plan.replaceAddons[1].price).toBe(50);
+      expect(updates.estimated_price).toBe(245);
+      expect(hasPricingRegimeMarker(updates)).toBe(true);
+      expect(frozenCapsFromRow(updates).addons[discountId]).toBe(5);
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
+
+  test('PUT /:id/update-details (planner, real rows): DELETING a discounted line outright on an UNMARKED visit adopts the same way — the surviving capped line stays $95', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      const { id, cappedRowId, discountId } = await seedTwoStampedAddonsUnmarked();
+      const updates = {};
+      const plan = await computeUpdateDetailsFinancialPlan({
+        db: mockPg, id, updates, primaryLinePrice: 100,
+        addons: [cappedLineRoundTrip(cappedRowId, discountId)], // the custom line is gone
+        appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+        presetEligibilityCheck: async () => {},
+      });
+      expect(plan.replaceAddons).toHaveLength(1);
+      expect(plan.replaceAddons[0].price).toBe(95);
+      expect(updates.estimated_price).toBe(195);
+      expect(hasPricingRegimeMarker(updates)).toBe(true);
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
 });

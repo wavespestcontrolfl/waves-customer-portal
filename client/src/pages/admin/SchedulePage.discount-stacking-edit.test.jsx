@@ -1344,3 +1344,63 @@ it('round 9 P2 (:3544) gate-OFF parity: the Subtotal never reads the preview\'s 
   // (55 net seed + 40) exactly as the pre-lane formula computed it.
   expect(screen.getByText('Subtotal').nextElementSibling.textContent).toBe('$95.00');
 });
+
+// ---------------------------------------------------------------------
+// GitHub Codex round 10 on #4657.
+// ---------------------------------------------------------------------
+
+it('round 10 P2 (:2328): a price edited AFTER the discount snap ($55 -> snapped $60 -> typed $70) survives the gate-close reset; the snap alone still unwinds', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(screen.getAllByText('Military Discount').length).toBeGreaterThan(0));
+  // First touch on the already-stamped mosquito line (Remove) snaps its seeded $55 net to the $60 gross.
+  fireEvent.click(screen.getAllByRole('button', { name: 'Remove line discount' })[0]);
+  const snapped = await waitFor(() => {
+    const input = screen.getAllByPlaceholderText('0.00').find((i) => i.value === '60');
+    expect(input).toBeTruthy();
+    return input;
+  });
+  // Then an explicit reprice on top of the snap.
+  fireEvent.change(snapped, { target: { value: '70' } });
+  // Gate closes before Save.
+  __resetDiscountStackingCache();
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
+    if (url.endsWith('/admin/discounts/stacking')) return { ok: true, json: async () => ({ enabled: false }) };
+    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => DISCOUNTS };
+    return { ok: true, json: async () => ({}) };
+  }));
+  await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+  await waitFor(() => expect(screen.queryByRole('combobox', { name: 'Line discount for Quarterly Fertilization' })).not.toBeInTheDocument());
+  const inputsAfter = screen.getAllByPlaceholderText('0.00').map((i) => i.value);
+  expect(inputsAfter).toContain('70'); // the operator's own edit survives
+  expect(inputsAfter).not.toContain('55'); // never silently reset to the net seed
+});
+
+it('round 10 P1 (legacy-visit-money-submission.cjs:49): a zero-add-on visit with a known $100 gross posts estimatedPrice 100 when its appointment discount is REPLACED — never the $90 net the discount would then compound onto ($72)', async () => {
+  const zeroAddonDiscounted = {
+    ...baseService,
+    serviceAddons: [],
+    primaryLinePrice: 100,
+    estimatedPrice: 90,
+    discountType: 'percentage', discountAmount: 10,
+  };
+  const writesSeen = [];
+  vi.stubGlobal('fetch', mockFetch({
+    stackingEnabled: true,
+    service: zeroAddonDiscounted,
+    onUpdateDetails: (body) => { writesSeen.push(body); return { ok: true, json: async () => ({}) }; },
+  }));
+  render(<Harness service={zeroAddonDiscounted} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(apptDiscountSelect()).toBeInTheDocument());
+  fireEvent.change(apptDiscountSelect(), { target: { value: 'disc-gold' } }); // 15% replaces the stored 10%
+  await waitForMoneyReady();
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  await waitFor(() => expect(writesSeen.length).toBe(1));
+  const body = writesSeen[0];
+  expect(Number(body.estimatedPrice)).toBe(100); // the GROSS — the server applies the new 15% to this figure ($85), never to $90 ($76.50)
+  expect(body.discountType).toBe('percentage');
+  expect(Number(body.discountAmount)).toBe(15);
+  expect(body.addons).toBeUndefined(); // zero-add-on: the single-service save path
+});

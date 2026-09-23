@@ -2325,7 +2325,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         ...l,
         lineDiscountTouched: false,
         lineDiscount: null,
-        price: priceWasSnapped ? (l._seededPrice ?? l.price) : l.price,
+        // GitHub Codex round 10 on #4657 (P2, :2328): undo the snap ONLY
+        // while Price still sits at the snapped gross — an operator who
+        // edited it AFTER the snap ($55 -> snapped $60 -> typed $70) made
+        // an explicit edit this reset must not discard.
+        price: priceWasSnapped && String(l.price) === String(l._origBasePrice)
+          ? (l._seededPrice ?? l.price)
+          : l.price,
         _touchSnappedPrice: false,
       };
     }));
@@ -3517,10 +3523,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       : 0;
   // Codex pre-push audit P2 (owner revert-and-carry on #4657, this round,
   // legacy-visit-money-submission.cjs:52 / SchedulePage.jsx): form.price
-  // (primaryPrice, above) is seeded with the stored NET — correct for the
-  // SAVE contract (deriveLegacyPrimarySubmission's own doctrine: an
-  // unedited zero-add-on save must resubmit the stored NET, never the
-  // gross), wrong for the Subtotal DISPLAY. A discounted zero-add-on
+  // (primaryPrice, above) is seeded with the stored NET for a legacy
+  // zero-add-on row with no stored gross (deriveLegacyPrimarySubmission —
+  // a KNOWN gross seeds the gross itself as of round 10's :49 fix) —
+  // correct for the SAVE contract, wrong for the Subtotal DISPLAY. Such a
   // visit otherwise renders Subtotal $90 / Discount ($10) / Total $90 —
   // an itemization no arithmetic ever produces. Prefer the server
   // preview's own primaryLinePrice (the authoritative gross this exact

@@ -843,17 +843,16 @@ describe('deriveLegacyPrimarySubmission — the shared module itself (GitHub rou
     expect(result).toBe(60);
   });
 
-  test(':6083 (round 5 on #4657) — a ZERO-add-on visit derives from the stored TOTAL, never the structured (gross) primaryLinePrice', () => {
-    // primaryLinePrice is the primary line's own GROSS (pre appointment-
-    // discount); estimatedPrice is the stored NET total. With no add-on
-    // lines to separate primary from total, there is nothing gross-vs-net
-    // needs disambiguating for — the Month-view row shape (primaryLinePrice
-    // + serviceAddons: []) made this a reachable combination, and trusting
-    // the gross here fed it into a field whose contract is "what an
-    // unchanged save resubmits," discarding a stored appointment discount
-    // on the very next save ($100 gross vs $90 stored net).
-    const result = deriveLegacyPrimarySubmission({ primaryLinePrice: 100, estimatedPrice: 90, addons: [] });
-    expect(result).toBe(90);
+  test('GitHub round 10 P1 on #4657 (:49, reverting round 5\'s :6083 net seed) — a ZERO-add-on visit with a KNOWN gross seeds the GROSS: a replaced appointment discount rebases from $100, never compounds onto the $90 net ($72)', () => {
+    // The untouched-save gross echo round 5 worried about is the SERVER's
+    // job (computeSingleServiceEstimatedPricePlan's isUnchangedGrossEcho,
+    // pinned by admin-schedule-discount-provenance-fields ':6083 — GATE
+    // OFF'); the net seed itself fed a CHANGED discount the wrong base.
+    expect(deriveLegacyPrimarySubmission({ primaryLinePrice: 100, estimatedPrice: 90, addons: [] })).toBe(100);
+  });
+
+  test('a ZERO-add-on legacy visit with NO stored gross still derives from the stored total (unchanged)', () => {
+    expect(deriveLegacyPrimarySubmission({ primaryLinePrice: null, estimatedPrice: 90, addons: [] })).toBe(90);
   });
 
   test('null total, null primary, no addons: nothing derivable — returns null', () => {
@@ -1192,18 +1191,18 @@ describe('GitHub round 9 P1 on #4657 — a discount-term change on an UNMARKED r
   };
 
   describe('adoptsCanonicalPricingOnEdit — the pure decision', () => {
-    const base = { legacyPreservationCandidate: true, legacyEconomicsPreserved: false, appointmentDiscountChanged: false, normalizedAddons: [] };
-    test('a genuinely fresh add-on pick (server-determined discountIsNew) on an unmarked, non-preserved row: adopts', () => {
-      expect(adoptsCanonicalPricingOnEdit({ ...base, normalizedAddons: [{ discountIsNew: true, discount: { discountId: CAPPED_20PCT } }] })).toBe(true);
+    const base = { legacyPreservationCandidate: true, legacyEconomicsPreserved: false, appointmentDiscountChanged: false, addonDiscountTermsChanged: false };
+    test('an add-on discount TERM change (a fresh/changed pick, a line discount removed, or a discounted line deleted — round 10 P1) on an unmarked, non-preserved row: adopts', () => {
+      expect(adoptsCanonicalPricingOnEdit({ ...base, addonDiscountTermsChanged: true })).toBe(true);
     });
     test('an appointment-level discount added, swapped OR removed (appointmentDiscountChanged) on an unmarked, non-preserved row: adopts', () => {
       expect(adoptsCanonicalPricingOnEdit({ ...base, appointmentDiscountChanged: true })).toBe(true);
     });
     test('a PRICE-only edit (no discount term changed anywhere) on an unmarked row: does NOT adopt — the legacy live recompute keeps it (#4405\'s own open product decision)', () => {
-      expect(adoptsCanonicalPricingOnEdit({ ...base, normalizedAddons: [{ discountIsNew: false, discount: { discountId: CAPPED_20PCT } }] })).toBe(false);
+      expect(adoptsCanonicalPricingOnEdit({ ...base, addonDiscountTermsChanged: false })).toBe(false);
     });
-    test('a round-tripped, UNCHANGED add-on stamp is never "new" — the client\'s own lineDiscountFresh claim is not consulted', () => {
-      expect(adoptsCanonicalPricingOnEdit({ ...base, normalizedAddons: [{ lineDiscountFresh: true, discountIsNew: false, discount: { discountId: CAPPED_20PCT } }] })).toBe(false);
+    test('the add-on answer is the planner\'s own stored-row comparison (a round-tripped, unchanged stamp reads false there) — a bare false never adopts', () => {
+      expect(adoptsCanonicalPricingOnEdit({ ...base, addonDiscountTermsChanged: false, appointmentDiscountChanged: false })).toBe(false);
     });
     test('a notes-only save that legacy preservation already claimed: never adopts (preservation and adoption are mutually exclusive)', () => {
       expect(adoptsCanonicalPricingOnEdit({ ...base, legacyEconomicsPreserved: true, appointmentDiscountChanged: true })).toBe(false);
@@ -1218,7 +1217,7 @@ describe('GitHub round 9 P1 on #4657 — a discount-term change on an UNMARKED r
       // normalizeUpdateDetailsAddons's own output for a FRESH catalog pick:
       // resolveLineDiscount already applied the cap (price 95, dollars 5).
       const normalizedAddons = [{
-        base: 100, price: 95, serviceId: null, serviceKey: null, discountIsNew: true,
+        base: 100, price: 95, serviceId: null, serviceKey: null, discountTermChanged: true,
         discount: { discountId: CAPPED_20PCT, discountType: 'percentage', discountAmount: 20, discountDollars: 5 },
       }];
       const result = await resolveUpdateDetailsAddonFinancials({
@@ -1226,7 +1225,7 @@ describe('GitHub round 9 P1 on #4657 — a discount-term change on an UNMARKED r
         effDiscountType: null, effDiscountAmount: null, effMaxDiscountDollars: null,
         effServiceKeyFilter: null, effServiceCategoryFilter: null, appointmentDiscountId: null,
         adoptCanonicalPricing: adoptsCanonicalPricingOnEdit({
-          legacyPreservationCandidate: true, legacyEconomicsPreserved: false, appointmentDiscountChanged: false, normalizedAddons,
+          legacyPreservationCandidate: true, legacyEconomicsPreserved: false, appointmentDiscountChanged: false, addonDiscountTermsChanged: true,
         }),
       });
       expect(result.canonicalPricingApplied).toBe(true);
@@ -1249,7 +1248,7 @@ describe('GitHub round 9 P1 on #4657 — a discount-term change on an UNMARKED r
       // normalizeUpdateDetailsAddons's own output for an UNCHANGED, round-
       // tripped stamp: cap-unaware applyDiscount(100, 'percentage', 20) → 80.
       const normalizedAddons = [{
-        base: 100, price: 80, serviceId: null, serviceKey: null, discountIsNew: false,
+        base: 100, price: 80, serviceId: null, serviceKey: null, discountTermChanged: false,
         discount: { discountId: CAPPED_20PCT, discountType: 'percentage', discountAmount: 20, discountDollars: 20 },
       }];
       const result = await resolveUpdateDetailsAddonFinancials({
@@ -1267,7 +1266,7 @@ describe('GitHub round 9 P1 on #4657 — a discount-term change on an UNMARKED r
   test('the SAME save 2 against a row that stayed UNMARKED (the pre-fix state) with NO adoption reproduces the bug — $80 / $170 — and adoption alone turns it into $95 / $185', async () => {
     await withGateLive(async () => {
       const normalizedAddons = [{
-        base: 100, price: 80, serviceId: null, serviceKey: null, discountIsNew: false,
+        base: 100, price: 80, serviceId: null, serviceKey: null, discountTermChanged: false,
         discount: { discountId: CAPPED_20PCT, discountType: 'percentage', discountAmount: 20, discountDollars: 20 },
       }];
       const run = (adoptCanonicalPricing) => resolveUpdateDetailsAddonFinancials({
@@ -1283,7 +1282,7 @@ describe('GitHub round 9 P1 on #4657 — a discount-term change on an UNMARKED r
       // appointmentDiscountChanged on an unmarked, non-preserved row is
       // exactly what adoptsCanonicalPricingOnEdit says adopts.
       const adopted = await run(adoptsCanonicalPricingOnEdit({
-        legacyPreservationCandidate: true, legacyEconomicsPreserved: false, appointmentDiscountChanged: true, normalizedAddons,
+        legacyPreservationCandidate: true, legacyEconomicsPreserved: false, appointmentDiscountChanged: true, addonDiscountTermsChanged: false,
       }));
       expect(adopted.canonicalPricingApplied).toBe(true);
       expect(adopted.canonicalRestackedAddonDollars[0]).toEqual({ discountDollars: 5, netPrice: 95 });
@@ -1295,7 +1294,7 @@ describe('GitHub round 9 P1 on #4657 — a discount-term change on an UNMARKED r
   test('null-primary legacy ambiguity still wins: an unmarked row with NO primary_line_price falls back to the legacy engine and stays unmarked even when adoption is requested', async () => {
     await withGateLive(async () => {
       const normalizedAddons = [{
-        base: 100, price: 95, serviceId: null, serviceKey: null, discountIsNew: true,
+        base: 100, price: 95, serviceId: null, serviceKey: null, discountTermChanged: true,
         discount: { discountId: CAPPED_20PCT, discountType: 'percentage', discountAmount: 20, discountDollars: 5 },
       }];
       const result = await resolveUpdateDetailsAddonFinancials({
@@ -1314,7 +1313,7 @@ describe('GitHub round 9 P1 on #4657 — a discount-term change on an UNMARKED r
     const result = await resolveUpdateDetailsAddonFinancials({
       db: () => { throw new Error('must not query when the gate is off'); },
       existing: unmarkedExisting, updates: {}, primaryGross: 100,
-      normalizedAddons: [{ base: 100, price: 95, discountIsNew: true, discount: { discountId: CAPPED_20PCT, discountType: 'percentage', discountAmount: 20, discountDollars: 5 } }],
+      normalizedAddons: [{ base: 100, price: 95, discountTermChanged: true, discount: { discountId: CAPPED_20PCT, discountType: 'percentage', discountAmount: 20, discountDollars: 5 } }],
       effDiscountType: null, effDiscountAmount: null, effMaxDiscountDollars: null,
       effServiceKeyFilter: null, effServiceCategoryFilter: null, appointmentDiscountId: null,
       adoptCanonicalPricing: true,

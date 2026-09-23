@@ -2838,21 +2838,23 @@ async function resolveUpdateDetailsAddonFinancials({
 // unmarked (legacy, or gate-was-off-at-save) row into a canonically-priced
 // one? Yes exactly when, with the gate live, the row is unmarked
 // (legacyPreservationCandidate), notes-only preservation did NOT engage,
-// AND a discount TERM changed — a genuinely new/changed add-on pick
-// (server-determined `discountIsNew`, never the client's own claim) or an
-// appointment-level discount added/swapped/removed (appointmentDiscountChanged
-// — removal included deliberately: a legacy live recompute after removing
-// the visit credit would replay a still-stamped capped add-on through
-// cap-unaware applyDiscount just the same). A PRICE-only edit on an
+// AND a discount TERM changed — on an add-on (`addonDiscountTermsChanged`,
+// computed by the planner from the server's own stored-row comparison,
+// never the client's claim: a genuinely new/changed pick, a line's stored
+// discount removed, or a discounted line deleted outright — GitHub round
+// 10 P1, :10035) or on the appointment level (appointmentDiscountChanged:
+// added/swapped/removed). Removal is included deliberately on both levels:
+// a legacy live recompute after removing ANY one term would replay a
+// still-stamped capped add-on through cap-unaware applyDiscount just the
+// same. A PRICE-only edit on an
 // unmarked row stays on the legacy live-recompute path exactly as before
 // (#4405's own open product decision about repricing existing visits —
 // not this finding's scope). Pure: no I/O, pinned by its own tests.
 function adoptsCanonicalPricingOnEdit({
-  legacyPreservationCandidate, legacyEconomicsPreserved, appointmentDiscountChanged, normalizedAddons,
+  legacyPreservationCandidate, legacyEconomicsPreserved, appointmentDiscountChanged, addonDiscountTermsChanged,
 }) {
   if (!legacyPreservationCandidate || legacyEconomicsPreserved) return false;
-  if (appointmentDiscountChanged) return true;
-  return (Array.isArray(normalizedAddons) ? normalizedAddons : []).some((l) => !!l?.discountIsNew);
+  return !!appointmentDiscountChanged || !!addonDiscountTermsChanged;
 }
 
 // PUT /:id/update-details gate-flip safety for an UNMARKED (legacy, or
@@ -10027,9 +10029,9 @@ async function normalizeUpdateDetailsAddons({
         let lineDiscount = null;
         // Server-determined (never the client's lineDiscountFresh claim):
         // is this line's discount genuinely new/changed relative to its
-        // own stored row? Recorded on the normalized line as
-        // `discountIsNew` — computeUpdateDetailsFinancialPlan reads it to
-        // decide whether this save turns an UNMARKED row canonical
+        // own stored row? Feeds `discountTermChanged` on the normalized
+        // line — computeUpdateDetailsFinancialPlan reads it to decide
+        // whether this save turns an UNMARKED row canonical
         // (adoptsCanonicalPricingOnEdit, GitHub round 9 P1 on #4657).
         let lineDiscountIsNew = false;
         if (gross != null && lineType && lineAmount != null && !isNaN(lineAmount)) {
@@ -10066,6 +10068,15 @@ async function normalizeUpdateDetailsAddons({
             };
           }
         }
+        // GitHub Codex round 10 on #4657 (P1, :10035): REMOVING this line's
+        // own stored discount (the posted line carries no discount fields
+        // while its stored row does) is a discount-term change exactly like
+        // a fresh pick — the earlier cut only looked at a posted term, so a
+        // legacy visit whose OTHER add-on still carried a capped stamp
+        // replayed that stamp cap-unaware ($95 -> $80) on the removal save.
+        const priorStampRow = a.id ? existingAddonDiscountById.get(a.id) : null;
+        const lineDiscountRemoved = !lineDiscount && !!priorStampRow
+          && !!(priorStampRow.discount_id || priorStampRow.discount_type);
         normalizedAddons.push({
           // GitHub review round 2 on #4657 (:2513): the addon ROW's own id
           // (scheduled_service_addons.id), when this line already existed
@@ -10083,10 +10094,11 @@ async function normalizeUpdateDetailsAddons({
           // isNewAddonDiscount's own stored-row comparison, above — a
           // client bug here can no longer skip scrutiny.
           lineDiscountFresh: !!a.lineDiscountFresh,
-          // The server's OWN answer to the same question (see above) — a
-          // line whose discount resolved to nothing (null lineDiscount) is
-          // never "new" for adoption purposes: there is no term to freeze.
-          discountIsNew: !!lineDiscount && lineDiscountIsNew,
+          // The server's OWN answer to "did this line's discount TERM
+          // change?" (see above): a genuinely new/changed pick, or the
+          // stored discount removed. A line whose fresh pick resolved to
+          // nothing counts as removed too — the stored term is gone.
+          discountTermChanged: (!!lineDiscount && lineDiscountIsNew) || lineDiscountRemoved,
           serviceId: a.serviceId || catalogService?.id || null,
           // GitHub round 2 on PR #4654 (P0): the RAW client-submitted id,
           // distinct from `serviceId` above (which can be INFERRED via a
@@ -10553,8 +10565,20 @@ async function computeUpdateDetailsFinancialPlan({
         // GitHub Codex round 9 on #4657 (P1, :9984): a discount-term change
         // on an UNMARKED row prices canonically and marks the row — see
         // adoptsCanonicalPricingOnEdit / resolveUpdateDetailsAddonFinancials.
+        // GitHub round 10 P1 (:10035): a DELETED add-on line that carried a
+        // stored discount is a term change too — it never reaches
+        // normalizedAddons at all, so it is detected here against the
+        // stored rows (existingAddonDiscountRows, loaded unconditionally
+        // by normalizeUpdateDetailsAddons).
+        const postedAddonRowIds = new Set(normalizedAddons
+          .map((l) => (l.submittedAddonId ? String(l.submittedAddonId) : null))
+          .filter(Boolean));
+        const discountedAddonRowDeleted = existingAddonDiscountRows.some((r) => (
+          (r.discount_id || r.discount_type) && !postedAddonRowIds.has(String(r.id))
+        ));
+        const addonDiscountTermsChanged = normalizedAddons.some((l) => !!l.discountTermChanged) || discountedAddonRowDeleted;
         const adoptCanonicalPricing = adoptsCanonicalPricingOnEdit({
-          legacyPreservationCandidate, legacyEconomicsPreserved, appointmentDiscountChanged, normalizedAddons,
+          legacyPreservationCandidate, legacyEconomicsPreserved, appointmentDiscountChanged, addonDiscountTermsChanged,
         });
         const {
           financials, primaryNet, canonicalRestackedAddonDollars: canonicalDollars, capsSnapshotToPersist,
