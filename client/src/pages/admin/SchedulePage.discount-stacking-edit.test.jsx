@@ -51,6 +51,11 @@ const BIG_CREDIT = {
   is_active: true, is_auto_apply: false, show_in_invoices: true,
 };
 const DISCOUNTS_R3 = [...DISCOUNTS, BIG_CREDIT];
+const FREE_SERVICE = {
+  id: 'disc-free', name: 'Free Service', discount_type: 'free_service', amount: 0,
+  max_discount_dollars: null, stack_group: null, is_stackable: true,
+  is_active: true, is_auto_apply: false, show_in_invoices: true,
+};
 
 // A row marked under the canonical engine (pricing_provenance.pricing_regime
 // === 'discount_stack_v1') — its Military stamp on the mosquito line was
@@ -336,6 +341,21 @@ it('gate on but untouched: the same notes-only save posts the identical addons p
     { serviceId: 'svc-mosquito', basePrice: 60, discountType: 'fixed_amount', discountAmount: 5, discountId: 'disc-military', discountName: 'Military Discount' },
     { serviceId: 'svc-fert', price: 40 },
   ]);
+});
+
+// GitHub Codex round 11 on #4657 (P2, SchedulePage.jsx:2381): the line
+// picker loads every active invoice discount type, so a free_service
+// preset reached the dollar branch and read "Free Service - $0.00" — the
+// server discounts the WHOLE line for that type. It reads "Free" here,
+// matching Create appointment and the mobile picker.
+it('gate on: a free_service preset is labelled "Free" in the line picker, never $0.00', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, discounts: [...DISCOUNTS, FREE_SERVICE] }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  const fertPicker = await screen.findByRole('combobox', { name: 'Line discount for Quarterly Fertilization' });
+  const labels = Array.from(fertPicker.querySelectorAll('option')).map((o) => o.textContent);
+  expect(labels).toContain('Free Service - Free');
+  expect(labels.some((l) => l.includes('$0.00'))).toBe(false);
 });
 
 it('gate on: picking a fresh line discount previews compound math and posts the gross+slot', async () => {
@@ -1237,7 +1257,10 @@ it('owner revert-and-carry: a discounted zero-add-on visit renders Subtotal as t
   // doesn't reproduce that no-op-vs-rebase distinction — this is the
   // exact response shape the real save-preservation contract produces,
   // and the one the client's own Subtotal fallback (service.primaryLinePrice)
-  // exists to handle.
+  // exists to handle. appointmentDiscountDollars: 10 is what the real
+  // preview now returns for this no-op shape too — it falls back to the
+  // row's stored discount_dollars (GitHub round 11 P2 on #4657, pinned on
+  // PG in admin-schedule-discount-provenance-fields (a2)).
   vi.stubGlobal('fetch', vi.fn(async (url) => {
     if (url.endsWith('/admin/discounts/stacking')) return { ok: true, json: async () => ({ enabled: true }) };
     if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => DISCOUNTS };

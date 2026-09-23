@@ -391,6 +391,80 @@ postgres('scheduled_services PUT /:id/update-details — non-stackable stack_gro
     expect(err).toBeFalsy();
     expect(statusCode).toBe(200);
   });
+
+  // GitHub Codex round 11 on #4657 (P1, :10415): the conflict check's own
+  // `_isNew` re-called isNewAddonDiscount WITHOUT the line's gross and
+  // resolved service identity, so a grandfathered same-group stamp that
+  // normalization already called FRESH (its gross changed — a reprice, or
+  // a remove-and-reselect after one) was grandfathered a second time and
+  // the re-applied conflicting tier persisted. The check now reuses the
+  // normalized line's own discountTermChanged verdict.
+  test('a grandfathered same-group stamp REPRICED on resave is a fresh pick again — 400 (GitHub round 11 P1 on #4657)', async () => {
+    const [addon1] = await trx('scheduled_service_addons').insert({
+      id: randomUUID(), scheduled_service_id: visitId, service_name: 'Mosquito Add-on',
+      base_price: 50, estimated_price: 45, discount_id: silverId, discount_name: 'WaveGuard Silver',
+      discount_type: 'percentage', discount_amount: 10, discount_dollars: 5,
+    }).returning('*');
+    const [addon2] = await trx('scheduled_service_addons').insert({
+      id: randomUUID(), scheduled_service_id: visitId, service_name: 'Fert Add-on',
+      base_price: 50, estimated_price: 42.5, discount_id: goldId, discount_name: 'WaveGuard Gold',
+      discount_type: 'percentage', discount_amount: 15, discount_dollars: 7.5,
+    }).returning('*');
+    // Same Gold preset on the same line, but its gross moved $50 -> $60.
+    const { statusCode, payload } = await put(visitId, {
+      primaryLinePrice: 100,
+      addons: [
+        { id: addon1.id, serviceName: 'Mosquito Add-on', basePrice: 50, discountType: 'percentage', discountAmount: 10, discountId: silverId, discountName: 'WaveGuard Silver' },
+        { id: addon2.id, serviceName: 'Fert Add-on', basePrice: 60, discountType: 'percentage', discountAmount: 15, discountId: goldId, discountName: 'WaveGuard Gold' },
+      ],
+    });
+    expect(statusCode).toBe(400);
+    expect(payload.error).toMatch(/WaveGuard tier discount/);
+    const stored = await trx('scheduled_service_addons').where({ id: addon2.id }).first();
+    expect(Number(stored.base_price)).toBe(50);
+  });
+
+  // Behaviour pin for the finding's own wording (appointment-level tier +
+  // grandfathered add-on tier). This shape is ALSO caught by the engine's
+  // own group check on the money path (discount-stack.js), so it does not
+  // fail without the route fix — the two-add-on test above is the one
+  // that does.
+  test('a STORED appointment-level tier plus a grandfathered add-on tier stamp REPRICED on resave — 400 (GitHub round 11 P1 on #4657)', async () => {
+    // A FIXED non-stackable tier credit at the appointment level: pricing
+    // a stored PERCENTAGE appointment discount would need the percent-
+    // exclusion catalog, which only the per-request middleware primes
+    // (direct handler calls here never run it) — the conflict rule under
+    // test is group-based and type-agnostic.
+    const bronzeId = randomUUID();
+    await trx('discounts').insert({
+      id: bronzeId, discount_key: 'wg_bronze_' + bronzeId.slice(0, 8), name: 'WaveGuard Bronze Credit',
+      discount_type: 'fixed_amount', amount: 5, is_active: true, is_auto_apply: false,
+      show_in_invoices: true, stack_group: 'tier', is_stackable: false,
+    });
+    await trx('scheduled_services').where({ id: visitId }).update({
+      discount_id: bronzeId, discount_type: 'fixed_amount', discount_amount: 5, discount_dollars: 5, estimated_price: 137.5,
+    });
+    const [addon] = await trx('scheduled_service_addons').insert({
+      id: randomUUID(), scheduled_service_id: visitId, service_name: 'Fert Add-on',
+      base_price: 50, estimated_price: 42.5, discount_id: goldId, discount_name: 'WaveGuard Gold',
+      discount_type: 'percentage', discount_amount: 15, discount_dollars: 7.5,
+    }).returning('*');
+    // Unchanged round-trip: grandfathered, saves.
+    const untouched = await put(visitId, {
+      primaryLinePrice: 100,
+      addons: [{ id: addon.id, serviceName: 'Fert Add-on', basePrice: 50, discountType: 'percentage', discountAmount: 15, discountId: goldId, discountName: 'WaveGuard Gold' }],
+    });
+    expect(untouched.err).toBeFalsy();
+    expect(untouched.payload?.error).toBeUndefined();
+    expect(untouched.statusCode).toBe(200);
+    // Repriced: the same Gold stamp is a fresh pick against the stored Bronze.
+    const repriced = await put(visitId, {
+      primaryLinePrice: 100,
+      addons: [{ id: addon.id, serviceName: 'Fert Add-on', basePrice: 60, discountType: 'percentage', discountAmount: 15, discountId: goldId, discountName: 'WaveGuard Gold' }],
+    });
+    expect(repriced.statusCode).toBe(400);
+    expect(repriced.payload.error).toMatch(/WaveGuard tier discount/);
+  });
 });
 
 postgres('scheduled_services PUT /:id/update-details — structural round (P0 :9965, P1 :10095, P1 :2994) against migrated PostgreSQL', () => {
@@ -679,6 +753,42 @@ postgres('POST /:id/update-details/preview — dry-run parity with the real save
     const savedRow = await trx('scheduled_services').where({ id: visitId }).first();
     expect(Number(savedRow.estimated_price)).toBe(90);
     expect(Number(previewResult.payload.total)).toBe(Number(savedRow.estimated_price));
+  });
+
+  // GitHub Codex round 11 on #4657 (P2, :13876): an untouched zero-add-on
+  // visit takes computeSingleServiceEstimatedPricePlan's no-op branch,
+  // which never places discount_dollars in `updates` — the preview then
+  // returned appointmentDiscountDollars null for a row that still carries
+  // a persisted appointment discount, and the modal drew Subtotal $100 /
+  // Total $90 with no discount line. The preview now falls back to the
+  // stored figure whenever the plan leaves it alone, like the primary
+  // line_discount_* fields already did.
+  test('(a2) untouched zero-add-on visit with a stored appointment discount: preview returns the stored discount_dollars', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    const [row] = await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, service_type: 'Quarterly Pest Control',
+      service_key_snapshot: 'pest_general_quarterly', status: 'confirmed',
+      scheduled_date: '2040-02-01', window_start: '08:00', window_end: '10:00',
+      estimated_price: 90, primary_line_price: 100,
+      discount_type: 'fixed_amount', discount_amount: 10, discount_dollars: 10,
+    }).returning('*');
+    visitId = row.id;
+    // No `addons` key at all — the client omits it for a zero-add-on
+    // visit, which is what routes this save through the single-service
+    // no-op branch (an `addons: []` array would take the addons branch,
+    // which always restates discount_dollars itself).
+    const body = { estimatedPrice: 90, primaryLinePrice: 100 };
+    const previewResult = await preview(visitId, body);
+    expect(previewResult.err).toBeFalsy();
+    expect(previewResult.statusCode).toBe(200);
+    expect(Number(previewResult.payload.total)).toBe(90);
+    expect(Number(previewResult.payload.appointmentDiscountDollars)).toBe(10);
+    const saveResult = await put(visitId, body);
+    expect(saveResult.err).toBeFalsy();
+    expect(saveResult.statusCode).toBe(200);
+    const savedRow = await trx('scheduled_services').where({ id: visitId }).first();
+    expect(Number(savedRow.estimated_price)).toBe(90);
+    expect(Number(savedRow.discount_dollars)).toBe(Number(previewResult.payload.appointmentDiscountDollars));
   });
 
   test('(b) single-service estimatedPrice row: preview and save agree', async () => {

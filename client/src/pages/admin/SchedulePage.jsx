@@ -2373,6 +2373,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     id ? lineDiscountPresets.find((d) => String(d.id) === String(id)) || null : null;
   const lineDiscountCatalogRow = (ld) => (ld ? { ...(linePresetById(ld.id) || {}), ...ld } : null);
   const presetOptionLabel = (d) => {
+    // GitHub Codex round 11 on #4657 (P2, :2381): the server resolves a
+    // free_service preset by discounting the WHOLE line, so it must read
+    // "Free" here exactly as Create appointment / the mobile picker
+    // render it — never `$0.00`, which misstates a full-service credit.
+    if (d.discount_type === "free_service") return `${d.name} - Free`;
     if (isCustomPercentagePreset(d)) return `${d.name} - custom %`;
     if (isCustomAmountPreset(d)) return `${d.name} - custom $`;
     return `${d.name} - ${
@@ -4008,7 +4013,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                         muted tone, matching the guidance text below it,
                         never the alert-fg red reserved for genuine warnings
                         (AGENTS.md / CLAUDE.md). */}
-                    <div style={{ fontSize: 12, color: D.muted }}>
+                    <div style={{ fontSize: 14, color: D.muted }}>
                       {lineDiscount.discount_type === "percentage" || lineDiscount.discount_type === "variable_percentage"
                         ? `${Number(lineDiscount.amount)}%`
                         : `$${Number(lineDiscount.amount || 0).toFixed(2)}`}
@@ -4026,7 +4031,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                       background: "#fff",
                       color: "#B42318",
                       border: "1px solid #FCA5A5",
-                      fontSize: 12,
+                      fontSize: 14,
                       cursor: "pointer",
                     }}
                   >
@@ -4862,7 +4867,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     borderRadius: 8,
                     padding: 10,
                     marginBottom: 14,
-                    fontSize: 12,
+                    fontSize: 14,
                     color: "#DC2626",
                     display: "flex",
                     alignItems: "center",
@@ -4882,7 +4887,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                       color: "#DC2626",
                       borderRadius: 6,
                       padding: "4px 10px",
-                      fontSize: 12,
+                      fontSize: 14,
                       fontWeight: 500,
                       cursor: "pointer",
                       flex: "0 0 auto",
@@ -4900,7 +4905,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     borderRadius: 8,
                     padding: 10,
                     marginBottom: 14,
-                    fontSize: 12,
+                    fontSize: 14,
                     color: "#DC2626",
                   }}
                 >
@@ -4911,7 +4916,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               {!stackingUnconfirmedBlocksSave && !moneyPreview?.error && moneyPreviewBlocksSave && (
                 <div
                   style={{
-                    fontSize: 12,
+                    fontSize: 14,
                     color: D.textMuted || D.textSecondary || "#6B7280",
                     marginBottom: 14,
                   }}
@@ -4927,7 +4932,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     borderRadius: 8,
                     padding: 10,
                     marginBottom: 14,
-                    fontSize: 12,
+                    fontSize: 14,
                     color: "#DC2626",
                   }}
                 >

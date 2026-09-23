@@ -10412,7 +10412,17 @@ async function computeUpdateDetailsFinancialPlan({
               return {
                 ...meta,
                 scope: l.submittedAddonId || l.submittedServiceId || `addon-${i}`,
-                _isNew: isNewAddonDiscount(l.submittedAddonId, l.discount),
+                // GitHub Codex round 11 on #4657 (P1, :10415): the SAME
+                // freshness verdict normalization already reached for this
+                // line (discountTermChanged = isNewAddonDiscount WITH the
+                // line's gross and resolved service identity). Re-calling
+                // isNewAddonDiscount here without those two inputs called a
+                // same-preset stamp "not new" after a reprice or a service
+                // swap, so a grandfathered visit could re-apply a conflicting
+                // tier past assertNewStackGroupConflicts. A line whose
+                // discount resolved (meta non-null) has discountTermChanged
+                // === its own lineDiscountIsNew.
+                _isNew: !!l.discountTermChanged,
               };
             })
             .filter(Boolean),
@@ -13854,16 +13864,32 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
     // or — the new failure mode this round's fix would have introduced
     // without this split — a null name for a dollar figure that just got
     // freshly restacked but whose name never changed at all.
+    // GitHub Codex round 11 on #4657 (P2, :13876): the appointment-level
+    // discount_dollars gets the same treatment — an untouched zero-add-on
+    // visit takes computeSingleServiceEstimatedPricePlan's no-op branch,
+    // which keeps the stored net total but never places discount_dollars
+    // in `updates`, so this response returned null for a row that still
+    // carries a persisted appointment discount ($100 primary stored at $90
+    // rendered Subtotal $100 / Total $90 with no discount line). Every
+    // path that CHANGES the appointment discount defines
+    // updates.discount_dollars (null included), so "undefined" means
+    // "this save leaves the stored figure alone" — return that figure.
     const dollarsPlanned = updates.line_discount_dollars !== undefined;
     const namePlanned = updates.line_discount_name !== undefined;
-    const primaryLineDiscountRow = (!dollarsPlanned || !namePlanned) && (cols.line_discount_dollars || cols.line_discount_name)
+    const appointmentDollarsPlanned = updates.discount_dollars !== undefined;
+    const storedReadCols = [
+      ...(!dollarsPlanned && cols.line_discount_dollars ? ['line_discount_dollars'] : []),
+      ...(!namePlanned && cols.line_discount_name ? ['line_discount_name'] : []),
+      ...(!appointmentDollarsPlanned && cols.discount_dollars ? ['discount_dollars'] : []),
+    ];
+    const primaryLineDiscountRow = storedReadCols.length
       ? await db('scheduled_services').where({ id })
-          .first(
-            ...(cols.line_discount_dollars ? ['line_discount_dollars'] : []),
-            ...(cols.line_discount_name ? ['line_discount_name'] : []),
-          )
+          .first(...storedReadCols)
           .catch(() => null)
       : null;
+    const previewAppointmentDiscountDollars = appointmentDollarsPlanned
+      ? updates.discount_dollars
+      : (primaryLineDiscountRow?.discount_dollars ?? null);
     const previewPrimaryLineDiscountDollars = dollarsPlanned
       ? updates.line_discount_dollars
       : (primaryLineDiscountRow?.line_discount_dollars ?? null);
@@ -13873,7 +13899,8 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
     res.json({
       total: updates.estimated_price !== undefined ? updates.estimated_price : null,
       primaryLinePrice: updates.primary_line_price !== undefined ? updates.primary_line_price : null,
-      appointmentDiscountDollars: updates.discount_dollars !== undefined ? updates.discount_dollars : null,
+      appointmentDiscountDollars: previewAppointmentDiscountDollars != null
+        ? Number(previewAppointmentDiscountDollars) : null,
       primaryLineDiscountDollars: previewPrimaryLineDiscountDollars != null
         ? Number(previewPrimaryLineDiscountDollars) : null,
       primaryLineDiscountName: previewPrimaryLineDiscountName || null,
