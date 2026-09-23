@@ -90,6 +90,38 @@ describe('stack groups', () => {
     expect(stackGroupConflict([SILVER, MILITARY, REFERRAL])).toBeNull();
   });
 
+  // GitHub review round 4 P2 (PR #4656, :3579): `names` alone lets a
+  // caller misclassify which SIDE of a conflict is the appointment-level
+  // slot when the SAME preset legitimately sits on the appointment slot in
+  // one submit group and on an unrelated line in another — the clash's
+  // `names` can then contain the appointment discount's own name even
+  // though neither actual clashing row is the appointment slot. `rows`
+  // carries the caller's own scope/spansAll tags through unmodified, so
+  // involvement is identifiable by ROW IDENTITY (spansAll), never by name.
+  test('a conflict exposes the actual clashing rows, carrying their spansAll/scope tags through', () => {
+    const apptSlotRow = { ...SILVER, spansAll: true };
+    const lineRow = { ...GOLD, scope: 'line:1' };
+    const conflict = stackGroupConflict([apptSlotRow, lineRow]);
+    expect(conflict.rows).toEqual([apptSlotRow, lineRow]);
+    expect(conflict.rows.some((r) => r.spansAll === true)).toBe(true);
+  });
+
+  test('a same-preset-in-two-groups line-vs-line conflict carries NO spansAll row, even though one clashing name equals a different, uninvolved appointment discount', () => {
+    // Silver rides the appointment slot in group A (spansAll) -- entirely
+    // separate from THIS conflict, which is between two LINE rows in
+    // group B: an unrelated Silver-preset line clashing with Gold, purely
+    // because a cadence edit merged their submit groups.
+    const lineSilver = { ...SILVER, scope: 'line:2' };
+    const lineGold = { ...GOLD, scope: 'line:3' };
+    const conflict = stackGroupConflict([lineSilver, lineGold]);
+    expect(conflict.names).toContain('WaveGuard Silver');
+    // The name-based classifier this fix replaced would have matched
+    // "WaveGuard Silver" against an appointment discount named the same --
+    // row-identity correctly shows NEITHER clashing row spans the
+    // appointment slot at all.
+    expect(conflict.rows.every((r) => r.spansAll !== true)).toBe(true);
+  });
+
   test('a line picker keeps the tier another LINE already uses, and drops the rest', () => {
     const offered = stackablePresets(
       [SILVER, GOLD, MILITARY, REFERRAL],

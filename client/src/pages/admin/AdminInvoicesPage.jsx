@@ -450,6 +450,21 @@ export function invoiceDiscountItemTerm(item, discountRowById, persistedClientId
     return {
       discountType: "fixed_amount",
       amount: Math.max(0, Math.abs(dollars)),
+      // REPLAY STABILITY (coordinator scope extension, round 3): mirrors
+      // server/services/invoice.js's frozenSortKeyFields exactly — a
+      // STORED item this invoice already carries (loaded from a saved
+      // invoice's line_items) may have stack_sort_kind/_value/_cap
+      // persisted on it from the resolve that first saved it. Without
+      // this, the EDIT-mode preview of an existing document-wide
+      // percentage term would still use the pre-fix unstable canonical-
+      // order position even though the server now saves it correctly —
+      // a preview/save mismatch of exactly the class this whole slice
+      // exists to close. Undefined (every item saved before this fix
+      // existed) falls straight through to discount-stack.js's own
+      // fallback — unchanged from before these fields existed.
+      ...(item?.stack_sort_kind != null
+        ? { sortKind: item.stack_sort_kind, sortValue: item.stack_sort_value, sortCap: item.stack_sort_cap }
+        : {}),
     };
   }
   const row = item?.discount_id
@@ -505,22 +520,140 @@ function invoiceServiceScopeEligibleLines(serviceLineItems, scopeKey, scopeCateg
     .filter((i) => i >= 0);
 }
 
+// GitHub review round 1 P0, second finding (PR #4659, round 2) — client
+// mirror of server/services/invoice.js's freshPickEligibleLines. Unlike
+// invoiceServiceScopeEligibleLines above (which falls back to UNSCOPED
+// when this invoice carries no service_key data anywhere, preserving a
+// pre-lane invoice's own historical "never scopes" contract), a FRESH
+// catalog pick the operator just chose must never silently preview as
+// unscoped just because this invoice's lines carry no service_key
+// snapshot — that would disagree with the server's own fail-closed save
+// (a preview/save mismatch). Fails closed: no service_key data to
+// verify against means no line can be confirmed eligible, so this
+// always returns the (possibly empty) matched-line array, never null.
+function freshPickEligibleLines(serviceLineItems, scopeKey, scopeCategory) {
+  return serviceLineItems
+    .map((line, i) => (
+      (!scopeKey || String(line?.service_key || "") === String(scopeKey))
+      && (!scopeCategory || String(line?.service_category || "") === String(scopeCategory))
+        ? i
+        : -1
+    ))
+    .filter((i) => i >= 0);
+}
+
+// Coordinator design call (round 3 on PR #4659, GitHub review P0 on
+// invoice.js:807) — client mirror of server/services/invoice.js's
+// strictScopeEligibleLines, and the ONE place both invoiceDocumentTerms
+// (pricing) and discountRowScopeLabel (caption) resolve a document-wide
+// item's eligibleLines, so preview text and the actual computed discount
+// can never disagree. Splits the same way the server does:
+//   - a FRESH (unsaved) pick resolves from its OWN catalog row's
+//     service_key_filter/_category_filter via freshPickEligibleLines
+//     (fail-closed) — it has no document_scope_* of its own yet.
+//   - a STORED item marked item.document_scope_strict === true (a
+//     PERSISTED fresh pick, replayed — the SAME dedicated provenance
+//     flag server/services/invoice.js's documentEntryTerms stamps ONLY
+//     when it actually, strictly resolved a scope, NEVER
+//     item.stacking_regime — see the server's own correction comment)
+//     resolves its PERSISTED document_scope_* strictly, same as a fresh
+//     pick — both being null/absent means unscoped BY CHOICE.
+//   - an UNMARKED stored item (every genuine scheduled_service/
+//     validated_checkout stamp, and any legacy pre-gate history) keeps
+//     the legacy invoiceServiceScopeEligibleLines "no service_key
+//     anywhere on this invoice ⇒ unscoped" fallback, unchanged.
+function resolveDocumentEligibleLines(item, serviceLineItems, discountRowById, persistedClientIds) {
+  const lines = serviceLineItems || [];
+  if (isStoredInvoiceDiscountItem(item, persistedClientIds)) {
+    if (item?.document_scope_strict === true) {
+      const scopeKey = item?.document_scope_service_key;
+      const scopeCategory = item?.document_scope_service_category;
+      return scopeKey || scopeCategory ? freshPickEligibleLines(lines, scopeKey, scopeCategory) : null;
+    }
+    return invoiceServiceScopeEligibleLines(lines, item?.document_scope_service_key, item?.document_scope_service_category);
+  }
+  const row = item?.discount_id ? discountRowById?.get(String(item.discount_id)) : null;
+  if (!row || (!row.service_key_filter && !row.service_category_filter)) return null;
+  return freshPickEligibleLines(lines, row.service_key_filter, row.service_category_filter);
+}
+
+// A document-wide/scoped discount item's own "Applies to" fragment — a
+// per-line pick's row already sits nested under its own line, so this is
+// only ever called for one with discount_for: null (see discountRowCaption
+// below). Split out of that function so each stays under the file's
+// complexity ceiling and reads as one job apiece.
+function discountRowScopeLabel(item, serviceLineItems, discountRowById, persistedClientIds) {
+  const eligibleLines = resolveDocumentEligibleLines(item, serviceLineItems, discountRowById, persistedClientIds);
+  if (eligibleLines == null) return "Applies to: entire invoice";
+  if (eligibleLines.length === 0) return "Applies to: no matching line (resolves to $0)";
+  const names = eligibleLines
+    .map((i) => (serviceLineItems || [])[i]?.description)
+    .filter(Boolean);
+  return names.length ? `Applies to: ${names.join(", ")}` : "Applies to: entire invoice";
+}
+
+// A discount item's own origin fragment: a trusted stored stamp names its
+// source; an ordinary row grandfathered frozen by persistedClientIds reads
+// generically; a fresh (unsaved) pick has no origin to report.
+function discountRowOriginLabel(item, persistedClientIds) {
+  if (item?.stored_discount_source === "scheduled_service") return "Frozen — from visit";
+  if (item?.stored_discount_source === "validated_checkout") return "Frozen — from checkout";
+  if (isStoredInvoiceDiscountItem(item, persistedClientIds)) return "Frozen — saved";
+  return null;
+}
+
+// GATE_DISCOUNT_STACKING (slice 8 of #4405 — the preview-display gaps
+// slice 5 left open): a short caption under a read-only discount row —
+// whether it's a FROZEN stored stamp or a fresh catalog pick, the cap on
+// its catalog row (never shown for a custom/operator-typed amount, which
+// has no catalog cap to report), and, for a document-wide or scoped
+// credit only, which line(s) it actually reaches. Display only; never
+// changes what is charged. Returns null when there is nothing worth
+// saying (an ordinary fresh per-line pick with no cap).
+export function discountRowCaption({ item, serviceLineItems, discountRowById, persistedClientIds }) {
+  const row = item?.discount_id ? discountRowById?.get(String(item.discount_id)) : null;
+  const cap = row?.max_discount_dollars;
+  const parts = [
+    discountRowOriginLabel(item, persistedClientIds),
+    !item?.discount_for ? discountRowScopeLabel(item, serviceLineItems, discountRowById, persistedClientIds) : null,
+    item?.custom_discount_amount == null && cap != null && Number(cap) > 0
+      ? `capped at $${Number(cap).toFixed(2)}`
+      : null,
+  ].filter(Boolean);
+  return parts.length ? parts.join(" · ") : null;
+}
+
 // The document-wide terms every stacked computation below feeds to
 // stackDocumentDiscounts — ONE builder, shared by
 // computeInvoiceLineDiscountTotal and repriceLineWithNewDiscountPick, so
 // they can't independently drift on this rule the way the aggregate and
 // the per-pick sizing already once did (round 1).
-function invoiceDocumentTerms(items, serviceLineItems, discountRowById, persistedClientIds) {
+//
+// Pre-push audit P1 (coordinator scope extension, round 3): every term
+// now carries `id: i.discount_id` (undefined for a plain literal credit,
+// same as every other identity-less term) — server/services/invoice.js's
+// own documentEntryTerms already tags both its fresh and stored branches
+// this way, so two document-wide terms tied on rank/value/cap/scope
+// broke the tie by ARRAY POSITION here but by catalog id there: two
+// stackable $80 document discounts added in id order b-then-a could
+// preview b=$80/a=$20 while the save recorded b=$20/a=$80 — the TOTAL
+// agreed either way, but the displayed per-row split (and which catalog
+// row's usage stats the save rolled up) disagreed with what the
+// operator saw. discount-stack.js's compareDiscountIdentity is the tie-
+// break this now reaches on both sides identically.
+export function invoiceDocumentTerms(items, serviceLineItems, discountRowById, persistedClientIds) {
   return items
     .filter((i) => i._kind === "discount" && !i.discount_for)
     .map((i) => {
-      const term = invoiceDiscountItemTerm(i, discountRowById, persistedClientIds);
-      if (!isStoredInvoiceDiscountItem(i, persistedClientIds)) return term;
-      const eligibleLines = invoiceServiceScopeEligibleLines(
-        serviceLineItems,
-        i.document_scope_service_key,
-        i.document_scope_service_category,
-      );
+      const term = { ...invoiceDiscountItemTerm(i, discountRowById, persistedClientIds), id: i.discount_id };
+      // Round 3/4: both a fresh pick's own catalog scope AND a stored
+      // item's persisted scope now resolve through the ONE shared
+      // resolveDocumentEligibleLines (see its own comment) — a STORED
+      // item marked document_scope_strict === true resolves strictly
+      // (fail-closed), matching invoice.js's own fix, so the preview
+      // never disagrees with what a marked stamp actually saves once
+      // its scoped line is gone.
+      const eligibleLines = resolveDocumentEligibleLines(i, serviceLineItems, discountRowById, persistedClientIds);
       return eligibleLines ? { ...term, eligibleLines } : term;
     });
 }
@@ -5858,6 +5991,11 @@ function CreateInvoice({
   const [allDiscountRowById, setAllDiscountRowById] = useState(new Map());
   const [discountSearchIdx, setDiscountSearchIdx] = useState(null);
   const [discountQueries, setDiscountQueries] = useState({});
+  // Slice 8 of #4405: the invoice-wide (document-scope) discount/credit
+  // picker — its own open/closed flag, since it isn't tied to a line
+  // index like discountSearchIdx. discountQueries.__document__ holds its
+  // search text, reusing the same query-state map as every per-line field.
+  const [documentDiscountSearchOpen, setDocumentDiscountSearchOpen] = useState(false);
   const [aiNotesLoading, setAiNotesLoading] = useState(false);
   const [aiSources, setAiSources] = useState({
     jobSummary: true,
@@ -6075,6 +6213,16 @@ function CreateInvoice({
       clearTimeout(timer);
     };
   }, [serviceSearchIdx, lineItems, serviceSearchAttempt]);
+  // GitHub review round 1 P1 (PR #4659): stamps service_key/service_category
+  // onto the picked line — the SAME two fields a scheduled-service
+  // invoice line already snapshots (buildScheduledServiceInvoiceLines,
+  // server-side) — so a document-wide catalog pick's OWN
+  // service_key_filter/_category_filter (e.g. the waveguard_member_wdo
+  // seed, restricted to wdo_inspection) has real per-line data to scope
+  // against on a hand-built admin invoice too, not just an
+  // auto-generated one. GET /admin/services already returns both
+  // (service-library.js's SERVICE_COLS) — this just carries them onto
+  // the line the operator actually picked.
   const pickService = (i, svc) => {
     const updated = [...lineItems];
     updated[i] = {
@@ -6082,8 +6230,28 @@ function CreateInvoice({
       _kind: "service",
       description: svc.name,
       unit_price: Number(svc.base_price) || updated[i].unit_price || 0,
+      service_key: svc.service_key || null,
+      service_category: svc.category || null,
     };
-    setLineItems(updated);
+    // Codex pre-push audit P1 (round 2 on PR #4659, follow-up to the
+    // updateLineItem fix): picking a service changes the line's OWN
+    // scope, which can change what a SIBLING document-wide discount
+    // resolves to (e.g. re-selecting the WDO service after a prior
+    // scope-clearing rename had zeroed a WDO-scoped credit) — but
+    // setLineItems(updated) alone never recomputes any other row's
+    // displayed dollars, only this line's own fields. Reproduced: apply
+    // a WDO-scoped $200 discount, edit the service text so the credit
+    // zeroes, then re-pick WDO — the credit field stayed blank/$0 while
+    // the aggregate preview and the submitted discount were already
+    // $200 again, a preview/row mismatch. repriceAllFreshDiscounts is
+    // the SAME call updateLineItem's own scope-clearing branch already
+    // makes for exactly this reason.
+    setLineItems(repriceAllFreshDiscounts({
+      lineItems: updated,
+      availableDiscounts,
+      stackingEnabled,
+      persistedClientIds: persistedClientIdsRef.current,
+    }));
     setServiceSearchIdx(null);
     setServiceResults([]);
   };
@@ -6311,12 +6479,150 @@ function CreateInvoice({
     )
       insertAt += 1;
     updated.splice(insertAt, 0, discountItem);
-    setLineItems(updated);
+    // Pre-push audit P1 (coordinator scope extension, round 2): repriceLineWithNewDiscountPick
+    // above only rewrites siblings ON THE SAME LINE — a fresh document-wide
+    // (invoice-wide) row's OWN displayed dollars can go stale the same way
+    // a same-line sibling's used to (round-1 fix on #4655): its own share
+    // of a document-wide fixed credit can shift once this new pick changes
+    // canonical order. repriceAllFreshDiscounts already recomputes EVERY
+    // fresh discount item, document-wide included, from the SAME engine —
+    // a no-op for what repriceLineWithNewDiscountPick just set correctly,
+    // and the fix for what it doesn't reach.
+    setLineItems(
+      stackingEnabled
+        ? repriceAllFreshDiscounts({
+            lineItems: updated,
+            availableDiscounts,
+            stackingEnabled,
+            persistedClientIds: persistedClientIdsRef.current,
+          })
+        : updated,
+    );
     setDiscountSearchIdx(null);
     setDiscountQueries((prev) => ({
       ...prev,
       [parent.client_id || lineIdx]: "",
     }));
+  };
+  // Slice 8 of #4405 ("Invoice UI"): the invoice-wide picker's own
+  // candidate list — same name search + one-tier stack-group filter as
+  // matchingDiscounts above, but scoped as a document-wide (spansAll)
+  // pick, so a tier already chosen on ANY line — or already document-wide
+  // — hides the rest of its group here too, matching
+  // assertNewStackGroupConflicts server-side (invoice.js).
+  //
+  // Coordinator scope extension (2026-09, after server/services/invoice.js
+  // came free of its prior lane): a fresh document-wide catalog pick's
+  // discount_id now survives to save — invoice_discounts.discount_id and
+  // discounts.times_applied / total_discount_given are recorded
+  // correctly, and a saved pick's stack_group membership survives reload
+  // (assertNewStackGroupConflicts, server-side) — so a stack-grouped row
+  // is safe to offer here again, mirrored by stackablePresets below, same
+  // as the per-line picker.
+  //
+  // Round 2 of this extension additionally restricted this picker to
+  // FIXED-type rows only — once a document-wide PERCENTAGE pick was
+  // saved, it replayed on the next edit as a flat fixed credit
+  // (resolveStoredDiscountLineItem, by design) that ALSO used to decide
+  // its canonical-order position, jumping it into the wrong pass and
+  // silently changing the invoice's total (reproduced: $50 → $66.67).
+  // Round 3 fixes the ROOT cause in discount-stack.js instead (a
+  // persisted sortKind/sortValue/sortCap ride along with a frozen term's
+  // dollars, so its canonical-order position never moves across a
+  // replay — see that file's own module header), so every type this
+  // form's math already models correctly is safe to offer here again.
+  // free_service stays excluded: a document-wide free_service term would
+  // zero out every eligible line's remaining balance at once —
+  // untested and unrequested here, unrelated to replay stability.
+  //
+  // GitHub review round 1 P1 (PR #4659): a catalog row carrying its own
+  // service_key_filter / service_category_filter (e.g. the active
+  // waveguard_member_wdo seed — 100% off, restricted to wdo_inspection)
+  // used to be offered here the SAME as an unscoped row, discarding that
+  // restriction and applying it to the WHOLE invoice. Fixed below
+  // (invoiceDocumentTerms) by scoping such a pick's own eligibleLines
+  // from the row's filter — pickService now stamps service_key/
+  // service_category onto a picked line (matching what a scheduled-
+  // service invoice line already snapshots), so the SAME
+  // invoiceServiceScopeEligibleLines a stored stamp's document scope
+  // already uses can resolve a fresh pick's scope too. A scoped row is
+  // therefore safe to offer here — worst case (no line matches its
+  // filter) resolves to $0, never a silent full-invoice replay.
+  const matchingDocumentDiscounts = () => {
+    const q = (discountQueries.__document__ || "").trim().toLowerCase();
+    const nameFiltered = availableDiscounts.filter((d) => (
+      d.discount_type !== "free_service" &&
+      (!q || `${d.name || ""} ${d.description || ""} ${formatDiscountLabel(d)}`
+        .toLowerCase()
+        .includes(q))
+    ));
+    const groupFiltered = stackingEnabled
+      ? stackablePresets(nameFiltered, chosenDiscountRowsForGroupCheck(), {
+          spansAll: true,
+        })
+      : nameFiltered;
+    return groupFiltered.slice(0, 10);
+  };
+  // Slice 8: adds a NEW document-wide (unparented, discount_for: null)
+  // discount/credit. #4655 already interleaves an EXISTING one into every
+  // stacked computation (computeInvoiceLineDiscountTotal,
+  // repriceAllFreshDiscounts, ...) but this form had no picker of its own
+  // to add one — "no document-level picker of its own" in its own words.
+  // Sizes the new pick by running the SAME repriceAllFreshDiscounts pass
+  // every other edit (remove, price change) already runs, over lineItems
+  // plus this one placeholder item, instead of a second sizing path that
+  // could independently drift from the engine every other picker here
+  // already defers to. Rendered only while stackingEnabled (see the JSX
+  // below), so there is no gate-off counterpart to this function.
+  const addDocumentDiscount = (discount) => {
+    if (!(subtotal > 0)) {
+      showToast(
+        "Enter at least one service line with a price before applying an invoice-wide discount",
+      );
+      return;
+    }
+    const custom = getCustomDiscountValue(
+      discount,
+      { description: "the whole invoice" },
+      subtotal,
+    );
+    if (
+      (isCustomAmountDiscount(discount) || isCustomPercentageDiscount(discount)) &&
+      !custom
+    )
+      return;
+    const discountItem = {
+      client_id: `li_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      _kind: "discount",
+      discount_id: discount.id,
+      discount_key: discount.discount_key || null,
+      discount_for: null,
+      description: discount.name,
+      quantity: 1,
+      unit_price: 0,
+      amount: 0,
+      is_waveguard_tier_discount: !!discount.is_waveguard_tier_discount,
+      ...(custom?.custom_discount_amount
+        ? { custom_discount_amount: custom.custom_discount_amount }
+        : {}),
+      ...(custom?.custom_discount_percentage
+        ? { custom_discount_percentage: custom.custom_discount_percentage }
+        : {}),
+    };
+    const repriced = repriceAllFreshDiscounts({
+      lineItems: [...lineItems, discountItem],
+      availableDiscounts,
+      stackingEnabled,
+      persistedClientIds: persistedClientIdsRef.current,
+    });
+    const added = repriced.find((i) => i.client_id === discountItem.client_id);
+    if (!(Math.abs(added ? invoiceLineAmount(added) : 0) > 0)) {
+      showToast("Discount has no amount for this invoice");
+      return;
+    }
+    setLineItems(repriced);
+    setDocumentDiscountSearchOpen(false);
+    setDiscountQueries((prev) => ({ ...prev, __document__: "" }));
   };
   const addLineItem = () => setLineItems([...lineItems, newLineItem()]);
   // Codex pre-push audit P0 (round 6 on PR #4655, post-push): removing a
@@ -6339,12 +6645,40 @@ function CreateInvoice({
   };
   const updateLineItem = (i, field, value) => {
     const updated = [...lineItems];
-    updated[i] = {
-      ...updated[i],
+    const prev = updated[i];
+    const next = {
+      ...prev,
       [field]: field === "description" ? value : parseFloat(value) || 0,
     };
+    // GitHub review round 2 P1 (PR #4659): a free-text edit of the
+    // description on a line that was picked from the catalog (carries
+    // service_key/service_category, stamped by pickService) must clear
+    // those catalog-derived fields — otherwise a line the operator has
+    // since RENAMED away from the picked service still reads as
+    // eligible for a service-scoped document-wide discount, both in
+    // this form's own preview (resolveDocumentEligibleLines reads
+    // line.service_key directly) and on save (the server trusts the
+    // submitted service_key verbatim, never re-deriving it from
+    // description — see normalizeInvoiceLineItems). Picking another
+    // service via pickService sets them fresh; a plain price/quantity
+    // edit never touches them at all.
+    let scopeCleared = false;
+    if (field === "description" && (prev.service_key != null || prev.service_category != null)) {
+      next.service_key = null;
+      next.service_category = null;
+      scopeCleared = true;
+    }
+    updated[i] = next;
+    // A scope-clearing rename must reprice any EXISTING fresh discount
+    // row too — its own displayed Credit ($) is the item's stored
+    // unit_price, refreshed only by repriceAllFreshDiscounts (never by
+    // a plain description edit otherwise), so without this the row kept
+    // showing its stale pre-rename dollars even though the aggregate
+    // total (recomputed fresh every render from live line data) had
+    // already dropped to the new, correct figure — a display mismatch
+    // right on the row the operator just changed.
     setLineItems(
-      field === "unit_price" || field === "quantity"
+      field === "unit_price" || field === "quantity" || scopeCleared
         ? repriceAllFreshDiscounts({
           lineItems: updated,
           availableDiscounts,
@@ -7687,7 +8021,9 @@ function CreateInvoice({
               {lineItems.length > 1 && (
                 <Button
                   onClick={() => removeLineItem(i)}
-                  aria-label="Remove line item"
+                  aria-label={
+                    item._kind === "discount" ? "Remove discount" : "Remove line item"
+                  }
                   variant={"secondary"}
                   onClickCapture={(event) =>
                     event.currentTarget.focus({
@@ -7700,6 +8036,26 @@ function CreateInvoice({
                   x
                 </Button>
               )}
+              {/* Slice 8: the frozen-origin / applies-to / cap caption below
+                  a read-only discount row — gated to stackingEnabled so
+                  gate-off rendering of a legacy discount row stays exactly
+                  what it was before this slice. */}
+              {stackingEnabled && item._kind === "discount" && (() => {
+                const caption = discountRowCaption({
+                  item,
+                  serviceLineItems,
+                  discountRowById,
+                  persistedClientIds: persistedClientIdsRef.current,
+                });
+                return caption ? (
+                  <div
+                    style={{ gridColumn: "1 / -1", padding: "0 0 4px 18px" }}
+                    className="text-ink-secondary text-ui-body"
+                  >
+                    {caption}
+                  </div>
+                ) : null;
+              })()}
               {item._kind !== "discount" && (
                 <div
                   style={{
@@ -7844,6 +8200,127 @@ function CreateInvoice({
           >
             + Add service
           </Button>{" "}
+          {/* Slice 8 of #4405: the invoice-wide (document-scope) discount/
+              credit picker — every discount before this slice was a
+              per-line pick. Gated to stackingEnabled: gate off keeps this
+              form's rendering byte-identical to before this slice. */}
+          {stackingEnabled && (
+            <div
+              style={{
+                position: "relative",
+                marginTop: 14,
+              }}
+            >
+              <Field className="min-w-0" label="Add an invoice-wide discount">
+                <Input
+                  value={discountQueries.__document__ || ""}
+                  onChange={(e) => {
+                    setDiscountQueries((prev) => ({
+                      ...prev,
+                      __document__: e.target.value,
+                    }));
+                    if (availableDiscounts.length > 0)
+                      setDocumentDiscountSearchOpen(true);
+                  }}
+                  onFocus={() => {
+                    if (availableDiscounts.length > 0)
+                      setDocumentDiscountSearchOpen(true);
+                  }}
+                  onBlur={() =>
+                    setTimeout(() => setDocumentDiscountSearchOpen(false), 150)
+                  }
+                  placeholder={
+                    discountsLoading
+                      ? "Loading discounts…"
+                      : discountsError
+                        ? "Discounts unavailable"
+                        : availableDiscounts.length === 0
+                          ? "No invoice discounts are available"
+                          : "Search discounts for the whole invoice..."
+                  }
+                  disabled={
+                    builderBusy ||
+                    discountsLoading ||
+                    !!discountsError ||
+                    availableDiscounts.length === 0
+                  }
+                />
+              </Field>
+              {documentDiscountSearchOpen && (
+                <div
+                  style={{
+                    position: "absolute",
+                    top: "100%",
+                    left: 0,
+                    right: 0,
+                    border: "1px solid #E4E4E7",
+                    zIndex: 18,
+                    maxHeight: 220,
+                    overflow: "auto",
+                    marginTop: 4,
+                  }}
+                  className="bg-white rounded-md"
+                >
+                  {matchingDocumentDiscounts().length === 0 ? (
+                    <div
+                      style={{ padding: "10px 12px" }}
+                      className="text-ink-secondary text-ui-body"
+                    >
+                      No discounts match.
+                    </div>
+                  ) : (
+                    matchingDocumentDiscounts().map((d) => (
+                      <Button
+                        key={d.id}
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          addDocumentDiscount(d);
+                        }}
+                        style={{
+                          padding: "10px 12px",
+                          cursor: "pointer",
+                          borderBottom: "1px solid #E4E4E7",
+                          display: "flex",
+                          justifyContent: "space-between",
+                          gap: 8,
+                          alignItems: "center",
+                        }}
+                        variant="ghost"
+                        className="w-full justify-start text-left whitespace-normal"
+                        onClick={(event) => {
+                          if (event.detail === 0)
+                            ((e) => {
+                              e.preventDefault();
+                              addDocumentDiscount(d);
+                            })(event);
+                        }}
+                        disabled={builderBusy}
+                      >
+                        {" "}
+                        <span
+                          style={{
+                            minWidth: 0,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                          className="text-zinc-900 font-medium"
+                        >
+                          {d.name}
+                        </span>{" "}
+                        <span
+                          style={{ whiteSpace: "nowrap" }}
+                          className="text-zinc-900 text-ui-body"
+                        >
+                          {formatDiscountLabel(d)}
+                        </span>{" "}
+                      </Button>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </Card>{" "}
         {!editMode && (
           <Card className="p-4">

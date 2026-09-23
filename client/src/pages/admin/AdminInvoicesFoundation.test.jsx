@@ -406,6 +406,385 @@ describe("Invoice foundation workflow preservation", () => {
     });
   });
 
+  // Slice 8 of #4405: this form gains its own document-wide (invoice-wide)
+  // discount/credit picker — #4655 shipped the math (computeInvoiceLineDiscountTotal
+  // etc. already interleave a document-wide credit) but had "no document-level
+  // picker of its own" (its own words). Gated behind stackingEnabled so gate-off
+  // rendering stays byte-identical to before this slice.
+  it("gate off: no invoice-wide discount picker renders at all (byte-identical to before this slice)", async () => {
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "ten-pct", name: "Ten Percent", discount_type: "percentage", amount: 10, is_active: true, show_in_invoices: true },
+    ] }));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Quarterly pest control" } });
+    fireEvent.change(screen.getByLabelText("Price ($)"), { target: { value: "100" } });
+    expect(screen.queryByLabelText("Add an invoice-wide discount")).not.toBeInTheDocument();
+  });
+
+  it("gate on: picking a FIXED discount from the invoice-wide picker adds a document-wide credit sized by the shared stacking engine", async () => {
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "twenty-five-fixed", name: "Twenty Five Dollars", discount_type: "fixed_amount", amount: 25, is_active: true, show_in_invoices: true },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Quarterly pest control" } });
+    fireEvent.change(screen.getByLabelText("Price ($)"), { target: { value: "100" } });
+    fireEvent.change(await screen.findByLabelText("Add an invoice-wide discount"), { target: { value: "Twenty" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Twenty Five Dollars/ }));
+    await waitFor(() => {
+      expect(screen.getByLabelText("Credit ($)")).toHaveValue(-25);
+    });
+    expect(screen.getByText("Applies to: entire invoice")).toBeInTheDocument();
+  });
+
+  // Round 2 of this scope extension excluded a PERCENTAGE (or
+  // free_service) document-wide pick here — once saved, every frozen
+  // discount replays on the next edit as a fixed credit, which used to
+  // ALSO decide its canonical-order position, silently changing the
+  // invoice's total on a no-op resubmit (reproduced: $50 → $66.67).
+  // Round 3 fixes the ROOT cause in discount-stack.js (a persisted sort
+  // key rides along with a frozen term's dollars — see that file's own
+  // module header), so every type this form's math already models is
+  // offered here again. free_service is the one exclusion left — a
+  // document-wide free_service term would zero out every eligible
+  // line's remaining balance at once, untested and unrequested here.
+  it("the invoice-wide picker offers fixed, percentage and stack-grouped rows, but excludes free_service", async () => {
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "free-svc", name: "Free Service", discount_type: "free_service", amount: 0, is_active: true, show_in_invoices: true },
+      { id: "ten-pct-doc", name: "Ten Percent Invoice-Wide", discount_type: "percentage", amount: 10, is_active: true, show_in_invoices: true },
+      { id: "grouped-fixed", name: "Grouped Fixed", discount_type: "fixed_amount", amount: 20, is_active: true, show_in_invoices: true, stack_group: "promo", is_stackable: false },
+      { id: "twenty-five-fixed", name: "Twenty Five Dollars", discount_type: "fixed_amount", amount: 25, is_active: true, show_in_invoices: true },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Quarterly pest control" } });
+    fireEvent.change(screen.getByLabelText("Price ($)"), { target: { value: "100" } });
+    fireEvent.focus(await screen.findByLabelText("Add an invoice-wide discount"));
+    expect(await screen.findByRole("button", { name: /Twenty Five Dollars/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Grouped Fixed/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Ten Percent Invoice-Wide/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Free Service/ })).not.toBeInTheDocument();
+  });
+
+  // Coordinator scope extension round 3: picking a PERCENTAGE discount
+  // from the invoice-wide picker previews the correct compounded
+  // amount — round 2 could not offer this at all.
+  it("gate on: picking a PERCENTAGE discount from the invoice-wide picker previews the correct compounded amount", async () => {
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "ten-pct-doc", name: "Ten Percent Invoice-Wide", discount_type: "percentage", amount: 10, is_active: true, show_in_invoices: true },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Quarterly pest control" } });
+    fireEvent.change(screen.getByLabelText("Price ($)"), { target: { value: "100" } });
+    fireEvent.change(await screen.findByLabelText("Add an invoice-wide discount"), { target: { value: "Ten" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Ten Percent Invoice-Wide/ }));
+    await waitFor(() => {
+      expect(screen.getByLabelText("Credit ($)")).toHaveValue(-10);
+    });
+  });
+
+  // One-tier / stack-group enforcement (assertNewStackGroupConflicts
+  // server-side, stackablePresets here) reaches across scopes: a tier
+  // already picked on a LINE must hide the rest of its stack_group in
+  // the invoice-wide picker too, not just within that same line's own
+  // picker — using WaveGuard tiers themselves (percentage-typed), now
+  // that the invoice-wide picker offers percentage rows again.
+  it("one-tier enforcement reaches across scopes: a line-scoped WaveGuard tier hides its group in the invoice-wide picker", async () => {
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "silver-id", name: "WaveGuard Silver", discount_type: "percentage", amount: 10, is_active: true, show_in_invoices: true, stack_group: "tier", is_stackable: false },
+      { id: "gold-id", name: "WaveGuard Gold", discount_type: "percentage", amount: 15, is_active: true, show_in_invoices: true, stack_group: "tier", is_stackable: false },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Quarterly pest control" } });
+    fireEvent.change(screen.getByLabelText("Price ($)"), { target: { value: "100" } });
+    fireEvent.change(await screen.findByLabelText("Add a discount"), { target: { value: "Wave" } });
+    fireEvent.click(await screen.findByRole("button", { name: /WaveGuard Silver/ }));
+    fireEvent.focus(await screen.findByLabelText("Add an invoice-wide discount"));
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /WaveGuard Gold/ })).not.toBeInTheDocument();
+    });
+  });
+
+  // Pre-push audit P1 round 1 (this slice's original push): the POST body
+  // for a fresh document-wide catalog pick must be accepted by the server
+  // at all. Coordinator scope extension (round 3): now that
+  // server/services/invoice.js validates and prices a fresh document-wide
+  // pick against its own catalog row, the client no longer needs (or
+  // does) any submit-time workaround — the pick's discount_id rides
+  // straight through, so invoice_discounts.discount_id is recorded and
+  // discounts.times_applied / total_discount_given roll up correctly.
+  it("a create carrying a fresh invoice-wide pick posts it WITH its discount_id (catalog attribution preserved end to end)", async () => {
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "twenty-five-fixed", name: "Twenty Five Dollars", discount_type: "fixed_amount", amount: 25, is_active: true, show_in_invoices: true },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Quarterly pest control" } });
+    fireEvent.change(screen.getByLabelText("Price ($)"), { target: { value: "100" } });
+    fireEvent.change(await screen.findByLabelText("Add an invoice-wide discount"), { target: { value: "Twenty" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Twenty Five Dollars/ }));
+    await waitFor(() => expect(screen.getByLabelText("Credit ($)")).toHaveValue(-25));
+    fireEvent.change(screen.getByLabelText("Send", { exact: true }), { target: { value: "draft" } });
+    const key = "POST /api/admin/invoices";
+    overrides.set(key, () => response({ id: "new-invoice-2", invoice_number: "WPC-2026-0101", status: "draft" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create draft", exact: true }));
+    await waitFor(() => expect(requests.some(request => request.key === key)).toBe(true));
+    const posted = requests.find(request => request.key === key).body.lineItems.find(i => i.description === "Twenty Five Dollars");
+    expect(posted).toBeTruthy();
+    expect(posted.discount_id).toBe("twenty-five-fixed");
+    expect(posted.unit_price).toBe(-25);
+  });
+
+  // GitHub review round 1 P1 (PR #4659): waveguard_member_wdo (100% off,
+  // scoped to wdo_inspection) on a mixed invoice (a WDO line and a pest
+  // line) must discount ONLY the WDO line — real search-and-pick flow
+  // through pickService (which now stamps service_key/service_category
+  // onto the picked line), through the invoice-wide picker, into both
+  // the live preview AND the submitted payload.
+  it("a service-scoped invoice-wide pick (waveguard_member_wdo shape) discounts only the matching line, real pick-a-service flow", async () => {
+    overrides.set("GET /api/admin/services", () => response({ services: [
+      { id: "svc-wdo", name: "WDO Inspection", service_key: "wdo_inspection", category: "wdo", base_price: 200 },
+      { id: "svc-pest", name: "Quarterly Pest Control", service_key: "pest_control", category: "pest", base_price: 100 },
+    ] }));
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "wdo-discount", name: "WaveGuard Member WDO", discount_type: "percentage", amount: 100, is_active: true, show_in_invoices: true, service_key_filter: "wdo_inspection" },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+
+    // Line 1: search for and PICK the WDO service (not just typed text —
+    // this is what actually runs pickService).
+    const serviceField = screen.getByLabelText("Service", { exact: true });
+    fireEvent.focus(serviceField);
+    fireEvent.change(serviceField, { target: { value: "WDO" } });
+    fireEvent.mouseDown(await screen.findByRole("button", { name: /WDO Inspection/ }));
+
+    // Line 2: add a service line and pick Quarterly Pest Control.
+    fireEvent.click(screen.getByRole("button", { name: "+ Add service" }));
+    const serviceFields = screen.getAllByLabelText("Service", { exact: true });
+    const secondServiceField = serviceFields[serviceFields.length - 1];
+    fireEvent.focus(secondServiceField);
+    fireEvent.change(secondServiceField, { target: { value: "Pest" } });
+    fireEvent.mouseDown(await screen.findByRole("button", { name: /Quarterly Pest Control/ }));
+
+    // Pick the WDO-scoped invoice-wide discount.
+    fireEvent.change(await screen.findByLabelText("Add an invoice-wide discount"), { target: { value: "WaveGuard" } });
+    fireEvent.click(await screen.findByRole("button", { name: /WaveGuard Member WDO/ }));
+
+    // Preview: the invoice-wide credit resolves to $200 (the WDO line's
+    // own gross), never $300 (both lines combined).
+    await waitFor(() => {
+      const credits = screen.getAllByLabelText("Credit ($)").map((el) => el.value);
+      expect(credits).toContain("-200");
+      expect(credits).not.toContain("-300");
+    });
+
+    fireEvent.change(screen.getByLabelText("Send", { exact: true }), { target: { value: "draft" } });
+    const key = "POST /api/admin/invoices";
+    overrides.set(key, () => response({ id: "new-invoice-wdo", invoice_number: "WPC-2026-0102", status: "draft" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create draft", exact: true }));
+    await waitFor(() => expect(requests.some((request) => request.key === key)).toBe(true));
+    const body = requests.find((request) => request.key === key).body;
+    const wdoLine = body.lineItems.find((i) => i.description === "WDO Inspection");
+    const pestLine = body.lineItems.find((i) => i.description === "Quarterly Pest Control");
+    const discountLine = body.lineItems.find((i) => i.discount_id === "wdo-discount");
+    expect(wdoLine.service_key).toBe("wdo_inspection");
+    expect(pestLine.service_key).toBe("pest_control");
+    expect(discountLine.unit_price).toBe(-200);
+  });
+
+  // GitHub review round 2 P1 (PR #4659): pickService stamps
+  // service_key/service_category onto a line, but the SAME "Service"
+  // field is an ordinary free-text input bound to updateLineItem the
+  // rest of the time — a manual rename after the pick left those
+  // catalog-derived fields stale, so a line renamed AWAY from WDO
+  // Inspection still read as WDO-eligible (both in this form's own
+  // preview, which reads line.service_key directly, and on save, since
+  // the server trusts the submitted service_key verbatim and never
+  // re-derives it from description). Reproduced and fixed by having
+  // updateLineItem clear service_key/service_category on any
+  // description edit that follows a pick.
+  it("renaming a picked line's description by hand clears its service scope — a WDO-scoped invoice-wide discount no longer applies, in preview or on save", async () => {
+    overrides.set("GET /api/admin/services", () => response({ services: [
+      { id: "svc-wdo", name: "WDO Inspection", service_key: "wdo_inspection", category: "wdo", base_price: 200 },
+      { id: "svc-pest", name: "Quarterly Pest Control", service_key: "pest_control", category: "pest", base_price: 100 },
+    ] }));
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "wdo-discount", name: "WaveGuard Member WDO", discount_type: "percentage", amount: 100, is_active: true, show_in_invoices: true, service_key_filter: "wdo_inspection" },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+
+    // Line 1: PICK the WDO service (runs pickService, stamps service_key).
+    const serviceField = screen.getByLabelText("Service", { exact: true });
+    fireEvent.focus(serviceField);
+    fireEvent.change(serviceField, { target: { value: "WDO" } });
+    fireEvent.mouseDown(await screen.findByRole("button", { name: /WDO Inspection/ }));
+    await waitFor(() => expect(screen.getByLabelText("Service", { exact: true }).value).toBe("WDO Inspection"));
+
+    // Line 2: a plain unkeyed Pest line, so an orphaned scope's "$0,
+    // never a silent full-invoice widen" behavior is also exercised.
+    fireEvent.click(screen.getByRole("button", { name: "+ Add service" }));
+    const serviceFields = screen.getAllByLabelText("Service", { exact: true });
+    const secondServiceField = serviceFields[serviceFields.length - 1];
+    fireEvent.focus(secondServiceField);
+    fireEvent.change(secondServiceField, { target: { value: "Pest" } });
+    fireEvent.mouseDown(await screen.findByRole("button", { name: /Quarterly Pest Control/ }));
+
+    // Pick the WDO-scoped invoice-wide discount WHILE line 1 is still
+    // WDO Inspection — confirms it applies first, matching the sibling
+    // test's baseline, before the rename below is what actually removes
+    // it.
+    fireEvent.change(await screen.findByLabelText("Add an invoice-wide discount"), { target: { value: "WaveGuard" } });
+    fireEvent.click(await screen.findByRole("button", { name: /WaveGuard Member WDO/ }));
+    await waitFor(() => {
+      const credits = screen.getAllByLabelText("Credit ($)").map((el) => el.value);
+      expect(credits).toContain("-200");
+    });
+
+    // Now RENAME line 1 by hand — a plain free-text edit, not a new
+    // pick — away from the WDO service entirely.
+    fireEvent.change(screen.getAllByLabelText("Service", { exact: true })[0], { target: { value: "Custom WDO Follow-Up Visit" } });
+
+    // Preview: the renamed line no longer carries service_key
+    // "wdo_inspection" — the ALREADY-ADDED discount resolves orphaned
+    // ($0), never staying at -200 against the renamed line and never
+    // widening onto Pest.
+    await waitFor(() => {
+      const credits = screen.getAllByLabelText("Credit ($)").map((el) => el.value);
+      expect(credits).not.toContain("-200");
+    });
+
+    fireEvent.change(screen.getByLabelText("Send", { exact: true }), { target: { value: "draft" } });
+    const key = "POST /api/admin/invoices";
+    overrides.set(key, () => response({ id: "new-invoice-renamed", invoice_number: "WPC-2026-0103", status: "draft" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create draft", exact: true }));
+    await waitFor(() => expect(requests.some((request) => request.key === key)).toBe(true));
+    const body = requests.find((request) => request.key === key).body;
+    const renamedLine = body.lineItems.find((i) => i.description === "Custom WDO Follow-Up Visit");
+    const pestLine = body.lineItems.find((i) => i.description === "Quarterly Pest Control");
+    const discountLine = body.lineItems.find((i) => i.discount_id === "wdo-discount");
+    expect(renamedLine.service_key).toBeFalsy();
+    expect(renamedLine.unit_price).toBe(200); // the renamed line's own price is untouched — full price, no credit
+    expect(pestLine.unit_price).toBe(100); // never widened onto the unrelated line either
+    // The orphaned $0 discount is dropped entirely by the submit-time
+    // filter (lineItems.filter(i => Number(i.unit_price) !== 0)) — the
+    // strongest possible confirmation that it no longer applies at all.
+    expect(discountLine).toBeUndefined();
+  });
+
+  // GitHub review round 2, follow-up P1 (PR #4659): the mirror-image
+  // gap of the rename fix above — pickService changes a line's OWN
+  // scope (which can change what a SIBLING document-wide discount
+  // resolves to) but called setLineItems(updated) directly, never
+  // repricing any other row. Reproduced: apply the WDO-scoped $200
+  // discount, edit the service text so the credit zeroes (the rename
+  // fix above), then RE-PICK WDO Inspection on the same line — the
+  // credit field stayed blank/$0 while the aggregate preview and the
+  // submitted discount amount were already back to $200, a preview/row
+  // display mismatch. Fixed by having pickService run
+  // repriceAllFreshDiscounts too, the same call updateLineItem's own
+  // scope-clearing branch already makes.
+  it("re-picking a service after a scope-clearing rename brings a sibling discount row's displayed credit back in line — preview matches the submitted amount", async () => {
+    overrides.set("GET /api/admin/services", () => response({ services: [
+      { id: "svc-wdo", name: "WDO Inspection", service_key: "wdo_inspection", category: "wdo", base_price: 200 },
+    ] }));
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "wdo-discount", name: "WaveGuard Member WDO", discount_type: "percentage", amount: 100, is_active: true, show_in_invoices: true, service_key_filter: "wdo_inspection" },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+
+    // Pick WDO, apply the WDO-scoped 100%-off invoice-wide discount —
+    // credit shows -200.
+    const serviceField = screen.getByLabelText("Service", { exact: true });
+    fireEvent.focus(serviceField);
+    fireEvent.change(serviceField, { target: { value: "WDO" } });
+    fireEvent.mouseDown(await screen.findByRole("button", { name: /WDO Inspection/ }));
+    fireEvent.change(await screen.findByLabelText("Add an invoice-wide discount"), { target: { value: "WaveGuard" } });
+    fireEvent.click(await screen.findByRole("button", { name: /WaveGuard Member WDO/ }));
+    await waitFor(() => expect(screen.getByLabelText("Credit ($)")).toHaveValue(-200));
+
+    // Rename by hand — the credit zeroes (round 2's own fix).
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Custom WDO Follow-Up Visit" } });
+    await waitFor(() => expect(screen.getByLabelText("Credit ($)")).not.toHaveValue(-200));
+
+    // RE-PICK WDO Inspection on the same line.
+    fireEvent.focus(screen.getByLabelText("Service", { exact: true }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "WDO" } });
+    fireEvent.mouseDown(await screen.findByRole("button", { name: /WDO Inspection/ }));
+
+    // Preview: the credit is back to -200 immediately — no stale $0
+    // display waiting for some OTHER trigger to catch it up.
+    await waitFor(() => expect(screen.getByLabelText("Credit ($)")).toHaveValue(-200));
+
+    fireEvent.change(screen.getByLabelText("Send", { exact: true }), { target: { value: "draft" } });
+    const key = "POST /api/admin/invoices";
+    overrides.set(key, () => response({ id: "new-invoice-repicked", invoice_number: "WPC-2026-0104", status: "draft" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create draft", exact: true }));
+    await waitFor(() => expect(requests.some((request) => request.key === key)).toBe(true));
+    const body = requests.find((request) => request.key === key).body;
+    const wdoLine = body.lineItems.find((i) => i.description === "WDO Inspection");
+    const discountLine = body.lineItems.find((i) => i.discount_id === "wdo-discount");
+    // Preview == submitted: both read -200, not a stale $0.
+    expect(wdoLine.service_key).toBe("wdo_inspection");
+    expect(discountLine.unit_price).toBe(-200);
+  });
+
+  // Pre-push audit P1 (coordinator scope extension, round 2):
+  // repriceLineWithNewDiscountPick only rewrote siblings on the SAME
+  // line — a fresh invoice-wide row's own displayed dollars could go
+  // stale the same way a same-line sibling's used to (#4655 round 1).
+  // Reproduced with two fixed credits (both resolve in the SAME
+  // canonical fixed-pass, so the reorder is real): a $100 line gets a
+  // $30 invoice-wide credit first (shows -$30, uncontested); adding a
+  // NEW $90 line-scoped credit outranks it (larger value sorts first),
+  // clamping the invoice-wide credit's own share down to $10 — the row
+  // must now display -$10, not the stale -$30.
+  it("adding a larger line-scoped fixed pick reprices an existing invoice-wide fixed credit's own displayed row", async () => {
+    overrides.set("GET /api/admin/discounts", () => response({ discounts: [
+      { id: "thirty-doc", name: "Thirty Invoice-Wide", discount_type: "fixed_amount", amount: 30, is_active: true, show_in_invoices: true },
+      { id: "ninety-line", name: "Ninety Dollars", discount_type: "fixed_amount", amount: 90, is_active: true, show_in_invoices: true },
+    ] }));
+    overrides.set("GET /api/admin/discounts/stacking", () => response({ enabled: true }));
+    await openPage(); fireEvent.click(screen.getByRole("button", { name: "Create invoice", exact: true }));
+    fireEvent.change(screen.getByLabelText("Find customer"), { target: { value: "Avery" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Avery Example/ }));
+    fireEvent.change(screen.getByLabelText("Service", { exact: true }), { target: { value: "Quarterly pest control" } });
+    fireEvent.change(screen.getByLabelText("Price ($)"), { target: { value: "100" } });
+    fireEvent.change(await screen.findByLabelText("Add an invoice-wide discount"), { target: { value: "Thirty" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Thirty Invoice-Wide/ }));
+    await waitFor(() => expect(screen.getByLabelText("Credit ($)")).toHaveValue(-30));
+    fireEvent.change(await screen.findByLabelText("Add a discount"), { target: { value: "Ninety" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Ninety Dollars/ }));
+    await waitFor(() => {
+      const creditValues = screen.getAllByLabelText("Credit ($)").map((el) => el.value);
+      expect(creditValues).toContain("-90");
+      expect(creditValues).toContain("-10"); // was -30, clamped by the larger new pick
+      expect(creditValues).not.toContain("-30");
+    });
+  });
+
   // Codex pre-push audit P1 (round 4 on PR #4655, LAST patch round): the
   // write binds the CONFIRMED gate state the preview ran under — the
   // server rejects a mismatch, so the client must actually send it.
@@ -627,7 +1006,9 @@ describe("Invoice foundation workflow preservation", () => {
       expect(creditValues).toContain("");
     });
     // Remove the $100 fixed credit — the 10% row must reprice back to $10.
-    const removeButtons = screen.getAllByRole("button", { name: "Remove line item" });
+    // Slice 8 of #4405: a discount row's own remove button now reads
+    // "Remove discount" (was "Remove line item" for every row alike).
+    const removeButtons = screen.getAllByRole("button", { name: /^Remove (line item|discount)$/ });
     fireEvent.click(removeButtons[removeButtons.length - 1]);
     await waitFor(() => {
       expect(screen.getByLabelText("Credit ($)").value).toBe("-10");

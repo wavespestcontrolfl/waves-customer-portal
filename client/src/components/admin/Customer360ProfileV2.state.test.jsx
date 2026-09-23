@@ -234,10 +234,16 @@ describe('Customer360ProfileV2 profile state', () => {
     const field = await screen.findByRole('textbox', { name: 'Text message' }, { timeout: 5000 });
     fireEvent.change(field, { target: { value: 'Service update' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send', exact: true }));
+    expect(screen.getByText('Choose a sending number before sending this message.')).toBeInTheDocument();
+    expect(fetch.mock.calls.filter(([url]) => String(url).endsWith('/communications/sms'))).toHaveLength(0);
+    const sender = screen.getByRole('combobox', { name: 'Send from' });
+    const chosenLine = [...sender.options].find(option => option.value).value;
+    fireEvent.change(sender, { target: { value: chosenLine } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send', exact: true }));
     await waitFor(() => expect(field).toHaveValue(''));
     const sends = fetch.mock.calls.filter(([url]) => String(url).endsWith('/communications/sms'));
     expect(sends).toHaveLength(1);
-    expect(JSON.parse(sends[0][1].body)).toMatchObject({ customerId: 'customer-a', to: '+19415550100', body: 'Service update' });
+    expect(JSON.parse(sends[0][1].body)).toMatchObject({ customerId: 'customer-a', to: '+19415550100', fromNumber: chosenLine, body: 'Service update' });
     expect(fetch.mock.calls.some(([url]) => String(url).split('?')[0].endsWith('/timeline'))).toBe(false);
     expect(fetch.mock.calls.some(([url]) => String(url).includes('/unread-count'))).toBe(false);
   });
@@ -265,6 +271,8 @@ describe('Customer360ProfileV2 profile state', () => {
     container.querySelector('.c360-panel').scrollTo = vi.fn();
     fireEvent.click(screen.getByRole('button', { name: 'Message', exact: true }));
     const field = await screen.findByRole('textbox', { name: 'Text message' });
+    const sender = screen.getByRole('combobox', { name: 'Send from' });
+    fireEvent.change(sender, { target: { value: [...sender.options].find(option => option.value).value } });
     fireEvent.change(field, { target: { value: 'Fixture service update' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send', exact: true }));
     await waitFor(() => expect(field).toHaveValue(''));

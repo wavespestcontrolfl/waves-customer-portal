@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  appointmentDiscountScopeLinesFor,
+  APPOINTMENT_DISCOUNT_TYPES,
   appointmentGroupRequestBody,
   assertManualPrepayMintEligible,
   bookableProperties,
@@ -29,6 +31,7 @@ import {
   recurringGroupRequestFields,
   shouldMintManualPrepay,
   submitFailureNotice,
+  submitGroupLinesForService,
 } from './CreateAppointmentModal.jsx';
 
 describe('CreateAppointmentModal won estimate helpers', () => {
@@ -340,6 +343,30 @@ describe('classifySubmitGroupFailure', () => {
     expect(decision).toEqual({ recoverable: true, duplicateConflict: null, firstError: null });
   });
 
+  // GitHub review round 4 P1 (PR #4656, :3225): the SAME conflict payload
+  // as the "recovers silently" case above proves only that a series
+  // exists from this booking's linked estimate -- duplicateSeriesConflictBody
+  // (server) does not report the existing row's discount identity or
+  // amount, so it proves nothing about whether that row actually carries
+  // the discount picked THIS session. A discount-bearing group must
+  // surface instead of being auto-recovered, with a message that tells
+  // the operator why.
+  it('does not auto-recover a discount-bearing group even when the same conflict payload would otherwise prove it', () => {
+    const decision = classifySubmitGroupFailure(
+      dupError([{ id: 's1', sourceEstimateId: 108 }]),
+      {
+        group: { seasonalIndex: 0 }, linkedEstimate: { id: 108 }, separateProgram: null,
+        key: 'quarterly', groupLabelText: 'Quarterly', carriesAppointmentDiscount: true,
+      },
+    );
+    expect(decision.recoverable).toBe(false);
+    expect(decision.duplicateConflict).toMatchObject({ key: 'quarterly' });
+    expect(decision.firstError).toMatchObject({
+      label: 'Quarterly', duplicate: true,
+      message: expect.stringContaining("discount was selected for this group and the existing series' discount can't be confirmed"),
+    });
+  });
+
   it('does not recover a same-family second seasonal sibling short of its own series', () => {
     // Only one owned series exists, but THIS group is the second seasonal
     // sibling (seasonalIndex 1) — the guard must not treat the first
@@ -404,6 +431,69 @@ describe('lineDiscountFields', () => {
   });
 });
 
+describe('APPOINTMENT_DISCOUNT_TYPES', () => {
+  it('offers every discount type the shared stack (discount-stack.js) accepts, not just percentage/fixed_amount', () => {
+    // Codex r1 P2: the appointment-level picker excluded the custom and
+    // free-service types even though pickAppointmentDiscount already
+    // prompts for their amount and the server booking path accepts them.
+    expect(APPOINTMENT_DISCOUNT_TYPES).toEqual(expect.arrayContaining([
+      'percentage', 'fixed_amount', 'variable_percentage', 'variable_amount', 'free_service',
+    ]));
+    expect(APPOINTMENT_DISCOUNT_TYPES).toHaveLength(5);
+  });
+});
+
+describe('submitGroupLinesForService (Codex r1 P2 — tier picker scoped to submit group)', () => {
+  // A booking with services on different cadences fans out into separate
+  // appointment POSTs (groupServicesForAppointmentSubmit) — one per cadence
+  // group, each validated independently by the server.
+  const quarterlyPest = { lineId: 'l1', name: 'Quarterly Pest', cadence: 'quarterly' };
+  const quarterlyBonus = { lineId: 'l2', name: 'Quarterly Add-on', cadence: 'quarterly' };
+  const monthlyLawn = { lineId: 'l3', name: 'Monthly Lawn', cadence: 'monthly' };
+  const services = [quarterlyPest, quarterlyBonus, monthlyLawn];
+  const groups = [
+    { cadence: 'quarterly', lines: [quarterlyPest, quarterlyBonus] },
+    { cadence: 'monthly', lines: [monthlyLawn] },
+  ];
+
+  it("returns only the requesting line's own submit group, not every service in the modal", () => {
+    expect(submitGroupLinesForService(groups, quarterlyPest, services)).toEqual([quarterlyPest, quarterlyBonus]);
+    expect(submitGroupLinesForService(groups, monthlyLawn, services)).toEqual([monthlyLawn]);
+  });
+
+  it('falls back to every service when the line is not found in any group', () => {
+    const stray = { lineId: 'l4', name: 'Stray', cadence: 'weekly' };
+    expect(submitGroupLinesForService(groups, stray, services)).toBe(services);
+  });
+
+  it('falls back to every service for a non-array groups argument', () => {
+    expect(submitGroupLinesForService(null, quarterlyPest, services)).toBe(services);
+    expect(submitGroupLinesForService(undefined, quarterlyPest, services)).toBe(services);
+  });
+});
+
+// GitHub review round 2 P2 (PR #4656): the scopeKey parameter this helper
+// used to carry (for an operator "Applies to" override no caller in this
+// slice ever passed) was removed — add it back, with its own tests, only
+// alongside the slice that actually ships that override UI.
+describe('appointmentDiscountScopeLinesFor (Codex r1 P2 — appointment slot scoped to its own group)', () => {
+  const quarterlyPest = { lineId: 'l1', name: 'Quarterly Pest', service_key: 'pest_general_quarterly' };
+  const monthlyLawn = { lineId: 'l2', name: 'Monthly Lawn', service_key: 'lawn_monthly' };
+  const services = [quarterlyPest, monthlyLawn];
+  const groups = [
+    { cadence: 'quarterly', lines: [quarterlyPest] },
+    { cadence: 'monthly', lines: [monthlyLawn] },
+  ];
+
+  it('always returns the first submit group\'s lines', () => {
+    expect(appointmentDiscountScopeLinesFor(groups, services)).toEqual([quarterlyPest]);
+  });
+
+  it('falls back to every service for a non-array groups argument', () => {
+    expect(appointmentDiscountScopeLinesFor(null, services)).toBe(services);
+  });
+});
+
 describe('appointmentGroupRequestBody', () => {
   const base = {
     separateProgram: null, key: 'quarterly', separateProgramReason: '',
@@ -446,6 +536,27 @@ describe('appointmentGroupRequestBody', () => {
       urgency: 'routine',
       createInvoice: true,
     });
+  });
+
+  it('carries the appointment-level discount slot only when one is chosen', () => {
+    expect(appointmentGroupRequestBody({
+      ...base,
+      appointmentDiscount: { id: 'mil', name: 'Military Discount', discount_type: 'percentage', amount: 5 },
+    })).toMatchObject({
+      discountId: 'mil',
+      discountType: 'percentage',
+      discountAmount: 5,
+    });
+    expect(appointmentGroupRequestBody(base).discountId).toBeUndefined();
+  });
+
+  it('omits the appointment discount for a group it does not ride', () => {
+    // The submit loop passes the slot only for the group that carries it;
+    // every other group's body must be free of discount fields.
+    const body = appointmentGroupRequestBody({ ...base, appointmentDiscount: undefined });
+    expect(body.discountId).toBeUndefined();
+    expect(body.discountType).toBeUndefined();
+    expect(body.discountAmount).toBeUndefined();
   });
 
   it('sends a blank-priced auto-mosquito primary as null regardless of groupHasPrice, with no discount block', () => {
