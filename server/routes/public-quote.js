@@ -3151,7 +3151,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             .update({
               archived_at: new Date(),
               updated_at: new Date(),
-              estimate_data: db.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ addressUnverified: true, addressUnverifiedFlag: addressUnverified })]),
+              // The block may come from a carried draft marker rather than a
+              // fresh flag — persist whichever verdict is real (pre-push
+              // audit P1).
+              estimate_data: db.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ addressUnverified: true, addressUnverifiedFlag: addressUnverified || carriedAddressFlag || null })]),
             })
             .returning('id')
           : [];
@@ -3163,7 +3166,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               actor_type: 'system', action: 'website_quote_withdrawn_address_unverified',
               resource_type: 'estimate', resource_id: id,
               metadata: { leadId: lead.id }, critical: true,
-            }).catch(() => {});
+            }).catch((auditErr) => logger.error(`[public-quote] audit row lost for website-quote withdrawal of estimate ${id}: ${auditErr.code || auditErr.name || 'error'}`));
           }
           logger.info(`[public-quote] withdrew ${withdrawn.length} published website estimate(s) for the flagged address`);
         }

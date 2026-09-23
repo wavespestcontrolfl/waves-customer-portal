@@ -26,6 +26,10 @@ describe('leadAddressUnverified', () => {
     expect(leadAddressUnverified({ address: '1260 Example St', zip: '34221', extracted_data: { address_unverified: stamped } })).toBeNull();
     // A unit added inline is the same audited house number.
     expect(leadAddressUnverified({ address: '1260 Example St Apt 4, Parrish, FL 34219', zip: '34219', extracted_data: { address_unverified: stamped } })).not.toBeNull();
+    // A five-digit house number is not the ZIP when the lead's zip column is empty.
+    const bigNumber = { ...flag, address_line1: '12345 Example St', zip: '34219' };
+    expect(leadAddressUnverified({ address: '12345 Example St, Parrish, FL 34219', extracted_data: { address_unverified: bigNumber } })).not.toBeNull();
+    expect(leadAddressUnverified({ address: '12345 Example St, Parrish, FL 34221', extracted_data: { address_unverified: bigNumber } })).toBeNull();
     // A city change alone (ZIP-less lead) retires it too.
     const cityStamped = { ...flag, address_line1: '1260 Example St', city: 'Parrish' };
     expect(leadAddressUnverified({ address: '1260 Example St, Bradenton, FL', extracted_data: { address_unverified: cityStamped } })).toBeNull();

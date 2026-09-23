@@ -41,8 +41,11 @@ const streetKeyNoUnit = (v) => lineKey(String(v || '').replace(UNIT_TAIL, ''));
 function flagCoversLeadAddress(flag, lead) {
   const leadLine = streetKeyNoUnit(String(lead?.address || '').split(',')[0]);
   if (!leadLine || leadLine !== streetKeyNoUnit(flag.address_line1)) return false;
+  // ZIP from the lead's zip column, else from the composed address's
+  // state/ZIP tail — never the first five digits of the whole string,
+  // which may be a five-digit house number.
   const a = zip5(flag.zip);
-  const b = zip5(lead?.zip) || zip5(lead?.address);
+  const b = zip5(lead?.zip) || zip5(String(lead?.address || '').split(',').map((s) => s.trim()).find((seg) => /^[a-z]{2}\s*\d{5}(?:-\d{4})?$/i.test(seg) || /^\d{5}(?:-\d{4})?$/.test(seg)) || '');
   if (a && b && a !== b) return false;
   // City too (a ZIP-less lead can change city alone): the lead's city
   // column, else the second comma segment of its composed address.
