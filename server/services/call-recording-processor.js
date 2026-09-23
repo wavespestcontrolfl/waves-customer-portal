@@ -9814,17 +9814,24 @@ const CallRecordingProcessor = {
           // door, not just the number (codex r1 P1) — canonical unit first.
           const statedUnit = extracted?.address_line2 || v2CanonicalExtraction?.property?.service_address?.street_line_2 || null;
           if (statedUnit) houseConflict.stated_unit = String(statedUnit).trim();
+          const conflictCard = buildTriageItem({
+            callLogId: call.id,
+            flag: 'on_file_house_number_conflict',
+            onFileAddress,
+            extraction: v2CanonicalExtraction,
+            severity: 'advisory',
+            addressValidation: effectiveAddressValidation,
+            extraPayload: houseConflict,
+          });
+          // MERGE, not ignore: a force-reprocess that heard a different
+          // street or relinked the call must refresh the open card's
+          // evidence, or the estimate surface keeps showing the previous
+          // pass's (or previous customer's) address (codex r3 P2). Same
+          // pattern as the secondary-contact card.
           await db('triage_items')
-            .insert(buildTriageItem({
-              callLogId: call.id,
-              flag: 'on_file_house_number_conflict',
-              onFileAddress,
-              extraction: v2CanonicalExtraction,
-              severity: 'advisory',
-              addressValidation: effectiveAddressValidation,
-              extraPayload: houseConflict,
-            }))
-            .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+            .insert(conflictCard)
+            .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+            .merge({ payload: conflictCard.payload, summary: conflictCard.summary, updated_at: new Date() });
           // Only a landed insert (or an ignored duplicate of an open card)
           // may suppress the second-address fallback and mark the call for
           // review — a thrown insert would otherwise leave review_status
@@ -9837,6 +9844,22 @@ const CallRecordingProcessor = {
           // reading as fully processed.
           if (!bridgeNeedsConfirmation.includes('on_file_house_number_conflict')) bridgeNeedsConfirmation.push('on_file_house_number_conflict');
           logger.info(`[call-proc] house-number conflict card for ${maskSid(callSid)}: stated ${houseConflict.stated_house_number}, on file ${houseConflict.on_file_house_number}`);
+        }
+        if (!houseConflict) {
+          // The latest pass found no conflict: an open card from an earlier
+          // pass no longer describes the call — retire it, or the
+          // auto-resolver and the address-ask surfaces keep acting on a
+          // payload the extraction no longer supports (codex r3 P2). Only
+          // cards still open (a human-claimed card stays theirs).
+          await db('triage_items')
+            .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict', status: 'open' })
+            .update({
+              status: 'resolved',
+              resolution_note: 'Superseded — a later pass over this call found no house-number disagreement with the record.',
+              resolution_source: 'system',
+              resolved_at: new Date(),
+              updated_at: new Date(),
+            });
         }
       } catch (e) {
         // Code/name only: a knex error message carries the insert bindings
