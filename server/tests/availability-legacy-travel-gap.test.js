@@ -220,6 +220,77 @@ describe('global mirror stops anchor legacy packing (Codex #4664 r3 P1)', () => 
     expect(starts).not.toContain('09:00');
     expect(starts).toEqual(['14:00']);
   });
+
+  // Codex r6 P1 — scheduledInZone already carries each v2-allocation
+  // member's OWN raw window (09:00-10:00 apiece), so the old id-dedupe saw
+  // those ids already in `occupied` and skipped the matching anchor
+  // entirely, even though that anchor carries the allocation-EXPANDED span
+  // (09:00-12:00, the real occupied time). `occupied` was left at the raw
+  // 10:00 end, packing an 11:00 candidate the commit gate rejects as
+  // overlapping the real 09:00-12:00 span.
+  test('a version-2 combined allocation\'s in-zone raw members are REPLACED by the expanded anchor, not skipped', async () => {
+    // Gate deliberately left unset: the anchor-set-driven packEnds geometry
+    // (occupied itself) is what this test isolates — with the gate on, the
+    // SEPARATE accept()-level travelGap mirror (built from the always-
+    // correct dayAnchors, never from `occupied`) would independently reject
+    // an 11:00 candidate that real-overlaps the anchor's true 09:00-12:00
+    // span, masking the bug this finding actually describes (findGaps' OWN
+    // packed-ends boundary, computed from the buggy `occupied`, offering a
+    // candidate the accept() mirror then has to catch after the fact).
+    const t = tables();
+    // Three members of one arrival-anchored allocation, in-zone — each
+    // stamped with its OWN raw per-member window (09:00-10:00).
+    t.scheduled_services = () => arrayChain([
+      { id: 'm1', window_start: '09:00', window_end: '10:00' },
+      { id: 'm2', window_start: '09:00', window_end: '10:00' },
+      { id: 'm3', window_start: '09:00', window_end: '10:00' },
+    ]);
+    db.mockImplementation((table) => { seen.push(table); return t[table](); });
+    // The SAME three ids — but loadPackingAnchors' allocation expansion
+    // (occupancy.js's occupiedRows) gives each one the REAL combined
+    // 09:00-12:00 span, not its own raw 09:00-10:00.
+    listOccupiedWindows.mockResolvedValue([
+      { id: 'm1', date: DATE, startMin: 540, endMin: 720, lat: null, lng: null },
+      { id: 'm2', date: DATE, startMin: 540, endMin: 720, lat: null, lng: null },
+      { id: 'm3', date: DATE, startMin: 540, endMin: 720, lat: null, lng: null },
+    ]);
+    const result = await engine.getAvailableSlots('Palmetto', 'est-1');
+    const starts = startsOf(result);
+    // Before the fix: occupied stayed at the raw 09:00-10:00 end (600), so
+    // the trailing gap packed to 11:00 (roundUp(600+15)) — a candidate that
+    // overlaps the real 09:00-12:00 allocation and 409s at commit. After the
+    // fix: occupied is REPLACED with the expanded 09:00-12:00 span (720),
+    // so the trailing gap packs to 13:00 instead.
+    expect(starts).not.toContain('11:00');
+    expect(starts).toEqual(['13:00']);
+  });
+});
+
+describe('findGaps: the packed-after-a-stop bound credits the stop\'s own expected minutes (Codex r6 P2)', () => {
+  test('a co-located 09:00-10:00 stop with 45 expected minutes offers the credited 10:00 after it, not the flat-buffer 11:00', async () => {
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    const t = tables();
+    t.scheduled_services = () => arrayChain([
+      { id: 'stop-1', window_start: '09:00', window_end: '10:00' },
+    ]);
+    db.mockImplementation((table) => { seen.push(table); return t[table](); });
+    // 60-minute window, 45 expected minutes — the stop's own catalog credit,
+    // preserved onto `occupied` by the same anchor merge finding 1 fixed.
+    listOccupiedWindows.mockResolvedValue([
+      { id: 'stop-1', date: DATE, startMin: 540, endMin: 600, windowMinutes: 60, expectedMinutes: 45, lat: null, lng: null },
+    ]);
+    const result = await engine.getAvailableSlots('Palmetto', 'est-1');
+    const starts = startsOf(result);
+    // Before the fix: findGaps' packed-after bound was the flat
+    // roundUpToHour(cursor + buffer) = roundUp(600+15) = 11:00, ignoring the
+    // stop's own 15 minutes of unused window (60 window - 45 expected) that
+    // should absorb the 15-minute buffer entirely. After the fix (packedBounds
+    // on the after side, credited from the stop's own expectedEndMin): the
+    // buffer is fully absorbed, and the bound floors at the stop's own raw
+    // end (10:00) — never earlier, however much credit it carries.
+    expect(starts).not.toContain('11:00');
+    expect(starts).toContain('10:00');
+  });
 });
 
 describe('the candidate\'s own expected-minutes credit (Codex #4664 r3 P2, r5 P2)', () => {

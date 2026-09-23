@@ -827,15 +827,22 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     expect(row.window_end).toBe('10:30');
   });
 
-  // Codex r5 P2 #5 — the resolved catalog row's identity (real admin-portal
-  // service, never model-supplied) must reach the re-check's expected-
-  // minutes credit lookup, or every voice revalidation silently degrades to
-  // the no-credit legacy gap regardless of what find_slots resolved.
-  test('the re-check threads the resolved catalog row\'s identity as serviceIdentity', async () => {
+  // Codex r6 P2 (reverts a round-5 attempt at this) — the re-check must NOT
+  // thread the resolved catalog row's identity into buildBookingAvailability.
+  // relay-tools.resolveAvailability's get_availability/find_slots (the ONLY
+  // source of the offer being re-checked) has no service parameter at all,
+  // so the offer this slot_ref remembers was NEVER built with any identity.
+  // Adding one only at recheck time gives the engine a credit the offer's
+  // own packed-ends geometry never had — a co-located candidate the offer
+  // legitimately promised at, say, 10:00 (no-credit packing) can shift to a
+  // different hour or vanish entirely once credited, coming back slot_gone
+  // for a slot that is genuinely still open. Matching the offer's inputs
+  // exactly (revalidateSlot's own documented contract) is what keeps
+  // offer/commit parity here, not adding a one-sided credit.
+  test('the re-check never threads a serviceIdentity — the offer never had one to match', async () => {
     await executeTool('request_booking', GOOD_INPUT, slotCtx());
-    expect(booking.buildBookingAvailability).toHaveBeenCalledWith(expect.objectContaining({
-      serviceIdentity: { catalogServiceKey: 'general_pest', serviceType: 'General Pest Control' },
-    }));
+    const call = booking.buildBookingAvailability.mock.calls.find((c) => c[0]?.rangeFrom === BOOK_DATE);
+    expect(call[0]).not.toHaveProperty('serviceIdentity');
   });
 
   test('the probe never covers LESS than the written duration, even if the offered end is short', async () => {

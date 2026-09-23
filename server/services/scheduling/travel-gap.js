@@ -250,11 +250,22 @@ function violatesTravelGap(candidate, stops) {
 /**
  * One divergence-guarded read of a scheduled_services row's own pin for
  * commit gates that only hold the raw row (rebooker): the stamped
- * scheduled_services.lat/lng, else the non-divergent customer coords.
- * Returns { lat, lng } with nulls when unknown — never throws (fail-open).
- * Gate off → undefined WITHOUT a query, so a legacy move issues exactly the
- * statements it issued before (findConflictingVisits treats an undefined
- * `travel` as "overlap only").
+ * scheduled_services.lat/lng, else the non-divergent customer coords —
+ * PLUS (Codex r6 P1 on #4664) that same row's own expected-minutes credit,
+ * resolved from its catalog identity (service_key_snapshot/service_type)
+ * exactly like every other reader of a scheduled row (expected-service-
+ * minutes.js's byKey/byName lookup), windowed to its own current duration.
+ * Every rebooker probe that threads this function's return as `travel` into
+ * findConflictingVisits used to measure a co-located candidate from its
+ * FULL window end (zero padding) — a packed offer availability.js/find-
+ * time.js had already credited and promised then came back SLOT_TAKEN at
+ * commit. findConflictingVisitsWithTravel re-clamps this to the actual
+ * candidate (destination) window itself, so a stale/rougher value here can
+ * never manufacture negative padding.
+ * Returns { lat, lng, expectedMinutes } with nulls/window-length fallbacks
+ * when unknown — never throws (fail-open). Gate off → undefined WITHOUT a
+ * query, so a legacy move issues exactly the statements it issued before
+ * (findConflictingVisits treats an undefined `travel` as "overlap only").
  */
 async function resolveStopCoords(db, scheduledServiceId) {
   if (!travelGapEnabled()) return undefined;
@@ -265,9 +276,21 @@ async function resolveStopCoords(db, scheduledServiceId) {
     const row = await db('scheduled_services')
       .where('scheduled_services.id', scheduledServiceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-      .select(...guardedCoordSelects(db))
+      .select(
+        ...guardedCoordSelects(db),
+        'scheduled_services.estimated_duration_minutes',
+        'scheduled_services.service_key_snapshot',
+        'scheduled_services.service_type',
+      )
       .first();
-    return coordsOf(row) || none;
+    const coords = coordsOf(row) || none;
+    if (!row) return coords;
+    const { expectedServiceMinutes } = require('./expected-service-minutes');
+    const windowMinutes = Number(row.estimated_duration_minutes) > 0 ? Number(row.estimated_duration_minutes) : 60;
+    const expectedMinutes = await expectedServiceMinutes(db, {
+      serviceKey: row.service_key_snapshot, serviceType: row.service_type, windowMinutes,
+    });
+    return { ...coords, expectedMinutes };
   } catch {
     return none;
   }

@@ -318,17 +318,39 @@ class AvailabilityEngine {
       // zone had `occupied` empty here even though the global anchor set
       // carried it, so `hasRealStops` read the day as empty and every hour
       // was offered instead of packing against that real stop. Merge the
-      // anchors for this date into the same packing geometry, deduplicating
-      // rows already added above by id — UNCONDITIONAL (anchorsByDate is
-      // loaded above independently of GATE_SLOT_TRAVEL_GAP).
+      // anchors for this date into the same packing geometry — UNCONDITIONAL
+      // (anchorsByDate is loaded above independently of GATE_SLOT_TRAVEL_GAP).
+      // A row already in `occupied` (in-zone) is REPLACED, never skipped
+      // (Codex r6 P1): `occupied`'s own entry is scheduledInZone's raw
+      // window_start/window_end, but the anchor for that same id carries
+      // loadPackingAnchors' allocation-expanded span — a version-2 combined
+      // allocation's three 09:00-10:00 members sharing a real 09:00-12:00
+      // occupancy used to leave `occupied` at the raw 09:00-10:00 (the
+      // anchor merge saw the id already known and skipped it entirely),
+      // packing an 11:00 candidate the commit gate then rejected as
+      // overlapping the real 09:00-12:00 span.
+      //
+      // Each merged/replaced entry also carries the anchor's own
+      // expectedEndMin (Codex r6 P2) — findGaps' packed-after-a-stop bound
+      // needs the STOP's own catalog credit, not just its raw span, or a
+      // co-located candidate is measured from the full window regardless of
+      // how little of it the stop is actually expected to use.
       const dayAnchors = anchorsByDate.get(dateStr) || [];
       {
-        const knownIds = new Set(occupied.map((o) => o.id).filter((id) => id != null).map(String));
+        const byId = new Map();
+        for (const o of occupied) if (o.id != null) byId.set(String(o.id), o);
         for (const anchor of dayAnchors) {
-          if (anchor.id != null && knownIds.has(String(anchor.id))) continue;
           if (!Number.isFinite(anchor.rawStartMin) || !Number.isFinite(anchor.rawEndMin)) continue;
-          occupied.push({ id: anchor.id, start: anchor.rawStartMin, end: anchor.rawEndMin });
-          if (anchor.id != null) knownIds.add(String(anchor.id));
+          const existing = anchor.id != null ? byId.get(String(anchor.id)) : null;
+          if (existing) {
+            existing.start = anchor.rawStartMin;
+            existing.end = anchor.rawEndMin;
+            existing.expectedEndMin = anchor.expectedEndMin;
+            continue;
+          }
+          const added = { id: anchor.id, start: anchor.rawStartMin, end: anchor.rawEndMin, expectedEndMin: anchor.expectedEndMin };
+          occupied.push(added);
+          if (anchor.id != null) byId.set(String(anchor.id), added);
         }
       }
 
@@ -513,6 +535,33 @@ class AvailabilityEngine {
     const gaps = [];
     let cursor = dayStart;
     let realBefore = false;
+    // The real block (never the lunch block) currently anchoring realBefore,
+    // if any — its own expectedEndMin feeds the packed-after-a-stop bound
+    // below (Codex r6 P2). Tracked in lockstep with realBefore itself: set
+    // whenever realBefore becomes true from a real block, cleared whenever
+    // a lunch block resets realBefore to false, untouched when a contained
+    // lunch block leaves realBefore alone.
+    let prevAnchorBlock = null;
+    // The earliest a slotDuration-long candidate may start after the most
+    // recent real anchor, credited with THAT STOP's own expected minutes
+    // (packedBounds' no-credit fallback — no anchor, or one with no known
+    // expectedEndMin — degrades to the exact legacy cursor + buffer shape;
+    // only ever consumed downstream when the gap's own realBefore is true).
+    const packedAfterStart = () => {
+      if (!prevAnchorBlock) return roundUpToHour(cursor + buffer);
+      const { earliestStart } = packedBounds({
+        prev: {
+          rawStartMin: prevAnchorBlock.start,
+          rawEndMin: prevAnchorBlock.end,
+          expectedEndMin: Number.isFinite(prevAnchorBlock.expectedEndMin)
+            ? prevAnchorBlock.expectedEndMin : prevAnchorBlock.end,
+        },
+        next: null,
+        durationMinutes: slotDuration,
+        buffer,
+      });
+      return roundUpToHour(earliestStart);
+    };
     for (const block of occupied) {
       // The latest a slotDuration-long candidate can start before this
       // block, credited with the candidate's own expected minutes when
@@ -525,19 +574,19 @@ class AvailabilityEngine {
         buffer,
       });
       gaps.push({
-        start: roundUpToHour(cursor + buffer), end: latestStart + slotDuration,
+        start: packedAfterStart(), end: latestStart + slotDuration,
         realBefore, realAfter: !block.lunch,
       });
       // The anchor flag for the NEXT gap follows the block that actually
       // ADVANCES the cursor — a lunch block contained inside a real stop
       // (11:00-14:00 around 12:00-13:00) must not erase that stop's anchor;
       // a real block tying the cursor keeps/sets it (Codex r2 P2).
-      if (block.end > cursor) realBefore = !block.lunch;
-      else if (!block.lunch && block.end === cursor) realBefore = true;
+      if (block.end > cursor) { realBefore = !block.lunch; prevAnchorBlock = block.lunch ? null : block; }
+      else if (!block.lunch && block.end === cursor) { realBefore = true; prevAnchorBlock = block; }
       cursor = Math.max(cursor, block.end);
     }
     // Gap after the last occupied block — same clean-hour rule.
-    gaps.push({ start: roundUpToHour(cursor + buffer), end: dayEnd, realBefore, realAfter: false });
+    gaps.push({ start: packedAfterStart(), end: dayEnd, realBefore, realAfter: false });
 
     gaps.forEach((gap) => {
       if (!packEnds) { offer(gap.start, gap.end); return; }

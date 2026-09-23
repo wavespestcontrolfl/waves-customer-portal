@@ -9,6 +9,7 @@ jest.mock('../models/db', () => jest.fn());
 
 const db = require('../models/db');
 const travelGap = require('../services/scheduling/travel-gap');
+const { clearExpectedServiceMinutesCache } = require('../services/scheduling/expected-service-minutes');
 
 const {
   DEFAULT_TRAVEL_BUFFER_MINUTES, travelBufferMinutes, requiredGapMinutes,
@@ -256,26 +257,56 @@ describe('resolveStopCoords', () => {
     return c;
   }
 
+  beforeEach(() => clearExpectedServiceMinutesCache());
+
   test('gate off → undefined with NO query (legacy statement set stays byte-identical)', async () => {
     expect(await resolveStopCoords(db, 'svc-1')).toBeUndefined();
     expect(db).not.toHaveBeenCalled();
   });
 
-  test('gate on → one guarded read (stamped pin, else non-divergent customer coords)', async () => {
+  test('gate on → one guarded read (stamped pin, else non-divergent customer coords), plus the row\'s own expected-minutes credit', async () => {
     gateOn();
+    // No service_key_snapshot/service_type on this row and no reachable
+    // catalog (db mocked to one chain regardless of table) — degrades to
+    // the window length (here estimated_duration_minutes' own 60 default),
+    // i.e. no credit, same as every other reader with nothing to match.
     const c = chain({ lat: '27.5', lng: '-82.5' });
     db.mockReturnValue(c);
     db.raw = jest.fn((sql) => sql);
-    expect(await resolveStopCoords(db, 'svc-1')).toEqual({ lat: 27.5, lng: -82.5 });
+    expect(await resolveStopCoords(db, 'svc-1')).toEqual({ lat: 27.5, lng: -82.5, expectedMinutes: 60 });
     expect(c.leftJoin).toHaveBeenCalledWith('customers', 'scheduled_services.customer_id', 'customers.id');
     expect(db.raw.mock.calls.some(([sql]) => /COALESCE\(scheduled_services\.lat/.test(sql))).toBe(true);
+  });
+
+  // Codex r6 P1 — every rebooker probe (single reschedule AND rescheduleSeries,
+  // both read this function's return as their `travel`) used to measure a
+  // co-located candidate against the stop's FULL window regardless of how
+  // little of it the stop's own catalog service actually expects to use,
+  // rejecting a packed move availability.js/find-time.js had already offered.
+  test('gate on → resolves the STOP\'s own catalog credit from its service_key_snapshot, clamped to its own duration', async () => {
+    gateOn();
+    const c = chain({
+      lat: '27.5', lng: '-82.5',
+      estimated_duration_minutes: 60,
+      service_key_snapshot: 'quarterly_pest',
+      service_type: 'Quarterly Pest Control Service',
+    });
+    const servicesChain = {
+      select: jest.fn().mockResolvedValue([
+        { service_key: 'quarterly_pest', name: 'Quarterly Pest Control Service', min_duration_minutes: 30, max_duration_minutes: 60 },
+      ]),
+    };
+    db.mockImplementation((table) => (table === 'services' ? servicesChain : c));
+    db.raw = jest.fn((sql) => sql);
+    // Catalog midpoint (30+60)/2 = 45, clamped to the row's own 60-minute window.
+    expect(await resolveStopCoords(db, 'svc-1')).toEqual({ lat: 27.5, lng: -82.5, expectedMinutes: 45 });
   });
 
   test('gate on → unknown pin or a failing read degrades to nulls (fail-open)', async () => {
     gateOn();
     db.raw = jest.fn((sql) => sql);
     db.mockReturnValue(chain({ lat: null, lng: null }));
-    expect(await resolveStopCoords(db, 'svc-1')).toEqual({ lat: null, lng: null });
+    expect(await resolveStopCoords(db, 'svc-1')).toEqual({ lat: null, lng: null, expectedMinutes: 60 });
     db.mockImplementation(() => { throw new Error('boom'); });
     expect(await resolveStopCoords(db, 'svc-1')).toEqual({ lat: null, lng: null });
     expect(await resolveStopCoords(db, null)).toEqual({ lat: null, lng: null });
