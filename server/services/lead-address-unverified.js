@@ -46,4 +46,21 @@ function snapshotCoversAddress(snapshot, address) {
   return !a || !b || a === b;
 }
 
-module.exports = { deriveAddressUnverified, snapshotCoversAddress };
+// The persisted flag off a lead snapshot, shape-checked: the only source a
+// later stage may recover from. Never the snapshot's `enriched` — after a
+// /calculate that is the client's own submission.
+function recoverAddressUnverified(snapshot) {
+  const flag = snapshot?.address_unverified;
+  if (!flag || typeof flag !== 'object' || flag.source !== 'county_roll' || typeof flag.reason !== 'string' || !flag.reason) return null;
+  return {
+    source: 'county_roll',
+    reason: flag.reason.slice(0, 600),
+    county: typeof flag.county === 'string' ? flag.county.slice(0, 40) : null,
+    house_number: flag.house_number != null ? String(flag.house_number).slice(0, 12) : null,
+    street_exists: typeof flag.street_exists === 'boolean' ? flag.street_exists : null,
+    nearest_numbers: Array.isArray(flag.nearest_numbers) ? flag.nearest_numbers.map(String).filter(Boolean).slice(0, 5) : [],
+    flagged_at: typeof flag.flagged_at === 'string' ? flag.flagged_at : new Date().toISOString(),
+  };
+}
+
+module.exports = { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified };

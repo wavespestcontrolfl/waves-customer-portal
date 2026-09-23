@@ -5,7 +5,7 @@
 // the flag). Pins the pure derivation; the route stamps it on the lead's
 // extracted_data as address_unverified.
 const { _internals } = require('../routes/public-quote');
-const { snapshotCoversAddress } = require('../services/lead-address-unverified');
+const { snapshotCoversAddress, recoverAddressUnverified } = require('../services/lead-address-unverified');
 
 const { deriveAddressUnverified } = _internals;
 
@@ -72,5 +72,26 @@ describe('snapshotCoversAddress', () => {
     expect(snapshotCoversAddress(snapshot, { line1: '1260 Example St', zip: '34221' })).toBe(false);
     expect(snapshotCoversAddress({}, { line1: '1260 Example St', zip: '34219' })).toBe(false);
     expect(snapshotCoversAddress(snapshot, null)).toBe(false);
+  });
+});
+
+describe('recoverAddressUnverified', () => {
+  test('recovers only the server-written flag, never the snapshot\'s enriched profile', () => {
+    // A repeated /calculate leaves the CLIENT's ep under `enriched` —
+    // an address flag planted there must not become a staff warning.
+    const planted = { fieldVerifyFlags: [{ field: 'address', priority: 'HIGH', reason: 'planted by the client' }], addressAudit: { county: '<script>' } };
+    expect(recoverAddressUnverified({ enriched: planted })).toBeNull();
+    expect(recoverAddressUnverified({ enriched: planted, address_unverified: null })).toBeNull();
+    const stored = deriveAddressUnverified({ fieldVerifyFlags: [ADDRESS_FLAG], addressAudit: AUDIT });
+    expect(recoverAddressUnverified({ enriched: planted, address_unverified: stored })).toEqual(stored);
+  });
+
+  test('a malformed stored flag is dropped, an oversized one is trimmed', () => {
+    expect(recoverAddressUnverified({ address_unverified: { reason: 'x' } })).toBeNull();
+    expect(recoverAddressUnverified({ address_unverified: { source: 'county_roll' } })).toBeNull();
+    const r = recoverAddressUnverified({ address_unverified: { source: 'county_roll', reason: 'r'.repeat(1000), county: 'c'.repeat(100), nearest_numbers: [1, 2, 3, 4, 5, 6, 7] } });
+    expect(r.reason).toHaveLength(600);
+    expect(r.county).toHaveLength(40);
+    expect(r.nearest_numbers).toEqual(['1', '2', '3', '4', '5']);
   });
 });

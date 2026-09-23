@@ -1043,7 +1043,7 @@ const quoteLimiter = rateLimit({
   message: { error: 'Too many quote requests. Please try again later.' },
 });
 
-const { deriveAddressUnverified, snapshotCoversAddress } = require('../services/lead-address-unverified');
+const { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified } = require('../services/lead-address-unverified');
 
 router.post('/calculate', quoteLimiter, async (req, res) => {
   try {
@@ -1202,9 +1202,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()])
           .first('extracted_data');
         const snapshot = typeof own?.extracted_data === 'string' ? JSON.parse(own.extracted_data) : own?.extracted_data;
+        // Only the server-derived key: after a /calculate the snapshot's
+        // `enriched` is the CLIENT's submitted ep, so deriving from it
+        // would promote client text into a staff-facing warning (pre-push
+        // audit P1). address_unverified is written by the server on both
+        // stages and never from the request body.
         if (snapshot && snapshotCoversAddress(snapshot, normalizedAddress)) {
-          addressUnverified = deriveAddressUnverified(snapshot.enriched)
-            || (snapshot.address_unverified && typeof snapshot.address_unverified === 'object' ? snapshot.address_unverified : null);
+          addressUnverified = recoverAddressUnverified(snapshot);
         }
       } catch (snapErr) {
         logger.warn(`[public-quote] lookup-stage snapshot re-read failed — address flag not recovered: ${snapErr.code || snapErr.name || 'error'}`);
