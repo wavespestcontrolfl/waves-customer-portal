@@ -3382,12 +3382,6 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     form.price !== "" && !isNaN(parseFloat(form.price))
       ? parseFloat(form.price)
       : 0;
-  // GATE_DISCOUNT_STACKING (slice 7): lineGrossFor reads a discounted line's
-  // true GROSS (never its net) so an untouched stamped line doesn't get
-  // double-discounted below; every other line is unaffected (gross===net),
-  // so this is byte-identical to the pre-lane sum when nothing is discounted
-  // or the gate is off.
-  const addonLinesTotal = serviceLines.reduce((sum, l) => sum + lineGrossFor(l), 0);
   const selectedDiscountPreset =
     discountPresetId && discountPresetId !== "custom"
       ? discountPresets.find((d) => String(d.id) === String(discountPresetId))
@@ -3541,7 +3535,6 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       : service.primaryLinePrice != null
         ? Number(service.primaryLinePrice)
         : primaryPrice;
-  const displaySubtotal = displayPrimaryGross + addonLinesTotal;
   // cleanServiceLines mirrors buildAddonsPayload's own filter exactly (the
   // same "trimmed serviceType" test) — the server's addons[] is ordered
   // and filtered identically, so a brand-new (id-less) line correlates by
@@ -3561,6 +3554,26 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     const idLessRows = moneyPreview.addons.filter((row) => !row.submittedAddonId);
     return idLessRows[idLessBefore] || null;
   };
+  // Subtotal's add-on share. GATE_DISCOUNT_STACKING (slice 7): lineGrossFor
+  // reads a discounted line's true GROSS (never its net) so an untouched
+  // stamped line doesn't get double-discounted; every other line is
+  // unaffected (gross===net), so gate OFF this is byte-identical to the
+  // pre-lane sum. Gate ON (GitHub Codex round 9 on #4657, P2): prefer the
+  // server preview's own per-line `gross` — the figure THIS exact save
+  // would persist — over the form's pre-save value. An eligible member
+  // converting a priced visit to a free callback has every line zeroed by
+  // the save (reServiceConversionZeroPrice, mirrored by the preview), so
+  // the Subtotal must itemize $0 too — never the pre-conversion add-on
+  // total sitting above a $0 Total with no discount to explain the gap.
+  // A line the preview has no figure for yet (unresolved, or a blank-
+  // priced quote-pending line the server leaves null) keeps the form's
+  // own gross, exactly as before.
+  const displayAddonGrossAt = (idx) => {
+    const row = stackingEnabled ? previewAddonAt(idx) : null;
+    return row && row.gross != null ? Number(row.gross) : lineGrossFor(serviceLines[idx]);
+  };
+  const displaySubtotal =
+    displayPrimaryGross + serviceLines.reduce((sum, _l, i) => sum + displayAddonGrossAt(i), 0);
   // Per-line dollars for renderServiceLine's own display box (index-aligned
   // to serviceLines).
   const lineDiscountDollarsAt = (idx) => {

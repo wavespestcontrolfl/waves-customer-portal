@@ -2711,10 +2711,30 @@ function calculateVisitFinancialsForAddons(pricing, addonLines) {
 // this fix — canonicalRestackedAddonDollars/capsSnapshotToPersist both stay
 // null, so insertScheduledServiceAddons and the provenance re-stamp are
 // both no-ops on that path.
+//
+// GitHub Codex round 9 on #4657 (P1, :9984): ONE exception to the
+// unmarked-row fallthrough — `adoptCanonicalPricing`, decided by the
+// caller (adoptsCanonicalPricingOnEdit): a gate-on save that CHANGES a
+// discount term on an unmarked row (a fresh add-on pick, or an
+// appointment-level discount added/swapped/removed) prices this save
+// through the canonical engine exactly as a marked row would, and its
+// capsSnapshotToPersist then carries the freshly-resolved caps into a
+// FULL regime stamp (the caller's stampPricingRegimeMarker). Without
+// this, a fresh 20%-capped-at-$5 add-on pick resolved its cap correctly
+// for THAT save ($95) but left the row unmarked, so the NEXT edit (adding
+// an appointment discount, which disqualifies notes-only preservation)
+// treated the now-unchanged preset as non-fresh and replayed it through
+// cap-unaware applyDiscount: $80. The null-primary legacy ambiguity is
+// still honored — restackStoredVisitFinancials refuses an unmarked row
+// with no primary_line_price, so adoption silently falls back to the
+// legacy engine (and the row stays unmarked) whenever the primary gross
+// is unknown. `canonicalPricingApplied` reports which engine actually
+// priced this save, so the caller's line_discount_dollars write follows
+// the SAME decision rather than re-deriving it from the marker alone.
 async function resolveUpdateDetailsAddonFinancials({
   db, existing, updates, primaryGross, normalizedAddons,
   effDiscountType, effDiscountAmount, effMaxDiscountDollars, effServiceKeyFilter, effServiceCategoryFilter,
-  appointmentDiscountId,
+  appointmentDiscountId, adoptCanonicalPricing = false,
 }) {
   // Primary line discount is not exposed here — back it out of the gross
   // primary price so the subtotal matches what was originally stored
@@ -2743,7 +2763,8 @@ async function resolveUpdateDetailsAddonFinancials({
   // restack's other outputs, so the caller can persist the FRESH cached
   // dollar figure instead of leaving the stale stored one behind.
   let restackedPrimaryLineDiscountDollars = null;
-  if (discountStackingLive() && hasPricingRegimeMarker(existing)) {
+  let canonicalPricingApplied = false;
+  if (discountStackingLive() && (hasPricingRegimeMarker(existing) || adoptCanonicalPricing)) {
     const canonicalParent = {
       primary_line_price: primaryGross,
       line_discount_id: existing?.line_discount_id ?? null,
@@ -2790,6 +2811,7 @@ async function resolveUpdateDetailsAddonFinancials({
       canonicalRestackedAddonDollars = restacked.addonDollars;
       capsSnapshotToPersist = restacked.capsSnapshot;
       restackedPrimaryLineDiscountDollars = restacked.primaryLineDiscountDollars;
+      canonicalPricingApplied = true;
     }
   }
   if (!financials) {
@@ -2808,8 +2830,29 @@ async function resolveUpdateDetailsAddonFinancials({
   }
   return {
     financials, primaryNet, canonicalRestackedAddonDollars, capsSnapshotToPersist,
-    restackedPrimaryLineDiscountDollars,
+    restackedPrimaryLineDiscountDollars, canonicalPricingApplied,
   };
+}
+
+// GitHub Codex round 9 on #4657 (P1, :9984): does THIS save turn an
+// unmarked (legacy, or gate-was-off-at-save) row into a canonically-priced
+// one? Yes exactly when, with the gate live, the row is unmarked
+// (legacyPreservationCandidate), notes-only preservation did NOT engage,
+// AND a discount TERM changed — a genuinely new/changed add-on pick
+// (server-determined `discountIsNew`, never the client's own claim) or an
+// appointment-level discount added/swapped/removed (appointmentDiscountChanged
+// — removal included deliberately: a legacy live recompute after removing
+// the visit credit would replay a still-stamped capped add-on through
+// cap-unaware applyDiscount just the same). A PRICE-only edit on an
+// unmarked row stays on the legacy live-recompute path exactly as before
+// (#4405's own open product decision about repricing existing visits —
+// not this finding's scope). Pure: no I/O, pinned by its own tests.
+function adoptsCanonicalPricingOnEdit({
+  legacyPreservationCandidate, legacyEconomicsPreserved, appointmentDiscountChanged, normalizedAddons,
+}) {
+  if (!legacyPreservationCandidate || legacyEconomicsPreserved) return false;
+  if (appointmentDiscountChanged) return true;
+  return (Array.isArray(normalizedAddons) ? normalizedAddons : []).some((l) => !!l?.discountIsNew);
 }
 
 // PUT /:id/update-details gate-flip safety for an UNMARKED (legacy, or
@@ -9933,6 +9976,17 @@ async function normalizeUpdateDetailsAddons({
           || priorRow.discount_type !== discount.discountType
           || Number(priorRow.discount_amount) !== Number(discount.discountAmount);
       };
+      // A stored CUSTOM add-on discount (no catalog id) posted back with
+      // the SAME type/amount against the SAME gross is a round-trip, not
+      // a fresh pick — see `discountIsNew` in the loop below.
+      const customAddonStampRoundTripped = (submittedAddonId, lineType, lineAmount, gross) => {
+        const priorRow = submittedAddonId ? existingAddonDiscountById.get(submittedAddonId) : null;
+        if (!priorRow || priorRow.discount_id || !priorRow.discount_type) return false;
+        const priorGross = priorRow.base_price != null ? Number(priorRow.base_price) : null;
+        return priorRow.discount_type === lineType
+          && Number(priorRow.discount_amount) === Number(lineAmount)
+          && priorGross != null && Math.abs(priorGross - Number(gross)) < 0.005;
+      };
       // Codex pre-push audit P1 (structural round 3 on #4657, :9413): a
       // fresh CATALOG-BACKED pick (a.discountId set AND isNewAddonDiscount
       // says it's genuinely new/changed — server-computed, never the
@@ -9971,10 +10025,26 @@ async function normalizeUpdateDetailsAddons({
         const lineAmount = (a.discountAmount != null && a.discountAmount !== '') ? Number(a.discountAmount) : null;
         let net = gross;
         let lineDiscount = null;
+        // Server-determined (never the client's lineDiscountFresh claim):
+        // is this line's discount genuinely new/changed relative to its
+        // own stored row? Recorded on the normalized line as
+        // `discountIsNew` — computeUpdateDetailsFinancialPlan reads it to
+        // decide whether this save turns an UNMARKED row canonical
+        // (adoptsCanonicalPricingOnEdit, GitHub round 9 P1 on #4657).
+        let lineDiscountIsNew = false;
         if (gross != null && lineType && lineAmount != null && !isNaN(lineAmount)) {
-          const freshCatalogPick = !!a.discountId && isNewAddonDiscount(a.id || null, {
-            discountId: a.discountId, discountType: lineType, discountAmount: lineAmount,
-          }, gross, catalogService?.id || null);
+          // isNewAddonDiscount answers "new" for ANY line whose stored row
+          // has no discount_id — right for the catalog-pick freshness it
+          // was written for, but a stored CUSTOM stamp (type/amount, no
+          // catalog id) round-trips with a null discount_id too, so it
+          // must be compared by its own terms + gross here, or a price-
+          // only edit on such a row would count as a discount change.
+          lineDiscountIsNew = a.discountId
+            ? isNewAddonDiscount(a.id || null, {
+              discountId: a.discountId, discountType: lineType, discountAmount: lineAmount,
+            }, gross, catalogService?.id || null)
+            : !customAddonStampRoundTripped(a.id || null, lineType, lineAmount, gross);
+          const freshCatalogPick = !!a.discountId && lineDiscountIsNew;
           if (freshCatalogPick) {
             const { customerRow, recurringMembershipBooking } = await getMembershipContext();
             const resolved = await resolveLineDiscount(a, gross, customerRow || {}, {
@@ -10013,6 +10083,10 @@ async function normalizeUpdateDetailsAddons({
           // isNewAddonDiscount's own stored-row comparison, above — a
           // client bug here can no longer skip scrutiny.
           lineDiscountFresh: !!a.lineDiscountFresh,
+          // The server's OWN answer to the same question (see above) — a
+          // line whose discount resolved to nothing (null lineDiscount) is
+          // never "new" for adoption purposes: there is no term to freeze.
+          discountIsNew: !!lineDiscount && lineDiscountIsNew,
           serviceId: a.serviceId || catalogService?.id || null,
           // GitHub round 2 on PR #4654 (P0): the RAW client-submitted id,
           // distinct from `serviceId` above (which can be INFERRED via a
@@ -10476,13 +10550,20 @@ async function computeUpdateDetailsFinancialPlan({
           ? (appointmentDiscountPreset.service_category_filter || null)
           : (appointmentDiscountChanged ? null : (existing?.discount_service_category_filter || null));
 
+        // GitHub Codex round 9 on #4657 (P1, :9984): a discount-term change
+        // on an UNMARKED row prices canonically and marks the row — see
+        // adoptsCanonicalPricingOnEdit / resolveUpdateDetailsAddonFinancials.
+        const adoptCanonicalPricing = adoptsCanonicalPricingOnEdit({
+          legacyPreservationCandidate, legacyEconomicsPreserved, appointmentDiscountChanged, normalizedAddons,
+        });
         const {
           financials, primaryNet, canonicalRestackedAddonDollars: canonicalDollars, capsSnapshotToPersist,
-          restackedPrimaryLineDiscountDollars,
+          restackedPrimaryLineDiscountDollars, canonicalPricingApplied,
         } = await resolveUpdateDetailsAddonFinancials({
           db, existing, updates, primaryGross, normalizedAddons,
           effDiscountType, effDiscountAmount, effMaxDiscountDollars, effServiceKeyFilter, effServiceCategoryFilter,
           appointmentDiscountId: appointmentDiscountPreset?.id ?? existing?.discount_id ?? null,
+          adoptCanonicalPricing,
         });
         canonicalRestackedAddonDollars = canonicalDollars;
 
@@ -10568,29 +10649,34 @@ async function computeUpdateDetailsFinancialPlan({
         // preview and PUT must agree, and invoice generation must read the
         // SAME number this save just computed, not a pre-restack one.
         // Codex pre-push audit P0 (local audit, this same push): gated on
-        // hasPricingRegimeMarker(existing) — the SAME condition
-        // resolveUpdateDetailsAddonFinancials itself uses to decide
-        // whether the canonical restack ran at all — not merely on
-        // "not legacy-preserved". An UNMARKED row's real (non-preserved)
-        // money edit never runs the canonical restack, so
-        // restackedPrimaryLineDiscountDollars stays null there; writing
-        // that null anyway would silently wipe a legacy row's legitimate
-        // cached dollar figure while line_discount_type/amount/id/name
-        // stay untouched, producing an inconsistent stamp invoicing reads.
-        // Only a MARKED row's own restack result — which can itself be a
-        // legitimate null (the discount computed to $0) — is trusted here.
-        if (discountStackingLive() && hasPricingRegimeMarker(existing) && cols.line_discount_dollars && existing?.line_discount_type) {
+        // canonicalPricingApplied — resolveUpdateDetailsAddonFinancials's
+        // OWN report of whether the canonical restack actually priced
+        // this save (a marked row, or an unmarked row this save adopts —
+        // GitHub round 9 P1) — not merely on "not legacy-preserved". An
+        // UNMARKED row's real (non-preserved) price-only edit never runs
+        // the canonical restack, so restackedPrimaryLineDiscountDollars
+        // stays null there; writing that null anyway would silently wipe
+        // a legacy row's legitimate cached dollar figure while
+        // line_discount_type/amount/id/name stay untouched, producing an
+        // inconsistent stamp invoicing reads. Only the restack's own
+        // result — which can itself be a legitimate null (the discount
+        // computed to $0) — is trusted here.
+        if (canonicalPricingApplied && cols.line_discount_dollars && existing?.line_discount_type) {
           updates.line_discount_dollars = restackedPrimaryLineDiscountDollars;
         }
         // Re-freeze provenance with the (possibly merged/updated) caps this
         // save actually restacked against — keeps the row's canonical-pricing
         // marker while a changed discount id/amount's cap resolves fresh
         // (never a stale cap silently applied to a new discount) and joins
-        // the frozen snapshot for the next save/extension to inherit. Never
-        // reached on the legacy-preservation path: capsSnapshotToPersist is
-        // only ever produced by the MARKED-row branch of
-        // resolveUpdateDetailsAddonFinancials, so an unmarked row's
-        // preserved save stays unmarked, exactly as before this fix.
+        // the frozen snapshot for the next save/extension to inherit. For
+        // an UNMARKED row this save adopts (GitHub round 9 P1 — a
+        // discount-term change), this is the row's FIRST full stamp: the
+        // caps the fresh pick just resolved against are frozen here so the
+        // next edit restacks from them instead of replaying the preset
+        // cap-unaware. Never reached on the legacy-preservation path, nor
+        // on an unmarked row's price-only edit: capsSnapshotToPersist is
+        // only ever produced by resolveUpdateDetailsAddonFinancials's
+        // canonical branch, so those saves stay unmarked exactly as before.
         if (capsSnapshotToPersist && cols.pricing_provenance) {
           stampPricingRegimeMarker(updates, cols, capsSnapshotToPersist);
         }
@@ -13783,6 +13869,23 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
         price: l.price,
         discountDollars: l.discount?.discountDollars ?? null,
         discountName: l.discount?.discountName ?? null,
+        // GitHub Codex round 9 on #4657 (P2, SchedulePage.jsx:3544): the
+        // line's GROSS this save would persist (base_price) — the client's
+        // Subtotal line must itemize what the save plans, not its own
+        // pre-save form figure: an eligible member converting a priced
+        // visit to a free callback has every line zeroed above
+        // (reServiceConversionZeroPrice), so the Subtotal must read $0
+        // too, never the pre-conversion add-on total against a $0 Total.
+        // A pre-base_price legacy row (preservedAddonLines with a null
+        // base) reconstructs gross = net + frozen dollars, the SAME
+        // relation restackStoredVisitFinancials uses; a blank-priced
+        // (quote-pending) line stays null so the client keeps its own
+        // fallback for it.
+        gross: l.base != null
+          ? Number(l.base)
+          : (l.price != null
+            ? Math.round((Number(l.price) + (Number(l.discount?.discountDollars) || 0)) * 100) / 100
+            : null),
       })),
     });
   } catch (err) {
@@ -21177,6 +21280,8 @@ router._test = {
   isPercentDiscountType,
   calculateVisitFinancialsForAddons,
   resolveUpdateDetailsAddonFinancials,
+  adoptsCanonicalPricingOnEdit,
+  computeUpdateDetailsFinancialPlan,
   legacyEconomicsPreservationDecision,
   loadExistingAddonRowsForLegacyPreservation,
   legacyPreservationSnapshotStale,

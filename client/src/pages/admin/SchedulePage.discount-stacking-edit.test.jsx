@@ -1265,3 +1265,82 @@ it('owner revert-and-carry: a discounted zero-add-on visit renders Subtotal as t
   // pinned here so the full itemization is checked together.
   expect(screen.getByText('Total').nextElementSibling.textContent).toBe('$90.00');
 });
+
+// ---------------------------------------------------------------------
+// GitHub Codex round 9 on #4657 (P2, SchedulePage.jsx:3544): the Subtotal
+// line added the pre-conversion client-side add-on total even when the
+// server preview had every line zeroed (an eligible member converting a
+// priced visit to a free callback) — Subtotal $200 / no discount / Total
+// $0.00, an itemization no arithmetic produces. The preview now carries
+// each line's own `gross`; gate ON, the Subtotal itemizes THAT.
+// ---------------------------------------------------------------------
+
+function zeroedCallbackPreview(url) {
+  if (url.endsWith('/admin/discounts/stacking')) return null;
+  if (!url.includes('/update-details/preview')) return null;
+  return {
+    ok: true,
+    json: async () => ({
+      total: 0, primaryLinePrice: 0, appointmentDiscountDollars: null,
+      primaryLineDiscountDollars: null, primaryLineDiscountName: null,
+      addons: [
+        { submittedAddonId: 'addon-1', serviceName: 'Monthly Mosquito', price: 0, discountDollars: null, discountName: null, gross: 0 },
+        { submittedAddonId: 'addon-2', serviceName: 'Quarterly Fertilization', price: 0, discountDollars: null, discountName: null, gross: 0 },
+      ],
+    }),
+  };
+}
+
+it('round 9 P2 (:3544): gate ON, a preview that zeroes every line (free-callback conversion) renders Subtotal $0.00 — never the pre-conversion $200 add-on total above a $0.00 Total', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
+    if (url.endsWith('/admin/discounts/stacking')) return { ok: true, json: async () => ({ enabled: true }) };
+    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => DISCOUNTS };
+    return zeroedCallbackPreview(url) || { ok: true, json: async () => ({}) };
+  }));
+  render(<Harness service={baseService} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  expect(screen.getByText('Subtotal').nextElementSibling.textContent).toBe('$0.00');
+  expect(totalText()).toBe('$0.00');
+});
+
+it('round 9 P2 (:3544): a preview row WITHOUT a gross figure (a blank-priced, quote-pending line the server leaves null) keeps the form\'s own gross for that line', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
+    if (url.endsWith('/admin/discounts/stacking')) return { ok: true, json: async () => ({ enabled: true }) };
+    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => DISCOUNTS };
+    if (url.includes('/update-details/preview')) {
+      return {
+        ok: true,
+        json: async () => ({
+          total: 195, primaryLinePrice: 100, appointmentDiscountDollars: null,
+          primaryLineDiscountDollars: null, primaryLineDiscountName: null,
+          addons: [
+            { submittedAddonId: 'addon-1', serviceName: 'Monthly Mosquito', price: 55, discountDollars: 5, discountName: 'Military Discount', gross: 60 },
+            { submittedAddonId: 'addon-2', serviceName: 'Quarterly Fertilization', price: 40, discountDollars: null, discountName: null, gross: null },
+          ],
+        }),
+      };
+    }
+    return { ok: true, json: async () => ({}) };
+  }));
+  render(<Harness service={baseService} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  // 100 (preview primary) + 60 (preview gross) + 40 (form fallback) = 200
+  expect(screen.getByText('Subtotal').nextElementSibling.textContent).toBe('$200.00');
+});
+
+it('round 9 P2 (:3544) gate-OFF parity: the Subtotal never reads the preview\'s gross — the pre-lane form sum stands even when the preview zeroes every line', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
+    if (url.endsWith('/admin/discounts/stacking')) return { ok: true, json: async () => ({ enabled: false }) };
+    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => DISCOUNTS };
+    return zeroedCallbackPreview(url) || { ok: true, json: async () => ({}) };
+  }));
+  render(<Harness service={baseService} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  // Gate off: primary from the preview's own primaryLinePrice (0 — that
+  // precedence predates this fix) + the form's untouched add-on sum
+  // (55 net seed + 40) exactly as the pre-lane formula computed it.
+  expect(screen.getByText('Subtotal').nextElementSibling.textContent).toBe('$95.00');
+});

@@ -66,6 +66,8 @@ const {
   calculateVisitFinancialsForAddons,
   resolveUpdateDetailsAddonFinancials,
   hasPricingRegimeMarker,
+  adoptsCanonicalPricingOnEdit,
+  stampPricingRegimeMarker,
 } = require('../routes/admin-schedule')._test;
 const {
   deriveLegacyPrimarySubmission,
@@ -1161,5 +1163,164 @@ describe('PUT /:id/update-details eligibility — restack (marked) vs preserve (
       existingEstimatedPrice: 100,
     });
     expect(decision.legacyEconomicsPreserved).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------
+// GitHub Codex round 9 on #4657 (P1, admin-schedule.js:9984): applying a
+// fresh CAPPED line discount to an UNMARKED legacy visit resolved the cap
+// correctly for THAT save, but the planner only produced a frozen-cap
+// snapshot (and therefore a regime stamp) for rows that were ALREADY
+// marked — so the visit stayed unmarked. The NEXT edit that added an
+// appointment discount disqualified notes-only preservation, treated the
+// now-unchanged line preset as non-fresh, and recomputed it through
+// cap-unaware applyDiscount: a 20%-off/$5-cap line saved at $95 restacked
+// to $80. Fix: adoptsCanonicalPricingOnEdit decides that a discount-TERM
+// change on an unmarked row prices this save canonically
+// (resolveUpdateDetailsAddonFinancials's `adoptCanonicalPricing`), whose
+// capsSnapshotToPersist then becomes the row's first FULL regime stamp.
+// ---------------------------------------------------------------------
+describe('GitHub round 9 P1 on #4657 — a discount-term change on an UNMARKED row adopts canonical pricing and marks the row', () => {
+  const CAPPED_20PCT = 'disc-20pct-cap5';
+  // loadDiscountCapsById's own read shape: db('discounts').whereIn('id', ids).select(...)
+  const dbWithCatalogCap = (cap) => () => ({
+    whereIn: () => ({ select: () => Promise.resolve([{ id: CAPPED_20PCT, max_discount_dollars: cap }]) }),
+  });
+  const unmarkedExisting = {
+    pricing_provenance: null,
+    line_discount_id: null, line_discount_type: null, line_discount_amount: null,
+  };
+
+  describe('adoptsCanonicalPricingOnEdit — the pure decision', () => {
+    const base = { legacyPreservationCandidate: true, legacyEconomicsPreserved: false, appointmentDiscountChanged: false, normalizedAddons: [] };
+    test('a genuinely fresh add-on pick (server-determined discountIsNew) on an unmarked, non-preserved row: adopts', () => {
+      expect(adoptsCanonicalPricingOnEdit({ ...base, normalizedAddons: [{ discountIsNew: true, discount: { discountId: CAPPED_20PCT } }] })).toBe(true);
+    });
+    test('an appointment-level discount added, swapped OR removed (appointmentDiscountChanged) on an unmarked, non-preserved row: adopts', () => {
+      expect(adoptsCanonicalPricingOnEdit({ ...base, appointmentDiscountChanged: true })).toBe(true);
+    });
+    test('a PRICE-only edit (no discount term changed anywhere) on an unmarked row: does NOT adopt — the legacy live recompute keeps it (#4405\'s own open product decision)', () => {
+      expect(adoptsCanonicalPricingOnEdit({ ...base, normalizedAddons: [{ discountIsNew: false, discount: { discountId: CAPPED_20PCT } }] })).toBe(false);
+    });
+    test('a round-tripped, UNCHANGED add-on stamp is never "new" — the client\'s own lineDiscountFresh claim is not consulted', () => {
+      expect(adoptsCanonicalPricingOnEdit({ ...base, normalizedAddons: [{ lineDiscountFresh: true, discountIsNew: false, discount: { discountId: CAPPED_20PCT } }] })).toBe(false);
+    });
+    test('a notes-only save that legacy preservation already claimed: never adopts (preservation and adoption are mutually exclusive)', () => {
+      expect(adoptsCanonicalPricingOnEdit({ ...base, legacyEconomicsPreserved: true, appointmentDiscountChanged: true })).toBe(false);
+    });
+    test('not a candidate at all (a MARKED row, or the gate off): never adopts — a marked row already restacks on its own marker', () => {
+      expect(adoptsCanonicalPricingOnEdit({ ...base, legacyPreservationCandidate: false, appointmentDiscountChanged: true })).toBe(false);
+    });
+  });
+
+  test('Codex\'s repro, save 1: a fresh 20%/$5-cap pick on an UNMARKED $100 + $100 visit prices canonically ($195), reports canonicalPricingApplied, and hands back the resolved $5 cap to freeze', async () => {
+    await withGateLive(async () => {
+      // normalizeUpdateDetailsAddons's own output for a FRESH catalog pick:
+      // resolveLineDiscount already applied the cap (price 95, dollars 5).
+      const normalizedAddons = [{
+        base: 100, price: 95, serviceId: null, serviceKey: null, discountIsNew: true,
+        discount: { discountId: CAPPED_20PCT, discountType: 'percentage', discountAmount: 20, discountDollars: 5 },
+      }];
+      const result = await resolveUpdateDetailsAddonFinancials({
+        db: dbWithCatalogCap(5), existing: unmarkedExisting, updates: {}, primaryGross: 100, normalizedAddons,
+        effDiscountType: null, effDiscountAmount: null, effMaxDiscountDollars: null,
+        effServiceKeyFilter: null, effServiceCategoryFilter: null, appointmentDiscountId: null,
+        adoptCanonicalPricing: adoptsCanonicalPricingOnEdit({
+          legacyPreservationCandidate: true, legacyEconomicsPreserved: false, appointmentDiscountChanged: false, normalizedAddons,
+        }),
+      });
+      expect(result.canonicalPricingApplied).toBe(true);
+      expect(result.financials.price).toBe(195);
+      expect(result.canonicalRestackedAddonDollars).toEqual([{ discountDollars: 5, netPrice: 95 }]);
+      // The snapshot the planner's stampPricingRegimeMarker call persists —
+      // the resolved cap, frozen, keyed by the discount id.
+      expect(result.capsSnapshotToPersist).toEqual({ line: { id: null, cap: null }, addons: { [CAPPED_20PCT]: 5 } });
+      const stamped = {};
+      stampPricingRegimeMarker(stamped, { pricing_provenance: true }, result.capsSnapshotToPersist);
+      expect(hasPricingRegimeMarker(stamped)).toBe(true);
+    });
+  });
+
+  test('Codex\'s repro, save 2: adding a $10 appointment credit to that now-MARKED row keeps the line at $95 (frozen $5 cap) — never the cap-unaware $80 — even though the catalog cap has since been raised', async () => {
+    await withGateLive(async () => {
+      const stamped = {};
+      stampPricingRegimeMarker(stamped, { pricing_provenance: true }, { line: { id: null, cap: null }, addons: { [CAPPED_20PCT]: 5 } });
+      const markedExisting = { ...unmarkedExisting, pricing_provenance: stamped.pricing_provenance };
+      // normalizeUpdateDetailsAddons's own output for an UNCHANGED, round-
+      // tripped stamp: cap-unaware applyDiscount(100, 'percentage', 20) → 80.
+      const normalizedAddons = [{
+        base: 100, price: 80, serviceId: null, serviceKey: null, discountIsNew: false,
+        discount: { discountId: CAPPED_20PCT, discountType: 'percentage', discountAmount: 20, discountDollars: 20 },
+      }];
+      const result = await resolveUpdateDetailsAddonFinancials({
+        db: dbWithCatalogCap(50), existing: markedExisting, updates: {}, primaryGross: 100, normalizedAddons,
+        effDiscountType: 'fixed_amount', effDiscountAmount: 10, effMaxDiscountDollars: null,
+        effServiceKeyFilter: null, effServiceCategoryFilter: null, appointmentDiscountId: null,
+        adoptCanonicalPricing: false, // a marked row needs no adoption
+      });
+      expect(result.canonicalRestackedAddonDollars[0]).toEqual({ discountDollars: 5, netPrice: 95 });
+      expect(result.financials.price).toBe(185); // 100 + 95 - 10, NEVER 170
+      expect(result.capsSnapshotToPersist.addons[CAPPED_20PCT]).toBe(5); // frozen $5 wins over the live $50
+    });
+  });
+
+  test('the SAME save 2 against a row that stayed UNMARKED (the pre-fix state) with NO adoption reproduces the bug — $80 / $170 — and adoption alone turns it into $95 / $185', async () => {
+    await withGateLive(async () => {
+      const normalizedAddons = [{
+        base: 100, price: 80, serviceId: null, serviceKey: null, discountIsNew: false,
+        discount: { discountId: CAPPED_20PCT, discountType: 'percentage', discountAmount: 20, discountDollars: 20 },
+      }];
+      const run = (adoptCanonicalPricing) => resolveUpdateDetailsAddonFinancials({
+        db: dbWithCatalogCap(5), existing: unmarkedExisting, updates: {}, primaryGross: 100, normalizedAddons,
+        effDiscountType: 'fixed_amount', effDiscountAmount: 10, effMaxDiscountDollars: null,
+        effServiceKeyFilter: null, effServiceCategoryFilter: null, appointmentDiscountId: null,
+        adoptCanonicalPricing,
+      });
+      const legacy = await run(false);
+      expect(legacy.canonicalPricingApplied).toBe(false);
+      expect(legacy.financials.price).toBe(170); // the exact finding: 100 + 80 - 10
+      expect(legacy.capsSnapshotToPersist).toBeNull(); // and the row would stay unmarked forever
+      // appointmentDiscountChanged on an unmarked, non-preserved row is
+      // exactly what adoptsCanonicalPricingOnEdit says adopts.
+      const adopted = await run(adoptsCanonicalPricingOnEdit({
+        legacyPreservationCandidate: true, legacyEconomicsPreserved: false, appointmentDiscountChanged: true, normalizedAddons,
+      }));
+      expect(adopted.canonicalPricingApplied).toBe(true);
+      expect(adopted.canonicalRestackedAddonDollars[0]).toEqual({ discountDollars: 5, netPrice: 95 });
+      expect(adopted.financials.price).toBe(185);
+      expect(adopted.capsSnapshotToPersist.addons[CAPPED_20PCT]).toBe(5);
+    });
+  });
+
+  test('null-primary legacy ambiguity still wins: an unmarked row with NO primary_line_price falls back to the legacy engine and stays unmarked even when adoption is requested', async () => {
+    await withGateLive(async () => {
+      const normalizedAddons = [{
+        base: 100, price: 95, serviceId: null, serviceKey: null, discountIsNew: true,
+        discount: { discountId: CAPPED_20PCT, discountType: 'percentage', discountAmount: 20, discountDollars: 5 },
+      }];
+      const result = await resolveUpdateDetailsAddonFinancials({
+        db: dbWithCatalogCap(5), existing: unmarkedExisting, updates: {}, primaryGross: null, normalizedAddons,
+        effDiscountType: null, effDiscountAmount: null, effMaxDiscountDollars: null,
+        effServiceKeyFilter: null, effServiceCategoryFilter: null, appointmentDiscountId: null,
+        adoptCanonicalPricing: true,
+      });
+      expect(result.canonicalPricingApplied).toBe(false);
+      expect(result.capsSnapshotToPersist).toBeNull();
+      expect(result.canonicalRestackedAddonDollars).toBeNull();
+    });
+  });
+
+  test('gate off: adoption is inert — the legacy engine prices it and the catalog is never read (gate-off parity is unconditional)', async () => {
+    const result = await resolveUpdateDetailsAddonFinancials({
+      db: () => { throw new Error('must not query when the gate is off'); },
+      existing: unmarkedExisting, updates: {}, primaryGross: 100,
+      normalizedAddons: [{ base: 100, price: 95, discountIsNew: true, discount: { discountId: CAPPED_20PCT, discountType: 'percentage', discountAmount: 20, discountDollars: 5 } }],
+      effDiscountType: null, effDiscountAmount: null, effMaxDiscountDollars: null,
+      effServiceKeyFilter: null, effServiceCategoryFilter: null, appointmentDiscountId: null,
+      adoptCanonicalPricing: true,
+    });
+    expect(result.canonicalPricingApplied).toBe(false);
+    expect(result.capsSnapshotToPersist).toBeNull();
+    expect(result.financials.price).toBe(195);
   });
 });
