@@ -14,7 +14,7 @@ jest.mock('../config/twilio-numbers', () => ({
   getLeadSourceFromNumber: jest.fn(() => ({ source: 'phone_call' })),
 }));
 
-const { onFileHouseNumberConflict, houseNumberStreetKey } = require('../services/call-triage-flags');
+const { onFileHouseNumberConflict, houseNumberStreetKey, sameHouseNumberStreet } = require('../services/call-triage-flags');
 const { buildTriageItem } = require('../services/call-routing-gates');
 const { classifyTriageItem, RULE_NOTES } = require('../services/triage-auto-resolve');
 
@@ -157,6 +157,17 @@ describe('triage auto-resolve: house_number_adopted', () => {
     expect(classifyTriageItem(item({
       customer_address_line1: '1250 N Main St', customer_city: 'Parrish', customer_zip: '34219',
       payload: { stated_house_number: '1250', stated_street: '1250 North Main Street', stated_city: 'Parrish', stated_zip: '34219' },
+    }), {}, { now: NOW })).toEqual({ action: 'resolve', rule: 'house_number_adopted' });
+  });
+
+  test('a saved spelling without a suffix still settles the ask (the detector equates them)', () => {
+    expect(sameHouseNumberStreet('1250 Main St', '1250 Main')).toBe(true);
+    expect(sameHouseNumberStreet('1250 Main St', '1250 Main Ave')).toBe(false);
+    expect(sameHouseNumberStreet('1250 N Main St', '1250 North Main Street')).toBe(true);
+    expect(sameHouseNumberStreet('Main St', '1250 Main St')).toBe(false);
+    expect(classifyTriageItem(item({
+      customer_address_line1: '1250 Main', customer_city: 'Parrish', customer_zip: '34219',
+      payload: { stated_house_number: '1250', stated_street: '1250 Main St', stated_city: 'Parrish', stated_zip: '34219' },
     }), {}, { now: NOW })).toEqual({ action: 'resolve', rule: 'house_number_adopted' });
   });
 

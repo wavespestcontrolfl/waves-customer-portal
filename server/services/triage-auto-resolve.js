@@ -941,10 +941,10 @@ function recordCarriesStatedStreet(item) {
   const payload = parseMaybeJson(item.payload);
   // The detector's own street key, so N / North and St / Street resolve
   // exactly as they were detected (codex #4666 P2).
-  const { houseNumberStreetKey } = require('./call-triage-flags');
-  const stated = houseNumberStreetKey(payload?.stated_street);
-  const onRecord = houseNumberStreetKey(item.customer_address_line1);
-  if (!stated || !onRecord || stated !== onRecord) return false;
+  // …including the suffix-less equivalence the detector applies ("1250
+  // Main" answers a card about "1250 Main St").
+  const { sameHouseNumberStreet } = require('./call-triage-flags');
+  if (!sameHouseNumberStreet(payload?.stated_street, item.customer_address_line1)) return false;
   // The stated locality must hold on the record too (same helper the
   // address-moot rules use): a ZIP or city the caller gave that the record
   // now lacks or contradicts is not the same premise (pre-push audit P1).

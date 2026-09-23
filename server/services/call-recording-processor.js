@@ -99,7 +99,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 
 // The address_recovered card's pass marker, reconciled to THIS pass. The two
@@ -9782,14 +9782,14 @@ const CallRecordingProcessor = {
       // an earlier card — an AV premise the canonical record does not
       // carry settles nothing either way (pre-push audit P1).
       const avNormalized = effectiveAddressValidation?.normalized || {};
-      const { streetKey: canonicalStreetKey, addressKey: propertyKey } = require('./customer-properties');
+      const { addressKey: propertyKey } = require('./customer-properties');
       const canonicalZip = String(extracted?.zip || '').match(/\d{5}/)?.[0] || '';
       const avZip = String(avNormalized.postal_code || '').match(/\d{5}/)?.[0] || '';
-      // Suffix-CANONICAL compare (St == Street, St != Ave) — the
-      // suffix-stripping key would corroborate a different road (codex
-      // r2 P2). Same comparator the second-address check uses.
-      const corroborated = !!canonicalStreetKey(extracted?.address_line1)
-        && canonicalStreetKey(extracted?.address_line1) === canonicalStreetKey(avNormalized.street_line_1)
+      // The detector's own street identity (house token + aliased name:
+      // St == Street, N == North, St != Ave) — the same rule that judged
+      // the on-file line, so a directional spelling cannot un-corroborate
+      // what the detector just matched (codex r5 P2; r2 P2 for suffixes).
+      const corroborated = sameHouseNumberStreet(extracted?.address_line1, avNormalized.street_line_1)
         && (!canonicalZip || !avZip || canonicalZip === avZip);
       if (houseConflict && !corroborated) houseConflict = null;
       // A second property the account already holds on the same street
@@ -13966,6 +13966,14 @@ const CallRecordingProcessor = {
                 if (propertyLinkage.holdReason) {
                   return { __held: { reason: propertyLinkage.holdReason } };
                 }
+                // The call's house number is DISPUTED against the record
+                // (on_file_house_number_conflict card filed above): a
+                // confirmed appointment must not dispatch a technician to
+                // a number the office has been asked to confirm first —
+                // hold it like an ambiguous attach (codex #4666 r5 P1).
+                if (houseNumberConflictFiled) {
+                  return { __held: { reason: 'on_file_house_number_conflict' } };
+                }
                 // findExistingCallAppointment only sees THIS call's rows —
                 // a visit booked through ANY other channel (a human in the
                 // portal mid-call, online self-booking) is invisible to it,
@@ -15803,7 +15811,7 @@ const CallRecordingProcessor = {
     if (CALL_EXTRACTION_V2_DRIVES_ROUTING && v2ApprovedExtraction && extracted.appointment_confirmed) {
       const bookedServiceId = appointmentResult?.scheduledServiceId || null;
       // Held bookings already opened their own reason-specific card above.
-      const heldReasons = new Set(['existing_appointment_same_date', 'ambiguous_existing_appointment', 'auto_booking_previously_cancelled', 'open_reservice_callback_exists', 'reservice_eligibility_lapsed', 'reservice_property_uncovered', 'on_file_proof_customer_mismatch']);
+      const heldReasons = new Set(['existing_appointment_same_date', 'ambiguous_existing_appointment', 'auto_booking_previously_cancelled', 'open_reservice_callback_exists', 'reservice_eligibility_lapsed', 'reservice_property_uncovered', 'on_file_proof_customer_mismatch', 'on_file_house_number_conflict']);
       if (!bookedServiceId && !heldReasons.has(appointmentResult?.skippedReason)) {
         const skipReason = appointmentResult?.skippedReason
           || appointmentResult?.scheduleError

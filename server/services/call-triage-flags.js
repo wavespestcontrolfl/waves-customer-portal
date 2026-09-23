@@ -1790,6 +1790,17 @@ function houseAndName(line) {
 // single line, so a resolver judging "does the record now carry the stated
 // premise" equates exactly the spellings the detector equates (N / North,
 // St / Street) — codex #4666 P2. '' when the line carries no house token.
+// Do two street lines name the SAME house on the same street by the
+// detector's own rules: equal house token, and the street names equal with
+// or without a trailing suffix ("1250 Main" == "1250 Main St") — codex
+// #4666 P2. False when either side carries no house token.
+function sameHouseNumberStreet(a, b) {
+  const x = houseAndName(splitStreetLineUnit(String(a || '')).street || String(a || ''));
+  const y = houseAndName(splitStreetLineUnit(String(b || '')).street || String(b || ''));
+  if (!x.house || !y.house || x.house !== y.house || !x.name || !y.name) return false;
+  return [y.name, y.withoutSuffix].includes(x.name) || [x.name, x.withoutSuffix].includes(y.name);
+}
+
 function houseNumberStreetKey(line) {
   const { house, name } = houseAndName(splitStreetLineUnit(String(line || '')).street || String(line || ''));
   return house && name ? `${house} ${name}` : '';
@@ -1851,6 +1862,7 @@ function dispatchesToOnFileAddress(extraction, opts = {}) {
 module.exports = {
   onFileHouseNumberConflict,
   houseNumberStreetKey,
+  sameHouseNumberStreet,
   SCHEDULING_CHANGE_REVIEW_FLAGS,
   isExplicitlyNonOwner,
   computeDeterministicTriageFlags,
