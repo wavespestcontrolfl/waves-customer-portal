@@ -3060,13 +3060,25 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
               .where('customer_phone', contactPhone)))
           .select('id', 'address', db.raw("estimate_data->>'lead_id' as lead_id"));
+        // Cross-lead rows need the COMPLETE locality (street, city, ZIP on
+        // both sides); this lead's own rows match on identity.
         const toWithdraw = candidates
-          .filter((row) => String(row.lead_id || '') === String(lead.id) || samePremiseDisplay(row.address, quoteFullAddress))
+          .filter((row) => String(row.lead_id || '') === String(lead.id)
+            || samePremiseDisplay(row.address, quoteFullAddress, { requireLocality: true }))
           .map((row) => row.id);
+        // The eligibility predicates are repeated on the UPDATE: an
+        // acceptance that commits between the SELECT and here promotes the
+        // row past sent/viewed and price-locks it, and an accepted,
+        // invoiced estimate must never be archived from a quote run
+        // (pre-push audit P1).
         const withdrawn = toWithdraw.length
           ? await db('estimates')
             .whereIn('id', toWithdraw)
+            .where({ source: 'quote_wizard' })
+            .whereIn('status', ['sent', 'viewed'])
             .whereNull('archived_at')
+            .whereNull('price_locked_at')
+            .whereRaw("estimate_data->'websiteSelfService' IS NOT NULL")
             .update({ archived_at: new Date(), updated_at: new Date() })
             .returning('id')
           : [];

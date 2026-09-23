@@ -106,7 +106,11 @@ function flagCoversAddress(flag, address) {
 // premise: same street line with any unit stripped, same locality where
 // both carry one. A unit added on a repeat run is the same audited house
 // number (pre-push audit P1). Either side missing a street → false.
-function samePremiseDisplay(a, b) {
+// `requireLocality`: BOTH sides must carry a city and a ZIP and they must
+// agree — the cross-lead publication withdrawal uses this stricter form,
+// so a street-only submission can never match a published estimate for
+// that street in some other town (pre-push audit P1).
+function samePremiseDisplay(a, b, { requireLocality = false } = {}) {
   const { splitStreetLineUnit } = require('../utils/address-normalizer');
   // The normalizer may emit the unit as its OWN comma segment ("…St, Apt
   // 4, Parrish, FL 34219"): the city is the first later segment that is
@@ -126,6 +130,7 @@ function samePremiseDisplay(a, b) {
   const x = parse(a);
   const y = parse(b);
   if (!x.street || x.street !== y.street) return false;
+  if (requireLocality && (!cityKey(x.city) || !cityKey(y.city) || !x.zip || !y.zip)) return false;
   return sameLocality(x, y);
 }
 

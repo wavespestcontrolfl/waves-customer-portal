@@ -897,8 +897,10 @@ its live recheck at `/api/booking/confirm` once the address is flagged,
 and a staff revision of the draft preserves the marker. A website estimate
 an earlier run already PUBLISHED for the same lead — or, since a repeat
 lookup mints a new lead row, for the same typed email AND phone AND the
-complete judged address (street, city, ZIP) — is archived on the flagged
-run
+complete judged premise (street with any unit stripped, and a city and ZIP
+present on both sides and equal) — is archived on the flagged run, with
+the sent/viewed, unarchived, not-price-locked predicates re-applied on
+the archive write itself
 (`website_quote_withdrawn_address_unverified` audit event), so its old
 token neither renders nor accepts. A roll that never answered (GIS
 outage) is not a fresh flag — but it does not clear one either: the prior

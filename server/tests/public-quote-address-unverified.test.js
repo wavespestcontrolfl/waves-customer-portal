@@ -155,4 +155,11 @@ describe('samePremiseDisplay', () => {
     expect(samePremiseDisplay('12345 Example St, Parrish, FL 34219', '12345 Example St, Parrish, FL 34221')).toBe(false);
     expect(samePremiseDisplay('12345 Example St, Parrish, FL 34219', '12345 Example St, Parrish, FL 34219-1234')).toBe(true);
   });
+
+  test('the strict form needs a complete locality on both sides', () => {
+    expect(samePremiseDisplay('1260 Example St', '1260 Example St, Parrish, FL 34219')).toBe(true);
+    expect(samePremiseDisplay('1260 Example St', '1260 Example St, Parrish, FL 34219', { requireLocality: true })).toBe(false);
+    expect(samePremiseDisplay('1260 Example St, Parrish', '1260 Example St, Parrish, FL 34219', { requireLocality: true })).toBe(false);
+    expect(samePremiseDisplay('1260 Example St, Parrish, FL 34219', '1260 Example St Apt 2, Parrish, FL 34219', { requireLocality: true })).toBe(true);
+  });
 });
