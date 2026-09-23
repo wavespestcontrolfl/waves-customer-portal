@@ -3127,8 +3127,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           .select('id', 'address', db.raw("estimate_data->>'lead_id' as lead_id"));
         // Cross-lead rows need the COMPLETE locality (street, city, ZIP on
         // both sides); this lead's own rows match on identity.
+        // Premise-matched in BOTH arms: this lead's own rows match on
+        // identity plus the (loose) premise — a lead's publication for a
+        // different property must not be archived by a flag on this one
+        // (pre-push audit P1); cross-lead rows need the complete locality.
         const toWithdraw = candidates
-          .filter((row) => String(row.lead_id || '') === String(lead.id)
+          .filter((row) => (String(row.lead_id || '') === String(lead.id) && samePremiseDisplay(row.address, quoteFullAddress))
             || samePremiseDisplay(row.address, quoteFullAddress, { requireLocality: true }))
           .map((row) => row.id);
         // The eligibility predicates are repeated on the UPDATE: an
