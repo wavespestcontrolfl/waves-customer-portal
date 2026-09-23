@@ -9833,13 +9833,23 @@ const CallRecordingProcessor = {
       // carry settles nothing either way (pre-push audit P1).
       const avNormalized = effectiveAddressValidation?.normalized || {};
       const { addressKey: propertyKey } = require('./customer-properties');
-      const canonicalZip = String(extracted?.zip || '').match(/\d{5}/)?.[0] || '';
+      // Corroborate against the extraction that DRIVES routing in the
+      // current mode: with V2 in charge, V1's missing or disagreeing street
+      // must not clear a conflict V2 and Address Validation agree on
+      // (codex r13 P1). Shadow / kill-switch mode keeps the legacy record.
+      const corroboratingStreet = CALL_EXTRACTION_V2_DRIVES_ROUTING && v2CanonicalExtraction
+        ? (v2CanonicalExtraction?.property?.service_address?.street_line_1 || extracted?.address_line1)
+        : extracted?.address_line1;
+      const corroboratingZip = CALL_EXTRACTION_V2_DRIVES_ROUTING && v2CanonicalExtraction
+        ? (v2CanonicalExtraction?.property?.service_address?.postal_code || extracted?.zip)
+        : extracted?.zip;
+      const canonicalZip = String(corroboratingZip || '').match(/\d{5}/)?.[0] || '';
       const avZip = String(avNormalized.postal_code || '').match(/\d{5}/)?.[0] || '';
       // The detector's own street identity (house token + aliased name:
       // St == Street, N == North, St != Ave) — the same rule that judged
       // the on-file line, so a directional spelling cannot un-corroborate
       // what the detector just matched (codex r5 P2; r2 P2 for suffixes).
-      const corroborated = sameHouseNumberStreet(extracted?.address_line1, avNormalized.street_line_1)
+      const corroborated = sameHouseNumberStreet(corroboratingStreet, avNormalized.street_line_1)
         && (!canonicalZip || !avZip || canonicalZip === avZip);
       if (houseConflict && !corroborated) houseConflict = null;
       // The booking hold is armed HERE, before the property lookup below:
@@ -10090,6 +10100,12 @@ const CallRecordingProcessor = {
     if (houseNumberDisputed && houseNumberConflictFiled && customerId) {
       try {
         await db.transaction(async (trx) => {
+          // The shared triage-call lock FIRST, held through recording the
+          // pulled ids: a concurrent verdict/dismiss otherwise reads the
+          // card before `held_unassigned_booking_ids` lands, sees the
+          // booking still assigned, and closes the card with no recovery
+          // task while this pass unassigns it (codex r13 P1).
+          await lockTriageCall(trx, call.id);
           const owned = await trx('call_log')
             .where({ id: call.id })
             .where('processing_token', procToken)

@@ -250,10 +250,15 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
       // The single-card transitions settle the held appointment exactly as
       // the call verdict does (codex r11 P1): Resolve reads as "the address
       // on file is right", Dismiss as a denial of the card.
-      const payload = typeof item.payload === 'string' ? (() => { try { return JSON.parse(item.payload); } catch { return null; } })() : item.payload;
+      // Settled from the payload read UNDER the call lock (`live`), never
+      // the route's initial snapshot: a force-reprocess that refreshed the
+      // card meanwhile (a newly confirmed ask, newly held booking ids)
+      // must not vanish with a stale settlement (codex r13 P1).
+      const lockedPayload = live?.payload ?? item.payload;
+      const payload = typeof lockedPayload === 'string' ? (() => { try { return JSON.parse(lockedPayload); } catch { return null; } })() : lockedPayload;
       if (payload) {
         await settleHeldConflictCard(trx, {
-          item, verdict: nextStatus === 'resolved' ? 'accept' : 'deny', wrongFields: [], heldConflictPayload: payload,
+          item: { ...item, payload }, verdict: nextStatus === 'resolved' ? 'accept' : 'deny', wrongFields: [], heldConflictPayload: payload,
         });
       }
     }
@@ -716,7 +721,7 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
     id: item.id, call_log_id: item.call_log_id, reason_code: 'on_file_house_number_conflict', status: 'open',
     // The customer's live columns the adopted-address arm reads
     // (recordCarriesStatedStreet) — pre-push audit P1.
-    customer_address_line1: liveCustomer?.address_line1 || null, customer_city: liveCustomer?.city || null, customer_zip: liveCustomer?.zip || null,
+    customer_address_line1: liveCustomer?.address_line1 || null, customer_address_line2: liveCustomer?.address_line2 || null, customer_city: liveCustomer?.city || null, customer_zip: liveCustomer?.zip || null,
     // Verdict-time coverage admits a matching PRE-EXISTING live booking
     // too (a call that merely reconfirmed an appointment booked before
     // it) — the boundary is the epoch, unlike the sweep's post-card
