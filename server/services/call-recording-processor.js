@@ -9783,19 +9783,20 @@ const CallRecordingProcessor = {
         // pipeline's own verdict — enforce mode adopted the AV street into
         // it, shadow mode adopted it only when V1 agreed — so a house number
         // the record does not carry is not corroborated. Fail closed.
-        if (houseConflict) {
-          const n = effectiveAddressValidation?.normalized || {};
-          const canonicalZip = String(extracted?.zip || '').match(/\d{5}/)?.[0] || '';
-          const avZip = String(n.postal_code || '').match(/\d{5}/)?.[0] || '';
-          // Suffix-CANONICAL compare (St == Street, St != Ave) — the
-          // suffix-stripping key would corroborate a different road (codex
-          // r2 P2). Same comparator the second-address check uses.
-          const { streetKey: canonicalStreetKey } = require('./customer-properties');
-          const corroborated = !!canonicalStreetKey(extracted?.address_line1)
-            && canonicalStreetKey(extracted?.address_line1) === canonicalStreetKey(n.street_line_1)
-            && (!canonicalZip || !avZip || canonicalZip === avZip);
-          if (!corroborated) houseConflict = null;
-        }
+        // Computed for BOTH outcomes: filing needs it, and so does retiring
+        // an earlier card — an AV premise the canonical record does not
+        // carry settles nothing either way (pre-push audit P1).
+        const avNormalized = effectiveAddressValidation?.normalized || {};
+        const { streetKey: canonicalStreetKey } = require('./customer-properties');
+        const canonicalZip = String(extracted?.zip || '').match(/\d{5}/)?.[0] || '';
+        const avZip = String(avNormalized.postal_code || '').match(/\d{5}/)?.[0] || '';
+        // Suffix-CANONICAL compare (St == Street, St != Ave) — the
+        // suffix-stripping key would corroborate a different road (codex
+        // r2 P2). Same comparator the second-address check uses.
+        const corroborated = !!canonicalStreetKey(extracted?.address_line1)
+          && canonicalStreetKey(extracted?.address_line1) === canonicalStreetKey(avNormalized.street_line_1)
+          && (!canonicalZip || !avZip || canonicalZip === avZip);
+        if (houseConflict && !corroborated) houseConflict = null;
         // A second property the account already holds on the same street
         // (a duplex, a rental two doors down) is a known address, not a typo
         // — the same recognition the second-address check applies (pre-push
@@ -9867,7 +9868,7 @@ const CallRecordingProcessor = {
         // stays theirs).
         const avPositive = ['validated_accept', 'corrected'].includes(effectiveAddressValidation?.status)
           && !!effectiveAddressValidation?.normalized?.street_line_1;
-        if (!detected && avPositive) {
+        if (!detected && avPositive && corroborated) {
           await db('triage_items')
             .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict', status: 'open' })
             .update({
