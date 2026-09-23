@@ -40,7 +40,9 @@ const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/
 const { signSlotOffer, appendOfferToSlotId, CAPACITY_OFFER_POLICY } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 const { getZoneFunnelDays, applyZoneDayFunnel, fallbackCenterZoneName } = require('./scheduling/zone-day-funnel');
-const { CUSTOMER_HOUR_GRID, CUSTOMER_DAY_END_HOUR, CUSTOMER_DAY_END_MINUTES } = require('./scheduling/customer-windows');
+const {
+  CUSTOMER_DAY_END_HOUR, CUSTOMER_DAY_END_MINUTES, customerOfferGrid, overlapsLunch, lunchBlockEnabled,
+} = require('./scheduling/customer-windows');
 const { isEnabled } = require('../config/feature-gates');
 const { getDailyRainOutlookBounded } = require('./weather-forecast');
 const {
@@ -1106,13 +1108,15 @@ function slotWindowFitsDay(windowStart, windowEnd) {
   const endMin = timeToMinutes(windowEnd);
   if (capacityEnabled()) return placementFitsShift(startMin, endMin);
   if (startMin == null || endMin == null) return true;
-  return endMin > startMin && endMin <= SLOT_DAY_END_MINUTES;
+  if (endMin <= startMin || endMin > SLOT_DAY_END_MINUTES) return false;
+  // Lunch block (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23): the
+  // synthetic ASAP grid already excludes noon via customerOfferGrid(), but a
+  // ROUTE-DERIVED slot's proven-feasible start can still round onto it — this
+  // is the one choke point every customer-facing slot (ASAP and route) runs
+  // through, so it is also where the gate is enforced for route slots.
+  if (overlapsLunch(startMin, endMin)) return false;
+  return true;
 }
-
-// Synthetic capacity retains its feasible start; selection only changes order.
-// Shared grid (scheduling/customer-windows.js) — see that module for the
-// consolidation rationale.
-const PREFERRED_WINDOWS = CUSTOMER_HOUR_GRID;
 
 function splitSlotResults(slots, maxResults, expanderMaxResults) {
   const visibleCount = Math.max(0, Number(maxResults) || 0);
@@ -1200,7 +1204,9 @@ function buildAsapCapacitySlotsForTechs({
   for (const date of enumerateETDateStrings(dateFrom, dateTo, { includeWeekends })) {
     if (excludeDates && excludeDates.has(date)) continue;
     const earliestMinute = earliestBookableMinuteForDate(date, now, minimumLeadMinutes);
-    for (const windowStart of PREFERRED_WINDOWS) {
+    // Read at call time (customerOfferGrid(), not a module-level constant) so
+    // a mid-process GATE_BOOKING_LUNCH_BLOCK flip takes effect immediately.
+    for (const windowStart of customerOfferGrid()) {
       if (timeToMinutes(windowStart) < earliestMinute) continue;
       const windowEnd = addMinutesToHHMM(windowStart, durationMinutes);
       if (!slotWindowFitsDay(windowStart, windowEnd)) continue;
@@ -1670,6 +1676,10 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   const cacheKey = [
     estimateId,
     capacityEnabled() ? 'capacity_v2' : 'legacy_capacity',
+    // Lunch gate state in the key (GATE_BOOKING_LUNCH_BLOCK, owner ruling
+    // 2026-09-23): a result computed while noon was offerable must never be
+    // served after the gate flips on (or vice versa) for the TTL's length.
+    lunchBlockEnabled() ? 'lunch_blocked' : 'noon_open',
     cacheHour(),
     opts.windowDays,
     opts.maxResults,

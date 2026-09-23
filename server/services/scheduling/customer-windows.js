@@ -33,6 +33,13 @@ const CUSTOMER_HOUR_GRID = ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00'
 const CUSTOMER_DAY_END_HOUR = 18;
 const CUSTOMER_DAY_END_MINUTES = CUSTOMER_DAY_END_HOUR * 60;
 
+// The lunch window the gate reserves when it's on. Fixed (not read from
+// booking_config.lunch_start/_end): estimate-slot-availability.js and
+// slot-reservation.js have no booking_config dependency at all — this is a
+// separate, DB-free customer offer engine.
+const CUSTOMER_LUNCH_START_MINUTES = 12 * 60;
+const CUSTOMER_LUNCH_END_MINUTES = 13 * 60;
+
 /**
  * Lunch block (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23). Unset
  * (default) means the 12:00–13:00 window is a normal offerable and
@@ -46,9 +53,32 @@ function lunchBlockEnabled() {
   return gateEnvValue('GATE_BOOKING_LUNCH_BLOCK');
 }
 
+/**
+ * The hour grid a synthetic (non-route-derived) offer builder should
+ * enumerate — CUSTOMER_HOUR_GRID minus noon while the lunch gate is on.
+ * Read at CALL time, like the gate itself: never memoize this array.
+ */
+function customerOfferGrid() {
+  return lunchBlockEnabled() ? CUSTOMER_HOUR_GRID.filter((t) => t !== '12:00') : CUSTOMER_HOUR_GRID;
+}
+
+/**
+ * Whether a [startMin, endMin) window overlaps the lunch block — false
+ * outright when the gate is off, so every caller can use this unconditionally
+ * as its one lunch predicate instead of separately checking the gate.
+ */
+function overlapsLunch(startMin, endMin) {
+  return lunchBlockEnabled() && Number.isFinite(startMin) && Number.isFinite(endMin)
+    && startMin < CUSTOMER_LUNCH_END_MINUTES && endMin > CUSTOMER_LUNCH_START_MINUTES;
+}
+
 module.exports = {
   CUSTOMER_HOUR_GRID,
   CUSTOMER_DAY_END_HOUR,
   CUSTOMER_DAY_END_MINUTES,
+  CUSTOMER_LUNCH_START_MINUTES,
+  CUSTOMER_LUNCH_END_MINUTES,
   lunchBlockEnabled,
+  customerOfferGrid,
+  overlapsLunch,
 };

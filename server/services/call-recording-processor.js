@@ -144,9 +144,13 @@ const DEFAULT_CALL_BOOKING_DURATION_MINUTES = 60;
 // review). The transcript parse has no clamp, so "Sunday 7pm" books 19:00
 // verbatim; these flags put that on a triage card instead of leaving it to
 // be discovered on the dispatch board. Bounds mirror the self-booking
-// surfaces' working day (booking_config defaults 08:00–17:00 ET).
+// surfaces' working day: 08:00 open, and the shared customer day close
+// (scheduling/customer-windows.js CUSTOMER_DAY_END_MINUTES — 18:00 since
+// the 2026-09-23 ruling added the 5 PM start; booking_config.day_end was
+// migrated alongside) so a phone-booked 17:00 visit is not triaged as
+// out-of-hours on a day the self-serve surfaces themselves offer 17:00.
 const CALL_BOOKING_DAY_START_MIN = 8 * 60;
-const CALL_BOOKING_DAY_END_MIN = 17 * 60;
+const CALL_BOOKING_DAY_END_MIN = require('./scheduling/customer-windows').CUSTOMER_DAY_END_MINUTES;
 function callBookingTimeMinutes(value) {
   if (!value) return null;
   const [h, m] = String(value).split(':').map(Number);
@@ -14807,7 +14811,7 @@ const CallRecordingProcessor = {
                       }
                       conflictBits.push(overlapBit);
                     }
-                    if (timeSanityFlags.includes('outside_business_hours')) conflictBits.push('outside 8am–5pm');
+                    if (timeSanityFlags.includes('outside_business_hours')) conflictBits.push('outside 8am–6pm');
                     if (timeSanityFlags.includes('weekend')) conflictBits.push('on a weekend');
                     await require('./notification-service').notifyAdmin(
                       'schedule',

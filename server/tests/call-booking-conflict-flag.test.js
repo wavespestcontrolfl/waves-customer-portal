@@ -39,44 +39,44 @@ const { buildTriageItem } = require('../services/call-routing-gates');
 const { callBookingTimeSanityFlags, recheckCallBookingConflicts } = CallRecordingProcessor._test;
 
 describe('callBookingTimeSanityFlags', () => {
-  test('weekday visit that starts AND ends inside 8a–5p is clean', () => {
+  test('weekday visit that starts AND ends inside 8a–6p is clean', () => {
     // 2099-01-05 is a Monday.
     expect(callBookingTimeSanityFlags({ scheduledDate: '2099-01-05', windowStart: '09:00' })).toEqual([]);
     expect(callBookingTimeSanityFlags({ scheduledDate: '2099-01-05', windowStart: '08:00' })).toEqual([]);
     // Ends exactly at close — the boundary is inclusive, a visit ending at
-    // 17:00 has not run past it.
-    expect(callBookingTimeSanityFlags({ scheduledDate: '2099-01-05', windowStart: '16:00' })).toEqual([]);
+    // 18:00 has not run past it.
+    expect(callBookingTimeSanityFlags({ scheduledDate: '2099-01-05', windowStart: '17:00' })).toEqual([]);
     expect(callBookingTimeSanityFlags({
-      scheduledDate: '2099-01-05', windowStart: '16:30', windowEnd: '17:00',
+      scheduledDate: '2099-01-05', windowStart: '17:30', windowEnd: '18:00',
     })).toEqual([]);
     // A short visit late in the day still fits.
     expect(callBookingTimeSanityFlags({
-      scheduledDate: '2099-01-05', windowStart: '16:30', durationMinutes: 20,
+      scheduledDate: '2099-01-05', windowStart: '17:30', durationMinutes: 20,
     })).toEqual([]);
   });
 
   // The P1: the check only ever looked at the START, so a 60-minute booking
-  // at 16:30 ran until 17:30 and passed clean. Advisory only — the booking
+  // at 17:30 ran until 18:30 and passed clean. Advisory only — the booking
   // still lands; this just puts it on the same out-of-hours card.
   test('an in-hours start whose visit RUNS PAST close flags ends_after_business_hours', () => {
-    // Duration-derived end (no explicit windowEnd): 16:30 + 60 = 17:30.
-    expect(callBookingTimeSanityFlags({ scheduledDate: '2099-01-05', windowStart: '16:30' }))
+    // Duration-derived end (no explicit windowEnd): 17:30 + 60 = 18:30.
+    expect(callBookingTimeSanityFlags({ scheduledDate: '2099-01-05', windowStart: '17:30' }))
       .toEqual(['ends_after_business_hours']);
     // Explicit windowEnd is preferred over the duration.
     expect(callBookingTimeSanityFlags({
-      scheduledDate: '2099-01-05', windowStart: '16:00', windowEnd: '18:00',
+      scheduledDate: '2099-01-05', windowStart: '17:00', windowEnd: '19:00',
     })).toEqual(['ends_after_business_hours']);
     // A long duration overruns from a start nowhere near close.
     expect(callBookingTimeSanityFlags({
-      scheduledDate: '2099-01-05', windowStart: '14:00', durationMinutes: 240,
+      scheduledDate: '2099-01-05', windowStart: '14:00', durationMinutes: 300,
     })).toEqual(['ends_after_business_hours']);
     // One minute past close is past close.
     expect(callBookingTimeSanityFlags({
-      scheduledDate: '2099-01-05', windowStart: '16:00', windowEnd: '17:01',
+      scheduledDate: '2099-01-05', windowStart: '17:00', windowEnd: '18:01',
     })).toEqual(['ends_after_business_hours']);
     // Combines with the weekend flag on the same card (2099-01-03 = Saturday).
     expect(callBookingTimeSanityFlags({
-      scheduledDate: '2099-01-03', windowStart: '16:30', windowEnd: '17:30',
+      scheduledDate: '2099-01-03', windowStart: '17:30', windowEnd: '18:30',
     })).toEqual(['weekend', 'ends_after_business_hours']);
   });
 
@@ -90,15 +90,15 @@ describe('callBookingTimeSanityFlags', () => {
 
   test('an unusable windowEnd falls back to the duration instead of clearing the flag', () => {
     // End at/behind start (parse noise, or a window crossing midnight) is not
-    // evidence the visit fits — fall back to the duration: 16:30 + 60.
+    // evidence the visit fits — fall back to the duration: 17:30 + 60.
     expect(callBookingTimeSanityFlags({
-      scheduledDate: '2099-01-05', windowStart: '16:30', windowEnd: '16:30',
+      scheduledDate: '2099-01-05', windowStart: '17:30', windowEnd: '17:30',
     })).toEqual(['ends_after_business_hours']);
     expect(callBookingTimeSanityFlags({
-      scheduledDate: '2099-01-05', windowStart: '16:30', windowEnd: '00:30',
+      scheduledDate: '2099-01-05', windowStart: '17:30', windowEnd: '00:30',
     })).toEqual(['ends_after_business_hours']);
     expect(callBookingTimeSanityFlags({
-      scheduledDate: '2099-01-05', windowStart: '16:30', windowEnd: 'garbage',
+      scheduledDate: '2099-01-05', windowStart: '17:30', windowEnd: 'garbage',
     })).toEqual(['ends_after_business_hours']);
   });
 
@@ -107,8 +107,8 @@ describe('callBookingTimeSanityFlags', () => {
       .toEqual(['outside_business_hours']);
     expect(callBookingTimeSanityFlags({ scheduledDate: '2099-01-05', windowStart: '07:59' }))
       .toEqual(['outside_business_hours']);
-    // 17:00 start means the visit runs past close — flagged.
-    expect(callBookingTimeSanityFlags({ scheduledDate: '2099-01-05', windowStart: '17:00' }))
+    // 18:00 start means the visit runs past close — flagged.
+    expect(callBookingTimeSanityFlags({ scheduledDate: '2099-01-05', windowStart: '18:00' }))
       .toEqual(['outside_business_hours']);
   });
 

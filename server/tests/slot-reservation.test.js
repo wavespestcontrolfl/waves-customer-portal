@@ -816,6 +816,98 @@ describe('slot reservation helpers', () => {
     }
   });
 
+  describe('lunch block (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23) — commit-side mirror of the offer filter', () => {
+    const ENV_KEY = 'GATE_BOOKING_LUNCH_BLOCK';
+    let previous;
+    beforeEach(() => { previous = process.env[ENV_KEY]; });
+    afterEach(() => {
+      if (previous === undefined) delete process.env[ENV_KEY];
+      else process.env[ENV_KEY] = previous;
+    });
+
+    function noonProfile() {
+      estimateSlotAvailability.resolveEstimateSlotProfile.mockReturnValueOnce({
+        serviceMode: 'one_time',
+        serviceLabel: 'Pest Control',
+        durationMinutes: 60,
+        services: [],
+      });
+    }
+
+    test('gate on: a signed 12:00 slot is refused as SLOT_UNAVAILABLE before any hold/conflict/insert query', async () => {
+      process.env[ENV_KEY] = 'true';
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+      try {
+        noonProfile();
+        const estimateBuilder = makeEstimateBuilder({ id: 'estimate-456', status: 'sent', service_interest: 'Pest Control' });
+        const technicianBuilder = makeTechnicianBuilder();
+        const scheduledBuilders = [];
+        const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
+        db.transaction = jest.fn(async (callback) => callback(trx));
+
+        // Signed over the profile duration so the HMAC passes and the LUNCH
+        // guard is what rejects (a forged/stale noon slot can't be committed).
+        await expect(slotReservation.reserveSlot({
+          estimateId: 'estimate-456',
+          slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '12:00', techId: 'tech-1', durationMinutes: 60 }),
+          serviceMode: 'one_time',
+        })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: 'slot is inside the lunch block' });
+        expect(scheduledBuilders).toHaveLength(0);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test('gate on: a window that merely TOUCHES the block (11:00–12:00, 13:00–14:00) still reserves', async () => {
+      process.env[ENV_KEY] = 'true';
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+      try {
+        for (const hhmm of ['11:00', '13:00']) {
+          noonProfile();
+          const estimateBuilder = makeEstimateBuilder({ id: 'estimate-456', status: 'sent', service_interest: 'Pest Control' });
+          const technicianBuilder = makeTechnicianBuilder();
+          const insertBuilder = makeInsertBuilder({ id: `scheduled-${hhmm}`, reservation_expires_at: '2027-05-20T21:15:00.000Z' });
+          const scheduledBuilders = [makeLiveHoldsBuilder([]), makeConflictBuilder(null), makeGlobalProbeBuilder([]), insertBuilder];
+          const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
+          db.transaction = jest.fn(async (callback) => callback(trx));
+          await expect(slotReservation.reserveSlot({
+            estimateId: 'estimate-456',
+            slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm, techId: 'tech-1', durationMinutes: 60 }),
+            serviceMode: 'one_time',
+          })).resolves.toMatchObject({ scheduledServiceId: `scheduled-${hhmm}` });
+          expect(insertBuilder.insert).toHaveBeenCalled();
+        }
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test('gate unset (default): the same 12:00 slot reserves — noon is an ordinary hour', async () => {
+      delete process.env[ENV_KEY];
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+      try {
+        noonProfile();
+        const estimateBuilder = makeEstimateBuilder({ id: 'estimate-456', status: 'sent', service_interest: 'Pest Control' });
+        const technicianBuilder = makeTechnicianBuilder();
+        const insertBuilder = makeInsertBuilder({ id: 'scheduled-noon', reservation_expires_at: '2027-05-20T21:15:00.000Z' });
+        const scheduledBuilders = [makeLiveHoldsBuilder([]), makeConflictBuilder(null), makeGlobalProbeBuilder([]), insertBuilder];
+        const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
+        db.transaction = jest.fn(async (callback) => callback(trx));
+        await expect(slotReservation.reserveSlot({
+          estimateId: 'estimate-456',
+          slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '12:00', techId: 'tech-1', durationMinutes: 60 }),
+          serviceMode: 'one_time',
+        })).resolves.toEqual({ scheduledServiceId: 'scheduled-noon', expiresAt: '2027-05-20T21:15:00.000Z' });
+        expect(insertBuilder.insert).toHaveBeenCalled();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+  });
+
   test('reserveSlot refreshes this estimate\'s own live hold for the same slot instead of 409ing', async () => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));

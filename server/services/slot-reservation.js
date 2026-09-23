@@ -43,6 +43,7 @@ const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 // under it before committing.
 const { acquireOccupancyLock, findConflictingVisits, findInterviewConflicts } = require('./scheduling/occupancy');
 const { capacityEnabled, placementFitsShift } = require('./scheduling/policy');
+const { overlapsLunch } = require('./scheduling/customer-windows');
 const { lockTechDays } = require('./scheduling/tech-day-lock');
 const { capacityError, prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder } = require('./scheduling/arrival-route');
 const { serviceDurationMinutes } = require('./service-library');
@@ -970,6 +971,17 @@ async function reserveSlot({
       if (useCapacity ? !placementFitsShift(slotStartMinutes, slotStartMinutes + effectiveDurationMinutes)
         : slotStartMinutes + effectiveDurationMinutes > SLOT_DAY_END_MINUTES + ROUND_UP_GRACE_MINUTES) {
         const err = new Error('slot runs past the end of the working day');
+        err.code = 'SLOT_UNAVAILABLE';
+        err.slotId = slotId;
+        throw err;
+      }
+      // Lunch block (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23):
+      // mirrors the offer-side filter (estimate-slot-availability.js
+      // slotWindowFitsDay) so a slot the generator wouldn't offer under the
+      // gate can't be forged past this commit gate either. No-op (always
+      // false) while the gate is off — byte-identical to before this check.
+      if (!useCapacity && overlapsLunch(slotStartMinutes, slotStartMinutes + effectiveDurationMinutes)) {
+        const err = new Error('slot is inside the lunch block');
         err.code = 'SLOT_UNAVAILABLE';
         err.slotId = slotId;
         throw err;
