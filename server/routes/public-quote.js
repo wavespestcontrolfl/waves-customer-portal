@@ -2983,8 +2983,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // archived_at outright); the office re-sends once the address is
       // confirmed (codex #4667 r5 P1). Own lead only; best-effort.
       try {
+        // sent AND viewed: opening the link flips the row to 'viewed'
+        // (estimate-public), which is just as acceptable (pre-push audit P1).
         const withdrawn = await db('estimates')
-          .where({ source: 'quote_wizard', status: 'sent' })
+          .where({ source: 'quote_wizard' })
+          .whereIn('status', ['sent', 'viewed'])
           .whereNull('archived_at')
           .whereRaw("estimate_data->>'lead_id' = ?", [String(lead.id)])
           .whereRaw("estimate_data->'websiteSelfService' IS NOT NULL")

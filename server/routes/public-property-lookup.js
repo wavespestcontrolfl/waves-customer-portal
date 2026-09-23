@@ -3,7 +3,7 @@ const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { deriveAddressUnverified } = require('../services/lead-address-unverified');
+const { snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified } = require('../services/lead-address-unverified');
 const { performPropertyLookup, VACANT_SQFT_FLAG_COPY } = require('./property-lookup-v2');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
 const { normalizeLeadAddress, formatAddress } = require('../utils/address-normalizer');
@@ -416,6 +416,31 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
     const propertyRecord = publicPropertySummary(result.propertyRecord || result.rentcast);
     const enriched = publicEnrichedProfile(result.enriched);
 
+    // A lead this run re-attached to (prefill token) may already carry a
+    // county-roll flag from an earlier run: a GIS outage on THIS lookup must
+    // not erase it through the merge below — only a clean roll answer, or
+    // a changed address, clears it (pre-push audit P1). Token-verified own
+    // row; the server-written key only.
+    let priorAddressUnverified = null;
+    if (attachedToExistingLead) {
+      try {
+        const own = await db('leads').where({ id: lead.id }).first('extracted_data');
+        const snapshot = typeof own?.extracted_data === 'string' ? JSON.parse(own.extracted_data) : own?.extracted_data;
+        if (snapshot && snapshotCoversAddress(snapshot, normalizedAddress)) priorAddressUnverified = recoverAddressUnverified(snapshot);
+      } catch (priorErr) {
+        logger.warn(`[public-property-lookup] prior address flag re-read failed: ${priorErr.code || priorErr.name || 'error'}`);
+      }
+    }
+    const addressUnverified = nextAddressUnverified({ enriched: result.enriched, profileFound: !!result?.enriched, prior: priorAddressUnverified });
+    if (addressUnverified && !addressUnverified.address_line1) {
+      Object.assign(addressUnverified, {
+        address_line1: String(normalizedAddress.line1 || '').trim() || null,
+        city: String(normalizedAddress.city || '').trim() || null,
+        state: String(normalizedAddress.state || '').trim().toUpperCase().slice(0, 2) || null,
+        zip: (String(normalizedAddress.zip || '').match(/\d{5}/) || [''])[0] || null,
+      });
+    }
+
     // Persist the enriched profile on the lead so a stale/abandoned row is
     // still useful for follow-up. On an attached call-pipeline lead, MERGE so
     // the voicemail provenance keys survive (same rule as the attach above).
@@ -439,7 +464,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
         // lead-address-unverified). Derived from the SERVER result, so an
         // abandoned row already carries the callback ask; /calculate
         // re-derives it (or recovers this one when its cache read misses).
-        address_unverified: deriveAddressUnverified(result.enriched, normalizedAddress),
+        address_unverified: addressUnverified,
       };
       await db('leads').where({ id: lead.id }).update({
         extracted_data: attachedToExistingLead
