@@ -1662,8 +1662,16 @@ async function commitReservation({
       ? addMinutesToTime(windowStart, effectiveDurationMinutes)
       : null;
 
+    // No ROUND_UP_GRACE_MINUTES here (unlike reserveSlot's own initial guard,
+    // which compensates for classifySlot's offer-side hour rounding): this is
+    // the FINAL resolved window at accept, after the service profile may have
+    // lengthened the hold's duration (e.g. 60->90 min on a 17:00 hold). Grace
+    // here would let that longer window commit past the real close — a 17:00
+    // hold re-resolving to 90 min would pass a +59 check (ends 18:30, bound
+    // 18:59) even though the actual close is 18:00. Compare the exact bound.
+    // Codex r2 P2 on #4663.
     if (!useCapacity && serviceProfile?.reservationServiceMix
-      && require('./scheduling/window-rules').parseHHMM(windowStart) + effectiveDurationMinutes > currentDayEndMinutes() + ROUND_UP_GRACE_MINUTES) {
+      && require('./scheduling/window-rules').parseHHMM(windowStart) + effectiveDurationMinutes > currentDayEndMinutes()) {
       throw require('./combined-visit-capacity').capacityUnavailable();
     }
     // Day-end bound on the FINAL resolved window, for the non-capacity,
@@ -1674,10 +1682,11 @@ async function commitReservation({
     // is what scoped the check above — nothing enforced this bound for the
     // ordinary single-service case. Capacity mode's day-end bound is already
     // enforced on this same resolved window by verifyArrivalCapacity
-    // (placementFitsShift) just below, so this only needs !useCapacity.
-    // Codex r1 P2 on #4663.
+    // (placementFitsShift) just below, so this only needs !useCapacity. No
+    // ROUND_UP_GRACE_MINUTES for the same reason as the mix check above.
+    // Codex r1 P2, r2 P2 on #4663.
     if (!useCapacity && !serviceProfile?.reservationServiceMix && windowStart && effectiveDurationMinutes
-      && require('./scheduling/window-rules').parseHHMM(windowStart) + effectiveDurationMinutes > currentDayEndMinutes() + ROUND_UP_GRACE_MINUTES) {
+      && require('./scheduling/window-rules').parseHHMM(windowStart) + effectiveDurationMinutes > currentDayEndMinutes()) {
       const err = new Error('slot runs past the end of the working day');
       err.code = 'SLOT_UNAVAILABLE';
       err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id}`;

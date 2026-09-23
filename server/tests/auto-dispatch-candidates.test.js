@@ -99,6 +99,25 @@ describe('findValidCandidateSlots', () => {
     expect(args.dateTo).toBe('2026-08-11');
   });
 
+  // Codex r2 P1 on #4663: once GATE_SCHEDULING_CAPACITY is on, find-time's
+  // shared admission bound is the CUSTOMER day close (18:00), not an
+  // auto-dispatch one — a 17:00 candidate ending at 18:00 must not reach
+  // auto-dispatch's route optimizer, which keeps its own 17:00 operating
+  // close (this module's DAY_CLOSE, used for the current-placement anchor).
+  test('drops a candidate ending after the 17:00 auto-dispatch day close, even one find-time capacity mode would offer a customer', async () => {
+    findAvailableSlots.mockResolvedValue({
+      slots: [
+        { date: '2026-08-05', technician: { id: 't1', name: 'A' }, start_time: '16:00', end_time: '17:00', detour_minutes: 3, total_drive_minutes: 15, stops_that_day: 2, score: 3 },
+        { date: '2026-08-05', technician: { id: 't1', name: 'A' }, start_time: '17:00', end_time: '18:00', detour_minutes: 1, total_drive_minutes: 10, stops_that_day: 2, score: 1 }, // ends after 17:00 close
+      ],
+    });
+
+    const { candidates } = await findValidCandidateSlots(SERVICE, prefs, ctx());
+
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({ start_time: '16:00', end_time: '17:00' });
+  });
+
   test('drops candidate dates already occupied by a same-series sibling', async () => {
     findAvailableSlots.mockResolvedValue({
       slots: [

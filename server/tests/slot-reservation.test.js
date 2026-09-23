@@ -526,6 +526,41 @@ describe('slot reservation helpers', () => {
         expect(updateBuilder.update).not.toHaveBeenCalled();
       } finally { jest.useRealTimers(); }
     });
+
+    // Codex r2 P2 on #4663: this check used to allow ROUND_UP_GRACE_MINUTES
+    // (59) past currentDayEndMinutes() on the FINAL resolved window, not just
+    // the offer-rounding case it exists for. A 17:00 hold (a legitimately
+    // offered start) whose accepted profile lengthens to 90 minutes ends at
+    // 18:30 — inside the old dayEnd+59=18:59 bound, so it committed straight
+    // through the 18:00 close. The exact bound must reject it.
+    test('a 17:00 hold whose accepted 90-minute profile ends at 18:30 is refused SLOT_UNAVAILABLE, nothing written', async () => {
+      jest.useFakeTimers(); jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+      try {
+        const { trx, updateBuilder } = wire({ windowStart: '17:00:00', windowEnd: '18:00:00' });
+        await expect(commit(trx)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: 'slot runs past the end of the working day' });
+        expect(updateBuilder.update).not.toHaveBeenCalled();
+      } finally { jest.useRealTimers(); }
+    });
+
+    // Same exact-bound fix, the reservationServiceMix (combined-visit, non-
+    // capacity) branch: a 17:00 hold whose accepted mixed profile lengthens
+    // to 90 minutes ends at 18:30 — inside the old dayEnd+59 bound, so it
+    // committed straight through the 18:00 close. Codex r2 P2 on #4663.
+    test('a 17:00 combined-visit hold whose accepted 90-minute mix ends at 18:30 is refused capacity_unavailable, nothing written', async () => {
+      jest.useFakeTimers(); jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+      const capabilities = jest.spyOn(require('../services/technician-capabilities'), 'assertCapabilitiesActive')
+        .mockResolvedValue();
+      try {
+        estimateSlotAvailability.resolveEstimateSlotProfile.mockReturnValueOnce({
+          durationMinutes: 90, serviceLabel: 'Pest Control + Lawn Care',
+          reservationServiceMix: { version: 2, services: ['pest_control', 'lawn_care'], durations: [40, 50], durationMinutes: 90 },
+          services: [{ service: 'pest_control', visitsPerYear: 4 }, { service: 'lawn_care', visitsPerYear: 6 }],
+        });
+        const { trx, updateBuilder } = wire({ windowStart: '17:00:00', windowEnd: '18:00:00' });
+        await expect(commit(trx)).rejects.toMatchObject({ code: 'COMBINED_VISIT_UNAVAILABLE', status: 409 });
+        expect(updateBuilder.update).not.toHaveBeenCalled();
+      } finally { capabilities.mockRestore(); jest.useRealTimers(); }
+    });
   });
 
   test('commitReservation rebinds the held row to the accepted service profile', async () => {

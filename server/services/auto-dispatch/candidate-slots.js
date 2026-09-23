@@ -272,9 +272,23 @@ async function findValidCandidateSlots(service, prefs, ctx) {
   // Drop tally — why feasible slots were rejected. Surfaced to the audit so an
   // empty candidate set reads as "honored the customer's preference, nothing
   // better available" rather than an opaque NO_VALID_SLOT.
-  const drops = { blackout: 0, sibling: 0, weekend: 0, preferred_day: 0, preferred_time: 0, deactivated: 0 };
+  const drops = { blackout: 0, sibling: 0, weekend: 0, preferred_day: 0, preferred_time: 0, deactivated: 0, after_hours: 0 };
   const candidates = [];
   for (const slot of slots) {
+    // HARD: find-time (findAvailableSlots) shares ONE admission bound across
+    // every caller once GATE_SCHEDULING_CAPACITY is on — scheduling/policy.js
+    // SHIFT.endMinutes is the CUSTOMER day close (18:00 since picker-windows
+    // PR 2, 2026-09-23), not an auto-dispatch one. Auto-dispatch re-optimizes
+    // an EXISTING technician's route, not a customer-facing offer, and this
+    // module's own DAY_CLOSE (used for the current-placement HQ anchor,
+    // above) has always been 17:00 — without this filter, capacity mode
+    // would let auto-dispatch move a visit into the new 17:00-18:00 hour the
+    // owner's ruling only extended for customer booking (Codex r1 P1 on
+    // #4663). Post-filtered here rather than threaded through find-time's
+    // shared admission check, which every customer-facing caller (booking,
+    // reschedule, re-service, the estimate picker, slot-reservation) also
+    // relies on for offer/commit parity at the real 18:00 close.
+    if (hhmmToMin(slot.end_time) > DAY_CLOSE) { drops.after_hours++; continue; }
     if (inBlackout(slot.date, prefs.blackout)) { drops.blackout++; continue; }       // HARD: blackout
     if (siblingDates.has(slot.date)) { drops.sibling++; continue; }                  // HARD: same-series occurrence that day
     if (service.skip_weekends === true && isSaturday(slot.date)) { drops.weekend++; continue; } // HARD: skip_weekends series
