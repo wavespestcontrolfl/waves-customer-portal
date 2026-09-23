@@ -5,7 +5,7 @@
 // the flag). Pins the pure derivation; the route stamps it on the lead's
 // extracted_data as address_unverified.
 const { _internals } = require('../routes/public-quote');
-const { snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified, countyRollAnswered } = require('../services/lead-address-unverified');
+const { snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified, countyRollAnswered, flagCoversAddress } = require('../services/lead-address-unverified');
 
 const { deriveAddressUnverified } = _internals;
 
@@ -118,5 +118,18 @@ describe('nextAddressUnverified', () => {
     expect(nextAddressUnverified({ enriched: { fieldVerifyFlags: [] }, profileFound: true, prior })).toBe(prior);
     expect(nextAddressUnverified({ enriched: null, profileFound: false, prior })).toBe(prior);
     expect(nextAddressUnverified({ enriched: { fieldVerifyFlags: [] }, profileFound: true, prior: null })).toBeNull();
+  });
+});
+
+describe('flagCoversAddress', () => {
+  const flag = { source: 'county_roll', reason: 'r', address_line1: '1260 Example St', city: 'Parrish', state: 'FL', zip: '34219' };
+
+  test('judged on the flag\'s own stamp, so a corrected prefill address drops the old flag', () => {
+    expect(flagCoversAddress(flag, { line1: '1260 EXAMPLE ST', city: 'Parrish', state: 'FL', zip: '34219' })).toBe(true);
+    expect(flagCoversAddress(flag, { line1: '1250 Example St', city: 'Parrish', state: 'FL', zip: '34219' })).toBe(false);
+    expect(flagCoversAddress(flag, { line1: '1260 Example St', city: 'Bradenton' })).toBe(false);
+    // An older flag without a stamp defers to the caller's snapshot check.
+    expect(flagCoversAddress({ source: 'county_roll', reason: 'r' }, { line1: '1250 Example St' })).toBe(true);
+    expect(flagCoversAddress(null, { line1: '1260 Example St' })).toBe(false);
   });
 });

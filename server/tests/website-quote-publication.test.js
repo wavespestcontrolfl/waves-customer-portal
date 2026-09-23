@@ -123,6 +123,14 @@ test.each(['lead_id', 'engineInput', 'setupFeeQuote'])('rejects drift or uncerta
   expect(await publishWebsiteQuote(args)).toBeNull();
 });
 
+test('refuses a draft whose stored county-roll verdict flags the address, whatever the publishing request says', async () => {
+  // A clean request that paused while another run flagged the same draft
+  // must not publish it: the marker is read off the LOCKED row.
+  rows.estimates[0].estimate_data.addressUnverified = true;
+  expect(await publishWebsiteQuote(args)).toBeNull();
+  expect(rows.estimates[0].status).toBe('draft');
+});
+
 test('refuses even one cent of drift between the quote and frozen booking price', async () => {
   snapshot.sendSnapshot.pricingBundle.frequencies[0].annual = 396.01;
   expect(await publishWebsiteQuote(args)).toBeNull();

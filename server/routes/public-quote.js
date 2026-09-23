@@ -1043,7 +1043,7 @@ const quoteLimiter = rateLimit({
   message: { error: 'Too many quote requests. Please try again later.' },
 });
 
-const { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified } = require('../services/lead-address-unverified');
+const { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified, flagCoversAddress } = require('../services/lead-address-unverified');
 
 router.post('/calculate', quoteLimiter, async (req, res) => {
   try {
@@ -1206,8 +1206,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()])
           .first('extracted_data');
         const snapshot = typeof own?.extracted_data === 'string' ? JSON.parse(own.extracted_data) : own?.extracted_data;
+        // Both checks: the snapshot's address (older flags carry no stamp)
+        // AND the flag's own stamped address (a re-attach may have rewritten
+        // the snapshot's address already).
         if (snapshot && snapshotCoversAddress(snapshot, normalizedAddress)) {
-          priorAddressUnverified = recoverAddressUnverified(snapshot);
+          const recovered = recoverAddressUnverified(snapshot);
+          if (recovered && flagCoversAddress(recovered, normalizedAddress)) priorAddressUnverified = recovered;
         }
       } catch (snapErr) {
         logger.warn(`[public-quote] lookup-stage snapshot re-read failed — prior address flag not recovered: ${snapErr.code || snapErr.name || 'error'}`);

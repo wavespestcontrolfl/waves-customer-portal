@@ -3,7 +3,7 @@ const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified } = require('../services/lead-address-unverified');
+const { recoverAddressUnverified, nextAddressUnverified, flagCoversAddress } = require('../services/lead-address-unverified');
 const { performPropertyLookup, VACANT_SQFT_FLAG_COPY } = require('./property-lookup-v2');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
 const { normalizeLeadAddress, formatAddress } = require('../utils/address-normalizer');
@@ -426,7 +426,10 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       try {
         const own = await db('leads').where({ id: lead.id }).first('extracted_data');
         const snapshot = typeof own?.extracted_data === 'string' ? JSON.parse(own.extracted_data) : own?.extracted_data;
-        if (snapshot && snapshotCoversAddress(snapshot, normalizedAddress)) priorAddressUnverified = recoverAddressUnverified(snapshot);
+        // The attach above already merged THIS run's address into the
+        // snapshot, so judge the flag on its own stamped address.
+        const recovered = recoverAddressUnverified(snapshot);
+        if (recovered && flagCoversAddress(recovered, normalizedAddress)) priorAddressUnverified = recovered;
       } catch (priorErr) {
         logger.warn(`[public-property-lookup] prior address flag re-read failed: ${priorErr.code || priorErr.name || 'error'}`);
       }

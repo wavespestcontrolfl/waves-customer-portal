@@ -29,6 +29,10 @@ async function publishWebsiteQuote({ estimateId, leadId, engineInput, engineResu
     const fee = stored.setupFeeQuote || {};
     if (stored.lead_id !== leadId || fee.unverified
       || !isDeepStrictEqual(stored.engineInput, JSON.parse(JSON.stringify(engineInput)))) return null;
+    // Under the row lock, the DRAFT's own county-roll verdict — not the
+    // publishing request's: a clean request that paused while another run
+    // flagged the same draft must not publish it (pre-push audit P1).
+    if (stored.addressUnverified === true) return null;
     if (['monthly_total', 'annual_total', 'onetime_total'].some(key => (
       moneyCents(row[key]) !== moneyCents(totals[key])
     ))) return null;

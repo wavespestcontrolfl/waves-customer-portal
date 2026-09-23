@@ -90,6 +90,18 @@ function recoverAddressUnverified(snapshot) {
   };
 }
 
+// Does a stored flag describe THIS address? Judged on the flag's own
+// stamped street/locality — never the snapshot's `address`, which a
+// prefill attach or a later stage has already overwritten with the new
+// address (pre-push audit P1). An older flag with no stamp is trusted for
+// the snapshot's address by the caller's snapshot check.
+function flagCoversAddress(flag, address) {
+  if (!flag || typeof flag !== 'object' || !address) return false;
+  if (!flag.address_line1) return true;
+  if (lineKey(flag.address_line1) !== lineKey(address.line1)) return false;
+  return sameLocality(flag, address);
+}
+
 // Did the county roll ANSWER on this profile? The audit object is present
 // whenever the roll replied (match or not); a GIS outage yields no audit
 // at all (auditAddressHouseNumber). Only an answer may clear a prior flag.
@@ -109,4 +121,4 @@ function nextAddressUnverified({ enriched = null, profileFound = false, prior = 
   return prior || null;
 }
 
-module.exports = { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, countyRollAnswered, nextAddressUnverified };
+module.exports = { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, countyRollAnswered, nextAddressUnverified, flagCoversAddress };
