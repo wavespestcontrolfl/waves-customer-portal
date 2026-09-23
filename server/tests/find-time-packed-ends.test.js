@@ -216,3 +216,55 @@ describe('packCapacityEnds — capacity results keep only the packed ends per ga
     expect(kept).toEqual(['t1@11:00', 't1@14:00', 't1@16:00', 't1@18:00', 't2@09:00', 't2@10:00']);
   });
 });
+
+describe('capacityGapNeighbours — unassigned blockers count as time-based anchors (Codex r3 P1)', () => {
+  const { capacityGapNeighbours } = require('../services/scheduling/find-time')._internals;
+
+  test('an unassigned-only day is NOT an empty-day gap identity: it anchors both sides by time', () => {
+    // fit.routeOrder only ever carries the selected tech's OWN stops
+    // (completed + pending + the candidate) — here the tech's own route is
+    // empty aside from the candidate, so routeOrder alone would read as an
+    // empty day even though the day has one real (unassigned) blocker at
+    // noon.
+    const context = {
+      target: { id: '__candidate__' },
+      rows: [{ id: 'u1', technician_id: null, status: 'confirmed', window_start: '12:00' }],
+    };
+    const fit = { routeOrder: ['__candidate__'] };
+    // Candidate at 9:00 (before the blocker) → no prev, blocker is next.
+    expect(capacityGapNeighbours(context, fit, new Map(), 9 * 60)).toEqual({ prevId: null, nextId: 'u1' });
+    // Candidate at 14:00 (after the blocker) → blocker is prev, no next.
+    expect(capacityGapNeighbours(context, fit, new Map(), 14 * 60)).toEqual({ prevId: 'u1', nextId: null });
+  });
+
+  test('merges the tech\'s own route (via routeOrder/byId) with unassigned rows, sorted by time', () => {
+    const byId = new Map([
+      ['own-1', { id: 'own-1', technician_id: 't1', window_start: '09:00' }],
+      ['own-2', { id: 'own-2', technician_id: 't1', window_start: '16:00' }],
+    ]);
+    const context = {
+      target: { id: '__candidate__' },
+      rows: [
+        { id: 'own-1', technician_id: 't1', status: 'confirmed', window_start: '09:00' },
+        { id: 'own-2', technician_id: 't1', status: 'confirmed', window_start: '16:00' },
+        { id: 'u1', technician_id: null, status: 'confirmed', window_start: '12:00' },
+      ],
+    };
+    // routeOrder carries the tech's own stops + the candidate, in the
+    // simulated visiting order — own-1 before the candidate, own-2 after.
+    const fit = { routeOrder: ['own-1', '__candidate__', 'own-2'] };
+    // Candidate placed at 13:00, between the unassigned blocker (12:00) and
+    // the tech's own 16:00 stop — the unassigned row is the real neighbour,
+    // not own-2 (which routeOrder alone would have named).
+    expect(capacityGapNeighbours(context, fit, byId, 13 * 60)).toEqual({ prevId: 'u1', nextId: 'own-2' });
+  });
+
+  test('a completed row is never treated as a fixed unassigned blocker', () => {
+    const context = {
+      target: { id: '__candidate__' },
+      rows: [{ id: 'done', technician_id: null, status: 'completed', window_start: '10:00' }],
+    };
+    const fit = { routeOrder: ['__candidate__'] };
+    expect(capacityGapNeighbours(context, fit, new Map(), 13 * 60)).toEqual({ prevId: null, nextId: null });
+  });
+});

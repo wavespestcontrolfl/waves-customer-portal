@@ -195,11 +195,10 @@ async function findCapacitySlots(opts) {
       estimated_arrival: fit.estimatedArrival, route_arrivals: fit.arrivals,
       route_mode: 'arrival_windows', travel_source: fit.travelSource, travel_reasons: fit.travelReasons,
       stops_that_day: fit.arrivals.length - 1, latest_start_min: start,
-      // Route neighbours of this placement (packed-ends filter below).
-      _gap: {
-        prevId: index > 0 ? fit.routeOrder[index - 1] : null,
-        nextId: index < fit.routeOrder.length - 1 ? fit.routeOrder[index + 1] : null,
-      },
+      // Route neighbours of this placement (packed-ends filter below) — BY
+      // TIME, including unassigned fixed blockers (Codex r3 P1; see
+      // capacityGapNeighbours).
+      _gap: capacityGapNeighbours(context, fit, byId, start),
     });
   }
   const packed = opts.packEnds === true ? packCapacityEnds(slots) : slots;
@@ -207,6 +206,36 @@ async function findCapacitySlots(opts) {
   packed.sort((a, b) => a.score - b.score || a.waiting_minutes - b.waiting_minutes || a.start_time.localeCompare(b.start_time));
   return { slots: packed.slice(0, topN).map((slot, i) => ({ rank: i + 1, ...slot })),
     evaluated: candidates.length, total_feasible: packed.length, travel: travel.diagnostics() };
+}
+
+// Route neighbours of a capacity placement, BY TIME rather than
+// fit.routeOrder alone (Codex r3 P1): routeOrder only ever lists the
+// SELECTED technician's own stops (completed + pending + the candidate) —
+// an unassigned committed visit is a fixed blocker on every technician's
+// route (see fixedRows in arrival-route.js) but never appears in
+// routeOrder, so a day whose only stop was unassigned collapsed to an
+// empty-day gap identity (prevId/nextId both null) and packCapacityEnds
+// below kept every hour around the blocker instead of packing against it.
+// Merges routeOrder's own stops with the day's unassigned rows (both from
+// context.rows), sorted by window_start, and picks this candidate's real
+// time neighbours from that merged list.
+function capacityGapNeighbours(context, fit, byId, startMin) {
+  const minuteOfRow = (row) => timeToMinutes(row?.window_start);
+  const anchors = [
+    ...fit.routeOrder
+      .filter((id) => id !== context.target.id)
+      .map((id) => ({ id, startMin: minuteOfRow(byId.get(id)) })),
+    ...context.rows
+      .filter((row) => row.technician_id == null && row.status !== 'completed')
+      .map((row) => ({ id: row.id, startMin: minuteOfRow(row) })),
+  ].filter((a) => Number.isFinite(a.startMin)).sort((a, b) => a.startMin - b.startMin);
+  let prevId = null;
+  let nextId = null;
+  for (const anchor of anchors) {
+    if (anchor.startMin <= startMin) prevId = anchor.id;
+    else { nextId = anchor.id; break; }
+  }
+  return { prevId, nextId };
 }
 
 // Packed-ends for capacity results (Codex r2 P1): findCapacitySlots
@@ -649,5 +678,6 @@ module.exports = {
   _internals: {
     enumerateDates,
     packCapacityEnds,
+    capacityGapNeighbours,
   },
 };
