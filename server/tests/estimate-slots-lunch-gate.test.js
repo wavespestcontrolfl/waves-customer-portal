@@ -103,6 +103,21 @@ describe('estimate slots — lunch block gate', () => {
       expect(_test.slotWindowFitsDay('11:00', '12:00')).toBe(true);
       expect(_test.slotWindowFitsDay('13:00', '14:00')).toBe(true);
     });
+    test('gate on + GATE_SCHEDULING_CAPACITY on: the lunch predicate still rejects noon ahead of the shift-fit branch', () => {
+      process.env[ENV_KEY] = 'true';
+      const prevCap = process.env.GATE_SCHEDULING_CAPACITY;
+      process.env.GATE_SCHEDULING_CAPACITY = 'true';
+      try {
+        expect(_test.slotWindowFitsDay('12:00', '13:00')).toBe(false);
+        expect(_test.slotWindowFitsDay('11:30', '12:30')).toBe(false);
+        // Non-lunch windows fall through to the capacity shift-fit check.
+        expect(_test.slotWindowFitsDay('10:00', '11:00')).toBe(true);
+        expect(_test.slotWindowFitsDay('13:00', '14:00')).toBe(true);
+      } finally {
+        if (prevCap === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+        else process.env.GATE_SCHEDULING_CAPACITY = prevCap;
+      }
+    });
     test('gate on: the day-end bound still applies first (18:00 close)', () => {
       process.env[ENV_KEY] = 'true';
       expect(_test.slotWindowFitsDay('17:00', '18:00')).toBe(true);

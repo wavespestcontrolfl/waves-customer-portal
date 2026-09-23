@@ -978,9 +978,10 @@ async function reserveSlot({
       // Lunch block (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23):
       // mirrors the offer-side filter (estimate-slot-availability.js
       // slotWindowFitsDay) so a slot the generator wouldn't offer under the
-      // gate can't be forged past this commit gate either. No-op (always
+      // gate can't be forged past this commit gate either — in BOTH capacity
+      // modes (the shift-fit check is orthogonal to lunch). No-op (always
       // false) while the gate is off — byte-identical to before this check.
-      if (!useCapacity && overlapsLunch(slotStartMinutes, slotStartMinutes + effectiveDurationMinutes)) {
+      if (overlapsLunch(slotStartMinutes, slotStartMinutes + effectiveDurationMinutes)) {
         const err = new Error('slot is inside the lunch block');
         err.code = 'SLOT_UNAVAILABLE';
         err.slotId = slotId;

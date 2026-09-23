@@ -400,6 +400,17 @@ class AvailabilityEngine {
         throw bookingError('That time has already passed today — please pick another slot', 'SLOT_TAKEN');
       }
     }
+    // Lunch block (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23) —
+    // commit-side mirror of getAvailableSlots' occupied-lunch push, using the
+    // same configured interval: an option the assistant quoted before the
+    // gate flipped on must not commit onto the block. No-op while unset.
+    if (lunchBlockEnabled()) {
+      const lunchStart = this.timeToMin(config?.lunch_start || '12:00');
+      const lunchEnd = this.timeToMin(config?.lunch_end || '13:00');
+      if (startMin < lunchEnd && endMin > lunchStart) {
+        throw bookingError('That time falls in the lunch block — please pick another slot', 'SLOT_TAKEN');
+      }
+    }
 
     // Shared CSPRNG generator (utils/slot-offer-token.js) — this row is served
     // by the same public /booking/status/:code as the /book confirm path, so a

@@ -1106,15 +1106,17 @@ function addMinutesToHHMM(hhmm, minutes) {
 function slotWindowFitsDay(windowStart, windowEnd) {
   const startMin = timeToMinutes(windowStart);
   const endMin = timeToMinutes(windowEnd);
-  if (capacityEnabled()) return placementFitsShift(startMin, endMin);
-  if (startMin == null || endMin == null) return true;
-  if (endMin <= startMin || endMin > SLOT_DAY_END_MINUTES) return false;
   // Lunch block (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23): the
   // synthetic ASAP grid already excludes noon via customerOfferGrid(), but a
   // ROUTE-DERIVED slot's proven-feasible start can still round onto it — this
   // is the one choke point every customer-facing slot (ASAP and route) runs
-  // through, so it is also where the gate is enforced for route slots.
+  // through, so it is also where the gate is enforced for route slots, in
+  // BOTH capacity modes (checked before the shift-fit branch; false outright
+  // while the gate is off, so legacy output is byte-identical).
   if (overlapsLunch(startMin, endMin)) return false;
+  if (capacityEnabled()) return placementFitsShift(startMin, endMin);
+  if (startMin == null || endMin == null) return true;
+  if (endMin <= startMin || endMin > SLOT_DAY_END_MINUTES) return false;
   return true;
 }
 
