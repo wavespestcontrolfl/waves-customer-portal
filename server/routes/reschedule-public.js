@@ -614,19 +614,6 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     if (!elig.ok) {
       return res.status(409).json({ error: 'This appointment can no longer be rescheduled online.', reason: elig.reason });
     }
-    // Self-serve notice window (owner ruling 2026-09-23): refuse moving a
-    // visit that itself starts within SELF_SERVE_NOTICE_HOURS. A MISSED
-    // visit is being rebooked, not moved off its own too-soon start. Its
-    // own code/message (not the generic reason above) so the client renders
-    // the specific call-us guidance (ScheduleFlowPage.jsx falls back to
-    // body.error verbatim for an unrecognized code).
-    if (!elig.missed && visitInsideNoticeWindow(svc)) {
-      return res.status(409).json({
-        error: 'This visit starts too soon to move online — call (941) 297-5749 and our team can help.',
-        code: 'SELF_SERVE_NOTICE',
-      });
-    }
-
     // Idempotent replay: a retried POST (network retry, double-tap) whose
     // target matches the visit's current date + start already succeeded —
     // committing again would duplicate the reschedule_log row, re-send the
@@ -680,6 +667,22 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         endLabel: label12(svc.window_end),
         seriesShifted: replaySeriesShifted,
         futurePlacementDays: replayPlacementDays,
+      });
+    }
+
+    // Self-serve notice window (owner ruling 2026-09-23): refuse moving a
+    // visit that itself starts within SELF_SERVE_NOTICE_HOURS. A MISSED
+    // visit is being rebooked, not moved off its own too-soon start. Runs
+    // AFTER the idempotent replay above: a move that succeeded just outside
+    // the boundary but lost its response must replay as success when
+    // retried past it, not flip to an ineligible page. Its own code/message
+    // (not the generic reason above) so the client renders the specific
+    // call-us guidance (ScheduleFlowPage.jsx falls back to body.error
+    // verbatim for an unrecognized code).
+    if (!elig.missed && visitInsideNoticeWindow(svc)) {
+      return res.status(409).json({
+        error: 'This visit starts too soon to move online — call (941) 297-5749 and our team can help.',
+        code: 'SELF_SERVE_NOTICE',
       });
     }
 

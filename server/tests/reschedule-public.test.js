@@ -750,6 +750,21 @@ describe('reschedule-public inactive-account fail-closed (C4)', () => {
       expect(body.error).toMatch(/941\)\s*297-5749/);
     });
 
+    test('POST: a retry whose target equals the visit\'s current slot still replays as SUCCESS inside the notice window (the move already happened)', async () => {
+      // A move committed just outside the boundary, response lost, retried
+      // past it: the idempotent replay runs BEFORE the notice guard.
+      const row = laterTodaySvc();
+      wireSvc(row);
+      const res = await fetch(`${base}/api/public/reschedule/${TOKEN}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ date: etDateString(), start_time: '23:59' }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.code).not.toBe('SELF_SERVE_NOTICE');
+    });
+
     test('POST find-slots: a visit starting later today is refused too (409 self_serve_notice)', async () => {
       wireSvc(laterTodaySvc());
       const res = await fetch(`${base}/api/public/reschedule/${TOKEN}/find-slots`, {
