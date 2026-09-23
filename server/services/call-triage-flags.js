@@ -1768,14 +1768,26 @@ function restatesOnFileAddress(sa, knownCustomer) {
  * second_service_address own that); a different ZIP or city is not a typo.
  * Returns the evidence for an advisory review card, or null. Pure.
  */
+const HOUSE_TOKEN = /^(\d+[a-z]?(?:-\d+[a-z]?)?)\b\s*/i;
+function houseAndName(line) {
+  const text = String(line || '').trim();
+  const m = text.match(HOUSE_TOKEN);
+  if (!m) return { house: '', name: '', withoutSuffix: '' };
+  const rest = restatementStreetParts(text.slice(m[0].length));
+  return { house: m[1].toLowerCase(), name: rest.name, withoutSuffix: rest.withoutSuffix };
+}
+
 function onFileHouseNumberConflict({ addressValidation = null, onFileAddress = null } = {}) {
   const av = addressValidation;
   if (!av || !(av.status === 'validated_accept' || av.status === 'corrected')) return null;
   const stated = String(av.normalized?.street_line_1 || '').trim();
   const onFile = String(onFileAddress?.address_line1 || '').trim();
   if (!stated || !onFile) return null;
-  const a = restatementStreetParts(splitStreetLineUnit(stated).street || stated);
-  const b = restatementStreetParts(splitStreetLineUnit(onFile).street || onFile);
+  // House tokens may be alphanumeric or hyphenated (1250A, 12-14) — the
+  // restatement parser's digits-only house would leave those unkeyed and
+  // this exact disagreement unsurfaced (codex r2 P2).
+  const a = houseAndName(splitStreetLineUnit(stated).street || stated);
+  const b = houseAndName(splitStreetLineUnit(onFile).street || onFile);
   if (!a.house || !b.house || a.house === b.house) return null;
   if (!a.name || !b.name) return null;
   const sameStreet = [b.name, b.withoutSuffix].includes(a.name) || [a.name, a.withoutSuffix].includes(b.name);

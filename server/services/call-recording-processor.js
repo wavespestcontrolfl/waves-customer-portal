@@ -9782,7 +9782,12 @@ const CallRecordingProcessor = {
           const n = effectiveAddressValidation?.normalized || {};
           const canonicalZip = String(extracted?.zip || '').match(/\d{5}/)?.[0] || '';
           const avZip = String(n.postal_code || '').match(/\d{5}/)?.[0] || '';
-          const corroborated = streetCompareKey(extracted?.address_line1) === streetCompareKey(n.street_line_1)
+          // Suffix-CANONICAL compare (St == Street, St != Ave) — the
+          // suffix-stripping key would corroborate a different road (codex
+          // r2 P2). Same comparator the second-address check uses.
+          const { streetKey: canonicalStreetKey } = require('./customer-properties');
+          const corroborated = !!canonicalStreetKey(extracted?.address_line1)
+            && canonicalStreetKey(extracted?.address_line1) === canonicalStreetKey(n.street_line_1)
             && (!canonicalZip || !avZip || canonicalZip === avZip);
           if (!corroborated) houseConflict = null;
         }
@@ -9796,23 +9801,19 @@ const CallRecordingProcessor = {
           // The caller's unit rides on the V2 service_address (AV normalizes
           // line 1 only) — without it Unit A and Unit B at one building
           // collapse to the same key (pre-push audit P1).
-          const statedUnit = v2CanonicalExtraction?.property?.service_address?.street_line_2 || null;
+          // The canonical unit first (V1's in shadow/kill-switch mode), the
+          // V2 unit as fallback — the same read the second-address check
+          // makes (codex r2 P2).
+          const statedUnit = extracted?.address_line2 || v2CanonicalExtraction?.property?.service_address?.street_line_2 || null;
           const statedKey = propertyKey({ address_line1: n.street_line_1, address_line2: statedUnit, city: n.city, zip: n.postal_code });
           const props = await db('customer_properties').where({ customer_id: customerId, active: true }).select('address_line1', 'address_line2', 'city', 'zip');
           if (statedKey && props.some((prop) => propertyKey(prop) === statedKey)) houseConflict = null;
         }
         if (houseConflict) {
-          houseNumberConflictFiled = true;
           // The stated unit rides on the card so the reviewer sees the whole
-          // door, not just the number (codex r1 P1).
-          const statedUnit = v2CanonicalExtraction?.property?.service_address?.street_line_2 || null;
+          // door, not just the number (codex r1 P1) — canonical unit first.
+          const statedUnit = extracted?.address_line2 || v2CanonicalExtraction?.property?.service_address?.street_line_2 || null;
           if (statedUnit) houseConflict.stated_unit = String(statedUnit).trim();
-          // Rides needs_confirmation like the second-address flag it replaces:
-          // that list drives call_log.review_status, the lead's
-          // needs_confirmation and the CONFIRM BEFORE DISPATCH timeline note
-          // (pre-push audit P1) — the card alone would leave the call
-          // reading as fully processed.
-          if (!bridgeNeedsConfirmation.includes('on_file_house_number_conflict')) bridgeNeedsConfirmation.push('on_file_house_number_conflict');
           await db('triage_items')
             .insert(buildTriageItem({
               callLogId: call.id,
@@ -9824,6 +9825,17 @@ const CallRecordingProcessor = {
               extraPayload: houseConflict,
             }))
             .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+          // Only a landed insert (or an ignored duplicate of an open card)
+          // may suppress the second-address fallback and mark the call for
+          // review — a thrown insert would otherwise leave review_status
+          // open with no card behind it (codex r2 P2).
+          houseNumberConflictFiled = true;
+          // Rides needs_confirmation like the second-address flag it replaces:
+          // that list drives call_log.review_status, the lead's
+          // needs_confirmation and the CONFIRM BEFORE DISPATCH timeline note
+          // (pre-push audit P1) — the card alone would leave the call
+          // reading as fully processed.
+          if (!bridgeNeedsConfirmation.includes('on_file_house_number_conflict')) bridgeNeedsConfirmation.push('on_file_house_number_conflict');
           logger.info(`[call-proc] house-number conflict card for ${maskSid(callSid)}: stated ${houseConflict.stated_house_number}, on file ${houseConflict.on_file_house_number}`);
         }
       } catch (e) {
