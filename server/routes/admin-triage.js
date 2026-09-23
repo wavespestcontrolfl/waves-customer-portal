@@ -630,6 +630,9 @@ function heldConflictTaskDecision({ verdict, wrongFields = [], heldConflictPaylo
     ...payload,
     stated_street: undefined,
     address_as_heard: undefined,
+    // The evidence item's own on-file snapshot follows the same (live)
+    // address as its heard / requested readings (pre-push audit P1).
+    on_file_address: onFile || payload.on_file_address || null,
     heard_address: approvedAddress || payload.heard_address,
     ...(approvedWindow ? { scheduling_window: approvedWindow } : {}),
   } : null;

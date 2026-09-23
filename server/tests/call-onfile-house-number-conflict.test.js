@@ -261,6 +261,7 @@ describe('heldConflictTaskDecision (verdict route)', () => {
   test('the live customer address outranks the card snapshot once the office adopted the caller\'s number', () => {
     const d = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, liveOnFile: { address_line1: '1250 Example St', address_line2: null, city: 'Parrish', zip: '34219' } });
     expect(d.approvedWindow.requested_address.street_line_1).toBe('1250 Example St');
+    expect(d.approvedPayload.on_file_address.address_line1).toBe('1250 Example St');
     expect(heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, liveOnFile: { address_line1: '' } }).approvedWindow.requested_address.street_line_1).toBe('1260 Example St');
   });
 
