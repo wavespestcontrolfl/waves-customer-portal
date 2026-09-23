@@ -108,10 +108,13 @@ describe('buildBookingAvailability — travel-gap mirror (GATE_SLOT_TRAVEL_GAP)'
     expect(dayStarts(await buildPalmetto())).toEqual(['09:00', '14:00']);
   });
 
-  test('find-time gets the customer-facing buffer, and occupancy the coords, only when the gate is on', async () => {
+  test('find-time gets the customer-facing buffer only when the gate is on; the shared anchor load stays gate-independent (Codex r5 structural)', async () => {
     await build();
     expect(findAvailableSlots).toHaveBeenLastCalledWith(expect.objectContaining({ bufferMinutes: 0 }));
-    expect(listOccupiedWindows).toHaveBeenLastCalledWith(expect.objectContaining({ withCoords: false }));
+    // packing-geometry's loadPackingAnchors always reads WITH coords —
+    // anchor loading is no longer where GATE_SLOT_TRAVEL_GAP lives; only
+    // the drive-time predicate (violatesTravelGap) is gated.
+    expect(listOccupiedWindows).toHaveBeenLastCalledWith(expect.objectContaining({ withCoords: true }));
     process.env.GATE_SLOT_TRAVEL_GAP = 'true';
     process.env.SLOT_TRAVEL_BUFFER_MINUTES = '20';
     await build();
@@ -149,12 +152,12 @@ describe('buildBookingAvailability — commit-gate occupancy mirror', () => {
     expect(result.slots).toEqual([]);
 
     // The occupancy fetch mirrors the builder's range and threads the
-    // public-reschedule exclusion (default []).
+    // public-reschedule exclusion (default []). Routed through the shared
+    // loadPackingAnchors (Codex r5 structural) — always WITH coords,
+    // gate-independent (see the travel-gap describe block above).
     expect(listOccupiedWindows).toHaveBeenCalledWith({
       dateFrom: D, dateTo: D, excludeServiceIds: [],
-      // Guarded lat/lng ride along for the travel-gap mirror ONLY while the
-      // gate is on — dark = the legacy scan, no customers join (r2 P2).
-      withCoords: false,
+      withCoords: true,
     });
   });
 

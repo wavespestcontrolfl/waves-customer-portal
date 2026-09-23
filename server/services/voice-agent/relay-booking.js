@@ -143,7 +143,7 @@ function slotStartMinutes(slot) {
  * A service that no longer fits at the offered start simply fails the re-check
  * (slot_gone) — fail closed, exactly like any other stale offer.
  */
-async function revalidateSlot({ offer, durationMinutes = null }) {
+async function revalidateSlot({ offer, durationMinutes = null, catalogRow = null }) {
   const { isEnabled } = require('../../config/feature-gates');
   if (!isEnabled('selfBooking')) return { status: 'engine_unavailable' };
   if (!offer || !offer.lat || !offer.lng || !offer.date) return { status: 'need_location' };
@@ -179,6 +179,12 @@ async function revalidateSlot({ offer, durationMinutes = null }) {
     today: new Date(),
     timeOfDay: offer.timeOfDay || 'any',
     expandOpenDays: offer.expandOpenDays === true,
+    // Codex r5 P2 #5 — the resolved catalog service (real admin-portal row,
+    // never model-supplied) carries the same identity bookingExpectedMinutes
+    // needs for the expected-minutes credit; without it every voice
+    // revalidation degraded to the no-credit legacy gap regardless of what
+    // the offer-generating find_slots/get_availability call resolved.
+    ...(catalogRow ? { serviceIdentity: { catalogServiceKey: catalogRow.service_key || null, serviceType: catalogRow.name || null } } : {}),
   });
   const day = (availability.days || []).find((d) => d && d.date === offer.date);
   const slot = ((day && day.slots) || []).find((s) => s && slotStartMinutes(s) === offer.startMinutes);
@@ -755,6 +761,7 @@ async function requestBookingText(input = {}, ctx = {}) {
   const recheck = await revalidateSlot({
     offer: { ...offer, lat: bookingCoords.lat, lng: bookingCoords.lng },
     durationMinutes: bookingDurationMinutes,
+    catalogRow,
   });
   if (recheck.status === 'engine_unavailable') {
     return 'Live scheduling is not available right now, so no booking request can be placed. '

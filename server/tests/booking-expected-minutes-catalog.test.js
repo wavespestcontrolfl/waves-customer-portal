@@ -81,4 +81,39 @@ describe('gate on', () => {
   test('an unrecognized service value still falls back to the window length', async () => {
     expect(await bookingExpectedMinutes(db, 'not_a_real_service', 60)).toBe(60);
   });
+
+  // Codex r5 P2 #5 — reschedule-public.js and the voice agent's
+  // revalidateSlot have an EXISTING scheduled_services row's own catalog
+  // identity (service_key_snapshot / service_type), never a /book funnel
+  // selection. That identity never matches the 7-key funnel vocabulary
+  // above, so without this fallback every one of those callers silently
+  // degraded to the no-credit legacy gap.
+  describe('serviceIdentity fallback (no funnel key resolves)', () => {
+    test('an unrecognized serviceKey with a matching catalogServiceKey resolves the EXACT row (bimonthly_pest midpoint 60)', async () => {
+      const minutes = await bookingExpectedMinutes(db, '', 80, { catalogServiceKey: 'bimonthly_pest' });
+      expect(minutes).toBe(60);
+    });
+
+    test('a cadence-specific serviceType name resolves via services.name when no catalogServiceKey is known', async () => {
+      // "Quarterly Pest Control Service" midpoint (30+60)/2 = 45.
+      const minutes = await bookingExpectedMinutes(db, '', 60, { serviceType: 'Quarterly Pest Control Service' });
+      expect(minutes).toBe(45);
+    });
+
+    test('an unrecognized serviceKey AND an identity matching nothing in the catalog falls back to the window length', async () => {
+      const minutes = await bookingExpectedMinutes(db, '', 60, { catalogServiceKey: 'no_such_key', serviceType: 'Not A Real Service' });
+      expect(minutes).toBe(60);
+    });
+
+    test('a recognized funnel key wins over serviceIdentity — the identity is never consulted', async () => {
+      // pest_control's own category average (52.5) must win, not
+      // bimonthly_lawn's 60, proving serviceIdentity is only a fallback.
+      const minutes = await bookingExpectedMinutes(db, 'pest_control', 60, { catalogServiceKey: 'bimonthly_lawn' });
+      expect(minutes).toBe(52.5);
+    });
+
+    test('no serviceIdentity and no funnel key: window length, same as before this fallback existed', async () => {
+      expect(await bookingExpectedMinutes(db, '', 60, null)).toBe(60);
+    });
+  });
 });

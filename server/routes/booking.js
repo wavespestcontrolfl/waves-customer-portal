@@ -12,6 +12,7 @@ const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
 const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes, requiredGapMinutes } = require('../services/scheduling/travel-gap');
 const { expectedMinutesForServices } = require('../services/scheduling/expected-service-minutes');
+const { loadPackingAnchors } = require('../services/scheduling/packing-geometry');
 
 // Funnel key -> catalog identity for the expected-minutes credit lookup
 // below (Codex r3 P2). An ordinary /book funnel key only ever carries a
@@ -45,15 +46,33 @@ const BOOKING_FUNNEL_SERVICE_CATEGORIES = {
 // ONCE per request and threaded through the finder, the offer-side mirror
 // and the commit probe so all three measure the same gap (Codex r2 P2).
 // Gate off → the window length (zero padding, legacy gap).
-async function bookingExpectedMinutes(conn, serviceKey, durationMinutes) {
+// `serviceIdentity` (Codex r5 P2 #5): an EXISTING scheduled_services row's
+// own catalog identity ({ catalogServiceKey: service_key_snapshot,
+// serviceType: service_type }) for a caller that has a real visit to
+// revalidate against (reschedule-public.js, voice-agent revalidateSlot) but
+// no funnel selection to normalize — a cadence-specific catalog name/key
+// ('Quarterly Pest Control Service') never matches the 7-key funnel
+// vocabulary normalizeBookingServiceKeys checks, so passing it AS serviceKey
+// silently degrades to the no-credit legacy gap. Tried only when serviceKey
+// resolves to no funnel key, so every existing funnel caller is unaffected.
+async function bookingExpectedMinutes(conn, serviceKey, durationMinutes, serviceIdentity = null) {
   if (!travelGapEnabled()) return durationMinutes;
-  const services = normalizeBookingServiceKeys(serviceKey)
-    .map((key) => ({
+  const keys = normalizeBookingServiceKeys(serviceKey);
+  if (keys.length) {
+    const services = keys.map((key) => ({
       catalogServiceKey: BOOKING_FUNNEL_SERVICE_CATALOG_KEYS[key] || null,
       category: BOOKING_FUNNEL_SERVICE_CATEGORIES[key] || null,
       label: BOOKING_FUNNEL_SERVICE_LABELS[key] || key,
     }));
-  return expectedMinutesForServices(conn, services, durationMinutes);
+    return expectedMinutesForServices(conn, services, durationMinutes);
+  }
+  if (serviceIdentity && (serviceIdentity.catalogServiceKey || serviceIdentity.serviceType)) {
+    return expectedMinutesForServices(conn, [{
+      catalogServiceKey: serviceIdentity.catalogServiceKey || null,
+      label: serviceIdentity.serviceType || null,
+    }], durationMinutes);
+  }
+  return durationMinutes;
 }
 const { fallbackCenterZoneName } = require('../services/scheduling/zone-day-funnel');
 const { violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
@@ -946,7 +965,7 @@ function roundPublicCoord(value) {
 // server/services/scheduling/self-serve-notice.js) is never offered. The
 // voice-agent callers (relay-tools.js, relay-booking.js) deliberately leave
 // this false — the call agent is unaffected by the notice rule.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], excludeSelfBookingId = null, serviceKey = '', selfServeNotice = false }) {
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], excludeSelfBookingId = null, serviceKey = '', serviceIdentity = null, selfServeNotice = false }) {
   config = applySchedulingPolicy(config);
   // Rain chips (GATE_BOOKING_RAIN_CHIPS): kick off ONE bounded office-point
   // daily outlook so it overlaps the slot computation; stamped onto days/slots
@@ -960,7 +979,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       .catch(() => null)
     : null;
 
-  const candidateExpectedMinutes = await bookingExpectedMinutes(db, serviceKey, duration);
+  const candidateExpectedMinutes = await bookingExpectedMinutes(db, serviceKey, duration, serviceIdentity);
   const result = await findAvailableSlots({
     lat,
     lng,
@@ -1089,20 +1108,28 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // owns correctness.
   let occupiedByDate = null;
   try {
-    const { listOccupiedWindows } = require('../services/scheduling/occupancy');
-    const occupiedRows = await listOccupiedWindows({
-      dateFrom: rangeFrom,
-      dateTo: rangeTo,
-      // Public self-reschedule: the moving row must not block the slot it
-      // is vacating — same exclusion findAvailableSlots already applies.
-      excludeServiceIds,
-      // Guarded lat/lng for the travel-gap mirror below — only while the
-      // gate is on, so the dark query stays the legacy scan (no customers
-      // join) (GH codex #3803 r2 P2).
-      withCoords: travelGapEnabled(),
-    });
+    // Same shared anchor set find-time.js and availability.js now read
+    // (packing-geometry.js, Codex r5 structural fix) — always loaded WITH
+    // coords/allocation-expanded spans, gate-independent, so this mirror
+    // never drifts from what the two pickers already anchored their own
+    // packed bounds against. Only the travel-gap PREDICATE below stays
+    // gated (violatesTravelGap itself returns false when the gate is off);
+    // the anchor load is no longer where that gate lives (GH codex #3803
+    // r2 P2's dark-scan optimization is superseded by the shared loader).
+    const anchors = await loadPackingAnchors({ dateFrom: rangeFrom, dateTo: rangeTo, excludeServiceIds });
     occupiedByDate = new Map();
-    for (const row of occupiedRows) {
+    for (const anchor of anchors) {
+      const row = {
+        technician_id: anchor.technician_id,
+        customer_id: anchor.customer_id,
+        date: anchor.date,
+        startMin: anchor.rawStartMin,
+        endMin: anchor.rawEndMin,
+        windowMinutes: anchor.rawEndMin - anchor.rawStartMin,
+        expectedMinutes: anchor.expectedEndMin - anchor.rawStartMin,
+        lat: anchor.lat,
+        lng: anchor.lng,
+      };
       if (!occupiedByDate.has(row.date)) occupiedByDate.set(row.date, []);
       occupiedByDate.get(row.date).push(row);
     }
@@ -5076,11 +5103,21 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
         return res.json({ ok: true, skipped: 'unverified_slot' });
       }
       const cfg = (await db('booking_config').first()) || {};
+      // Codex r5 P2 #5 — thread the same funnel identity /availability
+      // resolved (same fallback order as row.service_type's own
+      // canonicalBookingServiceLabel chain just above), so the revalidation's
+      // expected-minutes credit (packedBounds' padding term) and travel-gap
+      // predicate match what was actually offered instead of degrading to
+      // the no-credit legacy gap for every capture-intent revalidation.
+      const serviceKey = normalizeBookingServiceKey(b.service_id)
+        || normalizeBookingServiceKey(b.service_type)
+        || normalizeBookingServiceKey(b.quoted_service_label);
       const avail = await buildBookingAvailability({
         lat, lng,
         duration: cfg.slot_duration_minutes || 60,
         rangeFrom: row.slot_date, rangeTo: row.slot_date,
         config: cfg, today: new Date(), expandOpenDays: true,
+        serviceKey,
         // Self-serve surface — a slot the notice window would now refuse
         // must not be treated as still offered (offer/commit parity).
         selfServeNotice: true,

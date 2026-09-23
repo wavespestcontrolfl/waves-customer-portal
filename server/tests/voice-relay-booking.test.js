@@ -827,6 +827,17 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     expect(row.window_end).toBe('10:30');
   });
 
+  // Codex r5 P2 #5 — the resolved catalog row's identity (real admin-portal
+  // service, never model-supplied) must reach the re-check's expected-
+  // minutes credit lookup, or every voice revalidation silently degrades to
+  // the no-credit legacy gap regardless of what find_slots resolved.
+  test('the re-check threads the resolved catalog row\'s identity as serviceIdentity', async () => {
+    await executeTool('request_booking', GOOD_INPUT, slotCtx());
+    expect(booking.buildBookingAvailability).toHaveBeenCalledWith(expect.objectContaining({
+      serviceIdentity: { catalogServiceKey: 'general_pest', serviceType: 'General Pest Control' },
+    }));
+  });
+
   test('the probe never covers LESS than the written duration, even if the offered end is short', async () => {
     // Belt: a slot whose end predates start + the row's duration must not
     // shrink the conflict window (COALESCE(window_end, …) is what every other
