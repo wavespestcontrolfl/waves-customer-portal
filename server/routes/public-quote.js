@@ -2989,12 +2989,23 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       try {
         // sent AND viewed: opening the link flips the row to 'viewed'
         // (estimate-public), which is just as acceptable (pre-push audit P1).
+        // A repeat /property-lookup mints a NEW lead row (only a prefill
+        // token re-attaches), so the earlier publication is found by the
+        // visitor's verified ownership — the typed email, the same proof
+        // the lead UPDATE uses — plus the same street line, not by lead id
+        // alone (pre-push audit P1). Own publications only.
         const withdrawn = await db('estimates')
           .where({ source: 'quote_wizard' })
           .whereIn('status', ['sent', 'viewed'])
           .whereNull('archived_at')
-          .whereRaw("estimate_data->>'lead_id' = ?", [String(lead.id)])
           .whereRaw("estimate_data->'websiteSelfService' IS NOT NULL")
+          .where((q) => q
+            .whereRaw("estimate_data->>'lead_id' = ?", [String(lead.id)])
+            .orWhere((own) => own
+              .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
+              .whereRaw("LOWER(regexp_replace(split_part(address, ',', 1), '[^a-z0-9]+', ' ', 'gi')) = ?", [
+                String(quoteAddress || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(),
+              ])))
           .update({ archived_at: new Date(), updated_at: new Date() })
           .returning('id');
         if (withdrawn.length) {

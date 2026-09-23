@@ -895,9 +895,11 @@ estimate carries the same verdict as `estimate_data.addressUnverified`
 booking link minted by an EARLIER clean run over the same draft dies on
 its live recheck at `/api/booking/confirm` once the address is flagged,
 and a staff revision of the draft preserves the marker. A website estimate
-an earlier run already PUBLISHED for the same lead is archived on the
-flagged run (`website_quote_withdrawn_address_unverified` audit event), so
-its old token neither renders nor accepts. A roll that never answered (GIS
+an earlier run already PUBLISHED for the same lead — or, since a repeat
+lookup mints a new lead row, for the same typed email AND the same street
+line — is archived on the flagged run
+(`website_quote_withdrawn_address_unverified` audit event), so its old
+token neither renders nor accepts. A roll that never answered (GIS
 outage) is not a fresh flag — but it does not clear one either: the prior
 server-written flag for the same address carries forward until the roll
 answers clean.
