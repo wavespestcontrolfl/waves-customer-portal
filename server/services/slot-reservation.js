@@ -59,6 +59,27 @@ const { expectedServiceMinutes, expectedMinutesForServices } = require('./schedu
 // back to the window length inside occupancy.js — zero padding, legacy gap.
 async function candidateExpectedMinutesFromRow(conn, row, windowMinutes) {
   if (!row || !Number.isFinite(windowMinutes) || windowMinutes <= 0) return undefined;
+  // A combined-visit hold's reservation_service_mix (combined-visit-
+  // capacity.js, version 1/2) carries every member's own engine key (+ per-
+  // service minutes on v2) — the row's single service_key_snapshot/
+  // service_type column can only ever hold ONE identity, so a legacy
+  // multi-service hold's real credit is the SUM across its mix, never that
+  // one column read alone (Codex r3 P1). Engine keys line up with
+  // services.category for the families that have one (pest_control/
+  // lawn_care/tree_shrub/mosquito); the rest (termite_bait/rodent_bait/
+  // palm_injection) have no matching category and fall back to their own
+  // share of the window — the same safe default a single-service row with
+  // no catalog match gets.
+  const mix = row.reservation_service_mix;
+  if (mix && Array.isArray(mix.services) && mix.services.length) {
+    const perMemberMinutes = mix.version === 2 && Array.isArray(mix.durations)
+      && mix.durations.length === mix.services.length
+      ? mix.durations
+      : mix.services.map(() => windowMinutes / mix.services.length);
+    return expectedMinutesForServices(conn, mix.services.map((key, i) => ({
+      category: key, durationMinutes: perMemberMinutes[i],
+    })), windowMinutes);
+  }
   return expectedServiceMinutes(conn, {
     serviceKey: row.service_key_snapshot || null,
     serviceType: row.service_type || null,
@@ -1162,17 +1183,19 @@ async function reserveSlot({
           });
           return { staleHoldSuperseded: true };
         }
-        // Refresh expiry only — commitReservation recomputes service_type /
-        // notes / window_end from the accept-time profile, so the hold's
-        // stamped labels don't need to be rebuilt on a retry.
-        // The lifetime cap binds THIS path too (hold-grace self-audit): without it a
-        // token holder could keep one hold alive forever by re-POSTing
-        // /reserve for the same slot, bypassing the ceiling /extend enforces
-        // and monopolising the window. LEAST() rather than a refusal — a
-        // capped refresh is still idempotent for the client's "go back"
-        // retry; once the ceiling is reached the hold simply stops moving
-        // and lapses on its own, and a genuine re-pick mints a FRESH hold
-        // through the full conflict path like any other customer.
+        // Restamp the authoritative identity from THIS reselection's profile
+        // (Codex r3 P1) — a same-slot reselect under a different
+        // single-service mode matches sameSlotHold (same date/start/tech/
+        // duration/mix), but until now only the expiry moved, leaving the
+        // OLD service_key_snapshot/service_type/service_id on the row.
+        // commitReservation itself never reads that stale stamp (it
+        // re-resolves from the accept-time serviceProfile), but /extend's
+        // candidateExpectedMinutesFromRow has only the row to read — so a
+        // refreshed hold's expected-minutes credit (and the padding/gap math
+        // built on it) silently used the identity from BEFORE the reselect.
+        // catalogLink/catalogServiceId/serviceType were resolved above from
+        // the SAME serviceProfile the fresh-create path below stamps a new
+        // row with — reused here, not re-queried.
         const [refreshed] = await trx('scheduled_services')
           .where({ id: sameSlotHold.id })
           .update({
@@ -1180,6 +1203,9 @@ async function reserveSlot({
               'GREATEST(reservation_expires_at, LEAST(NOW() + make_interval(mins => ?), created_at + make_interval(mins => ?)))',
               [holdMins, MAX_HOLD_MINUTES],
             ),
+            service_id: catalogServiceId,
+            service_key_snapshot: catalogLink?.service_key || null,
+            service_type: serviceType,
           })
           .returning(['id', 'reservation_expires_at']);
         const refreshedExpiresAt = refreshed?.reservation_expires_at || null;
@@ -2408,5 +2434,6 @@ module.exports = {
     classifierStableServiceType,
     notesWithServiceMix,
     catalogLinkForProfile,
+    candidateExpectedMinutesFromRow,
   },
 };
