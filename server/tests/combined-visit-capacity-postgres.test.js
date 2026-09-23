@@ -75,6 +75,14 @@ postgres('combined booking capacity on PostgreSQL', () => {
       t.uuid('id').primary(); t.text('service_key'); t.text('name'); t.boolean('is_active'); t.jsonb('engine_keys');
     });
     await mockPg.schema.createTable('customers', (t) => { t.uuid('id').primary(); t.text('city'); });
+    // reserveSlot/commitReservation now read booking_config for the lunch
+    // interval / day-end override (Codex r1 P2s on #4663) and fail closed
+    // (push-audit P1) if that read has never succeeded — an empty table
+    // (no row) resolves the read successfully and falls back to the fixed
+    // defaults, matching this fixture's pre-existing behavior exactly.
+    await mockPg.schema.createTable('booking_config', (t) => {
+      t.time('lunch_start'); t.time('lunch_end'); t.time('day_end');
+    });
     await mockPg.schema.createTable('scheduled_services', (t) => {
       t.uuid('id').primary().defaultTo(mockPg.raw('gen_random_uuid()'));
       for (const c of ['customer_id', 'technician_id', 'service_id', 'recurring_parent_id']) t.uuid(c);

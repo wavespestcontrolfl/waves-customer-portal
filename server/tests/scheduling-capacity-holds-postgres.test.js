@@ -46,7 +46,12 @@ describeDb('scheduling capacity holds on PostgreSQL', () => {
     const offers = await findAvailableSlots({ ...f.PIN, dateFrom: f.date, dateTo: f.date,
       technicianId: f.ids.technician, serviceType: service, durationMinutes: duration, includeWeekends: true, topN: 99 });
     expect(offers.slots.some(slot => slot.start_time === '10:00' && slot.end_time === expectedEnd)).toBe(true);
-    expect(offers.slots.some(slot => slot.start_time >= '17:00')).toBe(false);
+    // Customer-facing day close moved from 17:00 to 18:00 (picker-windows PR 2,
+    // owner ruling 2026-09-23) — this fixture calls findAvailableSlots the same
+    // way the estimate offer surface does, so a 17:00 start (this job's short
+    // duration ends well within 18:00) is now a legitimately offered slot, not
+    // a bug. Only a start at/after the NEW close is disallowed.
+    expect(offers.slots.some(slot => slot.start_time >= '18:00')).toBe(false);
     const args = { estimateId: f.ids.estimates[0], slotId: f.signedSlot(f.ids.estimates[0], duration) };
     const hold = await reserveSlot(args);
     expect((await reserveSlot(args)).scheduledServiceId).toBe(hold.scheduledServiceId);

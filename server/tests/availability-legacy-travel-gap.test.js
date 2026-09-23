@@ -139,18 +139,16 @@ test('gate on: an OUT-OF-ZONE stop across a real drive drops the touching window
   expect(starts).not.toContain('09:00');
   // 10:00–11:00 overlaps it outright.
   expect(starts).not.toContain('10:00');
-  // Codex r3 P1: the far stop is now merged into the SAME packing geometry
+  // Codex r3 P1: the far stop is merged into the SAME packing geometry
   // findGaps uses (it is a real neighbour on the one tech-blind route, just
-  // in another zone) — the afternoon is no longer offered either, exactly
-  // like a zone-local stop immediately followed by lunch already behaves
-  // (see 'findGaps packed-ends: … a stop before lunch anchors the hour
-  // after it, but the gap after lunch gets nothing from the lunch side'
-  // below): the only real stop that day is mid-morning, lunch resets the
-  // packing anchor right after it, and nothing borders a real stop again
-  // before day-close. Offering 14:00 anyway was the bug this finding fixed
-  // — an unpacked, hole-making slot the rest of this PR's picked-ends rule
-  // would never allow for a zone-local stop in the same position.
-  expect(starts).toEqual([]);
+  // in another zone), so the trailing gap is packed against it exactly like
+  // a zone-local stop would be. With GATE_BOOKING_LUNCH_BLOCK unset
+  // (default, owner ruling 2026-09-23, #4663) no artificial lunch occupancy
+  // resets that anchor mid-day any more, so the trailing gap offers its
+  // first accepted hour once clear of the far stop's travel-gap radius —
+  // 12:00, not the old lunch-block-reset [] or the un-packed 14:00 the bug
+  // report described.
+  expect(starts).toContain('12:00');
 });
 
 test('gate on with a customerId and no estimate (AI assistant session): the customer pin, no estimates read', async () => {
@@ -162,8 +160,8 @@ test('gate on with a customerId and no estimate (AI assistant session): the cust
   expect(seen).not.toContain('estimates');
   expect(seen).toContain('customers');
   expect(startsOf(result)).not.toContain('09:00');
-  // Codex r3 P1 — see the identical comment above.
-  expect(startsOf(result)).toEqual([]);
+  // See the previous test — 12:00 with the lunch gate unset (default).
+  expect(startsOf(result)).toContain('12:00');
 });
 
 test('gate on without an estimate: buffer-only pin, still mirrored; a failed range read serves unfiltered', async () => {
@@ -301,6 +299,30 @@ test('findGaps advances an hour at a time inside a rejected gap (r5 P2)', () => 
   expect(engine.findGaps(occupied, 8 * 60, 18 * 60, 60, 0).map((g) => g.start / 60)).toEqual([9, 16]);
 });
 
+test('GATE_BOOKING_LUNCH_BLOCK (owner ruling 2026-09-23): unset drops the artificial lunch occupancy, true restores it', async () => {
+  const previous = process.env.GATE_BOOKING_LUNCH_BLOCK;
+  try {
+    // Unset (default): no lunch entry is pushed onto `occupied`, so the whole
+    // day is ONE gap; findGaps still offers its first hour (09:00) AND — so
+    // removing the block never costs the assistant its afternoon choices —
+    // the first accepted start at/after the configured afternoon boundary
+    // (13:00, the old lunch_end). Noon is offerable where a gap opens onto
+    // it (availability-lunch-gate-coverage.test.js).
+    delete process.env.GATE_BOOKING_LUNCH_BLOCK;
+    let result = await engine.getAvailableSlots('Palmetto');
+    expect(startsOf(result)).toEqual(['09:00', '13:00']);
+
+    // 'true' restores the legacy split: a morning gap (09:00) and an
+    // afternoon gap starting after the lunch block + buffer (14:00).
+    process.env.GATE_BOOKING_LUNCH_BLOCK = 'true';
+    result = await engine.getAvailableSlots('Palmetto');
+    expect(startsOf(result)).toEqual(['09:00', '14:00']);
+  } finally {
+    if (previous === undefined) delete process.env.GATE_BOOKING_LUNCH_BLOCK;
+    else process.env.GATE_BOOKING_LUNCH_BLOCK = previous;
+  }
+});
+
 test('a linked booking copy cannot retain the old window after its visit stops occupying it', async () => {
   const t = tables();
   const copy = { id: 'old-copy', start_time: '08:00', end_time: '17:00' };
@@ -317,13 +339,13 @@ describe('findGaps packed-ends: the lunch block is never a packing anchor (Codex
 
   test('a day whose only real stop is 16:00 offers the hour before it and the hour after it — never "packed before lunch"', () => {
     const occupied = [LUNCH, { start: 16 * 60, end: 17 * 60 }];
-    const slots = engine.findGaps(occupied, 8 * 60, 18 * 60, 60, 0, null, true);
+    const slots = engine.findGaps(occupied, 8 * 60, 18 * 60, 60, 0, null, { packEnds: true });
     expect(slots.map((g) => g.start / 60)).toEqual([15, 17]);
   });
 
   test('a stop before lunch anchors the hour after it, but the gap after lunch gets nothing from the lunch side', () => {
     const occupied = [{ start: 9 * 60, end: 10 * 60 }, LUNCH];
-    const slots = engine.findGaps(occupied, 8 * 60, 18 * 60, 60, 0, null, true);
+    const slots = engine.findGaps(occupied, 8 * 60, 18 * 60, 60, 0, null, { packEnds: true });
     // 8:00 packed before the 9:00 stop, 10:00 packed after it; 11:00 is
     // NOT offered (lunch is not a stop); the afternoon has no real stop to
     // pack against.
@@ -332,7 +354,7 @@ describe('findGaps packed-ends: the lunch block is never a packing anchor (Codex
 
   test('an unflagged block is still a real anchor on both sides (middle gap offers both packed ends)', () => {
     const occupied = [{ start: 9 * 60, end: 10 * 60 }, { start: 14 * 60, end: 15 * 60 }];
-    const slots = engine.findGaps(occupied, 8 * 60, 18 * 60, 60, 0, null, true);
+    const slots = engine.findGaps(occupied, 8 * 60, 18 * 60, 60, 0, null, { packEnds: true });
     expect(slots.map((g) => g.start / 60)).toEqual([8, 10, 13, 15]);
   });
 
@@ -345,7 +367,7 @@ describe('findGaps packed-ends: the lunch block is never a packing anchor (Codex
 
 test('findGaps packed-ends: a lunch block contained inside a real stop keeps that stop as the anchor (Codex #4664 r2 P2)', () => {
   const occupied = [{ start: 11 * 60, end: 14 * 60 }, { start: 12 * 60, end: 13 * 60, lunch: true }];
-  const slots = engine.findGaps(occupied, 8 * 60, 18 * 60, 60, 0, null, true);
+  const slots = engine.findGaps(occupied, 8 * 60, 18 * 60, 60, 0, null, { packEnds: true });
   // 10:00 packed before the 11:00 stop; 14:00 packed after it (the
   // contained lunch block must not erase the after-stop anchor).
   expect(slots.map((g) => g.start / 60)).toEqual([10, 14]);

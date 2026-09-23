@@ -27,6 +27,29 @@ const { travelGapEnabled } = require('./travel-gap');
 const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service-minutes');
 const { occupiedRows } = require('./visit-capacity');
 const { packedBounds } = require('./packing-geometry');
+const { customerWindowAdmits } = require('./customer-windows');
+
+// customerWindowAdmits (scheduling/customer-windows.js) is the ONE grid /
+// day-end / lunch admission rule for customer-facing callers — the
+// documented public/token offer grid (09:00-17:00), honoring a preserved
+// booking_config.day_end override and the lunch gate. Only applied when a
+// caller marks itself customerFacing (see findCapacitySlots and the legacy
+// per-gap loop below); staff/optimizer callers (admin-schedule-find-time.js,
+// intelligence-bar/schedule-tools.js, auto-dispatch/candidate-slots.js)
+// never pass that flag and stay on the raw shift bounds (SHIFT,
+// placementFitsShift / dayOpen-dayClose below), in both capacity modes
+// (Codex r4 P0 on #4663 — the gate-off legacy path never enforced the grid
+// at all).
+//
+// packedBounds/loadPackingAnchors (Codex r5 structural, packing-geometry.js)
+// are a DIFFERENT axis: they supply the packed-start GEOMETRY (how close a
+// candidate may sit next to a real neighbouring stop, credit-adjusted) —
+// customerWindowAdmits is the ADMISSION rule (is this start on the
+// customer grid, before day-end, outside lunch at all). A candidate must
+// clear both: customerWindowAdmits gates whether a start is offered on the
+// public grid; packedBounds/evaluateGap then tells it how early/late it may
+// legally sit against that day's real stops. Neither substitutes for the
+// other.
 
 const DAY_START_HOUR = 8;   // 8:00 AM
 const DAY_END_HOUR = 17;    // 5:00 PM
@@ -160,7 +183,24 @@ async function findCapacitySlots(opts) {
         .inactiveCapabilitiesForServices(db, [tech.id], [context.target])).length) continue;
       const floor = Math.max(SHIFT.startMinutes, opts.earliestStartMin || 0,
         date === today ? parts.hour * 60 + parts.minute + 30 : 0);
-      for (let start = Math.ceil(floor / 60) * 60; start + SHIFT.arrivalMinutes <= SHIFT.endMinutes; start += 60) {
+      // Enumerate every on-the-hour start through the shift close and let
+      // placementFitsShift (scheduling/policy.js) decide admission from the
+      // real (start, start+durationMinutes) window — the loop used to stop
+      // 2 hours early (SHIFT.arrivalMinutes), which silently dropped 17:00
+      // candidates that fit a normal 60-minute job comfortably before the
+      // 18:00 close (Codex r1 P1 on #4663). SHIFT.startMinutes is 08:00 — the
+      // full operating shift, not the documented public/token offer grid
+      // (09:00-17:00). A customerFacing caller (the estimate picker, /book
+      // and everything that shares its builder) additionally runs
+      // customerWindowAdmits — the grid floor AND the resolved
+      // (booking_config-aware) close AND the lunch gate in one check — so
+      // capacity mode never hands a customer surface an 08:00 candidate, a
+      // start past a preserved earlier close, or a lunch-overlapping start
+      // the public route contract doesn't describe; staff/optimizer callers
+      // that never pass customerFacing are unaffected and stay on the raw
+      // shift bound below (Codex r3 P0, r4 P2 on #4663).
+      for (let start = Math.ceil(floor / 60) * 60; start < SHIFT.endMinutes; start += 60) {
+        if (opts.customerFacing && !customerWindowAdmits({ startMin: start, endMin: start + durationMinutes })) continue;
         if (!placementFitsShift(start, start + durationMinutes)) continue;
         candidates.push({ context, date, tech, start, options: {
           windowStart: minutesToTime(start), windowEnd: minutesToTime(start + durationMinutes),

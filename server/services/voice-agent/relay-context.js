@@ -379,7 +379,7 @@ function speakDate(value) {
  * weekday-only "closed" claim would be wrong.
  */
 const DEFAULT_DAY_START = '08:00';
-const DEFAULT_DAY_END = '17:00';
+const DEFAULT_DAY_END = '18:00';
 
 /** 'HH:MM[:SS]' → minutes past midnight, or null. */
 function clockMinutes(value) {

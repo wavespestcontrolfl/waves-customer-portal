@@ -16,9 +16,11 @@ jest.mock('../services/estimate-slot-availability', () => ({
     ],
   })),
   // Mirror the real exported business bounds — slot-reservation destructures
-  // these at require time for its server-side slot policy.
+  // these at require time for its server-side slot policy. Customer-facing
+  // day end is 18:00 since PR 2 (2026-09-23,
+  // scheduling/customer-windows.js CUSTOMER_DAY_END_MINUTES).
   SLOT_DAY_START_MINUTES: 8 * 60,
-  SLOT_DAY_END_MINUTES: 17 * 60,
+  SLOT_DAY_END_MINUTES: 18 * 60,
   MAX_SLOT_HORIZON_DAYS: 90,
 }));
 
@@ -49,6 +51,18 @@ function signedSlotId({ estimateId, date, hhmm, techId, durationMinutes = 90 }) 
 describe('slot reservation helpers', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    // reserveSlot/commitReservation now await
+    // refreshCustomerBookingWindowConfig() (scheduling/customer-windows.js)
+    // before anything else and fail closed (SLOT_UNAVAILABLE) if that read
+    // has never succeeded (Codex push-audit P1 on #4663) — a default here
+    // so every test's own db mock only needs to cover the tables it
+    // actually cares about. Tests that install their own db.mockImplementation
+    // fall through to whatever was set before them (e.g. via
+    // db.getMockImplementation()) or use their own catch-all builder, both
+    // of which resolve 'booking_config' harmlessly too.
+    db.mockImplementation((table) => (
+      table === 'booking_config' ? { first: jest.fn().mockResolvedValue(undefined) } : undefined
+    ));
   });
 
   test('an admin-renamed catalog row never changes the visit CLASSIFICATION (codex r20 P1)', () => {
@@ -409,6 +423,62 @@ describe('slot reservation helpers', () => {
     expect(updateBuilder.update).not.toHaveBeenCalled();
   });
 
+  describe('commitReservation — lunch block mirror (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23)', () => {
+    const ENV_KEY = 'GATE_BOOKING_LUNCH_BLOCK';
+    let previous;
+    beforeEach(() => { previous = process.env[ENV_KEY]; });
+    afterEach(() => {
+      if (previous === undefined) delete process.env[ENV_KEY];
+      else process.env[ENV_KEY] = previous;
+    });
+    function wire({ windowStart, windowEnd }) {
+      const dateProbeBuilder = { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ scheduled_date: '2027-05-20' }) };
+      const reservationBuilder = {
+        where: jest.fn().mockReturnThis(), select: jest.fn().mockReturnThis(), forUpdate: jest.fn().mockReturnThis(),
+        first: jest.fn().mockResolvedValue({
+          id: 'scheduled-123', source_estimate_id: 'estimate-456', scheduled_date: '2027-05-20',
+          window_start: windowStart, window_end: windowEnd, technician_id: 'tech-1',
+          reservation_expires_at: '2027-05-20T13:15:00.000Z',
+        }),
+      };
+      const updateBuilder = { where: jest.fn().mockReturnThis(), update: jest.fn().mockReturnThis(), returning: jest.fn() };
+      const scheduledBuilders = [dateProbeBuilder, reservationBuilder, updateBuilder];
+      const techBuilder = makeAssignableTechnicianBuilder({ id: 'tech-1', name: 'Tech One', employment_status: 'active', field_dispatchable: true });
+      const trx = jest.fn((table) => {
+        if (table === 'scheduled_services') return scheduledBuilders.shift();
+        if (table === 'technicians') return techBuilder;
+        throw new Error(`unexpected table ${table}`);
+      });
+      trx.raw = jest.fn((sql) => ({ raw: sql }));
+      trx.isTransaction = true;
+      return { trx, updateBuilder };
+    }
+    const commit = (trx) => slotReservation.commitReservation({
+      scheduledServiceId: 'scheduled-123', customerId: 'customer-1', paymentMethodPreference: 'card_on_file',
+      estimatedPrice: 219.6, estimate: { id: 'estimate-456', service_interest: 'Pest Control' }, trx,
+    });
+
+    test('gate on: a noon hold minted before the flip is refused SLOT_UNAVAILABLE, nothing written', async () => {
+      process.env[ENV_KEY] = 'true';
+      jest.useFakeTimers(); jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+      try {
+        const { trx, updateBuilder } = wire({ windowStart: '12:00:00', windowEnd: '13:00:00' });
+        await expect(commit(trx)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: 'slot is inside the lunch block' });
+        expect(updateBuilder.update).not.toHaveBeenCalled();
+      } finally { jest.useRealTimers(); }
+    });
+
+    test('gate on: an 11:00 hold whose resolved window runs into lunch (11:00-12:30) is refused too', async () => {
+      process.env[ENV_KEY] = 'true';
+      jest.useFakeTimers(); jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+      try {
+        const { trx, updateBuilder } = wire({ windowStart: '11:00:00', windowEnd: '12:30:00' });
+        await expect(commit(trx)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+        expect(updateBuilder.update).not.toHaveBeenCalled();
+      } finally { jest.useRealTimers(); }
+    });
+  });
+
   describe('commitReservation — self-serve notice window (owner ruling 2026-09-23)', () => {
     function wire({ reservationExpiresAt }) {
       const dateProbeBuilder = { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ scheduled_date: '2027-05-20' }) };
@@ -459,6 +529,90 @@ describe('slot reservation helpers', () => {
         expect(row).toMatchObject({ id: 'scheduled-123' });
         expect(updateBuilder.update).not.toHaveBeenCalled();
       } finally { jest.useRealTimers(); }
+    });
+  });
+
+  describe('commitReservation — day-end bound on the FINAL resolved window (Codex r1 P2 on #4663)', () => {
+    // The mocked resolveEstimateSlotProfile (top of file) resolves
+    // durationMinutes: 90 with NO reservationServiceMix — a plain
+    // single-service hold, not a combined visit. The older
+    // reservationServiceMix-scoped day-end guard never covered this case:
+    // a non-capacity hold whose accepted profile lengthens between reserve
+    // and accept (e.g. 60->90 min on a 17:00 hold) graduated with no
+    // day-end check at all. This is the gap the new, unconditional check
+    // closes.
+    function wire({ windowStart, windowEnd }) {
+      const dateProbeBuilder = { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ scheduled_date: '2027-05-20' }) };
+      const reservationBuilder = {
+        where: jest.fn().mockReturnThis(), select: jest.fn().mockReturnThis(), forUpdate: jest.fn().mockReturnThis(),
+        first: jest.fn().mockResolvedValue({
+          id: 'scheduled-123', source_estimate_id: 'estimate-456', scheduled_date: '2027-05-20',
+          window_start: windowStart, window_end: windowEnd, technician_id: 'tech-1',
+          reservation_expires_at: '2027-05-20T13:15:00.000Z',
+        }),
+      };
+      const updateBuilder = { where: jest.fn().mockReturnThis(), update: jest.fn().mockReturnThis(), returning: jest.fn() };
+      const scheduledBuilders = [dateProbeBuilder, reservationBuilder, updateBuilder];
+      const techBuilder = makeAssignableTechnicianBuilder({ id: 'tech-1', name: 'Tech One', employment_status: 'active', field_dispatchable: true });
+      const trx = jest.fn((table) => {
+        if (table === 'scheduled_services') return scheduledBuilders.shift();
+        if (table === 'technicians') return techBuilder;
+        throw new Error(`unexpected table ${table}`);
+      });
+      trx.raw = jest.fn((sql) => ({ raw: sql }));
+      trx.isTransaction = true;
+      return { trx, updateBuilder };
+    }
+    const commit = (trx) => slotReservation.commitReservation({
+      scheduledServiceId: 'scheduled-123', customerId: 'customer-1', paymentMethodPreference: 'card_on_file',
+      estimatedPrice: 219.6, estimate: { id: 'estimate-456', service_interest: 'Pest Control' }, trx,
+    });
+
+    test('a 17:30 hold whose accepted 90-minute profile ends at 19:00 is refused SLOT_UNAVAILABLE, nothing written', async () => {
+      jest.useFakeTimers(); jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+      try {
+        // 17:30 + 90 = 19:00 — past the 18:00 close plus the 59-minute
+        // round-up grace (ROUND_UP_GRACE_MINUTES), so this must reject even
+        // though nothing here overlaps lunch or another visit.
+        const { trx, updateBuilder } = wire({ windowStart: '17:30:00', windowEnd: '18:30:00' });
+        await expect(commit(trx)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: 'slot runs past the end of the working day' });
+        expect(updateBuilder.update).not.toHaveBeenCalled();
+      } finally { jest.useRealTimers(); }
+    });
+
+    // Codex r2 P2 on #4663: this check used to allow ROUND_UP_GRACE_MINUTES
+    // (59) past currentDayEndMinutes() on the FINAL resolved window, not just
+    // the offer-rounding case it exists for. A 17:00 hold (a legitimately
+    // offered start) whose accepted profile lengthens to 90 minutes ends at
+    // 18:30 — inside the old dayEnd+59=18:59 bound, so it committed straight
+    // through the 18:00 close. The exact bound must reject it.
+    test('a 17:00 hold whose accepted 90-minute profile ends at 18:30 is refused SLOT_UNAVAILABLE, nothing written', async () => {
+      jest.useFakeTimers(); jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+      try {
+        const { trx, updateBuilder } = wire({ windowStart: '17:00:00', windowEnd: '18:00:00' });
+        await expect(commit(trx)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: 'slot runs past the end of the working day' });
+        expect(updateBuilder.update).not.toHaveBeenCalled();
+      } finally { jest.useRealTimers(); }
+    });
+
+    // Same exact-bound fix, the reservationServiceMix (combined-visit, non-
+    // capacity) branch: a 17:00 hold whose accepted mixed profile lengthens
+    // to 90 minutes ends at 18:30 — inside the old dayEnd+59 bound, so it
+    // committed straight through the 18:00 close. Codex r2 P2 on #4663.
+    test('a 17:00 combined-visit hold whose accepted 90-minute mix ends at 18:30 is refused capacity_unavailable, nothing written', async () => {
+      jest.useFakeTimers(); jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+      const capabilities = jest.spyOn(require('../services/technician-capabilities'), 'assertCapabilitiesActive')
+        .mockResolvedValue();
+      try {
+        estimateSlotAvailability.resolveEstimateSlotProfile.mockReturnValueOnce({
+          durationMinutes: 90, serviceLabel: 'Pest Control + Lawn Care',
+          reservationServiceMix: { version: 2, services: ['pest_control', 'lawn_care'], durations: [40, 50], durationMinutes: 90 },
+          services: [{ service: 'pest_control', visitsPerYear: 4 }, { service: 'lawn_care', visitsPerYear: 6 }],
+        });
+        const { trx, updateBuilder } = wire({ windowStart: '17:00:00', windowEnd: '18:00:00' });
+        await expect(commit(trx)).rejects.toMatchObject({ code: 'COMBINED_VISIT_UNAVAILABLE', status: 409 });
+        expect(updateBuilder.update).not.toHaveBeenCalled();
+      } finally { capabilities.mockRestore(); jest.useRealTimers(); }
     });
   });
 
@@ -821,8 +975,9 @@ describe('slot reservation helpers', () => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
     try {
-      // 180-minute profile starting 15:00 ends 18:00 — more than the 59-min
-      // round-up grace past the 17:00 close, so no generator offers it.
+      // 180-minute profile starting 16:00 ends 19:00 — more than the 59-min
+      // round-up grace past the 18:00 close (PR 2, 2026-09-23), so no
+      // generator offers it.
       estimateSlotAvailability.resolveEstimateSlotProfile.mockReturnValueOnce({
         serviceMode: 'recurring',
         serviceLabel: 'Lawn Care',
@@ -843,13 +998,143 @@ describe('slot reservation helpers', () => {
       // the DAY-END guard is what rejects (defense-in-depth stays live).
       await expect(slotReservation.reserveSlot({
         estimateId: 'estimate-456',
-        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '15:00', techId: 'tech-1', durationMinutes: 180 }),
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '16:00', techId: 'tech-1', durationMinutes: 180 }),
       })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
       // Rejected before the hold/conflict/insert queries ran.
       expect(scheduledBuilders).toHaveLength(0);
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  test('reserveSlot accepts a 17:00 start with the standard 60-minute visit (ends exactly at the 18:00 day close, PR 2 2026-09-23)', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    try {
+      estimateSlotAvailability.resolveEstimateSlotProfile.mockReturnValueOnce({
+        serviceMode: 'one_time',
+        serviceLabel: 'Pest Control',
+        durationMinutes: 60,
+        services: [],
+      });
+      const estimateBuilder = makeEstimateBuilder({
+        id: 'estimate-456',
+        status: 'sent',
+        service_interest: 'Pest Control',
+      });
+      const technicianBuilder = makeTechnicianBuilder();
+      const insertBuilder = makeInsertBuilder({
+        id: 'scheduled-1700',
+        reservation_expires_at: '2027-05-20T21:15:00.000Z',
+      });
+      const scheduledBuilders = [makeLiveHoldsBuilder([]), makeConflictBuilder(null), makeGlobalProbeBuilder([]), insertBuilder];
+      const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
+      db.transaction = jest.fn(async (callback) => callback(trx));
+
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '17:00', techId: 'tech-1', durationMinutes: 60 }),
+        serviceMode: 'one_time',
+      })).resolves.toEqual({
+        scheduledServiceId: 'scheduled-1700',
+        expiresAt: '2027-05-20T21:15:00.000Z',
+      });
+      expect(insertBuilder.insert).toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  describe('lunch block (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23) — commit-side mirror of the offer filter', () => {
+    const ENV_KEY = 'GATE_BOOKING_LUNCH_BLOCK';
+    let previous;
+    beforeEach(() => { previous = process.env[ENV_KEY]; });
+    afterEach(() => {
+      if (previous === undefined) delete process.env[ENV_KEY];
+      else process.env[ENV_KEY] = previous;
+    });
+
+    function noonProfile() {
+      estimateSlotAvailability.resolveEstimateSlotProfile.mockReturnValueOnce({
+        serviceMode: 'one_time',
+        serviceLabel: 'Pest Control',
+        durationMinutes: 60,
+        services: [],
+      });
+    }
+
+    test('gate on: a signed 12:00 slot is refused as SLOT_UNAVAILABLE before any hold/conflict/insert query', async () => {
+      process.env[ENV_KEY] = 'true';
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+      try {
+        noonProfile();
+        const estimateBuilder = makeEstimateBuilder({ id: 'estimate-456', status: 'sent', service_interest: 'Pest Control' });
+        const technicianBuilder = makeTechnicianBuilder();
+        const scheduledBuilders = [];
+        const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
+        db.transaction = jest.fn(async (callback) => callback(trx));
+
+        // Signed over the profile duration so the HMAC passes and the LUNCH
+        // guard is what rejects (a forged/stale noon slot can't be committed).
+        await expect(slotReservation.reserveSlot({
+          estimateId: 'estimate-456',
+          slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '12:00', techId: 'tech-1', durationMinutes: 60 }),
+          serviceMode: 'one_time',
+        })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: 'slot is inside the lunch block' });
+        expect(scheduledBuilders).toHaveLength(0);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test('gate on: a window that merely TOUCHES the block (11:00–12:00, 13:00–14:00) still reserves', async () => {
+      process.env[ENV_KEY] = 'true';
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+      try {
+        for (const hhmm of ['11:00', '13:00']) {
+          noonProfile();
+          const estimateBuilder = makeEstimateBuilder({ id: 'estimate-456', status: 'sent', service_interest: 'Pest Control' });
+          const technicianBuilder = makeTechnicianBuilder();
+          const insertBuilder = makeInsertBuilder({ id: `scheduled-${hhmm}`, reservation_expires_at: '2027-05-20T21:15:00.000Z' });
+          const scheduledBuilders = [makeLiveHoldsBuilder([]), makeConflictBuilder(null), makeGlobalProbeBuilder([]), insertBuilder];
+          const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
+          db.transaction = jest.fn(async (callback) => callback(trx));
+          await expect(slotReservation.reserveSlot({
+            estimateId: 'estimate-456',
+            slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm, techId: 'tech-1', durationMinutes: 60 }),
+            serviceMode: 'one_time',
+          })).resolves.toMatchObject({ scheduledServiceId: `scheduled-${hhmm}` });
+          expect(insertBuilder.insert).toHaveBeenCalled();
+        }
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test('gate unset (default): the same 12:00 slot reserves — noon is an ordinary hour', async () => {
+      delete process.env[ENV_KEY];
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+      try {
+        noonProfile();
+        const estimateBuilder = makeEstimateBuilder({ id: 'estimate-456', status: 'sent', service_interest: 'Pest Control' });
+        const technicianBuilder = makeTechnicianBuilder();
+        const insertBuilder = makeInsertBuilder({ id: 'scheduled-noon', reservation_expires_at: '2027-05-20T21:15:00.000Z' });
+        const scheduledBuilders = [makeLiveHoldsBuilder([]), makeConflictBuilder(null), makeGlobalProbeBuilder([]), insertBuilder];
+        const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
+        db.transaction = jest.fn(async (callback) => callback(trx));
+        await expect(slotReservation.reserveSlot({
+          estimateId: 'estimate-456',
+          slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '12:00', techId: 'tech-1', durationMinutes: 60 }),
+          serviceMode: 'one_time',
+        })).resolves.toEqual({ scheduledServiceId: 'scheduled-noon', expiresAt: '2027-05-20T21:15:00.000Z' });
+        expect(insertBuilder.insert).toHaveBeenCalled();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
   });
 
   test('reserveSlot refreshes this estimate\'s own live hold for the same slot instead of 409ing', async () => {
@@ -1795,5 +2080,196 @@ describe('releaseExpiredReservations', () => {
     // Pass 2: the DELETE is scoped to uncommitted holds only.
     expect(delChain.whereNull).toHaveBeenCalledWith('customer_id');
     expect(delChain.del).toHaveBeenCalled();
+  });
+});
+
+// Codex push-audit P1 on #4663: reserveSlot/commitReservation must fail
+// closed (SLOT_UNAVAILABLE) rather than admitting a window against the
+// guessed fixed constants when booking_config has NEVER been successfully
+// read — otherwise a fresh process whose first read fails would silently
+// treat every reservation as unrestricted (e.g. admitting an 11:00 booking
+// against a configured 11:00-12:00 lunch) until some later read succeeds.
+// Isolated in its own module registry (jest.resetModules()) so
+// customer-windows.js's cache genuinely starts unknown — the rest of this
+// file's tests establish a known (successful, if empty) config the moment
+// they run, and that cache is shared module state for the whole file.
+describe('reserveSlot/commitReservation fail closed when booking_config has never been read (push-audit P1 on #4663)', () => {
+  let isolatedDb;
+  let isolatedSlotReservation;
+
+  beforeEach(() => {
+    jest.resetModules();
+    isolatedDb = require('../models/db');
+    isolatedDb.mockImplementation((table) => {
+      if (table === 'booking_config') throw new Error('simulated booking_config read failure');
+      throw new Error(`unexpected table ${table}`);
+    });
+    isolatedSlotReservation = require('../services/slot-reservation');
+  });
+
+  test('reserveSlot rejects SLOT_UNAVAILABLE before any other query', async () => {
+    // The fail-closed check runs before parseSlotId/verifySlotOffer, so
+    // this never needs to be a validly-signed offer.
+    await expect(isolatedSlotReservation.reserveSlot({
+      estimateId: 'estimate-456', slotId: '2027-05-20_09-00_tech-1.exp.sig',
+    })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+    // Only the booking_config attempt — parseSlotId/verifySlotOffer and every
+    // later query never ran.
+    expect(isolatedDb).toHaveBeenCalledTimes(1);
+    expect(isolatedDb).toHaveBeenCalledWith('booking_config');
+  });
+
+  test('commitReservation rejects SLOT_UNAVAILABLE before any other query', async () => {
+    await expect(isolatedSlotReservation.commitReservation({
+      scheduledServiceId: 'scheduled-123', customerId: 'customer-1',
+      estimate: { id: 'estimate-456', service_interest: 'Pest Control' },
+    })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+    expect(isolatedDb).toHaveBeenCalledTimes(1);
+    expect(isolatedDb).toHaveBeenCalledWith('booking_config');
+  });
+
+  // Codex push-audit P1 on #4663 (a later round, on the fail-closed commit
+  // above): estimate acceptance and one-tap purchase call commitReservation
+  // with an ACTIVE trx already holding scheduling locks. Reading
+  // booking_config through the global pool on a cache miss there would try
+  // to check out a SECOND pooled connection while the first sits held —
+  // under load (every other connection similarly blocked behind those same
+  // locks) that second checkout can stall until it times out. Must read
+  // through the supplied trx instead.
+  test('commitReservation with a caller-supplied trx reads booking_config through THAT trx, never the global pool', async () => {
+    const trxMock = jest.fn((table) => {
+      if (table === 'booking_config') return { first: jest.fn().mockResolvedValue(undefined) };
+      throw new Error(`unexpected trx table ${table}`);
+    });
+    trxMock.isTransaction = true;
+    // savepointRead (utils/savepoint-read.js) isolates the read in its own
+    // SAVEPOINT whenever conn.isTransaction — exercise that path too.
+    trxMock.raw = jest.fn().mockResolvedValue(undefined);
+    // Fails later for an unrelated reason (no further trx table mocks
+    // wired) — this test only cares that the fail-closed check passed and
+    // that booking_config was read through trx, not isolatedDb.
+    await expect(isolatedSlotReservation.commitReservation({
+      scheduledServiceId: 'scheduled-123', customerId: 'customer-1',
+      estimate: { id: 'estimate-456', service_interest: 'Pest Control' },
+      trx: trxMock,
+    })).rejects.toThrow();
+    expect(isolatedDb).not.toHaveBeenCalledWith('booking_config');
+    expect(trxMock).toHaveBeenCalledWith('booking_config');
+  });
+
+  // Codex push-audit P1 on #4663 (a later round, on the trx-routing fix
+  // above): a caught JS error does NOT undo what PostgreSQL itself did — a
+  // failed statement aborts the rest of that transaction until a ROLLBACK
+  // (or, scoped tighter, a ROLLBACK TO SAVEPOINT). Reading booking_config
+  // through the caller's trx without a savepoint would poison every later
+  // query on that same trx (breaking estimate acceptance/one-tap purchase
+  // entirely) the moment this optional read failed.
+  test('a failing booking_config read on a caller-supplied trx rolls back to a savepoint, never poisoning the caller\'s transaction', async () => {
+    const rawCalls = [];
+    const trxMock = jest.fn((table) => {
+      if (table === 'booking_config') throw new Error('simulated booking_config read failure');
+      throw new Error(`unexpected trx table ${table}`);
+    });
+    trxMock.isTransaction = true;
+    trxMock.raw = jest.fn(async (sql) => { rawCalls.push(sql); });
+    await expect(isolatedSlotReservation.commitReservation({
+      scheduledServiceId: 'scheduled-123', customerId: 'customer-1',
+      estimate: { id: 'estimate-456', service_interest: 'Pest Control' },
+      trx: trxMock,
+    })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+    expect(rawCalls.some((sql) => /^SAVEPOINT /.test(sql))).toBe(true);
+    expect(rawCalls.some((sql) => /^ROLLBACK TO SAVEPOINT /.test(sql))).toBe(true);
+    expect(rawCalls.some((sql) => /^RELEASE SAVEPOINT /.test(sql))).toBe(true);
+  });
+});
+
+// Codex r4 P2 on #4663: capacity-mode commits enforced the day-end bound
+// only via verifyArrivalCapacity/placementFitsShift, which checks the FIXED
+// SHIFT.endMinutes fallback (18:00) — never a preserved, non-18:00
+// booking_config.day_end override. commitReservation's own day-end checks
+// (the "day-end bound" describe above) now run unconditionally, in BOTH
+// capacity modes. Isolated in its own module registry (jest.resetModules())
+// for the same reason as the fail-closed describe above: this file's
+// customer-windows.js cache is warmed by earlier tests' default (empty)
+// booking_config and would otherwise mask a configured override for the
+// rest of the file's run (the 60s TTL outlives the whole suite).
+describe('commitReservation enforces a configured close in capacity mode (Codex r4 P2 on #4663)', () => {
+  let isolatedSlotReservation;
+
+  beforeEach(() => {
+    jest.resetModules();
+    isolatedSlotReservation = require('../services/slot-reservation');
+  });
+
+  function wire({ windowStart, windowEnd, dayEnd }) {
+    const dateProbeBuilder = { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ scheduled_date: '2027-05-20' }) };
+    const reservationBuilder = {
+      where: jest.fn().mockReturnThis(), select: jest.fn().mockReturnThis(), forUpdate: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({
+        id: 'scheduled-123', source_estimate_id: 'estimate-456', scheduled_date: '2027-05-20',
+        window_start: windowStart, window_end: windowEnd, technician_id: 'tech-1',
+        reservation_expires_at: '2027-05-20T13:15:00.000Z',
+        // Capacity-mode hold, independent of the (unset in this describe)
+        // GATE_SCHEDULING_CAPACITY env — matches a hold minted while the
+        // gate was on and later accepted after it flipped off.
+        reservation_policy_version: 2,
+        // Must match the mocked resolveEstimateSlotProfile's durationMinutes
+        // (90) — resolveReservationServiceProfile's own duration-unchanged
+        // guard for a version-2 hold throws service_duration_changed
+        // otherwise, before this test's day-end check is ever reached.
+        estimated_duration_minutes: 90,
+      }),
+    };
+    const updateBuilder = { where: jest.fn().mockReturnThis(), update: jest.fn().mockReturnThis(), returning: jest.fn() };
+    const bookingConfigBuilder = { first: jest.fn().mockResolvedValue({ day_end: dayEnd, lunch_start: null, lunch_end: null }) };
+    const scheduledBuilders = [dateProbeBuilder, reservationBuilder, updateBuilder];
+    const techBuilder = { where: jest.fn(function chain() { return this; }), forShare: jest.fn(function chain() { return this; }),
+      first: jest.fn().mockResolvedValue({ id: 'tech-1', employment_status: 'active', field_dispatchable: true }) };
+    const trx = jest.fn((table) => {
+      if (table === 'scheduled_services') return scheduledBuilders.shift();
+      if (table === 'technicians') return techBuilder;
+      if (table === 'booking_config') return bookingConfigBuilder;
+      throw new Error(`unexpected table ${table}`);
+    });
+    trx.raw = jest.fn((sql) => ({ raw: sql }));
+    trx.isTransaction = true;
+    return { trx, updateBuilder };
+  }
+  const commit = (trx) => isolatedSlotReservation.commitReservation({
+    scheduledServiceId: 'scheduled-123', customerId: 'customer-1', paymentMethodPreference: 'card_on_file',
+    estimatedPrice: 219.6, estimate: { id: 'estimate-456', service_interest: 'Pest Control' }, trx,
+  });
+
+  // The mocked resolveEstimateSlotProfile (re-registered fresh after
+  // jest.resetModules(), same factory as the top of this file) always
+  // resolves durationMinutes: 90 regardless of the stored row's window_end
+  // — a 16:00 start + that accepted 90-minute profile ends at 17:30,
+  // comfortably inside the fixed 18:00 shift but past a configured 16:00
+  // close.
+  test('a 16:00 hold whose accepted 90-minute profile ends at 17:30 is refused once booking_config.day_end is configured to 16:00, even though placementFitsShift\'s fixed 18:00 alone would admit it', async () => {
+    jest.useFakeTimers(); jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    try {
+      const { trx, updateBuilder } = wire({ windowStart: '16:00:00', windowEnd: '17:30:00', dayEnd: '16:00:00' });
+      await expect(commit(trx)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: 'slot runs past the end of the working day' });
+      expect(updateBuilder.update).not.toHaveBeenCalled();
+    } finally { jest.useRealTimers(); }
+  });
+
+  // Full success needs verifyArrivalCapacity + findInterviewConflicts (both
+  // real, Postgres-backed functions imported by direct destructuring, not a
+  // lazy require() — not spy-able after the fact, and out of scope for this
+  // lightweight commit-path harness; the Postgres suites cover the full
+  // capacity-mode commit path end to end). This asserts the narrower claim:
+  // the SAME hold that the previous test's 16:00 close rejects at the
+  // day-end check is NOT rejected there once the close is the default
+  // 18:00 — whatever it fails on afterward is a different, expected gap in
+  // this mock (a real DB call this harness doesn't wire).
+  test('the same 16:00 hold is not rejected by the day-end check once booking_config.day_end is the default 18:00', async () => {
+    jest.useFakeTimers(); jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    try {
+      const { trx, updateBuilder } = wire({ windowStart: '16:00:00', windowEnd: '17:30:00', dayEnd: '18:00:00' });
+      await expect(commit(trx)).rejects.not.toMatchObject({ message: 'slot runs past the end of the working day' });
+      expect(updateBuilder.update).not.toHaveBeenCalled();
+    } finally { jest.useRealTimers(); }
   });
 });
