@@ -945,6 +945,12 @@ function recordCarriesStatedStreet(item) {
   // Main" answers a card about "1250 Main St").
   const { sameHouseNumberStreet } = require('./call-triage-flags');
   if (!sameHouseNumberStreet(payload?.stated_street, item.customer_address_line1)) return false;
+  // A stated unit must be on the record too: the validated DOOR is the
+  // premise, not the building (codex r12 P1).
+  if (String(payload?.stated_unit || '').trim()) {
+    const recordUnit = unitOf(item.customer_address_line1, item.customer_address_line2);
+    if (!recordUnit || recordUnit !== unitOf(payload.stated_street, payload.stated_unit)) return false;
+  }
   // The stated locality must hold on the record too (same helper the
   // address-moot rules use): a ZIP or city the caller gave that the record
   // now lacks or contradicts is not the same premise (pre-push audit P1).
