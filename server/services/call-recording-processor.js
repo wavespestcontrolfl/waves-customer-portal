@@ -1180,6 +1180,22 @@ function summarizeKnownCaller(customer) {
   };
 }
 
+// What a house-number DISPUTE does to a reused AI booking, pure (tested in
+// call-onfile-house-number-conflict.test.js): new side effects (default
+// technician backfill, follow-up creation) are held whenever disputed;
+// existing assignments are pulled only under this pass's processing claim
+// and never off a human's attached booking. Status is enforced atomically
+// by the assignment writer (allowedStatuses), not here.
+function disputeReuseDecision({ disputed = false, owned = false, attachedManualBooking = false, technicianId = null } = {}) {
+  const held = !!disputed;
+  const mayPull = held && !!owned && !attachedManualBooking;
+  return {
+    holdNewSideEffects: held,
+    pullPrimaryAssignment: mayPull && !!technicianId,
+    pullFollowUpAssignments: mayPull,
+  };
+}
+
 // The fail-open routing input for a known caller: null unless they are a
 // customer we actively serve, else the on-file address components so the
 // gate can tell a RESTATED on-file address from a new one (statesNewAddress).
@@ -13939,7 +13955,10 @@ const CallRecordingProcessor = {
                     disputeOwned = !!ownedForDispute;
                     if (!disputeOwned) logger.info(`[call-proc] processing claim lost — dispute unassignments skipped for ${maskSid(callSid)} (the owner applies them)`);
                   }
-                  const reuseHeldForAddress = houseNumberDisputed;
+                  const reuseDecision = disputeReuseDecision({
+                    disputed: houseNumberDisputed, owned: disputeOwned, attachedManualBooking: isAttachedManualBooking, technicianId: existing.technician_id,
+                  });
+                  const reuseHeldForAddress = reuseDecision.holdNewSideEffects;
                   if (reuseHeldForAddress) {
                     logger.warn(`[call-proc] reused booking for ${maskSid(callSid)} kept unassigned and without a follow-up: house number disputed (on_file_house_number_conflict)`);
                   }
@@ -13956,7 +13975,7 @@ const CallRecordingProcessor = {
                   // card is the office's surface for it (pre-push audit P1).
                   // The status predicate is enforced ATOMICALLY by the writer
                   // (allowedStatuses on its CAS write), not by this read.
-                  if (reuseHeldForAddress && disputeOwned && !isAttachedManualBooking && existing.technician_id) {
+                  if (reuseDecision.pullPrimaryAssignment) {
                     // Through the canonical assignment writer (codex r7 P1):
                     // its technician CAS (expectTechnicianId) refuses to
                     // overwrite a dispatcher's NEWER assignment, it holds the
@@ -13994,7 +14013,7 @@ const CallRecordingProcessor = {
                   // whenever the AI booking is, whether or not the parent
                   // still carried a technician (pre-push audit P1); same
                   // writer, same CAS (codex r6 P1).
-                  if (reuseHeldForAddress && disputeOwned && !isAttachedManualBooking) {
+                  if (reuseDecision.pullFollowUpAssignments) {
                     const { assignDispatchJob } = require('./dispatch-assignment');
                     const children = await trx('scheduled_services')
                       .where({ parent_service_id: existing.id, source_action: 'ai_call_pipeline_followup' })
@@ -17978,3 +17997,5 @@ CallRecordingProcessor.v2IsoToEtWallClock = v2IsoToEtWallClock;
 CallRecordingProcessor.recoveryMarkerPayload = recoveryMarkerPayload;
 
 module.exports = CallRecordingProcessor;
+// Pure decision helper, exported for its unit test.
+module.exports.disputeReuseDecision = disputeReuseDecision;

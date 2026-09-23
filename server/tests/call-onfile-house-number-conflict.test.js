@@ -239,3 +239,52 @@ describe('visitAtStatedAddress', () => {
     expect(visitAtStatedAddress({ ...card, payload: {} }, visit('1250 Example St'), new Map())).toBe(false);
   });
 });
+
+describe('heldConflictTaskDecision (verdict route)', () => {
+  const { __private } = require('../routes/admin-triage');
+  const { heldConflictTaskDecision } = __private;
+  const held = {
+    scheduling_window: { status: 'confirmed', confirmed_start_at: '2026-09-25T14:00:00Z', requested_address: { street_line_1: '1250 Example St', city: 'Parrish', postal_code: '34219' } },
+    on_file_address: { address_line1: '1260 Example St', address_line2: null, city: 'Parrish', zip: '34219' },
+    stated_street: '1250 Example St',
+  };
+
+  test('Accept on a confirmed, unbooked call files the task, judged at the approved on-file address', () => {
+    const d = heldConflictTaskDecision({ verdict: 'accept', wrongFields: [], heldConflictPayload: held, bookingCovered: false });
+    expect(d.file).toBe(true);
+    expect(d.skippedReason).toBe('address_confirmed_on_file_after_house_number_dispute');
+    expect(d.approvedWindow.requested_address).toEqual({ street_line_1: '1260 Example St', street_line_2: null, city: 'Parrish', postal_code: '34219' });
+    expect(d.approvedPayload.stated_street).toBeUndefined();
+    expect(d.approvedPayload.heard_address.street_line_1).toBe('1260 Example St');
+  });
+
+  test('a covering booking, or a card whose call never confirmed, files nothing', () => {
+    expect(heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, bookingCovered: true }).file).toBe(false);
+    expect(heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: { ...held, scheduling_window: { status: 'none' } } }).file).toBe(false);
+    expect(heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: null }).file).toBe(false);
+  });
+
+  test('Deny keeps the appointment owed unless the scheduling extraction itself was denied', () => {
+    expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['address'], heldConflictPayload: held }).file).toBe(true);
+    expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['address'], heldConflictPayload: held }).skippedReason).toBe('house_number_dispute_denied_appointment_unbooked');
+    expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['scheduling'], heldConflictPayload: held }).file).toBe(false);
+  });
+});
+
+describe('disputeReuseDecision (reused AI booking under a dispute)', () => {
+  const { disputeReuseDecision } = require('../services/call-recording-processor');
+
+  test('no dispute → nothing held, nothing pulled', () => {
+    expect(disputeReuseDecision({ disputed: false, owned: true, technicianId: 't1' })).toEqual({ holdNewSideEffects: false, pullPrimaryAssignment: false, pullFollowUpAssignments: false });
+  });
+
+  test('a dispute holds new side effects always, and pulls assignments only under the processing claim', () => {
+    expect(disputeReuseDecision({ disputed: true, owned: true, technicianId: 't1' })).toEqual({ holdNewSideEffects: true, pullPrimaryAssignment: true, pullFollowUpAssignments: true });
+    expect(disputeReuseDecision({ disputed: true, owned: false, technicianId: 't1' })).toEqual({ holdNewSideEffects: true, pullPrimaryAssignment: false, pullFollowUpAssignments: false });
+    expect(disputeReuseDecision({ disputed: true, owned: true, technicianId: null })).toEqual({ holdNewSideEffects: true, pullPrimaryAssignment: false, pullFollowUpAssignments: true });
+  });
+
+  test("a human's attached booking is never touched", () => {
+    expect(disputeReuseDecision({ disputed: true, owned: true, attachedManualBooking: true, technicianId: 't1' })).toEqual({ holdNewSideEffects: true, pullPrimaryAssignment: false, pullFollowUpAssignments: false });
+  });
+});

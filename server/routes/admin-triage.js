@@ -604,6 +604,43 @@ router.post('/:id/apply-property-roles', async (req, res) => {
 // (address_review + name_review …) and the reviewer judges the call once. The
 // per-flag detail lives in wrong_fields. Resolving the whole call also avoids
 // orphaned sibling rows inheriting this verdict via the call_log_id join.
+// The held-conflict → scheduling-task decision, pure (tested in
+// call-onfile-house-number-conflict.test.js): given the verdict, the
+// reviewer's wrong fields, the held card's payload and whether a covering
+// booking already exists, says whether a fallback task files and with what
+// snapshot. Accept = the on-file address is right (the ask is re-judged
+// there); Deny keeps the appointment owed unless the scheduling extraction
+// itself was denied.
+function heldConflictTaskDecision({ verdict, wrongFields = [], heldConflictPayload = null, bookingCovered = false } = {}) {
+  const payload = heldConflictPayload && typeof heldConflictPayload === 'object' ? heldConflictPayload : null;
+  const confirmed = !!payload && (payload.scheduling_window?.status === 'confirmed' || payload.scheduling_status === 'confirmed');
+  const scheduleDenied = verdict === 'deny' && wrongFields.includes('scheduling');
+  const onFile = payload?.on_file_address || null;
+  const approvedAddress = onFile
+    ? { street_line_1: onFile.address_line1, street_line_2: onFile.address_line2 || null, city: onFile.city || null, postal_code: onFile.zip || null }
+    : null;
+  const approvedWindow = payload?.scheduling_window
+    ? { ...payload.scheduling_window, ...(approvedAddress ? { requested_address: approvedAddress } : {}) }
+    : null;
+  const approvedPayload = payload ? {
+    ...payload,
+    stated_street: undefined,
+    address_as_heard: undefined,
+    heard_address: approvedAddress || payload.heard_address,
+    ...(approvedWindow ? { scheduling_window: approvedWindow } : {}),
+  } : null;
+  return {
+    confirmed,
+    approvedPayload,
+    approvedWindow,
+    file: confirmed && !scheduleDenied && !bookingCovered,
+    skippedReason: verdict === 'accept' ? 'address_confirmed_on_file_after_house_number_dispute' : 'house_number_dispute_denied_appointment_unbooked',
+    summary: verdict === 'accept'
+      ? 'Address confirmed on file after a house-number dispute — the confirmed appointment still needs booking'
+      : 'House-number dispute card denied — the confirmed appointment still needs booking',
+  };
+}
+
 router.post('/:id/verdict', async (req, res) => {
   try {
     const { id } = req.params;
@@ -703,8 +740,7 @@ router.post('/:id/verdict', async (req, res) => {
       const heldConflictPayload = typeof heldConflict?.payload === 'string'
         ? (() => { try { return JSON.parse(heldConflict.payload); } catch { return null; } })()
         : heldConflict?.payload;
-      const heldConflictConfirmed = !!heldConflictPayload
-        && (heldConflictPayload.scheduling_window?.status === 'confirmed' || heldConflictPayload.scheduling_status === 'confirmed');
+      const heldConflictConfirmed = heldConflictTaskDecision({ verdict, wrongFields, heldConflictPayload }).confirmed;
       const resolvedRows = await trx('triage_items')
         .where({ call_log_id: item.call_log_id })
         // Bounce follow-ups, pending property-role confirmations, and parked
@@ -785,63 +821,39 @@ router.post('/:id/verdict', async (req, res) => {
         }
       }
 
-      // Both verdicts: a Deny resolves the card just the same, and the
-      // confirmed appointment is still owed unless the reviewer denied the
-      // SCHEDULING extraction itself (wrong_fields includes 'scheduling')
-      // — then there was no appointment to hand on (pre-push audit P1).
-      const scheduleDenied = verdict === 'deny' && wrongFields.includes('scheduling');
-      if (!scheduleDenied && heldConflictConfirmed
-        && resolvedRows.some((r) => r?.reason_code === 'on_file_house_number_conflict')) {
+      if (heldConflictConfirmed && resolvedRows.some((r) => r?.reason_code === 'on_file_house_number_conflict')) {
+        // Pre-decision (address-independent parts) so the evidence item can
+        // carry the approved snapshot; the coverage check reads
+        // scheduling_window.requested_address.
+        const pre = heldConflictTaskDecision({ verdict, wrongFields, heldConflictPayload });
         // The same service / window / address coverage the sweep's booking
         // evidence applies — an unrelated older booking sharing this call
         // (a reprocess moved the service, date or property) must not stand
         // in for the appointment the card holds (codex r7 P1). The loader
         // reads the call's customer itself; with its gate off it yields no
-        // evidence, so the task card files (fail closed).
+        // evidence, so the task card files (fail closed). Judged at the
+        // approved on-file address, from the call onward (an earlier pass's
+        // booking counts).
         const { loadEvidence } = require('../services/triage-auto-resolve');
         const callRow = await trx('call_log').where({ id: item.call_log_id }).first('customer_id', 'created_at');
-        // The row's own identity (id, call_log_id): the coverage check
-        // associates bookings through source_call_log_id (pre-push audit
-        // P1). Accept means the ON-FILE address is the right one, so the
-        // ask is judged at that address (the card's heard address is
-        // rewritten to it), and a booking this call created BEFORE the card
-        // (an earlier pass) counts too — the evidence boundary is the call,
-        // not the card (pre-push audit P1).
-        const onFile = heldConflictPayload.on_file_address || null;
-        const approvedAddress = onFile
-          ? { street_line_1: onFile.address_line1, street_line_2: onFile.address_line2 || null, city: onFile.city || null, postal_code: onFile.zip || null }
-          : null;
-        // The coverage check reads scheduling_window.requested_address —
-        // rewritten to the approved on-file address, as is the heard
-        // address; the replacement task carries the same snapshot.
-        const approvedWindow = heldConflictPayload.scheduling_window
-          ? { ...heldConflictPayload.scheduling_window, ...(approvedAddress ? { requested_address: approvedAddress } : {}) }
-          : null;
-        const approvedPayload = {
-          ...heldConflictPayload,
-          stated_street: undefined,
-          address_as_heard: undefined,
-          heard_address: approvedAddress || heldConflictPayload.heard_address,
-          ...(approvedWindow ? { scheduling_window: approvedWindow } : {}),
-        };
         const heldItem = {
           id: item.id, call_log_id: item.call_log_id, reason_code: 'on_file_house_number_conflict', status: 'open',
-          created_at: callRow?.created_at || item.created_at, payload: approvedPayload, call_customer_id: callRow?.customer_id || null,
+          created_at: callRow?.created_at || item.created_at, payload: pre.approvedPayload, call_customer_id: callRow?.customer_id || null,
         };
         const evidence = await loadEvidence(trx, [heldItem]).catch(() => new Map());
-        const liveBooking = evidence.get(item.id)?.booking_after_card === true;
-        if (!liveBooking) {
+        const decision = heldConflictTaskDecision({
+          verdict, wrongFields, heldConflictPayload, bookingCovered: evidence.get(item.id)?.booking_after_card === true,
+        });
+        if (decision.file) {
           const { buildTriageItem } = require('../services/call-routing-gates');
           await trx('triage_items')
             .insert(buildTriageItem({
               callLogId: item.call_log_id,
               flag: 'auto_booking_skipped_after_approval',
-              extraction: { meta: { call_summary: verdict === 'accept'
-                ? 'Address confirmed on file after a house-number dispute — the confirmed appointment still needs booking'
-                : 'House-number dispute card denied — the confirmed appointment still needs booking' }, scheduling: heldConflictPayload.scheduling_window || { status: 'confirmed' } },
+              extraction: { meta: { call_summary: decision.summary }, scheduling: decision.approvedWindow || { status: 'confirmed' } },
               extraPayload: {
-                skipped_reason: verdict === 'accept' ? 'address_confirmed_on_file_after_house_number_dispute' : 'house_number_dispute_denied_appointment_unbooked',
-                scheduling_window: approvedWindow,
+                skipped_reason: decision.skippedReason,
+                scheduling_window: decision.approvedWindow,
                 on_file_address: heldConflictPayload.on_file_address || null,
               },
             }))
@@ -997,4 +1009,5 @@ router.post('/auto-routed/:callLogId/verdict', async (req, res) => {
 
 module.exports = router;
 module.exports.transitionCore = transitionCore;
-module.exports.__private = { sanitizeWrongFields, denyRejectsUnitEvidence, WRONG_FIELDS, VERDICTS };
+module.exports.__private = {
+  heldConflictTaskDecision, sanitizeWrongFields, denyRejectsUnitEvidence, WRONG_FIELDS, VERDICTS };
