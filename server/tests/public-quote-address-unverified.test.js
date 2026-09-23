@@ -115,6 +115,12 @@ describe('nextAddressUnverified', () => {
   test('a roll that never answered (outage, or no cached profile) keeps the prior flag', () => {
     expect(countyRollAnswered({ fieldVerifyFlags: [] })).toBe(false);
     expect(countyRollAnswered({ addressAudit: AUDIT })).toBe(true);
+    // A county-backed record that agreed with the typed number skips the
+    // audit — that is an answer and clears a prior flag; 'unanswered' does not.
+    expect(countyRollAnswered({ fieldVerifyFlags: [], addressVerdict: 'county_record' })).toBe(true);
+    expect(countyRollAnswered({ fieldVerifyFlags: [], addressVerdict: 'unanswered' })).toBe(false);
+    expect(nextAddressUnverified({ enriched: { fieldVerifyFlags: [], addressVerdict: 'county_record' }, profileFound: true, prior })).toBeNull();
+    expect(nextAddressUnverified({ enriched: { fieldVerifyFlags: [], addressVerdict: 'unanswered' }, profileFound: true, prior })).toBe(prior);
     expect(nextAddressUnverified({ enriched: { fieldVerifyFlags: [] }, profileFound: true, prior })).toBe(prior);
     expect(nextAddressUnverified({ enriched: null, profileFound: false, prior })).toBe(prior);
     expect(nextAddressUnverified({ enriched: { fieldVerifyFlags: [] }, profileFound: true, prior: null })).toBeNull();

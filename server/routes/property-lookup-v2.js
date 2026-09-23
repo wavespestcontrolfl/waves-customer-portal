@@ -2493,6 +2493,14 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     propertyProviders: rc?._aiProviders || [],
     analysisNotes: ai?.analysisNotes || '',
     addressAudit,
+    // How the typed address was vouched for: 'audited' (the county roll
+    // answered the house-number audit — match or not, see addressAudit),
+    // 'county_record' (a county/parcel-backed record whose own house
+    // number agrees with the typed one, so the audit was skipped), or
+    // 'unanswered' (no county signal at all — outage, out-of-area). The
+    // quote intake clears a prior address flag only on the first two;
+    // an unanswered profile must not erase an earlier warning.
+    addressVerdict: addressAudit ? 'audited' : (hasCountyEvidence(rc) ? 'county_record' : 'unanswered'),
     fieldVerifyFlags,
 
     // ── DATA SOURCE TRACKING ──

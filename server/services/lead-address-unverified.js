@@ -105,8 +105,16 @@ function flagCoversAddress(flag, address) {
 // Did the county roll ANSWER on this profile? The audit object is present
 // whenever the roll replied (match or not); a GIS outage yields no audit
 // at all (auditAddressHouseNumber). Only an answer may clear a prior flag.
+// A county-backed record whose house number agreed with the typed one
+// skips the audit (property-lookup-v2 runs it only when county evidence is
+// missing or the record's number disagrees) — that is a vouch, not an
+// outage, and must clear a prior flag (pre-push audit P1). The profile
+// says which via addressVerdict; older cached profiles fall back to the
+// audit object alone.
 function countyRollAnswered(enriched) {
-  return !!(enriched && typeof enriched === 'object' && enriched.addressAudit && typeof enriched.addressAudit === 'object');
+  if (!enriched || typeof enriched !== 'object') return false;
+  if (enriched.addressAudit && typeof enriched.addressAudit === 'object') return true;
+  return enriched.addressVerdict === 'audited' || enriched.addressVerdict === 'county_record';
 }
 
 // The flag this run should persist: a fresh verdict when the roll answered,
