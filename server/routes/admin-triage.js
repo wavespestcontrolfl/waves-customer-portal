@@ -611,11 +611,15 @@ router.post('/:id/apply-property-roles', async (req, res) => {
 // snapshot. Accept = the on-file address is right (the ask is re-judged
 // there); Deny keeps the appointment owed unless the scheduling extraction
 // itself was denied.
-function heldConflictTaskDecision({ verdict, wrongFields = [], heldConflictPayload = null, bookingCovered = false } = {}) {
+// `liveOnFile`: the customer's CURRENT address at verdict time (re-read
+// under the call lock) — it outranks the card's filing-time snapshot, since
+// the office may have adopted the caller's number since (pre-push audit
+// P1); the snapshot is the fallback for an unlinked call.
+function heldConflictTaskDecision({ verdict, wrongFields = [], heldConflictPayload = null, bookingCovered = false, liveOnFile = null } = {}) {
   const payload = heldConflictPayload && typeof heldConflictPayload === 'object' ? heldConflictPayload : null;
   const confirmed = !!payload && (payload.scheduling_window?.status === 'confirmed' || payload.scheduling_status === 'confirmed');
   const scheduleDenied = verdict === 'deny' && wrongFields.includes('scheduling');
-  const onFile = payload?.on_file_address || null;
+  const onFile = (liveOnFile && String(liveOnFile.address_line1 || '').trim()) ? liveOnFile : (payload?.on_file_address || null);
   const approvedAddress = onFile
     ? { street_line_1: onFile.address_line1, street_line_2: onFile.address_line2 || null, city: onFile.city || null, postal_code: onFile.zip || null }
     : null;
@@ -825,7 +829,12 @@ router.post('/:id/verdict', async (req, res) => {
         // Pre-decision (address-independent parts) so the evidence item can
         // carry the approved snapshot; the coverage check reads
         // scheduling_window.requested_address.
-        const pre = heldConflictTaskDecision({ verdict, wrongFields, heldConflictPayload });
+        const callRowForAddress = await trx('call_log').where({ id: item.call_log_id }).first('customer_id');
+        const liveCustomer = callRowForAddress?.customer_id
+          ? await trx('customers').where({ id: callRowForAddress.customer_id }).whereNull('deleted_at').first('address_line1', 'address_line2', 'city', 'zip')
+          : null;
+        const liveOnFile = liveCustomer ? { address_line1: liveCustomer.address_line1, address_line2: liveCustomer.address_line2, city: liveCustomer.city, zip: liveCustomer.zip } : null;
+        const pre = heldConflictTaskDecision({ verdict, wrongFields, heldConflictPayload, liveOnFile });
         // The same service / window / address coverage the sweep's booking
         // evidence applies — an unrelated older booking sharing this call
         // (a reprocess moved the service, date or property) must not stand
@@ -842,7 +851,7 @@ router.post('/:id/verdict', async (req, res) => {
         };
         const evidence = await loadEvidence(trx, [heldItem]).catch(() => new Map());
         const decision = heldConflictTaskDecision({
-          verdict, wrongFields, heldConflictPayload, bookingCovered: evidence.get(item.id)?.booking_after_card === true,
+          verdict, wrongFields, heldConflictPayload, liveOnFile, bookingCovered: evidence.get(item.id)?.booking_after_card === true,
         });
         if (decision.file) {
           const { buildTriageItem } = require('../services/call-routing-gates');
@@ -854,7 +863,7 @@ router.post('/:id/verdict', async (req, res) => {
               extraPayload: {
                 skipped_reason: decision.skippedReason,
                 scheduling_window: decision.approvedWindow,
-                on_file_address: heldConflictPayload.on_file_address || null,
+                on_file_address: liveOnFile || heldConflictPayload.on_file_address || null,
               },
             }))
             .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))

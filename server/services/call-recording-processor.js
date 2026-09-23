@@ -13996,6 +13996,12 @@ const CallRecordingProcessor = {
                           logger.warn(`[call-proc] ${label} ${rowId} is underway for ${maskSid(callSid)}: left assigned despite the house-number dispute (office review)`);
                           return false;
                         }
+                        if (pullErr?.code === 'TERMINAL_STATUS_RACE') {
+                          // Completed / cancelled / gone since the read —
+                          // nothing left to pull (pre-push audit P1).
+                          logger.info(`[call-proc] ${label} ${rowId} reached a terminal status before the dispute pull for ${maskSid(callSid)} — nothing to unassign`);
+                          return false;
+                        }
                         if (pullErr?.code === 'ASSIGNMENT_STALE' || pullErr?.status === 409 || pullErr?.statusCode === 409) {
                           logger.warn(`[call-proc] ${label} ${rowId} kept its newer assignment for ${maskSid(callSid)}: ${pullErr.code || 'reassigned concurrently'}`);
                           return false;
@@ -14025,7 +14031,7 @@ const CallRecordingProcessor = {
                         await assignDispatchJob({ jobId: child.id, technicianId: null, actorId: null, emit: true, trx, expectTechnicianId: child.technician_id, allowedStatuses: ['pending', 'confirmed'] });
                         logger.warn(`[call-proc] follow-up visit ${child.id} unassigned for ${maskSid(callSid)}: house number disputed`);
                       } catch (pullErr) {
-                        if (pullErr?.code === 'STATUS_NOT_ALLOWED' || pullErr?.code === 'ASSIGNMENT_STALE' || pullErr?.status === 409 || pullErr?.statusCode === 409) {
+                        if (pullErr?.code === 'STATUS_NOT_ALLOWED' || pullErr?.code === 'TERMINAL_STATUS_RACE' || pullErr?.code === 'ASSIGNMENT_STALE' || pullErr?.status === 409 || pullErr?.statusCode === 409) {
                           logger.warn(`[call-proc] follow-up visit ${child.id} kept its newer assignment for ${maskSid(callSid)}: ${pullErr.code || 'reassigned concurrently'}`);
                         } else {
                           throw pullErr;
