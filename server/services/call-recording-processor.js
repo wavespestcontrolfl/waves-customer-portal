@@ -9797,6 +9797,11 @@ const CallRecordingProcessor = {
       const corroborated = sameHouseNumberStreet(extracted?.address_line1, avNormalized.street_line_1)
         && (!canonicalZip || !avZip || canonicalZip === avZip);
       if (houseConflict && !corroborated) houseConflict = null;
+      // The booking hold is armed HERE, before the property lookup below:
+      // a lookup that throws must leave the dispute standing, not silently
+      // release the booking (pre-push audit P1). Cleared only when an
+      // independently saved property positively resolves it.
+      if (houseConflict) houseNumberDisputed = true;
       // A second property the account already holds on the same street
       // (a duplex, a rental two doors down) is a known address, not a typo
       // — the same recognition the second-address check applies (pre-push
@@ -9815,7 +9820,10 @@ const CallRecordingProcessor = {
           .whereNot({ source: 'call_pipeline' })
           .select('address_line1', 'address_line2', 'city', 'zip');
         knownIndependentProperty = !!statedKey && props.some((prop) => propertyKey(prop) === statedKey);
-        if (knownIndependentProperty) houseConflict = null;
+        if (knownIndependentProperty) {
+          houseConflict = null;
+          houseNumberDisputed = false;
+        }
       }
       // Positive evidence that no conflict stands: the latest pass validated
       // a corroborated premise and the detector found no disagreement, or
@@ -9828,7 +9836,6 @@ const CallRecordingProcessor = {
         && !!avNormalized.street_line_1;
       const retireStale = !customerId
         || (canCompare && avPositive && corroborated && (!detected || knownIndependentProperty));
-      if (houseConflict) houseNumberDisputed = true;
       if (houseConflict || retireStale) {
         // The card's scheduling snapshot comes from the extraction that
         // DRIVES booking in the current mode: V2 when it drives routing,
@@ -9959,6 +9966,13 @@ const CallRecordingProcessor = {
           logger.info(`[call-proc] processing claim lost — skipping the house-number conflict card write for ${maskSid(callSid)} (the owner files it)`);
         }
       }
+    } catch (e) {
+      // Code/name only: a knex error message carries the insert bindings
+      // (both streets) — no addresses in logs (pre-push audit P1).
+      logger.warn(`[call-proc] house-number conflict check skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
+    }
+    // Runs whether or not the lane above threw (pre-push audit P1).
+    try {
       // An UNRESOLVED card from an earlier pass is still the owed ask
       // (this pass may have had no AV, lost its claim, or deliberately
       // left a confirmed card standing): the booking hold and the
@@ -9976,10 +9990,8 @@ const CallRecordingProcessor = {
           logger.info(`[call-proc] house-number conflict still open for ${maskSid(callSid)} — booking hold carried over`);
         }
       }
-    } catch (e) {
-      // Code/name only: a knex error message carries the insert bindings
-      // (both streets) — no addresses in logs (pre-push audit P1).
-      logger.warn(`[call-proc] house-number conflict check skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
+    } catch (standingErr) {
+      logger.warn(`[call-proc] standing house-number card check failed for ${maskSid(callSid)}: ${standingErr.code || standingErr.name || 'db_error'}`);
     }
 
     const verifiableAni = firstExternalPhone(call.from_phone);

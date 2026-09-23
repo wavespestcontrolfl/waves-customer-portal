@@ -1449,7 +1449,13 @@ function bookingCoversRequest(item, mine, { singleProperty, places }) {
   const asked = requestedPlaces(item);
   if (!asked) return false;
   const direct = parents.filter((v) => String(v.source_call_log_id) === String(item.call_log_id) && inAsk(v));
-  const association = singleProperty && requestedAddressIsOnFile(item) && window
+  // A house-number card whose record now carries the STATED street: the
+  // office adopted the caller's number and booked by hand (admin bookings
+  // carry no source_call_log_id) — the filing-time on-file snapshot can no
+  // longer vouch, but the corrected record does (pre-push audit P1 on
+  // #4666). Service, cadence, window and hour checks still apply.
+  const adoptedAddress = item.reason_code === 'on_file_house_number_conflict' && recordCarriesStatedStreet(item);
+  const association = singleProperty && (requestedAddressIsOnFile(item) || adoptedAddress) && window
     ? parents.filter((v) => inAsk(v) && visitAtOnFileAddress(item, v, places))
     : [];
   // Every address the call named needs its own covering bookings — a
