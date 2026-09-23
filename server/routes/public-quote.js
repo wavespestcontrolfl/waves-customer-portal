@@ -3114,40 +3114,39 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // with any unit stripped, plus the complete locality), never an
         // email plus a street with a mistyped locality (pre-push audit
         // P0) and never a display string a unit changes (pre-push audit P1).
-        const candidates = await db('estimates')
-          .where({ source: 'quote_wizard' })
-          .whereIn('status', ['sent', 'viewed'])
-          .whereNull('archived_at')
-          .whereRaw("estimate_data->'websiteSelfService' IS NOT NULL")
-          .where((q) => q
-            .whereRaw("estimate_data->>'lead_id' = ?", [String(lead.id)])
-            .orWhere((own) => own
-              .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
-              .where('customer_phone', contactPhone)))
-          .select('id', 'address', db.raw("estimate_data->>'lead_id' as lead_id"));
-        // Cross-lead rows need the COMPLETE locality (street, city, ZIP on
-        // both sides); this lead's own rows match on identity.
-        // Premise-matched in BOTH arms: this lead's own rows match on
-        // identity plus the (loose) premise — a lead's publication for a
-        // different property must not be archived by a flag on this one
-        // (pre-push audit P1); cross-lead rows need the complete locality.
-        const toWithdraw = candidates
-          .filter((row) => (String(row.lead_id || '') === String(lead.id) && samePremiseDisplay(row.address, quoteFullAddress))
-            || samePremiseDisplay(row.address, quoteFullAddress, { requireLocality: true }))
-          .map((row) => row.id);
-        // The eligibility predicates are repeated on the UPDATE: an
-        // acceptance that commits between the SELECT and here promotes the
-        // row past sent/viewed and price-locks it, and an accepted,
-        // invoiced estimate must never be archived from a quote run
-        // (pre-push audit P1).
-        // The verdict rides on the archived row (addressUnverified +
-        // addressUnverifiedFlag): a flagged run against an existing
-        // publication mints no draft, and an archived row leaves duplicate
-        // detection, so a later new-lead run during an outage would find
-        // nothing to recover — see the withdrawn-row recovery above
-        // (pre-push audit P1).
-        const withdrawn = toWithdraw.length
-          ? await db('estimates')
+        // Withdrawal and its critical audit row commit TOGETHER: a lost
+        // audit row for a system-initiated archival is worse than a failed
+        // run (codex r8 P2). The marker on the row is the durable guard
+        // (estimateOffCustomerSurface) if this transaction fails.
+        const withdrawn = await db.transaction(async (trx) => {
+          const candidates = await trx('estimates')
+            .where({ source: 'quote_wizard' })
+            .whereIn('status', ['sent', 'viewed'])
+            .whereNull('archived_at')
+            .whereRaw("estimate_data->'websiteSelfService' IS NOT NULL")
+            .where((q) => q
+              .whereRaw("estimate_data->>'lead_id' = ?", [String(lead.id)])
+              .orWhere((own) => own
+                .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
+                .where('customer_phone', contactPhone)))
+            .select('id', 'address', trx.raw("estimate_data->>'lead_id' as lead_id"));
+          // Premise-matched in BOTH arms: this lead's own rows match on
+          // identity plus the (loose) premise — a lead's publication for a
+          // different property must not be archived by a flag on this one;
+          // cross-lead rows need the complete locality.
+          const toWithdraw = candidates
+            .filter((row) => (String(row.lead_id || '') === String(lead.id) && samePremiseDisplay(row.address, quoteFullAddress))
+              || samePremiseDisplay(row.address, quoteFullAddress, { requireLocality: true }))
+            .map((row) => row.id);
+          if (!toWithdraw.length) return [];
+          // The eligibility predicates are repeated on the UPDATE: an
+          // acceptance that commits between the SELECT and here promotes
+          // the row past sent/viewed and price-locks it, and an accepted,
+          // invoiced estimate must never be archived from a quote run.
+          // The verdict rides on the archived row (addressUnverified +
+          // addressUnverifiedFlag) for later recovery and the off-surface
+          // guard; a carried draft marker is persisted as the real flag.
+          const rows = await trx('estimates')
             .whereIn('id', toWithdraw)
             .where({ source: 'quote_wizard' })
             .whereIn('status', ['sent', 'viewed'])
@@ -3157,23 +3156,21 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             .update({
               archived_at: new Date(),
               updated_at: new Date(),
-              // The block may come from a carried draft marker rather than a
-              // fresh flag — persist whichever verdict is real (pre-push
-              // audit P1).
-              estimate_data: db.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ addressUnverified: true, addressUnverifiedFlag: addressUnverified || carriedAddressFlag || null })]),
+              estimate_data: trx.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ addressUnverified: true, addressUnverifiedFlag: addressUnverified || carriedAddressFlag || null })]),
             })
-            .returning('id')
-          : [];
-        if (withdrawn.length) {
+            .returning('id');
           const { recordAuditEvent } = require('../services/audit-log');
-          for (const row of withdrawn) {
+          for (const row of rows) {
             const id = row?.id ?? row;
             await recordAuditEvent({
               actor_type: 'system', action: 'website_quote_withdrawn_address_unverified',
               resource_type: 'estimate', resource_id: id,
-              metadata: { leadId: lead.id }, critical: true,
-            }).catch((auditErr) => logger.error(`[public-quote] audit row lost for website-quote withdrawal of estimate ${id}: ${auditErr.code || auditErr.name || 'error'}`));
+              metadata: { leadId: lead.id }, critical: true, trx,
+            });
           }
+          return rows;
+        });
+        if (withdrawn.length) {
           logger.info(`[public-quote] withdrew ${withdrawn.length} published website estimate(s) for the flagged address`);
         }
       } catch (withdrawErr) {

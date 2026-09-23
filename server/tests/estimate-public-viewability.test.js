@@ -19,6 +19,12 @@ describe('estimateOffCustomerSurface (the one verdict every public predicate sha
     expect(estimateOffCustomerSurface({ estimate_data: pending })).toBe(true);
     expect(estimateOffCustomerSurface({ estimate_data: JSON.stringify({ estimatorEngine: {} }) })).toBe(false);
     expect(estimateOffCustomerSurface({ estimate_data: null })).toBe(false);
+    // The quote intake's county-roll verdict is off-surface too (view,
+    // SSR, accept, asks — and after a generic unarchive).
+    expect(estimateOffCustomerSurface({ estimate_data: { addressUnverified: true } })).toBe(true);
+    expect(estimateOffCustomerSurface({ estimate_data: JSON.stringify({ addressUnverified: true }) })).toBe(true);
+    expect(estimateOffCustomerSurface({ estimate_data: { addressUnverified: false } })).toBe(false);
+    expect(isEstimateCustomerViewable({ status: 'sent', expires_at: FUTURE, estimate_data: { addressUnverified: true } })).toBe(false);
     expect(estimateOffCustomerSurface({})).toBe(false);
   });
   it('is the util verdict (estimate-claim-sql), shared with the add-service request that judges a LOCKED row (codex r10 P0)', () => {

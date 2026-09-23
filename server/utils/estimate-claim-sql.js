@@ -290,6 +290,12 @@ async function unitHoldSatisfied(dbc, callLogId, address) {
 function estimateOffCustomerSurface(estimate = {}) {
   let data = estimate?.estimate_data;
   if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+  // The quote intake's durable county-roll verdict (public-quote
+  // addressUnverified): a house number the roll could not confirm keeps the
+  // row off the customer surface — view, server page, accept, asks — even
+  // after a generic unarchive or a withdrawal that failed to land (codex
+  // #4667 r8 P1 ×2). Cleared only by a clean run refreshing the draft.
+  if (data && typeof data === 'object' && data.addressUnverified === true) return true;
   const eng = data && typeof data === 'object' ? data.estimatorEngine : null;
   if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) return true;
   return require('../services/estimate-clarify-asks').repricePendingActive(eng);
