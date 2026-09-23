@@ -1797,8 +1797,15 @@ function houseAndName(line) {
 // or without a trailing suffix ("1250 Main" == "1250 Main St") — codex
 // #4666 P2. False when either side carries no house token.
 function sameHouseNumberStreet(a, b) {
-  const x = houseAndName(splitStreetLineUnit(String(a || '')).street || String(a || ''));
-  const y = houseAndName(splitStreetLineUnit(String(b || '')).street || String(b || ''));
+  // Unit-first legacy lines ("Apt 4, 1250 Main St") are peeled on both
+  // sides before the trailing-unit split (codex r9 P2).
+  const peel = (line) => {
+    const text = String(line || '');
+    const rest = (splitUnitFirstLine(text) || {}).rest || text;
+    return splitStreetLineUnit(rest).street || rest;
+  };
+  const x = houseAndName(peel(a));
+  const y = houseAndName(peel(b));
   if (!x.house || !y.house || x.house !== y.house || !x.name || !y.name) return false;
   return [y.name, y.withoutSuffix].includes(x.name) || [x.name, x.withoutSuffix].includes(y.name);
 }

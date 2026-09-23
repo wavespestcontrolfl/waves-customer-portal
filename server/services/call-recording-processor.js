@@ -13486,6 +13486,12 @@ const CallRecordingProcessor = {
           let scheduledDateForLog = null;
           let windowStartForLog = null;
           let scheduleWasReused = false;
+          // A reused AI booking held on a house-number dispute: its
+          // customer-facing reuse repairs (legacy-row activation, which
+          // arms reminders / confirmations) are skipped — no confirmation
+          // goes out for an appointment whose address is unresolved and
+          // whose technician was just pulled (codex r9 P1).
+          let disputeHeldReuse = false;
           let followUpCreated = null;
           // Cross-customer overlap findings from inside the booking txn —
           // advisory only (owner's chosen behavior: the booking proceeds
@@ -13959,6 +13965,7 @@ const CallRecordingProcessor = {
                     disputed: houseNumberDisputed, owned: disputeOwned, attachedManualBooking: isAttachedManualBooking, technicianId: existing.technician_id,
                   });
                   const reuseHeldForAddress = reuseDecision.holdNewSideEffects;
+                  if (reuseHeldForAddress) disputeHeldReuse = true;
                   if (reuseHeldForAddress) {
                     logger.warn(`[call-proc] reused booking for ${maskSid(callSid)} kept unassigned and without a follow-up: house number disputed (on_file_house_number_conflict)`);
                   }
@@ -14786,7 +14793,7 @@ const CallRecordingProcessor = {
                   });
                 }
               }
-              if (scheduleWasReused) {
+              if (scheduleWasReused && !disputeHeldReuse) {
                 // The reused row can be a LEGACY outbound-review booking
                 // (created pending before the 2026-08-11 hold removal): the
                 // reuse branches convert its lead and the replay repair arms
@@ -16029,6 +16036,31 @@ const CallRecordingProcessor = {
     // opened. Every approved-but-unbooked confirmed call now opens ONE
     // blocking review card and corrects the route decision's recorded action
     // + forward-audit pointer.
+    // Shadow / legacy mode has no approved-but-unbooked fallback of its own:
+    // when the house-number hold landed WITHOUT its conflict card (a thrown
+    // property lookup or card write, a lost claim) and the confirmed
+    // appointment was not booked, this is the call's only scheduling trace
+    // (codex r9 P2). Enforce mode files through the block below.
+    if (!CALL_EXTRACTION_V2_DRIVES_ROUTING && houseNumberDisputed && !houseNumberConflictFiled
+      && extracted.appointment_confirmed && !appointmentResult?.scheduledServiceId) {
+      try {
+        await db('triage_items')
+          .insert(buildTriageItem({
+            callLogId: call.id,
+            flag: 'auto_booking_skipped_after_approval',
+            extraction: v2CanonicalExtraction || undefined,
+            extraPayload: {
+              skipped_reason: 'house_number_dispute_card_unfiled',
+              preferred_date_time: extracted.preferred_date_time || null,
+              service: extracted.matched_service || extracted.requested_service || null,
+            },
+          }))
+          .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+          .ignore();
+      } catch (fallbackErr) {
+        logger.warn(`[call-proc] shadow-mode dispute fallback card failed for ${maskSid(callSid)}: ${fallbackErr.code || fallbackErr.name || 'db_error'}`);
+      }
+    }
     if (CALL_EXTRACTION_V2_DRIVES_ROUTING && v2ApprovedExtraction && extracted.appointment_confirmed) {
       const bookedServiceId = appointmentResult?.scheduledServiceId || null;
       // Held bookings already opened their own reason-specific card above.

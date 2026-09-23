@@ -618,7 +618,9 @@ router.post('/:id/apply-property-roles', async (req, res) => {
 function heldConflictTaskDecision({ verdict, wrongFields = [], heldConflictPayload = null, bookingCovered = false, liveOnFile = null } = {}) {
   const payload = heldConflictPayload && typeof heldConflictPayload === 'object' ? heldConflictPayload : null;
   const confirmed = !!payload && (payload.scheduling_window?.status === 'confirmed' || payload.scheduling_status === 'confirmed');
-  const scheduleDenied = verdict === 'deny' && wrongFields.includes('scheduling');
+  // A Deny that marks the scheduling OR the service extraction wrong leaves
+  // no trustworthy appointment to hand on (codex r9 P2).
+  const scheduleDenied = verdict === 'deny' && (wrongFields.includes('scheduling') || wrongFields.includes('service'));
   const onFile = (liveOnFile && String(liveOnFile.address_line1 || '').trim()) ? liveOnFile : (payload?.on_file_address || null);
   const approvedAddress = onFile
     ? { street_line_1: onFile.address_line1, street_line_2: onFile.address_line2 || null, city: onFile.city || null, postal_code: onFile.zip || null }
@@ -860,7 +862,11 @@ router.post('/:id/verdict', async (req, res) => {
         const callRow = await trx('call_log').where({ id: item.call_log_id }).first('customer_id', 'created_at');
         const heldItem = {
           id: item.id, call_log_id: item.call_log_id, reason_code: 'on_file_house_number_conflict', status: 'open',
-          created_at: callRow?.created_at || item.created_at, payload: pre.approvedPayload, call_customer_id: callRow?.customer_id || null,
+          // Verdict-time coverage admits a matching PRE-EXISTING live booking
+          // too (a call that merely reconfirmed an appointment booked before
+          // it) — the boundary is the epoch, unlike the sweep's post-card
+          // rule (codex r9 P2); service, window, hour and address still bind.
+          created_at: new Date(0).toISOString(), payload: pre.approvedPayload, call_customer_id: callRow?.customer_id || null,
         };
         const evidence = await loadEvidence(trx, [heldItem]).catch(() => new Map());
         const decision = heldConflictTaskDecision({

@@ -64,6 +64,8 @@ describe('onFileHouseNumberConflict', () => {
     expect(onFileHouseNumberConflict({ addressValidation: av('1250 Main St N'), onFileAddress: { ...ON_FILE, address_line1: '1260 Main N' } })?.stated_house_number).toBe('1250');
     expect(sameHouseNumberStreet('1250 Main St N', '1250 Main N')).toBe(true);
     expect(sameHouseNumberStreet('1250 Main St N', '1250 Main St S')).toBe(false);
+    expect(sameHouseNumberStreet('Apt 4, 1250 Main St', '1250 Main St')).toBe(true);
+    expect(sameHouseNumberStreet('Apt 4, 1260 Main St', 'Apt 4, 1250 Main St')).toBe(false);
   });
 
   test('a legacy unit-first on-file line is peeled before comparing', () => {
@@ -280,6 +282,7 @@ describe('heldConflictTaskDecision (verdict route)', () => {
     expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['address'], heldConflictPayload: held }).file).toBe(true);
     expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['address'], heldConflictPayload: held }).skippedReason).toBe('house_number_dispute_denied_appointment_unbooked');
     expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['scheduling'], heldConflictPayload: held }).file).toBe(false);
+    expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['service'], heldConflictPayload: held }).file).toBe(false);
   });
 });
 
