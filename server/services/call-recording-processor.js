@@ -1180,6 +1180,28 @@ function summarizeKnownCaller(customer) {
   };
 }
 
+
+// The visit(s) a dispute pulled ride on the open conflict card
+// (payload.held_unassigned_booking_ids) so the verdict route names EXACTLY
+// those rows for reassignment, not any unassigned row of the call
+// (codex r11 P1). Best-effort; the card may not exist yet.
+async function noteDisputeHeldBooking(conn, callLogId, scheduledServiceId) {
+  try {
+    await conn('triage_items')
+      .where({ call_log_id: callLogId, reason_code: 'on_file_house_number_conflict' })
+      .whereIn('status', ['open', 'in_progress'])
+      .update({
+        payload: conn.raw(
+          "jsonb_set(COALESCE(payload, '{}'::jsonb), '{held_unassigned_booking_ids}', (COALESCE(payload->'held_unassigned_booking_ids', '[]'::jsonb) - ?::text) || to_jsonb(?::text), true)",
+          [String(scheduledServiceId), String(scheduledServiceId)],
+        ),
+        updated_at: new Date(),
+      });
+  } catch (noteErr) {
+    logger.warn(`[call-proc] could not note held booking ${scheduledServiceId} on the conflict card: ${noteErr.code || noteErr.name || 'db_error'}`);
+  }
+}
+
 // What a house-number DISPUTE does to a reused AI booking, pure (tested in
 // call-onfile-house-number-conflict.test.js): new side effects (default
 // technician backfill, follow-up creation) are held whenever disputed;
@@ -9789,6 +9811,13 @@ const CallRecordingProcessor = {
     // a lost claim) still must not dispatch to the disputed number
     // (pre-push audit P1). Set on detection; the card lands or not.
     let houseNumberDisputed = false;
+    // A claimed (in_progress) card that could not record this pass's newly
+    // confirmed ask: the standing-card recovery below must NOT count it as
+    // filed, or both fallback paths would suppress the task (codex r11 P1).
+    let disputeClaimedUnrecorded = false;
+    // The scheduling snapshot from the extraction that drives booking in
+    // the current mode — shared with the shadow-mode fallback (codex r11 P1).
+    let disputeSchedulingAuthority = null;
     try {
       const canCompare = !!(customerId && !createdCustomerFromCall && onFileAddress);
       // `detected` is the detector's own verdict; the guards below may
@@ -9863,7 +9892,7 @@ const CallRecordingProcessor = {
         // property) comes from the booking authority — in shadow mode the
         // legacy record, never a V2 blob with only its scheduling swapped
         // (askSnapshot reads service_request and property too; codex r8 P2).
-        const schedulingAuthority = CALL_EXTRACTION_V2_DRIVES_ROUTING
+        const schedulingAuthority = disputeSchedulingAuthority = CALL_EXTRACTION_V2_DRIVES_ROUTING
           ? v2CanonicalExtraction
           : {
             meta: v2CanonicalExtraction?.meta || null,
@@ -10010,6 +10039,9 @@ const CallRecordingProcessor = {
           logger.info(`[call-proc] house-number conflict card for ${maskSid(callSid)}: stated ${houseConflict.stated_house_number}, on file ${houseConflict.on_file_house_number}`);
         } else if (outcome === 'claim_lost') {
           logger.info(`[call-proc] processing claim lost — skipping the house-number conflict card write for ${maskSid(callSid)} (the owner files it)`);
+        } else if (outcome === 'claimed_unrecorded') {
+          disputeClaimedUnrecorded = true;
+          logger.info(`[call-proc] house-number conflict card is claimed and could not record a newly confirmed appointment for ${maskSid(callSid)} — fallback task will file`);
         }
       }
     } catch (e) {
@@ -10030,7 +10062,7 @@ const CallRecordingProcessor = {
           .whereIn('status', ['open', 'in_progress'])
           .first('id');
         if (standing) {
-          houseNumberConflictFiled = true;
+          if (!disputeClaimedUnrecorded) houseNumberConflictFiled = true;
           houseNumberDisputed = true;
           if (!bridgeNeedsConfirmation.includes('on_file_house_number_conflict')) bridgeNeedsConfirmation.push('on_file_house_number_conflict');
           logger.info(`[call-proc] house-number conflict still open for ${maskSid(callSid)} — booking hold carried over`);
@@ -10079,6 +10111,7 @@ const CallRecordingProcessor = {
             if (!row.technician_id) continue;
             try {
               await assignDispatchJob({ jobId: row.id, technicianId: null, actorId: null, emit: true, trx, expectTechnicianId: row.technician_id, allowedStatuses: ['pending', 'confirmed'] });
+              await noteDisputeHeldBooking(trx, call.id, row.id);
               logger.warn(`[call-proc] existing AI booking ${row.id} unassigned for ${maskSid(callSid)}: house number disputed`);
             } catch (pullErr) {
               if (['STATUS_NOT_ALLOWED', 'TERMINAL_STATUS_RACE', 'ASSIGNMENT_STALE'].includes(pullErr?.code) || pullErr?.status === 409 || pullErr?.statusCode === 409) {
@@ -14060,6 +14093,7 @@ const CallRecordingProcessor = {
                     const pull = async (rowId, expectTechnicianId, label) => {
                       try {
                         await assignDispatchJob({ jobId: rowId, technicianId: null, actorId: null, emit: true, trx, expectTechnicianId, allowedStatuses: ['pending', 'confirmed'] });
+                        await noteDisputeHeldBooking(trx, call.id, rowId);
                         logger.warn(`[call-proc] ${label} ${rowId} unassigned for ${maskSid(callSid)}: house number disputed`);
                         return true;
                       } catch (pullErr) {
@@ -14102,6 +14136,7 @@ const CallRecordingProcessor = {
                     for (const child of children) {
                       try {
                         await assignDispatchJob({ jobId: child.id, technicianId: null, actorId: null, emit: true, trx, expectTechnicianId: child.technician_id, allowedStatuses: ['pending', 'confirmed'] });
+                        await noteDisputeHeldBooking(trx, call.id, child.id);
                         logger.warn(`[call-proc] follow-up visit ${child.id} unassigned for ${maskSid(callSid)}: house number disputed`);
                       } catch (pullErr) {
                         if (pullErr?.code === 'STATUS_NOT_ALLOWED' || pullErr?.code === 'TERMINAL_STATUS_RACE' || pullErr?.code === 'ASSIGNMENT_STALE' || pullErr?.status === 409 || pullErr?.statusCode === 409) {
@@ -15412,7 +15447,10 @@ const CallRecordingProcessor = {
           // saved-method auto-secure, dedup, one-text-ever, the email leg
           // riding a confirmed text) and is idempotent on reused/attached
           // rows. Dark until APPOINTMENT_CARD_REQUEST + the template flip.
-          if (scheduledServiceId && !v2SmsBlocked && !holdImpliedSmsLeg) {
+          // Neither card-request path runs for a dispute-held reuse: no
+          // "secure your appointment" link and no auto-secure while the
+          // address is unresolved (codex r11 P1).
+          if (scheduledServiceId && !disputeHeldReuse && !v2SmsBlocked && !holdImpliedSmsLeg) {
             // Durable clearance record (codex #3234 r3): this exact guard IS
             // the call-level SMS clearance decision, and nothing else
             // persists it — the pre-visit card backstop keys on this stamp
@@ -15445,7 +15483,7 @@ const CallRecordingProcessor = {
             } catch (cardErr) {
               logger.warn(`[call-proc] card-request funnel failed for visit ${scheduledServiceId}: ${cardErr.message}`);
             }
-          } else if (scheduledServiceId) {
+          } else if (scheduledServiceId && !disputeHeldReuse) {
             // No call-level SMS clearance (TCPA gate blocked, or the
             // implied-consent leg is held): run ONLY the funnel's
             // non-messaging side — the policy exemption + saved-card
@@ -16127,14 +16165,16 @@ const CallRecordingProcessor = {
     // property lookup or card write, a lost claim) and the confirmed
     // appointment was not booked, this is the call's only scheduling trace
     // (codex r9 P2). Enforce mode files through the block below.
-    if (!CALL_EXTRACTION_V2_DRIVES_ROUTING && houseNumberDisputed && !houseNumberConflictFiled
+    if (!CALL_EXTRACTION_V2_DRIVES_ROUTING && houseNumberDisputed && (!houseNumberConflictFiled || disputeClaimedUnrecorded)
       && extracted.appointment_confirmed && !appointmentResult?.scheduledServiceId) {
       try {
         await db('triage_items')
           .insert(buildTriageItem({
             callLogId: call.id,
             flag: 'auto_booking_skipped_after_approval',
-            extraction: v2CanonicalExtraction || undefined,
+            // The booking-authority snapshot (legacy in shadow mode), never
+            // a V2 blob that may say 'none' (codex r11 P1).
+            extraction: disputeSchedulingAuthority || v2CanonicalExtraction || undefined,
             extraPayload: {
               skipped_reason: 'house_number_dispute_card_unfiled',
               preferred_date_time: extracted.preferred_date_time || null,
@@ -16155,7 +16195,7 @@ const CallRecordingProcessor = {
       // landed (a thrown insert or a lost claim holds the booking without
       // one) — otherwise the fallback card below is the call's only
       // scheduling trace and must file (pre-push audit P1).
-      if (houseNumberConflictFiled) heldReasons.add('on_file_house_number_conflict');
+      if (houseNumberConflictFiled && !disputeClaimedUnrecorded) heldReasons.add('on_file_house_number_conflict');
       if (!bookedServiceId && !heldReasons.has(appointmentResult?.skippedReason)) {
         const skipReason = appointmentResult?.skippedReason
           || appointmentResult?.scheduleError

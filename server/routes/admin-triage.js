@@ -246,6 +246,17 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
         updated_at: new Date(),
       });
     if (updated === 0) return { outcome: 'conflict' };
+    if (item.reason_code === 'on_file_house_number_conflict' && ['resolved', 'dismissed'].includes(nextStatus) && item.call_log_id) {
+      // The single-card transitions settle the held appointment exactly as
+      // the call verdict does (codex r11 P1): Resolve reads as "the address
+      // on file is right", Dismiss as a denial of the card.
+      const payload = typeof item.payload === 'string' ? (() => { try { return JSON.parse(item.payload); } catch { return null; } })() : item.payload;
+      if (payload) {
+        await settleHeldConflictCard(trx, {
+          item, verdict: nextStatus === 'resolved' ? 'accept' : 'deny', wrongFields: [], heldConflictPayload: payload,
+        });
+      }
+    }
     if (item.reason_code === 'missing_unit_number' && nextStatus === 'dismissed' && item.call_log_id) {
       // The human verdict outranks the SMS answer: dismissing the unit card
       // (the whole building IS the service address, or the texted reply was
@@ -670,6 +681,83 @@ function heldConflictTaskDecision({ verdict, wrongFields = [], heldConflictPaylo
   };
 }
 
+// Settles the appointment a house-number card was holding when that card
+// leaves review — from the call verdict AND from the single-card Resolve /
+// Dismiss transitions (codex r11 P1): a confirmed, unbooked appointment or
+// a visit the dispute left unassigned becomes an auto_booking_skipped_after_
+// approval task. `verdict` 'accept' = the on-file address is right, 'deny'
+// = the card was denied / dismissed; `wrongFields` may name 'scheduling' or
+// 'service' to say no trustworthy appointment exists.
+async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], heldConflictPayload }) {
+  // Pre-decision (address-independent parts) so the evidence item can
+  // carry the approved snapshot; the coverage check reads
+  // scheduling_window.requested_address.
+  const callRowForAddress = await trx('call_log').where({ id: item.call_log_id }).first('customer_id');
+  const liveCustomer = callRowForAddress?.customer_id
+    ? await trx('customers').where({ id: callRowForAddress.customer_id }).whereNull('deleted_at').first('address_line1', 'address_line2', 'city', 'zip')
+    : null;
+  const liveOnFile = liveCustomer ? { address_line1: liveCustomer.address_line1, address_line2: liveCustomer.address_line2, city: liveCustomer.city, zip: liveCustomer.zip } : null;
+  const pre = heldConflictTaskDecision({ verdict, wrongFields, heldConflictPayload, liveOnFile });
+  // The same service / window / address coverage the sweep's booking
+  // evidence applies — an unrelated older booking sharing this call
+  // (a reprocess moved the service, date or property) must not stand
+  // in for the appointment the card holds (codex r7 P1). The loader
+  // reads the call's customer itself; with its gate off it yields no
+  // evidence, so the task card files (fail closed). Judged at the
+  // approved on-file address, from the call onward (an earlier pass's
+  // booking counts).
+  const { loadEvidence } = require('../services/triage-auto-resolve');
+  const callRow = await trx('call_log').where({ id: item.call_log_id }).first('customer_id', 'created_at');
+  const heldItem = {
+    id: item.id, call_log_id: item.call_log_id, reason_code: 'on_file_house_number_conflict', status: 'open',
+    // The customer's live columns the adopted-address arm reads
+    // (recordCarriesStatedStreet) — pre-push audit P1.
+    customer_address_line1: liveCustomer?.address_line1 || null, customer_city: liveCustomer?.city || null, customer_zip: liveCustomer?.zip || null,
+    // Verdict-time coverage admits a matching PRE-EXISTING live booking
+    // too (a call that merely reconfirmed an appointment booked before
+    // it) — the boundary is the epoch, unlike the sweep's post-card
+    // rule (codex r9 P2); service, window, hour and address still bind.
+    created_at: new Date(0).toISOString(), payload: pre.approvedPayload, call_customer_id: callRow?.customer_id || null,
+  };
+  const evidence = await loadEvidence(trx, [heldItem]).catch(() => new Map());
+  // EXACTLY the visit(s) the dispute pulled (the processor notes their
+  // ids on the card), still live and unassigned — never any
+  // unassigned row of the call, which a reprocess may have made
+  // obsolete (codex r11 P1).
+  const heldIds = Array.isArray(heldConflictPayload.held_unassigned_booking_ids) ? heldConflictPayload.held_unassigned_booking_ids.map(String) : [];
+  const heldUnassigned = heldIds.length
+    ? await trx('scheduled_services')
+      .whereIn('id', heldIds)
+      .whereIn('status', ['pending', 'confirmed'])
+      .whereNull('technician_id')
+      .orderBy('scheduled_date', 'asc')
+      .first('id')
+    : null;
+  const decision = heldConflictTaskDecision({
+    verdict, wrongFields, heldConflictPayload, liveOnFile, bookingCovered: evidence.get(item.id)?.booking_after_card === true,
+    heldUnassignedBookingId: heldUnassigned?.id || null,
+  });
+  if (decision.file) {
+    const { buildTriageItem } = require('../services/call-routing-gates');
+    await trx('triage_items')
+      .insert(buildTriageItem({
+        callLogId: item.call_log_id,
+        flag: 'auto_booking_skipped_after_approval',
+        extraction: { meta: { call_summary: decision.summary }, scheduling: decision.approvedWindow || { status: 'confirmed' } },
+        extraPayload: {
+          skipped_reason: decision.skippedReason,
+          ...(decision.heldUnassignedBookingId ? { existing_scheduled_service_id: decision.heldUnassignedBookingId } : {}),
+          scheduling_window: decision.approvedWindow,
+          // The same live-else-snapshot choice the decision made (a
+          // blank live line falls back to the snapshot).
+          on_file_address: decision.approvedPayload?.on_file_address || null,
+        },
+      }))
+      .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+      .ignore();
+  }
+}
+
 router.post('/:id/verdict', async (req, res) => {
   try {
     const { id } = req.params;
@@ -864,68 +952,7 @@ router.post('/:id/verdict', async (req, res) => {
       // remains (a held booking files a task on an unconfirmed card too;
       // pre-push audit P1).
       if (heldConflictPayload && resolvedRows.some((r) => r?.reason_code === 'on_file_house_number_conflict')) {
-        // Pre-decision (address-independent parts) so the evidence item can
-        // carry the approved snapshot; the coverage check reads
-        // scheduling_window.requested_address.
-        const callRowForAddress = await trx('call_log').where({ id: item.call_log_id }).first('customer_id');
-        const liveCustomer = callRowForAddress?.customer_id
-          ? await trx('customers').where({ id: callRowForAddress.customer_id }).whereNull('deleted_at').first('address_line1', 'address_line2', 'city', 'zip')
-          : null;
-        const liveOnFile = liveCustomer ? { address_line1: liveCustomer.address_line1, address_line2: liveCustomer.address_line2, city: liveCustomer.city, zip: liveCustomer.zip } : null;
-        const pre = heldConflictTaskDecision({ verdict, wrongFields, heldConflictPayload, liveOnFile });
-        // The same service / window / address coverage the sweep's booking
-        // evidence applies — an unrelated older booking sharing this call
-        // (a reprocess moved the service, date or property) must not stand
-        // in for the appointment the card holds (codex r7 P1). The loader
-        // reads the call's customer itself; with its gate off it yields no
-        // evidence, so the task card files (fail closed). Judged at the
-        // approved on-file address, from the call onward (an earlier pass's
-        // booking counts).
-        const { loadEvidence } = require('../services/triage-auto-resolve');
-        const callRow = await trx('call_log').where({ id: item.call_log_id }).first('customer_id', 'created_at');
-        const heldItem = {
-          id: item.id, call_log_id: item.call_log_id, reason_code: 'on_file_house_number_conflict', status: 'open',
-          // The customer's live columns the adopted-address arm reads
-          // (recordCarriesStatedStreet) — pre-push audit P1.
-          customer_address_line1: liveCustomer?.address_line1 || null, customer_city: liveCustomer?.city || null, customer_zip: liveCustomer?.zip || null,
-          // Verdict-time coverage admits a matching PRE-EXISTING live booking
-          // too (a call that merely reconfirmed an appointment booked before
-          // it) — the boundary is the epoch, unlike the sweep's post-card
-          // rule (codex r9 P2); service, window, hour and address still bind.
-          created_at: new Date(0).toISOString(), payload: pre.approvedPayload, call_customer_id: callRow?.customer_id || null,
-        };
-        const evidence = await loadEvidence(trx, [heldItem]).catch(() => new Map());
-        // A booking this call created that the dispute left unassigned (the
-        // processor pulled its technician and skipped its repairs).
-        const heldUnassigned = await trx('scheduled_services')
-          .where({ source_call_log_id: item.call_log_id, booking_source: 'phone_call' })
-          .whereIn('status', ['pending', 'confirmed'])
-          .whereNull('technician_id')
-          .orderBy('scheduled_date', 'asc')
-          .first('id');
-        const decision = heldConflictTaskDecision({
-          verdict, wrongFields, heldConflictPayload, liveOnFile, bookingCovered: evidence.get(item.id)?.booking_after_card === true,
-          heldUnassignedBookingId: heldUnassigned?.id || null,
-        });
-        if (decision.file) {
-          const { buildTriageItem } = require('../services/call-routing-gates');
-          await trx('triage_items')
-            .insert(buildTriageItem({
-              callLogId: item.call_log_id,
-              flag: 'auto_booking_skipped_after_approval',
-              extraction: { meta: { call_summary: decision.summary }, scheduling: decision.approvedWindow || { status: 'confirmed' } },
-              extraPayload: {
-                skipped_reason: decision.skippedReason,
-                ...(decision.heldUnassignedBookingId ? { existing_scheduled_service_id: decision.heldUnassignedBookingId } : {}),
-                scheduling_window: decision.approvedWindow,
-                // The same live-else-snapshot choice the decision made (a
-                // blank live line falls back to the snapshot).
-                on_file_address: decision.approvedPayload?.on_file_address || null,
-              },
-            }))
-            .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-            .ignore();
-        }
+        await settleHeldConflictCard(trx, { item, verdict, wrongFields, heldConflictPayload });
       }
 
       // A surviving bounce card keeps the call visible in review — synced
