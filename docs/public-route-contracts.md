@@ -154,6 +154,19 @@ provider legs or exact route coordinates. Scheduling traffic lookups share a
 40-request/800-element allowance per application process per 15 minutes across
 HTTP requests and fall back to the conservative model when exhausted; response
 data remains request-local. Gate-off availability is unchanged.
+Packed offers + expected-minutes travel gap (owner ruling 2026-09-23,
+`scheduling/find-time.js` packEnds, `scheduling/travel-gap.js`,
+`scheduling/expected-service-minutes.js`): on a day that already has a
+committed stop, every customer-facing surface (estimate picker, `/book`,
+public reschedule, public re-service, the assistant's availability engine)
+offers only the starts packed against an existing stop, and the estimate
+picker's synthetic ASAP windows are dropped for such days. The travel gap the
+offer lanes and the commit gates share is measured from the earlier stop's
+expected service end (catalog min/max midpoint, clamped to its window) and the
+15-minute buffer is reduced by that stop's own window padding; rows with no
+catalog match keep the legacy drive + buffer gap. Ranking ties on `/book`
+break toward the less hole-making slot (`idle_minutes`, new per-slot field on
+the public availability payload).
 Catalog-sized estimate offers resolve the primary appointment allowance from
 `services.scheduling_duration_policy`; independent recurring companions do not
 enlarge that appointment, while one-time paid add-ons contribute shared work.
@@ -1423,8 +1436,11 @@ carries its own `nearby` boolean, true when its detour is within
 roll-ups. The per-slot flag is shared by every consumer of that engine:
 `/api/booking/availability`, this GET, re-service, and the find-slots
 searches — added in #3888 so the picker labels each time from its own
-route-fit, not the day's). Day lists contain all feasible starts; only the
-separate recommendations are curated. Moving an existing self-booked visit
+route-fit, not the day's). Day lists contain the packed feasible starts (owner ruling 2026-09-23:
+on a day with a committed stop, each route gap offers only the hour packed
+against its neighbouring stop(s) — the latest start before the next stop and/or
+the earliest after the previous one — never a mid-gap hour; an empty day still
+lists every grid hour); only the separate recommendations are curated. Moving an existing self-booked visit
 excludes that booking from its own day-cap count. POST is a WRITE with two owner-authorized
 scopes (ruling 2026-07-13; single-visit-only before #2725), both limited
 to the token's own customer/visit and never live/terminal visits (409),

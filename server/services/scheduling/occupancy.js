@@ -39,6 +39,7 @@ const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const defaultDb = require('../../models/db');
 const { guardedCoordSelects } = require('./day-stops');
 const { travelGapEnabled, travelGapConflicts } = require('./travel-gap');
+const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service-minutes');
 const { occupiedRows } = require('./visit-capacity');
 const logger = require('../logger');
 const { etParts, parseETDateTime, addETDays } = require('../../utils/datetime-et');
@@ -398,7 +399,7 @@ const DEFAULT_EXCLUDE_STATUSES = NOT_A_ROUTE_STOP_STATUSES;
 
 const CONFLICT_COLUMNS = [
   'id', 'customer_id', 'technician_id', 'scheduled_date',
-  'window_start', 'window_end', 'status', 'service_type',
+  'window_start', 'window_end', 'status', 'service_type', 'service_key_snapshot',
   'estimated_duration_minutes', 'reservation_expires_at', 'source_estimate_id',
   'reservation_service_mix',
   // Seeded-placeholder identity (recurring child, still pending, never
@@ -658,7 +659,19 @@ async function findConflictingVisitsWithTravel({
   const candStart = timeToMinutes(windowStart);
   const candEnd = timeToMinutes(windowEnd);
   if (candStart == null || candEnd == null) return [];
-  const candidate = { startMin: candStart, endMin: candEnd, lat: travel?.lat ?? null, lng: travel?.lng ?? null };
+  // Expected-minutes padding credit (owner ruling 2026-09-23) — the
+  // candidate's own, when the caller resolved it (travel.expectedMinutes);
+  // no match/omitted falls back to the window length (zero padding, legacy
+  // gap). Every existing stop's own credit is resolved below per row.
+  const candidateWindowMinutes = candEnd - candStart;
+  const candidate = {
+    startMin: candStart, endMin: candEnd, lat: travel?.lat ?? null, lng: travel?.lng ?? null,
+    windowMinutes: candidateWindowMinutes,
+    expectedMinutes: Number.isFinite(travel?.expectedMinutes)
+      ? Math.min(travel.expectedMinutes, candidateWindowMinutes)
+      : candidateWindowMinutes,
+  };
+  await ensureCatalogLoaded(db);
 
   const query = db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -693,13 +706,22 @@ async function findConflictingVisitsWithTravel({
     const durationMin = Number(row.estimated_duration_minutes) > 0
       ? Number(row.estimated_duration_minutes)
       : DEFAULT_DURATION_MINUTES;
+    const endMin = row.endMin ?? (explicitEnd != null ? explicitEnd : startMin + durationMin);
     stops.push({
       startMin,
-      endMin: row.endMin ?? (explicitEnd != null ? explicitEnd : startMin + durationMin),
+      endMin,
       lat: row.lat,
       lng: row.lng,
       // A live hold never shadows a committed neighbour (travel-gap.js).
       hold: row.reservation_expires_at != null && row.customer_id == null,
+      // Expected-minutes padding credit for THIS row (owner ruling
+      // 2026-09-23) — service_key_snapshot first, else services.name =
+      // service_type; no match falls back to the window length.
+      windowMinutes: endMin - startMin,
+      expectedMinutes: expectedMinutesSync({
+        serviceKey: row.service_key_snapshot, serviceType: row.service_type,
+        windowMinutes: endMin - startMin,
+      }),
       row,
     });
   }

@@ -1,0 +1,113 @@
+/**
+ * Expected service minutes — the ONE place that turns a service identity
+ * (a scheduled_services row's service_key_snapshot/service_type, or a
+ * find-time candidate's own service) into "how long the tech is actually
+ * expected to be on site", for the travel-gap padding formula
+ * (scheduling/travel-gap.js requiredGapMinutes).
+ *
+ * Expected minutes = the midpoint of the catalog's min/max duration when
+ * BOTH are set (quarterly pest 30-60 minutes -> 45), else
+ * default_duration_minutes, else the WINDOW LENGTH itself (no catalog
+ * signal -> zero padding -> the legacy drive+buffer gap, byte-identical).
+ * Always clamped to <= the window length: a catalog default longer than the
+ * customer's own window can never manufacture negative padding.
+ *
+ * Looked up by service_key first (a service_key_snapshot stamp, or a
+ * find-time candidate's own serviceKey), then by services.name =
+ * scheduled_services.service_type (the identity every older row carries,
+ * per owner ruling 2026-09-23). Falls back to the window length when
+ * neither resolves, or when no catalog row/db handle is available at all —
+ * a missing signal never blocks a slot, it only loses the padding credit.
+ *
+ * One in-memory catalog cache (TTL, like every other scheduling cache in
+ * this directory): callers PRELOAD once per request/pass with
+ * expectedServiceMinutes()/ensureCatalogLoaded(), then read synchronously
+ * with expectedMinutesSync() for every candidate/stop pair without a query
+ * per pair.
+ */
+
+const CATALOG_TTL_MS = 5 * 60 * 1000;
+
+let catalogCache = null; // { byKey: Map<string, row>, byName: Map<string, row>, expiresAt }
+
+function buildCatalogIndex(rows) {
+  const byKey = new Map();
+  const byName = new Map();
+  for (const row of (rows || [])) {
+    if (!row) continue;
+    if (row.service_key) byKey.set(String(row.service_key), row);
+    if (row.name) byName.set(String(row.name).trim().toLowerCase(), row);
+  }
+  return { byKey, byName, expiresAt: Date.now() + CATALOG_TTL_MS };
+}
+
+/**
+ * Populate (or refresh, past TTL) the shared catalog cache. Safe to call
+ * often — a warm cache is a no-op. Fails open: a query error leaves any
+ * existing cache in place (or an empty one on first load), never throws.
+ */
+async function ensureCatalogLoaded(conn) {
+  if (catalogCache && catalogCache.expiresAt > Date.now()) return catalogCache;
+  if (!conn) return catalogCache;
+  try {
+    const rows = await conn('services').select(
+      'service_key', 'name', 'default_duration_minutes',
+      'min_duration_minutes', 'max_duration_minutes',
+    );
+    catalogCache = buildCatalogIndex(rows);
+  } catch {
+    catalogCache = catalogCache || buildCatalogIndex([]);
+  }
+  return catalogCache;
+}
+
+function clampToWindow(minutes, windowMinutes) {
+  return Math.max(0, Math.min(minutes, windowMinutes));
+}
+
+function expectedFromCatalogRow(row, windowMinutes) {
+  const min = Number(row?.min_duration_minutes);
+  const max = Number(row?.max_duration_minutes);
+  if (Number.isFinite(min) && min > 0 && Number.isFinite(max) && max > 0) {
+    return clampToWindow((min + max) / 2, windowMinutes);
+  }
+  const def = Number(row?.default_duration_minutes);
+  if (Number.isFinite(def) && def > 0) return clampToWindow(def, windowMinutes);
+  return windowMinutes;
+}
+
+function catalogRowFor(serviceKey, serviceType) {
+  if (!catalogCache) return null;
+  if (serviceKey && catalogCache.byKey.has(String(serviceKey))) return catalogCache.byKey.get(String(serviceKey));
+  if (serviceType) return catalogCache.byName.get(String(serviceType).trim().toLowerCase()) || null;
+  return null;
+}
+
+/**
+ * Synchronous lookup against whatever is currently cached — a caller that
+ * never preloaded (or whose preload failed) degrades to the window length:
+ * no catalog signal, no padding, exactly the legacy gap.
+ */
+function expectedMinutesSync({ serviceKey = null, serviceType = null, windowMinutes } = {}) {
+  const win = Number.isFinite(windowMinutes) && windowMinutes > 0 ? windowMinutes : 60;
+  const row = catalogRowFor(serviceKey, serviceType);
+  return row ? expectedFromCatalogRow(row, win) : win;
+}
+
+/** Preload-then-read convenience for a single one-off lookup. */
+async function expectedServiceMinutes(conn, opts = {}) {
+  await ensureCatalogLoaded(conn);
+  return expectedMinutesSync(opts);
+}
+
+function clearExpectedServiceMinutesCache() {
+  catalogCache = null;
+}
+
+module.exports = {
+  expectedServiceMinutes,
+  expectedMinutesSync,
+  ensureCatalogLoaded,
+  clearExpectedServiceMinutesCache,
+  _internals: { expectedFromCatalogRow, buildCatalogIndex },
+};

@@ -10,7 +10,7 @@ const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
-const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes } = require('../services/scheduling/travel-gap');
+const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes, requiredGapMinutes } = require('../services/scheduling/travel-gap');
 const { fallbackCenterZoneName } = require('../services/scheduling/zone-day-funnel');
 const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
@@ -98,6 +98,13 @@ function compareRankedSlots(a, b) {
   if (scoreA !== scoreB) return scoreA - scoreB;
   const dateCmp = String(a.date).localeCompare(String(b.date));
   if (dateCmp !== 0) return dateCmp;
+  // Idle minutes created by placing THIS candidate here (0 for a packed
+  // position — see addCandidate) before start_time, so a score tie between
+  // a packed candidate and a hole-making one never lets the earlier clock
+  // time win on that basis alone (owner bug report 2026-09-23).
+  const idleA = a.idle_minutes ?? 0;
+  const idleB = b.idle_minutes ?? 0;
+  if (idleA !== idleB) return idleA - idleB;
   return String(a.start_time).localeCompare(String(b.start_time));
 }
 
@@ -1045,6 +1052,22 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // /confirm gate, which re-derives a non-empty funnel key.
   const offerLocationKey = bookingOfferLocationKey(lat, lng);
   const candidateMap = new Map();
+  // Idle minutes this candidate would leave next to its nearest committed
+  // neighbours (owner bug report 2026-09-23) — 0 when it sits right against
+  // the required drive+buffer gap on a side, which every packed candidate
+  // does on at least one side by construction. Used only to break a
+  // compareRankedSlots score tie toward the less hole-making option;
+  // degrades to 0 (no occupancy map, or no neighbour on a side).
+  const idleMinutesAgainst = (dayOccupied, startMin, endMin) => {
+    if (!Array.isArray(dayOccupied) || !dayOccupied.length) return 0;
+    let idle = 0;
+    const before = dayOccupied.filter((b) => b.endMin <= startMin).sort((a, b) => b.endMin - a.endMin)[0];
+    const after = dayOccupied.filter((b) => b.startMin >= endMin).sort((a, b) => a.startMin - b.startMin)[0];
+    if (before) idle += Math.max(0, startMin - before.endMin - requiredGapMinutes({ startMin, endMin, lat, lng }, before));
+    if (after) idle += Math.max(0, after.startMin - endMin - requiredGapMinutes({ startMin, endMin, lat, lng }, after));
+    return idle;
+  };
+
   const addCandidate = (slot, startMin) => {
     const endMin = startMin + duration;
     if (!isWholeHour(startMin)) return;
@@ -1055,6 +1078,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // match the gate's SQL predicate (half-open: back-to-back windows touch
     // without clashing). Also covers cleanBookingStart snaps that would land
     // a candidate on a window find-time validated around.
+    let idleMinutes = 0;
     if (occupiedByDate) {
       const dayOccupied = (occupiedByDate.get(slot.date) || []).filter(row => !capacityEnabled()
         || row.technician_id == null || row.technician_id === slot.technician.id);
@@ -1064,6 +1088,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       // touches a stop across a real drive; drop it here so it is never
       // offered. Same soft-degrade as the overlap mirror (no map → skip).
       if (dayOccupied && violatesTravelGap({ startMin, endMin, lat, lng }, dayOccupied)) return;
+      idleMinutes = idleMinutesAgainst(dayOccupied, startMin, endMin);
     }
     const startTime = fmt(startMin);
     if (!inTimeOfDay(startTime, timeOfDay)) return;
@@ -1100,6 +1125,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       technician_id: slot.technician.id,
       rank: slot.rank,
       score: slot.score,
+      idle_minutes: idleMinutes,
       startTime24: startTime,
       endTime24: fmt(endMin),
       start: minToTime12(startMin),
@@ -1123,27 +1149,46 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       // Route scoring returns minute-level travel offsets; customers see clean windows.
       const rawStartMin = timeToMin(slot.start_time);
       const firstStartMin = cleanBookingStart(rawStartMin, slot, dayStartMin, slotGridMinutes);
-      // Fan out every grid-aligned start the gap can hold, not just the
-      // earliest: find-time emits ONE earliest-feasible-minute candidate per
-      // route gap, and when its hour-snap landed in the lunch block or on an
-      // occupied hour, addCandidate's rejection silently discarded the gap's
-      // genuinely free later hours — whole near-term days with real capacity
-      // vanished from /book, the reschedule page, and /reservice (2026-08-05
-      // field report). latest_start_min bounds the fan-out to starts whose
-      // end still clears the drive to the next stop (the unbounded snap
-      // could previously overshoot that); addCandidate still owns the
-      // whole-hour / lunch / occupancy / day-end rules for every start.
-      // When the snap overshoots the bound (a gap too tight to hold any
-      // grid-aligned start), the loop body never runs and the gap offers
-      // nothing — the correct outcome; the old single-candidate path could
-      // offer that overshot start and leave the tech a slot the route can't
-      // reach. Fallback to the single snapped start only when the bound is
-      // absent (defensive: a caller-mocked or cached slot without the field).
+      // latest_start_min bounds the fan-out to starts whose end still clears
+      // the drive to the next stop. Fallback to the single snapped start
+      // only when the bound is absent (defensive: a caller-mocked or cached
+      // slot without the field).
       const lastStartMin = Number.isFinite(slot.latest_start_min)
         ? slot.latest_start_min
         : firstStartMin;
-      for (let startMin = firstStartMin; startMin <= lastStartMin; startMin += slotGridMinutes) {
-        addCandidate(slot, startMin);
+      if ((slot.stops_that_day || 0) > 0) {
+        // Packed-ends only (owner bug report 2026-09-23): a gap bordered by
+        // a real stop offers ONLY the packed position(s) against that stop
+        // — earliest (right after the previous stop) when insertion.after
+        // is a real stop, latest (right before the next stop, snapped DOWN
+        // to the grid) when insertion.before is a real stop — instead of
+        // every grid-aligned hour in between. That full fan-out is exactly
+        // the hole-making mid-gap offer the report describes: a 9 AM pick
+        // on a day whose first stop is noon leaves a 2-3 hour hole while
+        // the packed 11 AM sits lower in score-only ranking. A middle gap
+        // (both sides real stops) offers both ends, one candidate when they
+        // coincide. No fallback fan-out when the packed position collides
+        // with lunch/occupancy — that gap simply offers nothing, same as
+        // find-time's own packEnds rule (scheduling/find-time.js).
+        const wantEarliest = !!slot.insertion?.after_stop_id;
+        const wantLatest = !!slot.insertion?.before_stop_id;
+        const latestGridStart = Math.floor(lastStartMin / slotGridMinutes) * slotGridMinutes;
+        const starts = new Set();
+        if (wantEarliest && firstStartMin <= lastStartMin) starts.add(firstStartMin);
+        if (wantLatest && latestGridStart >= firstStartMin) starts.add(latestGridStart);
+        if (!wantEarliest && !wantLatest && firstStartMin <= lastStartMin) starts.add(firstStartMin);
+        for (const startMin of [...starts].sort((a, b) => a - b)) addCandidate(slot, startMin);
+      } else {
+        // Open day (no committed stops at all): fan out every grid-aligned
+        // start the gap can hold, not just the earliest — find-time's
+        // single-candidate-per-gap legacy shape combined with an hour-snap
+        // landing in the lunch block or on an occupied hour otherwise
+        // silently discarded the gap's genuinely free later hours (2026-08-05
+        // field report). No neighbouring stop exists to create a hole
+        // against, so every hour is an equally valid pick.
+        for (let startMin = firstStartMin; startMin <= lastStartMin; startMin += slotGridMinutes) {
+          addCandidate(slot, startMin);
+        }
       }
     }
   }

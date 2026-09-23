@@ -1,0 +1,119 @@
+/**
+ * scheduling/expected-service-minutes.js — the ONE lookup that turns a
+ * service identity into "how long the tech is actually expected to be on
+ * site" for the travel-gap padding formula (owner ruling 2026-09-23):
+ * midpoint of min/max duration when both are set, else the catalog default,
+ * else the window length itself (no signal -> zero padding, legacy gap).
+ * Always clamped to <= the window length.
+ */
+const {
+  expectedServiceMinutes, expectedMinutesSync, ensureCatalogLoaded, clearExpectedServiceMinutesCache,
+} = require('../services/scheduling/expected-service-minutes');
+
+function fakeConn(rows) {
+  const fn = (table) => {
+    if (table !== 'services') throw new Error(`unexpected table ${table}`);
+    return { select: async () => rows };
+  };
+  return fn;
+}
+
+beforeEach(() => clearExpectedServiceMinutesCache());
+
+describe('expectedMinutesSync — no catalog loaded', () => {
+  test('falls back to the window length (zero padding, legacy gap)', () => {
+    expect(expectedMinutesSync({ serviceKey: 'quarterly_pest', windowMinutes: 60 })).toBe(60);
+    expect(expectedMinutesSync({ windowMinutes: 45 })).toBe(45);
+  });
+
+  test('a non-finite/absent windowMinutes defaults to 60', () => {
+    expect(expectedMinutesSync({})).toBe(60);
+    expect(expectedMinutesSync({ windowMinutes: 0 })).toBe(60);
+    expect(expectedMinutesSync({ windowMinutes: -5 })).toBe(60);
+  });
+});
+
+describe('expectedServiceMinutes — catalog midpoint / default / clamp', () => {
+  test('midpoint of min/max when both are set (quarterly pest 30-60 -> 45)', async () => {
+    const conn = fakeConn([
+      { service_key: 'quarterly_pest', name: 'Pest Control (Quarterly)', min_duration_minutes: 30, max_duration_minutes: 60, default_duration_minutes: null },
+    ]);
+    const minutes = await expectedServiceMinutes(conn, { serviceKey: 'quarterly_pest', windowMinutes: 60 });
+    expect(minutes).toBe(45);
+  });
+
+  test('falls back to default_duration_minutes when min/max are not both set', async () => {
+    const conn = fakeConn([
+      { service_key: 'lawn_basic', name: 'Lawn Care', min_duration_minutes: null, max_duration_minutes: null, default_duration_minutes: 40 },
+    ]);
+    expect(await expectedServiceMinutes(conn, { serviceKey: 'lawn_basic', windowMinutes: 60 })).toBe(40);
+    clearExpectedServiceMinutesCache();
+    // Only one of min/max set is treated as "not both set".
+    const conn2 = fakeConn([
+      { service_key: 'half_set', name: 'Half Set', min_duration_minutes: 30, max_duration_minutes: null, default_duration_minutes: 50 },
+    ]);
+    expect(await expectedServiceMinutes(conn2, { serviceKey: 'half_set', windowMinutes: 60 })).toBe(50);
+  });
+
+  test('falls back to the window length when neither midpoint nor default resolve', async () => {
+    const conn = fakeConn([
+      { service_key: 'bare', name: 'Bare Service', min_duration_minutes: null, max_duration_minutes: null, default_duration_minutes: null },
+    ]);
+    expect(await expectedServiceMinutes(conn, { serviceKey: 'bare', windowMinutes: 60 })).toBe(60);
+  });
+
+  test('a catalog default longer than the window clamps to the window length (never negative padding)', async () => {
+    const conn = fakeConn([
+      { service_key: 'long_default', name: 'Long', min_duration_minutes: null, max_duration_minutes: null, default_duration_minutes: 120 },
+    ]);
+    expect(await expectedServiceMinutes(conn, { serviceKey: 'long_default', windowMinutes: 60 })).toBe(60);
+    clearExpectedServiceMinutesCache();
+    const conn2 = fakeConn([
+      { service_key: 'wide_midpoint', name: 'Wide', min_duration_minutes: 90, max_duration_minutes: 150, default_duration_minutes: null },
+    ]);
+    // midpoint 120, window 60 -> clamped to 60
+    expect(await expectedServiceMinutes(conn2, { serviceKey: 'wide_midpoint', windowMinutes: 60 })).toBe(60);
+  });
+
+  test('resolves by serviceKey first, then by services.name = serviceType', async () => {
+    const conn = fakeConn([
+      { service_key: 'quarterly_pest', name: 'Pest Control (Quarterly)', min_duration_minutes: 30, max_duration_minutes: 60, default_duration_minutes: null },
+    ]);
+    // Exact serviceKey match.
+    expect(await expectedServiceMinutes(conn, { serviceKey: 'quarterly_pest', windowMinutes: 60 })).toBe(45);
+    clearExpectedServiceMinutesCache();
+    // No serviceKey given (or no match) -> falls back to a case-insensitive
+    // services.name = serviceType match.
+    expect(await expectedServiceMinutes(conn, { serviceType: 'pest control (quarterly)', windowMinutes: 60 })).toBe(45);
+    clearExpectedServiceMinutesCache();
+    expect(await expectedServiceMinutes(conn, { serviceKey: 'no_such_key', serviceType: 'Pest Control (Quarterly)', windowMinutes: 60 })).toBe(45);
+  });
+
+  test('no match at all falls back to the window length', async () => {
+    const conn = fakeConn([
+      { service_key: 'quarterly_pest', name: 'Pest Control (Quarterly)', min_duration_minutes: 30, max_duration_minutes: 60, default_duration_minutes: null },
+    ]);
+    expect(await expectedServiceMinutes(conn, { serviceKey: 'unknown', serviceType: 'Unknown Service', windowMinutes: 60 })).toBe(60);
+  });
+
+  test('a failing catalog read fails open to the window length, never throws', async () => {
+    const conn = () => { throw new Error('boom'); };
+    await expect(expectedServiceMinutes(conn, { serviceKey: 'x', windowMinutes: 60 })).resolves.toBe(60);
+  });
+
+  test('no db handle at all -> sync fallback, no query attempted', async () => {
+    expect(await expectedServiceMinutes(null, { serviceKey: 'x', windowMinutes: 60 })).toBe(60);
+  });
+
+  test('ensureCatalogLoaded caches — a second call within TTL does not re-query', async () => {
+    let calls = 0;
+    const conn = (table) => {
+      calls += 1;
+      return { select: async () => [{ service_key: 'k', name: 'K', min_duration_minutes: 20, max_duration_minutes: 40, default_duration_minutes: null }] };
+    };
+    await ensureCatalogLoaded(conn);
+    await ensureCatalogLoaded(conn);
+    expect(calls).toBe(1);
+    expect(expectedMinutesSync({ serviceKey: 'k', windowMinutes: 60 })).toBe(30);
+  });
+});

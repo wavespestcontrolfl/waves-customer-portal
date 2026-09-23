@@ -138,25 +138,55 @@ describe('buildBookingAvailability — gap fan-out', () => {
     expect(findAvailableSlots).toHaveBeenCalledWith(expect.objectContaining({ serviceTypes: ['Pest Control', 'Tree & Shrub'] }));
   });
 
-  test('a gap whose earliest snap lands in lunch still offers its free afternoon hours', async () => {
+  test('packed-ends (owner bug report 2026-09-23): a trailing gap (real stop before, day-close after) offers ONLY its earliest packed start, not every hour in between', async () => {
     // Gap opens 11:10 (snaps to 12:00 = lunch) and runs long enough to hold
-    // starts through 15:30. Pre-fan-out this day rendered EMPTY.
+    // starts through 15:30 — but this is a TRAILING gap (insertion.after_stop_id
+    // set, no before_stop_id from the default gapSlot helper), so packing
+    // restricts the fan-out to its one earliest position. That position
+    // lands in lunch, so the gap offers nothing — no fallback fan-out.
     findAvailableSlots.mockResolvedValue({
       slots: [gapSlot('11:10', { latest_start_min: 15 * 60 + 30 })],
       total_feasible: 1,
     });
     const availability = await build();
-    expect(startTimes(availability)).toEqual(['13:00', '14:00', '15:00']);
+    expect(availability.days).toEqual([]);
   });
 
-  test('an occupied hour rejects that start only, not the rest of the gap', async () => {
+  test('packed-ends: a trailing gap offers its one earliest packed start; an occupied hour elsewhere in the gap is never even attempted', async () => {
     findAvailableSlots.mockResolvedValue({
       slots: [gapSlot('13:00', { latest_start_min: 15 * 60 })],
       total_feasible: 1,
     });
     listOccupiedWindows.mockResolvedValue([{ date: D, startMin: 14 * 60, endMin: 15 * 60 }]);
     const availability = await build();
-    expect(startTimes(availability)).toEqual(['13:00', '15:00']);
+    expect(startTimes(availability)).toEqual(['13:00']);
+  });
+
+  test('packed-ends: a middle gap (real stop on both sides) offers both the earliest-after and latest-before positions', async () => {
+    findAvailableSlots.mockResolvedValue({
+      slots: [gapSlot('11:10', {
+        latest_start_min: 15 * 60 + 30,
+        insertion: { after_stop_id: 'stop-1', before_stop_id: 'stop-2' },
+      })],
+      total_feasible: 1,
+    });
+    const availability = await build();
+    // Earliest packed (ceil 11:10 -> 12:00) lands in lunch and is dropped;
+    // latest packed (floor 15:30 -> 15:00) survives — a middle gap tries
+    // both ends independently, unlike the single-end trailing/leading case.
+    expect(startTimes(availability)).toEqual(['15:00']);
+  });
+
+  test('packed-ends: a leading gap (day-open before, real stop after) offers ONLY its latest packed start', async () => {
+    findAvailableSlots.mockResolvedValue({
+      slots: [gapSlot('08:05', {
+        latest_start_min: 11 * 60,
+        insertion: { after_stop_id: null, before_stop_id: 'stop-1' },
+      })],
+      total_feasible: 1,
+    });
+    const availability = await build();
+    expect(startTimes(availability)).toEqual(['11:00']);
   });
 
   test('the fan-out never passes latest_start_min — a snap past the bound offers nothing', async () => {
@@ -207,7 +237,10 @@ describe('buildBookingAvailability — gap fan-out', () => {
 test('an afternoon search result remains in the unfiltered confirmation-day list', async () => {
   wireDayCapCounts([]);
   listOccupiedWindows.mockResolvedValue([]);
-  findAvailableSlots.mockResolvedValue({ slots: [gapSlot('08:00', { latest_start_min: 16 * 60 })] });
+  // stops_that_day: 0 — an empty-route gap keeps the full-fan-out path
+  // (packed-ends restriction only applies once a real stop borders the
+  // gap), which is what this test's full-day fan-out invariant exercises.
+  findAvailableSlots.mockResolvedValue({ slots: [gapSlot('08:00', { latest_start_min: 16 * 60, stops_that_day: 0 })] });
   const opts = { lat: 27.4, lng: -82.4, duration: 60, rangeFrom: D, rangeTo: D, config: CONFIG, today: new Date() };
   const searched = await buildBookingAvailability({ ...opts, timeOfDay: 'afternoon' });
   const confirmation = await buildBookingAvailability(opts);

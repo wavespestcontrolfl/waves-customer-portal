@@ -265,6 +265,13 @@ class AvailabilityEngine {
         occupied.push({ start: this.timeToMin(b.start_time), end: this.timeToMin(b.end_time) });
       });
 
+      // Packed-ends (owner bug report 2026-09-23): a day with at least one
+      // REAL committed stop (not counting the lunch block added next)
+      // restricts each gap to its packed end(s) against that stop, instead
+      // of offering every hourly window in between — see findGaps. An
+      // empty day (lunch only) keeps today's earliest-per-gap behavior.
+      const hasRealStops = occupied.length > 0;
+
       // Add lunch block
       occupied.push({ start: lunchStart, end: lunchEnd });
 
@@ -279,7 +286,7 @@ class AvailabilityEngine {
           { startMin: g.start, endMin: g.end, ...travelMirror.pin },
           travelMirror.byDate.get(dateStr) || [],
         )
-        : null);
+        : null, hasRealStops);
 
       if (slots.length > 0) {
         days.push({
@@ -306,34 +313,70 @@ class AvailabilityEngine {
   // gap then advances an hour at a time so a long zone-local hole still
   // yields its first ACCEPTED hour (an out-of-zone stop can reject 9:00 while
   // 12:00 in the same hole is fine — r5 P2).
-  findGaps(occupied, dayStart, dayEnd, slotDuration, buffer, accept = null) {
+  //
+  // packEnds (owner bug report 2026-09-23, true only when the day already
+  // has a real committed stop — see the caller): restrict each gap to its
+  // packed end(s) instead of walking every hour in it — the leading gap
+  // (day-open to the first block) offers ONLY its latest accepted hour, the
+  // trailing gap (last block to day-end) offers ONLY its earliest, and a
+  // middle gap (between two blocks) tries both, independently (an accept
+  // rejection on one end never suppresses the other). False (or no real
+  // stop that day) keeps the legacy first-accepted-hour-per-gap walk.
+  findGaps(occupied, dayStart, dayEnd, slotDuration, buffer, accept = null, packEnds = false) {
     const slots = [];
-    const offer = (gapStart, gapEnd) => {
-      for (let start = gapStart; gapEnd - start >= slotDuration; start += 60) {
-        const slot = { start, end: start + slotDuration };
-        if (!accept || accept(slot)) { slots.push(slot); return; }
-        if (!accept) return;
-      }
-    };
-    let cursor = dayStart;
-
     // Round minutes-since-midnight UP to the next clean hour. Customer-
     // facing slot starts like 1:15 / 2:45 felt like "we're squeezing you
     // into a travel gap" — the operator wants every quoted time to land
     // on the hour (1:00, 2:00). The buffer still applies but the slot
     // only starts at the next :00 after buffer.
     const roundUpToHour = (min) => Math.ceil(min / 60) * 60;
+    const roundDownToHour = (min) => Math.floor(min / 60) * 60;
 
+    const offerEarliest = (gapStart, gapEnd) => {
+      for (let start = gapStart; gapEnd - start >= slotDuration; start += 60) {
+        const slot = { start, end: start + slotDuration };
+        if (!accept || accept(slot)) { slots.push(slot); return; }
+        if (!accept) return;
+      }
+    };
+    const offerLatest = (gapStart, gapEnd) => {
+      for (let start = roundDownToHour(gapEnd - slotDuration); start >= gapStart; start -= 60) {
+        const slot = { start, end: start + slotDuration };
+        if (!accept || accept(slot)) { slots.push(slot); return; }
+        if (!accept) return;
+      }
+    };
+
+    const gaps = [];
+    let cursor = dayStart;
     for (const block of occupied) {
-      const gapStart = roundUpToHour(cursor + buffer);
-      const gapEnd = block.start - buffer;
-
-      offer(gapStart, gapEnd);
+      gaps.push({ start: roundUpToHour(cursor + buffer), end: block.start - buffer });
       cursor = Math.max(cursor, block.end);
     }
-
     // Gap after the last occupied block — same clean-hour rule.
-    offer(roundUpToHour(cursor + buffer), dayEnd);
+    gaps.push({ start: roundUpToHour(cursor + buffer), end: dayEnd });
+
+    gaps.forEach((gap, i) => {
+      if (!packEnds) { offerEarliest(gap.start, gap.end); return; }
+      const isLeading = i === 0;
+      const isTrailing = i === gaps.length - 1;
+      // A middle gap's earliest and latest picks can land on the same hour
+      // (a gap too narrow to hold two distinct accepted starts) — dedupe
+      // within this one gap so it never reports the identical slot twice.
+      const gapStarts = [];
+      const tryOffer = (offerFn) => {
+        const before = slots.length;
+        offerFn(gap.start, gap.end);
+        if (slots.length > before) {
+          const added = slots[slots.length - 1];
+          if (gapStarts.includes(added.start)) slots.pop();
+          else gapStarts.push(added.start);
+        }
+      };
+      if (!isLeading) tryOffer(offerEarliest); // trailing or middle
+      if (!isTrailing) tryOffer(offerLatest); // leading or middle
+      if (isLeading && isTrailing) tryOffer(offerEarliest); // no real stop at all (defensive)
+    });
 
     return slots.slice(0, 4); // max 4 slots per day
   }

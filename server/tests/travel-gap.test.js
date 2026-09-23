@@ -165,6 +165,60 @@ describe('travelGapConflicts — route neighbours only', () => {
   });
 });
 
+describe('expected-minutes padding (owner ruling 2026-09-23)', () => {
+  // requiredGap(early, late) = drive + max(0, buffer - (early.windowMinutes
+  // - early.expectedMinutes)) — padding credited to whichever side is
+  // chronologically EARLY. A 60-min window with 45 expected minutes (a
+  // quarterly-pest midpoint) has 15 minutes of padding, which fully absorbs
+  // the default 15-minute buffer.
+  test('11:00-12:00 (45 expected) before a stop at 12:00: passes when drive <= 15, fails past it', () => {
+    const candidate = { startMin: 660, endMin: 720, windowMinutes: 60, expectedMinutes: 45, ...PALMETTO };
+    // ~11.7mi Palmetto->Bradenton models to ~33 min drive - too far.
+    expect(travelGapViolation(candidate, { startMin: 720, endMin: 780, ...BRADENTON })).not.toBeNull();
+    // A stop 0 driven-minutes away (candidate and stop at the same point) is
+    // well inside the reduced (drive-only, buffer fully absorbed) required gap.
+    expect(travelGapViolation(candidate, { startMin: 720, endMin: 780, ...PALMETTO })).toBeNull();
+  });
+
+  test('symmetric: an EXISTING stop\'s own expected minutes absorb the buffer on ITS side', () => {
+    // The stop (not the candidate) carries the expected-minutes signal —
+    // same reduction, now credited to the stop because IT is the early side.
+    const stop = { startMin: 660, endMin: 720, windowMinutes: 60, expectedMinutes: 45, ...PALMETTO };
+    expect(travelGapViolation({ startMin: 720, endMin: 780, ...PALMETTO }, stop)).toBeNull();
+    expect(travelGapViolation({ startMin: 720, endMin: 780, ...BRADENTON }, stop)).not.toBeNull();
+  });
+
+  test('the 2026-09-03 Palmetto/Bradenton case is still blocked — no expected-minutes signal on either side means zero padding', () => {
+    gateOn();
+    // Neither side carries windowMinutes/expectedMinutes (plain legacy
+    // shape) -> padding 0 -> the untouched drive+buffer gap, same as the
+    // pre-existing field-report regression test.
+    const v = travelGapViolation(
+      { startMin: 540, endMin: 600, ...PALMETTO },
+      { startMin: 600, endMin: 660, ...BRADENTON },
+    );
+    expect(v).not.toBeNull();
+    expect(v.requiredMin).toBeGreaterThan(40); // drive (~33) + full 15 buffer
+  });
+
+  test('a real overlap is never masked by expected-minutes padding', () => {
+    gateOn();
+    const candidate = { startMin: 600, endMin: 660, windowMinutes: 60, expectedMinutes: 20, ...PALMETTO };
+    const stop = { startMin: 630, endMin: 690, windowMinutes: 60, expectedMinutes: 20, ...PALMETTO };
+    const v = travelGapViolation(candidate, stop);
+    expect(v).not.toBeNull();
+    expect(v.gapMin).toBeLessThan(0);
+  });
+
+  test('padding never exceeds the window (a bogus expectedMinutes > window clamps to zero padding)', () => {
+    gateOn();
+    const candidate = { startMin: 660, endMin: 720, windowMinutes: 60, expectedMinutes: 999, ...PALMETTO };
+    const v = travelGapViolation(candidate, { startMin: 720, endMin: 780, ...BRADENTON });
+    expect(v).not.toBeNull();
+    expect(v.requiredMin).toBeGreaterThan(40); // no padding credit — full buffer applies
+  });
+});
+
 describe('violatesTravelGap (gate-checked)', () => {
   const candidate = { startMin: 540, endMin: 600, ...PALMETTO };
   const stops = [{ startMin: 600, endMin: 660, ...BRADENTON }];
