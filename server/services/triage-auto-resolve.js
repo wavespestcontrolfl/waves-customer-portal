@@ -939,8 +939,11 @@ const filled = (v) => String(v || '').trim() !== '';
 // '120 Example St' (pre-push audit P1).
 function recordCarriesStatedStreet(item) {
   const payload = parseMaybeJson(item.payload);
-  const stated = addressKey(payload?.stated_street);
-  const onRecord = addressKey(item.customer_address_line1);
+  // The detector's own street key, so N / North and St / Street resolve
+  // exactly as they were detected (codex #4666 P2).
+  const { houseNumberStreetKey } = require('./call-triage-flags');
+  const stated = houseNumberStreetKey(payload?.stated_street);
+  const onRecord = houseNumberStreetKey(item.customer_address_line1);
   if (!stated || !onRecord || stated !== onRecord) return false;
   // The stated locality must hold on the record too (same helper the
   // address-moot rules use): a ZIP or city the caller gave that the record

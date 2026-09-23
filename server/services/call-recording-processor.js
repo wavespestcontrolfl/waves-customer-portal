@@ -9768,122 +9768,137 @@ const CallRecordingProcessor = {
     // and absent from the estimate-send surface — so it read as a landlord
     // note, not a typo. This card replaces it for the same-street shape.
     let houseNumberConflictFiled = false;
-    if (customerId && !createdCustomerFromCall && onFileAddress) {
-      try {
-        // `detected` is the detector's own verdict; the guards below may
-        // withhold the CARD (uncorroborated, a known property) without
-        // settling the disagreement — only a positive verdict of "no
-        // conflict" may retire an earlier card (pre-push audit P1).
-        const detected = onFileHouseNumberConflict({ addressValidation: effectiveAddressValidation, onFileAddress });
-        let houseConflict = detected;
-        // AV proves a premise EXISTS, not that the caller said it: in shadow
-        // mode the bridge refuses to adopt an AV street that disagrees with
-        // the legacy extraction, and this lane must not present it as caller
-        // evidence either (codex r1 P2). The canonical record is the
-        // pipeline's own verdict — enforce mode adopted the AV street into
-        // it, shadow mode adopted it only when V1 agreed — so a house number
-        // the record does not carry is not corroborated. Fail closed.
-        // Computed for BOTH outcomes: filing needs it, and so does retiring
-        // an earlier card — an AV premise the canonical record does not
-        // carry settles nothing either way (pre-push audit P1).
-        const avNormalized = effectiveAddressValidation?.normalized || {};
-        const { streetKey: canonicalStreetKey } = require('./customer-properties');
-        const canonicalZip = String(extracted?.zip || '').match(/\d{5}/)?.[0] || '';
-        const avZip = String(avNormalized.postal_code || '').match(/\d{5}/)?.[0] || '';
-        // Suffix-CANONICAL compare (St == Street, St != Ave) — the
-        // suffix-stripping key would corroborate a different road (codex
-        // r2 P2). Same comparator the second-address check uses.
-        const corroborated = !!canonicalStreetKey(extracted?.address_line1)
-          && canonicalStreetKey(extracted?.address_line1) === canonicalStreetKey(avNormalized.street_line_1)
-          && (!canonicalZip || !avZip || canonicalZip === avZip);
-        if (houseConflict && !corroborated) houseConflict = null;
-        // A second property the account already holds on the same street
-        // (a duplex, a rental two doors down) is a known address, not a typo
-        // — the same recognition the second-address check applies (pre-push
-        // audit P1). Only when the multi-property table is live.
-        if (houseConflict && process.env.GATE_CUSTOMER_PROPERTIES === 'true') {
-          const { addressKey: propertyKey } = require('./customer-properties');
-          const n = effectiveAddressValidation.normalized;
-          // The caller's unit rides on the V2 service_address (AV normalizes
-          // line 1 only) — without it Unit A and Unit B at one building
-          // collapse to the same key (pre-push audit P1).
-          // The canonical unit first (V1's in shadow/kill-switch mode), the
-          // V2 unit as fallback — the same read the second-address check
-          // makes (codex r2 P2).
-          const statedUnit = extracted?.address_line2 || v2CanonicalExtraction?.property?.service_address?.street_line_2 || null;
-          const statedKey = propertyKey({ address_line1: n.street_line_1, address_line2: statedUnit, city: n.city, zip: n.postal_code });
-          // Independent provenance only: a property row the call pipeline
-          // itself minted from THIS (or an earlier pass's) stated address is
-          // the disagreement restated, not a confirmation of it (pre-push
-          // audit P1) — manual / self-book / backfill rows count.
-          const props = await db('customer_properties')
-            .where({ customer_id: customerId, active: true })
-            .whereNot({ source: 'call_pipeline' })
-            .select('address_line1', 'address_line2', 'city', 'zip');
-          if (statedKey && props.some((prop) => propertyKey(prop) === statedKey)) houseConflict = null;
-        }
-        if (houseConflict) {
-          // The stated unit rides on the card so the reviewer sees the whole
-          // door, not just the number (codex r1 P1) — canonical unit first.
-          const statedUnit = extracted?.address_line2 || v2CanonicalExtraction?.property?.service_address?.street_line_2 || null;
-          if (statedUnit) houseConflict.stated_unit = String(statedUnit).trim();
-          const conflictCard = buildTriageItem({
+    try {
+      const canCompare = !!(customerId && !createdCustomerFromCall && onFileAddress);
+      // `detected` is the detector's own verdict; the guards below may
+      // withhold the CARD (uncorroborated, a known property) without
+      // settling the disagreement — only positive evidence may retire an
+      // earlier card (pre-push audit P1).
+      const detected = canCompare
+        ? onFileHouseNumberConflict({ addressValidation: effectiveAddressValidation, onFileAddress })
+        : null;
+      let houseConflict = detected;
+      // Computed for BOTH outcomes: filing needs it, and so does retiring
+      // an earlier card — an AV premise the canonical record does not
+      // carry settles nothing either way (pre-push audit P1).
+      const avNormalized = effectiveAddressValidation?.normalized || {};
+      const { streetKey: canonicalStreetKey, addressKey: propertyKey } = require('./customer-properties');
+      const canonicalZip = String(extracted?.zip || '').match(/\d{5}/)?.[0] || '';
+      const avZip = String(avNormalized.postal_code || '').match(/\d{5}/)?.[0] || '';
+      // Suffix-CANONICAL compare (St == Street, St != Ave) — the
+      // suffix-stripping key would corroborate a different road (codex
+      // r2 P2). Same comparator the second-address check uses.
+      const corroborated = !!canonicalStreetKey(extracted?.address_line1)
+        && canonicalStreetKey(extracted?.address_line1) === canonicalStreetKey(avNormalized.street_line_1)
+        && (!canonicalZip || !avZip || canonicalZip === avZip);
+      if (houseConflict && !corroborated) houseConflict = null;
+      // A second property the account already holds on the same street
+      // (a duplex, a rental two doors down) is a known address, not a typo
+      // — the same recognition the second-address check applies (pre-push
+      // audit P1). Only when the multi-property table is live. Independent
+      // provenance only: a property row the call pipeline itself minted
+      // from a stated address is the disagreement restated, not a
+      // confirmation of it — manual / self-book / backfill rows count.
+      // The canonical unit first (V1's in shadow/kill-switch mode), the V2
+      // unit as fallback — the same read the second-address check makes.
+      const statedUnit = extracted?.address_line2 || v2CanonicalExtraction?.property?.service_address?.street_line_2 || null;
+      let knownIndependentProperty = false;
+      if (houseConflict && process.env.GATE_CUSTOMER_PROPERTIES === 'true') {
+        const statedKey = propertyKey({ address_line1: avNormalized.street_line_1, address_line2: statedUnit, city: avNormalized.city, zip: avNormalized.postal_code });
+        const props = await db('customer_properties')
+          .where({ customer_id: customerId, active: true })
+          .whereNot({ source: 'call_pipeline' })
+          .select('address_line1', 'address_line2', 'city', 'zip');
+        knownIndependentProperty = !!statedKey && props.some((prop) => propertyKey(prop) === statedKey);
+        if (knownIndependentProperty) houseConflict = null;
+      }
+      // Positive evidence that no conflict stands: the latest pass validated
+      // a corroborated premise and the detector found no disagreement, or
+      // an independently saved property covers the stated address (codex
+      // r4 P2) — or the call no longer has a linked customer at all, so a
+      // card about "stated vs on file" describes nothing (codex r3 P2).
+      // Missing evidence (AV off, unavailable, uncorroborated) settles
+      // nothing and leaves an earlier card standing (pre-push audit P1).
+      const avPositive = ['validated_accept', 'corrected'].includes(effectiveAddressValidation?.status)
+        && !!avNormalized.street_line_1;
+      const retireStale = !customerId
+        || (canCompare && avPositive && corroborated && (!detected || knownIndependentProperty));
+      if (houseConflict || retireStale) {
+        const conflictCard = houseConflict
+          ? buildTriageItem({
             callLogId: call.id,
             flag: 'on_file_house_number_conflict',
             onFileAddress,
             extraction: v2CanonicalExtraction,
             severity: 'advisory',
             addressValidation: effectiveAddressValidation,
-            extraPayload: houseConflict,
-          });
-          // MERGE, not ignore: a force-reprocess that heard a different
-          // street or relinked the call must refresh the open card's
-          // evidence, or the estimate surface keeps showing the previous
-          // pass's (or previous customer's) address (codex r3 P2). Same
-          // pattern as the secondary-contact card.
-          await db('triage_items')
-            .insert(conflictCard)
-            .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-            .merge({ payload: conflictCard.payload, summary: conflictCard.summary, updated_at: new Date() });
-          // Only a landed insert (or an ignored duplicate of an open card)
-          // may suppress the second-address fallback and mark the call for
-          // review — a thrown insert would otherwise leave review_status
-          // open with no card behind it (codex r2 P2).
+            // The stated unit rides on the card so the reviewer sees the
+            // whole door, not just the number (codex r1 P1).
+            extraPayload: { ...houseConflict, ...(statedUnit ? { stated_unit: String(statedUnit).trim() } : {}) },
+          })
+          : null;
+        // Both mutations under the per-call triage lock AND the
+        // processing-token lock (codex r4 P1): a pass whose claim was
+        // reclaimed must neither recreate a card the replacement pass
+        // retired nor retire one it just filed — the claim check and the
+        // write commit together or not at all, like the hold ledger.
+        const outcome = await db.transaction(async (trx) => {
+          await lockTriageCall(trx, call.id);
+          const owned = await trx('call_log')
+            .where({ id: call.id })
+            .where('processing_token', procToken)
+            .forUpdate()
+            .first('id');
+          if (!owned) return 'claim_lost';
+          if (conflictCard) {
+            // MERGE fresh evidence into an OPEN card (a force-reprocess that
+            // heard a different street or relinked the call must not leave
+            // the previous pass's address on the estimate surface — codex
+            // r3 P2) but never into a claimed (in_progress) one: an operator
+            // reviewing it would approve evidence that changed under them
+            // (codex r4 P1). A claimed card keeps its payload; the reviewer
+            // resolves it and the next pass files afresh.
+            await trx('triage_items')
+              .insert(conflictCard)
+              .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+              .merge({ payload: conflictCard.payload, summary: conflictCard.summary, updated_at: new Date() })
+              .where('triage_items.status', 'open');
+            return 'filed';
+          }
+          const retired = await trx('triage_items')
+            .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict', status: 'open' })
+            .update({
+              status: 'resolved',
+              resolution_note: customerId
+                ? 'Superseded — a later pass over this call found no house-number disagreement with the record.'
+                : 'Superseded — the call is no longer linked to a customer, so there is no on-file address to disagree with.',
+              resolution_source: 'system',
+              resolved_at: new Date(),
+              updated_at: new Date(),
+            });
+          return retired ? 'retired' : 'nothing';
+        });
+        if (outcome === 'filed') {
+          // Only a landed write may suppress the second-address fallback
+          // and mark the call for review — a thrown or fenced-out write
+          // would otherwise leave review_status open with no card behind it
+          // (codex r2 P2).
           houseNumberConflictFiled = true;
-          // Rides needs_confirmation like the second-address flag it replaces:
-          // that list drives call_log.review_status, the lead's
+          // Rides needs_confirmation like the second-address flag it
+          // replaces: that list drives call_log.review_status, the lead's
           // needs_confirmation and the CONFIRM BEFORE DISPATCH timeline note
           // (pre-push audit P1) — the card alone would leave the call
           // reading as fully processed.
           if (!bridgeNeedsConfirmation.includes('on_file_house_number_conflict')) bridgeNeedsConfirmation.push('on_file_house_number_conflict');
           logger.info(`[call-proc] house-number conflict card for ${maskSid(callSid)}: stated ${houseConflict.stated_house_number}, on file ${houseConflict.on_file_house_number}`);
+        } else if (outcome === 'claim_lost') {
+          logger.info(`[call-proc] processing claim lost — skipping the house-number conflict card write for ${maskSid(callSid)} (the owner files it)`);
         }
-        // The latest pass POSITIVELY validated a premise and found no
-        // conflict: an open card from an earlier pass no longer describes
-        // the call — retire it, or the auto-resolver and the address-ask
-        // surfaces keep acting on a payload the extraction no longer
-        // supports (codex r3 P2). Missing evidence (AV off, unavailable,
-        // unresolvable) settles nothing and leaves the card standing
-        // (pre-push audit P1). Only cards still open (a human-claimed card
-        // stays theirs).
-        const avPositive = ['validated_accept', 'corrected'].includes(effectiveAddressValidation?.status)
-          && !!effectiveAddressValidation?.normalized?.street_line_1;
-        if (!detected && avPositive && corroborated) {
-          await db('triage_items')
-            .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict', status: 'open' })
-            .update({
-              status: 'resolved',
-              resolution_note: 'Superseded — a later pass over this call found no house-number disagreement with the record.',
-              resolution_source: 'system',
-              resolved_at: new Date(),
-              updated_at: new Date(),
-            });
-        }
-      } catch (e) {
-        // Code/name only: a knex error message carries the insert bindings
-        // (both streets) — no addresses in logs (pre-push audit P1).
-        logger.warn(`[call-proc] house-number conflict check skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
       }
+    } catch (e) {
+      // Code/name only: a knex error message carries the insert bindings
+      // (both streets) — no addresses in logs (pre-push audit P1).
+      logger.warn(`[call-proc] house-number conflict check skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
     }
 
     const verifiableAni = firstExternalPhone(call.from_phone);

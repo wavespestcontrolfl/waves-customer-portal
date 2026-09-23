@@ -1786,6 +1786,15 @@ function houseAndName(line) {
   return { house: m[1].toLowerCase(), ...streetNameParts(tokens) };
 }
 
+// The detector's own street identity ("<house> <aliased name>") for a
+// single line, so a resolver judging "does the record now carry the stated
+// premise" equates exactly the spellings the detector equates (N / North,
+// St / Street) — codex #4666 P2. '' when the line carries no house token.
+function houseNumberStreetKey(line) {
+  const { house, name } = houseAndName(splitStreetLineUnit(String(line || '')).street || String(line || ''));
+  return house && name ? `${house} ${name}` : '';
+}
+
 function onFileHouseNumberConflict({ addressValidation = null, onFileAddress = null } = {}) {
   const av = addressValidation;
   if (!av || !(av.status === 'validated_accept' || av.status === 'corrected')) return null;
@@ -1841,6 +1850,7 @@ function dispatchesToOnFileAddress(extraction, opts = {}) {
 
 module.exports = {
   onFileHouseNumberConflict,
+  houseNumberStreetKey,
   SCHEDULING_CHANGE_REVIEW_FLAGS,
   isExplicitlyNonOwner,
   computeDeterministicTriageFlags,

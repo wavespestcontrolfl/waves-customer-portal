@@ -14,7 +14,7 @@ jest.mock('../config/twilio-numbers', () => ({
   getLeadSourceFromNumber: jest.fn(() => ({ source: 'phone_call' })),
 }));
 
-const { onFileHouseNumberConflict } = require('../services/call-triage-flags');
+const { onFileHouseNumberConflict, houseNumberStreetKey } = require('../services/call-triage-flags');
 const { buildTriageItem } = require('../services/call-routing-gates');
 const { classifyTriageItem, RULE_NOTES } = require('../services/triage-auto-resolve');
 
@@ -149,6 +149,15 @@ describe('triage auto-resolve: house_number_adopted', () => {
     expect(classifyTriageItem(item({ customer_address_line1: '1250 Example Street', customer_city: 'Bradenton', customer_zip: null }), {}, { now: NOW })).toBeNull();
     // A stated ZIP the record no longer carries is not the same premise.
     expect(classifyTriageItem(item({ customer_address_line1: '1250 Example Street', customer_zip: null }), {}, { now: NOW })).toBeNull();
+  });
+
+  test('directional and suffix spellings resolve exactly as they were detected', () => {
+    expect(houseNumberStreetKey('1250 North Main Street')).toBe(houseNumberStreetKey('1250 N Main St'));
+    expect(houseNumberStreetKey('Main St')).toBe('');
+    expect(classifyTriageItem(item({
+      customer_address_line1: '1250 N Main St', customer_city: 'Parrish', customer_zip: '34219',
+      payload: { stated_house_number: '1250', stated_street: '1250 North Main Street', stated_city: 'Parrish', stated_zip: '34219' },
+    }), {}, { now: NOW })).toEqual({ action: 'resolve', rule: 'house_number_adopted' });
   });
 
   test('suffix spelling and a unit do not keep a settled ask open', () => {
