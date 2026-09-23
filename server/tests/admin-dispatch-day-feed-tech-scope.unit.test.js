@@ -65,6 +65,7 @@ jest.mock('../services/service-completion-profiles', () => ({
 }));
 
 const router = require('../routes/admin-dispatch');
+const { etDateString } = require('../utils/datetime-et');
 
 function routeLayer(method, routePath) {
   return router.stack.find((l) => l.route && l.route.path === routePath && l.route.methods[method]);
@@ -89,7 +90,10 @@ function invoke(params, actor) {
 
 // Two visits on the same day assigned to DIFFERENT technicians. The caller
 // is tech-7; svc-other belongs to tech-9 and must never reach tech-7.
-const DATE = '2026-09-23';
+// Real "today" (ET) — the real technicianCurrentVisitFilter this test
+// exercises reads a rolling 7-day cutoff off the actual clock, so a fixed
+// calendar date would eventually fall outside the window and fail.
+const DATE = etDateString(new Date());
 const ROWS = [
   {
     id: 'svc-mine', customer_id: 'cust-1', technician_id: 'tech-7', tech_name: 'Tech Seven',

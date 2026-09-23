@@ -15,15 +15,19 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'audit-repro-jwt-secret';
 const http = require('http');
 const express = require('express');
 const jwt = require('jsonwebtoken');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 const SKIP = !process.env.DATABASE_URL;
 const describeOrSkip = SKIP ? describe.skip : describe;
 
+// Relative to real "now" (never a fixed calendar date) so the fixture never
+// ages out of technicianCurrentVisitFilter's rolling 7-day access window.
+const DATE = etDateString(addETDays(new Date(), -1)); // inside the 7-day tech window
+const OLD_DATE = '2024-01-15';                        // far outside any tech window
+
 describeOrSkip('r1-dispatch-1: technician token scoping on GET /api/admin/dispatch/:date', () => {
   let db, server, baseUrl;
   let techA, techB, custA, custB, svcA, svcB, svcOldB;
-  const DATE = '2026-09-22';          // inside the 7-day tech window
-  const OLD_DATE = '2024-01-15';      // far outside any tech window
 
   beforeAll(async () => {
     db = require('../models/db');

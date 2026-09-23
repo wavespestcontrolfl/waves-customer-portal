@@ -27,6 +27,19 @@ jest.setTimeout(30000);
 
 let mockCurrentRole = 'technician';
 
+// A weekday well in the future (never Sunday — the legacy engine skips
+// Sundays outright) relative to the REAL clock, so this fixture never goes
+// stale the way a fixed calendar date eventually does. Named with the
+// `mock` prefix so babel-plugin-jest-hoist allows referencing it from
+// inside the jest.mock('../models/db', ...) factory below.
+function mockFutureWeekday(daysAhead) {
+  const d = new Date();
+  d.setDate(d.getDate() + daysAhead);
+  while (d.getDay() === 0) d.setDate(d.getDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+const mockFutureDate = mockFutureWeekday(14);
+
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => {
   const actual = jest.requireActual('../middleware/admin-auth');
@@ -57,7 +70,7 @@ jest.mock('../models/db', () => {
     ],
     scheduled_services: [
       {
-        id: 'svc-other-1', scheduled_date: '2026-10-05', technician_id: 'tech-other',
+        id: 'svc-other-1', scheduled_date: mockFutureDate, technician_id: 'tech-other',
         window_start: '09:00', window_end: '10:00', service_type: 'Pest Control',
         estimated_duration_minutes: 60, svc_lat: 27.45, svc_lng: -82.45,
         first_name: 'Olivia', last_name: 'Otherton', city: 'Bradenton',
@@ -126,8 +139,8 @@ function post(body) {
   });
 }
 
-// A Monday well in the future so the same-day floor never applies.
-const RANGE = { dateFrom: '2026-10-05', dateTo: '2026-10-05', durationMinutes: 15, topN: 100 };
+// A weekday well in the future so the same-day floor never applies.
+const RANGE = { dateFrom: mockFutureDate, dateTo: mockFutureDate, durationMinutes: 15, topN: 100 };
 
 describe('r1-sched-routes-3: find-time leaks other techs\' customers and any customer address to a technician token', () => {
   beforeEach(() => { mockCurrentRole = 'technician'; });
