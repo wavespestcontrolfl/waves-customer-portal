@@ -2972,8 +2972,15 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     // already reports a blocking validation failure (see the time-on-site
     // check below).
     const lineDiscountGateSensitive = serviceLines.some((l) => !!effectiveLineDiscount(l));
+    // Codex pre-push audit P1 (round 10 on #4657, :2974): serviceLines holds
+    // ADD-ON lines only — the PRIMARY line's own stored discount (read-only
+    // here, but restacked by the marked-row canonical branch and replayed
+    // by the legacy one) is just as gate-sensitive: repricing the primary
+    // on a marked visit with a 10% primary discount previews $230 and would
+    // save $240 under a gate that closed before Save.
+    const primaryLineDiscountGateSensitive = !!service.lineDiscountType;
     const prepayGateSensitive = service.prepaidAmount != null && Number(service.prepaidAmount) > 0;
-    if (appointmentDiscountSelected || lineDiscountGateSensitive || prepayGateSensitive) {
+    if (appointmentDiscountSelected || lineDiscountGateSensitive || primaryLineDiscountGateSensitive || prepayGateSensitive) {
       const fresh = await ensureStackingFresh();
       if (!fresh.known || fresh.enabled !== stackingEnabled) {
         savingRef.current = false;
@@ -3492,11 +3499,16 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           }),
         });
         if (requestId !== previewRequestRef.current) return;
-        setMoneyPreview({ forRequestId: requestId, ...result });
+        // Codex pre-push audit P1 (round 10 on #4657, :3468): bind the
+        // response to the exact inputs it answered — moneyPreviewFresh
+        // compares this key against the CURRENT render's key, so a price
+        // typed after a confirmed preview disables Save on that very
+        // render, not 500ms later when the debounce finally fires.
+        setMoneyPreview({ forRequestId: requestId, forInputsKey: moneyPreviewInputsKey, ...result });
       } catch (err) {
         if (err?.name === "AbortError") return;
         if (requestId !== previewRequestRef.current) return;
-        setMoneyPreview({ forRequestId: requestId, error: err.message || "Could not preview totals" });
+        setMoneyPreview({ forRequestId: requestId, forInputsKey: moneyPreviewInputsKey, error: err.message || "Could not preview totals" });
       } finally {
         if (requestId === previewRequestRef.current) setMoneyPreviewLoading(false);
       }
@@ -3506,8 +3518,18 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       controller.abort();
     };
   }, [moneyPreviewInputsKey, service.id]);
+  // Codex pre-push audit P1 (round 10 on #4657, :3468): forRequestId alone
+  // was not enough — the ref increments inside the effect, AFTER the render
+  // that changed an input, so that render still read the old response as
+  // fresh and Save stayed enabled (a confirmed $100 preview, price retyped
+  // to $200, Save clickable with the $100 figure until the debounce ran).
+  // The response now carries the inputs key it answered; a mismatch with
+  // THIS render's key is stale, synchronously.
   const moneyPreviewFresh =
-    !!moneyPreview && moneyPreview.forRequestId === previewRequestRef.current && !moneyPreview.error;
+    !!moneyPreview
+    && moneyPreview.forRequestId === previewRequestRef.current
+    && moneyPreview.forInputsKey === moneyPreviewInputsKey
+    && !moneyPreview.error;
   // Save is held until the server's own dry-run has confirmed what THIS
   // exact form would persist — never a client guess, and never a stale
   // response (moneyPreviewFresh requires it be for the LATEST request).

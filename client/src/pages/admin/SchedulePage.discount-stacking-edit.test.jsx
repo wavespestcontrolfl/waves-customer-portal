@@ -1404,3 +1404,71 @@ it('round 10 P1 (legacy-visit-money-submission.cjs:49): a zero-add-on visit with
   expect(Number(body.discountAmount)).toBe(15);
   expect(body.addons).toBeUndefined(); // zero-add-on: the single-service save path
 });
+
+it('round 10 audit P1 (:3468): once a preview is confirmed, retyping a price disables Save on that same render — before the 500ms debounce ever re-requests', async () => {
+  let previewCalls = 0;
+  vi.stubGlobal('fetch', vi.fn(async (url, options) => {
+    if (url.endsWith('/admin/discounts/stacking')) return { ok: true, json: async () => ({ enabled: true }) };
+    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => DISCOUNTS };
+    if (url.includes('/update-details/preview')) {
+      previewCalls += 1;
+      return { ok: true, json: async () => computeMockPreview(JSON.parse(options.body), baseService, DISCOUNTS) };
+    }
+    return { ok: true, json: async () => ({}) };
+  }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  const callsAtConfirm = previewCalls;
+  const fertPriceInput = screen.getAllByPlaceholderText('0.00').find((i) => Number(i.value) === 40);
+  fireEvent.change(fertPriceInput, { target: { value: '200' } });
+  // Synchronously stale: no new preview request has fired yet (debounce),
+  // yet Save is already disabled and the total reads as unconfirmed.
+  expect(previewCalls).toBe(callsAtConfirm);
+  expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
+  expect(screen.getByText(/Confirming totals with the server/)).toBeInTheDocument();
+  // And it re-enables only once the NEW preview lands.
+  await waitForMoneyReady();
+  expect(previewCalls).toBeGreaterThan(callsAtConfirm);
+});
+
+it('round 10 audit P1 (:2974): a marked visit whose ONLY discount is the stored PRIMARY-line one still re-probes the gate at submit and refuses on a flip', async () => {
+  let stackingCalls = 0;
+  const service = {
+    ...baseService,
+    serviceAddons: [
+      { id: 'addon-2', serviceId: 'svc-fert', serviceName: 'Quarterly Fertilization', serviceKey: 'lawn_fert', serviceCategory: 'lawn', basePrice: 50, estimatedPrice: 50, estimatedDuration: 20 },
+    ],
+    primaryLinePrice: 100, estimatedPrice: 140,
+    lineDiscountType: 'percentage', lineDiscountAmount: 10, lineDiscountId: 'disc-silver',
+    pricingProvenance: {
+      pricing_regime: 'discount_stack_v1', engine_version: 1,
+      caps: { line: { id: 'disc-silver', cap: null }, addons: {} },
+    },
+  };
+  vi.stubGlobal('fetch', vi.fn(async (url, options) => {
+    if (url.endsWith('/admin/discounts/stacking')) {
+      stackingCalls += 1;
+      return { ok: true, json: async () => ({ enabled: stackingCalls === 1 }) }; // flips after mount
+    }
+    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => DISCOUNTS };
+    if (url.includes('/update-details/preview')) {
+      return { ok: true, json: async () => computeMockPreview(JSON.parse(options.body), service, DISCOUNTS) };
+    }
+    return { ok: true, json: async () => ({}) };
+  }));
+  vi.spyOn(window, 'alert').mockImplementation(() => {});
+  render(<Harness service={service} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  // Reprice the primary — the exact edit whose saved total differs by regime.
+  const primaryInput = screen.getAllByPlaceholderText('0.00').find((i) => Number(i.value) === 100);
+  fireEvent.change(primaryInput, { target: { value: '200' } });
+  await waitForMoneyReady();
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  await waitFor(() => expect(window.alert).toHaveBeenCalledWith(
+    expect.stringContaining('The discount-stacking setting changed while this was open'),
+  ));
+  expect(stackingCalls).toBeGreaterThanOrEqual(2);
+  expect(writes()).toHaveLength(0); // nothing posted under the wrong regime
+});
