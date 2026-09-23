@@ -10015,6 +10015,24 @@ async function normalizeUpdateDetailsAddons({
       };
       const normalizedAddons = [];
       for (const a of addons) {
+        // GitHub Codex round 12 P1 (#4657, :9970): the save transaction
+        // REPLACES every add-on row (delete + reinsert), so a row id is
+        // never stable across saves — a submitted id this visit no longer
+        // has means another editor's save landed between this operator's
+        // last read and now, not "this is a fresh line." The old behavior
+        // (isNewAddonDiscount's own `!priorRow → true` fallback, still
+        // correct for freshness classification) let that stale request
+        // continue and silently delete the other editor's rows on commit.
+        // Only an OMITTED id (a.id falsy) is legitimately a new line; a
+        // present id absent from existingAddonDiscountById is a stale
+        // read and must retry like every other concurrent-edit conflict
+        // this route already uses VISIT_CHANGED_RETRY for.
+        if (a && a.id && !existingAddonDiscountById.has(a.id)) {
+          throw Object.assign(
+            httpError(409, 'This visit changed while you were editing — reload and save again.'),
+            { code: 'VISIT_CHANGED_RETRY' },
+          );
+        }
         const serviceName = (a && (a.serviceName || a.name)) ? String(a.serviceName || a.name).trim() : '';
         if (!serviceName) continue;
         const catalogService = a.serviceId
@@ -10077,6 +10095,18 @@ async function normalizeUpdateDetailsAddons({
         const priorStampRow = a.id ? existingAddonDiscountById.get(a.id) : null;
         const lineDiscountRemoved = !lineDiscount && !!priorStampRow
           && !!(priorStampRow.discount_id || priorStampRow.discount_type);
+        // GitHub Codex round 12 P0 (#4657, :10306): the SAME untrustworthy-
+        // gross trap the primary line has (see computeUpdateDetailsFinancialPlan's
+        // legacyPrimaryGrossUnknown, just below) can exist on an EXISTING
+        // add-on row too — a stored row with no base_price (net-only) that
+        // still carries a discount. Reported unconditionally (never gated
+        // on THIS save's own adoptCanonicalPricing, which isn't resolved
+        // yet at this point in the pipeline) so the client can disable
+        // that line's own discount control proactively, before the
+        // operator ever triggers the primary-level refusal.
+        const legacyGrossUnknown = !!priorStampRow
+          && (priorStampRow.base_price == null || priorStampRow.base_price === '')
+          && !!(priorStampRow.discount_id || priorStampRow.discount_type);
         normalizedAddons.push({
           // GitHub review round 2 on #4657 (:2513): the addon ROW's own id
           // (scheduled_service_addons.id), when this line already existed
@@ -10119,6 +10149,7 @@ async function normalizeUpdateDetailsAddons({
           skipWeekends: a.skipWeekends,
           weekendShift: a.weekendShift,
           discount: lineDiscount,
+          legacyGrossUnknown,
         });
       }
 
@@ -10277,6 +10308,11 @@ async function computeUpdateDetailsFinancialPlan({
   let canonicalRestackedAddonDollars = null;
   let legacyPreservationCasSnapshot = null;
   let clearAddonDiscountsOnPriceEdit = false;
+  // GitHub Codex round 12 P0 (#4657, :10306) — reported here, never thrown:
+  // see the assignment inside the addons block below for the full
+  // rationale. Left false whenever this save never attempts canonical
+  // adoption on an untrustworthy primary gross.
+  let legacyPrimaryGrossUnknown = false;
   // Codex pre-push audit P1 (round 4 on #4657, :13181): resolved HERE, at
   // the planner's own top, not by the caller beforehand — the preview
   // route used to omit this classification entirely (it never affects
@@ -10590,6 +10626,38 @@ async function computeUpdateDetailsFinancialPlan({
         const adoptCanonicalPricing = adoptsCanonicalPricingOnEdit({
           legacyPreservationCandidate, legacyEconomicsPreserved, appointmentDiscountChanged, addonDiscountTermsChanged,
         });
+        // GitHub Codex round 12 P0 (#4657, :10306): a row with NO
+        // trustworthy stored primary gross (primary_line_price NULL) but a
+        // stored discount that reaches the primary (an appointment-level
+        // discount_type, OR the primary line's own line_discount_type)
+        // cannot safely adopt canonical pricing from a SUBMITTED
+        // primaryLinePrice. The edit modal seeds that field from the
+        // stored NET total whenever the real gross is unknown, so a save
+        // that only changes an add-on's discount term posts that net back
+        // as if it were a fresh gross entry; canonical adoption then
+        // reapplies the stored discount ON TOP of it, silently repricing
+        // the row off a lower base — a $100 primary stored at $90 after
+        // 10% off gets stamped as if gross were $90. There is no
+        // trustworthy way to recover the real gross here — reconstructing
+        // it by inverting the stored discount was tried and reverted
+        // twice (rounds 7/8) — so adoption is refused rather than
+        // guessed at: `adoptCanonicalPricing` is forced off for the
+        // resolve call below, which falls through to the legacy engine
+        // exactly as an unmarked row with no discount at all would (the
+        // gate-flip safety comment on adoptsCanonicalPricingOnEdit still
+        // applies — that path preserves whatever's stored, it just can't
+        // ALSO stamp this row canonical off a guessed gross). Reported,
+        // never thrown, from this shared planner — the real PUT route
+        // turns this into the actual refusal (LEGACY_PRIMARY_GROSS_UNKNOWN)
+        // after its own call site below; the preview route surfaces it as
+        // `legacyGrossUnknown` so the client can disable the control
+        // before the operator ever reaches a save. A row with no stored
+        // discount at all is unaffected (net === gross there, adoption
+        // stays correct), matching legacyPreservationCandidate's own
+        // scope.
+        legacyPrimaryGrossUnknown = adoptCanonicalPricing
+          && (existing?.primary_line_price == null || existing.primary_line_price === '')
+          && (!!existing?.discount_type || !!existing?.line_discount_type);
         const {
           financials, primaryNet, canonicalRestackedAddonDollars: canonicalDollars, capsSnapshotToPersist,
           restackedPrimaryLineDiscountDollars, canonicalPricingApplied,
@@ -10597,7 +10665,7 @@ async function computeUpdateDetailsFinancialPlan({
           db, existing, updates, primaryGross, normalizedAddons,
           effDiscountType, effDiscountAmount, effMaxDiscountDollars, effServiceKeyFilter, effServiceCategoryFilter,
           appointmentDiscountId: appointmentDiscountPreset?.id ?? existing?.discount_id ?? null,
-          adoptCanonicalPricing,
+          adoptCanonicalPricing: adoptCanonicalPricing && !legacyPrimaryGrossUnknown,
         });
         canonicalRestackedAddonDollars = canonicalDollars;
 
@@ -10754,6 +10822,21 @@ async function computeUpdateDetailsFinancialPlan({
       if (zeroCols.estimated_price) updates.estimated_price = 0;
       if (zeroCols.primary_line_price) updates.primary_line_price = 0;
       if (zeroCols.discount_dollars) updates.discount_dollars = null;
+      // GitHub Codex round 12 P2 (#4657, :13895): the primary line's own
+      // stored discount (line_discount_dollars/_name) was NEVER cleared
+      // by this block — a marked row's canonical restack (above, before
+      // this block runs) can have already planned a NONZERO
+      // line_discount_dollars against the visit's PRE-conversion total,
+      // and an unmarked row's stale stored figure simply survives
+      // untouched (this block never defines the key, so it reads as
+      // "unchanged"). Either way a free callback zeros the whole visit,
+      // so its primary line's discount must read as "none" too — in both
+      // the real save (this IS the object it writes verbatim) and the
+      // preview (computeUpdateDetailsFinancialPlan is shared by both, and
+      // the preview route's own fallback-to-stored-row logic only kicks
+      // in when these keys are left undefined).
+      if (zeroCols.line_discount_dollars) updates.line_discount_dollars = null;
+      if (zeroCols.line_discount_name) updates.line_discount_name = null;
     } catch { /* non-blocking */ }
     if (Array.isArray(replaceAddons)) {
       replaceAddons = replaceAddons.map((line) => ({
@@ -10765,7 +10848,7 @@ async function computeUpdateDetailsFinancialPlan({
 
   return {
     replaceAddons, canonicalRestackedAddonDollars, legacyPreservationCasSnapshot, clearAddonDiscountsOnPriceEdit,
-    reServiceConversion, reServiceTransition, reServiceConversionZeroPrice,
+    reServiceConversion, reServiceTransition, reServiceConversionZeroPrice, legacyPrimaryGrossUnknown,
   };
 }
 
@@ -11255,6 +11338,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       reServiceConversion = financialPlan.reServiceConversion;
       reServiceTransition = financialPlan.reServiceTransition;
       reServiceConversionZeroPrice = financialPlan.reServiceConversionZeroPrice;
+      // GitHub Codex round 12 P0 (#4657, :10306): the planner reports
+      // this rather than throwing itself (it's shared with the read-only
+      // preview route below) — the actual save refuses here, before any
+      // write has happened (no transaction has opened yet at this point
+      // in the route).
+      if (financialPlan.legacyPrimaryGrossUnknown) {
+        throw Object.assign(
+          httpError(422, 'This visit’s original price isn’t on file, so its discount can’t be edited here. Set the primary price explicitly, or contact support to reprice this visit.'),
+          { code: 'LEGACY_PRIMARY_GROSS_UNKNOWN' },
+        );
+      }
     }
     const addonsReplaced = Array.isArray(replaceAddons);
     const detailsChanged = Object.keys(updates).length > 0;
@@ -13765,9 +13859,40 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
     const cols = await db('scheduled_services').columnInfo();
     const {
       estimatedPrice, primaryLinePrice, addons, serviceId,
-      serviceKey: postedServiceKey, serviceType, isRecurring, discountId, scheduledDate,
+      serviceKey: postedServiceKey, serviceType, isRecurring, discountId,
     } = req.body;
-    let { discountType, discountAmount } = req.body;
+    let { discountType, discountAmount, scheduledDate } = req.body;
+
+    // GitHub Codex round 12 P2 (#4657, :13843): mirror the save route's own
+    // collective-move date handling (PUT /:id/update-details →
+    // planCollectiveEditDateMove, which strips req.body.scheduledDate
+    // before the SAME financial planner below ever runs for the real
+    // save — see its own top comment). A collective series move commits
+    // the date in ITS OWN transaction, separately from the per-row
+    // financial write, so the planner this preview shares with the save
+    // never actually sees the newly picked date on a real save;
+    // bookingCreatesWaveGuardCoverage needs an UPCOMING date to grant a
+    // WaveGuard-tier discount, so passing the fresh date here while the
+    // save computes against the row's UNCHANGED stored date let a fresh
+    // member-tier discount preview eligible (or refused) differently
+    // from what the save would actually decide. Detected the same way
+    // planCollectiveEditDateMove's own top does — the gate on, a valid
+    // DIFFERENT target date, and a live, non-terminal RECURRING row —
+    // without running its ack/grouped/frozen guards: those exist for the
+    // actual commit (and can throw/require a disclosure round-trip),
+    // never for a read-only dry run.
+    if (scheduledDate !== undefined && scheduledDate !== '' && collectiveMoveGateOn()) {
+      const collectiveMoveTarget = validScheduleDate(scheduledDate);
+      if (collectiveMoveTarget) {
+        const moveRow = await db('scheduled_services').where({ id })
+          .first('is_recurring', 'scheduled_date', 'status');
+        if (moveRow && moveRow.is_recurring === true
+          && !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(moveRow.status))
+          && collectiveMoveTarget !== dateOnly(moveRow.scheduled_date)) {
+          scheduledDate = undefined;
+        }
+      }
+    }
 
     // Same catalog-preset resolution the save path applies (loadInvoiceDiscount,
     // above) — a posted discountId is authoritative over discountType/Amount.
@@ -13904,6 +14029,15 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
       primaryLineDiscountDollars: previewPrimaryLineDiscountDollars != null
         ? Number(previewPrimaryLineDiscountDollars) : null,
       primaryLineDiscountName: previewPrimaryLineDiscountName || null,
+      // GitHub Codex round 12 P0 (#4657, :10306): mirrors
+      // computeUpdateDetailsFinancialPlan's own legacyPrimaryGrossUnknown
+      // — true exactly when THIS request's edit would be refused
+      // (LEGACY_PRIMARY_GROSS_UNKNOWN) on an actual save, because the
+      // row's stored primary_line_price is unknown yet it carries a
+      // discount that reaches the primary. The client disables the
+      // primary discount control on this signal rather than letting the
+      // operator hit a 422 after typing.
+      legacyGrossUnknown: !!plan.legacyPrimaryGrossUnknown,
       // Ordered exactly like the save path's own replaceAddons — a line the
       // client already has a row id for correlates by submittedAddonId; a
       // brand-new (id-less) line correlates by array position against the
@@ -13937,6 +14071,14 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
           : (l.price != null
             ? Math.round((Number(l.price) + (Number(l.discount?.discountDollars) || 0)) * 100) / 100
             : null),
+        // GitHub Codex round 12 P0 (#4657, :10306): per-line counterpart
+        // of the appointment-level legacyGrossUnknown above — this EXISTING
+        // add-on row's own stored base_price is unknown (net-only) while
+        // it still carries a discount, the same untrustworthy-gross shape
+        // the primary line has. Reported unconditionally (see
+        // normalizeUpdateDetailsAddons' own comment) so the client can
+        // disable this line's discount control too.
+        legacyGrossUnknown: !!l.legacyGrossUnknown,
       })),
     });
   } catch (err) {

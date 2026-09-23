@@ -457,10 +457,19 @@ postgres('scheduled_services PUT /:id/update-details — non-stackable stack_gro
     expect(untouched.err).toBeFalsy();
     expect(untouched.payload?.error).toBeUndefined();
     expect(untouched.statusCode).toBe(200);
+    // GitHub Codex round 12 P1 (#4657, :9970): the save's own replace
+    // strategy (insertScheduledServiceAddons) deletes and reinserts every
+    // add-on row on EVERY successful save, so `addon.id` (captured before
+    // the untouched save above) is already a STALE id — a real client
+    // reloads the row after a save and edits from its fresh id, so this
+    // re-reads the row's CURRENT id the same way, rather than replaying a
+    // pre-save id the round-12 fix now (correctly) refuses as a
+    // VISIT_CHANGED_RETRY.
+    const currentAddon = await trx('scheduled_service_addons').where({ scheduled_service_id: visitId }).first();
     // Repriced: the same Gold stamp is a fresh pick against the stored Bronze.
     const repriced = await put(visitId, {
       primaryLinePrice: 100,
-      addons: [{ id: addon.id, serviceName: 'Fert Add-on', basePrice: 60, discountType: 'percentage', discountAmount: 15, discountId: goldId, discountName: 'WaveGuard Gold' }],
+      addons: [{ id: currentAddon.id, serviceName: 'Fert Add-on', basePrice: 60, discountType: 'percentage', discountAmount: 15, discountId: goldId, discountName: 'WaveGuard Gold' }],
     });
     expect(repriced.statusCode).toBe(400);
     expect(repriced.payload.error).toMatch(/WaveGuard tier discount/);
@@ -1137,6 +1146,176 @@ postgres('round 4 on #4657 — preview must equal what the PUT persists, verbati
     const savedRow = await trx('scheduled_services').where({ id: visitId }).first();
     expect(Number(savedRow.estimated_price)).toBe(0);
     expect(Number(previewResult.payload.total)).toBe(Number(savedRow.estimated_price));
+  });
+
+  // GitHub Codex round 12 P2 (#4657, :13895): a free-callback conversion
+  // zeros estimated_price/primary_line_price but, before this fix, left
+  // the primary line's OWN stored discount (line_discount_dollars/_name)
+  // untouched — and on a MARKED row the canonical restack just above (it
+  // runs unconditionally for a marked row) had already PLANNED a fresh
+  // nonzero line_discount_dollars against the visit's pre-conversion
+  // total, so the free-conversion save persisted (and the preview
+  // showed) a lingering discount on a $0 visit.
+  test(':13895 — a free-callback conversion on a MARKED row clears the stale primary-line discount too, not just the total', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    let service = await trx('services').where({ service_key: 'pest_re_service' }).first();
+    if (!service) {
+      [service] = await trx('services').insert({
+        id: randomUUID(), service_key: 'pest_re_service', name: 'Pest Re-Service',
+        category: 'pest', frequency: 'as_needed', billing_type: 'one_time', visits_per_year: 0,
+      }).returning('*');
+    }
+    await trx('customers').where({ id: customerId }).update({ waveguard_tier: 'Silver' });
+    const lineDiscountId = randomUUID();
+    const [row] = await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, service_type: 'Quarterly Pest Control',
+      service_key_snapshot: 'pest_general_quarterly', status: 'confirmed',
+      scheduled_date: '2040-02-01', window_start: '08:00', window_end: '10:00',
+      // Stored: $100 gross, 10% primary-line discount, $90 net — a
+      // MARKED (canonically priced) row.
+      estimated_price: 90, primary_line_price: 100, is_callback: false,
+      line_discount_type: 'percentage', line_discount_amount: 10, line_discount_id: lineDiscountId,
+      line_discount_dollars: 10, line_discount_name: 'Fixture 10% Primary',
+      pricing_provenance: {
+        pricing_regime: 'discount_stack_v1', engine_version: 1,
+        caps: { line: { id: lineDiscountId, cap: null }, addons: {} },
+      },
+    }).returning('*');
+    visitId = row.id;
+    // Switches to the re-service catalog pick, echoes the stored NET
+    // back (the only figure the modal has for "no change"), no add-ons.
+    const body = { serviceId: service.id, serviceType: 'Pest Re-Service', primaryLinePrice: 90, addons: [] };
+    const previewResult = await preview(visitId, body);
+    expect(previewResult.err).toBeFalsy();
+    expect(previewResult.statusCode).toBe(200);
+    expect(Number(previewResult.payload.total)).toBe(0);
+    // THE FIX: never the stale (or freshly re-restacked) $10 — a free
+    // callback has no primary-line discount either.
+    expect(previewResult.payload.primaryLineDiscountDollars).toBeNull();
+    expect(previewResult.payload.primaryLineDiscountName).toBeNull();
+    const saveResult = await put(visitId, body);
+    expect(saveResult.err).toBeFalsy();
+    expect(saveResult.statusCode).toBe(200);
+    const savedRow = await trx('scheduled_services').where({ id: visitId }).first();
+    expect(Number(savedRow.estimated_price)).toBe(0);
+    expect(Number(savedRow.primary_line_price)).toBe(0);
+    expect(savedRow.line_discount_dollars).toBeNull();
+    expect(savedRow.line_discount_name).toBeNull();
+  });
+});
+
+postgres('round 12 on #4657 — collective-move date semantics mirrored in the preview (:13843)', () => {
+  let database;
+  let trx;
+  let customerId;
+  let visitId;
+
+  beforeAll(() => {
+    const connection = process.env.DATABASE_URL;
+    const url = new URL(connection);
+    const localCI = ['localhost', '127.0.0.1'].includes(url.hostname);
+    const ownedQA = process.env.WAVES_LOCAL_DEV === '1'
+      && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
+    if (!localCI && !ownedQA) throw new Error('Use disposable CI or this worktree\'s private QA database');
+    database = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 2 } });
+    require('../models/db').connection = database;
+  });
+
+  beforeEach(async () => {
+    delete process.env.GATE_DISCOUNT_STACKING;
+    delete process.env.GATE_ADMIN_COLLECTIVE_MOVE;
+    trx = await database.transaction();
+    require('../models/db').connection = trx;
+    customerId = randomUUID();
+    await trx('customers').insert({
+      id: customerId, first_name: 'Synthetic', last_name: 'Fixture',
+      email: `${customerId}@example.invalid`, phone: `fixture-${customerId.slice(0, 8)}`,
+      address_line1: '100 Test Lane', city: 'Test City', zip: '00000', active: true,
+      pipeline_stage: 'active_customer',
+      // Not yet a WaveGuard member — eligible for the Bronze-required
+      // preset ONLY through the "this booking itself creates coverage"
+      // floor (manualEligibilityFailures' anyMemberFloorMet), which
+      // needs recurringMembershipBooking, which needs an UPCOMING date.
+      waveguard_tier: null,
+    });
+  });
+
+  afterEach(async () => {
+    if (trx) await trx.rollback();
+    delete process.env.GATE_DISCOUNT_STACKING;
+    delete process.env.GATE_ADMIN_COLLECTIVE_MOVE;
+  });
+  afterAll(async () => { await database?.destroy(); });
+
+  const router = require('../routes/admin-schedule');
+  function findHandler(method, path) {
+    const layer = router.stack.find((l) => l.route?.path === path && l.route.methods[method]);
+    return layer.route.stack[layer.route.stack.length - 1].handle;
+  }
+  async function call(method, id, body) {
+    const handler = findHandler(method, '/:id/update-details' + (method === 'post' ? '/preview' : ''));
+    const req = { params: { id }, query: {}, body, headers: {} };
+    let statusCode = 200;
+    let payload = null;
+    const res = { status(code) { statusCode = code; return this; }, json(p) { payload = p; return this; } };
+    let nextErr = null;
+    await handler(req, res, (err) => { nextErr = err; });
+    return { statusCode, payload, err: nextErr };
+  }
+  const preview = (id, body) => call('post', id, body);
+
+  async function seedRecurringRow(storedDate) {
+    const [row] = await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, service_type: 'Quarterly Pest Control',
+      service_key_snapshot: 'pest_general_quarterly', status: 'confirmed', is_recurring: true,
+      scheduled_date: storedDate, window_start: '08:00', window_end: '10:00',
+      estimated_price: 100, primary_line_price: 100,
+    }).returning('*');
+    return row.id;
+  }
+
+  async function seedBronzeDiscount() {
+    const discountId = randomUUID();
+    await trx('discounts').insert({
+      id: discountId, discount_key: 'bronze_' + discountId.slice(0, 8), name: 'Any Member Discount',
+      discount_type: 'fixed_amount', amount: 10, is_active: true, is_auto_apply: false, show_in_invoices: true,
+      requires_waveguard_tier: 'Bronze',
+    });
+    return discountId;
+  }
+
+  test('a collective-move preview judges WaveGuard eligibility against the STORED (past) date, never the freshly submitted target — mirrors the save\'s own semantics', async () => {
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    visitId = await seedRecurringRow('2020-01-01'); // stored date is in the past — NOT upcoming
+    const discountId = await seedBronzeDiscount();
+    const body = {
+      scheduledDate: '2099-01-01', // a fresh, upcoming target — this IS a collective move (is_recurring, gate on, different date)
+      primaryLinePrice: 100, addons: [], discountId,
+    };
+    const previewResult = await preview(visitId, body);
+    // THE FIX: refused, exactly like the real save would be — the real
+    // save's own planCollectiveEditDateMove strips the fresh date before
+    // this SAME planner ever runs, so bookingCreatesWaveGuardCoverage
+    // sees the STORED (past) date, never grants "any member" coverage
+    // off it, and the Bronze-required preset fails eligibility.
+    expect(previewResult.err).toBeFalsy();
+    expect(previewResult.statusCode).toBe(400);
+    expect(previewResult.payload.error).toMatch(/WaveGuard Bronze/);
+  });
+
+  test('scope check: the SAME preset on the SAME row is eligible when this is NOT a collective move (gate off) — the fresh submitted date is used, proving the mirroring is conditional, not a blanket regression', async () => {
+    // Gate left off (deleted in beforeEach) — never a collective move,
+    // so the preview must behave exactly as before this fix: the fresh
+    // submitted (upcoming) date grants "any member" coverage.
+    visitId = await seedRecurringRow('2020-01-01');
+    const discountId = await seedBronzeDiscount();
+    const body = {
+      scheduledDate: '2099-01-01',
+      primaryLinePrice: 100, addons: [], discountId,
+    };
+    const previewResult = await preview(visitId, body);
+    expect(previewResult.err).toBeFalsy();
+    expect(previewResult.statusCode).toBe(200);
   });
 });
 

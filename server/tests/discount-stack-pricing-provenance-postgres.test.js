@@ -1430,4 +1430,128 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
       delete process.env.GATE_DISCOUNT_STACKING;
     }
   });
+
+  // GitHub Codex round 12 P0 (#4657, :10306): a zero-add-on legacy visit
+  // with NO trustworthy stored primary gross (primary_line_price NULL)
+  // but a stored appointment-level discount cannot safely adopt
+  // canonical pricing off a SUBMITTED primaryLinePrice — the edit modal
+  // seeds that field from the stored NET total when the real gross is
+  // unknown, so adding a fresh add-on discount posts that net back as if
+  // it were a fresh gross entry. The planner must refuse adoption
+  // (reporting legacyPrimaryGrossUnknown, never guessing) rather than
+  // reapply the stored 10% on top of the echoed net and stamp the row at
+  // the wrong (lower) base.
+  test('PUT /:id/update-details (planner, real rows): a zero-add-on legacy visit with NULL primary_line_price and a stored appointment discount refuses canonical adoption on a fresh add-on discount pick', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      const id = randomUUID();
+      // Stored: $100 primary (gross UNKNOWN — legacy row, no
+      // primary_line_price on file), a $10 fixed appointment-level
+      // discount, net $90, no add-ons. fixed_amount (never percentage)
+      // deliberately, so this test never depends on the module's
+      // percent-exclusion catalog prime — unrelated to this fix.
+      await mockPg('scheduled_services').insert({
+        id, scheduled_date: '2099-09-19', service_type: 'Fixture Round-12 Legacy Primary',
+        primary_line_price: null, estimated_price: 90,
+        discount_type: 'fixed_amount', discount_amount: 10,
+      });
+      const updates = {};
+      // The modal seeds Price from the stored discounted total (the only
+      // number it has) — $90, NOT the real $100 gross — then the
+      // operator adds a fresh discounted add-on.
+      const plan = await computeUpdateDetailsFinancialPlan({
+        db: mockPg, id, updates, primaryLinePrice: 90,
+        addons: [{
+          serviceName: 'Fixture Fresh Add-On', basePrice: 20,
+          discountType: 'fixed_amount', discountAmount: 5,
+        }],
+        appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+        presetEligibilityCheck: async () => {},
+      });
+      expect(plan.legacyPrimaryGrossUnknown).toBe(true);
+      // THE FIX: canonical adoption never ran off the guessed gross — no
+      // regime marker is stamped, so the stored 10% is never reapplied
+      // on top of the echoed net.
+      expect(hasPricingRegimeMarker(updates)).toBe(false);
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
+
+  // Scope boundary of the round-12 fix: a row with NO stored discount at
+  // all is unaffected — net === gross there, so adoption stays correct
+  // off the same NULL primary_line_price (matches
+  // legacyPreservationCandidate's own scope, and the pre-existing
+  // round-9 fixture shape above).
+  test('PUT /:id/update-details (planner, real rows): a zero-add-on legacy visit with NULL primary_line_price but NO stored discount adopts normally', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      const id = randomUUID();
+      await mockPg('scheduled_services').insert({
+        id, scheduled_date: '2099-09-20', service_type: 'Fixture Round-12 Legacy Primary No Discount',
+        primary_line_price: null, estimated_price: 100,
+      });
+      const updates = {};
+      const plan = await computeUpdateDetailsFinancialPlan({
+        db: mockPg, id, updates, primaryLinePrice: 100,
+        addons: [{
+          serviceName: 'Fixture Fresh Add-On', basePrice: 20,
+          discountType: 'percentage', discountAmount: 10,
+        }],
+        appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+        presetEligibilityCheck: async () => {},
+      });
+      expect(plan.legacyPrimaryGrossUnknown).toBe(false);
+      expect(hasPricingRegimeMarker(updates)).toBe(true);
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
+
+  // GitHub Codex round 12 P1 (#4657, :9970): the save transaction
+  // REPLACES every add-on row (delete + reinsert), so a submitted
+  // existing-row id absent from this visit means another editor's save
+  // already landed — it must retry like every other concurrent-edit
+  // conflict, never be treated as a fresh line that silently deletes the
+  // other editor's rows. Gate-independent (the stale-id guard runs
+  // unconditionally in normalizeUpdateDetailsAddons), so GATE_DISCOUNT_STACKING
+  // is left off here on purpose.
+  test('PUT /:id/update-details (planner, real rows): a submitted add-on row id absent from this visit rejects with VISIT_CHANGED_RETRY, never silently treated as a new line', async () => {
+    const id = randomUUID();
+    const realAddonRowId = randomUUID();
+    await mockPg('scheduled_services').insert({
+      id, scheduled_date: '2099-09-21', service_type: 'Fixture Round-12 Stale Id', primary_line_price: 100, estimated_price: 140,
+    });
+    await mockPg('scheduled_service_addons').insert({
+      id: realAddonRowId, scheduled_service_id: id, service_name: 'Fixture Existing Add-On', base_price: 40, estimated_price: 40,
+    });
+    // Never existed on this visit — simulates another editor's replace
+    // having already deleted/reinserted the add-on rows under a new id.
+    const staleId = randomUUID();
+    const updates = {};
+    await expect(computeUpdateDetailsFinancialPlan({
+      db: mockPg, id, updates, primaryLinePrice: 100,
+      addons: [{ id: staleId, serviceName: 'Fixture Existing Add-On', basePrice: 40 }],
+      appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+      presetEligibilityCheck: async () => {},
+    })).rejects.toMatchObject({ code: 'VISIT_CHANGED_RETRY', statusCode: 409 });
+  });
+
+  // Companion to the above: an OMITTED id is still a legitimate new line
+  // and must never be refused.
+  test('PUT /:id/update-details (planner, real rows): an OMITTED add-on id is still a legitimate new line, never refused', async () => {
+    const id = randomUUID();
+    await mockPg('scheduled_services').insert({
+      id, scheduled_date: '2099-09-22', service_type: 'Fixture Round-12 New Line', primary_line_price: 100, estimated_price: 100,
+    });
+    const updates = {};
+    const plan = await computeUpdateDetailsFinancialPlan({
+      db: mockPg, id, updates, primaryLinePrice: 100,
+      addons: [{ serviceName: 'Fixture Brand New Add-On', basePrice: 30 }], // no id — a genuine new line
+      appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+      presetEligibilityCheck: async () => {},
+    });
+    expect(plan.replaceAddons).toHaveLength(1);
+    expect(plan.replaceAddons[0].price).toBe(30);
+  });
 });

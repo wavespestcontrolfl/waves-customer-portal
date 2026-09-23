@@ -1495,3 +1495,100 @@ it('round 10 audit P1 (:2974): a marked visit whose ONLY discount is the stored 
   expect(stackingCalls).toBeGreaterThanOrEqual(2);
   expect(writes()).toHaveLength(0); // nothing posted under the wrong regime
 });
+
+// ---------------------------------------------------------------------
+// Codex review round 12 on #4657: 1 P0 + 2 P2.
+// ---------------------------------------------------------------------
+
+it('P0 (:2349): a legacy add-on with an unknown gross (base_price never recorded) locks its Line discount picker instead of letting a replacement pick post the stored net as basePrice', async () => {
+  const legacyNullGrossAddon = {
+    ...baseService,
+    serviceAddons: [
+      {
+        id: 'addon-1', serviceId: 'svc-mosquito', serviceName: 'Monthly Mosquito', serviceKey: 'mosquito_monthly',
+        serviceCategory: 'mosquito', basePrice: null, estimatedPrice: 55, discountId: 'disc-military',
+        discountName: 'Military Discount', discountType: 'fixed_amount', discountAmount: 5, discountDollars: 5,
+        estimatedDuration: 30,
+      },
+    ],
+  };
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service: legacyNullGrossAddon }));
+  render(<Harness service={legacyNullGrossAddon} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  const notice = await screen.findByText(/Discount can't be changed on this legacy line/);
+  // 14px readability floor (AGENTS.md / CLAUDE.md).
+  expect(notice.style.fontSize).toBe('14px');
+  // No picker at all — nothing in this modal can post a replacement pick
+  // for this line.
+  expect(screen.queryByRole('combobox', { name: 'Line discount for Monthly Mosquito' })).not.toBeInTheDocument();
+  await waitForMoneyReady();
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  const body = JSON.parse(writes()[0][1].body);
+  const mosquitoLine = body.addons.find((a) => a.serviceId === 'svc-mosquito');
+  // Flat net only — never a discountType with the stored NET posted as a
+  // fresh basePrice (which would let the server double-discount the line).
+  expect(mosquitoLine).toMatchObject({ price: 55 });
+  expect(mosquitoLine.basePrice).toBeUndefined();
+  expect(mosquitoLine.discountType).toBeUndefined();
+});
+
+it('P2 (:3622): gate off, the stored per-line discount is never itemized as its own row between Subtotal and Total (Subtotal $195 / no Line discount row / Total $195)', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: false }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  expect(screen.getByText('Subtotal').nextElementSibling.textContent).toBe('$195.00');
+  expect(totalText()).toBe('$195.00');
+  // The stored Military stamp must never surface as its own itemized row
+  // gate-off — Subtotal and Total already read the same flat figure; a
+  // "Line discount" row between them would claim an extra $5 credit no
+  // arithmetic here actually applies (this modal must stay byte-identical
+  // to before this lane).
+  expect(screen.queryByText('Military Discount', { selector: 'div' })).not.toBeInTheDocument();
+  expect(screen.queryByText('($5.00)')).not.toBeInTheDocument();
+});
+
+it('P2 (:2990): form inputs are frozen while the submit-time gate re-probe is in flight, so a stale edit typed underneath it never reaches the save', async () => {
+  let stackingCalls = 0;
+  let resolveSecondProbe;
+  vi.stubGlobal('fetch', vi.fn(async (url, options) => {
+    if (url.endsWith('/admin/discounts/stacking')) {
+      stackingCalls += 1;
+      // The FIRST probe (mount) resolves immediately; the SECOND (the
+      // submit-time re-probe) stays pending until the test resolves it —
+      // this is the exact window a slow probe leaves open.
+      if (stackingCalls === 1) return { ok: true, json: async () => ({ enabled: true }) };
+      return new Promise((resolve) => { resolveSecondProbe = resolve; });
+    }
+    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => DISCOUNTS };
+    if (url.includes('/update-details/preview')) {
+      return { ok: true, json: async () => computeMockPreview(JSON.parse(options.body), baseService, DISCOUNTS) };
+    }
+    return { ok: true, json: async () => ({}) };
+  }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  const notes = screen.getByDisplayValue('Existing note');
+  const mosquitoPrice = screen.getAllByPlaceholderText('0.00').find((i) => Number(i.value) === 55);
+  // baseService's stored Military stamp on the mosquito line makes this
+  // save gate-sensitive with no appointment discount ever touched, so the
+  // re-probe runs unconditionally (round 4 (:2936)'s own repro class).
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  await waitFor(() => expect(resolveSecondProbe).toBeInstanceOf(Function));
+  // The re-probe is now in flight — every field the stale-closure bug can
+  // resume with must be frozen, not just the Save button.
+  expect(notes).toBeDisabled();
+  expect(mosquitoPrice).toBeDisabled();
+  // The button itself already reads "Saving..." (pre-existing behavior) —
+  // no "Save" button is left to double-click.
+  expect(screen.queryByRole('button', { name: 'Save', exact: true })).not.toBeInTheDocument();
+  await act(async () => { resolveSecondProbe({ ok: true, json: async () => ({ enabled: true }) }); });
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  // Nothing could have been typed during the frozen window — the exact
+  // original note is what saved, never a value the closure could have
+  // gone stale on.
+  const body = JSON.parse(writes()[0][1].body);
+  expect(body.notes).toBe('Existing note');
+});

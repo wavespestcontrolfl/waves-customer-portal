@@ -2354,6 +2354,27 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         }
       : null;
   const effectiveLineDiscount = (l) => (lineDiscountActive(l) ? l.lineDiscount : origStampOf(l));
+  // GATE_DISCOUNT_STACKING (#4657 round 12, Codex P0 @ :2349): origStampOf
+  // above already hides a stored stamp whose gross was never recorded
+  // (_origBasePrice null — a row predating the base_price column, net only)
+  // because there is no gross to round-trip. But hiding the stamp alone
+  // still let the Line discount CONTROL render as "None" — an operator who
+  // then picked a replacement had setLineDiscount's own firstTouch guard
+  // (:2444, requires _origBasePrice != null) skip the net->gross snap, so
+  // the stored NET posted as the new discount's basePrice and the server
+  // applied a fresh discount on top of an already-discounted figure,
+  // permanently underpricing the line (rounds 7/8's exact regression class,
+  // from the opposite direction — reconstructing a gross by GUESSING it was
+  // never the bug; here it's silently trusting the net AS a gross). This
+  // line's own shape is the client's own, independent source of truth —
+  // needs no server round trip and catches the case even before any
+  // preview response has landed.
+  const lineGrossUnknownClient = (l) => !!l?._origDiscountType && l?._origBasePrice == null;
+  // The PRIMARY line's stored discount (service.lineDiscountType, read-only
+  // in this slice — see :3620's own note) has the identical shape: a
+  // pre-base_price-column row carries the discount type/amount but no
+  // recorded gross (service.primaryLinePrice null).
+  const primaryGrossUnknownClient = !!service.lineDiscountType && service.primaryLinePrice == null;
   // A line's own GROSS for the preview/subtotal: the true stored gross for
   // an untouched, price-unedited stamped line (never the seeded NET `price`
   // — recomputing a discount against a net figure would double-discount
@@ -3587,6 +3608,18 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     const idLessRows = moneyPreview.addons.filter((row) => !row.submittedAddonId);
     return idLessRows[idLessBefore] || null;
   };
+  // GATE_DISCOUNT_STACKING (#4657 round 12, Codex P0 @ :2349): combines the
+  // client-only shape check (lineGrossUnknownClient, works before any
+  // preview response) with the server's own per-line legacyGrossUnknown
+  // flag on the preview response — either one is enough to lock the
+  // picker; this must not depend on the server field alone.
+  const lineGrossUnknownAt = (idx) =>
+    lineGrossUnknownClient(serviceLines[idx]) || previewAddonAt(idx)?.legacyGrossUnknown === true;
+  // Same combination at the appointment level, for the primary line's own
+  // stored discount (moneyPreview.legacyGrossUnknown === true means the
+  // PRIMARY line's gross specifically, per the preview response contract).
+  const primaryGrossUnknown =
+    primaryGrossUnknownClient || (moneyPreviewFresh && moneyPreview.legacyGrossUnknown === true);
   // Subtotal's add-on share. GATE_DISCOUNT_STACKING (slice 7): lineGrossFor
   // reads a discounted line's true GROSS (never its net) so an untouched
   // stamped line doesn't get double-discounted; every other line is
@@ -3613,7 +3646,19 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     const row = previewAddonAt(idx);
     return row?.discountDollars != null ? Number(row.discountDollars) : 0;
   };
-  const lineDiscountRows = moneyPreviewFresh
+  // GATE_DISCOUNT_STACKING (#4657 round 12, Codex P2 @ :3622): gated on
+  // stackingEnabled — the server's dry-run preview returns these dollar
+  // figures regardless of the gate (it always knows a line's stored
+  // economics), but displayAddonGrossAt above deliberately reads each
+  // line's stored NET while the gate is off (lineGrossFor's own
+  // `!stackingEnabled` branch), matching the pre-lane Subtotal exactly.
+  // Showing these rows anyway split that net into a false "Subtotal
+  // (gross) / Line discount / Total (net)" breakdown no arithmetic on a
+  // gate-off save actually produces — a $100 add-on stored at $90 rendered
+  // Subtotal $90 / Line discount ($10) / Total $90. Gate-off must stay
+  // byte-identical to the pre-lane modal, so these rows are withheld
+  // outright rather than reconciled against a different gross source.
+  const lineDiscountRows = stackingEnabled && moneyPreviewFresh
     ? [
         // The primary line's own stored discount — read directly off the
         // server's response (primaryLineDiscountDollars/Name), never
@@ -3717,6 +3762,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     onLineDiscount = null,
     lineDiscountOptions = [],
     lineDiscountDollars = 0,
+    // GATE_DISCOUNT_STACKING (#4657 round 12, Codex P0 @ :2349): true when
+    // this line's true gross is unknown (a legacy net-only stamp) — the
+    // picker is replaced with a plain notice instead of rendering as if no
+    // discount exists at all.
+    lineDiscountLocked = false,
   }) => {
     const picking = pickerKey === pickerId;
     return (
@@ -3787,6 +3837,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     setPickerKey(pickerId);
                     setExpandedCategory(null);
                   }}
+                  disabled={saving}
                   className="font-medium"
                   style={{
                     padding: "8px 10px",
@@ -3821,6 +3872,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                         onClick={() =>
                           setExpandedCategory(isOpen ? null : group.category)
                         }
+                        disabled={saving}
                         className="font-medium"
                         style={{
                           width: "100%",
@@ -3892,6 +3944,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                                 setPickerKey(null);
                                 setExpandedCategory(null);
                               }}
+                              disabled={saving}
                               className="font-medium"
                               style={{
                                 padding: "8px 10px",
@@ -3970,6 +4023,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               value={price}
               onChange={(e) => onField("price", e.target.value)}
               placeholder="0.00"
+              disabled={saving}
               className="font-medium"
               style={inputStyle}
             />
@@ -3999,10 +4053,20 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               </div>
             )}
           </div>
-          {onLineDiscount && (
+          {(onLineDiscount || lineDiscountLocked) && (
             <div>
               <label style={labelStyle}>Line discount</label>
-              {lineDiscount ? (
+              {lineDiscountLocked ? (
+                // GATE_DISCOUNT_STACKING (#4657 round 12, Codex P0 @ :2349):
+                // this line's true gross is unknown (a legacy net-only
+                // stamp) — no picker at all, so a replacement pick can never
+                // post the stored net as a fresh discount's basePrice and
+                // double-discount the line. 14px floor (AGENTS.md/CLAUDE.md).
+                <div style={{ fontSize: 14, color: D.muted }}>
+                  Discount can't be changed on this legacy line until its
+                  price is re-entered.
+                </div>
+              ) : lineDiscount ? (
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                   <div style={{ flex: 1, fontSize: 14, color: "#111827", minWidth: 0 }}>
                     <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -4024,6 +4088,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     type="button"
                     onClick={() => onLineDiscount("")}
                     aria-label="Remove line discount"
+                    disabled={saving}
                     className="font-medium"
                     style={{
                       padding: "8px 10px",
@@ -4042,6 +4107,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 <select
                   value=""
                   onChange={(e) => onLineDiscount(e.target.value)}
+                  disabled={saving}
                   className="font-medium"
                   style={inputStyle}
                   aria-label={`Line discount for ${serviceType || "service"}`}
@@ -4054,7 +4120,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   ))}
                 </select>
               )}
-              {!lineDiscount && (
+              {!lineDiscountLocked && !lineDiscount && (
                 // Codex pre-push audit P2 (round 1, #4657): the portal's
                 // 14px readability floor (AGENTS.md / CLAUDE.md) — this text
                 // explains a real money-entry contract change (Price becomes
@@ -4636,6 +4702,16 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 onRemove: null,
                 showStaff: true,
                 showSeriesScope: priceServiceScopeActive,
+                // GATE_DISCOUNT_STACKING (#4657 round 12, Codex P0 @ :2349):
+                // this slice has no picker for the primary line's OWN
+                // stored discount (read-only, restated by :3620's note) —
+                // nothing here can post the stored net as a fresh
+                // basePrice. But an unknown-gross stamp must still not be
+                // SILENTLY invisible: surface the same explanatory notice
+                // an add-on line shows, so the operator can see this line
+                // carries a legacy discount neither this control nor any
+                // other in this modal can touch.
+                lineDiscountLocked: primaryGrossUnknown,
                 label: serviceLines.length > 0 ? "Primary service" : null,
               })}
               {serviceLines.map((line, idx) =>
@@ -4648,11 +4724,16 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     onField: (k, v) => updateLine(line._key, k, v),
                     onRemove: () => removeServiceLine(line._key),
                     lineDiscount: effectiveLineDiscount(line),
-                    onLineDiscount: stackingEnabled
+                    // GATE_DISCOUNT_STACKING (#4657 round 12, Codex P0 @
+                    // :2349): a gross-unknown line's picker is never wired
+                    // up at all — no path can post its stored net as a
+                    // fresh discount's basePrice.
+                    onLineDiscount: stackingEnabled && !lineGrossUnknownAt(idx)
                       ? (presetId) => setLineDiscount(line._key, presetId)
                       : null,
                     lineDiscountOptions: lineDiscountOptionsFor(line),
                     lineDiscountDollars: lineDiscountDollarsAt(idx),
+                    lineDiscountLocked: stackingEnabled && lineGrossUnknownAt(idx),
                   })}
                 </div>,
               )}
@@ -4774,6 +4855,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   onClick={() =>
                     setDiscountPresetId(discountPresetId || "custom")
                   }
+                  disabled={saving}
                   className="font-medium"
                   style={{
                     padding: "9px 12px",
@@ -4803,6 +4885,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   <select
                     value={discountPresetId}
                     onChange={(e) => applyDiscountPreset(e.target.value)}
+                    disabled={saving}
                     className="font-medium"
                     style={inputStyle}
                   >
@@ -4828,6 +4911,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                       <select
                         value={discountType}
                         onChange={(e) => setDiscountType(e.target.value)}
+                        disabled={saving}
                         className="font-medium"
                         style={inputStyle}
                       >
@@ -4851,6 +4935,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                           step={discountType === "percentage" ? 1 : 0.01}
                           value={discountAmount}
                           onChange={(e) => setDiscountAmount(e.target.value)}
+                          disabled={saving}
                           className="font-medium"
                           style={inputStyle}
                         />{" "}
@@ -5545,6 +5630,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               <textarea
                 value={form.notes}
                 onChange={(e) => update("notes", e.target.value)}
+                disabled={saving}
                 rows={5}
                 className="font-medium"
                 style={{ ...inputStyle, resize: "vertical" }}
