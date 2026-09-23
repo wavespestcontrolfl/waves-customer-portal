@@ -1210,3 +1210,41 @@ it('round 6 (:2342): an independent reprice BEFORE picking a fresh discount surv
   expect(priceInputsAfter.find((i) => i.value === '70')).toBeTruthy();
   expect(priceInputsAfter.find((i) => i.value === '55')).toBeFalsy();
 });
+
+// ---------------------------------------------------------------------
+// Round 7 on #4657 (GitHub review): a client-side parity pin for the
+// server's own round-7 fix (:9465) — the server now LOADS the stored
+// discount for a service-only rebase instead of trusting a request echo,
+// specifically because the real modal never sends one. This test pins
+// that contract from the other side.
+// ---------------------------------------------------------------------
+
+it('round 7 (:9465 client parity): a service-only change omits discountType/discountAmount/discountId from the Save payload — the Discount control opens empty, never seeded from the stored stamp', async () => {
+  const noAddonDiscountedVisit = {
+    ...baseService,
+    serviceAddons: [],
+    primaryLinePrice: 100,
+    estimatedPrice: 90,
+    discountType: 'fixed_amount', discountAmount: 10, discountId: 'disc-military',
+  };
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service: noAddonDiscountedVisit }));
+  render(<Harness service={noAddonDiscountedVisit} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  // Open the primary service picker and swap ONLY the service — Price and
+  // the Discount control are both left untouched.
+  fireEvent.click(await screen.findByRole('button', { name: 'Change' }));
+  fireEvent.click(screen.getByRole('button', { name: /Termite/ }));
+  fireEvent.click(screen.getByRole('button', { name: 'Termite Monitoring Service' }));
+  await waitForMoneyReady();
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  const body = JSON.parse(writes()[0][1].body);
+  expect(body.serviceType).toBe('Termite Monitoring Service');
+  // The whole point of the server's :9465 fix: these keys are not merely
+  // falsy, they are ABSENT — the modal's Discount control state
+  // (useState("")) never seeds from the visit's stored stamp, so a
+  // service-only save has nothing to echo even if it wanted to.
+  expect('discountType' in body).toBe(false);
+  expect('discountAmount' in body).toBe(false);
+  expect('discountId' in body).toBe(false);
+});

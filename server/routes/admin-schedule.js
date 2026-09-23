@@ -9369,6 +9369,7 @@ async function computeSingleServiceEstimatedPricePlan({
           .where({ id: id })
           .first('estimated_price', 'discount_type', 'discount_amount',
             ...(cols.service_id ? ['service_id'] : []),
+            ...(cols.discount_id ? ['discount_id'] : []),
             ...(cols.discount_max_dollars ? ['discount_max_dollars'] : []),
             ...(cols.service_key_snapshot ? ['service_key_snapshot'] : []),
             ...(cols.service_category_snapshot ? ['service_category_snapshot'] : []),
@@ -9459,6 +9460,27 @@ async function computeSingleServiceEstimatedPricePlan({
         const rebaseBasePrice = (serviceOnlyRebase && existingPrimaryGross != null)
           ? existingPrimaryGross
           : basePrice;
+        // Codex pre-push audit P1 (round 7 on #4657, :9465): the real
+        // modal never echoes discountType/discountAmount/discountId for a
+        // save that never touched the Discount control at all — those
+        // fields simply arrive undefined here (the control's local state
+        // starts empty and Save omits it unless touched), not a verbatim
+        // echo of the stored stamp. Round 6's own regression test supplied
+        // an artificial echo the modal never sends. For a serviceOnlyRebase,
+        // load the STORED discount terms — and, if it names a catalog id,
+        // that catalog row — from the visit itself, the same source legacy
+        // preservation already trusts, instead of depending on the request
+        // to carry them.
+        let loadedDiscountPreset = null;
+        if (serviceOnlyRebase && discountType === undefined && discountAmount === undefined
+          && existingPrice?.discount_type && existingPrice?.discount_amount != null) {
+          discountType = existingPrice.discount_type;
+          discountAmount = existingPrice.discount_amount;
+          if (existingPrice.discount_id) {
+            loadedDiscountPreset = await db('discounts').where({ id: existingPrice.discount_id }).first().catch(() => null);
+          }
+        }
+        const effectivePresetForRebase = loadedDiscountPreset || appointmentDiscountPreset;
         let finalPrice = rebaseBasePrice;
         if (discountType && discountAmount != null && discountAmount !== '') {
           finalPrice = applyDiscount(finalPrice, discountType, discountAmount);
@@ -9488,7 +9510,7 @@ async function computeSingleServiceEstimatedPricePlan({
           && (assertPercentExclusionCatalogReady() || lineExcludedFromPercentDiscount(legacyPrimaryKey)
             || legacyLines.some((line) => lineExcludedFromPercentDiscount(line.serviceKey)));
         if (discountType && discountAmount != null && discountAmount !== ''
-          && (appointmentDiscountPreset || legacyExclusionApplies)) {
+          && (effectivePresetForRebase || legacyExclusionApplies)) {
           const exclusionAware = calculateVisitFinancialsForAddons({
             primaryNet: primaryGross,
             primaryServiceKey: legacyPrimaryKey,
@@ -9496,11 +9518,11 @@ async function computeSingleServiceEstimatedPricePlan({
             appointmentDiscount: {
               discountType,
               discountAmount: Number(discountAmount),
-              maxDiscountDollars: appointmentDiscountPreset
-                ? (appointmentDiscountPreset.max_discount_dollars ?? null)
+              maxDiscountDollars: effectivePresetForRebase
+                ? (effectivePresetForRebase.max_discount_dollars ?? null)
                 : (appointmentDiscountChanged ? null : (existingPrice?.discount_max_dollars ?? null)),
-              serviceKeyFilter: appointmentDiscountPreset?.service_key_filter || null,
-              serviceCategoryFilter: appointmentDiscountPreset?.service_category_filter || null,
+              serviceKeyFilter: effectivePresetForRebase?.service_key_filter || null,
+              serviceCategoryFilter: effectivePresetForRebase?.service_category_filter || null,
             },
           }, legacyLines);
           if (exclusionAware.price != null) finalPrice = exclusionAware.price;
@@ -9515,7 +9537,7 @@ async function computeSingleServiceEstimatedPricePlan({
               serviceCategory: legacyPrimaryCategory,
             },
             ...legacyLines.map((l) => ({ amount: l.price, serviceKey: l.serviceKey, serviceCategory: l.serviceCategory })),
-          ]);
+          ], effectivePresetForRebase || undefined);
         } catch (eligibilityErr) {
           if (!serviceOnlyRebase || !eligibilityErr?.isOperational) throw eligibilityErr;
           // The service swap alone made the stored discount ineligible —
@@ -10416,16 +10438,26 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // visit passes on its add-on, and out-of-scope / excluded lines can't
     // satisfy a minimum subtotal (Codex #3531 r2 P1). `lines` =
     // [{ amount, serviceKey, serviceCategory }], primary first.
-    const presetEligibilityCheck = async (lines) => {
-      if (!appointmentDiscountPreset) return;
-      const keyFilter = appointmentDiscountPreset.service_key_filter || null;
-      const categoryFilter = appointmentDiscountPreset.service_category_filter || null;
+    // Codex pre-push audit P1 (round 7 on #4657, :9465): an OPTIONAL second
+    // `presetOverride` argument lets a caller check eligibility against a
+    // discount that was never posted in the request at all —
+    // computeSingleServiceEstimatedPricePlan's own serviceOnlyRebase loads
+    // the STORED catalog row for this (the real modal never echoes
+    // discountType/discountAmount/discountId for a save that never touched
+    // the Discount control). Every other caller passes nothing and keeps
+    // the original closure-over-`appointmentDiscountPreset` behavior,
+    // unchanged.
+    const presetEligibilityCheck = async (lines, presetOverride) => {
+      const preset = presetOverride || appointmentDiscountPreset;
+      if (!preset) return;
+      const keyFilter = preset.service_key_filter || null;
+      const categoryFilter = preset.service_category_filter || null;
       const matching = (lines || []).filter((line) => (
         (!keyFilter || keyFilter === line.serviceKey)
         && (!categoryFilter || categoryFilter === line.serviceCategory)
       ));
-      if (isPercentDiscountType(appointmentDiscountPreset.discount_type)) assertPercentExclusionCatalogReady();
-      const eligible = isPercentDiscountType(appointmentDiscountPreset.discount_type)
+      if (isPercentDiscountType(preset.discount_type)) assertPercentExclusionCatalogReady();
+      const eligible = isPercentDiscountType(preset.discount_type)
         ? matching.filter((line) => !lineExcludedFromPercentDiscount(line.serviceKey))
         : matching;
       const context = eligible[0] || matching[0] || {};
@@ -10440,14 +10472,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       const { customerRow, recurringMembershipBooking } = await resolveMembershipBookingContext({
         db, id: req.params.id, updates, isRecurring, serviceType, scheduledDate: req.body.scheduledDate,
       });
-      const failures = await DiscountEngine.manualEligibilityFailures(appointmentDiscountPreset, customerRow || {}, {
+      const failures = await DiscountEngine.manualEligibilityFailures(preset, customerRow || {}, {
         subtotal,
         serviceKey: serviceKey || null,
         serviceCategory: serviceCategory || null,
         recurringMembershipBooking,
       });
       if (failures.length) {
-        throw httpError(400, `${appointmentDiscountPreset.name} is not eligible: ${failures.join(', ')}`);
+        throw httpError(400, `${preset.name} is not eligible: ${failures.join(', ')}`);
       }
     };
     let clearAddonDiscountsOnPriceEdit = false;
@@ -13362,16 +13394,19 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
     // serviceType, which differ in shape between the two routes; any future
     // fix to one must be mirrored to the other by inspection (they sit a
     // few hundred lines apart in this same file).
-    const presetEligibilityCheck = async (lines) => {
-      if (!appointmentDiscountPreset) return;
-      const keyFilter = appointmentDiscountPreset.service_key_filter || null;
-      const categoryFilter = appointmentDiscountPreset.service_category_filter || null;
+    // Codex pre-push audit P1 (round 7 on #4657, :9465): byte-identical to
+    // the save path's own override contract, above.
+    const presetEligibilityCheck = async (lines, presetOverride) => {
+      const preset = presetOverride || appointmentDiscountPreset;
+      if (!preset) return;
+      const keyFilter = preset.service_key_filter || null;
+      const categoryFilter = preset.service_category_filter || null;
       const matching = (lines || []).filter((line) => (
         (!keyFilter || keyFilter === line.serviceKey)
         && (!categoryFilter || categoryFilter === line.serviceCategory)
       ));
-      if (isPercentDiscountType(appointmentDiscountPreset.discount_type)) assertPercentExclusionCatalogReady();
-      const eligible = isPercentDiscountType(appointmentDiscountPreset.discount_type)
+      if (isPercentDiscountType(preset.discount_type)) assertPercentExclusionCatalogReady();
+      const eligible = isPercentDiscountType(preset.discount_type)
         ? matching.filter((line) => !lineExcludedFromPercentDiscount(line.serviceKey))
         : matching;
       const context = eligible[0] || matching[0] || {};
@@ -13381,14 +13416,14 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
       const { customerRow, recurringMembershipBooking } = await resolveMembershipBookingContext({
         db, id, updates, isRecurring, serviceType, scheduledDate,
       });
-      const failures = await DiscountEngine.manualEligibilityFailures(appointmentDiscountPreset, customerRow || {}, {
+      const failures = await DiscountEngine.manualEligibilityFailures(preset, customerRow || {}, {
         subtotal,
         serviceKey: serviceKeyCtx || null,
         serviceCategory: serviceCategoryCtx || null,
         recurringMembershipBooking,
       });
       if (failures.length) {
-        throw httpError(400, `${appointmentDiscountPreset.name} is not eligible: ${failures.join(', ')}`);
+        throw httpError(400, `${preset.name} is not eligible: ${failures.join(', ')}`);
       }
     };
 

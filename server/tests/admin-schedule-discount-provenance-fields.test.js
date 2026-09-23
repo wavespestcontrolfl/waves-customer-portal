@@ -1185,12 +1185,13 @@ postgres('round 6 on #4657 — a primary-service swap revalidates the stored dis
     const { visitId: id, termiteSvc } = await seedNoAddonVisit({
       discountId, discountKey: 'mosquito_only_' + discountId.slice(0, 8), serviceKeyFilter: 'mosquito_monthly',
     });
-    // Price/discount echoed VERBATIM (the modal round-trips the stored
-    // stamp unless the operator touches it) — only serviceId changed, to a
-    // service the Mosquito-Only preset does not reach.
-    const body = {
-      serviceId: termiteSvc.id, estimatedPrice: 40, discountType: 'fixed_amount', discountAmount: 10, discountId,
-    };
+    // Codex pre-push audit P1 (round 7 on #4657, :9465): the REAL modal
+    // never echoes discountType/discountAmount/discountId for a save that
+    // never touched the Discount control — those fields simply arrive
+    // undefined (the control's own local state starts empty). Only
+    // serviceId and the stored NET (unedited Price) are posted, exactly
+    // what an actual service-only edit sends.
+    const body = { serviceId: termiteSvc.id, estimatedPrice: 40 };
     const previewResult = await preview(id, body);
     expect(previewResult.err).toBeFalsy();
     expect(previewResult.statusCode).toBe(200);
@@ -1220,10 +1221,10 @@ postgres('round 6 on #4657 — a primary-service swap revalidates the stored dis
       discountId, discountKey: 'mosquito_only_' + discountId.slice(0, 8), serviceKeyFilter: null,
     });
     // A preset with NO service_key_filter reaches every service — swap
-    // stays eligible.
-    const body = {
-      serviceId: mosquitoSvc2.id, estimatedPrice: 40, discountType: 'fixed_amount', discountAmount: 10, discountId,
-    };
+    // stays eligible. Codex pre-push audit P1 (round 7 on #4657, :9465):
+    // same real-modal payload as the sibling test above — no discount
+    // fields posted at all.
+    const body = { serviceId: mosquitoSvc2.id, estimatedPrice: 40 };
     const previewResult = await preview(id, body);
     expect(previewResult.err).toBeFalsy();
     expect(previewResult.statusCode).toBe(200);
