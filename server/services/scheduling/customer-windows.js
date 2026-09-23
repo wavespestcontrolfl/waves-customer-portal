@@ -170,15 +170,26 @@ function currentDayEndMinutes() {
 
 /**
  * The hour grid a synthetic (non-route-derived) offer builder should
- * enumerate — CUSTOMER_HOUR_GRID minus any hour overlapping the lunch
- * interval while the lunch gate is on. Read at CALL time, like the gate
- * itself: never memoize this array.
+ * enumerate — CUSTOMER_HOUR_GRID minus any hour whose visit overlaps the
+ * lunch interval while the lunch gate is on. Read at CALL time, like the
+ * gate itself: never memoize this array.
+ *
+ * `durationMinutes` (default 60, the standard visit) is the length of the
+ * visit being scheduled — the actual window this filters is
+ * [start, start + durationMinutes), not a fixed hour. Codex on #4663: the
+ * one current caller (buildAsapCapacitySlotsForTechs) already re-checks
+ * every start against the REAL window via slotWindowFitsDay right after
+ * calling this, but a fixed 60 here still wrongly dropped a documented
+ * grid hour for a SHORTER service — e.g. an 11:00 start with a
+ * 30-minute visit ends at 11:30, before an 11:30 lunch start, but the old
+ * fixed +60 check compared 11:00-12:00 against it and excluded 11:00
+ * anyway, hiding real capacity a 30-minute service could have used.
  */
-function customerOfferGrid() {
+function customerOfferGrid(durationMinutes = 60) {
   if (!lunchBlockEnabled()) return CUSTOMER_HOUR_GRID;
   return CUSTOMER_HOUR_GRID.filter((t) => {
     const startMin = parseHHMMMinutes(t);
-    return !overlapsLunch(startMin, startMin + 60);
+    return !overlapsLunch(startMin, startMin + durationMinutes);
   });
 }
 

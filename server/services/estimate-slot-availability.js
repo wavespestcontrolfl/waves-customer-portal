@@ -1241,7 +1241,12 @@ function buildAsapCapacitySlotsForTechs({
     const earliestMinute = earliestBookableMinuteForDate(date, now, minimumLeadMinutes);
     // Read at call time (customerOfferGrid(), not a module-level constant) so
     // a mid-process GATE_BOOKING_LUNCH_BLOCK flip takes effect immediately.
-    for (const windowStart of customerOfferGrid()) {
+    // Pass the REAL duration (Codex push-audit P1 on #4663) — a fixed 60
+    // here wrongly excluded a documented grid hour for a SHORTER service
+    // (e.g. an 11:00 start + 30 min ends at 11:30, before an 11:30 lunch
+    // start, but comparing 11:00-12:00 against it excluded 11:00 anyway).
+    // slotWindowFitsDay below still re-verifies the real window either way.
+    for (const windowStart of customerOfferGrid(durationMinutes)) {
       if (timeToMinutes(windowStart) < earliestMinute) continue;
       const windowEnd = addMinutesToHHMM(windowStart, durationMinutes);
       if (!slotWindowFitsDay(windowStart, windowEnd)) continue;

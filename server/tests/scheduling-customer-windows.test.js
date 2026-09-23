@@ -164,6 +164,26 @@ describe('customerOfferGrid / overlapsLunch (the two gate-aware predicates every
     expect(overlapsLunch(13 * 60, 14 * 60)).toBe(false);
   });
 
+  // Codex push-audit P1 on #4663: customerOfferGrid used to hardcode a
+  // 60-minute visit when checking each grid hour against the lunch
+  // interval, regardless of the actual service duration its one caller
+  // (buildAsapCapacitySlotsForTechs) passes. A 30-minute visit at 11:30
+  // ends at 12:00 — touching but not overlapping the 12:00-13:00 lunch
+  // block (half-open) — but the fixed +60 check computed 11:30-12:30
+  // instead, which DOES overlap, and wrongly dropped a documented grid
+  // hour a shorter service could have used.
+  test('gate on: the actual duration decides the overlap, not a hardcoded 60 minutes', () => {
+    process.env[ENV_KEY] = 'true';
+    // 11:00 default (60 min): 11:00-12:00 touches lunch, does not overlap.
+    expect(customerOfferGrid()).toContain('11:00');
+    // A 30-minute visit at 11:30 ends at 12:00 — also just touches.
+    expect(customerOfferGrid(30)).toContain('11:00');
+    // A 90-minute visit at 11:00 ends at 12:30 — genuinely overlaps.
+    expect(customerOfferGrid(90)).not.toContain('11:00');
+    // 12:00 itself always overlaps regardless of duration.
+    expect(customerOfferGrid(15)).not.toContain('12:00');
+  });
+
   test('gate on: non-finite bounds never overlap (a caller with no window falls through to its other guards)', () => {
     process.env[ENV_KEY] = 'true';
     expect(overlapsLunch(null, 13 * 60)).toBe(false);
