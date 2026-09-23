@@ -182,5 +182,59 @@ describe('estimate slots — lunch block gate', () => {
       const again = await getAvailableSlots('est-lunch-1', opts);
       expect(allOffered(again).some(overlapsNoon)).toBe(true);
     });
+
+    // Codex push-audit P1 on #4663: the cache key included the gate FLAG but
+    // not the booking_config-resolved lunch interval/day-end. The resolved
+    // bounds refresh on their own 60s TTL, independent of this 5-min offer
+    // cache — an owner narrowing the configured lunch interval mid-window
+    // (gate staying ON throughout) must invalidate the cached pool too, or
+    // reservation validation (which re-reads current config) would reject
+    // offers this cache kept serving.
+    test('a resolved-bounds change with the gate held ON produces a fresh cache key, not a stale hit', async () => {
+      let bookingConfigRow = { lunch_start: '12:00:00', lunch_end: '13:00:00', day_end: '18:00:00' };
+      db.mockImplementation((table) => {
+        if (table === 'booking_config') return { first: jest.fn().mockResolvedValue(bookingConfigRow) };
+        if (table === 'estimates') return { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(ESTIMATE_ROW) };
+        if (table === 'customers') {
+          return {
+            where: jest.fn().mockReturnThis(), select: jest.fn().mockReturnThis(),
+            first: jest.fn().mockResolvedValue({
+              latitude: 27.3364, longitude: -82.5307,
+              address_line1: '123 Test St', city: 'Sarasota', state: 'FL', zip: '34231',
+            }),
+          };
+        }
+        if (table === 'technicians') return { where: jest.fn().mockReturnThis(), select: jest.fn().mockResolvedValue([{ id: 'tech-1', name: 'Adam Benetti' }]) };
+        if (table === 'scheduled_services') {
+          return {
+            leftJoin: jest.fn().mockReturnThis(), whereBetween: jest.fn().mockReturnThis(),
+            whereNotIn: jest.fn().mockReturnThis(), andWhere: jest.fn().mockReturnThis(),
+            select: jest.fn().mockResolvedValue([]),
+          };
+        }
+        if (table === 'service_zones') return { select: jest.fn().mockResolvedValue([]) };
+        throw new Error(`unexpected table ${table}`);
+      });
+      process.env[ENV_KEY] = 'true';
+      estimateSlotAvailability._internals.clearCaches();
+      jest.useFakeTimers();
+      try {
+        jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+        const before = await getAvailableSlots('est-lunch-1', opts);
+        expect(before.metadata.cacheHit).toBe(false);
+
+        // The customer-windows 60s config TTL, not this 5-min offer cache,
+        // is what needs to expire for the change below to actually be read.
+        // Same UTC hour bucket (15:xx), so cacheHour() alone would NOT
+        // change the offer cache key — only the resolved-bounds addition does.
+        jest.setSystemTime(new Date('2027-05-01T15:01:05Z'));
+        bookingConfigRow = { lunch_start: '10:00:00', lunch_end: '11:00:00', day_end: '18:00:00' };
+        const after = await getAvailableSlots('est-lunch-1', opts);
+        expect(after.metadata.cacheHit).toBe(false);
+      } finally {
+        jest.useRealTimers();
+        delete process.env[ENV_KEY];
+      }
+    });
   });
 });

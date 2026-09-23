@@ -76,13 +76,23 @@ function lunchBlockEnabled() {
 // one row a request needs. Callers await refreshCustomerBookingWindowConfig()
 // ONCE at the top of an offer/commit entry point (getAvailableSlots,
 // reserveSlot, commitReservation); every synchronous helper below then reads
-// the cached value. A cache miss (nothing awaited yet, e.g. a caller added
-// later that forgets to) or a read failure both fall back to the fixed
-// constants — the same value booking_config normally holds post-migration —
-// so this can only ever be MORE permissive/parity-preserving than the old
-// fixed-constant behavior, never less available.
+// the cached value.
+//
+// Failure handling (Codex push-audit P1 on #4663 — the first cut here reset
+// to the fixed constants on ANY read failure, including one after a
+// successful read: reproduced, a configured 16:00 close + 11:00-12:00 lunch
+// silently became 18:00/12:00-13:00 — MORE permissive — for the rest of that
+// 60s TTL, and reservation commits trust this same cache). A failure now
+// keeps serving the last successfully-read row (retried on every call while
+// failing, never cached as a failure, so the blind window is exactly the
+// outage's real duration) instead of ever widening to the constants once a
+// real row has been read. Only a cache that has NEVER seen a successful read
+// falls back to the constants — the same value booking_config normally holds
+// post-migration, so this is the designed default, not an unverified guess —
+// bookingWindowConfigKnown() lets a commit path tell the two states apart
+// and refuse instead of guessing when it's never seen real config at all.
 const CUSTOMER_CONFIG_TTL_MS = 60 * 1000;
-let cachedBookingWindowConfig = null; // { lunchStartMinutes, lunchEndMinutes, dayEndMinutes, expiresAt }
+let cachedBookingWindowConfig = null; // last SUCCESSFULLY READ row: { lunchStartMinutes, lunchEndMinutes, dayEndMinutes, expiresAt }
 
 function parseHHMMMinutes(value) {
   const m = String(value ?? '').trim().match(/^(\d{1,2}):(\d{2})/);
@@ -95,27 +105,41 @@ function parseHHMMMinutes(value) {
 
 async function refreshCustomerBookingWindowConfig() {
   if (cachedBookingWindowConfig && cachedBookingWindowConfig.expiresAt > Date.now()) return;
-  let lunchStartMinutes = CUSTOMER_LUNCH_START_MINUTES;
-  let lunchEndMinutes = CUSTOMER_LUNCH_END_MINUTES;
-  let dayEndMinutes = CUSTOMER_DAY_END_MINUTES;
   try {
     const config = await db('booking_config').first('lunch_start', 'lunch_end', 'day_end');
     const parsedLunchStart = parseHHMMMinutes(config?.lunch_start);
     const parsedLunchEnd = parseHHMMMinutes(config?.lunch_end);
     const parsedDayEnd = parseHHMMMinutes(config?.day_end);
-    if (parsedLunchStart != null) lunchStartMinutes = parsedLunchStart;
-    if (parsedLunchEnd != null) lunchEndMinutes = parsedLunchEnd;
-    if (parsedDayEnd != null) dayEndMinutes = parsedDayEnd;
+    cachedBookingWindowConfig = {
+      lunchStartMinutes: parsedLunchStart != null ? parsedLunchStart : CUSTOMER_LUNCH_START_MINUTES,
+      lunchEndMinutes: parsedLunchEnd != null ? parsedLunchEnd : CUSTOMER_LUNCH_END_MINUTES,
+      dayEndMinutes: parsedDayEnd != null ? parsedDayEnd : CUSTOMER_DAY_END_MINUTES,
+      expiresAt: Date.now() + CUSTOMER_CONFIG_TTL_MS,
+    };
   } catch {
-    // Config unreadable (mocked test db, transient failure, …) — the fixed
-    // constants above are exactly what booking_config holds in the normal
-    // case, so this never blocks an offer.
+    // Config unreadable (mocked test db, transient failure, …). Keep
+    // whatever was last successfully read — do NOT widen to the fixed
+    // constants — and leave cachedBookingWindowConfig's expiresAt alone so
+    // the NEXT call retries immediately rather than caching this failure
+    // for the full TTL. If nothing has ever been read (still null), the
+    // synchronous getters below fall back to the constants, and
+    // bookingWindowConfigKnown() reports that so a commit path can choose
+    // to refuse instead of trusting an unverified default.
   }
-  cachedBookingWindowConfig = { lunchStartMinutes, lunchEndMinutes, dayEndMinutes, expiresAt: Date.now() + CUSTOMER_CONFIG_TTL_MS };
+}
+
+// True once a real booking_config row has been read at least once (even if
+// the most recent refresh attempt then failed and is serving that stale-but-
+// real value). False only for a process that has NEVER successfully read
+// booking_config — the one case the synchronous getters below are guessing
+// with the fixed constants rather than an actual value.
+function bookingWindowConfigKnown() {
+  return !!cachedBookingWindowConfig;
 }
 
 // Synchronous — reads whatever refreshCustomerBookingWindowConfig last
-// cached (or the fixed constants before anything has been cached yet).
+// successfully cached (or the fixed constants before any read has ever
+// succeeded — see bookingWindowConfigKnown()).
 function currentLunchInterval() {
   return cachedBookingWindowConfig
     ? { startMinutes: cachedBookingWindowConfig.lunchStartMinutes, endMinutes: cachedBookingWindowConfig.lunchEndMinutes }
@@ -166,4 +190,5 @@ module.exports = {
   refreshCustomerBookingWindowConfig,
   currentLunchInterval,
   currentDayEndMinutes,
+  bookingWindowConfigKnown,
 };

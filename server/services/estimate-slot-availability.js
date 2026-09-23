@@ -42,7 +42,7 @@ const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 const { getZoneFunnelDays, applyZoneDayFunnel, fallbackCenterZoneName } = require('./scheduling/zone-day-funnel');
 const {
   CUSTOMER_DAY_END_MINUTES, customerOfferGrid, overlapsLunch, lunchBlockEnabled,
-  refreshCustomerBookingWindowConfig, currentDayEndMinutes,
+  refreshCustomerBookingWindowConfig, currentDayEndMinutes, currentLunchInterval,
 } = require('./scheduling/customer-windows');
 const { isEnabled } = require('../config/feature-gates');
 const { getDailyRainOutlookBounded } = require('./weather-forecast');
@@ -1697,6 +1697,14 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     // 2026-09-23): a result computed while noon was offerable must never be
     // served after the gate flips on (or vice versa) for the TTL's length.
     lunchBlockEnabled() ? 'lunch_blocked' : 'noon_open',
+    // The RESOLVED bounds, not just the gate flag (Codex push-audit P1 on
+    // #4663): booking_config's lunch interval / day-end override refreshes
+    // on its own 60s TTL (customer-windows.js), independent of this 5-min
+    // offer cache — an owner narrowing either mid-window must not keep
+    // serving offers the reservation validation (which re-reads current
+    // config) would then reject.
+    `${currentLunchInterval().startMinutes}-${currentLunchInterval().endMinutes}`,
+    currentDayEndMinutes(),
     cacheHour(),
     opts.windowDays,
     opts.maxResults,

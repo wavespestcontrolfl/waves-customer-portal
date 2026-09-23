@@ -200,4 +200,53 @@ describe('refreshCustomerBookingWindowConfig / currentLunchInterval / currentDay
     await customerWindows.refreshCustomerBookingWindowConfig();
     expect(dbMock).toHaveBeenCalledTimes(1);
   });
+
+  test('bookingWindowConfigKnown() is false before any successful read and true after one', async () => {
+    expect(customerWindows.bookingWindowConfigKnown()).toBe(false);
+    mockConfig({ lunch_start: '11:30:00', lunch_end: '12:30:00', day_end: '16:00:00' });
+    await customerWindows.refreshCustomerBookingWindowConfig();
+    expect(customerWindows.bookingWindowConfigKnown()).toBe(true);
+  });
+
+  test('a read failure NEVER known: falls back to the fixed constants and stays unknown', async () => {
+    dbMock.mockImplementation(() => { throw new Error('db unavailable'); });
+    await customerWindows.refreshCustomerBookingWindowConfig();
+    expect(customerWindows.bookingWindowConfigKnown()).toBe(false);
+    expect(customerWindows.currentDayEndMinutes()).toBe(18 * 60);
+  });
+
+  // Codex push-audit P1 on #4663: the first cut reset to the fixed
+  // constants on ANY failure, including one AFTER a successful read —
+  // reproduced, a configured 16:00 close + 11:00-12:00 lunch silently
+  // became 18:00/12:00-13:00 (MORE permissive) for the rest of that
+  // failure's 60s TTL, and reservation commits trust this same cache.
+  test('a read failure AFTER a successful read preserves the last known-good config — never widens to the constants', async () => {
+    jest.useFakeTimers();
+    try {
+      mockConfig({ lunch_start: '11:00:00', lunch_end: '12:00:00', day_end: '16:00:00' });
+      await customerWindows.refreshCustomerBookingWindowConfig();
+      expect(customerWindows.currentDayEndMinutes()).toBe(16 * 60);
+      expect(customerWindows.currentLunchInterval()).toEqual({ startMinutes: 11 * 60, endMinutes: 12 * 60 });
+
+      // Advance past the 60s TTL so the next call actually re-queries, then
+      // fail that query.
+      jest.advanceTimersByTime(61 * 1000);
+      dbMock.mockImplementation(() => { throw new Error('db unavailable'); });
+      await customerWindows.refreshCustomerBookingWindowConfig();
+
+      // Still the configured 16:00/11:00-12:00 — NOT the fixed 18:00/12:00-13:00.
+      expect(customerWindows.currentDayEndMinutes()).toBe(16 * 60);
+      expect(customerWindows.currentLunchInterval()).toEqual({ startMinutes: 11 * 60, endMinutes: 12 * 60 });
+      expect(customerWindows.bookingWindowConfigKnown()).toBe(true);
+    } finally { jest.useRealTimers(); }
+  });
+
+  test('a failure with no known-good retries on the NEXT call rather than caching the failure for the TTL', async () => {
+    dbMock.mockImplementation(() => { throw new Error('db unavailable'); });
+    await customerWindows.refreshCustomerBookingWindowConfig();
+    expect(dbMock).toHaveBeenCalledTimes(1);
+    // No advanceTimersByTime — a cached FAILURE must not block an immediate retry.
+    await customerWindows.refreshCustomerBookingWindowConfig();
+    expect(dbMock).toHaveBeenCalledTimes(2);
+  });
 });
