@@ -13492,6 +13492,10 @@ const CallRecordingProcessor = {
           // goes out for an appointment whose address is unresolved and
           // whose technician was just pulled (codex r9 P1).
           let disputeHeldReuse = false;
+          // …and a promised follow-up the dispute hold kept from being
+          // created is still owed: filed as the same follow-up-unbooked
+          // card the manual-attachment branch uses (pre-push audit P1).
+          let disputeSkippedFollowUpPlan = false;
           let followUpCreated = null;
           // Cross-customer overlap findings from inside the booking txn —
           // advisory only (owner's chosen behavior: the booking proceeds
@@ -14125,6 +14129,8 @@ const CallRecordingProcessor = {
                   } else if (!primaryRowSkipped && !reuseHeldForAddress) {
                     // After the backfill so the child inherits the assigned tech.
                     followUpCreated = await ensureCallFollowUpVisit(primaryRow);
+                  } else if (!primaryRowSkipped && reuseHeldForAddress && callFollowUpPlan) {
+                    disputeSkippedFollowUpPlan = true;
                   }
                   return primaryRow;
                 }
@@ -15255,7 +15261,7 @@ const CallRecordingProcessor = {
                   }
                 }
               }
-              if (attachedManualBookingId && attachSkippedFollowUpPlan) {
+              if ((attachedManualBookingId && attachSkippedFollowUpPlan) || disputeSkippedFollowUpPlan) {
                 // The call promised a follow-up treatment, but the primary is
                 // a human's booking so no AI child was created (a manually
                 // planned visit 2 would be a standalone row the child-dedup
@@ -15270,6 +15276,7 @@ const CallRecordingProcessor = {
                       scheduled_service_id: svc.id,
                       scheduled_date: svc.scheduled_date || null,
                       service: svc.service_type || null,
+                      ...(disputeSkippedFollowUpPlan ? { skipped_reason: 'house_number_disputed' } : {}),
                     },
                   }))
                   .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
