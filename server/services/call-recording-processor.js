@@ -9876,6 +9876,28 @@ const CallRecordingProcessor = {
               resolved_at: new Date(),
               updated_at: new Date(),
             });
+          if (retired) {
+            // Same call_log.review_status bookkeeping as admin-triage's
+            // transitionCore, inside the locked transaction so the
+            // remaining-open count cannot race: the finalizer only ever
+            // SETS 'open' (when confirmation reasons exist) and the nightly
+            // sweep ignores resolved cards, so retiring the last open card
+            // here would otherwise strand a permanent review count with no
+            // card behind it (pre-push audit P1). This pass's own cards
+            // filed earlier in the run are counted like any other.
+            const stillOpen = await trx('triage_items')
+              .where({ call_log_id: call.id })
+              .whereIn('status', ['open', 'in_progress'])
+              .count({ n: '*' })
+              .first();
+            if (Number(stillOpen?.n || 0) === 0) {
+              await trx('call_log')
+                .where({ id: call.id })
+                .where('processing_token', procToken)
+                .whereIn('review_status', ['open'])
+                .update({ review_status: 'resolved', updated_at: new Date() });
+            }
+          }
           return retired ? 'retired' : 'nothing';
         });
         if (outcome === 'filed') {
