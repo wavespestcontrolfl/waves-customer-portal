@@ -138,7 +138,7 @@ describe('buildBookingAvailability — gap fan-out', () => {
     expect(findAvailableSlots).toHaveBeenCalledWith(expect.objectContaining({ serviceTypes: ['Pest Control', 'Tree & Shrub'] }));
     // The booking's own expected-minutes credit is threaded into the finder
     // (Codex r2 P2) — no catalog reachable here, so it is the window length.
-    expect(findAvailableSlots).toHaveBeenCalledWith(expect.objectContaining({ expectedMinutes: expect.any(Number) }));
+    expect(findAvailableSlots).toHaveBeenCalledWith(expect.objectContaining({ expectedMinutes: expect.any(Number), packEnds: true }));
   });
 
   test('packed-ends (owner bug report 2026-09-23): a trailing gap (real stop before, day-close after) offers ONLY its earliest packed start, not every hour in between', async () => {

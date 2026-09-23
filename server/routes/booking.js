@@ -930,6 +930,10 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // This booking's own expected-minutes credit — the same number the
     // mirror below and the commit probe use (offer/commit parity).
     expectedMinutes: candidateExpectedMinutes,
+    // Packed ends (owner bug report 2026-09-23): capacity-mode results are
+    // packed inside find-time (no `insertion` to key off here), and
+    // unassigned committed visits anchor the route (push-audit P1).
+    packEnds: true,
     dateFrom: rangeFrom,
     dateTo: rangeTo,
     // Travel gap (GATE_SLOT_TRAVEL_GAP): customer-facing turnaround buffer

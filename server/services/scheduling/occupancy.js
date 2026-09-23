@@ -644,6 +644,40 @@ async function bookedInterviewConflictRows(db, dateStr, startMin, endMin) {
   return out;
 }
 
+// Expected-minutes credit for EXISTING stops (owner ruling 2026-09-23): one
+// resolver per row set, shared by the commit-side travel probe and
+// listOccupiedWindows (the offer-side mirrors in routes/booking.js and
+// availability.js) so both sides credit an existing stop identically. A
+// version-2 combined allocation is expanded by occupiedRows to the SUM of
+// its members' work spans — its credit is summed the same way, or the
+// expanded stop reads as finished after its first member and the remaining
+// allocated work is credited toward travel (Codex r1 P1). Keyed exactly as
+// occupiedRows keys the span. Reads the catalog cache synchronously — the
+// caller preloads with ensureCatalogLoaded (no cache → window length, zero
+// padding).
+function stopCreditResolver(rows) {
+  const expectedByAllocation = new Map();
+  for (const row of rows) {
+    const key = allocationKey(row);
+    if (!key) continue;
+    const s = timeToMinutes(row.window_start);
+    const e = timeToMinutes(row.window_end);
+    const span = s != null && e != null && e > s ? e - s
+      : (Number(row.estimated_duration_minutes) > 0 ? Number(row.estimated_duration_minutes) : DEFAULT_DURATION_MINUTES);
+    const own = expectedMinutesSync({
+      serviceKey: row.service_key_snapshot, serviceType: row.service_type, windowMinutes: span,
+    });
+    expectedByAllocation.set(key, (expectedByAllocation.get(key) || 0) + own);
+  }
+  return (row, windowMinutes) => {
+    const allocation = allocationKey(row);
+    if (allocation) return Math.min(expectedByAllocation.get(allocation) || windowMinutes, windowMinutes);
+    return expectedMinutesSync({
+      serviceKey: row.service_key_snapshot, serviceType: row.service_type, windowMinutes,
+    });
+  };
+}
+
 /**
  * Travel-gap variant (GATE_SLOT_TRAVEL_GAP): every occupying row on the date,
  * with divergence-guarded coordinates, filtered in JS to the rows that either
@@ -698,24 +732,7 @@ async function findConflictingVisitsWithTravel({
     .orderBy('scheduled_services.window_start', 'asc');
   if (!Array.isArray(rows)) return [];
 
-  // A version-2 combined allocation is expanded by occupiedRows to the
-  // SUM of its members' work spans — its expected-minutes credit must be
-  // summed the same way, or the expanded stop is treated as finished after
-  // its first member and the remaining allocated work is credited toward
-  // travel (Codex r1 P1). Keyed exactly as occupiedRows keys the span.
-  const expectedByAllocation = new Map();
-  for (const row of rows) {
-    const key = allocationKey(row);
-    if (!key) continue;
-    const s = timeToMinutes(row.window_start);
-    const e = timeToMinutes(row.window_end);
-    const span = s != null && e != null && e > s ? e - s
-      : (Number(row.estimated_duration_minutes) > 0 ? Number(row.estimated_duration_minutes) : DEFAULT_DURATION_MINUTES);
-    const own = expectedMinutesSync({
-      serviceKey: row.service_key_snapshot, serviceType: row.service_type, windowMinutes: span,
-    });
-    expectedByAllocation.set(key, (expectedByAllocation.get(key) || 0) + own);
-  }
+  const stopExpectedMinutes = stopCreditResolver(rows);
 
   const stops = [];
   for (const row of occupiedRows(rows)) {
@@ -726,7 +743,6 @@ async function findConflictingVisitsWithTravel({
       ? Number(row.estimated_duration_minutes)
       : DEFAULT_DURATION_MINUTES;
     const endMin = row.endMin ?? (explicitEnd != null ? explicitEnd : startMin + durationMin);
-    const allocation = allocationKey(row);
     stops.push({
       startMin,
       endMin,
@@ -738,12 +754,7 @@ async function findConflictingVisitsWithTravel({
       // 2026-09-23) — service_key_snapshot first, else services.name =
       // service_type; no match falls back to the window length.
       windowMinutes: endMin - startMin,
-      expectedMinutes: allocation
-        ? Math.min(expectedByAllocation.get(allocation) || (endMin - startMin), endMin - startMin)
-        : expectedMinutesSync({
-          serviceKey: row.service_key_snapshot, serviceType: row.service_type,
-          windowMinutes: endMin - startMin,
-        }),
+      expectedMinutes: stopExpectedMinutes(row, endMin - startMin),
       row,
     });
   }
@@ -802,6 +813,13 @@ async function listOccupiedWindows({
   }
   if (!Array.isArray(rows)) return [];
 
+  // The offer-side travel mirrors (withCoords) need each stop's own
+  // expected-minutes credit — the same one the commit probe credits — or
+  // the mirror refuses a packed-after-stop start the commit would accept
+  // (push-audit P1). The dark (coordless) path keeps its statement set.
+  if (withCoords) await ensureCatalogLoaded(db);
+  const stopExpectedMinutes = withCoords ? stopCreditResolver(rows) : null;
+
   const out = [];
   for (const row of occupiedRows(rows)) {
     const startMin = timeToMinutes(row.window_start);
@@ -810,11 +828,18 @@ async function listOccupiedWindows({
     const durationMin = Number(row.estimated_duration_minutes) > 0
       ? Number(row.estimated_duration_minutes)
       : DEFAULT_DURATION_MINUTES;
+    const effectiveEnd = row.endMin ?? (endMin != null ? endMin : startMin + durationMin);
     out.push({
       ...row,
       date: normalizeDate(row.scheduled_date),
       startMin,
-      endMin: row.endMin ?? (endMin != null ? endMin : startMin + durationMin),
+      endMin: effectiveEnd,
+      ...(stopExpectedMinutes ? {
+        windowMinutes: effectiveEnd - startMin,
+        expectedMinutes: stopExpectedMinutes(row, effectiveEnd - startMin),
+        // A live hold never shadows a committed neighbour (travel-gap.js).
+        hold: row.reservation_expires_at != null && row.customer_id == null,
+      } : {}),
     });
   }
   return out;

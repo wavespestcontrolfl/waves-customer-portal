@@ -152,3 +152,39 @@ describe('version-2 combined allocation: expected minutes are summed across the 
     expect(clash).toEqual([]);
   });
 });
+
+describe('listOccupiedWindows (offer-side mirrors) carries each stop\'s own credit — same as the commit probe', () => {
+  const { listOccupiedWindows } = require('../services/scheduling/occupancy');
+  const { ensureCatalogLoaded, clearExpectedServiceMinutesCache } = require('../services/scheduling/expected-service-minutes');
+  const catalog = (table) => ({
+    select: async () => (table === 'services'
+      ? [{ service_key: 'quarterly_pest', name: 'Pest', min_duration_minutes: 30, max_duration_minutes: 60 }]
+      : []),
+  });
+  const stop = {
+    id: 's1', customer_id: 'cust-1', technician_id: 'tech-1', scheduled_date: '2026-09-03',
+    window_start: '12:00:00', window_end: '13:00:00', status: 'scheduled',
+    service_type: 'Pest', service_key_snapshot: 'quarterly_pest', estimated_duration_minutes: 60,
+    reservation_expires_at: null, reservation_service_mix: null, lat: PALMETTO.lat, lng: PALMETTO.lng,
+  };
+  beforeEach(async () => { clearExpectedServiceMinutesCache(); await ensureCatalogLoaded(catalog); });
+  afterEach(() => clearExpectedServiceMinutesCache());
+
+  test('withCoords rows are stamped with windowMinutes/expectedMinutes/hold; the dark path is untouched', async () => {
+    db.mockImplementation(() => makeQuery([stop]));
+    const [mirrorRow] = await listOccupiedWindows({ dateFrom: '2026-09-03', dateTo: '2026-09-03', withCoords: true });
+    expect(mirrorRow).toMatchObject({ startMin: 720, endMin: 780, windowMinutes: 60, expectedMinutes: 45, hold: false });
+    db.mockImplementation(() => makeQuery([stop]));
+    const [darkRow] = await listOccupiedWindows({ dateFrom: '2026-09-03', dateTo: '2026-09-03' });
+    expect(darkRow.expectedMinutes).toBeUndefined();
+  });
+
+  test('a co-located 13:00 candidate packed after the 12:00 stop passes the mirror exactly as the commit probe passes it', async () => {
+    db.mockImplementation(() => makeQuery([stop]));
+    const rows = await listOccupiedWindows({ dateFrom: '2026-09-03', dateTo: '2026-09-03', withCoords: true });
+    // Stop's own padding (60-45) absorbs the 15-minute buffer → no violation.
+    expect(violatesTravelGap({ startMin: 780, endMin: 840, ...PALMETTO }, rows)).toBe(false);
+    db.mockImplementation(() => makeQuery([stop]));
+    expect(await findConflictingVisits({ date: '2026-09-03', windowStart: '13:00', windowEnd: '14:00', travel: { ...PALMETTO } })).toEqual([]);
+  });
+});
