@@ -1211,7 +1211,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()])
           .first('extracted_data');
         const snapshot = typeof own?.extracted_data === 'string' ? JSON.parse(own.extracted_data) : own?.extracted_data;
-        leadCleanVerdict = !!snapshot && cleanVerdictCovers(snapshot, normalizedAddress);
+        // The own lead's clean verdict is NOT taken on its own: it joins the
+        // contact-pair reconciliation below, where the newest evidence wins
+        // by timestamp (pre-push audit P1).
         // Both checks: the snapshot's address (older flags carry no stamp)
         // AND the flag's own stamped address (a re-attach may have rewritten
         // the snapshot's address already).
@@ -1231,7 +1233,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // abandoned before /calculate leaves neither draft nor publication):
     // their flags carry over unless a newer clean verdict for the premise
     // supersedes them (pre-push audit P1).
-    if (!priorAddressUnverified && !leadCleanVerdict && contactEmail && contactPhone) {
+    if (contactEmail && contactPhone) {
       try {
         const phoneTen = String(contactPhone).replace(/\D/g, '').slice(-10);
         const rows = phoneTen ? await db('leads')
@@ -1251,13 +1253,18 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // Cross-lead flags must be STAMPED with their premise: an unstamped
         // (older) flag on another lead for the same contact proves nothing
         // about this address (pre-push audit P1).
+        // The own lead's flag (recovered above, possibly unstamped) joins
+        // the reconciliation as a candidate.
         const matchingFlags = snapshots
           .map((snap) => recoverAddressUnverified(snap))
           .filter((flag) => flag && flag.address_line1 && flagCoversAddress(flag, normalizedAddress));
+        if (priorAddressUnverified) matchingFlags.push(priorAddressUnverified);
         const newestFlag = matchingFlags.map((flag) => Date.parse(flag.flagged_at || '') || 0).reduce((max, at) => Math.max(max, at), 0);
         if (newestClean && newestClean > newestFlag) {
           leadCleanVerdict = true;
+          priorAddressUnverified = null;
         } else if (matchingFlags.length) {
+          leadCleanVerdict = false;
           priorAddressUnverified = matchingFlags.sort((a, b) => (Date.parse(b.flagged_at || '') || 0) - (Date.parse(a.flagged_at || '') || 0))[0];
         }
       } catch (leadErr) {
@@ -2008,13 +2015,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // an omitted key would keep a stale flag from an earlier address —
       // null clears it once a clean lookup prices the corrected address
       // (codex r1 P2).
-      address_unverified: addressUnverified || null,
-      address_verdict: buildAddressVerdict({
-        flag: addressUnverified,
-        enriched: trustedProfileFound ? trustedTurf : (leadCleanVerdict ? { addressVerdict: 'audited' } : null),
-        profileFound: trustedProfileFound || leadCleanVerdict,
-        address: normalizedAddress,
-      }),
+      // address_unverified / address_verdict are NOT written here: the
+      // locked publication after the lead write owns them, so no verdict
+      // ever commits outside the contact-pair lock (pre-push audit P1).
     });
 
     // If the property-lookup step already captured a lead row, update it

@@ -3,7 +3,7 @@ const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { recoverAddressUnverified, nextAddressUnverified, flagCoversAddress, buildAddressVerdict } = require('../services/lead-address-unverified');
+const { recoverAddressUnverified, nextAddressUnverified, flagCoversAddress, buildAddressVerdict, contactPairLockKey } = require('../services/lead-address-unverified');
 const { performPropertyLookup, VACANT_SQFT_FLAG_COPY } = require('./property-lookup-v2');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
 const { normalizeLeadAddress, formatAddress } = require('../utils/address-normalizer');
@@ -474,16 +474,27 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
         // lead-address-unverified). Derived from the SERVER result, so an
         // abandoned row already carries the callback ask; /calculate
         // re-derives it (or recovers this one when its cache read misses).
-        address_unverified: addressUnverified,
-        // Server-owned verdict for this address (clean / flagged /
-        // unanswered) — a clean one supersedes older warnings downstream.
-        address_verdict: buildAddressVerdict({ flag: addressUnverified, enriched: result.enriched, profileFound: !!result?.enriched, address: normalizedAddress }),
       };
       await db('leads').where({ id: lead.id }).update({
         extracted_data: attachedToExistingLead
           ? db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(completeStage)])
           : JSON.stringify(completeStage),
         updated_at: new Date(),
+      });
+      // The verdict keys are published UNDER the contact-pair advisory lock
+      // the booking confirm takes, never in the unlocked write above
+      // (pre-push audit P1).
+      await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(email, normPhone)]);
+        await trx('leads').where({ id: lead.id }).update({
+          extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+            address_unverified: addressUnverified,
+            // Server-owned verdict for this address (clean / flagged /
+            // unanswered) — a clean one supersedes older warnings downstream.
+            address_verdict: buildAddressVerdict({ flag: addressUnverified, enriched: result.enriched, profileFound: !!result?.enriched, address: normalizedAddress }),
+          })]),
+          updated_at: new Date(),
+        });
       });
     } catch (e) {
       logger.error(`[public-property-lookup] lead update failed: ${e.message}`);
