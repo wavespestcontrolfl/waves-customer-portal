@@ -785,7 +785,12 @@ router.post('/:id/verdict', async (req, res) => {
         }
       }
 
-      if (verdict === 'accept' && heldConflictConfirmed
+      // Both verdicts: a Deny resolves the card just the same, and the
+      // confirmed appointment is still owed unless the reviewer denied the
+      // SCHEDULING extraction itself (wrong_fields includes 'scheduling')
+      // — then there was no appointment to hand on (pre-push audit P1).
+      const scheduleDenied = verdict === 'deny' && wrongFields.includes('scheduling');
+      if (!scheduleDenied && heldConflictConfirmed
         && resolvedRows.some((r) => r?.reason_code === 'on_file_house_number_conflict')) {
         // The same service / window / address coverage the sweep's booking
         // evidence applies — an unrelated older booking sharing this call
@@ -831,9 +836,11 @@ router.post('/:id/verdict', async (req, res) => {
             .insert(buildTriageItem({
               callLogId: item.call_log_id,
               flag: 'auto_booking_skipped_after_approval',
-              extraction: { meta: { call_summary: 'Address confirmed on file after a house-number dispute — the confirmed appointment still needs booking' }, scheduling: heldConflictPayload.scheduling_window || { status: 'confirmed' } },
+              extraction: { meta: { call_summary: verdict === 'accept'
+                ? 'Address confirmed on file after a house-number dispute — the confirmed appointment still needs booking'
+                : 'House-number dispute card denied — the confirmed appointment still needs booking' }, scheduling: heldConflictPayload.scheduling_window || { status: 'confirmed' } },
               extraPayload: {
-                skipped_reason: 'address_confirmed_on_file_after_house_number_dispute',
+                skipped_reason: verdict === 'accept' ? 'address_confirmed_on_file_after_house_number_dispute' : 'house_number_dispute_denied_appointment_unbooked',
                 scheduling_window: approvedWindow,
                 on_file_address: heldConflictPayload.on_file_address || null,
               },
