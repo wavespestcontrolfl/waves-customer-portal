@@ -33,6 +33,7 @@ import {
   Textarea,
   UiSurface,
 } from "../../components/ui";
+import { leadAddressUnverifiedNotice } from "../../lib/leadAddressUnverified";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 // leads.address may hold either a street-only line or a fully composed
@@ -1658,6 +1659,11 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                           {formatLeadAddress(lead) || "--"}
                                         </span>
                                       </div>{" "}
+                                      {leadAddressUnverifiedNotice(lead) && (
+                                        <div className="mt-1 rounded border border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-900">
+                                          {leadAddressUnverifiedNotice(lead)}
+                                        </div>
+                                      )}{" "}
                                       {leadAdditionalProperties(lead).length >
                                         0 && (
                                         <div>

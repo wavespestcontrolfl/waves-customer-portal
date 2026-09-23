@@ -1043,6 +1043,35 @@ const quoteLimiter = rateLimit({
   message: { error: 'Too many quote requests. Please try again later.' },
 });
 
+// The lookup's county-roll house-number audit, as a lead-level flag. The
+// address panel already raises a HIGH `address` verify flag when the county
+// roll cannot match the typed house number (or the geocoder snapped it to a
+// neighbour), but the quote intake never read it: live 2026-09-14, a typo'd
+// house number that does not exist on an established street became the lead
+// AND the customer address, and the estimate went out to it. Only the
+// server-trusted profile is consulted (never the client's `enriched`), and
+// only the audit's own numbers ride along — the nearest numbers are context
+// for the callback, not corrections. Returns null when the roll vouched for
+// the number or never answered (a GIS outage yields no audit at all).
+function deriveAddressUnverified(enriched) {
+  const flags = Array.isArray(enriched?.fieldVerifyFlags) ? enriched.fieldVerifyFlags : [];
+  const flag = flags.find((f) => f && f.field === 'address' && f.priority === 'HIGH' && f.reason);
+  if (!flag) return null;
+  const audit = enriched?.addressAudit && typeof enriched.addressAudit === 'object' ? enriched.addressAudit : {};
+  const nearest = Array.isArray(audit.nearestNumbers)
+    ? audit.nearestNumbers.map(String).filter(Boolean).slice(0, 5)
+    : [];
+  return {
+    source: 'county_roll',
+    reason: String(flag.reason).slice(0, 600),
+    county: audit.county || null,
+    house_number: audit.houseNumber != null ? String(audit.houseNumber) : null,
+    street_exists: typeof audit.streetExists === 'boolean' ? audit.streetExists : null,
+    nearest_numbers: nearest,
+    flagged_at: new Date().toISOString(),
+  };
+}
+
 router.post('/calculate', quoteLimiter, async (req, res) => {
   try {
     // Honeypot (always on). /calculate is step 2 of the quote flow — the paid
@@ -1181,6 +1210,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         logger.warn(`[public-quote] server-side turf re-read failed — pricing without turf figures: ${turfErr.message}`);
         trustedTurf = {};
       }
+    }
+    // County roll could not vouch for the typed house number — carried on
+    // the lead for the callback (see deriveAddressUnverified). Never
+    // changes the price: the profile the engine priced from is unchanged.
+    const addressUnverified = trustedProfileFound ? deriveAddressUnverified(trustedTurf) : null;
+    if (addressUnverified) {
+      logger.info(`[public-quote] county roll could not match the typed house number (${addressUnverified.county || 'county unknown'}) — lead flagged address_unverified`);
     }
     // A lot the lookup itself flagged verify-first (the condo unit-lot flag:
     // a per-unit folio carrying the association's parcel — GH codex P1 on
@@ -1844,6 +1880,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       landing_url: attr?.landing_url || null,
       address: normalizedAddress,
       ...(additionalProperties.length ? { additional_properties: additionalProperties } : {}),
+      ...(addressUnverified ? { address_unverified: addressUnverified } : {}),
     });
 
     // If the property-lookup step already captured a lead row, update it
@@ -3454,6 +3491,7 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
 
 module.exports = router;
 module.exports._internals = {
+  deriveAddressUnverified,
   findPriorOpenWizardLeadId,
   duplicateOfFromExtracted,
   WIZARD_LEAD_REUSE_DAYS,
