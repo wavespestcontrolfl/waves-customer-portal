@@ -1961,6 +1961,9 @@ describe('reserveSlot/commitReservation fail closed when booking_config has neve
       throw new Error(`unexpected trx table ${table}`);
     });
     trxMock.isTransaction = true;
+    // savepointRead (utils/savepoint-read.js) isolates the read in its own
+    // SAVEPOINT whenever conn.isTransaction — exercise that path too.
+    trxMock.raw = jest.fn().mockResolvedValue(undefined);
     // Fails later for an unrelated reason (no further trx table mocks
     // wired) — this test only cares that the fail-closed check passed and
     // that booking_config was read through trx, not isolatedDb.
@@ -1971,5 +1974,30 @@ describe('reserveSlot/commitReservation fail closed when booking_config has neve
     })).rejects.toThrow();
     expect(isolatedDb).not.toHaveBeenCalledWith('booking_config');
     expect(trxMock).toHaveBeenCalledWith('booking_config');
+  });
+
+  // Codex push-audit P1 on #4663 (a later round, on the trx-routing fix
+  // above): a caught JS error does NOT undo what PostgreSQL itself did — a
+  // failed statement aborts the rest of that transaction until a ROLLBACK
+  // (or, scoped tighter, a ROLLBACK TO SAVEPOINT). Reading booking_config
+  // through the caller's trx without a savepoint would poison every later
+  // query on that same trx (breaking estimate acceptance/one-tap purchase
+  // entirely) the moment this optional read failed.
+  test('a failing booking_config read on a caller-supplied trx rolls back to a savepoint, never poisoning the caller\'s transaction', async () => {
+    const rawCalls = [];
+    const trxMock = jest.fn((table) => {
+      if (table === 'booking_config') throw new Error('simulated booking_config read failure');
+      throw new Error(`unexpected trx table ${table}`);
+    });
+    trxMock.isTransaction = true;
+    trxMock.raw = jest.fn(async (sql) => { rawCalls.push(sql); });
+    await expect(isolatedSlotReservation.commitReservation({
+      scheduledServiceId: 'scheduled-123', customerId: 'customer-1',
+      estimate: { id: 'estimate-456', service_interest: 'Pest Control' },
+      trx: trxMock,
+    })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+    expect(rawCalls.some((sql) => /^SAVEPOINT /.test(sql))).toBe(true);
+    expect(rawCalls.some((sql) => /^ROLLBACK TO SAVEPOINT /.test(sql))).toBe(true);
+    expect(rawCalls.some((sql) => /^RELEASE SAVEPOINT /.test(sql))).toBe(true);
   });
 });

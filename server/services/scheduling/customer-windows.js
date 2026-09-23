@@ -25,6 +25,7 @@
  */
 const { gateEnvValue } = require('../../config/feature-gates');
 const db = require('../../models/db');
+const { savepointRead } = require('../../utils/savepoint-read');
 
 // Single source for every customer-facing hourly offer surface.
 const CUSTOMER_HOUR_GRID = ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00'];
@@ -111,11 +112,16 @@ function parseHHMMMinutes(value) {
 // connection while the first sits held by the caller's transaction, and
 // under load (every remaining connection similarly blocked behind those
 // same locks) that second checkout can stall until it times out (Codex
-// push-audit P1 on #4663).
+// push-audit P1 on #4663). savepointRead (utils/savepoint-read.js) isolates
+// this read in its own SAVEPOINT whenever conn IS a transaction — a plain
+// caught error still aborts the rest of a PostgreSQL transaction, so
+// falling back here without one would break every later query on the
+// caller's own trx (a second push-audit P1, same commit).
 async function refreshCustomerBookingWindowConfig(conn = db) {
   if (cachedBookingWindowConfig && cachedBookingWindowConfig.expiresAt > Date.now()) return;
   try {
-    const config = await conn('booking_config').first('lunch_start', 'lunch_end', 'day_end');
+    const config = await savepointRead(conn, (database) => database('booking_config')
+      .first('lunch_start', 'lunch_end', 'day_end'));
     const parsedLunchStart = parseHHMMMinutes(config?.lunch_start);
     const parsedLunchEnd = parseHHMMMinutes(config?.lunch_end);
     const parsedDayEnd = parseHHMMMinutes(config?.day_end);
