@@ -1234,9 +1234,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           .whereNotNull('archived_at')
           .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
           .where('customer_phone', contactPhone)
+          // No row cap: the premise match runs in code, and a cap applied
+          // first could hide the one matching row behind newer unrelated
+          // premises for the same contact pair (codex r6 P2).
           .whereRaw("estimate_data->'addressUnverifiedFlag' IS NOT NULL")
           .orderBy('updated_at', 'desc')
-          .limit(10)
           .select('address', db.raw("estimate_data->'addressUnverifiedFlag' as flag"));
         const match = rows.find((row) => samePremiseDisplay(row.address, quoteFullAddress, { requireLocality: true }));
         if (match) priorAddressUnverified = recoverAddressUnverified({ address_unverified: match.flag });

@@ -1440,6 +1440,17 @@ function seededRowPin(row, offerLat, offerLng) {
 // transaction, and post-commit seeding/reminders/SMS/lead-conversion. Does NOT check
 // the selfBooking gate (the caller decides). Returns a discriminated result
 // { ok:true, body } | { ok:false, status, error }; throws on unexpected errors.
+// County records could not confirm the house number the quote was priced
+// at (public-quote address_unverified): the office confirms the address on
+// the callback before anything is scheduled. Same shape as the other
+// createSelfBooking refusals (the route maps status + error to the reply).
+const ADDRESS_UNVERIFIED_REFUSAL = () => ({
+  ok: false,
+  status: 409,
+  code: 'address_unverified',
+  error: 'County records could not confirm this house number. Our office will verify the address with you before scheduling.',
+});
+
 async function createSelfBooking(payload = {}) {
     const {
       estimate_id, estimate_share_token, pricing_estimate_id, estimate_token, customer_id, lead_id,
@@ -1635,6 +1646,50 @@ async function createSelfBooking(payload = {}) {
     // the customer would bypass the phone-on-file guard. It is used only as a
     // "this booking came from an estimate deep link" signal for the
     // customer-derived lead conversion after the booking commits (see below).
+    // …and, fail-closed, as the carrier of the quote's county-roll address
+    // verdict (public-quote address_unverified): a bare /book link minted
+    // by a run with no draft has no handoff token for the draft predicate
+    // to refuse, so the flag is enforced here — against the ADDRESS being
+    // booked, never as identity (a forged lead id can only block a booking
+    // at a premise the roll could not match, never enable one). Only when
+    // the submitted address is the flagged premise (codex #4667 r6 P1).
+    if (lead_id && new_customer?.address_line1) {
+      try {
+        const { recoverAddressUnverified, flagCoversAddress } = require('../services/lead-address-unverified');
+        const leadRow = await db('leads').where({ id: String(lead_id) }).whereNull('deleted_at').first('extracted_data');
+        const snapshot = typeof leadRow?.extracted_data === 'string'
+          ? (() => { try { return JSON.parse(leadRow.extracted_data); } catch { return null; } })()
+          : leadRow?.extracted_data;
+        const flag = recoverAddressUnverified(snapshot);
+        if (flag && flagCoversAddress(flag, {
+          line1: new_customer.address_line1, city: new_customer.city, state: new_customer.state, zip: new_customer.zip,
+        })) {
+          return ADDRESS_UNVERIFIED_REFUSAL();
+        }
+      } catch (flagErr) {
+        logger.warn(`[booking] lead address-verdict check failed: ${flagErr.code || flagErr.name || 'error'}`);
+      }
+    }
+    // The same verdict on a TOKEN-VERIFIED pricing handoff, checked
+    // unconditionally — before any booking write and regardless of the
+    // customers-only gate or an authenticated customer: the draft
+    // predicate's refusal only ever ran inside the gate branch, so an
+    // earlier valid handoff could still create a single appointment at the
+    // flagged address (pre-push audit P1 on #4667).
+    if (pricing_estimate_id && estimate_token) {
+      try {
+        const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
+        if (verifyEstimateHandoffToken(pricing_estimate_id, estimate_token)) {
+          const handoffDraft = await db('estimates').where({ id: pricing_estimate_id }).first('estimate_data');
+          const data = typeof handoffDraft?.estimate_data === 'string'
+            ? (() => { try { return JSON.parse(handoffDraft.estimate_data); } catch { return null; } })()
+            : handoffDraft?.estimate_data;
+          if (data?.addressUnverified === true) return ADDRESS_UNVERIFIED_REFUSAL();
+        }
+      } catch (handoffErr) {
+        logger.warn(`[booking] handoff address-verdict check failed: ${handoffErr.code || handoffErr.name || 'error'}`);
+      }
+    }
 
     // Customers-only gate (GATE_BOOKING_CUSTOMERS_ONLY, owner directive
     // 2026-07-23): with no verified customer (portal bearer) and no

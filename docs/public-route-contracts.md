@@ -911,7 +911,16 @@ cached) and supersedes older lead, draft and withdrawn-publication
 warnings for that premise — including the verdict on withdrawn
 publications for the same email, phone and premise, which a clean run
 marks superseded (`addressUnverifiedSupersededAt`) so no later outage run
-can recover it.
+can recover it. A bare `/book?lead=<id>` link (a run that minted no draft
+carries no handoff token) is enforced at `/api/booking/confirm` too: when
+the lead named by `lead` carries a server-written `address_unverified`
+flag that covers the submitted premise, the booking is refused with 409
+`address_unverified` — the lead id stays untrusted for identity (a forged
+id can only block a booking at a flagged premise, never enable one). A
+token-verified pricing handoff (`pricing_estimate_id` + `estimate_token`)
+whose draft carries `addressUnverified: true` is refused the same way,
+unconditionally — before any booking write, whatever the customers-only
+gate or the bearer's authentication.
 (`website_quote_withdrawn_address_unverified` audit event), so its old
 token neither renders nor accepts. A roll that never answered (GIS
 outage) is not a fresh flag — but it does not clear one either: the prior
