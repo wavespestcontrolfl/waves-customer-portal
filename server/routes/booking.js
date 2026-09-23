@@ -964,6 +964,41 @@ function roundPublicCoord(value) {
 // confirmation_code — this route AND services/availability.js's zone-engine
 // confirmBooking — mints the same ≈50-bit codes; /status/:code serves both.
 
+// Idle minutes a candidate would leave next to its nearest committed
+// neighbours (owner bug report 2026-09-23) — 0 when it sits right against
+// the required drive+buffer gap on a side, which every packed candidate
+// does on at least one side by construction. Used only to break a
+// compareRankedSlots score tie toward the less hole-making option; degrades
+// to 0 (no occupancy map, or no neighbour on a side). `candidate`
+// ({ lat, lng, durationMinutes, expectedMinutes }, Codex r7 P2) is the SAME
+// entity the violatesTravelGap mirror beside this call already builds —
+// omitting it previously silently degraded requiredGapMinutes to the legacy
+// full-buffer formula (no credit) for this ranking metric alone, so a slot
+// the mirror validated with credit could still rank as more hole-making
+// than it really is and lose a tie to a genuinely worse option. Extracted
+// to a top-level function (was a buildBookingAvailability closure) so it is
+// independently testable.
+function idleMinutesAgainst(dayOccupied, startMin, endMin, candidate = {}) {
+  if (!Array.isArray(dayOccupied) || !dayOccupied.length) return 0;
+  let idle = 0;
+  const ownWindow = Number.isFinite(candidate.durationMinutes) ? candidate.durationMinutes : (endMin - startMin);
+  const candidateEntity = {
+    startMin, endMin, lat: candidate.lat ?? null, lng: candidate.lng ?? null, windowMinutes: ownWindow,
+    expectedMinutes: Number.isFinite(candidate.expectedMinutes) ? Math.min(candidate.expectedMinutes, ownWindow) : ownWindow,
+  };
+  // The candidate's own EFFECTIVE end (start + its expected minutes, never
+  // past its real end) — the "after" gap is real idle time only once the
+  // candidate's actual work is done, not its full nominal window; a
+  // credited candidate that finishes early leaves less idle time before the
+  // next stop than its raw endMin would suggest.
+  const effectiveEnd = startMin + candidateEntity.expectedMinutes;
+  const before = dayOccupied.filter((b) => b.endMin <= startMin).sort((a, b) => b.endMin - a.endMin)[0];
+  const after = dayOccupied.filter((b) => b.startMin >= endMin).sort((a, b) => a.startMin - b.startMin)[0];
+  if (before) idle += Math.max(0, startMin - before.endMin - requiredGapMinutes(candidateEntity, before));
+  if (after) idle += Math.max(0, after.startMin - effectiveEnd - requiredGapMinutes(candidateEntity, after));
+  return idle;
+}
+
 // Core availability builder. Runs the route-aware slot finder over [rangeFrom,
 // rangeTo], applies the per-day cap / lunch / whole-hour rules, then returns the
 // curated best-4 plus a full per-day breakdown. `timeOfDay` ('morning' |
@@ -1187,21 +1222,6 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // /confirm gate, which re-derives a non-empty funnel key.
   const offerLocationKey = bookingOfferLocationKey(lat, lng);
   const candidateMap = new Map();
-  // Idle minutes this candidate would leave next to its nearest committed
-  // neighbours (owner bug report 2026-09-23) — 0 when it sits right against
-  // the required drive+buffer gap on a side, which every packed candidate
-  // does on at least one side by construction. Used only to break a
-  // compareRankedSlots score tie toward the less hole-making option;
-  // degrades to 0 (no occupancy map, or no neighbour on a side).
-  const idleMinutesAgainst = (dayOccupied, startMin, endMin) => {
-    if (!Array.isArray(dayOccupied) || !dayOccupied.length) return 0;
-    let idle = 0;
-    const before = dayOccupied.filter((b) => b.endMin <= startMin).sort((a, b) => b.endMin - a.endMin)[0];
-    const after = dayOccupied.filter((b) => b.startMin >= endMin).sort((a, b) => a.startMin - b.startMin)[0];
-    if (before) idle += Math.max(0, startMin - before.endMin - requiredGapMinutes({ startMin, endMin, lat, lng }, before));
-    if (after) idle += Math.max(0, after.startMin - endMin - requiredGapMinutes({ startMin, endMin, lat, lng }, after));
-    return idle;
-  };
 
   const addCandidate = (slot, startMin) => {
     const endMin = startMin + duration;
@@ -1242,7 +1262,9 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       if (dayOccupied && violatesTravelGap({
         startMin, endMin, lat, lng, windowMinutes: duration, expectedMinutes: candidateExpectedMinutes,
       }, dayOccupied)) return;
-      idleMinutes = idleMinutesAgainst(dayOccupied, startMin, endMin);
+      idleMinutes = idleMinutesAgainst(dayOccupied, startMin, endMin, {
+        lat, lng, durationMinutes: duration, expectedMinutes: candidateExpectedMinutes,
+      });
     }
     const startTime = fmt(startMin);
     if (!inTimeOfDay(startTime, timeOfDay)) return;
@@ -5394,6 +5416,7 @@ module.exports._internals = {
   resolveCallbackDuration,
   normalizeBookingServiceKey,
   bookingOfferLocationKey,
+  idleMinutesAgainst,
   BOOKING_FUNNEL_SERVICE_DURATIONS,
   validateBookingSlotGeometry,
   validateBookingSlotDate,

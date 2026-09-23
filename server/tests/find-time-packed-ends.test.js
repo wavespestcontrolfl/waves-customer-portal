@@ -294,6 +294,60 @@ describe('packCapacityEnds — capacity results keep only the packed ends per ga
     const kept = packCapacityEnds(slots).map((s) => `${s.technician.id}@${s.start_time}`);
     expect(kept).toEqual(['t1@11:00', 't1@14:00', 't1@16:00', 't1@18:00', 't2@09:00', 't2@10:00']);
   });
+
+  // Codex r7 P1: findCapacitySlots' arrival-window route feasibility models
+  // real drive but not the customer-facing travel-gap buffer/credit rule —
+  // it can accept a start (10:00, touching a 09:00-10:00 stop) the
+  // customer-facing gate would reject. Picking the packed endpoint BEFORE
+  // that gate ran (the old order) locked in the rejected 10:00 with no
+  // fallback, so the whole trailing gap looked unavailable even though
+  // 11:00 — never tried, since the old code stopped after picking one
+  // endpoint — clears the gate cleanly.
+  test('a route-feasible but travel-gap-rejected packed endpoint is skipped in favor of the next feasible candidate', () => {
+    const prevRow = { window_start: '09:00', window_end: '10:00', lat: 27.4, lng: -82.4, service_type: 'no_catalog_match' };
+    const capWithRow = (start, endTime) => ({
+      date: '2026-10-01', technician: { id: 't1' }, start_time: start, end_time: endTime,
+      _gap: { prevId: 's1', nextId: null, prevRow },
+    });
+    const slots = [capWithRow('10:00', '11:00'), capWithRow('11:00', '12:00')];
+    // Co-located with the stop (zero modeled drive) and no catalog match on
+    // either side — 10:00 touches the stop's raw end with 0 free minutes,
+    // well under the 15-minute buffer; 11:00 clears it with 60 free minutes.
+    const kept = packCapacityEnds(slots, { lat: 27.4, lng: -82.4, durationMinutes: 60 }).map((s) => s.start_time);
+    expect(kept).toEqual(['11:00']);
+  });
+
+  test('gate off: the travel-gap filter never runs — the OLD packed pick (10:00) survives even though it would violate the gate', () => {
+    const previous = process.env.GATE_SLOT_TRAVEL_GAP;
+    delete process.env.GATE_SLOT_TRAVEL_GAP;
+    try {
+      const prevRow = { window_start: '09:00', window_end: '10:00', lat: 27.4, lng: -82.4, service_type: 'no_catalog_match' };
+      const capWithRow = (start, endTime) => ({
+        date: '2026-10-01', technician: { id: 't1' }, start_time: start, end_time: endTime,
+        _gap: { prevId: 's1', nextId: null, prevRow },
+      });
+      const slots = [capWithRow('10:00', '11:00'), capWithRow('11:00', '12:00')];
+      const kept = packCapacityEnds(slots, { lat: 27.4, lng: -82.4, durationMinutes: 60 }).map((s) => s.start_time);
+      expect(kept).toEqual(['10:00']);
+    } finally {
+      if (previous === undefined) delete process.env.GATE_SLOT_TRAVEL_GAP;
+      else process.env.GATE_SLOT_TRAVEL_GAP = previous;
+    }
+  });
+
+  test('no survivors on a side: the group offers nothing from it, never a synthesized fallback', () => {
+    // Both candidates for this trailing gap touch the stop — neither clears
+    // the buffer, so this side of the group keeps nothing (consistent with
+    // every other packed-ends rule in this codebase: no fallback fan-out).
+    const prevRow = { window_start: '09:00', window_end: '10:00', lat: 27.4, lng: -82.4, service_type: 'no_catalog_match' };
+    const capWithRow = (start, endTime) => ({
+      date: '2026-10-01', technician: { id: 't1' }, start_time: start, end_time: endTime,
+      _gap: { prevId: 's1', nextId: null, prevRow },
+    });
+    const slots = [capWithRow('10:00', '11:00')];
+    const kept = packCapacityEnds(slots, { lat: 27.4, lng: -82.4, durationMinutes: 60 });
+    expect(kept).toEqual([]);
+  });
 });
 
 describe('capacityGapNeighbours — unassigned blockers count as time-based anchors (Codex r3 P1)', () => {
@@ -311,9 +365,13 @@ describe('capacityGapNeighbours — unassigned blockers count as time-based anch
     };
     const fit = { routeOrder: ['__candidate__'] };
     // Candidate at 9:00 (before the blocker) → no prev, blocker is next.
-    expect(capacityGapNeighbours(context, fit, new Map(), 9 * 60)).toEqual({ prevId: null, nextId: 'u1' });
+    // Row refs (Codex r7 P1) resolve through the SAME byId map passed in —
+    // an empty one here, so both come back undefined regardless of id.
+    expect(capacityGapNeighbours(context, fit, new Map(), 9 * 60))
+      .toEqual({ prevId: null, nextId: 'u1', prevRow: null, nextRow: undefined });
     // Candidate at 14:00 (after the blocker) → blocker is prev, no next.
-    expect(capacityGapNeighbours(context, fit, new Map(), 14 * 60)).toEqual({ prevId: 'u1', nextId: null });
+    expect(capacityGapNeighbours(context, fit, new Map(), 14 * 60))
+      .toEqual({ prevId: 'u1', nextId: null, prevRow: undefined, nextRow: null });
   });
 
   test('merges the tech\'s own route (via routeOrder/byId) with unassigned rows, sorted by time', () => {
@@ -335,7 +393,10 @@ describe('capacityGapNeighbours — unassigned blockers count as time-based anch
     // Candidate placed at 13:00, between the unassigned blocker (12:00) and
     // the tech's own 16:00 stop — the unassigned row is the real neighbour,
     // not own-2 (which routeOrder alone would have named).
-    expect(capacityGapNeighbours(context, fit, byId, 13 * 60)).toEqual({ prevId: 'u1', nextId: 'own-2' });
+    // 'u1' (the unassigned blocker) is not in byId (only own-1/own-2 are),
+    // so its row ref resolves undefined — own-2's does resolve, from byId.
+    expect(capacityGapNeighbours(context, fit, byId, 13 * 60))
+      .toEqual({ prevId: 'u1', nextId: 'own-2', prevRow: undefined, nextRow: byId.get('own-2') });
   });
 
   test('a completed row is never treated as a fixed unassigned blocker', () => {
@@ -344,6 +405,7 @@ describe('capacityGapNeighbours — unassigned blockers count as time-based anch
       rows: [{ id: 'done', technician_id: null, status: 'completed', window_start: '10:00' }],
     };
     const fit = { routeOrder: ['__candidate__'] };
-    expect(capacityGapNeighbours(context, fit, new Map(), 13 * 60)).toEqual({ prevId: null, nextId: null });
+    expect(capacityGapNeighbours(context, fit, new Map(), 13 * 60))
+      .toEqual({ prevId: null, nextId: null, prevRow: null, nextRow: null });
   });
 });

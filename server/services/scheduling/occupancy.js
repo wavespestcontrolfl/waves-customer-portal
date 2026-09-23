@@ -873,6 +873,7 @@ module.exports = {
   listOccupiedWindows,
   windowsOverlap,
   occupiedRows,
+  stopCreditResolver,
   acquireOccupancyLock,
   acquireOccupancyLocks,
   tryAcquireOccupancyLock,

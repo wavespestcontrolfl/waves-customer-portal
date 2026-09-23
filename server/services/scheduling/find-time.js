@@ -23,9 +23,10 @@ const { applyAssignable } = require('../technician-eligibility');
 const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, enumerateArrivalPlacements, evaluateArrivalPlacement } = require('./arrival-route');
 const { SHIFT, capacityEnabled, placementFitsShift } = require('./policy');
 const { serviceFamilyPreference } = require('../auto-dispatch/service-category');
-const { travelGapEnabled } = require('./travel-gap');
+const { travelGapEnabled, violatesTravelGap } = require('./travel-gap');
 const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service-minutes');
 const { occupiedRows } = require('./visit-capacity');
+const { stopCreditResolver } = require('./occupancy');
 const { packedBounds } = require('./packing-geometry');
 const { customerWindowAdmits } = require('./customer-windows');
 
@@ -243,7 +244,10 @@ async function findCapacitySlots(opts) {
       _gap: capacityGapNeighbours(context, fit, byId, start),
     });
   }
-  const packed = opts.packEnds === true ? packCapacityEnds(slots) : slots;
+  if (opts.packEnds === true) await ensureCatalogLoaded(db);
+  const packed = opts.packEnds === true ? packCapacityEnds(slots, {
+    lat: opts.lat, lng: opts.lng, durationMinutes, expectedMinutes: opts.expectedMinutes,
+  }) : slots;
   for (const slot of packed) delete slot._gap;
   packed.sort((a, b) => a.score - b.score || a.waiting_minutes - b.waiting_minutes || a.start_time.localeCompare(b.start_time));
   return { slots: packed.slice(0, topN).map((slot, i) => ({ rank: i + 1, ...slot })),
@@ -277,7 +281,36 @@ function capacityGapNeighbours(context, fit, byId, startMin) {
     if (anchor.startMin <= startMin) prevId = anchor.id;
     else { nextId = anchor.id; break; }
   }
-  return { prevId, nextId };
+  // Row references too (Codex r7 P1) — packCapacityEnds needs each
+  // neighbour's own coords/window/service identity to run the customer-
+  // facing travel-gap predicate before picking a group's packed endpoint.
+  return {
+    prevId, nextId,
+    prevRow: prevId != null ? byId.get(prevId) : null,
+    nextRow: nextId != null ? byId.get(nextId) : null,
+  };
+}
+
+// A context.rows neighbour reshaped into the {startMin, endMin, lat, lng,
+// windowMinutes, expectedMinutes} entity travel-gap.js's violatesTravelGap
+// reads. service_key_snapshot isn't selected on these rows (arrival-route.js
+// COLUMNS), so the credit falls back to a services.name match on
+// service_type — the same byName fallback expected-service-minutes.js
+// documents for every other caller with no exact key. Raw window only (no
+// version-2 allocation expansion) — a scope this fix doesn't extend to.
+function capacityNeighbourEntity(row) {
+  if (!row) return null;
+  const startMin = timeToMinutes(row.window_start);
+  if (!Number.isFinite(startMin)) return null;
+  const explicitEnd = timeToMinutes(row.window_end);
+  const windowMinutes = Number.isFinite(explicitEnd) && explicitEnd > startMin
+    ? explicitEnd - startMin
+    : (Number(row.estimated_duration_minutes) > 0 ? Number(row.estimated_duration_minutes) : 60);
+  return {
+    startMin, endMin: startMin + windowMinutes,
+    lat: row.lat ?? null, lng: row.lng ?? null, windowMinutes,
+    expectedMinutes: expectedMinutesSync({ serviceKey: row.service_key_snapshot, serviceType: row.service_type, windowMinutes }),
+  };
 }
 
 // Packed-ends for capacity results (Codex r2 P1): findCapacitySlots
@@ -287,21 +320,55 @@ function capacityGapNeighbours(context, fit, byId, startMin) {
 // keep only the earliest start when the gap follows a real stop and the
 // latest when it precedes one; a gap bordered by no stop (empty day) keeps
 // every hour, exactly as the non-capacity packEnds rule does.
-function packCapacityEnds(slots) {
+//
+// `caller` ({ lat, lng, durationMinutes, expectedMinutes }, Codex r7 P1):
+// the customer-facing travel-gap predicate (violatesTravelGap, the SAME one
+// booking.js's own commit-gate mirror applies) is now run against each
+// group's candidates BEFORE picking the packed endpoint, not after. Arrival-
+// window route feasibility (evaluateArrivalPlacement) models real drive but
+// not this buffer/credit rule, so it could accept a start (say 10:00, right
+// after a 09:00-10:00 stop) the customer-facing gate would reject — picking
+// that as "the" packed end first, with no fallback, made the whole gap look
+// unavailable even when a later start (11:00+) the OLD grid-scan would have
+// tried was genuinely fine. Filtering first means the packed pick is always
+// one the commit gate would also accept; a group with no survivors on a
+// side offers nothing from that side, same as every other packed-ends rule
+// in this codebase — never a synthesized fallback.
+function packCapacityEnds(slots, caller = {}) {
   const groups = new Map();
   for (const slot of slots) {
     const key = `${slot.date}|${slot.technician.id}|${slot._gap?.prevId ?? ''}|${slot._gap?.nextId ?? ''}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(slot);
   }
+  const clearsTravelGap = (slot, row) => {
+    if (!travelGapEnabled()) return true;
+    const neighbour = capacityNeighbourEntity(row);
+    if (!neighbour) return true;
+    const startMin = timeToMinutes(slot.start_time);
+    const endMin = timeToMinutes(slot.end_time);
+    if (!Number.isFinite(startMin) || !Number.isFinite(endMin)) return true;
+    const ownWindow = Number.isFinite(caller.durationMinutes) ? caller.durationMinutes : (endMin - startMin);
+    const candidate = {
+      startMin, endMin, lat: caller.lat ?? null, lng: caller.lng ?? null, windowMinutes: ownWindow,
+      expectedMinutes: Number.isFinite(caller.expectedMinutes) ? Math.min(caller.expectedMinutes, ownWindow) : ownWindow,
+    };
+    return !violatesTravelGap(candidate, [neighbour]);
+  };
   const keep = new Set();
   for (const group of groups.values()) {
     const prevReal = group[0]._gap?.prevId != null;
     const nextReal = group[0]._gap?.nextId != null;
     if (!prevReal && !nextReal) { for (const s of group) keep.add(s); continue; }
     const byStart = group.slice().sort((a, b) => a.start_time.localeCompare(b.start_time));
-    if (prevReal) keep.add(byStart[0]);
-    if (nextReal) keep.add(byStart[byStart.length - 1]);
+    if (prevReal) {
+      const survivors = byStart.filter((s) => clearsTravelGap(s, group[0]._gap.prevRow));
+      if (survivors.length) keep.add(survivors[0]);
+    }
+    if (nextReal) {
+      const survivors = byStart.filter((s) => clearsTravelGap(s, group[0]._gap.nextRow));
+      if (survivors.length) keep.add(survivors[survivors.length - 1]);
+    }
   }
   return slots.filter((s) => keep.has(s));
 }
@@ -348,6 +415,20 @@ function buildDayStops(services, {
     // the per-tech route byte-identical.
     return s.technician_id === tech.id || (wantsPackedEnds && s.technician_id == null);
   });
+  // One resolver per this tech/date's row set (occupancy.js's
+  // stopCreditResolver, shared with the commit-side travel probe and
+  // listOccupiedWindows) — NOT a plain per-row expectedMinutesSync call
+  // (Codex r7 P1): a version-2 combined allocation's members each carry
+  // only their OWN catalog credit, but occupiedRows below expands every
+  // member to the allocation's SUMMED span, so crediting one member's own
+  // minutes against that summed window understated it (two 60-min members
+  // 09:00-11:00 read as done at 09:45 instead of the aggregate 10:30) —
+  // exactly the offer/commit mismatch stopCreditResolver's own header
+  // describes for the identical bug on the commit side. Built from
+  // `filtered` (raw, pre-expansion rows) so its internal allocation sums
+  // are computed from each member's own raw span, same as the resolver's
+  // own commit-side callers.
+  const creditResolver = wantsExpectedMinutesCredit ? stopCreditResolver(filtered) : null;
   return occupiedRows(filtered)
     .map((s) => {
       // s.startMin/s.endMin are occupiedRows' own (allocation-expanded for
@@ -367,11 +448,8 @@ function buildDayStops(services, {
         // resolved for a customer-facing caller; a plain endMin-startMin
         // window with no catalog match degrades to the legacy endMin/zero
         // padding (see packedBounds).
-        ...(wantsExpectedMinutesCredit ? {
-          expectedMinutes: expectedMinutesSync({
-            serviceKey: s.service_key_snapshot, serviceType: s.service_type,
-            windowMinutes: endMin - startMin,
-          }),
+        ...(creditResolver ? {
+          expectedMinutes: creditResolver(s, endMin - startMin),
         } : {}),
       };
     })
@@ -869,5 +947,6 @@ module.exports = {
     enumerateDates,
     packCapacityEnds,
     capacityGapNeighbours,
+    buildDayStops,
   },
 };
