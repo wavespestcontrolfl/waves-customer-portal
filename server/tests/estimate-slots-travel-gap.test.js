@@ -112,15 +112,21 @@ test('gate on: a coordless stop (or a no-coords estimate) degrades to the 15-min
   // 0 free minutes < 15 → dropped; 15 free minutes (09:00-09:45, the
   // grid's first hour) → kept. Codex r4 on #4663: 08:45 was off-grid
   // (before 09:00) and off-the-hour; slotWindowFitsDay now enforces both.
+  // Merge note (round 5): durationMinutes must match this candidate's own
+  // 45-minute window here — candidateSlot()'s 60-minute default fed
+  // travel-gap.js's effectiveEndMinutes a windowMinutes wider than the
+  // real endMin, pushing the credited "effective end" to exactly 10:00
+  // (the neighbour's start) and manufacturing a false zero-gap violation
+  // on a window that has a real, sufficient 15 free minutes.
   expect(await filterCollidingSlots([candidateSlot()], { ...RANGE, coords: PALMETTO })).toHaveLength(0);
   expect(await filterCollidingSlots(
-    [candidateSlot({ windowStart: '09:00', windowEnd: '09:45' })], { ...RANGE, coords: PALMETTO },
+    [candidateSlot({ windowStart: '09:00', windowEnd: '09:45', durationMinutes: 45 })], { ...RANGE, coords: PALMETTO },
   )).toHaveLength(1);
   // No estimate coords at all (the no-coords branch passes null) → same buffer-only rule.
   wireRows([neighbourRow()]);
   expect(await filterCollidingSlots([candidateSlot()], { ...RANGE, coords: null })).toHaveLength(0);
   expect(await filterCollidingSlots(
-    [candidateSlot({ windowStart: '09:00', windowEnd: '09:45' })], { ...RANGE, coords: null },
+    [candidateSlot({ windowStart: '09:00', windowEnd: '09:45', durationMinutes: 45 })], { ...RANGE, coords: null },
   )).toHaveLength(1);
 });
 

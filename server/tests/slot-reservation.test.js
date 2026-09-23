@@ -1206,6 +1206,75 @@ describe('slot reservation helpers', () => {
     }
   });
 
+  test('the same-slot refresh restamps the authoritative identity from the CURRENT profile (Codex #4664 r3 P1)', async () => {
+    // Before this fix the refresh update carried ONLY reservation_expires_at
+    // — a reselected profile's identity (service_id/service_key_snapshot/
+    // service_type) never reached the row, so /extend's row-based credit
+    // lookup (candidateExpectedMinutesFromRow) kept reading whatever the
+    // hold was FIRST created with.
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    try {
+      const estimateBuilder = makeEstimateBuilder({
+        id: 'estimate-456',
+        status: 'sent',
+        service_interest: 'Generic estimate service',
+      });
+      const technicianBuilder = makeTechnicianBuilder();
+      // The held row's OWN stale stamp — a different identity than the
+      // CURRENT reselected profile resolves to below.
+      const liveHoldsBuilder = makeLiveHoldsBuilder([{
+        id: 'held-1',
+        scheduled_date: '2027-05-20',
+        window_start: '09:00:00',
+        technician_id: 'tech-1',
+        estimated_duration_minutes: 90,
+        reservation_expires_at: '2027-05-20T13:05:00.000Z',
+        service_id: 'stale-service-id',
+        service_key_snapshot: 'stale_key',
+        service_type: 'Stale Service Label',
+      }]);
+      const refreshProbeBuilder = makeGlobalProbeBuilder([]);
+      const refreshBuilder = {
+        where: jest.fn().mockReturnThis(),
+        update: jest.fn().mockReturnThis(),
+        returning: jest.fn().mockResolvedValue([{
+          id: 'held-1',
+          reservation_expires_at: '2027-05-20T13:30:00.000Z',
+        }]),
+      };
+      const scheduledBuilders = [liveHoldsBuilder, refreshProbeBuilder, refreshBuilder];
+      const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
+      db.transaction = jest.fn(async (callback) => callback(trx));
+
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 90 }),
+        selectedFrequency: 'quarterly',
+      })).resolves.toEqual({
+        scheduledServiceId: 'held-1',
+        expiresAt: '2027-05-20T13:30:00.000Z',
+      });
+
+      // The refresh update now restamps the identity fields from the
+      // CURRENT profile alongside the expiry — this fixture's trx has no
+      // .transaction() (catalogLinkForProfile short-circuits to null, as it
+      // does for every other test in this file), so service_id/
+      // service_key_snapshot resolve to null — but that null is now WRITTEN
+      // (clearing the stale row's identity), and service_type is
+      // recomputed from the reselected profile, never the stale label.
+      expect(refreshBuilder.update).toHaveBeenCalledWith(expect.objectContaining({
+        service_id: null,
+        service_key_snapshot: null,
+        service_type: expect.any(String),
+      }));
+      const [updateCall] = refreshBuilder.update.mock.calls;
+      expect(updateCall[0].service_type).not.toBe('Stale Service Label');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('the same-slot refresh probe carries the hold pin when GATE_SLOT_TRAVEL_GAP is on (pre-push P1)', async () => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));

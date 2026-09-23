@@ -36,6 +36,7 @@ const { guardedCoordSelects } = require('./scheduling/day-stops');
 const {
   violatesTravelGap, travelGapEnabled, travelBufferMinutes, customerFacingBufferMinutes,
 } = require('./scheduling/travel-gap');
+const { ensureCatalogLoaded, expectedServiceMinutes, expectedMinutesSync, expectedMinutesForServices } = require('./scheduling/expected-service-minutes');
 const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { signSlotOffer, appendOfferToSlotId, CAPACITY_OFFER_POLICY } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
@@ -1446,7 +1447,14 @@ function selectCustomerFacingSlots(slots, limit, { routeFirst = false } = {}) {
 // page could report no times at all and leave a still-live reservation
 // unconfirmable, and the React page forced a needless re-pick. Another
 // estimate's hold still blocks, exactly as before.
-async function filterCollidingSlots(slots, { dateFrom, dateTo, estimateZone = null, coords = null, serviceMix = null, ownEstimateId = null }) {
+async function filterCollidingSlots(slots, {
+  dateFrom, dateTo, estimateZone = null, coords = null, serviceMix = null, ownEstimateId = null,
+  // This estimate's own catalog expected-service minutes (owner ruling
+  // 2026-09-23) — null/omitted falls back to each slot's own window length
+  // (zero padding, legacy drive+buffer gap). Computed once by the caller
+  // from its resolved service profile; independent of `coords`.
+  candidateExpectedMinutes = null,
+} = {}) {
   if (!Array.isArray(slots) || slots.length === 0) return slots;
   let inactiveTechs = new Set();
   if (serviceMix) {
@@ -1494,13 +1502,15 @@ async function filterCollidingSlots(slots, { dateFrom, dateTo, estimateZone = nu
       'scheduled_services.customer_id',
       'scheduled_services.reservation_expires_at',
       'customers.city as customer_city',
-      // Coordinates are only needed for the optional travel-gap check.
+      // Coordinates + service identity are only needed for the optional
+      // travel-gap check (expected-minutes padding, owner ruling 2026-09-23).
       // Hold identity above also serves the unconditional global overlap check.
       ...(travelGapEnabled()
-        ? guardedCoordSelects(db)
+        ? [...guardedCoordSelects(db), 'scheduled_services.service_type', 'scheduled_services.service_key_snapshot']
         : []),
     );
   const candidatePin = { lat: coords?.lat ?? null, lng: coords?.lng ?? null };
+  if (travelGapEnabled()) await ensureCatalogLoaded(db);
 
   const zoneSlug = zoneSlugOf(estimateZone);
   const zoneCities = new Set(
@@ -1526,12 +1536,24 @@ async function filterCollidingSlots(slots, { dateFrom, dateTo, estimateZone = nu
     const fallbackDuration = Number(row.estimated_duration_minutes) > 0
       ? Number(row.estimated_duration_minutes)
       : DEFAULT_OPTS.durationMinutes;
+    const busyEndMin = explicitEndMin ?? (startMin != null ? startMin + fallbackDuration : null);
     const busy = {
       startMin,
-      endMin: explicitEndMin ?? (startMin != null ? startMin + fallbackDuration : null),
+      endMin: busyEndMin,
       lat: row.lat ?? null,
       lng: row.lng ?? null,
       hold: row.reservation_expires_at != null && row.customer_id == null,
+      // Expected-minutes padding credit for THIS row (owner ruling
+      // 2026-09-23) — only resolved when the travel-gap check runs; no
+      // service_key_snapshot/service_type match falls back to the window
+      // length (zero padding, legacy gap).
+      ...(travelGapEnabled() && startMin != null && busyEndMin != null ? {
+        windowMinutes: busyEndMin - startMin,
+        expectedMinutes: expectedMinutesSync({
+          serviceKey: row.service_key_snapshot, serviceType: row.service_type,
+          windowMinutes: busyEndMin - startMin,
+        }),
+      } : {}),
     };
     const key = `${row.technician_id || 'unassigned'}|${date}`;
     if (!byTechDate.has(key)) byTechDate.set(key, []);
@@ -1567,8 +1589,19 @@ async function filterCollidingSlots(slots, { dateFrom, dateTo, estimateZone = nu
     if (overlapsAny(techBusy, slotStart, slotEnd)) return false;
     if (overlapsAny(zoneByDate.get(s.date) || [], slotStart, slotEnd)) return false;
     // Travel gap is tech-blind (one field tech) — every live row that day.
+    // The candidate's own expected-minutes padding credit (owner ruling
+    // 2026-09-23) applies when IT is the early side of the pair — e.g. a
+    // packed-before-next-stop candidate; a slot with no known duration
+    // falls back to legacy (no windowMinutes -> paddingMinutesOf is 0).
+    const candidateWindow = Number.isFinite(s.durationMinutes) ? s.durationMinutes : (slotEnd - slotStart);
     return !violatesTravelGap(
-      { startMin: slotStart, endMin: slotEnd, ...candidatePin },
+      {
+        startMin: slotStart, endMin: slotEnd, ...candidatePin,
+        windowMinutes: candidateWindow,
+        expectedMinutes: Number.isFinite(candidateExpectedMinutes)
+          ? Math.min(candidateExpectedMinutes, candidateWindow)
+          : candidateWindow,
+      },
       allByDate.get(s.date) || [],
     );
   });
@@ -1581,6 +1614,49 @@ function timeToMinutes(hhmm) {
   const m = Number(parts[1] || 0);
   if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
   return h * 60 + m;
+}
+
+// Dates in [dateFrom, dateTo] that already have at least one committed route
+// stop (tech-blind — one active field tech) — same active-row predicate
+// filterCollidingSlots' own query uses. Packing rule (owner bug report
+// 2026-09-23): once a date has a real stop, the customer-facing pool for
+// that date must contain ONLY the packed find-time ends — a synthetic
+// hourly ASAP window on such a date is exactly the hole-maker the bug
+// report describes, so buildAsapCapacitySlots' output for these dates is
+// dropped before it ever reaches selection. An empty date (no rows here)
+// is untouched — ASAP windows keep filling it exactly as before.
+//
+// `ownEstimateId`: this estimate's OWN uncommitted hold is not a stop for
+// itself (same narrow predicate as filterCollidingSlots) — the route
+// generator and the collision filter both exclude it, so counting it here
+// would strip every ASAP window from a date whose only row is the customer's
+// own live hold and leave the reloaded picker unable to confirm it (Codex r1
+// P1). A committed visit of this estimate (customer_id set) still counts.
+async function stopDatesInRange(dateFrom, dateTo, ownEstimateId = null) {
+  if (!dateFrom || !dateTo) return new Set();
+  try {
+    let query = db('scheduled_services')
+      .whereBetween('scheduled_date', [dateFrom, dateTo])
+      .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
+      .whereNotNull('window_start')
+      .where((q) => {
+        q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()');
+      });
+    if (ownEstimateId) {
+      query = query.whereNot((own) => {
+        own.where('source_estimate_id', ownEstimateId)
+          .whereNull('customer_id')
+          .whereNotNull('reservation_expires_at');
+      });
+    }
+    const rows = await query
+      .distinct('scheduled_date')
+      .pluck('scheduled_date');
+    return new Set(rows.map((d) => (typeof d === 'string' ? d.slice(0, 10) : new Date(d).toISOString().slice(0, 10))));
+  } catch (err) {
+    logger.warn(`[estimate-slots] stop-date lookup failed — ASAP windows left unfiltered: ${err.message}`);
+    return new Set();
+  }
 }
 
 // Filter a customer-facing slot pool by time-of-day preference ('morning' |
@@ -1865,13 +1941,20 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     dateFrom, dateTo, seasonalSelectionProfile(serviceProfile),
   );
   if (!coords) {
-    const asapRaw = (await Promise.all(slotSegments.map(([segFrom, segTo]) => buildAsapCapacitySlots({
-      dateFrom: segFrom,
-      dateTo: segTo,
-      durationMinutes: serviceProfile.durationMinutes,
-      includeWeekends: opts.includeWeekends,
-      minimumLeadMinutes: opts.minimumLeadMinutes,
-    })))).flat();
+    // Same stop-date suppression as the coords path below (Codex r1 P2):
+    // a geocoding failure must not be the one case where the hourly ASAP
+    // windows still fill a date that has a committed stop.
+    const [asapLists, stopDates] = await Promise.all([
+      Promise.all(slotSegments.map(([segFrom, segTo]) => buildAsapCapacitySlots({
+        dateFrom: segFrom,
+        dateTo: segTo,
+        durationMinutes: serviceProfile.durationMinutes,
+        includeWeekends: opts.includeWeekends,
+        minimumLeadMinutes: opts.minimumLeadMinutes,
+      }))),
+      stopDatesInRange(dateFrom, dateTo, estimateId),
+    ]);
+    const asapRaw = asapLists.flat().filter((s) => !stopDates.has(s.date));
     const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, ownEstimateId: estimateId });
     const filtered = dedupeSlots(asap).sort(compareCustomerFacingSlots);
     const bookable = filterSeasonalSlots(
@@ -1917,10 +2000,21 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     return fallback;
   }
 
+  // This estimate's own catalog expected-service minutes (owner ruling
+  // 2026-09-23) — resolved once, shared by find-time's own geometry
+  // (`packEnds` below) and filterCollidingSlots' offer/commit-parity check.
+  // Not gated on the coords branch specifically: independent of location.
+  // Summed across EVERY service in the profile (each clamped to its own
+  // duration), never services[0] alone against the whole combined window
+  // (push-audit P1) — the same rule slot-reservation applies at commit.
+  const candidateExpectedMinutes = travelGapEnabled()
+    ? await expectedMinutesForServices(db, serviceProfile.services, serviceProfile.durationMinutes)
+    : serviceProfile.durationMinutes;
+
   // Pull a generous topN so we can split customer-facing slots post-hoc
   // without a second call. find-time sorts by score (detour + day penalty)
   // ascending, so this includes far more candidates than we'll surface.
-  const [rawLists, asapLists] = await Promise.all([
+  const [rawLists, asapLists, stopDates] = await Promise.all([
     Promise.all(slotSegments.map(([segFrom, segTo]) => findAvailableSlots({
       lat: coords.lat,
       lng: coords.lng,
@@ -1934,6 +2028,13 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       excludeEstimateId: estimateId,
       // Travel gap (GATE_SLOT_TRAVEL_GAP): customer-facing turnaround buffer.
       bufferMinutes: customerFacingBufferMinutes(),
+      // Packed-ends (customer-facing lane, owner bug report 2026-09-23):
+      // both ends of a real route gap instead of one earliest-only
+      // candidate — see find-time.js's packEnds option.
+      packEnds: true,
+      // The resolved whole-visit credit (above) — find-time must not
+      // re-derive it from one service key.
+      expectedMinutes: candidateExpectedMinutes,
       // Customer-facing day close (scheduling/customer-windows.js) — find-time's
       // own DAY_END_HOUR default (17) stays untouched for staff/optimizer
       // callers that don't pass this. currentDayEndMinutes() honors a
@@ -1956,20 +2057,24 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       includeWeekends: opts.includeWeekends,
       minimumLeadMinutes: opts.minimumLeadMinutes,
     }))),
+    stopDatesInRange(dateFrom, dateTo, estimateId),
   ]);
   const raw = { slots: rawLists.flatMap((r) => r?.slots || []) };
-  const asapRaw = asapLists.flat();
+  // A date with a committed stop offers ONLY the packed find-time ends — a
+  // synthetic hourly ASAP window there is the exact hole-maker the bug
+  // report describes (owner ruling 2026-09-23). An empty date is untouched.
+  const asapRaw = asapLists.flat().filter((s) => !stopDates.has(s.date));
 
   const classifiedRaw = (raw?.slots || [])
     .map((s) => classifySlot(s, opts.proximityDriveMinutes, serviceProfile.durationMinutes));
   // Drop candidates whose rounded display window collides with a real
   // existing booking on the same tech/date — see filterCollidingSlots.
-  const classified = await filterCollidingSlots(classifiedRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, ownEstimateId: estimateId });
+  const classified = await filterCollidingSlots(classifiedRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, ownEstimateId: estimateId });
 
   // Target: always show the soonest upcoming customer-facing windows first,
   // even when those windows are not route-optimal. Route-optimality remains
   // a per-slot badge/copy signal, not a reason to bury sooner dates.
-  const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, ownEstimateId: estimateId });
+  const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, ownEstimateId: estimateId });
   const sortedPool = dedupeSlots([...asap, ...classified]).sort(compareCustomerFacingSlots);
   // Preserve the collision-checked windows while choosing the displayed options.
   const bookable = filterSeasonalSlots(
@@ -2156,6 +2261,8 @@ async function getSlotDebug(estimateId, userOpts = {}) {
     // reflects what the customer is actually offered (codex r16 P1).
     excludeEstimateId: estimateId,
     bufferMinutes: customerFacingBufferMinutes(),
+    packEnds: true,
+    serviceKey: serviceProfile.services[0]?.catalogServiceKey || serviceProfile.services[0]?.engineKey || null,
     // Same customer-facing day close as the live path (see above).
     dayEndHour: currentDayEndMinutes() / 60,
     // Same customer-grid restriction as the live path — this admin debug
@@ -2284,6 +2391,7 @@ module.exports = {
     slotWindowFitsDay,
     signCustomerFacingSlots,
     filterCollidingSlots,
-    clearCaches() { wrapperCache.clear(); geocodeCache.clear(); },
+    clearCaches() { wrapperCache.clear(); geocodeCache.clear(); require('./scheduling/expected-service-minutes').clearExpectedServiceMinutesCache(); },
+    stopDatesInRange,
   },
 };

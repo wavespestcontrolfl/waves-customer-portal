@@ -142,6 +142,19 @@ function slotStartMinutes(slot) {
  * `window_end` and `estimated_duration_minutes` all describe the SAME window.
  * A service that no longer fits at the offered start simply fails the re-check
  * (slot_gone) — fail closed, exactly like any other stale offer.
+ *
+ * The resolved catalog service's IDENTITY (as opposed to its duration) is
+ * deliberately NOT threaded into buildBookingAvailability here either
+ * (Codex r6 P2 — a round-5 attempt to add it was reverted): the offer came
+ * from relay-tools.resolveAvailability's get_availability/find_slots, which
+ * has no service parameter at all and so was NEVER built with any identity —
+ * threading one in only at recheck time gives buildBookingAvailability a
+ * credit the offer's own packed-ends geometry never had, so the exact
+ * grid-aligned candidate the offer promised can shift to a different hour
+ * (or vanish) and a genuinely still-open slot comes back slot_gone. Identity
+ * here would only be safe once the OFFER step can also resolve and thread
+ * the same identity — until then, matching the offer's inputs exactly (this
+ * function's own contract, above) beats a one-sided credit.
  */
 async function revalidateSlot({ offer, durationMinutes = null }) {
   const { isEnabled } = require('../../config/feature-gates');
@@ -179,6 +192,8 @@ async function revalidateSlot({ offer, durationMinutes = null }) {
     today: new Date(),
     timeOfDay: offer.timeOfDay || 'any',
     expandOpenDays: offer.expandOpenDays === true,
+    // No serviceIdentity — see this function's doc comment (Codex r6 P2):
+    // the offer never had one, so the recheck must not manufacture one.
   });
   const day = (availability.days || []).find((d) => d && d.date === offer.date);
   const slot = ((day && day.slots) || []).find((s) => s && slotStartMinutes(s) === offer.startMinutes);

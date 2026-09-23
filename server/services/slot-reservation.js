@@ -50,6 +50,52 @@ const {
 const { lockTechDays } = require('./scheduling/tech-day-lock');
 const { capacityError, prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder } = require('./scheduling/arrival-route');
 const { serviceDurationMinutes } = require('./service-library');
+const { expectedServiceMinutes, expectedMinutesForServices } = require('./scheduling/expected-service-minutes');
+
+// The candidate's own expected-minutes padding credit (owner ruling
+// 2026-09-23) for the travel-gap probes below (occupancy.js decides
+// whether it's ever actually read — gate off, these numbers are unused).
+// Offer/commit parity requires the SAME number find-time/filterCollidingSlots
+// resolved for this exact appointment: a stamped hold row's own
+// service_key_snapshot/service_type when one already exists (refresh,
+// commit, extend), else the not-yet-persisted serviceProfile at fresh
+// reserve time. Undefined (no row/profile, or no positive window) falls
+// back to the window length inside occupancy.js — zero padding, legacy gap.
+async function candidateExpectedMinutesFromRow(conn, row, windowMinutes) {
+  if (!row || !Number.isFinite(windowMinutes) || windowMinutes <= 0) return undefined;
+  // A combined-visit hold's reservation_service_mix (combined-visit-
+  // capacity.js, version 1/2) carries every member's own engine key (+ per-
+  // service minutes on v2) — the row's single service_key_snapshot/
+  // service_type column can only ever hold ONE identity, so a legacy
+  // multi-service hold's real credit is the SUM across its mix, never that
+  // one column read alone (Codex r3 P1). Engine keys line up with
+  // services.category for the families that have one (pest_control/
+  // lawn_care/tree_shrub/mosquito); the rest (termite_bait/rodent_bait/
+  // palm_injection) have no matching category and fall back to their own
+  // share of the window — the same safe default a single-service row with
+  // no catalog match gets.
+  const mix = row.reservation_service_mix;
+  if (mix && Array.isArray(mix.services) && mix.services.length) {
+    const perMemberMinutes = mix.version === 2 && Array.isArray(mix.durations)
+      && mix.durations.length === mix.services.length
+      ? mix.durations
+      : mix.services.map(() => windowMinutes / mix.services.length);
+    return expectedMinutesForServices(conn, mix.services.map((key, i) => ({
+      category: key, durationMinutes: perMemberMinutes[i],
+    })), windowMinutes);
+  }
+  return expectedServiceMinutes(conn, {
+    serviceKey: row.service_key_snapshot || null,
+    serviceType: row.service_type || null,
+    windowMinutes,
+  });
+}
+async function candidateExpectedMinutesFromProfile(conn, serviceProfile, windowMinutes) {
+  if (!serviceProfile || !Number.isFinite(windowMinutes) || windowMinutes <= 0) return undefined;
+  // Every member of the profile, summed — never services[0] alone against
+  // the whole window (push-audit P1).
+  return expectedMinutesForServices(conn, serviceProfile.services, windowMinutes);
+}
 
 // Business bounds shared with the slot generators (see the exporting module
 // for provenance): 8:00 day start (find-time DAY_START_HOUR), 90-day offer
@@ -953,6 +999,12 @@ async function reserveSlot({
         ? Number(serviceProfile.durationMinutes)
         : DEFAULT_DURATION_MINUTES;
       const windowEnd = addMinutesToTime(windowStart, effectiveDurationMinutes);
+      // Offer/commit parity (owner ruling 2026-09-23): this appointment's
+      // own expected-minutes padding credit, same as find-time/
+      // filterCollidingSlots resolved when it was offered.
+      const candidateExpectedMinutes = await candidateExpectedMinutesFromProfile(
+        trx, serviceProfile, effectiveDurationMinutes,
+      );
 
       if (serviceProfile?.reservationServiceMix) {
         const { capacityUnavailable } = require('./combined-visit-capacity');
@@ -1149,8 +1201,18 @@ async function reserveSlot({
           includeHolds: false,
           // Travel gap (GATE_SLOT_TRAVEL_GAP): the same pin the fresh reserve
           // and commitReservation measure with — a refresh that skipped it
-          // would hand back a hold the commit is guaranteed to reject.
-          travel: holdPin || { lat: null, lng: null },
+          // would hand back a hold the commit is guaranteed to reject. Same
+          // expected-minutes credit as the row this hold already carries
+          // (owner ruling 2026-09-23).
+          // The CURRENT selection's profile is authoritative (Codex r2 P1):
+          // a same-slot reselect under another single-service mode still
+          // matches sameSlotHold, and the commit check below reads the
+          // reselected profile — the stale row's stamp is only the fallback.
+          travel: {
+            ...(holdPin || { lat: null, lng: null }),
+            expectedMinutes: candidateExpectedMinutes
+              ?? await candidateExpectedMinutesFromRow(trx, sameSlotHold, effectiveDurationMinutes),
+          },
         });
         if (refreshClash.length) {
           // Do NOT refresh a doomed hold — supersede it (same narrow
@@ -1169,17 +1231,19 @@ async function reserveSlot({
           });
           return { staleHoldSuperseded: true };
         }
-        // Refresh expiry only — commitReservation recomputes service_type /
-        // notes / window_end from the accept-time profile, so the hold's
-        // stamped labels don't need to be rebuilt on a retry.
-        // The lifetime cap binds THIS path too (hold-grace self-audit): without it a
-        // token holder could keep one hold alive forever by re-POSTing
-        // /reserve for the same slot, bypassing the ceiling /extend enforces
-        // and monopolising the window. LEAST() rather than a refusal — a
-        // capped refresh is still idempotent for the client's "go back"
-        // retry; once the ceiling is reached the hold simply stops moving
-        // and lapses on its own, and a genuine re-pick mints a FRESH hold
-        // through the full conflict path like any other customer.
+        // Restamp the authoritative identity from THIS reselection's profile
+        // (Codex r3 P1) — a same-slot reselect under a different
+        // single-service mode matches sameSlotHold (same date/start/tech/
+        // duration/mix), but until now only the expiry moved, leaving the
+        // OLD service_key_snapshot/service_type/service_id on the row.
+        // commitReservation itself never reads that stale stamp (it
+        // re-resolves from the accept-time serviceProfile), but /extend's
+        // candidateExpectedMinutesFromRow has only the row to read — so a
+        // refreshed hold's expected-minutes credit (and the padding/gap math
+        // built on it) silently used the identity from BEFORE the reselect.
+        // catalogLink/catalogServiceId/serviceType were resolved above from
+        // the SAME serviceProfile the fresh-create path below stamps a new
+        // row with — reused here, not re-queried.
         const [refreshed] = await trx('scheduled_services')
           .where({ id: sameSlotHold.id })
           .update({
@@ -1187,6 +1251,9 @@ async function reserveSlot({
               'GREATEST(reservation_expires_at, LEAST(NOW() + make_interval(mins => ?), created_at + make_interval(mins => ?)))',
               [holdMins, MAX_HOLD_MINUTES],
             ),
+            service_id: catalogServiceId,
+            service_key_snapshot: catalogLink?.service_key || null,
+            service_type: serviceType,
           })
           .returning(['id', 'reservation_expires_at']);
         const refreshedExpiresAt = refreshed?.reservation_expires_at || null;
@@ -1294,8 +1361,10 @@ async function reserveSlot({
         windowEnd,
         includeHolds: false,
         // Travel gap (GATE_SLOT_TRAVEL_GAP): the hold's own pin, resolved
-        // above; null → buffer-only, never a skipped check.
-        travel: holdPin || { lat: null, lng: null },
+        // above; null → buffer-only, never a skipped check. Same
+        // expected-minutes credit find-time/filterCollidingSlots resolved
+        // when this window was offered (owner ruling 2026-09-23).
+        travel: { ...(holdPin || { lat: null, lng: null }), expectedMinutes: candidateExpectedMinutes },
       });
       if (committedClash.length) {
         const err = new Error('slot no longer available');
@@ -1800,6 +1869,8 @@ async function commitReservation({
           : DEFAULT_DURATION_MINUTES)
         : null);
     if (scheduledDate && windowStart && probeWindowEnd) {
+      const { parseHHMM } = require('./scheduling/window-rules');
+      const probeWindowMinutes = parseHHMM(probeWindowEnd) - parseHHMM(windowStart);
       const committedClash = useCapacity ? [] : await findConflictingVisits({
         db: client,
         includeInterviews: true,
@@ -1808,8 +1879,18 @@ async function commitReservation({
         windowEnd: probeWindowEnd,
         excludeServiceIds: [scheduledServiceId],
         includeHolds: !!row._lapsed,
-        // Travel gap: the pin reserveSlot stamped on the hold row.
-        travel: { lat: row.lat ?? null, lng: row.lng ?? null },
+        // Travel gap: the pin reserveSlot stamped on the hold row, plus the
+        // expected-minutes credit of the service ACTUALLY being scheduled
+        // (owner ruling 2026-09-23). The accepted serviceProfile is
+        // authoritative here — the row below is restamped from it, so a hold
+        // taken for one service mode and accepted under another must not
+        // keep the stale row's padding credit (Codex r1 P1). The hold row's
+        // own stamp is only the fallback when no profile resolved.
+        travel: {
+          lat: row.lat ?? null, lng: row.lng ?? null,
+          expectedMinutes: (await candidateExpectedMinutesFromProfile(client, serviceProfile, probeWindowMinutes))
+            ?? (await candidateExpectedMinutesFromRow(client, row, probeWindowMinutes)),
+        },
       });
       // Capacity mode keeps its own visit check (verifyArrivalCapacity,
       // scheduled_services only) — a booked interview is probed on its own
@@ -2382,6 +2463,8 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
 
     // The rung-1 date lock acquired above is the same lock reserveSlot's
     // refresh branch holds before probing.
+    const { parseHHMM } = require('./scheduling/window-rules');
+    const extendWindowMinutes = parseHHMM(windowEnd) - parseHHMM(windowStart);
     const clash = rowUnderCapacity ? [] : await findConflictingVisits({
       db: trx,
         includeInterviews: true,
@@ -2390,7 +2473,12 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
       windowEnd,
       excludeServiceIds: [row.id],
       includeHolds: alreadyLapsed,
-      travel: { lat: row.lat ?? null, lng: row.lng ?? null },
+      // Same expected-minutes credit find-time/filterCollidingSlots
+      // resolved when this window was offered (owner ruling 2026-09-23).
+      travel: {
+        lat: row.lat ?? null, lng: row.lng ?? null,
+        expectedMinutes: await candidateExpectedMinutesFromRow(trx, row, extendWindowMinutes),
+      },
     });
     if (clash.length) {
       // Supersede — same narrow still-uncommitted predicate releaseReservation
@@ -2481,5 +2569,6 @@ module.exports = {
     classifierStableServiceType,
     notesWithServiceMix,
     catalogLinkForProfile,
+    candidateExpectedMinutesFromRow,
   },
 };

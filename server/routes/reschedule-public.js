@@ -251,6 +251,7 @@ async function loadByToken(token) {
       's.source_action',
       's.customer_confirmed',
       's.service_type',
+      's.service_key_snapshot',
       's.estimated_duration_minutes',
       's.is_recurring',
       's.visit_id',
@@ -402,7 +403,7 @@ function searchParseOpts(config, now = new Date()) {
 
 async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, timeOfDay }) {
   const booking = require('./booking');
-  const { resolveBookingCoords, buildBookingAvailability } = booking._internals;
+  const { resolveBookingCoords, buildBookingAvailability, normalizeBookingServiceKey } = booking._internals;
 
   let lat = svc.latitude != null ? parseFloat(svc.latitude) : null;
   let lng = svc.longitude != null ? parseFloat(svc.longitude) : null;
@@ -415,6 +416,20 @@ async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, ti
   if (!lat || !lng) return null;
 
   const duration = svc.estimated_duration_minutes || config.slot_duration_minutes || 60;
+  // Codex r5 P2 #5 — thread the visit's own catalog identity (service_key_
+  // snapshot / service_type, both already selected in loadByToken's query)
+  // so the expected-minutes credit and travel-gap predicate match what the
+  // field service actually is. A cadence-specific catalog name like
+  // "Quarterly Pest Control Service" never matches the 7-key funnel
+  // vocabulary normalizeBookingServiceKey checks (that's a /book WIZARD
+  // selection, not a scheduled row's identity), so serviceKey stays '' and
+  // serviceIdentity carries the real lookup — bookingExpectedMinutes falls
+  // back to it exactly when serviceKey resolves to no funnel key. No
+  // slot_sig is verified on this public surface (grep-confirmed: no
+  // verifySlotOfferField call in this file), so this can't affect signature
+  // checks — only the offered geometry.
+  const serviceKey = normalizeBookingServiceKey(svc.service_type);
+  const serviceIdentity = { catalogServiceKey: svc.service_key_snapshot || null, serviceType: svc.service_type || null };
   const availability = await buildBookingAvailability({
     lat,
     lng,
@@ -425,6 +440,8 @@ async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, ti
     today: new Date(),
     excludeServiceIds: [svc.id],
     excludeSelfBookingId: svc.self_booking_id || null,
+    serviceKey,
+    serviceIdentity,
     // Self-serve surface — a new target starting within the notice window
     // (owner ruling 2026-09-23) can't be offered or committed.
     selfServeNotice: true,
@@ -977,6 +994,7 @@ router._test = {
   WEATHER_MOVE_MAX_AGE_DAYS,
   collectiveAnchorActive,
   seriesScopeMismatch,
+  buildAvailabilityForService,
 };
 
 module.exports = router;
