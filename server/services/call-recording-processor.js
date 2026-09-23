@@ -14130,7 +14130,15 @@ const CallRecordingProcessor = {
                     // After the backfill so the child inherits the assigned tech.
                     followUpCreated = await ensureCallFollowUpVisit(primaryRow);
                   } else if (!primaryRowSkipped && reuseHeldForAddress && callFollowUpPlan) {
-                    disputeSkippedFollowUpPlan = true;
+                    // Only when no AI follow-up child exists yet (an earlier
+                    // pass may have created it; it was pulled above, not
+                    // lost) — otherwise the task would invite a duplicate
+                    // manual booking (pre-push audit P1).
+                    const existingChild = await trx('scheduled_services')
+                      .where({ parent_service_id: primaryRow.id, source_action: 'ai_call_pipeline_followup' })
+                      .whereNotIn('status', ['cancelled', 'skipped', 'no_show', 'rescheduled'])
+                      .first('id');
+                    if (!existingChild) disputeSkippedFollowUpPlan = true;
                   }
                   return primaryRow;
                 }
