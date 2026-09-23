@@ -181,14 +181,14 @@ test('GATE_BOOKING_LUNCH_BLOCK (owner ruling 2026-09-23): unset drops the artifi
   const previous = process.env.GATE_BOOKING_LUNCH_BLOCK;
   try {
     // Unset (default): no lunch entry is pushed onto `occupied`, so the whole
-    // day is ONE gap and findGaps' one-slot-per-gap design yields only its
-    // first hour (09:00) — noon itself is never a discrete candidate on this
-    // engine's coarse output regardless of the gate (pre-existing findGaps
-    // shape, untouched by this PR); what the gate controls is whether the
-    // lunch hour is artificially walled off from the rest of the day.
+    // day is ONE gap; findGaps still offers its first hour (09:00) AND — so
+    // removing the block never costs the assistant its afternoon choices —
+    // the first accepted start at/after the configured afternoon boundary
+    // (13:00, the old lunch_end). Noon is offerable where a gap opens onto
+    // it (availability-lunch-gate-coverage.test.js).
     delete process.env.GATE_BOOKING_LUNCH_BLOCK;
     let result = await engine.getAvailableSlots('Palmetto');
-    expect(startsOf(result)).toEqual(['09:00']);
+    expect(startsOf(result)).toEqual(['09:00', '13:00']);
 
     // 'true' restores the legacy split: a morning gap (09:00) and an
     // afternoon gap starting after the lunch block + buffer (14:00).
