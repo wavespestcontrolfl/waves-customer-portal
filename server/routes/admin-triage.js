@@ -803,11 +803,21 @@ router.post('/:id/verdict', async (req, res) => {
         // (an earlier pass) counts too — the evidence boundary is the call,
         // not the card (pre-push audit P1).
         const onFile = heldConflictPayload.on_file_address || null;
+        const approvedAddress = onFile
+          ? { street_line_1: onFile.address_line1, street_line_2: onFile.address_line2 || null, city: onFile.city || null, postal_code: onFile.zip || null }
+          : null;
+        // The coverage check reads scheduling_window.requested_address —
+        // rewritten to the approved on-file address, as is the heard
+        // address; the replacement task carries the same snapshot.
+        const approvedWindow = heldConflictPayload.scheduling_window
+          ? { ...heldConflictPayload.scheduling_window, ...(approvedAddress ? { requested_address: approvedAddress } : {}) }
+          : null;
         const approvedPayload = {
           ...heldConflictPayload,
           stated_street: undefined,
           address_as_heard: undefined,
-          heard_address: onFile ? { street_line_1: onFile.address_line1, street_line_2: onFile.address_line2 || null, city: onFile.city || null, postal_code: onFile.zip || null } : heldConflictPayload.heard_address,
+          heard_address: approvedAddress || heldConflictPayload.heard_address,
+          ...(approvedWindow ? { scheduling_window: approvedWindow } : {}),
         };
         const heldItem = {
           id: item.id, call_log_id: item.call_log_id, reason_code: 'on_file_house_number_conflict', status: 'open',
@@ -824,7 +834,7 @@ router.post('/:id/verdict', async (req, res) => {
               extraction: { meta: { call_summary: 'Address confirmed on file after a house-number dispute — the confirmed appointment still needs booking' }, scheduling: heldConflictPayload.scheduling_window || { status: 'confirmed' } },
               extraPayload: {
                 skipped_reason: 'address_confirmed_on_file_after_house_number_dispute',
-                scheduling_window: heldConflictPayload.scheduling_window || null,
+                scheduling_window: approvedWindow,
                 on_file_address: heldConflictPayload.on_file_address || null,
               },
             }))

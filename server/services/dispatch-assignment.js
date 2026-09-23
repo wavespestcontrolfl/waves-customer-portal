@@ -11,6 +11,7 @@ const TERMINAL_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
 const BOARD_HIDDEN_STATUSES = ['cancelled', 'rescheduled'];
 const TERMINAL_RACE = 'TERMINAL_STATUS_RACE';
 const ASSIGNMENT_RACE = 'ASSIGNMENT_RACE';
+const STATUS_NOT_ALLOWED = 'STATUS_NOT_ALLOWED';
 
 function httpError(status, message) {
   const err = new Error(message);
@@ -145,7 +146,12 @@ async function flushDispatchQualityDates(qualityDates) {
   return require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({ dates });
 }
 
-async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, trx = null, skipVisitSeam = false, expectTechnicianId, noticeSnapshot = null, noticeActorId } = {}) {
+// allowedStatuses: an ATOMIC status predicate on the CAS write — the
+// call-pipeline's dispute hold pulls an assignment only while the visit is
+// still pre-dispatch (pending / confirmed); a technician who went en route
+// between the caller's read and this write keeps the job (codex #4666
+// pre-push audit P1). Null = the writer's ordinary non-terminal rule.
+async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, trx = null, skipVisitSeam = false, expectTechnicianId, noticeSnapshot = null, noticeActorId, allowedStatuses = null } = {}) {
   if (!jobId) throw httpError(400, 'jobId is required');
   if (technicianId === undefined) throw httpError(400, 'technicianId required');
   if (technicianId !== null && typeof technicianId !== 'string') {
@@ -215,6 +221,7 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
     const rows = await assignmentTrx('scheduled_services')
       .where({ id: jobId })
       .whereNotIn('status', TERMINAL_STATUSES)
+      .modify((q) => { if (Array.isArray(allowedStatuses) && allowedStatuses.length) q.whereIn('status', allowedStatuses); })
       .whereRaw('technician_id IS NOT DISTINCT FROM ?', [fromTechId])
       .modify((q) => { if (dayRow?.day) q.whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ?", [dayRow.day]); })
       .update({ technician_id: newTechId, route_order: null, updated_at: assignmentTrx.fn.now() })
@@ -225,6 +232,9 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
         .first('status');
       if (!live || TERMINAL_STATUSES.includes(live.status)) {
         throw Object.assign(new Error('terminal status race'), { code: TERMINAL_RACE });
+      }
+      if (Array.isArray(allowedStatuses) && allowedStatuses.length && !allowedStatuses.includes(live.status)) {
+        throw Object.assign(new Error('status not allowed for this assignment change'), { code: STATUS_NOT_ALLOWED });
       }
       throw Object.assign(new Error('assignment race'), { code: ASSIGNMENT_RACE });
     }
@@ -256,6 +266,9 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
     }
     if (err && err.code === ASSIGNMENT_RACE) {
       throw httpError(409, 'Job was reassigned or rescheduled concurrently - reload and retry');
+    }
+    if (err && err.code === STATUS_NOT_ALLOWED) {
+      throw Object.assign(httpError(409, 'Job is no longer in a status this assignment change allows'), { code: STATUS_NOT_ALLOWED });
     }
     throw err;
   }

@@ -13903,11 +13903,9 @@ const CallRecordingProcessor = {
                   // site keeps its technician (pulling them mid-job would
                   // cut their access to the ongoing work) — the conflict
                   // card is the office's surface for it (pre-push audit P1).
-                  const preDispatch = ['pending', 'confirmed'].includes(String(existing.status || ''));
-                  if (reuseHeldForAddress && !isAttachedManualBooking && existing.technician_id && !preDispatch) {
-                    logger.warn(`[call-proc] reused booking ${existing.id} is ${existing.status} for ${callSid}: left assigned despite the house-number dispute (office review)`);
-                  }
-                  if (reuseHeldForAddress && !isAttachedManualBooking && existing.technician_id && preDispatch) {
+                  // The status predicate is enforced ATOMICALLY by the writer
+                  // (allowedStatuses on its CAS write), not by this read.
+                  if (reuseHeldForAddress && !isAttachedManualBooking && existing.technician_id) {
                     // Through the canonical assignment writer (codex r7 P1):
                     // its technician CAS (expectTechnicianId) refuses to
                     // overwrite a dispatcher's NEWER assignment, it holds the
@@ -13918,10 +13916,16 @@ const CallRecordingProcessor = {
                     const { assignDispatchJob } = require('./dispatch-assignment');
                     const pull = async (rowId, expectTechnicianId, label) => {
                       try {
-                        await assignDispatchJob({ jobId: rowId, technicianId: null, actorId: null, emit: true, trx, expectTechnicianId });
+                        await assignDispatchJob({ jobId: rowId, technicianId: null, actorId: null, emit: true, trx, expectTechnicianId, allowedStatuses: ['pending', 'confirmed'] });
                         logger.warn(`[call-proc] ${label} ${rowId} unassigned for ${callSid}: house number disputed`);
                         return true;
                       } catch (pullErr) {
+                        if (pullErr?.code === 'STATUS_NOT_ALLOWED') {
+                          // Already underway: the technician keeps the job;
+                          // the conflict card is the office's surface for it.
+                          logger.warn(`[call-proc] ${label} ${rowId} is underway for ${callSid}: left assigned despite the house-number dispute (office review)`);
+                          return false;
+                        }
                         if (pullErr?.code === 'ASSIGNMENT_STALE' || pullErr?.status === 409 || pullErr?.statusCode === 409) {
                           logger.warn(`[call-proc] ${label} ${rowId} kept its newer assignment for ${callSid}: ${pullErr.code || 'reassigned concurrently'}`);
                           return false;
@@ -13948,10 +13952,10 @@ const CallRecordingProcessor = {
                       .select('id', 'technician_id');
                     for (const child of children) {
                       try {
-                        await assignDispatchJob({ jobId: child.id, technicianId: null, actorId: null, emit: true, trx, expectTechnicianId: child.technician_id });
+                        await assignDispatchJob({ jobId: child.id, technicianId: null, actorId: null, emit: true, trx, expectTechnicianId: child.technician_id, allowedStatuses: ['pending', 'confirmed'] });
                         logger.warn(`[call-proc] follow-up visit ${child.id} unassigned for ${callSid}: house number disputed`);
                       } catch (pullErr) {
-                        if (pullErr?.code === 'ASSIGNMENT_STALE' || pullErr?.status === 409 || pullErr?.statusCode === 409) {
+                        if (pullErr?.code === 'STATUS_NOT_ALLOWED' || pullErr?.code === 'ASSIGNMENT_STALE' || pullErr?.status === 409 || pullErr?.statusCode === 409) {
                           logger.warn(`[call-proc] follow-up visit ${child.id} kept its newer assignment for ${callSid}: ${pullErr.code || 'reassigned concurrently'}`);
                         } else {
                           throw pullErr;
