@@ -13,6 +13,32 @@ const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('
 const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes, requiredGapMinutes } = require('../services/scheduling/travel-gap');
 const { expectedMinutesForServices } = require('../services/scheduling/expected-service-minutes');
 
+// Funnel key -> catalog identity for the expected-minutes credit lookup
+// below (Codex r3 P2). An ordinary /book funnel key only ever carries a
+// broad display label ('Pest Control', 'Lawn Care') — catalog rows are
+// cadence-specific ('Quarterly Pest Control Service', 'Bi-Monthly Lawn Care
+// Service'), so looking the label up as services.name (or as a service_key)
+// never matched and every /book credit silently degraded to the full
+// window (zero padding). services.category is a real catalog key field
+// whose CHECK-constrained vocabulary (server/models/migrations/
+// 20260401000105_service_library.js) is exactly this funnel's vocabulary —
+// pest_control / lawn_care / mosquito / termite / rodent / tree_shrub — so
+// it resolves a family-level credit (expected-service-minutes.js averages
+// every catalog row in that category) without string-matching a display
+// label. bora_care is the one funnel key with its OWN exact catalog
+// service_key ('bora_care', 20260808080000_estimate_gap_catalog_rows.js) —
+// an exact key match wins over the coarser category average.
+const BOOKING_FUNNEL_SERVICE_CATALOG_KEYS = { bora_care: 'bora_care' };
+const BOOKING_FUNNEL_SERVICE_CATEGORIES = {
+  pest_control: 'pest_control',
+  lawn_care: 'lawn_care',
+  mosquito: 'mosquito',
+  tree_shrub: 'tree_shrub',
+  termite: 'termite',
+  rodent: 'rodent',
+  bora_care: 'termite', // catalog service_key 'bora_care' carries category 'termite'
+};
+
 // The booking's own expected-minutes credit (owner ruling 2026-09-23) for
 // a funnel serviceKey ('pest_control', 'pest_control+lawn_care', …): every
 // member's catalog credit summed, clamped to the advertised window. Resolved
@@ -22,7 +48,11 @@ const { expectedMinutesForServices } = require('../services/scheduling/expected-
 async function bookingExpectedMinutes(conn, serviceKey, durationMinutes) {
   if (!travelGapEnabled()) return durationMinutes;
   const services = normalizeBookingServiceKeys(serviceKey)
-    .map((key) => ({ label: BOOKING_FUNNEL_SERVICE_LABELS[key] || key }));
+    .map((key) => ({
+      catalogServiceKey: BOOKING_FUNNEL_SERVICE_CATALOG_KEYS[key] || null,
+      category: BOOKING_FUNNEL_SERVICE_CATEGORIES[key] || null,
+      label: BOOKING_FUNNEL_SERVICE_LABELS[key] || key,
+    }));
   return expectedMinutesForServices(conn, services, durationMinutes);
 }
 const { fallbackCenterZoneName } = require('../services/scheduling/zone-day-funnel');
@@ -5211,6 +5241,7 @@ module.exports._internals = {
   // the web /book funnel (no duplicated scheduling logic).
   resolveBookingCoords,
   buildBookingAvailability,
+  bookingExpectedMinutes,
   loadBookingConfig,
   createSelfBooking,
   MAX_BOOKING_HORIZON_DAYS,

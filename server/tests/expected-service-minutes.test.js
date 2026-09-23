@@ -200,6 +200,51 @@ describe('expectedMinutesForServices — a whole visit sums every service (push-
   });
 });
 
+describe('category fallback — a broad family, never a cadence-specific key/name (Codex r3 P2)', () => {
+  // An ordinary /book funnel selection ('pest_control') and a combined-visit
+  // hold's reservation_service_mix engine keys only ever carry a broad
+  // family, never an exact service_key or services.name — the category
+  // credit averages the min/max midpoint across every catalog row sharing
+  // that category.
+  const conn = () => fakeConn([
+    { service_key: 'quarterly_pest', name: 'Quarterly Pest Control Service', category: 'pest_control', min_duration_minutes: 30, max_duration_minutes: 60 },
+    { service_key: 'bimonthly_pest', name: 'Bi-Monthly Pest Control Service', category: 'pest_control', min_duration_minutes: 40, max_duration_minutes: 80 },
+    { service_key: 'bora_care', name: 'Bora-Care Wood Treatment', category: 'termite', min_duration_minutes: 60, max_duration_minutes: 240 },
+  ]);
+
+  test('resolves the average midpoint across every row in the category when no key/name matches', async () => {
+    // quarterly_pest midpoint 45, bimonthly_pest midpoint 60 -> average 52.5
+    expect(await expectedServiceMinutes(conn(), { category: 'pest_control', windowMinutes: 60 })).toBe(52.5);
+  });
+
+  test('an exact serviceKey/serviceType match still wins over the category average', async () => {
+    expect(await expectedServiceMinutes(conn(), {
+      serviceKey: 'quarterly_pest', category: 'pest_control', windowMinutes: 60,
+    })).toBe(45);
+  });
+
+  test('category matching is case-insensitive and clamps to the window', async () => {
+    // bora_care midpoint 150, clamped to a 60-minute window.
+    expect(await expectedServiceMinutes(conn(), { category: 'Termite', windowMinutes: 60 })).toBe(60);
+  });
+
+  test('an unknown category falls back to the window length', async () => {
+    expect(await expectedServiceMinutes(conn(), { category: 'rodent', windowMinutes: 60 })).toBe(60);
+  });
+
+  test('expectedMinutesForServicesSync threads category through per-member resolution', async () => {
+    const { expectedMinutesForServices } = require('../services/scheduling/expected-service-minutes');
+    const services = [
+      { category: 'pest_control', label: 'Pest Control', durationMinutes: 60 },
+      { catalogServiceKey: 'bora_care', label: 'Bora-Care', durationMinutes: 60 },
+    ];
+    // 52.5 (pest_control average, clamped to 60) + 60 (bora_care exact key,
+    // midpoint 150 clamped to its own 60-minute member window) = 112.5,
+    // clamped to the 120-minute visit window.
+    expect(await expectedMinutesForServices(conn(), services, 120)).toBe(112.5);
+  });
+});
+
 describe('ambiguous catalog names (Codex #4664 r2 P1)', () => {
   test('a services.name shared by two rows resolves to NOTHING by name — window-length fallback', async () => {
     const conn = fakeConn([

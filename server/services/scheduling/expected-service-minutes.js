@@ -15,9 +15,17 @@
  * Looked up by service_key first (a service_key_snapshot stamp, or a
  * find-time candidate's own serviceKey), then by services.name =
  * scheduled_services.service_type (the identity every older row carries,
- * per owner ruling 2026-09-23). Falls back to the window length when
- * neither resolves, or when no catalog row/db handle is available at all —
- * a missing signal never blocks a slot, it only loses the padding credit.
+ * per owner ruling 2026-09-23), then by services.category (a real catalog
+ * key field — pest_control / lawn_care / mosquito / termite / rodent /
+ * tree_shrub / …) for a caller that only knows a broad family, never a
+ * cadence-specific key or exact catalog name (an ordinary /book funnel
+ * selection, a combined-visit hold's reservation_service_mix engine keys —
+ * Codex r3 P2/P1). The category credit AVERAGES the min/max midpoint across
+ * every catalog row in that category with a usable range — a deliberately
+ * coarse, conservative signal, never as precise as an exact key/name match.
+ * Falls back to the window length when nothing resolves, or when no catalog
+ * row/db handle is available at all — a missing signal never blocks a slot,
+ * it only loses the padding credit.
  *
  * One in-memory catalog cache (TTL, like every other scheduling cache in
  * this directory): callers PRELOAD once per request/pass with
@@ -33,6 +41,7 @@ let catalogCache = null; // { byKey: Map<string, row>, byName: Map<string, row>,
 function buildCatalogIndex(rows) {
   const byKey = new Map();
   const byName = new Map();
+  const byCategory = new Map();
   const nameCounts = new Map();
   for (const row of (rows || [])) {
     if (!row) continue;
@@ -42,6 +51,11 @@ function buildCatalogIndex(rows) {
       nameCounts.set(name, (nameCounts.get(name) || 0) + 1);
       byName.set(name, row);
     }
+    if (row.category) {
+      const category = String(row.category).trim().toLowerCase();
+      if (!byCategory.has(category)) byCategory.set(category, []);
+      byCategory.get(category).push(row);
+    }
   }
   // services.name is NOT unique across active/inactive rows (migration
   // 20260829000060 treats such matches as ambiguous) — a duplicated name
@@ -49,7 +63,7 @@ function buildCatalogIndex(rows) {
   // legacy row without service_key_snapshot never borrows the wrong
   // service's padding (Codex r2 P1). Window-length fallback instead.
   for (const [name, count] of nameCounts) if (count > 1) byName.delete(name);
-  return { byKey, byName, expiresAt: Date.now() + CATALOG_TTL_MS };
+  return { byKey, byName, byCategory, expiresAt: Date.now() + CATALOG_TTL_MS };
 }
 
 /**
@@ -79,7 +93,7 @@ async function ensureCatalogLoaded(conn) {
 // caller's transaction stays usable.
 function selectCatalog(conn) {
   const read = (c) => c('services').select(
-    'service_key', 'name', 'default_duration_minutes',
+    'service_key', 'name', 'category', 'default_duration_minutes',
     'min_duration_minutes', 'max_duration_minutes',
   );
   if (conn.isTransaction && typeof conn.transaction === 'function') {
@@ -110,15 +124,36 @@ function catalogRowFor(serviceKey, serviceType) {
   return null;
 }
 
+// A broad family (services.category — pest_control / lawn_care / mosquito /
+// termite / rodent / tree_shrub / …), never a single cadence-specific row:
+// average the min/max midpoint across every row in that category with a
+// usable range, each independently clamped to the window first. No rows
+// with a range -> no signal (caller falls back to the window length).
+function expectedFromCategoryRows(rows, windowMinutes) {
+  const withRange = (rows || []).filter((row) => {
+    const min = Number(row?.min_duration_minutes);
+    const max = Number(row?.max_duration_minutes);
+    return Number.isFinite(min) && min > 0 && Number.isFinite(max) && max > 0;
+  });
+  if (!withRange.length) return null;
+  const total = withRange.reduce((sum, row) => sum + expectedFromCatalogRow(row, windowMinutes), 0);
+  return clampToWindow(total / withRange.length, windowMinutes);
+}
+
 /**
  * Synchronous lookup against whatever is currently cached — a caller that
  * never preloaded (or whose preload failed) degrades to the window length:
  * no catalog signal, no padding, exactly the legacy gap.
  */
-function expectedMinutesSync({ serviceKey = null, serviceType = null, windowMinutes } = {}) {
+function expectedMinutesSync({ serviceKey = null, serviceType = null, category = null, windowMinutes } = {}) {
   const win = Number.isFinite(windowMinutes) && windowMinutes > 0 ? windowMinutes : 60;
   const row = catalogRowFor(serviceKey, serviceType);
-  return row ? expectedFromCatalogRow(row, win) : win;
+  if (row) return expectedFromCatalogRow(row, win);
+  if (category && catalogCache?.byCategory?.has(String(category).trim().toLowerCase())) {
+    const fromCategory = expectedFromCategoryRows(catalogCache.byCategory.get(String(category).trim().toLowerCase()), win);
+    if (fromCategory != null) return fromCategory;
+  }
+  return win;
 }
 
 /**
@@ -141,6 +176,7 @@ function expectedMinutesForServicesSync(services, windowMinutes) {
     total += expectedMinutesSync({
       serviceKey: service.catalogServiceKey || service.engineKey || service.serviceKey || null,
       serviceType: service.label || service.service || service.serviceType || null,
+      category: service.category || null,
       windowMinutes: own,
     });
   }
@@ -169,5 +205,5 @@ module.exports = {
   expectedMinutesForServicesSync,
   ensureCatalogLoaded,
   clearExpectedServiceMinutesCache,
-  _internals: { expectedFromCatalogRow, buildCatalogIndex },
+  _internals: { expectedFromCatalogRow, expectedFromCategoryRows, buildCatalogIndex },
 };
