@@ -1946,4 +1946,30 @@ describe('reserveSlot/commitReservation fail closed when booking_config has neve
     expect(isolatedDb).toHaveBeenCalledTimes(1);
     expect(isolatedDb).toHaveBeenCalledWith('booking_config');
   });
+
+  // Codex push-audit P1 on #4663 (a later round, on the fail-closed commit
+  // above): estimate acceptance and one-tap purchase call commitReservation
+  // with an ACTIVE trx already holding scheduling locks. Reading
+  // booking_config through the global pool on a cache miss there would try
+  // to check out a SECOND pooled connection while the first sits held —
+  // under load (every other connection similarly blocked behind those same
+  // locks) that second checkout can stall until it times out. Must read
+  // through the supplied trx instead.
+  test('commitReservation with a caller-supplied trx reads booking_config through THAT trx, never the global pool', async () => {
+    const trxMock = jest.fn((table) => {
+      if (table === 'booking_config') return { first: jest.fn().mockResolvedValue(undefined) };
+      throw new Error(`unexpected trx table ${table}`);
+    });
+    trxMock.isTransaction = true;
+    // Fails later for an unrelated reason (no further trx table mocks
+    // wired) — this test only cares that the fail-closed check passed and
+    // that booking_config was read through trx, not isolatedDb.
+    await expect(isolatedSlotReservation.commitReservation({
+      scheduledServiceId: 'scheduled-123', customerId: 'customer-1',
+      estimate: { id: 'estimate-456', service_interest: 'Pest Control' },
+      trx: trxMock,
+    })).rejects.toThrow();
+    expect(isolatedDb).not.toHaveBeenCalledWith('booking_config');
+    expect(trxMock).toHaveBeenCalledWith('booking_config');
+  });
 });

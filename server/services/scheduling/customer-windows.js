@@ -103,10 +103,19 @@ function parseHHMMMinutes(value) {
   return hh * 60 + mm;
 }
 
-async function refreshCustomerBookingWindowConfig() {
+// conn defaults to the module's own pooled connection. A caller already
+// inside its own transaction (commitReservation's optional `trx` — estimate
+// acceptance and one-tap purchase both call it with an active trx holding
+// scheduling locks) MUST pass that trx here on a cache miss/expiry: reading
+// through the global pool instead would try to check out a SECOND pooled
+// connection while the first sits held by the caller's transaction, and
+// under load (every remaining connection similarly blocked behind those
+// same locks) that second checkout can stall until it times out (Codex
+// push-audit P1 on #4663).
+async function refreshCustomerBookingWindowConfig(conn = db) {
   if (cachedBookingWindowConfig && cachedBookingWindowConfig.expiresAt > Date.now()) return;
   try {
-    const config = await db('booking_config').first('lunch_start', 'lunch_end', 'day_end');
+    const config = await conn('booking_config').first('lunch_start', 'lunch_end', 'day_end');
     const parsedLunchStart = parseHHMMMinutes(config?.lunch_start);
     const parsedLunchEnd = parseHHMMMinutes(config?.lunch_end);
     const parsedDayEnd = parseHHMMMinutes(config?.day_end);

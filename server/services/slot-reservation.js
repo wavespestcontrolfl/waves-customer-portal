@@ -1419,8 +1419,12 @@ async function commitReservation({
 }) {
   // One booking_config read (lunch interval + day-end override, 60s TTL) for
   // every synchronous lunch/day-end check below — see
-  // scheduling/customer-windows.js (Codex r1 P2s on #4663).
-  await refreshCustomerBookingWindowConfig();
+  // scheduling/customer-windows.js (Codex r1 P2s on #4663). A cache miss
+  // reads through the CALLER's trx when one is supplied (estimate
+  // acceptance, one-tap purchase both call in with an active transaction
+  // already holding scheduling locks) rather than checking out a second
+  // pooled connection while that one sits held (push-audit P1 on #4663).
+  await refreshCustomerBookingWindowConfig(trx || db);
   requireKnownBookingWindowConfig();
   if (!trx && !preparedCapacity) preparedCapacity = await prepareReservationCommit(scheduledServiceId, {
     estimate, serviceMode, selectedFrequency, serviceCadences, durationMinutes,
