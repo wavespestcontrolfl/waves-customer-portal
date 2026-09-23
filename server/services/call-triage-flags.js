@@ -1820,6 +1820,7 @@ function dispatchesToOnFileAddress(extraction, opts = {}) {
 
 module.exports = {
   onFileHouseNumberConflict,
+  streetHouseNum,
   SCHEDULING_CHANGE_REVIEW_FLAGS,
   isExplicitlyNonOwner,
   computeDeterministicTriageFlags,

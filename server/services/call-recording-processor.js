@@ -99,7 +99,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, streetHouseNum } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 
 // The address_recovered card's pass marker, reconciled to THIS pass. The two
@@ -9771,6 +9771,14 @@ const CallRecordingProcessor = {
     if (customerId && !createdCustomerFromCall && onFileAddress) {
       try {
         let houseConflict = onFileHouseNumberConflict({ addressValidation: effectiveAddressValidation, onFileAddress });
+        // AV proves a premise EXISTS, not that the caller said it: in shadow
+        // mode the bridge refuses to adopt an AV street that disagrees with
+        // the legacy extraction, and this lane must not present it as caller
+        // evidence either (codex r1 P2). The canonical record is the
+        // pipeline's own verdict — enforce mode adopted the AV street into
+        // it, shadow mode adopted it only when V1 agreed — so a house number
+        // the record does not carry is not corroborated. Fail closed.
+        if (houseConflict && streetHouseNum(extracted?.address_line1) !== houseConflict.stated_house_number) houseConflict = null;
         // A second property the account already holds on the same street
         // (a duplex, a rental two doors down) is a known address, not a typo
         // — the same recognition the second-address check applies (pre-push
@@ -9788,6 +9796,10 @@ const CallRecordingProcessor = {
         }
         if (houseConflict) {
           houseNumberConflictFiled = true;
+          // The stated unit rides on the card so the reviewer sees the whole
+          // door, not just the number (codex r1 P1).
+          const statedUnit = v2CanonicalExtraction?.property?.service_address?.street_line_2 || null;
+          if (statedUnit) houseConflict.stated_unit = String(statedUnit).trim();
           // Rides needs_confirmation like the second-address flag it replaces:
           // that list drives call_log.review_status, the lead's
           // needs_confirmation and the CONFIRM BEFORE DISPATCH timeline note
@@ -9924,7 +9936,12 @@ const CallRecordingProcessor = {
           || bothPresentAndDiffer(existingCust?.zip, extracted.zip);
         // A same-street house-number difference already has its own card
         // above; framing it as a possible second property buried the typo.
-        if (!knownProperty && !houseNumberConflictFiled && onFileStreet && fromCallStreet && locationDiffers && !bridgeNeedsConfirmation.includes('second_service_address')) {
+        // …but only when the units agree: a different unit is a different
+        // door, and the house-number card's auto-resolve strips units, so
+        // closing it on a line-1 edit would drop the only unit warning
+        // (codex r1 P1).
+        const houseNumberCardCoversThis = houseNumberConflictFiled && !callAddsDifferentUnit;
+        if (!knownProperty && !houseNumberCardCoversThis && onFileStreet && fromCallStreet && locationDiffers && !bridgeNeedsConfirmation.includes('second_service_address')) {
           bridgeNeedsConfirmation.push('second_service_address');
           logger.info(`[call-proc-bridge] ${callSid} service address differs from customer record (possible second property)`);
           // This flag is appended AFTER the bridge's triage_items loop above, so

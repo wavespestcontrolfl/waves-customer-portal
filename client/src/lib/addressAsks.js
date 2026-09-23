@@ -159,8 +159,9 @@ export function addressAskNotice(asks) {
     selected = sorted.find(({ card, callKey }) => card.reason_code === 'missing_unit_number'
       && callKey === lead.callKey) || lead;
   } else {
+    // A house-number conflict card carries its evidence as stated_street.
     selected = sorted.find(({ card, notice }) => notice.rank === lead.notice.rank
-      && card.payload?.address_as_heard) || lead;
+      && (card.payload?.address_as_heard || card.payload?.stated_street)) || lead;
   }
   const { card, notice } = selected;
   return {

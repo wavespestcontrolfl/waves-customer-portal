@@ -36,6 +36,14 @@ describe('on_file_house_number_conflict', () => {
     });
     expect(filterAddressAsks([ask('on_file_house_number_conflict')])).toHaveLength(1);
   });
+
+  it('is picked over an older same-rank card that carries no evidence', () => {
+    const n = notice(
+      ask('address_unverified', {}, 5, 1),
+      ask('on_file_house_number_conflict', { stated_street: '1250 Example Street' }, 7, 3),
+    );
+    expect(n).toMatchObject({ cardId: 3, heard: '1250 Example Street' });
+  });
 });
 
 describe('filterAddressAsks', () => {

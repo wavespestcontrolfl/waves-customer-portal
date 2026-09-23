@@ -186,7 +186,7 @@ export function ConfirmEvidence({ payload }) {
     },
     // House-number disagreement: the validated call address beside the
     // record's street so the reviewer picks a number, not just "confirm".
-    p.stated_street && { label: "Caller stated", value: p.stated_street },
+    p.stated_street && { label: "Caller stated", value: p.stated_unit ? `${p.stated_street}, ${p.stated_unit}` : p.stated_street },
     p.stated_street && (p.on_file_address?.address_line1 || p.on_file_street) && { label: "On file", value: p.on_file_address?.address_line1 || p.on_file_street },
     p.address_as_heard && { label: "Heard", value: p.address_as_heard },
     p.address_recovered && { label: "Matched to", value: p.address_recovered },
