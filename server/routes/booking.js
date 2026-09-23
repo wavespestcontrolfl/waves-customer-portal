@@ -10,7 +10,7 @@ const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
-const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes, requiredGapMinutes } = require('../services/scheduling/travel-gap');
+const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes, requiredGapMinutes, effectiveEndMinutes } = require('../services/scheduling/travel-gap');
 const { expectedMinutesForServices } = require('../services/scheduling/expected-service-minutes');
 const { loadPackingAnchors } = require('../services/scheduling/packing-geometry');
 
@@ -994,7 +994,16 @@ function idleMinutesAgainst(dayOccupied, startMin, endMin, candidate = {}) {
   const effectiveEnd = startMin + candidateEntity.expectedMinutes;
   const before = dayOccupied.filter((b) => b.endMin <= startMin).sort((a, b) => b.endMin - a.endMin)[0];
   const after = dayOccupied.filter((b) => b.startMin >= endMin).sort((a, b) => a.startMin - b.startMin)[0];
-  if (before) idle += Math.max(0, startMin - before.endMin - requiredGapMinutes(candidateEntity, before));
+  // The BEFORE stop's own effective end too (Codex r8 P2) — requiredGapMinutes
+  // already credits the earlier side's padding into the required buffer (see
+  // its header), so measuring free time from the stop's RAW endMin double-
+  // counted that credit as extra idle: a 09:00-10:00 stop expected to
+  // finish at 09:45 with a co-located 11:00 candidate has 75 real idle
+  // minutes (11:00 - 09:45), not 60 (11:00 - 10:00, the raw end the OLD
+  // code subtracted). Mirrors the AFTER side's own effectiveEnd treatment
+  // for the candidate, via the SAME travel-gap.js helper.
+  const beforeEffectiveEnd = before ? effectiveEndMinutes(before) : null;
+  if (before) idle += Math.max(0, startMin - beforeEffectiveEnd - requiredGapMinutes(candidateEntity, before));
   if (after) idle += Math.max(0, after.startMin - effectiveEnd - requiredGapMinutes(candidateEntity, after));
   return idle;
 }

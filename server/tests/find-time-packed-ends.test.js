@@ -34,7 +34,7 @@ jest.mock('../services/route-optimizer', () => ({
 const db = require('../models/db');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { customerFacingBufferMinutes } = require('../services/scheduling/travel-gap');
-const { clearExpectedServiceMinutesCache } = require('../services/scheduling/expected-service-minutes');
+const { clearExpectedServiceMinutesCache, ensureCatalogLoaded } = require('../services/scheduling/expected-service-minutes');
 
 const ENV_KEYS = ['GATE_SLOT_TRAVEL_GAP', 'SLOT_TRAVEL_BUFFER_MINUTES', 'GATE_DRIVE_TIME_CALIBRATION'];
 const saved = {};
@@ -304,7 +304,7 @@ describe('packCapacityEnds — capacity results keep only the packed ends per ga
   // 11:00 — never tried, since the old code stopped after picking one
   // endpoint — clears the gate cleanly.
   test('a route-feasible but travel-gap-rejected packed endpoint is skipped in favor of the next feasible candidate', () => {
-    const prevRow = { window_start: '09:00', window_end: '10:00', lat: 27.4, lng: -82.4, service_type: 'no_catalog_match' };
+    const prevRow = { startMin: 540, endMin: 600, lat: 27.4, lng: -82.4, expectedMinutes: 60 };
     const capWithRow = (start, endTime) => ({
       date: '2026-10-01', technician: { id: 't1' }, start_time: start, end_time: endTime,
       _gap: { prevId: 's1', nextId: null, prevRow },
@@ -321,7 +321,7 @@ describe('packCapacityEnds — capacity results keep only the packed ends per ga
     const previous = process.env.GATE_SLOT_TRAVEL_GAP;
     delete process.env.GATE_SLOT_TRAVEL_GAP;
     try {
-      const prevRow = { window_start: '09:00', window_end: '10:00', lat: 27.4, lng: -82.4, service_type: 'no_catalog_match' };
+      const prevRow = { startMin: 540, endMin: 600, lat: 27.4, lng: -82.4, expectedMinutes: 60 };
       const capWithRow = (start, endTime) => ({
         date: '2026-10-01', technician: { id: 't1' }, start_time: start, end_time: endTime,
         _gap: { prevId: 's1', nextId: null, prevRow },
@@ -339,7 +339,7 @@ describe('packCapacityEnds — capacity results keep only the packed ends per ga
     // Both candidates for this trailing gap touch the stop — neither clears
     // the buffer, so this side of the group keeps nothing (consistent with
     // every other packed-ends rule in this codebase: no fallback fan-out).
-    const prevRow = { window_start: '09:00', window_end: '10:00', lat: 27.4, lng: -82.4, service_type: 'no_catalog_match' };
+    const prevRow = { startMin: 540, endMin: 600, lat: 27.4, lng: -82.4, expectedMinutes: 60 };
     const capWithRow = (start, endTime) => ({
       date: '2026-10-01', technician: { id: 't1' }, start_time: start, end_time: endTime,
       _gap: { prevId: 's1', nextId: null, prevRow },
@@ -348,10 +348,36 @@ describe('packCapacityEnds — capacity results keep only the packed ends per ga
     const kept = packCapacityEnds(slots, { lat: 27.4, lng: -82.4, durationMinutes: 60 });
     expect(kept).toEqual([]);
   });
+
+  // Codex r8 P1: a v2 combined allocation's neighbour, as capacityGapNeighbours
+  // now builds it — the allocation's real EXPANDED span (09:00-11:00) and
+  // SUMMED credit (90), not one member's own raw 09:00-10:00 window. Before
+  // this fix, the neighbour entity here would have been {startMin:540,
+  // endMin:600, expectedMinutes:45} (one member's own window/credit), under
+  // which 10:00 shows 15 free minutes against a 0-required gap (60-window
+  // padding 15 == buffer 15) — no violation, so 10:00 was wrongly kept and
+  // 11:00 (also fine, but later) was dropped, even though the real combined
+  // job is still physically running from 09:00 to 11:00.
+  test('a v2 combined allocation\'s neighbour genuinely occupies through its real span: 10:00 (real overlap) is rejected, 11:00 (the earliest real survivor) is kept', () => {
+    const prevRow = { startMin: 540, endMin: 660, lat: 27.4, lng: -82.4, expectedMinutes: 90 };
+    const capWithRow = (start, endTime) => ({
+      date: '2026-10-01', technician: { id: 't1' }, start_time: start, end_time: endTime,
+      _gap: { prevId: 'm1', nextId: null, prevRow },
+    });
+    const slots = [capWithRow('10:00', '11:00'), capWithRow('11:00', '12:00')];
+    const kept = packCapacityEnds(slots, { lat: 27.4, lng: -82.4, durationMinutes: 60 }).map((s) => s.start_time);
+    expect(kept).toEqual(['11:00']);
+  });
 });
 
 describe('capacityGapNeighbours — unassigned blockers count as time-based anchors (Codex r3 P1)', () => {
   const { capacityGapNeighbours } = require('../services/scheduling/find-time')._internals;
+
+  // Codex r8 P1: capacityGapNeighbours now expands context.rows itself
+  // (occupiedRows + stopCreditResolver) instead of taking a caller-supplied
+  // byId map, so prevRow/nextRow always resolve from context.rows — never
+  // undefined for an id genuinely present there. The 3rd positional arg
+  // (byId) is gone; these were the only caller and only tests of it.
 
   test('an unassigned-only day is NOT an empty-day gap identity: it anchors both sides by time', () => {
     // fit.routeOrder only ever carries the selected tech's OWN stops
@@ -365,20 +391,21 @@ describe('capacityGapNeighbours — unassigned blockers count as time-based anch
     };
     const fit = { routeOrder: ['__candidate__'] };
     // Candidate at 9:00 (before the blocker) → no prev, blocker is next.
-    // Row refs (Codex r7 P1) resolve through the SAME byId map passed in —
-    // an empty one here, so both come back undefined regardless of id.
-    expect(capacityGapNeighbours(context, fit, new Map(), 9 * 60))
-      .toEqual({ prevId: null, nextId: 'u1', prevRow: null, nextRow: undefined });
+    // No window_end/duration on u1 -> occupiedRows' 60-minute fallback span.
+    const before = capacityGapNeighbours(context, fit, 9 * 60);
+    expect(before.prevId).toBe(null);
+    expect(before.nextId).toBe('u1');
+    expect(before.prevRow).toBe(null);
+    expect(before.nextRow).toMatchObject({ id: 'u1', startMin: 720, endMin: 780 });
     // Candidate at 14:00 (after the blocker) → blocker is prev, no next.
-    expect(capacityGapNeighbours(context, fit, new Map(), 14 * 60))
-      .toEqual({ prevId: 'u1', nextId: null, prevRow: undefined, nextRow: null });
+    const after = capacityGapNeighbours(context, fit, 14 * 60);
+    expect(after.prevId).toBe('u1');
+    expect(after.nextId).toBe(null);
+    expect(after.prevRow).toMatchObject({ id: 'u1', startMin: 720, endMin: 780 });
+    expect(after.nextRow).toBe(null);
   });
 
-  test('merges the tech\'s own route (via routeOrder/byId) with unassigned rows, sorted by time', () => {
-    const byId = new Map([
-      ['own-1', { id: 'own-1', technician_id: 't1', window_start: '09:00' }],
-      ['own-2', { id: 'own-2', technician_id: 't1', window_start: '16:00' }],
-    ]);
+  test('merges the tech\'s own route (via routeOrder) with unassigned rows, sorted by time', () => {
     const context = {
       target: { id: '__candidate__' },
       rows: [
@@ -392,11 +419,13 @@ describe('capacityGapNeighbours — unassigned blockers count as time-based anch
     const fit = { routeOrder: ['own-1', '__candidate__', 'own-2'] };
     // Candidate placed at 13:00, between the unassigned blocker (12:00) and
     // the tech's own 16:00 stop — the unassigned row is the real neighbour,
-    // not own-2 (which routeOrder alone would have named).
-    // 'u1' (the unassigned blocker) is not in byId (only own-1/own-2 are),
-    // so its row ref resolves undefined — own-2's does resolve, from byId.
-    expect(capacityGapNeighbours(context, fit, byId, 13 * 60))
-      .toEqual({ prevId: 'u1', nextId: 'own-2', prevRow: undefined, nextRow: byId.get('own-2') });
+    // not own-2 (which routeOrder alone would have named). Both row refs
+    // now resolve (Codex r8 P1) since both live in context.rows.
+    const result = capacityGapNeighbours(context, fit, 13 * 60);
+    expect(result.prevId).toBe('u1');
+    expect(result.nextId).toBe('own-2');
+    expect(result.prevRow).toMatchObject({ id: 'u1', startMin: 720 });
+    expect(result.nextRow).toMatchObject({ id: 'own-2', startMin: 960 });
   });
 
   test('a completed row is never treated as a fixed unassigned blocker', () => {
@@ -405,7 +434,45 @@ describe('capacityGapNeighbours — unassigned blockers count as time-based anch
       rows: [{ id: 'done', technician_id: null, status: 'completed', window_start: '10:00' }],
     };
     const fit = { routeOrder: ['__candidate__'] };
-    expect(capacityGapNeighbours(context, fit, new Map(), 13 * 60))
+    expect(capacityGapNeighbours(context, fit, 13 * 60))
       .toEqual({ prevId: null, nextId: null, prevRow: null, nextRow: null });
+  });
+});
+
+describe('capacityGapNeighbours — version-2 combined allocation expansion + summed credit (Codex r8 P1)', () => {
+  // Companion to the buildDayStops fix in find-time-combined-allocation-
+  // credit.test.js (Codex r7 P1) — capacityGapNeighbours used to anchor and
+  // reshape a v2 member from its OWN raw window (one member's 09:00-10:00),
+  // not the allocation's real summed span (both members' 09:00-11:00), so
+  // packCapacityEnds (next describe block) could pick a packed end that
+  // still genuinely overlapped the other member's ongoing work.
+  const { capacityGapNeighbours } = require('../services/scheduling/find-time')._internals;
+  const CATALOG = [{ service_key: null, name: 'pest_control', min_duration_minutes: 30, max_duration_minutes: 60, default_duration_minutes: null }];
+
+  function combinedMember(id, start, end) {
+    return {
+      id, scheduled_date: FUTURE_DATE, technician_id: null, status: 'confirmed',
+      window_start: start, window_end: end, service_type: 'pest_control', service_key_snapshot: null,
+      estimated_duration_minutes: null,
+      reservation_service_mix: { version: 2, allocatedServiceIds: ['m1', 'm2'] },
+    };
+  }
+
+  test('two credited 09:00-10:00 members occupying 09:00-11:00: the neighbour is the EXPANDED span with SUMMED credit, not one member\'s raw window', async () => {
+    wireDb({ stops: [], catalog: CATALOG });
+    await ensureCatalogLoaded(db);
+    const context = {
+      target: { id: '__candidate__' },
+      rows: [combinedMember('m1', '09:00', '10:00'), combinedMember('m2', '09:00', '10:00')],
+    };
+    const fit = { routeOrder: ['__candidate__'] };
+    // Candidate at 10:00 — inside the real combined span, but after each
+    // member's own raw 10:00 end — is still anchored to the allocation as
+    // prev (its expanded startMin, 540, is what anchors sort order).
+    const { prevId, prevRow } = capacityGapNeighbours(context, fit, 10 * 60);
+    expect(['m1', 'm2']).toContain(prevId);
+    expect(prevRow.startMin).toBe(540); // 09:00
+    expect(prevRow.endMin).toBe(660); // 11:00, NOT 600 (one member's own raw end)
+    expect(prevRow.expectedMinutes).toBe(90); // 45 + 45, NOT 45 (one member's own credit)
   });
 });

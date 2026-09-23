@@ -160,6 +160,14 @@ async function findCapacitySlots(opts) {
   const today = etDateString(now);
   const parts = etParts(now);
   const travel = require('../route-optimizer').createSchedulingTravel();
+  // Loaded before the candidate loop, not just before packCapacityEnds
+  // (Codex r8 P1 follow-on): capacityGapNeighbours below now resolves each
+  // neighbour's credited expected-minutes per candidate via
+  // stopCreditResolver, so the catalog must already be warm the first time
+  // that runs, not only by the time packCapacityEnds is reached — a cold
+  // cache there would silently degrade every neighbour to window-length
+  // (no credit) for the whole loop, not just the first candidate.
+  if (opts.packEnds === true) await ensureCatalogLoaded(db);
   const candidates = [];
   for (const date of enumerateDates(dateFrom, dateTo, { includeWeekends: opts.includeWeekends })) {
     if (date < today || blackout.has(date)) continue;
@@ -241,10 +249,9 @@ async function findCapacitySlots(opts) {
       // Route neighbours of this placement (packed-ends filter below) — BY
       // TIME, including unassigned fixed blockers (Codex r3 P1; see
       // capacityGapNeighbours).
-      _gap: capacityGapNeighbours(context, fit, byId, start),
+      _gap: capacityGapNeighbours(context, fit, start),
     });
   }
-  if (opts.packEnds === true) await ensureCatalogLoaded(db);
   const packed = opts.packEnds === true ? packCapacityEnds(slots, {
     lat: opts.lat, lng: opts.lng, durationMinutes, expectedMinutes: opts.expectedMinutes,
   }) : slots;
@@ -263,17 +270,34 @@ async function findCapacitySlots(opts) {
 // empty-day gap identity (prevId/nextId both null) and packCapacityEnds
 // below kept every hour around the blocker instead of packing against it.
 // Merges routeOrder's own stops with the day's unassigned rows (both from
-// context.rows), sorted by window_start, and picks this candidate's real
-// time neighbours from that merged list.
-function capacityGapNeighbours(context, fit, byId, startMin) {
-  const minuteOfRow = (row) => timeToMinutes(row?.window_start);
+// context.rows), sorted by (allocation-expanded) start, and picks this
+// candidate's real time neighbours from that merged list.
+//
+// Version-2 combined allocations, expanded through visit-capacity.js's
+// occupiedRows to their real summed span, with each row's credited
+// expected-minutes attached via occupancy.js's stopCreditResolver (summed
+// per allocation, not each member's own raw-window credit) — the SAME
+// expansion + resolver buildDayStops was wired to in Codex r7 P1, so
+// capacity and legacy paths share one neighbour representation (Codex r8
+// P1). Before this, a v2 member here was anchored and reshaped from its OWN
+// raw window: two credited 09:00-10:00 members occupying (expanded)
+// 09:00-11:00 anchored at 10:00, so packCapacityEnds kept a 10:00 packed
+// end and dropped the real 11:00 one, then buildBookingAvailability's own
+// (already-expanded) commit-side mirror rejected the kept 10:00 as still
+// occupied — no offer at all, though 11:00 was genuinely valid.
+function capacityGapNeighbours(context, fit, startMin) {
+  const creditResolver = stopCreditResolver(context.rows);
+  const expanded = occupiedRows(context.rows).map((row) => ({
+    ...row, expectedMinutes: creditResolver(row, row.endMin - row.startMin),
+  }));
+  const expandedById = new Map(expanded.map((row) => [row.id, row]));
   const anchors = [
     ...fit.routeOrder
       .filter((id) => id !== context.target.id)
-      .map((id) => ({ id, startMin: minuteOfRow(byId.get(id)) })),
-    ...context.rows
+      .map((id) => ({ id, startMin: expandedById.get(id)?.startMin })),
+    ...expanded
       .filter((row) => row.technician_id == null && row.status !== 'completed')
-      .map((row) => ({ id: row.id, startMin: minuteOfRow(row) })),
+      .map((row) => ({ id: row.id, startMin: row.startMin })),
   ].filter((a) => Number.isFinite(a.startMin)).sort((a, b) => a.startMin - b.startMin);
   let prevId = null;
   let nextId = null;
@@ -284,32 +308,30 @@ function capacityGapNeighbours(context, fit, byId, startMin) {
   // Row references too (Codex r7 P1) — packCapacityEnds needs each
   // neighbour's own coords/window/service identity to run the customer-
   // facing travel-gap predicate before picking a group's packed endpoint.
+  // Resolved from the SAME expanded map as the anchors above (Codex r8 P1)
+  // — never the raw context.rows member.
   return {
     prevId, nextId,
-    prevRow: prevId != null ? byId.get(prevId) : null,
-    nextRow: nextId != null ? byId.get(nextId) : null,
+    prevRow: prevId != null ? expandedById.get(prevId) : null,
+    nextRow: nextId != null ? expandedById.get(nextId) : null,
   };
 }
 
-// A context.rows neighbour reshaped into the {startMin, endMin, lat, lng,
-// windowMinutes, expectedMinutes} entity travel-gap.js's violatesTravelGap
-// reads. service_key_snapshot isn't selected on these rows (arrival-route.js
-// COLUMNS), so the credit falls back to a services.name match on
-// service_type — the same byName fallback expected-service-minutes.js
-// documents for every other caller with no exact key. Raw window only (no
-// version-2 allocation expansion) — a scope this fix doesn't extend to.
+// A capacityGapNeighbours neighbour (occupiedRows' allocation-expanded
+// startMin/endMin, plus stopCreditResolver's summed expectedMinutes — Codex
+// r8 P1) reshaped into the {startMin, endMin, lat, lng, windowMinutes,
+// expectedMinutes} entity travel-gap.js's violatesTravelGap reads. Mirrors
+// buildDayStops' Codex r7 P1 fix so capacity and legacy paths share one
+// neighbour representation; expectedMinutes falls back to the full window
+// (no credit) only for a malformed row missing the resolver's attached
+// value, which production never produces.
 function capacityNeighbourEntity(row) {
-  if (!row) return null;
-  const startMin = timeToMinutes(row.window_start);
-  if (!Number.isFinite(startMin)) return null;
-  const explicitEnd = timeToMinutes(row.window_end);
-  const windowMinutes = Number.isFinite(explicitEnd) && explicitEnd > startMin
-    ? explicitEnd - startMin
-    : (Number(row.estimated_duration_minutes) > 0 ? Number(row.estimated_duration_minutes) : 60);
+  if (!row || !Number.isFinite(row.startMin) || !Number.isFinite(row.endMin)) return null;
+  const windowMinutes = Math.max(0, row.endMin - row.startMin);
   return {
-    startMin, endMin: startMin + windowMinutes,
+    startMin: row.startMin, endMin: row.endMin,
     lat: row.lat ?? null, lng: row.lng ?? null, windowMinutes,
-    expectedMinutes: expectedMinutesSync({ serviceKey: row.service_key_snapshot, serviceType: row.service_type, windowMinutes }),
+    expectedMinutes: Number.isFinite(row.expectedMinutes) ? row.expectedMinutes : windowMinutes,
   };
 }
 
