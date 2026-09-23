@@ -54,6 +54,12 @@ describe('onFileHouseNumberConflict', () => {
     expect(r?.stated_house_number).toBe('500');
   });
 
+  test('numbered streets keep their number: 42 St and 43 St are different streets', () => {
+    expect(onFileHouseNumberConflict({ addressValidation: av('1250 42 St'), onFileAddress: { ...ON_FILE, address_line1: '1260 43 St' } })).toBeNull();
+    expect(onFileHouseNumberConflict({ addressValidation: av('1250 42nd St'), onFileAddress: { ...ON_FILE, address_line1: '1260 42nd Street' } })?.stated_house_number).toBe('1250');
+    expect(onFileHouseNumberConflict({ addressValidation: av('1250 42 St'), onFileAddress: { ...ON_FILE, address_line1: '1260 42 St' } })?.on_file_house_number).toBe('1260');
+  });
+
   test('same house number → nothing to confirm', () => {
     expect(onFileHouseNumberConflict({ addressValidation: av('1260 Example Street'), onFileAddress: ON_FILE })).toBeNull();
   });

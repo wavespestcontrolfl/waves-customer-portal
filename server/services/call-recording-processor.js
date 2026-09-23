@@ -9845,12 +9845,17 @@ const CallRecordingProcessor = {
           if (!bridgeNeedsConfirmation.includes('on_file_house_number_conflict')) bridgeNeedsConfirmation.push('on_file_house_number_conflict');
           logger.info(`[call-proc] house-number conflict card for ${maskSid(callSid)}: stated ${houseConflict.stated_house_number}, on file ${houseConflict.on_file_house_number}`);
         }
-        if (!houseConflict) {
-          // The latest pass found no conflict: an open card from an earlier
-          // pass no longer describes the call — retire it, or the
-          // auto-resolver and the address-ask surfaces keep acting on a
-          // payload the extraction no longer supports (codex r3 P2). Only
-          // cards still open (a human-claimed card stays theirs).
+        // The latest pass POSITIVELY validated a premise and found no
+        // conflict: an open card from an earlier pass no longer describes
+        // the call — retire it, or the auto-resolver and the address-ask
+        // surfaces keep acting on a payload the extraction no longer
+        // supports (codex r3 P2). Missing evidence (AV off, unavailable,
+        // unresolvable) settles nothing and leaves the card standing
+        // (pre-push audit P1). Only cards still open (a human-claimed card
+        // stays theirs).
+        const avPositive = ['validated_accept', 'corrected'].includes(effectiveAddressValidation?.status)
+          && !!effectiveAddressValidation?.normalized?.street_line_1;
+        if (!houseConflict && avPositive) {
           await db('triage_items')
             .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict', status: 'open' })
             .update({

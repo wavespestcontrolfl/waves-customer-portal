@@ -1674,9 +1674,17 @@ function restatementStreetParts(line) {
   const tokens = normalizeStreetLine(line).toLowerCase().split(/\s+/).filter(Boolean)
     .map(token => String(STREET_SUFFIX_ALIASES[token] || DIRECTIONAL_ALIASES[token] || token).toLowerCase());
   const house = /^\d+$/.test(tokens[0]) ? tokens.shift() : '';
+  return { house, ...streetNameParts(tokens) };
+}
+
+// Name + suffix-less name of an already house-less token list — a numbered
+// street ("42 St") keeps its number (pre-push audit P1: re-parsing the
+// remainder as a house number made 42 St and 43 St the same street).
+function streetNameParts(tokens) {
   const name = tokens.join(' ');
-  if (STREET_SUFFIX_WORDS.has(tokens[tokens.length - 1])) tokens.pop();
-  return { house, name, withoutSuffix: tokens.join(' ') };
+  const rest = [...tokens];
+  if (STREET_SUFFIX_WORDS.has(rest[rest.length - 1])) rest.pop();
+  return { name, withoutSuffix: rest.join(' ') };
 }
 
 function restatesOnFileAddress(sa, knownCustomer) {
@@ -1773,8 +1781,9 @@ function houseAndName(line) {
   const text = String(line || '').trim();
   const m = text.match(HOUSE_TOKEN);
   if (!m) return { house: '', name: '', withoutSuffix: '' };
-  const rest = restatementStreetParts(text.slice(m[0].length));
-  return { house: m[1].toLowerCase(), name: rest.name, withoutSuffix: rest.withoutSuffix };
+  const tokens = normalizeStreetLine(text.slice(m[0].length)).toLowerCase().split(/\s+/).filter(Boolean)
+    .map(token => String(STREET_SUFFIX_ALIASES[token] || DIRECTIONAL_ALIASES[token] || token).toLowerCase());
+  return { house: m[1].toLowerCase(), ...streetNameParts(tokens) };
 }
 
 function onFileHouseNumberConflict({ addressValidation = null, onFileAddress = null } = {}) {
