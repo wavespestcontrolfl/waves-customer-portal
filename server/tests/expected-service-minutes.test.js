@@ -165,3 +165,37 @@ describe('ensureCatalogLoaded inside a transaction (CI combined-visit capacity f
     expect(calls).toEqual(['savepoint', 'select:services']);
   });
 });
+
+describe('expectedMinutesForServices — a whole visit sums every service (push-audit P1)', () => {
+  const conn = () => fakeConn([
+    { service_key: 'quarterly_pest', name: 'Pest', min_duration_minutes: 30, max_duration_minutes: 60 },
+    { service_key: 'lawn_basic', name: 'Lawn Care', default_duration_minutes: 40 },
+  ]);
+  const { expectedMinutesForServices } = require('../services/scheduling/expected-service-minutes');
+
+  test('a 120-minute combined pest+lawn visit is expected at 45 + 40 = 85, not the primary alone (45)', async () => {
+    const services = [
+      { catalogServiceKey: 'quarterly_pest', label: 'Pest', durationMinutes: 60 },
+      { catalogServiceKey: 'lawn_basic', label: 'Lawn Care', durationMinutes: 60 },
+    ];
+    expect(await expectedMinutesForServices(conn(), services, 120)).toBe(85);
+  });
+
+  test('a member with no catalog match contributes its full own duration (zero padding for that member)', async () => {
+    const services = [
+      { catalogServiceKey: 'quarterly_pest', label: 'Pest', durationMinutes: 60 },
+      { label: 'Mystery add-on', durationMinutes: 60 },
+    ];
+    expect(await expectedMinutesForServices(conn(), services, 120)).toBe(105);
+  });
+
+  test('members without their own duration are clamped to the visit window and the sum never exceeds it', async () => {
+    const services = [{ catalogServiceKey: 'quarterly_pest', label: 'Pest' }, { label: 'Mystery' }];
+    expect(await expectedMinutesForServices(conn(), services, 60)).toBe(60);
+  });
+
+  test('a single service is the plain lookup', async () => {
+    expect(await expectedMinutesForServices(conn(), [{ catalogServiceKey: 'quarterly_pest', durationMinutes: 60 }], 60)).toBe(45);
+    expect(await expectedMinutesForServices(conn(), [], 60)).toBe(60);
+  });
+});

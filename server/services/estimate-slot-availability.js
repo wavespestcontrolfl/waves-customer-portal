@@ -36,7 +36,7 @@ const { guardedCoordSelects } = require('./scheduling/day-stops');
 const {
   violatesTravelGap, travelGapEnabled, travelBufferMinutes, customerFacingBufferMinutes,
 } = require('./scheduling/travel-gap');
-const { ensureCatalogLoaded, expectedServiceMinutes, expectedMinutesSync } = require('./scheduling/expected-service-minutes');
+const { ensureCatalogLoaded, expectedServiceMinutes, expectedMinutesSync, expectedMinutesForServices } = require('./scheduling/expected-service-minutes');
 const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { signSlotOffer, appendOfferToSlotId, CAPACITY_OFFER_POLICY } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
@@ -1931,13 +1931,11 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // 2026-09-23) — resolved once, shared by find-time's own geometry
   // (`packEnds` below) and filterCollidingSlots' offer/commit-parity check.
   // Not gated on the coords branch specifically: independent of location.
-  const primaryServiceForExpected = serviceProfile.services[0] || {};
+  // Summed across EVERY service in the profile (each clamped to its own
+  // duration), never services[0] alone against the whole combined window
+  // (push-audit P1) — the same rule slot-reservation applies at commit.
   const candidateExpectedMinutes = travelGapEnabled()
-    ? await expectedServiceMinutes(db, {
-      serviceKey: primaryServiceForExpected.catalogServiceKey || primaryServiceForExpected.engineKey || null,
-      serviceType: primaryServiceForExpected.label || primaryServiceForExpected.service || null,
-      windowMinutes: serviceProfile.durationMinutes,
-    })
+    ? await expectedMinutesForServices(db, serviceProfile.services, serviceProfile.durationMinutes)
     : serviceProfile.durationMinutes;
 
   // Pull a generous topN so we can split customer-facing slots post-hoc
@@ -1961,7 +1959,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       // both ends of a real route gap instead of one earliest-only
       // candidate — see find-time.js's packEnds option.
       packEnds: true,
-      serviceKey: primaryServiceForExpected.catalogServiceKey || primaryServiceForExpected.engineKey || null,
+      // The resolved whole-visit credit (above) — find-time must not
+      // re-derive it from one service key.
+      expectedMinutes: candidateExpectedMinutes,
       dateFrom: segFrom,
       dateTo: segTo,
       topN: Number.MAX_SAFE_INTEGER,

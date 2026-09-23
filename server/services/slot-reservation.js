@@ -46,7 +46,7 @@ const { capacityEnabled, placementFitsShift } = require('./scheduling/policy');
 const { lockTechDays } = require('./scheduling/tech-day-lock');
 const { capacityError, prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder } = require('./scheduling/arrival-route');
 const { serviceDurationMinutes } = require('./service-library');
-const { expectedServiceMinutes } = require('./scheduling/expected-service-minutes');
+const { expectedServiceMinutes, expectedMinutesForServices } = require('./scheduling/expected-service-minutes');
 
 // The candidate's own expected-minutes padding credit (owner ruling
 // 2026-09-23) for the travel-gap probes below (occupancy.js decides
@@ -67,12 +67,9 @@ async function candidateExpectedMinutesFromRow(conn, row, windowMinutes) {
 }
 async function candidateExpectedMinutesFromProfile(conn, serviceProfile, windowMinutes) {
   if (!serviceProfile || !Number.isFinite(windowMinutes) || windowMinutes <= 0) return undefined;
-  const primary = serviceProfile.services?.[0] || {};
-  return expectedServiceMinutes(conn, {
-    serviceKey: primary.catalogServiceKey || primary.engineKey || null,
-    serviceType: primary.label || primary.service || null,
-    windowMinutes,
-  });
+  // Every member of the profile, summed — never services[0] alone against
+  // the whole window (push-audit P1).
+  return expectedMinutesForServices(conn, serviceProfile.services, windowMinutes);
 }
 
 // Business bounds shared with the slot generators (see the exporting module

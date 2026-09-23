@@ -110,6 +110,37 @@ function expectedMinutesSync({ serviceKey = null, serviceType = null, windowMinu
   return row ? expectedFromCatalogRow(row, win) : win;
 }
 
+/**
+ * A whole visit's expected minutes from its service profile (the shape
+ * estimate-slot-availability / slot-reservation carry: [{ catalogServiceKey,
+ * engineKey, label, service, durationMinutes }]) — the SUM of every member's
+ * own credit, each clamped to its own duration (else the visit window),
+ * the sum clamped to the visit window. Reading only services[0] against the
+ * whole window would credit a combined visit's other members' work toward
+ * travel (push-audit P1, mirroring the version-2 allocation rule in
+ * occupancy.js). No services -> the window length (zero padding).
+ */
+function expectedMinutesForServicesSync(services, windowMinutes) {
+  const win = Number.isFinite(windowMinutes) && windowMinutes > 0 ? windowMinutes : 60;
+  const list = Array.isArray(services) ? services.filter(Boolean) : [];
+  if (!list.length) return win;
+  let total = 0;
+  for (const service of list) {
+    const own = Number(service.durationMinutes) > 0 ? Math.min(Number(service.durationMinutes), win) : win;
+    total += expectedMinutesSync({
+      serviceKey: service.catalogServiceKey || service.engineKey || service.serviceKey || null,
+      serviceType: service.label || service.service || service.serviceType || null,
+      windowMinutes: own,
+    });
+  }
+  return clampToWindow(total, win);
+}
+
+async function expectedMinutesForServices(conn, services, windowMinutes) {
+  await ensureCatalogLoaded(conn);
+  return expectedMinutesForServicesSync(services, windowMinutes);
+}
+
 /** Preload-then-read convenience for a single one-off lookup. */
 async function expectedServiceMinutes(conn, opts = {}) {
   await ensureCatalogLoaded(conn);
@@ -123,6 +154,8 @@ function clearExpectedServiceMinutesCache() {
 module.exports = {
   expectedServiceMinutes,
   expectedMinutesSync,
+  expectedMinutesForServices,
+  expectedMinutesForServicesSync,
   ensureCatalogLoaded,
   clearExpectedServiceMinutesCache,
   _internals: { expectedFromCatalogRow, buildCatalogIndex },

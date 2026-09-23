@@ -272,6 +272,11 @@ async function findAvailableSlots(opts) {
     // stop). Optional; no match (or no serviceKey/serviceType given) falls
     // back to the window length — zero padding, legacy gap.
     serviceKey = null,
+    // A caller-resolved whole-visit expected minutes (estimate picker: the
+    // sum across every service in the profile) — wins over the single
+    // serviceKey lookup so a combined visit's other members are never
+    // credited toward travel (push-audit P1).
+    expectedMinutes = null,
   } = opts;
   const stopBuffer = Math.max(0, Number(bufferMinutes) || 0);
   const wantsPackedEnds = packEnds === true;
@@ -393,9 +398,11 @@ async function findAvailableSlots(opts) {
   let candidatePadding = 0;
   if (stopBuffer > 0) {
     await ensureCatalogLoaded(db);
-    const candidateExpectedMinutes = expectedMinutesSync({
-      serviceKey, serviceType: opts.serviceType || null, windowMinutes: durationMinutes,
-    });
+    const candidateExpectedMinutes = Number.isFinite(expectedMinutes) && expectedMinutes > 0
+      ? Math.min(expectedMinutes, durationMinutes)
+      : expectedMinutesSync({
+        serviceKey, serviceType: opts.serviceType || null, windowMinutes: durationMinutes,
+      });
     candidatePadding = Math.max(0, durationMinutes - candidateExpectedMinutes);
   }
 
