@@ -85,7 +85,7 @@ function evidenceFromCard(card, unitOnly) {
     || (snapshotParts.length > 0 ? snapshotParts.join(', ') : null)
     // House-number disagreement cards carry the validated street the caller
     // stated instead of an as-heard transcript line.
-    || payload.stated_street
+    || (payload.stated_street ? (payload.stated_unit ? `${payload.stated_street}, ${payload.stated_unit}` : payload.stated_street) : null)
     || null;
   return {
     // A validated building is not transcription evidence.

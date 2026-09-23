@@ -615,7 +615,11 @@ router.post('/:id/apply-property-roles', async (req, res) => {
 // under the call lock) — it outranks the card's filing-time snapshot, since
 // the office may have adopted the caller's number since (pre-push audit
 // P1); the snapshot is the fallback for an unlinked call.
-function heldConflictTaskDecision({ verdict, wrongFields = [], heldConflictPayload = null, bookingCovered = false, liveOnFile = null } = {}) {
+// `heldUnassignedBookingId`: a booking this call created that the dispute
+// hold left in the UNASSIGNED pool (technician pulled, repairs skipped) —
+// coverage alone would resolve the card and strand it there; the task
+// files anyway, naming the visit to reassign and re-arm (codex r10 P1).
+function heldConflictTaskDecision({ verdict, wrongFields = [], heldConflictPayload = null, bookingCovered = false, liveOnFile = null, heldUnassignedBookingId = null } = {}) {
   const payload = heldConflictPayload && typeof heldConflictPayload === 'object' ? heldConflictPayload : null;
   const confirmed = !!payload && (payload.scheduling_window?.status === 'confirmed' || payload.scheduling_status === 'confirmed');
   // A Deny that marks the scheduling OR the service extraction wrong leaves
@@ -648,15 +652,21 @@ function heldConflictTaskDecision({ verdict, wrongFields = [], heldConflictPaylo
     heard_address: approvedAddress || payload.heard_address,
     ...(approvedWindow ? { scheduling_window: approvedWindow } : {}),
   } : null;
+  const heldBooking = !!heldUnassignedBookingId && !scheduleDenied;
   return {
     confirmed,
     approvedPayload,
     approvedWindow,
-    file: confirmed && !scheduleDenied && !bookingCovered,
-    skippedReason: verdict === 'accept' ? 'address_confirmed_on_file_after_house_number_dispute' : 'house_number_dispute_denied_appointment_unbooked',
-    summary: verdict === 'accept'
-      ? 'Address confirmed on file after a house-number dispute — the confirmed appointment still needs booking'
-      : 'House-number dispute card denied — the confirmed appointment still needs booking',
+    file: heldBooking || (confirmed && !scheduleDenied && !bookingCovered),
+    heldUnassignedBookingId: heldBooking ? heldUnassignedBookingId : null,
+    skippedReason: heldBooking
+      ? 'house_number_dispute_settled_reassign_held_booking'
+      : (verdict === 'accept' ? 'address_confirmed_on_file_after_house_number_dispute' : 'house_number_dispute_denied_appointment_unbooked'),
+    summary: heldBooking
+      ? 'House-number dispute settled — the appointment the dispute left unassigned needs a technician and its confirmation re-armed'
+      : (verdict === 'accept'
+        ? 'Address confirmed on file after a house-number dispute — the confirmed appointment still needs booking'
+        : 'House-number dispute card denied — the confirmed appointment still needs booking'),
   };
 }
 
@@ -765,7 +775,10 @@ router.post('/:id/verdict', async (req, res) => {
         // Bounce follow-ups, pending property-role confirmations, and parked
         // reschedule-link promises all survive a call verdict, as do
         // reschedule proposals — each has its own review action.
-        .whereNotIn('reason_code', ['email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise'])
+        // …and an owed follow-up visit the dispute hold kept from being
+        // created: settling the address dispute answers nothing about
+        // visit 2, so its card survives the call verdict (codex r10 P1).
+        .whereNotIn('reason_code', ['email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise', 'attached_booking_followup_unbooked'])
         .whereRaw("payload->'reschedule_proposal' IS NULL")
         .whereIn('status', OPEN_STATES)
         .update({
@@ -872,8 +885,17 @@ router.post('/:id/verdict', async (req, res) => {
           created_at: new Date(0).toISOString(), payload: pre.approvedPayload, call_customer_id: callRow?.customer_id || null,
         };
         const evidence = await loadEvidence(trx, [heldItem]).catch(() => new Map());
+        // A booking this call created that the dispute left unassigned (the
+        // processor pulled its technician and skipped its repairs).
+        const heldUnassigned = await trx('scheduled_services')
+          .where({ source_call_log_id: item.call_log_id, booking_source: 'phone_call' })
+          .whereIn('status', ['pending', 'confirmed'])
+          .whereNull('technician_id')
+          .orderBy('scheduled_date', 'asc')
+          .first('id');
         const decision = heldConflictTaskDecision({
           verdict, wrongFields, heldConflictPayload, liveOnFile, bookingCovered: evidence.get(item.id)?.booking_after_card === true,
+          heldUnassignedBookingId: heldUnassigned?.id || null,
         });
         if (decision.file) {
           const { buildTriageItem } = require('../services/call-routing-gates');
@@ -884,6 +906,7 @@ router.post('/:id/verdict', async (req, res) => {
               extraction: { meta: { call_summary: decision.summary }, scheduling: decision.approvedWindow || { status: 'confirmed' } },
               extraPayload: {
                 skipped_reason: decision.skippedReason,
+                ...(decision.heldUnassignedBookingId ? { existing_scheduled_service_id: decision.heldUnassignedBookingId } : {}),
                 scheduling_window: decision.approvedWindow,
                 // The same live-else-snapshot choice the decision made (a
                 // blank live line falls back to the snapshot).

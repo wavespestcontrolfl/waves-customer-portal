@@ -37,6 +37,11 @@ describe('on_file_house_number_conflict', () => {
     expect(filterAddressAsks([ask('on_file_house_number_conflict')])).toHaveLength(1);
   });
 
+  it('carries the stated unit in its evidence', () => {
+    const n = notice(ask('on_file_house_number_conflict', { stated_street: '1250 Example Street', stated_unit: 'Apt 4' }, 7, 3));
+    expect(n.heard).toBe('1250 Example Street, Apt 4');
+  });
+
   it('is picked over an older same-rank card that carries no evidence', () => {
     const n = notice(
       ask('address_unverified', {}, 5, 1),

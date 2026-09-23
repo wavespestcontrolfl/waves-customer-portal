@@ -272,6 +272,14 @@ describe('heldConflictTaskDecision (verdict route)', () => {
     expect(heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, liveOnFile: { address_line1: '' } }).approvedWindow.requested_address.street_line_1).toBe('1260 Example St');
   });
 
+  test('a booking the dispute left unassigned files a reassignment task even when coverage is satisfied', () => {
+    const d = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, bookingCovered: true, heldUnassignedBookingId: 'ss-9' });
+    expect(d.file).toBe(true);
+    expect(d.skippedReason).toBe('house_number_dispute_settled_reassign_held_booking');
+    expect(d.heldUnassignedBookingId).toBe('ss-9');
+    expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['scheduling'], heldConflictPayload: held, heldUnassignedBookingId: 'ss-9' }).file).toBe(false);
+  });
+
   test('a covering booking, or a card whose call never confirmed, files nothing', () => {
     expect(heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, bookingCovered: true }).file).toBe(false);
     expect(heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: { ...held, scheduling_window: { status: 'none' } } }).file).toBe(false);
