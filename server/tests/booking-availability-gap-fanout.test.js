@@ -313,3 +313,35 @@ test.each(['self-booking', 'voice'])('a same-day %s move excludes itself from th
     delete process.env.GATE_SELF_BOOK_DAY_CAP;
   }
 });
+
+// Codex r3 P0 on #4663: capacity mode's shared find-time shift starts at
+// 08:00 for every caller, but the documented public/token offer grid is
+// 09:00-17:00. buildBookingAvailability's self-serve callers (this file's
+// /availability, /find-slots, capture-intent revalidation; reschedule-public.js;
+// reservice-public.js) must mark themselves customerFacing so capacity mode
+// never hands them an 08:00 candidate; the voice-agent callers (relay-tools.js,
+// relay-booking.js), which never set selfServeNotice, must not be narrowed.
+describe('buildBookingAvailability — customerFacing propagation to find-time', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    wireDayCapCounts([]);
+    listOccupiedWindows.mockResolvedValue([]);
+    findAvailableSlots.mockResolvedValue({ slots: [] });
+  });
+
+  test('a self-serve caller (selfServeNotice: true) marks the find-time call customerFacing', async () => {
+    await buildBookingAvailability({
+      lat: 27.4, lng: -82.4, duration: 60, rangeFrom: D, rangeTo: D,
+      config: CONFIG, today: new Date(), selfServeNotice: true,
+    });
+    expect(findAvailableSlots).toHaveBeenCalledWith(expect.objectContaining({ customerFacing: true }));
+  });
+
+  test('a voice-agent caller (no selfServeNotice) does not mark the find-time call customerFacing', async () => {
+    await buildBookingAvailability({
+      lat: 27.4, lng: -82.4, duration: 60, rangeFrom: D, rangeTo: D,
+      config: CONFIG, today: new Date(),
+    });
+    expect(findAvailableSlots).toHaveBeenCalledWith(expect.objectContaining({ customerFacing: false }));
+  });
+});

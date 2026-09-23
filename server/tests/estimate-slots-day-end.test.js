@@ -113,4 +113,24 @@ describe('findEstimateSlots — customer-facing day end', () => {
       expect(call[0]).toMatchObject({ dayEndHour: 18 });
     }
   });
+
+  // Codex r3 P0 on #4663: capacity mode's shared shift starts at 08:00 for
+  // every caller (SHIFT.startMinutes), but the documented public/token offer
+  // grid is 09:00-17:00 — the estimate picker (the token-gated public
+  // surface) must never ask find-time for anything wider than that grid.
+  test('the live generator marks itself customerFacing so capacity mode never offers an 08:00 start', async () => {
+    await getAvailableSlots('est-dayend-1', { dateFrom: '2027-05-20', dateTo: '2027-05-20' });
+    expect(findAvailableSlots).toHaveBeenCalled();
+    for (const call of findAvailableSlots.mock.calls) {
+      expect(call[0]).toMatchObject({ customerFacing: true });
+    }
+  });
+
+  test('the debug surface (getSlotDebug) also marks itself customerFacing — it mirrors what the customer sees', async () => {
+    await getSlotDebug('est-dayend-1', { windowDays: 1 });
+    expect(findAvailableSlots).toHaveBeenCalled();
+    for (const call of findAvailableSlots.mock.calls) {
+      expect(call[0]).toMatchObject({ customerFacing: true });
+    }
+  });
 });

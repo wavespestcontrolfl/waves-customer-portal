@@ -23,6 +23,20 @@ const { applyAssignable } = require('../technician-eligibility');
 const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, enumerateArrivalPlacements, evaluateArrivalPlacement } = require('./arrival-route');
 const { SHIFT, capacityEnabled, placementFitsShift } = require('./policy');
 const { serviceFamilyPreference } = require('../auto-dispatch/service-category');
+const { CUSTOMER_HOUR_GRID } = require('./customer-windows');
+
+// Minute-of-day values of the documented public/token offer grid
+// (docs/public-route-contracts.md, scheduling/customer-windows.js) — 09:00
+// through 17:00, one hour apart. Only used when a caller marks itself
+// customerFacing (see findCapacitySlots below); staff/optimizer callers
+// (admin-schedule-find-time.js, intelligence-bar/schedule-tools.js,
+// auto-dispatch/candidate-slots.js) never pass that flag and are unaffected.
+const CUSTOMER_GRID_MINUTES = new Set(
+  CUSTOMER_HOUR_GRID.map((hhmm) => {
+    const [h, m] = hhmm.split(':').map(Number);
+    return h * 60 + m;
+  }),
+);
 
 const DAY_START_HOUR = 8;   // 8:00 AM
 const DAY_END_HOUR = 17;    // 5:00 PM
@@ -161,8 +175,16 @@ async function findCapacitySlots(opts) {
       // real (start, start+durationMinutes) window — the loop used to stop
       // 2 hours early (SHIFT.arrivalMinutes), which silently dropped 17:00
       // candidates that fit a normal 60-minute job comfortably before the
-      // 18:00 close (Codex r1 P1 on #4663).
+      // 18:00 close (Codex r1 P1 on #4663). SHIFT.startMinutes is 08:00 — the
+      // full operating shift, not the documented public/token offer grid
+      // (09:00-17:00). A customerFacing caller (the estimate picker, /book
+      // and everything that shares its builder) additionally requires each
+      // start to be one of the documented grid hours, so capacity mode never
+      // hands a customer surface an 08:00 candidate the public route
+      // contract doesn't describe; staff/optimizer callers that never pass
+      // customerFacing are unaffected (Codex r3 P0 on #4663).
       for (let start = Math.ceil(floor / 60) * 60; start < SHIFT.endMinutes; start += 60) {
+        if (opts.customerFacing && !CUSTOMER_GRID_MINUTES.has(start)) continue;
         if (!placementFitsShift(start, start + durationMinutes)) continue;
         candidates.push({ context, date, tech, start, options: {
           windowStart: minutesToTime(start), windowEnd: minutesToTime(start + durationMinutes),

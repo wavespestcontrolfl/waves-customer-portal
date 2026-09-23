@@ -149,13 +149,30 @@ const DEFAULT_CALL_BOOKING_DURATION_MINUTES = 60;
 // the 2026-09-23 ruling added the 5 PM start; booking_config.day_end was
 // migrated alongside) so a phone-booked 17:00 visit is not triaged as
 // out-of-hours on a day the self-serve surfaces themselves offer 17:00.
+const {
+  CUSTOMER_DAY_END_MINUTES, refreshCustomerBookingWindowConfig, currentDayEndMinutes,
+} = require('./scheduling/customer-windows');
 const CALL_BOOKING_DAY_START_MIN = 8 * 60;
-const CALL_BOOKING_DAY_END_MIN = require('./scheduling/customer-windows').CUSTOMER_DAY_END_MINUTES;
+// FIXED FALLBACK ONLY — callBookingTimeSanityFlags' default when a caller
+// doesn't resolve the live bound. The actual check below reads
+// currentDayEndMinutes() (Codex r3 P2 on #4663): the fixed 18:00 constant
+// ignored a preserved booking_config.day_end override (e.g. 16:00), so a
+// 17:00 phone booking against a configured-earlier close went unflagged.
+const CALL_BOOKING_DAY_END_MIN = CUSTOMER_DAY_END_MINUTES;
 function callBookingTimeMinutes(value) {
   if (!value) return null;
   const [h, m] = String(value).split(':').map(Number);
   if (!Number.isFinite(h)) return null;
   return h * 60 + (Number.isFinite(m) ? m : 0);
+}
+
+// "8am" / "4:30pm" — matches the existing triage-notification copy's style.
+function callBookingHourLabel(minutes) {
+  const h24 = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  const ampm = h24 >= 12 ? 'pm' : 'am';
+  const h12 = h24 % 12 || 12;
+  return m ? `${h12}:${String(m).padStart(2, '0')}${ampm}` : `${h12}${ampm}`;
 }
 
 /**
@@ -165,12 +182,22 @@ function callBookingTimeMinutes(value) {
  * @param {string} [args.windowEnd]         'HH:MM' — preferred end source.
  * @param {number} [args.durationMinutes]   fallback when windowEnd is absent
  *                                          (defaults to the catalog default).
+ * @param {number} [args.dayEndMinutes]     the authoritative close to check
+ *                                          against — pass currentDayEndMinutes()
+ *                                          (after awaiting
+ *                                          refreshCustomerBookingWindowConfig())
+ *                                          so a preserved booking_config.day_end
+ *                                          override is honored. Defaults to the
+ *                                          fixed 18:00 constant for callers
+ *                                          (and existing tests) that don't
+ *                                          resolve the live config.
  */
 function callBookingTimeSanityFlags({
   scheduledDate,
   windowStart,
   windowEnd,
   durationMinutes,
+  dayEndMinutes = CALL_BOOKING_DAY_END_MIN,
 } = {}) {
   const flags = [];
   if (scheduledDate) {
@@ -182,7 +209,7 @@ function callBookingTimeSanityFlags({
   const startMin = callBookingTimeMinutes(windowStart);
   if (startMin != null) {
     const startOutside = startMin < CALL_BOOKING_DAY_START_MIN
-      || startMin >= CALL_BOOKING_DAY_END_MIN;
+      || startMin >= dayEndMinutes;
     if (startOutside) flags.push('outside_business_hours');
     // A start INSIDE the working day still runs past close when the visit is
     // long enough: a 60-minute booking at 16:30 ends at 17:30. Checking only
@@ -199,7 +226,7 @@ function callBookingTimeSanityFlags({
       const endMin = explicitEnd != null && explicitEnd > startMin
         ? explicitEnd
         : startMin + duration;
-      if (endMin > CALL_BOOKING_DAY_END_MIN) flags.push('ends_after_business_hours');
+      if (endMin > dayEndMinutes) flags.push('ends_after_business_hours');
     }
   }
   return flags;
@@ -14713,6 +14740,14 @@ const CallRecordingProcessor = {
                 } catch (recheckErr) {
                   logger.warn(`[call-proc] post-commit occupancy recheck failed for ${maskSid(callSid)} (falling back to in-txn advisory findings): ${recheckErr.message}`);
                 }
+                // Resolve the LIVE close (honors a preserved, non-18:00
+                // booking_config.day_end override) rather than the fixed
+                // 18:00 fallback — Codex r3 P2 on #4663. Read fresh here
+                // (not cached on this module) since call processing is a
+                // background job with no other reason to have refreshed the
+                // 60s TTL cache recently.
+                await refreshCustomerBookingWindowConfig();
+                const resolvedDayEndMinutes = currentDayEndMinutes();
                 const timeSanityFlags = callBookingTimeSanityFlags({
                   scheduledDate,
                   windowStart: windowStart || '09:00',
@@ -14722,6 +14757,7 @@ const CallRecordingProcessor = {
                   windowEnd: windowEnd || '10:00',
                   durationMinutes: callBookingCatalogRow?.default_duration_minutes
                     || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
+                  dayEndMinutes: resolvedDayEndMinutes,
                 });
                 if (bookingTimeConflicts.length || timeSanityFlags.length) {
                   const conflictFlag = bookingTimeConflicts.length
@@ -14811,7 +14847,9 @@ const CallRecordingProcessor = {
                       }
                       conflictBits.push(overlapBit);
                     }
-                    if (timeSanityFlags.includes('outside_business_hours')) conflictBits.push('outside 8am–6pm');
+                    if (timeSanityFlags.includes('outside_business_hours')) {
+                      conflictBits.push(`outside ${callBookingHourLabel(CALL_BOOKING_DAY_START_MIN)}–${callBookingHourLabel(resolvedDayEndMinutes)}`);
+                    }
                     if (timeSanityFlags.includes('weekend')) conflictBits.push('on a weekend');
                     await require('./notification-service').notifyAdmin(
                       'schedule',

@@ -15,7 +15,7 @@ const { fallbackCenterZoneName } = require('../services/scheduling/zone-day-funn
 const { CUSTOMER_HOUR_GRID, lunchBlockEnabled } = require('../services/scheduling/customer-windows');
 const { violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
 const { selfBookDayCapEnabled } = require('../config/feature-gates');
-const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
 const { normalizeUnitLine, unitLineValueKey, splitStreetLineUnit, parseRawAddress } = require('../utils/address-normalizer');
@@ -933,6 +933,16 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     excludeServiceIds,
     dayStartHour: parseInt((config.day_start || '08:00').split(':')[0]),
     dayEndHour: parseInt((config.day_end || '18:00').split(':')[0]),
+    // Capacity mode's shared shift starts at 08:00 for every caller; only
+    // the self-serve HTTP surfaces (this file's /availability, /find-slots
+    // and capture-intent revalidation; reschedule-public.js; reservice-public.js
+    // — the exact set that sets selfServeNotice) are bound to the documented
+    // customer grid (09:00-17:00, docs/public-route-contracts.md). The
+    // voice-agent callers (relay-tools.js, relay-booking.js) leave
+    // selfServeNotice unset, same as they leave the notice window unset —
+    // phone bookings follow the full 8am-6pm business-hours shift, matching
+    // call-recording-processor.js's own sanity bound (Codex r3 P0 on #4663).
+    customerFacing: selfServeNotice,
     // Waves works weekends (Sat AND Sun) — the estimate slot flow already
     // offers Sundays (estimate-slot-availability defaults includeWeekends:true).
     // find-time's legacy default drops Sundays, which silently hid every Sunday

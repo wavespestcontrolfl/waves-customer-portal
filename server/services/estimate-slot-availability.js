@@ -1940,6 +1940,11 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       // callers that don't pass this. currentDayEndMinutes() honors a
       // preserved booking_config.day_end override (Codex r1 P2 on #4663).
       dayEndHour: currentDayEndMinutes() / 60,
+      // Capacity mode's shared shift starts at 08:00 for every caller; this
+      // is the public estimate picker, which only ever offers the documented
+      // customer grid (09:00-17:00, docs/public-route-contracts.md) — never
+      // an 08:00 start (Codex r3 P0 on #4663).
+      customerFacing: true,
       dateFrom: segFrom,
       dateTo: segTo,
       topN: Number.MAX_SAFE_INTEGER,
@@ -2154,6 +2159,11 @@ async function getSlotDebug(estimateId, userOpts = {}) {
     bufferMinutes: customerFacingBufferMinutes(),
     // Same customer-facing day close as the live path (see above).
     dayEndHour: currentDayEndMinutes() / 60,
+    // Same customer-grid restriction as the live path — this admin debug
+    // view exists to mirror exactly what the customer is offered, so it must
+    // never show an 08:00 candidate the live path would never surface
+    // (Codex r3 P0 on #4663).
+    customerFacing: true,
     dateFrom,
     dateTo,
     topN: 200, // broad — debug surface wants everything

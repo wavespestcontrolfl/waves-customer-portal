@@ -127,6 +127,28 @@ describe('callBookingTimeSanityFlags', () => {
     expect(callBookingTimeSanityFlags({ scheduledDate: null, windowStart: null })).toEqual([]);
     expect(callBookingTimeSanityFlags({ scheduledDate: 'garbage', windowStart: 'garbage' })).toEqual([]);
   });
+
+  // Codex r3 P2 on #4663: the default close is the fixed 18:00 fallback, but
+  // the caller (call-recording-processor's own booking path) resolves the
+  // LIVE authority (currentDayEndMinutes(), which honors a preserved
+  // booking_config.day_end override) and passes it in as dayEndMinutes — a
+  // 17:00 phone booking against a configured-earlier 16:00 close must still
+  // be flagged, not silently pass because the check used the fixed constant.
+  test('dayEndMinutes overrides the fixed 18:00 default — a preserved earlier close still flags', () => {
+    // 2099-01-05 is a Monday. Against the fixed default (18:00) a 17:00
+    // start is clean...
+    expect(callBookingTimeSanityFlags({ scheduledDate: '2099-01-05', windowStart: '17:00' })).toEqual([]);
+    // ...but against a configured 16:00 close (dayEndMinutes: 16*60), the
+    // same 17:00 start is outside business hours.
+    expect(callBookingTimeSanityFlags({
+      scheduledDate: '2099-01-05', windowStart: '17:00', dayEndMinutes: 16 * 60,
+    })).toEqual(['outside_business_hours']);
+    // A visit that starts inside the configured close but runs past it is
+    // still caught by the end-of-visit check.
+    expect(callBookingTimeSanityFlags({
+      scheduledDate: '2099-01-05', windowStart: '15:30', durationMinutes: 60, dayEndMinutes: 16 * 60,
+    })).toEqual(['ends_after_business_hours']);
+  });
 });
 
 describe('recheckCallBookingConflicts — the authoritative post-commit read', () => {
