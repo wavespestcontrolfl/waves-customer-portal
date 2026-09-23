@@ -3174,7 +3174,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           logger.info(`[public-quote] withdrew ${withdrawn.length} published website estimate(s) for the flagged address`);
         }
       } catch (withdrawErr) {
-        logger.warn(`[public-quote] website estimate withdrawal failed: ${withdrawErr.code || withdrawErr.name || 'error'}`);
+        // FAIL CLOSED: the off-surface marker is written inside the same
+        // transaction and rolled back with it, so an earlier publication
+        // would stay viewable and acceptable at the flagged number. The
+        // visitor retries; nothing has been priced away (codex r9 P1).
+        logger.error(`[public-quote] website estimate withdrawal failed — refusing the flagged run: ${withdrawErr.code || withdrawErr.name || 'error'}`);
+        return res.status(503).json({ error: 'We could not finish checking this address. Please try again in a moment.' });
       }
     }
     if (!quoteRequired && !commercialDetected && !estimateBlocksSelfBookLink(estimate) && !keyedNotBookable && !selfBookBlockedByAddress) {

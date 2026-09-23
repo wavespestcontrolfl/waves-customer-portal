@@ -27,6 +27,9 @@ describe('leadAddressUnverified', () => {
     // A hash-prefixed unit after a designator is the same house number.
     expect(leadAddressUnverified({ address: '1260 Example St Apt #4, Parrish, FL 34219', zip: '34219', extracted_data: { address_unverified: stamped } })).not.toBeNull();
     expect(leadAddressUnverified({ address: '1260 Example St #4, Parrish, FL 34219', zip: '34219', extracted_data: { address_unverified: stamped } })).not.toBeNull();
+    // The geocoder's "Lp" is the server's LOOP.
+    const loop = { ...flag, address_line1: '12 Example Loop', zip: '34219' };
+    expect(leadAddressUnverified({ address: '12 Example Lp, Parrish, FL 34219', zip: '34219', extracted_data: { address_unverified: loop } })).not.toBeNull();
     // A suffix spelling difference is the same street.
     expect(leadAddressUnverified({ address: '1260 Example Street, Parrish, FL 34219', zip: '34219', extracted_data: { address_unverified: stamped } })).not.toBeNull();
     // A unit added inline is the same audited house number.

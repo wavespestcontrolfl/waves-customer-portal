@@ -38,9 +38,12 @@ const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z]/g, '');
 // A named designator may carry a '#' before its value ("Apt #4").
 const UNIT_TAIL = /\s+(?:#|(?:apt|apartment|unit|ste|suite|bldg|building|lot|rm|room|fl|floor|spc|space)\.?\s*#?)\s*[a-z0-9-]+\s*$/i;
 // Suffix aliases mirror the server's canonical forms (St == Street).
+// Mirrors server/utils/address-normalizer STREET_SUFFIX_ALIASES (keep in
+// step): the geocoder abbreviates Loop as "Lp".
 const SUFFIX_ALIASES = {
   street: 'st', avenue: 'ave', drive: 'dr', road: 'rd', lane: 'ln', court: 'ct', boulevard: 'blvd',
   circle: 'cir', place: 'pl', terrace: 'ter', trail: 'trl', parkway: 'pkwy', highway: 'hwy', way: 'way',
+  lp: 'loop',
 };
 const streetKeyNoUnit = (v) => lineKey(String(v || '').replace(UNIT_TAIL, ''))
   .split(' ')

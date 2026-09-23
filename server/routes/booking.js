@@ -1444,6 +1444,11 @@ function seededRowPin(row, offerLat, offerLng) {
 // at (public-quote address_unverified): the office confirms the address on
 // the callback before anything is scheduled. Same shape as the other
 // createSelfBooking refusals (the route maps status + error to the reply).
+// `lead` is an untrusted correlation value: a malformed one is ignored
+// (never cast into a UUID column — 22P02 would 500 an otherwise valid
+// booking; codex r9 P2).
+const LEAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const ADDRESS_UNVERIFIED_REFUSAL = () => ({
   ok: false,
   status: 409,
@@ -1653,7 +1658,7 @@ async function createSelfBooking(payload = {}) {
     // booked, never as identity (a forged lead id can only block a booking
     // at a premise the roll could not match, never enable one). Only when
     // the submitted address is the flagged premise (codex #4667 r6 P1).
-    if (lead_id && new_customer?.address_line1) {
+    if (LEAD_ID_RE.test(String(lead_id || '')) && new_customer?.address_line1) {
       try {
         const { recoverAddressUnverified, flagCoversAddress } = require('../services/lead-address-unverified');
         const leadRow = await db('leads').where({ id: String(lead_id) }).whereNull('deleted_at').first('extracted_data');
@@ -2599,12 +2604,30 @@ async function createSelfBooking(payload = {}) {
             if (parseData(lockedDraft?.estimate_data)?.addressUnverified === true) refuse();
           }
         }
-        if (lead_id && new_customer?.address_line1) {
+        const submitted = new_customer?.address_line1 ? {
+          line1: new_customer.address_line1, city: new_customer.city, state: new_customer.state, zip: new_customer.zip,
+        } : null;
+        if (LEAD_ID_RE.test(String(lead_id || '')) && submitted) {
           const lockedLead = await trx('leads').where({ id: String(lead_id) }).whereNull('deleted_at').forUpdate().first('extracted_data');
           const flag = recoverAddressUnverified(parseData(lockedLead?.extracted_data));
-          if (flag && flagCoversAddress(flag, {
-            line1: new_customer.address_line1, city: new_customer.city, state: new_customer.state, zip: new_customer.zip,
-          })) refuse();
+          if (flag && flagCoversAddress(flag, submitted)) refuse();
+        }
+        // The CURRENT contact-and-premise verdict too, not only the lead
+        // the link names: a repeat lookup mints a NEW lead whose flag
+        // commits before the shared draft is re-locked, and an old link
+        // confirming in that window would see only the older clean lead
+        // (codex r9 P1). Both typed contact factors bind the lookup.
+        if (submitted && new_customer?.email && phoneDigits) {
+          const flaggedLeads = await trx('leads')
+            .whereNull('deleted_at')
+            .whereRaw('LOWER(email) = ?', [String(new_customer.email).toLowerCase().trim()])
+            .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ?", [phoneDigits])
+            .whereRaw("extracted_data->'address_unverified' IS NOT NULL")
+            .select('extracted_data');
+          for (const row of flaggedLeads) {
+            const flag = recoverAddressUnverified(parseData(row.extracted_data));
+            if (flag && flagCoversAddress(flag, submitted)) refuse();
+          }
         }
       }
 

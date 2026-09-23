@@ -928,7 +928,11 @@ unconditionally — before any booking write, whatever the customers-only
 gate or the bearer's authentication; both verdicts are rechecked under row
 locks inside the booking transaction itself, so a flag committed between
 the early read and the insert still refuses (409, code
-`ADDRESS_UNVERIFIED`). A roll that never answered (GIS
+`ADDRESS_UNVERIFIED`), and the in-transaction recheck also consults every
+lead for the typed email AND phone whose flag covers the submitted premise
+(a repeat lookup's newer lead). If the flagged run's publication
+withdrawal transaction fails, `/calculate` answers 503 (retry) rather than
+leaving an earlier publication live. A roll that never answered (GIS
 outage) is not a fresh flag — but it does not clear one either: the prior
 server-written flag for the same address carries forward until the roll
 answers clean, and an existing draft's own `addressUnverified` marker is
