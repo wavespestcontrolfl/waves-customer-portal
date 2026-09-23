@@ -862,6 +862,9 @@ router.post('/:id/verdict', async (req, res) => {
         const callRow = await trx('call_log').where({ id: item.call_log_id }).first('customer_id', 'created_at');
         const heldItem = {
           id: item.id, call_log_id: item.call_log_id, reason_code: 'on_file_house_number_conflict', status: 'open',
+          // The customer's live columns the adopted-address arm reads
+          // (recordCarriesStatedStreet) — pre-push audit P1.
+          customer_address_line1: liveCustomer?.address_line1 || null, customer_city: liveCustomer?.city || null, customer_zip: liveCustomer?.zip || null,
           // Verdict-time coverage admits a matching PRE-EXISTING live booking
           // too (a call that merely reconfirmed an appointment booked before
           // it) — the boundary is the epoch, unlike the sweep's post-card
