@@ -171,6 +171,17 @@ describe('triage auto-resolve: house_number_adopted', () => {
       .toEqual({ action: 'resolve', rule: 'house_number_adopted' });
   });
 
+  test('a stated unit must be on the record before the ask is settled', () => {
+    const unitCard = item({
+      customer_address_line1: '1250 Example Street', customer_address_line2: 'Apt 3',
+      payload: { stated_house_number: '1250', stated_street: '1250 Example Street', stated_unit: 'Apt 2', stated_city: 'Parrish', stated_zip: '34219', scheduling_status: null },
+    });
+    expect(classifyTriageItem(unitCard, {}, { now: NOW })).toBeNull();
+    expect(classifyTriageItem({ ...unitCard, customer_address_line2: null }, {}, { now: NOW })).toBeNull();
+    expect(classifyTriageItem({ ...unitCard, customer_address_line2: 'Unit 2' }, {}, { now: NOW }))
+      .toEqual({ action: 'resolve', rule: 'house_number_adopted' });
+  });
+
   test('an unrelated street sharing the house number does not settle the ask', () => {
     expect(classifyTriageItem(item({ customer_address_line1: '1250 Unrelated Avenue' }), {}, { now: NOW })).toBeNull();
     expect(classifyTriageItem(item({ customer_address_line1: '1250 Example Street', customer_zip: '34221' }), {}, { now: NOW })).toBeNull();
@@ -283,6 +294,10 @@ describe('heldConflictTaskDecision (verdict route)', () => {
     expect(d.file).toBe(true);
     expect(d.skippedReason).toBe('house_number_dispute_settled_reassign_held_booking');
     expect(d.heldUnassignedBookingId).toBe('ss-9');
+    // Every held visit (parent + follow-up) rides on the task.
+    const many = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, bookingCovered: true, heldUnassignedBookingIds: ['ss-9', 'ss-10'] });
+    expect(many.heldUnassignedBookingIds).toEqual(['ss-9', 'ss-10']);
+    expect(many.heldUnassignedBookingId).toBe('ss-9');
     expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['scheduling'], heldConflictPayload: held, heldUnassignedBookingId: 'ss-9' }).file).toBe(false);
   });
 

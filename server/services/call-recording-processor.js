@@ -10082,7 +10082,12 @@ const CallRecordingProcessor = {
     // writer, same CAS, same allowed-status fence and processing-claim
     // check as the reuse branch; the reuse branch then finds nothing left
     // to pull.
-    if (houseNumberDisputed && customerId) {
+    // …and only once a DURABLE card records the dispute (this pass's card
+    // landed or an earlier pass's still stands): pulling a technician with
+    // no card behind it leaves the office neither the dispute nor a
+    // reassignment task (codex r12 P1). Holding NEW side effects needs no
+    // card.
+    if (houseNumberDisputed && houseNumberConflictFiled && customerId) {
       try {
         await db.transaction(async (trx) => {
           const owned = await trx('call_log')
@@ -14061,7 +14066,7 @@ const CallRecordingProcessor = {
                     if (!disputeOwned) logger.info(`[call-proc] processing claim lost — dispute unassignments skipped for ${maskSid(callSid)} (the owner applies them)`);
                   }
                   const reuseDecision = disputeReuseDecision({
-                    disputed: houseNumberDisputed, owned: disputeOwned, attachedManualBooking: isAttachedManualBooking, technicianId: existing.technician_id,
+                    disputed: houseNumberDisputed, owned: disputeOwned && houseNumberConflictFiled, attachedManualBooking: isAttachedManualBooking, technicianId: existing.technician_id,
                   });
                   const reuseHeldForAddress = reuseDecision.holdNewSideEffects;
                   if (reuseHeldForAddress) disputeHeldReuse = true;

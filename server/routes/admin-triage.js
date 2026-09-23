@@ -630,7 +630,10 @@ router.post('/:id/apply-property-roles', async (req, res) => {
 // hold left in the UNASSIGNED pool (technician pulled, repairs skipped) —
 // coverage alone would resolve the card and strand it there; the task
 // files anyway, naming the visit to reassign and re-arm (codex r10 P1).
-function heldConflictTaskDecision({ verdict, wrongFields = [], heldConflictPayload = null, bookingCovered = false, liveOnFile = null, heldUnassignedBookingId = null } = {}) {
+function heldConflictTaskDecision({ verdict, wrongFields = [], heldConflictPayload = null, bookingCovered = false, liveOnFile = null, heldUnassignedBookingId = null, heldUnassignedBookingIds = null } = {}) {
+  const heldIdsIn = Array.isArray(heldUnassignedBookingIds)
+    ? heldUnassignedBookingIds.map(String).filter(Boolean)
+    : (heldUnassignedBookingId ? [String(heldUnassignedBookingId)] : []);
   const payload = heldConflictPayload && typeof heldConflictPayload === 'object' ? heldConflictPayload : null;
   const confirmed = !!payload && (payload.scheduling_window?.status === 'confirmed' || payload.scheduling_status === 'confirmed');
   // A Deny that marks the scheduling OR the service extraction wrong leaves
@@ -663,13 +666,14 @@ function heldConflictTaskDecision({ verdict, wrongFields = [], heldConflictPaylo
     heard_address: approvedAddress || payload.heard_address,
     ...(approvedWindow ? { scheduling_window: approvedWindow } : {}),
   } : null;
-  const heldBooking = !!heldUnassignedBookingId && !scheduleDenied;
+  const heldBooking = heldIdsIn.length > 0 && !scheduleDenied;
   return {
     confirmed,
     approvedPayload,
     approvedWindow,
     file: heldBooking || (confirmed && !scheduleDenied && !bookingCovered),
-    heldUnassignedBookingId: heldBooking ? heldUnassignedBookingId : null,
+    heldUnassignedBookingId: heldBooking ? heldIdsIn[0] : null,
+    heldUnassignedBookingIds: heldBooking ? heldIdsIn : [],
     skippedReason: heldBooking
       ? 'house_number_dispute_settled_reassign_held_booking'
       : (verdict === 'accept' ? 'address_confirmed_on_file_after_house_number_dispute' : 'house_number_dispute_denied_appointment_unbooked'),
@@ -725,17 +729,19 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
   // unassigned row of the call, which a reprocess may have made
   // obsolete (codex r11 P1).
   const heldIds = Array.isArray(heldConflictPayload.held_unassigned_booking_ids) ? heldConflictPayload.held_unassigned_booking_ids.map(String) : [];
-  const heldUnassigned = heldIds.length
+  // EVERY held visit (parent + AI follow-ups) rides on the task, not
+  // only the earliest (codex r12 P1).
+  const heldUnassignedRows = heldIds.length
     ? await trx('scheduled_services')
       .whereIn('id', heldIds)
       .whereIn('status', ['pending', 'confirmed'])
       .whereNull('technician_id')
       .orderBy('scheduled_date', 'asc')
-      .first('id')
-    : null;
+      .select('id')
+    : [];
   const decision = heldConflictTaskDecision({
     verdict, wrongFields, heldConflictPayload, liveOnFile, bookingCovered: evidence.get(item.id)?.booking_after_card === true,
-    heldUnassignedBookingId: heldUnassigned?.id || null,
+    heldUnassignedBookingIds: heldUnassignedRows.map((row) => String(row.id)),
   });
   if (decision.file) {
     const { buildTriageItem } = require('../services/call-routing-gates');
@@ -746,7 +752,10 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
         extraction: { meta: { call_summary: decision.summary }, scheduling: decision.approvedWindow || { status: 'confirmed' } },
         extraPayload: {
           skipped_reason: decision.skippedReason,
-          ...(decision.heldUnassignedBookingId ? { existing_scheduled_service_id: decision.heldUnassignedBookingId } : {}),
+          ...(decision.heldUnassignedBookingIds.length ? {
+            existing_scheduled_service_id: decision.heldUnassignedBookingIds[0],
+            existing_scheduled_service_ids: decision.heldUnassignedBookingIds,
+          } : {}),
           scheduling_window: decision.approvedWindow,
           // The same live-else-snapshot choice the decision made (a
           // blank live line falls back to the snapshot).
