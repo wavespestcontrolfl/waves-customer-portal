@@ -13937,11 +13937,11 @@ const CallRecordingProcessor = {
                       .forUpdate()
                       .first('id');
                     disputeOwned = !!ownedForDispute;
-                    if (!disputeOwned) logger.info(`[call-proc] processing claim lost — dispute unassignments skipped for ${callSid} (the owner applies them)`);
+                    if (!disputeOwned) logger.info(`[call-proc] processing claim lost — dispute unassignments skipped for ${maskSid(callSid)} (the owner applies them)`);
                   }
                   const reuseHeldForAddress = houseNumberDisputed;
                   if (reuseHeldForAddress) {
-                    logger.warn(`[call-proc] reused booking for ${callSid} kept unassigned and without a follow-up: house number disputed (on_file_house_number_conflict)`);
+                    logger.warn(`[call-proc] reused booking for ${maskSid(callSid)} kept unassigned and without a follow-up: house number disputed (on_file_house_number_conflict)`);
                   }
                   // An AI booking this call already ASSIGNED is still
                   // dispatchable to the disputed number: pull the
@@ -13968,17 +13968,17 @@ const CallRecordingProcessor = {
                     const pull = async (rowId, expectTechnicianId, label) => {
                       try {
                         await assignDispatchJob({ jobId: rowId, technicianId: null, actorId: null, emit: true, trx, expectTechnicianId, allowedStatuses: ['pending', 'confirmed'] });
-                        logger.warn(`[call-proc] ${label} ${rowId} unassigned for ${callSid}: house number disputed`);
+                        logger.warn(`[call-proc] ${label} ${rowId} unassigned for ${maskSid(callSid)}: house number disputed`);
                         return true;
                       } catch (pullErr) {
                         if (pullErr?.code === 'STATUS_NOT_ALLOWED') {
                           // Already underway: the technician keeps the job;
                           // the conflict card is the office's surface for it.
-                          logger.warn(`[call-proc] ${label} ${rowId} is underway for ${callSid}: left assigned despite the house-number dispute (office review)`);
+                          logger.warn(`[call-proc] ${label} ${rowId} is underway for ${maskSid(callSid)}: left assigned despite the house-number dispute (office review)`);
                           return false;
                         }
                         if (pullErr?.code === 'ASSIGNMENT_STALE' || pullErr?.status === 409 || pullErr?.statusCode === 409) {
-                          logger.warn(`[call-proc] ${label} ${rowId} kept its newer assignment for ${callSid}: ${pullErr.code || 'reassigned concurrently'}`);
+                          logger.warn(`[call-proc] ${label} ${rowId} kept its newer assignment for ${maskSid(callSid)}: ${pullErr.code || 'reassigned concurrently'}`);
                           return false;
                         }
                         throw pullErr;
@@ -14004,10 +14004,10 @@ const CallRecordingProcessor = {
                     for (const child of children) {
                       try {
                         await assignDispatchJob({ jobId: child.id, technicianId: null, actorId: null, emit: true, trx, expectTechnicianId: child.technician_id, allowedStatuses: ['pending', 'confirmed'] });
-                        logger.warn(`[call-proc] follow-up visit ${child.id} unassigned for ${callSid}: house number disputed`);
+                        logger.warn(`[call-proc] follow-up visit ${child.id} unassigned for ${maskSid(callSid)}: house number disputed`);
                       } catch (pullErr) {
                         if (pullErr?.code === 'STATUS_NOT_ALLOWED' || pullErr?.code === 'ASSIGNMENT_STALE' || pullErr?.status === 409 || pullErr?.statusCode === 409) {
-                          logger.warn(`[call-proc] follow-up visit ${child.id} kept its newer assignment for ${callSid}: ${pullErr.code || 'reassigned concurrently'}`);
+                          logger.warn(`[call-proc] follow-up visit ${child.id} kept its newer assignment for ${maskSid(callSid)}: ${pullErr.code || 'reassigned concurrently'}`);
                         } else {
                           throw pullErr;
                         }
