@@ -51,6 +51,18 @@ function signedSlotId({ estimateId, date, hhmm, techId, durationMinutes = 90 }) 
 describe('slot reservation helpers', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    // reserveSlot/commitReservation now await
+    // refreshCustomerBookingWindowConfig() (scheduling/customer-windows.js)
+    // before anything else and fail closed (SLOT_UNAVAILABLE) if that read
+    // has never succeeded (Codex push-audit P1 on #4663) — a default here
+    // so every test's own db mock only needs to cover the tables it
+    // actually cares about. Tests that install their own db.mockImplementation
+    // fall through to whatever was set before them (e.g. via
+    // db.getMockImplementation()) or use their own catch-all builder, both
+    // of which resolve 'booking_config' harmlessly too.
+    db.mockImplementation((table) => (
+      table === 'booking_config' ? { first: jest.fn().mockResolvedValue(undefined) } : undefined
+    ));
   });
 
   test('an admin-renamed catalog row never changes the visit CLASSIFICATION (codex r20 P1)', () => {
@@ -1887,5 +1899,51 @@ describe('releaseExpiredReservations', () => {
     // Pass 2: the DELETE is scoped to uncommitted holds only.
     expect(delChain.whereNull).toHaveBeenCalledWith('customer_id');
     expect(delChain.del).toHaveBeenCalled();
+  });
+});
+
+// Codex push-audit P1 on #4663: reserveSlot/commitReservation must fail
+// closed (SLOT_UNAVAILABLE) rather than admitting a window against the
+// guessed fixed constants when booking_config has NEVER been successfully
+// read — otherwise a fresh process whose first read fails would silently
+// treat every reservation as unrestricted (e.g. admitting an 11:00 booking
+// against a configured 11:00-12:00 lunch) until some later read succeeds.
+// Isolated in its own module registry (jest.resetModules()) so
+// customer-windows.js's cache genuinely starts unknown — the rest of this
+// file's tests establish a known (successful, if empty) config the moment
+// they run, and that cache is shared module state for the whole file.
+describe('reserveSlot/commitReservation fail closed when booking_config has never been read (push-audit P1 on #4663)', () => {
+  let isolatedDb;
+  let isolatedSlotReservation;
+
+  beforeEach(() => {
+    jest.resetModules();
+    isolatedDb = require('../models/db');
+    isolatedDb.mockImplementation((table) => {
+      if (table === 'booking_config') throw new Error('simulated booking_config read failure');
+      throw new Error(`unexpected table ${table}`);
+    });
+    isolatedSlotReservation = require('../services/slot-reservation');
+  });
+
+  test('reserveSlot rejects SLOT_UNAVAILABLE before any other query', async () => {
+    // The fail-closed check runs before parseSlotId/verifySlotOffer, so
+    // this never needs to be a validly-signed offer.
+    await expect(isolatedSlotReservation.reserveSlot({
+      estimateId: 'estimate-456', slotId: '2027-05-20_09-00_tech-1.exp.sig',
+    })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+    // Only the booking_config attempt — parseSlotId/verifySlotOffer and every
+    // later query never ran.
+    expect(isolatedDb).toHaveBeenCalledTimes(1);
+    expect(isolatedDb).toHaveBeenCalledWith('booking_config');
+  });
+
+  test('commitReservation rejects SLOT_UNAVAILABLE before any other query', async () => {
+    await expect(isolatedSlotReservation.commitReservation({
+      scheduledServiceId: 'scheduled-123', customerId: 'customer-1',
+      estimate: { id: 'estimate-456', service_interest: 'Pest Control' },
+    })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+    expect(isolatedDb).toHaveBeenCalledTimes(1);
+    expect(isolatedDb).toHaveBeenCalledWith('booking_config');
   });
 });

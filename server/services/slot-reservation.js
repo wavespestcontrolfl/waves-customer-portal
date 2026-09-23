@@ -43,7 +43,9 @@ const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 // under it before committing.
 const { acquireOccupancyLock, findConflictingVisits, findInterviewConflicts } = require('./scheduling/occupancy');
 const { capacityEnabled, placementFitsShift } = require('./scheduling/policy');
-const { overlapsLunch, refreshCustomerBookingWindowConfig, currentDayEndMinutes } = require('./scheduling/customer-windows');
+const {
+  overlapsLunch, refreshCustomerBookingWindowConfig, currentDayEndMinutes, bookingWindowConfigKnown,
+} = require('./scheduling/customer-windows');
 const { lockTechDays } = require('./scheduling/tech-day-lock');
 const { capacityError, prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder } = require('./scheduling/arrival-route');
 const { serviceDurationMinutes } = require('./service-library');
@@ -91,6 +93,24 @@ const MAX_HOLD_MINUTES = 60;
 // a legitimately offered slot can end up to 59 minutes past the 18:00 day
 // close. Allow exactly that much on the end-of-day check and no more.
 const ROUND_UP_GRACE_MINUTES = 59;
+
+// Fail closed rather than guess (push-audit P1 on #4663): every lunch/
+// day-end check below reads customer-windows.js's cache, which falls back
+// to the fixed 12:00-13:00/18:00 constants when booking_config has NEVER
+// been successfully read — a fresh process whose first read fails must not
+// silently treat every reservation as unrestricted (admitting an 11:00
+// booking against a configured 11:00-12:00 lunch, say) for the rest of
+// that failure. A cache that HAS seen a successful read keeps serving that
+// last-known-good value on a later failure instead (see
+// refreshCustomerBookingWindowConfig) and is not blocked here. Call this
+// AFTER awaiting refreshCustomerBookingWindowConfig().
+function requireKnownBookingWindowConfig(slotIdOrNull) {
+  if (bookingWindowConfigKnown()) return;
+  const err = new Error('scheduling configuration is temporarily unavailable — please try again');
+  err.code = 'SLOT_UNAVAILABLE';
+  if (slotIdOrNull) err.slotId = slotIdOrNull;
+  throw err;
+}
 
 // Slot IDs come from PR A's getAvailableSlots:
 //   `${date}_${startTime.replace(':', '-')}_${techId || 'unassigned'}`
@@ -626,6 +646,7 @@ async function reserveSlot({
   // every synchronous lunch/day-end check below — see
   // scheduling/customer-windows.js (Codex r1 P2s on #4663).
   await refreshCustomerBookingWindowConfig();
+  requireKnownBookingWindowConfig(slotId);
   const useCapacity = capacityEnabled();
   const parsed = parseSlotId(slotId);
   if (!parsed) {
@@ -1400,6 +1421,7 @@ async function commitReservation({
   // every synchronous lunch/day-end check below — see
   // scheduling/customer-windows.js (Codex r1 P2s on #4663).
   await refreshCustomerBookingWindowConfig();
+  requireKnownBookingWindowConfig();
   if (!trx && !preparedCapacity) preparedCapacity = await prepareReservationCommit(scheduledServiceId, {
     estimate, serviceMode, selectedFrequency, serviceCadences, durationMinutes,
   });
