@@ -11,7 +11,7 @@
 // numbers are context for the callback, not corrections. Returns null when
 // the roll vouched for the number or never answered (a GIS outage yields
 // no audit at all).
-function deriveAddressUnverified(enriched) {
+function deriveAddressUnverified(enriched, address = null) {
   const flags = Array.isArray(enriched?.fieldVerifyFlags) ? enriched.fieldVerifyFlags : [];
   const flag = flags.find((f) => f && f.field === 'address' && f.priority === 'HIGH' && f.reason);
   if (!flag) return null;
@@ -26,6 +26,11 @@ function deriveAddressUnverified(enriched) {
     house_number: audit.houseNumber != null ? String(audit.houseNumber) : null,
     street_exists: typeof audit.streetExists === 'boolean' ? audit.streetExists : null,
     nearest_numbers: nearest,
+    // The address the roll judged, so a later address edit on the lead
+    // (customer-address fanout, an operator) retires the flag on display
+    // without every correction path having to know about it (codex r2 P2).
+    address_line1: String(address?.line1 || '').trim() || null,
+    zip: zip5(address?.zip) || null,
     flagged_at: new Date().toISOString(),
   };
 }
@@ -59,6 +64,8 @@ function recoverAddressUnverified(snapshot) {
     house_number: flag.house_number != null ? String(flag.house_number).slice(0, 12) : null,
     street_exists: typeof flag.street_exists === 'boolean' ? flag.street_exists : null,
     nearest_numbers: Array.isArray(flag.nearest_numbers) ? flag.nearest_numbers.map(String).filter(Boolean).slice(0, 5) : [],
+    address_line1: typeof flag.address_line1 === 'string' ? flag.address_line1.slice(0, 120) : null,
+    zip: zip5(flag.zip) || null,
     flagged_at: typeof flag.flagged_at === 'string' ? flag.flagged_at : new Date().toISOString(),
   };
 }

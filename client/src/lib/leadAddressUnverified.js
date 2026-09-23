@@ -12,6 +12,11 @@ export function leadAddressUnverified(lead) {
   }
   const flag = data?.address_unverified;
   if (!flag || typeof flag !== 'object' || !flag.reason) return null;
+  // The flag names the address the roll judged; once the lead's address
+  // moved on (a correction fanout, an operator edit), the ask is stale and
+  // must not send staff to reconfirm a replaced address. An older flag
+  // with no stamped address still shows.
+  if (flag.address_line1 && !flagCoversLeadAddress(flag, lead)) return null;
   const nearest = Array.isArray(flag.nearest_numbers)
     ? flag.nearest_numbers.map(String).filter(Boolean)
     : [];
@@ -21,6 +26,17 @@ export function leadAddressUnverified(lead) {
     houseNumber: flag.house_number || null,
     nearestNumbers: nearest,
   };
+}
+
+const lineKey = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+const zip5 = (v) => (String(v || '').match(/\d{5}/) || [''])[0];
+
+function flagCoversLeadAddress(flag, lead) {
+  const leadLine = lineKey(String(lead?.address || '').split(',')[0]);
+  if (!leadLine || leadLine !== lineKey(flag.address_line1)) return false;
+  const a = zip5(flag.zip);
+  const b = zip5(lead?.zip) || zip5(lead?.address);
+  return !a || !b || a === b;
 }
 
 // One line for the card: the audit's OWN reason (a missing number, a number

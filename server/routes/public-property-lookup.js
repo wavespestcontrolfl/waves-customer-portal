@@ -439,7 +439,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
         // lead-address-unverified). Derived from the SERVER result, so an
         // abandoned row already carries the callback ask; /calculate
         // re-derives it (or recovers this one when its cache read misses).
-        address_unverified: deriveAddressUnverified(result.enriched),
+        address_unverified: deriveAddressUnverified(result.enriched, normalizedAddress),
       };
       await db('leads').where({ id: lead.id }).update({
         extracted_data: attachedToExistingLead

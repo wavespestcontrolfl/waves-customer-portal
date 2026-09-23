@@ -31,6 +31,9 @@ describe('deriveAddressUnverified', () => {
       nearest_numbers: ['1251', '1254', '1255'],
     });
     expect(typeof r.flagged_at).toBe('string');
+    expect(r).toMatchObject({ address_line1: null, zip: null });
+    const stamped = deriveAddressUnverified({ fieldVerifyFlags: [ADDRESS_FLAG], addressAudit: AUDIT }, { line1: ' 1260 Example St ', zip: '34219-1234' });
+    expect(stamped).toMatchObject({ address_line1: '1260 Example St', zip: '34219' });
   });
 
   test('a snapped-record audit (typed number resolved to a neighbour) is flagged the same way', () => {

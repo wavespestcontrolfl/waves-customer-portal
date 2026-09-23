@@ -18,6 +18,16 @@ describe('leadAddressUnverified', () => {
     expect(leadAddressUnverified({ extracted_data: JSON.stringify({ address_unverified: flag }) })?.houseNumber).toBe('1260');
   });
 
+  it('hides the flag once the lead address no longer matches the one the roll judged', () => {
+    const stamped = { ...flag, address_line1: '1260 Example St', zip: '34219' };
+    expect(leadAddressUnverified({ address: '1260 EXAMPLE ST., Parrish, FL 34219', zip: '34219', extracted_data: { address_unverified: stamped } })).not.toBeNull();
+    expect(leadAddressUnverified({ address: '1260 Example St', extracted_data: { address_unverified: stamped } })).not.toBeNull();
+    expect(leadAddressUnverified({ address: '1250 Example St, Parrish, FL 34219', zip: '34219', extracted_data: { address_unverified: stamped } })).toBeNull();
+    expect(leadAddressUnverified({ address: '1260 Example St', zip: '34221', extracted_data: { address_unverified: stamped } })).toBeNull();
+    // An older flag with no stamped address still shows.
+    expect(leadAddressUnverified({ address: '1250 Example St', extracted_data: { address_unverified: flag } })).not.toBeNull();
+  });
+
   it('is null for an unflagged, malformed, or missing lead', () => {
     expect(leadAddressUnverified({ extracted_data: {} })).toBeNull();
     expect(leadAddressUnverified({ extracted_data: { address_unverified: { county: 'Sample' } } })).toBeNull();

@@ -1193,7 +1193,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // recover the flag from THAT snapshot — ownership-predicated (id +
     // typed email, the same proof the UPDATE below uses) and only when the
     // snapshot is for this address (codex r1 P1).
-    let addressUnverified = trustedProfileFound ? deriveAddressUnverified(trustedTurf) : null;
+    let addressUnverified = trustedProfileFound ? deriveAddressUnverified(trustedTurf, normalizedAddress) : null;
     if (!trustedProfileFound && leadId && contactEmail) {
       try {
         const own = await db('leads')
