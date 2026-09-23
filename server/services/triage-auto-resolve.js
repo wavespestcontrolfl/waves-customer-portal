@@ -1097,6 +1097,9 @@ function loadCandidateItems(conn, itemIds = null) {
 const EVIDENCE_CODES = new Set([
   'quote_promised', 'email_unverified', 'caller_not_authorized', 'not_confirmed',
   ...ADDRESS_MOOT_CODES,
+  // house_number_adopted needs booking_after_card for a confirmed call
+  // (its booking is held on this very card).
+  'on_file_house_number_conflict',
 ]);
 
 // ── Evidence arms ───────────────────────────────────────────────────────

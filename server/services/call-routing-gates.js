@@ -264,6 +264,10 @@ const SCHEDULING_PAYLOAD_FLAGS = new Set([
   'missing_service_address', 'low_confidence_address', 'address_unverifiable',
   'address_unverified', 'address_validation_unavailable',
   'address_not_validated',
+  // The house-number disagreement card holds a confirmed booking too (the
+  // processor's booking hold), so it carries the ask the booking must
+  // answer before the sweep may close it (pre-push audit P1 on #4666).
+  'on_file_house_number_conflict',
 ]);
 
 // Address-review cards carry the address the call NAMED, snapshotted at

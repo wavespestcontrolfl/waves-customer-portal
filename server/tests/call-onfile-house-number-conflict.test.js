@@ -111,6 +111,10 @@ describe('on_file_house_number_conflict card', () => {
     expect(item.category).toBe('address_review');
     expect(item.severity).toBe('advisory');
     const payload = JSON.parse(item.payload);
+    // The card carries the scheduling ask a held confirmed booking must
+    // answer before the sweep may close it, and joins the evidence set.
+    expect(payload.scheduling_window).toEqual(expect.objectContaining({ status: 'none' }));
+    expect(require('../services/triage-auto-resolve').EVIDENCE_CODES.has('on_file_house_number_conflict')).toBe(true);
     expect(payload).toMatchObject({
       stated_street: '1250 Example Street',
       on_file_street: '1260 Example Street',
