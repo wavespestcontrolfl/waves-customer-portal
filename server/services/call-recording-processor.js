@@ -9830,12 +9830,27 @@ const CallRecordingProcessor = {
         || (canCompare && avPositive && corroborated && (!detected || knownIndependentProperty));
       if (houseConflict) houseNumberDisputed = true;
       if (houseConflict || retireStale) {
+        // The card's scheduling snapshot comes from the extraction that
+        // DRIVES booking in the current mode: V2 when it drives routing,
+        // else the legacy record (appointment_confirmed /
+        // preferred_date_time) — a shadow-mode V2 "none" over a confirmed
+        // legacy booking would file a card that looks unconfirmed and let
+        // an Accept drop the only trace of the appointment (codex r7 P1).
+        const schedulingAuthority = CALL_EXTRACTION_V2_DRIVES_ROUTING
+          ? v2CanonicalExtraction
+          : {
+            ...(v2CanonicalExtraction || {}),
+            scheduling: {
+              status: extracted?.appointment_confirmed ? 'confirmed' : (extracted?.preferred_date_time ? 'requested' : 'none'),
+              confirmed_start_at: extracted?.appointment_confirmed ? (extracted?.preferred_date_time || null) : null,
+            },
+          };
         const conflictCard = houseConflict
           ? buildTriageItem({
             callLogId: call.id,
             flag: 'on_file_house_number_conflict',
             onFileAddress,
-            extraction: v2CanonicalExtraction,
+            extraction: schedulingAuthority,
             severity: 'advisory',
             addressValidation: effectiveAddressValidation,
             // The stated unit rides on the card so the reviewer sees the
@@ -13885,100 +13900,41 @@ const CallRecordingProcessor = {
                   // confirms the address (codex r6 P1). A human's attached
                   // booking is never touched.
                   if (reuseHeldForAddress && !isAttachedManualBooking && existing.technician_id) {
-                    const dayRow = await trx('scheduled_services')
-                      .where({ id: existing.id })
-                      .first(trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
-                    if (dayRow?.day) {
-                      const { lockTechDays } = require('./scheduling/tech-day-lock');
-                      await lockTechDays(trx, [
-                        { techId: existing.technician_id, date: dayRow.day },
-                        { techId: null, date: dayRow.day },
-                      ]);
-                    }
-                    const [unassigned] = await trx('scheduled_services')
-                      .where({ id: existing.id })
-                      .whereIn('status', ['pending', 'confirmed'])
-                      .update({ technician_id: null, route_order: null, updated_at: new Date() })
-                      .returning('*');
-                    if (unassigned) {
-                      primaryRow = unassigned;
-                      logger.warn(`[call-proc] reused booking ${existing.id} unassigned for ${callSid}: house number disputed`);
-                      // Its AI-created follow-up child(ren) from an earlier
-                      // pass are just as dispatchable to the disputed
-                      // number — same fence, same pull (codex r6 P1).
-                      const children = await trx('scheduled_services')
-                        .where({ parent_service_id: existing.id, source_action: 'ai_call_pipeline_followup' })
-                        .whereNotNull('technician_id')
-                        .whereIn('status', ['pending', 'confirmed'])
-                        .select('id', 'technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
-                      for (const child of children) {
-                        if (child.day) {
-                          const { lockTechDays } = require('./scheduling/tech-day-lock');
-                          await lockTechDays(trx, [
-                            { techId: child.technician_id, date: child.day },
-                            { techId: null, date: child.day },
-                          ]);
+                    // Through the canonical assignment writer (codex r7 P1):
+                    // its technician CAS (expectTechnicianId) refuses to
+                    // overwrite a dispatcher's NEWER assignment, it holds the
+                    // tech-day fences itself, and it carries the socket /
+                    // notification side effects so clients drop the
+                    // disputed visit. A stale-assignment conflict means a
+                    // human moved it since — theirs stands, logged.
+                    const { assignDispatchJob } = require('./dispatch-assignment');
+                    const pull = async (rowId, expectTechnicianId, label) => {
+                      try {
+                        await assignDispatchJob({ jobId: rowId, technicianId: null, actorId: null, emit: true, trx, expectTechnicianId });
+                        logger.warn(`[call-proc] ${label} ${rowId} unassigned for ${callSid}: house number disputed`);
+                        return true;
+                      } catch (pullErr) {
+                        if (pullErr?.code === 'ASSIGNMENT_STALE' || pullErr?.status === 409 || pullErr?.statusCode === 409) {
+                          logger.warn(`[call-proc] ${label} ${rowId} kept its newer assignment for ${callSid}: ${pullErr.code || 'reassigned concurrently'}`);
+                          return false;
                         }
-                        await trx('scheduled_services')
-                          .where({ id: child.id })
-                          .whereIn('status', ['pending', 'confirmed'])
-                          .update({ technician_id: null, route_order: null, updated_at: new Date() });
-                        logger.warn(`[call-proc] follow-up visit ${child.id} unassigned for ${callSid}: house number disputed`);
+                        throw pullErr;
                       }
-                      if (trx?.executionPromise) {
-                        const seamRowId = existing.id;
-                        trx.executionPromise
-                          .then(() => require('./visit-groups').handleChildStopChanged(seamRowId))
-                          .catch((vgErr) => logger.warn(`[call-proc] visit-group seam failed for ${seamRowId}: ${vgErr.message}`));
-                      }
+                    };
+                    if (await pull(existing.id, existing.technician_id, 'reused booking')) {
+                      const refreshed = await trx('scheduled_services').where({ id: existing.id }).first();
+                      if (refreshed) primaryRow = refreshed;
                     }
-                  }
-                  if (!isAttachedManualBooking && !existing.technician_id && defaultTechnicianId && !reuseHeldForAddress) {
-                    // Tech-day membership fence + route_order clear (uncapped
-                    // audit r26 P1): unassigned → tech is a tech-day ENTRY,
-                    // so it must hold the same 'slot-reserve' fence every
-                    // other membership writer holds, and any unassigned-pool
-                    // sequence number is meaningless in the tech's run. Day
-                    // key from PG itself (to_char) like the other holders.
-                    const dayRow = await trx('scheduled_services')
-                      .where({ id: existing.id })
-                      .first(trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
-                    if (dayRow?.day) {
-                      const { lockTechDays } = require('./scheduling/tech-day-lock');
-                      await lockTechDays(trx, [
-                        { techId: null, date: dayRow.day },
-                        { techId: defaultTechnicianId, date: dayRow.day },
-                      ]);
-                    }
-                    // Re-checked FOR SHARE on the writing trx: the default tech was
-                    // resolved before this transaction opened. If eligibility
-                    // changed, leave the reused row unassigned rather than assign.
-                    let reuseTechId = defaultTechnicianId;
-                    try {
-                      await assertAssignableTechnician(reuseTechId, { conn: trx });
-                    } catch (eligErr) {
-                      if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
-                      logger.warn(`[call-proc] default technician ${reuseTechId} is no longer assignable; leaving reused booking unassigned`);
-                      reuseTechId = null;
-                    }
-                    const [updatedExisting] = reuseTechId
-                      ? await trx('scheduled_services')
-                        .where({ id: existing.id })
-                        .update({ technician_id: reuseTechId, route_order: null, updated_at: new Date() })
-                        .returning('*')
-                      : [existing];
-                    if (reuseTechId && updatedExisting) reuseAssignedTechId = reuseTechId;
-                    primaryRow = updatedExisting || existing;
-                    // Visit-group seam (visit-group-scope.md §2; codex #3590
-                    // r12): this direct assignment bypasses assignDispatchJob,
-                    // so a manually grouped row would go assigned while its
-                    // parent/siblings stayed unassigned. Same after-commit
-                    // pattern as dispatch-assignment's own seam; best-effort.
-                    if (trx?.executionPromise) {
-                      const seamRowId = existing.id;
-                      trx.executionPromise
-                        .then(() => require('./visit-groups').handleChildStopChanged(seamRowId))
-                        .catch((vgErr) => logger.warn(`[call-proc] visit-group seam failed for ${seamRowId}: ${vgErr.message}`));
+                    // Its AI-created follow-up child(ren) from an earlier
+                    // pass are just as dispatchable to the disputed number —
+                    // same writer, same CAS (codex r6 P1).
+                    const children = await trx('scheduled_services')
+                      .where({ parent_service_id: existing.id, source_action: 'ai_call_pipeline_followup' })
+                      .whereNotNull('technician_id')
+                      .whereIn('status', ['pending', 'confirmed'])
+                      .select('id', 'technician_id');
+                    for (const child of children) {
+                      await pull(child.id, child.technician_id, 'follow-up visit');
                     }
                   }
                   // A reused appointment still closed the deal: reprocessing a

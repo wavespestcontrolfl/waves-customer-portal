@@ -787,10 +787,20 @@ router.post('/:id/verdict', async (req, res) => {
 
       if (verdict === 'accept' && heldConflictConfirmed
         && resolvedRows.some((r) => r?.reason_code === 'on_file_house_number_conflict')) {
-        const liveBooking = await trx('scheduled_services')
-          .where({ source_call_log_id: item.call_log_id })
-          .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site', 'completed'])
-          .first('id');
+        // The same service / window / address coverage the sweep's booking
+        // evidence applies — an unrelated older booking sharing this call
+        // (a reprocess moved the service, date or property) must not stand
+        // in for the appointment the card holds (codex r7 P1). The loader
+        // reads the call's customer itself; with its gate off it yields no
+        // evidence, so the task card files (fail closed).
+        const { loadEvidence } = require('../services/triage-auto-resolve');
+        const callRow = await trx('call_log').where({ id: item.call_log_id }).first('customer_id');
+        const heldItem = {
+          id: item.id, reason_code: 'on_file_house_number_conflict', status: 'open',
+          created_at: item.created_at, payload: heldConflictPayload, call_customer_id: callRow?.customer_id || null,
+        };
+        const evidence = await loadEvidence(trx, [heldItem]).catch(() => new Map());
+        const liveBooking = evidence.get(item.id)?.booking_after_card === true;
         if (!liveBooking) {
           const { buildTriageItem } = require('../services/call-routing-gates');
           await trx('triage_items')
