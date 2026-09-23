@@ -1592,3 +1592,115 @@ it('P2 (:2990): form inputs are frozen while the submit-time gate re-probe is in
   const body = JSON.parse(writes()[0][1].body);
   expect(body.notes).toBe('Existing note');
 });
+
+// ---------------------------------------------------------------------
+// GitHub Codex round 13 on #4657.
+// P0 (admin-schedule.js:10660) + P2 (SchedulePage.jsx:4888): when the
+// primary gross is unknown (primary_line_price NULL) and a stored discount
+// sits ANYWHERE on the visit, the server refuses every discount-term
+// change with LEGACY_PRIMARY_GROSS_UNKNOWN — so the appointment Discount
+// picker and every add-on Line discount picker must lock up front, never
+// let the operator complete a confirmed-looking edit that fails at the PUT.
+// ---------------------------------------------------------------------
+
+const legacyApptDiscountVisit = {
+  ...baseService,
+  serviceAddons: [],
+  primaryLinePrice: null,
+  estimatedPrice: 90,
+  discountType: 'fixed_amount', discountAmount: 10,
+};
+// The P0 shape: no parent-level discount at all — the stored discount
+// lives on an existing add-on with a known base_price.
+const legacyAddonDiscountVisit = {
+  ...baseService,
+  primaryLinePrice: null,
+  estimatedPrice: 190,
+  serviceAddons: [
+    {
+      id: 'addon-1', serviceId: 'svc-mosquito', serviceName: 'Monthly Mosquito', serviceKey: 'mosquito_monthly',
+      serviceCategory: 'mosquito', basePrice: 100, estimatedPrice: 90, discountId: 'disc-military',
+      discountName: 'Military Discount', discountType: 'fixed_amount', discountAmount: 10, discountDollars: 10,
+      estimatedDuration: 30,
+    },
+  ],
+};
+
+it('round 13 P2 (:4888): gate ON, a legacy visit with NULL primary gross and a stored APPOINTMENT discount locks the appointment Discount picker with a 14px notice', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service: legacyApptDiscountVisit }));
+  render(<Harness service={legacyApptDiscountVisit} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(apptDiscountSelect()).toBeDisabled());
+  const notice = screen.getByText(/Discounts can't be changed on this legacy visit/);
+  expect(notice.style.fontSize).toBe('14px');
+  expect(screen.getByRole('button', { name: 'Add discount' })).toBeDisabled();
+});
+
+it('round 13 P0 (:10660): gate ON, a legacy visit with NULL primary gross and a stored ADD-ON discount (no parent discount) locks the appointment picker AND the add-on line picker', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service: legacyAddonDiscountVisit }));
+  render(<Harness service={legacyAddonDiscountVisit} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(apptDiscountSelect()).toBeDisabled());
+  // No picker is wired for the add-on line at all — nothing can post a
+  // changed term for it.
+  expect(screen.queryByRole('combobox', { name: 'Line discount for Monthly Mosquito' })).not.toBeInTheDocument();
+  expect(screen.getAllByText(/Discount can't be changed on this legacy line/).length).toBeGreaterThan(0);
+});
+
+it('round 13 (:4888) gate-off parity: the same legacy shape leaves the appointment Discount picker enabled with no notice', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: false, service: legacyApptDiscountVisit }));
+  render(<Harness service={legacyApptDiscountVisit} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  expect(apptDiscountSelect()).toBeEnabled();
+  expect(screen.queryByText(/Discounts can't be changed on this legacy visit/)).not.toBeInTheDocument();
+});
+
+// P2 (:3011): a field edited while the save-time gate re-probe is pending
+// is not in the awaiting closure's payload — the save must refuse rather
+// than silently post the pre-edit value and close the modal.
+it('round 13 P2 (:3011): a Date edit made while the save-time gate probe is pending aborts the save instead of posting the stale date', async () => {
+  let stackingCalls = 0;
+  let releaseProbe;
+  const probeGate = new Promise((resolve) => { releaseProbe = resolve; });
+  vi.stubGlobal('fetch', vi.fn(async (url, options) => {
+    if (url.endsWith('/admin/discounts/stacking')) {
+      stackingCalls += 1;
+      // Mount probe answers at once; the save-time re-probe hangs until
+      // the test releases it.
+      if (stackingCalls > 1) await probeGate;
+      return { ok: true, json: async () => ({ enabled: true }) };
+    }
+    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => DISCOUNTS };
+    if (url.includes('/update-details/preview')) {
+      return { ok: true, json: async () => computeMockPreview(JSON.parse(options.body), baseService, DISCOUNTS) };
+    }
+    return { ok: true, json: async () => ({}) };
+  }));
+  vi.spyOn(window, 'alert').mockImplementation(() => {});
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  await waitFor(() => expect(stackingCalls).toBeGreaterThanOrEqual(2));
+  // The Date control is not frozen by `saving` — the operator moves the
+  // visit while the probe is still out.
+  fireEvent.change(labeledControl('Date'), { target: { value: '2035-01-09' } });
+  await act(async () => { releaseProbe(); });
+  await waitFor(() => expect(window.alert).toHaveBeenCalledWith(
+    expect.stringContaining('Something changed while the discount setting was being checked'),
+  ));
+  expect(writes()).toHaveLength(0);
+  // The modal stays open with the operator's edit intact.
+  expect(labeledControl('Date').value).toBe('2035-01-09');
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeEnabled());
+});
+
+it('round 13 P2 (:3011): an untouched form during the probe still saves normally (the guard only fires on drift)', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  await waitFor(() => expect(writes()).toHaveLength(1));
+});

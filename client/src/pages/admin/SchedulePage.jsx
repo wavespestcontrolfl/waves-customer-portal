@@ -2962,6 +2962,32 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     return { cleanLines, sendAddons, addonsPayload };
   };
 
+  // GitHub Codex round 13 on #4657 (P2 @ :3011): handleSave awaits the
+  // gate re-probe below with the payload still to be built from THIS
+  // render's closure. Only the service/price/discount/notes controls are
+  // frozen by `saving` — date, time, technician, duration, recurrence,
+  // series scope and add/remove-service stay live, so an edit made while
+  // a slow probe is pending would be silently dropped: the old closure
+  // resumes, posts its pre-edit values, and closes the modal. Rather than
+  // chase every control with a disabled prop, every state the payload
+  // reads is snapshotted here each render; the await compares the
+  // snapshot it started with against the latest one and refuses to post
+  // a payload the operator has since changed.
+  const saveInputsRef = useRef(null);
+  saveInputsRef.current = {
+    // seriesPreview itself is a fresh object every render (hook return) —
+    // the payload reads only its `preview`, so that is what is compared.
+    form, selectedPropertyId, notificationType, serviceLines, seriesPreviewValue: seriesPreview.preview,
+    isRecurring, recurringFreq, recurringCount, recurringOngoing, seriesSummary,
+    recurringNth, recurringWeekday, recurringIntervalDays, skipWeekends, weekendShift,
+    discountType, discountAmount, discountPresetId, createInvoice, assignmentScope,
+    priceServiceScope, timeOnSiteMinutes, reentryExterior, reentryInterior,
+  };
+  const saveInputsDrifted = (before) => {
+    const after = saveInputsRef.current;
+    return Object.keys(before).some((k) => !Object.is(before[k], after[k]));
+  };
+
   const handleSave = async ({ takePayment = false } = {}) => {
     if (stackingUnconfirmedBlocksSave) return;
     if (lineDiscountPriceMissing) return;
@@ -3007,11 +3033,20 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     const primaryLineDiscountGateSensitive = !!service.lineDiscountType;
     const prepayGateSensitive = service.prepaidAmount != null && Number(service.prepaidAmount) > 0;
     if (appointmentDiscountSelected || lineDiscountGateSensitive || primaryLineDiscountGateSensitive || prepayGateSensitive) {
+      const inputsAtClick = saveInputsRef.current;
       const fresh = await ensureStackingFresh();
       if (!fresh.known || fresh.enabled !== stackingEnabled) {
         savingRef.current = false;
         setSaving(false);
         alert("The discount-stacking setting changed while this was open. Reload before saving so the totals match what will be saved.");
+        return;
+      }
+      // Round 13 P2 (:3011): a field edited while that probe was pending
+      // is not in this closure's payload — never post it silently.
+      if (saveInputsDrifted(inputsAtClick)) {
+        savingRef.current = false;
+        setSaving(false);
+        alert("Something changed while the discount setting was being checked. Review the form and save again.");
         return;
       }
     }
@@ -3620,6 +3655,27 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // PRIMARY line's gross specifically, per the preview response contract).
   const primaryGrossUnknown =
     primaryGrossUnknownClient || (moneyPreviewFresh && moneyPreview.legacyGrossUnknown === true);
+  // GitHub Codex round 13 on #4657 (P0 @ admin-schedule.js:10660, P2 @
+  // :4888): the server refuses canonical adoption (LEGACY_PRIMARY_GROSS_
+  // UNKNOWN) whenever the primary gross is unknown AND a stored discount
+  // sits ANYWHERE on the visit — appointment level, the primary line, or
+  // any existing add-on — because the primary figure this modal posts was
+  // derived from a stored total that already has that discount baked in.
+  // Any discount-term change would trip it, so every control that can
+  // change a term (the appointment Discount picker and each add-on's Line
+  // discount picker) locks for that shape — never a confirmed-looking
+  // edit that only fails at the PUT. Client shape first (works before any
+  // preview response), the server's own flag as the backstop.
+  const visitGrossUnknownClient =
+    service.primaryLinePrice == null
+    && (
+      !!service.lineDiscountType
+      || (!!service.discountType && service.discountAmount != null)
+      || serviceLines.some((l) => !!l?._origDiscountType)
+    );
+  const visitDiscountsLocked =
+    stackingEnabled
+    && (visitGrossUnknownClient || (moneyPreviewFresh && moneyPreview.legacyGrossUnknown === true));
   // Subtotal's add-on share. GATE_DISCOUNT_STACKING (slice 7): lineGrossFor
   // reads a discounted line's true GROSS (never its net) so an untouched
   // stamped line doesn't get double-discounted; every other line is
@@ -4728,12 +4784,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     // :2349): a gross-unknown line's picker is never wired
                     // up at all — no path can post its stored net as a
                     // fresh discount's basePrice.
-                    onLineDiscount: stackingEnabled && !lineGrossUnknownAt(idx)
+                    onLineDiscount: stackingEnabled && !lineGrossUnknownAt(idx) && !visitDiscountsLocked
                       ? (presetId) => setLineDiscount(line._key, presetId)
                       : null,
                     lineDiscountOptions: lineDiscountOptionsFor(line),
                     lineDiscountDollars: lineDiscountDollarsAt(idx),
-                    lineDiscountLocked: stackingEnabled && lineGrossUnknownAt(idx),
+                    lineDiscountLocked: stackingEnabled && (lineGrossUnknownAt(idx) || visitDiscountsLocked),
                   })}
                 </div>,
               )}
@@ -4855,7 +4911,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   onClick={() =>
                     setDiscountPresetId(discountPresetId || "custom")
                   }
-                  disabled={saving}
+                  disabled={saving || visitDiscountsLocked}
                   className="font-medium"
                   style={{
                     padding: "9px 12px",
@@ -4885,7 +4941,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   <select
                     value={discountPresetId}
                     onChange={(e) => applyDiscountPreset(e.target.value)}
-                    disabled={saving}
+                    disabled={saving || visitDiscountsLocked}
                     className="font-medium"
                     style={inputStyle}
                   >
@@ -4901,6 +4957,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     ))}
                     <option value="custom">Custom</option>{" "}
                   </select>{" "}
+                  {visitDiscountsLocked && (
+                    // 14px floor (AGENTS.md/CLAUDE.md).
+                    <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
+                      Discounts can't be changed on this legacy visit until its
+                      primary price is re-entered.
+                    </div>
+                  )}
                 </div>
                 {discountPresetId === "custom" && (
                   <>
@@ -4911,7 +4974,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                       <select
                         value={discountType}
                         onChange={(e) => setDiscountType(e.target.value)}
-                        disabled={saving}
+                        disabled={saving || visitDiscountsLocked}
                         className="font-medium"
                         style={inputStyle}
                       >
@@ -4935,7 +4998,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                           step={discountType === "percentage" ? 1 : 0.01}
                           value={discountAmount}
                           onChange={(e) => setDiscountAmount(e.target.value)}
-                          disabled={saving}
+                          disabled={saving || visitDiscountsLocked}
                           className="font-medium"
                           style={inputStyle}
                         />{" "}

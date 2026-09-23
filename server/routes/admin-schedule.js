@@ -10651,13 +10651,23 @@ async function computeUpdateDetailsFinancialPlan({
         // turns this into the actual refusal (LEGACY_PRIMARY_GROSS_UNKNOWN)
         // after its own call site below; the preview route surfaces it as
         // `legacyGrossUnknown` so the client can disable the control
-        // before the operator ever reaches a save. A row with no stored
-        // discount at all is unaffected (net === gross there, adoption
-        // stays correct), matching legacyPreservationCandidate's own
-        // scope.
+        // before the operator ever reaches a save. GitHub Codex round 13
+        // P0 (#4657, :10660): a stored discount on any EXISTING ADD-ON row
+        // hides the primary gross the same way a parent-level one does —
+        // $100 primary (NULL primary_line_price) + a $100 add-on stored net
+        // $90 totals $190, the modal derives the primary as $190 - $100 =
+        // $90, and changing that add-on's term would adopt canonical
+        // pricing off the false $90. existingAddonDiscountRows is loaded
+        // unconditionally above (same rows discountedAddonRowDeleted reads),
+        // so it is the source here too. A row with no discount ANYWHERE —
+        // parent, primary line, or any existing add-on — is unaffected
+        // (net === gross throughout, adoption stays correct), matching
+        // legacyPreservationCandidate's own scope.
+        const anyExistingAddonDiscounted = existingAddonDiscountRows
+          .some((r) => !!(r.discount_id || r.discount_type));
         legacyPrimaryGrossUnknown = adoptCanonicalPricing
           && (existing?.primary_line_price == null || existing.primary_line_price === '')
-          && (!!existing?.discount_type || !!existing?.line_discount_type);
+          && (!!existing?.discount_type || !!existing?.line_discount_type || anyExistingAddonDiscounted);
         const {
           financials, primaryNet, canonicalRestackedAddonDollars: canonicalDollars, capsSnapshotToPersist,
           restackedPrimaryLineDiscountDollars, canonicalPricingApplied,

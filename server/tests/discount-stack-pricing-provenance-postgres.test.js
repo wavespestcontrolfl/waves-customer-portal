@@ -1508,6 +1508,50 @@ postgres('discount-stacking pricing_provenance — real Postgres round trip (Pos
     }
   });
 
+  // GitHub Codex round 13 P0 (#4657, :10660): the round-12 refusal only
+  // looked at a PARENT-level stored discount. The same trap exists when
+  // the stored discount lives on an EXISTING ADD-ON instead — the modal
+  // derives the primary from the stored total ($190 - $100 = $90, not
+  // the real $100) and changing that add-on's term would adopt canonical
+  // pricing off the false gross, underpricing the visit by $10.
+  test('PUT /:id/update-details (planner, real rows): a legacy visit with NULL primary_line_price, NO parent discount, and a DISCOUNTED add-on refuses canonical adoption when that add-on\'s discount changes', async () => {
+    process.env.GATE_DISCOUNT_STACKING = 'true';
+    try {
+      const id = randomUUID();
+      const addonRowId = randomUUID();
+      // Stored: $100 primary (gross UNKNOWN — NULL primary_line_price, no
+      // parent-level discount at all), one $100 add-on stored net $90 via
+      // its own $10 fixed discount, total $190.
+      await mockPg('scheduled_services').insert({
+        id, scheduled_date: '2099-09-21', service_type: 'Fixture Round-13 Legacy Add-On Discount',
+        primary_line_price: null, estimated_price: 190,
+      });
+      await mockPg('scheduled_service_addons').insert({
+        id: addonRowId, scheduled_service_id: id, service_name: 'Fixture Discounted Add-On',
+        base_price: 100, estimated_price: 90,
+        discount_type: 'fixed_amount', discount_amount: 10, discount_dollars: 10,
+      });
+      const updates = {};
+      // The modal derives the primary as total - add-on gross = $90 (the
+      // add-on's discount is already baked into the $190), then the
+      // operator changes the add-on's discount ($10 -> $20).
+      const plan = await computeUpdateDetailsFinancialPlan({
+        db: mockPg, id, updates, primaryLinePrice: 90,
+        addons: [{
+          id: addonRowId, serviceName: 'Fixture Discounted Add-On', basePrice: 100,
+          discountType: 'fixed_amount', discountAmount: 20, lineDiscountFresh: true,
+        }],
+        appointmentDiscountPreset: null, appointmentDiscountChanged: false, appointmentDiscountCols: null,
+        presetEligibilityCheck: async () => {},
+      });
+      expect(plan.legacyPrimaryGrossUnknown).toBe(true);
+      // Never stamped canonical off the guessed $90 primary.
+      expect(hasPricingRegimeMarker(updates)).toBe(false);
+    } finally {
+      delete process.env.GATE_DISCOUNT_STACKING;
+    }
+  });
+
   // GitHub Codex round 12 P1 (#4657, :9970): the save transaction
   // REPLACES every add-on row (delete + reinsert), so a submitted
   // existing-row id absent from this visit means another editor's save
