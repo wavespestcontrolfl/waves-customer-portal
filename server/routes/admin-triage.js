@@ -704,6 +704,12 @@ router.post('/:id/verdict', async (req, res) => {
     if (item.reason_code === 'reschedule_link_promise') {
       return res.status(400).json({ error: 'This card is a parked reschedule-link promise, not a call verdict — use Resolve or Dismiss instead.' });
     }
+    // An owed follow-up visit is booked by hand and settled by its own
+    // Resolve — a call verdict says nothing about visit 2 and the bulk
+    // resolve below leaves this card out on purpose (codex r10 P1).
+    if (item.reason_code === 'attached_booking_followup_unbooked') {
+      return res.status(400).json({ error: 'This card is an owed follow-up visit, not a call verdict — book the follow-up and use Resolve instead.' });
+    }
 
     // Call-level compare-and-swap: resolve ALL open triage rows for this call in
     // one update. The affected-row count is the win check — the first verdict
