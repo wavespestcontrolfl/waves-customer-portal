@@ -2633,6 +2633,10 @@ async function createSelfBooking(payload = {}) {
             .whereRaw('LOWER(email) = ?', [String(new_customer.email).toLowerCase().trim()])
             .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneDigits.slice(-10)])
             .whereRaw("(extracted_data->'address_unverified' IS NOT NULL OR extracted_data->'address_verdict' IS NOT NULL)")
+            // Row-locked like the direct-lead read: a /calculate committing
+            // a flag on one of these rows serializes behind this booking
+            // rather than landing between the read and the insert.
+            .forUpdate()
             .select('extracted_data');
           // A NEWER clean verdict for this premise (a later run, possibly on
           // a different lead row) supersedes an older lead's flag — repeat
