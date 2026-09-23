@@ -566,7 +566,26 @@ async function markEstimateManuallyAccepted({
     if (annualPrepaySelected) {
       let customerLivePreservesMembership = false;
       if (estimate.customer_id) {
-        const linkedCustomer = await trx('customers').where({ id: estimate.customer_id }).first();
+        // LOCKED, not a bare read (codex pre-push P0): an unlocked peek here
+        // could pass on stale data while a concurrent membership activation
+        // commits between this read and convertEstimate's own customer lock
+        // below — convertEstimate would then preserve the NOW-live
+        // membership after this guard already let prepay_annual through.
+        // Same order convertEstimate itself uses ahead of its customer lock
+        // (property-preferences advisory BEFORE the row lock — codex #3565
+        // gh-r39, estimate-converter.js), with customer-comms already held
+        // from above: acquiring the row lock HERE, earlier, is safe and
+        // reentrant — convertEstimate's later advisory/comms/row
+        // re-acquisition on this same transaction is a no-op against locks
+        // this transaction already holds, and no new cross-transaction lock
+        // order is introduced (comms is already taken before this point in
+        // the unmodified function, and convertEstimate's own comment
+        // documents advisory-before-row as the global order).
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['property-preferences', String(estimate.customer_id)],
+        );
+        const linkedCustomer = await trx('customers').where({ id: estimate.customer_id }).forUpdate().first();
         customerLivePreservesMembership = !!(linkedCustomer && customerPreservesMonthlyMembership(linkedCustomer));
       }
       if (estimateDataMembershipSnapshotIsExistingCustomer(estimate) || customerLivePreservesMembership) {
