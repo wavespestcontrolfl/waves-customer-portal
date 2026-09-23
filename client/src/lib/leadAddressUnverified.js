@@ -35,7 +35,8 @@ const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z]/g, '');
 // Street line with a trailing inline unit stripped ("1260 Example St Apt
 // 4" → "1260 example st"), mirroring the server's unit-insensitive
 // comparison: the audited house number is the same with or without it.
-const UNIT_TAIL = /\s+(?:#|apt|apartment|unit|ste|suite|bldg|building|lot|rm|room|fl|floor|spc|space)\.?\s*[a-z0-9-]+\s*$/i;
+// A named designator may carry a '#' before its value ("Apt #4").
+const UNIT_TAIL = /\s+(?:#|(?:apt|apartment|unit|ste|suite|bldg|building|lot|rm|room|fl|floor|spc|space)\.?\s*#?)\s*[a-z0-9-]+\s*$/i;
 // Suffix aliases mirror the server's canonical forms (St == Street).
 const SUFFIX_ALIASES = {
   street: 'st', avenue: 'ave', drive: 'dr', road: 'rd', lane: 'ln', court: 'ct', boulevard: 'blvd',

@@ -1447,7 +1447,7 @@ function seededRowPin(row, offerLat, offerLng) {
 const ADDRESS_UNVERIFIED_REFUSAL = () => ({
   ok: false,
   status: 409,
-  code: 'address_unverified',
+  code: 'ADDRESS_UNVERIFIED',
   error: 'County records could not confirm this house number. Our office will verify the address with you before scheduling.',
 });
 
@@ -4900,6 +4900,9 @@ router.post('/confirm', bookingConfirmLimiter, bookingConfirmDailyLimiter, async
     if (!result.ok) {
       return res.status(result.status).json({
         error: result.error,
+        // The documented conflict code (ADDRESS_UNVERIFIED and the slot
+        // races) so clients can tell this 409 from the others.
+        ...(result.code ? { code: result.code } : {}),
         // Customers-only refusal carries its forward action (the quote
         // wizard) so the client never renders a dead end.
         ...(result.customersOnly ? { customersOnly: true, quoteUrl: result.quoteUrl } : {}),

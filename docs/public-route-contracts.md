@@ -917,7 +917,7 @@ can recover it. A bare `/book?lead=<id>` link (a run that minted no draft
 carries no handoff token) is enforced at `/api/booking/confirm` too: when
 the lead named by `lead` carries a server-written `address_unverified`
 flag that covers the submitted premise, the booking is refused with 409
-`address_unverified` — the lead id stays untrusted for identity (a forged
+`code: "ADDRESS_UNVERIFIED"` — the lead id stays untrusted for identity (a forged
 id can only block a booking at a flagged premise, never enable one). A
 token-verified pricing handoff (`pricing_estimate_id` + `estimate_token`)
 whose draft carries `addressUnverified: true` is refused the same way,
