@@ -123,3 +123,81 @@ describe('customerOfferGrid / overlapsLunch (the two gate-aware predicates every
     expect(overlapsLunch(12 * 60, 13 * 60)).toBe(false);
   });
 });
+
+describe('refreshCustomerBookingWindowConfig / currentLunchInterval / currentDayEndMinutes (Codex r1 P2s on #4663 — one booking_config authority)', () => {
+  // booking.js (bookingSlotWindow) and the assistant's availability engine
+  // already read booking_config.lunch_start/_end and .day_end, falling back
+  // to the fixed constants above; the estimate picker and slot-reservation
+  // used to read ONLY the fixed constants, which could disagree with an
+  // owner-configured interval or a preserved (non-18:00) day_end override.
+  let dbMock;
+  let customerWindows;
+  const ENV_KEY = 'GATE_BOOKING_LUNCH_BLOCK';
+  let previousGate;
+
+  beforeEach(() => {
+    previousGate = process.env[ENV_KEY];
+    jest.resetModules();
+    jest.doMock('../models/db', () => jest.fn());
+    dbMock = require('../models/db');
+    customerWindows = require('../services/scheduling/customer-windows');
+  });
+  afterEach(() => {
+    if (previousGate === undefined) delete process.env[ENV_KEY];
+    else process.env[ENV_KEY] = previousGate;
+    jest.dontMock('../models/db');
+  });
+
+  function mockConfig(row) {
+    dbMock.mockImplementation((table) => {
+      if (table !== 'booking_config') throw new Error(`unexpected table ${table}`);
+      return { first: jest.fn().mockResolvedValue(row) };
+    });
+  }
+
+  test('before any refresh, the fixed constants apply', () => {
+    expect(customerWindows.currentDayEndMinutes()).toBe(18 * 60);
+    expect(customerWindows.currentLunchInterval()).toEqual({ startMinutes: 12 * 60, endMinutes: 13 * 60 });
+  });
+
+  test('reads booking_config.day_end + lunch_start/_end into the cache', async () => {
+    mockConfig({ lunch_start: '11:30:00', lunch_end: '12:30:00', day_end: '16:00:00' });
+    await customerWindows.refreshCustomerBookingWindowConfig();
+    expect(customerWindows.currentDayEndMinutes()).toBe(16 * 60);
+    expect(customerWindows.currentLunchInterval()).toEqual({ startMinutes: 11 * 60 + 30, endMinutes: 12 * 60 + 30 });
+  });
+
+  test('a configured lunch interval (not 12:00-13:00) changes which grid hours the lunch gate removes', async () => {
+    process.env[ENV_KEY] = 'true';
+    mockConfig({ lunch_start: '11:00:00', lunch_end: '12:00:00', day_end: '18:00:00' });
+    await customerWindows.refreshCustomerBookingWindowConfig();
+    // 11:00-12:00 overlaps the configured interval and leaves the grid;
+    // 12:00-13:00 (the old fixed interval) no longer does.
+    expect(customerWindows.customerOfferGrid()).not.toContain('11:00');
+    expect(customerWindows.customerOfferGrid()).toContain('12:00');
+    expect(customerWindows.overlapsLunch(11 * 60, 12 * 60)).toBe(true);
+    expect(customerWindows.overlapsLunch(12 * 60, 13 * 60)).toBe(false);
+  });
+
+  test('a read failure falls back to the fixed constants, never blocking an offer', async () => {
+    dbMock.mockImplementation(() => { throw new Error('db unavailable'); });
+    await customerWindows.refreshCustomerBookingWindowConfig();
+    expect(customerWindows.currentDayEndMinutes()).toBe(18 * 60);
+    expect(customerWindows.currentLunchInterval()).toEqual({ startMinutes: 12 * 60, endMinutes: 13 * 60 });
+  });
+
+  test('a null/missing booking_config row falls back to the fixed constants', async () => {
+    mockConfig(undefined);
+    await customerWindows.refreshCustomerBookingWindowConfig();
+    expect(customerWindows.currentDayEndMinutes()).toBe(18 * 60);
+    expect(customerWindows.currentLunchInterval()).toEqual({ startMinutes: 12 * 60, endMinutes: 13 * 60 });
+  });
+
+  test('caches within the TTL — a second refresh call does not re-query', async () => {
+    mockConfig({ lunch_start: '11:30:00', lunch_end: '12:30:00', day_end: '16:00:00' });
+    await customerWindows.refreshCustomerBookingWindowConfig();
+    expect(dbMock).toHaveBeenCalledTimes(1);
+    await customerWindows.refreshCustomerBookingWindowConfig();
+    expect(dbMock).toHaveBeenCalledTimes(1);
+  });
+});

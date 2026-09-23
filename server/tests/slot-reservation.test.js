@@ -467,6 +467,55 @@ describe('slot reservation helpers', () => {
     });
   });
 
+  describe('commitReservation — day-end bound on the FINAL resolved window (Codex r1 P2 on #4663)', () => {
+    // The mocked resolveEstimateSlotProfile (top of file) resolves
+    // durationMinutes: 90 with NO reservationServiceMix — a plain
+    // single-service hold, not a combined visit. The older
+    // reservationServiceMix-scoped day-end guard never covered this case:
+    // a non-capacity hold whose accepted profile lengthens between reserve
+    // and accept (e.g. 60->90 min on a 17:00 hold) graduated with no
+    // day-end check at all. This is the gap the new, unconditional check
+    // closes.
+    function wire({ windowStart, windowEnd }) {
+      const dateProbeBuilder = { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ scheduled_date: '2027-05-20' }) };
+      const reservationBuilder = {
+        where: jest.fn().mockReturnThis(), select: jest.fn().mockReturnThis(), forUpdate: jest.fn().mockReturnThis(),
+        first: jest.fn().mockResolvedValue({
+          id: 'scheduled-123', source_estimate_id: 'estimate-456', scheduled_date: '2027-05-20',
+          window_start: windowStart, window_end: windowEnd, technician_id: 'tech-1',
+          reservation_expires_at: '2027-05-20T13:15:00.000Z',
+        }),
+      };
+      const updateBuilder = { where: jest.fn().mockReturnThis(), update: jest.fn().mockReturnThis(), returning: jest.fn() };
+      const scheduledBuilders = [dateProbeBuilder, reservationBuilder, updateBuilder];
+      const techBuilder = makeAssignableTechnicianBuilder({ id: 'tech-1', name: 'Tech One', employment_status: 'active', field_dispatchable: true });
+      const trx = jest.fn((table) => {
+        if (table === 'scheduled_services') return scheduledBuilders.shift();
+        if (table === 'technicians') return techBuilder;
+        throw new Error(`unexpected table ${table}`);
+      });
+      trx.raw = jest.fn((sql) => ({ raw: sql }));
+      trx.isTransaction = true;
+      return { trx, updateBuilder };
+    }
+    const commit = (trx) => slotReservation.commitReservation({
+      scheduledServiceId: 'scheduled-123', customerId: 'customer-1', paymentMethodPreference: 'card_on_file',
+      estimatedPrice: 219.6, estimate: { id: 'estimate-456', service_interest: 'Pest Control' }, trx,
+    });
+
+    test('a 17:30 hold whose accepted 90-minute profile ends at 19:00 is refused SLOT_UNAVAILABLE, nothing written', async () => {
+      jest.useFakeTimers(); jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+      try {
+        // 17:30 + 90 = 19:00 — past the 18:00 close plus the 59-minute
+        // round-up grace (ROUND_UP_GRACE_MINUTES), so this must reject even
+        // though nothing here overlaps lunch or another visit.
+        const { trx, updateBuilder } = wire({ windowStart: '17:30:00', windowEnd: '18:30:00' });
+        await expect(commit(trx)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: 'slot runs past the end of the working day' });
+        expect(updateBuilder.update).not.toHaveBeenCalled();
+      } finally { jest.useRealTimers(); }
+    });
+  });
+
   test('commitReservation rebinds the held row to the accepted service profile', async () => {
     // Unlocked pre-read that keys the date-occupancy lock (rung 1) — taken
     // before the FOR UPDATE so a writer already holding the date lock and

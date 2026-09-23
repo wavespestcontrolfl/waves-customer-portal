@@ -24,19 +24,22 @@
  * report for the full per-site decision.
  */
 const { gateEnvValue } = require('../../config/feature-gates');
+const db = require('../../models/db');
 
 // Single source for every customer-facing hourly offer surface.
 const CUSTOMER_HOUR_GRID = ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00'];
 
 // A 17:00 start plus the standard 60-minute visit ends at 18:00 — the
-// customer-facing service day close.
+// customer-facing service day close. Fixed FALLBACK only (matches
+// booking_config.day_end's post-migration value) — see
+// refreshCustomerBookingWindowConfig/currentDayEndMinutes below for the
+// actual bound a caller should use.
 const CUSTOMER_DAY_END_HOUR = 18;
 const CUSTOMER_DAY_END_MINUTES = CUSTOMER_DAY_END_HOUR * 60;
 
-// The lunch window the gate reserves when it's on. Fixed (not read from
-// booking_config.lunch_start/_end): estimate-slot-availability.js and
-// slot-reservation.js have no booking_config dependency at all — this is a
-// separate, DB-free customer offer engine.
+// The lunch window the gate reserves when it's on. Fixed FALLBACK only
+// (matches booking_config's own default) — see currentLunchInterval below
+// for the actual interval a caller should use.
 const CUSTOMER_LUNCH_START_MINUTES = 12 * 60;
 const CUSTOMER_LUNCH_END_MINUTES = 13 * 60;
 
@@ -53,13 +56,91 @@ function lunchBlockEnabled() {
   return gateEnvValue('GATE_BOOKING_LUNCH_BLOCK');
 }
 
+// ---------- one booking_config authority for the lunch interval + day end ----------
+//
+// Codex r1 P2s on #4663: booking.js (bookingSlotWindow) and the assistant's
+// availability engine (services/availability.js) already read
+// booking_config.lunch_start/_end and .day_end (falling back to the fixed
+// constants above); estimate-slot-availability.js and slot-reservation.js
+// used to read ONLY the fixed constants, so an owner who configures a
+// different lunch interval or preserves a non-18:00 day_end override (the
+// 20260923000001_booking_day_end_18 migration only touches a row that was
+// exactly 17:00:00) got offer/commit disagreement between /book and the
+// estimate picker. Both now read the same row through the cache below.
+//
+// The cache exists because overlapsLunch()/customerOfferGrid() and the
+// day-end bound are called synchronously, deep inside per-slot loops
+// (buildAsapCapacitySlotsForTechs, slotWindowFitsDay, slot-reservation's
+// commit checks) — threading an awaited config read through every one of
+// those call sites would be a much larger, riskier change than caching the
+// one row a request needs. Callers await refreshCustomerBookingWindowConfig()
+// ONCE at the top of an offer/commit entry point (getAvailableSlots,
+// reserveSlot, commitReservation); every synchronous helper below then reads
+// the cached value. A cache miss (nothing awaited yet, e.g. a caller added
+// later that forgets to) or a read failure both fall back to the fixed
+// constants — the same value booking_config normally holds post-migration —
+// so this can only ever be MORE permissive/parity-preserving than the old
+// fixed-constant behavior, never less available.
+const CUSTOMER_CONFIG_TTL_MS = 60 * 1000;
+let cachedBookingWindowConfig = null; // { lunchStartMinutes, lunchEndMinutes, dayEndMinutes, expiresAt }
+
+function parseHHMMMinutes(value) {
+  const m = String(value ?? '').trim().match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  const hh = parseInt(m[1], 10);
+  const mm = parseInt(m[2], 10);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm) || hh > 23 || mm > 59) return null;
+  return hh * 60 + mm;
+}
+
+async function refreshCustomerBookingWindowConfig() {
+  if (cachedBookingWindowConfig && cachedBookingWindowConfig.expiresAt > Date.now()) return;
+  let lunchStartMinutes = CUSTOMER_LUNCH_START_MINUTES;
+  let lunchEndMinutes = CUSTOMER_LUNCH_END_MINUTES;
+  let dayEndMinutes = CUSTOMER_DAY_END_MINUTES;
+  try {
+    const config = await db('booking_config').first('lunch_start', 'lunch_end', 'day_end');
+    const parsedLunchStart = parseHHMMMinutes(config?.lunch_start);
+    const parsedLunchEnd = parseHHMMMinutes(config?.lunch_end);
+    const parsedDayEnd = parseHHMMMinutes(config?.day_end);
+    if (parsedLunchStart != null) lunchStartMinutes = parsedLunchStart;
+    if (parsedLunchEnd != null) lunchEndMinutes = parsedLunchEnd;
+    if (parsedDayEnd != null) dayEndMinutes = parsedDayEnd;
+  } catch {
+    // Config unreadable (mocked test db, transient failure, …) — the fixed
+    // constants above are exactly what booking_config holds in the normal
+    // case, so this never blocks an offer.
+  }
+  cachedBookingWindowConfig = { lunchStartMinutes, lunchEndMinutes, dayEndMinutes, expiresAt: Date.now() + CUSTOMER_CONFIG_TTL_MS };
+}
+
+// Synchronous — reads whatever refreshCustomerBookingWindowConfig last
+// cached (or the fixed constants before anything has been cached yet).
+function currentLunchInterval() {
+  return cachedBookingWindowConfig
+    ? { startMinutes: cachedBookingWindowConfig.lunchStartMinutes, endMinutes: cachedBookingWindowConfig.lunchEndMinutes }
+    : { startMinutes: CUSTOMER_LUNCH_START_MINUTES, endMinutes: CUSTOMER_LUNCH_END_MINUTES };
+}
+
+// Synchronous — the authoritative customer day-end bound (booking_config.day_end,
+// falling back to CUSTOMER_DAY_END_MINUTES). Use this, not the fixed constant,
+// for any actual admission check.
+function currentDayEndMinutes() {
+  return cachedBookingWindowConfig ? cachedBookingWindowConfig.dayEndMinutes : CUSTOMER_DAY_END_MINUTES;
+}
+
 /**
  * The hour grid a synthetic (non-route-derived) offer builder should
- * enumerate — CUSTOMER_HOUR_GRID minus noon while the lunch gate is on.
- * Read at CALL time, like the gate itself: never memoize this array.
+ * enumerate — CUSTOMER_HOUR_GRID minus any hour overlapping the lunch
+ * interval while the lunch gate is on. Read at CALL time, like the gate
+ * itself: never memoize this array.
  */
 function customerOfferGrid() {
-  return lunchBlockEnabled() ? CUSTOMER_HOUR_GRID.filter((t) => t !== '12:00') : CUSTOMER_HOUR_GRID;
+  if (!lunchBlockEnabled()) return CUSTOMER_HOUR_GRID;
+  return CUSTOMER_HOUR_GRID.filter((t) => {
+    const startMin = parseHHMMMinutes(t);
+    return !overlapsLunch(startMin, startMin + 60);
+  });
 }
 
 /**
@@ -68,8 +149,9 @@ function customerOfferGrid() {
  * as its one lunch predicate instead of separately checking the gate.
  */
 function overlapsLunch(startMin, endMin) {
-  return lunchBlockEnabled() && Number.isFinite(startMin) && Number.isFinite(endMin)
-    && startMin < CUSTOMER_LUNCH_END_MINUTES && endMin > CUSTOMER_LUNCH_START_MINUTES;
+  if (!lunchBlockEnabled() || !Number.isFinite(startMin) || !Number.isFinite(endMin)) return false;
+  const { startMinutes, endMinutes } = currentLunchInterval();
+  return startMin < endMinutes && endMin > startMinutes;
 }
 
 module.exports = {
@@ -81,4 +163,7 @@ module.exports = {
   lunchBlockEnabled,
   customerOfferGrid,
   overlapsLunch,
+  refreshCustomerBookingWindowConfig,
+  currentLunchInterval,
+  currentDayEndMinutes,
 };

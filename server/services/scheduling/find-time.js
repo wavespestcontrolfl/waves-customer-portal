@@ -156,7 +156,13 @@ async function findCapacitySlots(opts) {
         .inactiveCapabilitiesForServices(db, [tech.id], [context.target])).length) continue;
       const floor = Math.max(SHIFT.startMinutes, opts.earliestStartMin || 0,
         date === today ? parts.hour * 60 + parts.minute + 30 : 0);
-      for (let start = Math.ceil(floor / 60) * 60; start + SHIFT.arrivalMinutes <= SHIFT.endMinutes; start += 60) {
+      // Enumerate every on-the-hour start through the shift close and let
+      // placementFitsShift (scheduling/policy.js) decide admission from the
+      // real (start, start+durationMinutes) window — the loop used to stop
+      // 2 hours early (SHIFT.arrivalMinutes), which silently dropped 17:00
+      // candidates that fit a normal 60-minute job comfortably before the
+      // 18:00 close (Codex r1 P1 on #4663).
+      for (let start = Math.ceil(floor / 60) * 60; start < SHIFT.endMinutes; start += 60) {
         if (!placementFitsShift(start, start + durationMinutes)) continue;
         candidates.push({ context, date, tech, start, options: {
           windowStart: minutesToTime(start), windowEnd: minutesToTime(start + durationMinutes),

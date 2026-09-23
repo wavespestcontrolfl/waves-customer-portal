@@ -41,7 +41,8 @@ const { signSlotOffer, appendOfferToSlotId, CAPACITY_OFFER_POLICY } = require('.
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 const { getZoneFunnelDays, applyZoneDayFunnel, fallbackCenterZoneName } = require('./scheduling/zone-day-funnel');
 const {
-  CUSTOMER_DAY_END_HOUR, CUSTOMER_DAY_END_MINUTES, customerOfferGrid, overlapsLunch, lunchBlockEnabled,
+  CUSTOMER_DAY_END_MINUTES, customerOfferGrid, overlapsLunch, lunchBlockEnabled,
+  refreshCustomerBookingWindowConfig, currentDayEndMinutes,
 } = require('./scheduling/customer-windows');
 const { isEnabled } = require('../config/feature-gates');
 const { getDailyRainOutlookBounded } = require('./weather-forecast');
@@ -79,6 +80,12 @@ const SLOT_DAY_START_MINUTES = 8 * 60;
 // Customer-facing service day close (scheduling/customer-windows.js) — a
 // 17:00 start plus the standard 60-minute visit ends at 18:00. Shared with
 // slot-reservation.js's server-side re-validation via this module's export.
+// FIXED FALLBACK ONLY — kept as the static default other consumers (and
+// tests) expect. The actual bound any admission check should use is
+// customer-windows.js's currentDayEndMinutes(), which honors a preserved
+// (non-18:00) booking_config.day_end override once
+// refreshCustomerBookingWindowConfig() has been awaited (Codex r1 P2 on
+// #4663 — estimate offers/reservations used to ignore that override).
 const SLOT_DAY_END_MINUTES = CUSTOMER_DAY_END_MINUTES;
 // Furthest-out date any offer surface produces: the public route clamps
 // ?windowDays to this and findEstimateSlots caps the AI date parse's
@@ -1116,7 +1123,10 @@ function slotWindowFitsDay(windowStart, windowEnd) {
   if (overlapsLunch(startMin, endMin)) return false;
   if (capacityEnabled()) return placementFitsShift(startMin, endMin);
   if (startMin == null || endMin == null) return true;
-  if (endMin <= startMin || endMin > SLOT_DAY_END_MINUTES) return false;
+  // currentDayEndMinutes() honors a preserved booking_config.day_end
+  // override (Codex r1 P2 on #4663); falls back to SLOT_DAY_END_MINUTES
+  // (18:00) before refreshCustomerBookingWindowConfig() has been awaited.
+  if (endMin <= startMin || endMin > currentDayEndMinutes()) return false;
   return true;
 }
 
@@ -1644,6 +1654,11 @@ function classifySlot(slot, proximityDriveMinutes, durationMinutes = DEFAULT_OPT
 async function getAvailableSlots(estimateId, userOpts = {}) {
   const opts = { ...DEFAULT_OPTS, ...userOpts };
 
+  // One booking_config read (lunch interval + day-end override, 60s TTL) for
+  // every synchronous lunch/day-end check this call makes below — see
+  // scheduling/customer-windows.js (Codex r1 P2s on #4663).
+  await refreshCustomerBookingWindowConfig();
+
   const estimate = await db('estimates').where({ id: estimateId }).first();
   if (!estimate) {
     const err = new Error('estimate not found');
@@ -1881,8 +1896,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       bufferMinutes: customerFacingBufferMinutes(),
       // Customer-facing day close (scheduling/customer-windows.js) — find-time's
       // own DAY_END_HOUR default (17) stays untouched for staff/optimizer
-      // callers that don't pass this.
-      dayEndHour: CUSTOMER_DAY_END_HOUR,
+      // callers that don't pass this. currentDayEndMinutes() honors a
+      // preserved booking_config.day_end override (Codex r1 P2 on #4663).
+      dayEndHour: currentDayEndMinutes() / 60,
       dateFrom: segFrom,
       dateTo: segTo,
       topN: Number.MAX_SAFE_INTEGER,
@@ -2057,6 +2073,9 @@ async function findEstimateSlots(estimateId, userOpts = {}) {
 
 async function getSlotDebug(estimateId, userOpts = {}) {
   const opts = { ...DEFAULT_OPTS, ...userOpts };
+  // Mirrors the live path's config read so this debug surface's dayEndHour
+  // reflects what the customer is actually offered (Codex r1 P2 on #4663).
+  await refreshCustomerBookingWindowConfig();
   const estimate = await db('estimates').where({ id: estimateId }).first();
   if (!estimate) {
     const err = new Error('estimate not found');
@@ -2091,7 +2110,7 @@ async function getSlotDebug(estimateId, userOpts = {}) {
     excludeEstimateId: estimateId,
     bufferMinutes: customerFacingBufferMinutes(),
     // Same customer-facing day close as the live path (see above).
-    dayEndHour: CUSTOMER_DAY_END_HOUR,
+    dayEndHour: currentDayEndMinutes() / 60,
     dateFrom,
     dateTo,
     topN: 200, // broad — debug surface wants everything

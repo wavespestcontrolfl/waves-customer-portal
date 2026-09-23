@@ -128,7 +128,13 @@ describe('buildBookingAvailability — gap fan-out', () => {
       expect(startTimes(await build('termite', { duration: 90 }))).toEqual(['16:00']);
       const { validateBookingSlotGeometry } = require('../routes/booking')._internals;
       expect(validateBookingSlotGeometry({ startMin: 960, duration: 90, config: CONFIG })).toBeNull();
-      expect(validateBookingSlotGeometry({ startMin: 1020, duration: 30, config: CONFIG })).not.toBeNull();
+      // A 17:00 start ending at 17:30 is now valid too (Codex r1 P1 on
+      // #4663 — placementFitsShift used to require 2 hours of headroom past
+      // start regardless of the job's own end, rejecting 17:00 even though
+      // it ends well before the 18:00 close); a duration that would run
+      // past 18:00 is still rejected.
+      expect(validateBookingSlotGeometry({ startMin: 1020, duration: 30, config: CONFIG })).toBeNull();
+      expect(validateBookingSlotGeometry({ startMin: 1020, duration: 90, config: CONFIG })).not.toBeNull();
     } finally {
       if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
       else process.env.GATE_SCHEDULING_CAPACITY = gate;

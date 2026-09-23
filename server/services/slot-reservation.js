@@ -43,18 +43,18 @@ const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 // under it before committing.
 const { acquireOccupancyLock, findConflictingVisits, findInterviewConflicts } = require('./scheduling/occupancy');
 const { capacityEnabled, placementFitsShift } = require('./scheduling/policy');
-const { overlapsLunch } = require('./scheduling/customer-windows');
+const { overlapsLunch, refreshCustomerBookingWindowConfig, currentDayEndMinutes } = require('./scheduling/customer-windows');
 const { lockTechDays } = require('./scheduling/tech-day-lock');
 const { capacityError, prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder } = require('./scheduling/arrival-route');
 const { serviceDurationMinutes } = require('./service-library');
 
 // Business bounds shared with the slot generators (see the exporting module
-// for provenance): 8:00 day start (find-time DAY_START_HOUR), 18:00
-// customer-facing day end (scheduling/customer-windows.js), 90-day offer
-// horizon.
+// for provenance): 8:00 day start (find-time DAY_START_HOUR), 90-day offer
+// horizon. The day-end bound itself is currentDayEndMinutes() (imported
+// above from customer-windows.js) — dynamic, not this module's fixed
+// SLOT_DAY_END_MINUTES (Codex r1 P2 on #4663).
 const {
   SLOT_DAY_START_MINUTES,
-  SLOT_DAY_END_MINUTES,
   MAX_SLOT_HORIZON_DAYS,
 } = estimateSlotAvailability;
 
@@ -622,6 +622,10 @@ async function reserveSlot({
   selectedFrequency = '',
   serviceCadences = null,
 }) {
+  // One booking_config read (lunch interval + day-end override, 60s TTL) for
+  // every synchronous lunch/day-end check below — see
+  // scheduling/customer-windows.js (Codex r1 P2s on #4663).
+  await refreshCustomerBookingWindowConfig();
   const useCapacity = capacityEnabled();
   const parsed = parseSlotId(slotId);
   if (!parsed) {
@@ -963,13 +967,15 @@ async function reserveSlot({
         throw err;
       }
 
-      // Working-day end: every legitimate offer ends by SLOT_DAY_END_MINUTES
-      // (find-time's dayClose / slotWindowFitsDay), plus the round-up grace —
-      // see ROUND_UP_GRACE_MINUTES. Needs the profile-resolved duration, so
-      // it lives in-txn with the signature check rather than with the pre-txn
+      // Working-day end: every legitimate offer ends by currentDayEndMinutes()
+      // (find-time's dayClose / slotWindowFitsDay — honors a preserved
+      // booking_config.day_end override, Codex r1 P2 on #4663; falls back to
+      // SLOT_DAY_END_MINUTES/18:00), plus the round-up grace — see
+      // ROUND_UP_GRACE_MINUTES. Needs the profile-resolved duration, so it
+      // lives in-txn with the signature check rather than with the pre-txn
       // policy guards.
       if (useCapacity ? !placementFitsShift(slotStartMinutes, slotStartMinutes + effectiveDurationMinutes)
-        : slotStartMinutes + effectiveDurationMinutes > SLOT_DAY_END_MINUTES + ROUND_UP_GRACE_MINUTES) {
+        : slotStartMinutes + effectiveDurationMinutes > currentDayEndMinutes() + ROUND_UP_GRACE_MINUTES) {
         const err = new Error('slot runs past the end of the working day');
         err.code = 'SLOT_UNAVAILABLE';
         err.slotId = slotId;
@@ -1390,6 +1396,10 @@ async function commitReservation({
   preparedCapacity = null,
   trx,
 }) {
+  // One booking_config read (lunch interval + day-end override, 60s TTL) for
+  // every synchronous lunch/day-end check below — see
+  // scheduling/customer-windows.js (Codex r1 P2s on #4663).
+  await refreshCustomerBookingWindowConfig();
   if (!trx && !preparedCapacity) preparedCapacity = await prepareReservationCommit(scheduledServiceId, {
     estimate, serviceMode, selectedFrequency, serviceCadences, durationMinutes,
   });
@@ -1627,8 +1637,25 @@ async function commitReservation({
       : null;
 
     if (!useCapacity && serviceProfile?.reservationServiceMix
-      && require('./scheduling/window-rules').parseHHMM(windowStart) + effectiveDurationMinutes > SLOT_DAY_END_MINUTES + ROUND_UP_GRACE_MINUTES) {
+      && require('./scheduling/window-rules').parseHHMM(windowStart) + effectiveDurationMinutes > currentDayEndMinutes() + ROUND_UP_GRACE_MINUTES) {
       throw require('./combined-visit-capacity').capacityUnavailable();
+    }
+    // Day-end bound on the FINAL resolved window, for the non-capacity,
+    // non-combined-visit hold the check above doesn't cover: a plain
+    // estimate hold's accepted service profile can lengthen between reserve
+    // and accept (e.g. 60->90 min on a 17:00 hold) without ever going
+    // through reserveSlot's own day-end guard again, and reservationServiceMix
+    // is what scoped the check above — nothing enforced this bound for the
+    // ordinary single-service case. Capacity mode's day-end bound is already
+    // enforced on this same resolved window by verifyArrivalCapacity
+    // (placementFitsShift) just below, so this only needs !useCapacity.
+    // Codex r1 P2 on #4663.
+    if (!useCapacity && !serviceProfile?.reservationServiceMix && windowStart && effectiveDurationMinutes
+      && require('./scheduling/window-rules').parseHHMM(windowStart) + effectiveDurationMinutes > currentDayEndMinutes() + ROUND_UP_GRACE_MINUTES) {
+      const err = new Error('slot runs past the end of the working day');
+      err.code = 'SLOT_UNAVAILABLE';
+      err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id}`;
+      throw err;
     }
     // Lunch block (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23) on the
     // FINAL resolved window (the accepted profile's duration, not the hold's
