@@ -428,8 +428,12 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
         const snapshot = typeof own?.extracted_data === 'string' ? JSON.parse(own.extracted_data) : own?.extracted_data;
         // The attach above already merged THIS run's address into the
         // snapshot, so judge the flag on its own stamped address.
+        // A STAMPED flag only: an unstamped (older) flag would pass the
+        // permissive cover check while the snapshot's own address is no
+        // longer the flag's — the attach above already overwrote it
+        // (pre-push audit P1).
         const recovered = recoverAddressUnverified(snapshot);
-        if (recovered && flagCoversAddress(recovered, normalizedAddress)) priorAddressUnverified = recovered;
+        if (recovered && recovered.address_line1 && flagCoversAddress(recovered, normalizedAddress)) priorAddressUnverified = recovered;
       } catch (priorErr) {
         logger.warn(`[public-property-lookup] prior address flag re-read failed: ${priorErr.code || priorErr.name || 'error'}`);
       }

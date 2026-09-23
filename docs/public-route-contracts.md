@@ -900,7 +900,9 @@ lookup mints a new lead row, for the same typed email AND phone AND the
 complete judged premise (street with any unit stripped, and a city and ZIP
 present on both sides and equal) — is archived on the flagged run, with
 the sent/viewed, unarchived, not-price-locked predicates re-applied on
-the archive write itself; the archived row keeps the verdict
+the archive write itself (`website_quote_withdrawn_address_unverified`
+audit event), so its old token neither renders nor accepts; the archived
+row keeps the verdict
 (`estimate_data.addressUnverified` + `addressUnverifiedFlag`), and a later
 run for the same email, phone and complete premise recovers it when the
 roll does not answer. Each stage also records a server-owned
@@ -920,9 +922,7 @@ id can only block a booking at a flagged premise, never enable one). A
 token-verified pricing handoff (`pricing_estimate_id` + `estimate_token`)
 whose draft carries `addressUnverified: true` is refused the same way,
 unconditionally — before any booking write, whatever the customers-only
-gate or the bearer's authentication.
-(`website_quote_withdrawn_address_unverified` audit event), so its old
-token neither renders nor accepts. A roll that never answered (GIS
+gate or the bearer's authentication. A roll that never answered (GIS
 outage) is not a fresh flag — but it does not clear one either: the prior
 server-written flag for the same address carries forward until the roll
 answers clean, and an existing draft's own `addressUnverified` marker is
