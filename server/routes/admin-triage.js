@@ -690,6 +690,21 @@ router.post('/:id/verdict', async (req, res) => {
       if (live?.payload?.reschedule_proposal) {
         throw Object.assign(new Error('Review or dismiss the reschedule proposal instead of recording a call verdict.'), { proposalConflict: true });
       }
+      // A house-number conflict card on a CONFIRMED call is that call's
+      // only scheduling ask (the processor's booking hold suppressed the
+      // fallback card). Read its snapshot under the lock BEFORE the bulk
+      // resolve so an Accept ("the address on file is right") can hand the
+      // still-unbooked appointment on as a task instead of erasing it
+      // (codex #4666 r6 P1).
+      const heldConflict = await trx('triage_items')
+        .where({ call_log_id: item.call_log_id, reason_code: 'on_file_house_number_conflict' })
+        .whereIn('status', OPEN_STATES)
+        .first('payload');
+      const heldConflictPayload = typeof heldConflict?.payload === 'string'
+        ? (() => { try { return JSON.parse(heldConflict.payload); } catch { return null; } })()
+        : heldConflict?.payload;
+      const heldConflictConfirmed = !!heldConflictPayload
+        && (heldConflictPayload.scheduling_window?.status === 'confirmed' || heldConflictPayload.scheduling_status === 'confirmed');
       const resolvedRows = await trx('triage_items')
         .where({ call_log_id: item.call_log_id })
         // Bounce follow-ups, pending property-role confirmations, and parked
@@ -767,6 +782,30 @@ router.post('/:id/verdict', async (req, res) => {
               status: trx.raw("CASE WHEN status = 'releasing' THEN 'pending' ELSE status END"),
               updated_at: now,
             });
+        }
+      }
+
+      if (verdict === 'accept' && heldConflictConfirmed
+        && resolvedRows.some((r) => r?.reason_code === 'on_file_house_number_conflict')) {
+        const liveBooking = await trx('scheduled_services')
+          .where({ source_call_log_id: item.call_log_id })
+          .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site', 'completed'])
+          .first('id');
+        if (!liveBooking) {
+          const { buildTriageItem } = require('../services/call-routing-gates');
+          await trx('triage_items')
+            .insert(buildTriageItem({
+              callLogId: item.call_log_id,
+              flag: 'auto_booking_skipped_after_approval',
+              extraction: { meta: { call_summary: 'Address confirmed on file after a house-number dispute — the confirmed appointment still needs booking' }, scheduling: heldConflictPayload.scheduling_window || { status: 'confirmed' } },
+              extraPayload: {
+                skipped_reason: 'address_confirmed_on_file_after_house_number_dispute',
+                scheduling_window: heldConflictPayload.scheduling_window || null,
+                on_file_address: heldConflictPayload.on_file_address || null,
+              },
+            }))
+            .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+            .ignore();
         }
       }
 

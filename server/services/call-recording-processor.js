@@ -13903,6 +13903,28 @@ const CallRecordingProcessor = {
                     if (unassigned) {
                       primaryRow = unassigned;
                       logger.warn(`[call-proc] reused booking ${existing.id} unassigned for ${callSid}: house number disputed`);
+                      // Its AI-created follow-up child(ren) from an earlier
+                      // pass are just as dispatchable to the disputed
+                      // number — same fence, same pull (codex r6 P1).
+                      const children = await trx('scheduled_services')
+                        .where({ parent_service_id: existing.id, source_action: 'ai_call_pipeline_followup' })
+                        .whereNotNull('technician_id')
+                        .whereIn('status', ['pending', 'confirmed'])
+                        .select('id', 'technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+                      for (const child of children) {
+                        if (child.day) {
+                          const { lockTechDays } = require('./scheduling/tech-day-lock');
+                          await lockTechDays(trx, [
+                            { techId: child.technician_id, date: child.day },
+                            { techId: null, date: child.day },
+                          ]);
+                        }
+                        await trx('scheduled_services')
+                          .where({ id: child.id })
+                          .whereIn('status', ['pending', 'confirmed'])
+                          .update({ technician_id: null, route_order: null, updated_at: new Date() });
+                        logger.warn(`[call-proc] follow-up visit ${child.id} unassigned for ${callSid}: house number disputed`);
+                      }
                       if (trx?.executionPromise) {
                         const seamRowId = existing.id;
                         trx.executionPromise
