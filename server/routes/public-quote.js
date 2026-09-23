@@ -1270,7 +1270,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           .where({ source: 'quote_wizard' })
           .whereNotNull('archived_at')
           .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
-          .where('customer_phone', contactPhone)
+          .whereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(contactPhone).replace(/\D/g, '').slice(-10)])
           // No row cap: the premise match runs in code, and a cap applied
           // first could hide the one matching row behind newer unrelated
           // premises for the same contact pair (codex r6 P2).
@@ -1303,7 +1303,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           .where({ source: 'quote_wizard' })
           .whereNotNull('archived_at')
           .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
-          .where('customer_phone', contactPhone)
+          .whereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(contactPhone).replace(/\D/g, '').slice(-10)])
           .whereRaw("estimate_data->'addressUnverifiedFlag' IS NOT NULL")
           .select('id', 'address');
         const superseded = stale
@@ -3192,7 +3192,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               .whereRaw("estimate_data->>'lead_id' = ?", [String(lead.id)])
               .orWhere((own) => own
                 .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
-                .where('customer_phone', contactPhone)))
+                .whereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(contactPhone).replace(/\D/g, '').slice(-10)])))
             .select('id', 'address', trx.raw("estimate_data->>'lead_id' as lead_id"));
           // Premise-matched in BOTH arms: this lead's own rows match on
           // identity plus the (loose) premise — a lead's publication for a

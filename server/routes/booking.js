@@ -2597,9 +2597,18 @@ async function createSelfBooking(payload = {}) {
           const lockedShared = await trx('estimates').where({ id: estimate.id }).forUpdate().first('estimate_data');
           if (parseData(lockedShared?.estimate_data)?.addressUnverified === true) refuse();
         }
-        const submitted = new_customer?.address_line1 ? {
+        // The premise being booked: the submitted new-customer address, else
+        // the resolved customer's on-file address (an existing customer
+        // booking without an address payload — pre-push audit P1).
+        let submitted = new_customer?.address_line1 ? {
           line1: new_customer.address_line1, city: new_customer.city, state: new_customer.state, zip: new_customer.zip,
         } : null;
+        if (!submitted && custId) {
+          const onFileCustomer = await trx('customers').where({ id: custId }).first('address_line1', 'city', 'state', 'zip');
+          if (onFileCustomer?.address_line1) {
+            submitted = { line1: onFileCustomer.address_line1, city: onFileCustomer.city, state: onFileCustomer.state, zip: onFileCustomer.zip };
+          }
+        }
         // Serialized with /calculate's verdict publication on the same
         // contact pair (codex r11 P1): a flag being persisted for this
         // email + phone lands before or after this whole recheck, never
