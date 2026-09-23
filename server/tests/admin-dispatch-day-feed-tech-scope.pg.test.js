@@ -4,11 +4,15 @@
  * totals) to a technician-role token, unscoped to the tech's assignments.
  *
  * Asserts the EXPECTED behaviour (technician sees only own current
- * assignments, as admin-schedule's scopeToAssignedTech does). FAILS on
- * current code if the bug is real.
+ * assignments, as admin-schedule's scopeToAssignedTech does).
  *
- * Real Postgres (DATABASE_URL = private clone of waves_audit_tpl), real
- * router, real adminAuthenticate with a signed staff access token.
+ * Runs only against a private clone (e.g.
+ * DATABASE_URL=postgres://.../waves_audit_fixauthz_1), real router, real
+ * adminAuthenticate with a signed staff access token. Skipped (not failed)
+ * unless DATABASE_URL names a waves_audit_* clone — this suite inserts
+ * live technicians/customers/visits and must never touch a shared database
+ * such as CI's own waves_test. All inserted fixtures, including the
+ * control-test admin, are deleted in afterAll.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'audit-repro-jwt-secret';
 
@@ -17,7 +21,7 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
-const SKIP = !process.env.DATABASE_URL;
+const SKIP = !/waves_audit_/.test(process.env.DATABASE_URL || '');
 const describeOrSkip = SKIP ? describe.skip : describe;
 
 // Relative to real "now" (never a fixed calendar date) so the fixture never
@@ -27,7 +31,7 @@ const OLD_DATE = '2024-01-15';                        // far outside any tech wi
 
 describeOrSkip('r1-dispatch-1: technician token scoping on GET /api/admin/dispatch/:date', () => {
   let db, server, baseUrl;
-  let techA, techB, custA, custB, svcA, svcB, svcOldB;
+  let techA, techB, techAdmin, custA, custB, svcA, svcB, svcOldB;
 
   beforeAll(async () => {
     db = require('../models/db');
@@ -53,7 +57,16 @@ describeOrSkip('r1-dispatch-1: technician token scoping on GET /api/admin/dispat
 
   afterAll(async () => {
     if (server) await new Promise((r) => server.close(r));
-    if (db) await db.destroy();
+    if (db) {
+      const svcIds = [svcA, svcB, svcOldB].filter(Boolean).map((s) => s.id);
+      const custIds = [custA, custB].filter(Boolean).map((c) => c.id);
+      const techIds = [techA, techB, techAdmin].filter(Boolean).map((t) => t.id);
+      if (svcIds.length) await db('scheduled_services').whereIn('id', svcIds).del();
+      if (custIds.length) await db('property_preferences').whereIn('customer_id', custIds).del();
+      if (custIds.length) await db('customers').whereIn('id', custIds).del();
+      if (techIds.length) await db('technicians').whereIn('id', techIds).del();
+      await db.destroy();
+    }
   });
 
   const tokenFor = (tech) => jwt.sign({ technicianId: tech.id, type: 'access', tokenVersion: 1 }, process.env.JWT_SECRET);
@@ -93,8 +106,8 @@ describeOrSkip('r1-dispatch-1: technician token scoping on GET /api/admin/dispat
   });
 
   test('control: an admin token sees both visits on the day (route stays useful for the office)', async () => {
-    const [admin] = await db('technicians').insert({ name: 'Audit Admin', role: 'admin', employment_status: 'active', auth_token_version: 1 }).returning('*');
-    const { status, body } = await get(`/api/admin/dispatch/${DATE}`, admin);
+    [techAdmin] = await db('technicians').insert({ name: 'Audit Admin', role: 'admin', employment_status: 'active', auth_token_version: 1 }).returning('*');
+    const { status, body } = await get(`/api/admin/dispatch/${DATE}`, techAdmin);
     expect(status).toBe(200);
     const ids = body.services.map((s) => s.id);
     expect(ids).toEqual(expect.arrayContaining([svcA.id, svcB.id]));
