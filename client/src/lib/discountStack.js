@@ -40,20 +40,28 @@ export function isFixedDiscountType(type) {
 }
 
 // A VARIABLE/CUSTOM catalog preset — the operator types the real amount per
-// use, catalog `amount` stays 0. Split in two so a picker knows which value
-// to prompt for; together, the client halves of the server's
-// isVariableOrCustomDiscountPreset. Reads the raw catalog row — a
-// picker-time predicate, not part of the arithmetic below.
+// use. Split in two so a picker knows which value to prompt for. Detected
+// ONLY by the variable_* type or the explicit seeded custom_percent /
+// custom_dollar key -- GitHub review round 3 P1 (PR #4656): this used to
+// ALSO treat any fixed_amount/percentage row with a non-positive catalog
+// `amount` as custom (matching the server's OWN isVariableOrCustomDiscountPreset
+// / normalizeDiscountAmount, which honor a client-supplied override for the
+// exact same broad rule) -- but a REAL zero-percent non-stackable catalog
+// tier (WaveGuard Bronze: discount_type 'percentage', amount 0, no
+// discount_key at all) is not a custom preset at all, and prompting for one
+// on it let an operator's typed value persist as a real recurring discount
+// on a tier that is supposed to be a flat, non-editable zero. The
+// server-side rule stays broader (out of this slice's file-ownership
+// scope), but nothing on this surface can trigger it once the client never
+// prompts for (or sends an override on) a non-custom zero-amount preset.
 export function isCustomAmountPreset(d) {
   return d?.discount_type === 'variable_amount'
-    || (d?.discount_type === 'fixed_amount'
-      && (d?.discount_key === 'custom_dollar' || !(Number(d?.amount) > 0)));
+    || (d?.discount_type === 'fixed_amount' && d?.discount_key === 'custom_dollar');
 }
 
 export function isCustomPercentagePreset(d) {
   return d?.discount_type === 'variable_percentage'
-    || (d?.discount_type === 'percentage'
-      && (d?.discount_key === 'custom_percent' || !(Number(d?.amount) > 0)));
+    || (d?.discount_type === 'percentage' && d?.discount_key === 'custom_percent');
 }
 
 function cents(value) {
@@ -570,7 +578,17 @@ export function stackGroupConflict(rows) {
       || String(first.scope ?? '') === String(row.scope ?? '')
     ));
     if (clash) {
-      return { group, names: [clash.name || 'discount', row.name || 'discount'] };
+      // GitHub review round 4 P2 (PR #4656, :3579): `names` alone lets two
+      // callers that only compare display names misclassify which SIDE of
+      // the conflict is the appointment-level slot — the same catalog
+      // preset can legitimately sit on the appointment slot in one submit
+      // group and on an unrelated LINE in another group; a cadence edit
+      // that merges groups can then produce a line-vs-line conflict where
+      // one of the two names happens to equal the (uninvolved) appointment
+      // discount's own name. Returning the actual clashing rows (which
+      // still carry the `spansAll`/`scope` tags laneRow attached) lets a
+      // caller identify appointment involvement by ROW IDENTITY instead.
+      return { group, names: [clash.name || 'discount', row.name || 'discount'], rows: [clash, row] };
     }
     seen.set(group, [...held, row]);
   }

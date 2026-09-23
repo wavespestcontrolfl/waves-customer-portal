@@ -10,7 +10,7 @@ const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../midd
 const logger = require('../services/logger');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive } = require('../config/feature-gates');
-const { percentageDiscountDollars } = require('../services/discount-stack');
+const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
 const { collectiveMoveGateOn, dateExceptionStamp } = require('../services/rebooker');
@@ -5989,6 +5989,244 @@ function duplicateSeriesConflictBody(existingSeries) {
 }
 
 // POST /api/admin/schedule — create new service
+// ─────────────────────────────────────────────────────────────────────────
+// POST /api/admin/schedule/preview — dry-run pricing/prepay preview for the
+// appointment-creation modal (GATE_DISCOUNT_STACKING, round 4 structural
+// fix on PR #4656). Accepts the SAME per-group payload shape the modal
+// POSTs to /api/admin/schedule to create a series (services, cadence,
+// discounts including the appointment-level pick and each line's own pick,
+// prepay options) and runs it through the EXACT SAME buildAppointmentPricing
+// the creation route below calls — zero drift risk, since it is the
+// identical function, not a client-side mirror. NO writes: nothing is
+// inserted, updated or deleted; only customer/service rows are READ, the
+// same reads buildAppointmentPricing's own inputs already require.
+//
+// Why this exists: the modal's own client-side re-derivation of this math
+// (CreateAppointmentModal.jsx's appointmentDiscountPreview /
+// groupStackedPerVisitTotal) kept drifting from this route's actual save
+// path across many review rounds — cadence-sort ordering, gate-regime
+// mismatches, committed-group tracking, each fixed as its own caller-side
+// patch, each round finding a new one (see this branch's own commit
+// history). The structural fix: stop maintaining two sources of truth for
+// the same number. The server computes it ONCE, here; the modal displays
+// and later POSTS exactly what this endpoint returned, never recomputing
+// it independently.
+//
+// Placed in its own region, separate from the creation route immediately
+// below — server/routes/admin-schedule.js is shared with another
+// concurrently-developed lane (an update-details preview endpoint); this
+// block is scoped to creation only and does not touch anything above it.
+// Shared by /preview (advisory verdict) and the creation route itself
+// (hard 400, added below): buildAppointmentPricing's own returned
+// discount shape (discountId/discountName) carries no stack_group/
+// is_stackable -- that catalog metadata is fetched here, once, for
+// exactly the discount ids this pricing result references, and folded
+// into the id/name/stack_group/is_stackable/scope/spansAll row shape
+// stackGroupConflict (server/services/discount-stack.js) reads. Kept as
+// a fetch here rather than widening buildAppointmentPricing's own return
+// contract, which several other callers already depend on unchanged.
+async function discountStackGroupRowsForPricing(pricing) {
+  const discountIdsInPricing = [
+    pricing.primaryDiscount?.discountId,
+    ...(pricing.addonLines || []).map((l) => l.discount?.discountId),
+    pricing.appointmentDiscount?.discountId,
+  ].filter(Boolean);
+  let stackGroupById = new Map();
+  if (discountIdsInPricing.length) {
+    // GitHub round 5 P1 (Codex, blocked push 5): a swallowed lookup
+    // failure used to leave every row's stack_group/is_stackable
+    // undefined, and stackGroupConflict SKIPS a row with no stack_group
+    // at all — silently disabling the conflict check itself (both here
+    // and in the creation route's own hard 400 below) on a transient DB
+    // hiccup, exactly when it matters least to fail open. Propagated
+    // instead: each caller decides how to fail closed (the creation
+    // route as a retryable error before any write; the preview route as
+    // a per-group advisory error, matching its own buildAppointmentPricing
+    // catch immediately above this call).
+    const rows = await db('discounts').whereIn('id', [...new Set(discountIdsInPricing)]).select('id', 'stack_group', 'is_stackable');
+    stackGroupById = new Map(rows.map((r) => [String(r.id), r]));
+    // Also fail closed when the query itself SUCCEEDS but a referenced id
+    // has no catalog row at all (deleted between selection and this
+    // request) — that id's stack_group is unknowable, not "none", and
+    // treating unknowable as "none" is exactly the same silent-disable
+    // this fix closes.
+    const missing = discountIdsInPricing.filter((id) => !stackGroupById.has(String(id)));
+    if (missing.length) {
+      throw new Error(`Could not confirm the catalog stack_group for discount id(s): ${[...new Set(missing)].join(', ')}`);
+    }
+  }
+  const conflictRow = (discount, lane) => {
+    if (!discount) return null;
+    const catalog = stackGroupById.get(String(discount.discountId)) || {};
+    return {
+      id: discount.discountId, name: discount.discountName,
+      stack_group: catalog.stack_group, is_stackable: catalog.is_stackable,
+      ...lane,
+    };
+  };
+  return [
+    conflictRow(pricing.primaryDiscount, { scope: 'line:primary' }),
+    ...(pricing.addonLines || []).map((line, i) => conflictRow(line.discount, { scope: `line:addon:${i}` })),
+    conflictRow(pricing.appointmentDiscount, { spansAll: true }),
+  ].filter(Boolean);
+}
+
+// GitHub round 5 P1 follow-up (Codex, on 3c7214fa45): the creation route
+// used to leave non-stackable-tier enforcement entirely client-side
+// (existingSelectionConflict in CreateAppointmentModal.jsx) with no
+// server backstop -- a client bypass, or simply the gate being off (which
+// already skips that client check), let two conflicting tiers actually
+// persist together. A same-group conflict needs 2+ discount rows to ever
+// fire, and a gate-off request carries at most one discount by this
+// slice's own pre-existing contract (the appointment-level slot doesn't
+// even render), so this is unconditional -- never gated on
+// discountStackingLive() -- and provably a no-op for every existing
+// gate-off caller (pinned: gate-off single-discount response is
+// byte-identical to before this check existed).
+function assertNoDiscountStackGroupConflict(rows) {
+  const conflict = discountStackGroupConflict(rows);
+  if (!conflict) return;
+  const label = conflict.group === 'tier' ? 'WaveGuard tier discount' : `${conflict.group} discount`;
+  throw Object.assign(
+    httpError(400, `Only one ${label} can apply: ${conflict.names.join(' and ')} cannot be combined`),
+    { code: 'DISCOUNT_STACK_GROUP_CONFLICT' },
+  );
+}
+
+router.post('/preview', requireAdmin, async (req, res, next) => {
+  try {
+    const groups = Array.isArray(req.body?.groups) ? req.body.groups : [];
+    if (!groups.length) return res.status(400).json({ error: 'groups is required and must be a non-empty array' });
+    if (groups.length > 12) return res.status(400).json({ error: 'too many groups' });
+    // The regime this WHOLE preview response was computed under — the
+    // modal records this per group at commit time (expected_discount_stacking
+    // on the real create POST) so the create route can refuse a mismatch
+    // instead of silently saving under a different regime than what was
+    // previewed.
+    const regime = discountStackingLive();
+    const results = [];
+    for (const group of groups) {
+      const {
+        key, customerId, scheduledDate, serviceType, serviceId, estimatedPrice, primaryLinePrice,
+        primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount,
+        isRecurring, recurringCount, collectPrepay,
+      } = group || {};
+      if (!customerId || !serviceType) {
+        results.push({ key: key ?? null, error: 'customerId and serviceType are required' });
+        continue;
+      }
+      const customer = await db('customers').where({ id: customerId }).first();
+      if (!customer) { results.push({ key: key ?? null, error: 'Customer not found' }); continue; }
+      let serviceRecord = null;
+      if (serviceId) {
+        try { serviceRecord = await db('services').where({ id: serviceId }).first(); }
+        catch (e) { logger.warn(`[schedule/preview] services lookup failed: ${e.message}`); }
+      }
+      // Same derivation the creation route itself uses (bookingCreatesWaveGuardCoverage,
+      // defined above buildAppointmentPricing) — a missing/invalid scheduledDate
+      // resolves anchorDate to null and this conservatively returns false
+      // (no membership-booking discount floor), never throws.
+      const resolvedIsCallback = isReService({ serviceKey: serviceRecord?.service_key, serviceName: serviceRecord?.name, serviceType });
+      const recurringMembershipBooking = bookingCreatesWaveGuardCoverage({
+        isRecurring: !!isRecurring, isCallback: resolvedIsCallback, serviceType, serviceRecord, customer, scheduledDate,
+      });
+      let pricing;
+      try {
+        pricing = await buildAppointmentPricing({
+          serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount,
+          serviceAddons, discountId, discountType, discountAmount, customer, recurringMembershipBooking,
+        });
+      } catch (e) {
+        results.push({ key: key ?? null, error: e.message || 'pricing failed' });
+        continue;
+      }
+      // Stack-group verdict: advisory here (a dry run reports, never
+      // blocks) — the creation route (below) now runs the SAME check
+      // (discountStackGroupRowsForPricing + assertNoDiscountStackGroupConflict)
+      // as a hard 400, so the client sees the exact conflict it would hit
+      // on save before ever submitting (GitHub round 5 P1 follow-up on
+      // 3c7214fa45).
+      //
+      // GitHub round 5 P1 follow-up (Codex, blocked push 5): a lookup
+      // failure surfaces as THIS group's own advisory error — same
+      // per-group-isolation contract as the buildAppointmentPricing catch
+      // immediately above — rather than silently reporting a
+      // conflict-free verdict the create route's own hard 400 would then
+      // disagree with.
+      let conflictRows;
+      try {
+        conflictRows = await discountStackGroupRowsForPricing(pricing);
+      } catch (e) {
+        results.push({ key: key ?? null, error: e.message || 'stack-group lookup failed' });
+        continue;
+      }
+      let stackGroupConflictVerdict = null;
+      try { stackGroupConflictVerdict = discountStackGroupConflict(conflictRows); } catch { stackGroupConflictVerdict = null; }
+
+      // The per-visit prepay projection — mirrors recurringGroupRequestFields'
+      // own client-side formula (finiteCount-or-4 default), now computed
+      // against the AUTHORITATIVE stacked per-visit price
+      // (pricing.finalPrice) instead of a client re-derivation.
+      const parsedCount = Number.parseInt(recurringCount, 10);
+      const finiteCount = Number.isInteger(parsedCount) && parsedCount >= 2 ? parsedCount : null;
+      const perVisit = pricing.finalPrice || 0;
+      const prepay = (isRecurring && collectPrepay)
+        ? { perVisit, totalAmount: Math.round(perVisit * (finiteCount || 4) * 100) / 100 }
+        : null;
+
+      results.push({
+        key: key ?? null,
+        price: pricing.finalPrice,
+        primaryDiscount: pricing.primaryDiscount || null,
+        addonLines: (pricing.addonLines || []).map((l) => ({ price: l.price, discount: l.discount || null })),
+        appointmentDiscount: pricing.appointmentDiscount || null,
+        stackGroupConflict: stackGroupConflictVerdict,
+        prepay,
+      });
+    }
+    res.json({ regime, results });
+  } catch (e) { next(e); }
+});
+
+// GitHub round 4 P0 follow-up (Codex; "the part that makes the P0 unfakeable"):
+// req.body.prepaid.totalAmount used to be stamped VERBATIM with no
+// server-side recomputation against the actual per-visit price -- a
+// catalog value changing mid-session (not only GATE_DISCOUNT_STACKING
+// flipping, which expected_discount_stacking already guards) produces the
+// identical symptom: a client-computed prepaid total that disagrees with
+// what the visits actually bill. Recomputed from the SAME pricing.finalPrice
+// buildAppointmentPricing already produced for this exact request, times
+// the SAME planned-visit-count fallback the client's own
+// recurringGroupRequestFields mirrors (finiteCount ?? 4) -- a mismatch
+// throws a retryable 409, matching DISCOUNT_STACKING_GATE_DIVERGED's own
+// shape and "before any write" contract for its own field.
+function assertPrepayTotalMatchesPricing({ totalAmount, finalPrice, plannedCount }) {
+  const authoritativePrepayTotal = Math.round((Number(finalPrice) || 0) * (Number(plannedCount) || 0) * 100) / 100;
+  if (Math.round(Number(totalAmount) * 100) !== Math.round(authoritativePrepayTotal * 100)) {
+    throw Object.assign(httpError(409, 'The price changed since this was previewed — reload and try again'), { code: 'PREPAY_TOTAL_DIVERGED' });
+  }
+}
+
+// Codex pre-push audit P0 (round 6, blocked push 8 on PR #4656): only the
+// STACKING REGIME was bound to the POST (expected_discount_stacking) —
+// nothing bound the previewed DOLLAR AMOUNT itself. A discount's own
+// catalog amount changing mid-session (a $10 credit edited to $5, no gate
+// flip involved at all) lets ensureStackingFresh agree while buildAppointmentPricing
+// still recomputes a DIFFERENT pricing.finalPrice than what /preview
+// showed and the operator saw on screen — an unchanged $100 booking
+// displays $90 but silently saves $95. assertPrepayTotalMatchesPricing
+// above already closed this exact class for prepaid.totalAmount; this is
+// the same check for the group's own per-visit price, which every OTHER
+// (non-prepay) booking also needs. Same shape: a retryable 409 before any
+// write, undefined (no field sent) skipping the check entirely so every
+// existing/older caller stays byte-identical.
+function assertPriceMatchesPricing({ expectedPrice, finalPrice }) {
+  if (expectedPrice === undefined) return;
+  if (Math.round(Number(expectedPrice) * 100) !== Math.round((Number(finalPrice) || 0) * 100)) {
+    throw Object.assign(httpError(409, 'The price changed since this was previewed — reload and try again'), { code: 'PRICE_DIVERGED' });
+  }
+}
+
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const {
@@ -6037,6 +6275,31 @@ router.post('/', requireAdmin, async (req, res, next) => {
     }
     void windowStartRaw; void windowEndRaw;
     if (!customerId || !scheduledDate || !serviceType) return res.status(400).json({ error: 'customerId, scheduledDate, serviceType required' });
+
+    // GitHub round 4 P0 (PR #4656): mirrors calculateUpdateFinancials
+    // (server/services/invoice.js, #4655) and InvoiceService.create's own
+    // gate check (#4658) — same field name, same error shape/code, so the
+    // client's existing generic POST-failure handling (surfacing e.message)
+    // already covers it with no special-casing needed. The freshness probe
+    // the client runs before submit only confirms the gate FOR THAT PROBE
+    // REQUEST; nothing bound the pricing/prepaid regime this WRITE actually
+    // saves under to what was previewed. A gate flip (or a rolling deploy
+    // routing the probe and this POST to pods reading different values)
+    // between the two requests let the probe pass while this route would
+    // have saved (and, for req.body.prepaid.totalAmount below, STAMPED
+    // VERBATIM with no server-side recomputation against the actual
+    // per-visit price) under the OPPOSITE regime — a booking whose prepaid
+    // total silently disagreed with what the visits actually bill.
+    // undefined (no field sent) skips the check entirely — every existing
+    // caller, and any client older than this slice, stays byte-identical.
+    // Checked before ANY read or write below.
+    const expectedDiscountStacking = req.body?.expected_discount_stacking;
+    if (expectedDiscountStacking !== undefined && expectedDiscountStacking !== discountStackingLive()) {
+      return res.status(409).json({
+        error: 'Discount rules changed since this was previewed — reload and try again',
+        code: 'DISCOUNT_STACKING_GATE_DIVERGED',
+      });
+    }
 
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
@@ -6536,6 +6799,41 @@ router.post('/', requireAdmin, async (req, res, next) => {
       customer,
       recurringMembershipBooking,
     });
+
+    // GitHub round 5 P1 (Codex, on 3c7214fa45): two picks in the same
+    // non-stackable stack_group (the WaveGuard tiers, promo, relationship)
+    // — one on a line, one on the appointment-level slot spanning onto
+    // that same line, or two different lines each carrying one — must
+    // never both actually persist. Before this, enforcement was entirely
+    // client-side (existingSelectionConflict in CreateAppointmentModal.jsx),
+    // with no server backstop: a client bypass, or the gate simply being
+    // off (which already skips that client check), let two conflicting
+    // tiers both save. Checked here, before ANY write (the transaction
+    // below has not opened yet) — a conflict throws a plain operational
+    // 400, not the transaction's own rollback path, since nothing has
+    // been written for it to roll back.
+    //
+    // GitHub round 5 P1 follow-up (Codex, blocked push 5): a failed
+    // stack_group lookup must FAIL CLOSED (a retryable error), never
+    // silently proceed as if the conflict check found nothing — the
+    // exact silent-disable this whole check exists to prevent, just
+    // moved one layer down.
+    let stackGroupRows;
+    try {
+      stackGroupRows = await discountStackGroupRowsForPricing(pricing);
+    } catch (e) {
+      throw Object.assign(
+        httpError(503, 'Could not confirm the discount rules for this booking — try again'),
+        { code: 'DISCOUNT_STACK_GROUP_LOOKUP_FAILED' },
+      );
+    }
+    assertNoDiscountStackGroupConflict(stackGroupRows);
+    // Codex pre-push audit P0 (round 6, blocked push 8): the group's own
+    // per-visit price, bound to the SAME previewed number the client
+    // displayed and posted expected_discount_stacking alongside — see
+    // assertPriceMatchesPricing's own comment for why this is needed even
+    // with the regime unchanged.
+    assertPriceMatchesPricing({ expectedPrice: req.body?.expected_price, finalPrice: pricing.finalPrice });
 
     // Re-service callbacks default to $0 for WaveGuard customers, but an operator
     // can still enter an explicit charge (e.g. a re-service that also handled a
@@ -7219,6 +7517,27 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (req.body.prepaid && isRecurring) {
         const { totalAmount, method, note } = req.body.prepaid;
         if (totalAmount > 0) {
+          // GitHub round 4 P0 follow-up (Codex; the coordinator's own
+          // framing: "the part that makes the P0 unfakeable"): totalAmount
+          // above is CLIENT-COMPUTED and was stamped VERBATIM, with no
+          // server-side recomputation against the actual per-visit price —
+          // exactly the gap expected_discount_stacking's gate check (above)
+          // does not cover, since a CATALOG value changing (not the gate)
+          // produces the identical symptom: four $100 visits prepaid at a
+          // stale $360 while pricing.finalPrice (this route's own,
+          // authoritative, buildAppointmentPricing result) actually bills
+          // $320/visit. Recomputed here from the SAME pricing this route
+          // already produced (cent-exact, percentageDiscountDollars) and
+          // the SAME planned-visit-count fallback the client's own
+          // recurringGroupRequestFields mirrors (finiteCount ?? 4) — a
+          // mismatch rejects with a retryable 409 BEFORE any write (this
+          // stamp is the first write in the transaction that touches
+          // prepaid money; the transaction that already inserted the
+          // appointment rows above rolls back with it, so a mismatch here
+          // leaves nothing committed at all, matching the sibling
+          // DISCOUNT_STACKING_GATE_DIVERGED check's own "before any write"
+          // contract for its own field).
+          assertPrepayTotalMatchesPricing({ totalAmount, finalPrice: pricing.finalPrice, plannedCount });
           await stampSeriesPrepaid(trx, {
             anchorServiceId: svc.id,
             totalAmount,
@@ -19996,6 +20315,10 @@ router._test = {
   customerFacingCompanionTypes,
   bookingCreatesWaveGuardCoverage,
   buildAppointmentPricing,
+  assertPrepayTotalMatchesPricing,
+  assertPriceMatchesPricing,
+  discountStackGroupRowsForPricing,
+  assertNoDiscountStackGroupConflict,
   lineExcludedFromPercentDiscount,
   buildPercentExclusionCatalog,
   appointmentDiscountIdentityChanged,
