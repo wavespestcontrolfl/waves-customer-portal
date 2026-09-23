@@ -2576,7 +2576,7 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
 // handoff-link recheck — an ordinary staff revision must not silently drop
 // it and revive a stale booking link for a still-unconfirmed address
 // (codex #4667 r5 P1); a clean wizard run clears it explicitly (false).
-const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id', 'manualSendAttempts', 'deliveryState', 'addressUnverified'];
+const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id', 'manualSendAttempts', 'deliveryState', 'addressUnverified', 'addressUnverifiedFlag'];
 const GROUP_PUBLICATION_KEYS = ['groupLinkViewableThrough', 'groupPublishedByEstimateId'];
 // Click-to-estimate mints (#3391 audit P0): both markers are
 // lifecycle-critical and PRIOR-WINS across a revise — the zero-comms

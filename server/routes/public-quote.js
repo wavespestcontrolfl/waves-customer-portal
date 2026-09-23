@@ -1043,7 +1043,7 @@ const quoteLimiter = rateLimit({
   message: { error: 'Too many quote requests. Please try again later.' },
 });
 
-const { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified, flagCoversAddress, countyRollAnswered } = require('../services/lead-address-unverified');
+const { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified, flagCoversAddress, countyRollAnswered, samePremiseDisplay } = require('../services/lead-address-unverified');
 
 router.post('/calculate', quoteLimiter, async (req, res) => {
   try {
@@ -1230,6 +1230,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // lead-level recovery above could not see it) — the handoff is then
     // withheld exactly as for a fresh flag (pre-push audit P1).
     let draftAddressBlockCarried = false;
+    // The structured audit carried with it, to land on the CURRENT lead
+    // (a repeat lookup's new row was saved without it).
+    let carriedAddressFlag = null;
     if (addressUnverified) {
       // Stamp the judged address on a freshly derived flag (a recovered
       // prior flag already carries its own).
@@ -2784,6 +2787,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // flag (codex #4667 r4 P1). Always written; false clears it once a
         // clean run refreshes the draft in place.
         addressUnverified: !!addressUnverified,
+        // The structured audit beside the boolean, so a carry-over can put
+        // the callback ask back on the current lead.
+        addressUnverifiedFlag: addressUnverified || null,
       };
       if (quoteRequired) {
         // A quoteRequired draft with NO engine manual line (the unit-on-
@@ -2818,9 +2824,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // audit P1). Read under the row lock.
       const carryDraftAddressBlock = (lockedRow) => {
         if (addressUnverified || rollAnsweredThisRun) return false;
-        if (wizardAddressChanged(lockedRow)) return false;
+        // Same PREMISE (street + locality, unit-insensitive), not the same
+        // display string — an added apartment number is the same audited
+        // house number (pre-push audit P1).
+        if (!samePremiseDisplay(lockedRow?.address, quoteFullAddress)) return false;
         const data = typeof lockedRow?.estimate_data === 'string' ? (() => { try { return JSON.parse(lockedRow.estimate_data); } catch { return null; } })() : lockedRow?.estimate_data;
-        return data?.addressUnverified === true;
+        if (data?.addressUnverified !== true) return false;
+        if (data.addressUnverifiedFlag && typeof data.addressUnverifiedFlag === 'object') carriedAddressFlag = data.addressUnverifiedFlag;
+        return true;
       };
       const estFields = {
         customer_id: customerId,
@@ -2892,7 +2903,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           if (carried) draftAddressBlockCarried = true;
           await trx('estimates').where({ id: existingEst.id }).update({
             ...estFields,
-            ...(carried ? { estimate_data: { ...estimateDataObj, addressUnverified: true } } : {}),
+            ...(carried ? { estimate_data: { ...estimateDataObj, addressUnverified: true, addressUnverifiedFlag: carriedAddressFlag } } : {}),
             ...(wizardAddressChanged(lockedEst) ? { property_id: null } : {}),
             archived_at: null,
             updated_at: new Date(),
@@ -2936,7 +2947,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
                   .where({ id: duplicateBlock.existingEstimateId, source: 'quote_wizard', status: 'draft' })
                   .update({
                     ...estFields,
-                    ...(carried ? { estimate_data: { ...estimateDataObj, addressUnverified: true } } : {}),
+                    ...(carried ? { estimate_data: { ...estimateDataObj, addressUnverified: true, addressUnverifiedFlag: carriedAddressFlag } } : {}),
                     ...(wizardAddressChanged(lockedDup) ? { property_id: null } : {}),
                     updated_at: new Date(),
                   });
@@ -2961,6 +2972,19 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       }
     } catch (e) {
       logger.error(`[public-quote] Estimate upsert failed: ${e.message}`);
+    }
+    // A carried draft block puts its structured audit back on the CURRENT
+    // lead (own row, this run's insert/update above) so the lead card shows
+    // the callback ask the draft still enforces (pre-push audit P1).
+    if (draftAddressBlockCarried && carriedAddressFlag && lead?.id) {
+      try {
+        await db('leads').where({ id: lead.id }).update({
+          extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_unverified: carriedAddressFlag })]),
+          updated_at: new Date(),
+        });
+      } catch (carryErr) {
+        logger.warn(`[public-quote] carried address flag not written to the lead: ${carryErr.code || carryErr.name || 'error'}`);
+      }
     }
 
     try {

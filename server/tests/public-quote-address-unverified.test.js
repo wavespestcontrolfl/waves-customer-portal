@@ -5,7 +5,7 @@
 // the flag). Pins the pure derivation; the route stamps it on the lead's
 // extracted_data as address_unverified.
 const { _internals } = require('../routes/public-quote');
-const { snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified, countyRollAnswered, flagCoversAddress } = require('../services/lead-address-unverified');
+const { snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified, countyRollAnswered, flagCoversAddress, samePremiseDisplay } = require('../services/lead-address-unverified');
 
 const { deriveAddressUnverified } = _internals;
 
@@ -137,5 +137,16 @@ describe('flagCoversAddress', () => {
     // An older flag without a stamp defers to the caller's snapshot check.
     expect(flagCoversAddress({ source: 'county_roll', reason: 'r' }, { line1: '1250 Example St' })).toBe(true);
     expect(flagCoversAddress(null, { line1: '1260 Example St' })).toBe(false);
+  });
+});
+
+describe('samePremiseDisplay', () => {
+  test('a unit added on a repeat run is the same audited premise; a new number or town is not', () => {
+    expect(samePremiseDisplay('1260 Example St, Parrish, FL 34219', '1260 Example St Apt 4, Parrish, FL 34219')).toBe(true);
+    expect(samePremiseDisplay('1260 Example St, Parrish, FL 34219', '1260 EXAMPLE ST., Parrish, FL 34219')).toBe(true);
+    expect(samePremiseDisplay('1260 Example St, Parrish, FL 34219', '1250 Example St, Parrish, FL 34219')).toBe(false);
+    expect(samePremiseDisplay('1260 Example St, Parrish, FL 34219', '1260 Example St, Bradenton, FL 34219')).toBe(false);
+    expect(samePremiseDisplay('1260 Example St, Parrish, FL 34219', '1260 Example St, Parrish, FL 34221')).toBe(false);
+    expect(samePremiseDisplay('', '1260 Example St, Parrish, FL 34219')).toBe(false);
   });
 });

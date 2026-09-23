@@ -102,6 +102,23 @@ function flagCoversAddress(flag, address) {
   return sameLocality(flag, address);
 }
 
+// Two DISPLAY addresses ("<street line>, <City>, FL <zip>") name the same
+// premise: same street line with any unit stripped, same locality where
+// both carry one. A unit added on a repeat run is the same audited house
+// number (pre-push audit P1). Either side missing a street → false.
+function samePremiseDisplay(a, b) {
+  const { splitStreetLineUnit } = require('../utils/address-normalizer');
+  const parse = (text) => {
+    const parts = String(text || '').split(',').map((part) => part.trim());
+    const street = splitStreetLineUnit(parts[0] || '').street || parts[0] || '';
+    return { street: lineKey(street), city: parts[1] || '', zip: zip5(text) };
+  };
+  const x = parse(a);
+  const y = parse(b);
+  if (!x.street || x.street !== y.street) return false;
+  return sameLocality(x, y);
+}
+
 // Did the county roll ANSWER on this profile? The audit object is present
 // whenever the roll replied (match or not); a GIS outage yields no audit
 // at all (auditAddressHouseNumber). Only an answer may clear a prior flag.
@@ -129,4 +146,4 @@ function nextAddressUnverified({ enriched = null, profileFound = false, prior = 
   return prior || null;
 }
 
-module.exports = { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, countyRollAnswered, nextAddressUnverified, flagCoversAddress };
+module.exports = { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, countyRollAnswered, nextAddressUnverified, flagCoversAddress, samePremiseDisplay };
