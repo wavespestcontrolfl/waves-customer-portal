@@ -42,10 +42,13 @@ const lineKey = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ')
 // Street line with any inline unit stripped ("1260 Example St Apt 4" →
 // "1260 example st"): the audited house number is the same with or
 // without the unit, on every comparison (pre-push audit P1).
+// …with the street suffix canonicalized (St == Street, Dr == Drive) so a
+// spelling difference between the two stages never reads as a different
+// premise (pre-push audit P1).
 const streetKeyNoUnit = (v) => {
-  const { splitStreetLineUnit } = require('../utils/address-normalizer');
+  const { splitStreetLineUnit, normalizeStreetLine } = require('../utils/address-normalizer');
   const text = String(v || '');
-  return lineKey(splitStreetLineUnit(text).street || text);
+  return lineKey(normalizeStreetLine(splitStreetLineUnit(text).street || text));
 };
 const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z]/g, '');
 

@@ -71,6 +71,7 @@ describe('snapshotCoversAddress', () => {
     // An inline unit added between lookup and calculate is the same audited number.
     expect(snapshotCoversAddress(snapshot, { line1: '1260 Example St Apt 4', zip: '34219' })).toBe(true);
     expect(flagCoversAddress({ source: 'county_roll', reason: 'r', address_line1: '1260 Example St', zip: '34219' }, { line1: '1260 Example St Apt 4', zip: '34219' })).toBe(true);
+    expect(flagCoversAddress({ source: 'county_roll', reason: 'r', address_line1: '1260 Example Street', zip: '34219' }, { line1: '1260 Example St', zip: '34219' })).toBe(true);
   });
 
   test('a changed street or ZIP between the two stages does not carry a flag over', () => {

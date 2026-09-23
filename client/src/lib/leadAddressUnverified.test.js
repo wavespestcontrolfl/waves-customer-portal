@@ -24,6 +24,8 @@ describe('leadAddressUnverified', () => {
     expect(leadAddressUnverified({ address: '1260 Example St', extracted_data: { address_unverified: stamped } })).not.toBeNull();
     expect(leadAddressUnverified({ address: '1250 Example St, Parrish, FL 34219', zip: '34219', extracted_data: { address_unverified: stamped } })).toBeNull();
     expect(leadAddressUnverified({ address: '1260 Example St', zip: '34221', extracted_data: { address_unverified: stamped } })).toBeNull();
+    // A suffix spelling difference is the same street.
+    expect(leadAddressUnverified({ address: '1260 Example Street, Parrish, FL 34219', zip: '34219', extracted_data: { address_unverified: stamped } })).not.toBeNull();
     // A unit added inline is the same audited house number.
     expect(leadAddressUnverified({ address: '1260 Example St Apt 4, Parrish, FL 34219', zip: '34219', extracted_data: { address_unverified: stamped } })).not.toBeNull();
     // A five-digit house number is not the ZIP when the lead's zip column is empty.

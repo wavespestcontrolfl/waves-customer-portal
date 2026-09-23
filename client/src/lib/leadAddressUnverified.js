@@ -36,7 +36,15 @@ const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z]/g, '');
 // 4" → "1260 example st"), mirroring the server's unit-insensitive
 // comparison: the audited house number is the same with or without it.
 const UNIT_TAIL = /\s+(?:#|apt|apartment|unit|ste|suite|bldg|building|lot|rm|room|fl|floor|spc|space)\.?\s*[a-z0-9-]+\s*$/i;
-const streetKeyNoUnit = (v) => lineKey(String(v || '').replace(UNIT_TAIL, ''));
+// Suffix aliases mirror the server's canonical forms (St == Street).
+const SUFFIX_ALIASES = {
+  street: 'st', avenue: 'ave', drive: 'dr', road: 'rd', lane: 'ln', court: 'ct', boulevard: 'blvd',
+  circle: 'cir', place: 'pl', terrace: 'ter', trail: 'trl', parkway: 'pkwy', highway: 'hwy', way: 'way',
+};
+const streetKeyNoUnit = (v) => lineKey(String(v || '').replace(UNIT_TAIL, ''))
+  .split(' ')
+  .map((token) => SUFFIX_ALIASES[token] || token)
+  .join(' ');
 
 function flagCoversLeadAddress(flag, lead) {
   const leadLine = streetKeyNoUnit(String(lead?.address || '').split(',')[0]);
