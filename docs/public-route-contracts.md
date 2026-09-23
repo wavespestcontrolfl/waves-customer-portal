@@ -893,8 +893,14 @@ address clears it (the key is always written, null when clean). The draft
 estimate carries the same verdict as `estimate_data.addressUnverified`
 (always written), which `wizardDraftSelfServeBookable` refuses — so a
 booking link minted by an EARLIER clean run over the same draft dies on
-its live recheck at `/api/booking/confirm` once the address is flagged. A
-roll that never answered (GIS outage) is not a flag.
+its live recheck at `/api/booking/confirm` once the address is flagged,
+and a staff revision of the draft preserves the marker. A website estimate
+an earlier run already PUBLISHED for the same lead is archived on the
+flagged run (`website_quote_withdrawn_address_unverified` audit event), so
+its old token neither renders nor accepts. A roll that never answered (GIS
+outage) is not a fresh flag — but it does not clear one either: the prior
+server-written flag for the same address carries forward until the roll
+answers clean.
 Request shape: either `services` keyed by the engine
 keys in `PUBLIC_QUOTE_SERVICE_KEYS` (`routes/public-quote.js`) or a catalog
 `serviceKey` / `service_key` from the `/api/public/services/menu` payload,

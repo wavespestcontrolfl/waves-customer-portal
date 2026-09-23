@@ -374,6 +374,15 @@ describe('reviseAdminEstimate', () => {
     expect(JSON.parse(updates[0].estimate_data).deliveryState).toEqual(latest);
   });
 
+  test('retains the wizard address-verification marker across an ordinary revision', async () => {
+    const priorData = JSON.parse(sentEstimate.estimate_data);
+    const flagged = { ...sentEstimate, estimate_data: JSON.stringify({ ...priorData, addressUnverified: true }) };
+    const { database, updates } = makeReviseDatabase({ estimate: flagged, lockedEstimate: flagged });
+    await reviseAdminEstimate({ database, estimateId: 'est-1', body: reviseBody,
+      technicianId: 'tech-2', recompute: noRecompute, now: fixedNow });
+    expect(JSON.parse(updates[0].estimate_data).addressUnverified).toBe(true);
+  });
+
   test('does not revive a delivery receipt removed before the row lock', async () => {
     const priorData = JSON.parse(sentEstimate.estimate_data);
     const preRead = { ...sentEstimate, estimate_data: JSON.stringify({ ...priorData,

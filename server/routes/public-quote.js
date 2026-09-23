@@ -1043,7 +1043,7 @@ const quoteLimiter = rateLimit({
   message: { error: 'Too many quote requests. Please try again later.' },
 });
 
-const { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified } = require('../services/lead-address-unverified');
+const { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified } = require('../services/lead-address-unverified');
 
 router.post('/calculate', quoteLimiter, async (req, res) => {
   try {
@@ -1187,14 +1187,18 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // County roll could not vouch for the typed house number — carried on
     // the lead for the callback (see deriveAddressUnverified). Never
     // changes the price: the profile the engine priced from is unchanged.
-    // The cache-only re-read misses when the lookup found an audit but no
-    // record to cache (the missing-house-number case itself); the lookup
-    // stage persisted its trusted profile on the visitor's own lead row, so
-    // recover the flag from THAT snapshot — ownership-predicated (id +
-    // typed email, the same proof the UPDATE below uses) and only when the
-    // snapshot is for this address (codex r1 P1).
-    let addressUnverified = trustedProfileFound ? deriveAddressUnverified(trustedTurf, normalizedAddress) : null;
-    if (!trustedProfileFound && leadId && contactEmail) {
+    // The prior server-written flag on the visitor's OWN lead row (the
+    // lookup stage persisted it; so does every /calculate) — ownership-
+    // predicated (id + typed email, the same proof the UPDATE below uses),
+    // only when the snapshot is for this address, and only the server-
+    // written key (after a /calculate the snapshot's `enriched` is the
+    // client's own submission — pre-push audit P1). It answers two cases:
+    // the cache-only re-read misses when the lookup found an audit but no
+    // record to cache (the missing-house-number case itself — codex r1
+    // P1), and a GIS outage on a recalculation must not erase an earlier
+    // authoritative warning (codex r5 P1).
+    let priorAddressUnverified = null;
+    if (leadId && contactEmail) {
       try {
         const own = await db('leads')
           .where({ id: leadId })
@@ -1202,19 +1206,29 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()])
           .first('extracted_data');
         const snapshot = typeof own?.extracted_data === 'string' ? JSON.parse(own.extracted_data) : own?.extracted_data;
-        // Only the server-derived key: after a /calculate the snapshot's
-        // `enriched` is the CLIENT's submitted ep, so deriving from it
-        // would promote client text into a staff-facing warning (pre-push
-        // audit P1). address_unverified is written by the server on both
-        // stages and never from the request body.
         if (snapshot && snapshotCoversAddress(snapshot, normalizedAddress)) {
-          addressUnverified = recoverAddressUnverified(snapshot);
+          priorAddressUnverified = recoverAddressUnverified(snapshot);
         }
       } catch (snapErr) {
-        logger.warn(`[public-quote] lookup-stage snapshot re-read failed — address flag not recovered: ${snapErr.code || snapErr.name || 'error'}`);
+        logger.warn(`[public-quote] lookup-stage snapshot re-read failed — prior address flag not recovered: ${snapErr.code || snapErr.name || 'error'}`);
       }
     }
+    const addressUnverified = nextAddressUnverified({
+      enriched: trustedProfileFound ? trustedTurf : null,
+      profileFound: trustedProfileFound,
+      prior: priorAddressUnverified,
+    });
     if (addressUnverified) {
+      // Stamp the judged address on a freshly derived flag (a recovered
+      // prior flag already carries its own).
+      if (!addressUnverified.address_line1) {
+        Object.assign(addressUnverified, {
+          address_line1: String(normalizedAddress.line1 || '').trim() || null,
+          city: String(normalizedAddress.city || '').trim() || null,
+          state: String(normalizedAddress.state || '').trim().toUpperCase().slice(0, 2) || null,
+          zip: (String(normalizedAddress.zip || '').match(/\d{5}/) || [''])[0] || null,
+        });
+      }
       logger.info(`[public-quote] county roll could not match the typed house number (${addressUnverified.county || 'county unknown'}) — lead flagged address_unverified`);
     }
     // A lot the lookup itself flagged verify-first (the condo unit-lot flag:
@@ -2962,6 +2976,35 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const selfBookBlockedByAddress = !!addressUnverified;
     if (selfBookBlockedByAddress) {
       logger.info('[public-quote] self-book link withheld — address flagged by the county-roll audit; office confirms on the callback');
+      // A website estimate an EARLIER run already published for this lead
+      // (publication promotes the row to `sent`, past the draft predicate)
+      // stays customer-viewable and acceptable on its old token — archive
+      // it so /estimate/:token and accept refuse it (both reject
+      // archived_at outright); the office re-sends once the address is
+      // confirmed (codex #4667 r5 P1). Own lead only; best-effort.
+      try {
+        const withdrawn = await db('estimates')
+          .where({ source: 'quote_wizard', status: 'sent' })
+          .whereNull('archived_at')
+          .whereRaw("estimate_data->>'lead_id' = ?", [String(lead.id)])
+          .whereRaw("estimate_data->'websiteSelfService' IS NOT NULL")
+          .update({ archived_at: new Date(), updated_at: new Date() })
+          .returning('id');
+        if (withdrawn.length) {
+          const { recordAuditEvent } = require('../services/audit-log');
+          for (const row of withdrawn) {
+            const id = row?.id ?? row;
+            await recordAuditEvent({
+              actor_type: 'system', action: 'website_quote_withdrawn_address_unverified',
+              resource_type: 'estimate', resource_id: id,
+              metadata: { leadId: lead.id }, critical: true,
+            }).catch(() => {});
+          }
+          logger.info(`[public-quote] withdrew ${withdrawn.length} published website estimate(s) for the flagged address`);
+        }
+      } catch (withdrawErr) {
+        logger.warn(`[public-quote] website estimate withdrawal failed: ${withdrawErr.code || withdrawErr.name || 'error'}`);
+      }
     }
     if (!quoteRequired && !commercialDetected && !estimateBlocksSelfBookLink(estimate) && !keyedNotBookable && !selfBookBlockedByAddress) {
       try {

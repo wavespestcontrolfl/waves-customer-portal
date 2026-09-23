@@ -5,7 +5,7 @@
 // the flag). Pins the pure derivation; the route stamps it on the lead's
 // extracted_data as address_unverified.
 const { _internals } = require('../routes/public-quote');
-const { snapshotCoversAddress, recoverAddressUnverified } = require('../services/lead-address-unverified');
+const { snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified, countyRollAnswered } = require('../services/lead-address-unverified');
 
 const { deriveAddressUnverified } = _internals;
 
@@ -101,5 +101,22 @@ describe('recoverAddressUnverified', () => {
     expect(r.reason).toHaveLength(600);
     expect(r.county).toHaveLength(40);
     expect(r.nearest_numbers).toEqual(['1', '2', '3', '4', '5']);
+  });
+});
+
+describe('nextAddressUnverified', () => {
+  const prior = { source: 'county_roll', reason: 'earlier verdict', address_line1: '1260 Example St' };
+
+  test('a fresh verdict wins; a clean roll answer clears a prior flag', () => {
+    expect(nextAddressUnverified({ enriched: { fieldVerifyFlags: [ADDRESS_FLAG], addressAudit: AUDIT }, profileFound: true, prior })?.reason).toBe(ADDRESS_FLAG.reason);
+    expect(nextAddressUnverified({ enriched: { fieldVerifyFlags: [], addressAudit: { ...AUDIT, hasExactMatch: true } }, profileFound: true, prior })).toBeNull();
+  });
+
+  test('a roll that never answered (outage, or no cached profile) keeps the prior flag', () => {
+    expect(countyRollAnswered({ fieldVerifyFlags: [] })).toBe(false);
+    expect(countyRollAnswered({ addressAudit: AUDIT })).toBe(true);
+    expect(nextAddressUnverified({ enriched: { fieldVerifyFlags: [] }, profileFound: true, prior })).toBe(prior);
+    expect(nextAddressUnverified({ enriched: null, profileFound: false, prior })).toBe(prior);
+    expect(nextAddressUnverified({ enriched: { fieldVerifyFlags: [] }, profileFound: true, prior: null })).toBeNull();
   });
 });

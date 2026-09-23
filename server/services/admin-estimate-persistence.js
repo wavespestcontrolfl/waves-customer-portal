@@ -2571,7 +2571,12 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
 // wholesale revision too. The locked-row pass below overwrites any pending
 // client copy, so the latest committed delivery state wins; a changed offer
 // still fails the annual resend gate through its fingerprint mismatch.
-const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id', 'manualSendAttempts', 'deliveryState'];
+// addressUnverified: the wizard's county-roll verdict on the draft's
+// address (public-quote), read by wizardDraftSelfServeBookable on every
+// handoff-link recheck — an ordinary staff revision must not silently drop
+// it and revive a stale booking link for a still-unconfirmed address
+// (codex #4667 r5 P1); a clean wizard run clears it explicitly (false).
+const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id', 'manualSendAttempts', 'deliveryState', 'addressUnverified'];
 const GROUP_PUBLICATION_KEYS = ['groupLinkViewableThrough', 'groupPublishedByEstimateId'];
 // Click-to-estimate mints (#3391 audit P0): both markers are
 // lifecycle-critical and PRIOR-WINS across a revise — the zero-comms

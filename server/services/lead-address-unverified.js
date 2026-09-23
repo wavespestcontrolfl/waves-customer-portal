@@ -90,4 +90,23 @@ function recoverAddressUnverified(snapshot) {
   };
 }
 
-module.exports = { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified };
+// Did the county roll ANSWER on this profile? The audit object is present
+// whenever the roll replied (match or not); a GIS outage yields no audit
+// at all (auditAddressHouseNumber). Only an answer may clear a prior flag.
+function countyRollAnswered(enriched) {
+  return !!(enriched && typeof enriched === 'object' && enriched.addressAudit && typeof enriched.addressAudit === 'object');
+}
+
+// The flag this run should persist: a fresh verdict when the roll answered,
+// else the prior server-written flag for the same address. A transient
+// outage on a recalculation must not erase an authoritative earlier
+// warning and mint a self-book link for a still-unverified address
+// (codex #4667 r5 P1). `prior` is already address-matched by the caller.
+function nextAddressUnverified({ enriched = null, profileFound = false, prior = null } = {}) {
+  const derived = profileFound ? deriveAddressUnverified(enriched) : null;
+  if (derived) return derived;
+  if (profileFound && countyRollAnswered(enriched)) return null;
+  return prior || null;
+}
+
+module.exports = { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, countyRollAnswered, nextAddressUnverified };
