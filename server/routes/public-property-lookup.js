@@ -3,7 +3,7 @@ const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { recoverAddressUnverified, nextAddressUnverified, flagCoversAddress, buildAddressVerdict, contactPairLockKey } = require('../services/lead-address-unverified');
+const { recoverAddressUnverified, nextAddressUnverified, flagCoversAddress, buildAddressVerdict, contactPairLockKey, cleanVerdictCovers, cachedAuditSuperseded } = require('../services/lead-address-unverified');
 const { performPropertyLookup, VACANT_SQFT_FLAG_COPY } = require('./property-lookup-v2');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
 const { normalizeLeadAddress, formatAddress } = require('../utils/address-normalizer');
@@ -441,7 +441,42 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
         logger.warn(`[public-property-lookup] prior address flag re-read failed: ${priorErr.code || priorErr.name || 'error'}`);
       }
     }
-    const addressUnverified = nextAddressUnverified({ enriched: result.enriched, profileFound: !!result?.enriched, prior: priorAddressUnverified });
+    // A CACHED audit (no new evidence this run) is outranked by a staff
+    // clean verdict for this premise stamped on any of the contact pair's
+    // leads AFTER it was cached and after every matching flag — otherwise
+    // a repeat lookup re-derives the flag staff already overruled and the
+    // next /calculate blocks the booking again (pre-push audit P1). A
+    // live lookup is fresh evidence and always stands.
+    let staffCleanAt = null;
+    if (result?.meta?.cache === 'hit' && result?.enriched && email && normPhone) {
+      try {
+        const rows = await db('leads')
+          .whereNull('deleted_at')
+          .whereRaw('LOWER(email) = ?', [String(email).toLowerCase().trim()])
+          .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(normPhone).replace(/\D/g, '').slice(-10)])
+          .whereRaw("(extracted_data->'address_unverified' IS NOT NULL OR extracted_data->'address_verdict' IS NOT NULL)")
+          .select('extracted_data');
+        const snapshots = rows.map((row) => (typeof row.extracted_data === 'string' ? (() => { try { return JSON.parse(row.extracted_data); } catch { return null; } })() : row.extracted_data)).filter(Boolean);
+        const newestClean = snapshots
+          .filter((snap) => cleanVerdictCovers(snap, normalizedAddress, { requireLocality: true }))
+          .map((snap) => Date.parse(snap.address_verdict?.at || '') || 0)
+          .reduce((max, at) => Math.max(max, at), 0);
+        const newestFlag = snapshots
+          .map((snap) => recoverAddressUnverified(snap))
+          .filter((flag) => flag && flag.address_line1 && flagCoversAddress(flag, normalizedAddress))
+          .map((flag) => Date.parse(flag.flagged_at || '') || 0)
+          .reduce((max, at) => Math.max(max, at), 0);
+        if (newestClean && newestClean > newestFlag) staffCleanAt = new Date(newestClean).toISOString();
+      } catch (cleanErr) {
+        logger.warn(`[public-property-lookup] contact-pair clean verdict re-read failed: ${cleanErr.code || cleanErr.name || 'error'}`);
+      }
+    }
+    const cachedAuditStale = cachedAuditSuperseded({
+      leadCleanVerdict: !!staffCleanAt, profileFound: !!result?.enriched, cachedAt: result?.meta?.cachedAt || null, cleanEvidenceAt: staffCleanAt,
+    });
+    const addressUnverified = cachedAuditStale
+      ? null
+      : nextAddressUnverified({ enriched: result.enriched, profileFound: !!result?.enriched, prior: priorAddressUnverified });
     if (addressUnverified && !addressUnverified.address_line1) {
       Object.assign(addressUnverified, {
         address_line1: String(normalizedAddress.line1 || '').trim() || null,
@@ -491,7 +526,11 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
             address_unverified: addressUnverified,
             // Server-owned verdict for this address (clean / flagged /
             // unanswered) — a clean one supersedes older warnings downstream.
-            address_verdict: buildAddressVerdict({ flag: addressUnverified, enriched: result.enriched, profileFound: !!result?.enriched, address: normalizedAddress }),
+            address_verdict: (() => {
+              if (!cachedAuditStale) return buildAddressVerdict({ flag: addressUnverified, enriched: result.enriched, profileFound: !!result?.enriched, address: normalizedAddress });
+              // The staff verdict is the evidence, at ITS timestamp.
+              return { ...buildAddressVerdict({ flag: null, enriched: { addressVerdict: 'audited' }, profileFound: true, address: normalizedAddress }), at: staffCleanAt };
+            })(),
           })]),
           updated_at: new Date(),
         });

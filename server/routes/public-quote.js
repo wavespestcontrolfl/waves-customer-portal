@@ -2343,7 +2343,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           // Re-read the contact pair UNDER the lock: a flag committed since
           // the unlocked scan outranks a recovered clean verdict when it is
           // newer than that verdict's ORIGINAL evidence (pre-push audit P1).
-          if (!addressUnverified && !(profileEvidence && countyRollAnswered(trustedTurf))) {
+          // A cached profile's clean answer is evidence from its CACHE time,
+          // not now: a flag another lookup committed after that stamp
+          // outranks it too (pre-push audit P1).
+          const cachedCleanAt = profileEvidence && countyRollAnswered(trustedTurf) ? (trustedProfileCachedAt || null) : null;
+          if (!addressUnverified) {
             const phoneTen = String(contactPhone).replace(/\D/g, '').slice(-10);
             const lockedRows = await trx('leads')
               .whereNull('deleted_at')
@@ -2351,7 +2355,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneTen])
               .whereRaw("extracted_data->'address_unverified' IS NOT NULL")
               .select('extracted_data');
-            const cleanAt = Date.parse(cleanEvidenceAt || '') || 0;
+            const cleanAt = Date.parse(cleanEvidenceAt || cachedCleanAt || '') || 0;
             const newerFlag = lockedRows
               .map((row) => recoverAddressUnverified(typeof row.extracted_data === 'string' ? (() => { try { return JSON.parse(row.extracted_data); } catch { return null; } })() : row.extracted_data))
               .filter((flag) => flag && flag.address_line1 && flagCoversAddress(flag, normalizedAddress) && (Date.parse(flag.flagged_at || '') || 0) > cleanAt)
@@ -2367,7 +2371,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             profileFound: profileEvidence || leadCleanVerdict,
             address: normalizedAddress,
           });
-          if (verdict.status === 'clean' && cleanEvidenceAt && !(profileEvidence && countyRollAnswered(trustedTurf))) verdict.at = cleanEvidenceAt;
+          if (verdict.status === 'clean' && cleanEvidenceAt && !cachedCleanAt) verdict.at = cleanEvidenceAt;
+          else if (verdict.status === 'clean' && cachedCleanAt) verdict.at = cachedCleanAt;
           await trx('leads').where({ id: lead.id }).update({
             extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
               address_unverified: addressUnverified || null,

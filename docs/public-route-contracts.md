@@ -948,7 +948,9 @@ estimate with 409 `ADDRESS_UNVERIFIED` since the customer link would not
 render. A staff confirmation stamps a clean verdict on the linked lead
 that outranks the CACHED county audit it answered (a cache-only re-read on
 the next `/calculate` obtains no new evidence); only a profile cached after
-the confirmation may flag the premise again. A roll that never answered (GIS
+the confirmation may flag the premise again (the lookup stage applies the
+same rule to a cache-hit audit), and a cached clean answer is evidence from
+its cache time, so a flag committed after that stamp outranks it. A roll that never answered (GIS
 outage) is not a fresh flag — but it does not clear one either: the prior
 server-written flag for the same address carries forward until the roll
 answers clean, and an existing draft's own `addressUnverified` marker is
