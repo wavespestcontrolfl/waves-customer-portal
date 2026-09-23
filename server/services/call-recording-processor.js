@@ -10017,8 +10017,32 @@ const CallRecordingProcessor = {
       // (both streets) — no addresses in logs (pre-push audit P1).
       logger.warn(`[call-proc] house-number conflict check skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
     }
-    // Existing AI bookings this call created are reconciled HERE, the
-    // moment a dispute stands — independently of whether the latest
+    // Runs whether or not the lane above threw (pre-push audit P1).
+    try {
+      // An UNRESOLVED card from an earlier pass is still the owed ask
+      // (this pass may have had no AV, lost its claim, or deliberately
+      // left a confirmed card standing): the booking hold and the
+      // second-address suppression follow the standing card, not only a
+      // card this pass filed (pre-push audit P1).
+      if (!houseNumberConflictFiled && customerId) {
+        const standing = await db('triage_items')
+          .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict' })
+          .whereIn('status', ['open', 'in_progress'])
+          .first('id');
+        if (standing) {
+          houseNumberConflictFiled = true;
+          houseNumberDisputed = true;
+          if (!bridgeNeedsConfirmation.includes('on_file_house_number_conflict')) bridgeNeedsConfirmation.push('on_file_house_number_conflict');
+          logger.info(`[call-proc] house-number conflict still open for ${maskSid(callSid)} — booking hold carried over`);
+        }
+      }
+    } catch (standingErr) {
+      logger.warn(`[call-proc] standing house-number card check failed for ${maskSid(callSid)}: ${standingErr.code || standingErr.name || 'db_error'}`);
+    }
+    // Existing AI bookings this call created are reconciled HERE — AFTER
+    // the standing-card check above, so a dispute carried over from an
+    // earlier pass reconciles them too (pre-push audit P1) — and
+    // independently of whether the latest
     // extraction still qualifies to create a booking (a reprocess can be
     // routing-blocked, unconfirmed or time-less and never reach the booking
     // branch, leaving an earlier booking and its children assigned and
@@ -10068,28 +10092,6 @@ const CallRecordingProcessor = {
       } catch (pullErr) {
         logger.warn(`[call-proc] existing-booking dispute pull failed for ${maskSid(callSid)}: ${pullErr.code || pullErr.name || 'db_error'}`);
       }
-    }
-    // Runs whether or not the lane above threw (pre-push audit P1).
-    try {
-      // An UNRESOLVED card from an earlier pass is still the owed ask
-      // (this pass may have had no AV, lost its claim, or deliberately
-      // left a confirmed card standing): the booking hold and the
-      // second-address suppression follow the standing card, not only a
-      // card this pass filed (pre-push audit P1).
-      if (!houseNumberConflictFiled && customerId) {
-        const standing = await db('triage_items')
-          .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict' })
-          .whereIn('status', ['open', 'in_progress'])
-          .first('id');
-        if (standing) {
-          houseNumberConflictFiled = true;
-          houseNumberDisputed = true;
-          if (!bridgeNeedsConfirmation.includes('on_file_house_number_conflict')) bridgeNeedsConfirmation.push('on_file_house_number_conflict');
-          logger.info(`[call-proc] house-number conflict still open for ${maskSid(callSid)} — booking hold carried over`);
-        }
-      }
-    } catch (standingErr) {
-      logger.warn(`[call-proc] standing house-number card check failed for ${maskSid(callSid)}: ${standingErr.code || standingErr.name || 'db_error'}`);
     }
 
     const verifiableAni = firstExternalPhone(call.from_phone);

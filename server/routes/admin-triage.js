@@ -775,7 +775,6 @@ router.post('/:id/verdict', async (req, res) => {
       const heldConflictPayload = typeof heldConflict?.payload === 'string'
         ? (() => { try { return JSON.parse(heldConflict.payload); } catch { return null; } })()
         : heldConflict?.payload;
-      const heldConflictConfirmed = heldConflictTaskDecision({ verdict, wrongFields, heldConflictPayload }).confirmed;
       const resolvedRows = await trx('triage_items')
         .where({ call_log_id: item.call_log_id })
         // Bounce follow-ups, pending property-role confirmations, and parked
