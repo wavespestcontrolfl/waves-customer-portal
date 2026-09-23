@@ -37,7 +37,7 @@ const estimateSlotAvailability = require('./estimate-slot-availability');
 const { addETDays, etDateString } = require('../utils/datetime-et');
 const { splitSignedSlotId, verifySlotOffer, isRealCalendarDate, CAPACITY_OFFER_POLICY } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
-const { violatesSelfServeNotice } = require('./scheduling/self-serve-notice');
+const { violatesSelfServeNotice, visitInsideNoticeWindow } = require('./scheduling/self-serve-notice');
 // Rung 1 of the global scheduling lock order — see the ORDERING CONTRACT in
 // scheduling/occupancy.js for why both write paths here take it first, and
 // why each also runs the tech-blind global probe (findConflictingVisits)
@@ -1524,6 +1524,17 @@ async function commitReservation({
       err.code = 'RESERVATION_EXPIRED';
       throw err;
     }
+    // Self-serve notice window (owner ruling 2026-09-23): a hold reserved
+    // just outside the window can cross the boundary during checkout. The
+    // LOCKED hold's own start is re-checked here — after the
+    // already-committed replay above (an accepted visit is never un-accepted
+    // by this rule) — so what the generator would no longer offer cannot be
+    // graduated either. Same recoverable code the other slot-side rejects use.
+    if (visitInsideNoticeWindow(row)) {
+      const err = new Error('slot start is inside the booking notice window');
+      err.code = 'SLOT_UNAVAILABLE';
+      throw err;
+    }
     // Graduating inside the grace window: reservation_expires_at itself has
     // passed (the row would have 409ed before this PR), but not by enough to
     // trip `_expired` above. Visible in prod logs so the grace's real-world
@@ -2144,6 +2155,15 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
       const err = new Error('Your time-slot hold has reached its limit — pick a time again');
       err.code = 'HOLD_LIMIT_REACHED';
       err.expiresAt = row.reservation_expires_at;
+      throw err;
+    }
+    // Self-serve notice window (owner ruling 2026-09-23): never extend a hold
+    // whose start has slid inside the window — commitReservation would refuse
+    // it anyway, so keeping it alive only strands the customer on a time they
+    // can no longer book. Same recoverable code reserveSlot uses.
+    if (visitInsideNoticeWindow(row)) {
+      const err = new Error('slot start is inside the booking notice window');
+      err.code = 'SLOT_UNAVAILABLE';
       throw err;
     }
 

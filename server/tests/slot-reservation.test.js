@@ -409,6 +409,59 @@ describe('slot reservation helpers', () => {
     expect(updateBuilder.update).not.toHaveBeenCalled();
   });
 
+  describe('commitReservation — self-serve notice window (owner ruling 2026-09-23)', () => {
+    function wire({ reservationExpiresAt }) {
+      const dateProbeBuilder = { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ scheduled_date: '2027-05-20' }) };
+      const reservationBuilder = {
+        where: jest.fn().mockReturnThis(), select: jest.fn().mockReturnThis(), forUpdate: jest.fn().mockReturnThis(),
+        first: jest.fn().mockResolvedValue({
+          id: 'scheduled-123', source_estimate_id: 'estimate-456', scheduled_date: '2027-05-20',
+          window_start: '09:00:00', window_end: '10:00:00', technician_id: 'tech-1',
+          reservation_expires_at: reservationExpiresAt,
+        }),
+      };
+      const updateBuilder = { where: jest.fn().mockReturnThis(), update: jest.fn().mockReturnThis(), returning: jest.fn() };
+      const scheduledBuilders = [dateProbeBuilder, reservationBuilder, updateBuilder];
+      const techBuilder = makeAssignableTechnicianBuilder({ id: 'tech-1', name: 'Tech One', employment_status: 'active', field_dispatchable: true });
+      const trx = jest.fn((table) => {
+        if (table === 'scheduled_services') return scheduledBuilders.shift();
+        if (table === 'technicians') return techBuilder;
+        throw new Error(`unexpected table ${table}`);
+      });
+      trx.raw = jest.fn((sql) => ({ raw: sql }));
+      trx.isTransaction = true;
+      return { trx, updateBuilder };
+    }
+
+    test('a live hold whose start slid inside the window during checkout is refused SLOT_UNAVAILABLE, nothing written', async () => {
+      jest.useFakeTimers();
+      // 2027-05-19 15:00Z = 11:00 ET — the 09:00 ET start on 05-20 is 22 h away.
+      jest.setSystemTime(new Date('2027-05-19T15:00:00Z'));
+      try {
+        const { trx, updateBuilder } = wire({ reservationExpiresAt: '2027-05-19T15:15:00.000Z' });
+        await expect(slotReservation.commitReservation({
+          scheduledServiceId: 'scheduled-123', customerId: 'customer-1', paymentMethodPreference: 'card_on_file',
+          estimatedPrice: 219.6, estimate: { id: 'estimate-456', service_interest: 'Pest Control' }, trx,
+        })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: expect.stringMatching(/notice window/) });
+        expect(updateBuilder.update).not.toHaveBeenCalled();
+      } finally { jest.useRealTimers(); }
+    });
+
+    test('an ALREADY-COMMITTED row inside the window still replays idempotently (an accepted visit is never un-accepted)', async () => {
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2027-05-19T15:00:00Z'));
+      try {
+        const { trx, updateBuilder } = wire({ reservationExpiresAt: null });
+        const row = await slotReservation.commitReservation({
+          scheduledServiceId: 'scheduled-123', customerId: 'customer-1', paymentMethodPreference: 'card_on_file',
+          estimatedPrice: 219.6, estimate: { id: 'estimate-456', service_interest: 'Pest Control' }, trx,
+        });
+        expect(row).toMatchObject({ id: 'scheduled-123' });
+        expect(updateBuilder.update).not.toHaveBeenCalled();
+      } finally { jest.useRealTimers(); }
+    });
+  });
+
   test('commitReservation rebinds the held row to the accepted service profile', async () => {
     // Unlocked pre-read that keys the date-occupancy lock (rung 1) — taken
     // before the FOR UPDATE so a writer already holding the date lock and

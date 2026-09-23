@@ -464,7 +464,10 @@ class AvailabilityEngine {
       // order stays fixed — date → zone → day-cap, the same relative order
       // as createSelfBooking's date → customer → tech → zone → day-cap — so
       // concurrent confirms across both writers can never deadlock.
-      await acquireSelfBookingDayCapLock(trx, dateStr);
+      // GATE_SELF_BOOK_DAY_CAP (owner ruling 2026-09-23): retired in favor of
+      // the self-serve notice window — unset (default) skips the lock AND the
+      // count below, matching getAvailableSlots (offer/commit parity).
+      if (selfBookDayCapEnabled()) await acquireSelfBookingDayCapLock(trx, dateStr);
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): the
       // scheduled_services insert below serializes against a concurrent
       // merge-undo of this customer — after the scheduling rungs, before
@@ -507,11 +510,13 @@ class AvailabilityEngine {
           }
         }
       }
-      const dayCount = await countActiveSelfBookingsForDay(trx, dateStr, {
-        excludeSelfBookingId: options.excludeSelfBookingId || null,
-      });
-      if (dayCount >= maxPerDay) {
-        throw bookingError('That day just filled up — please pick another day', 'SLOT_TAKEN');
+      if (selfBookDayCapEnabled()) {
+        const dayCount = await countActiveSelfBookingsForDay(trx, dateStr, {
+          excludeSelfBookingId: options.excludeSelfBookingId || null,
+        });
+        if (dayCount >= maxPerDay) {
+          throw bookingError('That day just filled up — please pick another day', 'SLOT_TAKEN');
+        }
       }
 
       // Rows the tech-blind probe below must ignore — the onboarding

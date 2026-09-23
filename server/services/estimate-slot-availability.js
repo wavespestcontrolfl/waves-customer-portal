@@ -1197,7 +1197,13 @@ function earliestBookableMinuteForDate(date, now = new Date(), minimumLeadMinute
   if (date < earliestDateStr) return Infinity;
   if (date > earliestDateStr) return 0;
   const parts = etParts(earliestInstant);
-  return parts.hour * 60 + parts.minute;
+  // Round UP when seconds/milliseconds remain: the commit gate
+  // (violatesSelfServeNotice) compares exact instants, so at 11:00:30 the
+  // 11:00 start is INSIDE the window — offering it here (minute precision
+  // says 11:00 >= 11:00) would hand out a slot reserveSlot immediately
+  // refuses. ET offsets are whole hours, so UTC seconds/ms are the ET ones.
+  const subMinute = earliestInstant.getUTCSeconds() > 0 || earliestInstant.getUTCMilliseconds() > 0 ? 1 : 0;
+  return parts.hour * 60 + parts.minute + subMinute;
 }
 
 function buildAsapCapacitySlotsForTechs({
