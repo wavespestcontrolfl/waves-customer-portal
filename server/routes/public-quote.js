@@ -1253,6 +1253,35 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // lookup stage)? Only an answer may clear a marker an existing draft
     // already carries (see the draft refresh).
     const rollAnsweredThisRun = (trustedProfileFound && countyRollAnswered(trustedTurf)) || leadCleanVerdict;
+    // A clean answer for this premise SUPERSEDES the verdict riding on
+    // publications an earlier flagged run withdrew for this contact pair —
+    // otherwise a fresh lead during a later outage would recover the old
+    // warning forever (pre-push audit P1). Same ownership proof as the
+    // withdrawal: both contact factors plus the complete premise.
+    if (!addressUnverified && rollAnsweredThisRun && contactEmail && contactPhone) {
+      try {
+        const stale = await db('estimates')
+          .where({ source: 'quote_wizard' })
+          .whereNotNull('archived_at')
+          .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
+          .where('customer_phone', contactPhone)
+          .whereRaw("estimate_data->'addressUnverifiedFlag' IS NOT NULL")
+          .select('id', 'address');
+        const superseded = stale
+          .filter((row) => samePremiseDisplay(row.address, quoteFullAddress, { requireLocality: true }))
+          .map((row) => row.id);
+        if (superseded.length) {
+          await db('estimates')
+            .whereIn('id', superseded)
+            .update({
+              estimate_data: db.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ addressUnverified: false, addressUnverifiedFlag: null, addressUnverifiedSupersededAt: new Date().toISOString() })]),
+              updated_at: new Date(),
+            });
+        }
+      } catch (supersedeErr) {
+        logger.warn(`[public-quote] withdrawn-publication supersession failed: ${supersedeErr.code || supersedeErr.name || 'error'}`);
+      }
+    }
     // Set when an existing draft's own addressUnverified marker was carried
     // over under its row lock (a repeat lookup minted a NEW lead, so the
     // lead-level recovery above could not see it) — the handoff is then

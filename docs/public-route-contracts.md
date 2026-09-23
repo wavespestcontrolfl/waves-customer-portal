@@ -908,7 +908,10 @@ roll does not answer. Each stage also records a server-owned
 with the judged premise): a CLEAN verdict from the lookup stage stands in
 for a roll answer at `/calculate` (record-less clean lookups are never
 cached) and supersedes older lead, draft and withdrawn-publication
-warnings for that premise.
+warnings for that premise — including the verdict on withdrawn
+publications for the same email, phone and premise, which a clean run
+marks superseded (`addressUnverifiedSupersededAt`) so no later outage run
+can recover it.
 (`website_quote_withdrawn_address_unverified` audit event), so its old
 token neither renders nor accepts. A roll that never answered (GIS
 outage) is not a fresh flag — but it does not clear one either: the prior
