@@ -2649,7 +2649,9 @@ async function createSelfBooking(payload = {}) {
             .reduce((max, at) => Math.max(max, at), 0);
           for (const snap of snapshots) {
             const flag = recoverAddressUnverified(snap);
-            if (!flag || !flagCoversAddress(flag, submitted)) continue;
+            // Stamped flags only across leads (an unstamped one would match
+            // any address) — pre-push audit P1.
+            if (!flag || !flag.address_line1 || !flagCoversAddress(flag, submitted)) continue;
             const flaggedAt = Date.parse(flag.flagged_at || '') || 0;
             if (newestClean && newestClean > flaggedAt) continue;
             refuse();

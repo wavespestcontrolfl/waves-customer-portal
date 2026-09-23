@@ -1248,9 +1248,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // The clean verdict counts only when it is newer than EVERY matching
         // flag — a clean lookup followed by a flagged one and an outage must
         // end flagged (pre-push audit P1).
+        // Cross-lead flags must be STAMPED with their premise: an unstamped
+        // (older) flag on another lead for the same contact proves nothing
+        // about this address (pre-push audit P1).
         const matchingFlags = snapshots
           .map((snap) => recoverAddressUnverified(snap))
-          .filter((flag) => flag && flagCoversAddress(flag, normalizedAddress));
+          .filter((flag) => flag && flag.address_line1 && flagCoversAddress(flag, normalizedAddress));
         const newestFlag = matchingFlags.map((flag) => Date.parse(flag.flagged_at || '') || 0).reduce((max, at) => Math.max(max, at), 0);
         if (newestClean && newestClean > newestFlag) {
           leadCleanVerdict = true;
