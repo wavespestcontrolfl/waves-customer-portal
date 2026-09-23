@@ -173,6 +173,18 @@ function nextAddressUnverified({ enriched = null, profileFound = false, prior = 
   return prior || null;
 }
 
+// Does a staff CLEAN verdict (stamped on the lead by an estimate revise —
+// a corrected premise or an explicit confirmation) outrank the cached
+// county audit /calculate re-reads? A cache-only re-read obtains no new
+// evidence, so an audit cached at or before the verdict must not derive
+// a fresh flag and undo the confirmation on the next recalculation; only
+// a profile cached AFTER it may flag again. An unstamped cache row counts
+// as older (pre-push audit P1 on #4667).
+function cachedAuditSuperseded({ leadCleanVerdict = false, profileFound = false, cachedAt = null, cleanEvidenceAt = null } = {}) {
+  if (!leadCleanVerdict || !profileFound) return false;
+  return !((Date.parse(cachedAt || '') || 0) > (Date.parse(cleanEvidenceAt || '') || 0));
+}
+
 // The server-owned verdict each intake stage records for the address it
 // judged: 'flagged' (a flag stands — fresh or carried), 'clean' (the roll
 // answered and vouched), 'unanswered' (no county signal). A CLEAN verdict
@@ -212,4 +224,5 @@ function contactPairLockKey(email, phone) {
   return `address-verdict:${String(email || '').toLowerCase().trim()}:${ten}`;
 }
 
-module.exports = { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, countyRollAnswered, nextAddressUnverified, flagCoversAddress, samePremiseDisplay, parseDisplayAddress, buildAddressVerdict, cleanVerdictCovers, contactPairLockKey };
+module.exports = {
+  cachedAuditSuperseded, deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, countyRollAnswered, nextAddressUnverified, flagCoversAddress, samePremiseDisplay, parseDisplayAddress, buildAddressVerdict, cleanVerdictCovers, contactPairLockKey };

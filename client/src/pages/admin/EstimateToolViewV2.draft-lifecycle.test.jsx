@@ -28,6 +28,32 @@ beforeEach(()=>{
 afterEach(()=>{cleanup();vi.restoreAllMocks();vi.unstubAllGlobals();localStorage.clear();});
 const renderEditor=(props={})=>render(<MemoryRouter><EstimateToolViewV2 {...props}/></MemoryRouter>);
 const committed=()=>writes.filter(b=>!b.dryRun);
+describe('county-roll address block',()=>{
+ it('shows the flag on an opened draft and sends confirmAddress only when staff tick the confirmation',async()=>{
+  currentSource={...structuredClone(source),addressUnverified:{reason:'House number 100 is not on the county roll for Example Court.',county:'Manatee',houseNumber:'100',nearestNumbers:['98','102']}};
+  renderEditor({editEstimateId:source.id});
+  await screen.findByDisplayValue('QA Contact');
+  expect(screen.getByRole('status',{name:'County address check'})).toHaveTextContent(/could not confirm this house number/);
+  expect(screen.getByRole('status',{name:'County address check'})).toHaveTextContent('Nearest on the roll: 98, 102.');
+  fireEvent.click(screen.getByRole('button',{name:'Save draft',exact:true}));
+  await waitFor(()=>expect(committed()).toHaveLength(1));
+  expect(committed()[0]).not.toHaveProperty('confirmAddress');
+  expect(screen.getByRole('status',{name:'County address check'})).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('checkbox',{name:/I confirmed this address/}));
+  fireEvent.click(screen.getByRole('button',{name:'Save draft',exact:true}));
+  await waitFor(()=>expect(committed()).toHaveLength(2));
+  expect(committed()[1].confirmAddress).toBe(true);
+  await waitFor(()=>expect(screen.queryByRole('status',{name:'County address check'})).not.toBeInTheDocument());
+ });
+ it('never sends confirmAddress for a draft the roll did not flag',async()=>{
+  renderEditor({editEstimateId:source.id});
+  await screen.findByDisplayValue('QA Contact');
+  expect(screen.queryByRole('status',{name:'County address check'})).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button',{name:'Save draft',exact:true}));
+  await waitFor(()=>expect(committed()).toHaveLength(1));
+  expect(committed()[0]).not.toHaveProperty('confirmAddress');
+ });
+});
 describe('draft identity and reviewed version',()=>{
  it('reopens the saved request and keeps server replay inputs on a contact-only revision',async()=>{
   renderEditor({editEstimateId:source.id});

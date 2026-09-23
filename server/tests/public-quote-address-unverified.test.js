@@ -131,6 +131,21 @@ describe('nextAddressUnverified', () => {
   });
 });
 
+describe('cachedAuditSuperseded', () => {
+  const { cachedAuditSuperseded } = require('../services/lead-address-unverified');
+  test('a staff clean verdict outranks a county audit cached at or before it, never one cached after', () => {
+    const clean = '2026-09-23T12:00:00Z';
+    expect(cachedAuditSuperseded({ leadCleanVerdict: true, profileFound: true, cachedAt: '2026-09-22T09:00:00Z', cleanEvidenceAt: clean })).toBe(true);
+    expect(cachedAuditSuperseded({ leadCleanVerdict: true, profileFound: true, cachedAt: clean, cleanEvidenceAt: clean })).toBe(true);
+    expect(cachedAuditSuperseded({ leadCleanVerdict: true, profileFound: true, cachedAt: null, cleanEvidenceAt: clean })).toBe(true);
+    expect(cachedAuditSuperseded({ leadCleanVerdict: true, profileFound: true, cachedAt: '2026-09-24T09:00:00Z', cleanEvidenceAt: clean })).toBe(false);
+  });
+  test('without a clean verdict, or without a cached profile, the cache stands as evidence', () => {
+    expect(cachedAuditSuperseded({ leadCleanVerdict: false, profileFound: true, cachedAt: '2026-09-22T09:00:00Z', cleanEvidenceAt: '2026-09-23T12:00:00Z' })).toBe(false);
+    expect(cachedAuditSuperseded({ leadCleanVerdict: true, profileFound: false, cachedAt: null, cleanEvidenceAt: '2026-09-23T12:00:00Z' })).toBe(false);
+  });
+});
+
 describe('flagCoversAddress', () => {
   const flag = { source: 'county_roll', reason: 'r', address_line1: '1260 Example St', city: 'Parrish', state: 'FL', zip: '34219' };
 

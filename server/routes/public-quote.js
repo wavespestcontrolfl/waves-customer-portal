@@ -1043,7 +1043,7 @@ const quoteLimiter = rateLimit({
   message: { error: 'Too many quote requests. Please try again later.' },
 });
 
-const { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified, flagCoversAddress, countyRollAnswered, samePremiseDisplay, buildAddressVerdict, cleanVerdictCovers, contactPairLockKey } = require('../services/lead-address-unverified');
+const { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified, flagCoversAddress, countyRollAnswered, samePremiseDisplay, buildAddressVerdict, cleanVerdictCovers, contactPairLockKey, cachedAuditSuperseded } = require('../services/lead-address-unverified');
 
 router.post('/calculate', quoteLimiter, async (req, res) => {
   try {
@@ -1171,6 +1171,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       : (normalizedAddress.fullAddress || String(address || '').trim());
     let trustedTurf = {};
     let trustedProfileFound = false;
+    // When the cached profile was saved (property_lookup_cache): a cache-only
+    // re-read obtains no NEW evidence, so its county audit is only as fresh
+    // as this stamp (see the staff-verdict check below).
+    let trustedProfileCachedAt = null;
     const { performPropertyLookup, countyCeilingStillValid } = require('./property-lookup-v2');
     if (parcelLookupAddress) {
       try {
@@ -1178,6 +1182,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         if (serverLookup?.enriched) {
           trustedTurf = serverLookup.enriched;
           trustedProfileFound = true;
+          trustedProfileCachedAt = serverLookup?.meta?.cachedAt || null;
         }
       } catch (turfErr) {
         logger.warn(`[public-quote] server-side turf re-read failed — pricing without turf figures: ${turfErr.message}`);
@@ -1296,15 +1301,24 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         logger.warn(`[public-quote] withdrawn-publication flag re-read failed: ${withdrawnErr.code || withdrawnErr.name || 'error'}`);
       }
     }
+    // A staff confirmation (a clean verdict newer than every flag, stamped
+    // on the lead by the estimate revise) outranks the CACHED county audit
+    // it was given in answer to: the cache-only re-read above obtained no
+    // new evidence, so deriving a fresh flag from it would undo the
+    // confirmation on the next recalculation (pre-push audit P1). Only a
+    // profile cached AFTER the clean verdict may flag again.
+    const profileEvidence = trustedProfileFound && !cachedAuditSuperseded({
+      leadCleanVerdict, profileFound: trustedProfileFound, cachedAt: trustedProfileCachedAt, cleanEvidenceAt,
+    });
     let addressUnverified = nextAddressUnverified({
-      enriched: trustedProfileFound ? trustedTurf : null,
-      profileFound: trustedProfileFound,
+      enriched: profileEvidence ? trustedTurf : null,
+      profileFound: profileEvidence,
       prior: leadCleanVerdict ? null : priorAddressUnverified,
     });
     // Did the county roll answer on THIS run (or, for this premise, on the
     // lookup stage)? Only an answer may clear a marker an existing draft
     // already carries (see the draft refresh).
-    const rollAnsweredThisRun = (trustedProfileFound && countyRollAnswered(trustedTurf)) || leadCleanVerdict;
+    const rollAnsweredThisRun = (profileEvidence && countyRollAnswered(trustedTurf)) || leadCleanVerdict;
     // A clean answer for this premise SUPERSEDES the verdict riding on
     // publications an earlier flagged run withdrew for this contact pair —
     // otherwise a fresh lead during a later outage would recover the old
@@ -2329,7 +2343,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           // Re-read the contact pair UNDER the lock: a flag committed since
           // the unlocked scan outranks a recovered clean verdict when it is
           // newer than that verdict's ORIGINAL evidence (pre-push audit P1).
-          if (!addressUnverified && !(trustedProfileFound && countyRollAnswered(trustedTurf))) {
+          if (!addressUnverified && !(profileEvidence && countyRollAnswered(trustedTurf))) {
             const phoneTen = String(contactPhone).replace(/\D/g, '').slice(-10);
             const lockedRows = await trx('leads')
               .whereNull('deleted_at')
@@ -2349,11 +2363,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           }
           const verdict = buildAddressVerdict({
             flag: addressUnverified,
-            enriched: trustedProfileFound ? trustedTurf : (leadCleanVerdict ? { addressVerdict: 'audited' } : null),
-            profileFound: trustedProfileFound || leadCleanVerdict,
+            enriched: profileEvidence ? trustedTurf : (leadCleanVerdict ? { addressVerdict: 'audited' } : null),
+            profileFound: profileEvidence || leadCleanVerdict,
             address: normalizedAddress,
           });
-          if (verdict.status === 'clean' && cleanEvidenceAt && !(trustedProfileFound && countyRollAnswered(trustedTurf))) verdict.at = cleanEvidenceAt;
+          if (verdict.status === 'clean' && cleanEvidenceAt && !(profileEvidence && countyRollAnswered(trustedTurf))) verdict.at = cleanEvidenceAt;
           await trx('leads').where({ id: lead.id }).update({
             extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
               address_unverified: addressUnverified || null,

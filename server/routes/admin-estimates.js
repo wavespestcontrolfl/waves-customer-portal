@@ -1105,6 +1105,10 @@ router.put('/:id', async (req, res, next) => {
       // Unlinked-member guard (2026-08-10) — same contract and ADMIN-ONLY
       // scope as POST / (codex #3338 r23).
       memberLinkageWarning: req.techRole === 'admin' ? (memberLinkageWarning || null) : null,
+      // The county-roll block as it stands AFTER this write (false once a
+      // changed premise or `confirmAddress: true` cleared it), so the
+      // builder drops its notice without a reload.
+      addressUnverified: parseEstimateData(estimate.estimate_data)?.addressUnverified === true,
     });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
@@ -1213,6 +1217,18 @@ router.get('/:id/edit-source', async (req, res, next) => {
       engineRequest: inputs ? estData.engineRequest || null : null,
       token: estimate.token,
       engineProfile,
+      // The quote intake's county-roll verdict on this draft, so the builder
+      // can offer the explicit confirmation the revise route honors
+      // (`confirmAddress: true`) — without it staff could only clear the
+      // block by changing the premise (pre-push audit P1 on #4667).
+      addressUnverified: estData.addressUnverified === true
+        ? {
+          reason: String(estData.addressUnverifiedFlag?.reason || 'County records could not confirm this house number.').slice(0, 600),
+          county: estData.addressUnverifiedFlag?.county || null,
+          houseNumber: estData.addressUnverifiedFlag?.house_number || null,
+          nearestNumbers: Array.isArray(estData.addressUnverifiedFlag?.nearest_numbers) ? estData.addressUnverifiedFlag.nearest_numbers.map(String).slice(0, 5) : [],
+        }
+        : null,
       customer,
     });
   } catch (err) { next(err); }

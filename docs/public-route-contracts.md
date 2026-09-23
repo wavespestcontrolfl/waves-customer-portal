@@ -941,9 +941,14 @@ recheck, so no flag lands as a phantom row between that recheck and the
 insert. Staff clear the draft's marker by
 revising the estimate with a changed PREMISE (house number / street /
 locality — a unit-only edit is not a correction) or an explicit
-`addressUnverified: false` (confirmation); the admin send guard refuses a
-still-flagged estimate with 409 `ADDRESS_UNVERIFIED` since the customer
-link would not render. A roll that never answered (GIS
+`confirmAddress: true` on the revise request (the builder's "I confirmed
+this address" control; edit-source reports the standing flag as
+`addressUnverified`); the admin send guard refuses a still-flagged
+estimate with 409 `ADDRESS_UNVERIFIED` since the customer link would not
+render. A staff confirmation stamps a clean verdict on the linked lead
+that outranks the CACHED county audit it answered (a cache-only re-read on
+the next `/calculate` obtains no new evidence); only a profile cached after
+the confirmation may flag the premise again. A roll that never answered (GIS
 outage) is not a fresh flag — but it does not clear one either: the prior
 server-written flag for the same address carries forward until the roll
 answers clean, and an existing draft's own `addressUnverified` marker is
