@@ -95,7 +95,7 @@ async function bookableDate(conn) {
 }
 
 /** One estimate + one hold row, inside a rolled-back transaction. */
-async function withHold({ expiresInSeconds = 900, createdMinutesAgo = 0, committed = false }, run) {
+async function withHold({ expiresInSeconds = 900, createdMinutesAgo = 0, committed = false, date: dateOverride = null, windowStart = '13:00:00', windowEnd = '14:00:00' }, run) {
   const pool = mockPg;
   const trx = await pool.transaction();
   mockPg = trx;
@@ -103,7 +103,7 @@ async function withHold({ expiresInSeconds = 900, createdMinutesAgo = 0, committ
     const estimateId = randomUUID();
     const holdId = randomUUID();
     const customerId = randomUUID();
-    const date = await bookableDate(trx);
+    const date = dateOverride || await bookableDate(trx);
     await trx('customers').insert({
       id: customerId, first_name: 'Synthetic', last_name: 'Hold',
       email: `${customerId}@example.invalid`, phone: '+19415550111', active: true,
@@ -119,8 +119,8 @@ async function withHold({ expiresInSeconds = 900, createdMinutesAgo = 0, committ
       source_estimate_id: estimateId,
       customer_id: committed ? customerId : null,
       scheduled_date: date,
-      window_start: '13:00:00',
-      window_end: '14:00:00',
+      window_start: windowStart,
+      window_end: windowEnd,
       estimated_duration_minutes: 60,
       service_type: 'Lawn Care',
       status: 'pending',
@@ -273,6 +273,22 @@ postgres('hold grace + extend (real Postgres)', () => {
       await withHold({ expiresInSeconds: 600, committed: true }, async ({ estimateId, holdId }) => {
         await expect(slotReservation.extendReservation({ estimateId, scheduledServiceId: holdId }))
           .rejects.toMatchObject({ code: 'RESERVATION_NOT_FOUND' });
+      });
+    });
+
+    test('refuses a live hold whose start is now inside the self-serve notice window (owner ruling 2026-09-23)', async () => {
+      // A start ~2 h from now: inside the default 24 h notice. Tomorrow's
+      // date + a fixed hour would race midnight; anchor on now instead.
+      const { etDateString: ds, etParts: ep } = require('../utils/datetime-et');
+      const soon = new Date(Date.now() + 2 * 60 * 60 * 1000);
+      const p = ep(soon);
+      const hh = String(p.hour).padStart(2, '0');
+      const mm = String(p.minute).padStart(2, '0');
+      await withHold({
+        expiresInSeconds: 600, date: ds(soon), windowStart: `${hh}:${mm}:00`, windowEnd: `${hh}:${mm}:00`,
+      }, async ({ estimateId, holdId }) => {
+        await expect(slotReservation.extendReservation({ estimateId, scheduledServiceId: holdId }))
+          .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
       });
     });
 

@@ -252,6 +252,9 @@ test('an afternoon search result remains in the unfiltered confirmation-day list
 });
 
 test.each(['self-booking', 'voice'])('a same-day %s move excludes itself from the day cap', async origin => {
+  // GATE_SELF_BOOK_DAY_CAP (owner ruling 2026-09-23): dark by default —
+  // this test is about the cap itself, so force it on.
+  process.env.GATE_SELF_BOOK_DAY_CAP = 'true';
   listOccupiedWindows.mockResolvedValue([]);
   findAvailableSlots.mockResolvedValue({ slots: [gapSlot('13:00', { latest_start_min: 16 * 60 })] });
   const subquery = { select() { return this; }, from() { return this; }, as() { return this; }, whereNot: jest.fn().mockReturnThis() };
@@ -269,7 +272,11 @@ test.each(['self-booking', 'voice'])('a same-day %s move excludes itself from th
     return q;
   });
   const opts = { lat: 27.4, lng: -82.4, duration: 60, rangeFrom: D, rangeTo: D, config: CONFIG, today: new Date() };
-  expect((await buildBookingAvailability(opts)).days).toHaveLength(0);
-  const moved = await buildBookingAvailability({ ...opts, excludeServiceIds: ['moving-visit'], excludeSelfBookingId: origin === 'self-booking' ? 'moving-booking' : null });
-  expect(startTimes(moved)).toContain('13:00');
+  try {
+    expect((await buildBookingAvailability(opts)).days).toHaveLength(0);
+    const moved = await buildBookingAvailability({ ...opts, excludeServiceIds: ['moving-visit'], excludeSelfBookingId: origin === 'self-booking' ? 'moving-booking' : null });
+    expect(startTimes(moved)).toContain('13:00');
+  } finally {
+    delete process.env.GATE_SELF_BOOK_DAY_CAP;
+  }
 });

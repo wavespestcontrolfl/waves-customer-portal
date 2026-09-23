@@ -26,7 +26,11 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/lead-from-extraction', () => ({ createLeadFromExtraction: jest.fn() }));
 jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: jest.fn(() => true),
+  // Read at call time from the real env so the day-cap tests can flip it.
+  selfBookDayCapEnabled: () => jest.requireActual('../config/feature-gates').selfBookDayCapEnabled(),
+}));
 // ⭐ THE MOCK BELOW IS NOT EVIDENCE THE REAL MODULE EXPORTS ANY OF THIS. It
 // once hid exactly that: `resolveCallBookingPropertyLinkage` lived only under
 // `_test`, so production got `undefined`, every single-property account fell
@@ -903,11 +907,33 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     assertNoComms();
   });
 
-  test('max_self_books_per_day is re-checked at COMMIT, not just by the builder', async () => {
-    availability.countActiveSelfBookingsForDay.mockResolvedValue(3);
-    const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
-    expect(out).toMatch(/just filled up/i);
-    expect(trxBuilders.scheduled_services.insert).not.toHaveBeenCalled();
+  test('max_self_books_per_day is re-checked at COMMIT, not just by the builder (GATE_SELF_BOOK_DAY_CAP=true)', async () => {
+    const prev = process.env.GATE_SELF_BOOK_DAY_CAP;
+    process.env.GATE_SELF_BOOK_DAY_CAP = 'true';
+    try {
+      availability.countActiveSelfBookingsForDay.mockResolvedValue(3);
+      const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
+      expect(out).toMatch(/just filled up/i);
+      expect(trxBuilders.scheduled_services.insert).not.toHaveBeenCalled();
+    } finally {
+      if (prev === undefined) delete process.env.GATE_SELF_BOOK_DAY_CAP;
+      else process.env.GATE_SELF_BOOK_DAY_CAP = prev;
+    }
+  });
+
+  test('GATE_SELF_BOOK_DAY_CAP unset (owner ruling 2026-09-23): the cap is retired — a 3-booking day still commits, matching what the builder offers', async () => {
+    const prev = process.env.GATE_SELF_BOOK_DAY_CAP;
+    delete process.env.GATE_SELF_BOOK_DAY_CAP;
+    try {
+      availability.countActiveSelfBookingsForDay.mockResolvedValue(3);
+      const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
+      expect(out).not.toMatch(/just filled up/i);
+      expect(availability.countActiveSelfBookingsForDay).not.toHaveBeenCalled();
+      expect(trxBuilders.scheduled_services.insert).toHaveBeenCalled();
+    } finally {
+      if (prev === undefined) delete process.env.GATE_SELF_BOOK_DAY_CAP;
+      else process.env.GATE_SELF_BOOK_DAY_CAP = prev;
+    }
   });
 
   test('validateBookingSlotDate runs BEFORE the engine (advance_days_min floor, 90-day horizon)', async () => {

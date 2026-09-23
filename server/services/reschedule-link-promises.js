@@ -502,10 +502,22 @@ function narrowBySubject(candidates, subject) {
 // duplicate, narrower allowlist here parked a link the customer could
 // already use the page for (codex #4293 P1 r8). Group membership and the
 // token stay here; eligibility() alone decides status AND missed-vs-past.
+// Self-serve notice window (owner ruling 2026-09-23): the public page now
+// refuses to MOVE a visit that itself starts within SELF_SERVE_NOTICE_HOURS
+// (missed visits exempt — they are being rebooked), so a promised link for
+// such a visit would land on a page that says "call us". Sending that link is
+// a self-serve act, distinct from the exempt voice BOOKING; park it for the
+// office instead. Same predicate reschedule-public.js layers over
+// eligibilityAsync (withSelfServeNotice), kept out of the shared eligibility
+// module the voice-agent surfaces also read.
 function visitNotSelfServiceReason(visit, now) {
   if (!visit.reschedule_token || (visit.visit_id && visit.follow_through_group_eligible !== true)) return 'visit_not_self_service';
   const verdict = require('./reschedule-eligibility').eligibility(visit, now);
-  if (verdict.ok) return null;
+  if (verdict.ok) {
+    const { visitInsideNoticeWindow } = require('./scheduling/self-serve-notice');
+    if (!verdict.missed && visitInsideNoticeWindow(visit, now)) return 'visit_not_self_service';
+    return null;
+  }
   return verdict.reason === 'past' ? 'visit_elapsed' : 'visit_not_self_service';
 }
 

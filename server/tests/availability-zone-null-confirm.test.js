@@ -265,6 +265,27 @@ describe('confirmBooking — zone-null occupancy fallback', () => {
   // any other order could deadlock against createSelfBooking, which shares
   // all three.
   describe('lock ordering', () => {
+    // The day-cap rung only exists while GATE_SELF_BOOK_DAY_CAP is set
+    // (owner ruling 2026-09-23 retired the cap for the notice window).
+    let prevCap;
+    beforeEach(() => { prevCap = process.env.GATE_SELF_BOOK_DAY_CAP; process.env.GATE_SELF_BOOK_DAY_CAP = 'true'; });
+    afterEach(() => {
+      if (prevCap === undefined) delete process.env.GATE_SELF_BOOK_DAY_CAP;
+      else process.env.GATE_SELF_BOOK_DAY_CAP = prevCap;
+    });
+
+    test('GATE_SELF_BOOK_DAY_CAP unset (default): no day-cap lock and no day count — the commit mirrors the offer side', async () => {
+      delete process.env.GATE_SELF_BOOK_DAY_CAP;
+      const { trx } = wireConfirm({ zones: [] });
+      const result = await Availability.confirmBooking(null, 'cust-1', DATE, '09:00', null);
+      expect(result.confirmationCode).toBeTruthy();
+      expect(lockKeys(trx)).not.toContain(DATE);
+      expect(advisoryLocks(trx).some(([ns]) => ns === 'self-booking-day-cap')).toBe(false);
+      // The self_booked_appointments table was only touched for the INSERT
+      // (call #1), never for a day count.
+      expect(trx.selfBookCalls).toBe(1);
+    });
+
     test.each([
       ['zone-null', []],
       ['zone-resolved', [{ id: 'zone-1', zone_name: 'Sarasota / South', cities: ['Offgridville'] }]],

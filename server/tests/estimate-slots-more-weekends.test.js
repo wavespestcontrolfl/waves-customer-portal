@@ -147,6 +147,18 @@ describe('estimate slot weekend and expander behavior', () => {
       .toBe(0);
   });
 
+  test('earliestBookableMinuteForDate spans calendar days and rounds UP past leftover seconds (offer/commit parity with violatesSelfServeNotice)', () => {
+    // 11:00:30 ET + 24 h = tomorrow 11:00:30 — the 11:00 start is INSIDE the
+    // window (the commit gate compares exact instants), so the floor is 11:01.
+    const now = new Date('2026-05-26T15:00:30Z');
+    expect(slotAvailabilityInternals.earliestBookableMinuteForDate('2026-05-27', now, 24 * 60)).toBe(11 * 60 + 1);
+    // Exactly on the minute: no rounding, 11:00 is offerable AT the boundary.
+    expect(slotAvailabilityInternals.earliestBookableMinuteForDate('2026-05-27', new Date('2026-05-26T15:00:00Z'), 24 * 60)).toBe(11 * 60);
+    // Today is entirely inside a 24 h lead; the day after tomorrow is clear.
+    expect(slotAvailabilityInternals.earliestBookableMinuteForDate('2026-05-26', now, 24 * 60)).toBe(Infinity);
+    expect(slotAvailabilityInternals.earliestBookableMinuteForDate('2026-05-28', now, 24 * 60)).toBe(0);
+  });
+
   test('past windows on today are dropped while future dates and bookable times stay', () => {
     const now = new Date('2026-05-26T15:01:00Z'); // 11:01 AM ET
     const slots = [
@@ -192,6 +204,13 @@ describe('estimate slot weekend and expander behavior', () => {
       dateTo: '2026-05-27',
       durationMinutes: 60,
       techs,
+      // Pinned well before dateFrom — this test is about tech/window
+      // enumeration, not lead-time filtering (the default `now` would
+      // otherwise be the actual wall-clock date the suite runs on, which
+      // the self-serve notice window (owner ruling 2026-09-23) would now
+      // correctly treat this fixed 2026-05-27 date as being in the past
+      // of, since the environment's real "today" is well after it).
+      now: new Date('2026-05-01T12:00:00Z'),
     });
 
     const windows = new Set(slots.map((slot) => slot.windowStart));

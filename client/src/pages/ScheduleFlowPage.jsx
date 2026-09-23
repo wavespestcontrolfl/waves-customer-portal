@@ -560,6 +560,9 @@ const INELIGIBLE_COPY = {
   // Grouped visit (two or more services at one stop): the office moves the
   // whole visit together; self-serve is staff-only for now (#3609).
   grouped: 'This appointment includes more than one service, so it can\'t be moved online yet. We\'ll move the whole visit together for you.',
+  // Self-serve notice window (owner ruling 2026-09-23): this visit starts
+  // too soon to move online.
+  self_serve_notice: 'This visit is coming up too soon to move online.',
 };
 
 function IneligibleCard({ data }) {
@@ -835,7 +838,11 @@ const FLOWS = {
       disclosed_current_date: data?.current?.date || null,
     }),
     // SCOPE_CHANGED: gate flip / dispatch race on the disclosed series scope.
-    stateChangedCodes: ['SCOPE_CHANGED'],
+    // SELF_SERVE_NOTICE (owner ruling 2026-09-23): the visit slid inside the
+    // notice window between page load and Confirm — reload so the page
+    // renders the truthful (now not-reschedulable) state instead of leaving
+    // a stale picker up under the error banner.
+    stateChangedCodes: ['SCOPE_CHANGED', 'SELF_SERVE_NOTICE'],
     stateChangedMessage: 'The scheduling details for your plan just updated — here is the latest.',
     // Inside the picked row so the heads-up sits directly under the Confirm
     // it applies to — never below the fold.

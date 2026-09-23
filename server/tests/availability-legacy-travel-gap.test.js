@@ -38,14 +38,27 @@ const CONFIG = {
   buffer_minutes: 15,
   max_self_books_per_day: 3,
 };
-const DATE = etDateString(addETDays(new Date(), 1));
+// Pinned to an early ET morning (owner ruling 2026-09-23, self-serve notice
+// window default 24h): "tomorrow" (advance_days_min: 1) must never itself
+// fall inside the notice window, or this file's day-start assertions
+// ('09:00' present/absent) would depend on the wall-clock time the suite
+// happens to run at. This file is about the travel-gap mirror, not the
+// notice window — self-serve-notice.test.js owns that boundary coverage.
+const NOW = new Date('2027-05-14T09:00:00Z'); // 05:00 ET
+let DATE;
 const PALMETTO = { latitude: 27.545, longitude: -82.545 };
 const BRADENTON = { lat: 27.425, lng: -82.41 };
 
 const ENV_KEYS = ['GATE_SLOT_TRAVEL_GAP', 'SLOT_TRAVEL_BUFFER_MINUTES', 'GATE_DRIVE_TIME_CALIBRATION'];
 const saved = {};
-beforeAll(() => { for (const k of ENV_KEYS) saved[k] = process.env[k]; });
+beforeAll(() => {
+  for (const k of ENV_KEYS) saved[k] = process.env[k];
+  jest.useFakeTimers();
+  jest.setSystemTime(NOW);
+  DATE = etDateString(addETDays(NOW, 1));
+});
 afterAll(() => {
+  jest.useRealTimers();
   for (const k of ENV_KEYS) {
     if (saved[k] === undefined) delete process.env[k];
     else process.env[k] = saved[k];
