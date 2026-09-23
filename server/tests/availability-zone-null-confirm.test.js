@@ -338,7 +338,7 @@ describe('confirmBooking — candidate expected-minutes credit (Codex #4664 r3 P
 
   test('gate on: resolves the estimate-less "General Pest Control" default against the catalog and threads it through', async () => {
     process.env.GATE_SLOT_TRAVEL_GAP = 'true';
-    const { trx } = wireConfirmWithCatalog(CATALOG);
+    wireConfirmWithCatalog(CATALOG);
     await Availability.confirmBooking(null, 'cust-1', DATE, '09:00', null);
     // midpoint(30, 50) = 40, well under the 60-minute default slot window —
     // a real credit, not the window length the bug always fell back to.
@@ -349,7 +349,7 @@ describe('confirmBooking — candidate expected-minutes credit (Codex #4664 r3 P
 
   test('gate on, no catalog match: falls back to the window length (zero padding), same shape as the gate-off pin', async () => {
     process.env.GATE_SLOT_TRAVEL_GAP = 'true';
-    const { trx } = wireConfirmWithCatalog([]);
+    wireConfirmWithCatalog([]);
     await Availability.confirmBooking(null, 'cust-1', DATE, '09:00', null);
     expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
       travel: { lat: null, lng: null, expectedMinutes: 60 },
@@ -357,7 +357,7 @@ describe('confirmBooking — candidate expected-minutes credit (Codex #4664 r3 P
   });
 
   test('gate off: travel stays the plain {lat, lng} pin — byte-identical, no catalog read', async () => {
-    const { trx } = wireConfirmWithCatalog(CATALOG);
+    wireConfirmWithCatalog(CATALOG);
     await Availability.confirmBooking(null, 'cust-1', DATE, '09:00', null);
     expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
       travel: { lat: null, lng: null },
