@@ -168,4 +168,30 @@ function nextAddressUnverified({ enriched = null, profileFound = false, prior = 
   return prior || null;
 }
 
-module.exports = { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, countyRollAnswered, nextAddressUnverified, flagCoversAddress, samePremiseDisplay };
+// The server-owned verdict each intake stage records for the address it
+// judged: 'flagged' (a flag stands — fresh or carried), 'clean' (the roll
+// answered and vouched), 'unanswered' (no county signal). A CLEAN verdict
+// is what supersedes older lead, draft and withdrawn-publication
+// warnings for the same premise — record-less clean lookups are never
+// cached, so without it the next /calculate would treat the cache miss as
+// missing evidence and recover a stale flag (pre-push audit P1).
+function buildAddressVerdict({ flag = null, enriched = null, profileFound = false, address = null } = {}) {
+  const status = flag ? 'flagged' : (profileFound && countyRollAnswered(enriched) ? 'clean' : 'unanswered');
+  return {
+    status,
+    address_line1: String(address?.line1 || '').trim() || null,
+    city: String(address?.city || '').trim() || null,
+    state: String(address?.state || '').trim().toUpperCase().slice(0, 2) || null,
+    zip: zip5(address?.zip) || null,
+    at: new Date().toISOString(),
+  };
+}
+
+// Does a snapshot's stored verdict say THIS premise is clean?
+function cleanVerdictCovers(snapshot, address) {
+  const verdict = snapshot?.address_verdict;
+  if (!verdict || typeof verdict !== 'object' || verdict.status !== 'clean' || !verdict.address_line1) return false;
+  return flagCoversAddress({ ...verdict, reason: 'clean' }, address);
+}
+
+module.exports = { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, countyRollAnswered, nextAddressUnverified, flagCoversAddress, samePremiseDisplay, buildAddressVerdict, cleanVerdictCovers };

@@ -5,7 +5,7 @@
 // the flag). Pins the pure derivation; the route stamps it on the lead's
 // extracted_data as address_unverified.
 const { _internals } = require('../routes/public-quote');
-const { snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified, countyRollAnswered, flagCoversAddress, samePremiseDisplay } = require('../services/lead-address-unverified');
+const { snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified, countyRollAnswered, flagCoversAddress, samePremiseDisplay, buildAddressVerdict, cleanVerdictCovers } = require('../services/lead-address-unverified');
 
 const { deriveAddressUnverified } = _internals;
 
@@ -164,5 +164,25 @@ describe('samePremiseDisplay', () => {
     expect(samePremiseDisplay('1260 Example St', '1260 Example St, Parrish, FL 34219', { requireLocality: true })).toBe(false);
     expect(samePremiseDisplay('1260 Example St, Parrish', '1260 Example St, Parrish, FL 34219', { requireLocality: true })).toBe(false);
     expect(samePremiseDisplay('1260 Example St, Parrish, FL 34219', '1260 Example St Apt 2, Parrish, FL 34219', { requireLocality: true })).toBe(true);
+  });
+});
+
+describe('address verdict', () => {
+  const address = { line1: '1260 Example St', city: 'Parrish', state: 'FL', zip: '34219' };
+
+  test('flagged / clean / unanswered, stamped with the judged address', () => {
+    expect(buildAddressVerdict({ flag: { reason: 'r' }, enriched: { addressAudit: AUDIT }, profileFound: true, address }).status).toBe('flagged');
+    expect(buildAddressVerdict({ flag: null, enriched: { addressAudit: { ...AUDIT, hasExactMatch: true } }, profileFound: true, address })).toMatchObject({ status: 'clean', address_line1: '1260 Example St', city: 'Parrish', state: 'FL', zip: '34219' });
+    expect(buildAddressVerdict({ flag: null, enriched: { fieldVerifyFlags: [] }, profileFound: true, address }).status).toBe('unanswered');
+    expect(buildAddressVerdict({ flag: null, enriched: null, profileFound: false, address }).status).toBe('unanswered');
+  });
+
+  test('a clean verdict covers only its own premise', () => {
+    const clean = buildAddressVerdict({ flag: null, enriched: { addressAudit: { ...AUDIT, hasExactMatch: true } }, profileFound: true, address });
+    expect(cleanVerdictCovers({ address_verdict: clean }, address)).toBe(true);
+    expect(cleanVerdictCovers({ address_verdict: clean }, { ...address, line1: '1260 Example St Apt 4' })).toBe(true);
+    expect(cleanVerdictCovers({ address_verdict: clean }, { ...address, line1: '1250 Example St' })).toBe(false);
+    expect(cleanVerdictCovers({ address_verdict: { ...clean, status: 'unanswered' } }, address)).toBe(false);
+    expect(cleanVerdictCovers({}, address)).toBe(false);
   });
 });

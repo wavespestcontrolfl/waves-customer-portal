@@ -903,7 +903,12 @@ the sent/viewed, unarchived, not-price-locked predicates re-applied on
 the archive write itself; the archived row keeps the verdict
 (`estimate_data.addressUnverified` + `addressUnverifiedFlag`), and a later
 run for the same email, phone and complete premise recovers it when the
-roll does not answer
+roll does not answer. Each stage also records a server-owned
+`extracted_data.address_verdict` (clean / flagged / unanswered, stamped
+with the judged premise): a CLEAN verdict from the lookup stage stands in
+for a roll answer at `/calculate` (record-less clean lookups are never
+cached) and supersedes older lead, draft and withdrawn-publication
+warnings for that premise.
 (`website_quote_withdrawn_address_unverified` audit event), so its old
 token neither renders nor accepts. A roll that never answered (GIS
 outage) is not a fresh flag — but it does not clear one either: the prior

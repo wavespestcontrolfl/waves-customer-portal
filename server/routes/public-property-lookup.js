@@ -3,7 +3,7 @@ const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { recoverAddressUnverified, nextAddressUnverified, flagCoversAddress } = require('../services/lead-address-unverified');
+const { recoverAddressUnverified, nextAddressUnverified, flagCoversAddress, buildAddressVerdict } = require('../services/lead-address-unverified');
 const { performPropertyLookup, VACANT_SQFT_FLAG_COPY } = require('./property-lookup-v2');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
 const { normalizeLeadAddress, formatAddress } = require('../utils/address-normalizer');
@@ -468,6 +468,9 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
         // abandoned row already carries the callback ask; /calculate
         // re-derives it (or recovers this one when its cache read misses).
         address_unverified: addressUnverified,
+        // Server-owned verdict for this address (clean / flagged /
+        // unanswered) — a clean one supersedes older warnings downstream.
+        address_verdict: buildAddressVerdict({ flag: addressUnverified, enriched: result.enriched, profileFound: !!result?.enriched, address: normalizedAddress }),
       };
       await db('leads').where({ id: lead.id }).update({
         extracted_data: attachedToExistingLead

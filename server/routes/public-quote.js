@@ -1043,7 +1043,7 @@ const quoteLimiter = rateLimit({
   message: { error: 'Too many quote requests. Please try again later.' },
 });
 
-const { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified, flagCoversAddress, countyRollAnswered, samePremiseDisplay } = require('../services/lead-address-unverified');
+const { deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, nextAddressUnverified, flagCoversAddress, countyRollAnswered, samePremiseDisplay, buildAddressVerdict, cleanVerdictCovers } = require('../services/lead-address-unverified');
 
 router.post('/calculate', quoteLimiter, async (req, res) => {
   try {
@@ -1198,6 +1198,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // P1), and a GIS outage on a recalculation must not erase an earlier
     // authoritative warning (codex r5 P1).
     let priorAddressUnverified = null;
+    // The lookup stage's server-owned CLEAN verdict for this premise: it
+    // stands in for a roll answer this run could not get (record-less
+    // clean lookups are never cached) and supersedes every older warning
+    // (pre-push audit P1).
+    let leadCleanVerdict = false;
     if (leadId && contactEmail) {
       try {
         const own = await db('leads')
@@ -1206,6 +1211,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()])
           .first('extracted_data');
         const snapshot = typeof own?.extracted_data === 'string' ? JSON.parse(own.extracted_data) : own?.extracted_data;
+        leadCleanVerdict = !!snapshot && cleanVerdictCovers(snapshot, normalizedAddress);
         // Both checks: the snapshot's address (older flags carry no stamp)
         // AND the flag's own stamped address (a re-attach may have rewritten
         // the snapshot's address already).
@@ -1221,7 +1227,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // a publication a FLAGGED run withdrew for this visitor still carries
     // the verdict — both contact factors plus the complete premise, the
     // same proof the withdrawal itself required (pre-push audit P1).
-    if (!priorAddressUnverified && contactEmail && contactPhone) {
+    if (!priorAddressUnverified && !leadCleanVerdict && contactEmail && contactPhone) {
       try {
         const rows = await db('estimates')
           .where({ source: 'quote_wizard' })
@@ -1241,11 +1247,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const addressUnverified = nextAddressUnverified({
       enriched: trustedProfileFound ? trustedTurf : null,
       profileFound: trustedProfileFound,
-      prior: priorAddressUnverified,
+      prior: leadCleanVerdict ? null : priorAddressUnverified,
     });
-    // Did the county roll answer on THIS run? Only an answer may clear a
-    // marker an existing draft already carries (see the draft refresh).
-    const rollAnsweredThisRun = trustedProfileFound && countyRollAnswered(trustedTurf);
+    // Did the county roll answer on THIS run (or, for this premise, on the
+    // lookup stage)? Only an answer may clear a marker an existing draft
+    // already carries (see the draft refresh).
+    const rollAnsweredThisRun = (trustedProfileFound && countyRollAnswered(trustedTurf)) || leadCleanVerdict;
     // Set when an existing draft's own addressUnverified marker was carried
     // over under its row lock (a repeat lookup minted a NEW lead, so the
     // lead-level recovery above could not see it) — the handoff is then
@@ -1934,6 +1941,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // null clears it once a clean lookup prices the corrected address
       // (codex r1 P2).
       address_unverified: addressUnverified || null,
+      address_verdict: buildAddressVerdict({
+        flag: addressUnverified,
+        enriched: trustedProfileFound ? trustedTurf : (leadCleanVerdict ? { addressVerdict: 'audited' } : null),
+        profileFound: trustedProfileFound || leadCleanVerdict,
+        address: normalizedAddress,
+      }),
     });
 
     // If the property-lookup step already captured a lead row, update it
