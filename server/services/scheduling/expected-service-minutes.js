@@ -176,7 +176,18 @@ function expectedMinutesForServicesSync(services, windowMinutes) {
     total += expectedMinutesSync({
       serviceKey: service.catalogServiceKey || service.engineKey || service.serviceKey || null,
       serviceType: service.label || service.service || service.serviceType || null,
-      category: service.category || null,
+      // A standard recurring/one-time estimate profile's own family lives
+      // in `service` (estimate-slot-availability.js: "`service` is the
+      // category") — pest_control / lawn_care / mosquito / tree_shrub, the
+      // same vocabulary a combined-visit hold's reservation_service_mix
+      // engine keys use. Tried as `serviceType` above too (for an exact
+      // catalog-name match), but a bare family key like 'pest_control'
+      // never matches a cadence-specific catalog name, so without this it
+      // fell through to zero credit at accept-time profile validation
+      // while /extend's mix-based lookup (candidateExpectedMinutesFromRow)
+      // resolved a real one — an extend-succeeds/accept-409 identity
+      // mismatch (Codex r4 P1). An explicit `.category` still wins.
+      category: service.category || service.service || null,
       windowMinutes: own,
     });
   }

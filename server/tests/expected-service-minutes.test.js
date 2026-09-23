@@ -245,6 +245,43 @@ describe('category fallback — a broad family, never a cadence-specific key/nam
   });
 });
 
+describe('recurring/one-time profile family as category fallback (Codex r4 P1)', () => {
+  // estimate-slot-availability.js's resolveEstimateSlotProfile/
+  // oneTimeProfileServices shape every profile member as
+  // { service: 'pest_control', label: '<generic display label>', ... } —
+  // `service` IS the family/category ("`service` is the category", per
+  // oneTimeProfileServices' own comment), never an exact catalog key or
+  // name. Before this fix, expectedMinutesForServicesSync only tried
+  // `.category` (never set on these profiles) and `.label`/`.service` as a
+  // `serviceType` NAME match — which a bare family key can never win —
+  // so a standard recurring accept-time profile validation always credited
+  // zero padding while /extend's reservation_service_mix-based lookup
+  // (candidateExpectedMinutesFromRow, slot-reservation.js) resolved a real
+  // one for the identical family, an extend-succeeds/accept-409 mismatch.
+  const conn = () => fakeConn([
+    { service_key: 'quarterly_pest', name: 'Quarterly Pest Control Service', category: 'pest_control', min_duration_minutes: 30, max_duration_minutes: 60 },
+  ]);
+  const { expectedMinutesForServices } = require('../services/scheduling/expected-service-minutes');
+
+  test('a recurring profile member ({ service: "pest_control", label: <generic> }) gets real category credit, not zero', async () => {
+    const services = [{ service: 'pest_control', label: '4x Pest Control', visitsPerYear: 4 }];
+    // quarterly_pest midpoint 45 — real credit, not the 60-minute window
+    // the bug's zero padding always produced.
+    expect(await expectedMinutesForServices(conn(), services, 60)).toBe(45);
+  });
+
+  test('an explicit .category still wins over .service when both are present', async () => {
+    const conn2 = () => fakeConn([
+      { service_key: 'bora_care', name: 'Bora-Care Wood Treatment', category: 'termite', min_duration_minutes: 60, max_duration_minutes: 240 },
+      { service_key: 'quarterly_pest', name: 'Quarterly Pest Control Service', category: 'pest_control', min_duration_minutes: 30, max_duration_minutes: 60 },
+    ]);
+    const services = [{ service: 'pest_control', category: 'termite', label: 'Explicitly annotated' }];
+    // termite midpoint 150 clamped to 90, proving `.category` (termite) was
+    // read, not `.service` (pest_control, which would give 45).
+    expect(await expectedMinutesForServices(conn2(), services, 90)).toBe(90);
+  });
+});
+
 describe('ambiguous catalog names (Codex #4664 r2 P1)', () => {
   test('a services.name shared by two rows resolves to NOTHING by name — window-length fallback', async () => {
     const conn = fakeConn([
