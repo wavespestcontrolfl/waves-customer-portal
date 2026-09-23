@@ -900,7 +900,10 @@ lookup mints a new lead row, for the same typed email AND phone AND the
 complete judged premise (street with any unit stripped, and a city and ZIP
 present on both sides and equal) — is archived on the flagged run, with
 the sent/viewed, unarchived, not-price-locked predicates re-applied on
-the archive write itself
+the archive write itself; the archived row keeps the verdict
+(`estimate_data.addressUnverified` + `addressUnverifiedFlag`), and a later
+run for the same email, phone and complete premise recovers it when the
+roll does not answer
 (`website_quote_withdrawn_address_unverified` audit event), so its old
 token neither renders nor accepts. A roll that never answered (GIS
 outage) is not a fresh flag — but it does not clear one either: the prior

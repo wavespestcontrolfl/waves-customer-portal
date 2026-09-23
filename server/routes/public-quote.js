@@ -1217,6 +1217,27 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         logger.warn(`[public-quote] lookup-stage snapshot re-read failed — prior address flag not recovered: ${snapErr.code || snapErr.name || 'error'}`);
       }
     }
+    // No prior flag on the lead row (a repeat lookup minted a fresh one):
+    // a publication a FLAGGED run withdrew for this visitor still carries
+    // the verdict — both contact factors plus the complete premise, the
+    // same proof the withdrawal itself required (pre-push audit P1).
+    if (!priorAddressUnverified && contactEmail && contactPhone) {
+      try {
+        const rows = await db('estimates')
+          .where({ source: 'quote_wizard' })
+          .whereNotNull('archived_at')
+          .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
+          .where('customer_phone', contactPhone)
+          .whereRaw("estimate_data->'addressUnverifiedFlag' IS NOT NULL")
+          .orderBy('updated_at', 'desc')
+          .limit(10)
+          .select('address', db.raw("estimate_data->'addressUnverifiedFlag' as flag"));
+        const match = rows.find((row) => samePremiseDisplay(row.address, quoteFullAddress, { requireLocality: true }));
+        if (match) priorAddressUnverified = recoverAddressUnverified({ address_unverified: match.flag });
+      } catch (withdrawnErr) {
+        logger.warn(`[public-quote] withdrawn-publication flag re-read failed: ${withdrawnErr.code || withdrawnErr.name || 'error'}`);
+      }
+    }
     const addressUnverified = nextAddressUnverified({
       enriched: trustedProfileFound ? trustedTurf : null,
       profileFound: trustedProfileFound,
@@ -3071,6 +3092,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // row past sent/viewed and price-locks it, and an accepted,
         // invoiced estimate must never be archived from a quote run
         // (pre-push audit P1).
+        // The verdict rides on the archived row (addressUnverified +
+        // addressUnverifiedFlag): a flagged run against an existing
+        // publication mints no draft, and an archived row leaves duplicate
+        // detection, so a later new-lead run during an outage would find
+        // nothing to recover — see the withdrawn-row recovery above
+        // (pre-push audit P1).
         const withdrawn = toWithdraw.length
           ? await db('estimates')
             .whereIn('id', toWithdraw)
@@ -3079,7 +3106,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             .whereNull('archived_at')
             .whereNull('price_locked_at')
             .whereRaw("estimate_data->'websiteSelfService' IS NOT NULL")
-            .update({ archived_at: new Date(), updated_at: new Date() })
+            .update({
+              archived_at: new Date(),
+              updated_at: new Date(),
+              estimate_data: db.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ addressUnverified: true, addressUnverifiedFlag: addressUnverified })]),
+            })
             .returning('id')
           : [];
         if (withdrawn.length) {

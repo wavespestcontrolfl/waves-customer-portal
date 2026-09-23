@@ -32,10 +32,15 @@ const lineKey = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ')
 const zip5 = (v) => (String(v || '').match(/\d{5}/) || [''])[0];
 
 const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z]/g, '');
+// Street line with a trailing inline unit stripped ("1260 Example St Apt
+// 4" → "1260 example st"), mirroring the server's unit-insensitive
+// comparison: the audited house number is the same with or without it.
+const UNIT_TAIL = /\s+(?:#|apt|apartment|unit|ste|suite|bldg|building|lot|rm|room|fl|floor|spc|space)\.?\s*[a-z0-9-]+\s*$/i;
+const streetKeyNoUnit = (v) => lineKey(String(v || '').replace(UNIT_TAIL, ''));
 
 function flagCoversLeadAddress(flag, lead) {
-  const leadLine = lineKey(String(lead?.address || '').split(',')[0]);
-  if (!leadLine || leadLine !== lineKey(flag.address_line1)) return false;
+  const leadLine = streetKeyNoUnit(String(lead?.address || '').split(',')[0]);
+  if (!leadLine || leadLine !== streetKeyNoUnit(flag.address_line1)) return false;
   const a = zip5(flag.zip);
   const b = zip5(lead?.zip) || zip5(lead?.address);
   if (a && b && a !== b) return false;
