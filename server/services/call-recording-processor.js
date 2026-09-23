@@ -9858,10 +9858,22 @@ const CallRecordingProcessor = {
             // reviewing it would approve evidence that changed under them
             // (codex r4 P1). A claimed card keeps its payload; the reviewer
             // resolves it and the next pass files afresh.
+            // Refresh the ADDRESS evidence only: the open card's own
+            // scheduling snapshot (scheduling_window / scheduling_status)
+            // is the promise the sweep holds the card to, and a reprocess
+            // that now hears "none" must not erase a confirmed ask
+            // (pre-push audit P1).
+            const parsedCard = JSON.parse(conflictCard.payload);
+            const addressEvidence = Object.fromEntries(Object.entries(parsedCard)
+              .filter(([key]) => !['scheduling_window', 'scheduling_status'].includes(key)));
             await trx('triage_items')
               .insert(conflictCard)
               .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-              .merge({ payload: conflictCard.payload, summary: conflictCard.summary, updated_at: new Date() })
+              .merge({
+                payload: trx.raw("COALESCE(triage_items.payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify(addressEvidence)]),
+                summary: conflictCard.summary,
+                updated_at: new Date(),
+              })
               .where('triage_items.status', 'open');
             return 'filed';
           }
