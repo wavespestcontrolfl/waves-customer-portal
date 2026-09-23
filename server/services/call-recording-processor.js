@@ -9853,7 +9853,13 @@ const CallRecordingProcessor = {
             meta: v2CanonicalExtraction?.meta || null,
             service_request: {
               primary_service_category: extracted?.matched_service || extracted?.requested_service || null,
-              specific_service_name: extracted?.requested_service || null,
+              specific_service_name: extracted?.specific_service_name || extracted?.requested_service || null,
+              // The legacy record carries no structured intent — its cadence
+              // lives in the service NAME the catalog resolves — so the
+              // snapshot takes the intent that admits EITHER cadence; the
+              // service-category, window and hour checks still bind
+              // (pre-push audit P1: a null intent rejected every booking).
+              service_intent: 'active_infestation_treatment',
             },
             property: {
               service_address: {
