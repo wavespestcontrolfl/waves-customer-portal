@@ -174,11 +174,20 @@ class AvailabilityEngine {
         // legitimate credit (Codex r3 P1). Same estimate-derived identity
         // confirmBooking resolves at commit; no estimate/no match falls
         // back to the window length (zero padding, legacy gap).
+        //
+        // estimates has NO `services`/`service_type` columns (never did —
+        // see the admin_layer/estimates_source migrations; the real
+        // free-text summary column is `service_interest`) — selecting them
+        // by name threw a real "column does not exist" in Postgres, caught
+        // by this function's own try/catch, which nulled travelMirror
+        // ENTIRELY for every estimate-linked call (Codex r4 P1: this also
+        // silently undid the r3 P1 global-stop merge and the original r1
+        // mirror for that whole class of caller). Read the real column.
         let candidateServiceType = 'General Pest Control';
         if (estimateId) {
-          const est = await db('estimates').where('id', estimateId).first('customer_id', 'services', 'service_type');
+          const est = await db('estimates').where('id', estimateId).first('customer_id', 'service_interest');
           if (!pinCustomerId) pinCustomerId = est?.customer_id || null;
-          candidateServiceType = est?.services?.[0] || est?.service_type || candidateServiceType;
+          candidateServiceType = est?.service_interest || candidateServiceType;
         }
         if (pinCustomerId) {
           const cust = await db('customers').where('id', pinCustomerId).first('latitude', 'longitude');
@@ -514,7 +523,13 @@ class AvailabilityEngine {
     // by the same public /booking/status/:code as the /book confirm path, so a
     // guessable four-char code here would undercut the ≈50-bit codes there.
     const confCode = generateConfirmationCode();
-    const serviceType = estimate?.services?.[0] || estimate?.service_type || 'General Pest Control';
+    // estimates has no `services`/`service_type` columns (see the identical
+    // note on getAvailableSlots' candidateServiceType above) — `estimate` is
+    // read via a bare `.first()` here so this never THREW, but the fields
+    // never existed either, so this always silently fell through to the
+    // literal default regardless of what the estimate actually named
+    // (Codex r4 P1: offer/commit identity parity requires the real column).
+    const serviceType = estimate?.service_interest || 'General Pest Control';
     const zoneCities = zone?.cities || [];
 
     // Two customers browsing the same zone see the same slots and can both
