@@ -257,6 +257,8 @@ describe('heldConflictTaskDecision (verdict route)', () => {
     const multi = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: { ...held, scheduling_window: { ...held.scheduling_window, requested_address: { ...held.scheduling_window.requested_address, additional_properties: [{ street_line_1: '9 Other Rd' }] } } } });
     expect(multi.approvedWindow.requested_address.additional_properties).toEqual([{ street_line_1: '9 Other Rd' }]);
     expect(multi.approvedWindow.requested_address.street_line_1).toBe('1260 Example St');
+    const spoken = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: { ...held, scheduling_window: { ...held.scheduling_window, requested_address: { ...held.scheduling_window.requested_address, raw_text: '1250 Example Street in Parrish' } } } });
+    expect(spoken.approvedWindow.requested_address.raw_text).toBeNull();
     expect(d.approvedPayload.stated_street).toBeUndefined();
     expect(d.approvedPayload.heard_address.street_line_1).toBe('1260 Example St');
   });

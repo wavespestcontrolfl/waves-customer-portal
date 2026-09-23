@@ -630,7 +630,10 @@ function heldConflictTaskDecision({ verdict, wrongFields = [], heldConflictPaylo
   const approvedWindow = payload?.scheduling_window
     ? {
       ...payload.scheduling_window,
-      ...(approvedAddress ? { requested_address: { ...(payload.scheduling_window.requested_address || {}), ...approvedAddress } } : {}),
+      // …and the caller's RAW spoken line goes with the disputed number:
+      // a reading of it would still key to the old premise (pre-push
+      // audit P1).
+      ...(approvedAddress ? { requested_address: { ...(payload.scheduling_window.requested_address || {}), ...approvedAddress, raw_text: null } } : {}),
     }
     : null;
   const approvedPayload = payload ? {
